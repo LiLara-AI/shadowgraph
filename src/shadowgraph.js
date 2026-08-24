@@ -8,6 +8,7 @@ export function createShadowGraph(options = {}) {
   const facts = new Map();
   const currentFacts = new Map();
   const events = [];
+  const relations = new Map();
 
   function id(prefix) {
     return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -55,6 +56,20 @@ export function createShadowGraph(options = {}) {
     facts.set(fact.id, fact); currentFacts.set(fact.key, fact); event('fact.observed', { factId: fact.id, key: fact.key }); return clone(fact);
   }
 
+  function link(input) {
+    if (!input || typeof input.from !== 'string' || typeof input.to !== 'string' || typeof input.relation !== 'string') throw new Error('A relationship requires from, to, and relation');
+    const relation = { id: id('relation'), kind: 'relation', schemaVersion: SCHEMA_VERSION, from: input.from, to: input.to, relation: input.relation, createdAt: now() };
+    relations.set(relation.id, relation);
+    events.push({ id: id('event'), type: 'relation.created', at: now(), relationId: relation.id });
+    return clone(relation);
+  }
+  function updateDecisionStatus(decisionId, status) {
+    const allowed = ['proposed', 'active', 'aging', 'stale', 'validated', 'failed', 'superseded', 'archived'];
+    const record = records.get(decisionId); if (!record || record.kind !== 'decision') throw new Error('Decision not found');
+    if (!allowed.includes(status)) throw new Error(`Invalid decision status: ${status}`);
+    record.status = status; record.updatedAt = now(); event('decision.status', { recordId: decisionId, status }); return clone(record);
+  }
+
   function setOutcome(decisionId, outcome) {
     const record = records.get(decisionId); if (!record || record.kind !== 'decision') throw new Error('Decision not found');
     if (!['successful', 'mixed', 'failed', 'unknown'].includes(outcome?.status)) throw new Error('Outcome status must be successful, mixed, failed, or unknown');
@@ -93,21 +108,21 @@ export function createShadowGraph(options = {}) {
 
   function search(query = '', options = {}) {
     const needle = String(query).toLowerCase();
-    return [...records.values()].filter((record) => (!options.project || record.project === options.project) && JSON.stringify(record).toLowerCase().includes(needle)).map((record) => ({ record: clone(record), score: score(record, needle), matched: matchFields(record, needle), reason: `Matched ${matchFields(record, needle).join(', ') || 'record content'}` })).sort((a, b) => b.score - a.score);
+    return [...records.values()].filter((record) => (!options.project || record.project === options.project) && (!options.status || record.status === options.status) && (!options.minConfidence || (record.confidence?.current ?? 0) >= options.minConfidence) && JSON.stringify(record).toLowerCase().includes(needle)).map((record) => ({ record: clone(record), score: score(record, needle), matched: matchFields(record, needle), reason: `Matched ${matchFields(record, needle).join(', ') || 'record content'}` })).sort((a, b) => b.score - a.score);
   }
   function context(input = {}) {
     const project = input.project ?? 'default';
     return { project, activeDecisions: [...records.values()].filter((x) => x.kind === 'decision' && x.project === project && x.status === 'active').map(clone), staleAssumptions: [...facts.values()].filter((x) => x.project === project && x.status !== 'active').map(clone), failedAttemptsToAvoid: [...records.values()].filter((x) => x.kind === 'attempt' && x.project === project && /fail|regression|error/i.test(x.result)).map(clone), openReviews: review({ changedFacts: input.changedFacts ?? [], facts: input.facts ?? {} }).filter((x) => records.get(x.decisionId)?.project === project), suggestedQuestions: [...records.values()].filter((x) => x.kind === 'decision' && x.project === project && x.confidence.current < 0.5).map((x) => `What evidence could change the decision: ${x.title}?`) };
   }
-  function exportData() { return { schemaVersion: SCHEMA_VERSION, records: [...records.values()].map(clone), facts: [...facts.values()].map(clone), events: clone(events) }; }
-  function importData(data = []) { const source = Array.isArray(data) ? { records: data } : data; for (const item of source.records ?? []) { if (!item || typeof item.id !== 'string' || !['decision', 'attempt'].includes(item.kind)) continue; records.set(item.id, migrateRecord(item)); } for (const fact of source.facts ?? []) { if (!fact || typeof fact.key !== 'string') continue; const imported = { schemaVersion: SCHEMA_VERSION, project: 'default', source: 'unknown', confidence: 0.5, status: 'active', ...clone(fact) }; facts.set(imported.id ?? id('fact'), imported); if (imported.status === 'active') currentFacts.set(imported.key, imported); } events.push(...(source.events ?? []).filter((item) => item && typeof item.id === 'string').map(clone)); return records.size + facts.size; }
-  function stats() { const all = [...records.values()]; return { schemaVersion: SCHEMA_VERSION, total: all.length, decisions: all.filter((x) => x.kind === 'decision').length, attempts: all.filter((x) => x.kind === 'attempt').length, facts: facts.size, events: events.length }; }
-  return { addDecision, addAttempt, addFact, setOutcome, review, search, context, exportData, importData, stats };
+  function exportData() { return { schemaVersion: SCHEMA_VERSION, records: [...records.values()].map(clone), facts: [...facts.values()].map(clone), relations: [...relations.values()].map(clone), events: clone(events) }; }
+  function importData(data = []) { const source = Array.isArray(data) ? { records: data } : data; for (const item of source.records ?? []) { if (!item || typeof item.id !== 'string' || !['decision', 'attempt'].includes(item.kind)) continue; records.set(item.id, migrateRecord(item)); } for (const fact of source.facts ?? []) { if (!fact || typeof fact.key !== 'string') continue; const imported = { schemaVersion: SCHEMA_VERSION, project: 'default', source: 'unknown', confidence: 0.5, status: 'active', ...clone(fact) }; facts.set(imported.id ?? id('fact'), imported); if (imported.status === 'active') currentFacts.set(imported.key, imported); } for (const relation of source.relations ?? []) { if (relation?.id && relation.from && relation.to && relation.relation) relations.set(relation.id, clone(relation)); } events.push(...(source.events ?? []).filter((item) => item && typeof item.id === 'string').map(clone)); return records.size + facts.size + relations.size; }
+  function stats() { const all = [...records.values()]; return { schemaVersion: SCHEMA_VERSION, total: all.length, decisions: all.filter((x) => x.kind === 'decision').length, attempts: all.filter((x) => x.kind === 'attempt').length, facts: facts.size, relations: relations.size, events: events.length }; }
+  return { addDecision, addAttempt, addFact, setOutcome, updateDecisionStatus, link, review, search, context, exportData, importData, stats };
 }
 
 function normalizeRules(rules) { return rules.map((rule) => typeof rule === 'string' ? rule : { key: rule.key, operator: rule.operator ?? 'equals', value: rule.value }); }
 function normalizeEvidence(item, clock = () => new Date().toISOString()) { return typeof item === 'string' ? { source: item, type: 'unknown', confidence: 0.5, observedAt: clock() } : { source: item.source ?? 'unknown', type: item.type ?? 'unknown', confidence: item.confidence ?? 0.5, observedAt: item.observedAt ?? clock(), detail: item.detail ?? '' }; }
 function migrateRecord(item) { if (item.kind !== 'decision') return { schemaVersion: SCHEMA_VERSION, project: 'default', ...clone(item) }; const confidence = typeof item.confidence === 'number' ? item.confidence : item.confidence?.current ?? 0.5; return { ...clone(item), schemaVersion: SCHEMA_VERSION, project: item.project ?? 'default', confidence: { initial: confidence, current: confidence, history: item.confidence?.history ?? [] }, alternatives: (item.alternatives ?? []).map((a) => ({ ...a, id: a.id ?? `alternative_${Date.now()}`, reopenWhen: normalizeRules(a.reopenWhen ?? []) })) }; }
-function matchFields(record, needle) { const fields = []; if (String(record.title ?? '').toLowerCase().includes(needle)) fields.push('title'); if (String(record.goal ?? '').toLowerCase().includes(needle)) fields.push('goal'); if (String(record.chosen ?? '').toLowerCase().includes(needle)) fields.push('chosen'); if ((record.alternatives ?? []).some((x) => String(x.label).toLowerCase().includes(needle))) fields.push('alternative'); if (String(record.result ?? '').toLowerCase().includes(needle)) fields.push('attempt result'); return fields; }
-function score(record, needle) { return matchFields(record, needle).reduce((sum, field) => sum + (field === 'title' ? 5 : 2), 0); }
+function matchFields(record, needle) { const fields = []; if (String(record.title ?? '').toLowerCase().includes(needle)) fields.push('title'); if (String(record.goal ?? '').toLowerCase().includes(needle)) fields.push('goal'); if (String(record.chosen ?? '').toLowerCase().includes(needle)) fields.push('chosen'); if ((record.assumptions ?? []).some((x) => String(x).toLowerCase().includes(needle))) fields.push('assumption'); if ((record.evidence ?? []).some((x) => JSON.stringify(x).toLowerCase().includes(needle))) fields.push('evidence'); if ((record.alternatives ?? []).some((x) => JSON.stringify(x).toLowerCase().includes(needle))) fields.push('alternative'); if (String(record.result ?? '').toLowerCase().includes(needle)) fields.push('attempt result'); if (String(record.reason ?? '').toLowerCase().includes(needle)) fields.push('attempt reason'); return fields; }
+function score(record, needle) { return matchFields(record, needle).reduce((sum, field) => sum + (field === 'title' ? 5 : field === 'chosen' || field === 'goal' ? 3 : 2), 0); }
 function clone(value) { return JSON.parse(JSON.stringify(value)); }

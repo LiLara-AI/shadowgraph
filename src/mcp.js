@@ -1,9 +1,9 @@
 import { createInterface } from 'node:readline';
-import { createJsonFileStore } from './storage.js';
+import { createStorage } from './storage.js';
 import { createShadowGraph } from './shadowgraph.js';
 
 const file = process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json';
-const store = createJsonFileStore(file);
+const store = await createStorage({ file });
 const graph = createShadowGraph();
 graph.importData(await store.load());
 
@@ -11,10 +11,12 @@ const tools = [
   { name: 'shadowgraph_record_decision', description: 'Record a decision, its assumptions, evidence, and rejected alternatives.', inputSchema: { type: 'object', required: ['title', 'chosen'], properties: { title: { type: 'string' }, chosen: { type: 'string' }, goal: { type: 'string' }, assumptions: { type: 'array', items: { type: 'string' } }, evidence: { type: 'array', items: { type: 'string' } }, alternatives: { type: 'array' } } } },
   { name: 'shadowgraph_record_attempt', description: 'Record a failed or informative attempt so the agent does not repeat it blindly.', inputSchema: { type: 'object', required: ['solution', 'result'], properties: { solution: { type: 'string' }, result: { type: 'string' }, reason: { type: 'string' }, environment: { type: 'string' } } } },
   { name: 'shadowgraph_review', description: 'Find decisions whose rejected alternatives should be reconsidered after facts change.', inputSchema: { type: 'object', properties: { changedFacts: { type: 'array', items: { type: 'string' } }, facts: { type: 'object' } } } },
-  { name: 'shadowgraph_search', description: 'Search the unified decision and attempt memory with explanations.', inputSchema: { type: 'object', properties: { query: { type: 'string' }, project: { type: 'string' } } } },
+  { name: 'shadowgraph_search', description: 'Search the unified decision and attempt memory with explanations.', inputSchema: { type: 'object', properties: { query: { type: 'string' }, project: { type: 'string' }, status: { type: 'string' }, minConfidence: { type: 'number' } } } },
   { name: 'shadowgraph_context', description: 'Build relevant working context before an agent starts a consequential task.', inputSchema: { type: 'object', properties: { project: { type: 'string' }, changedFacts: { type: 'array', items: { type: 'string' } }, facts: { type: 'object' } } } },
   { name: 'shadowgraph_record_fact', description: 'Record an observed fact with provenance and confidence.', inputSchema: { type: 'object', required: ['key'], properties: { key: { type: 'string' }, value: {}, source: { type: 'string' }, confidence: { type: 'number' }, project: { type: 'string' } } } },
-  { name: 'shadowgraph_record_outcome', description: 'Record what happened after a decision and update its confidence.', inputSchema: { type: 'object', required: ['decisionId', 'outcome'], properties: { decisionId: { type: 'string' }, outcome: { type: 'object' } } } }
+  { name: 'shadowgraph_record_outcome', description: 'Record what happened after a decision and update its confidence.', inputSchema: { type: 'object', required: ['decisionId', 'outcome'], properties: { decisionId: { type: 'string' }, outcome: { type: 'object' } } } },
+  { name: 'shadowgraph_update_status', description: 'Move a decision through its lifecycle.', inputSchema: { type: 'object', required: ['decisionId', 'status'], properties: { decisionId: { type: 'string' }, status: { type: 'string' } } } },
+  { name: 'shadowgraph_link', description: 'Create an explainable relationship between graph entities.', inputSchema: { type: 'object', required: ['from', 'to', 'relation'], properties: { from: { type: 'string' }, to: { type: 'string' }, relation: { type: 'string' } } } }
 ];
 
 async function call(name, args) {
@@ -26,9 +28,11 @@ async function call(name, args) {
   else if (name === 'shadowgraph_context') value = graph.context(args ?? {});
   else if (name === 'shadowgraph_record_fact') value = graph.addFact(args);
   else if (name === 'shadowgraph_record_outcome') value = graph.setOutcome(args?.decisionId, args?.outcome);
+  else if (name === 'shadowgraph_update_status') value = graph.updateDecisionStatus(args?.decisionId, args?.status);
+  else if (name === 'shadowgraph_link') value = graph.link(args);
   else if (!name) { const error = new Error('Invalid tool parameters'); error.code = -32602; throw error; }
   else { const error = new Error(`Unknown tool: ${name}`); error.code = -32601; throw error; }
-  if (name.includes('record_')) await store.save(graph.exportData());
+  if (name.includes('record_') || name === 'shadowgraph_update_status' || name === 'shadowgraph_link') await store.save(graph.exportData());
   return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }] };
 }
 
@@ -42,7 +46,7 @@ input.on('line', async (line) => {
   let request;
   try {
     request = JSON.parse(line);
-    if (request.method === 'initialize') reply(request.id, { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'shadowgraph', version: '0.2.0' } });
+    if (request.method === 'initialize') reply(request.id, { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'shadowgraph', version: '0.25.0' } });
     else if (request.method === 'notifications/initialized') return;
     else if (request.method === 'tools/list') reply(request.id, { tools });
     else if (request.method === 'tools/call') reply(request.id, await call(request.params?.name, request.params.arguments ?? {}));

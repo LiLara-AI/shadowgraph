@@ -1,12 +1,12 @@
-# ShadowGraph v0.2
+# ShadowGraph v0.25
 
 ShadowGraph is a local-first, vendor-neutral learning layer for AI agents. It is not generic chat memory: it is an explainable decision graph that tracks what an agent chose, what it rejected, the assumptions and evidence behind it, what happened afterward, and when the decision should be reopened.
 
 > ShadowGraph remembers not only what an agent chose, but what it rejected, why it rejected it, and what evidence should make it think again.
 
-## v0.2 status
+## v0.25 status
 
-Version 0.2 is the structured decision-graph release. It preserves import compatibility with v0.1 records and adds project scopes, facts, evidence provenance, outcomes, confidence history, event history, explainable retrieval, and a context tool for agents.
+Version 0.25 is the hardening and lifecycle release built on the v0.2 decision graph. It preserves import compatibility with v0.1 records and adds project scopes, facts, evidence provenance, outcomes, confidence history, event history, explainable retrieval, and a context tool for agents.
 
 ## Requirements
 
@@ -82,12 +82,15 @@ GET  /health
 GET  /stats
 GET  /records
 GET  /search?q=database&project=my-app
+GET  /records
 POST /decisions
 POST /attempts
 POST /facts
 POST /outcomes
 POST /review
 POST /context
+POST /status
+POST /relationships
 ```
 
 ### MCP
@@ -103,6 +106,10 @@ MCP tools:
 - `shadowgraph_review`
 - `shadowgraph_search`
 - `shadowgraph_context`
+- `shadowgraph_record_fact`
+- `shadowgraph_record_outcome`
+- `shadowgraph_update_status`
+- `shadowgraph_link`
 
 Recommended agent policy:
 
@@ -117,6 +124,7 @@ The JSON store accepts both the v0.1 array format and the v0.2 graph envelope. v
   "schemaVersion": 2,
   "records": [],
   "facts": [],
+  "relations": [],
   "events": []
 }
 ```

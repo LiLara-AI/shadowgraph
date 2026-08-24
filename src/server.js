@@ -1,12 +1,12 @@
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
-import { createJsonFileStore } from './storage.js';
+import { createStorage } from './storage.js';
 import { createShadowGraph } from './shadowgraph.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 
 export async function createShadowGraphServer(options = {}) {
-  const store = options.store ?? createJsonFileStore(options.file ?? './.shadowgraph/data.json');
+  const store = options.store ?? await createStorage({ type: options.storage ?? process.env.SHADOWGRAPH_STORAGE, file: options.file ?? process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json' });
   const graph = createShadowGraph(options);
   graph.importData(await store.load());
 
@@ -22,6 +22,8 @@ export async function createShadowGraphServer(options = {}) {
     if (method === 'POST' && path === '/context') return graph.context(body ?? {});
     if (method === 'POST' && path === '/facts') { const value = graph.addFact(body); await persist(); return value; }
     if (method === 'POST' && path === '/outcomes') { const value = graph.setOutcome(body.decisionId, body.outcome); await persist(); return value; }
+    if (method === 'POST' && path === '/status') { const value = graph.updateDecisionStatus(body.decisionId, body.status); await persist(); return value; }
+    if (method === 'POST' && path === '/relationships') { const value = graph.link(body); await persist(); return value; }
     if (method === 'POST' && path === '/decisions') {
       const value = graph.addDecision(body);
       await persist();

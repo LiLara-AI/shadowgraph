@@ -55,7 +55,7 @@ test('CLI persists a decision and reports stats', async () => {
   });
   await run(['decision', JSON.stringify({ title: 'Testing', chosen: 'Node' })]);
   const stats = await run(['stats']);
-  assert.deepEqual(stats, { schemaVersion: 2, total: 1, decisions: 1, attempts: 0, facts: 0, events: 1 });
+  assert.deepEqual(stats, { schemaVersion: 2, total: 1, decisions: 1, attempts: 0, facts: 0, relations: 0, events: 1 });
   assert.equal((await readFile(file, 'utf8')).includes('Testing'), true);
 });
 
@@ -93,5 +93,5 @@ test('MCP lists tools and returns parse errors', async () => {
   child.kill();
   const responses = lines.map((line) => JSON.parse(line));
   assert.equal(responses.some((item) => item.error?.code === -32700), true);
-  assert.equal(responses.some((item) => item.result?.tools?.length === 7), true);
+  assert.equal(responses.some((item) => item.result?.tools?.length === 9), true);
 });
