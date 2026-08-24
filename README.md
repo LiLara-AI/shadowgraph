@@ -4,9 +4,26 @@ ShadowGraph is a local-first, vendor-neutral learning layer for AI agents. It is
 
 > ShadowGraph remembers not only what an agent chose, but what it rejected, why it rejected it, and what evidence should make it think again.
 
+## What it does
+
+When an AI agent starts an important task, ShadowGraph gives it relevant working context. During the task, the agent can save decisions, assumptions, evidence, rejected alternatives, failed attempts, and observed facts. After implementation, the agent records the outcome. ShadowGraph updates confidence, marks replaced facts as superseded, and creates review signals when an old decision may no longer fit the current situation.
+
+The normal learning loop is:
+
+```text
+1. Context: load active decisions, stale facts, failed attempts, and open reviews.
+2. Decide: record the chosen approach, assumptions, evidence, and rejected alternatives.
+3. Work: record failed or informative attempts and link related graph entities.
+4. Observe: record facts and their provenance as human, tool, model, or imported evidence.
+5. Evaluate: record a successful, mixed, failed, or unknown outcome.
+6. Reconsider: review decisions whose assumptions, facts, confidence, or outcomes changed.
+```
+
+This lets an agent remember the reasoning behind work instead of blindly repeating old answers.
+
 ## v0.26 status
 
-Version 0.26 is the final hardening release built on the v0.25 decision graph. It adds selectable storage, optional API authentication, complete relationship persistence, scoped facts, retrieval filters, and release-grade interface checks. It preserves import compatibility with v0.1 records and adds project scopes, facts, evidence provenance, outcomes, confidence history, event history, explainable retrieval, and a context tool for agents.
+Version 0.26 is the final hardening release built on the v0.25 decision graph. It adds selectable storage, optional API authentication, complete relationship persistence, scoped facts, retrieval filters, release-grade interface checks, cross-platform CI, and migration compatibility with v0.1 records.
 
 ## Requirements
 
@@ -23,25 +40,36 @@ npm test
 npm start
 ```
 
-The API listens on `http://127.0.0.1:8787` and stores a versioned JSON graph in `.shadowgraph/data.json`. Set `SHADOWGRAPH_FILE` to choose another location. Set `SHADOWGRAPH_STORAGE=sqlite` on Node 22.5+ to use the WAL-backed SQLite adapter. For shared local deployments, set `SHADOWGRAPH_API_TOKEN` to a random value of at least 16 characters and send `Authorization: Bearer <token>`.
+The API listens on `http://127.0.0.1:8787` and stores a versioned JSON graph in `.shadowgraph/data.json`. Set `SHADOWGRAPH_FILE` to choose another location. Set `SHADOWGRAPH_STORAGE=sqlite` on Node 22.5+ to use the WAL-backed SQLite adapter.
 
-## v0.2 data model
+For a shared local deployment, enable optional authentication:
+
+```bash
+SHADOWGRAPH_API_TOKEN="use-a-random-token-at-least-16-characters" npm start
+```
+
+Then send this header with every HTTP request:
+
+```text
+Authorization: Bearer use-a-random-token-at-least-16-characters
+```
+
+## How the graph works
 
 The graph contains:
 
 - **Decision** — selected approach, goal, project, confidence, assumptions, alternatives, evidence, outcome.
 - **Alternative** — rejected proposal, rejection reason, and structured reopen rules.
-- **Fact** — observed value with source, confidence, timestamp, and status.
+- **Fact** — observed value with source, confidence, timestamp, project scope, and status.
 - **Evidence** — source, type, confidence, timestamp, and optional detail.
 - **Attempt** — approach, result, environment, lesson/reason, and relationships.
 - **Outcome** — successful, mixed, failed, or unknown result with lessons and confidence update.
+- **Relationship** — explainable link such as `depends_on`, `supports`, `tested_by`, or `supersedes`.
 - **Event** — append-only record of important graph changes.
 
 Confidence has an initial value, current value, and history of outcome-driven changes. Sources can be labeled `human_confirmed`, `tool_observed`, `model_inferred`, `imported`, or `unknown`; inferred memory should not automatically be treated as verified truth.
 
-## Interfaces
-
-### JavaScript core
+Example decision:
 
 ```js
 import { createShadowGraph } from './src/shadowgraph.js';
@@ -61,6 +89,8 @@ graph.addFact({ key: 'deployment', value: 'local', source: 'human_confirmed', co
 console.log(graph.context({ project: 'my-app', facts: { deployment: 'local' } }));
 ```
 
+## Interfaces
+
 ### CLI
 
 ```bash
@@ -72,6 +102,8 @@ node src/cli.js review '{"changedFacts":["local-single-user"]}'
 node src/cli.js fact '{"key":"deployment","value":"local","source":"human_confirmed","confidence":1}'
 node src/cli.js decision '{"project":"my-app","title":"Choose a database","chosen":"PostgreSQL"}'
 node src/cli.js outcome '{"decisionId":"DECISION_ID","outcome":{"status":"failed","lessons":["Assumption was wrong"]}}'
+node src/cli.js status '{"decisionId":"DECISION_ID","status":"validated"}'
+node src/cli.js link '{"from":"DECISION_ID","to":"FACT_ID","relation":"depends_on"}'
 node src/cli.js attempt '{"solution":"Rewrite everything","result":"Regression"}'
 ```
 
@@ -90,8 +122,9 @@ POST /review
 POST /context
 POST /status
 POST /relationships
+```
 
-Set `SHADOWGRAPH_API_TOKEN` to enable Bearer authentication on the HTTP API. Use `Authorization: Bearer <token>` with every request.
+Responses are JSON. The server returns `401` when token authentication is enabled and missing, `403` for disallowed browser origins, `404` for missing decisions or routes, and `413` for oversized request bodies.
 
 ### MCP
 
@@ -115,9 +148,21 @@ Recommended agent policy:
 
 > Before a consequential task, call ShadowGraph context for the project. Search relevant decisions and failed attempts. Record decisions with assumptions, evidence, and rejected alternatives. Record outcomes after implementation. Treat model-inferred facts as unverified until supported by a human or tool observation.
 
+## AI tool setup
+
+Copy-ready templates are in `integrations/` for Claude Code, Cursor, and Codex MCP configuration, plus HTTP/Python examples for Hermes Agent, OpenClaw, and Antigravity.
+
+For MCP clients, replace `ABSOLUTE_PATH_TO_SHADOWGRAPH` in the relevant JSON file and register the command:
+
+```text
+node ABSOLUTE_PATH_TO_SHADOWGRAPH/src/mcp.js
+```
+
+The exact settings location varies by product and version. Use the product's MCP import/settings UI when available. ShadowGraph communicates through standard local MCP stdio or HTTP; it does not depend on a vendor-private API.
+
 ## Migration and storage
 
-The JSON store accepts both the v0.1 array format and the v0.2 graph envelope. v0.2 exports:
+The JSON store accepts both the v0.1 array format and the v0.26 graph envelope. v0.26 exports:
 
 ```json
 {
@@ -129,15 +174,11 @@ The JSON store accepts both the v0.1 array format and the v0.2 graph envelope. v
 }
 ```
 
-The current local store remains JSON for zero-dependency portability. v0.26 also includes an optional `src/sqlite-storage.js` adapter for Node 22.5+ runtimes exposing `node:sqlite`; Node 20 users should continue using JSON storage. Do not run multiple writers against the same JSON file concurrently; use the SQLite adapter for transactional multi-process storage.
-
-## Integration
-
-Copy-ready templates remain in `integrations/` for Claude Code, Cursor, Codex, Hermes Agent, OpenClaw, and Antigravity. They use the stable MCP/HTTP surfaces rather than vendor-specific internals.
+JSON is the zero-dependency portable default. SQLite is selectable through `SHADOWGRAPH_STORAGE=sqlite` on Node 22.5+ and uses WAL mode with a busy timeout for concurrent local writers. Do not run multiple writers against the same JSON file concurrently; use SQLite for that deployment shape.
 
 ## Security and privacy
 
-The HTTP server has no authentication. Keep it bound to `127.0.0.1`; do not expose it publicly. Browser origins other than localhost are rejected as defense in depth. Do not store secrets or sensitive transcripts unless your local storage policy permits it. See `SECURITY.md`.
+The HTTP server binds to `127.0.0.1` by default and rejects non-local browser origins. Set `SHADOWGRAPH_API_TOKEN` for Bearer authentication in shared local deployments. This is defense in depth, not a public internet security model. Do not expose the API publicly without TLS, rate limiting, and a deployment threat model. Do not store secrets or sensitive transcripts unless your local storage policy permits it. See `SECURITY.md`.
 
 ## Checks
 
@@ -148,6 +189,8 @@ npm audit --omit=dev
 python -m py_compile integrations/hermes-agent.py
 npm pack --dry-run
 ```
+
+GitHub Actions runs the checks on Ubuntu and Windows with Node 20 and 22.
 
 ## License
 
