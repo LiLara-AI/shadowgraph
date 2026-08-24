@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.26.0
+
+- Added optional Bearer-token authentication for shared local HTTP deployments.
+- Added constant-time token comparison and SQLite WAL verification.
+- Added project-scoped fact supersession, localhost port compatibility, no-store headers, and CLI search filters.
+- Added final release hardening and v0.26 documentation parity.
+
 ## 0.25.0
 
 - Added selectable JSON/SQLite storage through `SHADOWGRAPH_STORAGE`, including WAL mode and a 5-second busy timeout for concurrent SQLite writers.

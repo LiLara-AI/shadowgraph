@@ -1,6 +1,6 @@
 {
   "name": "shadowgraph-unified-plugin",
-  "version": "0.25.0",
+  "version": "0.26.0",
   "private": false,
   "description": "Portable decision memory and rejected-alternative learning layer for AI agents",
   "type": "module",

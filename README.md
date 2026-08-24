@@ -1,16 +1,16 @@
-# ShadowGraph v0.25
+# ShadowGraph v0.26
 
 ShadowGraph is a local-first, vendor-neutral learning layer for AI agents. It is not generic chat memory: it is an explainable decision graph that tracks what an agent chose, what it rejected, the assumptions and evidence behind it, what happened afterward, and when the decision should be reopened.
 
 > ShadowGraph remembers not only what an agent chose, but what it rejected, why it rejected it, and what evidence should make it think again.
 
-## v0.25 status
+## v0.26 status
 
-Version 0.25 is the hardening and lifecycle release built on the v0.2 decision graph. It preserves import compatibility with v0.1 records and adds project scopes, facts, evidence provenance, outcomes, confidence history, event history, explainable retrieval, and a context tool for agents.
+Version 0.26 is the final hardening release built on the v0.25 decision graph. It adds selectable storage, optional API authentication, complete relationship persistence, scoped facts, retrieval filters, and release-grade interface checks. It preserves import compatibility with v0.1 records and adds project scopes, facts, evidence provenance, outcomes, confidence history, event history, explainable retrieval, and a context tool for agents.
 
 ## Requirements
 
-- Node.js 20+
+- Node.js 20+ (SQLite backend requires Node 22.5+ with `node:sqlite`)
 - No runtime npm dependencies
 - Python 3.10+ only for the optional Hermes wrapper
 
@@ -23,7 +23,7 @@ npm test
 npm start
 ```
 
-The API listens on `http://127.0.0.1:8787` and stores a versioned JSON graph in `.shadowgraph/data.json`. Set `SHADOWGRAPH_FILE` to choose another location.
+The API listens on `http://127.0.0.1:8787` and stores a versioned JSON graph in `.shadowgraph/data.json`. Set `SHADOWGRAPH_FILE` to choose another location. Set `SHADOWGRAPH_STORAGE=sqlite` on Node 22.5+ to use the WAL-backed SQLite adapter. For shared local deployments, set `SHADOWGRAPH_API_TOKEN` to a random value of at least 16 characters and send `Authorization: Bearer <token>`.
 
 ## v0.2 data model
 
@@ -66,7 +66,7 @@ console.log(graph.context({ project: 'my-app', facts: { deployment: 'local' } })
 ```bash
 node src/cli.js stats
 node src/cli.js list
-node src/cli.js search database
+node src/cli.js search '{"query":"database","project":"my-app","status":"validated","minConfidence":0.7}'
 node src/cli.js context '{"project":"my-app","facts":{"deployment":"local"}}'
 node src/cli.js review '{"changedFacts":["local-single-user"]}'
 node src/cli.js fact '{"key":"deployment","value":"local","source":"human_confirmed","confidence":1}'
@@ -82,7 +82,6 @@ GET  /health
 GET  /stats
 GET  /records
 GET  /search?q=database&project=my-app
-GET  /records
 POST /decisions
 POST /attempts
 POST /facts
@@ -91,7 +90,8 @@ POST /review
 POST /context
 POST /status
 POST /relationships
-```
+
+Set `SHADOWGRAPH_API_TOKEN` to enable Bearer authentication on the HTTP API. Use `Authorization: Bearer <token>` with every request.
 
 ### MCP
 
@@ -129,7 +129,7 @@ The JSON store accepts both the v0.1 array format and the v0.2 graph envelope. v
 }
 ```
 
-The current local store remains JSON for zero-dependency portability. v0.2 also includes an optional `src/sqlite-storage.js` adapter for Node 22.5+ runtimes exposing `node:sqlite`; Node 20 users should continue using JSON storage. Do not run multiple writers against the same JSON file concurrently; use the SQLite adapter for transactional multi-process storage.
+The current local store remains JSON for zero-dependency portability. v0.26 also includes an optional `src/sqlite-storage.js` adapter for Node 22.5+ runtimes exposing `node:sqlite`; Node 20 users should continue using JSON storage. Do not run multiple writers against the same JSON file concurrently; use the SQLite adapter for transactional multi-process storage.
 
 ## Integration
 

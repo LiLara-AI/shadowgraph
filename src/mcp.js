@@ -4,6 +4,7 @@ import { createShadowGraph } from './shadowgraph.js';
 
 const file = process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json';
 const store = await createStorage({ file });
+const MCP_VERSION = '0.26.0';
 const graph = createShadowGraph();
 graph.importData(await store.load());
 
@@ -46,7 +47,7 @@ input.on('line', async (line) => {
   let request;
   try {
     request = JSON.parse(line);
-    if (request.method === 'initialize') reply(request.id, { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'shadowgraph', version: '0.25.0' } });
+    if (request.method === 'initialize') reply(request.id, { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'shadowgraph', version: MCP_VERSION } });
     else if (request.method === 'notifications/initialized') return;
     else if (request.method === 'tools/list') reply(request.id, { tools });
     else if (request.method === 'tools/call') reply(request.id, await call(request.params?.name, request.params.arguments ?? {}));
