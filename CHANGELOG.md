@@ -2,6 +2,8 @@
 
 ## 0.26.0
 
+- Rewrote the user-facing README and integration guide to explain the context, decision, work, observe, evaluate, and reconsider workflow.
+- Added practical setup guidance for MCP clients, HTTP clients, JSON/SQLite storage, and optional Bearer authentication.
 - Added optional Bearer-token authentication for shared local HTTP deployments.
 - Added constant-time token comparison and SQLite WAL verification.
 - Added project-scoped fact supersession, localhost port compatibility, no-store headers, and CLI search filters.
