@@ -1,6 +1,6 @@
 # ShadowGraph
 
-[![CI](https://github.com/YOUR_GITHUB_USER/shadowgraph/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_GITHUB_USER/shadowgraph/actions/workflows/ci.yml)
+[![CI](https://github.com/LiLara-AI/shadowgraph/actions/workflows/ci.yml/badge.svg)](https://github.com/LiLara-AI/shadowgraph/actions/workflows/ci.yml)
 
 ShadowGraph is a local-first, vendor-neutral learning layer for AI agents. It combines decision memory, rejected alternatives, failed attempts, assumptions, evidence, and review triggers in one durable store.
 
