@@ -8,6 +8,15 @@
     "node": ">=20"
   },
   "license": "MIT",
+  "author": "LiLara-AI",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LiLara-AI/shadowgraph.git"
+  },
+  "bugs": {
+    "url": "https://github.com/LiLara-AI/shadowgraph/issues"
+  },
+  "homepage": "https://github.com/LiLara-AI/shadowgraph#readme",
   "files": [
     "src/",
     "integrations/",

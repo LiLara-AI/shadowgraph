@@ -10,8 +10,8 @@ export function createShadowGraph(options = {}) {
   }
 
   function addDecision(input) {
-    if (!input || !input.title || !input.chosen) {
-      throw new Error('A decision requires title and chosen values');
+    if (!input || typeof input !== 'object' || typeof input.title !== 'string' || !input.title.trim() || typeof input.chosen !== 'string' || !input.chosen.trim()) {
+      throw new Error('A decision requires non-empty title and chosen strings');
     }
     const record = {
       id: input.id ?? id('decision'),
@@ -39,8 +39,8 @@ export function createShadowGraph(options = {}) {
   }
 
   function addAttempt(input) {
-    if (!input || !input.solution || !input.result) {
-      throw new Error('An attempt requires solution and result');
+    if (!input || typeof input !== 'object' || typeof input.solution !== 'string' || !input.solution.trim() || typeof input.result !== 'string' || !input.result.trim()) {
+      throw new Error('An attempt requires non-empty solution and result strings');
     }
     const attempt = {
       id: input.id ?? id('attempt'),

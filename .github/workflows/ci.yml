@@ -19,5 +19,7 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm test
+      - run: npm audit --omit=dev
+      - run: python -m py_compile integrations/hermes-agent.py
       - name: Validate JSON integration templates
         run: node --input-type=module -e "import fs from 'node:fs'; for (const f of fs.readdirSync('integrations').filter(x => x.endsWith('.json'))) JSON.parse(fs.readFileSync('integrations/' + f, 'utf8'));"

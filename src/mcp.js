@@ -26,7 +26,7 @@ async function call(name, args) {
 }
 
 function reply(id, result, error) {
-  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, ...(error ? { error: { code: -32000, message: error.message } } : { result }) }) + '\n');
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: id ?? null, ...(error ? { error: { code: error.code ?? -32000, message: error.message } } : { result }) }) + '\n');
 }
 
 const input = createInterface({ input: process.stdin });
@@ -40,6 +40,6 @@ input.on('line', async (line) => {
     else if (request.method === 'tools/call') reply(request.id, await call(request.params.name, request.params.arguments ?? {}));
     else reply(request.id, {});
   } catch (error) {
-    try { reply(JSON.parse(line).id, null, error); } catch { /* ignore malformed input */ }
+    reply(null, null, { code: -32700, message: 'Parse error' });
   }
 });
