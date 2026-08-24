@@ -10,6 +10,8 @@ export async function createSqliteStore(filePath) {
   db.exec('PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; CREATE TABLE IF NOT EXISTS shadowgraph_state (id INTEGER PRIMARY KEY CHECK (id = 1), payload TEXT NOT NULL)');
   return {
     async load() {
+      const mode = db.prepare('PRAGMA journal_mode').get();
+      if (String(mode?.journal_mode).toLowerCase() !== 'wal') throw new Error('ShadowGraph SQLite storage requires WAL mode');
       const row = db.prepare('SELECT payload FROM shadowgraph_state WHERE id = 1').get();
       try { return row ? JSON.parse(row.payload) : { schemaVersion: 2, records: [], facts: [], events: [] }; }
       catch { throw new Error('ShadowGraph SQLite storage contains invalid data'); }

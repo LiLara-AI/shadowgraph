@@ -8,9 +8,9 @@ import { spawn } from 'node:child_process';
 import { createShadowGraphServer } from '../src/server.js';
 import { createJsonFileStore } from '../src/storage.js';
 
-async function startServer() {
+async function startServer(options = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-http-'));
-  const app = await createShadowGraphServer({ file: join(directory, 'data.json') });
+  const app = await createShadowGraphServer({ file: join(directory, 'data.json'), ...options });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const { port } = app.server.address();
@@ -25,6 +25,37 @@ test('HTTP API records and reviews decisions without wildcard CORS', async () =>
     assert.equal(create.headers.get('access-control-allow-origin'), null);
     const review = await fetch(`${base}/review`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ changedFacts: ['local'] }) });
     assert.equal((await review.json()).length, 1);
+  } finally {
+    await new Promise((resolve) => app.server.close(resolve));
+  }
+});
+
+test('HTTP API enforces optional bearer authentication', async () => {
+  const { app, base } = await startServer({ apiToken: '1234567890123456' });
+  try {
+    assert.equal((await fetch(`${base}/health`)).status, 401);
+    assert.equal((await fetch(`${base}/health`, { headers: { authorization: 'Bearer 1234567890123456' } })).status, 200);
+  } finally {
+    await new Promise((resolve) => app.server.close(resolve));
+  }
+});
+
+test('HTTP API returns a useful status for unknown decisions', async () => {
+  const { app, base } = await startServer();
+  try {
+    const response = await fetch(`${base}/status`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decisionId: 'missing', status: 'failed' }) });
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), { error: 'decision not found' });
+  } finally {
+    await new Promise((resolve) => app.server.close(resolve));
+  }
+});
+
+test('HTTP API preserves Unicode request text', async () => {
+  const { app, base } = await startServer();
+  try {
+    const response = await fetch(`${base}/decisions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: 'قرار عربي 🚀', chosen: 'حل محلي' }) });
+    assert.equal((await response.json()).title, 'قرار عربي 🚀');
   } finally {
     await new Promise((resolve) => app.server.close(resolve));
   }

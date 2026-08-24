@@ -17,7 +17,7 @@ let result;
 try {
 if (command === 'stats') result = graph.stats();
 else if (command === 'list') result = graph.exportData();
-else if (command === 'search') result = graph.search(input);
+else if (command === 'search') { const query = parse(input || '{}'); result = graph.search(query.query ?? '', query); }
 else if (command === 'context') result = graph.context(parse(input || '{}'));
 else if (command === 'review') result = graph.review(parse(input || '{}'));
 else if (command === 'fact') { result = graph.addFact(parse(input)); await store.save(graph.exportData()); }

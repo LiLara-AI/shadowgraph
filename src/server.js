@@ -1,5 +1,6 @@
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
+import { timingSafeEqual } from 'node:crypto';
 import { createStorage } from './storage.js';
 import { createShadowGraph } from './shadowgraph.js';
 
@@ -9,6 +10,8 @@ export async function createShadowGraphServer(options = {}) {
   const store = options.store ?? await createStorage({ type: options.storage ?? process.env.SHADOWGRAPH_STORAGE, file: options.file ?? process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json' });
   const graph = createShadowGraph(options);
   graph.importData(await store.load());
+  const apiToken = options.apiToken ?? process.env.SHADOWGRAPH_API_TOKEN;
+  if (apiToken && apiToken.length < 16) throw new Error('SHADOWGRAPH_API_TOKEN must be at least 16 characters');
 
   async function persist() {
     await store.save(graph.exportData());
@@ -42,7 +45,16 @@ export async function createShadowGraphServer(options = {}) {
     try {
       const url = new URL(request.url, 'http://127.0.0.1');
       const origin = request.headers.origin;
-      if (origin && !origin.startsWith('http://127.0.0.1:') && origin !== 'http://localhost') {
+      const authorization = request.headers.authorization ?? '';
+      const expected = Buffer.from(`Bearer ${apiToken ?? ''}`);
+      const provided = Buffer.from(authorization);
+      const authenticated = !apiToken || (provided.length === expected.length && timingSafeEqual(provided, expected));
+      if (!authenticated) {
+        response.writeHead(401, { 'content-type': 'application/json; charset=utf-8' });
+        response.end(JSON.stringify({ error: 'authentication required' }));
+        return;
+      }
+      if (origin && !origin.startsWith('http://127.0.0.1:') && !/^http:\/\/localhost(?::\d+)?$/.test(origin)) {
         response.writeHead(403, { 'content-type': 'application/json; charset=utf-8' });
         response.end(JSON.stringify({ error: 'origin not allowed' }));
         return;
@@ -62,11 +74,12 @@ export async function createShadowGraphServer(options = {}) {
       const body = raw ? JSON.parse(raw) : Object.fromEntries(url.searchParams);
       const result = await handle(url.pathname, request.method, body);
       const status = result.error ? 404 : 200;
-      response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
+      response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
       response.end(JSON.stringify(result));
     } catch (error) {
-      response.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
-      response.end(JSON.stringify({ error: 'invalid request' }));
+      const status = error.message === 'Decision not found' ? 404 : 400;
+      response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      response.end(JSON.stringify({ error: error.message === 'Decision not found' ? 'decision not found' : 'invalid request' }));
     }
   });
 
