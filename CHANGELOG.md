@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.25.0
+
+- Added selectable JSON/SQLite storage through `SHADOWGRAPH_STORAGE`, including WAL mode and a 5-second busy timeout for concurrent SQLite writers.
+- Added decision lifecycle statuses, relationships, retrieval filters, and expanded MCP tools.
+- Added concurrency-safe JSON saves and broader integration tests.
+
 ## 0.2.0 - 2026-08-24
 
 - Redesigned the core as a versioned decision graph.

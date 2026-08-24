@@ -5,24 +5,26 @@ export function createJsonFileStore(filePath) {
   let saveQueue = Promise.resolve();
   return {
     async load() {
-      try {
-        const text = await readFile(filePath, 'utf8');
-        const parsed = JSON.parse(text);
-        return Array.isArray(parsed) ? parsed : parsed;
-      } catch (error) {
-        if (error.code === 'ENOENT') return [];
-        throw error;
-      }
+      try { return JSON.parse(await readFile(filePath, 'utf8')); }
+      catch (error) { if (error.code === 'ENOENT') return { schemaVersion: 2, records: [], facts: [], events: [] }; throw new Error('ShadowGraph storage is invalid or unreadable'); }
     },
-    async save(records) {
-      const payload = Array.isArray(records) ? { schemaVersion: 2, records, facts: [], events: [] } : records;
+    async save(data) {
+      const payload = Array.isArray(data) ? { schemaVersion: 2, records: data, facts: [], events: [] } : data;
       saveQueue = saveQueue.then(async () => {
         await mkdir(dirname(filePath), { recursive: true });
-        const temporaryPath = join(dirname(filePath), `.${filePath.split(/[\\/]/).pop()}.${process.pid}.${Date.now()}.tmp`);
+        const temporaryPath = join(dirname(filePath), `.${filePath.split(/[\\/]/).pop()}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`);
         await writeFile(temporaryPath, JSON.stringify(payload, null, 2) + '\n', 'utf8');
         await rename(temporaryPath, filePath);
       });
       return saveQueue;
     }
   };
+}
+
+export async function createStorage(options = {}) {
+  if ((options.type ?? process.env.SHADOWGRAPH_STORAGE ?? 'json') === 'sqlite') {
+    const { createSqliteStore } = await import('./sqlite-storage.js');
+    return createSqliteStore(options.file);
+  }
+  return createJsonFileStore(options.file);
 }
