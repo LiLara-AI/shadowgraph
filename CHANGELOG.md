@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.27.0
+
+- Added bounded relationship traversal with direction, depth, and relation filters.
+- Added explicit same-project decision supersession with persisted `supersedes` relationships.
+- Added privacy-safe redacted exports and permanent project purge controls across HTTP, CLI, and MCP.
+- Added multi-term explainable search and matching HTTP, CLI, and MCP surfaces.
+
 ## 0.26.0
 
 - Rewrote the user-facing README and integration guide to explain the context, decision, work, observe, evaluate, and reconsider workflow.

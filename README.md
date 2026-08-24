@@ -1,4 +1,4 @@
-# ShadowGraph v0.26
+# ShadowGraph v0.27
 
 ShadowGraph is a local-first, vendor-neutral learning layer for AI agents. It is not generic chat memory: it is an explainable decision graph that tracks what an agent chose, what it rejected, the assumptions and evidence behind it, what happened afterward, and when the decision should be reopened.
 
@@ -21,9 +21,9 @@ The normal learning loop is:
 
 This lets an agent remember the reasoning behind work instead of blindly repeating old answers.
 
-## v0.26 status
+## v0.27 status
 
-Version 0.26 is the final hardening release built on the v0.25 decision graph. It adds selectable storage, optional API authentication, complete relationship persistence, scoped facts, retrieval filters, release-grade interface checks, cross-platform CI, and migration compatibility with v0.1 records.
+Version 0.27 builds on the v0.26 hardening release. It adds bounded graph traversal, explicit decision supersession, privacy-safe redacted exports, project purge, stronger multi-term explainable search, and matching HTTP, CLI, and MCP capabilities. It preserves selectable storage, optional API authentication, relationship persistence, scoped facts, migration compatibility, and the v0.26 graph envelope.
 
 ## Requirements
 
@@ -104,6 +104,10 @@ node src/cli.js decision '{"project":"my-app","title":"Choose a database","chose
 node src/cli.js outcome '{"decisionId":"DECISION_ID","outcome":{"status":"failed","lessons":["Assumption was wrong"]}}'
 node src/cli.js status '{"decisionId":"DECISION_ID","status":"validated"}'
 node src/cli.js link '{"from":"DECISION_ID","to":"FACT_ID","relation":"depends_on"}'
+node src/cli.js traverse '{"id":"DECISION_ID","depth":2,"direction":"out"}'
+node src/cli.js supersede '{"decisionId":"OLD_ID","replacementId":"NEW_ID"}'
+node src/cli.js redact '{"project":"my-app"}'
+node src/cli.js purge '{"project":"my-app"}'
 node src/cli.js attempt '{"solution":"Rewrite everything","result":"Regression"}'
 ```
 
@@ -122,9 +126,13 @@ POST /review
 POST /context
 POST /status
 POST /relationships
+POST /traverse
+POST /redact
+POST /supersede
+DELETE /projects
 ```
 
-Responses are JSON. The server returns `401` when token authentication is enabled and missing, `403` for disallowed browser origins, `404` for missing decisions or routes, and `413` for oversized request bodies.
+`/redact` is read-only and returns a privacy-safe export. `DELETE /projects` permanently removes the selected project's records, facts, and attached relationships. Responses are JSON. `/redact` returns a filtered, redacted export without changing storage. `DELETE /projects` permanently removes the selected project's records, facts, events, and attached relationships; this cannot be undone. The server returns `401` when token authentication is enabled and missing, `403` for disallowed browser origins, `404` for missing decisions or routes, and `413` for oversized request bodies.
 
 ### MCP
 
@@ -143,6 +151,10 @@ MCP tools:
 - `shadowgraph_record_outcome`
 - `shadowgraph_update_status`
 - `shadowgraph_link`
+- `shadowgraph_traverse`
+- `shadowgraph_supersede`
+- `shadowgraph_redact`
+- `shadowgraph_purge`
 
 Recommended agent policy:
 

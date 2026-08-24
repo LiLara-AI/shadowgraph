@@ -61,6 +61,24 @@ test('HTTP API preserves Unicode request text', async () => {
   }
 });
 
+test('HTTP API exposes traversal, supersession, redaction, and project purge', async () => {
+  const { app, base } = await startServer();
+  try {
+    const post = async (path, body, method = 'POST') => fetch(`${base}${path}`, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const first = await (await post('/decisions', { project: 'private', title: 'Old', chosen: 'Bearer private-token' })).json();
+    const second = await (await post('/decisions', { project: 'private', title: 'New', chosen: 'Safe' })).json();
+    assert.equal((await post('/supersede', { decisionId: first.id, replacementId: second.id })).status, 200);
+    const traversal = await (await post('/traverse', { id: second.id })).json();
+    assert.equal(traversal.nodes.length, 2);
+    const redacted = await (await post('/redact', { project: 'private' })).json();
+    assert.equal(redacted.records.some((item) => item.chosen === 'Bearer [REDACTED]'), true);
+    const purged = await (await post('/projects', { project: 'private' }, 'DELETE')).json();
+    assert.equal(purged.removed, 2);
+  } finally {
+    await new Promise((resolve) => app.server.close(resolve));
+  }
+});
+
 test('HTTP API rejects oversized request bodies', async () => {
   const { app, base } = await startServer();
   try {
@@ -136,5 +154,5 @@ test('MCP lists tools and returns parse errors', async () => {
   const responses = await readMcpResponses(child, 2);
   child.kill();
   assert.equal(responses.some((item) => item.error?.code === -32700), true);
-  assert.equal(responses.some((item) => item.result?.tools?.length === 9), true);
+  assert.equal(responses.some((item) => item.result?.tools?.length === 13), true);
 });
