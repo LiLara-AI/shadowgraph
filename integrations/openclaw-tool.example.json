@@ -1,0 +1,12 @@
+{
+  "name": "shadowgraph",
+  "description": "Persistent decision memory and rejected-alternative review",
+  "transport": "http",
+  "baseUrl": "http://127.0.0.1:8787",
+  "operations": [
+    { "name": "search", "method": "GET", "path": "/search", "query": { "q": "string" } },
+    { "name": "review", "method": "POST", "path": "/review", "body": { "changedFacts": ["string"] } },
+    { "name": "record_decision", "method": "POST", "path": "/decisions", "body": { "title": "string", "chosen": "string", "assumptions": ["string"], "alternatives": ["object"] } },
+    { "name": "record_attempt", "method": "POST", "path": "/attempts", "body": { "solution": "string", "result": "string", "reason": "string" } }
+  ]
+}

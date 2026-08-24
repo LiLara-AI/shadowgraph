@@ -1,0 +1,11 @@
+{
+  "name": "shadowgraph",
+  "transport": "http",
+  "baseUrl": "http://127.0.0.1:8787",
+  "actions": {
+    "search": { "method": "GET", "path": "/search?q={query}" },
+    "review": { "method": "POST", "path": "/review", "body": { "changedFacts": ["{fact}"] } },
+    "recordDecision": { "method": "POST", "path": "/decisions", "body": { "title": "{title}", "chosen": "{chosen}", "assumptions": [], "alternatives": [] } },
+    "recordAttempt": { "method": "POST", "path": "/attempts", "body": { "solution": "{solution}", "result": "{result}", "reason": "{reason}" } }
+  }
+}

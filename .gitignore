@@ -1,0 +1,9 @@
+node_modules/
+.npm-cache/
+.shadowgraph/
+coverage/
+*.log
+__pycache__/
+*.py[cod]
+.DS_Store
+.env

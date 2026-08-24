@@ -1,0 +1,58 @@
+import { createServer } from 'node:http';
+import { fileURLToPath } from 'node:url';
+import { createJsonFileStore } from './storage.js';
+import { createShadowGraph } from './shadowgraph.js';
+
+export async function createShadowGraphServer(options = {}) {
+  const store = options.store ?? createJsonFileStore(options.file ?? './.shadowgraph/data.json');
+  const graph = createShadowGraph(options);
+  graph.importData(await store.load());
+
+  async function persist() {
+    await store.save(graph.exportData());
+  }
+
+  async function handle(path, method, body) {
+    if (method === 'GET' && path === '/health') return { ok: true, name: 'shadowgraph' };
+    if (method === 'GET' && path === '/stats') return graph.stats();
+    if (method === 'GET' && path === '/records') return graph.exportData();
+    if (method === 'GET' && path === '/search') return graph.search(body?.q ?? '');
+    if (method === 'POST' && path === '/decisions') {
+      const value = graph.addDecision(body);
+      await persist();
+      return value;
+    }
+    if (method === 'POST' && path === '/attempts') {
+      const value = graph.addAttempt(body);
+      await persist();
+      return value;
+    }
+    if (method === 'POST' && path === '/review') return graph.review(body ?? {});
+    return { error: 'not_found' };
+  }
+
+  const server = createServer(async (request, response) => {
+    try {
+      const url = new URL(request.url, 'http://127.0.0.1');
+      let raw = '';
+      for await (const chunk of request) raw += chunk;
+      const body = raw ? JSON.parse(raw) : Object.fromEntries(url.searchParams);
+      const result = await handle(url.pathname, request.method, body);
+      const status = result.error ? 404 : 200;
+      response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*' });
+      response.end(JSON.stringify(result));
+    } catch (error) {
+      response.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+      response.end(JSON.stringify({ error: error.message }));
+    }
+  });
+
+  return { server, graph, persist };
+}
+
+if (fileURLToPath(import.meta.url) === process.argv[1]) {
+  const port = Number(process.env.PORT ?? 8787);
+  const file = process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json';
+  const app = await createShadowGraphServer({ file });
+  app.server.listen(port, '127.0.0.1', () => console.log(`ShadowGraph listening on http://127.0.0.1:${port}`));
+}

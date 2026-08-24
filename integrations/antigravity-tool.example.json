@@ -1,0 +1,11 @@
+{
+  "name": "shadowgraph",
+  "description": "Local HTTP tool adapter for ShadowGraph",
+  "endpoint": "http://127.0.0.1:8787",
+  "methods": {
+    "before_task": { "method": "POST", "path": "/review", "input": { "changedFacts": ["string"] } },
+    "find_memory": { "method": "GET", "path": "/search?q={query}" },
+    "save_decision": { "method": "POST", "path": "/decisions", "input": { "title": "string", "chosen": "string", "assumptions": ["string"], "alternatives": ["object"] } },
+    "save_attempt": { "method": "POST", "path": "/attempts", "input": { "solution": "string", "result": "string", "reason": "string" } }
+  }
+}
