@@ -100,29 +100,41 @@ test('HTTP API rejects disallowed browser origins', async () => {
   }
 });
 
+function readMcpResponses(child, expected) {
+  return new Promise((resolve, reject) => {
+    let buffer = '';
+    const responses = [];
+    const timer = setTimeout(() => { child.kill(); reject(new Error('Timed out waiting for MCP responses')); }, 5000);
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      buffer += chunk;
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        responses.push(JSON.parse(line));
+        if (responses.length >= expected) { clearTimeout(timer); resolve(responses); }
+      }
+    });
+    child.on('error', (error) => { clearTimeout(timer); reject(error); });
+  });
+}
+
 test('MCP correlates validation errors to request ids', async () => {
   const child = spawn(process.execPath, ['src/mcp.js'], { cwd: process.cwd(), env: { ...process.env, SHADOWGRAPH_FILE: join(tmpdir(), 'shadowgraph-mcp-validation.json') } });
-  let output = '';
-  child.stdout.setEncoding('utf8');
-  child.stdout.on('data', (chunk) => { output += chunk; });
   child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'shadowgraph_record_decision', arguments: { title: '' } } }) + '\n');
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  const [response] = await readMcpResponses(child, 1);
   child.kill();
-  const response = JSON.parse(output.trim());
   assert.equal(response.id, 9);
   assert.equal(response.error.code, -32000);
 });
 
 test('MCP lists tools and returns parse errors', async () => {
   const child = spawn(process.execPath, ['src/mcp.js'], { cwd: process.cwd(), env: { ...process.env, SHADOWGRAPH_FILE: join(tmpdir(), 'shadowgraph-mcp-test.json') } });
-  const lines = [];
-  child.stdout.setEncoding('utf8');
-  child.stdout.on('data', (chunk) => lines.push(...chunk.trim().split('\n').filter(Boolean)));
   child.stdin.write('{bad json\n');
   child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) + '\n');
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  const responses = await readMcpResponses(child, 2);
   child.kill();
-  const responses = lines.map((line) => JSON.parse(line));
   assert.equal(responses.some((item) => item.error?.code === -32700), true);
   assert.equal(responses.some((item) => item.result?.tools?.length === 9), true);
 });
