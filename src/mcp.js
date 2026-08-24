@@ -32,14 +32,16 @@ function reply(id, result, error) {
 const input = createInterface({ input: process.stdin });
 input.on('line', async (line) => {
   if (!line.trim()) return;
+  let request;
   try {
-    const request = JSON.parse(line);
+    request = JSON.parse(line);
     if (request.method === 'initialize') reply(request.id, { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'shadowgraph', version: '0.1.0' } });
     else if (request.method === 'notifications/initialized') return;
     else if (request.method === 'tools/list') reply(request.id, { tools });
     else if (request.method === 'tools/call') reply(request.id, await call(request.params.name, request.params.arguments ?? {}));
     else reply(request.id, {});
   } catch (error) {
-    reply(null, null, { code: -32700, message: 'Parse error' });
+    const parseError = error instanceof SyntaxError;
+    reply(request?.id ?? null, null, { code: parseError ? -32700 : -32000, message: parseError ? 'Parse error' : error.message });
   }
 });

@@ -13,13 +13,21 @@ export function createShadowGraph(options = {}) {
     if (!input || typeof input !== 'object' || typeof input.title !== 'string' || !input.title.trim() || typeof input.chosen !== 'string' || !input.chosen.trim()) {
       throw new Error('A decision requires non-empty title and chosen strings');
     }
+    const confidence = input.confidence ?? 0.5;
+    if (typeof confidence !== 'number' || confidence < 0 || confidence > 1) {
+      throw new Error('Decision confidence must be a number between 0 and 1');
+    }
+    const alternatives = input.alternatives ?? [];
+    if (!Array.isArray(alternatives) || alternatives.some((item) => !item || typeof item.label !== 'string' || !item.label.trim())) {
+      throw new Error('Decision alternatives must have non-empty label strings');
+    }
     const record = {
       id: input.id ?? id('decision'),
       kind: 'decision',
       title: input.title,
       goal: input.goal ?? '',
       chosen: input.chosen,
-      confidence: input.confidence ?? 0.5,
+      confidence,
       status: 'active',
       assumptions: [...(input.assumptions ?? [])],
       evidence: [...(input.evidence ?? [])],

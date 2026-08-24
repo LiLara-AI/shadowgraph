@@ -59,6 +59,29 @@ test('CLI persists a decision and reports stats', async () => {
   assert.equal((await readFile(file, 'utf8')).includes('Testing'), true);
 });
 
+test('HTTP API rejects disallowed browser origins', async () => {
+  const { app, base } = await startServer();
+  try {
+    const response = await fetch(`${base}/health`, { headers: { origin: 'https://evil.example' } });
+    assert.equal(response.status, 403);
+  } finally {
+    await new Promise((resolve) => app.server.close(resolve));
+  }
+});
+
+test('MCP correlates validation errors to request ids', async () => {
+  const child = spawn(process.execPath, ['src/mcp.js'], { cwd: process.cwd(), env: { ...process.env, SHADOWGRAPH_FILE: join(tmpdir(), 'shadowgraph-mcp-validation.json') } });
+  let output = '';
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => { output += chunk; });
+  child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'shadowgraph_record_decision', arguments: { title: '' } } }) + '\n');
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  child.kill();
+  const response = JSON.parse(output.trim());
+  assert.equal(response.id, 9);
+  assert.equal(response.error.code, -32000);
+});
+
 test('MCP lists tools and returns parse errors', async () => {
   const child = spawn(process.execPath, ['src/mcp.js'], { cwd: process.cwd(), env: { ...process.env, SHADOWGRAPH_FILE: join(tmpdir(), 'shadowgraph-mcp-test.json') } });
   const lines = [];
