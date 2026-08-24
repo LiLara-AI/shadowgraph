@@ -1,4 +1,4 @@
-# ShadowGraph v0.27
+# ShadowGraph v0.30
 
 ShadowGraph is a local-first, vendor-neutral learning layer for AI agents. It is not generic chat memory: it is an explainable decision graph that tracks what an agent chose, what it rejected, the assumptions and evidence behind it, what happened afterward, and when the decision should be reopened.
 
@@ -21,13 +21,14 @@ The normal learning loop is:
 
 This lets an agent remember the reasoning behind work instead of blindly repeating old answers.
 
-## v0.27 status
+## v0.30 status
 
-Version 0.27 builds on the v0.26 hardening release. It adds bounded graph traversal, explicit decision supersession, privacy-safe redacted exports, project purge, stronger multi-term explainable search, and matching HTTP, CLI, and MCP capabilities. It preserves selectable storage, optional API authentication, relationship persistence, scoped facts, migration compatibility, and the v0.26 graph envelope.
+Version 0.30 is the public repository release candidate. It builds on v0.27 with persistent review signals, automatic maintenance and aging, fact verification/expiry, idempotent recording, graph-aware retrieval, integrity validation and repair plans, normalized relational SQLite storage with transactional migration, atomic backup snapshots, revision conflict recovery, expanded MCP tools/resources/prompts, and a local dashboard/policy package.
 
 ## Requirements
 
 - Node.js 20+ (SQLite backend requires Node 22.5+ with `node:sqlite`)
+- v0.30 supports public repository use
 - No runtime npm dependencies
 - Python 3.10+ only for the optional Hermes wrapper
 
@@ -40,7 +41,7 @@ npm test
 npm start
 ```
 
-The API listens on `http://127.0.0.1:8787` and stores a versioned JSON graph in `.shadowgraph/data.json`. Set `SHADOWGRAPH_FILE` to choose another location. Set `SHADOWGRAPH_STORAGE=sqlite` on Node 22.5+ to use the WAL-backed SQLite adapter.
+The API listens on `http://127.0.0.1:8787` and stores a versioned JSON graph in `.shadowgraph/data.json`. Set `SHADOWGRAPH_FILE` to choose another location. Set `SHADOWGRAPH_STORAGE=sqlite` on Node 22.5+ to use the WAL-backed relational SQLite adapter. SQLite `backup` creates an atomic snapshot and SQLite `restore` accepts a validated SQLite snapshot; JSON restore remains available only for JSON storage.
 
 For a shared local deployment, enable optional authentication:
 
@@ -118,6 +119,7 @@ GET  /health
 GET  /stats
 GET  /records
 GET  /search?q=database&project=my-app
+GET  /review-signals
 POST /decisions
 POST /attempts
 POST /facts
@@ -129,10 +131,18 @@ POST /relationships
 POST /traverse
 POST /redact
 POST /supersede
+POST /maintain
+POST /review-signals/ack
+POST /retrieve
+GET  /validate
+POST /repair-plan
+POST /backup
+POST /restore
+POST /projects/purge-preview
 DELETE /projects
 ```
 
-`/redact` is read-only and returns a privacy-safe export. `DELETE /projects` permanently removes the selected project's records, facts, and attached relationships. Responses are JSON. `/redact` returns a filtered, redacted export without changing storage. `DELETE /projects` permanently removes the selected project's records, facts, events, and attached relationships; this cannot be undone. The server returns `401` when token authentication is enabled and missing, `403` for disallowed browser origins, `404` for missing decisions or routes, and `413` for oversized request bodies.
+`/redact` is read-only and returns a privacy-safe export. `/review` evaluates rules and persists deduplicated review signals; use `/review-signals` to read them and `/review-signals/ack` to acknowledge them. `/repair-plan` is always non-destructive and returns `{apply:false, actions:[...]}`. `/projects/purge-preview` shows deletion counts without changing storage. `DELETE /projects` permanently removes the selected project's records, facts, events, and attached relationships; this cannot be undone. The server returns `401` when token authentication is enabled and missing, `403` for disallowed browser origins, `404` for missing decisions or routes, and `413` for oversized request bodies.
 
 ### MCP
 
@@ -155,6 +165,17 @@ MCP tools:
 - `shadowgraph_supersede`
 - `shadowgraph_redact`
 - `shadowgraph_purge`
+- `shadowgraph_maintain`
+- `shadowgraph_retrieve`
+- `shadowgraph_validate`
+- `shadowgraph_review_signals`
+- `shadowgraph_purge_preview`
+- `shadowgraph_ack_review`
+- `shadowgraph_repair_plan`
+- `shadowgraph_backup`
+- `shadowgraph_restore`
+
+MCP exposes 22 tools and also advertises a read-only `shadowgraph://context` resource and a consequential-task prompt.
 
 Recommended agent policy:
 
@@ -186,7 +207,7 @@ The JSON store accepts both the v0.1 array format and the v0.26 graph envelope. 
 }
 ```
 
-JSON is the zero-dependency portable default. SQLite is selectable through `SHADOWGRAPH_STORAGE=sqlite` on Node 22.5+ and uses WAL mode with a busy timeout for concurrent local writers. Do not run multiple writers against the same JSON file concurrently; use SQLite for that deployment shape.
+JSON is the zero-dependency portable default. v0.30 stores a monotonic revision and can reject stale `expectedRevision` saves to prevent lost updates; callers should reload and retry after a revision conflict. SQLite is selectable through `SHADOWGRAPH_STORAGE=sqlite` on Node 22.5+ and now uses normalized relational tables with WAL, a busy timeout, transactional replacement, legacy envelope migration, and revision checks. Do not assume revision checks replace application-level conflict handling when multiple processes mutate stale in-memory graphs.
 
 ## Security and privacy
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.30.0 (public repository release candidate)
+
+- Added persistent review signals, maintenance/aging, fact verification and expiry, idempotency, graph-aware retrieval, validation, repair planning, and backup/restore helpers.
+- Added normalized relational SQLite tables, transactional legacy-envelope migration, repeated-save revision synchronization, and revision conflict detection for JSON and SQLite saves.
+- Added MCP resources/prompts, local dashboard, agent policy assets, and expanded interface parity.
+- This version is intentionally not published or pushed as a release.
+
 ## 0.27.0
 
 - Added bounded relationship traversal with direction, depth, and relation filters.
