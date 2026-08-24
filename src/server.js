@@ -36,6 +36,12 @@ export async function createShadowGraphServer(options = {}) {
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url, 'http://127.0.0.1');
+      const origin = request.headers.origin;
+      if (origin && !origin.startsWith('http://127.0.0.1:') && origin !== 'http://localhost') {
+        response.writeHead(403, { 'content-type': 'application/json; charset=utf-8' });
+        response.end(JSON.stringify({ error: 'origin not allowed' }));
+        return;
+      }
       let raw = '';
       let bodyBytes = 0;
       for await (const chunk of request) {
