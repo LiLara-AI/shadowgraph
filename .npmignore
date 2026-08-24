@@ -1,0 +1,12 @@
+node_modules/
+.npm-cache/
+.shadowgraph/
+coverage/
+__pycache__/
+*.py[cod]
+.github/
+test/
+.git/
+.gitignore
+.npmignore
+CONTRIBUTING.md

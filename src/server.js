@@ -3,6 +3,8 @@ import { fileURLToPath } from 'node:url';
 import { createJsonFileStore } from './storage.js';
 import { createShadowGraph } from './shadowgraph.js';
 
+const MAX_BODY_BYTES = 1024 * 1024;
+
 export async function createShadowGraphServer(options = {}) {
   const store = options.store ?? createJsonFileStore(options.file ?? './.shadowgraph/data.json');
   const graph = createShadowGraph(options);
@@ -35,15 +37,24 @@ export async function createShadowGraphServer(options = {}) {
     try {
       const url = new URL(request.url, 'http://127.0.0.1');
       let raw = '';
-      for await (const chunk of request) raw += chunk;
+      let bodyBytes = 0;
+      for await (const chunk of request) {
+        bodyBytes += Buffer.byteLength(chunk);
+        if (bodyBytes > MAX_BODY_BYTES) {
+          response.writeHead(413, { 'content-type': 'application/json; charset=utf-8' });
+          response.end(JSON.stringify({ error: 'request body too large' }));
+          return;
+        }
+        raw += chunk;
+      }
       const body = raw ? JSON.parse(raw) : Object.fromEntries(url.searchParams);
       const result = await handle(url.pathname, request.method, body);
       const status = result.error ? 404 : 200;
-      response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*' });
+      response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
       response.end(JSON.stringify(result));
     } catch (error) {
       response.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
-      response.end(JSON.stringify({ error: error.message }));
+      response.end(JSON.stringify({ error: 'invalid request' }));
     }
   });
 
