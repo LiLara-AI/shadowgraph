@@ -1,14 +1,12 @@
-# ShadowGraph
+# ShadowGraph v0.2
 
-[![CI](https://github.com/LiLara-AI/shadowgraph/actions/workflows/ci.yml/badge.svg)](https://github.com/LiLara-AI/shadowgraph/actions/workflows/ci.yml)
+ShadowGraph is a local-first, vendor-neutral learning layer for AI agents. It is not generic chat memory: it is an explainable decision graph that tracks what an agent chose, what it rejected, the assumptions and evidence behind it, what happened afterward, and when the decision should be reopened.
 
-ShadowGraph is a local-first, vendor-neutral learning layer for AI agents. It combines decision memory, rejected alternatives, failed attempts, assumptions, evidence, and review triggers in one durable store.
+> ShadowGraph remembers not only what an agent chose, but what it rejected, why it rejected it, and what evidence should make it think again.
 
-> ShadowGraph remembers not only what an agent chose, but what it rejected, why it rejected it, and when it should think again.
+## v0.2 status
 
-## Status
-
-This is the first public release candidate (`0.1.0`). The core, persistence, CLI, HTTP API, MCP server, integration templates, and CI workflow are included. Claude should perform an independent integration and behavior review before this is treated as production-ready.
+Version 0.2 is the structured decision-graph release. It preserves import compatibility with v0.1 records and adds project scopes, facts, evidence provenance, outcomes, confidence history, event history, explainable retrieval, and a context tool for agents.
 
 ## Requirements
 
@@ -25,7 +23,21 @@ npm test
 npm start
 ```
 
-The API listens only on `http://127.0.0.1:8787` and stores records in `.shadowgraph/data.json`. Set `SHADOWGRAPH_FILE` to use a different file.
+The API listens on `http://127.0.0.1:8787` and stores a versioned JSON graph in `.shadowgraph/data.json`. Set `SHADOWGRAPH_FILE` to choose another location.
+
+## v0.2 data model
+
+The graph contains:
+
+- **Decision** — selected approach, goal, project, confidence, assumptions, alternatives, evidence, outcome.
+- **Alternative** — rejected proposal, rejection reason, and structured reopen rules.
+- **Fact** — observed value with source, confidence, timestamp, and status.
+- **Evidence** — source, type, confidence, timestamp, and optional detail.
+- **Attempt** — approach, result, environment, lesson/reason, and relationships.
+- **Outcome** — successful, mixed, failed, or unknown result with lessons and confidence update.
+- **Event** — append-only record of important graph changes.
+
+Confidence has an initial value, current value, and history of outcome-driven changes. Sources can be labeled `human_confirmed`, `tool_observed`, `model_inferred`, `imported`, or `unknown`; inferred memory should not automatically be treated as verified truth.
 
 ## Interfaces
 
@@ -34,6 +46,19 @@ The API listens only on `http://127.0.0.1:8787` and stores records in `.shadowgr
 ```js
 import { createShadowGraph } from './src/shadowgraph.js';
 const graph = createShadowGraph();
+const decision = graph.addDecision({
+  project: 'my-app',
+  title: 'Choose a database',
+  chosen: 'PostgreSQL',
+  confidence: 0.8,
+  evidence: [{ source: 'load-test', type: 'tool_observed', confidence: 0.9 }],
+  alternatives: [{
+    label: 'SQLite',
+    reopenWhen: [{ key: 'deployment', operator: 'equals', value: 'local' }]
+  }]
+});
+graph.addFact({ key: 'deployment', value: 'local', source: 'human_confirmed', confidence: 1 });
+console.log(graph.context({ project: 'my-app', facts: { deployment: 'local' } }));
 ```
 
 ### CLI
@@ -42,8 +67,11 @@ const graph = createShadowGraph();
 node src/cli.js stats
 node src/cli.js list
 node src/cli.js search database
+node src/cli.js context '{"project":"my-app","facts":{"deployment":"local"}}'
 node src/cli.js review '{"changedFacts":["local-single-user"]}'
-node src/cli.js decision '{"title":"Choose a database","chosen":"PostgreSQL"}'
+node src/cli.js fact '{"key":"deployment","value":"local","source":"human_confirmed","confidence":1}'
+node src/cli.js decision '{"project":"my-app","title":"Choose a database","chosen":"PostgreSQL"}'
+node src/cli.js outcome '{"decisionId":"DECISION_ID","outcome":{"status":"failed","lessons":["Assumption was wrong"]}}'
 node src/cli.js attempt '{"solution":"Rewrite everything","result":"Regression"}'
 ```
 
@@ -53,10 +81,13 @@ node src/cli.js attempt '{"solution":"Rewrite everything","result":"Regression"}
 GET  /health
 GET  /stats
 GET  /records
-GET  /search?q=database
+GET  /search?q=database&project=my-app
 POST /decisions
 POST /attempts
+POST /facts
+POST /outcomes
 POST /review
+POST /context
 ```
 
 ### MCP
@@ -65,64 +96,50 @@ POST /review
 npm run mcp
 ```
 
-The MCP server exposes:
+MCP tools:
 
 - `shadowgraph_record_decision`
 - `shadowgraph_record_attempt`
 - `shadowgraph_review`
 - `shadowgraph_search`
+- `shadowgraph_context`
 
-## AI tool integrations
+Recommended agent policy:
 
-Copy-ready templates live in `integrations/`:
+> Before a consequential task, call ShadowGraph context for the project. Search relevant decisions and failed attempts. Record decisions with assumptions, evidence, and rejected alternatives. Record outcomes after implementation. Treat model-inferred facts as unverified until supported by a human or tool observation.
 
-- Claude Code: `integrations/claude-code.mcp.json`
-- Cursor: `integrations/cursor.mcp.json`
-- Codex: `integrations/codex.mcp.json`
-- Hermes Agent: `integrations/hermes-agent.py`
-- OpenClaw: `integrations/openclaw-tool.example.json`
-- Antigravity: `integrations/antigravity-tool.example.json`
+## Migration and storage
 
-Replace `ABSOLUTE_PATH_TO_SHADOWGRAPH` in MCP templates. Native settings paths and import screens are product/version-specific, so the templates intentionally provide the standard transport body rather than claiming a universal path.
+The JSON store accepts both the v0.1 array format and the v0.2 graph envelope. v0.2 exports:
 
-Recommended agent instruction:
+```json
+{
+  "schemaVersion": 2,
+  "records": [],
+  "facts": [],
+  "events": []
+}
+```
 
-> Before a consequential task, search ShadowGraph and review changed assumptions. After making an architectural decision, record the decision and rejected alternatives. After a failed approach, record the attempt and lesson. Reopen old decisions when their assumptions change.
+The current local store remains JSON for zero-dependency portability. v0.2 also includes an optional `src/sqlite-storage.js` adapter for Node 22.5+ runtimes exposing `node:sqlite`; Node 20 users should continue using JSON storage. Do not run multiple writers against the same JSON file concurrently; use the SQLite adapter for transactional multi-process storage.
 
-## Data model
+## Integration
 
-A decision contains:
-
-- selected approach;
-- goal;
-- confidence;
-- assumptions;
-- evidence;
-- rejected alternatives;
-- reason for rejection;
-- facts that should reopen each alternative;
-- optional review date.
-
-An attempt contains the approach, result, environment, reason, and conditions under which it may be useful again.
+Copy-ready templates remain in `integrations/` for Claude Code, Cursor, Codex, Hermes Agent, OpenClaw, and Antigravity. They use the stable MCP/HTTP surfaces rather than vendor-specific internals.
 
 ## Security and privacy
 
-The HTTP server has no authentication in this release. Keep it bound to `127.0.0.1`; do not expose it publicly. Do not store secrets or sensitive transcripts unless your local storage policy permits it. See `SECURITY.md`.
+The HTTP server has no authentication. Keep it bound to `127.0.0.1`; do not expose it publicly. Browser origins other than localhost are rejected as defense in depth. Do not store secrets or sensitive transcripts unless your local storage policy permits it. See `SECURITY.md`.
 
-## Development and release checks
+## Checks
 
 ```bash
 npm run check
 npm test
+npm audit --omit=dev
 python -m py_compile integrations/hermes-agent.py
 npm pack --dry-run
 ```
-
-GitHub Actions runs syntax checks, tests, and JSON-template validation on Node 20 and 22.
-
-## Contributing
-
-See `CONTRIBUTING.md`. ShadowGraph must remain vendor-neutral and local-first.
 
 ## License
 

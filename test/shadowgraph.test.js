@@ -17,7 +17,7 @@ test('stores one decision and reopens it when facts change', () => {
 test('keeps attempts searchable and exportable', () => {
   const graph = createShadowGraph();
   graph.addAttempt({ solution: 'Rewrite everything', result: 'Regression', reason: 'Too broad' });
-  assert.equal(graph.search('regression').length, 1);
+  assert.equal(graph.search('regression')[0].record.result, 'Regression');
   assert.equal(graph.stats().attempts, 1);
 });
 
@@ -28,6 +28,6 @@ test('persists records in a portable JSON file', async () => {
   graph.addDecision({ title: 'Use tests', chosen: 'Yes' });
   await store.save(graph.exportData());
   const loaded = await store.load();
-  assert.equal(loaded.length, 1);
-  assert.equal(JSON.parse(await readFile(join(directory, 'data.json'), 'utf8')).version, 1);
+  assert.equal(loaded.records.length, 1);
+  assert.equal(JSON.parse(await readFile(join(directory, 'data.json'), 'utf8')).schemaVersion, 2);
 });
