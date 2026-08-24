@@ -23,7 +23,7 @@ Replace `ABSOLUTE_PATH_TO_SHADOWGRAPH` with the repository's absolute path. Regi
 node ABSOLUTE_PATH_TO_SHADOWGRAPH/src/mcp.js
 ```
 
-The MCP server exposes nine tools:
+The MCP server exposes thirteen tools:
 
 ```text
 shadowgraph_record_decision
@@ -35,6 +35,10 @@ shadowgraph_record_fact
 shadowgraph_record_outcome
 shadowgraph_update_status
 shadowgraph_link
+shadowgraph_traverse
+shadowgraph_supersede
+shadowgraph_redact
+shadowgraph_purge
 ```
 
 The exact configuration file location varies by product and release. These files document the common MCP stdio body; they do not claim one universal vendor path.

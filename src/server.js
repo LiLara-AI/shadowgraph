@@ -27,6 +27,10 @@ export async function createShadowGraphServer(options = {}) {
     if (method === 'POST' && path === '/outcomes') { const value = graph.setOutcome(body.decisionId, body.outcome); await persist(); return value; }
     if (method === 'POST' && path === '/status') { const value = graph.updateDecisionStatus(body.decisionId, body.status); await persist(); return value; }
     if (method === 'POST' && path === '/relationships') { const value = graph.link(body); await persist(); return value; }
+    if (method === 'POST' && path === '/traverse') return graph.traverse(body ?? {});
+    if (method === 'POST' && path === '/redact') return graph.redact(body ?? {});
+    if (method === 'POST' && path === '/supersede') { const value = graph.supersedeDecision(body); await persist(); return value; }
+    if (method === 'DELETE' && path === '/projects') { const value = graph.purgeProject(body?.project); await persist(); return value; }
     if (method === 'POST' && path === '/decisions') {
       const value = graph.addDecision(body);
       await persist();
