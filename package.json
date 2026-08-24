@@ -1,7 +1,7 @@
 {
   "name": "shadowgraph-unified-plugin",
-  "version": "0.27.0",
-  "private": false,
+  "version": "0.30.0",
+  "private": true,
   "description": "Portable decision memory and rejected-alternative learning layer for AI agents",
   "type": "module",
   "engines": {
@@ -19,6 +19,7 @@
   "homepage": "https://github.com/LiLara-AI/shadowgraph#readme",
   "files": [
     "src/",
+    "dashboard/",
     "integrations/",
     "README.md",
     "LICENSE",
@@ -32,6 +33,6 @@
     "test": "node --test --test-concurrency=1",
     "start": "node src/server.js",
     "mcp": "node src/mcp.js",
-    "check": "node --check src/shadowgraph.js && node --check src/storage.js && node --check src/sqlite-storage.js && node --check src/server.js && node --check src/cli.js && node --check src/mcp.js"
+    "check": "node --check src/shadowgraph.js && node --check src/storage.js && node --check src/sqlite-storage.js && node --check src/server.js && node --check src/cli.js && node --check src/mcp.js && node --check src/backup.js && node --check src/revision-store.js"
   }
 }
