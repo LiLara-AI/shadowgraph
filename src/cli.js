@@ -14,15 +14,23 @@ function parse(value) {
 }
 
 let result;
+try {
 if (command === 'stats') result = graph.stats();
 else if (command === 'list') result = graph.exportData();
 else if (command === 'search') result = graph.search(input);
+else if (command === 'context') result = graph.context(parse(input || '{}'));
 else if (command === 'review') result = graph.review(parse(input || '{}'));
+else if (command === 'fact') { result = graph.addFact(parse(input)); await store.save(graph.exportData()); }
+else if (command === 'outcome') { const value = parse(input); result = graph.setOutcome(value.decisionId, value.outcome); await store.save(graph.exportData()); }
 else if (command === 'decision') { result = graph.addDecision(parse(input)); await store.save(graph.exportData()); }
 else if (command === 'attempt') { result = graph.addAttempt(parse(input)); await store.save(graph.exportData()); }
 else {
-  console.error('Usage: shadowgraph <stats|list|search|review|decision|attempt> [JSON]');
+  console.error('Usage: shadowgraph <stats|list|search|context|review|decision|attempt|fact|outcome> [JSON]');
   process.exitCode = 1;
   result = null;
 }
 if (result !== null) console.log(JSON.stringify(result, null, 2));
+} catch (error) {
+  console.error(error.message);
+  process.exitCode = 1;
+}

@@ -1,0 +1,22 @@
+// Optional v0.2 SQLite backend. Requires a Node runtime exposing node:sqlite (22.5+).
+export async function createSqliteStore(filePath) {
+  let DatabaseSync;
+  try {
+    ({ DatabaseSync } = await import('node:sqlite'));
+  } catch {
+    throw new Error('SQLite storage requires Node 22.5+ with node:sqlite; use JSON storage on Node 20');
+  }
+  const db = new DatabaseSync(filePath);
+  db.exec('CREATE TABLE IF NOT EXISTS shadowgraph_state (id INTEGER PRIMARY KEY CHECK (id = 1), payload TEXT NOT NULL)');
+  return {
+    async load() {
+      const row = db.prepare('SELECT payload FROM shadowgraph_state WHERE id = 1').get();
+      return row ? JSON.parse(row.payload) : { schemaVersion: 2, records: [], facts: [], events: [] };
+    },
+    async save(data) {
+      const payload = Array.isArray(data) ? { schemaVersion: 2, records: data, facts: [], events: [] } : data;
+      db.prepare('INSERT INTO shadowgraph_state (id, payload) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET payload = excluded.payload').run(JSON.stringify(payload));
+    },
+    close() { db.close(); }
+  };
+}

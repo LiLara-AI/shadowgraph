@@ -2,8 +2,11 @@ node_modules/
 .npm-cache/
 .shadowgraph/
 coverage/
-__pycache__/
-*.py[cod]
+integrations/__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
 .github/
 test/
 .git/

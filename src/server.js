@@ -18,7 +18,10 @@ export async function createShadowGraphServer(options = {}) {
     if (method === 'GET' && path === '/health') return { ok: true, name: 'shadowgraph' };
     if (method === 'GET' && path === '/stats') return graph.stats();
     if (method === 'GET' && path === '/records') return graph.exportData();
-    if (method === 'GET' && path === '/search') return graph.search(body?.q ?? '');
+    if (method === 'GET' && path === '/search') return graph.search(body?.q ?? '', body ?? {});
+    if (method === 'POST' && path === '/context') return graph.context(body ?? {});
+    if (method === 'POST' && path === '/facts') { const value = graph.addFact(body); await persist(); return value; }
+    if (method === 'POST' && path === '/outcomes') { const value = graph.setOutcome(body.decisionId, body.outcome); await persist(); return value; }
     if (method === 'POST' && path === '/decisions') {
       const value = graph.addDecision(body);
       await persist();
@@ -42,17 +45,18 @@ export async function createShadowGraphServer(options = {}) {
         response.end(JSON.stringify({ error: 'origin not allowed' }));
         return;
       }
-      let raw = '';
+      const chunks = [];
       let bodyBytes = 0;
       for await (const chunk of request) {
-        bodyBytes += Buffer.byteLength(chunk);
+        bodyBytes += chunk.length;
         if (bodyBytes > MAX_BODY_BYTES) {
           response.writeHead(413, { 'content-type': 'application/json; charset=utf-8' });
           response.end(JSON.stringify({ error: 'request body too large' }));
           return;
         }
-        raw += chunk;
+        chunks.push(chunk);
       }
+      const raw = Buffer.concat(chunks).toString('utf8');
       const body = raw ? JSON.parse(raw) : Object.fromEntries(url.searchParams);
       const result = await handle(url.pathname, request.method, body);
       const status = result.error ? 404 : 200;
