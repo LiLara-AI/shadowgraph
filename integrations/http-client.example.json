@@ -3,9 +3,15 @@
   "transport": "http",
   "baseUrl": "http://127.0.0.1:8787",
   "actions": {
-    "search": { "method": "GET", "path": "/search?q={query}" },
-    "review": { "method": "POST", "path": "/review", "body": { "changedFacts": ["{fact}"] } },
-    "recordDecision": { "method": "POST", "path": "/decisions", "body": { "title": "{title}", "chosen": "{chosen}", "assumptions": [], "alternatives": [] } },
-    "recordAttempt": { "method": "POST", "path": "/attempts", "body": { "solution": "{solution}", "result": "{result}", "reason": "{reason}" } }
-  }
+    "context": { "method": "POST", "path": "/context", "body": { "project": "{project}" } },
+    "search": { "method": "GET", "path": "/search?q={urlencoded_query}&project={urlencoded_project}&limit={limit}&offset={offset}" },
+    "retrieve": { "method": "POST", "path": "/retrieve", "body": { "query": "{query}", "project": "{project}", "limit": "{limit}", "offset": "{offset}" } },
+    "reviewStored": { "method": "POST", "path": "/review", "body": { "project": "{project}" } },
+    "recordDecision": { "method": "POST", "path": "/decisions", "body": { "title": "{title}", "chosen": "{chosen}", "project": "{project}", "sourceClass": "agent_claimed", "idempotencyKey": "{idempotencyKey}", "assumptions": [], "alternatives": [] } },
+    "recordFact": { "method": "POST", "path": "/facts", "body": { "key": "{key}", "value": "{value}", "project": "{project}", "sourceClass": "agent_claimed", "idempotencyKey": "{idempotencyKey}" } },
+    "recordOutcome": { "method": "POST", "path": "/outcomes", "body": { "decisionId": "{decisionId}", "outcome": { "status": "{status}", "sourceClass": "agent_claimed" } } },
+    "updateStatus": { "method": "POST", "path": "/status", "body": { "decisionId": "{decisionId}", "status": "{status}" } },
+    "maintain": { "method": "POST", "path": "/maintain", "body": { "changedFacts": [] } }
+  },
+  "notes": ["Use a URL encoder for every GET placeholder, especially query and project.", "reviewStored intentionally omits facts and reads persisted state.", "No action may pass verificationStatus verified or expired."]
 }

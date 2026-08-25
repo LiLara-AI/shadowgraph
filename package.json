@@ -1,6 +1,6 @@
 {
   "name": "shadowgraph-unified-plugin",
-  "version": "0.30.0",
+  "version": "0.31.0",
   "private": true,
   "description": "Portable decision memory and rejected-alternative learning layer for AI agents",
   "type": "module",
@@ -33,6 +33,7 @@
     "test": "node --test --test-concurrency=1",
     "start": "node src/server.js",
     "mcp": "node src/mcp.js",
-    "check": "node --check src/shadowgraph.js && node --check src/storage.js && node --check src/sqlite-storage.js && node --check src/server.js && node --check src/cli.js && node --check src/mcp.js && node --check src/backup.js && node --check src/revision-store.js"
+    "check": "node --check src/shadowgraph.js && node --check src/storage.js && node --check src/sqlite-storage.js && node --check src/server.js && node --check src/cli.js && node --check src/mcp.js && node --check src/backup.js && node --check src/revision-store.js && node --check src/journal.js && node --check src/confidence.js && node --check scripts/bench-journal.mjs",
+    "bench": "node scripts/bench-journal.mjs"
   }
 }
