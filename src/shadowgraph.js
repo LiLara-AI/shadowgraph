@@ -243,7 +243,12 @@ export function createShadowGraph(options = {}) {
     const results = direct.map((item) => ({ ...item, graphBoost: 0, reasons: [item.reason] }));
     const directIds = new Set(results.map((item) => item.record.id));
     for (const relation of relations.values()) { const relatedId = directIds.has(relation.from) ? relation.to : directIds.has(relation.to) ? relation.from : null; const related = relatedId && entity(relatedId); if (related && related.kind !== 'alternative' && (!options.project || related.project === options.project) && !directIds.has(relatedId)) results.push({ record: clone(related), score: 1, graphBoost: 1, matched: ['relationship'], reasons: [`Related by ${relation.relation}`] }); }
-    return results.sort((a, b) => b.score - a.score);
+    const sorted = results.sort((a, b) => b.score - a.score);
+    if (options.limit === undefined) return sorted;
+    if (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 1000) throw new Error('Retrieval limit must be an integer between 1 and 1000');
+    const offset = options.offset ?? 0;
+    if (!Number.isInteger(offset) || offset < 0) throw new Error('Retrieval offset must be a non-negative integer');
+    return { items: sorted.slice(offset, offset + options.limit), page: { offset, limit: options.limit, total: sorted.length, hasMore: offset + options.limit < sorted.length } };
   }
   function search(query = '', options = {}) {
     const terms = String(query).toLowerCase().split(/\s+/).filter(Boolean);

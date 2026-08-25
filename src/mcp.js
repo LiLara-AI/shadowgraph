@@ -10,7 +10,7 @@ graph.importData(await store.load());
 let persistQueue = Promise.resolve();
 function persist() { const operation = persistQueue.then(async () => { const revision = await store.save(graph.exportData()); graph.setRevision(revision); }).catch(async (error) => { if (/revision conflict/i.test(error.message)) graph.replaceData(await store.load()); throw error; }); persistQueue = operation.catch(() => {}); return operation; }
 
-const tools = [
+const allTools = [
   { name: 'shadowgraph_record_decision', description: 'Record a decision, its assumptions, evidence, and rejected alternatives.', inputSchema: { type: 'object', required: ['title', 'chosen'], properties: { title: { type: 'string' }, chosen: { type: 'string' }, project: { type: 'string' }, goal: { type: 'string' }, assumptions: { type: 'array', items: { type: 'string' } }, evidence: { type: 'array', items: { type: 'string' } }, alternatives: { type: 'array', items: { type: 'object', properties: { label: { type: 'string' }, reasonRejected: { type: 'string' }, reason: { type: 'string' }, reopenWhen: { type: 'array' } } } } } } },
   { name: 'shadowgraph_record_attempt', description: 'Record a failed or informative attempt so the agent does not repeat it blindly.', inputSchema: { type: 'object', required: ['solution', 'result'], properties: { solution: { type: 'string' }, result: { type: 'string' }, project: { type: 'string' }, reason: { type: 'string' }, environment: { type: 'string' } } } },
   { name: 'shadowgraph_review', description: 'Find decisions whose rejected alternatives should be reconsidered after facts change.', inputSchema: { type: 'object', properties: { changedFacts: { type: 'array', items: { type: 'string' } }, facts: { type: 'object' } } } },
@@ -25,7 +25,7 @@ const tools = [
   { name: 'shadowgraph_redact', description: 'Return a redacted export without changing stored data.', inputSchema: { type: 'object', properties: { project: { type: 'string' }, patterns: { type: 'array', items: { type: 'string' } } } } },
   { name: 'shadowgraph_purge', description: 'Permanently remove all records, facts, events, and relationships for a project.', inputSchema: { type: 'object', required: ['project'], properties: { project: { type: 'string' } } } },
   { name: 'shadowgraph_maintain', description: 'Age due decisions, expire facts, and generate persistent review signals.', inputSchema: { type: 'object', properties: { now: { type: 'string' }, changedFacts: { type: 'array' }, facts: { type: 'object' } } } },
-  { name: 'shadowgraph_retrieve', description: 'Retrieve relevant records plus one-hop related graph context.', inputSchema: { type: 'object', properties: { query: { type: 'string' }, project: { type: 'string' }, status: { type: 'string' } } } },
+  { name: 'shadowgraph_retrieve', description: 'Retrieve relevant records plus one-hop related graph context.', inputSchema: { type: 'object', properties: { query: { type: 'string' }, project: { type: 'string' }, status: { type: 'string' }, limit: { type: 'integer' }, offset: { type: 'integer' } } } },
   { name: 'shadowgraph_validate', description: 'Validate graph integrity without modifying storage.', inputSchema: { type: 'object' } },
   { name: 'shadowgraph_review_signals', description: 'List persistent review signals.', inputSchema: { type: 'object', properties: { project: { type: 'string' }, status: { type: 'string' } } } },
   { name: 'shadowgraph_purge_preview', description: 'Preview project deletion counts without modifying storage.', inputSchema: { type: 'object', required: ['project'], properties: { project: { type: 'string' } } } },
@@ -34,6 +34,8 @@ const tools = [
   { name: 'shadowgraph_backup', description: 'Create a consistent backup snapshot at a destination path.', inputSchema: { type: 'object', required: ['destination'], properties: { destination: { type: 'string' } } } },
   { name: 'shadowgraph_restore', description: 'Restore a JSON or SQLite backup using the configured storage backend.', inputSchema: { type: 'object', required: ['source'], properties: { source: { type: 'string' } } } }
 ];
+const compactNames = new Set(['shadowgraph_context','shadowgraph_record_decision','shadowgraph_record_attempt','shadowgraph_record_fact','shadowgraph_record_outcome','shadowgraph_retrieve','shadowgraph_search','shadowgraph_review','shadowgraph_validate','shadowgraph_maintain']);
+const tools = process.env.SHADOWGRAPH_MCP_COMPACT === '1' ? allTools.filter((tool) => compactNames.has(tool.name)) : allTools;
 
 async function call(name, args) {
   let value;
