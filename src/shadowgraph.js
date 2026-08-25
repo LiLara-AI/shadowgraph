@@ -54,7 +54,7 @@ export function createShadowGraph(options = {}) {
       project: input.project ?? 'default', title: input.title, goal: input.goal ?? '', chosen: input.chosen,
       confidence: { initial: confidence, current: confidence, history: [] }, status: 'active',
       assumptions: strings(input.assumptions, 'assumptions'), evidence: (input.evidence ?? []).map((item) => normalizeEvidence(item, now)),
-      alternatives: alternatives.map((item) => ({ id: item.id ?? id('alternative'), label: item.label, reasonRejected: item.reasonRejected ?? '', reopenWhen: normalizeRules(item.reopenWhen ?? []), status: 'rejected' })),
+      alternatives: alternatives.map((item) => ({ id: item.id ?? id('alternative'), label: item.label, reasonRejected: item.reasonRejected ?? item.reason ?? '', reopenWhen: normalizeRules(item.reopenWhen ?? []), status: 'rejected' })),
       failedAttempts: [...(input.failedAttempts ?? [])], outcome: input.outcome ?? null,
       reviewAfter: input.reviewAfter ?? null, createdAt: input.createdAt ?? now(), updatedAt: now()
     };
@@ -76,9 +76,10 @@ export function createShadowGraph(options = {}) {
     const factScope = JSON.stringify([input.project ?? 'default', input.key]);
     const previous = currentFacts.get(factScope);
     if (previous) previous.status = 'superseded';
-    const verificationStatus = input.verificationStatus ?? (input.source === 'human_confirmed' || input.source === 'tool_observed' ? 'verified' : 'unverified');
+    const normalizedSource = input.source == null ? 'model_inferred' : String(input.source).replaceAll('-', '_');
+     const verificationStatus = input.verificationStatus ?? (normalizedSource === 'human_confirmed' || normalizedSource === 'tool_observed' ? 'verified' : 'unverified');
     if (!['unverified', 'verified', 'contradicted', 'expired'].includes(verificationStatus)) throw new Error('Invalid fact verificationStatus');
-    const fact = { id: input.id ?? id('fact'), kind: 'fact', schemaVersion: SCHEMA_VERSION, project: input.project ?? 'default', key: input.key, value: input.value, source: input.source ?? 'model_inferred', confidence, verificationStatus, status: 'active', expiresAt: input.expiresAt ?? null, observedAt: input.observedAt ?? now() };
+    const fact = { id: input.id ?? id('fact'), kind: 'fact', schemaVersion: SCHEMA_VERSION, project: input.project ?? 'default', key: input.key, value: input.value, source: normalizedSource, confidence, verificationStatus, status: 'active', expiresAt: input.expiresAt ?? null, observedAt: input.observedAt ?? now() };
     facts.set(fact.id, fact); currentFacts.set(factScope, fact); event('fact.observed', { factId: fact.id, key: fact.key }); const result = clone(fact); rememberIdempotency(input, 'fact', result); return result;
   }
 
