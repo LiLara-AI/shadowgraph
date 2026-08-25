@@ -58,10 +58,20 @@ test('migration preserves confidence initial values and prevents supersession cy
   assert.throws(() => graph.supersedeDecision({ decisionId: 'd2', replacementId: 'd1' }), /invalid decision chain/);
 });
 
+test('migration preserves legacy current confidence when adding first new evidence', () => {
+  const graph = createShadowGraph();
+  graph.importData({ records: [{ id: 'legacy-confidence', kind: 'decision', title: 'Old', chosen: 'A', confidence: { initial: 0.5, current: 0.9, history: [] }, alternatives: [] }] });
+  const before = graph.exportData().records[0].confidence;
+  assert.equal(before.current, 0.9);
+  const after = graph.addConfidenceEvidence({ decisionId: 'legacy-confidence', key: 'new-observation', sourceClass: 'tool_observed', reason: 'new evidence' });
+  assert.equal(after.confidence.current, 1.0, 'legacy current becomes the explicit baseline for the first new contribution');
+  assert.equal(after.confidence.migratedFromLegacyCurrent, false);
+});
 test('search requires every query term', () => {
   const graph = createShadowGraph();
   graph.addDecision({ title: 'Database selection', chosen: 'PostgreSQL' });
   graph.addDecision({ title: 'Cache selection', chosen: 'Redis' });
-  assert.equal(graph.search('database postgres').length, 1);
-  assert.equal(graph.search('database redis').length, 0);
+  // G6: paginated envelope; every term must still match a content field (G7).
+  assert.equal(graph.search('database postgres').items.length, 1);
+  assert.equal(graph.search('database redis').items.length, 0);
 });

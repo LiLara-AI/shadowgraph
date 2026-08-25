@@ -1,12 +1,18 @@
 {
   "name": "shadowgraph",
-  "description": "Persistent decision memory and rejected-alternative review",
+  "description": "Persistent project-scoped decision memory and rejected-alternative review",
   "transport": "http",
   "baseUrl": "http://127.0.0.1:8787",
   "operations": [
-    { "name": "search", "method": "GET", "path": "/search", "query": { "q": "string" } },
-    { "name": "review", "method": "POST", "path": "/review", "body": { "changedFacts": ["string"] } },
-    { "name": "record_decision", "method": "POST", "path": "/decisions", "body": { "title": "string", "chosen": "string", "assumptions": ["string"], "alternatives": ["object"] } },
-    { "name": "record_attempt", "method": "POST", "path": "/attempts", "body": { "solution": "string", "result": "string", "reason": "string" } }
-  ]
+    { "name": "context", "method": "POST", "path": "/context", "body": { "project": "string" } },
+    { "name": "retrieve", "method": "POST", "path": "/retrieve", "body": { "query": "string", "project": "string", "limit": "integer", "offset": "integer" } },
+    { "name": "search", "method": "GET", "path": "/search", "query": { "q": "string (URL-encoded)", "project": "string", "limit": "integer", "offset": "integer" } },
+    { "name": "review", "method": "POST", "path": "/review", "body": { "project": "string" } },
+    { "name": "record_decision", "method": "POST", "path": "/decisions", "body": { "title": "string", "chosen": "string", "project": "string", "sourceClass": "agent_claimed", "idempotencyKey": "string", "alternatives": ["object"] } },
+    { "name": "record_fact", "method": "POST", "path": "/facts", "body": { "key": "string", "value": "any", "project": "string", "sourceClass": "agent_claimed", "idempotencyKey": "string" } },
+    { "name": "record_outcome", "method": "POST", "path": "/outcomes", "body": { "decisionId": "string", "outcome": { "status": "successful|mixed|failed|unknown", "sourceClass": "agent_claimed" } } },
+    { "name": "update_status", "method": "POST", "path": "/status", "body": { "decisionId": "string", "status": "string" } },
+    { "name": "maintain", "method": "POST", "path": "/maintain", "body": { "changedFacts": ["string"] } }
+  ],
+  "notes": ["Review reads stored project-scoped facts; changedFacts is optional and ephemeral.", "Read envelopes expose page and completeness; do not assume bare arrays."]
 }

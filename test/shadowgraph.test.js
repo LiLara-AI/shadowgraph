@@ -17,7 +17,8 @@ test('stores one decision and reopens it when facts change', () => {
 test('keeps attempts searchable and exportable', () => {
   const graph = createShadowGraph();
   graph.addAttempt({ solution: 'Rewrite everything', result: 'Regression', reason: 'Too broad' });
-  assert.equal(graph.search('regression')[0].record.result, 'Regression');
+  // G6: search() returns { items, page, completeness } — see completeness-contract.md.
+  assert.equal(graph.search('regression').items[0].record.result, 'Regression');
   assert.equal(graph.stats().attempts, 1);
 });
 
@@ -29,5 +30,6 @@ test('persists records in a portable JSON file', async () => {
   await store.save(graph.exportData());
   const loaded = await store.load();
   assert.equal(loaded.records.length, 1);
-  assert.equal(JSON.parse(await readFile(join(directory, 'data.json'), 'utf8')).schemaVersion, 2);
+  // G4-E: schema version 3 introduces the journal. See journal-contract.md.
+  assert.equal(JSON.parse(await readFile(join(directory, 'data.json'), 'utf8')).schemaVersion, 3);
 });

@@ -1,4 +1,4 @@
-# ShadowGraph v0.30
+# ShadowGraph v0.31.0 (review candidate)
 
 ShadowGraph is a local-first, vendor-neutral learning layer for AI agents. It is not generic chat memory: it is an explainable decision graph that tracks what an agent chose, what it rejected, the assumptions and evidence behind it, what happened afterward, and when the decision should be reopened.
 
@@ -14,21 +14,21 @@ The normal learning loop is:
 1. Context: load active decisions, stale facts, failed attempts, and open reviews.
 2. Decide: record the chosen approach, assumptions, evidence, and rejected alternatives.
 3. Work: record failed or informative attempts and link related graph entities.
-4. Observe: record facts and their provenance as human, tool, model, or imported evidence.
+4. Observe: record project-scoped facts with `sourceClass` provenance claims. Agent/tool input cannot create `verified`.
 5. Evaluate: record a successful, mixed, failed, or unknown outcome.
-6. Reconsider: review decisions whose assumptions, facts, confidence, or outcomes changed.
+6. Reconsider: persist the fact, then call `review({ project })` or `context({ project })` after restart; do not pass the triggering fact again.
 ```
 
 This lets an agent remember the reasoning behind work instead of blindly repeating old answers.
 
-## v0.30 status
+## v0.31.0 status
 
-Version 0.30 is the public repository release candidate. It builds on v0.27 with persistent review signals, automatic maintenance and aging, fact verification/expiry, idempotent recording, graph-aware retrieval, integrity validation and repair plans, normalized relational SQLite storage with transactional migration, atomic backup snapshots, revision conflict recovery, expanded MCP tools/resources/prompts, and a local dashboard/policy package.
+Version 0.31.0 is an unreleased review candidate. It includes persistent review signals, automatic maintenance and aging, project-scoped stored-fact reconsideration after restart, provenance claims that cannot self-assert verification, idempotent recording, complete retrieval envelopes, journal snapshots with rebuild diagnostics, integrity validation, normalized relational SQLite storage, atomic backup snapshots, revision conflict recovery, MCP tools/resources/prompts, and local integrations. Confidence weights are a declared policy, not an empirically calibrated model; no tool input can create `verified` in this build.
 
 ## Requirements
 
 - Node.js 20+ (SQLite backend requires Node 22.5+ with `node:sqlite`)
-- v0.30 supports public repository use
+- v0.31.0 is an unreleased review candidate; schema 3 imports schemas 1-3
 - No runtime npm dependencies
 - Python 3.10+ only for the optional Hermes wrapper
 
@@ -61,14 +61,14 @@ The graph contains:
 
 - **Decision** — selected approach, goal, project, confidence, assumptions, alternatives, evidence, outcome.
 - **Alternative** — rejected proposal, rejection reason, and structured reopen rules.
-- **Fact** — observed value with source, confidence, timestamp, project scope, and status.
+- **Fact** — observed value with `sourceClass` provenance claim, confidence, timestamp, project scope, and status. Current tool input cannot create `verified`; legacy verified values are preserved only for compatibility.
 - **Evidence** — source, type, confidence, timestamp, and optional detail.
 - **Attempt** — approach, result, environment, lesson/reason, and relationships.
 - **Outcome** — successful, mixed, failed, or unknown result with lessons and confidence update.
 - **Relationship** — explainable link such as `depends_on`, `supports`, `tested_by`, or `supersedes`.
-- **Event** — append-only record of important graph changes.
+- **Journal entry** — append-**oriented** record of a graph change, carrying a complete post-operation snapshot. Not append-only: an explicit hard purge deletes entries, which is why the term is "append-oriented with documented deletion semantics" (see `docs/handoffs/journal-contract.md`).
 
-Confidence has an initial value, current value, and history of outcome-driven changes. Sources can be labeled `human_confirmed`, `tool_observed`, `model_inferred`, `imported`, or `unknown`; inferred memory should not automatically be treated as verified truth.
+Confidence has an initial value, a current value, a history of evidence-weighted updates, and a `basis` that counts supporting and contradicting evidence by source class. `sourceClass` is one of exactly four values — `agent_claimed`, `tool_observed`, `human_confirmed`, `production_verified` — and it records **what was claimed** about an observation's origin, never proof of it. Unrecognised labels downgrade to `agent_claimed` with the original string preserved in `sourceRaw` for audit only. **Nothing reaches `verificationStatus: 'verified'` from tool input in this build**, and passing `verified` explicitly is rejected; see `docs/handoffs/provenance-contract.md`.
 
 Example decision:
 
@@ -86,8 +86,10 @@ const decision = graph.addDecision({
     reopenWhen: [{ key: 'deployment', operator: 'equals', value: 'local' }]
   }]
 });
-graph.addFact({ key: 'deployment', value: 'local', source: 'human_confirmed', confidence: 1 });
-console.log(graph.context({ project: 'my-app', facts: { deployment: 'local' } }));
+graph.addFact({ project: 'my-app', key: 'deployment', value: 'local', sourceClass: 'human_confirmed', confidence: 1 });
+// After exporting/saving and loading this graph in a new process, call without
+// passing the triggering fact again. review() reads the project-scoped stored fact.
+console.log(graph.review({ project: 'my-app' }));
 ```
 
 ## Interfaces
@@ -138,11 +140,14 @@ GET  /validate
 POST /repair-plan
 POST /backup
 POST /restore
+POST /confidence-evidence
+GET  /journal
+POST /rebuild
 POST /projects/purge-preview
 DELETE /projects
 ```
 
-`/redact` is read-only and returns a privacy-safe export. `/review` evaluates rules and persists deduplicated review signals; use `/review-signals` to read them and `/review-signals/ack` to acknowledge them. `/repair-plan` is always non-destructive and returns `{apply:false, actions:[...]}`. `/projects/purge-preview` shows deletion counts without changing storage. `DELETE /projects` permanently removes the selected project's records, facts, events, and attached relationships; this cannot be undone. The server returns `401` when token authentication is enabled and missing, `403` for disallowed browser origins, `404` for missing decisions or routes, and `413` for oversized request bodies.
+`/redact` is read-only and returns a privacy-safe export. `/review` evaluates rules and persists deduplicated review signals; use `/review-signals` to read them and `/review-signals/ack` to acknowledge them. `/repair-plan` is always non-destructive and returns `{apply:false, actions:[...]}`. `/projects/purge-preview` shows deletion counts without changing storage. `DELETE /projects` performs a logical/tombstone purge by default: project content is removed from the live projection and the auditable purge skeleton remains. Use `{ "mode": "hard" }` only for explicit physical journal deletion; hard purge creates a declared journal gap and cannot be undone. The server returns `401` when token authentication is enabled and missing, `403` for disallowed browser origins, `404` for missing decisions or routes, and `413` for oversized request bodies.
 
 ### MCP
 
@@ -177,11 +182,11 @@ MCP tools:
 - `shadowgraph_backup`
 - `shadowgraph_restore`
 
-MCP exposes 22 tools by default and also advertises a read-only `shadowgraph://context` resource and a consequential-task prompt.
+MCP exposes 25 tools by default (10 in compact mode) and also advertises a read-only `shadowgraph://context` resource and a consequential-task prompt. Search, retrieve, context, and journal reads declare pagination and completeness; confidence evidence requires a stable caller-supplied `key`.
 
 Recommended agent policy:
 
-> Before a consequential task, call ShadowGraph context for the project. Search relevant decisions and failed attempts. Record decisions with assumptions, evidence, and rejected alternatives. Record outcomes after implementation. Treat model-inferred facts as unverified until supported by a human or tool observation.
+> Before a consequential task, call ShadowGraph context for the project. Search relevant decisions and failed attempts. Record decisions with assumptions, evidence, and rejected alternatives. Record outcomes after implementation. Treat every fact as a hypothesis unless `verificationStatus` is `verified` — and note that nothing reaches `verified` from tool input, so a strong `sourceClass` is a strong claim, not a warrant.
 
 ## AI tool setup
 
@@ -197,19 +202,20 @@ The exact settings location varies by product and version. Use the product's MCP
 
 ## Migration and storage
 
-The JSON store accepts both the v0.1 array format and the v0.26 graph envelope. v0.26 exports:
+The JSON store accepts both the v0.1 array format and the v0.26 graph envelope. Current exports use schema 3:
 
 ```json
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "records": [],
   "facts": [],
   "relations": [],
-  "events": []
+  "events": [],
+  "journal": []
 }
 ```
 
-JSON is the zero-dependency portable default. v0.30 stores a monotonic revision and can reject stale `expectedRevision` saves to prevent lost updates; callers should reload and retry after a revision conflict. SQLite is selectable through `SHADOWGRAPH_STORAGE=sqlite` on Node 22.5+ and now uses normalized relational tables with WAL, a busy timeout, transactional replacement, legacy envelope migration, and revision checks. Do not assume revision checks replace application-level conflict handling when multiple processes mutate stale in-memory graphs.
+Schemas 1 and 2 remain importable. An unsupported future envelope schema is rejected before replacing live state; individual future entities are preserved and reported by validation. JSON is the zero-dependency portable default. v0.31.0 stores a monotonic revision and can reject stale `expectedRevision` saves to prevent lost updates; callers should reload and retry after a revision conflict. SQLite is selectable through `SHADOWGRAPH_STORAGE=sqlite` on Node 22.5+ and now uses normalized relational tables with WAL, a busy timeout, transactional replacement, legacy envelope migration, and revision checks. Do not assume revision checks replace application-level conflict handling when multiple processes mutate stale in-memory graphs.
 
 ## Security and privacy
 
