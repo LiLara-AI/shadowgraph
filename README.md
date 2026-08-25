@@ -150,6 +150,8 @@ DELETE /projects
 npm run mcp
 ```
 
+For lower prompt overhead without losing stored fidelity, set `SHADOWGRAPH_MCP_COMPACT=1`. Compact mode advertises 10 core tools while the full relational graph, facts, events, alternatives, and outcomes remain stored unchanged. Retrieval supports `limit`/`offset` only as explicit pagination and returns `{items,page:{total,hasMore}}`; no records are silently summarized or discarded.
+
 MCP tools:
 
 - `shadowgraph_record_decision` (supports `project`)
@@ -175,7 +177,7 @@ MCP tools:
 - `shadowgraph_backup`
 - `shadowgraph_restore`
 
-MCP exposes 22 tools and also advertises a read-only `shadowgraph://context` resource and a consequential-task prompt.
+MCP exposes 22 tools by default and also advertises a read-only `shadowgraph://context` resource and a consequential-task prompt.
 
 Recommended agent policy:
 
