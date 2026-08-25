@@ -6,6 +6,15 @@ import { tmpdir } from 'node:os';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { backupFile, restoreFile } from '../src/backup.js';
 
+test('normalizes common MCP aliases for rejection reasons and human sources', () => {
+  const graph = createShadowGraph();
+  const decision = graph.addDecision({ title: 'Alias test', chosen: 'A', alternatives: [{ label: 'B', reason: 'not suitable' }] });
+  assert.equal(decision.alternatives[0].reasonRejected, 'not suitable');
+  const fact = graph.addFact({ key: 'reviewed', value: true, source: 'human-confirmed' });
+  assert.equal(fact.source, 'human_confirmed');
+  assert.equal(fact.verificationStatus, 'verified');
+});
+
 test('idempotency prevents duplicate decisions and facts', () => {
   const graph = createShadowGraph();
   const first = graph.addDecision({ title: 'Same', chosen: 'A', idempotencyKey: 'x' });
