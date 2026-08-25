@@ -152,8 +152,8 @@ npm run mcp
 
 MCP tools:
 
-- `shadowgraph_record_decision`
-- `shadowgraph_record_attempt`
+- `shadowgraph_record_decision` (supports `project`)
+- `shadowgraph_record_attempt` (supports `project`)
 - `shadowgraph_review`
 - `shadowgraph_search`
 - `shadowgraph_context`

@@ -155,4 +155,7 @@ test('MCP lists tools and returns parse errors', async () => {
   child.kill();
   assert.equal(responses.some((item) => item.error?.code === -32700), true);
   assert.equal(responses.some((item) => item.result?.tools?.length === 22), true);
+  const tools = responses.find((item) => item.result?.tools)?.result.tools;
+  assert.equal(tools.find((tool) => tool.name === 'shadowgraph_record_decision').inputSchema.properties.project.type, 'string');
+  assert.equal(tools.find((tool) => tool.name === 'shadowgraph_record_attempt').inputSchema.properties.project.type, 'string');
 });
