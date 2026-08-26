@@ -1,6 +1,6 @@
 # ShadowGraph — Next Actions
 
-**Last updated:** 2026-08-26 · **State:** G1–G8 and final-review hardening delivered; release branch/commit/push are the active next actions.
+**Last updated:** 2026-08-26 · **State:** G1–G8 and final-review hardening delivered; review branch is pushed and awaiting conditional merge.
 
 Any new agent can pick up from here without reading chat history. Read `current-status.md` first, then the six contracts in this folder.
 
@@ -14,7 +14,7 @@ Any new agent can pick up from here without reading chat history. Read `current-
 | **L-1** | Should the entry state be `proposed` instead of `active`? | lifecycle semantics | stays `active` (load-bearing in `context()`/`maintain()`) |
 | **L-2** | Is the documented transition order normative? | transition enforcement | any→any allowed |
 | **L-5** | Give `stale`/`archived` meaning, or migrate them out? | vocabulary cleanup | accepted, deprecated, no producer |
-| **Release branch** | Create a review branch, commit the tested tree, and push without merging | version control | requested for this release handoff |
+| **Merge** | Merge only after identity, local gates, CI, and post-merge gates pass | version control | conditional final review in progress |
 
 ## P1 — Highest-value engineering work remaining
 

@@ -18,6 +18,22 @@ test('final review: legacy facts without ids receive generated ids during import
   assert.equal(fact.key, 'legacy-key');
 });
 
+test('final review: generated legacy fact ids are deterministic and duplicate-safe', () => {
+  const payload = { facts: [
+    { project: 'p', key: 'same', value: { state: 'ready' } },
+    { project: 'p', key: 'same', value: { state: 'ready' } }
+  ] };
+  const first = createShadowGraph();
+  const second = createShadowGraph();
+  first.importData(payload);
+  second.importData(payload);
+  const firstIds = first.exportData().facts.map((fact) => fact.id);
+  const secondIds = second.exportData().facts.map((fact) => fact.id);
+  assert.deepEqual(firstIds, secondIds, 'same legacy payload must produce the same ids after restart/import');
+  assert.equal(new Set(firstIds).size, 2, 'identical duplicate facts must not overwrite one another');
+  assert.match(firstIds[0], /^fact_[a-f0-9]{20}$/);
+});
+
 test('final review: malformed persisted entities are rejected with indexed diagnostics', () => {
   const cases = [
     [{ records: [decision(), { id: 'bad', kind: 'unknown' }] }, /records\[1\]/],

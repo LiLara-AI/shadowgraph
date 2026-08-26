@@ -357,4 +357,4 @@ At that historical point nothing was committed. The current release follow-up an
 
 ### Verification
 
-The focused release follow-up suite passed **29/29**. The complete suite subsequently passed **230 tests / 225 pass / 0 fail / 5 todo**. Remaining TODOs are U-1 (accepted unverified-only), L-1, L-2, and L-5; modern MCP interoperability and warm-task economics remain unverified/deferred.
+The focused release follow-up suite passed **29/29**. The complete suite passed **235 tests / 230 pass / 0 fail / 5 todo**. Remaining TODOs are U-1 (accepted unverified-only), L-1, L-2, and L-5; modern MCP interoperability and warm-task economics remain unverified/deferred.

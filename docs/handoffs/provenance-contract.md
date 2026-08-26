@@ -98,8 +98,8 @@ Rationale: import is a migration/restore path, not an agent assertion. The secur
 
 Accepted residual risk: someone with filesystem write access can hand-author a `verified` fact. In a local-first single-user threat model they already own the data. Documented, not mitigated.
 
-## 7. Unresolved — needs a decision before it can be built
+## 7. Deferred capability decisions
 
-- **U-1 — how does anything ever become `verified`?** Options sketched, none chosen: (a) an out-of-band human confirmation channel (CLI prompt / HTTP endpoint requiring a separate operator action); (b) a re-checkable reference the core can validate offline (file hash, signed attestation); (c) a trusted-writer credential distinct from the agent's own tool path; (d) accept that `verified` is only ever set by an external integration and document ShadowGraph as unverified-only. **Blocks G8** — confidence weighting by source class is meaningless while every class is equally unverifiable.
-- **U-2 — should `tool_observed` get a privileged path?** It is the most plausible candidate for machine re-verification (re-run the command, compare output), but that is an execution capability ShadowGraph does not have and should not casually acquire.
-- **U-3 — legacy `verified` facts already on disk.** No audit or migration exists to distinguish pre-fix `verified` facts from any future genuinely-verified ones. A schema-version marker will likely be needed.
+- **U-1 — verification channel:** **accepted unverified-only for 0.31.0**. No out-of-band authorization or re-checkable evidence mechanism exists; ordinary tool input cannot produce `verified`. Revisit only after designing and testing a separately authorized mechanism.
+- **U-2 — privileged `tool_observed` re-verification:** deferred. This would require an execution capability ShadowGraph does not have.
+- **U-3 — legacy `verified` facts already on disk:** accepted provisional. Preserve legacy values for compatibility, never elevate them from ordinary input or replay; a future migration marker depends on U-1.

@@ -1,18 +1,18 @@
 # ShadowGraph — Current Status
 
 **Last updated:** 2026-08-26
-**Version:** 0.31.0 (unreleased, review candidate) · **Schema:** 3 · **Base:** `1dde968`; release work remains uncommitted until the review branch is created.
+**Version:** 0.31.0 (release candidate) · **Schema:** 3 · **Base:** `1dde968`; review branch `feature/shadowgraph-v031-release-review`.
 **Phase:** G1–G8 delivered end-to-end. Follow-up review also closed project-scoped idempotency, declared journal high-water marks, legacy confidence baseline handling, malformed import validation, and integration coverage. This document is the current-status summary; older handoff logs are historical snapshots.
 
 ## Suite state
 
-    npm test              -> 230 tests / 225 pass / 0 fail / 0 skipped / 5 todo
+    npm test              -> 235 tests / 230 pass / 0 fail / 0 skipped / 5 todo
     npm run check         -> exit 0 (11 files)
     npm audit --omit=dev  -> 0 vulnerabilities
     git diff --check      -> clean
     npm run bench         -> verdict: no pre-declared threshold breached
 
-Test count reached 230 in the current working tree, including `test/final-review.test.js` and follow-up migration/idempotency coverage.
+The current suite has 235 tests, including `test/final-review.test.js`, follow-up migration/idempotency coverage, and packaging regressions.
 
 The 5 remaining `todo` entries are all labelled `BLOCKED ON <id>` and name a real open decision (U-1 x2, L-1, L-2, L-5). **No characterization test for known-bad behaviour remains** — the only surviving mention of the word is a methodology comment explaining why such a test must fail once its gap is fixed.
 

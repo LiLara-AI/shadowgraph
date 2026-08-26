@@ -10,6 +10,7 @@
 
 import { rebuildProjection, journalGaps, duplicateSequences, JOURNAL_ENTRY_TYPES, REPLAYABLE_ENTRY_TYPES } from './journal.js';
 import { createConfidence, applyContribution, setOutcomeContribution, computeConfidence, summarizeBasis, CONFIDENCE_POLICY } from './confidence.js';
+import { createHash } from 'node:crypto';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
 // docs/api-reference.md) and are frozen so a consumer cannot mutate validation
@@ -57,6 +58,30 @@ export const MAX_PAGE_LIMIT = 1000;
 export { rebuildProjection, journalGaps, CONFIDENCE_POLICY };
 
 function clone(value) { return JSON.parse(JSON.stringify(value)); }
+
+// Legacy facts may have no id. Runtime-random ids make the same persisted legacy
+// file produce a different graph on every import, which breaks restart parity and
+// makes relations/idempotency difficult to audit. Canonicalize the content and
+// hash it; an occurrence ordinal keeps duplicate, otherwise-identical legacy
+// facts distinct without depending on wall-clock time or randomness.
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
+  return value;
+}
+
+function legacyFactId(fact, index, allFacts) {
+  const content = { ...fact };
+  delete content.id;
+  const canonicalContent = JSON.stringify(canonical(content));
+  const occurrence = allFacts.slice(0, index).filter((candidate) => {
+    const prior = { ...candidate };
+    delete prior.id;
+    return JSON.stringify(canonical(prior)) === canonicalContent;
+  }).length;
+  const digest = createHash('sha256').update(JSON.stringify({ content: canonicalContent, occurrence })).digest('hex').slice(0, 20);
+  return `fact_${digest}`;
+}
 
 // ---------------------------------------------------------------------------
 // Pagination helpers (G6). Every multi-result read path goes through these, so
@@ -799,8 +824,8 @@ export function createShadowGraph(options = {}) {
     // Direct import is intentionally merge-oriented, but a malformed entity must
     // never leave a partially merged graph behind.
     const importedRecords = (source.records ?? []).map((item) => migrateRecord(item));
-    const importedFacts = (source.facts ?? []).map((fact) => {
-      const factId = fact.id ?? id('fact');
+    const importedFacts = (source.facts ?? []).map((fact, index, allFacts) => {
+      const factId = fact.id ?? legacyFactId(fact, index, allFacts);
       return migrateFact({ ...fact, id: factId });
     });
     const importedRelations = (source.relations ?? []).map((relation) => clone(relation));
