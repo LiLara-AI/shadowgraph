@@ -190,7 +190,8 @@ test('HTTP SQLite restore rejects malformed snapshots without replacing the vali
   catch (error) { if (/requires Node/.test(error.message)) return t.skip(error.message); throw error; }
   await sourceStore.save({ schemaVersion: 3, records: [{ id: 'bad', kind: 'unknown' }], facts: [], relations: [], reviewSignals: [], idempotency: [], events: [], journal: [] });
   sourceStore.close();
-  const app = await createShadowGraphServer({ file, storage: 'sqlite' });
+  const liveStore = await createSqliteStore(file);
+  const app = await createShadowGraphServer({ file, storage: 'sqlite', store: liveStore });
   try {
     app.server.listen(0, '127.0.0.1');
     await once(app.server, 'listening');
@@ -201,6 +202,13 @@ test('HTTP SQLite restore rejects malformed snapshots without replacing the vali
     assert.equal(app.graph.search('KEEP SQLITE').page.total, 1);
   } finally {
     await new Promise((resolve) => app.server.close(resolve));
+    liveStore.close();
+  }
+  const reopened = await createSqliteStore(file);
+  try {
+    assert.equal((await reopened.load()).records.some((record) => record.title === 'KEEP SQLITE'), true);
+  } finally {
+    reopened.close();
   }
 });
 

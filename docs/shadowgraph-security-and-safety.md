@@ -40,7 +40,9 @@ Never promote an agent assertion to a verified fact merely because it is repeate
 - Use atomic temporary writes and rename for JSON.
 - Use transactions and revision checks for SQLite.
 - Read the SQLite revision inside the write lock.
-- Preserve the original database handle if restore replacement fails.
+- Preserve a verified standalone rollback snapshot until an SQLite replacement opens, prepares, loads, and validates.
+- On a caught post-replacement failure, restore and reopen the old payload; report `sqlite_restore_recovery_unconfirmed` rather than claiming safety if recovery itself fails.
+- Treat SQLite restore as process-level rollback safety only: it does not guarantee crash consistency, filesystem durability, or coordination with external writers.
 - Validate backups and restored files before replacing live data.
 - Serialize persistence queues and reload after conflict recovery.
 - Test process concurrency and stale-writer rejection.

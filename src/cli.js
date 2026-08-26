@@ -2,6 +2,7 @@
 import { createStorage } from './storage.js';
 import { createShadowGraph } from './shadowgraph.js';
 import { backupFile, restoreFile } from './backup.js';
+import { validateRestorePayload } from './restore-validation.js';
 
 const file = process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json';
 const store = await createStorage({ file });
@@ -40,7 +41,7 @@ else if (command === 'retrieve') { const value = parse(input || '{}'); result = 
 else if (command === 'validate') result = graph.validate();
 else if (command === 'repair-plan') result = graph.repairPlan();
 else if (command === 'backup') result = await backupFile(file, input || `${file}.backup`, { store });
-else if (command === 'restore') result = store.restore ? await store.restore(input) : await restoreFile(input, file, { storage: process.env.SHADOWGRAPH_STORAGE });
+else if (command === 'restore') result = store.restore ? await store.restore(input) : await restoreFile(input, file, { storage: process.env.SHADOWGRAPH_STORAGE, validate: validateRestorePayload });
 else if (command === 'decision') { result = graph.addDecision(parse(input)); await store.save(graph.exportData()); }
 else if (command === 'attempt') { result = graph.addAttempt(parse(input)); await store.save(graph.exportData()); }
 else {
