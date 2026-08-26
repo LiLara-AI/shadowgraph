@@ -20,7 +20,9 @@
   "files": [
     "src/",
     "dashboard/",
-    "integrations/",
+    "integrations/*.py",
+    "integrations/*.json",
+    "integrations/*.md",
     "scripts/",
     "README.md",
     "LICENSE",
