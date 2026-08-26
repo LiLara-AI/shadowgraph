@@ -47,6 +47,14 @@ export async function createShadowGraphServer(options = {}) {
   const apiToken = options.apiToken ?? process.env.SHADOWGRAPH_API_TOKEN;
   if (apiToken && apiToken.length < 16) throw new Error('SHADOWGRAPH_API_TOKEN must be at least 16 characters');
 
+  async function validateRestorePayload(payload) {
+    const staging = createShadowGraph(options);
+    staging.importData(payload);
+    const validation = staging.validate();
+    const blocking = validation.issues.filter((issue) => issue.severity === 'error' || issue.severity === 'unsupported');
+    if (blocking.length) throw new Error(`Refusing to restore data: ${blocking.length} blocking issue(s) — ${[...new Set(blocking.map((issue) => issue.code))].join(', ')}`);
+  }
+
   let persistQueue = Promise.resolve();
   function persist() {
     const operation = persistQueue.then(async () => { const snapshot = graph.exportData(); const revision = await store.save(snapshot); graph.setRevision(revision); }).catch(async (error) => { if (/revision conflict/i.test(error.message)) graph.replaceData(await store.load()); throw error; });
@@ -94,7 +102,13 @@ export async function createShadowGraphServer(options = {}) {
     if (method === 'GET' && path === '/validate') return graph.validate();
     if (method === 'POST' && path === '/repair-plan') return graph.repairPlan();
     if (method === 'POST' && path === '/backup') return backupFile(options.file ?? process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json', body?.destination, { store });
-    if (method === 'POST' && path === '/restore') { const value = store.restore ? await store.restore(body?.source) : await restoreFile(body?.source, options.file ?? process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json', { storage: options.storage ?? process.env.SHADOWGRAPH_STORAGE }); graph.replaceData(await store.load()); return value; }
+    if (method === 'POST' && path === '/restore') {
+      if (store.restore) { const value = await store.restore(body?.source); graph.replaceData(await store.load()); return value; }
+      const destination = options.file ?? process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json';
+      const value = await restoreFile(body?.source, destination, { storage: options.storage ?? process.env.SHADOWGRAPH_STORAGE, validate: validateRestorePayload });
+      graph.replaceData(await store.load());
+      return value;
+    }
     return { error: 'not_found' };
   }
 

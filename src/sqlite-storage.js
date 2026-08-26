@@ -12,6 +12,7 @@ export async function createSqliteStore(filePath) {
   let DatabaseSync;
   try { ({ DatabaseSync } = await import('node:sqlite')); }
   catch { throw new Error('SQLite storage requires Node 22.5+ with node:sqlite; use JSON storage on Node 20'); }
+  await mkdir(dirname(filePath), { recursive: true });
   let db = new DatabaseSync(filePath);
   function prepare(database) {
     database.exec(`PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;

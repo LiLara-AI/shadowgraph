@@ -135,6 +135,26 @@ test('HTTP API rejects disallowed browser origins', async () => {
   }
 });
 
+test('HTTP restore rejects malformed JSON without replacing the valid store', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-http-restore-'));
+  const file = join(directory, 'data.json');
+  const backup = join(directory, 'bad.json');
+  const { writeFile, readFile } = await import('node:fs/promises');
+  await writeFile(backup, JSON.stringify({ records: [{ id: 'bad', kind: 'unknown' }] }));
+  const app = await createShadowGraphServer({ file });
+  try {
+    app.server.listen(0, '127.0.0.1');
+    await once(app.server, 'listening');
+    const base = `http://127.0.0.1:${app.server.address().port}`;
+    await fetch(`${base}/decisions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: 'KEEP', chosen: 'x' }) });
+    const response = await fetch(`${base}/restore`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: backup }) });
+    assert.equal(response.status, 400);
+    assert.match(await readFile(file, 'utf8'), /KEEP/);
+  } finally {
+    await new Promise((resolve) => app.server.close(resolve));
+  }
+});
+
 function readMcpResponses(child, expected) {
   return new Promise((resolve, reject) => {
     let buffer = '';

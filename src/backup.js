@@ -13,6 +13,7 @@ export async function restoreFile(source, destination, options = {}) {
   if (options.storage === 'sqlite' || destination.toLowerCase().endsWith('.db')) throw new Error('JSON restore cannot overwrite a SQLite database; use the SQLite backup snapshot directly or a database-aware restore');
   const payload = JSON.parse(await readFile(source, 'utf8'));
   if (!payload || typeof payload !== 'object' || !Array.isArray(payload.records)) throw new Error('Backup is not a JSON ShadowGraph export; SQLite files require a database-aware restore');
+  if (options.validate) await options.validate(payload);
   await mkdir(dirname(destination), { recursive: true });
   const temporaryPath = join(dirname(destination), `.restore.${process.pid}.${Date.now()}.tmp`);
   try {
