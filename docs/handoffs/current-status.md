@@ -56,6 +56,14 @@ The two P0 findings were the serious ones — both were **data-loss** bugs. P0-1
 
 ## Honest limits
 
+## v0.32 hardening review status
+
+- **P1-11 fixed:** malformed HTTP JSON restore is staged and validated before replacing the active file; failed restore preserves the prior valid file.
+- **P1-12 fixed:** SQLite creates its parent directory before opening a new database, matching JSON deployment behavior.
+- **P2-19 fixed:** project-scoped redaction now excludes other projects' idempotency payloads and redacts idempotency/cache key values.
+- **P2-20 fixed:** JSON and SQLite storage expose the documented `load()` / `save()` / `close()` surface.
+- Review acknowledgment remains snapshot-persisted but not journal-replayed, as documented; no product decision was silently invented.
+
 - **Nothing reaches `verificationStatus: 'verified'` from tool input.** Deliberate. **U-1** blocks any change.
 - **No token, cost, latency, or tool-call benchmark exists.** Only journal performance is measured.
 - **Confidence calibration is not established** and is not claimed anywhere. Weights are a declared policy, not a fitted model.

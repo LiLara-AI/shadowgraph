@@ -117,6 +117,17 @@ describe('P0-1 — purge removes idempotency entries for purged entities', () =>
   });
 });
 
+describe('security — project-scoped redaction', () => {
+  it('does not export another project idempotency entries or secret-like keys', () => {
+    const graph = createShadowGraph();
+    graph.addDecision({ project: 'A', title: 'A', chosen: 'x', idempotencyKey: 'token=TOPSECRET' });
+    graph.addDecision({ project: 'B', title: 'B', chosen: 'x', idempotencyKey: 'b-key' });
+    const redacted = JSON.stringify(graph.redact({ project: 'A' }));
+    assert.equal(redacted.includes('b-key'), false);
+    assert.equal(redacted.includes('TOPSECRET'), false);
+  });
+});
+
 describe('P0-2 — a failed replace/import leaves the live graph untouched', () => {
   // WAS BROKEN: replaceData() cleared every map FIRST and parsed afterwards, so a
   // malformed payload destroyed the live graph with nothing to fall back to.
