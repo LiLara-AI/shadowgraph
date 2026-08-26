@@ -76,7 +76,7 @@ const graph = createShadowGraph({ now });   // `now` is an injectable clock, use
 | `rebuild(options?)` | Replays this graph's own journal through `rebuildProjection`. |
 | `purgeProject(project, options?)` | **Logical/tombstone by default.** `{ mode: 'hard' }` physically deletes and creates a declared `seq` gap. |
 | `redact(options?)` | Privacy-safe export; covers journal payloads. |
-| `exportData()` / `importData(data)` | Round-trip stable. Import preserves stored values and **never elevates trust**; legacy facts get `sourceClass` backfilled from `source`. Direct import preflights and validates all entities before mutating live collections; malformed input is rejected with an indexed diagnostic. Legacy unscoped idempotency keys are migrated to `action:project:key` only when the cached payload identifies its project. |
+| `exportData()` / `importData(data)` | Round-trip stable. Import preserves stored values and **never elevates trust**; legacy facts get `sourceClass` backfilled from `source` and deterministic content-derived IDs when an ID is absent. Direct import preflights and validates all entities before mutating live collections; malformed input is rejected with an indexed diagnostic. Legacy unscoped idempotency keys are migrated to `action:project:key` only when the cached payload identifies its project. |
 ## 3. `validate()` diagnostics — four severities
 
 | Severity | Meaning | Affects `valid` |

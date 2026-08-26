@@ -16,6 +16,7 @@ Closes the eight architectural gaps G1–G8 proven by the 2026-08-25 audit. Vers
 - **`addConfidenceEvidence()` now REQUIRES a `key`.** Previously an omitted key was synthesised from a timestamp, which silently defeated the documented retry-idempotency: the same observation retried a few milliseconds later got a different key and was counted twice.
   **Migration:** pass a stable `key` identifying the observation (e.g. `ci-run-4821`). Reuse it for retries of the same observation; use a new key for a genuinely new one. The MCP schema marks it required.
 - **`importData()` now refuses an envelope `schemaVersion` outside `SUPPORTED_SCHEMA_VERSIONS`.** Previously an unknown future version was silently half-read. Individual future *records/facts* are still preserved verbatim and reported by `validate()` — only the whole-file envelope is refused.
+- **Legacy facts without IDs now receive deterministic content-derived IDs.** Re-importing the same legacy payload preserves restart parity; an occurrence ordinal keeps identical duplicate facts distinct.
 - **MCP behaviour changes a strict client may notice:** `resources/read` with an unknown URI and `prompts/get` with an unknown name now return `-32602` instead of the default context/policy payload; unknown methods return `-32601` instead of `{}`; notifications receive no response at all.
 
 ### Added
