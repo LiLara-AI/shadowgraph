@@ -498,7 +498,7 @@ export function createShadowGraph(options = {}) {
     const patterns = (input.patterns ?? ['password', 'secret', 'token', 'api[-_]?key', 'authorization', 'private[-_]?key']).map((item) => new RegExp(String(item), 'i'));
     const replacement = input.replacement ?? '[REDACTED]';
     const transform = (value, key = '') => {
-      if (patterns.some((pattern) => pattern.test(key))) return replacement;
+      if (key === 'idempotencyKey' || patterns.some((pattern) => pattern.test(key))) return replacement;
       if (typeof value === 'string') return value.replace(/(Bearer\s+)[^\s]+/gi, `$1${replacement}`).replace(/(https?:\/\/[^\s]*)(token|secret|key)[^\s]*/gi, replacement);
       if (Array.isArray(value)) return value.map((item) => transform(item, key));
       if (value && typeof value === 'object') {
@@ -508,10 +508,15 @@ export function createShadowGraph(options = {}) {
       return value;
     };
     const data = exportData();
+    data.idempotency = data.idempotency.map((item) => ({ ...item, key: replacement }));
     if (project) {
       data.records = data.records.filter((item) => item.project === project);
       data.facts = data.facts.filter((item) => item.project === project);
-      const ids = new Set([...data.records, ...data.facts].map((item) => item.id));
+      data.idempotency = data.idempotency.filter((item) => item.value?.project === project);
+      const recordIds = new Set(data.records.map((item) => item.id));
+      const decisionIds = new Set(data.records.filter((item) => item.kind === 'decision').map((item) => item.id));
+      const ids = new Set([...recordIds, ...data.facts.map((item) => item.id)]);
+      data.reviewSignals = data.reviewSignals.filter((item) => decisionIds.has(item.decisionId));
       data.relations = data.relations.filter((item) => ids.has(item.from) && ids.has(item.to));
       data.events = data.events.filter((item) => item.project === project && (!item.relationId || data.relations.some((relation) => relation.id === item.relationId)));
       data.journal = data.journal.filter((item) => item.project === project);

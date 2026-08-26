@@ -32,6 +32,7 @@ Never promote an agent assertion to a verified fact merely because it is repeate
 - Retrieval limits are explicit, validated, and accompanied by total/offset/hasMore metadata.
 - A compact response must identify what it contains and what remains available.
 - No silent summaries, silent truncation, or lossy projection may become the source of truth.
+- Project-scoped exports/redaction must filter records, facts, relations, events, journal, idempotency payloads, and review signals to the requested project.
 - Full record expansion must be deterministic and testable.
 - Search/ranking must not hide contradictory evidence without declaring the ranking scope.
 
@@ -40,9 +41,13 @@ Never promote an agent assertion to a verified fact merely because it is repeate
 - Use atomic temporary writes and rename for JSON.
 - Use transactions and revision checks for SQLite.
 - Read the SQLite revision inside the write lock.
-- Preserve the original database handle if restore replacement fails.
+- Preserve a verified standalone rollback snapshot until an SQLite replacement opens, prepares, loads, and validates.
+- Inspect a possible existing recovery destination as a regular file and read-only database before any write-capable open; inspection must not create an empty destination.
+- Reject corrupt journal folds and any records/facts/relations/idempotency projection that disagrees with live restored state. A sequence gap requires a persisted `project.purged` entry whose payload records `mode: 'hard'`; otherwise restore rejects it as unexplained. Documented legacy semantics remain accepted.
+- On a caught post-replacement failure, restore and reopen the old payload; report `sqlite_restore_recovery_unconfirmed` rather than claiming safety if recovery itself fails, and latch the HTTP process degraded so it cannot serve or mutate potentially divergent graph state before restart/manual recovery.
+- Treat SQLite restore as process-level rollback safety only: it does not guarantee crash consistency, filesystem durability, or coordination with external writers.
 - Validate backups and restored files before replacing live data.
-- Serialize persistence queues and reload after conflict recovery.
+- Serialize persistence queues, reject graph-mutating routes such as `/context` while restore owns persistence, and reload after conflict recovery.
 - Test process concurrency and stale-writer rejection.
 
 ## Access control and network safety

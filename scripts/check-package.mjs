@@ -18,7 +18,7 @@ const report = JSON.parse(stdout);
 const files = report.flatMap((item) => item.files ?? []).map((item) => item.path);
 const forbidden = files.filter((file) => /(^|\/)(?:__pycache__|\.npm-cache|\.shadowgraph|test|\.github)(\/|$)|\.(?:pyc|pyo|pyd|log)$/i.test(file));
 if (forbidden.length) throw new Error(`forbidden package artifacts: ${forbidden.join(', ')}`);
-for (const required of ['scripts/bench-journal.mjs', 'scripts/check-package.mjs']) {
+for (const required of ['src/restore-validation.js', 'scripts/bench-journal.mjs', 'scripts/check-package.mjs']) {
   if (!files.includes(required)) throw new Error(`required package file is missing: ${required}`);
 }
 

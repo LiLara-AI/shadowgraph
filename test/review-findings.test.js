@@ -117,6 +117,46 @@ describe('P0-1 — purge removes idempotency entries for purged entities', () =>
   });
 });
 
+describe('security — project-scoped redaction', () => {
+  it('does not export another project idempotency entries, review signals, or secret-like keys', () => {
+    const graph = createShadowGraph({ now: () => '2026-01-01T00:00:00.000Z' });
+    const decisionA = graph.addDecision({ project: 'A', title: 'A', chosen: 'x', reviewAfter: '2025-01-01T00:00:00.000Z', idempotencyKey: 'token=TOPSECRET' });
+    const decisionB = graph.addDecision({ project: 'B', title: 'B_CROSS_PROJECT_LEAK', chosen: 'x', reviewAfter: '2025-01-01T00:00:00.000Z', idempotencyKey: 'b-key' });
+    graph.review({});
+    const redactedData = graph.redact({ project: 'A' });
+    const redacted = JSON.stringify(redactedData);
+    assert.equal(redacted.includes('b-key'), false);
+    assert.equal(redacted.includes('TOPSECRET'), false);
+    assert.equal(redacted.includes('B_CROSS_PROJECT_LEAK'), false);
+    assert.equal(redactedData.reviewSignals.every((signal) => signal.decisionId === decisionA.id), true);
+    assert.equal(redactedData.reviewSignals.some((signal) => signal.decisionId === decisionB.id), false);
+
+    const collision = createShadowGraph();
+    collision.importData({
+      schemaVersion: 3,
+      records: [{ id: 'COLLIDE', kind: 'decision', project: 'B', title: 'B_COLLISION_LEAK', chosen: 'x' }],
+      facts: [{ id: 'COLLIDE', kind: 'fact', project: 'A', key: 'same-id', value: true }],
+      reviewSignals: [{ id: 'signal_B', kind: 'review', decisionId: 'COLLIDE', title: 'B_COLLISION_LEAK', reason: 'due', status: 'open' }]
+    });
+    const collisionRedacted = collision.redact({ project: 'A' });
+    assert.deepEqual(collisionRedacted.reviewSignals, [], 'a same-id fact must not authorize another project decision signal');
+    assert.equal(JSON.stringify(collisionRedacted).includes('B_COLLISION_LEAK'), false);
+
+    const recordCollision = createShadowGraph();
+    recordCollision.importData({
+      schemaVersion: 3,
+      records: [
+        { id: 'RECORD_COLLIDE', kind: 'decision', project: 'B', title: 'B_RECORD_COLLISION_LEAK', chosen: 'x' },
+        { id: 'RECORD_COLLIDE', kind: 'attempt', project: 'A', solution: 'local', result: 'ok' }
+      ],
+      reviewSignals: [{ id: 'signal_B_record', kind: 'review', decisionId: 'RECORD_COLLIDE', title: 'B_RECORD_COLLISION_LEAK', reason: 'due', status: 'open' }]
+    });
+    const recordCollisionRedacted = recordCollision.redact({ project: 'A' });
+    assert.deepEqual(recordCollisionRedacted.reviewSignals, [], 'a same-id non-decision record must not authorize another project decision signal');
+    assert.equal(JSON.stringify(recordCollisionRedacted).includes('B_RECORD_COLLISION_LEAK'), false);
+  });
+});
+
 describe('P0-2 — a failed replace/import leaves the live graph untouched', () => {
   // WAS BROKEN: replaceData() cleared every map FIRST and parsed afterwards, so a
   // malformed payload destroyed the live graph with nothing to fall back to.

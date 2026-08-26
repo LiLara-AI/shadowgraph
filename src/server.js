@@ -1,10 +1,12 @@
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { timingSafeEqual } from 'node:crypto';
+import { stat } from 'node:fs/promises';
 import { createStorage } from './storage.js';
 import { createShadowGraph } from './shadowgraph.js';
 import { backupFile, restoreFile } from './backup.js';
 import { VERSION, NAME } from './version.js';
+import { validateRestorePayload } from './restore-validation.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 
@@ -16,6 +18,10 @@ const MAX_BODY_BYTES = 1024 * 1024;
 const INTEGER_PARAMS = ['limit', 'offset', 'depth'];
 const NUMBER_PARAMS = ['minConfidence'];
 const BOOLEAN_PARAMS = ['requireFullHistory', 'hard'];
+const RESTORE_BLOCKED_MUTATIONS = new Set([
+  '/facts', '/outcomes', '/status', '/relationships', '/supersede', '/decisions', '/attempts',
+  '/context', '/review', '/maintain', '/review-signals/ack', '/confidence-evidence', '/projects', '/restore'
+]);
 
 function coerceQuery(params) {
   const parsed = { ...params };
@@ -47,14 +53,34 @@ export async function createShadowGraphServer(options = {}) {
   const apiToken = options.apiToken ?? process.env.SHADOWGRAPH_API_TOKEN;
   if (apiToken && apiToken.length < 16) throw new Error('SHADOWGRAPH_API_TOKEN must be at least 16 characters');
 
+  let restoreInProgress = false;
+  let persistenceUnavailable = null;
   let persistQueue = Promise.resolve();
+  function queuePersistence(operation, onError) {
+    const queued = persistQueue.then(operation).catch(async (error) => {
+      if (onError) return onError(error);
+      throw error;
+    });
+    persistQueue = queued.catch(() => {});
+    return queued;
+  }
   function persist() {
-    const operation = persistQueue.then(async () => { const snapshot = graph.exportData(); const revision = await store.save(snapshot); graph.setRevision(revision); }).catch(async (error) => { if (/revision conflict/i.test(error.message)) graph.replaceData(await store.load()); throw error; });
-    persistQueue = operation.catch(() => {});
-    return operation;
+    return queuePersistence(
+      async () => { const snapshot = graph.exportData(); const revision = await store.save(snapshot); graph.setRevision(revision); },
+      async (error) => { if (/revision conflict/i.test(error.message)) graph.replaceData(await store.load()); throw error; }
+    );
   }
 
   async function handle(path, method, body) {
+    if (persistenceUnavailable) {
+      if (method === 'GET' && path === '/health') return { ok: false, name: NAME, version: VERSION, status: 'degraded', detail: 'persistent storage unavailable; restart required' };
+      const unavailable = new Error('Persistent storage unavailable after unconfirmed restore recovery; restart required');
+      unavailable.code = 'persistence_unavailable';
+      throw unavailable;
+    }
+    if (restoreInProgress && RESTORE_BLOCKED_MUTATIONS.has(path) && (method === 'POST' || method === 'DELETE')) {
+      throw new Error('SQLite restore is in progress; write rejected before mutation');
+    }
     // P1-3: version comes from package.json via src/version.js — one source only.
     if (method === 'GET' && path === '/health') return { ok: true, name: NAME, version: VERSION };
     if (method === 'GET' && path === '/dashboard') return { dashboard: dashboardRoot.href };
@@ -94,7 +120,29 @@ export async function createShadowGraphServer(options = {}) {
     if (method === 'GET' && path === '/validate') return graph.validate();
     if (method === 'POST' && path === '/repair-plan') return graph.repairPlan();
     if (method === 'POST' && path === '/backup') return backupFile(options.file ?? process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json', body?.destination, { store });
-    if (method === 'POST' && path === '/restore') { const value = store.restore ? await store.restore(body?.source) : await restoreFile(body?.source, options.file ?? process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json', { storage: options.storage ?? process.env.SHADOWGRAPH_STORAGE }); graph.replaceData(await store.load()); return value; }
+    if (method === 'POST' && path === '/restore') {
+      restoreInProgress = true;
+      try {
+        return await queuePersistence(async () => {
+          if (store.restore) {
+            try { await stat(body?.source); }
+            catch (error) { if (error.code === 'ENOENT') throw new Error('Restore source does not exist'); throw error; }
+            const value = await store.restore(body?.source);
+            graph.replaceData(await store.load());
+            return value;
+          }
+          const destination = options.file ?? process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json';
+          const value = await restoreFile(body?.source, destination, { storage: options.storage ?? process.env.SHADOWGRAPH_STORAGE, validate: (payload) => validateRestorePayload(payload, options) });
+          graph.replaceData(await store.load());
+          return value;
+        });
+      } catch (error) {
+        if (error.code === 'sqlite_restore_recovery_unconfirmed') persistenceUnavailable = error;
+        throw error;
+      } finally {
+        restoreInProgress = false;
+      }
+    }
     return { error: 'not_found' };
   }
 
@@ -140,7 +188,9 @@ export async function createShadowGraphServer(options = {}) {
       // Report WHAT was wrong. A blanket 'invalid request' hid parameter and
       // validation errors that the caller could otherwise fix.
       const notFound = error.message === 'Decision not found';
-      const status = notFound ? 404 : 400;
+      const recoveryUnconfirmed = error.code === 'sqlite_restore_recovery_unconfirmed';
+      const storageUnavailable = error.code === 'persistence_unavailable';
+      const status = storageUnavailable ? 503 : recoveryUnconfirmed ? 500 : notFound ? 404 : 400;
       response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
       response.end(JSON.stringify({ error: notFound ? 'decision not found' : error.message }));
     }
