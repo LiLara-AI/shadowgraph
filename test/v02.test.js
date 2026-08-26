@@ -6,9 +6,10 @@ test('v0.2 creates explainable search results and context', () => {
   const graph = createShadowGraph({ now: () => '2026-08-24T00:00:00.000Z' });
   const decision = graph.addDecision({ project: 'app', title: 'Choose database', chosen: 'PostgreSQL', confidence: 0.8, evidence: [{ source: 'load-test', type: 'tool_observed', confidence: 0.9 }], alternatives: [{ label: 'SQLite', reopenWhen: [{ key: 'deployment', operator: 'equals', value: 'local' }] }] });
   graph.addAttempt({ project: 'app', solution: 'Rewrite everything', result: 'failed regression' });
+  // G6: search() returns { items, page, completeness }.
   const search = graph.search('database', { project: 'app' });
-  assert.equal(search[0].record.id, decision.id);
-  assert.deepEqual(search[0].matched, ['title']);
+  assert.equal(search.items[0].record.id, decision.id);
+  assert.deepEqual(search.items[0].matched, ['title']);
   const context = graph.context({ project: 'app', facts: { deployment: 'local' } });
   assert.equal(context.activeDecisions.length, 1);
   assert.equal(context.failedAttemptsToAvoid.length, 1);
@@ -20,7 +21,13 @@ test('outcomes update confidence and produce review signals', () => {
   const graph = createShadowGraph();
   const decision = graph.addDecision({ title: 'Use cache', chosen: 'Redis', confidence: 0.8 });
   const updated = graph.setOutcome(decision.id, { status: 'failed', lessons: ['Cache invalidation was unsafe'] });
-  assert.equal(Number(updated.confidence.current.toFixed(2)), 0.6);
+  // UPDATED for G8 (evidence_weighted_bounded_v1). Previously this asserted 0.6,
+  // produced by a hardcoded -0.2 penalty with no stated basis — the exact defect
+  // G8 was raised for. The outcome here declares no source class, so it is an
+  // agent_claimed report (weight 0.5): delta = 0.2 * 0.5 * -1 = -0.1 => 0.7.
+  // A stronger claim moves it further: production_verified would give 0.6.
+  assert.equal(Number(updated.confidence.current.toFixed(2)), 0.7);
+  assert.equal(updated.confidence.basis.failedOutcomes, 1);
   assert.equal(graph.review().length, 1);
 });
 

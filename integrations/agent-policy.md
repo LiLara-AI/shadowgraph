@@ -6,7 +6,26 @@ Use ShadowGraph as a decision ledger, not as unquestioned truth.
 
 1. Call `shadowgraph_context` for the project.
 2. Call `shadowgraph_retrieve` for the task and inspect related facts, failed attempts, and superseded decisions.
-3. Treat `model_inferred` and `unverified` facts as hypotheses.
+3. Treat every fact as an **unverified hypothesis**. Legacy imported `verificationStatus: 'verified'` values may be preserved for compatibility, but this build has no agent-accessible verification channel and no tool input can create verified facts. Read `sourceClass`, not `source`.
+
+## Provenance vocabulary
+
+`sourceClass` is one of exactly four values, and it records **what was claimed** about a fact's origin — it is never proof:
+
+| `sourceClass` | Meaning |
+| --- | --- |
+| `agent_claimed` | An agent asserted it. The default, and the fallback for any unrecognised label. |
+| `tool_observed` | Claimed to come from a tool run. ShadowGraph cannot confirm this. |
+| `human_confirmed` | Claimed to be human-confirmed. ShadowGraph cannot confirm this. |
+| `production_verified` | Claimed to be observed in production. ShadowGraph cannot confirm this. |
+
+Rules that the server enforces, so do not attempt to work around them:
+
+- Passing `verificationStatus: 'verified'` or `'expired'` to the fact-recording API is **rejected with an error**. Verification is not self-assertable; expiry is assigned by `maintain()`.
+- Claiming `sourceClass: 'human_confirmed'` yields a fact that is still `unverified`. A stronger class is a stronger *claim*, not a stronger *warrant*.
+- When recording confidence evidence, always provide a stable caller-owned `key`; retries reuse the same key and new observations use a new key.
+- An unrecognised label downgrades to `agent_claimed`; the original string is kept in `sourceRaw` for audit only. **`sourceRaw` is not evidence.**
+- `contradicted` **is** accepted, because it lowers trust rather than raising it.
 
 ## During work
 

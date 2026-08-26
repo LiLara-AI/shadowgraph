@@ -9,5 +9,6 @@ test('v0.25 supports lifecycle, relationships, and retrieval filters', () => {
   const relation = graph.link({ from: decision.id, to: 'fact_1', relation: 'depends_on' });
   assert.equal(relation.relation, 'depends_on');
   assert.equal(graph.exportData().relations.length, 1);
-  assert.equal(graph.search('SQLite', { project: 'demo', status: 'validated', minConfidence: 0.7 }).length, 1);
+  // G6: paginated envelope. G7: 'SQLite' matches the `chosen` content field.
+  assert.equal(graph.search('SQLite', { project: 'demo', status: 'validated', minConfidence: 0.7 }).items.length, 1);
 });

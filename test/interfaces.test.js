@@ -30,6 +30,22 @@ test('HTTP API records and reviews decisions without wildcard CORS', async () =>
   }
 });
 
+test('HTTP API scopes idempotency keys by project and persists retry behavior', async () => {
+  const { app, base } = await startServer();
+  try {
+    const post = (body) => fetch(`${base}/decisions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    const first = await (await post({ project: 'p1', title: 'One', chosen: 'A', idempotencyKey: 'same' })).json();
+    const second = await (await post({ project: 'p2', title: 'Two', chosen: 'B', idempotencyKey: 'same' })).json();
+    assert.notEqual(first.id, second.id);
+    assert.equal((await (await post({ project: 'p1', title: 'retry', chosen: 'x', idempotencyKey: 'same' })).json()).id, first.id);
+    assert.equal((await (await post({ project: 'p2', title: 'retry', chosen: 'x', idempotencyKey: 'same' })).json()).id, second.id);
+    const records = await (await fetch(`${base}/records`)).json();
+    assert.deepEqual(records.records.map((item) => item.project).sort(), ['p1', 'p2']);
+  } finally {
+    await new Promise((resolve) => app.server.close(resolve));
+  }
+});
+
 test('HTTP API enforces optional bearer authentication', async () => {
   const { app, base } = await startServer({ apiToken: '1234567890123456' });
   try {
@@ -104,7 +120,8 @@ test('CLI persists a decision and reports stats', async () => {
   });
   await run(['decision', JSON.stringify({ title: 'Testing', chosen: 'Node' })]);
   const stats = await run(['stats']);
-  assert.deepEqual(stats, { schemaVersion: 2, total: 1, decisions: 1, attempts: 0, facts: 0, relations: 0, reviewSignals: 0, events: 1 });
+  // G4-E: schemaVersion 3 adds the journal; stats now reports its entry count.
+  assert.deepEqual(stats, { schemaVersion: 3, total: 1, decisions: 1, attempts: 0, facts: 0, relations: 0, reviewSignals: 0, events: 1, journal: 1 });
   assert.equal((await readFile(file, 'utf8')).includes('Testing'), true);
 });
 
@@ -154,8 +171,20 @@ test('MCP lists tools and returns parse errors', async () => {
   const responses = await readMcpResponses(child, 2);
   child.kill();
   assert.equal(responses.some((item) => item.error?.code === -32700), true);
-  assert.equal(responses.some((item) => item.result?.tools?.length === 22), true);
+  // UPDATED: 22 -> 25. G4/G8 added shadowgraph_journal, shadowgraph_rebuild and
+  // shadowgraph_confidence_evidence. NOTE the ADR-0003 tension: a larger tool
+  // surface costs context and can hurt selection accuracy, which is why the
+  // compact profile (SHADOWGRAPH_MCP_COMPACT=1) deliberately stays at 10 tools
+  // and does NOT include the three new ones.
+  assert.equal(responses.some((item) => item.result?.tools?.length === 25), true);
   const tools = responses.find((item) => item.result?.tools)?.result.tools;
   assert.equal(tools.find((tool) => tool.name === 'shadowgraph_record_decision').inputSchema.properties.project.type, 'string');
   assert.equal(tools.find((tool) => tool.name === 'shadowgraph_record_attempt').inputSchema.properties.project.type, 'string');
+  for (const name of ['shadowgraph_record_decision', 'shadowgraph_record_attempt', 'shadowgraph_record_fact']) {
+    assert.equal(tools.find((tool) => tool.name === name).inputSchema.properties.idempotencyKey.type, 'string');
+  }
+  // The fact tool must not advertise `verified` as a settable value (G2).
+  assert.deepEqual(tools.find((tool) => tool.name === 'shadowgraph_record_fact').inputSchema.properties.verificationStatus.enum, ['unverified', 'contradicted']);
+  // Purge must advertise that logical is the default and hard is explicit (G5).
+  assert.deepEqual(tools.find((tool) => tool.name === 'shadowgraph_purge').inputSchema.properties.mode.enum, ['logical', 'hard']);
 });

@@ -1,5 +1,7 @@
 # ShadowGraph v0.30 local acceptance criteria
 
+> **Historical acceptance baseline — not the current implementation contract.** Current v0.31 status and evidence are in `docs/handoffs/current-status.md` and `docs/api-reference.md`.
+
 This build is considered the strongest practical local v0.30 decision-memory build when all of the following pass:
 
 - Capture: decisions, assumptions, alternatives, evidence, facts, attempts, outcomes, confidence, events, and relationships.
