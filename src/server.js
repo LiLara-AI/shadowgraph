@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { timingSafeEqual } from 'node:crypto';
+import { stat } from 'node:fs/promises';
 import { createStorage } from './storage.js';
 import { createShadowGraph } from './shadowgraph.js';
 import { backupFile, restoreFile } from './backup.js';
@@ -104,6 +105,8 @@ export async function createShadowGraphServer(options = {}) {
     if (method === 'POST' && path === '/backup') return backupFile(options.file ?? process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json', body?.destination, { store });
     if (method === 'POST' && path === '/restore') {
       if (store.restore) {
+        try { await stat(body?.source); }
+        catch (error) { if (error.code === 'ENOENT') throw new Error('Restore source does not exist'); throw error; }
         const sourceStore = await createStorage({ type: 'sqlite', file: body?.source });
         let payload;
         try { payload = await sourceStore.load(); } finally { sourceStore.close?.(); }
