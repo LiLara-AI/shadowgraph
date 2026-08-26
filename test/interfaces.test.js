@@ -162,7 +162,9 @@ test('HTTP SQLite restore rejects a missing source without replacing the valid d
   const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-http-sqlite-missing-'));
   const file = join(directory, 'data.db');
   const missing = join(directory, 'does-not-exist.db');
-  const app = await createShadowGraphServer({ file, storage: 'sqlite' });
+  let app;
+  try { app = await createShadowGraphServer({ file, storage: 'sqlite' }); }
+  catch (error) { if (/requires Node/.test(error.message)) return t.skip(error.message); throw error; }
   try {
     app.server.listen(0, '127.0.0.1');
     await once(app.server, 'listening');
