@@ -4,8 +4,40 @@ import { timingSafeEqual } from 'node:crypto';
 import { createStorage } from './storage.js';
 import { createShadowGraph } from './shadowgraph.js';
 import { backupFile, restoreFile } from './backup.js';
+import { VERSION, NAME } from './version.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
+
+// P1-4: a GET query string is all strings. Passing `limit: "2"` straight into the
+// core meant `Number.isInteger('2')` was false, so a perfectly valid request
+// failed — or worse, a filter like minConfidence silently compared a string.
+// Typed parameters are coerced HERE, at the transport boundary, and a value that
+// is not coercible is a 400 rather than a confusing core error.
+const INTEGER_PARAMS = ['limit', 'offset', 'depth'];
+const NUMBER_PARAMS = ['minConfidence'];
+const BOOLEAN_PARAMS = ['requireFullHistory', 'hard'];
+
+function coerceQuery(params) {
+  const parsed = { ...params };
+  for (const key of INTEGER_PARAMS) {
+    if (parsed[key] === undefined || typeof parsed[key] !== 'string') continue;
+    if (!/^-?\d+$/.test(parsed[key].trim())) throw new Error(`Query parameter ${key} must be an integer`);
+    parsed[key] = Number.parseInt(parsed[key], 10);
+  }
+  for (const key of NUMBER_PARAMS) {
+    if (parsed[key] === undefined || typeof parsed[key] !== 'string') continue;
+    const value = Number(parsed[key]);
+    if (!Number.isFinite(value)) throw new Error(`Query parameter ${key} must be a number`);
+    parsed[key] = value;
+  }
+  for (const key of BOOLEAN_PARAMS) {
+    if (parsed[key] === undefined || typeof parsed[key] !== 'string') continue;
+    const raw = parsed[key].trim().toLowerCase();
+    if (!['true', 'false', '1', '0'].includes(raw)) throw new Error(`Query parameter ${key} must be true or false`);
+    parsed[key] = raw === 'true' || raw === '1';
+  }
+  return parsed;
+}
 
 export async function createShadowGraphServer(options = {}) {
   const store = options.store ?? await createStorage({ type: options.storage ?? process.env.SHADOWGRAPH_STORAGE, file: options.file ?? process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json' });
@@ -23,11 +55,12 @@ export async function createShadowGraphServer(options = {}) {
   }
 
   async function handle(path, method, body) {
-    if (method === 'GET' && path === '/health') return { ok: true, name: 'shadowgraph', version: '0.30.0' };
+    // P1-3: version comes from package.json via src/version.js — one source only.
+    if (method === 'GET' && path === '/health') return { ok: true, name: NAME, version: VERSION };
     if (method === 'GET' && path === '/dashboard') return { dashboard: dashboardRoot.href };
     if (method === 'GET' && path === '/stats') return graph.stats();
     if (method === 'GET' && path === '/records') return graph.exportData();
-    if (method === 'GET' && path === '/search') return graph.search(body?.q ?? '', body ?? {});
+    if (method === 'GET' && path === '/search') return graph.search(body?.q ?? body?.query ?? '', body ?? {});
     if (method === 'POST' && path === '/context') return graph.context(body ?? {});
     if (method === 'POST' && path === '/facts') { const value = graph.addFact(body); await persist(); return value; }
     if (method === 'POST' && path === '/outcomes') { const value = graph.setOutcome(body.decisionId, body.outcome); await persist(); return value; }
@@ -37,7 +70,12 @@ export async function createShadowGraphServer(options = {}) {
     if (method === 'POST' && path === '/redact') return graph.redact(body ?? {});
     if (method === 'POST' && path === '/supersede') { const value = graph.supersedeDecision(body); await persist(); return value; }
     if (method === 'POST' && path === '/projects/purge-preview') return graph.projectSummary(body?.project);
-    if (method === 'DELETE' && path === '/projects') { const value = graph.purgeProject(body?.project); await persist(); return value; }
+    // G5: logical/tombstone purge is the default. `mode: 'hard'` must be asked for
+    // explicitly and physically removes journal entries.
+    if (method === 'DELETE' && path === '/projects') { const value = graph.purgeProject(body?.project, { mode: body?.mode }); await persist(); return value; }
+    if (method === 'POST' && path === '/confidence-evidence') { const value = graph.addConfidenceEvidence(body ?? {}); await persist(); return value; }
+    if (method === 'GET' && path === '/journal') return graph.getJournal(body ?? {});
+    if (method === 'POST' && path === '/rebuild') return graph.rebuild(body ?? {});
     if (method === 'POST' && path === '/decisions') {
       const value = graph.addDecision(body);
       await persist();
@@ -90,15 +128,21 @@ export async function createShadowGraphServer(options = {}) {
         chunks.push(chunk);
       }
       const raw = Buffer.concat(chunks).toString('utf8');
-      const body = raw ? JSON.parse(raw) : Object.fromEntries(url.searchParams);
+      // P1-4: a JSON body is already typed; a query string is not, so only the
+      // query path is coerced. An uncoercible value raises before it reaches the
+      // core, so the caller gets a specific 400 instead of a vague core error.
+      const body = raw ? JSON.parse(raw) : coerceQuery(Object.fromEntries(url.searchParams));
       const result = await handle(url.pathname, request.method, body);
       const status = result.error ? 404 : 200;
       response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
       response.end(JSON.stringify(result));
     } catch (error) {
-      const status = error.message === 'Decision not found' ? 404 : 400;
+      // Report WHAT was wrong. A blanket 'invalid request' hid parameter and
+      // validation errors that the caller could otherwise fix.
+      const notFound = error.message === 'Decision not found';
+      const status = notFound ? 404 : 400;
       response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-      response.end(JSON.stringify({ error: error.message === 'Decision not found' ? 'decision not found' : 'invalid request' }));
+      response.end(JSON.stringify({ error: notFound ? 'decision not found' : error.message }));
     }
   });
 

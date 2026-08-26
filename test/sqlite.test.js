@@ -17,7 +17,9 @@ test('SQLite storage round-trips relational graph and rejects stale revisions', 
   try {
     const payload = { schemaVersion: 2, records: [{ id: 'd1', kind: 'decision' }], facts: [], relations: [{ id: 'r1', from: 'd1', to: 'f1', relation: 'depends_on' }], events: [] };
     await store.save(payload);
-    assert.deepEqual(await store.load(), { ...payload, reviewSignals: [], idempotency: [], revision: 1 });
+    // G4-B: the journal is persisted in the SAME transaction as the state, so the
+    // loaded envelope always carries journal/journalSeq/journalEpoch.
+    assert.deepEqual(await store.load(), { ...payload, reviewSignals: [], idempotency: [], revision: 1, journal: [], journalSeq: 0, journalEpoch: null });
     await assert.rejects(store.save({ ...payload, revision: 0 }), /revision conflict/);
     await store.save({ ...payload, revision: 1, records: [{ id: 'd2', kind: 'decision' }] });
     assert.equal((await store.load()).revision, 2);

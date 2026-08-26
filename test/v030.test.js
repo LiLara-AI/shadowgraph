@@ -12,7 +12,18 @@ test('normalizes common MCP aliases for rejection reasons and human sources', ()
   assert.equal(decision.alternatives[0].reasonRejected, 'not suitable');
   const fact = graph.addFact({ key: 'reviewed', value: true, source: 'human-confirmed' });
   assert.equal(fact.source, 'human_confirmed');
-  assert.equal(fact.verificationStatus, 'verified');
+  // UPDATED IN PHASE 2 (G2 fix, 2026-08-25) — this assertion previously read
+  //   assert.equal(fact.verificationStatus, 'verified');
+  // which pinned the G2 defect in place as if it were desired behaviour: a
+  // self-asserted `human-confirmed` string auto-promoted the fact to `verified`
+  // with no evidence and no human in the loop, violating the security doc rule
+  // "Never promote an agent assertion to a verified fact".
+  // The alias normalization being tested here (human-confirmed -> human_confirmed)
+  // is unchanged and still correct; only the trust consequence changed.
+  // See docs/handoffs/provenance-contract.md §2.
+  assert.equal(fact.verificationStatus, 'unverified');
+  assert.equal(fact.sourceClass, 'human_confirmed');
+  assert.equal(fact.sourceRaw, 'human-confirmed');
 });
 
 test('idempotency prevents duplicate decisions and facts', () => {
@@ -40,8 +51,9 @@ test('validation and retrieval provide graph-aware explanations', () => {
   const decision = graph.addDecision({ title: 'Database', chosen: 'Postgres' });
   const fact = graph.addFact({ key: 'deployment', value: 'local' });
   graph.link({ from: decision.id, to: fact.id, relation: 'depends_on' });
+  // G6: retrieve() returns a paginated envelope — see completeness-contract.md.
   const result = graph.retrieve('database');
-  assert.equal(result.some((item) => item.record.id === fact.id && item.graphBoost === 1), true);
+  assert.equal(result.items.some((item) => item.record.id === fact.id && item.graphBoost === 1), true);
   assert.equal(graph.validate().valid, true);
 });
 

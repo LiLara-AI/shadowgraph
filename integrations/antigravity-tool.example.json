@@ -1,11 +1,17 @@
 {
   "name": "shadowgraph",
-  "description": "Local HTTP tool adapter for ShadowGraph",
+  "description": "Local HTTP tool adapter for project-scoped decision memory",
   "endpoint": "http://127.0.0.1:8787",
   "methods": {
-    "before_task": { "method": "POST", "path": "/review", "input": { "changedFacts": ["string"] } },
-    "find_memory": { "method": "GET", "path": "/search?q={query}" },
-    "save_decision": { "method": "POST", "path": "/decisions", "input": { "title": "string", "chosen": "string", "assumptions": ["string"], "alternatives": ["object"] } },
-    "save_attempt": { "method": "POST", "path": "/attempts", "input": { "solution": "string", "result": "string", "reason": "string" } }
-  }
+    "context": { "method": "POST", "path": "/context", "input": { "project": "string" } },
+    "retrieve": { "method": "POST", "path": "/retrieve", "input": { "query": "string", "project": "string", "limit": "integer", "offset": "integer" } },
+    "review": { "method": "POST", "path": "/review", "input": { "project": "string" } },
+    "find_memory": { "method": "GET", "path": "/search?q={urlencoded_query}&project={urlencoded_project}&limit={limit}&offset={offset}" },
+    "save_decision": { "method": "POST", "path": "/decisions", "input": { "title": "string", "chosen": "string", "project": "string", "sourceClass": "agent_claimed", "idempotencyKey": "string", "assumptions": ["string"], "alternatives": ["object"] } },
+    "save_fact": { "method": "POST", "path": "/facts", "input": { "key": "string", "value": "any", "project": "string", "sourceClass": "agent_claimed", "idempotencyKey": "string" } },
+    "save_outcome": { "method": "POST", "path": "/outcomes", "input": { "decisionId": "string", "outcome": { "status": "successful|mixed|failed|unknown", "sourceClass": "agent_claimed" } } },
+    "update_status": { "method": "POST", "path": "/status", "input": { "decisionId": "string", "status": "string" } },
+    "maintain": { "method": "POST", "path": "/maintain", "input": { "changedFacts": ["string"] } }
+  },
+  "notes": ["GET query placeholders must be URL-encoded by the adapter.", "Review uses stored project-scoped facts; do not pass changedFacts as the only reconsideration mechanism.", "Responses are envelopes where documented and include completeness metadata."]
 }

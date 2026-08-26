@@ -2,9 +2,9 @@
 
 ShadowGraph is a local decision ledger for AI agents. It stores choices, rejected alternatives, assumptions, evidence, facts, failed attempts, outcomes, relationships, review signals, and supersession history.
 
-## v0.30 local status
+## v0.31.0 local status
 
-The v0.30 build in this workspace is intentionally not published. It adds idempotency, verification and expiry, automatic maintenance, graph-aware retrieval, integrity validation, backup/restore helpers, MCP resources/prompts, a dashboard, and revision conflict detection. Do not treat this local build as a released package until separately approved.
+The v0.31.0 build in this workspace is an unreleased review candidate. It adds project-scoped stored-fact reconsideration after restart, provenance claims that cannot self-assert verification, idempotency, automatic maintenance, complete retrieval envelopes, journal rebuild diagnostics, integrity validation, backup/restore helpers, MCP resources/prompts, a dashboard, and revision conflict detection. Do not treat this local build as released until separately approved.
 
 ## Agent loop
 
@@ -31,7 +31,7 @@ Register:
 node ABSOLUTE_PATH_TO_SHADOWGRAPH/src/mcp.js
 ```
 
-The local v0.30 MCP server exposes tools for recording, traversal, supersession, redaction, purge, maintenance, retrieval, validation, and review signals. It also advertises a context resource and a consequential-task prompt.
+The local v0.31.0 MCP server exposes the current recording, traversal, supersession, redaction, purge, maintenance, retrieval, confidence, journal, rebuild, validation, and review-signal tools. It also advertises a context resource and a consequential-task prompt. Retrieval responses use completeness envelopes, and confidence evidence requires a stable `key`.
 
 ## HTTP and CLI
 

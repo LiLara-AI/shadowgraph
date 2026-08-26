@@ -29,7 +29,10 @@ else if (command === 'traverse') result = graph.traverse(parse(input));
 else if (command === 'redact') result = graph.redact(parse(input));
 else if (command === 'supersede') { result = graph.supersedeDecision(parse(input)); await store.save(graph.exportData()); }
 else if (command === 'purge-preview') result = graph.projectSummary(parse(input).project);
-else if (command === 'purge') { result = graph.purgeProject(parse(input).project); await store.save(graph.exportData()); }
+else if (command === 'purge') { const value = parse(input); result = graph.purgeProject(value.project, { mode: value.mode }); await store.save(graph.exportData()); }
+else if (command === 'confidence-evidence') { result = graph.addConfidenceEvidence(parse(input)); await store.save(graph.exportData()); }
+else if (command === 'journal') result = graph.getJournal(parse(input || '{}'));
+else if (command === 'rebuild') result = graph.rebuild(parse(input || '{}'));
 else if (command === 'maintain') { result = graph.maintain(parse(input || '{}')); await store.save(graph.exportData()); }
 else if (command === 'signals') result = graph.getReviewSignals(parse(input || '{}'));
 else if (command === 'ack') { result = graph.acknowledgeReview(parse(input).id); await store.save(graph.exportData()); }
