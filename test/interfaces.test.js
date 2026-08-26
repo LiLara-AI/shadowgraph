@@ -162,7 +162,9 @@ test('HTTP SQLite restore rejects malformed snapshots without replacing the vali
   const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-http-sqlite-restore-'));
   const file = join(directory, 'data.db');
   const backup = join(directory, 'bad.db');
-  const sourceStore = await createSqliteStore(backup);
+  let sourceStore;
+  try { sourceStore = await createSqliteStore(backup); }
+  catch (error) { if (/requires Node/.test(error.message)) return t.skip(error.message); throw error; }
   await sourceStore.save({ schemaVersion: 3, records: [{ id: 'bad', kind: 'unknown' }], facts: [], relations: [], reviewSignals: [], idempotency: [], events: [], journal: [] });
   sourceStore.close();
   const app = await createShadowGraphServer({ file, storage: 'sqlite' });
