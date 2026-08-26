@@ -155,6 +155,27 @@ test('HTTP restore rejects malformed JSON without replacing the valid store', as
   }
 });
 
+test('HTTP SQLite restore rejects a missing source without replacing the valid database', async (t) => {
+  let createSqliteStore;
+  try { ({ createSqliteStore } = await import('../src/sqlite-storage.js')); }
+  catch (error) { if (/requires Node/.test(error.message)) return t.skip(error.message); throw error; }
+  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-http-sqlite-missing-'));
+  const file = join(directory, 'data.db');
+  const missing = join(directory, 'does-not-exist.db');
+  const app = await createShadowGraphServer({ file, storage: 'sqlite' });
+  try {
+    app.server.listen(0, '127.0.0.1');
+    await once(app.server, 'listening');
+    const base = `http://127.0.0.1:${app.server.address().port}`;
+    await fetch(`${base}/decisions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: 'KEEP MISSING SOURCE', chosen: 'x' }) });
+    const response = await fetch(`${base}/restore`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: missing }) });
+    assert.equal(response.status, 400);
+    assert.equal(app.graph.search('KEEP MISSING SOURCE').page.total, 1);
+  } finally {
+    await new Promise((resolve) => app.server.close(resolve));
+  }
+});
+
 test('HTTP SQLite restore rejects malformed snapshots without replacing the valid database', async (t) => {
   let createSqliteStore;
   try { ({ createSqliteStore } = await import('../src/sqlite-storage.js')); }
