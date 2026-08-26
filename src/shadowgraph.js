@@ -513,7 +513,10 @@ export function createShadowGraph(options = {}) {
       data.records = data.records.filter((item) => item.project === project);
       data.facts = data.facts.filter((item) => item.project === project);
       data.idempotency = data.idempotency.filter((item) => item.value?.project === project);
-      const ids = new Set([...data.records, ...data.facts].map((item) => item.id));
+      const recordIds = new Set(data.records.map((item) => item.id));
+      const decisionIds = new Set(data.records.filter((item) => item.kind === 'decision').map((item) => item.id));
+      const ids = new Set([...recordIds, ...data.facts.map((item) => item.id)]);
+      data.reviewSignals = data.reviewSignals.filter((item) => decisionIds.has(item.decisionId));
       data.relations = data.relations.filter((item) => ids.has(item.from) && ids.has(item.to));
       data.events = data.events.filter((item) => item.project === project && (!item.relationId || data.relations.some((relation) => relation.id === item.relationId)));
       data.journal = data.journal.filter((item) => item.project === project);
