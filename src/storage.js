@@ -56,7 +56,8 @@ export function createJsonFileStore(filePath, options = {}) {
       });
       saveQueue = operation.catch(() => {});
       return operation;
-    }
+    },
+    close() {}
   };
 }
 

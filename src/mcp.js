@@ -2,6 +2,7 @@ import { createInterface } from 'node:readline';
 import { createStorage } from './storage.js';
 import { createShadowGraph, SOURCE_CLASSES, DECISION_STATUSES, OUTCOME_STATUSES, CONTENT_SEARCH_FIELDS } from './shadowgraph.js';
 import { VERSION } from './version.js';
+import { validateRestorePayload } from './restore-validation.js';
 
 const file = process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json';
 const store = await createStorage({ file });
@@ -88,10 +89,10 @@ async function call(name, args) {
   else if (name === 'shadowgraph_ack_review') value = graph.acknowledgeReview(args?.id);
   else if (name === 'shadowgraph_repair_plan') value = graph.repairPlan();
   else if (name === 'shadowgraph_backup') { const { backupFile } = await import('./backup.js'); value = await backupFile(file, args?.destination, { store }); }
-  else if (name === 'shadowgraph_restore') { value = store.restore ? await store.restore(args?.source) : await (await import('./backup.js')).restoreFile(args?.source, file, { storage: process.env.SHADOWGRAPH_STORAGE }); graph.replaceData(await store.load()); }
+  else if (name === 'shadowgraph_restore') { value = store.restore ? await store.restore(args?.source) : await (await import('./backup.js')).restoreFile(args?.source, file, { storage: process.env.SHADOWGRAPH_STORAGE, validate: validateRestorePayload }); graph.replaceData(await store.load()); }
   else if (!name) { const error = new Error('Invalid tool parameters'); error.code = -32602; throw error; }
   else { const error = new Error(`Unknown tool: ${name}`); error.code = -32601; throw error; }
-  if (name.includes('record_') || name === 'shadowgraph_confidence_evidence' || name === 'shadowgraph_update_status' || name === 'shadowgraph_link' || name === 'shadowgraph_supersede' || name === 'shadowgraph_purge' || name === 'shadowgraph_maintain' || name === 'shadowgraph_review' || name === 'shadowgraph_ack_review' || name === 'shadowgraph_backup' || name === 'shadowgraph_restore') await persist();
+  if (name.includes('record_') || name === 'shadowgraph_confidence_evidence' || name === 'shadowgraph_update_status' || name === 'shadowgraph_link' || name === 'shadowgraph_supersede' || name === 'shadowgraph_purge' || name === 'shadowgraph_maintain' || name === 'shadowgraph_review' || name === 'shadowgraph_ack_review' || name === 'shadowgraph_backup') await persist();
   return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }] };
 }
 

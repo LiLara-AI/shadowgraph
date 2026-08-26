@@ -41,7 +41,7 @@ npm test
 npm start
 ```
 
-The API listens on `http://127.0.0.1:8787` and stores a versioned JSON graph in `.shadowgraph/data.json`. Set `SHADOWGRAPH_FILE` to choose another location. Set `SHADOWGRAPH_STORAGE=sqlite` on Node 22.5+ to use the WAL-backed relational SQLite adapter. SQLite `backup` creates an atomic snapshot and SQLite `restore` accepts a validated SQLite snapshot; JSON restore remains available only for JSON storage.
+The API listens on `http://127.0.0.1:8787` and stores a versioned JSON graph in `.shadowgraph/data.json`. Set `SHADOWGRAPH_FILE` to choose another location. Set `SHADOWGRAPH_STORAGE=sqlite` on Node 22.5+ to use the WAL-backed relational SQLite adapter. JSON and SQLite restore use mandatory domain/journal consistency validation on direct JavaScript, HTTP, CLI, and MCP paths. SQLite `backup` creates an atomic snapshot; SQLite `restore` additionally retains standalone source/rollback snapshots of committed WAL state and confirms the replacement through open/prepare/load/validation before cleanup. Recovery inspects candidates read-only before a write-capable reopen. Caught failures are rolled back and reopened; cleanup and recovery failures report retained artifacts honestly. HTTP rejects writes and mutating context requests before graph change while restore owns persistence. This is process-level rollback safety, not crash or power-loss durability. JSON restore remains available only for JSON storage.
 
 For a shared local deployment, enable optional authentication:
 

@@ -31,7 +31,7 @@ test('SQLite backup uses a consistent database snapshot', async (t) => {
   try {
     const dir = await mkdtemp(join(tmpdir(), 'shadowgraph-sqlite-backup-'));
     store = await createSqliteStore(join(dir, 'graph.db'));
-    await store.save({ schemaVersion: 2, records: [{ id: 'd1', kind: 'decision' }], facts: [], relations: [], events: [] });
+    await store.save({ schemaVersion: 2, records: [{ id: 'd1', kind: 'decision', project: 'default', status: 'active', title: 'Backup decision', chosen: 'SQLite' }], facts: [], relations: [], events: [] });
     const destination = join(dir, 'copy.db');
     await store.backup(destination);
     await store.backup(destination);
