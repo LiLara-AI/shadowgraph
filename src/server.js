@@ -6,6 +6,7 @@ import { createStorage } from './storage.js';
 import { createShadowGraph } from './shadowgraph.js';
 import { backupFile, restoreFile } from './backup.js';
 import { VERSION, NAME } from './version.js';
+import { validateRestorePayload } from './restore-validation.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 
@@ -17,6 +18,10 @@ const MAX_BODY_BYTES = 1024 * 1024;
 const INTEGER_PARAMS = ['limit', 'offset', 'depth'];
 const NUMBER_PARAMS = ['minConfidence'];
 const BOOLEAN_PARAMS = ['requireFullHistory', 'hard'];
+const RESTORE_BLOCKED_MUTATIONS = new Set([
+  '/facts', '/outcomes', '/status', '/relationships', '/supersede', '/decisions', '/attempts',
+  '/review', '/maintain', '/review-signals/ack', '/confidence-evidence', '/projects', '/restore'
+]);
 
 function coerceQuery(params) {
   const parsed = { ...params };
@@ -48,22 +53,27 @@ export async function createShadowGraphServer(options = {}) {
   const apiToken = options.apiToken ?? process.env.SHADOWGRAPH_API_TOKEN;
   if (apiToken && apiToken.length < 16) throw new Error('SHADOWGRAPH_API_TOKEN must be at least 16 characters');
 
-  async function validateRestorePayload(payload) {
-    const staging = createShadowGraph(options);
-    staging.importData(payload);
-    const validation = staging.validate();
-    const blocking = validation.issues.filter((issue) => issue.severity === 'error' || issue.severity === 'unsupported');
-    if (blocking.length) throw new Error(`Refusing to restore data: ${blocking.length} blocking issue(s) — ${[...new Set(blocking.map((issue) => issue.code))].join(', ')}`);
-  }
-
+  let restoreInProgress = false;
   let persistQueue = Promise.resolve();
+  function queuePersistence(operation, onError) {
+    const queued = persistQueue.then(operation).catch(async (error) => {
+      if (onError) return onError(error);
+      throw error;
+    });
+    persistQueue = queued.catch(() => {});
+    return queued;
+  }
   function persist() {
-    const operation = persistQueue.then(async () => { const snapshot = graph.exportData(); const revision = await store.save(snapshot); graph.setRevision(revision); }).catch(async (error) => { if (/revision conflict/i.test(error.message)) graph.replaceData(await store.load()); throw error; });
-    persistQueue = operation.catch(() => {});
-    return operation;
+    return queuePersistence(
+      async () => { const snapshot = graph.exportData(); const revision = await store.save(snapshot); graph.setRevision(revision); },
+      async (error) => { if (/revision conflict/i.test(error.message)) graph.replaceData(await store.load()); throw error; }
+    );
   }
 
   async function handle(path, method, body) {
+    if (restoreInProgress && RESTORE_BLOCKED_MUTATIONS.has(path) && (method === 'POST' || method === 'DELETE')) {
+      throw new Error('SQLite restore is in progress; write rejected before mutation');
+    }
     // P1-3: version comes from package.json via src/version.js — one source only.
     if (method === 'GET' && path === '/health') return { ok: true, name: NAME, version: VERSION };
     if (method === 'GET' && path === '/dashboard') return { dashboard: dashboardRoot.href };
@@ -104,21 +114,24 @@ export async function createShadowGraphServer(options = {}) {
     if (method === 'POST' && path === '/repair-plan') return graph.repairPlan();
     if (method === 'POST' && path === '/backup') return backupFile(options.file ?? process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json', body?.destination, { store });
     if (method === 'POST' && path === '/restore') {
-      if (store.restore) {
-        try { await stat(body?.source); }
-        catch (error) { if (error.code === 'ENOENT') throw new Error('Restore source does not exist'); throw error; }
-        const sourceStore = await createStorage({ type: 'sqlite', file: body?.source });
-        let payload;
-        try { payload = await sourceStore.load(); } finally { sourceStore.close?.(); }
-        await validateRestorePayload(payload);
-        const value = await store.restore(body?.source);
-        graph.replaceData(await store.load());
-        return value;
+      restoreInProgress = true;
+      try {
+        return await queuePersistence(async () => {
+          if (store.restore) {
+            try { await stat(body?.source); }
+            catch (error) { if (error.code === 'ENOENT') throw new Error('Restore source does not exist'); throw error; }
+            const value = await store.restore(body?.source);
+            graph.replaceData(await store.load());
+            return value;
+          }
+          const destination = options.file ?? process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json';
+          const value = await restoreFile(body?.source, destination, { storage: options.storage ?? process.env.SHADOWGRAPH_STORAGE, validate: (payload) => validateRestorePayload(payload, options) });
+          graph.replaceData(await store.load());
+          return value;
+        });
+      } finally {
+        restoreInProgress = false;
       }
-      const destination = options.file ?? process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json';
-      const value = await restoreFile(body?.source, destination, { storage: options.storage ?? process.env.SHADOWGRAPH_STORAGE, validate: validateRestorePayload });
-      graph.replaceData(await store.load());
-      return value;
     }
     return { error: 'not_found' };
   }
@@ -165,7 +178,8 @@ export async function createShadowGraphServer(options = {}) {
       // Report WHAT was wrong. A blanket 'invalid request' hid parameter and
       // validation errors that the caller could otherwise fix.
       const notFound = error.message === 'Decision not found';
-      const status = notFound ? 404 : 400;
+      const recoveryUnconfirmed = error.code === 'sqlite_restore_recovery_unconfirmed';
+      const status = recoveryUnconfirmed ? 500 : notFound ? 404 : 400;
       response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
       response.end(JSON.stringify({ error: notFound ? 'decision not found' : error.message }));
     }

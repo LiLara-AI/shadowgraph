@@ -1,18 +1,20 @@
 # ShadowGraph — Current Status
 
 **Last updated:** 2026-08-26
-**Version:** 0.31.0 (release candidate) · **Schema:** 3 · **Base:** `1dde968`; review branch `feature/shadowgraph-v031-release-review`.
+**Version:** 0.31.0 (release candidate) · **Schema:** 3 · **Main baseline:** `ab8572967de79f2fe0370b4f9af92d4d785531b2` · **Review branch:** `feature/shadowgraph-v032-hardening`.
 **Phase:** G1–G8 delivered end-to-end. Follow-up review also closed project-scoped idempotency, declared journal high-water marks, legacy confidence baseline handling, malformed import validation, and integration coverage. This document is the current-status summary; older handoff logs are historical snapshots.
 
 ## Suite state
 
-    npm test              -> 236 tests / 231 pass / 0 fail / 0 skipped / 5 todo
-    npm run check         -> exit 0 (11 files)
+    npm test              -> 265 tests / 260 pass / 0 fail / 0 skipped / 5 todo
+    npm run check         -> exit 0 (13 files)
     npm audit --omit=dev  -> 0 vulnerabilities
     git diff --check      -> clean
     npm run bench         -> verdict: no pre-declared threshold breached
+    Node 20.20.2 suite    -> 265 tests / 224 pass / 0 fail / 36 skipped (node:sqlite unavailable) / 5 todo
+    Node 22.23.2 suite    -> 265 tests / 260 pass / 0 fail / 0 skipped / 5 todo
 
-The current suite has 236 tests, including `test/final-review.test.js`, deterministic legacy-ID coverage, follow-up migration/idempotency coverage, and packaging regressions.
+The current suite has 265 tests, including `test/sqlite-restore-failure.test.js` (24 Node 22 restore/fault/interface cases), `test/final-review.test.js`, deterministic legacy-ID coverage, follow-up migration/idempotency coverage, and packaging regressions.
 
 The 5 remaining `todo` entries are all labelled `BLOCKED ON <id>` and name a real open decision (U-1 x2, L-1, L-2, L-5). **No characterization test for known-bad behaviour remains** — the only surviving mention of the word is a methodology comment explaining why such a test must fail once its gap is fixed.
 
@@ -60,6 +62,7 @@ The two P0 findings were the serious ones — both were **data-loss** bugs. P0-1
 
 - **P1-11 fixed:** malformed HTTP JSON restore is staged and validated before replacing the active file; failed restore preserves the prior valid file.
 - **P1-13 fixed:** malformed HTTP SQLite restore is loaded and validated before database replacement; JSON/SQLite restore semantics now match.
+- **P1-14 fixed:** SQLite restore keeps verified standalone source and rollback snapshots. A caught failure during rename, post-rename `DatabaseSync` reopen, schema preparation, load, or validation restores and reopens the old payload before returning `sqlite_restore_rolled_back`; failed recovery is explicit and retains its rollback artifact. Source and live committed WAL state are folded with `VACUUM INTO`. Domain validation is mandatory for direct JavaScript, HTTP, CLI, and MCP restores; HTTP rejects concurrent writes before graph mutation while restore owns persistence, and MCP does not perform a second save after restore commits. Cleanup failures report retained artifacts. The guarantee is process-level rollback safety, not crash consistency or filesystem durability.
 - **P1-12 fixed:** SQLite creates its parent directory before opening a new database, matching JSON deployment behavior.
 - **P2-19 fixed:** project-scoped redaction now excludes other projects' idempotency payloads and redacts idempotency/cache key values.
 - **P2-20 fixed:** JSON and SQLite storage expose the documented `load()` / `save()` / `close()` surface.

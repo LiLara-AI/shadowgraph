@@ -2,7 +2,7 @@
 
 **Version:** 0.31.0 · **Schema version:** 3 · **Supported import schemas:** 1, 2, 3
 
-Authoritative contracts: [provenance](handoffs/provenance-contract.md) · [lifecycle](handoffs/lifecycle-contract.md) · [journal](handoffs/journal-contract.md) · [completeness](handoffs/completeness-contract.md) · [search](handoffs/search-contract.md) · [confidence](handoffs/confidence-contract.md)
+Authoritative contracts: [provenance](handoffs/provenance-contract.md) · [lifecycle](handoffs/lifecycle-contract.md) · [journal](handoffs/journal-contract.md) · [completeness](handoffs/completeness-contract.md) · [search](handoffs/search-contract.md) · [confidence](handoffs/confidence-contract.md) · [SQLite restore](handoffs/sqlite-restore-contract.md)
 
 ---
 
@@ -98,6 +98,8 @@ import { createSqliteStore } from './src/sqlite-storage.js';
 ```
 
 Both expose `load()` / `save(data)` / `close()`. State and journal are written in **one** atomic operation — `rename()` for JSON, `BEGIN IMMEDIATE`…`COMMIT` for SQLite — so they cannot diverge. JSON saves additionally use an atomic lock file with a bounded wait and stale-lock recovery; a timeout is an explicit error and SQLite is recommended for sustained multi-process writers. `createSqliteStore` requires a Node build with `node:sqlite` (stability 1.2, Release Candidate) and throws a clear error otherwise; tests skip on `/requires Node/`.
+
+SQLite restore uses verified `VACUUM INTO` snapshots for both the source and the live rollback state, so committed WAL contents are folded into standalone files. The shared domain validator is mandatory for direct JavaScript, HTTP, CLI, and MCP restores. The rollback snapshot remains until the installed replacement has opened, prepared, loaded, and passed validation. Caught post-replacement failures restore, reopen, and payload-compare the old state; an unconfirmed recovery is reported explicitly and retains its rollback artifact. HTTP restore is serialized with persistence and rejects concurrent mutating requests before graph mutation. This is **process-level rollback safety**, not a claim of crash consistency, directory-`fsync` durability, or coordination with another process writing the same path. Full contract: [SQLite restore](handoffs/sqlite-restore-contract.md).
 
 ### U-1 — Verification channel
 
