@@ -125,7 +125,10 @@ export async function createSqliteStore(filePath, options = {}) {
     for (const path of paths) {
       if (!path) continue;
       try { await removeDatabase(path); }
-      catch { retained.push(path); }
+      catch {
+        const inventory = await inspectArtifacts([path]);
+        if (inventory.retainedArtifacts.length || inventory.unknownArtifacts.length) retained.push(path);
+      }
     }
     return retained;
   }

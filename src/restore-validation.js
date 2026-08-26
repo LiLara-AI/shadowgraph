@@ -24,17 +24,25 @@ export function validateRestorePayload(payload, options = {}) {
     throw new Error(`Refusing to restore data: ${blocking.length} blocking issue(s) — ${codes}`);
   }
 
+  const live = staging.exportData();
   const rebuild = staging.rebuild();
   const corruptSkipped = rebuild.skipped;
   if (corruptSkipped.length) {
     const reasons = [...new Set(corruptSkipped.map((entry) => entry.why))].join(', ');
     throw new Error(`Refusing to restore data: journal rebuild contains ${corruptSkipped.length} corrupt or unsupported entry/entries — ${reasons}`);
   }
-  if (!rebuild.rebuildable && rebuild.reason === 'journal epoch is outside the available sequence range') {
-    throw new Error(`Refusing to restore data: ${rebuild.reason}`);
+  if (!rebuild.rebuildable) {
+    const hasHardPurgeMarker = live.journal.some((entry) => entry.type === 'project.purged' && entry.payload?.mode === 'hard');
+    const internalHardPurgeGap = rebuild.reason === 'journal contains unexplained sequence gaps inside the replay range';
+    const leadingHardPurgeGap = rebuild.reason === 'journal epoch is outside the available sequence range'
+      && Number.isInteger(rebuild.journalEpoch)
+      && Number.isInteger(rebuild.replayedFrom)
+      && rebuild.journalEpoch < rebuild.replayedFrom;
+    if (!hasHardPurgeMarker || (!internalHardPurgeGap && !leadingHardPurgeGap)) {
+      throw new Error(`Refusing to restore data: ${rebuild.reason}`);
+    }
   }
 
-  const live = staging.exportData();
   for (const key of ['records', 'facts', 'relations', 'idempotency']) {
     if (canonicalCollection(live[key]) !== canonicalCollection(rebuild.projection[key])) {
       throw new Error(`Refusing to restore data: journal projection does not match live ${key}`);

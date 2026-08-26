@@ -6,15 +6,15 @@
 
 ## Suite state
 
-    npm test              -> 270 tests / 265 pass / 0 fail / 0 skipped / 5 todo
+    npm test              -> 274 tests / 269 pass / 0 fail / 0 skipped / 5 todo
     npm run check         -> exit 0 (13 files)
     npm audit --omit=dev  -> 0 vulnerabilities
     git diff --check      -> clean
     npm run bench         -> verdict: no pre-declared threshold breached
-    Node 20.20.2 suite    -> 270 tests / 225 pass / 0 fail / 40 skipped (node:sqlite unavailable) / 5 todo
-    Node 22.23.2 suite    -> 270 tests / 265 pass / 0 fail / 0 skipped / 5 todo
+    Node 20.20.2 suite    -> 274 tests / 225 pass / 0 fail / 44 skipped (node:sqlite unavailable) / 5 todo
+    Node 22.23.2 suite    -> 274 tests / 269 pass / 0 fail / 0 skipped / 5 todo
 
-The current suite has 270 tests, including `test/sqlite-restore-failure.test.js` (28 Node 22 restore/fault/interface cases), `test/final-review.test.js`, deterministic legacy-ID coverage, follow-up migration/idempotency coverage, and packaging regressions.
+The current suite has 274 tests, including `test/sqlite-restore-failure.test.js` (32 Node 22 restore/fault/interface cases), `test/final-review.test.js`, deterministic legacy-ID coverage, follow-up migration/idempotency coverage, and packaging regressions.
 
 The 5 remaining `todo` entries are all labelled `BLOCKED ON <id>` and name a real open decision (U-1 x2, L-1, L-2, L-5). **No characterization test for known-bad behaviour remains** — the only surviving mention of the word is a methodology comment explaining why such a test must fail once its gap is fixed.
 
