@@ -44,7 +44,7 @@ Never promote an agent assertion to a verified fact merely because it is repeate
 - Preserve a verified standalone rollback snapshot until an SQLite replacement opens, prepares, loads, and validates.
 - Inspect a possible existing recovery destination as a regular file and read-only database before any write-capable open; inspection must not create an empty destination.
 - Reject corrupt journal folds and any records/facts/relations/idempotency projection that disagrees with live restored state, while preserving documented legacy/hard-purge semantics.
-- On a caught post-replacement failure, restore and reopen the old payload; report `sqlite_restore_recovery_unconfirmed` rather than claiming safety if recovery itself fails.
+- On a caught post-replacement failure, restore and reopen the old payload; report `sqlite_restore_recovery_unconfirmed` rather than claiming safety if recovery itself fails, and latch the HTTP process degraded so it cannot serve or mutate potentially divergent graph state before restart/manual recovery.
 - Treat SQLite restore as process-level rollback safety only: it does not guarantee crash consistency, filesystem durability, or coordination with external writers.
 - Validate backups and restored files before replacing live data.
 - Serialize persistence queues, reject graph-mutating routes such as `/context` while restore owns persistence, and reload after conflict recovery.

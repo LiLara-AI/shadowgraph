@@ -529,7 +529,7 @@ test('HTTP SQLite restore failure keeps in-memory graph and persistent database 
   await assertOldState(pair);
 });
 
-test('HTTP SQLite restore reports unconfirmed recovery as 500 and retains the rollback snapshot', async (t) => {
+test('HTTP SQLite restore reports unconfirmed recovery as 500, retains rollback, and fail-closes the server', async (t) => {
   const pair = await createPair(t, 'shadowgraph-http-sqlite-restore-unconfirmed-', {
     liveOptions: {
       restoreFault(stage) { if (stage === 'afterReplacementRename') throw new Error('trigger HTTP recovery'); },
@@ -557,6 +557,23 @@ test('HTTP SQLite restore reports unconfirmed recovery as 500 and retains the ro
     assert.equal(response.status, 500);
     assert.match((await response.json()).error, /rollback is unconfirmed/);
     assert.equal(app.graph.search('OLD').page.total, 1, 'in-memory state must not be replaced after an unconfirmed disk recovery');
+
+    const base = `http://127.0.0.1:${app.server.address().port}`;
+    const writeAfterFatal = await fetch(`${base}/decisions`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ project: 'default', title: 'POST_FATAL', chosen: 'x' })
+    });
+    assert.equal(writeAfterFatal.status, 503, 'unconfirmed recovery must latch the server unavailable before graph mutation');
+    assert.match((await writeAfterFatal.json()).error, /persistent storage unavailable/i);
+    assert.equal(app.graph.search('POST_FATAL').page.total, 0, 'a degraded server must not mutate in-memory graph state');
+
+    const readAfterFatal = await fetch(`${base}/search?query=OLD`);
+    assert.equal(readAfterFatal.status, 503, 'a degraded server must not serve potentially divergent graph reads');
+    const healthAfterFatal = await fetch(`${base}/health`);
+    assert.equal(healthAfterFatal.status, 200);
+    const degradedHealth = await healthAfterFatal.json();
+    assert.equal(degradedHealth.ok, false);
+    assert.equal(degradedHealth.status, 'degraded');
   } finally {
     await new Promise((resolveClose) => app.server.close(resolveClose));
   }
