@@ -28,7 +28,7 @@ The selected design is the smallest compatible change that closes the proven pos
 9. Open the replacement with `DatabaseSync`, run schema preparation, load its payload, and domain-validate it.
 10. Only after step 9 succeeds, make the replacement handle active and remove rollback/displacement artifacts.
 
-The source, staged snapshot, and installed replacement are all validated. The shared domain validator is mandatory for direct JavaScript, HTTP, CLI, and MCP SQLite restores and rejects malformed imports plus both `error` and `unsupported` findings. It also rejects corrupt skipped journal entries and compares the rebuilt records/facts/relations/idempotency projection with the imported live state; documented legacy entries and hard-purge gaps remain accepted when the surviving projection is consistent. A direct JavaScript caller may supply an additional validator, but cannot disable the built-in one.
+The source, staged snapshot, and installed replacement are all validated. The shared domain validator is mandatory for direct JavaScript, HTTP, CLI, and MCP SQLite restores and rejects malformed imports plus both `error` and `unsupported` findings. It also rejects corrupt skipped journal entries and compares the rebuilt records/facts/relations/idempotency projection with the imported live state. An unexplained sequence gap is rejected; a gap remains accepted only when the journal contains the persisted `project.purged` entry with `payload.mode === 'hard'` and the surviving projection is consistent. Documented legacy entries remain accepted. A direct JavaScript caller may supply an additional validator, but cannot disable the built-in one.
 
 ## WAL, SHM, and rollback state
 
@@ -50,7 +50,7 @@ For a caught failure after the live handle closes:
 
 A confirmed recovery rejects the restore with code `sqlite_restore_rolled_back`. If any recovery operation fails, restore rejects with `sqlite_restore_recovery_unconfirmed`, includes the original and recovery causes, and inventories the restore files that actually exist (`retainedArtifacts` plus named staged/rollback/displaced/recovery paths). If artifact inspection itself fails, `unknownArtifacts` names the paths whose existence could not be confirmed. It does **not** claim that the live database is usable. The HTTP server latches this condition as degraded: every authenticated non-health route request returns `503`, health reports `ok: false`, and restart/manual artifact recovery is required before serving or mutating graph state.
 
-Ordinary successful restore and confirmed rollback leave no restore artifacts. If cleanup itself fails, the returned result or thrown error names `retainedArtifacts`; cleanup failure is never silently swallowed.
+Ordinary successful restore and confirmed rollback leave no restore artifacts. If cleanup itself fails, the implementation re-inspects the artifact family and reports `retainedArtifacts` only when a file still exists or its existence cannot be confirmed; a delete-that-then-throws does not create a false retained-artifact report. Cleanup failure is never silently swallowed.
 
 ## Server serialization
 

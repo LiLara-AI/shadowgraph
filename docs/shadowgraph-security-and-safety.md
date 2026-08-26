@@ -43,7 +43,7 @@ Never promote an agent assertion to a verified fact merely because it is repeate
 - Read the SQLite revision inside the write lock.
 - Preserve a verified standalone rollback snapshot until an SQLite replacement opens, prepares, loads, and validates.
 - Inspect a possible existing recovery destination as a regular file and read-only database before any write-capable open; inspection must not create an empty destination.
-- Reject corrupt journal folds and any records/facts/relations/idempotency projection that disagrees with live restored state, while preserving documented legacy/hard-purge semantics.
+- Reject corrupt journal folds and any records/facts/relations/idempotency projection that disagrees with live restored state. A sequence gap requires a persisted `project.purged` entry whose payload records `mode: 'hard'`; otherwise restore rejects it as unexplained. Documented legacy semantics remain accepted.
 - On a caught post-replacement failure, restore and reopen the old payload; report `sqlite_restore_recovery_unconfirmed` rather than claiming safety if recovery itself fails, and latch the HTTP process degraded so it cannot serve or mutate potentially divergent graph state before restart/manual recovery.
 - Treat SQLite restore as process-level rollback safety only: it does not guarantee crash consistency, filesystem durability, or coordination with external writers.
 - Validate backups and restored files before replacing live data.

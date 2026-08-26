@@ -156,6 +156,86 @@ test('SQLite restore rejects a journal epoch outside the available sequence rang
   await assertOldState(pair);
 });
 
+test('SQLite restore rejects an unexplained journal sequence gap without hard-purge evidence', async (t) => {
+  const pair = await createPair(t, 'shadowgraph-sqlite-restore-journal-gap-');
+  if (!pair) return;
+  await pair.live.save(snapshot('OLD'));
+
+  const graph = createShadowGraph({ now: () => '2026-01-01T00:00:00.000Z' });
+  graph.addDecision({ project: 'kept-a', title: 'A', chosen: 'A' });
+  const removed = graph.addDecision({ project: 'missing-without-purge', title: 'REMOVED', chosen: 'REMOVED' });
+  graph.addDecision({ project: 'kept-b', title: 'B', chosen: 'B' });
+  const unexplained = graph.exportData();
+  unexplained.records = unexplained.records.filter((record) => record.id !== removed.id);
+  unexplained.journal = unexplained.journal.filter((entry) => entry.entityId !== removed.id);
+
+  await pair.source.save(unexplained);
+  pair.source.close();
+  pair.source = undefined;
+
+  await assert.rejects(pair.live.restore(pair.sourcePath), /unexplained sequence gaps/);
+  await assertOldState(pair);
+});
+
+test('SQLite restore accepts a documented hard-purge journal gap with a matching surviving projection', async (t) => {
+  const pair = await createPair(t, 'shadowgraph-sqlite-restore-journal-hard-purge-gap-');
+  if (!pair) return;
+  await pair.live.save(snapshot('OLD'));
+
+  const graph = createShadowGraph({ now: () => '2026-01-01T00:00:00.000Z' });
+  graph.addDecision({ project: 'kept-a', title: 'A', chosen: 'A' });
+  graph.addDecision({ project: 'purged', title: 'PURGED', chosen: 'PURGED' });
+  graph.addDecision({ project: 'kept-b', title: 'B', chosen: 'B' });
+  graph.purgeProject('purged', { mode: 'hard' });
+  const hardPurged = graph.exportData();
+
+  await pair.source.save(hardPurged);
+  pair.source.close();
+  pair.source = undefined;
+
+  await pair.live.restore(pair.sourcePath);
+  const activeTitles = (await pair.live.load()).records.map((record) => record.title).sort();
+  assert.deepEqual(activeTitles, ['A', 'B']);
+  pair.live.close();
+  pair.live = undefined;
+  const reopened = await createSqliteStore(pair.livePath);
+  try {
+    assert.deepEqual((await reopened.load()).records.map((record) => record.title).sort(), ['A', 'B']);
+  } finally {
+    reopened.close();
+  }
+  assert.deepEqual(await artifacts(pair.directory), []);
+});
+
+test('SQLite restore accepts a documented hard purge that removes the leading journal sequence', async (t) => {
+  const pair = await createPair(t, 'shadowgraph-sqlite-restore-journal-leading-hard-purge-');
+  if (!pair) return;
+  await pair.live.save(snapshot('OLD'));
+
+  const graph = createShadowGraph({ now: () => '2026-01-01T00:00:00.000Z' });
+  graph.addDecision({ project: 'purged-first', title: 'PURGED', chosen: 'PURGED' });
+  graph.addDecision({ project: 'kept-a', title: 'A', chosen: 'A' });
+  graph.addDecision({ project: 'kept-b', title: 'B', chosen: 'B' });
+  graph.purgeProject('purged-first', { mode: 'hard' });
+  const hardPurged = graph.exportData();
+
+  await pair.source.save(hardPurged);
+  pair.source.close();
+  pair.source = undefined;
+
+  await pair.live.restore(pair.sourcePath);
+  assert.deepEqual((await pair.live.load()).records.map((record) => record.title).sort(), ['A', 'B']);
+  pair.live.close();
+  pair.live = undefined;
+  const reopened = await createSqliteStore(pair.livePath);
+  try {
+    assert.deepEqual((await reopened.load()).records.map((record) => record.title).sort(), ['A', 'B']);
+  } finally {
+    reopened.close();
+  }
+  assert.deepEqual(await artifacts(pair.directory), []);
+});
+
 test('SQLite restore rejects live state that diverges from its journal projection', async (t) => {
   const pair = await createPair(t, 'shadowgraph-sqlite-restore-journal-parity-');
   if (!pair) return;
@@ -680,6 +760,36 @@ test('SQLite restore reports a temporary artifact when cleanup itself fails', as
   const leftovers = await artifacts(pair.directory);
   assert.ok(leftovers.some((name) => name.endsWith('.restore')));
   for (const name of leftovers) await realUnlink(join(pair.directory, name));
+});
+
+test('SQLite successful restore does not report an artifact deleted before unlink throws', async (t) => {
+  let movedThenThrew = false;
+  const pair = await createPair(t, 'shadowgraph-sqlite-restore-cleanup-move-throw-', {
+    liveOptions: {
+      restoreFs: {
+        async unlink(path) {
+          if (!movedThenThrew && String(path).endsWith('.rollback')) {
+            await realUnlink(path);
+            movedThenThrew = true;
+            const error = new Error('injected unlink-after-delete failure');
+            error.code = 'EIO';
+            throw error;
+          }
+          return realUnlink(path);
+        }
+      }
+    }
+  });
+  if (!pair) return;
+  await seed(pair);
+  pair.source.close();
+  pair.source = undefined;
+
+  const result = await pair.live.restore(pair.sourcePath);
+  assert.equal(movedThenThrew, true, 'the side-effect-then-throw cleanup path must execute');
+  assert.deepEqual(result.retainedArtifacts ?? [], [], 'deleted artifacts must not be reported as retained');
+  assert.equal((await pair.live.load()).records[0].id, 'NEW');
+  assert.deepEqual(await artifacts(pair.directory), []);
 });
 
 test('CLI SQLite restore refuses a domain-invalid snapshot and preserves old state', async (t) => {
