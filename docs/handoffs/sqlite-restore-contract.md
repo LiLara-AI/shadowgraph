@@ -28,7 +28,7 @@ The selected design is the smallest compatible change that closes the proven pos
 9. Open the replacement with `DatabaseSync`, run schema preparation, load its payload, and domain-validate it.
 10. Only after step 9 succeeds, make the replacement handle active and remove rollback/displacement artifacts.
 
-The source, staged snapshot, and installed replacement are all validated. The shared domain validator is mandatory for direct JavaScript, HTTP, CLI, and MCP SQLite restores and rejects malformed imports plus both `error` and `unsupported` findings. A direct JavaScript caller may supply an additional validator, but cannot disable the built-in one.
+The source, staged snapshot, and installed replacement are all validated. The shared domain validator is mandatory for direct JavaScript, HTTP, CLI, and MCP SQLite restores and rejects malformed imports plus both `error` and `unsupported` findings. It also rejects corrupt skipped journal entries and compares the rebuilt records/facts/relations/idempotency projection with the imported live state; documented legacy entries and hard-purge gaps remain accepted when the surviving projection is consistent. A direct JavaScript caller may supply an additional validator, but cannot disable the built-in one.
 
 ## WAL, SHM, and rollback state
 
@@ -41,7 +41,7 @@ The rollback snapshot—not the displaced main file plus sidecars—is the autho
 For a caught failure after the live handle closes:
 
 - close any replacement, staging, source, or recovery handle that was opened;
-- if the unchanged old main file is still present, reopen, prepare, load, and compare it with the verified rollback payload;
+- if the unchanged old main file may still be present, require a regular file and inspect/compare it read-only before any write-capable open; only then reopen, prepare, load, and compare it again with the verified rollback payload; this inspection cannot create an empty destination;
 - otherwise copy the rollback snapshot to a separate recovery path while preserving the original rollback artifact;
 - open and load the recovery copy before installing it;
 - replace the failed destination with the recovery copy;
@@ -54,7 +54,7 @@ Ordinary successful restore and confirmed rollback leave no restore artifacts. I
 
 ## Server serialization
 
-The HTTP server places restore on the same persistence queue as ordinary writes. It sets a restore guard synchronously before enqueueing the operation, waits for already-queued persistence to finish, and rejects later mutating requests before they touch the in-memory graph. Reads remain available from the existing graph. The guard is released after success or failure. This prevents an HTTP write from mutating the graph and then failing at the store boundary while restore owns the database.
+The HTTP server places restore on the same persistence queue as ordinary writes. It sets a restore guard synchronously before enqueueing the operation, waits for already-queued persistence to finish, and rejects later mutating requests—including `/context`, which can generate review signals—before they touch the in-memory graph. Reads that are actually side-effect-free remain available from the existing graph. The guard is released after success or failure. This prevents an HTTP operation from mutating the graph and then failing at the store boundary while restore owns the database.
 
 ## Guarantee boundaries
 
@@ -72,4 +72,4 @@ The HTTP server places restore on the same persistence queue as ordinary writes.
 
 The direct JavaScript factory accepts internal filesystem/open/prepare/close seams used by `test/sqlite-restore-failure.test.js`. `createStorage`, HTTP, MCP, CLI, and Python integrations pass only a file path and cannot set those hooks. No request parameter exposes fault injection.
 
-Coverage includes malformed direct/HTTP/CLI/MCP validation, pre-replacement and post-close failures, live-displacement and replacement rename failures (including move-then-throw), post-rename failure, an actual `DatabaseSync` constructor failure, an actual SQLite error during replacement preparation, installed-replacement read and validation failures, source-handle closure, source and live WAL folding, sidecar-operation failure, ordinary cleanup, explicit retained-artifact reporting when cleanup fails, exact artifact inventory when recovery is unconfirmed, confirmed rollback, HTTP graph/store and durable-reopen consistency, HTTP `500` reporting for unconfirmed recovery, rejection of concurrent HTTP mutation before graph change, and an MCP success regression proving restore does not perform a second post-commit save or revision increment.
+Coverage includes malformed direct/HTTP/CLI/MCP validation, corrupt-journal rejection (missing payload, contradictory replayability, and impossible epoch), journal/live-parity rejection, pre-replacement and post-close failures, live-displacement and replacement rename failures (including move-then-throw), post-rename failure, an actual `DatabaseSync` constructor failure, an actual SQLite error during replacement preparation, installed-replacement read and validation failures, source-handle closure, source and live WAL folding, sidecar-operation failure, ordinary cleanup, explicit retained-artifact reporting when cleanup fails, exact artifact inventory when recovery is unconfirmed, proof that recovery inspection does not create a missing destination, confirmed rollback, HTTP graph/store and durable-reopen consistency, HTTP `500` reporting for unconfirmed recovery, rejection of concurrent HTTP write and mutating-context operations before graph change, and an MCP success regression proving restore does not perform a second post-commit save or revision increment.

@@ -20,7 +20,7 @@ const NUMBER_PARAMS = ['minConfidence'];
 const BOOLEAN_PARAMS = ['requireFullHistory', 'hard'];
 const RESTORE_BLOCKED_MUTATIONS = new Set([
   '/facts', '/outcomes', '/status', '/relationships', '/supersede', '/decisions', '/attempts',
-  '/review', '/maintain', '/review-signals/ack', '/confidence-evidence', '/projects', '/restore'
+  '/context', '/review', '/maintain', '/review-signals/ack', '/confidence-evidence', '/projects', '/restore'
 ]);
 
 function coerceQuery(params) {

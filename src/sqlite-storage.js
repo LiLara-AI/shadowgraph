@@ -216,13 +216,23 @@ export async function createSqliteStore(filePath, options = {}) {
         if (restoreOptions.validate) await restoreOptions.validate(payload);
       };
 
-      const confirmOldAtDestination = () => {
+      const confirmOldAtDestination = async () => {
+        let inspection;
         let candidate;
+        try {
+          const info = await restoreFs.stat(destination);
+          if (!info.isFile()) throw new Error('Recovery destination is not a regular SQLite file');
+          inspection = openDatabase(destination, { readOnly: true });
+          const inspectedPayload = exportFrom(inspection);
+          if (payloadIdentity(inspectedPayload) !== payloadIdentity(oldPayload)) throw new Error('Recovered payload does not match the rollback snapshot');
+        } finally {
+          closeQuietly(inspection, 'recovery-inspection');
+        }
         try {
           candidate = openDatabase(destination);
           prepareDatabase(candidate, 'recovery');
           const payload = exportFrom(candidate);
-          if (payloadIdentity(payload) !== payloadIdentity(oldPayload)) throw new Error('Recovered payload does not match the rollback snapshot');
+          if (payloadIdentity(payload) !== payloadIdentity(oldPayload)) throw new Error('Recovered payload does not match the rollback snapshot after prepare');
           db = candidate;
           candidate = undefined;
           liveClosed = false;
@@ -311,7 +321,7 @@ export async function createSqliteStore(filePath, options = {}) {
             // A failed or move-then-throw rename can leave either path state; a
             // payload comparison decides safely without trusting optimistic flags.
             try {
-              confirmOldAtDestination();
+              await confirmOldAtDestination();
               recoveredInPlace = true;
             } catch {
               closeQuietly(db, 'recovery');
@@ -336,7 +346,7 @@ export async function createSqliteStore(filePath, options = {}) {
               await removeDatabase(destination);
               await restoreFs.rename(recoveryPath, destination);
               recoveryExists = false;
-              confirmOldAtDestination();
+              await confirmOldAtDestination();
             }
 
             const retainedArtifacts = await cleanupArtifacts([

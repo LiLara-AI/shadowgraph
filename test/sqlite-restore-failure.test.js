@@ -13,6 +13,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createShadowGraphServer } from '../src/server.js';
+import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 
 const snapshot = (id) => ({
@@ -28,6 +29,12 @@ const snapshot = (id) => ({
   journalSeq: 0,
   journalEpoch: null
 });
+
+const journalSnapshot = (title = 'NEW') => {
+  const graph = createShadowGraph({ now: () => '2026-01-01T00:00:00.000Z' });
+  graph.addDecision({ project: 'default', title, chosen: title });
+  return graph.exportData();
+};
 
 const unsupported = (error) => /SQLite storage requires Node/.test(error.message);
 const closeQuietly = (store) => { try { store?.close(); } catch { /* test cleanup */ } };
@@ -103,6 +110,63 @@ test('SQLite restore rejects malformed readable payload before touching live sta
   pair.source = undefined;
 
   await assert.rejects(pair.live.restore(pair.sourcePath), /records\[0\] is malformed/);
+  await assertOldState(pair);
+});
+
+test('SQLite restore rejects a journal entry missing its required payload', async (t) => {
+  const pair = await createPair(t, 'shadowgraph-sqlite-restore-journal-missing-payload-');
+  if (!pair) return;
+  await pair.live.save(snapshot('OLD'));
+  const malformed = journalSnapshot('NEW');
+  delete malformed.journal.find((entry) => entry.type === 'decision.recorded').payload;
+  await pair.source.save(malformed);
+  pair.source.close();
+  pair.source = undefined;
+
+  await assert.rejects(pair.live.restore(pair.sourcePath), /missing_payload/);
+  await assertOldState(pair);
+});
+
+test('SQLite restore rejects a replayable journal type marked non-replayable', async (t) => {
+  const pair = await createPair(t, 'shadowgraph-sqlite-restore-journal-replayable-flag-');
+  if (!pair) return;
+  await pair.live.save(snapshot('OLD'));
+  const contradictory = journalSnapshot('NEW');
+  contradictory.journal.find((entry) => entry.type === 'decision.recorded').replayable = false;
+  await pair.source.save(contradictory);
+  pair.source.close();
+  pair.source = undefined;
+
+  await assert.rejects(pair.live.restore(pair.sourcePath), /marked_non_replayable/);
+  await assertOldState(pair);
+});
+
+test('SQLite restore rejects a journal epoch outside the available sequence range', async (t) => {
+  const pair = await createPair(t, 'shadowgraph-sqlite-restore-journal-epoch-');
+  if (!pair) return;
+  await pair.live.save(snapshot('OLD'));
+  const impossible = journalSnapshot('NEW');
+  impossible.records = [];
+  impossible.journalEpoch = impossible.journalSeq + 1;
+  await pair.source.save(impossible);
+  pair.source.close();
+  pair.source = undefined;
+
+  await assert.rejects(pair.live.restore(pair.sourcePath), /journal epoch is outside the available sequence range/);
+  await assertOldState(pair);
+});
+
+test('SQLite restore rejects live state that diverges from its journal projection', async (t) => {
+  const pair = await createPair(t, 'shadowgraph-sqlite-restore-journal-parity-');
+  if (!pair) return;
+  await pair.live.save(snapshot('OLD'));
+  const divergent = journalSnapshot('JOURNAL');
+  divergent.records[0].title = 'LIVE_ONLY_TAMPER';
+  await pair.source.save(divergent);
+  pair.source.close();
+  pair.source = undefined;
+
+  await assert.rejects(pair.live.restore(pair.sourcePath), /journal projection does not match live records/);
   await assertOldState(pair);
 });
 
@@ -306,7 +370,7 @@ test('SQLite restore rolls back an actual replacement DatabaseSync open failure'
   pair.source = undefined;
 
   await assert.rejects(pair.live.restore(pair.sourcePath), /previous database restored:.*options\.readOnly.*boolean/i);
-  assert.equal(liveOpens, 4, 'initial, failed replacement, rejected destination confirmation, and verified recovery opens must occur');
+  assert.equal(liveOpens, 5, 'initial, failed replacement, rejected destination inspection, recovered read-only inspection, and verified recovery opens must occur');
   await assertOldState(pair);
 });
 
@@ -427,6 +491,7 @@ test('SQLite unconfirmed recovery reports exactly the staged, rollback, and disp
     assert.equal(error.recoveryArtifact, undefined);
     return true;
   });
+  await assert.rejects(realStat(pair.livePath), (error) => error.code === 'ENOENT', 'recovery inspection must not create an empty live database');
   const suffixes = recoveryError.retainedArtifacts.map((path) => path.match(/\.(restore|rollback|old)$/)?.[1]).filter(Boolean).sort();
   assert.deepEqual(suffixes, ['old', 'restore', 'rollback']);
   for (const path of recoveryError.retainedArtifacts) {
@@ -733,10 +798,13 @@ test('HTTP rejects a concurrent mutation before graph state changes during resto
   });
   if (!pair) return;
   sourcePath = pair.sourcePath;
-  await seed(pair);
+  const oldSnapshot = snapshot('OLD');
+  oldSnapshot.records[0].reviewAfter = '2025-01-01T00:00:00.000Z';
+  await pair.live.save(oldSnapshot);
+  await pair.source.save(snapshot('NEW'));
   pair.source.close();
   pair.source = undefined;
-  const app = await createShadowGraphServer({ file: pair.livePath, storage: 'sqlite', store: pair.live });
+  const app = await createShadowGraphServer({ file: pair.livePath, storage: 'sqlite', store: pair.live, now: () => '2026-01-01T00:00:00.000Z' });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   const base = `http://127.0.0.1:${app.server.address().port}`;
@@ -751,6 +819,12 @@ test('HTTP rejects a concurrent mutation before graph state changes during resto
     assert.equal(writeResponse.status, 400);
     assert.match((await writeResponse.json()).error, /restore is in progress/);
     assert.equal(app.graph.search('RACE').page.total, 0, 'rejected write must not mutate the graph');
+    const contextResponse = await fetch(`${base}/context`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'default' })
+    });
+    assert.equal(contextResponse.status, 400, 'context can create review signals and must be blocked during restore');
+    assert.match((await contextResponse.json()).error, /restore is in progress/);
+    assert.equal(app.graph.getReviewSignals().length, 0, 'blocked context must not create an in-memory-only review signal');
     releaseStat();
     const restoreResponse = await restoreResponsePromise;
     assert.equal(restoreResponse.status, 200);
