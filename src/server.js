@@ -103,7 +103,15 @@ export async function createShadowGraphServer(options = {}) {
     if (method === 'POST' && path === '/repair-plan') return graph.repairPlan();
     if (method === 'POST' && path === '/backup') return backupFile(options.file ?? process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json', body?.destination, { store });
     if (method === 'POST' && path === '/restore') {
-      if (store.restore) { const value = await store.restore(body?.source); graph.replaceData(await store.load()); return value; }
+      if (store.restore) {
+        const sourceStore = await createStorage({ type: 'sqlite', file: body?.source });
+        let payload;
+        try { payload = await sourceStore.load(); } finally { sourceStore.close?.(); }
+        await validateRestorePayload(payload);
+        const value = await store.restore(body?.source);
+        graph.replaceData(await store.load());
+        return value;
+      }
       const destination = options.file ?? process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json';
       const value = await restoreFile(body?.source, destination, { storage: options.storage ?? process.env.SHADOWGRAPH_STORAGE, validate: validateRestorePayload });
       graph.replaceData(await store.load());

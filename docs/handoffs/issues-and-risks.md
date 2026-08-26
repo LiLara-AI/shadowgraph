@@ -130,6 +130,7 @@ A `.probe-audit.mjs` was created and deleted this session; `git status` verified
 | ID | Severity | Finding | Status |
 | --- | --- | --- | --- |
 | **P1-11** | high | HTTP JSON restore wrote a syntactically valid but semantically malformed payload over the live file before `replaceData()` validated it; a failed restore could brick the next restart. | fixed with staged validation before atomic rename; regression test added |
+| **P1-13** | high | HTTP SQLite restore replaced the database before graph validation; malformed SQLite snapshots could replace valid state even when the request returned 400. | fixed with pre-restore SQLite load/validation; parity regression test added |
 | **P1-12** | high | SQLite initialization failed when its configured parent directory did not exist, unlike JSON storage. | fixed by creating the parent directory; parity test added |
 | **P2-19** | medium | Project-scoped redaction returned all projects' idempotency entries and did not redact `idempotencyKey`/cache-key values. | fixed with project filtering and key-value redaction; adversarial test added |
 | **P2-20** | medium | The documented common storage interface promised `close()` for both backends, but JSON exposed no `close()`. | fixed with an idempotent JSON no-op close; parity test added |

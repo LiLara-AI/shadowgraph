@@ -59,6 +59,7 @@ The two P0 findings were the serious ones — both were **data-loss** bugs. P0-1
 ## v0.32 hardening review status
 
 - **P1-11 fixed:** malformed HTTP JSON restore is staged and validated before replacing the active file; failed restore preserves the prior valid file.
+- **P1-13 fixed:** malformed HTTP SQLite restore is loaded and validated before database replacement; JSON/SQLite restore semantics now match.
 - **P1-12 fixed:** SQLite creates its parent directory before opening a new database, matching JSON deployment behavior.
 - **P2-19 fixed:** project-scoped redaction now excludes other projects' idempotency payloads and redacts idempotency/cache key values.
 - **P2-20 fixed:** JSON and SQLite storage expose the documented `load()` / `save()` / `close()` surface.
