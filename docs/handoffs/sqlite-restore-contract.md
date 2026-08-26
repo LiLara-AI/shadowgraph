@@ -48,7 +48,7 @@ For a caught failure after the live handle closes:
 - reopen the restored live database, run preparation, load it, and compare it with the verified old payload;
 - remove temporary, rollback, displacement, recovery, and associated sidecar files after confirmation.
 
-A confirmed recovery rejects the restore with code `sqlite_restore_rolled_back`. If any recovery operation fails, restore rejects with `sqlite_restore_recovery_unconfirmed`, includes the original and recovery causes, and inventories the restore files that actually exist (`retainedArtifacts` plus named staged/rollback/displaced/recovery paths). If artifact inspection itself fails, `unknownArtifacts` names the paths whose existence could not be confirmed. It does **not** claim that the live database is healthy in that case.
+A confirmed recovery rejects the restore with code `sqlite_restore_rolled_back`. If any recovery operation fails, restore rejects with `sqlite_restore_recovery_unconfirmed`, includes the original and recovery causes, and inventories the restore files that actually exist (`retainedArtifacts` plus named staged/rollback/displaced/recovery paths). If artifact inspection itself fails, `unknownArtifacts` names the paths whose existence could not be confirmed. It does **not** claim that the live database is usable. The HTTP server latches this condition as degraded: every authenticated non-health route request returns `503`, health reports `ok: false`, and restart/manual artifact recovery is required before serving or mutating graph state.
 
 Ordinary successful restore and confirmed rollback leave no restore artifacts. If cleanup itself fails, the returned result or thrown error names `retainedArtifacts`; cleanup failure is never silently swallowed.
 

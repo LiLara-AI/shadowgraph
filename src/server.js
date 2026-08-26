@@ -54,6 +54,7 @@ export async function createShadowGraphServer(options = {}) {
   if (apiToken && apiToken.length < 16) throw new Error('SHADOWGRAPH_API_TOKEN must be at least 16 characters');
 
   let restoreInProgress = false;
+  let persistenceUnavailable = null;
   let persistQueue = Promise.resolve();
   function queuePersistence(operation, onError) {
     const queued = persistQueue.then(operation).catch(async (error) => {
@@ -71,6 +72,12 @@ export async function createShadowGraphServer(options = {}) {
   }
 
   async function handle(path, method, body) {
+    if (persistenceUnavailable) {
+      if (method === 'GET' && path === '/health') return { ok: false, name: NAME, version: VERSION, status: 'degraded', detail: 'persistent storage unavailable; restart required' };
+      const unavailable = new Error('Persistent storage unavailable after unconfirmed restore recovery; restart required');
+      unavailable.code = 'persistence_unavailable';
+      throw unavailable;
+    }
     if (restoreInProgress && RESTORE_BLOCKED_MUTATIONS.has(path) && (method === 'POST' || method === 'DELETE')) {
       throw new Error('SQLite restore is in progress; write rejected before mutation');
     }
@@ -129,6 +136,9 @@ export async function createShadowGraphServer(options = {}) {
           graph.replaceData(await store.load());
           return value;
         });
+      } catch (error) {
+        if (error.code === 'sqlite_restore_recovery_unconfirmed') persistenceUnavailable = error;
+        throw error;
       } finally {
         restoreInProgress = false;
       }
@@ -179,7 +189,8 @@ export async function createShadowGraphServer(options = {}) {
       // validation errors that the caller could otherwise fix.
       const notFound = error.message === 'Decision not found';
       const recoveryUnconfirmed = error.code === 'sqlite_restore_recovery_unconfirmed';
-      const status = recoveryUnconfirmed ? 500 : notFound ? 404 : 400;
+      const storageUnavailable = error.code === 'persistence_unavailable';
+      const status = storageUnavailable ? 503 : recoveryUnconfirmed ? 500 : notFound ? 404 : 400;
       response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
       response.end(JSON.stringify({ error: notFound ? 'decision not found' : error.message }));
     }
