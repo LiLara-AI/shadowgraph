@@ -660,6 +660,7 @@ test('MCP SQLite restore refuses a domain-invalid snapshot and preserves old sta
   child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 91, method: 'tools/call', params: { name: 'shadowgraph_restore', arguments: { source: pair.sourcePath } } })}\n`);
   const response = await responsePromise;
   child.kill();
+  await once(child, 'exit');
   assert.equal(response.id, 91);
   assert.match(response.error.message, /records\[0\] is malformed/);
   const reopened = await createSqliteStore(pair.livePath);
