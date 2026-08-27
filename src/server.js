@@ -19,7 +19,7 @@ const INTEGER_PARAMS = ['limit', 'offset', 'depth'];
 const NUMBER_PARAMS = ['minConfidence'];
 const BOOLEAN_PARAMS = ['requireFullHistory', 'hard'];
 const RESTORE_BLOCKED_MUTATIONS = new Set([
-  '/facts', '/outcomes', '/status', '/relationships', '/supersede', '/decisions', '/attempts',
+  '/facts', '/memories', '/outcomes', '/status', '/relationships', '/supersede', '/decisions', '/attempts',
   '/context', '/review', '/maintain', '/review-signals/ack', '/confidence-evidence', '/projects', '/restore'
 ]);
 
@@ -70,6 +70,21 @@ export async function createShadowGraphServer(options = {}) {
       async (error) => { if (/revision conflict/i.test(error.message)) graph.replaceData(await store.load()); throw error; }
     );
   }
+  function mutateAndPersist(operation) {
+    return queuePersistence(async () => {
+      const before = graph.exportData();
+      try {
+        const value = await operation();
+        const revision = await store.save(graph.exportData());
+        graph.setRevision(revision);
+        return value;
+      } catch (error) {
+        try { graph.replaceData(await store.load()); }
+        catch { graph.replaceData(before); }
+        throw error;
+      }
+    });
+  }
 
   async function handle(path, method, body) {
     if (persistenceUnavailable) {
@@ -87,35 +102,29 @@ export async function createShadowGraphServer(options = {}) {
     if (method === 'GET' && path === '/stats') return graph.stats();
     if (method === 'GET' && path === '/records') return graph.exportData();
     if (method === 'GET' && path === '/search') return graph.search(body?.q ?? body?.query ?? '', body ?? {});
-    if (method === 'POST' && path === '/context') return graph.context(body ?? {});
-    if (method === 'POST' && path === '/facts') { const value = graph.addFact(body); await persist(); return value; }
-    if (method === 'POST' && path === '/outcomes') { const value = graph.setOutcome(body.decisionId, body.outcome); await persist(); return value; }
-    if (method === 'POST' && path === '/status') { const value = graph.updateDecisionStatus(body.decisionId, body.status); await persist(); return value; }
-    if (method === 'POST' && path === '/relationships') { const value = graph.link(body); await persist(); return value; }
+    if (method === 'POST' && path === '/context') return mutateAndPersist(() => graph.context(body ?? {}));
+    if (method === 'POST' && path === '/memories') return mutateAndPersist(() => Array.isArray(body?.operations) ? graph.applyMemoryPlan(body) : graph.remember(body));
+    if (method === 'POST' && path === '/recall') return graph.recall(body?.query ?? '', body ?? {});
+    if (method === 'POST' && path === '/facts') return mutateAndPersist(() => graph.addFact(body));
+    if (method === 'POST' && path === '/outcomes') return mutateAndPersist(() => graph.setOutcome(body.decisionId, body.outcome));
+    if (method === 'POST' && path === '/status') return mutateAndPersist(() => graph.updateDecisionStatus(body.decisionId, body.status));
+    if (method === 'POST' && path === '/relationships') return mutateAndPersist(() => graph.link(body));
     if (method === 'POST' && path === '/traverse') return graph.traverse(body ?? {});
     if (method === 'POST' && path === '/redact') return graph.redact(body ?? {});
-    if (method === 'POST' && path === '/supersede') { const value = graph.supersedeDecision(body); await persist(); return value; }
+    if (method === 'POST' && path === '/supersede') return mutateAndPersist(() => graph.supersedeDecision(body));
     if (method === 'POST' && path === '/projects/purge-preview') return graph.projectSummary(body?.project);
     // G5: logical/tombstone purge is the default. `mode: 'hard'` must be asked for
     // explicitly and physically removes journal entries.
-    if (method === 'DELETE' && path === '/projects') { const value = graph.purgeProject(body?.project, { mode: body?.mode }); await persist(); return value; }
-    if (method === 'POST' && path === '/confidence-evidence') { const value = graph.addConfidenceEvidence(body ?? {}); await persist(); return value; }
+    if (method === 'DELETE' && path === '/projects') return mutateAndPersist(() => graph.purgeProject(body?.project, { mode: body?.mode }));
+    if (method === 'POST' && path === '/confidence-evidence') return mutateAndPersist(() => graph.addConfidenceEvidence(body ?? {}));
     if (method === 'GET' && path === '/journal') return graph.getJournal(body ?? {});
     if (method === 'POST' && path === '/rebuild') return graph.rebuild(body ?? {});
-    if (method === 'POST' && path === '/decisions') {
-      const value = graph.addDecision(body);
-      await persist();
-      return value;
-    }
-    if (method === 'POST' && path === '/attempts') {
-      const value = graph.addAttempt(body);
-      await persist();
-      return value;
-    }
-    if (method === 'POST' && path === '/review') { const value = graph.review(body ?? {}); await persist(); return value; }
-    if (method === 'POST' && path === '/maintain') { const value = graph.maintain(body ?? {}); await persist(); return value; }
+    if (method === 'POST' && path === '/decisions') return mutateAndPersist(() => graph.addDecision(body));
+    if (method === 'POST' && path === '/attempts') return mutateAndPersist(() => graph.addAttempt(body));
+    if (method === 'POST' && path === '/review') return mutateAndPersist(() => graph.review(body ?? {}));
+    if (method === 'POST' && path === '/maintain') return mutateAndPersist(() => graph.maintain(body ?? {}));
     if (method === 'GET' && path === '/review-signals') return graph.getReviewSignals(body ?? {});
-    if (method === 'POST' && path === '/review-signals/ack') { const value = graph.acknowledgeReview(body?.id); await persist(); return value; }
+    if (method === 'POST' && path === '/review-signals/ack') return mutateAndPersist(() => graph.acknowledgeReview(body?.id));
     if (method === 'POST' && path === '/retrieve') return graph.retrieve(body?.query ?? '', body ?? {});
     if (method === 'GET' && path === '/validate') return graph.validate();
     if (method === 'POST' && path === '/repair-plan') return graph.repairPlan();

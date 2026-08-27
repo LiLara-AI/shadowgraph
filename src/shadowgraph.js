@@ -8,15 +8,16 @@
 //   search-contract.md      — content fields vs filters
 //   confidence-contract.md  — evidence-weighted bounded confidence
 
-import { rebuildProjection, journalGaps, duplicateSequences, JOURNAL_ENTRY_TYPES, REPLAYABLE_ENTRY_TYPES } from './journal.js';
+import { rebuildProjection, journalGaps, duplicateSequences, JOURNAL_ENTRY_TYPES, JOURNAL_TYPE_ENTITY_KIND, REPLAYABLE_ENTRY_TYPES } from './journal.js';
 import { createConfidence, applyContribution, setOutcomeContribution, computeConfidence, summarizeBasis, CONFIDENCE_POLICY } from './confidence.js';
+import { hybridSearch } from './hybrid-search.js';
 import { createHash } from 'node:crypto';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
 // docs/api-reference.md) and are frozen so a consumer cannot mutate validation
 // behaviour at a distance.
-export const SCHEMA_VERSION = 3;
-export const SUPPORTED_SCHEMA_VERSIONS = Object.freeze([1, 2, 3]);
+export const SCHEMA_VERSION = 4;
+export const SUPPORTED_SCHEMA_VERSIONS = Object.freeze([1, 2, 3, 4]);
 
 // A source class records WHAT WAS CLAIMED about a fact's origin. It is never proof
 // and never by itself grants trust.
@@ -41,6 +42,9 @@ export const LEGACY_DECISION_STATUSES = Object.freeze(['active', 'aging', 'stale
 export const DECISION_STATUSES = Object.freeze([...DOCUMENTED_DECISION_STATUSES, ...LEGACY_DECISION_STATUSES]);
 
 export const OUTCOME_STATUSES = Object.freeze(['successful', 'mixed', 'failed', 'unknown']);
+export const MEMORY_TYPES = Object.freeze(['preference', 'profile', 'goal', 'instruction', 'procedure', 'episode', 'note']);
+const MEMORY_STATUSES = Object.freeze(['active', 'superseded', 'invalidated']);
+
 
 // G7: the ONLY fields a free-text query may match. Schema/metadata keys are not
 // content, so `search('confidence')` must not match a record that merely has a
@@ -57,7 +61,22 @@ export const MAX_PAGE_LIMIT = 1000;
 
 export { rebuildProjection, journalGaps, CONFIDENCE_POLICY };
 
-function clone(value) { return JSON.parse(JSON.stringify(value)); }
+function assertFiniteJsonNumbers(value, seen = new WeakSet()) {
+  if (value === undefined || typeof value === 'function' || typeof value === 'symbol') throw new Error('Values must be plain JSON data');
+  if (typeof value === 'number' && !Number.isFinite(value)) throw new Error('Non-finite numbers are not JSON-serializable');
+  if (!value || typeof value !== 'object' || seen.has(value)) return;
+  if (!Array.isArray(value)) {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) throw new Error('Values must be plain JSON data');
+  }
+  seen.add(value);
+  for (const child of Array.isArray(value) ? value : Object.values(value)) assertFiniteJsonNumbers(child, seen);
+}
+
+function clone(value) {
+  assertFiniteJsonNumbers(value);
+  return JSON.parse(JSON.stringify(value));
+}
 
 // Legacy facts may have no id. Runtime-random ids make the same persisted legacy
 // file produce a different graph on every import, which breaks restart parity and
@@ -81,6 +100,14 @@ function legacyFactId(fact, index, allFacts) {
   }).length;
   const digest = createHash('sha256').update(JSON.stringify({ content: canonicalContent, occurrence })).digest('hex').slice(0, 20);
   return `fact_${digest}`;
+}
+
+function legacyCollisionId(kind, item, index, used) {
+  const digest = createHash('sha256').update(JSON.stringify(canonical({ kind, item, index }))).digest('hex').slice(0, 20);
+  let candidate = `${kind}_${digest}`;
+  let suffix = 1;
+  while (used.has(candidate)) candidate = `${kind}_${digest}_${suffix++}`;
+  return candidate;
 }
 
 // ---------------------------------------------------------------------------
@@ -120,6 +147,7 @@ function paginate(items, options, scope, extra = {}) {
 export function createShadowGraph(options = {}) {
   const now = options.now ?? (() => new Date().toISOString());
   const records = new Map();
+  const currentMemories = new Map();
   const facts = new Map();
   const currentFacts = new Map();
   const events = [];
@@ -131,6 +159,13 @@ export function createShadowGraph(options = {}) {
   let journalSeq = 0;
   let journalEpoch = null;
   function setRevision(value) { if (Number.isInteger(value) && value >= revision) revision = value; }
+  function assertUnusedEntityId(value, reserved = null) {
+    if (typeof value !== 'string' || !value) throw new Error('Entity id must be a non-empty string');
+    const alternativeExists = [...records.values()].some((record) => (record.alternatives ?? []).some((alternative) => alternative.id === value));
+    if (records.has(value) || facts.has(value) || relations.has(value) || alternativeExists || reserved?.has(value)) {
+      throw new Error(`Entity id already exists: ${value}`);
+    }
+  }
 
   function id(prefix) {
     return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -194,32 +229,55 @@ export function createShadowGraph(options = {}) {
     return [...value];
   }
 
+  function validateIdempotencyKey(value) {
+    if (value === undefined || value === null || value === '') return;
+    if (typeof value !== 'string' || value.length > 200) throw new Error('idempotencyKey must be a string of at most 200 characters');
+  }
+
+  function scopedIdempotencyKey(input, action) {
+    const project = normalizeProject(input?.project);
+    if (action !== 'memory') return `${action}:${project}:${input.idempotencyKey}`;
+    const scope = normalizeMemoryScope(input.scope);
+    const identity = JSON.stringify([scope.userId, scope.agentId, scope.runId, input.memoryType ?? null, input.key ?? null]);
+    return `memory:${project}:${identity}:${input.idempotencyKey}`;
+  }
+
   function idempotent(input, action) {
     if (!input?.idempotencyKey) return undefined;
-    if (typeof input.idempotencyKey !== 'string' || input.idempotencyKey.length > 200) throw new Error('idempotencyKey must be a string of at most 200 characters');
-    const project = input.project ?? 'default';
-    const existing = idempotency.get(`${action}:${project}:${input.idempotencyKey}`);
+    validateIdempotencyKey(input.idempotencyKey);
+    const project = normalizeProject(input.project);
+    const existing = idempotency.get(scopedIdempotencyKey(input, action));
     if (existing) return clone(existing);
-    // A legacy cache key may have been persisted without project scope. Only use it
-    // when its payload belongs to the requested project; otherwise do not let an
-    // old unscoped entry suppress a write in another project.
-    const legacy = idempotency.get(`${action}:${input.idempotencyKey}`);
-    if (legacy && (legacy.project ?? 'default') === project) return clone(legacy);
+    // Legacy keys did not include project (all actions) or exact memory identity.
+    // Reuse one only when the payload belongs to the same project and, for a
+    // memory, the exact same scope/type/key; otherwise it would leak another
+    // user's retry result.
+    const legacyKeys = [`${action}:${project}:${input.idempotencyKey}`, `${action}:${input.idempotencyKey}`];
+    for (const key of legacyKeys) {
+      const legacy = idempotency.get(key);
+      if (!legacy || (legacy.project ?? 'default') !== project) continue;
+      if (action === 'memory' && memoryScopeKey(legacy) !== memoryScopeKey(input)) continue;
+      return clone(legacy);
+    }
     return undefined;
   }
-  function rememberIdempotency(input, action, value) { if (input?.idempotencyKey) idempotency.set(`${action}:${value.project ?? input.project ?? 'default'}:${input.idempotencyKey}`, clone(value)); }
+  function rememberIdempotency(input, action, value) {
+    if (input?.idempotencyKey) idempotency.set(scopedIdempotencyKey({ ...input, ...value }, action), clone(value));
+  }
 
   function addDecision(input) {
     const existing = idempotent(input, 'decision'); if (existing) return existing;
     if (!input || typeof input !== 'object' || typeof input.title !== 'string' || !input.title.trim() || typeof input.chosen !== 'string' || !input.chosen.trim()) throw new Error('A decision requires non-empty title and chosen strings');
+    validateTemporalFields(input, ['createdAt', 'reviewAfter']);
     const confidence = input.confidence ?? 0.5;
     if (typeof confidence !== 'number' || confidence < 0 || confidence > 1) throw new Error('Decision confidence must be a number between 0 and 1');
     const alternatives = input.alternatives ?? [];
     if (!Array.isArray(alternatives) || alternatives.some((item) => !item || typeof item.label !== 'string' || !item.label.trim())) throw new Error('Decision alternatives must have non-empty label strings');
+    const project = normalizeProject(input.project);
     const evidence = (input.evidence ?? []).map((item) => normalizeEvidence(item, now));
     const record = {
       id: input.id ?? id('decision'), kind: 'decision', schemaVersion: SCHEMA_VERSION,
-      project: input.project ?? 'default', title: input.title, goal: input.goal ?? '', chosen: input.chosen,
+      project, title: input.title, goal: input.goal ?? '', chosen: input.chosen,
       // G2: provenance travels with the decision. Plain JSON values only.
       ...provenanceFields(input),
       // G8: confidence carries an auditable basis, not a bare number.
@@ -229,6 +287,13 @@ export function createShadowGraph(options = {}) {
       failedAttempts: [...(input.failedAttempts ?? [])], outcome: input.outcome ?? null,
       reviewAfter: input.reviewAfter ?? null, createdAt: input.createdAt ?? now(), updatedAt: now()
     };
+    clone(record);
+    assertUnusedEntityId(record.id);
+    const reservedIds = new Set([record.id]);
+    for (const alternative of record.alternatives) {
+      assertUnusedEntityId(alternative.id, reservedIds);
+      reservedIds.add(alternative.id);
+    }
     records.set(record.id, record);
     event('decision.recorded', { recordId: record.id });
     appendJournal({ type: 'decision.recorded', entityKind: 'decision', entityId: record.id, project: record.project, payload: record, provenance: writeProvenance(record), idempotencyKey: input.idempotencyKey ? `decision:${record.project}:${input.idempotencyKey}` : undefined });
@@ -238,19 +303,197 @@ export function createShadowGraph(options = {}) {
   function addAttempt(input) {
     const existing = idempotent(input, 'attempt'); if (existing) return existing;
     if (!input || typeof input !== 'object' || typeof input.solution !== 'string' || !input.solution.trim() || typeof input.result !== 'string' || !input.result.trim()) throw new Error('An attempt requires non-empty solution and result strings');
-    const attempt = { id: input.id ?? id('attempt'), kind: 'attempt', schemaVersion: SCHEMA_VERSION, project: input.project ?? 'default', ...provenanceFields(input), solution: input.solution, result: input.result, environment: input.environment ?? '', reason: input.reason ?? '', reusableWhen: normalizeRules(input.reusableWhen ?? []), relatedTo: input.relatedTo ?? [], createdAt: input.createdAt ?? now() };
+    validateTemporalFields(input, ['createdAt']);
+    const attempt = { id: input.id ?? id('attempt'), kind: 'attempt', schemaVersion: SCHEMA_VERSION, project: normalizeProject(input.project), ...provenanceFields(input), solution: input.solution, result: input.result, environment: input.environment ?? '', reason: input.reason ?? '', reusableWhen: normalizeRules(input.reusableWhen ?? []), relatedTo: input.relatedTo ?? [], createdAt: input.createdAt ?? now() };
+    clone(attempt);
+    assertUnusedEntityId(attempt.id);
     records.set(attempt.id, attempt);
     event('attempt.recorded', { recordId: attempt.id });
     appendJournal({ type: 'attempt.recorded', entityKind: 'attempt', entityId: attempt.id, project: attempt.project, payload: attempt, provenance: writeProvenance(attempt), idempotencyKey: input.idempotencyKey ? `attempt:${attempt.project}:${input.idempotencyKey}` : undefined });
     const result = clone(attempt); rememberIdempotency(input, 'attempt', result); return result;
   }
 
+  // Scoped memory covers profile and continuity use cases without flattening
+  // decisions, alternatives, evidence, and outcomes into generic text.
+  function remember(input) {
+    const existingRetry = idempotent(input, 'memory');
+    if (existingRetry) return { operation: 'NOOP', memory: existingRetry };
+    if (!input || typeof input !== 'object') throw new Error('A memory requires an input object');
+    if (!MEMORY_TYPES.includes(input.memoryType)) throw new Error(`Memory type must be one of: ${MEMORY_TYPES.join(', ')}`);
+    if (typeof input.key !== 'string' || !input.key.trim()) throw new Error('A memory requires a non-empty key');
+    if (typeof input.text !== 'string' || !input.text.trim()) throw new Error('A memory requires non-empty text');
+    if (input.metadata !== undefined && (!input.metadata || typeof input.metadata !== 'object' || Array.isArray(input.metadata))) throw new Error('Memory metadata must be an object');
+    validateTemporalFields(input, ['recordedAt', 'createdAt', 'validFrom', 'validTo']);
+    const project = normalizeProject(input.project);
+    const scope = normalizeMemoryScope(input.scope);
+    const tags = strings(input.tags, 'tags');
+    const metadata = clone(input.metadata ?? {});
+    const embedding = normalizeEmbedding(input.embedding);
+    const scopeKey = memoryScopeKey({ project, scope, memoryType: input.memoryType, key: input.key });
+    const previous = currentMemories.get(scopeKey);
+    const latest = [...records.values()]
+      .filter((record) => record.kind === 'memory' && memoryScopeKey(record) === scopeKey)
+      .sort((left, right) => (right.version ?? 1) - (left.version ?? 1) || compareInstants(right.temporal?.validFrom, left.temporal?.validFrom) || String(right.id).localeCompare(String(left.id)))[0];
+    const recordedAt = input.recordedAt ?? now();
+    const validFrom = input.validFrom ?? recordedAt;
+    const validTo = input.validTo ?? null;
+    const temporalRequested = Object.prototype.hasOwnProperty.call(input, 'validFrom') || Object.prototype.hasOwnProperty.call(input, 'validTo');
+    if (temporalRequested) validateMemoryInterval(validFrom, validTo);
+    const nextContent = canonical({ text: input.text, metadata, tags });
+    const previousContent = previous ? canonical({ text: previous.text, metadata: previous.metadata ?? {}, tags: previous.tags ?? [] }) : null;
+    const sameRequestedInterval = !temporalRequested || (sameInstant(previous?.temporal?.validFrom, validFrom) && sameInstant(previous?.temporal?.validTo ?? null, validTo));
+    if (previous && JSON.stringify(previousContent) === JSON.stringify(nextContent) && sameRequestedInterval) {
+      const indexUpdated = input.embedding !== undefined && JSON.stringify(canonical(previous.embedding)) !== JSON.stringify(canonical(embedding));
+      if (indexUpdated) {
+        const indexedAt = recordedAt;
+        previous.embedding = embedding;
+        previous.updatedAt = indexedAt;
+        event('memory.indexed', { recordId: previous.id, project });
+        appendJournal({ type: 'memory.indexed', entityKind: 'memory', entityId: previous.id, project, payload: clone(previous), provenance: writeProvenance({ ...previous, ...input }) });
+      }
+      return { operation: 'NOOP', memory: clone(previous), ...(indexUpdated ? { indexUpdated: true } : {}) };
+    }
+
+    validateMemoryInterval(validFrom, validTo);
+    if (latest?.temporal?.validFrom && compareInstants(validFrom, latest.temporal.validFrom) < 0) {
+      throw new Error('Memories for one identity must be recorded in non-decreasing validFrom order');
+    }
+    const provenance = provenanceFields(input);
+    const memory = {
+      id: input.id ?? id('memory'), kind: 'memory', schemaVersion: SCHEMA_VERSION,
+      project, scope, memoryType: input.memoryType, key: input.key, text: input.text,
+      version: (latest?.version ?? 0) + 1,
+      metadata, tags, embedding, ...provenance, verificationStatus: 'unverified', status: 'active',
+      temporal: { validFrom, validTo, recordedAt, invalidatedAt: null },
+      createdAt: input.createdAt ?? recordedAt, updatedAt: recordedAt,
+      ...(previous ? { supersedes: previous.id } : {})
+    };
+    assertUnusedEntityId(memory.id);
+
+    if (previous) {
+      previous.status = 'superseded';
+      previous.supersededBy = memory.id;
+      previous.temporal = { ...(previous.temporal ?? {}), validTo: earliestBoundary(previous.temporal?.validTo, validFrom), invalidatedAt: recordedAt };
+      previous.updatedAt = recordedAt;
+      appendJournal({ type: 'memory.superseded', entityKind: 'memory', entityId: previous.id, project, payload: clone(previous), provenance: writeProvenance(memory) });
+    }
+
+    records.set(memory.id, memory);
+    currentMemories.set(scopeKey, memory);
+    event('memory.recorded', { recordId: memory.id, project });
+    appendJournal({ type: 'memory.recorded', entityKind: 'memory', entityId: memory.id, project, payload: memory, provenance: writeProvenance(memory), idempotencyKey: input.idempotencyKey ? scopedIdempotencyKey({ ...input, ...memory }, 'memory') : undefined });
+    rememberIdempotency(input, 'memory', memory);
+    return { operation: previous ? 'UPDATE' : 'ADD', memory: clone(memory), ...(previous ? { previous: clone(previous) } : {}) };
+  }
+
+  function memoryHistory(input = {}) {
+    const project = normalizeProject(input.project);
+    const scope = normalizeMemoryScope(input.scope);
+    const scopeKey = memoryScopeKey({ project, scope, memoryType: input.memoryType, key: input.key });
+    const items = [...records.values()]
+      .filter((record) => record.kind === 'memory' && memoryScopeKey(record) === scopeKey)
+      .sort((left, right) => (left.version ?? 1) - (right.version ?? 1) || compareInstants(left.temporal?.validFrom ?? left.createdAt, right.temporal?.validFrom ?? right.createdAt) || String(left.id).localeCompare(String(right.id)))
+      .map(clone);
+    return paginate(items, input, { project, scope, memoryType: input.memoryType, key: input.key }, { historical: true });
+  }
+
+  function applyMemoryPlan(input = {}) {
+    if (!Array.isArray(input.operations)) throw new Error('Memory plan operations must be an array');
+    const project = normalizeProject(input.project);
+    const defaultScope = normalizeMemoryScope(input.scope);
+    const actions = new Set(['ADD', 'UPDATE', 'DELETE', 'NOOP']);
+    const simulatedValidFrom = new Map([...currentMemories].map(([key, memory]) => [key, memory.temporal?.validFrom ?? null]));
+    const reservedIds = new Set();
+
+    // Preflight the complete plan before mutating anything. Extraction output is
+    // untrusted input; one malformed late operation must not leave a partial plan.
+    const operations = input.operations.map((raw) => {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Memory plan operations must be objects');
+      const action = String(raw.action ?? '').toUpperCase();
+      if (!actions.has(action)) throw new Error('Memory plan action must be ADD, UPDATE, DELETE, or NOOP');
+      if (!MEMORY_TYPES.includes(raw.memoryType)) throw new Error(`Memory type must be one of: ${MEMORY_TYPES.join(', ')}`);
+      if (typeof raw.key !== 'string' || !raw.key.trim()) throw new Error('A memory plan operation requires a non-empty key');
+      if (['ADD', 'UPDATE'].includes(action) && (typeof raw.text !== 'string' || !raw.text.trim())) throw new Error(`${action} memory plan operations require non-empty text`);
+      if (raw.metadata !== undefined && (!raw.metadata || typeof raw.metadata !== 'object' || Array.isArray(raw.metadata))) throw new Error('Memory metadata must be an object');
+      strings(raw.tags, 'tags');
+      normalizeEmbedding(raw.embedding);
+      validateIdempotencyKey(raw.idempotencyKey);
+      validateTemporalFields(raw, ['recordedAt', 'createdAt', 'validFrom', 'validTo', 'validAt']);
+      const scope = normalizeMemoryScope(raw.scope ?? defaultScope);
+      if (['ADD', 'UPDATE'].includes(action) && raw.id !== undefined) {
+        assertUnusedEntityId(raw.id, reservedIds);
+        reservedIds.add(raw.id);
+      }
+      for (const name of ['actor', 'client', 'sessionId']) provenanceString(raw[name] ?? input[name], name);
+      const recordedAt = ['ADD', 'UPDATE'].includes(action) ? (raw.recordedAt ?? now()) : raw.recordedAt;
+      const identityKey = memoryScopeKey({ project, scope, memoryType: raw.memoryType, key: raw.key });
+      if (['ADD', 'UPDATE'].includes(action)) {
+        const validFrom = raw.validFrom ?? recordedAt;
+        validateMemoryInterval(validFrom, raw.validTo ?? null);
+        const previousValidFrom = simulatedValidFrom.get(identityKey);
+        if (previousValidFrom && compareInstants(validFrom, previousValidFrom) < 0) {
+          throw new Error('Memories for one identity must be recorded in non-decreasing validFrom order');
+        }
+        simulatedValidFrom.set(identityKey, validFrom);
+      } else if (action === 'DELETE') {
+        const previousValidFrom = simulatedValidFrom.get(identityKey);
+        if (previousValidFrom && raw.validAt && compareInstants(raw.validAt, previousValidFrom) < 0) {
+          throw new Error('Memory invalidation time must not precede validFrom');
+        }
+        // Invalidation ends current validity; it does not erase history. Keep the
+        // last validFrom so a later operation in this plan cannot sneak in an
+        // out-of-order backfill and fail only after DELETE has already mutated.
+      }
+      return { ...clone(raw), action, scope, ...(recordedAt ? { recordedAt } : {}) };
+    });
+
+    const results = [];
+    for (const operation of operations) {
+      const scopeKey = memoryScopeKey({ project, scope: operation.scope, memoryType: operation.memoryType, key: operation.key });
+      const current = currentMemories.get(scopeKey);
+      if (operation.action === 'NOOP' || (operation.action === 'DELETE' && !current)) {
+        results.push({ operation: 'NOOP', memory: current ? clone(current) : null });
+        continue;
+      }
+      if (operation.action === 'DELETE') {
+        const recordedAt = operation.recordedAt ?? now();
+        const requestedBoundary = operation.validAt ?? recordedAt;
+        const validFrom = current.temporal?.validFrom ?? requestedBoundary;
+        const safeBoundary = compareInstants(requestedBoundary, validFrom) < 0 ? validFrom : requestedBoundary;
+        current.status = 'invalidated';
+        current.temporal = {
+          ...(current.temporal ?? {}),
+          validTo: earliestBoundary(current.temporal?.validTo, safeBoundary),
+          invalidatedAt: recordedAt
+        };
+        current.updatedAt = recordedAt;
+        currentMemories.delete(scopeKey);
+        event('memory.invalidated', { recordId: current.id, project });
+        appendJournal({ type: 'memory.invalidated', entityKind: 'memory', entityId: current.id, project, payload: clone(current), provenance: writeProvenance({ ...input, ...operation }) });
+        results.push({ operation: 'DELETE', memory: clone(current) });
+        continue;
+      }
+      results.push(remember({
+        ...operation,
+        project,
+        scope: operation.scope,
+        sourceClass: operation.sourceClass ?? input.sourceClass,
+        actor: operation.actor ?? input.actor,
+        client: operation.client ?? input.client,
+        sessionId: operation.sessionId ?? input.sessionId
+      }));
+    }
+    return { results, completeness: { complete: true, requested: operations.length, applied: results.length } };
+  }
+
   function addFact(input) {
     const existing = idempotent(input, 'fact'); if (existing) return existing;
     if (!input || typeof input.key !== 'string' || !input.key.trim()) throw new Error('A fact requires a non-empty key');
+    validateTemporalFields(input, ['recordedAt', 'observedAt', 'validFrom', 'validTo', 'expiresAt']);
+    const project = normalizeProject(input.project);
     const confidence = input.confidence ?? 0.5;
     if (typeof confidence !== 'number' || confidence < 0 || confidence > 1) throw new Error('Fact confidence must be a number between 0 and 1');
-    const factScope = JSON.stringify([input.project ?? 'default', input.key]);
+    const factScope = JSON.stringify([project, input.key]);
     const previous = currentFacts.get(factScope);
     // G2: a source label is a CLAIM about origin, not a grant of trust. Unknown or
     // non-canonical labels downgrade to agent_claimed with the raw label kept for
@@ -267,10 +510,32 @@ export function createShadowGraph(options = {}) {
       if (requested === 'verified' || requested === 'expired') throw new Error(`A caller cannot set fact verificationStatus to ${requested}`);
     }
     const verificationStatus = requested === 'contradicted' ? 'contradicted' : 'unverified';
-    const fact = { id: input.id ?? id('fact'), kind: 'fact', schemaVersion: SCHEMA_VERSION, project: input.project ?? 'default', key: input.key, value: input.value, source: provenance.sourceClass, ...provenance, confidence, verificationStatus, status: 'active', expiresAt: input.expiresAt ?? null, observedAt: input.observedAt ?? now() };
+    const recordedAt = input.recordedAt ?? now();
+    const observedAt = input.observedAt ?? recordedAt;
+    const validFrom = input.validFrom ?? observedAt;
+    const validTo = input.validTo ?? null;
+    if (validTo && compareInstants(validTo, validFrom) <= 0) throw new Error('Fact validTo must be later than validFrom');
+    if (previous?.temporal?.validFrom && compareInstants(validFrom, previous.temporal.validFrom) < 0) {
+      throw new Error('Facts for one scope must be recorded in non-decreasing validFrom order');
+    }
+    const fact = {
+      id: input.id ?? id('fact'), kind: 'fact', schemaVersion: SCHEMA_VERSION,
+      project, key: input.key, value: input.value,
+      source: provenance.sourceClass, ...provenance, confidence, verificationStatus,
+      status: 'active', expiresAt: input.expiresAt ?? null, observedAt,
+      temporal: { validFrom, validTo, recordedAt, invalidatedAt: null }
+    };
+    clone(fact);
+    assertUnusedEntityId(fact.id);
     if (previous) {
       previous.status = 'superseded';
       previous.supersededBy = fact.id;
+      previous.temporal = {
+        validFrom: previous.temporal?.validFrom ?? previous.observedAt ?? null,
+        validTo: earliestBoundary(previous.temporal?.validTo, validFrom),
+        recordedAt: previous.temporal?.recordedAt ?? previous.observedAt ?? null,
+        invalidatedAt: recordedAt
+      };
       // The implicit supersession used to be silent. It is now an explicit entry.
       appendJournal({ type: 'fact.superseded', entityKind: 'fact', entityId: previous.id, project: previous.project, payload: clone(previous), provenance: writeProvenance(fact) });
     }
@@ -292,7 +557,19 @@ export function createShadowGraph(options = {}) {
 
   function link(input) {
     if (!input || typeof input.from !== 'string' || typeof input.to !== 'string' || typeof input.relation !== 'string' || !input.relation.trim()) throw new Error('A relationship requires from, to, and relation');
-    const relation = { id: input.id ?? id('relation'), kind: 'relation', schemaVersion: SCHEMA_VERSION, from: input.from, to: input.to, relation: input.relation, createdAt: input.createdAt ?? now() };
+    if (!entity(input.from) || !entity(input.to)) throw new Error('Relation endpoints must exist before linking');
+    validateTemporalFields(input, ['recordedAt', 'createdAt', 'validFrom', 'validTo']);
+    const recordedAt = input.recordedAt ?? now();
+    const createdAt = input.createdAt ?? recordedAt;
+    const validFrom = input.validFrom ?? createdAt;
+    const validTo = input.validTo ?? null;
+    if (validTo && compareInstants(validTo, validFrom) <= 0) throw new Error('Relation validTo must be later than validFrom');
+    const relation = {
+      id: input.id ?? id('relation'), kind: 'relation', schemaVersion: SCHEMA_VERSION,
+      from: input.from, to: input.to, relation: input.relation, createdAt,
+      temporal: { validFrom, validTo, recordedAt, invalidatedAt: null }
+    };
+    assertUnusedEntityId(relation.id);
     relations.set(relation.id, relation);
     event('relation.created', { relationId: relation.id });
     appendJournal({ type: 'relation.created', entityKind: 'relation', entityId: relation.id, project: entity(relation.from)?.project ?? entity(relation.to)?.project ?? null, payload: relation });
@@ -301,6 +578,10 @@ export function createShadowGraph(options = {}) {
 
   function traverse(input = {}) {
     if (typeof input.id !== 'string' || !entity(input.id)) throw new Error('A traversal requires an existing id');
+    const memoryProject = normalizeProject(input.project);
+    const memoryScope = normalizeMemoryScope(input.scope);
+    const memoryVisible = (item) => item?.kind !== 'memory' || (item.project === memoryProject && sameMemoryScopeValues(item.scope, memoryScope));
+    if (!memoryVisible(entity(input.id))) throw new Error('Traversal root is outside the requested memory scope');
     const direction = input.direction ?? 'both';
     if (!['in', 'out', 'both'].includes(direction)) throw new Error('Traversal direction must be in, out, or both');
     const depth = input.depth ?? 1;
@@ -315,6 +596,7 @@ export function createShadowGraph(options = {}) {
         if (!fromMatch && !toMatch) continue;
         const targetId = fromMatch ? relation.to : relation.from;
         if (!entity(targetId)) continue;
+        if (!memoryVisible(entity(targetId))) continue;
         if (!edges.some((item) => item.id === relation.id)) edges.push(clone(relation));
         if (!seen.has(targetId) && entity(targetId)) { seen.add(targetId); next.push(targetId); nodes.push(clone(entity(targetId))); }
       }
@@ -437,21 +719,37 @@ export function createShadowGraph(options = {}) {
   // caller happens to re-supply. Projects one project's ACTIVE facts into the same
   // { key: value } shape review({ facts }) already accepts, so stored and supplied
   // facts share a single matching path. Project-scoped; superseded/expired skipped.
-  function storedFactValues(project) {
-    const values = {};
-    for (const fact of currentFacts.values()) {
-      if (fact.status !== 'active') continue;
+  function storedFactValues(project, asOf) {
+    const candidates = new Map();
+    for (const fact of facts.values()) {
       if ((fact.project ?? 'default') !== project) continue;
-      values[fact.key] = fact.value;
+      const temporal = fact.temporal;
+      if (temporal) {
+        if (temporal.validFrom && compareInstants(temporal.validFrom, asOf) > 0) continue;
+        if (temporal.validTo && compareInstants(temporal.validTo, asOf) <= 0) continue;
+      } else if (fact.status !== 'active') continue;
+      if (!candidates.has(fact.key)) candidates.set(fact.key, []);
+      candidates.get(fact.key).push(fact);
+    }
+    const values = {};
+    for (const [key, matches] of candidates) {
+      const winner = [...matches].sort((left, right) => {
+        const byValidFrom = compareInstants(right.temporal?.validFrom ?? right.observedAt, left.temporal?.validFrom ?? left.observedAt);
+        return byValidFrom !== 0 ? byValidFrom : String(right.id).localeCompare(String(left.id));
+      })[0];
+      values[key] = winner.value;
     }
     return values;
   }
 
   function review(context = {}) {
+    validateTemporalFields(context, ['asOf']);
+    const project = context.project === undefined ? undefined : normalizeProject(context.project);
     const changed = new Set(context.changedFacts ?? []); const due = [];
+    const reviewAt = context.asOf ?? now();
     for (const record of records.values()) {
       if (record.kind !== 'decision') continue;
-      if (context.project && record.project !== context.project) continue;
+      if (project !== undefined && record.project !== project) continue;
       const matches = [];
       const reconsider = new Set();
       // Precedence: caller-supplied `facts` override stored facts of the same key,
@@ -459,42 +757,49 @@ export function createShadowGraph(options = {}) {
       // matching `changedFacts` only: that list is an ephemeral "these just
       // changed" signal, whereas facts are durable state, so feeding state into it
       // would make every decision due forever.
-      const knownFacts = { ...storedFactValues(record.project ?? 'default'), ...(context.facts ?? {}) };
+      const knownFacts = { ...storedFactValues(record.project ?? 'default', reviewAt), ...(context.facts ?? {}) };
       for (const alternative of record.alternatives) for (const rule of alternative.reopenWhen) {
         if (typeof rule === 'string' && changed.has(rule)) { matches.push(rule); reconsider.add(alternative.label); }
         else if (rule && Object.prototype.hasOwnProperty.call(knownFacts, rule.key) && ruleMatches(rule, knownFacts[rule.key])) { matches.push(rule.key); reconsider.add(alternative.label); }
       }
-      if (record.reviewAfter && record.reviewAfter <= now()) matches.push('review date reached');
+      if (record.reviewAfter && compareInstants(record.reviewAfter, reviewAt) <= 0) matches.push('review date reached');
       if (record.outcome?.status === 'failed') matches.push('decision outcome failed');
       if (matches.length) due.push({ decisionId: record.id, title: record.title, reason: [...new Set(matches)].join(', '), alternativesToReconsider: reconsider.size ? [...reconsider] : record.alternatives.map((item) => item.label) });
     }
     for (const item of due) {
-      const key = `${item.decisionId}:${item.reason}`;
+      const key = reviewSignalKey(item.decisionId, item.reason);
       if (!reviewSignals.has(key)) reviewSignals.set(key, { id: id('review'), kind: 'review', ...clone(item), status: 'open', createdAt: now() });
     }
     return due;
   }
 
   function maintain(input = {}) {
+    validateTemporalFields(input, ['now']);
     const at = input.now ?? now();
     const agedDecisionIds = [];
-    for (const record of records.values()) if (record.kind === 'decision' && record.reviewAfter && record.reviewAfter <= at && ['active', 'validated'].includes(record.status)) {
+    for (const record of records.values()) if (record.kind === 'decision' && record.reviewAfter && compareInstants(record.reviewAfter, at) <= 0 && ['active', 'validated'].includes(record.status)) {
       record.status = 'aging'; record.updatedAt = at; agedDecisionIds.push(record.id);
       appendJournal({ type: 'decision.aged', entityKind: 'decision', entityId: record.id, project: record.project, payload: clone(record) });
     }
-    for (const fact of facts.values()) if (fact.status === 'active' && fact.expiresAt && fact.expiresAt <= at) {
+    for (const fact of facts.values()) if (fact.status === 'active' && fact.expiresAt && compareInstants(fact.expiresAt, at) <= 0) {
       fact.status = 'expired'; fact.verificationStatus = 'expired';
+      fact.temporal = {
+        validFrom: fact.temporal?.validFrom ?? fact.observedAt ?? null,
+        validTo: fact.temporal?.validTo && compareInstants(fact.temporal.validTo, fact.expiresAt) <= 0 ? fact.temporal.validTo : fact.expiresAt,
+        recordedAt: fact.temporal?.recordedAt ?? fact.observedAt ?? null,
+        invalidatedAt: at
+      };
       appendJournal({ type: 'fact.expired', entityKind: 'fact', entityId: fact.id, project: fact.project, payload: clone(fact) });
     }
-    const due = review({ changedFacts: input.changedFacts ?? [], facts: input.facts ?? {} });
+    const due = review({ changedFacts: input.changedFacts ?? [], facts: input.facts ?? {}, asOf: at });
     return { at, agedDecisionIds, reviewSignals: [...reviewSignals.values()].map(clone), due };
   }
 
-  function getReviewSignals(input = {}) { return [...reviewSignals.values()].filter((item) => (!input.project || records.get(item.decisionId)?.project === input.project) && (!input.status || item.status === input.status)).map(clone); }
+  function getReviewSignals(input = {}) { const project = input.project === undefined ? undefined : normalizeProject(input.project); return [...reviewSignals.values()].filter((item) => (project === undefined || records.get(item.decisionId)?.project === project) && (!input.status || item.status === input.status)).map(clone); }
   function acknowledgeReview(signalId) { const item = [...reviewSignals.values()].find((candidate) => candidate.id === signalId); if (!item) throw new Error('Review signal not found'); item.status = 'acknowledged'; item.acknowledgedAt = now(); return clone(item); }
 
   function redact(input = {}) {
-    const project = input.project;
+    const project = input.project === undefined ? undefined : normalizeProject(input.project);
     const patterns = (input.patterns ?? ['password', 'secret', 'token', 'api[-_]?key', 'authorization', 'private[-_]?key']).map((item) => new RegExp(String(item), 'i'));
     const replacement = input.replacement ?? '[REDACTED]';
     const transform = (value, key = '') => {
@@ -503,7 +808,7 @@ export function createShadowGraph(options = {}) {
       if (Array.isArray(value)) return value.map((item) => transform(item, key));
       if (value && typeof value === 'object') {
         const sensitiveValue = patterns.some((pattern) => pattern.test(String(value.key ?? '')));
-        return Object.fromEntries(Object.entries(value).map(([childKey, item]) => [childKey, childKey === 'value' && sensitiveValue ? replacement : transform(item, childKey)]));
+        return Object.fromEntries(Object.entries(value).map(([childKey, item]) => [childKey, ['value', 'text'].includes(childKey) && sensitiveValue ? replacement : transform(item, childKey)]));
       }
       return value;
     };
@@ -549,6 +854,7 @@ export function createShadowGraph(options = {}) {
     for (const record of projectRecords) for (const alternative of record.alternatives ?? []) removed.add(alternative.id);
     for (const fact of facts.values()) if (fact.project === project) removed.add(fact.id);
     for (const [recordId, record] of records) if (record.project === project) records.delete(recordId);
+    for (const [scopeKey, memory] of currentMemories) if (memory.project === project) currentMemories.delete(scopeKey);
     for (const [factId, fact] of facts) if (fact.project === project) facts.delete(factId);
     const removedRelationIds = new Set();
     for (const [relationId, relation] of relations) {
@@ -572,13 +878,20 @@ export function createShadowGraph(options = {}) {
 
     let journalEntriesRedacted = 0;
     let journalEntriesRemoved = 0;
+    const removedJournalSequences = journal
+      .filter((item) => item.type === 'project.purged' && item.project === project && item.payload?.mode === 'hard')
+      .flatMap((item) => Array.isArray(item.payload?.removedJournalSequences) ? item.payload.removedJournalSequences.filter(Number.isInteger) : []);
     if (mode === 'hard') {
       for (let index = journal.length - 1; index >= 0; index -= 1) {
         const item = journal[index];
-        if (item.project === project || removed.has(item.entityId) || removedRelationIds.has(item.entityId)) { journal.splice(index, 1); journalEntriesRemoved += 1; }
+        if (item.project === project || removed.has(item.entityId) || removedRelationIds.has(item.entityId)) {
+          if (Number.isInteger(item.seq)) removedJournalSequences.push(item.seq);
+          journal.splice(index, 1); journalEntriesRemoved += 1;
+        }
       }
     } else {
       for (const item of journal) {
+        if (item.type === 'project.purged' && item.project === project && item.payload?.mode === 'hard') continue;
         if (item.project === project || removed.has(item.entityId) || removedRelationIds.has(item.entityId)) {
           if (item.payload !== null || item.redacted !== true) journalEntriesRedacted += 1;
           item.payload = null; item.redacted = true; item.redactedReason = 'project_purged';
@@ -603,8 +916,9 @@ export function createShadowGraph(options = {}) {
       payload.relations = (payload.relations ?? []).filter((relation) => !removedRelationIds.has(relation?.id) && !removed.has(relation?.from) && !removed.has(relation?.to));
       payload.idempotency = (payload.idempotency ?? []).filter((entry) => keep(entry?.value));
     }
-    const purgeEntry = appendJournal({ type: 'project.purged', entityKind: 'project', entityId: project, project, payload: { project, mode, removed: removed.size, purgedEntityIds: [...removed] } });
-    return { ...summary, removed: removed.size, mode, journalEntriesRedacted, journalEntriesRemoved, idempotencyRemoved, journalEntryId: purgeEntry.id };
+    const uniqueRemovedJournalSequences = [...new Set(removedJournalSequences)].sort((left, right) => left - right);
+    const purgeEntry = appendJournal({ type: 'project.purged', entityKind: 'project', entityId: project, project, payload: { project, mode, removed: removed.size, purgedEntityIds: [...removed], removedJournalSequences: uniqueRemovedJournalSequences } });
+    return { ...summary, removed: removed.size, mode, journalEntriesRedacted, journalEntriesRemoved, removedJournalSequences: uniqueRemovedJournalSequences, idempotencyRemoved, journalEntryId: purgeEntry.id };
   }
 
   // Diagnostics distinguish three different problems (see api-reference.md):
@@ -659,6 +973,13 @@ export function createShadowGraph(options = {}) {
       activeScopes.set(scope, (activeScopes.get(scope) ?? 0) + 1);
     }
     for (const [scope, count] of activeScopes) if (count > 1) push('error', 'duplicate_active_fact_scope', { scope, count });
+    const activeMemoryScopes = new Map();
+    for (const record of records.values()) {
+      if (record.kind !== 'memory' || record.status !== 'active') continue;
+      const scope = memoryScopeKey(record);
+      activeMemoryScopes.set(scope, (activeMemoryScopes.get(scope) ?? 0) + 1);
+    }
+    for (const [scope, count] of activeMemoryScopes) if (count > 1) push('error', 'duplicate_active_memory_scope', { scope, count });
     for (const gap of journalGaps(journal)) push('info', 'journal_gap', gap);
     // `valid` is false for genuine errors AND for data this build cannot
     // interpret. Saying "valid" while holding an unsupported schema would be a
@@ -689,10 +1010,14 @@ export function createShadowGraph(options = {}) {
   }
 
   function rank(query = '', options = {}) {
+    if (options.project !== undefined) normalizeProject(options.project);
+    const memoryProject = normalizeProject(options.project);
+    const memoryScope = normalizeMemoryScope(options.scope);
     const terms = String(query).toLowerCase().split(/\s+/).filter(Boolean);
     const hits = [];
     for (const record of records.values()) {
       if (!matchesFilters(record, options)) continue;
+      if (record.kind === 'memory' && (record.project !== memoryProject || !sameMemoryScopeValues(record.scope, memoryScope))) continue;
       // G7: a term must match a DECLARED CONTENT FIELD. Schema keys and internal
       // metadata are not content, so `search('confidence')` no longer matches a
       // record merely because it has a confidence field.
@@ -718,12 +1043,14 @@ export function createShadowGraph(options = {}) {
 
   function retrieve(query = '', options = {}) {
     const hits = rank(query, options);
+    const memoryProject = normalizeProject(options.project);
+    const memoryScope = normalizeMemoryScope(options.scope);
     const directIds = new Set(hits.map((item) => item.record.id));
     const results = hits.map((item) => ({ ...item, graphBoost: 0, reasons: [item.reason] }));
     for (const relation of relations.values()) {
       const relatedId = directIds.has(relation.from) ? relation.to : directIds.has(relation.to) ? relation.from : null;
       const related = relatedId && entity(relatedId);
-      if (related && related.kind !== 'alternative' && (!options.project || related.project === options.project) && !directIds.has(relatedId)) {
+      if (related && related.kind !== 'alternative' && (!options.project || related.project === options.project) && (related.kind !== 'memory' || (related.project === memoryProject && sameMemoryScopeValues(related.scope, memoryScope))) && !directIds.has(relatedId)) {
         results.push({ record: clone(related), score: 1, graphBoost: 1, matched: ['relationship'], matchedBy: 'graph', reason: `Related by ${relation.relation}`, reasons: [`Related by ${relation.relation}`], filters: appliedFilters(options) });
         directIds.add(relatedId);
       }
@@ -732,10 +1059,23 @@ export function createShadowGraph(options = {}) {
     return paginate(sorted, options, { project: options.project ?? 'all', query: String(query), filters: appliedFilters(options) }, { includesGraphNeighbours: true, contentFields: [...CONTENT_SEARCH_FIELDS] });
   }
 
+  function recall(query = '', options = {}) {
+    validateTemporalFields(options, ['asOf', 'currentAt']);
+    const recallOptions = { ...options, project: normalizeProject(options.project), scope: normalizeMemoryScope(options.scope), currentAt: options.currentAt ?? (options.asOf ? null : now()) };
+    const result = hybridSearch(exportData(), query, recallOptions);
+    const envelope = paginate(
+      result.items,
+      recallOptions,
+      { project: recallOptions.project, scope: recallOptions.scope, query: String(query), asOf: options.asOf ?? null },
+      { signals: result.signals, ranking: result.ranking }
+    );
+    return { ...envelope, signals: result.signals, ranking: result.ranking };
+  }
+
   // context() returns several collections. Each one declares its own total and
   // whether it was truncated, so a caller can never be silently short-changed.
   function context(input = {}) {
-    const project = input.project ?? 'default';
+    const project = normalizeProject(input.project);
     const limit = input.limit;
     const collect = (items) => {
       const page = resolvePage({ limit, offset: 0 }, items.length);
@@ -787,7 +1127,13 @@ export function createShadowGraph(options = {}) {
   function replaceData(data = []) {
     const staging = createShadowGraph({ now });
     // Any parse/migration failure throws HERE, before a single live map is cleared.
-    staging.importData(data);
+    try {
+      staging.importData(data);
+    } catch (cause) {
+      const error = new Error(`Refusing to replace data: ${cause.message}`);
+      error.cause = cause;
+      throw error;
+    }
     const check = staging.validate();
     const blocking = check.issues.filter((issue) => issue.severity === 'error');
     if (blocking.length) {
@@ -798,7 +1144,7 @@ export function createShadowGraph(options = {}) {
     // The staged snapshot is already migrated and validated, so this import cannot
     // fail. Only now is the live state discarded.
     const staged = staging.exportData();
-    records.clear(); facts.clear(); currentFacts.clear(); relations.clear(); reviewSignals.clear(); idempotency.clear();
+    records.clear(); currentMemories.clear(); facts.clear(); currentFacts.clear(); relations.clear(); reviewSignals.clear(); idempotency.clear();
     events.length = 0; journal.length = 0; revision = 0; journalSeq = 0; journalEpoch = null;
     return importData(staged);
   }
@@ -818,6 +1164,9 @@ export function createShadowGraph(options = {}) {
     // verbatim at their own future version and reported by validate(). A future
     // envelope means "this file is unreadable"; a future record means "one entity
     // came from a newer build" and losing it would be worse than keeping it.
+    if (source.schemaVersion !== undefined && !Number.isInteger(source.schemaVersion)) {
+      throw new Error('Data schemaVersion must be an integer when provided');
+    }
     if (Number.isInteger(source.schemaVersion) && !SUPPORTED_SCHEMA_VERSIONS.includes(source.schemaVersion)) {
       const error = new Error(`Unsupported data schemaVersion ${source.schemaVersion}: this build supports ${SUPPORTED_SCHEMA_VERSIONS.join(', ')}`);
       error.code = 'unsupported_schema_version';
@@ -834,13 +1183,179 @@ export function createShadowGraph(options = {}) {
       return migrateFact({ ...fact, id: factId });
     });
     const importedRelations = (source.relations ?? []).map((relation) => clone(relation));
+    const importedJournal = Array.isArray(source.journal) ? source.journal.map((item) => clone(item)) : [];
     const importedSignals = (source.reviewSignals ?? []).map((signal) => clone(signal));
     const importedIdempotency = (source.idempotency ?? []).map((item) => ({ key: importIdempotencyKey(item.key, item.value), value: clone(item.value) }));
+    const canonicalIdempotencyKeys = new Set();
+    for (const item of importedIdempotency) {
+      if (canonicalIdempotencyKeys.has(item.key)) throw new Error(`Duplicate canonical idempotency key ${item.key}`);
+      canonicalIdempotencyKeys.add(item.key);
+    }
     const importedEvents = (source.events ?? []).map((item) => clone(item));
-    const importedJournal = Array.isArray(source.journal) ? source.journal.map((item) => clone(item)) : [];
-    revision = Number.isInteger(source.revision) ? source.revision : revision;
+    const legacyIdRemaps = new Map();
+    if (source.schemaVersion !== SCHEMA_VERSION) {
+      const existingImportedIds = new Set([...importedRecords, ...importedFacts].map((item) => item.id));
+      for (const item of importedIdempotency) {
+        const value = item.value;
+        if (!value?.id || existingImportedIds.has(value.id) || records.has(value.id) || facts.has(value.id)) continue;
+        if (value.kind === 'fact') importedFacts.push(migrateFact(value));
+        else if (['decision', 'attempt', 'memory'].includes(value.kind)) importedRecords.push(migrateRecord(value));
+        else continue;
+        existingImportedIds.add(value.id);
+      }
+
+      // Schemas 1–3 had collection-local ids. Schema 4 has one global entity
+      // namespace, so ambiguous legacy collisions receive stable migrated ids
+      // rather than silently overwriting one another or becoming backend-specific.
+      const used = new Set();
+      for (const [index, record] of importedRecords.entries()) {
+        if (used.has(record.id)) {
+          const previousId = record.id;
+          record.id = legacyCollisionId(record.kind, record, index, used);
+          legacyIdRemaps.set(`${record.kind}:${previousId}`, record.id);
+        }
+        used.add(record.id);
+        for (const [alternativeIndex, alternative] of (record.alternatives ?? []).entries()) {
+          if (used.has(alternative.id)) {
+            const previousId = alternative.id;
+            alternative.id = legacyCollisionId('alternative', alternative, alternativeIndex, used);
+            legacyIdRemaps.set(`alternative:${previousId}`, alternative.id);
+          }
+          used.add(alternative.id);
+        }
+      }
+      for (const [index, fact] of importedFacts.entries()) {
+        if (used.has(fact.id)) {
+          const previousId = fact.id;
+          fact.id = legacyCollisionId('fact', fact, index, used);
+          legacyIdRemaps.set(`fact:${previousId}`, fact.id);
+        }
+        used.add(fact.id);
+      }
+      for (const [index, relation] of importedRelations.entries()) {
+        if (used.has(relation.id)) {
+          const previousId = relation.id;
+          relation.id = legacyCollisionId('relation', relation, index, used);
+          legacyIdRemaps.set(`relation:${previousId}`, relation.id);
+        }
+        used.add(relation.id);
+      }
+      for (const item of importedIdempotency) {
+        const remapped = legacyIdRemaps.get(`${item.value?.kind}:${item.value?.id}`);
+        if (remapped) item.value.id = remapped;
+      }
+      for (const entry of importedJournal) {
+        const kind = entry.entityKind ?? entry.payload?.kind;
+        const remapped = legacyIdRemaps.get(`${kind}:${entry.entityId ?? entry.payload?.id}`);
+        if (!remapped) continue;
+        entry.entityId = remapped;
+        if (entry.payload?.id !== undefined) entry.payload.id = remapped;
+      }
+    }
+    {
+      const importedAlternatives = importedRecords.flatMap((record) => record.alternatives ?? []);
+      assertUniqueEntityIds(importedRecords, importedAlternatives, importedFacts, importedRelations);
+      const existingAlternativeOwners = new Map();
+      for (const record of records.values()) for (const alternative of record.alternatives ?? []) existingAlternativeOwners.set(alternative.id, record.id);
+      for (const record of importedRecords) {
+        const existingRecord = records.get(record.id);
+        if (existingRecord && (existingRecord.kind !== record.kind || existingRecord.project !== record.project)) throw new Error(`Existing entity id ${record.id} cannot change kind or project`);
+        if (existingRecord?.kind === 'memory' && memoryScopeKey(existingRecord) !== memoryScopeKey(record)) throw new Error(`Existing memory id ${record.id} cannot change scope, type, or key`);
+        if (facts.has(record.id) || relations.has(record.id) || (existingAlternativeOwners.has(record.id) && existingAlternativeOwners.get(record.id) !== record.id)) throw new Error(`Entity id already exists: ${record.id}`);
+        for (const alternative of record.alternatives ?? []) {
+          const existingOwner = existingAlternativeOwners.get(alternative.id);
+          if (records.has(alternative.id) || facts.has(alternative.id) || relations.has(alternative.id) || (existingOwner && existingOwner !== record.id)) throw new Error(`Entity id already exists: ${alternative.id}`);
+        }
+      }
+      for (const fact of importedFacts) {
+        if (records.has(fact.id) || relations.has(fact.id) || existingAlternativeOwners.has(fact.id)) throw new Error(`Entity id already exists: ${fact.id}`);
+        const existingFact = facts.get(fact.id);
+        if (existingFact && existingFact.project !== fact.project) throw new Error(`Existing entity id ${fact.id} cannot change kind or project`);
+      }
+      for (const relation of importedRelations) {
+        if (records.has(relation.id) || facts.has(relation.id) || existingAlternativeOwners.has(relation.id)) throw new Error(`Entity id already exists: ${relation.id}`);
+        const existingRelation = relations.get(relation.id);
+        if (existingRelation && (existingRelation.project !== relation.project || existingRelation.from !== relation.from || existingRelation.to !== relation.to || existingRelation.relation !== relation.relation)) throw new Error(`Existing relation id ${relation.id} cannot change identity`);
+      }
+      const availableEntityIds = new Set([...records.keys(), ...facts.keys()]);
+      const overwrittenRecordIds = new Set(importedRecords.map((record) => record.id));
+      for (const [alternativeId, ownerId] of existingAlternativeOwners) if (!overwrittenRecordIds.has(ownerId)) availableEntityIds.add(alternativeId);
+      for (const record of importedRecords) {
+        availableEntityIds.add(record.id);
+        for (const alternative of record.alternatives ?? []) availableEntityIds.add(alternative.id);
+      }
+      for (const fact of importedFacts) availableEntityIds.add(fact.id);
+      if (source.schemaVersion === SCHEMA_VERSION) {
+        for (const relation of importedRelations) {
+          if (!availableEntityIds.has(relation.from) || !availableEntityIds.has(relation.to)) throw new Error('Relation endpoints must exist before import');
+        }
+        const finalRelations = new Map(relations);
+        for (const relation of importedRelations) finalRelations.set(relation.id, relation);
+        for (const relation of finalRelations.values()) {
+          if (!availableEntityIds.has(relation.from) || !availableEntityIds.has(relation.to)) throw new Error('Relation endpoints must exist after import');
+        }
+      }
+      const liveJournalIds = new Set(journal.map((entry) => entry.id));
+      const liveJournalSequences = new Set(journal.filter((entry) => Number.isInteger(entry.seq)).map((entry) => entry.seq));
+      for (const entry of importedJournal) {
+        if (liveJournalIds.has(entry.id) || (Number.isInteger(entry.seq) && liveJournalSequences.has(entry.seq))) throw new Error('Journal id or sequence already exists');
+      }
+      const liveEventIds = new Set(events.map((item) => item.id));
+      for (const eventItem of importedEvents) if (liveEventIds.has(eventItem.id)) throw new Error(`Event id already exists: ${eventItem.id}`);
+      const finalRecords = new Map(records);
+      const finalFacts = new Map(facts);
+      for (const record of importedRecords) finalRecords.set(record.id, record);
+      for (const fact of importedFacts) finalFacts.set(fact.id, fact);
+      const reviewOwners = new Map([...reviewSignals.values()].map((signal) => [signal.id, reviewSignalKey(signal.decisionId, signal.reason)]));
+      const incomingReviewIds = new Set();
+      const existingReviewIdentities = new Map([...reviewSignals.values()].map((signal) => [reviewSignalKey(signal.decisionId, signal.reason), signal.id]));
+      const incomingReviewIdentities = new Set();
+      for (const signal of importedSignals) {
+        if (!signal || typeof signal.id !== 'string' || !signal.id || typeof signal.decisionId !== 'string' || !signal.decisionId || typeof signal.reason !== 'string' || !signal.reason) throw new Error('Review signal is malformed');
+        if (incomingReviewIds.has(signal.id)) throw new Error(`Duplicate review signal id ${signal.id}`);
+        incomingReviewIds.add(signal.id);
+        const ownerKey = reviewSignalKey(signal.decisionId, signal.reason);
+        if (incomingReviewIdentities.has(ownerKey) || (existingReviewIdentities.has(ownerKey) && existingReviewIdentities.get(ownerKey) !== signal.id)) throw new Error(`Duplicate review signal identity ${ownerKey}`);
+        incomingReviewIdentities.add(ownerKey);
+        if (reviewOwners.has(signal.id) && reviewOwners.get(signal.id) !== ownerKey) throw new Error(`Duplicate review signal id ${signal.id}`);
+        const decision = finalRecords.get(signal.decisionId);
+        if (!decision || decision.kind !== 'decision') throw new Error('Review signal must reference an existing decision');
+      }
+      for (const item of importedIdempotency) {
+        const value = item.value;
+        const entity = value?.kind === 'fact' ? finalFacts.get(value.id) : finalRecords.get(value?.id);
+        if (typeof item.key !== 'string' || !value || typeof value !== 'object' || typeof value.id !== 'string' || !entity) throw new Error('Idempotency entry must reference an existing entity');
+        const scope = value?.scope ?? {};
+        const expectedKeyPrefix = value?.kind === 'memory'
+          ? `memory:${value.project}:${JSON.stringify([scope.userId ?? null, scope.agentId ?? null, scope.runId ?? null, value.memoryType ?? null, value.key ?? null])}:`
+          : `${value?.kind}:${value?.project}:`;
+        if (entity.kind !== value.kind || entity.project !== value.project || !item.key.startsWith(expectedKeyPrefix)) throw new Error('Idempotency entry identity does not match its entity');
+        if (value.kind === 'memory' && memoryScopeKey(entity) !== memoryScopeKey(value)) throw new Error('Idempotency entry identity does not match its entity');
+      }
+    }
+    revision = Number.isInteger(source.revision) ? Math.max(revision, source.revision) : revision;
     for (const item of importedRecords) records.set(item.id, item);
+    currentMemories.clear();
+    const memoryScopeCandidates = new Map();
+    for (const item of records.values()) {
+      if (item.kind !== 'memory' || item.status !== 'active') continue;
+      const scope = memoryScopeKey(item);
+      if (!memoryScopeCandidates.has(scope)) memoryScopeCandidates.set(scope, []);
+      memoryScopeCandidates.get(scope).push(item);
+    }
+    for (const [scope, candidates] of memoryScopeCandidates) {
+      const winner = [...candidates].sort((left, right) => {
+        const byVersion = (right.version ?? 1) - (left.version ?? 1);
+        if (byVersion !== 0) return byVersion;
+        const byValidFrom = compareInstants(right.temporal?.validFrom, left.temporal?.validFrom);
+        if (byValidFrom !== 0) return byValidFrom;
+        const byRecordedAt = compareInstants(right.temporal?.recordedAt, left.temporal?.recordedAt);
+        return byRecordedAt !== 0 ? byRecordedAt : String(right.id).localeCompare(String(left.id));
+      })[0];
+      currentMemories.set(scope, winner);
+    }
     for (const fact of importedFacts) facts.set(fact.id, fact);
+    currentFacts.clear();
     // P2-15: two ACTIVE facts can share a (project, key) scope in imported data.
     // Picking whichever arrived last made the winner depend on array order, so the
     // same file reordered produced a different current fact — and therefore
@@ -856,26 +1371,31 @@ export function createShadowGraph(options = {}) {
     }
     for (const [scope, candidates] of scopeCandidates) {
       const winner = [...candidates].sort((left, right) => {
-        const byObserved = String(right.observedAt ?? '').localeCompare(String(left.observedAt ?? ''));
+        const byObserved = compareInstants(right.observedAt, left.observedAt);
         return byObserved !== 0 ? byObserved : String(right.id ?? '').localeCompare(String(left.id ?? ''));
       })[0];
       currentFacts.set(scope, winner);
     }
     for (const relation of importedRelations) relations.set(relation.id, relation);
-    for (const signal of importedSignals) reviewSignals.set(`${signal.decisionId}:${signal.reason}`, signal);
+    for (const signal of importedSignals) reviewSignals.set(reviewSignalKey(signal.decisionId, signal.reason), signal);
     for (const item of importedIdempotency) idempotency.set(item.key, item.value);
-    events.push(...importedEvents);
+    for (const importedEvent of importedEvents) events.push(importedEvent);
 
     if (importedJournal.length) {
-      journal.push(...importedJournal);
-      const numbered = journal.filter((item) => Number.isInteger(item.seq)).map((item) => item.seq);
-      journalSeq = Math.max(Number.isInteger(source.journalSeq) ? source.journalSeq : 0, numbered.length ? Math.max(...numbered) : 0);
+      for (const importedEntry of importedJournal) journal.push(importedEntry);
+      let minimumSequence = null;
+      let maximumSequence = 0;
+      for (const item of journal) if (Number.isInteger(item.seq)) {
+        if (minimumSequence === null || item.seq < minimumSequence) minimumSequence = item.seq;
+        if (item.seq > maximumSequence) maximumSequence = item.seq;
+      }
+      journalSeq = Math.max(journalSeq, Number.isInteger(source.journalSeq) ? source.journalSeq : 0, maximumSequence);
       // P2-11: Math.min(...[]) is Infinity. A journal whose entries carry no `seq`
       // at all must not silently produce an Infinity epoch that then excludes
       // every entry from the replay range while still reporting success.
       // journalEpoch stays null; rebuild derives its own start and reports the
       // unnumbered entries as non-replayable legacy.
-      journalEpoch = Number.isInteger(source.journalEpoch) ? source.journalEpoch : (numbered.length ? Math.min(...numbered) : null);
+      journalEpoch = Number.isInteger(source.journalEpoch) ? source.journalEpoch : minimumSequence;
     } else {
       // Preserve a declared high-water mark even when the journal was compacted
       // or intentionally exported empty. Otherwise the next append can reuse a
@@ -910,8 +1430,9 @@ export function createShadowGraph(options = {}) {
   }
 
   function getJournal(options = {}) {
-    const entries = journal.filter((entry) => !options.project || entry.project === options.project);
-    return paginate(entries.map(clone), options, { project: options.project ?? 'all' }, { journalEpoch, journalSeq, gaps: journalGaps(journal) });
+    const project = options.project === undefined ? undefined : normalizeProject(options.project);
+    const entries = journal.filter((entry) => project === undefined || entry.project === project);
+    return paginate(entries.map(clone), options, { project: project ?? 'all' }, { journalEpoch, journalSeq, gaps: journalGaps(journal) });
   }
 
   // Rebuild a projection from this graph's own journal and report honestly whether
@@ -926,14 +1447,111 @@ export function createShadowGraph(options = {}) {
   }
 
   return {
-    setRevision, replaceData, addDecision, addAttempt, addFact, setOutcome, addConfidenceEvidence,
+    setRevision, replaceData, addDecision, addAttempt, remember, applyMemoryPlan, memoryHistory, addFact, setOutcome, addConfidenceEvidence,
     updateDecisionStatus, supersedeDecision, link, traverse, redact, projectSummary, purgeProject,
-    review, maintain, getReviewSignals, acknowledgeReview, search, retrieve, validate, repairPlan,
+    review, maintain, getReviewSignals, acknowledgeReview, search, retrieve, recall, validate, repairPlan,
     context, exportData, importData, getJournal, rebuild, stats
   };
 }
 
 function normalizeRules(rules) { return rules.map((rule) => typeof rule === 'string' ? rule : { key: rule.key, operator: rule.operator ?? 'equals', value: rule.value }); }
+
+function normalizeProject(value) {
+  if (value === undefined || value === null) return 'default';
+  if (typeof value !== 'string' || !value.trim()) throw new Error('project must be a non-empty string');
+  return value;
+}
+
+function normalizeMemoryScope(scope = {}) {
+  if (!scope || typeof scope !== 'object' || Array.isArray(scope)) throw new Error('Memory scope must be an object');
+  const allowed = new Set(['userId', 'agentId', 'runId']);
+  for (const name of Object.keys(scope)) if (!allowed.has(name)) throw new Error(`Memory scope contains unknown field ${name}`);
+  const value = {};
+  for (const name of ['userId', 'agentId', 'runId']) {
+    if (scope[name] !== undefined && scope[name] !== null && typeof scope[name] !== 'string') throw new Error(`Memory scope ${name} must be a string or null`);
+    value[name] = scope[name] ?? null;
+  }
+  return value;
+}
+
+function reviewSignalKey(decisionId, reason) {
+  return JSON.stringify([decisionId, reason]);
+}
+
+function sameMemoryScopeValues(left, right) {
+  const a = normalizeMemoryScope(left);
+  const b = normalizeMemoryScope(right);
+  return a.userId === b.userId && a.agentId === b.agentId && a.runId === b.runId;
+}
+
+function memoryScopeKey(input) {
+  const scope = normalizeMemoryScope(input.scope);
+  return JSON.stringify([normalizeProject(input.project), scope.userId, scope.agentId, scope.runId, input.memoryType ?? null, input.key ?? null]);
+}
+
+function normalizeEmbedding(value) {
+  if (value === undefined || value === null) return null;
+  const values = Array.isArray(value) ? value : value?.values;
+  if (!Array.isArray(values) || values.length === 0 || values.some((item) => typeof item !== 'number' || !Number.isFinite(item))) {
+    throw new Error('Memory embedding must contain a finite non-empty numeric vector');
+  }
+  if (Array.isArray(value)) return [...values];
+  if (value.model !== undefined && typeof value.model !== 'string') throw new Error('Memory embedding model must be a string');
+  return { model: value.model ?? null, values: [...values] };
+}
+
+function validateTemporalFields(input, names) {
+  for (const name of names) {
+    const value = input?.[name];
+    if (value !== undefined && value !== null && typeof value !== 'string') throw new Error(`${name} must be a string or null`);
+    if (typeof value === 'string' && !isValidTimestamp(value)) throw new Error(`${name} must be a valid timestamp`);
+  }
+}
+
+function isValidTimestamp(value) {
+  if (!Number.isFinite(Date.parse(value))) return false;
+  const iso = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-]\d{2}:\d{2})$/.exec(value);
+  if (!iso) return false;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, zone] = iso;
+  const year = Number(yearText); const month = Number(monthText); const day = Number(dayText);
+  const hour = Number(hourText); const minute = Number(minuteText); const second = Number(secondText);
+  if (month < 1 || month > 12 || day < 1 || day > new Date(Date.UTC(year, month, 0)).getUTCDate()) return false;
+  if (hour > 23 || minute > 59 || second > 59) return false;
+  if (zone !== 'Z') {
+    const [zoneHour, zoneMinute] = zone.slice(1).split(':').map(Number);
+    if (zoneHour > 23 || zoneMinute > 59) return false;
+  }
+  return true;
+}
+
+function instantMs(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function compareInstants(left, right) {
+  return (instantMs(left) ?? Number.NEGATIVE_INFINITY) - (instantMs(right) ?? Number.NEGATIVE_INFINITY);
+}
+
+function sameInstant(left, right) {
+  if ((left === undefined || left === null) && (right === undefined || right === null)) return true;
+  return instantMs(left) === instantMs(right);
+}
+
+function validateMemoryInterval(validFrom, validTo) {
+  if (validTo && compareInstants(validTo, validFrom) <= 0) throw new Error('Memory validTo must be later than validFrom');
+}
+
+function validateStoredMemoryInterval(validFrom, validTo) {
+  if (validTo && compareInstants(validTo, validFrom) < 0) throw new Error('Stored memory validTo must not precede validFrom');
+}
+
+function earliestBoundary(existing, candidate) {
+  if (!existing) return candidate ?? null;
+  if (!candidate) return existing;
+  return compareInstants(existing, candidate) <= 0 ? existing : candidate;
+}
 
 // G3: resolve a caller-supplied decision status to its canonical form, or undefined
 // if unrecognised. Only FORMATTING variance is absorbed (whitespace, case,
@@ -990,26 +1608,133 @@ function validateImportShape(source) {
     if (source[name] !== undefined && !Array.isArray(source[name])) throw new Error(`${name} must be an array`);
     return source[name] ?? [];
   };
+  if (source.journalSeq !== undefined && (!Number.isSafeInteger(source.journalSeq) || source.journalSeq < 0)) throw new Error('journalSeq must be a non-negative safe integer');
+  if (source.journalEpoch !== undefined && source.journalEpoch !== null && (!Number.isSafeInteger(source.journalEpoch) || source.journalEpoch <= 0)) throw new Error('journalEpoch must be a positive safe integer or null');
   for (const [index, item] of array('records').entries()) {
-    if (!item || typeof item !== 'object' || typeof item.id !== 'string' || !['decision', 'attempt'].includes(item.kind)) throw new Error(`records[${index}] is malformed`);
+    if (!item || typeof item !== 'object' || !['decision', 'attempt', 'memory'].includes(item.kind)) throw new Error(`records[${index}] is malformed`);
+    if (typeof item.id !== 'string' || !item.id) throw new Error(`records[${index}].id must be a non-empty string`);
+    if (source.schemaVersion === SCHEMA_VERSION) {
+      try { normalizeProject(item.project); }
+      catch { throw new Error(`records[${index}].project must be a non-empty string`); }
+    }
+    validateTemporalFields(item, ['createdAt', 'updatedAt', 'reviewAfter']);
     if (item.kind === 'decision') {
       if (typeof item.title !== 'string' || typeof item.chosen !== 'string') throw new Error(`records[${index}] decision requires title and chosen strings`);
       if (item.alternatives !== undefined && !Array.isArray(item.alternatives)) throw new Error(`records[${index}].alternatives must be an array`);
       for (const [alternativeIndex, alternative] of (item.alternatives ?? []).entries()) {
         if (!alternative || typeof alternative !== 'object' || typeof alternative.label !== 'string') throw new Error(`records[${index}].alternatives[${alternativeIndex}] is malformed`);
+        if (source.schemaVersion === SCHEMA_VERSION && (typeof alternative.id !== 'string' || !alternative.id)) throw new Error(`records[${index}].alternatives[${alternativeIndex}] id must be a non-empty string`);
         if (alternative.reopenWhen !== undefined && !Array.isArray(alternative.reopenWhen)) throw new Error(`records[${index}].alternatives[${alternativeIndex}].reopenWhen must be an array`);
       }
     }
+    if (item.kind === 'memory') {
+      if (!MEMORY_TYPES.includes(item.memoryType) || typeof item.key !== 'string' || !item.key.trim() || typeof item.text !== 'string' || !item.text.trim()) throw new Error(`records[${index}] memory requires memoryType, key, and text`);
+      normalizeMemoryScope(item.scope);
+      if (item.project !== undefined && typeof item.project !== 'string') throw new Error(`records[${index}].project must be a string`);
+      if (item.metadata !== undefined && (!item.metadata || typeof item.metadata !== 'object' || Array.isArray(item.metadata))) throw new Error(`records[${index}].metadata must be an object`);
+      if (item.tags !== undefined && (!Array.isArray(item.tags) || item.tags.some((tag) => typeof tag !== 'string'))) throw new Error(`records[${index}].tags must be an array of strings`);
+      normalizeEmbedding(item.embedding);
+      if (item.version !== undefined && (!Number.isInteger(item.version) || item.version < 1)) throw new Error(`records[${index}].version must be a positive integer`);
+      if (item.status !== undefined && !MEMORY_STATUSES.includes(item.status)) throw new Error(`records[${index}].status is invalid`);
+      if (item.temporal !== undefined) {
+        if (!item.temporal || typeof item.temporal !== 'object' || Array.isArray(item.temporal)) throw new Error(`records[${index}].temporal must be an object`);
+        validateTemporalFields(item.temporal, ['validFrom', 'validTo', 'recordedAt', 'invalidatedAt']);
+        validateStoredMemoryInterval(item.temporal.validFrom ?? item.createdAt ?? item.temporal.recordedAt ?? '', item.temporal.validTo ?? null);
+      }
+    }
   }
-  for (const [index, fact] of array('facts').entries()) if (!fact || typeof fact !== 'object' || (fact.id !== undefined && typeof fact.id !== 'string') || typeof fact.key !== 'string' || (fact.kind !== undefined && fact.kind !== 'fact')) throw new Error(`facts[${index}] is malformed`);
-  for (const [index, relation] of array('relations').entries()) if (!relation || typeof relation !== 'object' || typeof relation.id !== 'string' || typeof relation.from !== 'string' || typeof relation.to !== 'string' || typeof relation.relation !== 'string') throw new Error(`relations[${index}] is malformed`);
-  for (const [index, entry] of array('journal').entries()) if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`journal[${index}] is malformed`);
+  for (const [index, fact] of array('facts').entries()) {
+    if (!fact || typeof fact !== 'object' || (fact.id !== undefined && typeof fact.id !== 'string') || typeof fact.key !== 'string' || (fact.kind !== undefined && fact.kind !== 'fact')) throw new Error(`facts[${index}] is malformed`);
+    if (source.schemaVersion === SCHEMA_VERSION && !fact.id) throw new Error(`facts[${index}].id must be a non-empty string`);
+    if (source.schemaVersion === SCHEMA_VERSION) {
+      try { normalizeProject(fact.project); }
+      catch { throw new Error(`facts[${index}].project must be a non-empty string`); }
+    }
+    validateTemporalFields(fact, ['recordedAt', 'observedAt', 'validFrom', 'validTo', 'expiresAt']);
+    if (fact.temporal !== undefined) {
+      if (!fact.temporal || typeof fact.temporal !== 'object' || Array.isArray(fact.temporal)) throw new Error(`facts[${index}].temporal must be an object`);
+      validateTemporalFields(fact.temporal, ['recordedAt', 'validFrom', 'validTo', 'invalidatedAt']);
+    }
+    const factValidFrom = fact.temporal?.validFrom ?? fact.validFrom ?? fact.observedAt ?? null;
+    const factValidTo = fact.temporal?.validTo ?? fact.validTo ?? null;
+    if (factValidFrom && factValidTo && compareInstants(factValidTo, factValidFrom) < 0) throw new Error('Stored fact validTo must not precede validFrom');
+  }
+  for (const [index, relation] of array('relations').entries()) {
+    if (!relation || typeof relation !== 'object' || typeof relation.from !== 'string' || typeof relation.to !== 'string' || typeof relation.relation !== 'string') throw new Error(`relations[${index}] is malformed`);
+    if (typeof relation.id !== 'string' || !relation.id) throw new Error(`relations[${index}].id must be a non-empty string`);
+    validateTemporalFields(relation, ['recordedAt', 'createdAt', 'validFrom', 'validTo']);
+    if (relation.temporal !== undefined) {
+      if (!relation.temporal || typeof relation.temporal !== 'object' || Array.isArray(relation.temporal)) throw new Error(`relations[${index}].temporal must be an object`);
+      validateTemporalFields(relation.temporal, ['recordedAt', 'validFrom', 'validTo', 'invalidatedAt']);
+    }
+    const relationValidFrom = relation.temporal?.validFrom ?? relation.validFrom ?? relation.createdAt ?? null;
+    const relationValidTo = relation.temporal?.validTo ?? relation.validTo ?? null;
+    if (relationValidFrom && relationValidTo && compareInstants(relationValidTo, relationValidFrom) < 0) throw new Error('Stored relation validTo must not precede validFrom');
+  }
+  const journalIds = new Set();
+  const journalSequences = new Set();
+  for (const [index, entry] of array('journal').entries()) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`journal[${index}] is malformed`);
+    const expectedEntityKind = JOURNAL_TYPE_ENTITY_KIND[entry.type];
+    if (expectedEntityKind && entry.entityKind != null && entry.entityKind !== expectedEntityKind) throw new Error(`journal[${index}] type ${entry.type} requires entityKind ${expectedEntityKind}`);
+    if (source.schemaVersion >= 3) {
+      if (typeof entry.id !== 'string' || !entry.id) throw new Error(`journal[${index}].id must be a non-empty string`);
+      if (journalIds.has(entry.id)) throw new Error(`Duplicate journal id ${entry.id}`);
+      journalIds.add(entry.id);
+      if (!Number.isSafeInteger(entry.seq) || entry.seq <= 0) throw new Error(`journal[${index}].seq must be a positive safe integer`);
+      if (journalSequences.has(entry.seq)) throw new Error(`Duplicate journal sequence ${entry.seq}`);
+      journalSequences.add(entry.seq);
+      if (entry.payload?.id !== undefined && entry.entityId !== entry.payload.id) throw new Error(`journal[${index}] entityId must match payload.id`);
+      if (entry.payload?.project !== undefined && entry.project !== entry.payload.project) throw new Error(`journal[${index}] project must match payload.project`);
+      if (entry.payload?.kind !== undefined && entry.entityKind !== entry.payload.kind) throw new Error(`journal[${index}] entityKind must match payload.kind`);
+    }
+  }
   for (const [index, signal] of array('reviewSignals').entries()) if (!signal || typeof signal !== 'object' || Array.isArray(signal) || typeof signal.id !== 'string' || typeof signal.decisionId !== 'string' || typeof signal.reason !== 'string') throw new Error(`reviewSignals[${index}] is malformed`);
-  for (const [index, item] of array('idempotency').entries()) if (!item || typeof item !== 'object' || Array.isArray(item) || typeof item.key !== 'string' || !item.key || !item.value || typeof item.value !== 'object' || Array.isArray(item.value)) throw new Error(`idempotency[${index}] is malformed`);
-  for (const [index, eventItem] of array('events').entries()) if (!eventItem || typeof eventItem !== 'object' || Array.isArray(eventItem) || typeof eventItem.id !== 'string' || typeof eventItem.type !== 'string') throw new Error(`events[${index}] is malformed`);
+  const idempotencyKeys = new Set();
+  for (const [index, item] of array('idempotency').entries()) {
+    if (!item || typeof item !== 'object' || Array.isArray(item) || typeof item.key !== 'string' || !item.key || !item.value || typeof item.value !== 'object' || Array.isArray(item.value)) throw new Error(`idempotency[${index}] is malformed`);
+    if (idempotencyKeys.has(item.key)) throw new Error(`Duplicate idempotency key ${item.key}`);
+    idempotencyKeys.add(item.key);
+  }
+  const eventIds = new Set();
+  for (const [index, eventItem] of array('events').entries()) {
+    if (!eventItem || typeof eventItem !== 'object' || Array.isArray(eventItem) || typeof eventItem.id !== 'string' || typeof eventItem.type !== 'string') throw new Error(`events[${index}] is malformed`);
+    if (eventIds.has(eventItem.id)) throw new Error(`Duplicate event id ${eventItem.id}`);
+    eventIds.add(eventItem.id);
+  }
+}
+
+function assertUniqueEntityIds(...collections) {
+  const seen = new Set();
+  for (const collection of collections) {
+    for (const item of collection) {
+      if (!item?.id) continue;
+      if (seen.has(item.id)) throw new Error(`Duplicate entity id ${item.id} appears more than once in schema 4`);
+      seen.add(item.id);
+    }
+  }
 }
 
 function migrateRecord(item) {
+  if (item.kind === 'memory') {
+    const source = clone(item);
+    const recordedAt = source.temporal?.recordedAt ?? source.createdAt ?? null;
+    return {
+      schemaVersion: SCHEMA_VERSION,
+      project: source.project ?? 'default',
+      ...source,
+      scope: normalizeMemoryScope(source.scope),
+      version: Number.isInteger(source.version) && source.version > 0 ? source.version : 1,
+      status: source.status ?? 'active',
+      verificationStatus: source.verificationStatus ?? 'unverified',
+      temporal: {
+        validFrom: source.temporal?.validFrom ?? source.createdAt ?? null,
+        validTo: source.temporal?.validTo ?? null,
+        recordedAt,
+        invalidatedAt: source.temporal?.invalidatedAt ?? null
+      }
+    };
+  }
   if (item.kind !== 'decision') return { schemaVersion: SCHEMA_VERSION, project: 'default', ...clone(item) };
   const source = clone(item);
   const numeric = typeof source.confidence === 'number' ? source.confidence : source.confidence?.current ?? 0.5;
