@@ -120,8 +120,8 @@ test('CLI persists a decision and reports stats', async () => {
   });
   await run(['decision', JSON.stringify({ title: 'Testing', chosen: 'Node' })]);
   const stats = await run(['stats']);
-  // G4-E: schemaVersion 3 adds the journal; stats now reports its entry count.
-  assert.deepEqual(stats, { schemaVersion: 3, total: 1, decisions: 1, attempts: 0, facts: 0, relations: 0, reviewSignals: 0, events: 1, journal: 1 });
+  // Schema 4 adds scoped memory while preserving the journal and existing stats.
+  assert.deepEqual(stats, { schemaVersion: 4, total: 1, decisions: 1, attempts: 0, facts: 0, relations: 0, reviewSignals: 0, events: 1, journal: 1 });
   assert.equal((await readFile(file, 'utf8')).includes('Testing'), true);
 });
 
@@ -248,12 +248,9 @@ test('MCP lists tools and returns parse errors', async () => {
   const responses = await readMcpResponses(child, 2);
   child.kill();
   assert.equal(responses.some((item) => item.error?.code === -32700), true);
-  // UPDATED: 22 -> 25. G4/G8 added shadowgraph_journal, shadowgraph_rebuild and
-  // shadowgraph_confidence_evidence. NOTE the ADR-0003 tension: a larger tool
-  // surface costs context and can hurt selection accuracy, which is why the
-  // compact profile (SHADOWGRAPH_MCP_COMPACT=1) deliberately stays at 10 tools
-  // and does NOT include the three new ones.
-  assert.equal(responses.some((item) => item.result?.tools?.length === 25), true);
+  // Schema 4 adds the high-level remember/recall workflows. The full surface has
+  // 27 tools; compact mode keeps the 12 workflow tools.
+  assert.equal(responses.some((item) => item.result?.tools?.length === 27), true);
   const tools = responses.find((item) => item.result?.tools)?.result.tools;
   assert.equal(tools.find((tool) => tool.name === 'shadowgraph_record_decision').inputSchema.properties.project.type, 'string');
   assert.equal(tools.find((tool) => tool.name === 'shadowgraph_record_attempt').inputSchema.properties.project.type, 'string');

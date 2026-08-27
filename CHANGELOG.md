@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.40.0 (unreleased — unified memory review candidate)
+
+This release keeps ShadowGraph's decision-first model and adds the everyday memory capabilities needed for user personalization, temporal recall, hybrid retrieval, and human-readable Markdown workflows. The implementation is independent; no competitor source code was copied.
+
+### Breaking
+
+- **`SCHEMA_VERSION` is now `4`** and imports schemas 1–4. Schema 4 adds `memory` records and their journal event types.
+- Compact MCP mode now advertises **12** workflow tools (previously 10), adding `shadowgraph_remember` and `shadowgraph_recall`. Full mode advertises 27 tools.
+
+### Added
+
+- Scoped memory for project plus `userId` / `agentId` / `runId`, with `preference`, `profile`, `goal`, `instruction`, `procedure`, `episode`, and `note` types.
+- Deterministic reconciliation outcomes: `ADD`, `UPDATE`, `DELETE`, and `NOOP`; previous versions are retained and journalled rather than overwritten.
+- Validated memory operation plans that preflight the complete batch before mutation.
+- Bi-temporal validity and record-time fields for memory, facts, and relations; point-in-time `asOf` recall.
+- Explainable hybrid candidate union over BM25-style lexical rank, optional cosine vector rank, graph distance, and temporal rank, fused with weighted RRF. Every response declares unavailable signals.
+- Localhost-first OpenAI-compatible embedding adapter. Remote embedding endpoints require `allowRemote=true` / `SHADOWGRAPH_ALLOW_REMOTE_EMBEDDINGS=1`.
+- Deterministic Markdown rendering and explicit push/pull synchronization with atomic writes, stable identity paths, Unicode round trips, content hashes, dry-run support, and conflict refusal.
+- JavaScript, CLI (`remember`, `recall`, `markdown-sync`), HTTP (`POST /memories`, `POST /recall`), and MCP workflow surfaces.
+- JSON/SQLite restart parity and journal rebuild coverage for scoped memories.
+- Architecture decision record with grounded competitor research: `docs/adr/0006-unified-memory-kernel.md`.
+
+### Fixed
+
+- Scoped recall now fails closed: omitted project/scope means only the `default` project and all-null scope, never every project/user/agent/run. Supplied memory projects must be non-empty strings. Memory idempotency keys include the full scope/type/key identity.
+- Schema-4 runtime writes/imports enforce globally unique record/fact/relation/alternative IDs so JSON and SQLite accept the same graph; new links reject missing endpoints; direct merge import rebuilds current-memory/current-fact indexes instead of retaining overwritten payload objects.
+- Memory plans preflight retry keys, IDs, temporal ordering, and invalidation bounds. Re-adding an invalidated identity continues its monotonic version history.
+- Same-content writes validate explicit temporal changes; temporal fields must be strings/null; supersession, deletion, and fact replacement never extend an interval that had already ended. Current recall keeps the prior value until a future-effective replacement starts. Fact expiry closes valid time before reconsideration.
+- Derived embeddings can be refreshed without creating a semantic version, are journalled as `memory.indexed`, require model+dimension compatibility, reject redirects, and fall back honestly when a configured MCP query embedder fails.
+- Schema-4 persisted memory/fact/relation envelopes receive full temporal validation, globally unique IDs are enforced, and journal-bearing schemas 1–3 are compared after symmetric migration during restore.
+- Hard purge now persists an exact `removedJournalSequences` ledger; an unrelated or empty hard-purge marker can no longer excuse arbitrary restore gaps.
+- Project purge clears the in-memory scoped-memory index; a later write cannot accidentally supersede or re-journal a purged payload. A tracked stale Markdown file cannot resurrect a purged memory.
+- Markdown paths use stable bounded identity segments; immutable IDs and frontmatter identity edits are rejected. Pull rolls back the whole graph on a later-file error and advances sync state only after an optional canonical persistence callback succeeds.
+- The MCP server continues to negotiate `2024-11-05` and therefore omits newer tool annotations rather than advertising a protocol feature it does not implement.
+- CLI/HTTP/MCP context paths now persist generated review signals. HTTP and MCP mutators reconcile live state to the last readable durable snapshot after ordinary persistence failures.
+- MCP serializes complete tool/restore calls, preventing concurrent acknowledged writes from being erased by restore or conflict recovery.
+- Schema-4 imports reject malformed projects/scopes/IDs before merge, reject collisions against live collections, validate stored fact/relation intervals and journal identity, and preserve nested-alternative links through rebuild.
+- Markdown persistence callbacks now require durable read-back, resolving both pre-commit failures and commit-then-throw ambiguity.
+- Explicit empty projects fail closed across search, retrieval, review, journal, redaction, and context instead of becoming cross-project wildcards.
+- Temporal strings are validated as real timestamps and compared by instant, including equivalent timezone-offset representations.
+- Restore/import validates review-signal references and IDs, idempotency references/namespaces, and schema-3/4 journal identities; legacy collection-local ID collisions migrate to deterministic schema-4 IDs.
+- Direct writes preflight lossless plain-JSON serializability, large journal imports avoid argument-spread limits, and merge imports cannot decrease live revision or journal sequence high-water marks.
+- Memory isolation now applies consistently to recall, search, retrieve, and traverse; omitted project/scope resolves to the default/all-null memory scope.
+- Merge/restore validation covers final relation endpoints, duplicate review/idempotency semantic identities, journal type/entity consistency in both import and direct replay, strict calendar timestamps, and bounded hard-purge gap arithmetic.
+- Review identities use tuple encoding rather than delimiter concatenation, and legacy idempotency keys are collision-checked again after canonicalization.
+
+### Honest limits
+
+- Semantic retrieval is available only when embeddings are supplied or an embedding endpoint is explicitly configured; lexical fallback is never labelled semantic.
+- No default LLM extractor, background file watcher, hosted cloud sync, competitor-parity claim, or token/cost/answer-quality benchmark is included.
+- Confidence calibration and the trusted verification channel remain unresolved exactly as documented for 0.31.0.
+
 ## 0.31.0 (unreleased — review candidate)
 
 Closes the eight architectural gaps G1–G8 proven by the 2026-08-25 audit. Versioning note: this project is `0.x` and `private: true`, so per semver's pre-1.0 allowance the breaking input-contract change below ships as a **minor** bump rather than a major one, consistent with the project's existing 0.26 → 0.27 → 0.30 feature-bump history.

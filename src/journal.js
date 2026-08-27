@@ -6,7 +6,7 @@
 // re-deriving trust (a command-replay design could mint `verified` through future
 // code paths — see ADR-0001 D4/D14).
 
-export const JOURNAL_SCHEMA_VERSION = 3;
+export const JOURNAL_SCHEMA_VERSION = 4;
 
 // Entry types that carry a replayable payload. Every one of these is produced by
 // real code in src/shadowgraph.js — no aspirational types are listed here.
@@ -17,6 +17,10 @@ export const REPLAYABLE_ENTRY_TYPES = Object.freeze([
   'decision.superseded',
   'decision.aged',
   'attempt.recorded',
+  'memory.recorded',
+  'memory.indexed',
+  'memory.superseded',
+  'memory.invalidated',
   'fact.observed',
   'fact.superseded',
   'fact.expired',
@@ -34,9 +38,22 @@ export const JOURNAL_ENTRY_TYPES = Object.freeze([
   ...NON_REPLAYABLE_ENTRY_TYPES
 ]);
 
+export const JOURNAL_TYPE_ENTITY_KIND = Object.freeze({
+  'decision.recorded': 'decision', 'decision.status_changed': 'decision',
+  'decision.superseded': 'decision', 'decision.aged': 'decision',
+  'attempt.recorded': 'attempt',
+  'fact.observed': 'fact', 'fact.superseded': 'fact', 'fact.expired': 'fact',
+  'outcome.recorded': 'decision', 'confidence.changed': 'decision',
+  'relation.created': 'relation',
+  'memory.recorded': 'memory', 'memory.indexed': 'memory',
+  'memory.superseded': 'memory', 'memory.invalidated': 'memory',
+  'project.purged': 'project'
+});
+
 const KIND_TO_COLLECTION = Object.freeze({
   decision: 'records',
   attempt: 'records',
+  memory: 'records',
   fact: 'facts',
   relation: 'relations'
 });
@@ -115,6 +132,11 @@ export function rebuildProjection(entries = [], options = {}) {
     // rebuildable status agree.
     if (!isReplayable(entry)) {
       skipped.push({ seq: entry.seq, type: entry.type, why: 'marked_non_replayable' });
+      continue;
+    }
+    const expectedEntityKind = JOURNAL_TYPE_ENTITY_KIND[entry.type];
+    if (expectedEntityKind && entry.entityKind != null && KIND_TO_COLLECTION[entry.entityKind] && entry.entityKind !== expectedEntityKind) {
+      skipped.push({ seq: entry.seq, type: entry.type, why: 'type_entity_kind_mismatch' });
       continue;
     }
     replayable.push(entry);
@@ -196,7 +218,12 @@ export function rebuildProjection(entries = [], options = {}) {
   for (const { collection, entity } of entities.values()) {
     if (entity && typeof entity === 'object') projection[collection].push(entity);
   }
-  const entityIds = new Set([...projection.records, ...projection.facts].map((item) => item.id));
+  const entityIds = new Set();
+  for (const record of projection.records) {
+    entityIds.add(record.id);
+    for (const alternative of record.alternatives ?? []) if (alternative?.id) entityIds.add(alternative.id);
+  }
+  for (const fact of projection.facts) entityIds.add(fact.id);
   const danglingRelations = projection.relations.filter((relation) => !entityIds.has(relation.from) || !entityIds.has(relation.to));
   if (danglingRelations.length) {
     skipped.push(...danglingRelations.map((relation) => ({ seq: null, type: 'relation.created', why: 'dangling_relation', relationId: relation.id })));
@@ -209,7 +236,7 @@ export function rebuildProjection(entries = [], options = {}) {
     .map(([key, value]) => ({ key, value }))
     .sort((left, right) => left.key.localeCompare(right.key));
 
-  const unsupported = skipped.filter((item) => ['unsupported_schema_version', 'unknown_entry_type', 'missing_payload', 'unmappable_entity', 'marked_non_replayable', 'dangling_relation'].includes(item.why));
+  const unsupported = skipped.filter((item) => ['unsupported_schema_version', 'unknown_entry_type', 'missing_payload', 'unmappable_entity', 'type_entity_kind_mismatch', 'marked_non_replayable', 'dangling_relation'].includes(item.why));
   const crossesEpoch = legacy.length > 0 && (journalEpoch === null || journalEpoch > 0);
 
   let rebuildable = true;

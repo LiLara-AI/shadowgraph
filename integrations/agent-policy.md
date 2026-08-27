@@ -5,7 +5,7 @@ Use ShadowGraph as a decision ledger, not as unquestioned truth.
 ## Before consequential work
 
 1. Call `shadowgraph_context` for the project.
-2. Call `shadowgraph_retrieve` for the task and inspect related facts, failed attempts, and superseded decisions.
+2. Call `shadowgraph_recall` for scoped/temporal memory and `shadowgraph_retrieve` for decision compatibility. Inspect matched signals, facts, failed attempts, and superseded decisions.
 3. Treat every fact as an **unverified hypothesis**. Legacy imported `verificationStatus: 'verified'` values may be preserved for compatibility, but this build has no agent-accessible verification channel and no tool input can create verified facts. Read `sourceClass`, not `source`.
 
 ## Provenance vocabulary
@@ -34,6 +34,8 @@ Rules that the server enforces, so do not attempt to work around them:
 3. Record facts with provenance, verification status, expiry, and project.
 4. Use relationships to connect decisions, facts, attempts, and evidence.
 5. Supply an idempotency key when retrying a tool call.
+6. Use `shadowgraph_remember` for durable preferences, profile facts, goals, instructions, procedures, episodes, or notes. Do not flatten a consequential decision into general memory.
+7. If recall reports `semantic.available=false`, treat the result as lexical/graph/temporal retrieval; never describe it as a semantic match.
 
 ## After work
 

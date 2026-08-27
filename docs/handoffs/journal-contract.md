@@ -22,9 +22,9 @@ Every entry is produced by exactly one function, `appendJournal()`:
   "type": "fact.observed",
   "at": "2026-08-25T…Z",     // temporal/human field, NOT the sort key
   "project": "default",
-  "entityKind": "fact",      // decision | attempt | fact | relation | project
+  "entityKind": "fact",      // decision | attempt | fact | memory | relation | project
   "entityId": "fact_…",
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "payload": { … },          // complete post-operation snapshot, or null if redacted
   "provenance": { "actor": null, "client": null, "sessionId": null },
   "idempotencyKey": "…",     // present only when the operation carried one
@@ -54,7 +54,7 @@ Cost, stated honestly: storage grows with `entity size × mutation count`, not w
 
 ## 5. Entry types
 
-`REPLAYABLE_ENTRY_TYPES` (13) — `projection.baseline`, `decision.recorded`, `decision.status_changed`, `decision.superseded`, `decision.aged`, `attempt.recorded`, `fact.observed`, `fact.superseded`, `fact.expired`, `outcome.recorded`, `confidence.changed`, `relation.created`, `project.purged`.
+`REPLAYABLE_ENTRY_TYPES` (17) — `projection.baseline`, `decision.recorded`, `decision.status_changed`, `decision.superseded`, `decision.aged`, `attempt.recorded`, `fact.observed`, `fact.superseded`, `fact.expired`, `outcome.recorded`, `confidence.changed`, `relation.created`, `memory.recorded`, `memory.indexed`, `memory.superseded`, `memory.invalidated`, `project.purged`.
 
 `NON_REPLAYABLE_ENTRY_TYPES` (1) — `legacy_metadata_event`.
 
@@ -103,7 +103,7 @@ Pre-existing events carry `{id, type, at, project, recordId}` and **no payload**
 
 **Logical (default).** `purgeProject(project)` or `{ mode: 'logical' }`. Entities are removed from live state; matching journal entries keep `seq`/`type`/`at`/`project`/`entityId` but get `payload: null`, `redacted: true`, `redactedReason: 'project_purged'`. A `project.purged` entry is appended. **`seq` stays contiguous**; the skeleton remains auditable. Returns `journalEntriesRedacted`.
 
-**Hard (explicit, never default).** `{ mode: 'hard' }` or `{ hard: true }`. Entries are spliced out. This **creates a `seq` gap** — declared, not hidden: `journalGaps()` reports the missing ranges and `validate()` surfaces them as `journal_gap` at severity `info`. Returns `journalEntriesRemoved`.
+**Hard (explicit, never default).** `{ mode: 'hard' }` or `{ hard: true }`. Entries are spliced out. This **creates a `seq` gap** — declared, not hidden: `journalGaps()` reports the missing ranges and `validate()` surfaces them as `journal_gap` at severity `info`. The surviving purge marker carries the exact transitive `removedJournalSequences` ledger; later hard/logical purges preserve that evidence. Restore verifies coverage with bounded range arithmetic and rejects any unexplained sequence without materializing every missing integer. Returns `journalEntriesRemoved`.
 
 Both modes remove relations pointing at purged entities, so referential integrity holds after either.
 

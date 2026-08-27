@@ -1,24 +1,24 @@
 # ShadowGraph — Current Status
 
-**Last updated:** 2026-08-26
-**Version:** 0.31.0 (release candidate) · **Schema:** 3 · **Main baseline:** `ab8572967de79f2fe0370b4f9af92d4d785531b2` · **Review branch:** `feature/shadowgraph-v032-hardening`.
-**Phase:** G1–G8 delivered end-to-end. Follow-up review also closed project-scoped idempotency, declared journal high-water marks, legacy confidence baseline handling, malformed import validation, and integration coverage. This document is the current-status summary; older handoff logs are historical snapshots.
+**Last updated:** 2026-08-27
+**Version:** 0.40.0 (unreleased unified-memory review candidate) · **Schema:** 4 · **Branch:** `main` with an uncommitted review tree.
+**Phase:** The v0.31 decision-first contracts remain; v0.40 adds scoped general memory, temporal/hybrid recall, localhost-first embeddings, Markdown push/pull, and JavaScript/CLI/HTTP/MCP surfaces. ADR-0006 is accepted. Older review tables below are retained as historical evidence, not the current release summary.
 
 ## Suite state
 
-    npm test              -> 274 tests / 269 pass / 0 fail / 0 skipped / 5 todo
-    npm run check         -> exit 0 (13 files)
+    npm test              -> 372 tests / 367 pass / 0 fail / 0 skipped / 5 todo
+    npm run check         -> exit 0
+    npm run check:package -> exit 0 (62 files)
     npm audit --omit=dev  -> 0 vulnerabilities
-    git diff --check      -> clean
-    npm run bench         -> verdict: no pre-declared threshold breached
-    Node 20.20.2 suite    -> 274 tests / 225 pass / 0 fail / 44 skipped (node:sqlite unavailable) / 5 todo
-    Node 22.23.2 suite    -> 274 tests / 269 pass / 0 fail / 0 skipped / 5 todo
+    git diff --check      -> exit 0; one existing LF→CRLF warning for test/compact-mcp.test.js
+    ADR citation verify   -> strict pass
+    retrieval benchmark  -> not run / not measured
 
-The current suite has 274 tests, including `test/sqlite-restore-failure.test.js` (32 Node 22 restore/fault/interface cases), `test/final-review.test.js`, deterministic legacy-ID coverage, follow-up migration/idempotency coverage, and packaging regressions.
+The current suite has 372 tests, including the existing restore/fault/interface coverage plus unified-memory reconciliation, temporal handoff, scoped isolation across recall/search/retrieve/traverse, JSON/SQLite parity, Markdown atomicity/read-back reconciliation, embedding safety, bounded hard-purge evidence validation, delimiter-safe review identities, canonical idempotency collision checks, journal type/entity consistency, legacy namespace migration, large-journal import safety, and CLI/HTTP/MCP concurrency/durability regressions.
 
 The 5 remaining `todo` entries are all labelled `BLOCKED ON <id>` and name a real open decision (U-1 x2, L-1, L-2, L-5). **No characterization test for known-bad behaviour remains** — the only surviving mention of the word is a methodology comment explaining why such a test must fail once its gap is fixed.
 
-## Independent review findings — all 18 closed
+## Historical v0.31 independent review findings — all 18 closed
 
 | ID | Finding | Regression tests |
 | --- | --- | --- |
@@ -43,7 +43,7 @@ The 5 remaining `todo` entries are all labelled `BLOCKED ON <id>` and name a rea
 
 The two P0 findings were the serious ones — both were **data-loss** bugs. P0-1 resurrected purged data through a cache nobody had thought of as storage. P0-2 destroyed the live graph on a failed recovery-path import: the operation that runs when something is *already* wrong was itself capable of losing everything.
 
-## Gap status
+## Historical v0.31 gap status
 
 | Gap | Status | Evidence |
 | --- | --- | --- |
@@ -58,7 +58,7 @@ The two P0 findings were the serious ones — both were **data-loss** bugs. P0-1
 
 ## Honest limits
 
-## v0.32 hardening review status
+## Historical v0.32 hardening review status
 
 - **P1-11 fixed:** malformed JSON restore is staged and mandatorily domain-validated on direct JavaScript, HTTP, CLI, and MCP paths before replacing the active file; failed restore preserves the prior valid file.
 - **P1-13 fixed:** malformed HTTP SQLite restore is loaded and validated before database replacement; JSON/SQLite restore semantics now match.

@@ -7,7 +7,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { nextRevision, assertRevision } from './revision-store.js';
 import { validateRestorePayload as validateDomainRestorePayload } from './restore-validation.js';
 
-const EMPTY = { schemaVersion: 3, revision: 0, records: [], facts: [], relations: [], reviewSignals: [], idempotency: [], events: [], journal: [], journalSeq: 0, journalEpoch: null };
+const EMPTY = { schemaVersion: 4, revision: 0, records: [], facts: [], relations: [], reviewSignals: [], idempotency: [], events: [], journal: [], journalSeq: 0, journalEpoch: null };
 
 export async function createSqliteStore(filePath, options = {}) {
   let DatabaseSync;
@@ -50,7 +50,7 @@ export async function createSqliteStore(filePath, options = {}) {
   function exportFrom(database) {
     const readMeta = (key, fallback = '0') => database.prepare('SELECT value FROM shadowgraph_meta WHERE key = ?').get(key)?.value ?? fallback;
     const epoch = readMeta('journalEpoch', '');
-    const result = { schemaVersion: Number(readMeta('schemaVersion', '3')), revision: Number(readMeta('revision', '0')), records: [], facts: [], relations: [], reviewSignals: [], idempotency: [], events: [], journal: [], journalSeq: Number(readMeta('journalSeq', '0')), journalEpoch: epoch === '' ? null : Number(epoch) };
+    const result = { schemaVersion: Number(readMeta('schemaVersion', '4')), revision: Number(readMeta('revision', '0')), records: [], facts: [], relations: [], reviewSignals: [], idempotency: [], events: [], journal: [], journalSeq: Number(readMeta('journalSeq', '0')), journalEpoch: epoch === '' ? null : Number(epoch) };
     for (const row of database.prepare('SELECT kind, payload FROM shadowgraph_entities ORDER BY rowid').all()) { const item = JSON.parse(row.payload); (item.kind === 'fact' ? result.facts : result.records).push(item); }
     for (const row of database.prepare('SELECT payload FROM shadowgraph_relations ORDER BY rowid').all()) result.relations.push(JSON.parse(row.payload));
     for (const row of database.prepare('SELECT payload FROM shadowgraph_reviews ORDER BY rowid').all()) result.reviewSignals.push(JSON.parse(row.payload));
@@ -64,7 +64,7 @@ export async function createSqliteStore(filePath, options = {}) {
   function replaceRelational(data) {
     db.exec('DELETE FROM shadowgraph_entities; DELETE FROM shadowgraph_relations; DELETE FROM shadowgraph_reviews; DELETE FROM shadowgraph_idempotency; DELETE FROM shadowgraph_events; DELETE FROM shadowgraph_journal; DELETE FROM shadowgraph_meta;');
     const meta = db.prepare('INSERT INTO shadowgraph_meta (key,value) VALUES (?,?)');
-    meta.run('schemaVersion', String(data.schemaVersion ?? 3));
+    meta.run('schemaVersion', String(data.schemaVersion ?? 4));
     meta.run('revision', String(data.revision ?? 0));
     meta.run('journalSeq', String(data.journalSeq ?? 0));
     meta.run('journalEpoch', data.journalEpoch === null || data.journalEpoch === undefined ? '' : String(data.journalEpoch));

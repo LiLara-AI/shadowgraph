@@ -9,9 +9,11 @@ ShadowGraph stores potentially sensitive project decisions, assumptions, facts, 
 - Default to local-only binding and local filesystem storage.
 - Never send memory to a hosted service unless a future feature explicitly opts in and documents consent.
 - Never log tokens, secrets, bearer values, or full private records unnecessarily.
-- Keep project scoping explicit on reads and writes.
+- Keep project scoping explicit on reads and writes; supplied memory project identifiers must be non-empty strings.
+- Treat omitted memory project/scope as `default` plus the all-null scope, never as an all-projects/all-users wildcard.
 - Reject or redact secrets and sensitive fields where the existing redaction policy applies.
 - Make purge and backup operations explicit and auditable.
+- Treat Markdown workspaces as independent plaintext copies: canonical purge cannot erase arbitrary Git/cloud/backup copies, so users must remove those separately.
 
 ## Provenance and truth safety
 
@@ -43,11 +45,12 @@ Never promote an agent assertion to a verified fact merely because it is repeate
 - Read the SQLite revision inside the write lock.
 - Preserve a verified standalone rollback snapshot until an SQLite replacement opens, prepares, loads, and validates.
 - Inspect a possible existing recovery destination as a regular file and read-only database before any write-capable open; inspection must not create an empty destination.
-- Reject corrupt journal folds and any records/facts/relations/idempotency projection that disagrees with live restored state. A sequence gap requires a persisted `project.purged` entry whose payload records `mode: 'hard'`; otherwise restore rejects it as unexplained. Documented legacy semantics remain accepted.
+- Reject corrupt journal folds and any records/facts/relations/idempotency projection that disagrees with live restored state. Every missing sequence must be enumerated by a persisted `project.purged` entry with `mode: 'hard'` and `removedJournalSequences`; an unrelated or empty marker cannot excuse a gap. Documented legacy semantics remain accepted where they are still verifiable.
 - On a caught post-replacement failure, restore and reopen the old payload; report `sqlite_restore_recovery_unconfirmed` rather than claiming safety if recovery itself fails, and latch the HTTP process degraded so it cannot serve or mutate potentially divergent graph state before restart/manual recovery.
 - Treat SQLite restore as process-level rollback safety only: it does not guarantee crash consistency, filesystem durability, or coordination with external writers.
 - Validate backups and restored files before replacing live data.
-- Serialize persistence queues, reject graph-mutating routes such as `/context` while restore owns persistence, and reload after conflict recovery.
+- Keep schema-4 record, fact, relation, and nested alternative IDs globally unique, and reject new relations whose endpoints do not exist.
+- Serialize HTTP mutation with persistence, reject graph-mutating routes such as `/context` while restore owns persistence, persist review signals created by context paths, and reload durable state after ordinary save or conflict failures.
 - Test process concurrency and stale-writer rejection.
 
 ## Access control and network safety
@@ -57,7 +60,7 @@ Never promote an agent assertion to a verified fact merely because it is repeate
 - Reject disallowed browser origins and oversized request bodies.
 - Do not add wildcard CORS.
 - Do not start a replacement server for the existing GUI without an explicit request.
-- MCP stdio should not perform network access unless a separately reviewed capability requires it.
+- MCP stdio should not perform network access unless a separately reviewed capability requires it. The embedding adapter is localhost-only by default; remote endpoints require explicit opt-in and redirects are rejected.
 
 ## Lifecycle safety
 
