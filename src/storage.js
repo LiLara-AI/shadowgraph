@@ -5,7 +5,7 @@ import { nextRevision, assertRevision } from './revision-store.js';
 // Journal lives INSIDE the same payload as the state and is written by the same
 // atomic temp-write + rename. See journal-contract.md §atomicity: state and
 // journal can never diverge because they are never written separately.
-const empty = () => ({ schemaVersion: 3, revision: 0, records: [], facts: [], relations: [], reviewSignals: [], idempotency: [], events: [], journal: [], journalSeq: 0, journalEpoch: null });
+const empty = () => ({ schemaVersion: 4, revision: 0, records: [], facts: [], relations: [], reviewSignals: [], idempotency: [], events: [], journal: [], journalSeq: 0, journalEpoch: null });
 
 export function createJsonFileStore(filePath, options = {}) {
   let saveQueue = Promise.resolve();

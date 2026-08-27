@@ -3,6 +3,7 @@ import { createStorage } from './storage.js';
 import { createShadowGraph } from './shadowgraph.js';
 import { backupFile, restoreFile } from './backup.js';
 import { validateRestorePayload } from './restore-validation.js';
+import { syncMarkdownWorkspace } from './markdown-workspace.js';
 
 const file = process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json';
 const store = await createStorage({ file });
@@ -20,7 +21,15 @@ try {
 if (command === 'stats') result = graph.stats();
 else if (command === 'list') result = graph.exportData();
 else if (command === 'search') { const query = parse(input || '{}'); result = graph.search(query.query ?? '', query); }
-else if (command === 'context') result = graph.context(parse(input || '{}'));
+else if (command === 'context') { result = graph.context(parse(input || '{}')); await store.save(graph.exportData()); }
+else if (command === 'remember') { const value = parse(input); result = Array.isArray(value.operations) ? graph.applyMemoryPlan(value) : graph.remember(value); await store.save(graph.exportData()); }
+else if (command === 'recall') { const value = parse(input || '{}'); result = graph.recall(value.query ?? '', value); }
+else if (command === 'markdown-sync') {
+  const value = parse(input);
+  const persist = value.mode === 'pull' && value.dryRun !== true ? async (data) => store.save(data) : undefined;
+  const loadPersisted = persist ? async () => store.load() : undefined;
+  result = await syncMarkdownWorkspace({ graph, ...value, ...(persist ? { persist, loadPersisted } : {}) });
+}
 else if (command === 'review') { result = graph.review(parse(input || '{}')); await store.save(graph.exportData()); }
 else if (command === 'fact') { result = graph.addFact(parse(input)); await store.save(graph.exportData()); }
 else if (command === 'outcome') { const value = parse(input); result = graph.setOutcome(value.decisionId, value.outcome); await store.save(graph.exportData()); }
@@ -45,7 +54,7 @@ else if (command === 'restore') result = store.restore ? await store.restore(inp
 else if (command === 'decision') { result = graph.addDecision(parse(input)); await store.save(graph.exportData()); }
 else if (command === 'attempt') { result = graph.addAttempt(parse(input)); await store.save(graph.exportData()); }
 else {
-  console.error('Usage: shadowgraph <stats|list|search|retrieve|context|review|maintain|signals|ack|validate|repair-plan|backup|restore|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge> [JSON/path]');
+  console.error('Usage: shadowgraph <stats|list|search|retrieve|recall|remember|markdown-sync|context|review|maintain|signals|ack|validate|repair-plan|backup|restore|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge> [JSON/path]');
   process.exitCode = 1;
   result = null;
 }

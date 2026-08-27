@@ -1,12 +1,12 @@
-# ShadowGraph v0.31.0 (review candidate)
+# ShadowGraph v0.40.0 (unified memory review candidate)
 
-ShadowGraph is a local-first, vendor-neutral learning layer for AI agents. It is not generic chat memory: it is an explainable decision graph that tracks what an agent chose, what it rejected, the assumptions and evidence behind it, what happened afterward, and when the decision should be reopened.
+ShadowGraph is a local-first, vendor-neutral learning layer for AI agents. It is not merely generic chat memory: its core remains an explainable decision graph that tracks what an agent chose, what it rejected, the assumptions and evidence behind it, what happened afterward, and when the decision should be reopened.
 
 > ShadowGraph remembers not only what an agent chose, but what it rejected, why it rejected it, and what evidence should make it think again.
 
 ## What it does
 
-When an AI agent starts an important task, ShadowGraph gives it relevant working context. During the task, the agent can save decisions, assumptions, evidence, rejected alternatives, failed attempts, and observed facts. After implementation, the agent records the outcome. ShadowGraph updates confidence, marks replaced facts as superseded, and creates review signals when an old decision may no longer fit the current situation.
+When an AI agent starts an important task, ShadowGraph gives it relevant working context. During the task, the agent can save decisions, assumptions, evidence, rejected alternatives, failed attempts, observed facts, and scoped user/agent/run memory. After implementation, the agent records the outcome. ShadowGraph updates confidence, preserves superseded temporal history, and creates review signals when an old decision may no longer fit the current situation.
 
 The normal learning loop is:
 
@@ -21,14 +21,24 @@ The normal learning loop is:
 
 This lets an agent remember the reasoning behind work instead of blindly repeating old answers.
 
-## v0.31.0 status
+## v0.40.0 status
 
-Version 0.31.0 is an unreleased review candidate. It includes persistent review signals, automatic maintenance and aging, project-scoped stored-fact reconsideration after restart, provenance claims that cannot self-assert verification, idempotent recording, complete retrieval envelopes, journal snapshots with rebuild diagnostics, integrity validation, normalized relational SQLite storage, atomic backup snapshots, revision conflict recovery, MCP tools/resources/prompts, and local integrations. Confidence weights are a declared policy, not an empirically calibrated model; no tool input can create `verified` in this build.
+Version 0.40.0 is an unreleased review candidate. It preserves the v0.31 decision journal and adds scoped general memory, bi-temporal facts/relations, explainable lexical/vector/graph/temporal RRF retrieval, a localhost-first embedding adapter, and conflict-aware Markdown push/pull. JSON and SQLite restart parity, journal rebuild, canonical purge non-resurrection, CLI, HTTP, and MCP workflows are covered by the local suite. Confidence weights are still a declared policy rather than an empirically calibrated model; no tool input can create `verified` in this build.
+
+## Unified memory kernel
+
+- `remember()` stores `preference`, `profile`, `goal`, `instruction`, `procedure`, `episode`, or `note` memory under a non-empty project plus optional `userId`, `agentId`, and `runId` scope. Omitted recall project/scope means the `default` project plus all-null scope, never all projects or users.
+- Reusing a scope/type/key with identical content is `NOOP`; changed content is `UPDATE`, with the previous version retained and journalled. Explicit plans may also `DELETE` by invalidating rather than silently erasing history.
+- `recall()` unions lexical, optional vector, graph-distance, and temporal candidates, then applies weighted Reciprocal Rank Fusion. Results expose raw signal scores/ranks and state when a signal was unavailable; valid-time recall keeps a prior value visible until a future-effective replacement starts.
+- Markdown is an inspectable projection and validated write surface. `markdown-sync` uses stable identity paths, hashes, atomic writes, and refuses two-sided conflicts. Exported plaintext copies must be deleted separately after a canonical purge.
+- Embeddings are derived data, never canonical truth. No endpoint is configured by default; localhost works when explicitly configured, and remote endpoints require a separate privacy opt-in.
+
+See [the unified-memory guide](docs/unified-memory.md) and [ADR-0006](docs/adr/0006-unified-memory-kernel.md).
 
 ## Requirements
 
 - Node.js 20+ (SQLite backend requires Node 22.5+ with `node:sqlite`)
-- v0.31.0 is an unreleased review candidate; schema 3 imports schemas 1-3
+- v0.40.0 is an unreleased review candidate; schema 4 imports schemas 1-4
 - No runtime npm dependencies
 - Python 3.10+ only for the optional Hermes wrapper
 
@@ -100,6 +110,9 @@ console.log(graph.review({ project: 'my-app' }));
 node src/cli.js stats
 node src/cli.js list
 node src/cli.js search '{"query":"database","project":"my-app","status":"validated","minConfidence":0.7}'
+node src/cli.js remember '{"project":"my-app","scope":{"userId":"alice"},"memoryType":"preference","key":"editor","text":"Prefers VS Code"}'
+node src/cli.js recall '{"project":"my-app","scope":{"userId":"alice"},"query":"development environment"}'
+node src/cli.js markdown-sync '{"directory":"./memory-notes","mode":"push"}'
 node src/cli.js context '{"project":"my-app","facts":{"deployment":"local"}}'
 node src/cli.js review '{"changedFacts":["local-single-user"]}'
 node src/cli.js fact '{"key":"deployment","value":"local","source":"human_confirmed","confidence":1}'
@@ -124,6 +137,8 @@ GET  /search?q=database&project=my-app
 GET  /review-signals
 POST /decisions
 POST /attempts
+POST /memories
+POST /recall
 POST /facts
 POST /outcomes
 POST /review
@@ -155,7 +170,17 @@ DELETE /projects
 npm run mcp
 ```
 
-For lower prompt overhead without losing stored fidelity, set `SHADOWGRAPH_MCP_COMPACT=1`. Compact mode advertises 10 core tools while the full relational graph, facts, events, alternatives, and outcomes remain stored unchanged. Retrieval supports `limit`/`offset` only as explicit pagination and returns `{items,page:{total,hasMore}}`; no records are silently summarized or discarded.
+For lower prompt overhead without losing stored fidelity, set `SHADOWGRAPH_MCP_COMPACT=1`. Compact mode advertises 12 workflow tools while the full relational graph, memories, facts, events, alternatives, and outcomes remain stored unchanged. Retrieval supports `limit`/`offset` only as explicit pagination and returns `{items,page:{total,hasMore}}`; no records are silently summarized or discarded.
+
+To let MCP generate semantic vectors through a local OpenAI-compatible server (Ollama, llama.cpp, LM Studio, or equivalent), configure both values:
+
+```bash
+SHADOWGRAPH_EMBEDDING_URL="http://127.0.0.1:11434/v1" \
+SHADOWGRAPH_EMBEDDING_MODEL="nomic-embed-text" \
+npm run mcp
+```
+
+Remote URLs are rejected unless `SHADOWGRAPH_ALLOW_REMOTE_EMBEDDINGS=1` is also set. That opt-in means memory/query text leaves the machine. Without an embedder or caller-supplied vectors, recall remains lexical/graph/temporal and explicitly returns `semantic.available=false`.
 
 MCP tools:
 
@@ -164,6 +189,8 @@ MCP tools:
 - `shadowgraph_review`
 - `shadowgraph_search`
 - `shadowgraph_context`
+- `shadowgraph_remember`
+- `shadowgraph_recall`
 - `shadowgraph_record_fact`
 - `shadowgraph_record_outcome`
 - `shadowgraph_update_status`
@@ -182,7 +209,7 @@ MCP tools:
 - `shadowgraph_backup`
 - `shadowgraph_restore`
 
-MCP exposes 25 tools by default (10 in compact mode) and also advertises a read-only `shadowgraph://context` resource and a consequential-task prompt. Search, retrieve, context, and journal reads declare pagination and completeness; confidence evidence requires a stable caller-supplied `key`.
+MCP exposes 27 tools by default (12 in compact mode) and also advertises a `shadowgraph://context` resource and a consequential-task prompt. Reading that context may generate review signals, so the MCP server serializes and persists it like a mutation. Search, retrieve, recall, context, and journal responses declare pagination and completeness; confidence evidence requires a stable caller-supplied `key`.
 
 Recommended agent policy:
 
@@ -202,11 +229,11 @@ The exact settings location varies by product and version. Use the product's MCP
 
 ## Migration and storage
 
-The JSON store accepts both the v0.1 array format and the v0.26 graph envelope. Current exports use schema 3:
+The JSON store accepts both the v0.1 array format and later graph envelopes. Current exports use schema 4:
 
 ```json
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "records": [],
   "facts": [],
   "relations": [],
@@ -215,7 +242,7 @@ The JSON store accepts both the v0.1 array format and the v0.26 graph envelope. 
 }
 ```
 
-Schemas 1 and 2 remain importable. An unsupported future envelope schema is rejected before replacing live state; individual future entities are preserved and reported by validation. JSON is the zero-dependency portable default. v0.31.0 stores a monotonic revision and can reject stale `expectedRevision` saves to prevent lost updates; callers should reload and retry after a revision conflict. SQLite is selectable through `SHADOWGRAPH_STORAGE=sqlite` on Node 22.5+ and now uses normalized relational tables with WAL, a busy timeout, transactional replacement, legacy envelope migration, and revision checks. Do not assume revision checks replace application-level conflict handling when multiple processes mutate stale in-memory graphs.
+Schemas 1, 2, and 3 remain importable. An unsupported future envelope schema is rejected before replacing live state; individual future entities are preserved and reported by validation. JSON is the zero-dependency portable default. v0.40.0 stores a monotonic revision and can reject stale `expectedRevision` saves to prevent lost updates; callers should reload and retry after a revision conflict. SQLite is selectable through `SHADOWGRAPH_STORAGE=sqlite` on Node 22.5+ and uses normalized relational tables with WAL, a busy timeout, transactional replacement, legacy envelope migration, and revision checks. Do not assume revision checks replace application-level conflict handling when multiple processes mutate stale in-memory graphs.
 
 ## Security and privacy
 

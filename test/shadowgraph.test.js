@@ -30,6 +30,6 @@ test('persists records in a portable JSON file', async () => {
   await store.save(graph.exportData());
   const loaded = await store.load();
   assert.equal(loaded.records.length, 1);
-  // G4-E: schema version 3 introduces the journal. See journal-contract.md.
-  assert.equal(JSON.parse(await readFile(join(directory, 'data.json'), 'utf8')).schemaVersion, 3);
+  // Schema version 4 adds scoped memory while retaining the journal contract.
+  assert.equal(JSON.parse(await readFile(join(directory, 'data.json'), 'utf8')).schemaVersion, 4);
 });

@@ -1,6 +1,7 @@
 import { createInterface } from 'node:readline';
 import { createStorage } from './storage.js';
-import { createShadowGraph, SOURCE_CLASSES, DECISION_STATUSES, OUTCOME_STATUSES, CONTENT_SEARCH_FIELDS } from './shadowgraph.js';
+import { createShadowGraph, SOURCE_CLASSES, DECISION_STATUSES, OUTCOME_STATUSES, CONTENT_SEARCH_FIELDS, MEMORY_TYPES } from './shadowgraph.js';
+import { createEmbeddingClient } from './embedding.js';
 import { VERSION } from './version.js';
 import { validateRestorePayload } from './restore-validation.js';
 
@@ -16,8 +17,16 @@ const MCP_VERSION = VERSION;
 const PROTOCOL_VERSION = '2024-11-05';
 const graph = createShadowGraph();
 graph.importData(await store.load());
+const embeddingClient = process.env.SHADOWGRAPH_EMBEDDING_URL ? createEmbeddingClient({
+  baseUrl: process.env.SHADOWGRAPH_EMBEDDING_URL,
+  model: process.env.SHADOWGRAPH_EMBEDDING_MODEL,
+  apiKey: process.env.SHADOWGRAPH_EMBEDDING_API_KEY,
+  allowRemote: process.env.SHADOWGRAPH_ALLOW_REMOTE_EMBEDDINGS === '1'
+}) : null;
 let persistQueue = Promise.resolve();
 function persist() { const operation = persistQueue.then(async () => { const revision = await store.save(graph.exportData()); graph.setRevision(revision); }).catch(async (error) => { if (/revision conflict/i.test(error.message)) graph.replaceData(await store.load()); throw error; }); persistQueue = operation.catch(() => {}); return operation; }
+let callQueue = Promise.resolve();
+function queueCall(operation) { const queued = callQueue.then(operation); callQueue = queued.catch(() => {}); return queued; }
 
 // Provenance properties shared by every write tool. `sourceClass` records WHAT WAS
 // CLAIMED about origin — it is never proof and never produces a verified fact.
@@ -31,6 +40,27 @@ const pageProperties = {
   limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'Page size. Omitted means a declared default, never silent truncation.' },
   offset: { type: 'integer', minimum: 0, description: 'Page offset.' }
 };
+const memoryScopeProperty = {
+  type: 'object',
+  properties: {
+    userId: { type: ['string', 'null'] },
+    agentId: { type: ['string', 'null'] },
+    runId: { type: ['string', 'null'] }
+  },
+  additionalProperties: false
+};
+const embeddingProperty = { type: 'array', minItems: 1, items: { type: 'number' }, description: 'Optional caller-supplied vector. When omitted, the configured embedding provider is used.' };
+const memoryProperties = {
+  memoryType: { type: 'string', enum: [...MEMORY_TYPES] },
+  key: { type: 'string' },
+  text: { type: 'string' },
+  scope: memoryScopeProperty,
+  tags: { type: 'array', items: { type: 'string' } },
+  metadata: { type: 'object' },
+  validFrom: { type: 'string' },
+  validTo: { type: ['string', 'null'] },
+  embedding: embeddingProperty
+};
 const RESULT_ENVELOPE = 'Returns { items, page: { offset, limit, total, hasMore }, completeness } — completeness always declares what was omitted.';
 
 const allTools = [
@@ -39,6 +69,25 @@ const allTools = [
   { name: 'shadowgraph_review', description: 'Find decisions whose rejected alternatives should be reconsidered. Evaluates reopenWhen rules against STORED facts, so it works after a restart without re-supplying them.', inputSchema: { type: 'object', properties: { project: { type: 'string' }, changedFacts: { type: 'array', items: { type: 'string' } }, facts: { type: 'object', description: 'Optional overrides; these take precedence over stored facts.' } } } },
   { name: 'shadowgraph_search', description: `Search decision and attempt memory. A query term matches DECLARED CONTENT FIELDS only (${CONTENT_SEARCH_FIELDS.join(', ')}) — schema keys and internal metadata never match. ${RESULT_ENVELOPE}`, inputSchema: { type: 'object', properties: { query: { type: 'string' }, project: { type: 'string' }, status: { type: 'string', enum: [...DECISION_STATUSES] }, kind: { type: 'string', enum: ['decision', 'attempt'] }, sourceClass: { type: 'string', enum: [...SOURCE_CLASSES] }, minConfidence: { type: 'number', minimum: 0, maximum: 1 }, ...pageProperties } } },
   { name: 'shadowgraph_context', description: 'Build working context before a consequential task. Every collection declares its total in `completeness.collections`, so truncation is never silent.', inputSchema: { type: 'object', properties: { project: { type: 'string' }, limit: { type: 'integer', minimum: 1, maximum: 1000 }, changedFacts: { type: 'array', items: { type: 'string' } }, facts: { type: 'object' } } } },
+  {
+    name: 'shadowgraph_remember',
+    description: 'Add or reconcile scoped user, agent, run, procedure, episode, or note memory without flattening decision records. Accepts one memory or an explicit ADD/UPDATE/DELETE/NOOP plan.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string' },
+        ...memoryProperties,
+        operations: { type: 'array', items: { type: 'object', required: ['action', 'memoryType', 'key'], properties: { action: { type: 'string', enum: ['ADD', 'UPDATE', 'DELETE', 'NOOP'] }, ...memoryProperties } } },
+        ...provenanceProperties
+      },
+      oneOf: [{ required: ['memoryType', 'key', 'text'] }, { required: ['operations'] }]
+    }
+  },
+  {
+    name: 'shadowgraph_recall',
+    description: `Explainable hybrid recall across decisions, facts, attempts, and scoped memories. Fuses lexical, optional vector, graph-distance, and temporal ranks and declares unavailable signals. ${RESULT_ENVELOPE}`,
+    inputSchema: { type: 'object', properties: { query: { type: 'string' }, project: { type: 'string' }, scope: memoryScopeProperty, memoryType: { type: 'string', enum: [...MEMORY_TYPES] }, asOf: { type: 'string' }, focalId: { type: 'string' }, preferRecent: { type: 'boolean' }, queryEmbedding: embeddingProperty, ...pageProperties } }
+  },
   { name: 'shadowgraph_record_fact', description: 'Record an observed fact with provenance. IMPORTANT: no input can mark a fact `verified` — a source label is a claim about origin, not proof.', inputSchema: { type: 'object', required: ['key'], properties: { key: { type: 'string' }, value: {}, source: { type: 'string', description: 'Legacy alias for sourceClass. Unknown labels downgrade to agent_claimed with the raw label kept in sourceRaw.' }, confidence: { type: 'number', minimum: 0, maximum: 1 }, project: { type: 'string' }, expiresAt: { type: 'string' }, verificationStatus: { type: 'string', enum: ['unverified', 'contradicted'], description: 'Only `contradicted` may be set by a caller; `verified` and `expired` are rejected.' }, idempotencyKey: { type: 'string', maxLength: 200, description: 'Retry key scoped by project and operation; reuse only for the same logical write.' }, ...provenanceProperties } } },
   { name: 'shadowgraph_record_outcome', description: 'Record what happened after a decision. Confidence moves by an evidence-weighted amount derived from the outcome\'s claimed source class; it never sets a verification status.', inputSchema: { type: 'object', required: ['decisionId', 'outcome'], properties: { decisionId: { type: 'string' }, outcome: { type: 'object', required: ['status'], properties: { status: { type: 'string', enum: [...OUTCOME_STATUSES] }, sourceClass: { type: 'string', enum: [...SOURCE_CLASSES] }, lessons: { type: 'array', items: { type: 'string' } }, observedAt: { type: 'string' } } } } } },
   { name: 'shadowgraph_confidence_evidence', description: 'Record evidence for or against a decision and move its confidence by a weighted, auditable amount. `key` is REQUIRED and must be stable: it is the dedupe key, so a retry with the same key is a no-op and cannot double-count.', inputSchema: { type: 'object', required: ['decisionId', 'reason', 'key'], properties: { decisionId: { type: 'string' }, reason: { type: 'string' }, supports: { type: 'boolean', description: 'Defaults to true. false records contradicting evidence.' }, key: { type: 'string', description: 'REQUIRED stable dedupe key. Reuse the same key for the same observation so retries do not double-count; use a NEW key for a genuinely new observation.' }, observedAt: { type: 'string' }, ...provenanceProperties } } },
@@ -60,16 +109,47 @@ const allTools = [
   { name: 'shadowgraph_backup', description: 'Create a consistent backup snapshot at a destination path.', inputSchema: { type: 'object', required: ['destination'], properties: { destination: { type: 'string' } } } },
   { name: 'shadowgraph_restore', description: 'Restore a JSON or SQLite backup using the configured storage backend.', inputSchema: { type: 'object', required: ['source'], properties: { source: { type: 'string' } } } }
 ];
-const compactNames = new Set(['shadowgraph_context','shadowgraph_record_decision','shadowgraph_record_attempt','shadowgraph_record_fact','shadowgraph_record_outcome','shadowgraph_retrieve','shadowgraph_search','shadowgraph_review','shadowgraph_validate','shadowgraph_maintain']);
+const compactNames = new Set(['shadowgraph_context','shadowgraph_remember','shadowgraph_recall','shadowgraph_record_decision','shadowgraph_record_attempt','shadowgraph_record_fact','shadowgraph_record_outcome','shadowgraph_retrieve','shadowgraph_search','shadowgraph_review','shadowgraph_validate','shadowgraph_maintain']);
 const tools = process.env.SHADOWGRAPH_MCP_COMPACT === '1' ? allTools.filter((tool) => compactNames.has(tool.name)) : allTools;
 
-async function call(name, args) {
+async function addConfiguredEmbeddings(args = {}) {
+  if (!embeddingClient) return args;
+  if (Array.isArray(args.operations)) {
+    const operations = [];
+    for (const operation of args.operations) {
+      const needsEmbedding = ['ADD', 'UPDATE'].includes(String(operation.action ?? '').toUpperCase()) && !operation.embedding && typeof operation.text === 'string' && operation.text.trim();
+      operations.push(needsEmbedding ? { ...operation, embedding: await embeddingClient(operation.text) } : operation);
+    }
+    return { ...args, operations };
+  }
+  return !args.embedding && typeof args.text === 'string' && args.text.trim()
+    ? { ...args, embedding: await embeddingClient(args.text) }
+    : args;
+}
+
+async function callUnqueued(name, args) {
+  const before = graph.exportData();
   let value;
   if (name === 'shadowgraph_record_decision') value = graph.addDecision(args);
   else if (name === 'shadowgraph_record_attempt') value = graph.addAttempt(args);
   else if (name === 'shadowgraph_review') value = graph.review(args ?? {});
   else if (name === 'shadowgraph_search') value = graph.search(args?.query ?? '', args ?? {});
   else if (name === 'shadowgraph_context') value = graph.context(args ?? {});
+  else if (name === 'shadowgraph_remember') {
+    const prepared = await addConfiguredEmbeddings(args ?? {});
+    value = Array.isArray(prepared.operations) ? graph.applyMemoryPlan(prepared) : graph.remember(prepared);
+  }
+  else if (name === 'shadowgraph_recall') {
+    const query = args?.query ?? '';
+    let prepared = args ?? {};
+    let embeddingFailure = null;
+    if (embeddingClient && !args?.queryEmbedding && String(query).trim()) {
+      try { prepared = { ...(args ?? {}), queryEmbedding: await embeddingClient(String(query)) }; }
+      catch (error) { embeddingFailure = `Configured embedding provider failed: ${error.message}`; }
+    }
+    value = graph.recall(query, prepared);
+    if (embeddingFailure) value.signals.semantic = { ...value.signals.semantic, available: false, matched: 0, reason: embeddingFailure };
+  }
   else if (name === 'shadowgraph_record_fact') value = graph.addFact(args);
   else if (name === 'shadowgraph_record_outcome') value = graph.setOutcome(args?.decisionId, args?.outcome);
   else if (name === 'shadowgraph_confidence_evidence') value = graph.addConfidenceEvidence(args ?? {});
@@ -92,9 +172,18 @@ async function call(name, args) {
   else if (name === 'shadowgraph_restore') { value = store.restore ? await store.restore(args?.source) : await (await import('./backup.js')).restoreFile(args?.source, file, { storage: process.env.SHADOWGRAPH_STORAGE, validate: validateRestorePayload }); graph.replaceData(await store.load()); }
   else if (!name) { const error = new Error('Invalid tool parameters'); error.code = -32602; throw error; }
   else { const error = new Error(`Unknown tool: ${name}`); error.code = -32601; throw error; }
-  if (name.includes('record_') || name === 'shadowgraph_confidence_evidence' || name === 'shadowgraph_update_status' || name === 'shadowgraph_link' || name === 'shadowgraph_supersede' || name === 'shadowgraph_purge' || name === 'shadowgraph_maintain' || name === 'shadowgraph_review' || name === 'shadowgraph_ack_review' || name === 'shadowgraph_backup') await persist();
+  if (name.includes('record_') || name === 'shadowgraph_context' || name === 'shadowgraph_remember' || name === 'shadowgraph_confidence_evidence' || name === 'shadowgraph_update_status' || name === 'shadowgraph_link' || name === 'shadowgraph_supersede' || name === 'shadowgraph_purge' || name === 'shadowgraph_maintain' || name === 'shadowgraph_review' || name === 'shadowgraph_ack_review' || name === 'shadowgraph_backup') {
+    try { await persist(); }
+    catch (error) {
+      try { graph.replaceData(await store.load()); }
+      catch { graph.replaceData(before); }
+      throw error;
+    }
+  }
   return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }] };
 }
+
+function call(name, args) { return queueCall(() => callUnqueued(name, args)); }
 
 // The single resource and prompt this server actually serves. Requests for
 // anything else are errors, not silent substitutions (P1-7).
@@ -152,7 +241,18 @@ input.on('line', async (line) => {
       const uri = request.params?.uri;
       if (typeof uri !== 'string' || !uri) throw rpcError(-32602, 'Invalid params: uri is required');
       if (!RESOURCE_URIS.has(uri)) throw rpcError(-32602, `Unknown resource URI: ${uri}`);
-      reply(request.id, { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(graph.context({})) }] });
+      const context = await queueCall(async () => {
+        const before = graph.exportData();
+        const value = graph.context({});
+        try { await persist(); }
+        catch (error) {
+          try { graph.replaceData(await store.load()); }
+          catch { graph.replaceData(before); }
+          throw error;
+        }
+        return value;
+      });
+      reply(request.id, { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(context) }] });
     } else if (request.method === 'prompts/list') reply(request.id, { prompts: [{ name: 'shadowgraph_consequential_task', description: 'Use ShadowGraph before, during, and after consequential work.', arguments: [] }] });
     else if (request.method === 'prompts/get') {
       // P1-7: same failure as resources/read — any name returned the policy text.

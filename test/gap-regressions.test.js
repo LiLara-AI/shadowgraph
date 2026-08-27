@@ -25,6 +25,7 @@ import { join } from 'node:path';
 import {
   createShadowGraph,
   rebuildProjection,
+  SCHEMA_VERSION,
   DECISION_STATUSES,
   DOCUMENTED_DECISION_STATUSES,
   LEGACY_DECISION_STATUSES
@@ -729,7 +730,7 @@ describe('G4 (S2) — FIXED: the journal carries complete payloads and rebuilds 
     }
     assert.equal(entry.type, 'decision.recorded');
     assert.equal(entry.entityKind, 'decision');
-    assert.equal(entry.schemaVersion, 3);
+    assert.equal(entry.schemaVersion, SCHEMA_VERSION);
     // The write actor, NOT evidence about the claim (journal-contract security rule).
     assert.deepEqual(entry.provenance, { actor: 'claude', client: 'claude-cli', sessionId: 's1' });
     // Complete post-operation snapshot: the content the legacy event array omits.
