@@ -68,9 +68,9 @@ const graph = createShadowGraph({ now });   // `now` is an injectable clock, use
 
 ### Reconsideration
 
-`review(context)` — evaluates `reopenWhen` rules against **stored** facts, so it works after a restart. Caller-supplied `facts` override stored facts of the same key; string-form rules match `changedFacts` only.
+`review(context)` — evaluates `reopenWhen` rules against **stored** facts, so it works after a restart. Caller-supplied `facts` override stored facts of the same key; string-form rules match `changedFacts` only. `context`, `project`, `asOf`, `changedFacts`, `facts`, and nested fact values are preflight-validated before a review signal can be inserted.
 
-`maintain(options)` · `acknowledgeReview(id)`
+`maintain(options)` preflights its object shape, `now`, `changedFacts`, `facts`, and the complete delegated review input before staling decisions, expiring facts, or appending journal entries. A rejected core or MCP maintain call leaves state, review signals, journal sequence, revision, and durable state unchanged. MCP restores the pre-call graph snapshot on any domain-operation exception before persistence. · `acknowledgeReview(id)`
 
 ### Integrity and lifecycle
 
@@ -78,10 +78,10 @@ const graph = createShadowGraph({ now });   // `now` is an injectable clock, use
 | --- | --- |
 | `validate()` | Returns `{ valid, issues, counts }`. `valid` is false for errors and unsupported data; legacy and info diagnostics remain readable. Unknown confidence policies are preserved without v1 recalculation and reported as unsupported. |
 | `repairPlan()` | Always `apply: false`. Unknown statuses route to `manual_review`, never automatic mutation. |
-| `rebuild(options?)` | Replays this graph's own journal through `rebuildProjection`. |
+| `rebuild(options?)` | Replays this graph's own journal through `rebuildProjection`. Invalid baseline placement is skipped and returns `rebuildable:false` with stable issue code `invalid_projection_baseline_placement`; an incomplete fold is never presented as trusted. |
 | `purgeProject(project, options?)` | **Logical/tombstone by default.** `{ mode: 'hard' }` physically deletes and creates a declared `seq` gap. |
 | `redact(options?)` | Privacy-safe export; covers journal payloads. |
-| `exportData()` / `importData(data)` | Round-trip stable. Import preserves stored values and **never elevates trust**; legacy facts get `sourceClass` backfilled and collection-local ID remaps propagate through journal/idempotency dependencies. Direct import preflights final relation endpoints, journal type/identity/sequence, event IDs, review identities, idempotency namespaces, and plain-JSON values before mutation. Legacy orphaned idempotency payloads become explicit canonical entities rather than hidden cache-only state. Merge import cannot lower the live revision or journal high-water mark. |
+| `exportData()` / `importData(data)` | Round-trip stable. Import preserves stored values and **never elevates trust**; legacy facts get `sourceClass` backfilled and collection-local ID remaps propagate through journal/idempotency dependencies. Direct import preflights final relation endpoints, journal type/identity/sequence/baseline placement, event IDs, review identities, idempotency namespaces, and plain-JSON values before mutation. Legacy orphaned idempotency payloads become explicit canonical entities rather than hidden cache-only state. Merge import cannot lower the live revision, journal high-water mark, or existing replay epoch. |
 ## 3. `validate()` diagnostics — four severities
 
 | Severity | Meaning | Affects `valid` |
@@ -91,7 +91,7 @@ const graph = createShadowGraph({ now });   // `now` is an injectable clock, use
 | `unsupported` | From a newer/unknown schema or policy this build cannot interpret | **Yes** |
 | `info` | Declared discontinuity, e.g. a hard-purge `journal_gap` | No |
 
-Codes include `missing_relation_source`, `missing_relation_target`, `self_supersession`, `invalid_confidence`, `unknown_decision_status`, `unknown_verification_status`, `confidence_policy_mismatch`, `duplicate_active_fact_scope`, `duplicate_active_memory_scope` (errors) · `legacy_missing_decision_status`, `legacy_confidence_without_basis`, `legacy_fact_source_class` (legacy) · `unsupported_journal_entry`, `unsupported_journal_schema_version`, `unsupported_record_schema_version`, `unsupported_fact_schema_version`, `unsupported_confidence_policy` (unsupported) · `journal_gap` (info).
+Codes include `missing_relation_source`, `missing_relation_target`, `self_supersession`, `invalid_confidence`, `unknown_decision_status`, `unknown_verification_status`, `confidence_policy_mismatch`, `duplicate_active_fact_scope`, `duplicate_active_memory_scope`, `invalid_projection_baseline_placement` (errors) · `legacy_missing_decision_status`, `legacy_confidence_without_basis`, `legacy_fact_source_class` (legacy) · `unsupported_journal_entry`, `unsupported_journal_schema_version`, `unsupported_record_schema_version`, `unsupported_fact_schema_version`, `unsupported_confidence_policy` (unsupported) · `journal_gap` (info).
 
 This three-way split is the answer to "don't let legacy data fail silently and don't guess-repair it": legacy data is **named as legacy**, reported, and left alone.
 
@@ -102,20 +102,21 @@ import { createJsonFileStore, createStorage } from './src/storage.js';
 import { createSqliteStore } from './src/sqlite-storage.js';
 ```
 
-Both expose `load()` / `save(data)` / `close()`. State and journal are written in **one** atomic operation — `rename()` for JSON, `BEGIN IMMEDIATE`…`COMMIT` for SQLite — so they cannot diverge. HTTP serializes graph mutation with persistence; MCP serializes complete tool calls including restore. HTTP and MCP reload the last durable snapshot (or the pre-mutation snapshot if storage cannot be read) after an ordinary save failure. Markdown pull accepts a persistence callback only with a paired durable read-back callback, reloads the committed snapshot so live revision/state match storage before sync-state write, and therefore resolves commit-then-throw ambiguity. JSON saves additionally use an atomic lock file with a bounded wait and stale-lock recovery; a timeout is an explicit error and SQLite is recommended for sustained multi-process writers. `createSqliteStore` requires a Node build with `node:sqlite` (stability 1.2, Release Candidate) and throws a clear error otherwise; tests skip on `/requires Node/`.
+Both expose `load()` / `save(data)` / `close()`. State and journal are written in **one** atomic operation — `rename()` for JSON, `BEGIN IMMEDIATE`…`COMMIT` for SQLite — so they cannot diverge. Revisions are non-negative safe-integer concurrency tokens; a save or restore that cannot mint a strictly greater safe integer rejects with `revision_overflow` instead of rounding or wrapping. HTTP serializes graph mutation with persistence; MCP serializes complete tool calls including restore. HTTP and MCP reload the last durable snapshot (or the pre-mutation snapshot if storage cannot be read) after an ordinary save failure. Markdown pull accepts a persistence callback only with a paired durable read-back callback, reloads the committed snapshot so live revision/state match storage before sync-state write, and therefore resolves commit-then-throw ambiguity. JSON saves/restores and SQLite create/load/save/backup/restore operations use the same per-destination atomic `.lock` fence across handles and processes. A writer that overlaps restore waits and is checked against the installed revision, or fails explicitly; timeout is `storage_lock_timeout`, stale abandoned locks are recovered, and same-async-chain callback reentry is `storage_lock_reentrant` rather than a deadlock. SQLite opens the configured path per operation and closes it before releasing the fence, so no idle handle can pin the destination or WAL/SHM sidecars and a post-restore operation always opens the installed file. `createSqliteStore` requires a Node build with `node:sqlite` (stability 1.2, Release Candidate) and throws a clear error otherwise; tests skip on `/requires Node/`.
 
-JSON and SQLite restore apply the shared domain validator even for direct JavaScript calls; callers may add validation but cannot disable the built-in checks. SQLite additionally uses verified `VACUUM INTO` snapshots for both the source and the live rollback state, so committed WAL contents are folded into standalone files, and rejects corrupt journal folds, sequence gaps not enumerated by a persisted hard-purge `removedJournalSequences` ledger, or a records/facts/relations/idempotency projection that differs from live state. The rollback snapshot remains until the installed replacement has opened, prepared, loaded, and passed validation. Recovery inspects an existing candidate read-only before any write-capable reopen, so checking a missing destination cannot create an empty database. Caught post-replacement failures restore, reopen, and payload-compare the old state; an unconfirmed recovery is reported explicitly, retains its rollback artifact, and latches the HTTP server degraded so every authenticated non-health route request returns `503` until restart/manual recovery. HTTP restore is serialized with persistence and rejects concurrent mutating requests—including `/context`, which can generate review signals—before graph mutation. This is **process-level rollback safety**, not a claim of crash consistency, directory-`fsync` durability, or coordination with another process writing the same path. Full contract: [SQLite restore](handoffs/sqlite-restore-contract.md).
+JSON and SQLite restore apply the shared domain validator even for direct JavaScript calls; callers may add validation but cannot disable the built-in checks. The same validator is used by direct import/replacement and the CLI/HTTP/MCP restore surfaces. Duplicate, ordinary midstream, rewind, wrong-epoch, and terminal-rewriting baselines reject as `invalid_projection_baseline_placement` before replacement; the narrowly compatible migration forms are defined by [ADR-0007](adr/0007-canonical-journal-baseline-placement.md). A restore copies the source's **semantic content**—records, facts, relations, review state, idempotency, events, and journal—but does not reuse the backup's concurrency token. While holding the destination fence, restore validates the source revision (a missing legacy revision means `0`), reads the current destination revision, and installs `max(destinationRevision, sourceRevision) + 1`. The source backup bytes are never rewritten. The activated in-memory graph and a fresh durable reopen expose that exact installed revision, so every payload captured before restore remains stale and raises `RevisionConflictError`; it cannot become valid again after a post-restore write. Same-path restore remains unchanged. If either high-water mark is `Number.MAX_SAFE_INTEGER`, restore rejects with `revision_overflow` before replacement.
+
+Hard-purge `removedJournalSequences` values must be positive safe integers, unique per marker, actual replay-range gaps, and strictly earlier than their surviving marker; every gap needs a later marker, and coverage uses bounded sorted-range arithmetic rather than expanding absent sequences. SQLite additionally uses verified `VACUUM INTO` snapshots for both the source and the live rollback state, so committed WAL contents are folded into standalone files, and rejects corrupt journal folds or a records/facts/relations/idempotency projection that differs from live state. The rollback snapshot remains until the installed replacement has opened, prepared, loaded, and passed validation. Recovery inspects an existing candidate read-only before any write-capable reopen, so checking a missing destination cannot create an empty database. Caught post-replacement failures restore, reopen, and payload-compare the old state, including its exact old revision; JSON recovery restores the exact old destination bytes. An unconfirmed recovery is reported explicitly, retains its rollback artifact, and latches the HTTP server degraded so every authenticated non-health route request returns `503` until restart/manual recovery. HTTP restore is serialized with persistence and rejects concurrent mutating requests—including `/context`, which can generate review signals—before graph mutation. External save/restore overlap is also serialized by the destination fence. This is **process-level rollback safety**, not a claim of crash consistency or directory-`fsync` durability. Full contract: [SQLite restore](handoffs/sqlite-restore-contract.md).
+
+JSON restore inventories `.rollback`, `.recovery`, and `.tmp` paths without replacing the primary restore outcome when `stat` itself fails. `json_restore_recovery_unconfirmed` always remains the error code; `retainedArtifacts` lists files confirmed present, while `unknownArtifacts` contains `{ path, code }` entries whose existence could not be determined. HTTP and MCP latch every graph read/write closed before accepting a later operation; authenticated HTTP health and MCP error diagnostics carry the same inventory. The intentionally public static dashboard never includes recovery diagnostics.
+
+After a successful JSON restore or a confirmed rollback, cleanup attempts and then inspects every artifact path. An anomalous cleanup result/error includes `retainedArtifacts`, `unknownArtifacts`, and `artifactCleanup: { status, errors }`, where `status` is `complete`, `incomplete`, or `unknown` and each cleanup error is `{ path, code }`. Final inspection is authoritative: a delete-that-then-throws is reported as `status: "complete"` with an empty `retainedArtifacts`, never as a retained file. Ordinary clean success keeps the existing `{ source, destination, records }` result shape.
 
 ### U-1 — Verification channel
 
-**Status: accepted — unverified-only for 0.31.0.** No agent-accessible trusted writer, authorization boundary, or re-checkable evidence mechanism exists. Therefore:
+**Status: implemented in schema 5.** Ordinary fact writes still cannot create `verificationStatus: 'verified'`. A graph/server may be constructed with a separate local verifier whose trust store is not caller input. `verifyFact({factId,evidencePath})` accepts only those two fields and verifies a closed-shape Ed25519 attestation inside a configured evidence root. The signed digest binds the canonical fact claim, verifier identity, evidence reference, method, and verification timestamp. Invalid/tampered evidence rejects before fact, event, or journal mutation. Signed verification survives export/import, journal rebuild, and JSON/SQLite restart; expired facts cannot be promoted back to effective verification during import.
 
-- tool input cannot create `verificationStatus: 'verified'`;
-- legacy imported `verified` values are preserved read-only for compatibility and reported as legacy-compatible data;
-- `sourceClass`, `sourceRaw`, confidence, and evidence are claims or policy inputs, not proof;
-- confidence calibration is not established.
-
-A future trusted channel requires a separately authorized writer and regression-tested authorization boundary; it is deferred rather than implied by this API.
+MCP exposes `shadowgraph_verify_fact` only in full mode when `SHADOWGRAPH_VERIFIER_CONFIG` is set. The caller never supplies the trust key, verifier identity, signature, method, or target status through tool arguments.
 
 ### U-2 — Privileged tool re-verification
 
@@ -123,25 +124,25 @@ A future trusted channel requires a separately authorized writer and regression-
 
 ### U-3 — Legacy verified values
 
-**Status: accepted provisional.** Preserve legacy values during import/export to avoid destructive rewriting, but do not allow ordinary agent writes or replay to mint them. A migration marker is deferred until U-1 is resolved.
+**Status: implemented migration.** A schema-1–4 unsigned `verified` value becomes effective `unverified` with `legacyVerificationStatus: 'verified'`. It remains visible for audit but is never trusted as a signed attestation.
 
 ### L-1 — Entry state
 
-**Status: deferred.** `active` remains the load-bearing default validity state; changing it would alter context semantics and is outside release scope.
+**Status: implemented.** New decisions enter `proposed`. Current/actionable context is defined by the explicit current-state set rather than a literal `active` value. Schema-4 `active` migrates to `proposed` with `migration.legacyDecisionStatus`.
 
 ### L-2 — Transition enforcement
 
-**Status: deferred.** Status values are canonicalized, but arbitrary valid-state transitions remain allowed until a normative product transition contract is accepted.
+**Status: implemented.** `DECISION_TRANSITIONS` defines every legal caller transition. `stale` and `superseded` are system-owned. Illegal transitions reject before decision/event/journal mutation.
 
 ### L-5 — `stale` / `archived`
 
-**Status: deferred.** They remain legacy compatibility states with no producer; no semantic alias or migration is invented.
+**Status: implemented.** `maintain()` produces `stale` when a current decision reaches `reviewAfter`; callers cannot self-assign it. `archived` is an explicit terminal disposition, distinct from `abandoned`, and excluded from current context and automatic review.
 
 ### Review-signal acknowledgment audit scope
 
 **Status: accepted provisional.** Acknowledgment is persisted in the projection/storage snapshot but is not journalled or replayed. Rebuild therefore reconstructs domain records/facts/relations/confidence/idempotency, not review-signal acknowledgment history. Actor/session audit for acknowledgment is deferred; the product currently requires review signals, not an immutable acknowledgment audit trail.
 
-**MCP** (`npm run mcp`) — protocol `2024-11-05`; see [MCP compatibility](mcp-compatibility.md) for the honest version statement.
+**MCP** (`npm run mcp`) — dual-era legacy `2024-11-05` plus modern `2026-07-28`; see [MCP compatibility](mcp-compatibility.md).
 **HTTP** (`npm start`) — optional Bearer auth.
 **CLI** (`npx shadowgraph`).
 

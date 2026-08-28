@@ -19,7 +19,8 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
+import { generateKeyPairSync } from 'node:crypto';
+import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -32,6 +33,7 @@ import {
 } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
+import { createFactAttestation, createLocalEvidenceVerifier } from '../src/verification.js';
 
 // Smallest decision that carries a machine-checkable reopen condition.
 function decisionWithReopenRule(graph, project = 'p') {
@@ -426,17 +428,17 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
     } finally { reopened.close(); }
   });
 
-  it('ACCEPTANCE (documented residual risk): import PRESERVES a stored verified status without elevating it', () => {
-    // Import is a migration/restore path, not an agent assertion. Rewriting
-    // stored data would break round-trip stability and violate the security
-    // doc's "do not rewrite user data in place" rule. In a local-first
-    // single-user threat model, filesystem write access already implies
-    // ownership. Contract §6; open question U-3.
+  it('ACCEPTANCE U-1: legacy verified data without a signed attestation is preserved as an audit marker, not trusted', () => {
+    // Schema 1–4 could persist `verified` without cryptographic proof. Keeping
+    // that value trusted would let an edited import bypass the new verifier.
+    // Migration therefore retains the old claim explicitly while downgrading
+    // the effective status until a configured verifier checks signed evidence.
     const graph = createShadowGraph();
     graph.importData({
       facts: [{ id: 'legacy', key: 'old', value: 1, source: 'human_confirmed', verificationStatus: 'verified', status: 'active' }]
     });
-    assert.equal(graph.exportData().facts[0].verificationStatus, 'verified');
+    assert.equal(graph.exportData().facts[0].verificationStatus, 'unverified');
+    assert.equal(graph.exportData().facts[0].legacyVerificationStatus, 'verified');
   });
 
   it('ACCEPTANCE (regression guard): the legacy `source` field still mirrors the class', () => {
@@ -447,8 +449,45 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
     assert.equal(fact.source, fact.sourceClass);
   });
 
-  it.todo('BLOCKED ON U-1: define how a fact can ever legitimately become `verified` (no verification channel exists yet)');
-  it.todo('BLOCKED ON U-1: accept a re-checkable evidence reference and verify it without network access from MCP stdio');
+  it('ACCEPTANCE U-1: a separately trusted Ed25519 verifier can legitimately mark a fact verified', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-u1-channel-'));
+    const keys = generateKeyPairSync('ed25519');
+    const verifier = createLocalEvidenceVerifier({ allowedEvidenceRoot: directory, trustedVerifiers: { approver: keys.publicKey } });
+    const graph = createShadowGraph({ verifier });
+    const fact = graph.addFact({ id: 'u1-fact', key: 'release', value: 'ready', sourceClass: 'production_verified' });
+    const evidencePath = join(directory, 'evidence.json');
+    await writeFile(evidencePath, JSON.stringify(createFactAttestation({
+      fact, verifierIdentity: 'approver', evidenceReference: 'ticket:42',
+      verifiedAt: '2026-08-27T00:00:00.000Z', privateKey: keys.privateKey
+    })));
+
+    const result = await graph.verifyFact({ factId: fact.id, evidencePath });
+    assert.equal(result.fact.verificationStatus, 'verified');
+    assert.equal(result.fact.verification.verifierIdentity, 'approver');
+    assert.equal(result.fact.verification.evidenceReference, 'ticket:42');
+    assert.equal(result.fact.verification.verificationMethod, 'ed25519-local-evidence-v1');
+    assert.equal(result.fact.verification.verifiedAt, '2026-08-27T00:00:00.000Z');
+  });
+
+  it('ACCEPTANCE U-1: offline evidence is re-checkable and rejects a modified document or missing reference', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-u1-offline-'));
+    const keys = generateKeyPairSync('ed25519');
+    const verifier = createLocalEvidenceVerifier({ allowedEvidenceRoot: directory, trustedVerifiers: { approver: keys.publicKey } });
+    const graph = createShadowGraph({ verifier });
+    const fact = graph.addFact({ id: 'u1-offline-fact', key: 'build', value: 'green' });
+    const evidence = createFactAttestation({
+      fact, verifierIdentity: 'approver', evidenceReference: 'ci:4821',
+      verifiedAt: '2026-08-27T00:00:00.000Z', privateKey: keys.privateKey
+    });
+    const evidencePath = join(directory, 'evidence.json');
+    await writeFile(evidencePath, JSON.stringify({ ...evidence, evidenceReference: 'ci:tampered' }));
+    await assert.rejects(graph.verifyFact({ factId: fact.id, evidencePath }), /signature/i);
+    const missingReference = { ...evidence };
+    delete missingReference.evidenceReference;
+    await writeFile(evidencePath, JSON.stringify(missingReference));
+    await assert.rejects(graph.verifyFact({ factId: fact.id, evidencePath }), /evidenceReference/);
+    assert.equal(graph.exportData().facts[0].verificationStatus, 'unverified');
+  });
 });
 
 describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', () => {
@@ -458,8 +497,8 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
   // to the code without being classified in the contract shows up here.
   //
   // Contract: docs/handoffs/lifecycle-contract.md
-  //  - 13 canonical stored states: the 9 documented execution states plus
-  //    active (validity) · aging (derived) · stale, archived (deprecated);
+  //  - schema 5 has 11 canonical states: the 9 documented execution states plus
+  //    system-owned stale and explicit terminal archived;
   //  - FORMATTING aliases only (case, hyphen/underscore). No semantic aliases:
   //    `archived` is NOT `abandoned`, `active` is NOT `executed`;
   //  - updateDecisionStatus() stores and returns the canonical value;
@@ -467,33 +506,56 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
   //  - importData() preserves stored values; validate() REPORTS unknown ones
   //    rather than rewriting them.
 
-  it('ACCEPTANCE: all 9 documented states are accepted and stored canonically', () => {
-    const graph = createShadowGraph();
+  it('ACCEPTANCE: all 9 documented states are reachable and stored canonically', () => {
     assert.equal(DOCUMENTED_DECISION_STATUSES.length, 9);
 
-    for (const status of DOCUMENTED_DECISION_STATUSES) {
+    const paths = {
+      proposed: [], planned: ['planned'], in_progress: ['planned', 'in_progress'],
+      executed: ['planned', 'in_progress', 'executed'],
+      validated: ['planned', 'in_progress', 'executed', 'validated'],
+      failed: ['planned', 'in_progress', 'failed'],
+      reconsidered: ['planned', 'in_progress', 'failed', 'reconsidered'],
+      abandoned: ['abandoned']
+    };
+    for (const [status, path] of Object.entries(paths)) {
+      const graph = createShadowGraph();
       const decision = graph.addDecision({ title: 'T', chosen: 'C' });
-      assert.equal(graph.updateDecisionStatus(decision.id, status).status, status, `${status} must be accepted`);
+      for (const step of path) graph.updateDecisionStatus(decision.id, step);
+      assert.equal(graph.exportData().records[0].status, status, `${status} must be reachable`);
     }
+    const superseded = createShadowGraph();
+    const previous = superseded.addDecision({ title: 'Old', chosen: 'A' });
+    const replacement = superseded.addDecision({ title: 'New', chosen: 'B' });
+    superseded.supersedeDecision({ decisionId: previous.id, replacementId: replacement.id });
+    assert.equal(superseded.exportData().records.find((item) => item.id === previous.id).status, 'superseded');
   });
 
   it('ACCEPTANCE: the 5 previously-rejected states now work', () => {
     // These threw `Invalid decision status` before Phase 3.
     const graph = createShadowGraph();
-    for (const status of ['planned', 'in_progress', 'executed', 'reconsidered', 'abandoned']) {
+    const paths = {
+      planned: ['planned'],
+      in_progress: ['planned', 'in_progress'],
+      executed: ['planned', 'in_progress', 'executed'],
+      reconsidered: ['planned', 'in_progress', 'failed', 'reconsidered'],
+      abandoned: ['abandoned']
+    };
+    for (const [status, path] of Object.entries(paths)) {
       const decision = graph.addDecision({ title: 'T', chosen: 'C' });
-      assert.equal(graph.updateDecisionStatus(decision.id, status).status, status);
+      for (const step of path) graph.updateDecisionStatus(decision.id, step);
+      assert.equal(graph.exportData().records.find((item) => item.id === decision.id).status, status);
     }
   });
 
-  it('ACCEPTANCE: the 4 legacy states are retained for backward compatibility', () => {
+  it('ACCEPTANCE: schema 4 lifecycle states migrate explicitly without dropping records', () => {
     const graph = createShadowGraph();
-    assert.deepEqual(LEGACY_DECISION_STATUSES, ['active', 'aging', 'stale', 'archived']);
-
-    for (const status of LEGACY_DECISION_STATUSES) {
-      const decision = graph.addDecision({ title: 'T', chosen: 'C' });
-      assert.equal(graph.updateDecisionStatus(decision.id, status).status, status);
-    }
+    assert.deepEqual(LEGACY_DECISION_STATUSES, ['active', 'aging']);
+    graph.importData({ schemaVersion: 4, records: ['active', 'aging', 'stale', 'archived'].map((status, index) => ({
+      id: `legacy-state-${index}`, kind: 'decision', schemaVersion: 4, project: 'app',
+      title: 'Legacy', chosen: 'C', status, alternatives: []
+    })) });
+    assert.deepEqual(graph.exportData().records.map((item) => item.status), ['proposed', 'stale', 'stale', 'archived']);
+    assert.deepEqual(graph.exportData().records.slice(0, 2).map((item) => item.migration.legacyDecisionStatus), ['active', 'aging']);
   });
 
   it('ACCEPTANCE: formatting aliases resolve to the canonical value', () => {
@@ -512,8 +574,8 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
     // `archived` overlaps `abandoned` in spirit but must NOT be rewritten to it:
     // that would silently change what the record claims about itself.
     assert.equal(graph.updateDecisionStatus(decision.id, 'archived').status, 'archived');
-    // `active` is a VALIDITY state, not the execution rung `executed`.
-    assert.equal(graph.updateDecisionStatus(decision.id, 'active').status, 'active');
+    // Removed schema-4 states are not silently remapped by the runtime API.
+    assert.throws(() => graph.updateDecisionStatus(decision.id, 'active'), /Invalid decision status: active/);
   });
 
   it('ACCEPTANCE: the stored value is canonical, so search({status}) matches it', () => {
@@ -549,25 +611,23 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
     assert.equal(graph.exportData().records[0].status, before, 'no partial write occurred');
   });
 
-  it('ACCEPTANCE (regression guard): the default entry state is still `active`', () => {
-    // Deliberately unchanged — context().activeDecisions and maintain() depend
-    // on it, and test/v02.test.js / test/v030.test.js assert it. Whether the
-    // entry state SHOULD be `proposed` is open question L-1.
+  it('ACCEPTANCE L-1 (regression guard): the default entry state is `proposed`', () => {
     const graph = createShadowGraph();
-    assert.equal(graph.addDecision({ title: 'T', chosen: 'C' }).status, 'active');
+    assert.equal(graph.addDecision({ title: 'T', chosen: 'C' }).status, 'proposed');
   });
 
-  it('ACCEPTANCE: importing legacy data with all 4 legacy states does not break the graph', () => {
+  it('ACCEPTANCE: importing schema 4 data with all 4 former extra states does not break the graph', () => {
     const graph = createShadowGraph();
     graph.importData({
-      records: LEGACY_DECISION_STATUSES.map((status, index) => ({
-        id: `legacy-${index}`, kind: 'decision', title: 'Legacy', chosen: 'C', status, alternatives: []
+      schemaVersion: 4,
+      records: ['active', 'aging', 'stale', 'archived'].map((status, index) => ({
+        id: `legacy-${index}`, kind: 'decision', schemaVersion: 4, project: 'app', title: 'Legacy', chosen: 'C', status, alternatives: []
       }))
     });
 
     assert.equal(graph.stats().decisions, 4);
-    assert.deepEqual(graph.exportData().records.map((item) => item.status), LEGACY_DECISION_STATUSES);
-    assert.equal(graph.validate().valid, true, 'legacy states are canonical, so validation passes');
+    assert.deepEqual(graph.exportData().records.map((item) => item.status), ['proposed', 'stale', 'stale', 'archived']);
+    assert.equal(graph.validate().valid, true, 'the migrated schema-5 states are canonical');
   });
 
   it('ACCEPTANCE: an unknown STORED status is preserved but reported, not silently accepted', () => {
@@ -650,18 +710,83 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
   it('ACCEPTANCE (drift guard): every canonical state is classified in the contract', () => {
     // If someone adds a state to DECISION_STATUSES without classifying it as
     // documented-or-legacy, this fails — keeping code and contract in step.
-    assert.equal(DECISION_STATUSES.length, 13);
+    assert.equal(DECISION_STATUSES.length, 11);
     assert.deepEqual(
       [...DECISION_STATUSES].sort(),
-      [...DOCUMENTED_DECISION_STATUSES, ...LEGACY_DECISION_STATUSES].sort()
+      [...DOCUMENTED_DECISION_STATUSES, 'stale', 'archived'].sort()
     );
     // No duplicates across the two groups.
     assert.equal(new Set(DECISION_STATUSES).size, DECISION_STATUSES.length);
   });
 
-  it.todo('BLOCKED ON L-1: decide whether the entry state should be `proposed` instead of `active`');
-  it.todo('BLOCKED ON L-2: decide whether the documented transition order is normative and should be enforced');
-  it.todo('BLOCKED ON L-5: give `stale`/`archived` a meaning or formally deprecate them with a migration');
+  it('ACCEPTANCE L-1: new decisions enter proposed and remain current in context across migration and restart', async () => {
+    const graph = createShadowGraph();
+    const created = graph.addDecision({ id: 'new-entry', project: 'app', title: 'Entry', chosen: 'A' });
+    assert.equal(created.status, 'proposed');
+    assert.deepEqual(graph.context({ project: 'app' }).activeDecisions.map((item) => item.id), ['new-entry']);
+
+    const legacy = createShadowGraph();
+    legacy.importData({ schemaVersion: 4, records: [{
+      id: 'legacy-active', kind: 'decision', schemaVersion: 4, project: 'app',
+      title: 'Legacy', chosen: 'A', status: 'active', alternatives: []
+    }] });
+    assert.equal(legacy.exportData().records[0].status, 'proposed');
+    assert.equal(legacy.exportData().records[0].migration.legacyDecisionStatus, 'active');
+
+    const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-l1-restart-'));
+    const store = createJsonFileStore(join(directory, 'data.json'));
+    await store.save(graph.exportData());
+    const restarted = createShadowGraph();
+    restarted.importData(await store.load());
+    assert.equal(restarted.exportData().records[0].status, 'proposed');
+    assert.equal(restarted.context({ project: 'app' }).activeDecisions.length, 1);
+  });
+
+  it('ACCEPTANCE L-2: legal transitions are explicit and illegal transitions reject before any partial write', () => {
+    const graph = createShadowGraph();
+    const decision = graph.addDecision({ id: 'lifecycle', project: 'app', title: 'Lifecycle', chosen: 'A' });
+    for (const status of ['planned', 'in_progress', 'executed', 'validated', 'reconsidered', 'planned']) {
+      assert.equal(graph.updateDecisionStatus(decision.id, status).status, status);
+    }
+
+    const illegal = createShadowGraph();
+    const fresh = illegal.addDecision({ id: 'illegal', project: 'app', title: 'Illegal', chosen: 'A' });
+    const before = illegal.exportData();
+    assert.throws(() => illegal.updateDecisionStatus(fresh.id, 'validated'), /Illegal decision status transition: proposed -> validated/);
+    assert.deepEqual(illegal.exportData(), before);
+    assert.throws(() => illegal.updateDecisionStatus(fresh.id, 'stale'), /stale is system-owned/);
+    assert.deepEqual(illegal.exportData(), before);
+
+    assert.equal(illegal.updateDecisionStatus(fresh.id, 'archived').status, 'archived');
+    const archived = illegal.exportData();
+    assert.throws(() => illegal.updateDecisionStatus(fresh.id, 'planned'), /Illegal decision status transition: archived -> planned/);
+    assert.deepEqual(illegal.exportData(), archived);
+  });
+
+  it('ACCEPTANCE L-5: maintain produces stale at the review deadline and archived is an explicit terminal disposition', () => {
+    const graph = createShadowGraph({ now: () => '2026-08-27T00:00:00.000Z' });
+    const due = graph.addDecision({
+      id: 'due', project: 'app', title: 'Due', chosen: 'A', reviewAfter: '2026-08-26T00:00:00.000Z'
+    });
+    const maintenance = graph.maintain({ now: '2026-08-27T00:00:00.000Z' });
+    assert.deepEqual(maintenance.staleDecisionIds, [due.id]);
+    assert.equal(graph.search('', { project: 'app', status: 'stale' }).page.total, 1);
+    assert.equal(graph.context({ project: 'app' }).activeDecisions.length, 0);
+    assert.equal(graph.context({ project: 'app' }).openReviews.length, 1);
+
+    const archived = graph.addDecision({ id: 'archived', project: 'app', title: 'Archive me', chosen: 'A' });
+    graph.updateDecisionStatus(archived.id, 'archived');
+    assert.equal(graph.search('', { project: 'app', status: 'archived' }).page.total, 1);
+    assert.equal(graph.context({ project: 'app' }).activeDecisions.some((item) => item.id === archived.id), false);
+    assert.equal(graph.review({ project: 'app' }).some((item) => item.decisionId === archived.id), false);
+
+    const migrated = createShadowGraph();
+    migrated.importData({ schemaVersion: 4, records: [
+      { id: 'old-aging', kind: 'decision', schemaVersion: 4, project: 'app', title: 'Old aging', chosen: 'A', status: 'aging', alternatives: [] },
+      { id: 'old-archived', kind: 'decision', schemaVersion: 4, project: 'app', title: 'Old archived', chosen: 'A', status: 'archived', alternatives: [] }
+    ] });
+    assert.deepEqual(migrated.exportData().records.map((item) => item.status), ['stale', 'archived']);
+  });
 });
 
 describe('G4 (S2) — FIXED: the journal carries complete payloads and rebuilds state', () => {
@@ -808,7 +933,7 @@ describe('G4 (S2) — FIXED: the journal carries complete payloads and rebuilds 
     graph.addFact({ project: 'a', key: 'k', value: 1 });
     graph.addFact({ project: 'a', key: 'k', value: 2 });
     graph.addFact({ project: 'b', key: 'other', value: true, idempotencyKey: 'idem-1' });
-    graph.updateDecisionStatus(first.id, 'validated');
+    for (const status of ['planned', 'in_progress', 'executed', 'validated']) graph.updateDecisionStatus(first.id, status);
     graph.setOutcome(first.id, { status: 'mixed', sourceClass: 'human_confirmed' });
     graph.supersedeDecision({ decisionId: first.id, replacementId: second.id });
 
@@ -1231,10 +1356,10 @@ describe('G6 (S1) — FIXED: every read path declares its completeness', () => {
   });
 
   it('ACCEPTANCE: the applied filters and scope are echoed back', () => {
-    const result = graphWithFive().search('decision', { project: 'p', status: 'active' });
-    assert.deepEqual(result.completeness.scope.filters, { project: 'p', status: 'active' });
+    const result = graphWithFive().search('decision', { project: 'p', status: 'proposed' });
+    assert.deepEqual(result.completeness.scope.filters, { project: 'p', status: 'proposed' });
     assert.equal(result.completeness.scope.query, 'decision');
-    assert.deepEqual(result.items[0].filters, { project: 'p', status: 'active' });
+    assert.deepEqual(result.items[0].filters, { project: 'p', status: 'proposed' });
   });
 
   it('ACCEPTANCE: the journal read path is paginated too', () => {
@@ -1670,8 +1795,10 @@ describe('ADVERSARIAL: bugs found by end-to-end review, now fixed', () => {
         assert.equal(match?.verificationStatus, 'verified', `rebuild invented verification for ${fact.id}`);
       }
     }
-    // The legacy `verified` is preserved (U-3), the new self-asserted one is not.
-    assert.equal(live.find((item) => item.id === 'legacy').verificationStatus, 'verified');
+    // Legacy verification remains visible only as an audit marker; neither it
+    // nor the new self-asserted source claim becomes effective verification.
+    assert.equal(live.find((item) => item.id === 'legacy').verificationStatus, 'unverified');
+    assert.equal(live.find((item) => item.id === 'legacy').legacyVerificationStatus, 'verified');
     assert.equal(live.find((item) => item.key === 'y').verificationStatus, 'unverified');
   });
 

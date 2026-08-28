@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createShadowGraphServer } from '../src/server.js';
 import { createJsonFileStore } from '../src/storage.js';
+import { SCHEMA_VERSION } from '../src/shadowgraph.js';
 
 async function startServer(options = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-http-'));
@@ -120,8 +121,7 @@ test('CLI persists a decision and reports stats', async () => {
   });
   await run(['decision', JSON.stringify({ title: 'Testing', chosen: 'Node' })]);
   const stats = await run(['stats']);
-  // Schema 4 adds scoped memory while preserving the journal and existing stats.
-  assert.deepEqual(stats, { schemaVersion: 4, total: 1, decisions: 1, attempts: 0, facts: 0, relations: 0, reviewSignals: 0, events: 1, journal: 1 });
+  assert.deepEqual(stats, { schemaVersion: SCHEMA_VERSION, total: 1, decisions: 1, attempts: 0, facts: 0, relations: 0, reviewSignals: 0, events: 1, journal: 1 });
   assert.equal((await readFile(file, 'utf8')).includes('Testing'), true);
 });
 
@@ -259,6 +259,23 @@ test('MCP lists tools and returns parse errors', async () => {
   }
   // The fact tool must not advertise `verified` as a settable value (G2).
   assert.deepEqual(tools.find((tool) => tool.name === 'shadowgraph_record_fact').inputSchema.properties.verificationStatus.enum, ['unverified', 'contradicted']);
+  // Strict MCP clients require portable JSON Schema: no empty schemas and no
+  // array-valued `type` unions. Fact values remain arbitrary JSON, but that
+  // contract must be declared explicitly rather than represented as `{}`.
+  const decisionSchema = tools.find((tool) => tool.name === 'shadowgraph_record_decision').inputSchema;
+  const factSchema = tools.find((tool) => tool.name === 'shadowgraph_record_fact').inputSchema;
+  assert.ok(decisionSchema.properties.evidence.items.anyOf, 'evidence items declare string/object alternatives');
+  assert.ok(factSchema.properties.value.anyOf, 'fact.value declares the JSON value contract');
+  const typeArrays = [];
+  const inspectSchema = (value, path = 'inputSchema') => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value.type)) typeArrays.push(path);
+    for (const [key, child] of Object.entries(value)) {
+      if (child && typeof child === 'object') inspectSchema(child, `${path}.${key}`);
+    }
+  };
+  for (const tool of tools) inspectSchema(tool.inputSchema, tool.name);
+  assert.deepEqual(typeArrays, []);
   // Purge must advertise that logical is the default and hard is explicit (G5).
   assert.deepEqual(tools.find((tool) => tool.name === 'shadowgraph_purge').inputSchema.properties.mode.enum, ['logical', 'hard']);
 });

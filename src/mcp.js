@@ -1,21 +1,76 @@
 import { createInterface } from 'node:readline';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { stat as fsStat, unlink as fsUnlink } from 'node:fs/promises';
 import { createStorage } from './storage.js';
-import { createShadowGraph, SOURCE_CLASSES, DECISION_STATUSES, OUTCOME_STATUSES, CONTENT_SEARCH_FIELDS, MEMORY_TYPES } from './shadowgraph.js';
+import { createShadowGraph, isCommittedRejection, SOURCE_CLASSES, DECISION_STATUSES, OUTCOME_STATUSES, CONTENT_SEARCH_FIELDS, MEMORY_TYPES } from './shadowgraph.js';
 import { createEmbeddingClient } from './embedding.js';
 import { VERSION } from './version.js';
-import { validateRestorePayload } from './restore-validation.js';
+import { createRestoreValidator } from './restore-validation.js';
+import { loadLocalEvidenceVerifier } from './verification.js';
 
 const file = process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json';
-const store = await createStorage({ file });
+const injectedRestoreFaultStages = process.env.NODE_ENV === 'test'
+  ? new Set(String(process.env.SHADOWGRAPH_TEST_RESTORE_FAULT_STAGES ?? '').split(',').map((value) => value.trim()).filter(Boolean))
+  : new Set();
+function injectedRestoreFault(stage) {
+  if (injectedRestoreFaultStages.has(stage)) throw new Error(`injected MCP restore fault at ${stage}`);
+}
+const injectedStatErrorSuffix = process.env.NODE_ENV === 'test'
+  ? process.env.SHADOWGRAPH_TEST_RESTORE_STAT_ERROR_SUFFIX
+  : undefined;
+const injectedUnlinkErrorSuffix = process.env.NODE_ENV === 'test'
+  ? process.env.SHADOWGRAPH_TEST_RESTORE_UNLINK_ERROR_SUFFIX
+  : undefined;
+const injectedRestoreFs = injectedStatErrorSuffix || injectedUnlinkErrorSuffix ? {
+  ...(injectedStatErrorSuffix ? {
+    async stat(path) {
+      if (String(path).endsWith(injectedStatErrorSuffix)) {
+        const error = new Error(`injected MCP restore stat fault for ${injectedStatErrorSuffix}`);
+        error.code = process.env.SHADOWGRAPH_TEST_RESTORE_STAT_ERROR_CODE ?? 'EACCES';
+        throw error;
+      }
+      return fsStat(path);
+    }
+  } : {}),
+  ...(injectedUnlinkErrorSuffix ? {
+    async unlink(path) {
+      if (String(path).endsWith(injectedUnlinkErrorSuffix)) {
+        const error = new Error(`injected MCP restore unlink fault for ${injectedUnlinkErrorSuffix}`);
+        error.code = process.env.SHADOWGRAPH_TEST_RESTORE_UNLINK_ERROR_CODE ?? 'EACCES';
+        throw error;
+      }
+      return fsUnlink(path);
+    }
+  } : {})
+} : undefined;
+const verifier = process.env.SHADOWGRAPH_VERIFIER_CONFIG
+  ? await loadLocalEvidenceVerifier(process.env.SHADOWGRAPH_VERIFIER_CONFIG)
+  : null;
+const injectedClockFile = process.env.NODE_ENV === 'test'
+  ? process.env.SHADOWGRAPH_TEST_CLOCK_FILE
+  : undefined;
+const injectedNow = injectedClockFile
+  ? () => readFileSync(injectedClockFile, 'utf8').trim()
+  : undefined;
+const injectedSaveFaultFile = process.env.NODE_ENV === 'test'
+  ? process.env.SHADOWGRAPH_TEST_SAVE_FAULT_FILE
+  : undefined;
+function injectedSaveFault(stage) {
+  if (!injectedSaveFaultFile) return;
+  if (readFileSync(injectedSaveFaultFile, 'utf8').trim() !== stage) return;
+  writeFileSync(injectedSaveFaultFile, `triggered:${stage}`, 'utf8');
+  throw new Error(`injected MCP persistence fault at ${stage}`);
+}
+const restoreValidator = createRestoreValidator({ verifier });
+const store = await createStorage({ file, restoreValidator, restoreFault: injectedRestoreFault, saveFault: injectedSaveFault });
 // P1-3: single source of truth — package.json via src/version.js.
 const MCP_VERSION = VERSION;
-// Protocol version actually IMPLEMENTED by this server. The current MCP spec is
-// 2026-07-28 (no initialize handshake, mandatory server/discover); this server
-// implements the legacy 2024-11-05 handshake and is therefore a "Legacy-era"
-// server in that spec's own terms. Advertising anything newer without client
-// interoperability testing would be a false claim — see docs/mcp-compatibility.md.
-const PROTOCOL_VERSION = '2024-11-05';
-const graph = createShadowGraph();
+// Dual-era protocol support: initialize selects the legacy contract, while
+// per-request io.modelcontextprotocol metadata selects the modern contract.
+const LEGACY_PROTOCOL_VERSION = '2024-11-05';
+const MODERN_PROTOCOL_VERSION = '2026-07-28';
+const SUPPORTED_PROTOCOL_VERSIONS = Object.freeze([MODERN_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION]);
+const graph = createShadowGraph({ verifier, ...(injectedNow ? { now: injectedNow } : {}) });
 graph.importData(await store.load());
 const embeddingClient = process.env.SHADOWGRAPH_EMBEDDING_URL ? createEmbeddingClient({
   baseUrl: process.env.SHADOWGRAPH_EMBEDDING_URL,
@@ -24,9 +79,70 @@ const embeddingClient = process.env.SHADOWGRAPH_EMBEDDING_URL ? createEmbeddingC
   allowRemote: process.env.SHADOWGRAPH_ALLOW_REMOTE_EMBEDDINGS === '1'
 }) : null;
 let persistQueue = Promise.resolve();
-function persist() { const operation = persistQueue.then(async () => { const revision = await store.save(graph.exportData()); graph.setRevision(revision); }).catch(async (error) => { if (/revision conflict/i.test(error.message)) graph.replaceData(await store.load()); throw error; }); persistQueue = operation.catch(() => {}); return operation; }
+function persist() { const operation = persistQueue.then(async () => { const revision = await store.save(graph.exportData()); graph.setRevision(revision); }); persistQueue = operation.catch(() => {}); return operation; }
 let callQueue = Promise.resolve();
 function queueCall(operation) { const queued = callQueue.then(operation); callQueue = queued.catch(() => {}); return queued; }
+let persistenceUnavailable = null;
+const UNCONFIRMED_RECOVERY_CODES = new Set(['json_restore_recovery_unconfirmed', 'sqlite_restore_recovery_unconfirmed']);
+function unavailableError() {
+  const error = new Error(persistenceUnavailable.message ?? 'Persistent storage unavailable after unconfirmed restore recovery; restart required');
+  error.code = -32001;
+  error.data = persistenceUnavailable.data
+    ? structuredClone(persistenceUnavailable.data)
+    : {
+        recoveryCode: persistenceUnavailable.recoveryCode,
+        retainedArtifacts: [...persistenceUnavailable.retainedArtifacts],
+        ...(persistenceUnavailable.unknownArtifacts ? { unknownArtifacts: structuredClone(persistenceUnavailable.unknownArtifacts) } : {})
+      };
+  return error;
+}
+
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
+  return value;
+}
+
+function isExpectedCommittedPayload(snapshot, durable) {
+  if (!Number.isSafeInteger(snapshot?.revision) || durable?.revision !== snapshot.revision + 1) return false;
+  return JSON.stringify(canonical({ ...durable, revision: snapshot.revision })) === JSON.stringify(canonical(snapshot));
+}
+
+function committedPersistenceError(persistenceError, durable, reconciliationError) {
+  const data = {
+    issueCode: 'committed_rejection_persistence_unconfirmed',
+    expirationDurable: false,
+    ...(Number.isSafeInteger(durable?.revision) ? { durableRevision: durable.revision } : {}),
+    persistenceError: persistenceError?.message ?? 'durable read-back failed',
+    ...(reconciliationError ? { reconciliationError: reconciliationError.message } : {})
+  };
+  persistenceUnavailable = {
+    message: 'Committed expiration could not be confirmed durable; persistent storage unavailable until restart',
+    data
+  };
+  return unavailableError();
+}
+
+async function persistCommittedRejection(rejection) {
+  const committed = graph.exportData();
+  let persistenceError = null;
+  try { await persist(); }
+  catch (error) { persistenceError = error; }
+
+  let durable;
+  try { durable = await store.load(); }
+  catch (error) { throw committedPersistenceError(persistenceError ?? error, null, error); }
+
+  if (isExpectedCommittedPayload(committed, durable)) {
+    graph.replaceData(durable);
+    throw rejection;
+  }
+
+  let reconciliationError = null;
+  try { graph.replaceData(durable); }
+  catch (error) { reconciliationError = error; }
+  throw committedPersistenceError(persistenceError, durable, reconciliationError);
+}
 
 // Provenance properties shared by every write tool. `sourceClass` records WHAT WAS
 // CLAIMED about origin — it is never proof and never produces a verified fact.
@@ -40,12 +156,41 @@ const pageProperties = {
   limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'Page size. Omitted means a declared default, never silent truncation.' },
   offset: { type: 'integer', minimum: 0, description: 'Page offset.' }
 };
+const nullableStringProperty = { anyOf: [{ type: 'string' }, { type: 'null' }] };
+const jsonValueProperty = {
+  description: 'Any lossless JSON value: string, finite number, boolean, null, array, or object.',
+  anyOf: [
+    { type: 'string' },
+    { type: 'number' },
+    { type: 'boolean' },
+    { type: 'null' },
+    { type: 'array', items: { $ref: '#/$defs/jsonValue' } },
+    { type: 'object', additionalProperties: { $ref: '#/$defs/jsonValue' } }
+  ]
+};
+const evidenceItemProperty = {
+  anyOf: [
+    { type: 'string' },
+    {
+      type: 'object',
+      properties: {
+        source: { type: 'string' },
+        type: { type: 'string' },
+        sourceClass: { type: 'string', enum: [...SOURCE_CLASSES] },
+        confidence: { type: 'number', minimum: 0, maximum: 1 },
+        observedAt: { type: 'string' },
+        detail: { type: 'string' }
+      },
+      additionalProperties: true
+    }
+  ]
+};
 const memoryScopeProperty = {
   type: 'object',
   properties: {
-    userId: { type: ['string', 'null'] },
-    agentId: { type: ['string', 'null'] },
-    runId: { type: ['string', 'null'] }
+    userId: nullableStringProperty,
+    agentId: nullableStringProperty,
+    runId: nullableStringProperty
   },
   additionalProperties: false
 };
@@ -58,13 +203,13 @@ const memoryProperties = {
   tags: { type: 'array', items: { type: 'string' } },
   metadata: { type: 'object' },
   validFrom: { type: 'string' },
-  validTo: { type: ['string', 'null'] },
+  validTo: nullableStringProperty,
   embedding: embeddingProperty
 };
 const RESULT_ENVELOPE = 'Returns { items, page: { offset, limit, total, hasMore }, completeness } — completeness always declares what was omitted.';
 
-const allTools = [
-  { name: 'shadowgraph_record_decision', description: 'Record a decision, its assumptions, evidence, and rejected alternatives.', inputSchema: { type: 'object', required: ['title', 'chosen'], properties: { title: { type: 'string' }, chosen: { type: 'string' }, project: { type: 'string' }, goal: { type: 'string' }, confidence: { type: 'number', minimum: 0, maximum: 1 }, assumptions: { type: 'array', items: { type: 'string' } }, evidence: { type: 'array', items: {} }, alternatives: { type: 'array', items: { type: 'object', properties: { label: { type: 'string' }, reasonRejected: { type: 'string' }, reason: { type: 'string' }, reopenWhen: { type: 'array' } } } }, idempotencyKey: { type: 'string', maxLength: 200, description: 'Retry key scoped by project and operation; reuse only for the same logical write.' }, ...provenanceProperties } } },
+const baseTools = [
+  { name: 'shadowgraph_record_decision', description: 'Record a decision, its assumptions, evidence, and rejected alternatives.', inputSchema: { type: 'object', required: ['title', 'chosen'], properties: { title: { type: 'string' }, chosen: { type: 'string' }, project: { type: 'string' }, goal: { type: 'string' }, confidence: { type: 'number', minimum: 0, maximum: 1 }, assumptions: { type: 'array', items: { type: 'string' } }, evidence: { type: 'array', items: evidenceItemProperty }, alternatives: { type: 'array', items: { type: 'object', properties: { label: { type: 'string' }, reasonRejected: { type: 'string' }, reason: { type: 'string' }, reopenWhen: { type: 'array' } } } }, idempotencyKey: { type: 'string', maxLength: 200, description: 'Retry key scoped by project and operation; reuse only for the same logical write.' }, ...provenanceProperties } } },
   { name: 'shadowgraph_record_attempt', description: 'Record a failed or informative attempt so the agent does not repeat it blindly.', inputSchema: { type: 'object', required: ['solution', 'result'], properties: { solution: { type: 'string' }, result: { type: 'string' }, project: { type: 'string' }, reason: { type: 'string' }, environment: { type: 'string' }, idempotencyKey: { type: 'string', maxLength: 200, description: 'Retry key scoped by project and operation; reuse only for the same logical write.' }, ...provenanceProperties } } },
   { name: 'shadowgraph_review', description: 'Find decisions whose rejected alternatives should be reconsidered. Evaluates reopenWhen rules against STORED facts, so it works after a restart without re-supplying them.', inputSchema: { type: 'object', properties: { project: { type: 'string' }, changedFacts: { type: 'array', items: { type: 'string' } }, facts: { type: 'object', description: 'Optional overrides; these take precedence over stored facts.' } } } },
   { name: 'shadowgraph_search', description: `Search decision and attempt memory. A query term matches DECLARED CONTENT FIELDS only (${CONTENT_SEARCH_FIELDS.join(', ')}) — schema keys and internal metadata never match. ${RESULT_ENVELOPE}`, inputSchema: { type: 'object', properties: { query: { type: 'string' }, project: { type: 'string' }, status: { type: 'string', enum: [...DECISION_STATUSES] }, kind: { type: 'string', enum: ['decision', 'attempt'] }, sourceClass: { type: 'string', enum: [...SOURCE_CLASSES] }, minConfidence: { type: 'number', minimum: 0, maximum: 1 }, ...pageProperties } } },
@@ -88,10 +233,10 @@ const allTools = [
     description: `Explainable hybrid recall across decisions, facts, attempts, and scoped memories. Fuses lexical, optional vector, graph-distance, and temporal ranks and declares unavailable signals. ${RESULT_ENVELOPE}`,
     inputSchema: { type: 'object', properties: { query: { type: 'string' }, project: { type: 'string' }, scope: memoryScopeProperty, memoryType: { type: 'string', enum: [...MEMORY_TYPES] }, asOf: { type: 'string' }, focalId: { type: 'string' }, preferRecent: { type: 'boolean' }, queryEmbedding: embeddingProperty, ...pageProperties } }
   },
-  { name: 'shadowgraph_record_fact', description: 'Record an observed fact with provenance. IMPORTANT: no input can mark a fact `verified` — a source label is a claim about origin, not proof.', inputSchema: { type: 'object', required: ['key'], properties: { key: { type: 'string' }, value: {}, source: { type: 'string', description: 'Legacy alias for sourceClass. Unknown labels downgrade to agent_claimed with the raw label kept in sourceRaw.' }, confidence: { type: 'number', minimum: 0, maximum: 1 }, project: { type: 'string' }, expiresAt: { type: 'string' }, verificationStatus: { type: 'string', enum: ['unverified', 'contradicted'], description: 'Only `contradicted` may be set by a caller; `verified` and `expired` are rejected.' }, idempotencyKey: { type: 'string', maxLength: 200, description: 'Retry key scoped by project and operation; reuse only for the same logical write.' }, ...provenanceProperties } } },
+  { name: 'shadowgraph_record_fact', description: 'Record an observed fact with provenance. IMPORTANT: no input can mark a fact `verified` — a source label is a claim about origin, not proof.', inputSchema: { type: 'object', $defs: { jsonValue: jsonValueProperty }, required: ['key'], properties: { key: { type: 'string' }, value: jsonValueProperty, source: { type: 'string', description: 'Legacy alias for sourceClass. Unknown labels downgrade to agent_claimed with the raw label kept in sourceRaw.' }, confidence: { type: 'number', minimum: 0, maximum: 1 }, project: { type: 'string' }, expiresAt: { type: 'string' }, verificationStatus: { type: 'string', enum: ['unverified', 'contradicted'], description: 'Only `contradicted` may be set by a caller; `verified` and `expired` are rejected.' }, idempotencyKey: { type: 'string', maxLength: 200, description: 'Retry key scoped by project and operation; reuse only for the same logical write.' }, ...provenanceProperties } } },
   { name: 'shadowgraph_record_outcome', description: 'Record what happened after a decision. Confidence moves by an evidence-weighted amount derived from the outcome\'s claimed source class; it never sets a verification status.', inputSchema: { type: 'object', required: ['decisionId', 'outcome'], properties: { decisionId: { type: 'string' }, outcome: { type: 'object', required: ['status'], properties: { status: { type: 'string', enum: [...OUTCOME_STATUSES] }, sourceClass: { type: 'string', enum: [...SOURCE_CLASSES] }, lessons: { type: 'array', items: { type: 'string' } }, observedAt: { type: 'string' } } } } } },
   { name: 'shadowgraph_confidence_evidence', description: 'Record evidence for or against a decision and move its confidence by a weighted, auditable amount. `key` is REQUIRED and must be stable: it is the dedupe key, so a retry with the same key is a no-op and cannot double-count.', inputSchema: { type: 'object', required: ['decisionId', 'reason', 'key'], properties: { decisionId: { type: 'string' }, reason: { type: 'string' }, supports: { type: 'boolean', description: 'Defaults to true. false records contradicting evidence.' }, key: { type: 'string', description: 'REQUIRED stable dedupe key. Reuse the same key for the same observation so retries do not double-count; use a NEW key for a genuinely new observation.' }, observedAt: { type: 'string' }, ...provenanceProperties } } },
-  { name: 'shadowgraph_update_status', description: 'Move a decision through its lifecycle. Nine documented execution states plus four retained legacy states; formatting variants like in-progress are accepted and stored canonically.', inputSchema: { type: 'object', required: ['decisionId', 'status'], properties: { decisionId: { type: 'string' }, status: { type: 'string', enum: [...DECISION_STATUSES] } } } },
+  { name: 'shadowgraph_update_status', description: 'Move a decision through the explicit schema-5 lifecycle. stale and superseded are system-owned; archived is an explicit terminal disposition. Formatting variants like in-progress are accepted and stored canonically.', inputSchema: { type: 'object', required: ['decisionId', 'status'], properties: { decisionId: { type: 'string' }, status: { type: 'string', enum: [...DECISION_STATUSES] } } } },
   { name: 'shadowgraph_link', description: 'Create an explainable relationship between graph entities.', inputSchema: { type: 'object', required: ['from', 'to', 'relation'], properties: { from: { type: 'string' }, to: { type: 'string' }, relation: { type: 'string' } } } },
   { name: 'shadowgraph_traverse', description: 'Traverse related decisions, facts, attempts, and relationships.', inputSchema: { type: 'object', required: ['id'], properties: { id: { type: 'string' }, depth: { type: 'integer', minimum: 1, maximum: 10 }, direction: { type: 'string', enum: ['in', 'out', 'both'] }, relation: { type: 'string' } } } },
   { name: 'shadowgraph_supersede', description: 'Mark one decision superseded by a replacement decision in the same project.', inputSchema: { type: 'object', required: ['decisionId', 'replacementId'], properties: { decisionId: { type: 'string' }, replacementId: { type: 'string' } } } },
@@ -109,6 +254,20 @@ const allTools = [
   { name: 'shadowgraph_backup', description: 'Create a consistent backup snapshot at a destination path.', inputSchema: { type: 'object', required: ['destination'], properties: { destination: { type: 'string' } } } },
   { name: 'shadowgraph_restore', description: 'Restore a JSON or SQLite backup using the configured storage backend.', inputSchema: { type: 'object', required: ['source'], properties: { source: { type: 'string' } } } }
 ];
+const verificationTool = {
+  name: 'shadowgraph_verify_fact',
+  description: 'Verify an active fact using a signed local evidence file checked by the server\'s separately preconfigured Ed25519 trust store. The caller cannot supply verifier identity, key, signature, method, or verified status.',
+  inputSchema: {
+    type: 'object',
+    required: ['factId', 'evidencePath'],
+    additionalProperties: false,
+    properties: {
+      factId: { type: 'string' },
+      evidencePath: { type: 'string', description: 'Path inside the verifier-configured evidence root.' }
+    }
+  }
+};
+const allTools = verifier ? [...baseTools, verificationTool] : baseTools;
 const compactNames = new Set(['shadowgraph_context','shadowgraph_remember','shadowgraph_recall','shadowgraph_record_decision','shadowgraph_record_attempt','shadowgraph_record_fact','shadowgraph_record_outcome','shadowgraph_retrieve','shadowgraph_search','shadowgraph_review','shadowgraph_validate','shadowgraph_maintain']);
 const tools = process.env.SHADOWGRAPH_MCP_COMPACT === '1' ? allTools.filter((tool) => compactNames.has(tool.name)) : allTools;
 
@@ -128,8 +287,10 @@ async function addConfiguredEmbeddings(args = {}) {
 }
 
 async function callUnqueued(name, args) {
+  if (persistenceUnavailable) throw unavailableError();
   const before = graph.exportData();
   let value;
+  try {
   if (name === 'shadowgraph_record_decision') value = graph.addDecision(args);
   else if (name === 'shadowgraph_record_attempt') value = graph.addAttempt(args);
   else if (name === 'shadowgraph_review') value = graph.review(args ?? {});
@@ -151,6 +312,7 @@ async function callUnqueued(name, args) {
     if (embeddingFailure) value.signals.semantic = { ...value.signals.semantic, available: false, matched: 0, reason: embeddingFailure };
   }
   else if (name === 'shadowgraph_record_fact') value = graph.addFact(args);
+  else if (name === 'shadowgraph_verify_fact' && verifier) value = await graph.verifyFact(args ?? {});
   else if (name === 'shadowgraph_record_outcome') value = graph.setOutcome(args?.decisionId, args?.outcome);
   else if (name === 'shadowgraph_confidence_evidence') value = graph.addConfidenceEvidence(args ?? {});
   else if (name === 'shadowgraph_update_status') value = graph.updateDecisionStatus(args?.decisionId, args?.status);
@@ -169,10 +331,54 @@ async function callUnqueued(name, args) {
   else if (name === 'shadowgraph_ack_review') value = graph.acknowledgeReview(args?.id);
   else if (name === 'shadowgraph_repair_plan') value = graph.repairPlan();
   else if (name === 'shadowgraph_backup') { const { backupFile } = await import('./backup.js'); value = await backupFile(file, args?.destination, { store }); }
-  else if (name === 'shadowgraph_restore') { value = store.restore ? await store.restore(args?.source) : await (await import('./backup.js')).restoreFile(args?.source, file, { storage: process.env.SHADOWGRAPH_STORAGE, validate: validateRestorePayload }); graph.replaceData(await store.load()); }
+  else if (name === 'shadowgraph_restore') {
+    value = store.restore
+      ? await store.restore(args?.source, { validate: restoreValidator, afterReplace: (payload) => graph.replaceData(payload) })
+      : await (await import('./backup.js')).restoreFile(args?.source, file, {
+        storage: process.env.SHADOWGRAPH_STORAGE,
+        validate: restoreValidator,
+        restoreFs: injectedRestoreFs,
+        restoreFault: injectedRestoreFault,
+        afterReplace: (payload) => graph.replaceData(payload)
+      });
+  }
   else if (!name) { const error = new Error('Invalid tool parameters'); error.code = -32602; throw error; }
   else { const error = new Error(`Unknown tool: ${name}`); error.code = -32601; throw error; }
-  if (name.includes('record_') || name === 'shadowgraph_context' || name === 'shadowgraph_remember' || name === 'shadowgraph_confidence_evidence' || name === 'shadowgraph_update_status' || name === 'shadowgraph_link' || name === 'shadowgraph_supersede' || name === 'shadowgraph_purge' || name === 'shadowgraph_maintain' || name === 'shadowgraph_review' || name === 'shadowgraph_ack_review' || name === 'shadowgraph_backup') {
+  } catch (error) {
+    if (isCommittedRejection(error)) {
+      return persistCommittedRejection(error);
+    }
+    // P1-4: persistence rollback is too late for a domain operation that mutates
+    // and then throws. Restore the snapshot while this call still owns the global
+    // queue, so a later serialized write cannot persist the rejected mutation.
+    if (UNCONFIRMED_RECOVERY_CODES.has(error.code)) {
+      persistenceUnavailable = {
+        recoveryCode: error.code,
+        retainedArtifacts: [...(error.retainedArtifacts ?? [])],
+        ...(error.unknownArtifacts ? { unknownArtifacts: structuredClone(error.unknownArtifacts) } : {})
+      };
+      error.data = {
+        recoveryCode: error.code,
+        retainedArtifacts: [...(error.retainedArtifacts ?? [])],
+        ...(error.unknownArtifacts ? { unknownArtifacts: structuredClone(error.unknownArtifacts) } : {})
+      };
+      error.code = -32000;
+    } else if (error.artifactCleanup) {
+      error.data = {
+        retainedArtifacts: [...(error.retainedArtifacts ?? [])],
+        unknownArtifacts: structuredClone(error.unknownArtifacts ?? []),
+        artifactCleanup: structuredClone(error.artifactCleanup)
+      };
+    } else if (typeof error.code === 'string') {
+      error.data = { ...(error.data ?? {}), issueCode: error.code };
+      error.code = -32000;
+    }
+    // Install the fail-closed latch before restoring the in-memory snapshot, so
+    // no later graph call can enter if snapshot restoration itself ever fails.
+    graph.replaceData(before);
+    throw error;
+  }
+  if (name.includes('record_') || name === 'shadowgraph_verify_fact' || name === 'shadowgraph_context' || name === 'shadowgraph_remember' || name === 'shadowgraph_confidence_evidence' || name === 'shadowgraph_update_status' || name === 'shadowgraph_link' || name === 'shadowgraph_supersede' || name === 'shadowgraph_purge' || name === 'shadowgraph_maintain' || name === 'shadowgraph_review' || name === 'shadowgraph_ack_review' || name === 'shadowgraph_backup') {
     try { await persist(); }
     catch (error) {
       try { graph.replaceData(await store.load()); }
@@ -189,16 +395,72 @@ function call(name, args) { return queueCall(() => callUnqueued(name, args)); }
 // anything else are errors, not silent substitutions (P1-7).
 const RESOURCE_URIS = new Set(['shadowgraph://context']);
 const PROMPT_NAMES = new Set(['shadowgraph_consequential_task']);
+const SERVER_INFO = Object.freeze({ name: 'shadowgraph', version: MCP_VERSION });
+const SERVER_CAPABILITIES = Object.freeze({
+  tools: Object.freeze({ listChanged: false }),
+  resources: Object.freeze({ listChanged: false, subscribe: false }),
+  prompts: Object.freeze({ listChanged: false })
+});
+const PROTOCOL_VERSION_META = 'io.modelcontextprotocol/protocolVersion';
+const CLIENT_INFO_META = 'io.modelcontextprotocol/clientInfo';
+const CLIENT_CAPABILITIES_META = 'io.modelcontextprotocol/clientCapabilities';
+const SERVER_INFO_META = 'io.modelcontextprotocol/serverInfo';
 
-function rpcError(code, message) {
+function rpcError(code, message, data) {
   const error = new Error(message);
   error.code = code;
+  if (data !== undefined) error.data = data;
   return error;
 }
 
 function reply(id, result, error) {
-  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: id ?? null, ...(error ? { error: { code: error.code ?? -32000, message: error.message } } : { result }) }) + '\n');
+  process.stdout.write(JSON.stringify({
+    jsonrpc: '2.0', id: id ?? null,
+    ...(error ? { error: { code: error.code ?? -32000, message: error.message, ...(error.data === undefined ? {} : { data: error.data }) } } : { result })
+  }) + '\n');
 }
+
+function requestUsesModernProtocol(request) {
+  if (request.method === 'initialize') return false;
+  const meta = request.params?._meta;
+  const attempted = request.method === 'server/discover'
+    || (meta && typeof meta === 'object' && [PROTOCOL_VERSION_META, CLIENT_INFO_META, CLIENT_CAPABILITIES_META].some((key) => Object.hasOwn(meta, key)));
+  if (!attempted) return false;
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) throw rpcError(-32602, 'Invalid params: modern requests require params._meta');
+  const protocolVersion = meta[PROTOCOL_VERSION_META];
+  if (typeof protocolVersion !== 'string' || !protocolVersion) throw rpcError(-32602, `Invalid params: _meta.${PROTOCOL_VERSION_META} must be a string`);
+  if (!SUPPORTED_PROTOCOL_VERSIONS.includes(protocolVersion) || protocolVersion !== MODERN_PROTOCOL_VERSION) {
+    throw rpcError(-32022, 'Unsupported protocol version', { supported: [...SUPPORTED_PROTOCOL_VERSIONS], requested: protocolVersion });
+  }
+  const clientInfo = meta[CLIENT_INFO_META];
+  if (!clientInfo || typeof clientInfo !== 'object' || Array.isArray(clientInfo) || typeof clientInfo.name !== 'string' || !clientInfo.name || typeof clientInfo.version !== 'string' || !clientInfo.version) {
+    throw rpcError(-32602, `Invalid params: _meta.${CLIENT_INFO_META} requires name and version strings`);
+  }
+  const capabilities = meta[CLIENT_CAPABILITIES_META];
+  if (!capabilities || typeof capabilities !== 'object' || Array.isArray(capabilities)) {
+    throw rpcError(-32602, `Invalid params: _meta.${CLIENT_CAPABILITIES_META} must be an object`);
+  }
+  return true;
+}
+
+function modernResult(result, cacheScope) {
+  return {
+    resultType: 'complete',
+    ...result,
+    ...(cacheScope ? { ttlMs: 0, cacheScope } : {}),
+    _meta: { ...(result?._meta ?? {}), [SERVER_INFO_META]: SERVER_INFO }
+  };
+}
+
+function eraResult(modern, result, cacheScope) {
+  return modern ? modernResult(result, cacheScope) : result;
+}
+
+const resourceList = [{ uri: 'shadowgraph://context', name: 'ShadowGraph context', description: 'Current project context and open review signals.', mimeType: 'application/json' }];
+const promptList = [{ name: 'shadowgraph_consequential_task', description: 'Use ShadowGraph before, during, and after consequential work.', arguments: [] }];
+const promptText = verifier
+  ? 'Before consequential work call context and retrieve. Record decisions, assumptions, evidence, alternatives, failed attempts, facts, and outcomes. Review open signals before continuing. Treat agent_claimed and unverified facts as hypotheses. Only the separately configured signed local-evidence verifier can mark an active fact verified.'
+  : 'Before consequential work call context and retrieve. Record decisions, assumptions, evidence, alternatives, failed attempts, facts, and outcomes. Review open signals before continuing. Treat agent_claimed and unverified facts as hypotheses: without a separately configured verifier, nothing in ShadowGraph can be marked verified, so never present a stored claim as confirmed.';
 
 const input = createInterface({ input: process.stdin });
 input.on('line', async (line) => {
@@ -212,11 +474,20 @@ input.on('line', async (line) => {
   try {
     request = JSON.parse(line);
     if (!request || typeof request !== 'object' || Array.isArray(request)) throw rpcError(-32600, 'Invalid Request');
-    isNotification = !Object.prototype.hasOwnProperty.call(request, 'id');
+    if (request.jsonrpc !== '2.0') throw rpcError(-32600, 'Invalid Request: jsonrpc must be 2.0');
     if (typeof request.method !== 'string') throw rpcError(-32600, 'Invalid Request: method must be a string');
+    // Only a syntactically valid Request object with no id is a notification.
+    // Parse errors and malformed request envelopes still receive id:null errors.
+    isNotification = !Object.prototype.hasOwnProperty.call(request, 'id');
     if (request.params !== undefined && (typeof request.params !== 'object' || request.params === null || Array.isArray(request.params))) {
       throw rpcError(-32602, 'Invalid params: params must be an object');
     }
+    const respond = (result, error) => {
+      if (!isNotification) reply(request.id, result, error);
+    };
+    const modern = requestUsesModernProtocol(request);
+
+    if (persistenceUnavailable && request.method === 'resources/read') throw unavailableError();
 
     if (request.method === 'initialize') {
       // Legacy 2024-11-05 handshake. A client may ask for a different revision;
@@ -224,17 +495,20 @@ input.on('line', async (line) => {
       // rather than echoing a version it does not support.
       const requested = request.params?.protocolVersion;
       if (requested !== undefined && typeof requested !== 'string') throw rpcError(-32602, 'Invalid params: protocolVersion must be a string');
-      reply(request.id, { protocolVersion: PROTOCOL_VERSION, capabilities: { tools: {}, resources: {}, prompts: {} }, serverInfo: { name: 'shadowgraph', version: MCP_VERSION } });
+      respond({ protocolVersion: LEGACY_PROTOCOL_VERSION, capabilities: SERVER_CAPABILITIES, serverInfo: SERVER_INFO });
     } else if (request.method.startsWith('notifications/')) {
-      // Accepted and deliberately unanswered.
-      return;
-    } else if (request.method === 'tools/list') reply(request.id, { tools });
-    // Minimal forward-compatibility shim: a 2026-07-28-era client sends
-    // server/discover with no handshake. Answering it truthfully is better than
-    // returning "method not found", but this server is still a Legacy-era server
-    // and does not claim conformance to that revision.
-    else if (request.method === 'server/discover') reply(request.id, { protocolVersion: PROTOCOL_VERSION, serverInfo: { name: 'shadowgraph', version: MCP_VERSION }, capabilities: { tools: {}, resources: {}, prompts: {} }, tools });
-    else if (request.method === 'resources/list') reply(request.id, { resources: [{ uri: 'shadowgraph://context', name: 'ShadowGraph context', description: 'Current project context and open review signals.', mimeType: 'application/json' }] });
+      // Method names do not define notifications; absence of id does. A client
+      // that explicitly supplies id:null sent a request and still gets a reply.
+      if (isNotification) return;
+      respond({});
+    } else if (request.method === 'server/discover') {
+      respond(modernResult({
+        supportedVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
+        capabilities: SERVER_CAPABILITIES,
+        instructions: 'Local-first explainable decision and scoped temporal memory. Use context/retrieve before consequential work and record outcomes afterward.'
+      }, 'public'));
+    } else if (request.method === 'tools/list') respond(eraResult(modern, { tools }, 'public'));
+    else if (request.method === 'resources/list') respond(eraResult(modern, { resources: resourceList }, 'public'));
     else if (request.method === 'resources/read') {
       // P1-7: an unknown URI used to receive the real context payload anyway,
       // which told the client its request had succeeded when it had not.
@@ -243,7 +517,9 @@ input.on('line', async (line) => {
       if (!RESOURCE_URIS.has(uri)) throw rpcError(-32602, `Unknown resource URI: ${uri}`);
       const context = await queueCall(async () => {
         const before = graph.exportData();
-        const value = graph.context({});
+        let value;
+        try { value = graph.context({}); }
+        catch (error) { graph.replaceData(before); throw error; }
         try { await persist(); }
         catch (error) {
           try { graph.replaceData(await store.load()); }
@@ -252,19 +528,29 @@ input.on('line', async (line) => {
         }
         return value;
       });
-      reply(request.id, { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(context) }] });
-    } else if (request.method === 'prompts/list') reply(request.id, { prompts: [{ name: 'shadowgraph_consequential_task', description: 'Use ShadowGraph before, during, and after consequential work.', arguments: [] }] });
+      respond(eraResult(modern, { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(context) }] }, 'private'));
+    } else if (request.method === 'prompts/list') respond(eraResult(modern, { prompts: promptList }, 'public'));
     else if (request.method === 'prompts/get') {
       // P1-7: same failure as resources/read — any name returned the policy text.
       const promptName = request.params?.name;
       if (typeof promptName !== 'string' || !promptName) throw rpcError(-32602, 'Invalid params: name is required');
       if (!PROMPT_NAMES.has(promptName)) throw rpcError(-32602, `Unknown prompt: ${promptName}`);
-      reply(request.id, { description: 'ShadowGraph operating policy', messages: [{ role: 'user', content: { type: 'text', text: 'Before consequential work call context and retrieve. Record decisions, assumptions, evidence, alternatives, failed attempts, facts, and outcomes. Review open signals before continuing. Treat agent_claimed and unverified facts as hypotheses: nothing in ShadowGraph can be marked verified, so never present a stored claim as confirmed.' } }] });
+      respond(eraResult(modern, { description: 'ShadowGraph operating policy', messages: [{ role: 'user', content: { type: 'text', text: promptText } }] }));
     } else if (request.method === 'tools/call') {
       if (request.params === undefined) throw rpcError(-32602, 'Invalid params: params is required for tools/call');
+      if (typeof request.params.name !== 'string' || !request.params.name) throw rpcError(-32602, 'Invalid params: name is required for tools/call');
       const args = request.params.arguments ?? {};
       if (typeof args !== 'object' || args === null || Array.isArray(args)) throw rpcError(-32602, 'Invalid params: arguments must be an object');
-      reply(request.id, await call(request.params.name, args));
+      if (!tools.some((tool) => tool.name === request.params.name)) {
+        throw rpcError(modern ? -32602 : -32601, `Unknown tool: ${request.params.name}`);
+      }
+      try {
+        const result = await call(request.params.name, args);
+        respond(eraResult(modern, modern ? { ...result, isError: false } : result));
+      } catch (error) {
+        if (!modern || error.code !== undefined) throw error;
+        respond(modernResult({ content: [{ type: 'text', text: error.message }], isError: true }));
+      }
     } else throw rpcError(-32601, `Method not found: ${request.method}`);
   } catch (error) {
     // P1-5: PRESERVE error.code. The old catch rebuilt a plain object and
@@ -273,6 +559,10 @@ input.on('line', async (line) => {
     // internal failure.
     if (isNotification) return;
     const parseError = error instanceof SyntaxError;
-    reply(request?.id ?? null, null, { code: error.code ?? (parseError ? -32700 : -32000), message: parseError ? 'Parse error' : error.message });
+    reply(request?.id ?? null, null, {
+      code: error.code ?? (parseError ? -32700 : -32000),
+      message: parseError ? 'Parse error' : error.message,
+      ...(error.data === undefined ? {} : { data: error.data })
+    });
   }
 });

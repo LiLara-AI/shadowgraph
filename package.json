@@ -4,9 +4,23 @@
   "private": true,
   "description": "Local-first decision and scoped temporal memory for AI agents",
   "type": "module",
+  "exports": {
+    ".": "./src/shadowgraph.js",
+    "./embedding": "./src/embedding.js",
+    "./markdown-workspace": "./src/markdown-workspace.js",
+    "./server": "./src/server.js",
+    "./storage": "./src/storage.js"
+  },
   "engines": {
     "node": ">=20"
   },
+  "keywords": [
+    "ai",
+    "decision-graph",
+    "local-first",
+    "mcp",
+    "memory"
+  ],
   "license": "MIT",
   "author": "LiLara-AI",
   "repository": {
@@ -20,15 +34,34 @@
   "files": [
     "src/",
     "dashboard/",
-    "integrations/*.py",
-    "integrations/*.json",
-    "integrations/*.md",
+    "integrations/README.md",
+    "integrations/agent-policy.md",
+    "integrations/antigravity-tool.example.json",
+    "integrations/claude-code.mcp.json",
+    "integrations/codex.mcp.toml",
+    "integrations/cursor.mcp.json",
+    "integrations/hermes-agent.py",
+    "integrations/hermes.mcp.yaml",
+    "integrations/http-client.example.json",
+    "integrations/openclaw-tool.example.json",
     "scripts/",
-    "docs/",
+    "benchmark/preregistration.json",
+    "benchmark/preregistration.sha256",
+    "benchmark/competitors.lock.json",
+    "benchmark/cli.mjs",
+    "benchmark/lib/",
+    "docs/adr/0006-unified-memory-kernel.md",
+    "docs/adr/0007-canonical-journal-baseline-placement.md",
+    "docs/api-reference.md",
+    "docs/benchmark-report.md",
+    "docs/mcp-compatibility.md",
+    "docs/shadowgraph-benchmark-plan.md",
+    "docs/unified-memory.md",
     "README.md",
     "LICENSE",
     "SECURITY.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "RELEASE_NOTES.md"
   ],
   "bin": {
     "shadowgraph": "./src/cli.js"
@@ -36,9 +69,22 @@
   "scripts": {
     "test": "node --test --test-concurrency=1",
     "start": "node src/server.js",
+    "serve": "node src/cli.js serve",
+    "setup": "node src/cli.js setup",
+    "doctor": "node src/cli.js doctor",
     "mcp": "node src/mcp.js",
-    "check": "node --check src/shadowgraph.js && node --check src/hybrid-search.js && node --check src/embedding.js && node --check src/markdown-workspace.js && node --check src/storage.js && node --check src/sqlite-storage.js && node --check src/restore-validation.js && node --check src/server.js && node --check src/cli.js && node --check src/mcp.js && node --check src/backup.js && node --check src/revision-store.js && node --check src/journal.js && node --check src/confidence.js && node --check scripts/bench-journal.mjs && node --check scripts/check-package.mjs",
+    "check": "node --check src/shadowgraph.js && node --check src/hybrid-search.js && node --check src/embedding.js && node --check src/markdown-workspace.js && node --check src/storage.js && node --check src/sqlite-storage.js && node --check src/restore-validation.js && node --check src/server.js && node --check src/cli.js && node --check src/mcp.js && node --check src/verification.js && node --check src/backup.js && node --check src/revision-store.js && node --check src/journal.js && node --check src/confidence.js && node --check scripts/bench-journal.mjs && node --check scripts/validate-bench-journal.mjs && node --check scripts/check-package.mjs && node --check scripts/check-mcp.mjs && node --check scripts/check-integrations.mjs && node --check scripts/smoke-package.mjs && npm run benchmark:check",
     "bench": "node scripts/bench-journal.mjs",
-    "check:package": "node scripts/check-package.mjs"
+    "benchmark:preflight": "node benchmark/cli.mjs preflight",
+    "benchmark:run": "node benchmark/cli.mjs run",
+    "benchmark:validate": "node benchmark/cli.mjs validate",
+    "benchmark:aggregate": "node benchmark/cli.mjs aggregate",
+    "benchmark:test": "node --test test/benchmark-harness.test.js test/bench-journal.test.js",
+    "benchmark:check": "node --check benchmark/cli.mjs && node --check benchmark/lib/preregistration.mjs && node --check benchmark/lib/capabilities.mjs && node --check benchmark/lib/adapters.mjs && node --check benchmark/lib/scoring.mjs && node --check benchmark/lib/validate.mjs && node --check benchmark/lib/aggregate.mjs && node --check benchmark/lib/journal-validation.mjs && node --check scripts/bench-journal.mjs && node --check scripts/validate-bench-journal.mjs",
+    "benchmark:journal:validate": "node scripts/validate-bench-journal.mjs",
+    "check:package": "node scripts/check-package.mjs",
+    "check:mcp": "node scripts/check-mcp.mjs",
+    "check:integrations": "node scripts/check-integrations.mjs",
+    "smoke:package": "node scripts/smoke-package.mjs"
   }
 }
