@@ -7,6 +7,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { nextRevision, assertRevision, createDestinationFence, currentRevision, nextRevisionAfter } from './revision-store.js';
 import { createRestoreValidator, requiresLegacyPurgeMigration } from './restore-validation.js';
+import { NODE_SQLITE_NOT_APPLICABLE_REASON } from './runtime-capabilities.js';
 import { SCHEMA_VERSION } from './shadowgraph.js';
 
 const EMPTY = { schemaVersion: SCHEMA_VERSION, revision: 0, records: [], facts: [], relations: [], reviewSignals: [], idempotency: [], events: [], journal: [], journalSeq: 0, journalEpoch: null };
@@ -14,7 +15,7 @@ const EMPTY = { schemaVersion: SCHEMA_VERSION, revision: 0, records: [], facts: 
 export async function createSqliteStore(filePath, options = {}) {
   let DatabaseSync;
   try { ({ DatabaseSync } = await import('node:sqlite')); }
-  catch { throw new Error('SQLite storage requires Node 22.5+ with node:sqlite; use JSON storage on Node 20'); }
+  catch { throw new Error(NODE_SQLITE_NOT_APPLICABLE_REASON); }
 
   await mkdir(dirname(filePath), { recursive: true });
   const openDatabase = options.openDatabase ?? ((path, openOptions) => openOptions ? new DatabaseSync(path, openOptions) : new DatabaseSync(path));

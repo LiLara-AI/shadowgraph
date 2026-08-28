@@ -6,6 +6,7 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { backupFile, restoreFile } from '../src/backup.js';
+import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
 import { createShadowGraphServer } from '../src/server.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { rebuildProjection } from '../src/journal.js';
@@ -14,6 +15,8 @@ import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 
 const NOW = '2026-08-27T15:00:00.000Z';
+const NODE_SQLITE = (await getRuntimeCapabilities()).nodeSqlite;
+const SQLITE_TEST_OPTIONS = NODE_SQLITE.available ? {} : { skip: NODE_SQLITE.reason };
 const LEGACY_PURGED_ID = 'rrv04-legacy-purged-secret-id';
 const LEGACY_PURGED_CONTENT = 'RRV04_LEGACY_PURGED_SECRET_CONTENT';
 const RRV06_SECRETS = [
@@ -274,7 +277,7 @@ async function createStore(backend, path) {
 
 async function assertPayloadAcrossRestartBackupRestore(t, payload, assertSafe, label) {
   for (const backend of ['json', 'sqlite']) {
-    await t.test(`${label} ${backend}`, async () => {
+    await t.test(`${label} ${backend}`, backend === 'sqlite' ? SQLITE_TEST_OPTIONS : {}, async () => {
       const directory = await mkdtemp(join(tmpdir(), `shadowgraph-third-review-${backend}-`));
       const extension = backend === 'sqlite' ? 'db' : 'json';
       const livePath = join(directory, `live.${extension}`);
@@ -537,7 +540,7 @@ test('RRV-07: forged future ledgers fail closed in JSON/SQLite restore and CLI/H
     assert.deepEqual(await readFile(destination), before);
   });
 
-  await t.test('direct SQLite restore', async () => {
+  await t.test('direct SQLite restore', SQLITE_TEST_OPTIONS, async () => {
     const source = join(directory, 'forged.db');
     const destination = join(directory, 'direct-live.db');
     const sourceStore = await createSqliteStore(source);
@@ -599,7 +602,13 @@ test('RRV-07: forged future ledgers fail closed in JSON/SQLite restore and CLI/H
         jsonrpc: '2.0', id: 2, method: 'tools/call',
         params: { name: 'shadowgraph_restore', arguments: { source: sourceJson } }
       });
-      assert.match(response.error.message, /strictly earlier than/i);
+      assert.equal(response.result, undefined, 'legacy tool failures use the numeric JSON-RPC error form');
+      assert.deepEqual(response.error, { code: -32000, message: 'Tool execution failed' });
+      const publicFailure = JSON.stringify(response);
+      assert.equal(publicFailure.includes(sourceJson), false, 'MCP failure disclosed the forged source path');
+      assert.equal(publicFailure.includes(destination), false, 'MCP failure disclosed the storage path');
+      assert.equal(publicFailure.includes('rrv07-forged-early-marker'), false, 'MCP failure disclosed the forged ledger id');
+      assert.equal(publicFailure.includes('strictly earlier than'), false, 'MCP failure disclosed the raw ledger diagnostic');
       assert.deepEqual(await readFile(destination), before);
     } finally {
       await rpc.stop();

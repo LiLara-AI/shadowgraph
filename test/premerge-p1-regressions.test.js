@@ -6,6 +6,7 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { restoreFile } from '../src/backup.js';
+import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
 import { validateRestorePayload } from '../src/restore-validation.js';
 import { createShadowGraphServer } from '../src/server.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
@@ -14,6 +15,8 @@ import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 
 const BOUNDARY = '2026-08-28T00:00:01.000Z';
+const NODE_SQLITE = (await getRuntimeCapabilities()).nodeSqlite;
+const SQLITE_TEST_OPTIONS = NODE_SQLITE.available ? {} : { skip: NODE_SQLITE.reason };
 
 async function verifyAcrossIoBoundary(postIoInstant) {
   const clock = { value: '2026-08-28T00:00:00.999Z' };
@@ -449,7 +452,7 @@ async function seedJsonRestoreDestination(path, id) {
   return readFile(path);
 }
 
-test('P1 follow-up schema surfaces: redacted false, omitted, or replayable:false purge skeletons fail closed on every restore path', async () => {
+test('P1 follow-up schema surfaces: redacted false, omitted, or replayable:false purge skeletons fail closed on every restore path', async (t) => {
   const rejection = /schema 5.*purge|noncanonical.*purge|redacted true|replayable.*(?:false|type)/i;
   for (const redactedMode of ['false', 'omitted', 'replayable-false']) {
     const directory = await mkdtemp(join(tmpdir(), `shadowgraph-premerge-purge-${redactedMode}-`));
@@ -464,20 +467,22 @@ test('P1 follow-up schema surfaces: redacted false, omitted, or replayable:false
     await assert.rejects(restoreFile(sourceJson, jsonDestination), rejection, `${redactedMode}: JSON restore`);
     assert.deepEqual(await readFile(jsonDestination), jsonBefore, `${redactedMode}: JSON bytes stay unchanged`);
 
-    const sqliteSource = join(directory, 'malicious.db');
-    const sqliteDestination = join(directory, 'direct.db');
-    const sqliteSourceStore = await createSqliteStore(sqliteSource);
-    await sqliteSourceStore.save(payload);
-    sqliteSourceStore.close();
-    const sqliteStore = await createSqliteStore(sqliteDestination);
-    await sqliteStore.save(safeRestorePayload(`sqlite-kept-${redactedMode}`));
-    const sqliteBefore = await sqliteStore.load();
-    try {
-      await assert.rejects(sqliteStore.restore(sqliteSource), rejection, `${redactedMode}: SQLite restore`);
-      assert.deepEqual(await sqliteStore.load(), sqliteBefore, `${redactedMode}: SQLite state stays unchanged`);
-    } finally {
-      sqliteStore.close();
-    }
+    await t.test(`${redactedMode}: SQLite restore`, SQLITE_TEST_OPTIONS, async () => {
+      const sqliteSource = join(directory, 'malicious.db');
+      const sqliteDestination = join(directory, 'direct.db');
+      const sqliteSourceStore = await createSqliteStore(sqliteSource);
+      await sqliteSourceStore.save(payload);
+      sqliteSourceStore.close();
+      const sqliteStore = await createSqliteStore(sqliteDestination);
+      await sqliteStore.save(safeRestorePayload(`sqlite-kept-${redactedMode}`));
+      const sqliteBefore = await sqliteStore.load();
+      try {
+        await assert.rejects(sqliteStore.restore(sqliteSource), rejection, `${redactedMode}: SQLite restore`);
+        assert.deepEqual(await sqliteStore.load(), sqliteBefore, `${redactedMode}: SQLite state stays unchanged`);
+      } finally {
+        sqliteStore.close();
+      }
+    });
 
     const cliDestination = join(directory, 'cli.json');
     const cliBefore = await seedJsonRestoreDestination(cliDestination, `cli-kept-${redactedMode}`);
@@ -514,8 +519,12 @@ test('P1 follow-up schema surfaces: redacted false, omitted, or replayable:false
         jsonrpc: '2.0', id: 2, method: 'tools/call',
         params: { name: 'shadowgraph_restore', arguments: { source: sourceJson } }
       });
-      assert.ok(response.error, `${redactedMode}: MCP must reject`);
-      assert.match(response.error.message, rejection);
+      assert.equal(response.result, undefined, `${redactedMode}: legacy failure uses JSON-RPC error form`);
+      assert.deepEqual(response.error, { code: -32000, message: 'Tool execution failed' });
+      const publicFailure = JSON.stringify(response);
+      assert.equal(publicFailure.includes(sourceJson), false, `${redactedMode}: MCP failure disclosed the restore path`);
+      assert.equal(publicFailure.includes(payload.journal[0].requestId), false, `${redactedMode}: MCP failure disclosed the purge identity`);
+      assert.equal(rejection.test(publicFailure), false, `${redactedMode}: MCP failure disclosed the raw purge diagnostic`);
       assert.deepEqual(await readFile(mcpDestination), mcpBefore, `${redactedMode}: MCP bytes stay unchanged`);
     } finally {
       await rpc.stop();
@@ -1062,29 +1071,31 @@ async function seedOverflowStore(store, id) {
   return store.load();
 }
 
-test('P1 journal overflow persistence: JSON/SQLite HTTP plus CLI and MCP reject without changing live or durable state', async () => {
+test('P1 journal overflow persistence: JSON/SQLite HTTP plus CLI and MCP reject without changing live or durable state', async (t) => {
   for (const backend of ['json', 'sqlite']) {
-    const directory = await mkdtemp(join(tmpdir(), `shadowgraph-premerge-overflow-http-${backend}-`));
-    const destination = join(directory, backend === 'sqlite' ? 'live.db' : 'live.json');
-    const store = backend === 'sqlite' ? await createSqliteStore(destination) : createJsonFileStore(destination);
-    const durableBefore = await seedOverflowStore(store, `http-${backend}-kept`);
-    const app = await createShadowGraphServer({ file: destination, storage: backend, store, now: () => ATOMIC_NOW });
-    const liveBefore = app.graph.exportData();
-    app.server.listen(0, '127.0.0.1');
-    await once(app.server, 'listening');
-    try {
-      const response = await fetch(`http://127.0.0.1:${app.server.address().port}/decisions`, {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ id: `http-${backend}-must-not-land`, project: 'transport-overflow', title: 'Must not land', chosen: 'reject' })
-      });
-      assert.equal(response.status, 400, `${backend}: HTTP overflow must reject`);
-      assert.match((await response.json()).error, /journal sequence overflow/i);
-      assert.deepEqual(app.graph.exportData(), liveBefore, `${backend}: HTTP live state`);
-      assert.deepEqual(await store.load(), durableBefore, `${backend}: HTTP durable state`);
-    } finally {
-      await new Promise((resolve) => app.server.close(resolve));
-      store.close();
-    }
+    await t.test(`${backend} HTTP persistence`, backend === 'sqlite' ? SQLITE_TEST_OPTIONS : {}, async () => {
+      const directory = await mkdtemp(join(tmpdir(), `shadowgraph-premerge-overflow-http-${backend}-`));
+      const destination = join(directory, backend === 'sqlite' ? 'live.db' : 'live.json');
+      const store = backend === 'sqlite' ? await createSqliteStore(destination) : createJsonFileStore(destination);
+      const durableBefore = await seedOverflowStore(store, `http-${backend}-kept`);
+      const app = await createShadowGraphServer({ file: destination, storage: backend, store, now: () => ATOMIC_NOW });
+      const liveBefore = app.graph.exportData();
+      app.server.listen(0, '127.0.0.1');
+      await once(app.server, 'listening');
+      try {
+        const response = await fetch(`http://127.0.0.1:${app.server.address().port}/decisions`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: `http-${backend}-must-not-land`, project: 'transport-overflow', title: 'Must not land', chosen: 'reject' })
+        });
+        assert.equal(response.status, 400, `${backend}: HTTP overflow must reject`);
+        assert.match((await response.json()).error, /journal sequence overflow/i);
+        assert.deepEqual(app.graph.exportData(), liveBefore, `${backend}: HTTP live state`);
+        assert.deepEqual(await store.load(), durableBefore, `${backend}: HTTP durable state`);
+      } finally {
+        await new Promise((resolve) => app.server.close(resolve));
+        store.close();
+      }
+    });
   }
 
   const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-premerge-overflow-transports-'));
@@ -1115,8 +1126,12 @@ test('P1 journal overflow persistence: JSON/SQLite HTTP plus CLI and MCP reject 
         arguments: { id: 'mcp-must-not-land', project: 'transport-overflow', title: 'Must not land', chosen: 'reject' }
       }
     });
-    assert.ok(response.error);
-    assert.match(response.error.message, /journal sequence overflow/i);
+    assert.equal(response.result, undefined, 'legacy tool failures use the numeric JSON-RPC error form');
+    assert.deepEqual(response.error, { code: -32000, message: 'Tool execution failed' });
+    const publicFailure = JSON.stringify(response);
+    assert.equal(publicFailure.includes(mcpDestination), false, 'overflow failure disclosed the storage path');
+    assert.equal(publicFailure.includes('mcp-must-not-land'), false, 'overflow failure disclosed the rejected entity id');
+    assert.equal(publicFailure.includes('journal sequence overflow'), false, 'overflow failure disclosed the raw journal diagnostic');
     assert.deepEqual(await readFile(mcpDestination), mcpBefore, 'MCP destination bytes');
   } finally {
     await rpc.stop();

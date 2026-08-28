@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { restoreFile } from '../src/backup.js';
 import { rebuildProjection } from '../src/journal.js';
+import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
 
 const INVALID_BASELINE_PLACEMENT_CODE = 'invalid_projection_baseline_placement';
 import { createRestoreValidator, validateRestorePayload } from '../src/restore-validation.js';
@@ -19,6 +20,8 @@ import { createFactAttestation, createLocalEvidenceVerifier } from '../src/verif
 
 const NOW = '2026-08-27T12:00:00.000Z';
 const EXPIRES_AT = '2026-09-30T00:00:00.000Z';
+const NODE_SQLITE = (await getRuntimeCapabilities()).nodeSqlite;
+const SQLITE_TEST_OPTIONS = NODE_SQLITE.available ? {} : { skip: NODE_SQLITE.reason };
 
 async function verifierFixture(directory) {
   const keys = generateKeyPairSync('ed25519');
@@ -663,33 +666,27 @@ test('DS-P1-006 journal-less overwrite survives JSON and SQLite restart with reb
   assert.deepEqual(merged.journal.map((entry) => entry.type), ['memory.recorded', 'memory.invalidated']);
 
   for (const backend of ['json', 'sqlite']) {
-    const path = join(directory, backend === 'json' ? 'state.json' : 'state.db');
-    let store;
-    try {
+    await t.test(`${backend} restart with rebuild parity`, backend === 'sqlite' ? SQLITE_TEST_OPTIONS : {}, async () => {
+      const path = join(directory, backend === 'json' ? 'state.json' : 'state.db');
+      let store = backend === 'json' ? createJsonFileStore(path) : await createSqliteStore(path);
+      await store.save(merged);
+      store.close();
+
       store = backend === 'json' ? createJsonFileStore(path) : await createSqliteStore(path);
-    } catch (error) {
-      if (/requires Node/.test(error.message)) {
-        assert.fail(`SQLite restart coverage unavailable: ${error.message}`);
-      }
-      throw error;
-    }
-    await store.save(merged);
-    store.close();
+      const durable = await store.load();
+      store.close();
+      assert.deepEqual(durable.journal, merged.journal, `${backend}: exact prebuilt journal entries persist`);
 
-    store = backend === 'json' ? createJsonFileStore(path) : await createSqliteStore(path);
-    const durable = await store.load();
-    store.close();
-    assert.deepEqual(durable.journal, merged.journal, `${backend}: exact prebuilt journal entries persist`);
-
-    const restarted = createShadowGraph({ now: () => NOW });
-    restarted.importData(durable);
-    const report = restarted.rebuild();
-    const exported = restarted.exportData();
-    assert.equal(report.rebuildable, true, `${backend}: ${report.reason}`);
-    assert.deepEqual(report.projection.records, exported.records, `${backend}: records rebuild exactly`);
-    assert.deepEqual(report.projection.idempotency, exported.idempotency, `${backend}: idempotency rebuilds exactly`);
-    assert.equal(JSON.stringify(exported.records).includes('restart-old-private'), false, `${backend}: old private text stays out of live state`);
-    assert.equal(JSON.stringify(report.projection).includes('restart-old-private'), false, `${backend}: old private text stays out of rebuild`);
+      const restarted = createShadowGraph({ now: () => NOW });
+      restarted.importData(durable);
+      const report = restarted.rebuild();
+      const exported = restarted.exportData();
+      assert.equal(report.rebuildable, true, `${backend}: ${report.reason}`);
+      assert.deepEqual(report.projection.records, exported.records, `${backend}: records rebuild exactly`);
+      assert.deepEqual(report.projection.idempotency, exported.idempotency, `${backend}: idempotency rebuilds exactly`);
+      assert.equal(JSON.stringify(exported.records).includes('restart-old-private'), false, `${backend}: old private text stays out of live state`);
+      assert.equal(JSON.stringify(report.projection).includes('restart-old-private'), false, `${backend}: old private text stays out of rebuild`);
+    });
   }
 });
 
@@ -798,9 +795,21 @@ test('DS-P1-006 eighth review: CLI, HTTP, and MCP restore reject the same baseli
     jsonrpc: '2.0', id: 2, method: 'tools/call',
     params: { name: 'shadowgraph_restore', arguments: { source } }
   });
-  assert.ok(response.error);
-  assert.equal(response.error.data?.issueCode ?? response.error.data?.code, INVALID_BASELINE_PLACEMENT_CODE);
-  assert.match(response.error.message, /projection baseline placement/i);
+  assert.equal(response.result, undefined, 'legacy tool failures use the numeric JSON-RPC error form');
+  assert.deepEqual(response.error, {
+    code: -32000,
+    message: `Tool execution failed (${INVALID_BASELINE_PLACEMENT_CODE})`,
+    data: { issueCode: INVALID_BASELINE_PLACEMENT_CODE }
+  });
+  const publicFailure = JSON.stringify(response);
+  for (const privateValue of [
+    source,
+    'projection baseline placement',
+    'ds-p1-006-forged-baseline-interfaces',
+    'ds-p1-006-fact-interfaces'
+  ]) {
+    assert.equal(publicFailure.includes(privateValue), false, `MCP failure disclosed ${privateValue}`);
+  }
   assert.deepEqual(await readFile(mcpDestination), mcpBefore);
   const search = await rpc.call({
     jsonrpc: '2.0', id: 3, method: 'tools/call',

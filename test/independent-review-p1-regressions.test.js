@@ -153,8 +153,12 @@ async function assertMcpRestorePreflightIsAtomic(t, backend) {
     jsonrpc: '2.0', id: 2, method: 'tools/call',
     params: { name: 'shadowgraph_restore', arguments: { source } }
   });
-  assert.ok(rejected.error, 'tampered signed restore RPC must fail');
-  assert.match(rejected.error.message, /persisted fact verification.*invalid/i);
+  assert.equal(rejected.result, undefined, 'legacy tool failures use the numeric JSON-RPC error form');
+  assert.deepEqual(rejected.error, { code: -32000, message: 'Tool execution failed' });
+  const publicFailure = JSON.stringify(rejected);
+  for (const privateValue of [source, 'tampered-after-signing', 'persisted fact verification']) {
+    assert.equal(publicFailure.includes(privateValue), false, `${backend}: MCP failure disclosed ${privateValue}`);
+  }
   assert.deepEqual(await readFile(destination), originalBytes, 'destination bytes must not change on verifier preflight failure');
 
   const live = liveRecordsFromSearch(await rpc.call({

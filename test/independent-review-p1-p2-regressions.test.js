@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { restoreFile } from '../src/backup.js';
+import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
 import { validateRestorePayload } from '../src/restore-validation.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
@@ -14,6 +15,8 @@ import { createJsonFileStore } from '../src/storage.js';
 
 const FIXED_NOW = '2026-08-27T12:00:00.000Z';
 const DUE_AT = '2026-08-27T11:00:00.000Z';
+const NODE_SQLITE = (await getRuntimeCapabilities()).nodeSqlite;
+const SQLITE_TEST_OPTIONS = NODE_SQLITE.available ? {} : { skip: NODE_SQLITE.reason };
 
 function startMcp(file, extraEnv = {}) {
   const child = spawn(process.execPath, ['src/mcp.js'], {
@@ -331,7 +334,7 @@ async function assertPurgeErasureAcrossBackend(backend, mode) {
 test('P2-5 independent review: logical and hard purge erase secret-bearing ids across JSON and SQLite restart/restore', async (t) => {
   for (const backend of ['json', 'sqlite']) {
     for (const mode of ['logical', 'hard']) {
-      await t.test(`${backend} ${mode}`, async () => {
+      await t.test(`${backend} ${mode}`, backend === 'sqlite' ? SQLITE_TEST_OPTIONS : {}, async () => {
         await assertPurgeErasureAcrossBackend(backend, mode);
       });
     }
