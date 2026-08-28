@@ -8,7 +8,7 @@
 //   search-contract.md      — content fields vs filters
 //   confidence-contract.md  — evidence-weighted bounded confidence
 
-import { assertHardPurgeGapLedgers, assertJournalBaselinePlacement, rebuildProjection, journalGaps, duplicateSequences, journalBaselinePlacementIssues, journalEntryPostconditionIssue, journalFactLifecycleIssues, schema5PurgeArtifactIssue, JOURNAL_ENTRY_TYPES, JOURNAL_TYPE_ENTITY_KIND, REPLAYABLE_ENTRY_TYPES } from './journal.js';
+import { assertHardPurgeGapLedgers, assertJournalBaselinePlacement, assertJournalEntrySequence, assertUniqueJournalSequences, rebuildProjection, journalGaps, duplicateSequences, journalBaselinePlacementIssues, journalEntryPostconditionIssue, journalEntrySequenceIssue, journalFactLifecycleIssues, schema5PurgeArtifactIssue, JOURNAL_ENTRY_TYPES, JOURNAL_TYPE_ENTITY_KIND, REPLAYABLE_ENTRY_TYPES } from './journal.js';
 import { createConfidence, applyContribution, setOutcomeContribution, computeConfidence, summarizeBasis, CONFIDENCE_POLICY } from './confidence.js';
 import { hybridSearch } from './hybrid-search.js';
 import { effectiveFactExpirationBoundary, factValidityPolicyIssue, isValidIsoInstant } from './fact-validity.js';
@@ -1705,6 +1705,26 @@ export function createShadowGraph(options = {}) {
       if (intervalIssue) push('error', 'contradictory_fact_interval', { recordId: fact.id, detail: intervalIssue });
     }
     for (const entry of journal) {
+      const sequenceIssue = journalEntrySequenceIssue(entry, { allowLegacyMetadata: true });
+      if (sequenceIssue) {
+        push('error', 'invalid_journal_sequence', {
+          entryId: entry?.id ?? null,
+          seq: entry?.seq ?? null,
+          type: entry?.type ?? null,
+          detail: sequenceIssue
+        });
+        continue;
+      }
+      if (entry.seq === undefined) {
+        if (entry.schemaVersion === undefined && entry.type !== 'legacy_metadata_event') {
+          // Unversioned compatibility arrays remain readable/rebuild-declared, but
+          // validate cannot prove which legacy envelope admitted them.
+          push('error', 'journal_entry_without_sequence', { entryId: entry.id ?? null, type: entry.type ?? null });
+        } else {
+          push('legacy', 'legacy_metadata_without_sequence', { entryId: entry.id ?? null, type: entry.type ?? null });
+        }
+        continue;
+      }
       const purgeArtifactIssue = schema5PurgeArtifactIssue(entry, SCHEMA_VERSION);
       if (purgeArtifactIssue) push('error', 'noncanonical_schema5_purge_artifact', { entryId: entry.id ?? null, seq: entry.seq ?? null, detail: purgeArtifactIssue });
       const journalFacts = entry.type === 'projection.baseline' ? (entry.payload?.facts ?? []) : entry.payload?.kind === 'fact' ? [entry.payload] : [];
@@ -1714,7 +1734,6 @@ export function createShadowGraph(options = {}) {
       }
       if (!JOURNAL_ENTRY_TYPES.includes(entry.type)) push('unsupported', 'unsupported_journal_entry', { entryId: entry.id, seq: entry.seq ?? null, type: entry.type ?? null });
       else if (Number.isInteger(entry.schemaVersion) && entry.schemaVersion > SCHEMA_VERSION) push('unsupported', 'unsupported_journal_schema_version', { entryId: entry.id, seq: entry.seq, schemaVersion: entry.schemaVersion });
-      else if (!Number.isInteger(entry.seq)) push('error', 'journal_entry_without_sequence', { entryId: entry.id ?? null, type: entry.type ?? null });
     }
     for (const issue of journalBaselinePlacementIssues(journal, {
       journalEpoch,
@@ -2829,10 +2848,20 @@ function validateImportShape(source) {
     const relationValidTo = relation.temporal?.validTo ?? relation.validTo ?? null;
     if (relationValidFrom && relationValidTo && compareInstants(relationValidTo, relationValidFrom) < 0) throw new Error('Stored relation validTo must not precede validFrom');
   }
+  const journalEntries = array('journal');
+  // Sequence identity is the primary ordering invariant. Check it before journal
+  // ids or type semantics so same-id and different-id collisions share one stable
+  // diagnostic in every supported source schema.
+  assertUniqueJournalSequences(journalEntries);
   const journalIds = new Set();
-  const journalSequences = new Set();
-  for (const [index, entry] of array('journal').entries()) {
+  for (const [index, entry] of journalEntries.entries()) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`journal[${index}] is malformed`);
+    assertJournalEntrySequence(entry, {
+      path: `journal[${index}]`,
+      sourceSchemaVersion: source.schemaVersion,
+      allowLegacyMetadata: true
+    });
+
     const purgeArtifactIssue = schema5PurgeArtifactIssue(entry, source.schemaVersion);
     if (purgeArtifactIssue) throw new Error(`journal[${index}] has noncanonical schema 5 purge artifact: ${purgeArtifactIssue}`);
     const expectedEntityKind = JOURNAL_TYPE_ENTITY_KIND[entry.type];
@@ -2841,9 +2870,6 @@ function validateImportShape(source) {
       if (typeof entry.id !== 'string' || !entry.id) throw new Error(`journal[${index}].id must be a non-empty string`);
       if (journalIds.has(entry.id)) throw new Error(`Duplicate journal id ${entry.id}`);
       journalIds.add(entry.id);
-      if (!Number.isSafeInteger(entry.seq) || entry.seq <= 0) throw new Error(`journal[${index}].seq must be a positive safe integer`);
-      if (journalSequences.has(entry.seq)) throw new Error(`Duplicate journal sequence ${entry.seq}`);
-      journalSequences.add(entry.seq);
       if (entry.payload?.id !== undefined && entry.entityId !== entry.payload.id) throw new Error(`journal[${index}] entityId must match payload.id`);
       if (entry.payload?.project !== undefined && entry.project !== entry.payload.project) throw new Error(`journal[${index}] project must match payload.project`);
       if (entry.payload?.kind !== undefined && entry.entityKind !== entry.payload.kind) throw new Error(`journal[${index}] entityKind must match payload.kind`);
@@ -2860,10 +2886,17 @@ function validateImportShape(source) {
       if (validityIssue) throw new Error(`journal[${index}] ${entry.type} has invalid fact validity: ${validityIssue}`);
     }
   }
-  assertJournalBaselinePlacement(array('journal'), {
+  assertJournalBaselinePlacement(journalEntries, {
     journalEpoch: source.journalEpoch,
     sourceSchemaVersion: source.schemaVersion
   });
+  const hardPurgeMarkers = array('journal').filter((entry) => entry?.type === 'project.purged' && entry?.payload?.mode === 'hard');
+  if (hardPurgeMarkers.length && hardPurgeMarkers.every((entry) => Object.hasOwn(entry.payload, 'removedJournalSequences'))) {
+    assertHardPurgeGapLedgers(array('journal'), {
+      journalEpoch: source.journalEpoch,
+      sourceSchemaVersion: source.schemaVersion
+    });
+  }
   const lifecycleIssues = journalFactLifecycleIssues(array('journal'), {
     journalEpoch: source.journalEpoch,
     sourceSchemaVersion: source.schemaVersion

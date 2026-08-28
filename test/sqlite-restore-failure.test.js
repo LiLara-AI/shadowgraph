@@ -12,6 +12,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
 import { createShadowGraphServer } from '../src/server.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
@@ -36,7 +37,8 @@ const journalSnapshot = (title = 'NEW') => {
   return graph.exportData();
 };
 
-const unsupported = (error) => /SQLite storage requires Node/.test(error.message);
+const NODE_SQLITE = (await getRuntimeCapabilities()).nodeSqlite;
+const unsupported = (error) => !NODE_SQLITE.available && error.message === NODE_SQLITE.reason;
 const closeQuietly = (store) => { try { store?.close(); } catch { /* test cleanup */ } };
 const artifactPattern = /\.(?:restore|rollback|old|recovery)(?:-(?:wal|shm|journal))?$/;
 
@@ -89,12 +91,11 @@ async function seed(pair) {
 }
 
 async function databaseSync(t) {
-  try {
-    return (await import('node:sqlite')).DatabaseSync;
-  } catch (error) {
-    t.skip(`node:sqlite unavailable: ${error.message}`);
+  if (!NODE_SQLITE.available) {
+    t.skip(NODE_SQLITE.reason);
     return null;
   }
+  return (await import('node:sqlite')).DatabaseSync;
 }
 
 function openWith(DatabaseSync, path, options) {
@@ -852,7 +853,13 @@ test('MCP SQLite restore refuses a domain-invalid snapshot and preserves old sta
   child.kill();
   await once(child, 'exit');
   assert.equal(response.id, 91);
-  assert.match(response.error.message, /records\[0\] is malformed/);
+  assert.equal(response.result, undefined, 'legacy tool failures use the numeric JSON-RPC error form');
+  assert.deepEqual(response.error, { code: -32000, message: 'Tool execution failed' });
+  const publicFailure = JSON.stringify(response);
+  assert.equal(publicFailure.includes(pair.sourcePath), false, 'MCP failure disclosed the SQLite source path');
+  assert.equal(publicFailure.includes(pair.livePath), false, 'MCP failure disclosed the SQLite destination path');
+  assert.equal(publicFailure.includes('records[0] is malformed'), false, 'MCP failure disclosed the raw record diagnostic');
+  assert.equal(publicFailure.includes('"id":"bad"'), false, 'MCP failure disclosed the malformed payload id');
   const reopened = await createSqliteStore(pair.livePath);
   try { assert.equal((await reopened.load()).records[0].id, 'OLD'); }
   finally { reopened.close(); }

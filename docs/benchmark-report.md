@@ -203,6 +203,10 @@ MEASUREMENT, not by guess.`
 - All three rebuilds and both backend round trips were canonically equivalent.
 - Journal validation passed `3/3`; no preregistered journal threshold was
   breached.
+- Those retained SQLite measurements were produced on a Node 22.5+ runtime.
+  On supported runtimes before Node 22.5, SQLite is explicitly
+  `NOT_APPLICABLE` and not measured because `node:sqlite` is unavailable; JSON
+  and journal rebuild evidence remain valid.
 
 ### `NOT_MEASURED`
 

@@ -6,8 +6,10 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { restoreFile } from '../src/backup.js';
+import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
 import {
   hardPurgeGapLedgerReport,
+  INVALID_JOURNAL_SEQUENCE_CODE,
   rebuildProjection,
   schema5PurgeArtifactIssue
 } from '../src/journal.js';
@@ -22,6 +24,8 @@ const PROJECT = 'semantic-purge-project';
 const NULL_PROVENANCE = Object.freeze({ actor: null, client: null, sessionId: null });
 const INVALID_CODE = 'noncanonical_schema5_purge_artifact';
 const INVALID_REASON = 'journal contains noncanonical schema-5 purge artifacts';
+const NODE_SQLITE = (await getRuntimeCapabilities()).nodeSqlite;
+const SQLITE_TEST_OPTIONS = NODE_SQLITE.available ? {} : { skip: NODE_SQLITE.reason };
 const VICTIM = Object.freeze({
   id: 'semantic-purge-victim',
   kind: 'decision',
@@ -166,16 +170,21 @@ function liveVictimGraph() {
 }
 
 function assertPureRejected(report, testCase) {
+  const invalidSequence = testCase.name.startsWith('seq_');
   assert.equal(report.rebuildable, false, `${testCase.name}: invalid marker blocks complete rebuild`);
-  assert.equal(report.reason, INVALID_REASON, `${testCase.name}: stable rebuild reason`);
-  assert.equal(report.applied, 1, `${testCase.name}: invalid marker is not folded`);
-  assert.deepEqual(report.projection.records, [VICTIM], `${testCase.name}: invalid marker cannot delete the projection`);
-  assert.deepEqual(report.projection.idempotency, [{
+  assert.equal(
+    report.reason,
+    invalidSequence ? 'journal contains invalid sequence numbers' : INVALID_REASON,
+    `${testCase.name}: stable rebuild reason`
+  );
+  assert.equal(report.applied, invalidSequence ? 0 : 1, `${testCase.name}: invalid marker is not folded`);
+  assert.deepEqual(report.projection.records, invalidSequence ? [] : [VICTIM], `${testCase.name}: invalid marker cannot delete the projection`);
+  assert.deepEqual(report.projection.idempotency, invalidSequence ? [] : [{
     key: `decision:${PROJECT}:semantic-retry`,
     value: VICTIM
   }], `${testCase.name}: invalid marker cannot delete idempotency state`);
   assert.equal(report.skipped.length, 1, `${testCase.name}: one attributable skip`);
-  assert.equal(report.skipped[0].why, INVALID_CODE, `${testCase.name}: stable skip code`);
+  assert.equal(report.skipped[0].why, invalidSequence ? INVALID_JOURNAL_SEQUENCE_CODE : INVALID_CODE, `${testCase.name}: stable skip code`);
   assert.match(report.skipped[0].detail, testCase.detail, `${testCase.name}: semantic diagnostic`);
 }
 
@@ -402,7 +411,7 @@ test('malformed marker rejection is atomic across JSON and SQLite restore', asyn
     assert.deepEqual(await readFile(destination), before);
   });
 
-  await t.test('SQLite restore', async () => {
+  await t.test('SQLite restore', SQLITE_TEST_OPTIONS, async () => {
     const source = join(directory, 'malformed.db');
     const destination = join(directory, 'live.db');
     const sourceStore = await createSqliteStore(source);
@@ -467,7 +476,13 @@ test('malformed marker rejection is atomic across CLI, HTTP, and MCP restore', a
         jsonrpc: '2.0', id: 2, method: 'tools/call',
         params: { name: 'shadowgraph_restore', arguments: { source } }
       });
-      assert.match(response.error.message, /mode must be exactly logical or hard/i);
+      assert.equal(response.result, undefined, 'legacy tool failures use the numeric JSON-RPC error form');
+      assert.deepEqual(response.error, { code: -32000, message: 'Tool execution failed' });
+      const publicFailure = JSON.stringify(response);
+      assert.equal(publicFailure.includes(source), false, 'MCP failure disclosed the restore path');
+      assert.equal(publicFailure.includes(destination), false, 'MCP failure disclosed the storage path');
+      assert.equal(publicFailure.includes(VICTIM.id), false, 'MCP failure disclosed the retained entity id');
+      assert.equal(publicFailure.includes('mode must be exactly logical or hard'), false, 'MCP failure disclosed the raw purge diagnostic');
       assert.deepEqual(await readFile(destination), before);
     } finally {
       await rpc.stop();

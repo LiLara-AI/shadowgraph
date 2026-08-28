@@ -6,6 +6,7 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { backupFile, restoreFile } from '../src/backup.js';
+import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
 import { createShadowGraphServer } from '../src/server.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
@@ -19,6 +20,8 @@ const RAW_FACT_ID = 'DS_P1_007_RAW_PURGED_FACT_SENTINEL';
 const RAW_RELATION_ID = 'DS_P1_007_RAW_PURGED_RELATION_SENTINEL';
 const RAW_EVENT_ID = 'DS_P1_007_RAW_PURGED_EVENT_SENTINEL';
 const BASELINE_METADATA_SENTINEL = 'DS_P1_008_BASELINE_METADATA_SENTINEL';
+const NODE_SQLITE = (await getRuntimeCapabilities()).nodeSqlite;
+const SQLITE_TEST_OPTIONS = NODE_SQLITE.available ? {} : { skip: NODE_SQLITE.reason };
 
 function decision(id, project, title = id) {
   return {
@@ -392,7 +395,7 @@ test('DS-P1-007 ninth review RED: raw schema-4 restores are normalized in JSON/S
     assertRawIdentityAbsent(await readFile(backup), 'direct JSON backup bytes');
   });
 
-  await t.test('direct SQLite restart, backup, and restore bytes', async () => {
+  await t.test('direct SQLite restart, backup, and restore bytes', SQLITE_TEST_OPTIONS, async () => {
     const source = join(directory, 'raw.db');
     const destination = join(directory, 'direct.db');
     const backup = join(directory, 'direct.backup.db');
@@ -443,7 +446,7 @@ test('DS-P1-007 ninth review RED: raw schema-4 restores are normalized in JSON/S
     await assertStandaloneCompactedDatabase(backup, 'direct SQLite backup database');
   });
 
-  await t.test('SQLite staged delete-then-failure rolls back without changing source or destination', async () => {
+  await t.test('SQLite staged delete-then-failure rolls back without changing source or destination', SQLITE_TEST_OPTIONS, async () => {
     const source = join(directory, 'failure-raw.db');
     const destination = join(directory, 'failure-direct.db');
     let sourceStore = await createSqliteStore(source);
@@ -592,7 +595,7 @@ function assertBaselineRebuildParity(payload, label) {
 
 async function assertBaselineAcrossPersistence(t, payload, label, expectedRecordIds) {
   for (const backend of ['json', 'sqlite']) {
-    await t.test(`${label} ${backend} restart, backup, and restore`, async () => {
+    await t.test(`${label} ${backend} restart, backup, and restore`, backend === 'sqlite' ? SQLITE_TEST_OPTIONS : {}, async () => {
       const directory = await mkdtemp(join(tmpdir(), `shadowgraph-ds-p1-008-${backend}-`));
       const extension = backend === 'sqlite' ? 'db' : 'json';
       const live = join(directory, `live.${extension}`);
