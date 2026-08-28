@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { copyFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { copyFile, cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -78,10 +78,15 @@ async function packageFixture(t, auditText) {
   return root;
 }
 
-function runChecker(root) {
+function runChecker(root, { env: envOverrides = {}, withoutNpmExecpath = false } = {}) {
+  const env = { ...process.env, ...envOverrides };
+  if (withoutNpmExecpath) {
+    delete env.npm_execpath;
+    delete env.npm_node_execpath;
+  }
   return exec(process.execPath, [join(root, 'scripts', 'check-package.mjs')], {
     cwd: root,
-    env: { ...process.env },
+    env,
     maxBuffer: 10 * 1024 * 1024,
     windowsHide: true
   });
@@ -131,4 +136,20 @@ test('check-package allows harmless packaged URLs, URL metadata, versions, and i
   const result = await runChecker(root);
   assert.match(result.stdout, /package metadata and tarball contents valid/);
   assert.doesNotMatch(result.stderr, /packaged text policy violations/i);
+});
+
+test('check-package npm fallback safely packs metacharacter paths without DEP0190', async (t) => {
+  const metacharacterTemp = await mkdtemp(join(tmpdir(), 'shadowgraph npm pack &()!^%-'));
+  t.after(() => rm(metacharacterTemp, { recursive: true, force: true }));
+  const root = await packageFixture(t, '# Harmless metacharacter-path package\n');
+  const metacharacterRoot = join(metacharacterTemp, 'safe repo copy &()!^%');
+  await cp(root, metacharacterRoot, { recursive: true });
+
+  const result = await runChecker(metacharacterRoot, {
+    env: { TEMP: metacharacterTemp, TMP: metacharacterTemp, TMPDIR: metacharacterTemp },
+    withoutNpmExecpath: true
+  });
+  const output = `${result.stdout}\n${result.stderr}`;
+  assert.match(result.stdout, /package metadata and tarball contents valid/);
+  assert.doesNotMatch(output, /DEP0190/u);
 });

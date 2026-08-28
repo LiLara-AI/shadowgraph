@@ -103,6 +103,25 @@ function mcpTool(id, name, args = {}) {
   };
 }
 
+function assertPrivateLegacyMcpFailure(response, {
+  code = -32000,
+  message = 'Tool execution failed',
+  data,
+  forbidden = []
+} = {}) {
+  assert.equal(response.result, undefined, 'legacy tool failures use the numeric JSON-RPC error form');
+  assert.deepEqual(response.error, {
+    code,
+    message,
+    ...(data === undefined ? {} : { data })
+  });
+  const publicFailure = JSON.stringify(response);
+  for (const privateValue of forbidden) {
+    assert.equal(publicFailure.includes(String(privateValue)), false, `MCP failure disclosed ${String(privateValue)}`);
+  }
+  assert.doesNotMatch(publicFailure, /retainedArtifacts|unknownArtifacts|artifactCleanup|rollbackArtifact|recoveryArtifact|EACCES|EPERM|SQLITE_[A-Z_]+/);
+}
+
 async function verifierFixture(directory) {
   const keys = generateKeyPairSync('ed25519');
   const evidenceRoot = join(directory, 'evidence');
@@ -381,11 +400,18 @@ test('RRV-01: real MCP JSON restore fail-closes after unconfirmed recovery and p
   await rpc.call({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
 
   const restore = await rpc.call(mcpTool(2, 'shadowgraph_restore', { source }));
-  assert.ok(restore.error);
-  assert.match(restore.error.message, /rollback is unconfirmed/i);
-  assert.equal(restore.error.data.recoveryCode, 'json_restore_recovery_unconfirmed');
-  assert.equal(restore.error.data.retainedArtifacts.length, 1);
-  const [retainedPath] = restore.error.data.retainedArtifacts;
+  assertPrivateLegacyMcpFailure(restore, {
+    message: 'Tool execution failed (json_restore_recovery_unconfirmed)',
+    data: {
+      issueCode: 'json_restore_recovery_unconfirmed',
+      recoveryCode: 'json_restore_recovery_unconfirmed'
+    },
+    forbidden: [source, destination, 'rrv01-mcp-old', 'rrv01-mcp-new', 'rollback is unconfirmed']
+  });
+  const artifactNames = await jsonArtifacts(directory);
+  assert.equal(artifactNames.length, 1, 'unconfirmed JSON recovery retains only one rollback artifact');
+  assert.equal(artifactNames[0].endsWith('.rollback'), true);
+  const retainedPath = join(directory, artifactNames[0]);
   t.after(async () => { await unlink(retainedPath).catch(() => {}); });
   assert.deepEqual(await readFile(retainedPath), originalBytes);
   const evidenceBeforeLaterCalls = await readFile(retainedPath);
@@ -393,13 +419,20 @@ test('RRV-01: real MCP JSON restore fail-closes after unconfirmed recovery and p
   const blockedWrite = await rpc.call(mcpTool(3, 'shadowgraph_record_decision', {
     id: 'rrv01-mcp-post-fatal', project: 'rrv', title: 'MUST NOT LAND', chosen: 'unsafe'
   }));
-  assert.ok(blockedWrite.error);
-  assert.match(blockedWrite.error.message, /persistent storage unavailable/i);
-  assert.equal(blockedWrite.error.data.recoveryCode, 'json_restore_recovery_unconfirmed');
+  assertPrivateLegacyMcpFailure(blockedWrite, {
+    code: -32001,
+    message: 'Persistent storage unavailable',
+    data: { recoveryCode: 'json_restore_recovery_unconfirmed' },
+    forbidden: ['rrv01-mcp-post-fatal', retainedPath]
+  });
 
   const blockedRead = await rpc.call(mcpTool(4, 'shadowgraph_search', { project: 'rrv', query: 'RRV01' }));
-  assert.ok(blockedRead.error);
-  assert.match(blockedRead.error.message, /persistent storage unavailable/i);
+  assertPrivateLegacyMcpFailure(blockedRead, {
+    code: -32001,
+    message: 'Persistent storage unavailable',
+    data: { recoveryCode: 'json_restore_recovery_unconfirmed' },
+    forbidden: [retainedPath]
+  });
   assert.deepEqual(await readFile(retainedPath), evidenceBeforeLaterCalls);
   assert.equal((await readFile(destination, 'utf8')).includes('MUST NOT LAND'), false);
 
@@ -433,11 +466,20 @@ test('RRV-01: real MCP SQLite unconfirmed recovery uses the same fail-closed lat
   t.after(async () => { await rpc.stop(); });
   await rpc.call({ jsonrpc: '2.0', id: 20, method: 'tools/list' });
   const restore = await rpc.call(mcpTool(21, 'shadowgraph_restore', { source }));
-  assert.ok(restore.error);
-  assert.equal(restore.error.data.recoveryCode, 'sqlite_restore_recovery_unconfirmed');
-  assert.ok(restore.error.data.retainedArtifacts.some((path) => String(path).endsWith('.rollback')));
-
-  const rollbackPath = restore.error.data.retainedArtifacts.find((path) => String(path).endsWith('.rollback'));
+  assertPrivateLegacyMcpFailure(restore, {
+    message: 'Tool execution failed (sqlite_restore_recovery_unconfirmed)',
+    data: {
+      issueCode: 'sqlite_restore_recovery_unconfirmed',
+      recoveryCode: 'sqlite_restore_recovery_unconfirmed'
+    },
+    forbidden: [source, destination, 'rrv01-mcp-sqlite-old', 'rrv01-mcp-sqlite-new', 'rollback is unconfirmed']
+  });
+  const retainedNames = (await readdir(directory))
+    .filter((name) => /^\..+\.(?:restore|rollback|old|recovery)(?:-(?:wal|shm|journal))?$/.test(name))
+    .sort();
+  const rollbackNames = retainedNames.filter((name) => name.endsWith('.rollback'));
+  assert.equal(rollbackNames.length, 1, 'unconfirmed SQLite recovery retains one complete rollback database');
+  const rollbackPath = join(directory, rollbackNames[0]);
   const retained = await createSqliteStore(rollbackPath);
   try { assert.equal((await retained.load()).records[0].id, 'rrv01-mcp-sqlite-old'); }
   finally { retained.close(); }
@@ -446,11 +488,19 @@ test('RRV-01: real MCP SQLite unconfirmed recovery uses the same fail-closed lat
     id: 'rrv01-mcp-sqlite-post-fatal', title: 'MUST NOT LAND SQLITE', chosen: 'unsafe'
   }));
   const blockedRead = await rpc.call(mcpTool(23, 'shadowgraph_search', { query: 'RRV01' }));
-  assert.match(blockedWrite.error.message, /persistent storage unavailable/i);
-  assert.match(blockedRead.error.message, /persistent storage unavailable/i);
+  const sqliteLatch = {
+    code: -32001,
+    message: 'Persistent storage unavailable',
+    data: { recoveryCode: 'sqlite_restore_recovery_unconfirmed' }
+  };
+  assertPrivateLegacyMcpFailure(blockedWrite, {
+    ...sqliteLatch,
+    forbidden: ['rrv01-mcp-sqlite-post-fatal', rollbackPath]
+  });
+  assertPrivateLegacyMcpFailure(blockedRead, { ...sqliteLatch, forbidden: [rollbackPath] });
 
   await rpc.stop();
-  for (const path of restore.error.data.retainedArtifacts) await unlink(path).catch(() => {});
+  for (const name of retainedNames) await unlink(join(directory, name)).catch(() => {});
 });
 
 test('RRV-02: core import and journal rebuild reject rewritten, duplicate, and post-terminal fact verification', async () => {
@@ -609,8 +659,9 @@ test('RRV-02: real HTTP and MCP restore reject lifecycle resurrection atomically
   t.after(async () => { await rpc.stop(); });
   await rpc.call({ jsonrpc: '2.0', id: 30, method: 'tools/list' });
   const rejected = await rpc.call(mcpTool(31, 'shadowgraph_restore', { source: mcpSource }));
-  assert.ok(rejected.error);
-  assert.match(rejected.error.message, /lifecycle|duplicate.*fact\.verified|monotonic/i);
+  assertPrivateLegacyMcpFailure(rejected, {
+    forbidden: [mcpSource, mcpDestination, factId, 'lifecycle', 'duplicate fact.verified', 'monotonic']
+  });
   assert.deepEqual(await readFile(mcpDestination), mcpBefore);
   const search = await rpc.call(mcpTool(32, 'shadowgraph_search', { project: 'rrv', query: 'RRV02 INTERFACE OLD' }));
   assert.equal(search.error, undefined, search.error?.message);

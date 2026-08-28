@@ -264,16 +264,29 @@ test('DS-P1-001 MCP: stat-denied inventory latches all graph tools while protoco
   await rpc.call({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
 
   const restore = await rpc.call(mcpTool(2, 'shadowgraph_restore', { source }));
-  assert.ok(restore.error);
-  assert.equal(restore.error.data.recoveryCode, 'json_restore_recovery_unconfirmed');
-  assert.deepEqual(restore.error.data.retainedArtifacts, []);
-  assert.equal(restore.error.data.unknownArtifacts?.length, 1);
-  assert.equal(restore.error.data.unknownArtifacts[0].code, 'EACCES');
+  assert.equal(restore.result, undefined, 'legacy tool failures use the numeric JSON-RPC error form');
+  assert.deepEqual(restore.error, {
+    code: -32000,
+    message: 'Tool execution failed (json_restore_recovery_unconfirmed)',
+    data: {
+      issueCode: 'json_restore_recovery_unconfirmed',
+      recoveryCode: 'json_restore_recovery_unconfirmed'
+    }
+  });
 
-  const [rollbackPath] = await artifactPaths(directory);
+  const retainedPaths = await artifactPaths(directory);
+  assert.equal(retainedPaths.length, 1, 'stat-denied cleanup retains exactly the unknown rollback artifact');
+  const [rollbackPath] = retainedPaths;
   t.after(async () => { await unlink(rollbackPath).catch(() => {}); });
-  assert.equal(resolve(restore.error.data.unknownArtifacts[0].path), resolve(rollbackPath));
   assert.deepEqual(await readFile(rollbackPath), originalBytes);
+  const publicRestore = JSON.stringify(restore);
+  for (const privateValue of [
+    source, destination, rollbackPath,
+    'ds-p1-mcp-old', 'ds-p1-mcp-new',
+    'EACCES', 'retainedArtifacts', 'unknownArtifacts', 'rollback is unconfirmed'
+  ]) {
+    assert.equal(publicRestore.includes(privateValue), false, `restore failure disclosed ${privateValue}`);
+  }
   const destinationAfterFailure = await readFile(destination);
   const evidenceAfterFailure = await readFile(rollbackPath);
 
@@ -281,9 +294,19 @@ test('DS-P1-001 MCP: stat-denied inventory latches all graph tools while protoco
     id: 'ds-p1-mcp-must-not-land', project: 'fourth-review', title: 'MUST NOT LAND', chosen: 'unsafe'
   }));
   const blockedRead = await rpc.call(mcpTool(4, 'shadowgraph_search', { project: 'fourth-review', query: 'DS P1' }));
-  assert.equal(blockedWrite.error.data.recoveryCode, 'json_restore_recovery_unconfirmed');
-  assert.deepEqual(blockedWrite.error.data.unknownArtifacts, restore.error.data.unknownArtifacts);
-  assert.equal(blockedRead.error.data.recoveryCode, 'json_restore_recovery_unconfirmed');
+  const publicLatchError = {
+    code: -32001,
+    message: 'Persistent storage unavailable',
+    data: { recoveryCode: 'json_restore_recovery_unconfirmed' }
+  };
+  assert.equal(blockedWrite.result, undefined);
+  assert.deepEqual(blockedWrite.error, publicLatchError);
+  assert.equal(blockedRead.result, undefined);
+  assert.deepEqual(blockedRead.error, publicLatchError);
+  const publicLatch = JSON.stringify([blockedWrite, blockedRead]);
+  for (const privateValue of ['ds-p1-mcp-must-not-land', rollbackPath, 'EACCES', 'unknownArtifacts']) {
+    assert.equal(publicLatch.includes(privateValue), false, `degraded latch disclosed ${privateValue}`);
+  }
   assert.deepEqual(await readFile(destination), destinationAfterFailure, 'later MCP calls must not mutate the unconfirmed destination');
   assert.deepEqual(await readFile(rollbackPath), evidenceAfterFailure, 'later MCP calls must not alter retained evidence');
 
@@ -544,7 +567,7 @@ test('DS-P2-002 MCP: successful restore propagates retained rollback cleanup evi
   assert.deepEqual(await readFile(rollbackPath), originalBytes);
 });
 
-test('DS-P2-002 MCP: confirmed rollback propagates cleanup evidence and remains usable with old state', async (t) => {
+test('DS-P2-002 MCP: confirmed rollback keeps cleanup evidence private and remains usable with old state', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-ds-p2-002-mcp-rollback-'));
   const destination = join(directory, 'live.json');
   const source = join(directory, 'source.json');
@@ -561,15 +584,26 @@ test('DS-P2-002 MCP: confirmed rollback propagates cleanup evidence and remains 
   await rpc.call({ jsonrpc: '2.0', id: 40, method: 'tools/list' });
 
   const response = await rpc.call(mcpTool(41, 'shadowgraph_restore', { source }));
-  assert.ok(response.error);
-  assert.equal(response.error.data.artifactCleanup.status, 'incomplete');
-  assert.equal(response.error.data.retainedArtifacts.length, 1);
-  assert.deepEqual(response.error.data.unknownArtifacts, []);
-  const [rollbackPath] = await artifactPaths(directory);
+  assert.equal(response.result, undefined, 'legacy tool failures use the numeric JSON-RPC error form');
+  assert.deepEqual(response.error, {
+    code: -32000,
+    message: 'Tool execution failed (json_restore_rolled_back)',
+    data: { issueCode: 'json_restore_rolled_back' }
+  });
+  const retainedPaths = await artifactPaths(directory);
+  assert.equal(retainedPaths.length, 1, 'incomplete cleanup retains exactly the rollback artifact');
+  const [rollbackPath] = retainedPaths;
   t.after(async () => { await unlink(rollbackPath).catch(() => {}); });
-  assert.equal(resolve(response.error.data.retainedArtifacts[0]), resolve(rollbackPath));
   assert.deepEqual(await readFile(rollbackPath), originalBytes);
   assert.deepEqual(await readFile(destination), originalBytes);
+  const publicFailure = JSON.stringify(response);
+  for (const privateValue of [
+    source, destination, rollbackPath,
+    'ds-p2-mcp-rollback-old', 'ds-p2-mcp-rollback-new',
+    'EACCES', 'artifactCleanup', 'retainedArtifacts', 'injected MCP activation rejection'
+  ]) {
+    assert.equal(publicFailure.includes(privateValue), false, `rollback failure disclosed ${privateValue}`);
+  }
 
   const search = await rpc.call(mcpTool(42, 'shadowgraph_search', { project: 'fourth-review', query: 'DS P2 MCP ROLLBACK OLD' }));
   assert.equal(search.error, undefined, search.error?.message);

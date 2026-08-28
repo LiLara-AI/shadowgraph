@@ -31,9 +31,9 @@ jobs:
       - name: Strict official MCP Inspector (27 full / 12 compact)
         if: matrix.node-version == 24
         run: npm run check:mcp
-      - name: Assert SQLite coverage where node:sqlite exists
+      - name: Assert SQLite coverage (zero skips, todos, or failures)
         if: matrix.node-version != 20
-        run: node --test test/sqlite.test.js test/sqlite-migration.test.js test/sqlite-concurrency.test.js test/sqlite-restore-failure.test.js
+        run: node scripts/assert-sqlite-coverage.mjs
       - run: python -m py_compile integrations/hermes-agent.py
       - run: npm run check:package
       - name: Real tarball clean-install smoke (path contains spaces)

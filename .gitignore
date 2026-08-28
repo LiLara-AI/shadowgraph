@@ -2,6 +2,7 @@ node_modules/
 .npm-cache/
 .shadowgraph/
 coverage/
+benchmark/results/
 *.log
 __pycache__/
 *.py[cod]

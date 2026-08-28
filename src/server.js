@@ -24,6 +24,29 @@ const RESTORE_BLOCKED_MUTATIONS = new Set([
 ]);
 const UNCONFIRMED_RECOVERY_CODES = new Set(['json_restore_recovery_unconfirmed', 'sqlite_restore_recovery_unconfirmed']);
 
+function parseLoopbackAuthority(authority) {
+  if (typeof authority !== 'string') return null;
+  const match = /^(localhost|127\.0\.0\.1|\[::1\])(?::([1-9]\d{0,4}))?$/u.exec(authority);
+  if (!match) return null;
+  const port = match[2] === undefined ? 80 : Number(match[2]);
+  if (port > 65_535) return null;
+  return { hostname: match[1], port };
+}
+
+function isAllowedLocalOrigin(origin, localPort) {
+  if (typeof origin !== 'string' || !origin.startsWith('http://')) return false;
+  return parseLoopbackAuthority(origin.slice('http://'.length))?.port === localPort;
+}
+
+function isAllowedLocalHost(host, localPort) {
+  return parseLoopbackAuthority(host)?.port === localPort;
+}
+
+function rejectForbidden(response) {
+  response.writeHead(403, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+  response.end(JSON.stringify({ error: 'forbidden' }));
+}
+
 function coerceQuery(params) {
   const parsed = { ...params };
   for (const key of INTEGER_PARAMS) {
@@ -189,6 +212,15 @@ export async function createShadowGraphServer(options = {}) {
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url, 'http://127.0.0.1');
+      if (!isAllowedLocalHost(request.headers.host, request.socket.localPort)) {
+        rejectForbidden(response);
+        return;
+      }
+      const origin = request.headers.origin;
+      if (origin !== undefined && !isAllowedLocalOrigin(origin, request.socket.localPort)) {
+        rejectForbidden(response);
+        return;
+      }
       if (request.method === 'GET' && url.pathname === '/dashboard') {
         response.writeHead(200, {
           'content-type': 'text/html; charset=utf-8',
@@ -198,7 +230,6 @@ export async function createShadowGraphServer(options = {}) {
         response.end(dashboardHtml);
         return;
       }
-      const origin = request.headers.origin;
       const authorization = request.headers.authorization ?? '';
       const expected = Buffer.from(`Bearer ${apiToken ?? ''}`);
       const provided = Buffer.from(authorization);
@@ -206,11 +237,6 @@ export async function createShadowGraphServer(options = {}) {
       if (!authenticated) {
         response.writeHead(401, { 'content-type': 'application/json; charset=utf-8' });
         response.end(JSON.stringify({ error: 'authentication required' }));
-        return;
-      }
-      if (origin && !origin.startsWith('http://127.0.0.1:') && !/^http:\/\/localhost(?::\d+)?$/.test(origin)) {
-        response.writeHead(403, { 'content-type': 'application/json; charset=utf-8' });
-        response.end(JSON.stringify({ error: 'origin not allowed' }));
         return;
       }
       const chunks = [];

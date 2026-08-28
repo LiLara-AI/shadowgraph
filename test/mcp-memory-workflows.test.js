@@ -127,7 +127,13 @@ test('MCP rolls live memory back when ordinary persistence fails', async (t) => 
       arguments: { project: 'app', memoryType: 'note', key: 'transient', text: 'Must roll back' }
     }
   });
-  assert.match(failed.error.message, /rename|directory|EPERM|EISDIR|storage/i);
+  assert.equal(failed.result, undefined, 'legacy tool failures use the numeric JSON-RPC error form');
+  assert.deepEqual(failed.error, { code: -32000, message: 'Tool execution failed' });
+  const publicFailure = JSON.stringify(failed);
+  for (const privateValue of [file, 'transient', 'Must roll back']) {
+    assert.equal(publicFailure.includes(privateValue), false, `persistence failure disclosed ${privateValue}`);
+  }
+  assert.doesNotMatch(publicFailure, /rename|directory|EPERM|EISDIR|storage/i, 'persistence failure disclosed an OS/storage diagnostic');
 
   const recalled = await rpc.call({
     jsonrpc: '2.0', id: 4, method: 'tools/call', params: {

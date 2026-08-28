@@ -11,6 +11,61 @@ import { effectiveFactExpirationBoundary, factValidityPolicyIssue, isValidIsoIns
 export const JOURNAL_SCHEMA_VERSION = 5;
 export const INVALID_BASELINE_PLACEMENT_CODE = 'invalid_projection_baseline_placement';
 export const NONCANONICAL_SCHEMA5_PURGE_ARTIFACT_CODE = 'noncanonical_schema5_purge_artifact';
+export const INVALID_JOURNAL_SEQUENCE_CODE = 'invalid_journal_sequence';
+export const DUPLICATE_JOURNAL_SEQUENCE_CODE = 'duplicate_journal_sequence';
+
+/**
+ * The sole compatibility exception to numbered journal ordering.
+ *
+ * Schemas 1/2 used event-shaped audit breadcrumbs before replayable snapshots
+ * existed. They have no payload or structural entity identity, so preserving
+ * their absent sequence cannot hide a projection mutation. Explicit
+ * `legacy_metadata_event` entries are likewise safe only when they make their
+ * non-replayability and payload absence unambiguous. `null` is never absence.
+ */
+export function isLegacyUnnumberedMetadataEntry(entry, options = {}) {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry) || entry.seq !== undefined) return false;
+
+  if (entry.type === 'legacy_metadata_event') {
+    return entry.replayable === false && entry.payload === null;
+  }
+
+  const entryIsLegacy = Number.isInteger(entry.schemaVersion) && entry.schemaVersion <= 2;
+  const entryIsUnversioned = entry.schemaVersion === undefined;
+  // A current envelope can legitimately retain pre-journal breadcrumbs verbatim;
+  // the entry's own old/absent schema plus its metadata-only shape is the proof.
+  if (!entryIsLegacy && !entryIsUnversioned) return false;
+  if (!REPLAYABLE_ENTRY_TYPES.includes(entry.type) || ['projection.baseline', 'project.purged'].includes(entry.type)) return false;
+
+  return !Object.hasOwn(entry, 'payload')
+    && !Object.hasOwn(entry, 'entityKind')
+    && !Object.hasOwn(entry, 'entityId')
+    && !Object.hasOwn(entry, 'replayable')
+    && !Object.hasOwn(entry, 'redacted')
+    && !Object.hasOwn(entry, 'redactedReason')
+    && !Object.hasOwn(entry, 'derivedFrom')
+    && !Object.hasOwn(entry, 'idempotencyKey');
+}
+
+export function journalEntrySequenceIssue(entry, options = {}) {
+  if (entry?.seq === undefined
+    && options.allowLegacyMetadata === true
+    && isLegacyUnnumberedMetadataEntry(entry, options)) return null;
+  return Number.isSafeInteger(entry?.seq) && entry.seq > 0
+    ? null
+    : 'seq must be a positive safe integer';
+}
+
+export function assertJournalEntrySequence(entry, options = {}) {
+  const issue = journalEntrySequenceIssue(entry, options);
+  if (!issue) return { valid: true, issues: [] };
+  const path = options.path ?? 'journal entry';
+  const detail = `${path}.${issue}`;
+  const error = new Error(`Invalid journal sequence (${INVALID_JOURNAL_SEQUENCE_CODE}): ${detail}`);
+  error.code = INVALID_JOURNAL_SEQUENCE_CODE;
+  error.issues = [{ code: INVALID_JOURNAL_SEQUENCE_CODE, path, seq: entry?.seq ?? null, detail: issue }];
+  throw error;
+}
 
 const PURGE_SKELETON_FIELDS = new Set([
   'id', 'seq', 'type', 'at', 'project', 'entityKind', 'entityId',
@@ -291,7 +346,7 @@ function normalizeIdempotencyKey(key, value) {
 }
 
 export function isReplayable(entry) {
-  return Number.isInteger(entry?.seq) && entry.replayable !== false && REPLAYABLE_ENTRY_TYPES.includes(entry.type);
+  return journalEntrySequenceIssue(entry) === null && entry.replayable !== false && REPLAYABLE_ENTRY_TYPES.includes(entry.type);
 }
 
 /**
@@ -461,10 +516,21 @@ export function assertJournalBaselinePlacement(entries = [], options = {}) {
 export function duplicateSequences(entries = []) {
   const seen = new Map();
   for (const entry of entries) {
-    if (!Number.isInteger(entry?.seq)) continue;
+    if (journalEntrySequenceIssue(entry) !== null) continue;
     seen.set(entry.seq, (seen.get(entry.seq) ?? 0) + 1);
   }
   return [...seen.entries()].filter(([, count]) => count > 1).map(([seq, count]) => ({ seq, count })).sort((left, right) => left.seq - right.seq);
+}
+
+export function assertUniqueJournalSequences(entries = []) {
+  const duplicates = duplicateSequences(entries);
+  if (duplicates.length) {
+    const error = new Error(`Duplicate journal sequence (${DUPLICATE_JOURNAL_SEQUENCE_CODE}): ${duplicates.map((item) => item.seq).join(', ')}`);
+    error.code = DUPLICATE_JOURNAL_SEQUENCE_CODE;
+    error.issues = duplicates.map((item) => ({ code: DUPLICATE_JOURNAL_SEQUENCE_CODE, ...item }));
+    throw error;
+  }
+  return { valid: true, issues: [] };
 }
 
 function hardPurgeMarkerRelationshipIssues(entries = [], options = {}) {
@@ -504,14 +570,21 @@ function hardPurgeMarkerRelationshipIssues(entries = [], options = {}) {
  */
 export function rebuildProjection(entries = [], options = {}) {
   const all = Array.isArray(entries) ? [...entries] : [];
-  const journalEpoch = Number.isInteger(options.journalEpoch) ? options.journalEpoch : null;
+  const duplicates = duplicateSequences(all);
+  const duplicateSequenceValues = new Set(duplicates.map((item) => item.seq));
+  const unambiguous = all.filter((entry) => !duplicateSequenceValues.has(entry?.seq));
+  const epochProvided = options.journalEpoch !== undefined && options.journalEpoch !== null;
+  const invalidDeclaredEpoch = epochProvided
+    && (!Number.isSafeInteger(options.journalEpoch) || options.journalEpoch <= 0);
+  const journalEpoch = invalidDeclaredEpoch ? null : (Number.isSafeInteger(options.journalEpoch) ? options.journalEpoch : null);
   const sourceSchemaVersion = options.sourceSchemaVersion;
 
   const legacy = [];
   const skipped = [];
   const replayable = [];
+  const invalidSequences = [];
   const purgeArtifactIssues = [];
-  const hardPurgeRelationshipIssues = hardPurgeMarkerRelationshipIssues(all, {
+  const hardPurgeRelationshipIssues = hardPurgeMarkerRelationshipIssues(unambiguous, {
     journalEpoch,
     sourceSchemaVersion
   });
@@ -525,6 +598,29 @@ export function rebuildProjection(entries = [], options = {}) {
       skipped.push({ seq: entry.seq, type: entry.type, why: 'unsupported_schema_version' });
       continue;
     }
+    const sequenceIssue = journalEntrySequenceIssue(entry, {
+      allowLegacyMetadata: true,
+      sourceSchemaVersion
+    });
+    if (sequenceIssue) {
+      const issue = {
+        seq: entry.seq ?? null,
+        type: entry.type ?? null,
+        why: INVALID_JOURNAL_SEQUENCE_CODE,
+        detail: sequenceIssue
+      };
+      skipped.push(issue);
+      invalidSequences.push(issue);
+      continue;
+    }
+    if (entry.seq === undefined) {
+      // The only unnumbered compatibility forms are metadata-only by construction;
+      // they cannot mutate the projection and therefore need no invented order.
+      legacy.push({ id: entry.id ?? null, type: entry.type ?? null, why: 'metadata_only_no_seq' });
+      continue;
+    }
+    // Sequence identity is the primary journal invariant. Purge canonicality is a
+    // semantic check and must never mask an unsafe ordering key.
     const purgeArtifactIssue = schema5PurgeArtifactIssue(entry, sourceSchemaVersion)
       ?? hardPurgeRelationshipIssues.get(entry.seq)
       ?? null;
@@ -539,10 +635,12 @@ export function rebuildProjection(entries = [], options = {}) {
       purgeArtifactIssues.push(issue);
       continue;
     }
-    if (!Number.isInteger(entry.seq)) {
-      // Pre-journal metadata-only event: no payload exists, so it can never be
-      // replayed. Recorded honestly instead of being silently dropped.
-      legacy.push({ id: entry.id ?? null, type: entry.type ?? null, why: 'metadata_only_no_seq' });
+    if (duplicateSequenceValues.has(entry.seq)) {
+      skipped.push({
+        seq: entry.seq,
+        type: entry.type ?? null,
+        why: DUPLICATE_JOURNAL_SEQUENCE_CODE
+      });
       continue;
     }
     if (NON_REPLAYABLE_ENTRY_TYPES.includes(entry.type)) {
@@ -574,18 +672,19 @@ export function rebuildProjection(entries = [], options = {}) {
     replayable.push(entry);
   }
 
-  // A duplicate `seq` cannot be totally ordered, so "last writer wins" would
-  // depend on file order rather than on the sequence. Detected and declared.
-  const duplicates = duplicateSequences(replayable);
-
   // `seq` is the ordering key. `at` is deliberately NOT used: it is injectable in
   // tests and ties within a millisecond are normal, so it cannot totally order.
   replayable.sort((left, right) => left.seq - right.seq);
 
   const start = journalEpoch ?? (replayable.length ? replayable[0].seq : null);
   const maxSeq = replayable.length ? replayable[replayable.length - 1].seq : null;
-  const inRange = replayable.filter((entry) => start === null || entry.seq >= start);
-  const baselinePlacementIssues = journalBaselinePlacementIssues(replayable, {
+  // An invalid ordering key poisons the fold as a whole. Returning a valid prefix
+  // alongside rebuildable:false invites callers to consume a partial projection,
+  // so retain diagnostics but apply no entry until the sequence defect is fixed.
+  const inRange = invalidSequences.length
+    ? []
+    : replayable.filter((entry) => start === null || entry.seq >= start);
+  const baselinePlacementIssues = invalidSequences.length ? [] : journalBaselinePlacementIssues(replayable, {
     journalEpoch: start,
     sourceSchemaVersion
   });
@@ -603,7 +702,9 @@ export function rebuildProjection(entries = [], options = {}) {
     seq: issue.seq, type: issue.type, why: 'fact_lifecycle_violation', entityId: issue.entityId, detail: issue.detail
   })));
   const rangeGaps = journalGaps(inRange);
-  const invalidEpoch = start !== null && (maxSeq === null || start > maxSeq || (inRange.length > 0 && inRange[0].seq !== start));
+  const invalidEpoch = invalidSequences.length === 0
+    && start !== null
+    && (maxSeq === null || start > maxSeq || (inRange.length > 0 && inRange[0].seq !== start));
 
   const entities = new Map();
   const idempotency = new Map();
@@ -707,12 +808,23 @@ export function rebuildProjection(entries = [], options = {}) {
     ? { ...fact, verificationStatus: 'unverified', verificationUntrustedReason: 'journal_lifecycle_invalid' }
     : fact);
 
-  const unsupported = skipped.filter((item) => ['unsupported_schema_version', 'unknown_entry_type', 'missing_payload', 'unmappable_entity', 'type_entity_kind_mismatch', 'type_payload_postcondition_mismatch', 'fact_lifecycle_violation', INVALID_BASELINE_PLACEMENT_CODE, 'marked_non_replayable', NONCANONICAL_SCHEMA5_PURGE_ARTIFACT_CODE, 'dangling_relation'].includes(item.why));
+  const unsupported = skipped.filter((item) => ['unsupported_schema_version', 'unknown_entry_type', 'missing_payload', 'unmappable_entity', 'type_entity_kind_mismatch', 'type_payload_postcondition_mismatch', 'fact_lifecycle_violation', INVALID_BASELINE_PLACEMENT_CODE, INVALID_JOURNAL_SEQUENCE_CODE, DUPLICATE_JOURNAL_SEQUENCE_CODE, 'marked_non_replayable', NONCANONICAL_SCHEMA5_PURGE_ARTIFACT_CODE, 'dangling_relation'].includes(item.why));
   const crossesEpoch = legacy.length > 0 && (journalEpoch === null || journalEpoch > 0);
 
   let rebuildable = true;
   let reason = null;
-  if (purgeArtifactIssues.length) {
+  if (invalidSequences.length) {
+    rebuildable = false;
+    reason = 'journal contains invalid sequence numbers';
+  } else if (invalidDeclaredEpoch) {
+    rebuildable = false;
+    reason = 'journal epoch must be a positive safe integer or null';
+  } else if (duplicates.length) {
+    // All entries claiming an ambiguous position were quarantined above. Never
+    // choose a winner from source-array order, even for metadata-only collisions.
+    rebuildable = false;
+    reason = `journal contains duplicate sequence numbers (${duplicates.map((item) => item.seq).join(', ')}), so entry order is ambiguous`;
+  } else if (purgeArtifactIssues.length) {
     rebuildable = false;
     reason = 'journal contains noncanonical schema-5 purge artifacts';
   } else if (baselinePlacementIssues.length) {
@@ -724,11 +836,6 @@ export function rebuildProjection(entries = [], options = {}) {
   } else if (rangeGaps.length) {
     rebuildable = false;
     reason = 'journal contains unexplained sequence gaps inside the replay range';
-  } else if (duplicates.length) {
-    // Reported BEFORE unsupported entries: an ambiguous ordering makes the whole
-    // fold untrustworthy, not just one entity.
-    rebuildable = false;
-    reason = `journal contains duplicate sequence numbers (${duplicates.map((item) => item.seq).join(', ')}), so entry order is ambiguous`;
   } else if (lifecycleIssues.length) {
     rebuildable = false;
     reason = 'journal contains non-monotonic fact lifecycle transitions';
@@ -758,7 +865,7 @@ export function rebuildProjection(entries = [], options = {}) {
 /** Contiguity report. A hard purge legitimately creates gaps; they are declared, not hidden. */
 export function journalGaps(entries = []) {
   const sequences = entries
-    .filter((entry) => Number.isInteger(entry?.seq))
+    .filter((entry) => journalEntrySequenceIssue(entry) === null)
     .map((entry) => entry.seq)
     .sort((left, right) => left - right);
   const gaps = [];

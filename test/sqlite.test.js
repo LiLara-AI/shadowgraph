@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readdir, stat, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { NODE_SQLITE_NOT_APPLICABLE_REASON } from '../src/runtime-capabilities.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 
 test('SQLite storage round-trips relational graph and rejects stale revisions', async (t) => {
@@ -47,7 +48,7 @@ test('SQLite backup uses a consistent database snapshot', async (t) => {
 test('SQLite create, load, save, backup, restore, rollback, and close leave no live handles or sidecars', async (t) => {
   let DatabaseSync;
   try { ({ DatabaseSync } = await import('node:sqlite')); }
-  catch (error) { return t.skip(error.message); }
+  catch { return t.skip(NODE_SQLITE_NOT_APPLICABLE_REASON); }
   const directory = await mkdtemp(join(tmpdir(), 'shadowgraph sqlite handle lifecycle '));
   const file = join(directory, 'live state with spaces.db');
   const backup = join(directory, 'backup source with spaces.db');
