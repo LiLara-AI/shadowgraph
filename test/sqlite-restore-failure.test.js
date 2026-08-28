@@ -256,6 +256,7 @@ test('SQLite restore succeeds, folds source WAL state, closes its source handle,
   const openedPaths = new WeakMap();
   let internalSourceCloses = 0;
   let sourceRaw;
+  let sourcePath;
   const pair = await createPair(t, 'shadowgraph-sqlite-restore-success-', {
     liveOptions: {
       openDatabase(path, options) {
@@ -264,36 +265,33 @@ test('SQLite restore succeeds, folds source WAL state, closes its source handle,
         return handle;
       },
       closeHandle(handle) {
-        if (openedPaths.get(handle) === resolve(pair.sourcePath)) internalSourceCloses += 1;
+        if (sourcePath && openedPaths.get(handle) === resolve(sourcePath)) internalSourceCloses += 1;
         handle.close();
-      }
-    },
-    sourceOptions: {
-      openDatabase(path, options) {
-        const handle = openWith(DatabaseSync, path, options);
-        if (resolve(path).endsWith('source.db')) {
-          sourceRaw = handle;
-          handle.exec('PRAGMA wal_autocheckpoint = 0');
-        }
-        return handle;
       }
     }
   });
   if (!pair) return;
+  sourcePath = pair.sourcePath;
   await seed(pair);
-  assert.ok(sourceRaw, 'test must control the source connection');
+  pair.source.close();
+  pair.source = undefined;
+  sourceRaw = new DatabaseSync(pair.sourcePath);
+  sourceRaw.exec("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0; BEGIN IMMEDIATE; UPDATE shadowgraph_meta SET value = '7' WHERE key = 'revision'; COMMIT;");
   assert.ok((await readdir(pair.directory)).includes('source.db-wal'), 'source mutation must still be represented by WAL state');
 
-  await pair.live.restore(pair.sourcePath, { validate: (payload) => {
-    assert.equal(payload.records[0].id, 'NEW');
-  } });
+  try {
+    await pair.live.restore(pair.sourcePath, { validate: (payload) => {
+      assert.equal(payload.records[0].id, 'NEW');
+      assert.ok(payload.revision >= 7, 'restore must read source state committed in WAL');
+    } });
+  } finally {
+    sourceRaw.close();
+  }
 
   assert.equal(internalSourceCloses, 1, 'restore-owned source handle closes exactly once');
   assert.equal((await pair.live.load()).records[0].id, 'NEW');
   pair.live.close();
   pair.live = undefined;
-  pair.source.close();
-  pair.source = undefined;
   const reopened = await createSqliteStore(pair.livePath);
   try { assert.equal((await reopened.load()).records[0].id, 'NEW'); }
   finally { reopened.close(); }
@@ -314,7 +312,7 @@ test('SQLite restore closes its source handle when validation fails', async (t) 
         return handle;
       },
       closeHandle(handle) {
-        if (openedPaths.get(handle) === resolve(sourcePath)) sourceCloses += 1;
+        if (sourcePath && openedPaths.get(handle) === resolve(sourcePath)) sourceCloses += 1;
         handle.close();
       }
     }
@@ -422,7 +420,7 @@ test('SQLite restore rolls back failure after replacement rename and before reop
   });
   if (!pair) return;
   await seed(pair);
-  assert.ok((await readdir(pair.directory)).includes('live.db-wal'), 'old committed state must still be represented by live WAL before rollback snapshot');
+  assert.equal((await readdir(pair.directory)).includes('live.db-wal'), false, 'operation-scoped handles must not retain the live WAL while idle');
   pair.source.close();
   pair.source = undefined;
   await assert.rejects(pair.live.restore(pair.sourcePath), /previous database restored: injected post-rename failure/);
@@ -438,7 +436,7 @@ test('SQLite restore rolls back an actual replacement DatabaseSync open failure'
       openDatabase(path, options) {
         if (String(path).endsWith('live.db')) {
           liveOpens += 1;
-          if (liveOpens === 2) return new DatabaseSync(path, { readOnly: 'not-a-boolean' });
+          if (liveOpens === 4) return new DatabaseSync(path, { readOnly: 'not-a-boolean' });
         }
         return openWith(DatabaseSync, path, options);
       }
@@ -450,7 +448,7 @@ test('SQLite restore rolls back an actual replacement DatabaseSync open failure'
   pair.source = undefined;
 
   await assert.rejects(pair.live.restore(pair.sourcePath), /previous database restored:.*options\.readOnly.*boolean/i);
-  assert.equal(liveOpens, 5, 'initial, failed replacement, rejected destination inspection, recovered read-only inspection, and verified recovery opens must occur');
+  assert.equal(liveOpens, 7, 'initialization, save, restore, failed replacement, rejected inspection, and two verified recovery opens must occur');
   await assertOldState(pair);
 });
 
@@ -897,7 +895,7 @@ test('MCP valid SQLite restore does not perform a post-commit save', async (t) =
   try {
     const payload = await reopened.load();
     assert.equal(payload.records[0].id, 'NEW');
-    assert.equal(payload.revision, 1, 'restore must preserve the source revision without a second save');
+    assert.equal(payload.revision, 2, 'restore must install max(destination=1, source=1) + 1 without a second save');
   } finally {
     reopened.close();
   }

@@ -7,12 +7,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createShadowGraph } from '../src/shadowgraph.js';
 
-function startJsonRpcChild(file, embeddingUrl) {
+function startJsonRpcChild(file, embeddingUrl, compact = true) {
   const child = spawn(process.execPath, ['src/mcp.js'], {
     env: {
       ...process.env,
       SHADOWGRAPH_FILE: file,
-      SHADOWGRAPH_MCP_COMPACT: '1',
+      SHADOWGRAPH_MCP_COMPACT: compact ? '1' : '0',
       ...(embeddingUrl ? {
         SHADOWGRAPH_EMBEDDING_URL: embeddingUrl,
         SHADOWGRAPH_EMBEDDING_MODEL: 'test-embedding'
@@ -197,7 +197,7 @@ test('MCP serializes restore with a concurrent acknowledged memory write', async
     source.addDecision({ id: `restored-${index}`, project: 'restored', title: `Restored ${index}`, chosen: 'A' });
   }
   await writeFile(sourceFile, JSON.stringify(source.exportData()), 'utf8');
-  const rpc = startJsonRpcChild(file);
+  const rpc = startJsonRpcChild(file, undefined, false);
   t.after(() => rpc.child.kill());
   await rpc.call({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
 

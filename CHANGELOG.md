@@ -1,12 +1,12 @@
 # Changelog
 
-## 0.40.0 (unreleased — unified memory review candidate)
+## 0.40.0 (unreleased — pre-Beta release candidate)
 
 This release keeps ShadowGraph's decision-first model and adds the everyday memory capabilities needed for user personalization, temporal recall, hybrid retrieval, and human-readable Markdown workflows. The implementation is independent; no competitor source code was copied.
 
 ### Breaking
 
-- **`SCHEMA_VERSION` is now `4`** and imports schemas 1–4. Schema 4 adds `memory` records and their journal event types.
+- **`SCHEMA_VERSION` is now `5`** and imports schemas 1–5. Schema 4 added memory records; schema 5 adds the canonical lifecycle and signed-verification migration boundary.
 - Compact MCP mode now advertises **12** workflow tools (previously 10), adding `shadowgraph_remember` and `shadowgraph_recall`. Full mode advertises 27 tools.
 
 ### Added
@@ -21,9 +21,15 @@ This release keeps ShadowGraph's decision-first model and adds the everyday memo
 - JavaScript, CLI (`remember`, `recall`, `markdown-sync`), HTTP (`POST /memories`, `POST /recall`), and MCP workflow surfaces.
 - JSON/SQLite restart parity and journal rebuild coverage for scoped memories.
 - Architecture decision record with grounded competitor research: `docs/adr/0006-unified-memory-kernel.md`.
+- Canonical replay-baseline placement ADR: `docs/adr/0007-canonical-journal-baseline-placement.md`.
+- Frozen seven-arm/ten-scenario benchmark preregistration, deterministic validation/aggregation harness, and measured 1k/10k/100k local journal evidence. Comparative lifecycle values remain unavailable because the common local/free LLM-and-embedding prerequisite was absent; dependency import probes are not performance evidence.
+- Installed-package commands: `shadowgraph setup`, `shadowgraph doctor`, `shadowgraph serve`, and `shadowgraph mcp`.
+- Real-tarball clean-install smoke coverage for paths containing spaces, including installed CLI, MCP full/compact, HTTP health, dashboard, and restart persistence workflows.
+- Copy-ready Claude Code, Cursor, Codex, and Hermes MCP configurations, with compact mode recommended and full mode preserved.
 
 ### Fixed
 
+- Replay baselines can no longer reset fact lifecycle history. Duplicate, ordinary midstream, rewind, wrong-epoch, and terminal-rewriting baselines reject atomically as `invalid_projection_baseline_placement`; pure rebuild skips them and reports incomplete instead of reactivating an expired or superseded signed fact. Schema 1–5 migration baselines, proven monotonic migration extensions, baseline-only snapshots, and hard-purge leading gaps remain supported.
 - Scoped recall now fails closed: omitted project/scope means only the `default` project and all-null scope, never every project/user/agent/run. Supplied memory projects must be non-empty strings. Memory idempotency keys include the full scope/type/key identity.
 - Schema-4 runtime writes/imports enforce globally unique record/fact/relation/alternative IDs so JSON and SQLite accept the same graph; new links reject missing endpoints; direct merge import rebuilds current-memory/current-fact indexes instead of retaining overwritten payload objects.
 - Memory plans preflight retry keys, IDs, temporal ordering, and invalidation bounds. Re-adding an invalidated identity continues its monotonic version history.
@@ -33,7 +39,7 @@ This release keeps ShadowGraph's decision-first model and adds the everyday memo
 - Hard purge now persists an exact `removedJournalSequences` ledger; an unrelated or empty hard-purge marker can no longer excuse arbitrary restore gaps.
 - Project purge clears the in-memory scoped-memory index; a later write cannot accidentally supersede or re-journal a purged payload. A tracked stale Markdown file cannot resurrect a purged memory.
 - Markdown paths use stable bounded identity segments; immutable IDs and frontmatter identity edits are rejected. Pull rolls back the whole graph on a later-file error and advances sync state only after an optional canonical persistence callback succeeds.
-- The MCP server continues to negotiate `2024-11-05` and therefore omits newer tool annotations rather than advertising a protocol feature it does not implement.
+- The MCP stdio server supports legacy `2024-11-05` initialization and modern `2026-07-28` per-request metadata/discovery semantics without falsely advertising one contract as the other.
 - CLI/HTTP/MCP context paths now persist generated review signals. HTTP and MCP mutators reconcile live state to the last readable durable snapshot after ordinary persistence failures.
 - MCP serializes complete tool/restore calls, preventing concurrent acknowledged writes from being erased by restore or conflict recovery.
 - Schema-4 imports reject malformed projects/scopes/IDs before merge, reject collisions against live collections, validate stored fact/relation intervals and journal identity, and preserve nested-alternative links through rebuild.
@@ -45,12 +51,18 @@ This release keeps ShadowGraph's decision-first model and adds the everyday memo
 - Memory isolation now applies consistently to recall, search, retrieve, and traverse; omitted project/scope resolves to the default/all-null memory scope.
 - Merge/restore validation covers final relation endpoints, duplicate review/idempotency semantic identities, journal type/entity consistency in both import and direct replay, strict calendar timestamps, and bounded hard-purge gap arithmetic.
 - Review identities use tuple encoding rather than delimiter concatenation, and legacy idempotency keys are collision-checked again after canonicalization.
+- Review/maintenance inputs are fully preflighted before mutation, and MCP restores its pre-call graph snapshot for domain-operation exceptions so a later write cannot persist rejected state.
+- Logical and hard purge markers no longer retain caller-controlled entity IDs. Logical replay derives project/entity/relation deletion structurally; hard markers retain only sequence-gap evidence. JSON/SQLite restart and restore preserve erasure.
+- Every valid no-id JSON-RPC message is response-suppressed after execution, including successful `initialize`, `tools/list`, and `tools/call`; explicit `id:null` requests and parse errors still respond.
+- JSON and SQLite saves/restores now share one destination lock domain across store handles and processes. A writer overlapping restore waits and is revision-checked against the installed state or fails explicitly; it can no longer return success and disappear after replacement. The fence has bounded timeout, heartbeat-backed stale-lock recovery, and immediate same-chain reentry errors for validation/activation callbacks.
 
 ### Honest limits
 
 - Semantic retrieval is available only when embeddings are supplied or an embedding endpoint is explicitly configured; lexical fallback is never labelled semantic.
-- No default LLM extractor, background file watcher, hosted cloud sync, competitor-parity claim, or token/cost/answer-quality benchmark is included.
-- Confidence calibration and the trusted verification channel remain unresolved exactly as documented for 0.31.0.
+- No default LLM extractor, background file watcher, hosted cloud sync, competitor-parity claim, or measured comparative token/cost/answer-quality result is included. All seven preregistered arms are `NOT_MEASURED` in the retained comparative run because no common local/free LLM and embedding endpoint was available.
+- Dependency installation/import success is setup evidence only and must not be described as a benchmark win. The word `best` and equivalent overall-superiority wording are prohibited for the current evidence.
+- Confidence calibration remains unresolved. Optional verification is restricted to a separately configured local Ed25519 trust boundary and is not a general remote attestation system.
+- Version 0.40.0 remains pre-Beta and `private: true`. Independent security review and actual preregistered comparative measurement remain release gates; package/install hardening and the measured local journal run do not satisfy either gate.
 
 ## 0.31.0 (unreleased — review candidate)
 

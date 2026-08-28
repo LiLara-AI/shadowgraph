@@ -1,2 +1,52 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>ShadowGraph Dashboard</title><style>body{font:16px system-ui;margin:2rem;max-width:1100px}button,input{font:inherit;padding:.5rem}section{margin:1rem 0;padding:1rem;border:1px solid #ddd;border-radius:8px}pre{white-space:pre-wrap;background:#f5f5f5;padding:1rem;max-height:500px;overflow:auto}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.75rem}.card{padding:.75rem;background:#f5f5f5;border-radius:6px}</style></head><body><h1>ShadowGraph Dashboard</h1><p>Local read-only overview. Start the API with <code>npm start</code>.</p><section><label>API URL <input id="base" value="http://127.0.0.1:8787"></label> <button id="load">Load</button></section><section><div id="stats" class="grid"></div></section><section><h2>Review signals</h2><pre id="signals">Click Load</pre></section><section><h2>Graph records</h2><pre id="records">Click Load</pre></section><script>const $=id=>document.getElementById(id);async function load(){const base=$('base').value.replace(/\/$/,'');const [stats,signals,records]=await Promise.all([fetch(base+'/stats').then(r=>r.json()),fetch(base+'/review-signals').then(r=>r.json()),fetch(base+'/records').then(r=>r.json())]);$('stats').innerHTML=Object.entries(stats).map(([k,v])=>`<div class="card"><b>${k}</b><br>${v}</div>`).join('');$('signals').textContent=JSON.stringify(signals,null,2);$('records').textContent=JSON.stringify(records,null,2)}$('load').onclick=()=>load().catch(e=>alert(e.message));</script></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width">
+  <title>ShadowGraph Dashboard</title>
+  <style>
+    body { font: 16px system-ui; margin: 2rem; max-width: 1100px; }
+    button, input { font: inherit; padding: .5rem; }
+    input { min-width: 20rem; }
+    section { margin: 1rem 0; padding: 1rem; border: 1px solid #ddd; border-radius: 8px; }
+    pre { white-space: pre-wrap; background: #f5f5f5; padding: 1rem; max-height: 500px; overflow: auto; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .75rem; }
+    .card { padding: .75rem; background: #f5f5f5; border-radius: 6px; }
+    .notice { border-left: 4px solid #946200; padding-left: .75rem; }
+  </style>
+</head>
+<body>
+  <h1>ShadowGraph Dashboard</h1>
+  <p class="notice"><strong>Local-only:</strong> this read-only page is served by the ShadowGraph API at <code>127.0.0.1</code> and reads only that same local origin. It is not a public deployment console.</p>
+  <section>
+    <label>API token (optional) <input id="token" type="password" autocomplete="off" placeholder="Required only when SHADOWGRAPH_API_TOKEN is set"></label>
+    <button id="load">Load</button>
+    <p>The token stays only in this page's memory and is <strong>not persisted</strong> to storage, cookies, or local browser storage. Closing or reloading the page clears it.</p>
+  </section>
+  <section><div id="stats" class="grid"></div></section>
+  <section><h2>Review signals</h2><pre id="signals">Click Load</pre></section>
+  <section><h2>Graph records</h2><pre id="records">Click Load</pre></section>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    async function request(path) {
+      const token = $('token').value;
+      const response = await fetch(path, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const hint = response.status === 401 ? ' Enter the SHADOWGRAPH_API_TOKEN configured for the local server.' : '';
+        throw new Error(`${body.error || `HTTP ${response.status}`}.${hint}`);
+      }
+      return body;
+    }
+    async function load() {
+      const [stats, signals, records] = await Promise.all([
+        request('/stats'), request('/review-signals'), request('/records')
+      ]);
+      $('stats').innerHTML = Object.entries(stats).map(([key, value]) => `<div class="card"><b>${key}</b><br>${value}</div>`).join('');
+      $('signals').textContent = JSON.stringify(signals, null, 2);
+      $('records').textContent = JSON.stringify(records, null, 2);
+    }
+    $('load').onclick = () => load().catch((error) => alert(error.message));
+  </script>
+</body>
+</html>

@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "resolvedAt": "2026-08-27",
+  "pythonImage": "python:3.12.11-slim@sha256:47ae396f09c1303b8653019811a8498470603d7ffefc29cb07c88f1f8cb3d19f",
+  "arms": {
+    "no-memory": {
+      "type": "control",
+      "version": "none"
+    },
+    "shadowgraph-full": {
+      "type": "local-checkout",
+      "package": "shadowgraph-unified-plugin",
+      "version": "0.40.0",
+      "mode": "full"
+    },
+    "shadowgraph-compact": {
+      "type": "local-checkout",
+      "package": "shadowgraph-unified-plugin",
+      "version": "0.40.0",
+      "mode": "compact"
+    },
+    "mem0-oss": {
+      "type": "pypi",
+      "package": "mem0ai",
+      "version": "2.0.19",
+      "specifier": "mem0ai==2.0.19",
+      "importProbe": "import importlib.metadata; print(importlib.metadata.version('mem0ai'))"
+    },
+    "graphiti": {
+      "type": "pypi",
+      "package": "graphiti-core",
+      "version": "0.29.3",
+      "specifier": "graphiti-core==0.29.3",
+      "supportPackages": ["httpx==0.28.1"],
+      "importProbe": "import importlib.metadata; print(importlib.metadata.version('graphiti-core'))",
+      "requiredService": "Neo4j-compatible graph database plus common LLM and embedding endpoint",
+      "installNote": "The 0.29.3 wheel installed httpx2 but imports httpx. This sanitized lock metadata records that the first clean import failed with ModuleNotFoundError and that pinning the public httpx 0.28.1 support package made the unchanged graphiti-core 0.29.3 import succeed. Raw probe logs are local and not packaged."
+    },
+    "basic-memory": {
+      "type": "pypi",
+      "package": "basic-memory",
+      "version": "0.23.2",
+      "specifier": "basic-memory==0.23.2",
+      "importProbe": "import importlib.metadata; print(importlib.metadata.version('basic-memory'))"
+    },
+    "cognee": {
+      "type": "pypi",
+      "package": "cognee",
+      "version": "1.5.3",
+      "specifier": "cognee==1.5.3",
+      "importProbe": "import importlib.metadata; print(importlib.metadata.version('cognee'))",
+      "requiredService": "common LLM and embedding endpoint"
+    }
+  }
+}

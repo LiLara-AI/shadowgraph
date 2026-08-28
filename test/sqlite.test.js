@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, readdir, stat, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createSqliteStore } from '../src/sqlite-storage.js';
@@ -42,4 +42,70 @@ test('SQLite backup uses a consistent database snapshot', async (t) => {
     assert.equal((await store.load()).records[0].id, 'd1');
   } catch (error) { if (/requires Node/.test(error.message)) return t.skip(error.message); throw error; }
   finally { store?.close(); }
+});
+
+test('SQLite create, load, save, backup, restore, rollback, and close leave no live handles or sidecars', async (t) => {
+  let DatabaseSync;
+  try { ({ DatabaseSync } = await import('node:sqlite')); }
+  catch (error) { return t.skip(error.message); }
+  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph sqlite handle lifecycle '));
+  const file = join(directory, 'live state with spaces.db');
+  const backup = join(directory, 'backup source with spaces.db');
+  const active = new Set();
+  let opened = 0;
+  let closed = 0;
+  const store = await createSqliteStore(file, {
+    openDatabase(path, options) {
+      const handle = options ? new DatabaseSync(path, options) : new DatabaseSync(path);
+      active.add(handle);
+      opened += 1;
+      return handle;
+    },
+    closeHandle(handle) {
+      assert.equal(active.delete(handle), true, 'every close must correspond to one tracked open');
+      closed += 1;
+      handle.close();
+    }
+  });
+  const assertIdle = async (stage) => {
+    assert.equal(active.size, 0, `${stage} must not retain a DatabaseSync handle`);
+    const names = await readdir(directory);
+    assert.equal(names.includes('live state with spaces.db-wal'), false, `${stage} must not retain WAL`);
+    assert.equal(names.includes('live state with spaces.db-shm'), false, `${stage} must not retain SHM`);
+  };
+  await assertIdle('create');
+  const payload = {
+    schemaVersion: 2,
+    records: [{ id: 'lifecycle', kind: 'decision', project: 'default', status: 'active', title: 'Lifecycle', chosen: 'safe' }],
+    facts: [], relations: [], reviewSignals: [], idempotency: [], events: [], journal: [], journalSeq: 0, journalEpoch: null
+  };
+  await store.save(payload);
+  await assertIdle('save');
+  const loaded = await store.load();
+  assert.equal(loaded.revision, 1);
+  await assertIdle('load');
+  await store.backup(backup);
+  await assertIdle('backup');
+  await store.save(loaded);
+  assert.equal((await store.load()).revision, 2);
+  await store.restore(backup);
+  assert.equal((await store.load()).revision, 3);
+  await assertIdle('restore');
+  await assert.rejects(
+    store.restore(backup, { afterReplace() { throw new Error('injected lifecycle rollback'); } }),
+    (error) => error.code === 'sqlite_restore_rolled_back' && /injected lifecycle rollback/.test(error.message)
+  );
+  assert.equal((await store.load()).revision, 3, 'rollback must preserve the exact prior revision');
+  await assertIdle('rollback');
+
+  store.close();
+  assert.doesNotThrow(() => store.close(), 'close remains idempotent after all operation-scoped handles are gone');
+  await assert.rejects(store.load(), /closed/);
+  await assert.rejects(store.save(loaded), /closed/);
+  await assert.rejects(store.backup(join(directory, 'closed backup.db')), /closed/);
+  await assert.rejects(store.restore(backup), /closed/);
+  assert.equal(active.size, 0);
+  assert.equal(closed, opened, 'all SQLite open paths must have a matching close');
+  await unlink(file);
+  await assert.rejects(stat(file), (error) => error.code === 'ENOENT', 'the closed destination must be removable on Windows');
 });

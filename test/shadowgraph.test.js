@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createShadowGraph } from '../src/shadowgraph.js';
+import { createShadowGraph, SCHEMA_VERSION } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
 
 test('stores one decision and reopens it when facts change', () => {
@@ -30,6 +30,5 @@ test('persists records in a portable JSON file', async () => {
   await store.save(graph.exportData());
   const loaded = await store.load();
   assert.equal(loaded.records.length, 1);
-  // Schema version 4 adds scoped memory while retaining the journal contract.
-  assert.equal(JSON.parse(await readFile(join(directory, 'data.json'), 'utf8')).schemaVersion, 4);
+  assert.equal(JSON.parse(await readFile(join(directory, 'data.json'), 'utf8')).schemaVersion, SCHEMA_VERSION);
 });

@@ -39,7 +39,10 @@ test('idempotency prevents duplicate decisions and facts', () => {
 test('maintenance ages decisions, expires facts, and persists review signals', () => {
   const graph = createShadowGraph({ now: () => '2027-01-01T00:00:00.000Z' });
   const decision = graph.addDecision({ title: 'Old', chosen: 'A', reviewAfter: '2026-01-01T00:00:00.000Z', alternatives: [{ label: 'B', reopenWhen: ['changed'] }] });
-  graph.addFact({ key: 'expiry', value: true, expiresAt: '2026-01-01T00:00:00.000Z' });
+  graph.addFact({
+    key: 'expiry', value: true,
+    validFrom: '2025-01-01T00:00:00.000Z', expiresAt: '2026-01-01T00:00:00.000Z'
+  });
   const result = graph.maintain({ changedFacts: ['changed'] });
   assert.equal(result.agedDecisionIds[0], decision.id);
   assert.equal(graph.getReviewSignals().length, 1);

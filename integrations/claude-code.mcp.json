@@ -1,10 +1,11 @@
 {
   "mcpServers": {
     "shadowgraph": {
-      "command": "node",
-      "args": ["ABSOLUTE_PATH_TO_SHADOWGRAPH/src/mcp.js"],
+      "type": "stdio",
+      "command": "shadowgraph",
+      "args": ["mcp"],
       "env": {
-        "SHADOWGRAPH_FILE": "ABSOLUTE_PATH_TO_SHADOWGRAPH/.shadowgraph/data.json"
+        "SHADOWGRAPH_MCP_COMPACT": "1"
       }
     }
   }
