@@ -1,0 +1,7 @@
+[mcp_servers.shadowgraph]
+command = "shadowgraph"
+args = ["mcp"]
+startup_timeout_sec = 30
+
+[mcp_servers.shadowgraph.env]
+SHADOWGRAPH_MCP_COMPACT = "1"

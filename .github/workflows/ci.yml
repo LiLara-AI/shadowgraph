@@ -6,25 +6,35 @@ on:
 
 jobs:
   test:
+    name: ${{ matrix.os }} / Node ${{ matrix.node-version }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        node-version: [20, 22]
+        node-version: [20, 22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
       - run: npm ci
       - run: npm run check
       - run: npm test
       - run: npm audit --omit=dev
-      - name: Assert SQLite coverage on Node 22+
-        if: matrix.node-version == 22
-        run: node --test test/sqlite.test.js test/sqlite-migration.test.js test/sqlite-concurrency.test.js
+      - run: npm run check:integrations
+      - name: Strict official MCP Inspector (27 full / 12 compact)
+        if: matrix.node-version == 24
+        run: npm run check:mcp
+      - name: Assert SQLite coverage where node:sqlite exists
+        if: matrix.node-version != 20
+        run: node --test test/sqlite.test.js test/sqlite-migration.test.js test/sqlite-concurrency.test.js test/sqlite-restore-failure.test.js
       - run: python -m py_compile integrations/hermes-agent.py
-      - name: Validate JSON integration templates
-        run: node --input-type=module -e "import fs from 'node:fs'; for (const f of fs.readdirSync('integrations').filter(x => x.endsWith('.json'))) JSON.parse(fs.readFileSync('integrations/' + f, 'utf8'));"
       - run: npm run check:package
+      - name: Real tarball clean-install smoke (path contains spaces)
+        run: npm run smoke:package

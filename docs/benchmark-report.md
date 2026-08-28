@@ -1,95 +1,290 @@
-# ShadowGraph — Benchmark Report
+# ShadowGraph benchmark report
 
-**Generated:** 2026-08-25T16:04:47.630Z
-**Environment:** Node v24.18.0, win32 x64
-**Command actually run:** `node scripts/bench-journal.mjs --sizes 1000,10000 --runs 5 --json`
-**Also verified:** `npm run bench -- --sizes=1000,10000 --runs=5 --json` (equals form)
-**Arguments were parsed, not defaulted:** the JSON output echoes `"sizes": [1000, 10000]` and `"runs": 5`, and the script now **throws on an unknown or malformed argument** instead of silently falling back to defaults. A number in this report can therefore be traced to the invocation that produced it.
+**Evidence set:** frozen preregistration plus raw run<br>
+`benchmark/results/20260827T161115Z/`<br>
+**Comparative run id:** `20260827T161115Z-no-model`<br>
+**Journal raw generated:** `2026-08-27T16:21:36.964Z`
 
----
+## Scope and evidence discipline
 
-## 0. Scope of this report — read before quoting any number
+This report uses only these raw artifacts:
 
-This report covers **journal replay and persistence performance only** (finding P2-18).
+- `benchmark/preregistration.json`
+- `benchmark/preregistration.sha256`
+- `benchmark/competitors.lock.json`
+- `benchmark/results/20260827T161115Z/run-intent.json`
+- `benchmark/results/20260827T161115Z/comparative/raw-run.json`
+- `benchmark/results/20260827T161115Z/comparative/aggregate.json`
+- `benchmark/results/20260827T161115Z/comparative/logs/capability-probe.json`
+- `benchmark/results/20260827T161115Z/journal-raw.json`
+- `benchmark/results/20260827T161115Z/journal-output.txt`
 
-It is **not** a confidence-calibration report, and nothing here supports any claim about calibration. The two are separate concerns and are deliberately kept apart:
+The comparative lifecycle and the local journal benchmark are different
+evidence. The journal run measures ShadowGraph journal rebuild/persistence on one
+machine; it is not evidence about any competitor. Dependency install/import
+probes are capability setup evidence only and are not lifecycle, quality,
+economics, or performance measurements.
 
-| Concern | Status | Where it lives |
-| --- | --- | --- |
-| Journal rebuild speed and size (X-2) | ✅ **measured**, thresholds pre-declared | this report |
-| Confidence **correctness** (fold, dedupe, bounds, parity) | ✅ **tested**, not benchmarked | `test/review-findings.test.js` P1-8/P1-9/P1-10 |
-| Confidence **calibration** (does 0.7 mean right 70% of the time?) | ❌ **not established, not claimed** | `docs/handoffs/confidence-contract.md` §7 |
-| Token / cost / latency per work lifecycle | ❌ **never measured** | ADR-0004, unimplemented |
+## Frozen preregistration
 
-The confidence weights (`BASE_STEP = 0.2`; class weights 0.5 / 0.7 / 0.85 / 1.0) are a **declared policy, not an empirically calibrated model**. No Brier score, ECE, or reliability bucket exists in this repository. Producing one honestly needs ground-truth outcomes at volume, a no-memory baseline, and a benchmark that does not feed the answer through call arguments; a synthetic score would measure the generator, not the model.
+| Field | Exact value |
+| --- | --- |
+| Status | `FROZEN_BEFORE_COMPARATIVE_RESULTS` |
+| Frozen at | `2026-08-27T15:19:06Z` |
+| Repository commit at freeze | `3e831959ec163f8a78fa852a96f552852c58ce95` |
+| SHA-256 | `738ee8b4813fab77da2e4e24582b12e756686650e4c39fad41c5337f831f5dac` |
+| Arms | `7` |
+| Scenarios | `10` |
+| Repetitions | `3` |
+| Seeds | `1729`, `2718`, `31415` |
+| Phases/probes per lifecycle | `10` |
+| Fully measured unit count | `2100` |
+| Temperature | `0` |
+| Input/output limits | `8192` / `1200` tokens |
+| Retrieval limit / concurrency | `20` / `1` |
 
-## 1. Verdict
+The SHA-256 matches the sidecar, comparative raw run, and aggregate. Neither the
+preregistration nor its sidecar was changed for this report.
 
-**No pre-declared threshold was breached. Snapshots and compaction stay DEFERRED BY MEASUREMENT, not by guess.**
+## Exact captured environment
 
-Thresholds were fixed in ADR-0001 D13 **before** measuring, so the verdict could not be rationalised after seeing the numbers. The script computes the verdict itself and reports `"breaches": []`.
+The comparative raw run started `2026-08-27T16:11:42.008Z` and finished
+`2026-08-27T16:11:42.549Z`.
 
-| Threshold (pre-declared) | Limit | Measured | Result |
+| Field | Captured value |
+| --- | --- |
+| Node | `v24.18.0` |
+| npm | `11.9.0` |
+| Python | `Python 3.11.15` |
+| pip | `pip 26.2.1 from a local virtual-environment site-packages directory (absolute path redacted; python 3.11)` |
+| Node platform / architecture | `win32` / `x64` |
+| OS | `Windows_NT 10.0.26200` |
+| CPU | `Intel(R) Core(TM) Ultra 9 185H` |
+| Logical CPU count | `22` |
+| Total memory | `68201287680` bytes |
+| Git commit captured by run | `3e831959ec163f8a78fa852a96f552852c58ce95` |
+| Git dirty at run | `true` |
+| Docker client | `29.6.2`, API `1.55`, `windows/amd64` |
+| Docker server | `29.6.2`, API `1.55`, `linux/amd64`, kernel `6.18.33.2-microsoft-standard-WSL2` |
+| Docker Desktop | `4.85.0 (235549)` |
+| Python image pin | `python:3.12.11-slim@sha256:47ae396f09c1303b8653019811a8498470603d7ffefc29cb07c88f1f8cb3d19f` |
+| Common LLM id | `null` |
+| Common embedding id | `null` |
+
+The journal raw records the same Node, platform, architecture, OS, CPU, logical
+CPU count, and total-memory values. It ran each requested size in a fresh
+process and used five rebuild runs at 1,000 and 10,000 entries and three at
+100,000 entries.
+
+## Dependency probes only — explicitly not performance evidence
+
+This tracked report records only sanitized status from the local dependency
+probes. Those status notes do not show that an arm completed the preregistered
+lifecycle, that all required services were available, or that one product beat
+another.
+
+| Arm | Exact pin | Tracked sanitized status | Qualification |
 | --- | --- | --- | --- |
-| Rebuild p95 at ~10k entries | > 250 ms | **7.01 ms** | ✅ 36× headroom |
-| Rebuild p95 at ~100k entries | > 1000 ms | not measured (§4) | — |
-| Journal ÷ projection bytes at ~10k | > 10× | **3.47×** | ✅ 2.9× headroom |
+| Mem0 OSS | `mem0ai==2.0.19` | Import status reports version `2.0.19` | Import probe only; no benchmark measurement. |
+| Graphiti | `graphiti-core==0.29.3` + `httpx==0.28.1` | Sanitized status records version `0.29.3` after adding the fixed support package | The sanitized lock metadata records the initial `httpx` import issue and the successful fixed-support import. No benchmark measurement. |
+| Basic Memory | `basic-memory==0.23.2` | Import status reports version `0.23.2` | Import probe only; no benchmark measurement. |
+| Cognee | `cognee==1.5.3` | Import status reports version `1.5.3` | Sanitized status records `comparativeMeasurement: false`. |
 
-## 2. Raw results
+Raw install/probe logs under `benchmark/results/20260827T153024Z/logs/` are
+local ignored files: they are not source-controlled and are intentionally
+excluded from the npm package. This report and `benchmark/competitors.lock.json`
+retain only sanitized status and pin metadata.
 
-### ~1,000 journal entries (200 decisions, 200 facts)
+## Comparative lifecycle result: all seven arms
 
-```
-rebuild   p50=0.60ms  p95=8.41ms  min=0.51ms  max=8.41ms  rebuildable=true  applied=1000
-rebuilt   records=200  facts=200
-size      journal=1,693,168B  projection=488,568B  ratio=3.47x
-json      save=12.62ms  load=22.61ms  file=3,658,522B  journalRoundTripped=1000
-sqlite    save=19.10ms  load=13.71ms  file=3,723,264B  journalRoundTripped=1000
-```
+The capability probe recorded:
 
-### ~10,000 journal entries (2,000 decisions, 2,000 facts)
+- `commonModelAvailable: false`;
+- configured credentials: `0`;
+- configured endpoints: `0`;
+- configured models: `0`;
+- local discovery attempts: `4`;
+- responding local endpoints: `0`;
+- LLM configured/reachable/compatible: `false/false/false`;
+- embedding configured/reachable/compatible: `false/false/false`.
 
-```
-rebuild   p50=6.88ms  p95=7.01ms  min=5.08ms  max=7.01ms  rebuildable=true  applied=10000
-rebuilt   records=2000  facts=2000
-size      journal=16,965,569B  projection=4,895,168B  ratio=3.47x
-json      save=103.15ms  load=89.80ms   file=36,629,124B  journalRoundTripped=10000
-sqlite    save=273.08ms  load=108.23ms  file=36,536,320B  journalRoundTripped=10000
-```
+Every arm was recorded at the same preregistered preflight boundary with exit
+code `2` and reason `No common local/free LLM and embedding endpoint was
+available.`
 
-## 3. What the numbers say
+| Arm id | Display name | Version | Status | Measured values |
+| --- | --- | --- | --- | --- |
+| `no-memory` | No memory | `none` | `NOT_MEASURED` | None |
+| `shadowgraph-full` | ShadowGraph Full | `0.40.0` | `NOT_MEASURED` | None |
+| `shadowgraph-compact` | ShadowGraph Compact | `0.40.0` | `NOT_MEASURED` | None |
+| `mem0-oss` | Mem0 OSS | `2.0.19` | `NOT_MEASURED` | None |
+| `graphiti` | Graphiti | `0.29.3` | `NOT_MEASURED` | None |
+| `basic-memory` | Basic Memory | `0.23.2` | `NOT_MEASURED` | None |
+| `cognee` | Cognee | `1.5.3` | `NOT_MEASURED` | None |
 
-**Rebuild is not the bottleneck — it is nearly free.** 10,000 entries fold in ~7 ms. That is the expected consequence of the ADR-0001 D4 choice: replay is a fold over complete post-operation snapshots with no domain logic, no clock, and no id generation, so per-entry cost is a map assignment.
+### Exact comparative validation and aggregation counts
 
-**The 1k p95 (8.41 ms) is HIGHER than the 10k p95 (7.01 ms), and that is not a size effect.** It is first-iteration JIT warm-up: `min` at 1k was 0.51 ms and p50 was 0.60 ms, so a single cold run dominates the tail of a 5-run sample. Reading it as "1k is slower than 10k" would be a misreading of measurement noise, and it is the reason p50 is quoted alongside p95 rather than p95 alone.
+| Count | Exact value |
+| --- | ---: |
+| Total arms | 7 |
+| `MEASURED` arms | 0 |
+| `NOT_MEASURED` arms | 7 |
+| `FAILED` arms | 0 |
+| `EXCLUDED` arms | 0 |
+| Raw measurements | 0 |
+| Rank-eligible arms | 0 |
+| Aggregate arm results | 0 |
+| `bestClaimAllowed` | `false` |
 
-**Storage is the real cost, and the passing ratio understates it in absolute terms.** 3.47× clears the 10× threshold comfortably, but the persisted file at 10k entries is **~36 MB on both backends**. That is the honest price of full snapshots — storage grows with `entity size × mutation count`, not with change size. For a local-first single-user decision ledger it is acceptable (2,000 decisions is a great many recorded decisions), but it is stated plainly rather than hidden behind a ratio.
+`benchmark:validate` accepts this as a valid no-common-model record because all
+seven arms are present, every arm has the same exact `NOT_MEASURED` reason, and
+no comparative values or scores were inferred. Validity of the record does not
+turn absence into a measurement.
 
-**Both backends round-tripped all 10,000 entries.** `journalRoundTripped` equals the entry count for JSON and SQLite, so the journal survives persistence intact on both paths — the parity that finding P1-10 asked to be proven for confidence specifically is now also visible at the whole-journal level here.
+## Measured ShadowGraph journal results
 
-**SQLite save is ~2.6× slower than JSON at 10k** (273 ms vs 103 ms), while load is comparable (108 ms vs 90 ms). This is consistent with suspicion **X-4**: the SQLite path rewrites all rows inside one `BEGIN IMMEDIATE` transaction on every save. At this scale it is acceptable and the atomicity it buys is worth the cost — that single transaction is precisely what makes state and journal unable to diverge (journal contract §10). The write amplification is now **measured rather than suspected**, and it is the first thing to revisit if save latency ever becomes a complaint.
+These are local ShadowGraph journal/rebuild/backend measurements, not seven-arm
+comparative results. Total wall time across the three fresh size processes was
+`98971.39 ms`.
 
-## 4. Not measured, and why
+| Entries | Decisions | Facts | Rebuild runs | Rebuild p50 (ms) | Rebuild p95 (ms) | Wall (ms) | Journal bytes | Projection bytes | JSON bytes | SQLite bytes | Sampled RSS proxy bytes |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 200 | 200 | 5 | 0.903 | 7.948 | 189.827 | 1,719,568 | 514,168 | 3,734,922 | 3,760,128 | 98,439,168 |
+| 10,000 | 2,000 | 2,000 | 5 | 10.43 | 18.03 | 1,454.577 | 17,229,569 | 5,151,168 | 37,393,124 | 36,888,576 | 322,953,216 |
+| 100,000 | 20,000 | 20,000 | 3 | 85.493 | 103.532 | 96,854.631 | 172,635,570 | 51,611,168 | 374,389,126 | 368,717,824 | 2,992,775,168 |
 
-**100k entries.** The 10k case already writes ~36 MB per backend per run; 100k would generate ~360 MB of temp files per run and cross into territory where the binding limit is disk and memory rather than fold speed. Given 36× headroom against the rebuild threshold, extrapolation is uninformative and the cost is real. Run it deliberately if the number is ever needed:
+`Sampled RSS proxy bytes` is `process.memoryUsage().rss` sampled at deterministic
+phase boundaries. It is `peakSampledBytes`, not a continuously observed peak.
+
+### Backend latency and round-trip evidence
+
+| Entries | JSON save (ms) | JSON load (ms) | SQLite save (ms) | SQLite load (ms) | JSON actual entries | SQLite actual entries |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 24.644 | 9.191 | 19.786 | 9.166 | 1,000 | 1,000 |
+| 10,000 | 109.812 | 78.273 | 269.037 | 87.153 | 10,000 | 10,000 |
+| 100,000 | 977.414 | 881.032 | 2,425.679 | 1,085.048 | 100,000 | 100,000 |
+
+### Validation, equivalence, and thresholds
+
+Journal validation is `PASS`: `valid=true`, three requested sizes, three
+measured sizes, and zero validation errors.
+
+For all three sizes:
+
+- `actualEntries` equals `requestedEntries`;
+- rebuild applied the exact entry count;
+- canonical rebuild equivalence is true;
+- record, fact, and relation component equivalence are each true;
+- JSON round-trip equivalence is true; and
+- SQLite round-trip equivalence is true after the database is closed and its
+  final file footprint is measured.
+
+| Preregistered trigger | Trigger value | Measured value | Breached |
+| --- | ---: | ---: | --- |
+| Rebuild p95 at 10,000 entries | `> 250 ms` | `18.03 ms` | No |
+| Rebuild p95 at 100,000 entries | `> 1000 ms` | `103.532 ms` | No |
+| Journal/projection ratio at 10,000 entries | `> 10` | `3.345` | No |
+
+The raw verdict contains zero breaches and states:
+`No pre-declared threshold was breached. Snapshots/compaction stay DEFERRED BY
+MEASUREMENT, not by guess.`
+
+## Proven vs. not measured
+
+### Supported by retained raw evidence or tracked sanitized status
+
+- The preregistration hash and sidecar match the required frozen SHA-256.
+- The raw comparative record contains exactly seven preregistered arms, with
+  zero measured arms, seven `NOT_MEASURED` arms, and zero measurement rows.
+- The tracked sanitized dependency status records four successful import probes,
+  with Graphiti requiring the separately pinned `httpx==0.28.1` support package;
+  ignored raw install logs are not claimed as tracked evidence.
+- The local journal benchmark measured 1,000, 10,000, and 100,000 entries.
+- All three rebuilds and both backend round trips were canonically equivalent.
+- Journal validation passed `3/3`; no preregistered journal threshold was
+  breached.
+
+### `NOT_MEASURED`
+
+- Comparative decision retrieval accuracy, alternative recall, rejection-reason
+  recall, changed-fact detection, false-alert rate, failed-attempt avoidance,
+  project isolation, and user isolation for every arm.
+- Comparative fixed-rubric decision quality for every arm.
+- Comparative lifecycle tokens, tool calls, latency, cost, and storage for every
+  arm.
+- Every pairwise comparison, ranking, win, tie, and overall-superiority claim.
+- Any conclusion that dependency import success predicts end-to-end behavior or
+  performance.
+
+## Limitations
+
+1. No common local/free LLM and embedding endpoint existed, so the comparative
+   harness stopped before any arm received scenario content.
+2. The journal benchmark is machine- and build-specific and has no competitor
+   control arm.
+3. Timings are a small fixed sample: five rebuilds at 1k/10k and three at 100k.
+4. RSS is sampled only at deterministic boundaries and can miss a higher
+   between-sample peak; `resourceUsage().maxRSS` is also retained in raw data but
+   is not substituted for the declared sampled-process-RSS metric.
+5. Backend bytes are final local files after the persistence cycle; they do not
+   include package/image/runtime installation or logs.
+6. The repository was dirty during capture. The raw run preserves its commit and
+   dirty-path list; reproduction must capture a new commit/tree and dirty state.
+7. No remote or paid inference was attempted, in accordance with the frozen
+   network policy.
+
+## Reproduction and validation commands
+
+Verify the preregistration:
 
 ```bash
-node scripts/bench-journal.mjs --sizes 100000 --runs 3
+sha256sum -c benchmark/preregistration.sha256
 ```
 
-**Token, cost, latency, tool-call counts.** Still **never measured**. The ADR-0004 warm-task benchmark (first decision → restart recall → repeated task → changed-fact reconsideration → failed-attempt avoidance) is not implemented. No figure of that kind appears anywhere in this repository.
-
-**Confidence calibration.** See §0. Not measured, not claimable.
-
-## 5. Reproducing
+Validate the retained journal and comparative raw files, then regenerate the
+aggregate deterministically:
 
 ```bash
-npm run bench                                              # defaults: 1k + 10k, 5 runs
-npm run bench -- --sizes=1000,10000 --runs=5 --json        # equals form
-node scripts/bench-journal.mjs --sizes 1000,10000 --runs 5  # space form
-node scripts/bench-journal.mjs --json                       # machine-readable
+npm run benchmark:journal:validate -- \
+  benchmark/results/20260827T161115Z/journal-raw.json
+npm run benchmark:validate -- \
+  --input benchmark/results/20260827T161115Z/comparative/raw-run.json
+npm run benchmark:aggregate -- \
+  --input benchmark/results/20260827T161115Z/comparative/raw-run.json \
+  --output benchmark/results/20260827T161115Z/comparative/aggregate.json
 ```
 
-Both argument forms are supported and both are exercised above. An unknown flag, a non-integer size, or a non-positive run count **throws** rather than silently reverting to defaults, so a report cannot quote default-run numbers while claiming custom arguments.
+The journal command recorded before execution was:
 
-The generator uses a fixed injected clock, so entry counts and record shapes are deterministic across runs; only timings vary. Temp files are created under the OS temp directory and removed in a `finally` block. If `node:sqlite` is unavailable the SQLite row reports `SKIPPED` with the reason rather than being silently omitted from the comparison.
+```bash
+npm run bench -- \
+  --json-out benchmark/results/20260827T161115Z/journal-raw.json \
+  --human-out benchmark/results/20260827T161115Z/journal-output.txt
+```
+
+Run all local harness and release checks:
+
+```bash
+npm run benchmark:test
+npm run benchmark:check
+npm test
+npm run check
+npm run check:package
+npm pack --dry-run --json
+npm audit --omit=dev
+git diff --check
+git status --short --branch
+```
+
+A future real comparative run must first expose one policy-allowed common
+local/free LLM and embedding endpoint and provide real seven-arm adapter
+commands. It must retain the exact frozen configuration and write a new run id;
+the current no-model raw file must not be overwritten.
+
+## Only allowed marketing text
+
+The deterministic aggregate sets `bestClaimAllowed=false`. The word `best` and
+equivalent overall-superiority language are prohibited for this result. The
+only preregistered marketing text allowed for the current evidence is:
+
+> Comparative benchmark infrastructure was executed, but no arm was measured because no common local/free LLM and embedding endpoint was available. No comparative performance, quality, token, cost, or 'best' claim is supported.

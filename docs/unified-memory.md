@@ -1,6 +1,6 @@
 # ShadowGraph Unified Memory Kernel
 
-**Version:** 0.40.0 review candidate · **Data schema:** 4
+**Version:** 0.40.0 public-beta candidate · **Data schema:** 5
 
 This guide documents implemented behavior. Research and architecture rationale live in [ADR-0006](adr/0006-unified-memory-kernel.md).
 
@@ -219,11 +219,11 @@ CLI, HTTP, MCP tools, and the MCP context resource persist review signals create
 - `shadowgraph_remember`
 - `shadowgraph_recall`
 
-Compact mode includes both workflows. The server still negotiates MCP `2024-11-05`, so it deliberately omits newer tool-annotation fields instead of advertising a protocol feature it does not implement.
+Compact mode includes both workflows and remains exactly 12 tools. The server supports legacy MCP `2024-11-05` through `initialize` and modern `2026-07-28` through per-request metadata and `server/discover`.
 
 ## Persistence and purge
 
-Schema 4 stores memories in the existing `records` collection and SQLite entity table. There is no second canonical database. Records, facts, relations, and nested alternative IDs share one global non-empty entity-ID namespace to match SQLite, including merge imports against existing live state. Legacy collection-local collisions receive deterministic migrated IDs and dependent journal/idempotency references are remapped with them. Legacy idempotency keys are checked again after canonicalization, and review identities use tuple encoding so delimiters inside IDs/reasons cannot collide. Schema-4 merge validates relations against the final replacement state, including alternatives removed by an overwrite. Restore validates review/idempotency semantic identities plus journal type/entity/project/sequence consistency; direct replay uses the same journal type/entity map. Direct runtime writes prove caller-controlled content is lossless plain JSON before changing canonical state; large journal imports avoid argument-spread limits. Journal replay understands `memory.recorded`, `memory.indexed`, `memory.superseded`, and `memory.invalidated`.
+Schema 4 introduced memories in the existing `records` collection and SQLite entity table; schema 5 retains those invariants while adding lifecycle and signed-verification migration. There is no second canonical database. Records, facts, relations, and nested alternative IDs share one global non-empty entity-ID namespace to match SQLite, including schema-4 and schema-5 merge imports against existing live state. Legacy collection-local collisions receive deterministic migrated IDs and dependent journal/idempotency references are remapped with them. Legacy idempotency keys are checked again after canonicalization, and review identities use tuple encoding so delimiters inside IDs/reasons cannot collide. Schema-4/5 merge validates relations against the final replacement state, including alternatives removed by an overwrite. Restore validates review/idempotency semantic identities plus journal type/entity/project/sequence consistency; direct replay uses the same journal type/entity map. Direct runtime writes prove caller-controlled content is lossless plain JSON before changing canonical state; large journal imports avoid argument-spread limits. Journal replay understands `memory.recorded`, `memory.indexed`, `memory.superseded`, and `memory.invalidated`.
 
 Logical and hard project purge cover memory records, current-memory indexes, idempotency payloads, relations, and journal semantics. A purged memory cannot be returned by an old idempotency key or resurrected by journal rebuild. Hard purge records the exact removed journal sequence numbers; later hard/logical purges preserve that ledger transitively, and restore validates gap coverage with bounded range arithmetic instead of expanding every absent sequence.
 
@@ -254,4 +254,4 @@ Logical and hard project purge cover memory records, current-memory indexes, ide
 - background watcher race behavior (no watcher is shipped);
 - cloud synchronization (not shipped);
 - competitor parity or SOTA performance;
-- confidence calibration or a trusted verification channel.
+- confidence calibration or externally benchmarked verification operations.

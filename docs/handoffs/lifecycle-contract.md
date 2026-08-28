@@ -1,118 +1,85 @@
-# ShadowGraph — Decision Lifecycle Contract (G3)
+# ShadowGraph — Decision Lifecycle Contract (schema 5)
 
-**Status:** implemented in Phase 3 (2026-08-25). Applies to `updateDecisionStatus()` and `validate()` in `src/shadowgraph.js`.
-**Scope:** G3 only. Does **not** change provenance/verification (G2), reconsideration (G1), event payloads, purge, search, pagination, or confidence.
+**Status:** accepted and implemented (2026-08-27).
+**Applies to:** `addDecision()`, `updateDecisionStatus()`, `supersedeDecision()`, `maintain()`, import/migration, validation, journal rebuild, and JS/CLI/HTTP/MCP surfaces.
 
----
+## 1. Canonical schema-5 states
 
-## 1. What was actually wrong
+Schema 5 stores one explicit disposition state machine:
 
-The docs and the code used two **different vocabularies**, and neither was a superset of the other.
+```text
+proposed · planned · in_progress · executed · validated
+failed · reconsidered · superseded · abandoned · stale · archived
+```
 
-`docs/shadowgraph-vision-scope.md:33` and `docs/shadowgraph-next-session-brief.md:32` promise nine states. `src/shadowgraph.js` accepted eight — of which **four were undocumented** and **five of the promised nine were rejected outright**.
+- `proposed` is the default entry state.
+- `stale` is system-owned. `maintain()` produces it after `reviewAfter` is due for a current decision.
+- `superseded` is system-owned. Only `supersedeDecision()` produces it.
+- `archived` is an explicit terminal disposition. It is distinct from the execution outcome `abandoned`.
+- `context().activeDecisions` means current/actionable decisions, not the literal old status `active`; it includes `proposed`, `planned`, `in_progress`, `executed`, `validated`, and `reconsidered`.
 
-Reading every producer and consumer of `record.status` revealed that the four undocumented states are *not all the same kind of thing*, which is why a naive "just merge both lists" would have been wrong.
+Fact, memory, review-signal, alternative, and outcome statuses are separate vocabularies and are unchanged by this contract.
 
-## 2. Vocabularies that are NOT decision lifecycle (untouched)
+## 2. Legal transitions
 
-`status` is an overloaded field name in this codebase. Only **decision** `status` is in scope.
+`updateDecisionStatus()` accepts formatting aliases (case and hyphen/underscore) but never semantic aliases. The legal graph is exported as `DECISION_TRANSITIONS`:
 
-| Entity | `status` values | Where |
+| From | Legal caller transitions |
+| --- | --- |
+| `proposed` | `planned`, `in_progress`, `abandoned`, `archived` |
+| `planned` | `in_progress`, `abandoned`, `archived` |
+| `in_progress` | `executed`, `failed`, `abandoned`, `archived` |
+| `executed` | `validated`, `failed`, `reconsidered`, `archived` |
+| `validated` | `reconsidered`, `archived` |
+| `failed` | `reconsidered`, `abandoned`, `archived` |
+| `reconsidered` | `planned`, `in_progress`, `abandoned`, `archived` |
+| `stale` | `reconsidered`, `archived` |
+| `abandoned` | `archived` |
+| `superseded` | none |
+| `archived` | none |
+
+A same-state update is an idempotent no-op except callers still cannot claim a system-owned state. Illegal transitions throw `Illegal decision status transition: <from> -> <to>`.
+
+## 3. Atomic rejection
+
+Status normalization, system ownership, and the transition graph are checked before changing the decision. A rejected update changes none of:
+
+- the live decision;
+- compatibility events;
+- journal entries or sequence high-water marks;
+- JSON/SQLite durable state.
+
+The same rule is exercised through JavaScript, CLI, HTTP, and MCP. HTTP and MCP persistence rollback remain a second safety boundary for storage failures; they are not needed to undo a domain transition rejection because no domain mutation occurred.
+
+## 4. `stale` and `archived`
+
+`maintain({now})` changes a due current decision to `stale`, records the prior and next state in the journal transition metadata, returns its ID in `staleDecisionIds`, and retains `agedDecisionIds` as a response alias for older callers. Stale decisions are excluded from current context but can generate/open reconsideration signals. A caller cannot directly set `stale`.
+
+`archived` is caller-selected and terminal. Archived decisions remain searchable/auditable but are excluded from current context and automatic review. Archiving does not mean execution failed or was abandoned.
+
+## 5. Schema-4 migration
+
+Schema 4 had overlapping execution/validity values. Schema 5 performs the least-breaking explicit migration:
+
+| Schema-4 stored value | Schema-5 value | Marker |
 | --- | --- | --- |
-| **Alternative** | `rejected` | `addDecision()` |
-| **Fact** | `active` · `superseded` · `expired` | `addFact()`, `maintain()` |
-| **Review signal** | `open` · `acknowledged` | `review()`, `acknowledgeReview()` |
-| **Outcome** | `successful` · `mixed` · `failed` · `unknown` | `setOutcome()` |
+| `active` | `proposed` | `migration.legacyDecisionStatus = 'active'` |
+| `aging` | `stale` | `migration.legacyDecisionStatus = 'aging'` |
+| `stale` | `stale` | unchanged |
+| `archived` | `archived` | unchanged |
 
-None of these were changed. Note that `failed` appears in both the outcome vocabulary and the decision vocabulary with **different meanings** — an outcome describes what happened, a decision status describes the decision's own state.
+Migration is staged before merge/replacement. Schema-4 global entity-ID uniqueness, non-empty project/ID rules, final-state relation integrity, idempotency identity, and journal invariants remain enforced. A failed import/restore leaves records, indexes, revision, events, and journal untouched.
 
-## 3. Classification of every state
+Schemas 1–3 retain their existing legacy collision migration. Unknown stored statuses are preserved for diagnosis and reported by `validate()`; they are never silently mapped onto a known meaning.
 
-Determined by reading producers and consumers, not by guessing.
+## 6. Persistence and rebuild
 
-### 3.1 Core execution-lifecycle states (the documented nine)
+Current exports and new journal entries use schema version 5. JSON empty state, SQLite metadata defaults, restore validation, and journal projections use the same current version. Schema-4 snapshots migrate identically through JSON and SQLite and remain equivalent after restart and journal rebuild.
 
-| State | Accepted before? | Producer | Consumer | Notes |
-| --- | --- | --- | --- | --- |
-| `proposed` | ✅ | caller only | `search({status})` | |
-| `planned` | ❌ **rejected** | caller only | `search({status})` | **added** |
-| `in_progress` | ❌ **rejected** | caller only | `search({status})` | **added** |
-| `executed` | ❌ **rejected** | caller only | `search({status})` | **added** |
-| `validated` | ✅ | caller only | `maintain()` aging candidate · `search({status})` | load-bearing — `test/v025.test.js` |
-| `failed` | ✅ | caller only | `search({status})` | load-bearing — `test/interfaces.test.js` |
-| `reconsidered` | ❌ **rejected** | caller only | `search({status})` | **added** |
-| `superseded` | ✅ | `supersedeDecision()` | `supersedeDecision()` chain guard · `search({status})` | load-bearing — `test/v027.test.js` |
-| `abandoned` | ❌ **rejected** | caller only | `search({status})` | **added** |
+## 7. Regression evidence
 
-### 3.2 `active` — a VALIDITY state, not an execution state
-
-**This is the key finding.** `active` is not a missing rung on the execution ladder; it is a different axis entirely — "this decision is currently in force and not superseded/filed".
-
-- **Producers:** `addDecision()` (hardcoded default) and `supersedeDecision()` (sets the replacement to `active`).
-- **Consumers:** `context().activeDecisions` filters `status === 'active'`; `maintain()` treats `active` as an aging candidate; `search({status})`.
-- **Verdict:** **canonical, retained, and now documented.** It cannot be aliased onto any of the nine without changing what `context()` returns and breaking `test/v02.test.js` and `test/v030.test.js`.
-
-### 3.3 `aging` — a DERIVED state
-
-- **Producer:** `maintain()` only, when `reviewAfter <= now` and status is `active` or `validated`.
-- **Consumer:** `search({status})`.
-- **Verdict:** **canonical, retained, documented as derived.** Callers may set it, but the system also computes it. It is a review signal expressed as a status, not a step an agent walks through.
-
-### 3.4 `stale` and `archived` — caller-only, no producer
-
-- **Producers:** **none.** Nothing in `src/` ever sets either one.
-- **Consumers:** `search({status})` only.
-- **Verdict:** **canonical, retained, marked DEPRECATED.** They stay accepted because stored data or existing callers may use them, and the directive requires backward compatibility absent a documented reason to break it. `archived` overlaps `abandoned` semantically but is **not** aliased onto it — see §5.
-
-## 4. The contract
-
-### 4.1 Canonical stored states — 13
-
-```
-Core lifecycle (9, documented):
-  proposed · planned · in_progress · executed · validated
-  failed · reconsidered · superseded · abandoned
-
-Validity (1):        active     ← default for new decisions
-Derived (1):         aging      ← set by maintain()
-Deprecated (2):      stale · archived   ← accepted, never produced
-```
-
-### 4.2 Accepted aliases — formatting only
-
-Normalization is `trim()` → `toLowerCase()` → `-` becomes `_`. So `IN_PROGRESS`, `in-progress`, and ` In-Progress ` all resolve to `in_progress`.
-
-This mirrors the alias rule already established for provenance in G2 (`normalizeSourceClass`), and it exists because MCP clients commonly send hyphenated or title-cased enums.
-
-**No semantic aliases exist.** `archived` does not map to `abandoned`; `active` does not map to `executed`. See §5.
-
-### 4.3 Canonical on read — yes
-
-`updateDecisionStatus()` stores and returns the **canonical** form. A caller passing `in-progress` gets back `in_progress`, and that is what persists and what `search({status: 'in_progress'})` will match.
-
-### 4.4 Unknown status — throws, never silent
-
-`updateDecisionStatus()` throws `Invalid decision status: <raw>` — the **pre-existing message shape**, so any caller matching on it keeps working. The raw (un-normalized) value is echoed so the caller sees what it actually sent.
-
-### 4.5 Import — preserves data, reports rather than rewrites
-
-`importData()` **does not** validate or rewrite `status`. Legacy data carrying `active` / `aging` / `stale` / `archived` — or even a status from outside the vocabulary — loads unchanged.
-
-Rationale, consistent with the G2 import decision: import is a migration/restore path, not an agent assertion. Rewriting stored values would break `exportData`/`importData` round-trip stability (which runs on every persist and reload) and violates the security doc's *"do not rewrite user data in place"*.
-
-**But it is not silent.** `validate()` now reports an `unknown_decision_status` issue for any stored status outside the canonical 13. This makes the problem discoverable and fixable without destroying data. `repairPlan()` routes it to `manual_review` (its existing default for non-relation issues), so nothing is auto-mutated.
-
-## 5. Deliberately NOT done — these need product decisions
-
-Each of these was reachable but would have required inventing semantics. Per the directive, they are recorded instead of guessed.
-
-- **L-1 — the entry state disagrees with the documented diagram.** `docs/shadowgraph-redesign-proposal.md:57` shows `proposed → planned → …`, implying new decisions start at `proposed`. `addDecision()` hardcodes `active`. Changing the default would alter what `context().activeDecisions` returns and break `test/v02.test.js` (expects 1 active decision) and `test/v030.test.js` (aging needs `active`/`validated`). **Left as `active`.** Needs a product decision: is `proposed` the entry state, and if so does `context()` surface proposed decisions?
-- **L-2 — transitions are not enforced.** The documented diagram implies an ordering; the code allows any state → any state. Enforcing it would break `test/v025.test.js` (`active` → `validated` directly) and `test/interfaces.test.js` (`active` → `failed` directly). **No transition graph was added.** Needs a decision on whether the diagram is normative or illustrative.
-- **L-3 — `maintain()` aging candidates were not extended.** It ages only `active` and `validated`. Arguably `executed` should also age, but `maintain()` calls `review()`, so changing it changes review-signal generation — explicitly out of scope for G3.
-- **L-4 — `search({status})` does not normalize its filter.** `search('x', {status: 'IN_PROGRESS'})` will not match stored `in_progress`. Fixing it means touching search semantics, which G3 is forbidden from doing. Callers must pass canonical values.
-- **L-5 — `stale` and `archived` have no producer and no documented meaning.** They are retained for compatibility only. Needs a decision: give them meaning, formally deprecate with a migration, or drop them in a future schema version.
-- **L-6 — `addDecision()` still ignores a caller-supplied `status`.** Unchanged from before; every new decision is `active`. Related to L-1.
-
-## 6. Docs that now need updating (not done in this phase)
-
-`docs/shadowgraph-vision-scope.md:33` and `docs/shadowgraph-next-session-brief.md:32` list nine states and omit `active`, `aging`, `stale`, `archived`. Those four are real, stored, and in two cases load-bearing. The docs are therefore **incomplete**, not merely aspirational. Updating the public-facing vision/brief text is left for a docs pass so this phase's diff stays confined to G3 code plus this contract.
+- core lifecycle acceptance and migration: `test/gap-regressions.test.js`;
+- JS/CLI/HTTP/MCP atomic interface rejection: `test/lifecycle-interfaces.test.js`;
+- schema-4 → schema-5 JSON/SQLite parity: `test/memory-persistence.test.js`;
+- relation/ID/import invariants retained from schema 4: `test/unified-memory.test.js`;
+- dual-era MCP schemas and error semantics: `test/mcp-dual-era.test.js`.

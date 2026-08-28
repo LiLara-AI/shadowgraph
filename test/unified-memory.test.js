@@ -1305,9 +1305,11 @@ test('an unrelated empty hard-purge marker cannot excuse arbitrary journal gaps'
   payload.records = payload.records.filter((record) => record.id !== removed.id);
   payload.journal = payload.journal.filter((entry) => entry.entityId !== removed.id);
   payload.journal.push({
-    id: 'fake-purge', type: 'project.purged', schemaVersion: 4, seq: 3,
-    entityKind: 'project', entityId: 'unrelated-empty', project: 'unrelated-empty',
-    payload: { project: 'unrelated-empty', mode: 'hard', removed: 0, purgedEntityIds: [] }
+    id: 'fake-purge', type: 'project.purged', schemaVersion: 5, seq: 3,
+    at: '2026-03-01T00:00:00.000Z', entityKind: 'project', entityId: null,
+    project: 'unrelated-empty',
+    payload: { project: 'unrelated-empty', mode: 'hard', removed: 0, removedJournalSequences: [] },
+    provenance: { actor: null, client: null, sessionId: null }
   });
   payload.journalSeq = 3;
   payload.journalEpoch = 1;
@@ -1322,12 +1324,13 @@ test('restore rejects huge hard-purge gaps without expanding every missing seque
   graph.addDecision({ id: 'gap-kept', project: 'kept', title: 'Kept', chosen: 'A' });
   const payload = graph.exportData();
   payload.journal.push({
-    id: 'huge-gap-marker', seq: 100002, type: 'project.purged', schemaVersion: 4,
-    project: 'other', entityKind: 'project', entityId: 'other',
+    id: 'huge-gap-marker', seq: 100002, type: 'project.purged', schemaVersion: 5,
+    at: '2026-03-01T00:00:00.000Z', project: 'other', entityKind: 'project', entityId: null,
     payload: {
-      project: 'other', mode: 'hard', removed: 0, purgedEntityIds: [],
+      project: 'other', mode: 'hard', removed: 0,
       removedJournalSequences: [2]
-    }
+    },
+    provenance: { actor: null, client: null, sessionId: null }
   });
   payload.journalSeq = 100002;
   assert.throws(() => validateRestorePayload(payload, { now }), /hard purge ledger cannot cover declared gap/);
