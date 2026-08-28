@@ -24,12 +24,12 @@ const INHERITED_ENVIRONMENT_ALLOWLIST = new Set([
   'USERPROFILE',
   'WINDIR'
 ]);
-const SECRET_FIELD_PATTERN = /(?:api[_-]?key|authorization|credential|password|passwd|secret|token)/iu;
 const SPEC_SECRET_VALUES = Symbol('adapter configured secret values');
 const MAX_SECRET_ENCODING_ROUNDS = 3;
 const MAX_DISCOVERED_CREDENTIALS = 64;
 const MAX_DISCOVERED_SECRET_VARIANTS = 256;
 const MAX_DISCOVERED_CREDENTIAL_CHARS = 512;
+const MAX_DISCOVERED_CREDENTIAL_NAME_CHARS = 512;
 const MAX_DISCOVERED_URL_CHARS = 8192;
 const MIN_DISCOVERED_CREDENTIAL_CHARS = 8;
 const MAX_DISCOVERY_TEXT_CHARS = 2 * MAX_OUTPUT_BYTES;
@@ -41,10 +41,26 @@ const DISCOVERY_EXHAUSTED = 'exhausted';
 const SANITIZATION_COMPLETE = 'sanitized';
 const SANITIZATION_AMBIGUOUS = 'ambiguous';
 const SANITIZATION_BUDGET_ERROR = 'Adapter output could not be safely sanitized';
-const OUTPUT_CREDENTIAL_NAME = String.raw`(?:x[-_]?api[-_]?key|api[-_]?key|apikey|access[-_]?token|refresh[-_]?token|id[-_]?token|auth[-_]?token|token|password|passwd|client[-_]?secret|secret|credential)`;
-const OUTPUT_AUTHORIZATION_PATTERN = /\b(?:proxy[-_ ]?authorization|authorization)\b["']?\s*(?:=|:)\s*["']?(?:bearer|basic)\s+([A-Za-z0-9._~+/%=-]+)/giu;
+const OUTPUT_CREDENTIAL_NAME_CHARACTERS = String.raw`[A-Za-z0-9._%+-]`;
+const OUTPUT_POSSIBLE_CREDENTIAL_NAME = String.raw`-{0,2}${OUTPUT_CREDENTIAL_NAME_CHARACTERS}{1,${MAX_DISCOVERED_CREDENTIAL_NAME_CHARS}}`;
+const OUTPUT_OVERLONG_CREDENTIAL_ASSIGNMENT_PATTERN = new RegExp(
+  String.raw`(?:^|[\s,;{(\[])\s*["']?(?:(?:--|-(?!-))|(?!-))${OUTPUT_CREDENTIAL_NAME_CHARACTERS}{${MAX_DISCOVERED_CREDENTIAL_NAME_CHARS + 1}}${OUTPUT_CREDENTIAL_NAME_CHARACTERS}*["']?\s*(?:=|:)`,
+  'iu'
+);
+const OUTPUT_OVERLONG_CREDENTIAL_ARGUMENT_PATTERN = new RegExp(
+  String.raw`(?:^|[,\[])\s*["'](?:--|-(?!-))${OUTPUT_CREDENTIAL_NAME_CHARACTERS}{${MAX_DISCOVERED_CREDENTIAL_NAME_CHARS + 1}}`,
+  'iu'
+);
+const OUTPUT_AUTHORIZATION_PATTERN = new RegExp(
+  String.raw`(?:^|[\s,;{(\[])\s*(?=["']?(${OUTPUT_POSSIBLE_CREDENTIAL_NAME})["']?\s*(?:=|:)\s*["']?(?:bearer|basic)\s+([A-Za-z0-9._~+/%=-]+))`,
+  'giu'
+);
 const OUTPUT_CREDENTIAL_ASSIGNMENT_PATTERN = new RegExp(
-  String.raw`\b${OUTPUT_CREDENTIAL_NAME}\b["']?\s*(?:=|:)\s*(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s&,;}\]"']+))`,
+  String.raw`(?:^|[\s,;{(\[])\s*(?=["']?(${OUTPUT_POSSIBLE_CREDENTIAL_NAME})["']?\s*(?:=|:)\s*(?:"([^"\x0D\x0A]+)"|'([^'\x0D\x0A]+)'|([^\s&,;{}\[\]"']+)))`,
+  'giu'
+);
+const OUTPUT_CREDENTIAL_SEPARATE_ARGUMENT_PATTERN = new RegExp(
+  String.raw`(?:^|[,\[])\s*(?=["'](-{1,2}[A-Za-z0-9._%+-]{1,512})["']\s*,\s*(?:"([^"\x0D\x0A]+)"|'([^'\x0D\x0A]+)'|([^\s,\]}]+)))`,
   'giu'
 );
 const OUTPUT_URL_PATTERN = /\b[A-Za-z][A-Za-z0-9+.-]{1,20}:\/\/[^\s"'<>\\]+/gu;
@@ -63,12 +79,25 @@ const CREDENTIAL_QUERY_NAMES = new Set([
 ]);
 const AUTH_RELATED_KEY_PREFIXES = [
   'access', 'api', 'auth', 'authorization', 'client', 'credential', 'encryption',
-  'private', 'public', 'secret', 'signing'
+  'private', 'secret', 'signing'
 ];
 const CREDENTIAL_QUERY_SUFFIXES = [
   'apikey', 'authorization', 'credential', 'passwd', 'password', 'secret',
   'signature', 'token'
 ];
+const ORDINARY_TOKEN_NAMES = new Set([
+  'continuationtoken',
+  'designtoken',
+  'nextpagetoken',
+  'pagetoken',
+  'paginationtoken',
+  'previouspagetoken'
+]);
+const PUBLIC_SIGNATURE_NAMES = new Set([
+  'documentsignature',
+  'providersignature',
+  'publicsignature'
+]);
 
 function addExactSecret(secrets, value) {
   if (typeof value !== 'string' || value.length === 0) return;
@@ -80,6 +109,46 @@ function markDiscoveryExhausted(budget) {
   if (budget) budget.state = DISCOVERY_EXHAUSTED;
 }
 
+function decodePercentLeniently(value) {
+  let output = '';
+  for (let index = 0; index < value.length;) {
+    if (value[index] !== '%' || !/^[0-9A-F]{2}$/iu.test(value.slice(index + 1, index + 3))) {
+      output += value[index];
+      index += 1;
+      continue;
+    }
+
+    const escapes = [];
+    while (value[index] === '%' && /^[0-9A-F]{2}$/iu.test(value.slice(index + 1, index + 3))) {
+      escapes.push({ raw: value.slice(index, index + 3), byte: Number.parseInt(value.slice(index + 1, index + 3), 16) });
+      index += 3;
+    }
+
+    for (let offset = 0; offset < escapes.length;) {
+      const first = escapes[offset].byte;
+      const length = first <= 0x7f ? 1
+        : first >= 0xc2 && first <= 0xdf ? 2
+          : first >= 0xe0 && first <= 0xef ? 3
+            : first >= 0xf0 && first <= 0xf4 ? 4
+              : 0;
+      if (length > 0 && offset + length <= escapes.length) {
+        try {
+          output += new TextDecoder('utf-8', { fatal: true }).decode(
+            Uint8Array.from(escapes.slice(offset, offset + length), ({ byte }) => byte)
+          );
+          offset += length;
+          continue;
+        } catch {
+          // Preserve the first undecodable octet and continue with the bounded run.
+        }
+      }
+      output += escapes[offset].raw;
+      offset += 1;
+    }
+  }
+  return output;
+}
+
 function decodedCandidates(value) {
   const candidates = [];
   for (const candidate of [value, value.replaceAll('+', ' ')]) {
@@ -87,7 +156,8 @@ function decodedCandidates(value) {
       const decoded = decodeURIComponent(candidate);
       if (decoded.length > 0) candidates.push(decoded);
     } catch {
-      // Invalid percent escapes remain protected in their exact original form.
+      const decoded = decodePercentLeniently(candidate);
+      if (decoded.length > 0 && decoded !== candidate) candidates.push(decoded);
     }
   }
   return candidates;
@@ -136,93 +206,128 @@ function addSecretValue(secrets, value, budget) {
   }
 }
 
-function addStringLeaves(secrets, value, seen = new Set()) {
-  if (typeof value === 'string') {
-    addSecretValue(secrets, value);
-    return;
-  }
-  if (value === null || typeof value !== 'object' || seen.has(value)) return;
-  seen.add(value);
-  if (Array.isArray(value)) {
-    for (const item of value) addStringLeaves(secrets, item, seen);
-    return;
-  }
-  for (const item of Object.values(value)) addStringLeaves(secrets, item, seen);
+function compactCredentialName(name) {
+  return name.toLowerCase().replace(/[^a-z0-9]/gu, '');
 }
 
-function credentialQueryName(name) {
-  if (typeof name !== 'string' || name.length === 0) return false;
-  const compact = name.toLowerCase().replace(/[^a-z0-9]/gu, '');
-  if (CREDENTIAL_QUERY_NAMES.has(compact)) return true;
-  if (CREDENTIAL_QUERY_SUFFIXES.some((suffix) => compact.endsWith(suffix))) return true;
-  if (!compact.endsWith('key')) return false;
+function excludedCredentialName(name) {
+  const compact = compactCredentialName(name);
+  return compact === 'publickey'
+    || PUBLIC_SIGNATURE_NAMES.has(compact)
+    || ORDINARY_TOKEN_NAMES.has(compact);
+}
+
+function classifyCredentialName(name) {
+  if (typeof name !== 'string' || name.length === 0) return null;
+  const compact = compactCredentialName(name);
+  if (excludedCredentialName(name)) return null;
+  if (compact === 'credentials' || compact === 'proxyauthorization') return compact;
+  if (CREDENTIAL_QUERY_NAMES.has(compact)) return compact;
+  if (CREDENTIAL_QUERY_SUFFIXES.some((suffix) => compact.endsWith(suffix))) return compact;
+  if (!compact.endsWith('key')) return null;
   const prefix = compact.slice(0, -'key'.length);
-  return AUTH_RELATED_KEY_PREFIXES.some((candidate) => prefix.startsWith(candidate));
+  return AUTH_RELATED_KEY_PREFIXES.some((candidate) => prefix.startsWith(candidate)) ? compact : null;
 }
 
-function outputCredentialFieldName(name) {
-  if (typeof name !== 'string' || name.length === 0) return false;
-  const compact = name.toLowerCase().replace(/[^a-z0-9]/gu, '');
-  return compact === 'credentials'
-    || compact === 'proxyauthorization'
-    || credentialQueryName(name);
-}
-
-function addUrlSecrets(secrets, value) {
-  if (typeof value !== 'string' || !value.includes('://')) return;
+function invalidPercentElision(value) {
+  if (!value.includes('%')) return null;
   try {
-    const parsed = new URL(value);
-    if (parsed.username) addSecretValue(secrets, parsed.username);
-    if (parsed.password) addSecretValue(secrets, parsed.password);
-    for (const [name, queryValue] of parsed.searchParams) {
-      if (credentialQueryName(name)) addSecretValue(secrets, queryValue);
-    }
-    for (const parameter of parsed.search.slice(1).split('&')) {
-      if (parameter.length === 0) continue;
-      const separator = parameter.indexOf('=');
-      const rawName = separator === -1 ? parameter : parameter.slice(0, separator);
-      const rawValue = separator === -1 ? '' : parameter.slice(separator + 1);
-      let decodedName = rawName;
-      try { decodedName = decodeURIComponent(rawName.replaceAll('+', ' ')); } catch { /* exact name remains inspectable */ }
-      if (credentialQueryName(decodedName)) addSecretValue(secrets, rawValue);
-    }
+    decodeURIComponent(value);
+    return null;
   } catch {
-    // Non-URL strings are inspected through their field and argument context.
+    // Decode valid portions first, then elide only the undecodable percent fragments.
   }
+  const decoded = decodePercentLeniently(value);
+  let elided = '';
+  let removed = false;
+  for (let index = 0; index < decoded.length;) {
+    if (decoded[index] !== '%') {
+      elided += decoded[index];
+      index += 1;
+      continue;
+    }
+    removed = true;
+    index += 1;
+    for (let count = 0; count < 2 && index < decoded.length && /^[A-Za-z0-9]$/u.test(decoded[index]); count += 1) {
+      index += 1;
+    }
+  }
+  return removed ? elided : null;
 }
 
-function credentialArgumentValue(argument) {
+function normalizedCredentialName(rawName, budget) {
+  if (typeof rawName !== 'string' || rawName.length === 0) return null;
+  const initial = rawName.replace(/^-+/u, '').replaceAll('+', ' ');
+  if (initial.length > MAX_DISCOVERED_CREDENTIAL_NAME_CHARS) {
+    markDiscoveryExhausted(budget);
+    return null;
+  }
+  let frontier = [initial];
+  const seen = new Set(frontier);
+  let classified = null;
+  for (let round = 0; round <= MAX_SECRET_ENCODING_ROUNDS; round += 1) {
+    for (const current of frontier) {
+      if (current.length > MAX_DISCOVERED_CREDENTIAL_NAME_CHARS) {
+        markDiscoveryExhausted(budget);
+        return null;
+      }
+      const invalidElision = invalidPercentElision(current);
+      if (invalidElision !== null && classifyCredentialName(invalidElision) !== null) {
+        markDiscoveryExhausted(budget);
+        return null;
+      }
+      if (excludedCredentialName(current)) return null;
+      const normalized = classifyCredentialName(current);
+      if (normalized !== null && classified === null) classified = normalized;
+    }
+
+    const next = [];
+    for (const current of frontier) {
+      for (const decoded of decodedCandidates(current)) {
+        if (decoded === current || seen.has(decoded)) continue;
+        seen.add(decoded);
+        next.push(decoded);
+      }
+    }
+    if (next.length === 0) return classified;
+    if (round === MAX_SECRET_ENCODING_ROUNDS) {
+      markDiscoveryExhausted(budget);
+      return null;
+    }
+    frontier = next;
+  }
+  return null;
+}
+
+function outputCredentialFieldName(name, budget) {
+  return normalizedCredentialName(name, budget) !== null;
+}
+
+function credentialArgumentValue(argument, budget) {
   if (typeof argument !== 'string' || !argument.startsWith('-')) return null;
   const separator = argument.indexOf('=');
   if (separator === -1) return null;
   const name = argument.slice(0, separator);
-  return SECRET_FIELD_PATTERN.test(name) ? argument.slice(separator + 1) : null;
+  return credentialArgumentName(name, budget) ? argument.slice(separator + 1) : null;
 }
 
-function credentialArgumentName(argument) {
+function credentialArgumentName(argument, budget) {
   if (typeof argument !== 'string' || !argument.startsWith('-')) return false;
-  return SECRET_FIELD_PATTERN.test(argument.split('=', 1)[0]);
+  return outputCredentialFieldName(argument.split('=', 1)[0].replace(/^-+/u, ''), budget);
 }
 
-function inspectCommandSecrets(secrets, command) {
-  if (!Array.isArray(command)) return;
-  for (let index = 0; index < command.length; index += 1) {
-    const argument = command[index];
-    addUrlSecrets(secrets, argument);
-    const inline = credentialArgumentValue(argument);
-    if (inline !== null) addSecretValue(secrets, inline);
-    if (credentialArgumentName(argument) && !argument.includes('=') && index + 1 < command.length) {
-      addSecretValue(secrets, command[index + 1]);
-    }
-  }
-}
-
-function newCredentialDiscoveryBudget() {
+function newCredentialDiscoveryBudget({
+  maxCredentials = MAX_DISCOVERED_CREDENTIALS,
+  maxVariants = MAX_DISCOVERED_SECRET_VARIANTS
+} = {}) {
   return {
     candidates: new Set(),
     matches: 0,
+    maxCredentials,
+    maxVariants,
     nodes: 0,
     secretVariants: new Set(),
+    variantKeys: new Set(),
     state: DISCOVERY_COMPLETE,
     textChars: 0
   };
@@ -230,22 +335,31 @@ function newCredentialDiscoveryBudget() {
 
 function addDiscoveredCredential(budget, value) {
   if (budget.state === DISCOVERY_EXHAUSTED || typeof value !== 'string') return;
-  const candidate = value.trim();
-  if (candidate.length < MIN_DISCOVERED_CREDENTIAL_CHARS || budget.candidates.has(candidate)) return;
-  if (candidate.length > MAX_DISCOVERED_CREDENTIAL_CHARS
-    || budget.candidates.size >= MAX_DISCOVERED_CREDENTIALS) {
+  const rawCandidate = value.trim();
+  const authorization = /^(?:basic|bearer)\s+(.+)$/iu.exec(rawCandidate);
+  const candidate = authorization?.[1] ?? rawCandidate;
+  if (candidate.length === 0) return;
+  if (candidate.length > MAX_DISCOVERED_CREDENTIAL_CHARS) {
     markDiscoveryExhausted(budget);
     return;
   }
-  budget.candidates.add(candidate);
+  if (!budget.candidates.has(candidate)) {
+    if (budget.candidates.size >= budget.maxCredentials) {
+      markDiscoveryExhausted(budget);
+      return;
+    }
+    budget.candidates.add(candidate);
+  }
   const variants = new Set();
   addSecretValue(variants, candidate, budget);
   for (const variant of variants) {
-    if (budget.secretVariants.has(variant)) continue;
-    if (budget.secretVariants.size >= MAX_DISCOVERED_SECRET_VARIANTS) {
+    if (variant.length === 0 || budget.secretVariants.has(variant)) continue;
+    if (!budget.variantKeys.has(variant)
+      && budget.variantKeys.size >= budget.maxVariants) {
       markDiscoveryExhausted(budget);
       break;
     }
+    budget.variantKeys.add(variant);
     budget.secretVariants.add(variant);
   }
 }
@@ -256,17 +370,13 @@ function inspectDiscoveredUrl(budget, value) {
     const parsed = new URL(value);
     if (parsed.username) addDiscoveredCredential(budget, parsed.username);
     if (parsed.password) addDiscoveredCredential(budget, parsed.password);
-    for (const [name, queryValue] of parsed.searchParams) {
-      if (credentialQueryName(name)) addDiscoveredCredential(budget, queryValue);
-    }
     for (const parameter of parsed.search.slice(1).split('&')) {
       if (parameter.length === 0) continue;
       const separator = parameter.indexOf('=');
       const rawName = separator === -1 ? parameter : parameter.slice(0, separator);
       const rawValue = separator === -1 ? '' : parameter.slice(separator + 1);
-      let decodedName = rawName;
-      try { decodedName = decodeURIComponent(rawName.replaceAll('+', ' ')); } catch { /* bounded raw name remains inspectable */ }
-      if (credentialQueryName(decodedName)) addDiscoveredCredential(budget, rawValue);
+      if (normalizedCredentialName(rawName, budget) !== null) addDiscoveredCredential(budget, rawValue);
+      if (budget.state === DISCOVERY_EXHAUSTED) return;
     }
   } catch {
     // Only syntactically valid URLs contribute credential candidates.
@@ -281,25 +391,41 @@ function inspectDiscoveredText(budget, value) {
     return;
   }
   budget.textChars += value.length;
+  if (OUTPUT_OVERLONG_CREDENTIAL_ASSIGNMENT_PATTERN.test(value)
+    || OUTPUT_OVERLONG_CREDENTIAL_ARGUMENT_PATTERN.test(value)) {
+    markDiscoveryExhausted(budget);
+    return;
+  }
   const inspectMatches = (pattern, inspect) => {
     for (const match of value.matchAll(pattern)) {
+      const apply = inspect(match);
+      if (budget.state === DISCOVERY_EXHAUSTED) return false;
+      if (typeof apply !== 'function') continue;
       if (budget.matches >= MAX_DISCOVERY_MATCHES) {
         markDiscoveryExhausted(budget);
         return false;
       }
       budget.matches += 1;
-      inspect(match);
+      apply();
       if (budget.state === DISCOVERY_EXHAUSTED) return false;
     }
     return true;
   };
   if (!inspectMatches(OUTPUT_AUTHORIZATION_PATTERN, (match) => {
-    addDiscoveredCredential(budget, match[1]);
+    const normalized = normalizedCredentialName(match[1], budget);
+    if (normalized !== 'authorization' && normalized !== 'proxyauthorization') return null;
+    return () => addDiscoveredCredential(budget, match[2]);
   })) return;
   if (!inspectMatches(OUTPUT_CREDENTIAL_ASSIGNMENT_PATTERN, (match) => {
-    addDiscoveredCredential(budget, match[1] ?? match[2] ?? match[3]);
+    const normalized = normalizedCredentialName(match[1], budget);
+    if (normalized === null || normalized === 'authorization' || normalized === 'proxyauthorization') return null;
+    return () => addDiscoveredCredential(budget, match[2] ?? match[3] ?? match[4]);
   })) return;
-  inspectMatches(OUTPUT_URL_PATTERN, (match) => {
+  if (!inspectMatches(OUTPUT_CREDENTIAL_SEPARATE_ARGUMENT_PATTERN, (match) => {
+    if (normalizedCredentialName(match[1], budget) === null) return null;
+    return () => addDiscoveredCredential(budget, match[2] ?? match[3] ?? match[4]);
+  })) return;
+  inspectMatches(OUTPUT_URL_PATTERN, (match) => () => {
     if (match[0].length > MAX_DISCOVERED_URL_CHARS) {
       markDiscoveryExhausted(budget);
       return;
@@ -308,100 +434,220 @@ function inspectDiscoveredText(budget, value) {
   });
 }
 
-function inspectDiscoveredCommand(budget, command) {
+function inspectDiscoveredCommand(budget, command, inspectText = false) {
   if (budget.state === DISCOVERY_EXHAUSTED || !Array.isArray(command)) return;
   for (let index = 0; index < command.length && budget.state === DISCOVERY_COMPLETE; index += 1) {
     const argument = command[index];
     if (typeof argument !== 'string') continue;
-    inspectDiscoveredText(budget, argument);
-    const separator = argument.indexOf('=');
-    const name = separator === -1 ? argument : argument.slice(0, separator);
-    if (!name.startsWith('-') || !outputCredentialFieldName(name)) continue;
-    if (separator !== -1) addDiscoveredCredential(budget, argument.slice(separator + 1));
-    else if (typeof command[index + 1] === 'string') addDiscoveredCredential(budget, command[index + 1]);
+    if (inspectText) inspectDiscoveredText(budget, argument);
+    const inline = credentialArgumentValue(argument, budget);
+    if (inline !== null) addDiscoveredCredential(budget, inline);
+    if (credentialArgumentName(argument, budget)
+      && !argument.includes('=')
+      && typeof command[index + 1] === 'string') {
+      addDiscoveredCredential(budget, command[index + 1]);
+    }
   }
 }
 
-function discoveredOutputSecrets(...sources) {
-  const budget = newCredentialDiscoveryBudget();
-  const seen = new Set();
-  const inspect = (value, depth = 0, credentialContext = false) => {
-    if (budget.state === DISCOVERY_EXHAUSTED) return;
-    if (budget.nodes >= MAX_DISCOVERY_NODES || depth > MAX_DISCOVERY_DEPTH) {
-      markDiscoveryExhausted(budget);
-      return;
-    }
-    budget.nodes += 1;
-    if (typeof value === 'string') {
-      if (credentialContext) addDiscoveredCredential(budget, value);
-      inspectDiscoveredText(budget, value);
-      return;
-    }
-    if (value === null || typeof value !== 'object' || seen.has(value)) return;
-    seen.add(value);
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        inspect(item, depth + 1, credentialContext);
-        if (budget.state === DISCOVERY_EXHAUSTED) break;
-      }
-      return;
-    }
-    if (Array.isArray(value.command)) inspectDiscoveredCommand(budget, value.command);
-    for (const [name, item] of Object.entries(value)) {
-      if (budget.state === DISCOVERY_EXHAUSTED) break;
-      inspectDiscoveredText(budget, name);
-      inspect(item, depth + 1, credentialContext || outputCredentialFieldName(name));
-    }
-  };
+function discoverSecretsWithBudget(budget, sources) {
   for (const source of sources) {
-    inspect(source);
+    const seen = new Set();
+    const stack = [{ credentialContext: false, depth: 0, value: source }];
+    while (stack.length > 0 && budget.state === DISCOVERY_COMPLETE) {
+      const { credentialContext, depth, value } = stack.pop();
+      if (budget.nodes >= MAX_DISCOVERY_NODES || depth > MAX_DISCOVERY_DEPTH) {
+        markDiscoveryExhausted(budget);
+        break;
+      }
+      budget.nodes += 1;
+      if (typeof value === 'string') {
+        if (credentialContext) addDiscoveredCredential(budget, value);
+        inspectDiscoveredText(budget, value);
+        continue;
+      }
+      if (value === null || typeof value !== 'object' || seen.has(value)) continue;
+      seen.add(value);
+      if (Array.isArray(value)) {
+        inspectDiscoveredCommand(budget, value);
+        for (let index = value.length - 1; index >= 0; index -= 1) {
+          stack.push({ credentialContext, depth: depth + 1, value: value[index] });
+        }
+        continue;
+      }
+      const entries = Object.entries(value);
+      for (let index = entries.length - 1; index >= 0; index -= 1) {
+        const [name, item] = entries[index];
+        inspectDiscoveredText(budget, name);
+        if (budget.state === DISCOVERY_EXHAUSTED) break;
+        if (name === 'command' && Array.isArray(item)) {
+          inspectDiscoveredCommand(budget, item, true);
+          if (budget.state === DISCOVERY_EXHAUSTED) break;
+        }
+        stack.push({
+          credentialContext: credentialContext || outputCredentialFieldName(name, budget),
+          depth: depth + 1,
+          value: item
+        });
+      }
+    }
     if (budget.state === DISCOVERY_EXHAUSTED) break;
   }
   return {
-    state: budget.state,
-    secrets: budget.state === DISCOVERY_COMPLETE ? [...budget.secretVariants] : null
+    secrets: budget.state === DISCOVERY_COMPLETE ? [...budget.secretVariants] : null,
+    state: budget.state
   };
 }
 
-function withDiscoveredOutputSecrets(secrets, ...sources) {
-  const discovery = discoveredOutputSecrets(...sources);
-  if (discovery.state === DISCOVERY_EXHAUSTED) {
-    return { state: SANITIZATION_AMBIGUOUS, secrets: null };
+function discoveredOutputSecrets(...sources) {
+  return discoverSecretsWithBudget(newCredentialDiscoveryBudget(), sources);
+}
+
+function configuredSecrets(...sources) {
+  return discoverSecretsWithBudget(newCredentialDiscoveryBudget({
+    maxVariants: MAX_DISCOVERY_NODES
+  }), sources);
+}
+
+function consumeStructuralText(budget, value) {
+  const remaining = MAX_DISCOVERY_TEXT_CHARS - budget.textChars;
+  if (value.length > remaining) {
+    markDiscoveryExhausted(budget);
+    return false;
   }
-  return {
-    state: SANITIZATION_COMPLETE,
-    secrets: [...new Set([...secrets, ...discovery.secrets])]
-      .sort((left, right) => right.length - left.length || left.localeCompare(right))
+  budget.textChars += value.length;
+  return true;
+}
+
+function cloneRedactedArtifact(source, secrets, budget) {
+  const holder = { value: null };
+  const seen = new Map();
+  const stack = [{
+    arrayParent: false,
+    credentialContext: false,
+    depth: 0,
+    key: 'value',
+    parent: holder,
+    value: source
+  }];
+  const assign = (frame, value) => {
+    if (frame.arrayParent) {
+      frame.parent[frame.key] = value;
+      return;
+    }
+    Object.defineProperty(frame.parent, frame.key, {
+      configurable: true,
+      enumerable: true,
+      value,
+      writable: true
+    });
   };
+
+  while (stack.length > 0 && budget.state === DISCOVERY_COMPLETE) {
+    const frame = stack.pop();
+    if (budget.nodes >= MAX_DISCOVERY_NODES || frame.depth > MAX_DISCOVERY_DEPTH) {
+      markDiscoveryExhausted(budget);
+      break;
+    }
+    budget.nodes += 1;
+    const { value } = frame;
+    if (typeof value === 'string') {
+      if (!consumeStructuralText(budget, value)) break;
+      assign(frame, frame.credentialContext ? REDACTED : redactText(value, secrets));
+      continue;
+    }
+    if (value === null || typeof value !== 'object') {
+      assign(frame, value);
+      continue;
+    }
+    if (seen.has(value)) {
+      assign(frame, seen.get(value));
+      continue;
+    }
+
+    const output = Array.isArray(value) ? [] : {};
+    seen.set(value, output);
+    assign(frame, output);
+    if (Array.isArray(value)) {
+      for (let index = value.length - 1; index >= 0; index -= 1) {
+        const previous = index > 0 ? value[index - 1] : null;
+        stack.push({
+          arrayParent: true,
+          credentialContext: frame.credentialContext || (
+            typeof previous === 'string'
+            && credentialArgumentName(previous, budget)
+            && !previous.includes('=')
+          ),
+          depth: frame.depth + 1,
+          key: index,
+          parent: output,
+          value: value[index]
+        });
+      }
+      continue;
+    }
+
+    const entries = Object.entries(value);
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const [name, item] = entries[index];
+      if (!consumeStructuralText(budget, name)) break;
+      stack.push({
+        arrayParent: false,
+        credentialContext: frame.credentialContext || outputCredentialFieldName(name, budget),
+        depth: frame.depth + 1,
+        key: redactText(name, secrets),
+        parent: output,
+        value: item
+      });
+    }
+  }
+  return budget.state === DISCOVERY_COMPLETE ? holder.value : null;
+}
+
+function sanitizeBoundedArtifacts(discover, secrets, sources, {
+  retainKnownShortSecrets = false
+} = {}) {
+  const discovery = discover(...sources);
+  if (discovery.state === DISCOVERY_EXHAUSTED) {
+    return { state: SANITIZATION_AMBIGUOUS, values: null };
+  }
+  const budget = newCredentialDiscoveryBudget();
+  const stableSecrets = retainKnownShortSecrets
+    ? secrets
+    : secrets.filter((secret) => secret.length >= MIN_DISCOVERED_CREDENTIAL_CHARS);
+  const artifactSecrets = [...new Set([...stableSecrets, ...discovery.secrets])]
+    .sort((left, right) => right.length - left.length || left.localeCompare(right));
+  const values = sources.map((source) => cloneRedactedArtifact(
+    source,
+    artifactSecrets,
+    budget
+  ));
+  return {
+    state: budget.state === DISCOVERY_EXHAUSTED ? SANITIZATION_AMBIGUOUS : SANITIZATION_COMPLETE,
+    values: budget.state === DISCOVERY_EXHAUSTED ? null : values
+  };
+}
+
+function structurallyRedactCredentialContexts(secrets, ...sources) {
+  return sanitizeBoundedArtifacts(discoveredOutputSecrets, secrets, sources, {
+    retainKnownShortSecrets: true
+  });
+}
+
+function structurallyRedactConfiguredContexts(secrets, ...sources) {
+  return sanitizeBoundedArtifacts(configuredSecrets, secrets, sources);
 }
 
 function configuredSecretValues(...sources) {
-  const secrets = new Set();
-  const seen = new Set();
-  const inspect = (value) => {
-    if (value === null || value === undefined) return;
-    if (typeof value === 'string') {
-      addUrlSecrets(secrets, value);
-      return;
-    }
-    if (typeof value !== 'object' || seen.has(value)) return;
-    seen.add(value);
-    if (value[SPEC_SECRET_VALUES]) {
-      for (const secret of value[SPEC_SECRET_VALUES]) addSecretValue(secrets, secret);
-    }
-    if (Array.isArray(value)) {
-      for (const item of value) inspect(item);
-      return;
-    }
-    if (Array.isArray(value.command)) inspectCommandSecrets(secrets, value.command);
-    for (const [name, item] of Object.entries(value)) {
-      if (SECRET_FIELD_PATTERN.test(name)) addStringLeaves(secrets, item);
-      if (typeof item === 'string') addUrlSecrets(secrets, item);
-      inspect(item);
-    }
-  };
-  for (const source of sources) inspect(source);
-  return [...secrets].sort((left, right) => right.length - left.length || left.localeCompare(right));
+  const discovery = configuredSecrets(...sources);
+  if (discovery.state === DISCOVERY_EXHAUSTED) throw adapterSanitizationBudgetError({});
+  const secrets = new Set(discovery.secrets);
+  for (const source of sources) {
+    if (source === null || typeof source !== 'object' || !source[SPEC_SECRET_VALUES]) continue;
+    for (const secret of source[SPEC_SECRET_VALUES]) secrets.add(secret);
+  }
+  return [...secrets]
+    .sort((left, right) => right.length - left.length || left.localeCompare(right));
 }
 
 function redactText(value, secrets) {
@@ -410,29 +656,6 @@ function redactText(value, secrets) {
     if (secret.length > 0 && redacted.includes(secret)) redacted = redacted.replaceAll(secret, REDACTED);
   }
   return redacted;
-}
-
-function redactValue(value, secrets, seen = new Map()) {
-  if (typeof value === 'string') return redactText(value, secrets);
-  if (value === null || typeof value !== 'object') return value;
-  if (seen.has(value)) return seen.get(value);
-  if (Array.isArray(value)) {
-    const output = [];
-    seen.set(value, output);
-    for (const item of value) output.push(redactValue(item, secrets, seen));
-    return output;
-  }
-  const output = {};
-  seen.set(value, output);
-  for (const [name, item] of Object.entries(value)) {
-    Object.defineProperty(output, redactText(name, secrets), {
-      configurable: true,
-      enumerable: true,
-      value: redactValue(item, secrets, seen),
-      writable: true
-    });
-  }
-  return output;
 }
 
 function withExplicitSecrets(detected, explicit) {
@@ -506,11 +729,18 @@ function validateAdapterOutput(output) {
 export function adapterCommandForRecord(spec, ...secretSources) {
   const validated = validateAdapterSpec(spec, '<record>');
   const secrets = configuredSecretValues(validated, ...secretSources);
-  return JSON.stringify(redactValue(validated.command, secrets));
+  const sanitization = sanitizeBoundedArtifacts(configuredSecrets, secrets, [validated.command], {
+    retainKnownShortSecrets: true
+  });
+  if (sanitization.state === SANITIZATION_AMBIGUOUS) throw adapterSanitizationBudgetError({});
+  return JSON.stringify(sanitization.values[0]);
 }
 
 export function redactConfiguredSecrets(value, ...secretSources) {
-  return redactValue(value, configuredSecretValues(...secretSources));
+  const secrets = configuredSecretValues(...secretSources);
+  const sanitization = structurallyRedactConfiguredContexts(secrets, value);
+  if (sanitization.state === SANITIZATION_AMBIGUOUS) throw adapterSanitizationBudgetError({});
+  return sanitization.values[0];
 }
 
 function adapterSanitizationBudgetError({
@@ -538,19 +768,26 @@ function adapterError(message, {
 }) {
   let discoveryStdout = stdout;
   try { discoveryStdout = JSON.parse(stdout); } catch { /* malformed output is inspected as bounded text */ }
-  const sanitization = withDiscoveredOutputSecrets(secrets, discoveryStdout, stderr, message);
-  if (sanitization.state === SANITIZATION_AMBIGUOUS) {
+  const structural = structurallyRedactCredentialContexts(
+    secrets,
+    discoveryStdout,
+    stderr,
+    message,
+    command.command
+  );
+  if (structural.state === SANITIZATION_AMBIGUOUS) {
     return adapterSanitizationBudgetError({ command, secrets, code, signal });
   }
-  const outputSecrets = sanitization.secrets;
-  const safeStdout = redactText(stdout, outputSecrets);
-  const safeStderr = redactText(stderr, outputSecrets);
+  const safeStdout = typeof discoveryStdout === 'string'
+    ? structural.values[0]
+    : JSON.stringify(structural.values[0]);
+  const safeStderr = structural.values[1];
   const details = safeStderr.trim().length > 0 ? `; stderr: ${safeStderr.trim()}` : '';
-  const error = new Error(`${redactText(message, outputSecrets)}${details}`);
+  const error = new Error(`${structural.values[2]}${details}`);
   error.name = 'AdapterExecutionError';
   error.stdout = safeStdout;
   error.stderr = safeStderr;
-  error.command = JSON.stringify(redactValue(command.command, outputSecrets));
+  error.command = JSON.stringify(structural.values[3]);
   error.exitCode = code;
   error.signal = signal;
   error.sanitizationState = SANITIZATION_COMPLETE;
@@ -634,14 +871,13 @@ export async function runAdapterRequest(spec, request, {
       }
       try {
         const parsed = JSON.parse(stdout.toString('utf8'));
-        const sanitization = withDiscoveredOutputSecrets(secrets, parsed, stderr.toString('utf8'));
-        if (sanitization.state === SANITIZATION_AMBIGUOUS) {
+        const structural = structurallyRedactCredentialContexts(secrets, parsed, stderr.toString('utf8'));
+        if (structural.state === SANITIZATION_AMBIGUOUS) {
           reject(adapterSanitizationBudgetError(evidence));
           return;
         }
-        const outputSecrets = sanitization.secrets;
-        const output = validateAdapterOutput(redactValue(parsed, outputSecrets));
-        const safeStderr = redactText(stderr.toString('utf8'), outputSecrets).trim();
+        const output = validateAdapterOutput(structural.values[0]);
+        const safeStderr = structural.values[1].trim();
         if (safeStderr.length > 0) output.logs = [...output.logs, `Adapter stderr: ${safeStderr}`];
         resolve(output);
       } catch (cause) {

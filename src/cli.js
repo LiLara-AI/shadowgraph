@@ -8,6 +8,7 @@ import { createShadowGraph } from './shadowgraph.js';
 import { backupFile, restoreFile } from './backup.js';
 import { createRestoreValidator } from './restore-validation.js';
 import { syncMarkdownWorkspace } from './markdown-workspace.js';
+import { getRuntimeCapabilities } from './runtime-capabilities.js';
 import { VERSION } from './version.js';
 
 const [command, ...rest] = process.argv.slice(2);
@@ -50,6 +51,13 @@ async function startHttp() {
 async function runOneShot() {
   assertStorageType();
   const initializedBeforeOpen = await exists(file);
+  if (command === 'doctor' && storageType === 'sqlite') {
+    const { nodeSqlite } = await getRuntimeCapabilities();
+    if (!nodeSqlite.available) throw new Error(nodeSqlite.reason);
+  }
+  if (command === 'doctor' && !initializedBeforeOpen) {
+    throw new Error(`Storage is not initialized at ${file}. Run \`shadowgraph setup\` first.`);
+  }
   const restoreValidator = createRestoreValidator();
   const store = await createStorage({ type: storageType, file, restoreValidator });
   try {
@@ -71,9 +79,6 @@ async function runOneShot() {
     }
 
     if (command === 'doctor') {
-      if (!initializedBeforeOpen) {
-        throw new Error(`Storage is not initialized at ${file}. Run \`shadowgraph setup\` first.`);
-      }
       await access(file, fsConstants.R_OK | fsConstants.W_OK);
       const validation = graph.validate();
       const mcpPath = fileURLToPath(new URL('./mcp.js', import.meta.url));

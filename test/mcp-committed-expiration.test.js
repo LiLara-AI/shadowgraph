@@ -26,6 +26,24 @@ function toolPayload(response) {
   return JSON.parse(response.result.content[0].text);
 }
 
+function assertPrivateLegacyToolFailure(response, {
+  code = -32000,
+  message = 'Tool execution failed',
+  data,
+  forbidden = []
+} = {}) {
+  assert.equal(response.result, undefined, 'legacy tool failures use the numeric JSON-RPC error form');
+  assert.deepEqual(response.error, {
+    code,
+    message,
+    ...(data === undefined ? {} : { data })
+  });
+  const publicFailure = JSON.stringify(response);
+  for (const privateValue of forbidden) {
+    assert.equal(publicFailure.includes(String(privateValue)), false, `MCP failure disclosed ${String(privateValue)}`);
+  }
+}
+
 function startMcp(file, extraEnv = {}) {
   const child = spawn(process.execPath, ['src/mcp.js'], {
     cwd: process.cwd(),
@@ -233,8 +251,9 @@ test('MCP JSON persists a committed expiration before returning the legacy verif
 
   await writeFile(fixture.clockFile, BOUNDARY, 'utf8');
   const retry = await rpc.call(toolRequest(4, 'shadowgraph_verify_fact', { factId: fact.id, evidencePath }));
-  assert.equal(retry.error.code, -32000);
-  assert.match(retry.error.message, /invalid or expired persisted fact verification/i);
+  assertPrivateLegacyToolFailure(retry, {
+    forbidden: [fact.id, evidencePath, 'invalid or expired persisted fact verification']
+  });
 
   const liveJournal = toolPayload(await rpc.call(toolRequest(5, 'shadowgraph_journal', { limit: 100 })));
   assert.equal(liveJournal.items.at(-1).type, 'fact.expired');
@@ -317,8 +336,9 @@ test('MCP SQLite persists a committed expiration with JSON-equivalent restart an
 
   await writeFile(fixture.clockFile, BOUNDARY, 'utf8');
   const retry = await rpc.call(toolRequest(23, 'shadowgraph_verify_fact', { factId: fact.id, evidencePath }));
-  assert.equal(retry.error.code, -32000);
-  assert.match(retry.error.message, /invalid or expired persisted fact verification/i);
+  assertPrivateLegacyToolFailure(retry, {
+    forbidden: [fact.id, evidencePath, 'invalid or expired persisted fact verification']
+  });
 
   const liveJournal = toolPayload(await rpc.call(toolRequest(24, 'shadowgraph_journal', { limit: 100 })));
   assert.equal(liveJournal.items.at(-1).type, 'fact.expired');
@@ -409,8 +429,9 @@ for (const backend of ['json', 'sqlite']) {
       factId: scenario.fact.id,
       evidencePath: scenario.evidencePath
     }));
-    assert.equal(retry.error.code, -32000);
-    assert.match(retry.error.message, /invalid or expired persisted fact verification/i);
+    assertPrivateLegacyToolFailure(retry, {
+      forbidden: [scenario.fact.id, scenario.evidencePath, 'invalid or expired persisted fact verification']
+    });
     assert.equal(await readFile(scenario.faultFile, 'utf8'), 'triggered:afterCommit');
 
     const liveJournal = toolPayload(await scenario.rpc.call(toolRequest(`${backend}-postcommit-journal`, 'shadowgraph_journal', { limit: 100 })));
@@ -460,10 +481,20 @@ for (const backend of ['json', 'sqlite']) {
       factId: scenario.fact.id,
       evidencePath: scenario.evidencePath
     }));
-    assert.equal(retry.error.code, -32001);
-    assert.equal(retry.error.data.issueCode, 'committed_rejection_persistence_unconfirmed');
-    assert.equal(retry.error.data.expirationDurable, false);
-    assert.match(retry.error.data.persistenceError, /revision conflict/i);
+    const publicConflictData = { issueCode: 'committed_rejection_persistence_unconfirmed' };
+    assertPrivateLegacyToolFailure(retry, {
+      code: -32001,
+      message: 'Persistent storage unavailable',
+      data: publicConflictData,
+      forbidden: [
+        scenario.fact.id,
+        scenario.evidencePath,
+        independent.id,
+        'expirationDurable',
+        'persistenceError',
+        'revision conflict'
+      ]
+    });
 
     const durable = await loadBackend(backend, scenario.file);
     assert.equal(durable.revision, 3);
@@ -477,11 +508,21 @@ for (const backend of ['json', 'sqlite']) {
       project: scenario.fact.project,
       query: 'release ready'
     }));
-    assert.equal(blockedRead.error.code, -32001, 'no later read may expose the now-expired durable verification');
+    assertPrivateLegacyToolFailure(blockedRead, {
+      code: -32001,
+      message: 'Persistent storage unavailable',
+      data: publicConflictData,
+      forbidden: [scenario.fact.id, 'expirationDurable', 'persistenceError', 'revision conflict']
+    });
     const blockedWrite = await scenario.rpc.call(toolRequest(`${backend}-conflict-blocked-write`, 'shadowgraph_record_decision', {
       id: `${backend}-blocked-after-conflict`, title: 'Blocked', chosen: 'must not persist'
     }));
-    assert.equal(blockedWrite.error.code, -32001);
+    assertPrivateLegacyToolFailure(blockedWrite, {
+      code: -32001,
+      message: 'Persistent storage unavailable',
+      data: publicConflictData,
+      forbidden: [`${backend}-blocked-after-conflict`, 'expirationDurable', 'persistenceError', 'revision conflict']
+    });
     assert.equal((await loadBackend(backend, scenario.file)).revision, 3);
   });
 }

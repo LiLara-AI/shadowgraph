@@ -11,6 +11,10 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
 import { validateJournalBenchmark } from '../benchmark/lib/journal-validation.mjs';
+import {
+  NODE_SQLITE_NOT_APPLICABLE_REASON,
+  getRuntimeCapabilities
+} from '../src/runtime-capabilities.js';
 import { createShadowGraph, rebuildProjection } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
@@ -272,6 +276,19 @@ async function measureBackend(name, path, exported, memory) {
   }
 }
 
+function notApplicableSqliteBackend() {
+  return {
+    status: 'NOT_APPLICABLE',
+    reason: NODE_SQLITE_NOT_APPLICABLE_REASON,
+    saveMs: null,
+    loadMs: null,
+    storageFiles: [],
+    fileBytes: 0,
+    actualEntries: null,
+    roundTripEquivalent: null
+  };
+}
+
 async function measureWorker(requestedEntries, runs) {
   const wallStarted = performance.now();
   const memory = memorySampler();
@@ -308,9 +325,12 @@ async function measureWorker(requestedEntries, runs) {
     directory = await mkdtemp(join(tmpdir(), 'shadowgraph-bench-'));
     const jsonPath = join(directory, 'bench.json');
     const sqlitePath = join(directory, 'bench.sqlite');
+    const capabilities = await getRuntimeCapabilities();
     const backends = {
       json: await measureBackend('json', jsonPath, exported, memory),
-      sqlite: await measureBackend('sqlite', sqlitePath, exported, memory)
+      sqlite: capabilities.nodeSqlite.available
+        ? await measureBackend('sqlite', sqlitePath, exported, memory)
+        : notApplicableSqliteBackend()
     };
     const actualEntries = journal.length;
     const validation = {
@@ -318,7 +338,9 @@ async function measureWorker(requestedEntries, runs) {
       rebuildEquivalent,
       rebuildComponentsEquivalent,
       jsonRoundTripEquivalent: backends.json.roundTripEquivalent === true,
-      sqliteRoundTripEquivalent: backends.sqlite.roundTripEquivalent === true
+      sqliteRoundTripEquivalent: backends.sqlite.status === 'NOT_APPLICABLE'
+        ? null
+        : backends.sqlite.roundTripEquivalent === true
     };
     memory.sample('complete');
     return {
@@ -404,6 +426,7 @@ function humanOutput(output) {
     for (const name of ['json', 'sqlite']) {
       const backend = result.backends[name];
       if (backend.status === 'MEASURED') lines.push(`  ${name.padEnd(9)} save=${backend.saveMs}ms load=${backend.loadMs}ms file=${backend.fileBytes}B actual=${backend.actualEntries} equivalent=${backend.roundTripEquivalent}`);
+      else if (backend.status === 'NOT_APPLICABLE') lines.push(`  ${name.padEnd(9)} NOT_APPLICABLE — ${backend.reason}`);
       else lines.push(`  ${name.padEnd(9)} FAILED — ${backend.error?.name}: ${backend.error?.message}`);
     }
     lines.push(`  memory    metric=${result.memory.metric} peakSampled=${result.memory.peakSampledBytes}B current=${result.memory.currentBytes}B resourceUsageMaxRSS=${result.memory.resourceUsageMaxRssKilobytes}KiB`, '');

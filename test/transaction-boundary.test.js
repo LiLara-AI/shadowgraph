@@ -695,8 +695,12 @@ test('transaction boundary: MCP rejection preserves bytes, then a smaller succes
       jsonrpc: '2.0', id: 2, method: 'tools/call',
       params: { name: 'shadowgraph_record_outcome', arguments: { decisionId, outcome: { status: 'successful', observedAt: NOW } } }
     });
-    assert.ok(rejected.error);
-    assert.match(rejected.error.message, /journal sequence overflow/i);
+    assert.equal(rejected.result, undefined, 'legacy tool failures use the numeric JSON-RPC error form');
+    assert.deepEqual(rejected.error, { code: -32000, message: 'Tool execution failed' });
+    const publicFailure = JSON.stringify(rejected);
+    assert.equal(publicFailure.includes(file), false, 'MCP failure disclosed the storage path');
+    assert.equal(publicFailure.includes(decisionId), false, 'MCP failure disclosed the decision id');
+    assert.equal(publicFailure.includes('journal sequence overflow'), false, 'MCP failure disclosed the raw journal diagnostic');
     assert.deepEqual(await readFile(file), before, 'MCP rejection preserves exact durable bytes');
 
     const successful = await rpc.call({

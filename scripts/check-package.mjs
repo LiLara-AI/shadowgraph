@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, join, resolve } from 'node:path';
+import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { gunzip } from 'node:zlib';
@@ -19,10 +19,34 @@ const posixProfilePathPattern = new RegExp(
   + String.raw`root(?:/[^\s"'\x60<>]*)?)`,
   'u'
 );
+const windowsTempPathPattern = /(?:^|[^A-Za-z0-9])(?:[A-Za-z]:[\\/]+(?:Temp|Windows[\\/]+Temp|Users[\\/]+[^\\/\s"'`<>|]+[\\/]+AppData[\\/]+Local[\\/]+Temp)(?:[\\/]|$))/iu;
+const posixTempPathPattern = /(?:^|[^A-Za-z0-9_:/])\/(?:tmp|var\/tmp|private\/tmp)(?:\/|$)/u;
+const localHermesPathPattern = /(?:^|[^A-Za-z0-9_.-])\.hermes[\\/]|AppData[\\/]Local[\\/]hermes[\\/]|[\\/]hermes[\\/](?:profiles|cache|skills|plugins|cron|memories)[\\/]/iu;
+const absoluteRepositoryPathPattern = /(?:[A-Za-z]:[\\/][^\x0D\x0A]*[\\/](?:AI +Projects|repos?|workspaces?)[\\/][^\s"'`<>|]+)|(?:^|[^A-Za-z0-9_:/])\/(?:[^/\s"'`<>]+\/)*(?:repos?|workspaces?)\/[^/\s"'`<>]+/iu;
 const webUrlPattern = /https?:\/\/[^\s<>"'`]+/giu;
-const credentialNameSource = String.raw`(?:[A-Za-z0-9]+[_-])*(?:api[_-]?key|api[_-]?token|access[_-]?token|auth[_-]?token|authorization|client[_-]?secret|credential|password|passwd|private[_-]?key|secret|token)`;
-const quotedCredentialPattern = new RegExp(String.raw`\b(${credentialNameSource})\b\s*[:=]\s*(["'\x60])([^"'\x60\r\n]*)\2`, 'giu');
-const unquotedCredentialPattern = new RegExp(String.raw`\b(${credentialNameSource})\b\s*=\s*([^\s,;#}\]]+)`, 'giu');
+const namedValuePattern = new RegExp(
+  String.raw`(?:^|[^A-Za-z0-9%._-])(?:["'\x60])?([A-Za-z0-9%._-]+)(?:["'\x60])?\s*(?::|=(?![=>]))\s*`
+  + String.raw`(?:(["'\x60])([^"'\x60\x0D\x0A]*)\2|((?:Basic|Bearer)\s+(?:\$\{[A-Z_][A-Z0-9_]*\}|<[A-Z_][A-Z0-9_]*>|[^\s,;#}\]"'\x60<>\x0D\x0A]+)|\$\{[A-Z_][A-Z0-9_]*\}|[^,;#}\]\x0D\x0A]+))`,
+  'giu'
+);
+const credentialNameExact = new Set([
+  'apikey', 'apitoken', 'accesstoken', 'authtoken', 'authorization',
+  'clientsecret', 'credential', 'password', 'passwd', 'privatekey',
+  'secret', 'sig', 'token', 'xamzsignature'
+]);
+const credentialNameSuffixes = Object.freeze([
+  'apikey', 'apitoken', 'accesstoken', 'authtoken', 'clientsecret',
+  'credential', 'password', 'passwd', 'privatekey', 'secret'
+]);
+const knownHarmlessCredentialValues = new Set([
+  '', 'null', 'none', 'false', 'true', '***', '[redacted]', '<redacted>',
+  'redacted', 'example', 'sample', 'dummy', 'placeholder', 'fake', 'changeme',
+  'change-me', 'replace-me', 'not-a-secret',
+  'use-a-random-token-at-least-16-characters', 'public-beta-smoke-token',
+  'bearer use-a-random-token-at-least-16-characters', 'bearer <token>', 'bearer ***'
+]);
+const environmentCredentialReferencePattern = /^(?:(?:\$\{[A-Z_][A-Z0-9_]*\}|\$[A-Z_][A-Z0-9_]*|%[A-Z_][A-Z0-9_]*%|process\.env\.[A-Z_][A-Z0-9_]*|import\.meta\.env\.[A-Z_][A-Z0-9_]*|<[A-Z_][A-Z0-9_]*>)|(?:Basic|Bearer)\s+\$\{[A-Z_][A-Z0-9_]*\})$/iu;
+const labelledCredentialPlaceholderPattern = /^(?:your|example|sample|dummy|fake)[-_ ](?:api[-_ ]?key|api[-_ ]?token|access[-_ ]?token|auth[-_ ]?token|authorization|client[-_ ]?secret|credential|password|passwd|private[-_ ]?key|secret|signature|token)$/iu;
 const knownCredentialPatterns = [
   /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/gu,
   /\bgithub_pat_[A-Za-z0-9_]{20,}\b/gu,
@@ -30,11 +54,6 @@ const knownCredentialPatterns = [
   /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/gu,
   /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/gu
 ];
-const credentialQueryNames = new Set([
-  'apikey', 'authorization', 'credential', 'key', 'passwd', 'password',
-  'secret', 'signature', 'token', 'xamzsignature'
-]);
-
 const requiredFiles = [
   'README.md',
   'SECURITY.md',
@@ -174,20 +193,125 @@ function decodeText(buffer) {
   }
 }
 
-function normalizedCredentialName(name) {
-  return name.toLowerCase().replaceAll(/[-_]/gu, '');
+const maxCredentialNameDecodeRounds = 5;
+
+function decodePercentEscapesStrict(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function decodePercentEscapesLenient(value) {
+  return value.replace(/(?:%[0-9A-Fa-f]{2})+/gu, (encoded) => {
+    try {
+      return decodeURIComponent(encoded);
+    } catch {
+      return encoded.replace(/%[0-9A-Fa-f]{2}/gu, (escape) => {
+        try {
+          return decodeURIComponent(escape);
+        } catch {
+          return escape;
+        }
+      });
+    }
+  });
+}
+
+function elideInvalidPercentFragments(value, fragmentLength) {
+  let elided = '';
+  for (let index = 0; index < value.length;) {
+    if (value[index] !== '%') {
+      elided += value[index];
+      index += 1;
+      continue;
+    }
+    const encodedRun = /^(?:%[0-9A-Fa-f]{2})+/u.exec(value.slice(index))?.[0];
+    if (encodedRun) {
+      try {
+        decodeURIComponent(encodedRun);
+        elided += encodedRun;
+        index += encodedRun.length;
+        continue;
+      } catch {
+        try {
+          decodeURIComponent(encodedRun.slice(0, 3));
+          elided += value[index];
+          index += 1;
+          continue;
+        } catch {}
+      }
+    }
+    index += 1;
+    for (let offset = 1;
+      offset < fragmentLength && index < value.length && value[index] !== '%';
+      offset += 1) {
+      index += 1;
+    }
+  }
+  return elided;
+}
+
+function credentialNameDetails(name) {
+  const candidates = new Set([String(name)]);
+  let decoded = String(name);
+  for (let round = 0; round < maxCredentialNameDecodeRounds && decoded.includes('%'); round += 1) {
+    const next = decodePercentEscapesLenient(decoded);
+    if (next === decoded) break;
+    candidates.add(next);
+    decoded = next;
+  }
+  const ambiguous = decodePercentEscapesStrict(decoded) !== decoded
+    || decodePercentEscapesLenient(decoded) !== decoded;
+  for (const candidate of [...candidates]) {
+    for (const fragmentLength of [1, 2, 3]) {
+      candidates.add(elideInvalidPercentFragments(candidate, fragmentLength));
+    }
+  }
+  return {
+    ambiguous,
+    normalized: [...candidates].map((value) => value.toLowerCase().replaceAll(/[^a-z0-9]/gu, ''))
+  };
+}
+
+function isCredentialName(name, allowBareKey = false) {
+  const details = credentialNameDetails(name);
+  return details.ambiguous || details.normalized.some((normalized) => (
+    (allowBareKey && normalized === 'key')
+    || credentialNameExact.has(normalized)
+    || credentialNameSuffixes.some((suffix) => normalized.endsWith(suffix))
+  ));
+}
+
+function isExplicitRuntimeCredentialIdentifier(value) {
+  const candidate = value.trim();
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(candidate) && isCredentialName(candidate);
+}
+
+function isRuntimeDeclaration(line, matchIndex) {
+  return /^\s*(?:const|let|var)\s+$/u.test(line.slice(0, matchIndex + 1));
+}
+
+function isRuntimeDeclarationReference(value, quoted) {
+  const candidate = value.trim();
+  if (quoted) {
+    return /^(?:\$\{[^{}\x0D\x0A]+\})(?:[.:/_-]\$\{[^{}\x0D\x0A]+\})*$/u.test(candidate);
+  }
+  return /^[A-Za-z_$]/u.test(candidate)
+    || /^\/(?:\\.|[^/\x0D\x0A])+\/[a-z]*\.[A-Za-z_$][A-Za-z0-9_$]*\(/u.test(candidate);
 }
 
 function isHarmlessCredentialValue(rawValue) {
-  const value = String(rawValue).trim().replace(/[),.;]+$/u, '');
-  if (!value || /^(?:null|none|false|true)$/iu.test(value)) return true;
-  if (/^(?:v?\d+)(?:\.\d+){1,3}(?:[-+][0-9A-Za-z.-]+)?$/u.test(value)) return true;
-  if (/\$\{|process\.env|import\.meta\.env|%[A-Z0-9_]+%|^\$[A-Z_][A-Z0-9_]*$|^<[^>]+>$/iu.test(value)) return true;
-  if (/(?:example|sample|dummy|placeholder|replace|change.?me|use.?a.?random|your|redacted|not.?a.?secret|smoke|test|fake|xxxx)/iu.test(value)) return true;
+  const value = String(rawValue).trim();
+  if (knownHarmlessCredentialValues.has(value.toLowerCase())) return true;
+  if (environmentCredentialReferencePattern.test(value)) return true;
+  if (labelledCredentialPlaceholderPattern.test(value)) return true;
+  if (/^x{4,}$/iu.test(value)) return true;
   try {
     const url = new URL(value);
     if ((url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password) {
-      return ![...url.searchParams].some(([name, queryValue]) => credentialQueryNames.has(normalizedCredentialName(name)) && queryValue);
+      return ![...url.searchParams].some(([name, queryValue]) => isCredentialName(name, true) && queryValue);
     }
   } catch {}
   return false;
@@ -197,11 +321,16 @@ function urlContainsCredential(urlText) {
   try {
     const url = new URL(urlText.replace(/[),.;]+$/u, ''));
     if (url.username || url.password) return true;
-    return [...url.searchParams].some(([name, value]) => (
-      credentialQueryNames.has(normalizedCredentialName(name))
-      && value
-      && !isHarmlessCredentialValue(value)
-    ));
+    return url.search.slice(1).split('&').some((segment) => {
+      if (!segment) return false;
+      const equals = segment.indexOf('=');
+      const rawName = equals < 0 ? segment : segment.slice(0, equals);
+      const pair = new URLSearchParams(segment).entries().next().value ?? ['', ''];
+      const [decodedName, value] = pair;
+      return (isCredentialName(rawName, true) || isCredentialName(decodedName, true))
+        && value
+        && !isHarmlessCredentialValue(value);
+    });
   } catch {
     return false;
   }
@@ -214,16 +343,30 @@ function lineViolationCategories(line) {
   const withoutWebUrls = line.replace(webUrlPattern, ' ');
   if (windowsProfilePathPattern.test(withoutWebUrls)) categories.add('absolute-windows-profile-path');
   if (posixProfilePathPattern.test(withoutWebUrls)) categories.add('absolute-posix-profile-path');
+  if (windowsTempPathPattern.test(withoutWebUrls)) categories.add('absolute-windows-temp-path');
+  if (posixTempPathPattern.test(withoutWebUrls)) categories.add('absolute-posix-temp-path');
+  if (localHermesPathPattern.test(withoutWebUrls)) categories.add('local-hermes-path');
+  if (absoluteRepositoryPathPattern.test(withoutWebUrls)) categories.add('absolute-repository-path');
   if (/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/u.test(line)) categories.add('credential-literal');
-
-  for (const match of line.matchAll(quotedCredentialPattern)) {
-    if (!isHarmlessCredentialValue(match[3])) categories.add('credential-literal');
+  if (/ignored raw/iu.test(line)
+    && /(?:tracked|published|packaged) evidence|proves?|supports?|substantiates?/iu.test(line)
+    && !/(?:not|never|no)\s+(?:claimed\s+as\s+)?(?:tracked|published|packaged)?\s*evidence/iu.test(line)) {
+    categories.add('ignored-raw-evidence-claim');
   }
-  for (const match of line.matchAll(unquotedCredentialPattern)) {
-    const [name, value] = [match[1], match[2]];
-    if (name !== name.toUpperCase()) continue;
-    if (!/^[A-Za-z0-9][A-Za-z0-9_+./=-]{7,}$/u.test(value)) continue;
-    if (!isHarmlessCredentialValue(value)) categories.add('credential-literal');
+
+  for (const match of withoutWebUrls.matchAll(namedValuePattern)) {
+    const [name, value] = [match[1], match[3] ?? match[4]];
+    const quoted = match[3] !== undefined;
+    const declaration = isRuntimeDeclaration(withoutWebUrls, match.index);
+    const runtimeReference = declaration
+      ? isRuntimeDeclarationReference(value, quoted)
+      : (!quoted && isExplicitRuntimeCredentialIdentifier(value));
+    if (isCredentialName(name)
+      && value.trim().length > 0
+      && !runtimeReference
+      && !isHarmlessCredentialValue(value)) {
+      categories.add('credential-literal');
+    }
   }
   for (const pattern of knownCredentialPatterns) {
     for (const match of line.matchAll(pattern)) {
@@ -254,14 +397,30 @@ function inspectPackagedText(entries) {
   fail(`packaged text policy violations:\n${violations.map(({ path, line, category }) => `- ${path}:${line} [${category}]`).join('\n')}`);
 }
 
+async function resolveNpmCli() {
+  if (process.env.npm_execpath) return process.env.npm_execpath;
+  if (process.platform !== 'win32') return null;
+
+  const pathDirectories = (process.env.PATH ?? '').split(delimiter).filter(Boolean);
+  const candidates = [
+    dirname(process.execPath),
+    ...pathDirectories
+  ].map((directory) => join(directory, 'node_modules', 'npm', 'bin', 'npm-cli.js'));
+  for (const candidate of new Set(candidates)) {
+    try {
+      await access(candidate);
+      return candidate;
+    } catch {}
+  }
+  fail('npm CLI entry point could not be resolved');
+}
+
 async function runNpm(args, cwd) {
   const options = { cwd, maxBuffer: 10 * 1024 * 1024, windowsHide: true };
   try {
-    if (process.env.npm_execpath) return await execFileAsync(process.execPath, [process.env.npm_execpath, ...args], options);
-    return await execFileAsync(process.platform === 'win32' ? 'npm.cmd' : 'npm', args, {
-      ...options,
-      shell: process.platform === 'win32'
-    });
+    const npmCli = await resolveNpmCli();
+    if (npmCli) return await execFileAsync(process.execPath, [npmCli, ...args], options);
+    return await execFileAsync('npm', args, options);
   } catch {
     fail('npm pack command failed');
   }

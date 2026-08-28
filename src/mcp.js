@@ -70,6 +70,8 @@ const MCP_VERSION = VERSION;
 const LEGACY_PROTOCOL_VERSION = '2024-11-05';
 const MODERN_PROTOCOL_VERSION = '2026-07-28';
 const SUPPORTED_PROTOCOL_VERSIONS = Object.freeze([MODERN_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION]);
+const JSON_RPC_ERROR = Symbol('shadowgraph.jsonRpcError');
+const PUBLIC_ERROR = Symbol('shadowgraph.publicError');
 const graph = createShadowGraph({ verifier, ...(injectedNow ? { now: injectedNow } : {}) });
 graph.importData(await store.load());
 const embeddingClient = process.env.SHADOWGRAPH_EMBEDDING_URL ? createEmbeddingClient({
@@ -85,16 +87,26 @@ function queueCall(operation) { const queued = callQueue.then(operation); callQu
 let persistenceUnavailable = null;
 const UNCONFIRMED_RECOVERY_CODES = new Set(['json_restore_recovery_unconfirmed', 'sqlite_restore_recovery_unconfirmed']);
 function unavailableError() {
-  const error = new Error(persistenceUnavailable.message ?? 'Persistent storage unavailable after unconfirmed restore recovery; restart required');
-  error.code = -32001;
-  error.data = persistenceUnavailable.data
+  const data = persistenceUnavailable.data
     ? structuredClone(persistenceUnavailable.data)
     : {
         recoveryCode: persistenceUnavailable.recoveryCode,
         retainedArtifacts: [...persistenceUnavailable.retainedArtifacts],
         ...(persistenceUnavailable.unknownArtifacts ? { unknownArtifacts: structuredClone(persistenceUnavailable.unknownArtifacts) } : {})
       };
-  return error;
+  const recoveryCode = data.recoveryCode;
+  const issueCode = data.issueCode;
+  const publicData = {
+    ...(PUBLIC_DOMAIN_CODES.has(issueCode) ? { issueCode } : {}),
+    ...(PUBLIC_DOMAIN_CODES.has(recoveryCode) ? { recoveryCode } : {})
+  };
+  return applicationError(
+    -32001,
+    persistenceUnavailable.message ?? 'Persistent storage unavailable after unconfirmed restore recovery; restart required',
+    data,
+    'Persistent storage unavailable',
+    Object.keys(publicData).length ? publicData : undefined
+  );
 }
 
 function canonical(value) {
@@ -343,7 +355,7 @@ async function callUnqueued(name, args) {
       });
   }
   else if (!name) { const error = new Error('Invalid tool parameters'); error.code = -32602; throw error; }
-  else { const error = new Error(`Unknown tool: ${name}`); error.code = -32601; throw error; }
+  else { const error = new Error('Unknown tool'); error.code = -32601; throw error; }
   } catch (error) {
     if (isCommittedRejection(error)) {
       return persistCommittedRejection(error);
@@ -406,17 +418,164 @@ const CLIENT_INFO_META = 'io.modelcontextprotocol/clientInfo';
 const CLIENT_CAPABILITIES_META = 'io.modelcontextprotocol/clientCapabilities';
 const SERVER_INFO_META = 'io.modelcontextprotocol/serverInfo';
 
-function rpcError(code, message, data) {
-  const error = new Error(message);
-  error.code = code;
-  if (data !== undefined) error.data = data;
+const PUBLIC_PROTOCOL_MESSAGES = new Set([
+  'Parse error',
+  'Invalid Request',
+  'Invalid Request: jsonrpc must be 2.0',
+  'Invalid Request: method must be a string',
+  'Method not found',
+  'Unknown tool',
+  'Unknown resource URI',
+  'Unknown prompt',
+  'Unsupported protocol version',
+  'Invalid params: params must be an object',
+  'Invalid params: modern requests require params._meta',
+  `Invalid params: _meta.${PROTOCOL_VERSION_META} must be a string`,
+  `Invalid params: _meta.${CLIENT_INFO_META} requires name and version strings when present`,
+  `Invalid params: _meta.${CLIENT_CAPABILITIES_META} must be an object`,
+  'Invalid params: protocolVersion must be a string',
+  'Invalid params: clientInfo requires name and version strings when present',
+  'Invalid params: capabilities must be an object when present',
+  'Invalid params: uri is required',
+  'Invalid params: name is required',
+  'Invalid params: params is required for tools/call',
+  'Invalid params: name is required for tools/call',
+  'Invalid params: arguments must be an object'
+]);
+const PUBLIC_RPC_FALLBACK_MESSAGES = new Map([
+  [-32700, 'Parse error'],
+  [-32600, 'Invalid Request'],
+  [-32601, 'Method not found'],
+  [-32602, 'Invalid params'],
+  [-32022, 'Unsupported protocol version']
+]);
+// Only stable codes documented by the storage/journal contracts cross the MCP
+// boundary. In particular, platform codes such as ENOENT/EACCES are private.
+const PUBLIC_DOMAIN_CODES = new Set([
+  'committed_rejection_persistence_unconfirmed',
+  'duplicate_hard_purge_ledger_sequence',
+  'duplicate_journal_sequence',
+  'hard_purge_ledger_not_array',
+  'invalid_hard_purge_ledger_sequence',
+  'invalid_journal_sequence',
+  'invalid_projection_baseline_placement',
+  'json_restore_recovery_unconfirmed',
+  'json_restore_rolled_back',
+  'multiply_claimed_hard_purge_ledger_sequence',
+  'noncanonical_schema5_purge_artifact',
+  'noncausal_hard_purge_ledger_sequence',
+  'persistence_unavailable',
+  'revision_overflow',
+  'sqlite_restore_recovery_unconfirmed',
+  'sqlite_restore_rolled_back',
+  'sqlite_save_compaction_unconfirmed',
+  'storage_lock_reentrant',
+  'storage_lock_timeout',
+  'unexplained_journal_gap',
+  'unrelated_hard_purge_ledger_sequence',
+  'unsupported_schema_version'
+]);
+const PUBLIC_DOMAIN_MESSAGES = new Set([
+  'A caller cannot set fact verificationStatus to verified',
+  'A caller cannot set fact verificationStatus to expired',
+  'Invalid fact verificationStatus',
+  'Purge mode must be logical or hard',
+  'Outcome status must be successful, mixed, failed, or unknown',
+  'Decision not found'
+]);
+const PUBLIC_ERROR_NAME_MESSAGES = new Map([
+  ['RevisionConflictError', 'Storage revision conflict']
+]);
+
+function tagPublicError(error, message, data) {
+  error[PUBLIC_ERROR] = Object.freeze({
+    message,
+    ...(data === undefined ? {} : { data: structuredClone(data) })
+  });
   return error;
 }
 
+function publicRpcData(code, data) {
+  if (code !== -32022 || !Array.isArray(data?.supported)) return undefined;
+  const supported = data.supported.filter((version) => SUPPORTED_PROTOCOL_VERSIONS.includes(version));
+  if (!supported.length) return undefined;
+  const requested = typeof data.requested === 'string' && /^\d{4}-\d{2}-\d{2}$/u.test(data.requested)
+    ? data.requested
+    : undefined;
+  return {
+    supported,
+    ...(requested === undefined ? {} : { requested })
+  };
+}
+
+function rpcError(code, message, data) {
+  const error = new Error(message);
+  error.code = code;
+  error[JSON_RPC_ERROR] = true;
+  if (data !== undefined) error.data = data;
+  const publicMessage = PUBLIC_PROTOCOL_MESSAGES.has(message)
+    ? message
+    : PUBLIC_RPC_FALLBACK_MESSAGES.get(code);
+  return publicMessage
+    ? tagPublicError(error, publicMessage, publicRpcData(code, data))
+    : error;
+}
+
+function applicationError(code, message, data, publicMessage, publicData) {
+  const error = new Error(message);
+  error.code = code;
+  if (data !== undefined) error.data = data;
+  return tagPublicError(error, publicMessage, publicData);
+}
+
+function isRpcError(error) {
+  return error?.[JSON_RPC_ERROR] === true;
+}
+
+function publicDomainCode(error) {
+  for (const candidate of [error?.code, error?.data?.issueCode, error?.data?.recoveryCode]) {
+    if (PUBLIC_DOMAIN_CODES.has(candidate)) return candidate;
+  }
+  return null;
+}
+
+function publicErrorDetails(error) {
+  const tagged = error?.[PUBLIC_ERROR];
+  if (tagged) return tagged;
+
+  const issueCode = publicDomainCode(error);
+  if (issueCode) {
+    return {
+      message: `Tool execution failed (${issueCode})`,
+      data: {
+        issueCode,
+        ...(error?.data?.recoveryCode === issueCode ? { recoveryCode: issueCode } : {})
+      }
+    };
+  }
+  if (error instanceof SyntaxError) return { message: 'Tool execution failed: invalid JSON data' };
+  const namedMessage = PUBLIC_ERROR_NAME_MESSAGES.get(error?.name);
+  if (namedMessage) return { message: namedMessage };
+  if (PUBLIC_DOMAIN_MESSAGES.has(error?.message)) return { message: error.message };
+  return { message: 'Tool execution failed' };
+}
+
+function publicErrorMessage(error) {
+  return publicErrorDetails(error).message;
+}
+
 function reply(id, result, error) {
+  const errorCode = Number.isFinite(error?.code) && Number.isInteger(error.code)
+    ? error.code
+    : -32000;
+  const publicFailure = error ? publicErrorDetails(error) : null;
   process.stdout.write(JSON.stringify({
     jsonrpc: '2.0', id: id ?? null,
-    ...(error ? { error: { code: error.code ?? -32000, message: error.message, ...(error.data === undefined ? {} : { data: error.data }) } } : { result })
+    ...(error ? { error: {
+      code: errorCode,
+      message: publicFailure.message,
+      ...(publicFailure.data === undefined ? {} : { data: publicFailure.data })
+    } } : { result })
   }) + '\n');
 }
 
@@ -433,8 +592,8 @@ function requestUsesModernProtocol(request) {
     throw rpcError(-32022, 'Unsupported protocol version', { supported: [...SUPPORTED_PROTOCOL_VERSIONS], requested: protocolVersion });
   }
   const clientInfo = meta[CLIENT_INFO_META];
-  if (!clientInfo || typeof clientInfo !== 'object' || Array.isArray(clientInfo) || typeof clientInfo.name !== 'string' || !clientInfo.name || typeof clientInfo.version !== 'string' || !clientInfo.version) {
-    throw rpcError(-32602, `Invalid params: _meta.${CLIENT_INFO_META} requires name and version strings`);
+  if (clientInfo !== undefined && (!clientInfo || typeof clientInfo !== 'object' || Array.isArray(clientInfo) || typeof clientInfo.name !== 'string' || !clientInfo.name || typeof clientInfo.version !== 'string' || !clientInfo.version)) {
+    throw rpcError(-32602, `Invalid params: _meta.${CLIENT_INFO_META} requires name and version strings when present`);
   }
   const capabilities = meta[CLIENT_CAPABILITIES_META];
   if (!capabilities || typeof capabilities !== 'object' || Array.isArray(capabilities)) {
@@ -495,6 +654,14 @@ input.on('line', async (line) => {
       // rather than echoing a version it does not support.
       const requested = request.params?.protocolVersion;
       if (requested !== undefined && typeof requested !== 'string') throw rpcError(-32602, 'Invalid params: protocolVersion must be a string');
+      const clientInfo = request.params?.clientInfo;
+      if (clientInfo !== undefined && (!clientInfo || typeof clientInfo !== 'object' || Array.isArray(clientInfo) || typeof clientInfo.name !== 'string' || !clientInfo.name || typeof clientInfo.version !== 'string' || !clientInfo.version)) {
+        throw rpcError(-32602, 'Invalid params: clientInfo requires name and version strings when present');
+      }
+      const capabilities = request.params?.capabilities;
+      if (capabilities !== undefined && (!capabilities || typeof capabilities !== 'object' || Array.isArray(capabilities))) {
+        throw rpcError(-32602, 'Invalid params: capabilities must be an object when present');
+      }
       respond({ protocolVersion: LEGACY_PROTOCOL_VERSION, capabilities: SERVER_CAPABILITIES, serverInfo: SERVER_INFO });
     } else if (request.method.startsWith('notifications/')) {
       // Method names do not define notifications; absence of id does. A client
@@ -514,7 +681,7 @@ input.on('line', async (line) => {
       // which told the client its request had succeeded when it had not.
       const uri = request.params?.uri;
       if (typeof uri !== 'string' || !uri) throw rpcError(-32602, 'Invalid params: uri is required');
-      if (!RESOURCE_URIS.has(uri)) throw rpcError(-32602, `Unknown resource URI: ${uri}`);
+      if (!RESOURCE_URIS.has(uri)) throw rpcError(-32602, 'Unknown resource URI');
       const context = await queueCall(async () => {
         const before = graph.exportData();
         let value;
@@ -534,7 +701,7 @@ input.on('line', async (line) => {
       // P1-7: same failure as resources/read — any name returned the policy text.
       const promptName = request.params?.name;
       if (typeof promptName !== 'string' || !promptName) throw rpcError(-32602, 'Invalid params: name is required');
-      if (!PROMPT_NAMES.has(promptName)) throw rpcError(-32602, `Unknown prompt: ${promptName}`);
+      if (!PROMPT_NAMES.has(promptName)) throw rpcError(-32602, 'Unknown prompt');
       respond(eraResult(modern, { description: 'ShadowGraph operating policy', messages: [{ role: 'user', content: { type: 'text', text: promptText } }] }));
     } else if (request.method === 'tools/call') {
       if (request.params === undefined) throw rpcError(-32602, 'Invalid params: params is required for tools/call');
@@ -542,27 +709,25 @@ input.on('line', async (line) => {
       const args = request.params.arguments ?? {};
       if (typeof args !== 'object' || args === null || Array.isArray(args)) throw rpcError(-32602, 'Invalid params: arguments must be an object');
       if (!tools.some((tool) => tool.name === request.params.name)) {
-        throw rpcError(modern ? -32602 : -32601, `Unknown tool: ${request.params.name}`);
+        throw rpcError(modern ? -32602 : -32601, 'Unknown tool');
       }
       try {
         const result = await call(request.params.name, args);
         respond(eraResult(modern, modern ? { ...result, isError: false } : result));
       } catch (error) {
-        if (!modern || error.code !== undefined) throw error;
-        respond(modernResult({ content: [{ type: 'text', text: error.message }], isError: true }));
+        if (!modern || isRpcError(error)) throw error;
+        respond(modernResult({ content: [{ type: 'text', text: publicErrorMessage(error) }], isError: true }));
       }
-    } else throw rpcError(-32601, `Method not found: ${request.method}`);
+    } else throw rpcError(-32601, 'Method not found');
   } catch (error) {
     // P1-5: PRESERVE error.code. The old catch rebuilt a plain object and
     // hardcoded -32000, so the -32601/-32602 codes that `call()` raises were
     // flattened and a client could not distinguish "no such tool" from a genuine
     // internal failure.
     if (isNotification) return;
-    const parseError = error instanceof SyntaxError;
-    reply(request?.id ?? null, null, {
-      code: error.code ?? (parseError ? -32700 : -32000),
-      message: parseError ? 'Parse error' : error.message,
-      ...(error.data === undefined ? {} : { data: error.data })
-    });
+    const parseError = request === undefined && error instanceof SyntaxError;
+    reply(request?.id ?? null, null, parseError
+      ? rpcError(-32700, 'Parse error')
+      : error);
   }
 });

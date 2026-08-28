@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { NODE_SQLITE_NOT_APPLICABLE_REASON } from '../src/runtime-capabilities.js';
 import { createShadowGraph, rebuildProjection, SUPPORTED_SCHEMA_VERSIONS } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
@@ -460,7 +461,7 @@ describe('P1-10 — SQLite/JSON confidence parity across close and reopen', () =
       const { live, reloaded } = await roundTrip((directory) => createSqliteStore(join(directory, 'data.sqlite')));
       assertParity(live, reloaded);
     } catch (error) {
-      if (/requires Node/.test(error.message)) return t.skip('node:sqlite unavailable in this build');
+      if (/requires Node/.test(error.message)) return t.skip(NODE_SQLITE_NOT_APPLICABLE_REASON);
       throw error;
     }
   });
@@ -483,7 +484,7 @@ describe('P1-10 — SQLite/JSON confidence parity across close and reopen', () =
       });
       assert.deepEqual(strip(confidenceOf(viaSqlite.reloaded)), strip(confidenceOf(viaJson.reloaded)));
     } catch (error) {
-      if (/requires Node/.test(error.message)) return t.skip('node:sqlite unavailable in this build');
+      if (/requires Node/.test(error.message)) return t.skip(NODE_SQLITE_NOT_APPLICABLE_REASON);
       throw error;
     }
   });
@@ -548,15 +549,17 @@ describe('P2-12 — duplicate journal sequences are detected, not resolved by in
     assert.equal(forward.reason, reversed.reason, 'same diagnosis either way');
   });
 
-  it('validate() reports it as an error', () => {
+  it('import preflight rejects it before validate can observe a corrupted live graph', () => {
     const graph = createShadowGraph();
-    graph.importData({ journal: duplicated });
+    graph.addDecision({ id: 'duplicate-seq-sentinel', project: 'duplicate-seq-sentinel', title: 'Keep', chosen: 'keep' });
+    const before = JSON.stringify(graph.exportData());
 
-    const issues = graph.validate().issues.filter((issue) => issue.code === 'duplicate_journal_sequence');
-    assert.equal(issues.length, 1);
-    assert.equal(issues[0].severity, 'error');
-    assert.equal(issues[0].seq, 1);
-    assert.equal(graph.validate().valid, false);
+    assert.throws(
+      () => graph.importData({ journal: duplicated }),
+      (error) => error?.code === 'duplicate_journal_sequence'
+    );
+    assert.equal(JSON.stringify(graph.exportData()), before);
+    assert.equal(graph.validate().valid, true);
   });
 
   it('a correctly numbered journal is unaffected', () => {
