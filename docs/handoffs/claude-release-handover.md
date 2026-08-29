@@ -18,7 +18,8 @@ as unverified until you re-derive it.
 | Remote | `https://github.com/LiLara-AI/shadowgraph.git` | verified |
 | `main` | `96a34c6`, identical to `origin/main` (0 ahead / 0 behind) | verified |
 | **CI on `main`** | **RED** — run 33201202487 failed 5 of 6 matrix jobs | verified via `gh` |
-| Fix branch | `claude/final-beta-readiness` @ `77d8206` — **local only, not pushed** | verified |
+| **CI on fix branch** | run 33244747010: **4 of 6 green**; only Node 20 x2 still fail | verified via `gh` |
+| Fix branch | `claude/final-beta-readiness` — pushed to origin | verified |
 | Local suite on fix branch | 1204 tests / 1204 pass / 0 fail / 0 skipped / 0 todo | verified (Windows, Node 24) |
 | Version / schema | `0.40.0` / entity schema **5**, journal schema **5** | verified in code |
 | Publication state | `"private": true` — correct, keep it | verified |
@@ -46,47 +47,49 @@ fixes, each with a regression test. No existing assertion was weakened.
 
 | ID | Defect | File | Status |
 | --- | --- | --- | --- |
-| CI-1 | `runtime-local-root` used a bare `includes()`, so on Linux (`tmpdir()` = `/tmp`) the packed source of this project's own `posixTempPathPattern` was reported as a leaked local path. Failed **all three Linux jobs**. | `test/followup-public-artifacts.test.js` | **fixed, proven** by scanning the real tarball with Linux-style roots: old matcher = exactly the CI hit, new matcher = zero, other packed files unaffected |
-| CI-2 | `runNpm()` replaced npm's real error *and* the specific `resolveNpmCli()` error with a bare "npm pack command failed", so the Node 20 failure reached CI undiagnosable. | `scripts/check-package.mjs` | **diagnostic fixed; underlying Node 20 cause still UNKNOWN** |
-| CI-3 | The destination fence treated only `EEXIST` as contention. Windows delete-pending files answer `open` with `EPERM`/`EACCES`, so a writer arriving during lock release failed hard instead of waiting. Failed `windows / Node 24`. | `src/revision-store.js` | **fixed by reasoning**; the race is not deterministically reproducible locally |
+| CI-1 | `runtime-local-root` used a bare `includes()`, so on Linux (`tmpdir()` = `/tmp`) the packed source of this project's own `posixTempPathPattern` was reported as a leaked local path. Failed **all three Linux jobs**. | `test/followup-public-artifacts.test.js` | **FIXED — confirmed by CI.** ubuntu Node 20/22/24 all pass this test now |
+| CI-2 | `runNpm()` replaced npm's real error with a bare "npm pack command failed", so the Node 20 failure reached CI undiagnosable. | `scripts/check-package.mjs`, `test/check-package.test.js` | **ROOT CAUSE FOUND** via the new diagnostic: `npm error URI malformed`. npm 10.8 (Node 20) cannot turn a package directory containing `%` into a `file:` spec; npm 10.9+ can. Upstream npm bug. Test now branches on that capability — **fix pushed, awaiting CI** |
+| CI-3 | The destination fence treated only `EEXIST` as contention. Windows delete-pending files answer `open` with `EPERM`/`EACCES`, so a writer arriving during lock release failed hard instead of waiting. Failed `windows / Node 24`. | `src/revision-store.js` | **FIXED — windows Node 24 now green.** The race was intermittent, so confirm across one more run |
 
 ## 4. Your next action, in order
 
-1. **Get CI to run the fix branch.** This is the blocking step and it needs your
-   approval, because pushing is outward-facing:
+The branch is pushed and CI has already run once (33244747010): **4 of 6 jobs
+green**, up from 1 of 6 on `main`. Only `ubuntu / Node 20` and `windows / Node 20`
+still fail, both on the same single test, and a fix for it is committed.
 
-   ```bash
-   git push -u origin claude/final-beta-readiness
-   ```
-
-   Then watch it:
+1. **Check the latest run on the branch.**
 
    ```bash
    gh run list --branch claude/final-beta-readiness --limit 3
    ```
 
-2. **Read what Node 20 now says.** CI-2's whole purpose is to make the Node 20
-   failure legible. Expect a message of the form
-   `package check failed: npm pack command failed: exit=<n> stderr=<sanitized>`
-   in the `ubuntu / Node 20` and `windows / Node 20` jobs. Fix the real cause from
-   that text.
+   The commit after `550b118` carries the Node 20 fix. All six jobs should be green.
+   If they are, the P0 CI gate is closed.
 
-   Leading hypothesis, **unproven**: npm bundled with Node 20 (npm 10.8.x)
-   mishandles a package directory whose absolute path contains `%` and other
-   metacharacters when building its internal `file:` spec, and npm 10.9+/11 does
-   not. `test/check-package.test.js:141` deliberately packs from a path named
-   `shadowgraph npm pack &()!^%-XXXX/safe repo copy &()!^%`. If that is confirmed,
-   the honest fix is a version-aware expectation in the test — **not** weakening
-   `scripts/check-package.mjs`, which is a security control.
+2. **If Node 20 still fails,** read it directly — the diagnostic is legible now:
 
-3. **Confirm CI-3 held.** `windows / Node 24` should now pass
-   `DS-P1-003 MCP restore fences an external JSON writer in a separate server process`.
-   It was flaky (it passed on `windows / Node 20` and `windows / Node 22` in the
-   same run), so one green run is suggestive, not conclusive. Re-run the workflow
-   once more before trusting it.
+   ```bash
+   gh run view <RUN_ID> --log-failed
+   ```
 
-4. **Only then** merge to `main` — with your explicit approval. Do not merge while
-   the matrix is red.
+   The known cause is `npm error URI malformed` from npm 10.8 on a package
+   directory containing `%`. Do **not** relax `scripts/check-package.mjs` to make
+   it pass; it is a security control, and the limitation is upstream npm.
+
+3. **Confirm CI-3 is genuinely fixed, not just lucky.** `windows / Node 24` passed
+   `DS-P1-003 MCP restore fences an external JSON writer in a separate server process`
+   on run 33244747010, but that test was intermittent before. Re-run the workflow
+   once and confirm it passes again:
+
+   ```bash
+   gh run rerun <RUN_ID>
+   ```
+
+4. **Then ask the user before merging to `main`.** Do not merge while any job is red,
+   and do not merge without explicit approval.
+
+5. **Remaining release gates are not CI's to close** — independent security review,
+   the seven-arm comparative benchmark, and maintainer sign-off (§6).
 
 ## 5. What NOT to do
 

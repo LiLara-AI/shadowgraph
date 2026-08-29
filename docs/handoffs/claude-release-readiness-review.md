@@ -482,8 +482,33 @@ that the offending line is still rejected as `absolute-posix-temp-path`, and tha
 empty root never matches everything.
 
 **CI-2 — the Node 20 packaging failure had no diagnosable cause** *(P1)*
-`scripts/check-package.mjs` — see **S-2**. This **surfaces** the Node 20 cause; it
-is not yet proven to **fix** it. See §15.
+`scripts/check-package.mjs` — see **S-2**. Surfacing the cause worked: CI run
+33244747010 reported
+
+    package check failed: npm pack command failed: exit=1
+      stderr=npm error URI malformed | npm error A complete log of this run can be found in: <path>
+
+(note the sanitizer replaced npm's log path with `<path>` and disclosed no local root).
+
+**Root cause, now confirmed:** npm 10.8.x, bundled with **Node 20**, throws
+`URI malformed` when it turns a package directory whose absolute path contains `%`
+into a `file:` spec. npm 10.9+ (Node 22/24) does not. The fixture at
+`test/check-package.test.js` deliberately packs from
+`shadowgraph npm pack &()!^%-XXXX/safe repo copy &()!^%`. **This is an upstream npm
+bug, not a ShadowGraph defect**, and no invocation style avoids it — npm hits it
+while resolving the package directory itself.
+
+**Resolution:** the test now asserts what ShadowGraph actually owns, unconditionally
+on every runtime — the fallback never spawns a shell (no `DEP0190`, so `&()!^%`
+cannot be interpreted) and no local path is disclosed — and then branches: where npm
+can handle `%` it must succeed, and where npm cannot it must fail with *exactly* the
+sanitized upstream reason. Any other failure still fails the test. The assertion was
+made truthful rather than weakened: `scripts/check-package.mjs` is a security control
+and was not relaxed to accommodate npm.
+
+*Impact note:* this affects only the maintainer-facing release gate. The shipped
+runtime (`src/`) never shells out to npm, and `npm run check:package` runs from the
+repository root.
 
 **CI-3 — Windows delete-pending lock defeated the destination fence** *(P1)*
 `src/revision-store.js` — see **S-1**.
@@ -496,21 +521,34 @@ Post-change gate results on the branch (all exit 0): `check`, `test`
 
 ## 15. Remaining P0 blockers
 
-**P0-1 — CI on `main` is red and the fixes are not yet verified remotely.**
-The `RELEASE_CHECKLIST.md` gates "Windows Node 20/22/24 matrix green" and "Linux
-Node 20/22/24 matrix green" are unmet on `main`. Branch `claude/final-beta-readiness`
-addresses all three defects and is green on Windows/Node 24 locally, but:
+**P0-1 — CI matrix not yet fully green.**
 
-- **CI-1** is proven by faithful local simulation of the Linux roots (high confidence).
-- **CI-3** is a reasoned Windows-only fix; the underlying race is not deterministically
-  reproducible locally.
-- **CI-2 is not proven fixed.** No Node 20 runtime is available here, so the actual
-  Node 20 `npm pack` failure cause is still unknown — the change makes CI *report*
-  it rather than *fix* it.
+The fix branch was pushed (with approval) and the matrix ran as **run 33244747010**:
 
-**Verification requires pushing the branch so the matrix runs.** That is
-outward-facing and was not done without your approval (§18). Until the matrix is
-green, this remains **P0**.
+| Job | On `main` (33201202487) | On fix branch (33244747010) |
+| --- | --- | --- |
+| ubuntu / Node 20 | fail (2 tests) | fail (**1** test) |
+| ubuntu / Node 22 | fail | **success** |
+| ubuntu / Node 24 | fail | **success** |
+| windows / Node 20 | fail | fail (1 test) |
+| windows / Node 22 | pass | **success** |
+| windows / Node 24 | fail | **success** |
+
+**1 of 6 green → 4 of 6 green.**
+
+- **CI-1 is confirmed fixed by the real matrix** — all three Linux jobs now pass the
+  tarball audit, including `ubuntu / Node 20`, which dropped from 2 failures to 1.
+- **CI-3 is confirmed fixed** — `windows / Node 24` now passes
+  `DS-P1-003 MCP restore fences an external JSON writer in a separate server process`.
+  That test was intermittent, so it warrants one confirming re-run rather than being
+  treated as settled on a single observation.
+- **CI-2's diagnostic worked exactly as intended** and produced the root cause
+  (§14): `npm error URI malformed` from npm 10.8 on a `%`-containing package
+  directory. The corresponding test fix is committed; **the matrix has not yet
+  confirmed it**, which is the only reason this remains P0.
+
+Once both Node 20 jobs are green, the `RELEASE_CHECKLIST.md` matrix gates close and
+P0-1 is done. Nothing else in this review is P0.
 
 ## 16. Remaining P1 blockers
 
@@ -574,9 +612,10 @@ bounded fail-closed credential redaction; a zero-dependency package; and — not
 
 It is not Beta-ready because required release gates are genuinely unmet:
 
-1. **CI on `main` is red** and has never been green at the current HEAD. Three
-   defects are fixed on `claude/final-beta-readiness`, but the matrix has not yet
-   confirmed it, and the Node 20 cause is still unidentified.
+1. **CI on `main` is red** and has never been green at the current HEAD. The fix
+   branch takes the matrix from 1/6 to 4/6 green, with CI-1 and CI-3 confirmed by
+   the real matrix and the Node 20 root cause now identified and fixed — but the
+   matrix has not yet confirmed that last fix, and nothing has been merged.
 2. **The independent security review has not happened.**
 3. **The comparative benchmark measured zero of seven arms.**
 4. **Maintainer sign-off and publication authorization are outstanding**, and
