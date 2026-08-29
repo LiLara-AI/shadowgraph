@@ -53,7 +53,6 @@ GitHub repository. Both paths below work today and need no build step or runtime
 
 ```bash
 npm install --global github:LiLara-AI/shadowgraph
-shadowgraph doctor
 ```
 
 **Or clone and run from source:**
@@ -62,8 +61,13 @@ shadowgraph doctor
 git clone https://github.com/LiLara-AI/shadowgraph.git
 cd shadowgraph
 npm install
+node src/cli.js setup
 node src/cli.js doctor
 ```
+
+`setup` creates a store in the current directory (`.shadowgraph/data.json`), so run it from
+where you want that store to live. `doctor` reports `Storage is not initialized` and exits `1`
+until `setup` has run — that is expected, not a failed install.
 
 > `npm install shadowgraph-unified-plugin` does **not** work and will fail with `E404`.
 > The package is `private: true` and unpublished; the registry name is not reserved.
@@ -302,6 +306,7 @@ Install globally from GitHub before configuring a GUI/agent client, so `shadowgr
 
 ```bash
 npm install --global github:LiLara-AI/shadowgraph
+shadowgraph setup
 shadowgraph doctor
 ```
 
