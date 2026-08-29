@@ -1,22 +1,33 @@
 # ShadowGraph — Current Status
 
-**Last updated:** 2026-08-27
-**Version:** 0.40.0 (unreleased unified-memory review candidate) · **Schema:** 4 · **Branch:** `main` with an uncommitted review tree.
+**Last updated:** 2026-08-29 (independent Claude release-readiness review)
+**Version:** 0.40.0 (unreleased pre-Beta candidate, `private: true`) · **Entity schema:** 5 (supports 1–5) · **Journal schema:** 5
+**Branch:** `main` @ `96a34c6` is clean but its CI is **red**. Fix branch `claude/final-beta-readiness` (5 commits ahead; last code-bearing commit `6b0dbbd`) is **green on all six CI jobs** and has an open pull request; **not merged**.
 **Phase:** The v0.31 decision-first contracts remain; v0.40 adds scoped general memory, temporal/hybrid recall, localhost-first embeddings, Markdown push/pull, and JavaScript/CLI/HTTP/MCP surfaces. ADR-0006 is accepted. Older review tables below are retained as historical evidence, not the current release summary.
 
 ## Suite state
 
-    npm test              -> 372 tests / 367 pass / 0 fail / 0 skipped / 5 todo
+    npm test              -> 1204 tests / 1204 pass / 0 fail / 0 skipped / 0 todo
     npm run check         -> exit 0
-    npm run check:package -> exit 0 (62 files)
-    npm audit --omit=dev  -> 0 vulnerabilities
-    git diff --check      -> exit 0; one existing LF→CRLF warning for test/compact-mcp.test.js
-    ADR citation verify   -> strict pass
-    retrieval benchmark  -> not run / not measured
+    npm run benchmark:test-> exit 0 (49 / 49 pass)
+    npm run check:mcp     -> exit 0 (Inspector: 27 full / 12 compact, 0 errors, 0 warnings)
+    npm run check:integrations -> exit 0
+    npm run check:package -> exit 0 (60 files, private=true)
+    npm run smoke:package -> exit 0 (real clean install under a path with spaces)
+    npm audit --omit=dev  -> 0 vulnerabilities (zero runtime dependencies)
+    npm pack --dry-run    -> 60 entries
+    assert-sqlite-coverage-> exit 0 (37 / 37, zero skips/todos/failures)
+    py_compile hermes     -> exit 0
+    git diff --check      -> exit 0
+    CI matrix             -> 6 / 6 green on claude/final-beta-readiness (3 green runs from 6b0dbbd onward)
+    CI matrix on main     -> RED at 96a34c6 (run 33201202487, 5 of 6 jobs failed)
+    comparative benchmark -> NOT MEASURED (0 of 7 arms; no common LLM/embedding endpoint)
 
-The current suite has 372 tests, including the existing restore/fault/interface coverage plus unified-memory reconciliation, temporal handoff, scoped isolation across recall/search/retrieve/traverse, JSON/SQLite parity, Markdown atomicity/read-back reconciliation, embedding safety, bounded hard-purge evidence validation, delimiter-safe review identities, canonical idempotency collision checks, journal type/entity consistency, legacy namespace migration, large-journal import safety, and CLI/HTTP/MCP concurrency/durability regressions.
+The current suite has 1204 tests, including the existing restore/fault/interface coverage plus unified-memory reconciliation, temporal handoff, scoped isolation across recall/search/retrieve/traverse, JSON/SQLite parity, Markdown atomicity/read-back reconciliation, embedding safety, bounded hard-purge evidence validation, delimiter-safe review identities, canonical idempotency collision checks, journal type/entity consistency, legacy namespace migration, large-journal import safety, and CLI/HTTP/MCP concurrency/durability regressions.
 
-The 5 remaining `todo` entries are all labelled `BLOCKED ON <id>` and name a real open decision (U-1 x2, L-1, L-2, L-5). **No characterization test for known-bad behaviour remains** — the only surviving mention of the word is a methodology comment explaining why such a test must fail once its gap is fixed.
+**There are no `todo` tests left (0).** The open *decisions* they used to mark — U-1, L-1, L-2, L-5 — are still open and are tracked below under "Deferred"; they are product decisions, not missing tests. **No characterization test for known-bad behaviour remains** — the only surviving mention of the word is a methodology comment explaining why such a test must fail once its gap is fixed.
+
+On Node 20 the suite reports 110 skipped tests. Those are the SQLite cases, skipped by runtime capability (`SQLite not measured: requires Node 22.5+ with node:sqlite`), and CI enforces zero skips on Node 22/24 via `scripts/assert-sqlite-coverage.mjs`.
 
 ## Historical v0.31 independent review findings — all 18 closed
 
@@ -71,7 +82,7 @@ The two P0 findings were the serious ones — both were **data-loss** bugs. P0-1
 - **Nothing reaches `verificationStatus: 'verified'` from tool input.** Deliberate. **U-1** blocks any change.
 - **No token, cost, latency, or tool-call benchmark exists.** Only journal performance is measured.
 - **Confidence calibration is not established** and is not claimed anywhere. Weights are a declared policy, not a fitted model.
-- **MCP is `2024-11-05`**, four revisions behind current. No newer support claimed; no client interop tested (X-1).
+- **MCP is dual-era**: legacy `2024-11-05` and modern `2026-07-28` are both implemented (`src/mcp.js`). The official Inspector passes 27 full / 12 compact tools with 0 errors. Real third-party client interop is still untested (X-1).
 - Storage: ~36 MB persisted at 10k journal entries; SQLite save ~2.6x JSON (X-4, now measured not suspected).
 
 ## Deferred, with reason / impact / workaround / test / next action

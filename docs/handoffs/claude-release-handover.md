@@ -18,8 +18,10 @@ as unverified until you re-derive it.
 | Remote | `https://github.com/LiLara-AI/shadowgraph.git` | verified |
 | `main` | `96a34c6`, identical to `origin/main` (0 ahead / 0 behind) | verified |
 | **CI on `main`** | **RED** — run 33201202487 failed 5 of 6 matrix jobs | verified via `gh` |
-| **CI on fix branch** | **6 of 6 green, twice** (run 33245087040 + its re-run) | verified via `gh` |
-| Fix branch | `claude/final-beta-readiness` @ `6b0dbbd` — pushed, **not merged** | verified |
+| **CI on fix branch** | **6 of 6 green** for every commit from `6b0dbbd` onward | verified via `gh` |
+| Green six-job runs | **3** — 33245087040 att.1 + att.2 (`6b0dbbd`), 33245578769 (`feb277e`) | verified via `gh` |
+| Fix branch | `claude/final-beta-readiness` — **5 commits** ahead of `main`, pushed, PR open, **not merged** | verified |
+| Last code-bearing commit | `6b0dbbd`. Everything after it is documentation-only | verified |
 | Local suite on fix branch | 1204 tests / 1204 pass / 0 fail / 0 skipped / 0 todo | verified (Windows, Node 24) |
 | CI suite on fix branch | 1204 tests, 0 fail on all six jobs; every gate ran | verified per step |
 | Version / schema | `0.40.0` / entity schema **5**, journal schema **5** | verified in code |
@@ -43,29 +45,35 @@ cannot observe either failure mode:
 
 ## 3. What is on the fix branch
 
-`claude/final-beta-readiness` @ `6b0dbbd` — three commits, three defects fixed, each
-with a regression test. No existing assertion was weakened; the one assertion that
-changed (Node 20) was made *truthful* about what ShadowGraph owns versus what npm
-owns, and still fails on any unexpected error.
+`claude/final-beta-readiness` — **5 commits** ahead of `main`. Only two carry code:
+`77d8206` (the three fixes) and `6b0dbbd` (the Node 20 fix). `550b118`, `feb277e` and
+the consistency pass are documentation-only, so **`6b0dbbd` is the last commit that
+can change behaviour**. Three defects fixed, each with a regression test.
+
+> This file deliberately does not name its own HEAD SHA: a document that records the
+> commit it ships in is stale the moment it is committed, which is how the earlier
+> "three commits / head `6b0dbbd`" mismatch happened. The authoritative HEAD and
+> commit count are on the pull request.
+No existing assertion was weakened; the one assertion that changed (Node 20) was
+made *truthful* about what ShadowGraph owns versus what npm owns, and still fails
+on any unexpected error.
 
 | ID | Defect | File | Status |
 | --- | --- | --- | --- |
 | CI-1 | `runtime-local-root` used a bare `includes()`, so on Linux (`tmpdir()` = `/tmp`) the packed source of this project's own `posixTempPathPattern` was reported as a leaked local path. Failed **all three Linux jobs**. | `test/followup-public-artifacts.test.js` | **FIXED — confirmed by CI.** ubuntu Node 20/22/24 all pass this test now |
 | CI-2 | `runNpm()` replaced npm's real error with a bare "npm pack command failed", so the Node 20 failure reached CI undiagnosable. | `scripts/check-package.mjs`, `test/check-package.test.js` | **FIXED — confirmed by CI.** The new diagnostic named it: `npm error URI malformed`. npm 10.8 (Node 20) cannot turn a package directory containing `%` into a `file:` spec; npm 10.9+ can — an upstream npm bug. The test now asserts the shell-free and no-disclosure invariants unconditionally and branches on npm's capability |
-| CI-3 | The destination fence treated only `EEXIST` as contention. Windows delete-pending files answer `open` with `EPERM`/`EACCES`, so a writer arriving during lock release failed hard instead of waiting. Failed `windows / Node 24`. | `src/revision-store.js` | **FIXED — confirmed across two consecutive green runs**, so not a lucky pass |
+| CI-3 | The destination fence treated only `EEXIST` as contention. Windows delete-pending files answer `open` with `EPERM`/`EACCES`, so a writer arriving during lock release failed hard instead of waiting. Failed `windows / Node 24`. | `src/revision-store.js` | **FIXED — confirmed across three green runs**, so not a lucky pass |
 
 ## 4. Your next action, in order
 
 The CI blocker is **solved but not landed**. `claude/final-beta-readiness` is green
-on all six matrix jobs across two consecutive runs; `main` is still red because
-nothing has been merged.
+on all six matrix jobs for every commit from the final code state `6b0dbbd` onward —
+three six-job runs green in total. `main` is still red at `96a34c6` because nothing
+has been merged. A pull request is open.
 
-1. **Merge the fix branch — this needs the user's explicit approval.** Do not merge
-   without it.
-
-   ```bash
-   gh pr create --base main --head claude/final-beta-readiness --title "fix: make the CI matrix green" --body "See docs/handoffs/claude-release-readiness-review.md"
-   ```
+1. **Merge the open pull request — this needs the user's explicit approval.** The PR
+   is already created (base `main`, head `claude/final-beta-readiness`). Do not merge
+   without explicit approval.
 
 2. **After merging, confirm `main` itself goes green** — a merge commit is a new
    tree and gets its own run:
@@ -121,7 +129,7 @@ removed, gap **declared**, graph still `valid`), and a three-process MCP lifecyc
 
 | Gate | Owner | Status |
 | --- | --- | --- |
-| CI matrix green (Linux + Windows, Node 20/22/24) | — | **CLOSED on the fix branch** (6/6, twice). Still red on `main` until merged |
+| CI matrix green (Linux + Windows, Node 20/22/24) | — | **CLOSED on the fix branch** — 6/6, 3 green runs from `6b0dbbd` onward. Still red on `main` until merged |
 | Independent security review | external reviewer | **P1** — cannot be satisfied by Claude self-review or `npm audit` |
 | Preregistered comparative benchmark, 7 arms | needs a common LLM + embedding endpoint | **P1** — currently 0 measured |
 | Maintainer sign-off + publication authorization | you | **P1** |
@@ -180,9 +188,11 @@ Repository: C:\Users\aelkh\AI Projects\test deepseek
 Read first: docs/handoffs/claude-release-handover.md, then
             docs/handoffs/claude-release-readiness-review.md
 
-State: branch claude/final-beta-readiness @ 6b0dbbd fixes the three defects that
-kept CI red and is GREEN on all six matrix jobs across two consecutive runs.
-main @ 96a34c6 is still red because nothing has been merged.
+State: branch claude/final-beta-readiness (5 commits ahead of main) fixes the
+three defects that kept CI red and is GREEN on all six matrix jobs. The last
+code-bearing commit is 6b0dbbd; everything after it is documentation. 3 six-job
+runs are green. main @ 96a34c6 is still red because nothing has been merged.
+A PR is open and must not be merged without my approval.
 
 Do this in order:
 1. Verify identity and state: git rev-parse --show-toplevel;
