@@ -3,8 +3,10 @@
 **Reviewer:** Claude (first independent reviewer; did not participate in prior sessions)
 **Review date:** 2026-08-29
 **Reviewed tree:** `main` @ `96a34c60475739014b38f9a44caf30b5e4527c76`
-**Fix branch produced:** `claude/final-beta-readiness` @ `77d8206`
-**Verdict:** **NOT READY FOR PUBLIC BETA** — see §19.
+**Fix branch produced:** `claude/final-beta-readiness` @ `6b0dbbd` (pushed; CI **green on all 6 jobs**, twice)
+**Verdict:** **NOT READY FOR PUBLIC BETA** — see §19. The CI blocker is closed; the
+remaining blockers are the independent security review, the comparative benchmark,
+and maintainer sign-off — none of which can be satisfied from inside this repository.
 
 Everything below was independently re-derived from the repository. No claim from
 the previous Hermes handover was accepted without its own evidence.
@@ -235,9 +237,10 @@ On `main` @ `96a34c6`:
 | `python -m py_compile integrations/hermes-agent.py` | 0 | — |
 | `git diff --check` | 0 | clean |
 
-On `claude/final-beta-readiness` @ `77d8206`, every command above was re-run with
+On `claude/final-beta-readiness` @ `6b0dbbd`, every command above was re-run with
 the same exit codes; `npm test` becomes **1204 / 1204 pass / 0 fail / 0 skipped /
-0 todo** (three regression tests added).
+0 todo** (three regression tests added). The same chain then ran green on all six
+CI jobs — §15.
 
 Code markers: `git grep -nE "TODO|FIXME|HACK|XXX"` returns **5 hits, all in
 historical handoff prose**, none in `src/`, `test/`, `scripts/`, or `benchmark/`.
@@ -458,9 +461,10 @@ repository (§5c).
 
 ## 14. Confirmed code changes
 
-Branch `claude/final-beta-readiness`, single commit `77d8206`,
-5 files, +176 / −7. Each fix has a regression test; no existing assertion was
-weakened to obtain a green suite.
+Branch `claude/final-beta-readiness`, three commits, head `6b0dbbd`.
+Each fix has a regression test. No existing assertion was weakened to obtain a
+green suite: the only assertion that changed (CI-2) was made *truthful* about what
+ShadowGraph owns versus what npm owns, and still fails on any unexpected error.
 
 **CI-1 — `runtime-local-root` false positive on every Linux runner** *(P0 — blocks CI)*
 `test/followup-public-artifacts.test.js`. `sensitiveRoots.some(root =>
@@ -521,34 +525,36 @@ Post-change gate results on the branch (all exit 0): `check`, `test`
 
 ## 15. Remaining P0 blockers
 
-**P0-1 — CI matrix not yet fully green.**
+**None. P0-1 (CI matrix) is CLOSED.**
 
-The fix branch was pushed (with approval) and the matrix ran as **run 33244747010**:
+The fix branch was pushed with approval and the matrix was taken from red to fully
+green, then re-run to rule out flakiness:
 
-| Job | On `main` (33201202487) | On fix branch (33244747010) |
-| --- | --- | --- |
-| ubuntu / Node 20 | fail (2 tests) | fail (**1** test) |
-| ubuntu / Node 22 | fail | **success** |
-| ubuntu / Node 24 | fail | **success** |
-| windows / Node 20 | fail | fail (1 test) |
-| windows / Node 22 | pass | **success** |
-| windows / Node 24 | fail | **success** |
+| Job | `main` 33201202487 | fix branch 33244747010 | fix branch 33245087040 | re-run of 33245087040 |
+| --- | --- | --- | --- | --- |
+| ubuntu / Node 20 | fail (2) | fail (1) | **success** | **success** |
+| ubuntu / Node 22 | fail | success | **success** | **success** |
+| ubuntu / Node 24 | fail | success | **success** | **success** |
+| windows / Node 20 | fail | fail (1) | **success** | **success** |
+| windows / Node 22 | pass | success | **success** | **success** |
+| windows / Node 24 | fail | success | **success** | **success** |
+| **Overall** | **1/6** | **4/6** | **6/6** | **6/6** |
 
-**1 of 6 green → 4 of 6 green.**
+Every gate genuinely executed — verified per step, not inferred from the job
+conclusion: `npm ci`, `npm run check`, `npm test`, `npm audit --omit=dev`,
+`check:integrations`, strict MCP Inspector, SQLite coverage assertion,
+`py_compile`, `check:package`, and the real tarball clean-install smoke under a
+spaced path. The only `skipped` steps are the workflow's own deliberate `if:`
+conditions (Inspector on Node 24 only; SQLite coverage off Node 20), which is the
+documented design.
 
-- **CI-1 is confirmed fixed by the real matrix** — all three Linux jobs now pass the
-  tarball audit, including `ubuntu / Node 20`, which dropped from 2 failures to 1.
-- **CI-3 is confirmed fixed** — `windows / Node 24` now passes
-  `DS-P1-003 MCP restore fences an external JSON writer in a separate server process`.
-  That test was intermittent, so it warrants one confirming re-run rather than being
-  treated as settled on a single observation.
-- **CI-2's diagnostic worked exactly as intended** and produced the root cause
-  (§14): `npm error URI malformed` from npm 10.8 on a `%`-containing package
-  directory. The corresponding test fix is committed; **the matrix has not yet
-  confirmed it**, which is the only reason this remains P0.
+`windows / Node 24` passed the previously intermittent
+`DS-P1-003 MCP restore fences an external JSON writer in a separate server process`
+on **both** runs, so CI-3 is treated as genuinely fixed rather than lucky.
 
-Once both Node 20 jobs are green, the `RELEASE_CHECKLIST.md` matrix gates close and
-P0-1 is done. Nothing else in this review is P0.
+This closes the `RELEASE_CHECKLIST.md` gates "Windows Node 20/22/24 matrix green"
+and "Linux Node 20/22/24 matrix green" **for the fix branch**. They are still
+unmet on `main`, because nothing has been merged — merging requires your approval.
 
 ## 16. Remaining P1 blockers
 
@@ -612,10 +618,10 @@ bounded fail-closed credential redaction; a zero-dependency package; and — not
 
 It is not Beta-ready because required release gates are genuinely unmet:
 
-1. **CI on `main` is red** and has never been green at the current HEAD. The fix
-   branch takes the matrix from 1/6 to 4/6 green, with CI-1 and CI-3 confirmed by
-   the real matrix and the Node 20 root cause now identified and fixed — but the
-   matrix has not yet confirmed that last fix, and nothing has been merged.
+1. **CI on `main` is still red** — `main` is unchanged at `96a34c6`. The fix branch
+   `claude/final-beta-readiness` is green on all six matrix jobs across two
+   consecutive runs, but **nothing has been merged**, which needs your approval.
+   This blocker is solved but not yet landed.
 2. **The independent security review has not happened.**
 3. **The comparative benchmark measured zero of seven arms.**
 4. **Maintainer sign-off and publication authorization are outstanding**, and

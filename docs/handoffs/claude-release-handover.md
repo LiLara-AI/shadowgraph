@@ -18,9 +18,10 @@ as unverified until you re-derive it.
 | Remote | `https://github.com/LiLara-AI/shadowgraph.git` | verified |
 | `main` | `96a34c6`, identical to `origin/main` (0 ahead / 0 behind) | verified |
 | **CI on `main`** | **RED** — run 33201202487 failed 5 of 6 matrix jobs | verified via `gh` |
-| **CI on fix branch** | run 33244747010: **4 of 6 green**; only Node 20 x2 still fail | verified via `gh` |
-| Fix branch | `claude/final-beta-readiness` — pushed to origin | verified |
+| **CI on fix branch** | **6 of 6 green, twice** (run 33245087040 + its re-run) | verified via `gh` |
+| Fix branch | `claude/final-beta-readiness` @ `6b0dbbd` — pushed, **not merged** | verified |
 | Local suite on fix branch | 1204 tests / 1204 pass / 0 fail / 0 skipped / 0 todo | verified (Windows, Node 24) |
+| CI suite on fix branch | 1204 tests, 0 fail on all six jobs; every gate ran | verified per step |
 | Version / schema | `0.40.0` / entity schema **5**, journal schema **5** | verified in code |
 | Publication state | `"private": true` — correct, keep it | verified |
 | Comparative benchmark | **NOT MEASURED** — 0 of 7 arms | verified in artifacts |
@@ -42,54 +43,46 @@ cannot observe either failure mode:
 
 ## 3. What is on the fix branch
 
-`claude/final-beta-readiness` @ `77d8206` — 5 files, +176 / −7, one commit, three
-fixes, each with a regression test. No existing assertion was weakened.
+`claude/final-beta-readiness` @ `6b0dbbd` — three commits, three defects fixed, each
+with a regression test. No existing assertion was weakened; the one assertion that
+changed (Node 20) was made *truthful* about what ShadowGraph owns versus what npm
+owns, and still fails on any unexpected error.
 
 | ID | Defect | File | Status |
 | --- | --- | --- | --- |
 | CI-1 | `runtime-local-root` used a bare `includes()`, so on Linux (`tmpdir()` = `/tmp`) the packed source of this project's own `posixTempPathPattern` was reported as a leaked local path. Failed **all three Linux jobs**. | `test/followup-public-artifacts.test.js` | **FIXED — confirmed by CI.** ubuntu Node 20/22/24 all pass this test now |
-| CI-2 | `runNpm()` replaced npm's real error with a bare "npm pack command failed", so the Node 20 failure reached CI undiagnosable. | `scripts/check-package.mjs`, `test/check-package.test.js` | **ROOT CAUSE FOUND** via the new diagnostic: `npm error URI malformed`. npm 10.8 (Node 20) cannot turn a package directory containing `%` into a `file:` spec; npm 10.9+ can. Upstream npm bug. Test now branches on that capability — **fix pushed, awaiting CI** |
-| CI-3 | The destination fence treated only `EEXIST` as contention. Windows delete-pending files answer `open` with `EPERM`/`EACCES`, so a writer arriving during lock release failed hard instead of waiting. Failed `windows / Node 24`. | `src/revision-store.js` | **FIXED — windows Node 24 now green.** The race was intermittent, so confirm across one more run |
+| CI-2 | `runNpm()` replaced npm's real error with a bare "npm pack command failed", so the Node 20 failure reached CI undiagnosable. | `scripts/check-package.mjs`, `test/check-package.test.js` | **FIXED — confirmed by CI.** The new diagnostic named it: `npm error URI malformed`. npm 10.8 (Node 20) cannot turn a package directory containing `%` into a `file:` spec; npm 10.9+ can — an upstream npm bug. The test now asserts the shell-free and no-disclosure invariants unconditionally and branches on npm's capability |
+| CI-3 | The destination fence treated only `EEXIST` as contention. Windows delete-pending files answer `open` with `EPERM`/`EACCES`, so a writer arriving during lock release failed hard instead of waiting. Failed `windows / Node 24`. | `src/revision-store.js` | **FIXED — confirmed across two consecutive green runs**, so not a lucky pass |
 
 ## 4. Your next action, in order
 
-The branch is pushed and CI has already run once (33244747010): **4 of 6 jobs
-green**, up from 1 of 6 on `main`. Only `ubuntu / Node 20` and `windows / Node 20`
-still fail, both on the same single test, and a fix for it is committed.
+The CI blocker is **solved but not landed**. `claude/final-beta-readiness` is green
+on all six matrix jobs across two consecutive runs; `main` is still red because
+nothing has been merged.
 
-1. **Check the latest run on the branch.**
-
-   ```bash
-   gh run list --branch claude/final-beta-readiness --limit 3
-   ```
-
-   The commit after `550b118` carries the Node 20 fix. All six jobs should be green.
-   If they are, the P0 CI gate is closed.
-
-2. **If Node 20 still fails,** read it directly — the diagnostic is legible now:
+1. **Merge the fix branch — this needs the user's explicit approval.** Do not merge
+   without it.
 
    ```bash
-   gh run view <RUN_ID> --log-failed
+   gh pr create --base main --head claude/final-beta-readiness --title "fix: make the CI matrix green" --body "See docs/handoffs/claude-release-readiness-review.md"
    ```
 
-   The known cause is `npm error URI malformed` from npm 10.8 on a package
-   directory containing `%`. Do **not** relax `scripts/check-package.mjs` to make
-   it pass; it is a security control, and the limitation is upstream npm.
-
-3. **Confirm CI-3 is genuinely fixed, not just lucky.** `windows / Node 24` passed
-   `DS-P1-003 MCP restore fences an external JSON writer in a separate server process`
-   on run 33244747010, but that test was intermittent before. Re-run the workflow
-   once and confirm it passes again:
+2. **After merging, confirm `main` itself goes green** — a merge commit is a new
+   tree and gets its own run:
 
    ```bash
-   gh run rerun <RUN_ID>
+   gh run list --branch main --limit 3
    ```
 
-4. **Then ask the user before merging to `main`.** Do not merge while any job is red,
-   and do not merge without explicit approval.
+   Do not report the release gate as closed until `main` is green.
 
-5. **Remaining release gates are not CI's to close** — independent security review,
-   the seven-arm comparative benchmark, and maintainer sign-off (§6).
+3. **Then the remaining gates are not engineering work** (§6): an independent
+   security review by someone outside this build, the seven-arm preregistered
+   comparative benchmark (needs a common LLM + embedding endpoint), and maintainer
+   sign-off plus explicit publication authorization.
+
+4. **Optional P2 cleanup** is listed in the companion review §17 — most usefully,
+   correcting `docs/handoffs/current-status.md`, which is wrong in five places (§7).
 
 ## 5. What NOT to do
 
@@ -128,7 +121,7 @@ removed, gap **declared**, graph still `valid`), and a three-process MCP lifecyc
 
 | Gate | Owner | Status |
 | --- | --- | --- |
-| CI matrix green (Linux + Windows, Node 20/22/24) | next session | **P0** — needs the push in §4 |
+| CI matrix green (Linux + Windows, Node 20/22/24) | — | **CLOSED on the fix branch** (6/6, twice). Still red on `main` until merged |
 | Independent security review | external reviewer | **P1** — cannot be satisfied by Claude self-review or `npm audit` |
 | Preregistered comparative benchmark, 7 arms | needs a common LLM + embedding endpoint | **P1** — currently 0 measured |
 | Maintainer sign-off + publication authorization | you | **P1** |
@@ -187,22 +180,23 @@ Repository: C:\Users\aelkh\AI Projects\test deepseek
 Read first: docs/handoffs/claude-release-handover.md, then
             docs/handoffs/claude-release-readiness-review.md
 
-State: main @ 96a34c6 has RED CI. Branch claude/final-beta-readiness @ 77d8206
-fixes three defects and is green locally on Windows/Node 24, but is NOT pushed.
+State: branch claude/final-beta-readiness @ 6b0dbbd fixes the three defects that
+kept CI red and is GREEN on all six matrix jobs across two consecutive runs.
+main @ 96a34c6 is still red because nothing has been merged.
 
 Do this in order:
-1. Verify identity: git rev-parse --show-toplevel; git status --short --branch;
-   git log --oneline -3. Confirm the branch is still 77d8206.
-2. Confirm remote CI state before trusting anything local:
-   gh run list --branch main --limit 3
-3. Ask me to approve pushing claude/final-beta-readiness, then push it and wait
-   for the matrix.
-4. Read the ubuntu/Node 20 and windows/Node 20 logs. The check-package failure now
-   reports its real cause. Diagnose and fix it. Do NOT weaken
-   scripts/check-package.mjs - it is a security control.
-5. Confirm windows/Node 24 passes the MCP restore-fence test; re-run the workflow
-   once to check it is no longer flaky.
-6. Re-run every local gate; report proven vs not-measured separately.
-7. Do not publish, tag, release, or flip private:false. Do not merge to main
+1. Verify identity and state: git rev-parse --show-toplevel;
+   git status --short --branch; git log --oneline -4.
+2. Confirm the branch is still green before trusting anything local:
+   gh run list --branch claude/final-beta-readiness --limit 3
+3. Ask me whether to merge claude/final-beta-readiness into main. Do not merge
    without my explicit approval.
+4. After any merge, confirm main itself goes green:
+   gh run list --branch main --limit 3
+5. Report proven vs not-measured separately. The still-open gates are the
+   independent security review, the seven-arm comparative benchmark
+   (COMPARATIVE BENCHMARK NOT MEASURED - 0 of 7 arms), and maintainer sign-off.
+6. Do not publish to npm, tag, create a release, or flip private:false.
+7. Optional: the P2 documentation corrections in the review, section 17 -
+   docs/handoffs/current-status.md is wrong in five places.
 ```
