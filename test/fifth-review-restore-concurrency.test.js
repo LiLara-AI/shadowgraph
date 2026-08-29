@@ -2,13 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readdir, stat, utimes, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { restoreFile } from '../src/backup.js';
 import { createShadowGraphServer } from '../src/server.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
+import { createDestinationFence } from '../src/revision-store.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 
@@ -865,4 +866,41 @@ test('DS-P1-003 MCP restore fences an external JSON writer in a separate server 
   reopened.close();
   assert.equal(durable.records.length, 3000);
   assert.equal(durable.records.some((record) => record.id === 'mcp-external-writer'), false);
+});
+
+test('DS-P1-003 destination fence treats a transiently unopenable lock as contention and still fails closed', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph fence contention '));
+  const destination = join(directory, 'live state.json');
+  const lockPath = `${resolve(destination)}.lock`;
+
+  // A held lock must still fail closed rather than being stolen.
+  const holder = createDestinationFence(destination, { lockTimeoutMs: 2000, lockPollIntervalMs: 5 });
+  const impatient = createDestinationFence(destination, { lockTimeoutMs: 60, staleLockMs: 10_000, lockPollIntervalMs: 5 });
+  const held = deferred();
+  const holding = holder.run(async () => { await held.promise; });
+  await waitForFile(lockPath);
+  await assert.rejects(impatient.run(async () => 'must not run'), (error) => {
+    assert.equal(error.code, 'storage_lock_timeout');
+    return true;
+  });
+  held.resolve();
+  await holding;
+
+  // A foreign lock that disappears while a writer is waiting must be waited out,
+  // not treated as a hard failure. On Windows the same window can answer `open`
+  // with EPERM/EACCES instead of EEXIST, which is why those codes count as
+  // contention there; the observable contract is identical on every platform.
+  await writeFile(lockPath, 'foreign-holder', 'utf8');
+  const patient = createDestinationFence(destination, { lockTimeoutMs: 5000, staleLockMs: 10_000, lockPollIntervalMs: 5 });
+  let waited = false;
+  const removal = delay(120).then(() => rm(lockPath, { force: true }));
+  const acquired = await patient.run(async () => 'acquired', { onWait: () => { waited = true; } });
+  await removal;
+  assert.equal(acquired, 'acquired');
+  assert.equal(waited, true, 'the writer must report waiting rather than failing immediately');
+
+  // The fence is reusable and leaves no lock behind.
+  assert.equal(await patient.run(async () => 'reacquired'), 'reacquired');
+  assert.deepEqual((await readdir(directory)).filter((name) => name.endsWith('.lock')), []);
+  await rm(directory, { recursive: true, force: true });
 });

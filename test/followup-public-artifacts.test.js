@@ -525,11 +525,31 @@ async function actualPackedEntries(t) {
   }));
 }
 
+// A runtime root leak is a path REFERENCE, so the root has to start where a path
+// starts. A bare `includes()` also matched a root that merely ended some longer
+// path-like token, and on Linux `tmpdir()` is `/tmp`, so every packed line holding
+// `var/tmp` or `private/tmp` — including this checker's own
+// `posixTempPathPattern` source — was reported as a local-path leak. Anchor the
+// match at a path boundary instead: skip back over a run of separators (so
+// `file:///home/you/x` still counts) and reject the hit when the character before
+// that run could continue a path segment (`var/tmp`, `private/tmp`). Genuine
+// absolute-path disclosures always begin at such a boundary, so this narrows false
+// positives without narrowing detection.
+function containsRuntimeRoot(normalized, root) {
+  for (let index = normalized.indexOf(root); index !== -1; index = normalized.indexOf(root, index + 1)) {
+    let start = index;
+    while (start > 0 && normalized[start - 1] === '/') start -= 1;
+    const before = start === 0 ? '' : normalized[start - 1];
+    if (before === '' || !/[a-z0-9_.-]/u.test(before)) return true;
+  }
+  return false;
+}
+
 function packageAuditCategories(line, sensitiveRoots) {
   const categories = new Set();
   const withoutWebUrls = line.replace(/https?:\/\/[^\s<>"'`]+/giu, ' ');
   const normalized = withoutWebUrls.replaceAll('\\', '/').toLowerCase();
-  if (sensitiveRoots.some((root) => root && normalized.includes(root))) categories.add('runtime-local-root');
+  if (sensitiveRoots.some((root) => root && containsRuntimeRoot(normalized, root))) categories.add('runtime-local-root');
   if (/(?:^|[^A-Za-z0-9])(?:[A-Za-z]:[\\/]+(?:Users|Documents +and +Settings)[\\/]+[^\\/\s"'`<>|]+)/iu.test(withoutWebUrls)) {
     categories.add('absolute-windows-profile-path');
   }
@@ -607,6 +627,42 @@ test('follow-up: the actual npm tarball contains no local paths, credentials, ig
   }
   assert.ok(scannedTextFiles > 0);
   assert.deepEqual(violations, []);
+});
+
+test('follow-up: runtime-local-root anchors at a path boundary and still catches every real disclosure', () => {
+  const flagged = (raw, roots) => packageAuditCategories(raw, roots).includes('runtime-local-root');
+
+  // RED before the boundary fix: on Linux `tmpdir()` is `/tmp`, so the packed
+  // source of this repository's own POSIX temp-path detector was reported as a
+  // local-path leak on every Linux runner.
+  const posixTempPatternSource = String.raw`const posixTempPathPattern = /(?:^|[^A-Za-z0-9_:/])\/(?:tmp|var\/tmp|private\/tmp)(?:\/|$)/u;`;
+  assert.equal(flagged(posixTempPatternSource, ['/tmp']), false);
+  assert.equal(flagged('values like var/tmp and private/tmp are pattern fragments', ['/tmp']), false);
+  assert.equal(flagged('a token such as notmp or mytmp is unrelated', ['/tmp']), false);
+
+  // The line is still rejected for the reasons it SHOULD be rejected for, so the
+  // boundary fix narrowed one category rather than the audit as a whole.
+  assert.deepEqual(packageAuditCategories('build output written to /tmp/shadowgraph-build/report.md', ['/tmp']).sort(), [
+    'absolute-posix-temp-path',
+    'runtime-local-root'
+  ]);
+
+  // GREEN in both directions: every shape a genuine runtime-root disclosure takes.
+  const disclosures = [
+    ['leading separator', '/tmp', '   /tmp'],
+    ['nested temp path', '/tmp', 'wrote /tmp/shadowgraph-build/report.md'],
+    ['home subdirectory', '/home/runner', 'stack at /home/runner/work/shadowgraph/src/x.js:12'],
+    ['file: URL', '/home/runner', 'file:///home/runner/work/shadowgraph/src/x.js'],
+    ['quoted bare root', '/home/runner', 'see "/home/runner" for details'],
+    ['windows repository root', '<local-repo-path>', String.raw`packed from <local-repo-path>\src\cli.js`],
+    ['end of line', '/home/runner', 'resolved to /home/runner']
+  ];
+  for (const [label, root, raw] of disclosures) {
+    assert.equal(flagged(raw, [root]), true, `missed runtime-local-root disclosure: ${label}`);
+  }
+
+  // An empty or missing root must never match everything.
+  assert.equal(flagged('any harmless line', ['', null, undefined]), false);
 });
 
 test('follow-up: package diagnostics cover every local-path/evidence category and disclose only relative locations', () => {

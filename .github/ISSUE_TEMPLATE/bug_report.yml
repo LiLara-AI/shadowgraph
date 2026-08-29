@@ -1,0 +1,117 @@
+name: Bug report
+description: Report incorrect behaviour in ShadowGraph
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug.
+
+        **Do not paste secrets or personal data.** ShadowGraph stores decision and
+        memory content locally, so exports, journal entries and state files can
+        contain private text. Redact before pasting, and prefer `shadowgraph doctor`
+        output over raw state files.
+
+        If you believe you have found a **security vulnerability**, do not open a
+        public issue — follow [SECURITY.md](../../SECURITY.md) instead.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you observe, and what did you expect instead?
+      placeholder: |
+        Expected: ...
+        Actual: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The smallest sequence that shows the problem.
+      placeholder: |
+        1. shadowgraph setup
+        2. shadowgraph remember '{"project":"demo","memoryType":"note","key":"k","text":"..."}'
+        3. shadowgraph recall '{"project":"demo"}'
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`shadowgraph doctor` output"
+      description: Run `shadowgraph doctor` and paste the result. Redact any paths you consider private.
+      render: json
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface?
+      multiple: true
+      options:
+        - CLI
+        - MCP (full mode)
+        - MCP (compact mode)
+        - HTTP server
+        - JavaScript API
+        - Dashboard
+        - Markdown sync
+        - Benchmark harness
+    validations:
+      required: true
+
+  - type: dropdown
+    id: storage
+    attributes:
+      label: Storage backend
+      options:
+        - JSON
+        - SQLite
+        - Both / not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: ShadowGraph version
+      description: From `package.json`, or the `version` field of `shadowgraph doctor`.
+      placeholder: "0.40.0"
+    validations:
+      required: true
+
+  - type: input
+    id: node
+    attributes:
+      label: Node version
+      description: Output of `node --version`. ShadowGraph requires Node >= 20; SQLite features require Node >= 22.5.
+      placeholder: "v24.18.0"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "Windows 11 / Ubuntu 24.04 / macOS 15"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error output
+      description: Any error message or stack trace. Redact absolute paths and tokens.
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I have redacted secrets, tokens, and private content from everything above.
+          required: true
+        - label: This is not a security vulnerability (those go through SECURITY.md).
+          required: true
