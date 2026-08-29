@@ -1,6 +1,6 @@
 # ShadowGraph Unified Memory Kernel
 
-**Version:** 0.40.0 public-beta candidate · **Data schema:** 5
+**Version:** 0.40.0 (Technical Preview) · **Data schema:** 5
 
 This guide documents implemented behavior. Research and architecture rationale live in [ADR-0006](adr/0006-unified-memory-kernel.md).
 

@@ -4,6 +4,11 @@ on:
   push:
   pull_request:
 
+# Least privilege: CI only reads the repository. No job needs write access to
+# contents, packages, issues, or id-token, so nothing is granted.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: ${{ matrix.os }} / Node ${{ matrix.node-version }}

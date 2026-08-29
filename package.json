@@ -53,6 +53,7 @@
     "docs/adr/0006-unified-memory-kernel.md",
     "docs/adr/0007-canonical-journal-baseline-placement.md",
     "docs/api-reference.md",
+    "docs/contracts/",
     "docs/benchmark-report.md",
     "docs/mcp-compatibility.md",
     "docs/shadowgraph-benchmark-plan.md",

@@ -1,6 +1,6 @@
 // ShadowGraph: an explainable, outcome-aware decision graph.
 //
-// Contracts (docs/handoffs/):
+// Contracts (docs/contracts/):
 //   provenance-contract.md  — source classes, why nothing can be `verified`
 //   lifecycle-contract.md   — the 13 decision statuses and their classification
 //   journal-contract.md     — append-oriented journal + rebuildable projections

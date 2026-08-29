@@ -1,4 +1,4 @@
-// ShadowGraph journal replay — see docs/handoffs/journal-contract.md.
+// ShadowGraph journal replay — see docs/contracts/journal-contract.md.
 //
 // This module is PURE. It must never touch the clock, the filesystem, randomness,
 // or re-execute domain logic. Rebuild is a FOLD over complete post-operation

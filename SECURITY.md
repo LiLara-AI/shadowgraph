@@ -2,11 +2,18 @@
 
 ## Supported versions
 
-ShadowGraph 0.40.0 is an unreleased public-beta candidate. After publication, only the latest published version on the default branch will be supported. Until then, do not treat the review tarball as a production security boundary.
+ShadowGraph 0.40.0 is a **Technical Preview / Early Access** release, installed from GitHub and not published to npm. Only the current `main` branch is supported; there are no patched older versions. Do not treat a Technical Preview build as a production security boundary.
 
 ## Reporting a vulnerability
 
-Please do not open a public issue for a suspected vulnerability. Contact the repository maintainers privately through the security contact configured on the GitHub repository. Include affected version/commit, reproduction steps, impact, and whether the report may be acknowledged publicly.
+Please do not open a public issue for a suspected vulnerability. Report it privately through GitHub's
+[private vulnerability reporting](https://github.com/LiLara-AI/shadowgraph/security/advisories/new)
+— the **Report a vulnerability** button on the repository's Security tab. This channel is enabled and
+is the only supported way to reach the maintainer privately.
+
+Include the affected commit, reproduction steps, impact, and whether the report may be acknowledged
+publicly. Expect an initial acknowledgement within 7 days. ShadowGraph is a single-maintainer
+Technical Preview project: there is no paid support, no guaranteed patch SLA, and no bug bounty.
 
 ## Local threat model
 

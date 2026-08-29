@@ -654,7 +654,7 @@ test('follow-up: runtime-local-root anchors at a path boundary and still catches
     ['home subdirectory', '/home/runner', 'stack at /home/runner/work/shadowgraph/src/x.js:12'],
     ['file: URL', '/home/runner', 'file:///home/runner/work/shadowgraph/src/x.js'],
     ['quoted bare root', '/home/runner', 'see "/home/runner" for details'],
-    ['windows repository root', '<local-repo-path>', String.raw`packed from <local-repo-path>\src\cli.js`],
+    ['windows repository root', 'c:/users/example-user/ai projects/example repo', String.raw`packed from C:\Users\example-user\AI Projects\example repo\src\cli.js`],
     ['end of line', '/home/runner', 'resolved to /home/runner']
   ];
   for (const [label, root, raw] of disclosures) {

@@ -29,11 +29,6 @@ test/
 .npmignore
 CONTRIBUTING.md
 RELEASE_CHECKLIST.md
-docs-v030-acceptance.md
-docs/handoffs/
-
-docs/*brief*.md
-docs/*research-notes*.md
 .hermes/
 .claude/
 .codex/

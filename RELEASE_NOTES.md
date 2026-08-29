@@ -1,18 +1,24 @@
-# ShadowGraph 0.40.0 pre-Beta release-candidate notes
+# ShadowGraph 0.40.0 — Technical Preview release notes
 
-> Pre-Beta release candidate only. The package remains `private: true`; no npm publication, Git tag, or GitHub release has been created.
+> Technical Preview / Early Access only — not Beta, not stable. Install from GitHub; the package remains `private: true`, and no npm publication, Git tag, or GitHub release has been created.
 
 ShadowGraph 0.40.0 keeps the decision-first graph and adds scoped temporal memory, explainable hybrid recall, durable reconsideration, compact/full MCP modes, and inspectable Markdown workflows.
 
 ## Public-install workflow
 
-Once the remaining release gates in the repository's [`RELEASE_CHECKLIST.md`](https://github.com/LiLara-AI/shadowgraph/blob/main/RELEASE_CHECKLIST.md) are approved and the package is published:
+During the Technical Preview, install from GitHub:
 
 ```bash
-npm install --global shadowgraph-unified-plugin@0.40.0
+npm install --global github:LiLara-AI/shadowgraph
 shadowgraph setup
 shadowgraph doctor
 shadowgraph stats
+```
+
+The npm command below becomes valid only once the remaining gates in [`RELEASE_CHECKLIST.md`](https://github.com/LiLara-AI/shadowgraph/blob/main/RELEASE_CHECKLIST.md) are approved and the package is published:
+
+```bash
+npm install --global shadowgraph-unified-plugin@0.40.0   # NOT YET AVAILABLE — returns E404
 ```
 
 For a pre-publication review, replace the registry spec with the absolute path to the built `.tgz` file:
@@ -48,7 +54,7 @@ The exact unscoped name `shadowgraph-unified-plugin` returned HTTP 404 from the 
 - The current seven-arm comparative run measured zero arms because no common local/free LLM and embedding endpoint was available. Dependency import probes are setup evidence only, not benchmark wins. This candidate makes no competitor-parity, answer-quality, cost, latency, token, ranking, `best`, or equivalent overall-superiority claim.
 - No default extractor, background watcher, hosted sync, or public-internet deployment model is included.
 - Remote embeddings require an explicit privacy opt-in because memory and query text leave the machine.
-- This remains a non-Beta candidate with `private: true` until independent security review and actual preregistered comparative measurement are complete and approved. The measured local journal benchmark does not replace either gate.
+- This remains a Technical Preview with `private: true` until independent security review and actual preregistered comparative measurement are complete and approved. The measured local journal benchmark does not replace either gate.
 
 The only preregistered marketing text allowed for the current benchmark evidence is:
 

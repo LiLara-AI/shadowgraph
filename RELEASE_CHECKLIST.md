@@ -1,4 +1,4 @@
-# Release checklist — ShadowGraph 0.40.0 pre-Beta candidate
+# Release checklist — ShadowGraph 0.40.0 (Technical Preview → publication)
 
 No publish, tag, GitHub release, commit, push, or release-branch action is part of this checklist run.
 
@@ -7,7 +7,7 @@ No publish, tag, GitHub release, commit, push, or release-branch action is part 
 - [x] Package and lockfile use the identical name/version: `shadowgraph-unified-plugin@0.40.0`.
 - [x] The exact name was syntactically accepted by `npm pack` and the live registry returned HTTP 404 / npm `E404` on 2026-08-27.
 - [x] Recheck the exact registry name immediately before publication; the 404 is evidence at one point in time, not a reservation.
-- [x] Keep `"private": true` and retain non-Beta status while independent security review and actual preregistered comparative measurement remain open. The valid zero-measurement run and local journal benchmark do not satisfy those gates.
+- [x] Keep `"private": true` and retain Technical Preview status while independent security review and actual preregistered comparative measurement remain open. The valid zero-measurement run and local journal benchmark do not satisfy those gates.
 - [ ] After every remaining gate is approved, change `private` to `false`, regenerate/verify the lockfile, rerun every command below, inspect the real tarball, then obtain explicit publish authorization.
 
 ## Technical gates
@@ -46,7 +46,7 @@ No publish, tag, GitHub release, commit, push, or release-branch action is part 
 
 - [ ] **Independent security review.** Record reviewer, scope, commit/tree hash, findings, accepted risk, and remediation verification. Do not replace this with self-review or `npm audit`.
 - [ ] **Actual preregistered benchmark comparison.** The retained record is valid but has `MEASURED=0`, `NOT_MEASURED=7`, and `measurements=0` because no common local/free LLM and embedding endpoint existed. Run all seven arms under the frozen equal-configuration rules, retain raw outputs, validate/aggregate them, and obtain independent interpretation. Dependency import probes and the local journal benchmark do not satisfy this gate. Until then, `best` and equivalent overall-superiority wording are prohibited.
-- [ ] Maintainer signs off on public-beta wording, package ownership/access, provenance, and support contact.
+- [ ] Maintainer signs off on release wording, package ownership/access, provenance, and support contact.
 - [ ] Explicit authorization to remove `private`, publish npm, create a Git tag, and create a GitHub release.
 
 ## Publication-day commands (only after all gates are checked)

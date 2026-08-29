@@ -20,7 +20,7 @@ test('normalizes common MCP aliases for rejection reasons and human sources', ()
   // "Never promote an agent assertion to a verified fact".
   // The alias normalization being tested here (human-confirmed -> human_confirmed)
   // is unchanged and still correct; only the trust consequence changed.
-  // See docs/handoffs/provenance-contract.md §2.
+  // See docs/contracts/provenance-contract.md §2.
   assert.equal(fact.verificationStatus, 'unverified');
   assert.equal(fact.sourceClass, 'human_confirmed');
   assert.equal(fact.sourceRaw, 'human-confirmed');

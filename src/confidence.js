@@ -1,4 +1,4 @@
-// ShadowGraph confidence model — see docs/handoffs/confidence-contract.md.
+// ShadowGraph confidence model — see docs/contracts/confidence-contract.md.
 //
 // Policy id: evidence_weighted_bounded_v1
 //

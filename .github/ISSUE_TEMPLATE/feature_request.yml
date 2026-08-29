@@ -11,8 +11,9 @@ body:
         that keep the source of truth local, keep retrieval explainable, and never
         silently drop or fabricate stored content are the easiest to accept.
 
-        Please check [`docs/handoffs/claude-release-handover.md`](../../docs/handoffs/claude-release-handover.md)
-        first — some open items are deliberate product decisions rather than gaps.
+        Please check the [API reference](../../docs/api-reference.md) and the
+        [contracts](../../docs/contracts) first — some behaviour that looks like a
+        gap is a deliberate, documented product decision.
 
   - type: textarea
     id: problem

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.40.0 (unreleased — pre-Beta release candidate)
+## 0.40.0 — Technical Preview (unreleased on npm)
 
 This release keeps ShadowGraph's decision-first model and adds the everyday memory capabilities needed for user personalization, temporal recall, hybrid retrieval, and human-readable Markdown workflows. The implementation is independent; no competitor source code was copied.
 
@@ -62,7 +62,7 @@ This release keeps ShadowGraph's decision-first model and adds the everyday memo
 - No default LLM extractor, background file watcher, hosted cloud sync, competitor-parity claim, or measured comparative token/cost/answer-quality result is included. All seven preregistered arms are `NOT_MEASURED` in the retained comparative run because no common local/free LLM and embedding endpoint was available.
 - Dependency installation/import success is setup evidence only and must not be described as a benchmark win. The word `best` and equivalent overall-superiority wording are prohibited for the current evidence.
 - Confidence calibration remains unresolved. Optional verification is restricted to a separately configured local Ed25519 trust boundary and is not a general remote attestation system.
-- Version 0.40.0 remains pre-Beta and `private: true`. Independent security review and actual preregistered comparative measurement remain release gates; package/install hardening and the measured local journal run do not satisfy either gate.
+- Version 0.40.0 is a Technical Preview and remains `private: true`. Independent security review and actual preregistered comparative measurement remain release gates; package/install hardening and the measured local journal run do not satisfy either gate.
 
 ## 0.31.0 (unreleased — review candidate)
 
@@ -71,12 +71,12 @@ Closes the eight architectural gaps G1–G8 proven by the 2026-08-25 audit. Vers
 ### Breaking
 
 - **`addFact()` now rejects caller-supplied `verificationStatus: 'verified'` and `'expired'`** with an error. Previously both were accepted verbatim, and `source: 'human-confirmed'` or `'tool_observed'` silently auto-promoted a fact to `verified`. Trust is no longer self-assertable from tool input. `'contradicted'` is still accepted because it lowers trust. `'expired'` is owned by `maintain()`.
-  **Migration:** stop passing `verificationStatus`. A fact's trust is now derived, not declared. If you relied on auto-verification, note that **nothing in this build reaches `verified` from tool input** — see `docs/handoffs/provenance-contract.md` §2 and open question U-1.
+  **Migration:** stop passing `verificationStatus`. A fact's trust is now derived, not declared. If you relied on auto-verification, note that **nothing in this build reaches `verified` from tool input** — see `docs/contracts/provenance-contract.md` §2 and open question U-1.
 - **The no-source default changed from `model_inferred` to `agent_claimed`.** `model_inferred` is no longer producible. Unrecognised labels now downgrade to `agent_claimed` with the original string preserved in `sourceRaw` (audit only, not evidence).
   **Migration:** read `sourceClass`, not `source`. Stored legacy facts are backfilled on import; `source` is retained as a mirror for compatibility.
 - **`SCHEMA_VERSION` is now `3`** (was `2`). v1 and v2 files still import — `SUPPORTED_SCHEMA_VERSIONS` is `[1, 2, 3]`.
 - **`validate()` is stricter and returns severity-classified issues.** Legacy records with an unknown or missing decision `status` now surface as issues instead of validating clean. Data is **reported, never silently rewritten**.
-- **Read paths return envelopes instead of bare arrays.** `search()`, `retrieve()`, and `context()` now return `{ items, page, completeness }`. See `docs/handoffs/completeness-contract.md`.
+- **Read paths return envelopes instead of bare arrays.** `search()`, `retrieve()`, and `context()` now return `{ items, page, completeness }`. See `docs/contracts/completeness-contract.md`.
 - **`addConfidenceEvidence()` now REQUIRES a `key`.** Previously an omitted key was synthesised from a timestamp, which silently defeated the documented retry-idempotency: the same observation retried a few milliseconds later got a different key and was counted twice.
   **Migration:** pass a stable `key` identifying the observation (e.g. `ci-run-4821`). Reuse it for retries of the same observation; use a new key for a genuinely new one. The MCP schema marks it required.
 - **`importData()` now refuses an envelope `schemaVersion` outside `SUPPORTED_SCHEMA_VERSIONS`.** Previously an unknown future version was silently half-read. Individual future *records/facts* are still preserved verbatim and reported by `validate()` — only the whole-file envelope is refused.

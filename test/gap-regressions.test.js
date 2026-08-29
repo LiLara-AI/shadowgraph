@@ -13,7 +13,7 @@
 // failure is the intended signal. The fix commit must then invert the
 // assertion and promote the corresponding `it.todo` into a real test.
 //
-// Gap IDs, severities, proofs and phases: docs/handoffs/current-status.md §4.
+// Gap IDs, severities, and proofs are recorded in the contracts under docs/contracts/.
 // No production code is changed by this file. It adds no dependencies.
 // =========================================================================
 
@@ -218,7 +218,7 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
   // behaviour. Satisfies principle 3 ("Provenance is data") and the security
   // doc rule "Never promote an agent assertion to a verified fact".
   //
-  // Contract: docs/handoffs/provenance-contract.md
+  // Contract: docs/contracts/provenance-contract.md
   //  - four official classes: agent_claimed | tool_observed | human_confirmed |
   //    production_verified; the class records WHAT WAS CLAIMED about origin;
   //  - NO caller input can produce `verified` — there is no verification
@@ -496,7 +496,7 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
   // current-status.md §4 — it reads the vocabulary from src/, so a state added
   // to the code without being classified in the contract shows up here.
   //
-  // Contract: docs/handoffs/lifecycle-contract.md
+  // Contract: docs/contracts/lifecycle-contract.md
   //  - schema 5 has 11 canonical states: the 9 documented execution states plus
   //    system-owned stale and explicit terminal archived;
   //  - FORMATTING aliases only (case, hyphen/underscore). No semantic aliases:
@@ -791,7 +791,7 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
 
 describe('G4 (S2) — FIXED: the journal carries complete payloads and rebuilds state', () => {
   // STATUS: fixed. ADR-0001 journal (NOT full event sourcing, NOT CQRS).
-  // Contract: docs/handoffs/journal-contract.md
+  // Contract: docs/contracts/journal-contract.md
   //
   // The legacy `events` array is RETAINED VERBATIM for backward compatibility and
   // is still metadata-only by design. The tests below labelled LEGACY assert that
@@ -1254,7 +1254,7 @@ describe('G5 (S2) — FIXED: purge is logical by default, hard purge is explicit
 
 describe('G6 (S1) — FIXED: every read path declares its completeness', () => {
   // STATUS: fixed. ACCEPTANCE tests. Satisfies principle 2, "No silent omission".
-  // Contract: docs/handoffs/completeness-contract.md
+  // Contract: docs/contracts/completeness-contract.md
   //  - search/retrieve/getJournal return { items, page, completeness };
   //  - context() returns per-collection totals in `completeness.collections`;
   //  - a default limit is applied but ALWAYS declared via completeness.limitSource.
@@ -1374,7 +1374,7 @@ describe('G6 (S1) — FIXED: every read path declares its completeness', () => {
 
 describe('G7 (S2) — FIXED: search matches declared content fields only', () => {
   // STATUS: fixed. ACCEPTANCE tests.
-  // Contract: docs/handoffs/search-contract.md
+  // Contract: docs/contracts/search-contract.md
   //  - a free-text term must match a DECLARED CONTENT FIELD;
   //  - schema keys, provenance and internal metadata are NOT content;
   //  - filters are matched separately and never reported as content matches.
@@ -1487,7 +1487,7 @@ describe('G7 (S2) — FIXED: search matches declared content fields only', () =>
 
 describe('G8 (S2) — FIXED: confidence has an auditable, evidence-weighted basis', () => {
   // STATUS: fixed. ACCEPTANCE tests. Satisfies principle 7.
-  // Contract: docs/handoffs/confidence-contract.md, policy
+  // Contract: docs/contracts/confidence-contract.md, policy
   // `evidence_weighted_bounded_v1`: delta = BASE_STEP(0.2) * classWeight * direction,
   // recomputed from the contribution list (never incrementally mutated), deduped
   // by contribution key, clamped to [0,1].
