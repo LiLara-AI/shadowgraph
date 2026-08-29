@@ -57,6 +57,18 @@ export class DestinationFenceReentryError extends Error {
   }
 }
 
+// Windows keeps a deleted-but-still-open file in a "delete pending" state, and every
+// open of it fails with EPERM/EACCES instead of ENOENT until the last handle closes.
+// A lock file is unlinked on release, so a writer that arrives during that window saw
+// a hard EPERM and gave up, rather than waiting for the holder like an EEXIST wait.
+// That surfaced as an external writer failing with EPERM instead of the documented
+// revision conflict. These codes mean "the lock is busy right now", so they join
+// EEXIST as contention and remain bounded by lockTimeoutMs; a genuine permission
+// fault still fails, as an explicit fence timeout.
+const LOCK_CONTENTION_CODES = new Set(
+  process.platform === 'win32' ? ['EEXIST', 'EPERM', 'EACCES', 'EBUSY'] : ['EEXIST']
+);
+
 export function createDestinationFence(filePath, options = {}) {
   const destination = resolve(filePath);
   const lockPath = `${destination}.lock`;
@@ -100,7 +112,7 @@ export function createDestinationFence(filePath, options = {}) {
           }
         };
       } catch (error) {
-        if (error.code !== 'EEXIST') throw error;
+        if (!LOCK_CONTENTION_CODES.has(error.code)) throw error;
         if (!waitingReported) {
           waitingReported = true;
           await onWait?.();
@@ -115,7 +127,9 @@ export function createDestinationFence(filePath, options = {}) {
           }
         } catch (candidate) {
           if (candidate.code === 'ENOENT') continue;
-          throw candidate;
+          // The same delete-pending window can also make the staleness probe fail.
+          // Fall through to the timeout check and poll instead of retrying hot.
+          if (!LOCK_CONTENTION_CODES.has(candidate.code)) throw candidate;
         }
         if (Date.now() - started >= lockTimeoutMs) throw new DestinationFenceTimeoutError(lockPath, lockTimeoutMs);
         await new Promise((resolveWait) => setTimeout(resolveWait, pollIntervalMs));

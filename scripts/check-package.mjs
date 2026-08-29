@@ -415,14 +415,50 @@ async function resolveNpmCli() {
   fail('npm CLI entry point could not be resolved');
 }
 
+// npm's own failure text names absolute paths (cwd, cache, tarball destination), and
+// this checker must never disclose a local root. Keep the part that identifies the
+// fault — exit code, signal, spawn errno, `npm ERR! code <CODE>` — and replace every
+// absolute path with a placeholder.
+function sanitizeCommandDiagnostic(value) {
+  const text = String(value ?? '');
+  if (!text) return '';
+  return text
+    .replace(/[A-Za-z]:[\\/][^\s"'`<>|]*/gu, '<path>')
+    .replace(/(^|[\s"'`(<[])\/[^\s"'`<>|]*/gu, '$1<path>')
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line && !/^npm\s+warn\b/iu.test(line))
+    .slice(-4)
+    .join(' | ')
+    .slice(0, 300);
+}
+
+function npmFailureReason(error) {
+  const parts = [];
+  if (typeof error?.code === 'number') parts.push(`exit=${error.code}`);
+  else if (typeof error?.code === 'string') parts.push(`errno=${error.code}`);
+  if (error?.signal) parts.push(`signal=${error.signal}`);
+  const stderr = sanitizeCommandDiagnostic(error?.stderr);
+  const stdout = stderr ? '' : sanitizeCommandDiagnostic(error?.stdout);
+  if (stderr) parts.push(`stderr=${stderr}`);
+  else if (stdout) parts.push(`stdout=${stdout}`);
+  if (!parts.length && error?.message) parts.push(sanitizeCommandDiagnostic(error.message));
+  return parts.join(' ');
+}
+
 async function runNpm(args, cwd) {
   const options = { cwd, maxBuffer: 10 * 1024 * 1024, windowsHide: true };
+  // Resolve OUTSIDE the try: a PackageCheckError raised here already says exactly
+  // what went wrong ("npm CLI entry point could not be resolved"), and catching it
+  // below replaced that with the generic "npm pack command failed", which is how a
+  // Node-20-only packaging failure reached CI with no diagnosable cause.
+  const npmCli = await resolveNpmCli();
   try {
-    const npmCli = await resolveNpmCli();
     if (npmCli) return await execFileAsync(process.execPath, [npmCli, ...args], options);
     return await execFileAsync('npm', args, options);
-  } catch {
-    fail('npm pack command failed');
+  } catch (error) {
+    const reason = npmFailureReason(error);
+    fail(reason ? `npm pack command failed: ${reason}` : 'npm pack command failed');
   }
 }
 
