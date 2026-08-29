@@ -1,0 +1,75 @@
+name: Feature request
+description: Suggest a capability or change for ShadowGraph
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion.
+
+        ShadowGraph is a **local-first decision and scoped memory store**. Proposals
+        that keep the source of truth local, keep retrieval explainable, and never
+        silently drop or fabricate stored content are the easiest to accept.
+
+        Please check [`docs/handoffs/claude-release-handover.md`](../../docs/handoffs/claude-release-handover.md)
+        first — some open items are deliberate product decisions rather than gaps.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the situation you hit, not the solution you have in mind.
+      placeholder: "When I restart an agent session, I cannot ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: What should ShadowGraph do instead?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface would this affect?
+      multiple: true
+      options:
+        - CLI
+        - MCP (full mode)
+        - MCP (compact mode)
+        - HTTP server
+        - JavaScript API
+        - Dashboard
+        - Markdown sync
+        - Storage / journal
+        - Benchmark harness
+        - Documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What else did you try or reject, and why?
+
+  - type: dropdown
+    id: compatibility
+    attributes:
+      label: Would this be a breaking change?
+      description: Changes to stored schema, export shape, or an existing API response are breaking.
+      options:
+        - "No — additive only"
+        - "Yes — changes existing behaviour, schema, or output shape"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Links, prior art, or usage details. Redact secrets and private content.
