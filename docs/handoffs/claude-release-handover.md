@@ -19,7 +19,7 @@ as unverified until you re-derive it.
 | `main` | `96a34c6`, identical to `origin/main` (0 ahead / 0 behind) | verified |
 | **CI on `main`** | **RED** — run 33201202487 failed 5 of 6 matrix jobs | verified via `gh` |
 | **CI on fix branch** | **6 of 6 green** for every commit from `6b0dbbd` onward | verified via `gh` |
-| Green six-job runs | **3** — 33245087040 att.1 + att.2 (`6b0dbbd`), 33245578769 (`feb277e`) | verified via `gh` |
+| Green six-job runs | **3 named** — 33245087040 att.1 + att.2 (`6b0dbbd`), 33245578769 (`feb277e`); later documentation-only pushes each add another, all green | verified via `gh` |
 | Fix branch | `claude/final-beta-readiness` — **5 commits** ahead of `main`, pushed, PR open, **not merged** | verified |
 | Last code-bearing commit | `6b0dbbd`. Everything after it is documentation-only | verified |
 | Local suite on fix branch | 1204 tests / 1204 pass / 0 fail / 0 skipped / 0 todo | verified (Windows, Node 24) |

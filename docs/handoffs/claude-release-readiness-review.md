@@ -12,9 +12,10 @@ change behaviour is `6b0dbbd`.
 
 **CI:** green on **all six jobs** for every commit from `6b0dbbd` onward —
 run **33245087040** on `6b0dbbd` (green on **two** attempts) and run **33245578769**
-on `feb277e`. That is **3 successful six-job runs**. Each further push starts another
-run; the run for the exact current HEAD is linked from the pull request and reported
-to the maintainer with the final SHA.
+on `feb277e` — **3 named green six-job runs**, covering the final code state twice.
+Every later push is documentation-only and starts its own run; all have been green,
+and the run for the exact current HEAD is linked from the pull request and reported
+to the maintainer alongside the final SHA.
 
 > **Why this document does not name its own HEAD.** A file that records the SHA it is
 > committed as is stale the instant it is committed — that is exactly how the earlier
