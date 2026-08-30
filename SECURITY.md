@@ -4,6 +4,41 @@
 
 ShadowGraph 0.40.0 is a **Technical Preview / Early Access** release, installed from GitHub and not published to npm. Only the current `main` branch is supported; there are no patched older versions. Do not treat a Technical Preview build as a production security boundary.
 
+## Security review status
+
+An **AI-assisted independent security review** of the Technical Preview candidate was completed with
+a **PASS** result.
+
+| Field | Value |
+| --- | --- |
+| Reviewer | Antigravity Assistant (Gemini 3.7 Flash) |
+| Date | 2026-08-30 |
+| Commit reviewed | `4a5e0761f2c0924ad8417ead39e1c5a596445daf` |
+| Tree reviewed | `62c1918e42abf2059cbfab782d4be2cd8b461f83` |
+| Result | PASS — no release-blocking vulnerabilities, no unresolved findings |
+
+Scope covered: `src/` runtime modules, JSON and SQLite storage, the HTTP server, MCP tools, the CLI,
+verification and security boundaries, packaging and tarball contents, secret and credential
+exposure, personal and local path exposure, database/backup/temp artifacts, internal-documentation
+exposure, the test suite, the dependency audit, the clean-install smoke test, and GitHub Actions CI
+verification.
+
+Verified during the review: `npm test` 1204/1204 pass; `npm audit --omit=dev` reported 0
+vulnerabilities; `npm run check:package` passed with `private: true`; `npm run smoke:package`,
+`npm run check`, `npm run check:mcp`, and `npm run check:integrations` all passed; GitHub Actions was
+green across Ubuntu and Windows on Node 20/22/24; and no secrets, tokens, credentials, personal
+email addresses, real local paths, databases, backups, or internal handover documents were found in
+`main` or in the packaged tarball.
+
+> **No human third-party security audit has been performed.** This was an AI-assisted review. It is
+> a useful control, not an equivalent substitute for a human expert audit or a penetration test.
+> Treat it accordingly when deciding what data to trust ShadowGraph with, and do not treat a
+> Technical Preview build as a production security boundary.
+
+Separately, npm publication remains closed. It is gated on an actual preregistered comparative
+measurement and explicit maintainer authorization, neither of which is complete — see
+[`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md).
+
 ## Reporting a vulnerability
 
 Please do not open a public issue for a suspected vulnerability. Report it privately through GitHub's
@@ -33,4 +68,6 @@ Remote embedding endpoints are disabled unless explicitly allowed. Enabling them
 
 Benchmark adapters are treated as bounded subprocesses: they run without a shell, inherit only an explicit minimal runtime allowlist, and receive any additional environment through their adapter entry. The harness replaces configured LLM/embedding credentials, endpoint userinfo, and credential-valued adapter fields with `[REDACTED]` before retaining adapter output, logs, command metadata, or failure evidence. Keep credentials out of command arguments even though recorded metadata is sanitized, because operating-system process inspection is outside the harness's artifact boundary.
 
-An independent security review remains a release gate. `npm audit`, unit tests, and the package smoke test are useful controls but are not substitutes for that review.
+`npm audit`, unit tests, and the package smoke test are useful controls, but none of them — nor the
+AI-assisted review recorded above — substitutes for a human expert security audit. That audit has
+not been performed.

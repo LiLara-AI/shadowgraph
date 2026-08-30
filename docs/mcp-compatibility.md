@@ -39,6 +39,57 @@ Modern complete results include `resultType: 'complete'` and server identity met
 
 `SHADOWGRAPH_MCP_COMPACT=1` must be passed to the server process, not merely assumed from the Inspector launch shell. The automated gate uses Inspector's server environment option and verifies the returned list count.
 
+### Tool inventory
+
+The **12 compact tools** are the everyday agent workflow. They are also present in full mode:
+
+| Tool | Purpose |
+| --- | --- |
+| `shadowgraph_context` | Load the working set for a project before a consequential task |
+| `shadowgraph_remember` | Store scoped memory (`preference`, `profile`, `goal`, `instruction`, `procedure`, `episode`, `note`) |
+| `shadowgraph_recall` | Hybrid lexical/vector/graph/temporal recall of scoped memory |
+| `shadowgraph_record_decision` | Record a decision with assumptions, evidence, and rejected alternatives |
+| `shadowgraph_record_attempt` | Record an attempt and its lesson |
+| `shadowgraph_record_fact` | Record an observed fact with a `sourceClass` provenance claim |
+| `shadowgraph_record_outcome` | Record `successful` / `mixed` / `failed` / `unknown` and update confidence |
+| `shadowgraph_retrieve` | Bounded retrieval with declared completeness |
+| `shadowgraph_search` | Content search across decisions, attempts, and facts |
+| `shadowgraph_review` | Evaluate reopen rules against stored facts and persist review signals |
+| `shadowgraph_validate` | Report graph diagnostics by severity |
+| `shadowgraph_maintain` | Stale decisions past `reviewAfter`, expire facts, then review |
+
+**Full mode adds these 15**, for 27 total:
+
+| Tool | Purpose |
+| --- | --- |
+| `shadowgraph_update_status` | Move a decision through the documented lifecycle states |
+| `shadowgraph_link` | Create an explainable relationship between two entities |
+| `shadowgraph_traverse` | Walk relationships from an entity by depth and direction |
+| `shadowgraph_supersede` | Replace a decision, persisting a `supersedes` relation |
+| `shadowgraph_redact` | Produce a privacy-safe export; never mutates |
+| `shadowgraph_purge` | Logical (default) or explicit irreversible hard project purge |
+| `shadowgraph_purge_preview` | Show deletion counts without changing storage |
+| `shadowgraph_review_signals` | Read persisted review signals |
+| `shadowgraph_ack_review` | Acknowledge one review signal |
+| `shadowgraph_repair_plan` | Return a non-destructive repair plan (`apply:false`) |
+| `shadowgraph_journal` | Read journal entries with declared pagination |
+| `shadowgraph_rebuild` | Replay the journal into a projection |
+| `shadowgraph_backup` | Write a consistent snapshot to a destination path |
+| `shadowgraph_restore` | Restore a validated JSON or SQLite backup |
+| `shadowgraph_confidence_evidence` | Apply one keyed confidence contribution |
+
+A 28th tool, `shadowgraph_verify_fact`, appears in full mode **only** when
+`SHADOWGRAPH_VERIFIER_CONFIG` names a local trust configuration. The caller supplies just `factId`
+and an evidence path inside the configured root — never verifier identity, key, signature, method,
+or target status. Compact mode stays at exactly 12 regardless.
+
+Compact mode is a tool-advertisement choice, not lossy storage: the full relational graph,
+memories, facts, alternatives, and outcomes are stored identically in both modes.
+
+Alongside tools, the server advertises exactly one resource, `shadowgraph://context`, and one
+prompt, `shadowgraph_consequential_task`, in both modes. Reading that resource can generate review
+signals, so the server serializes and persists it like a mutation.
+
 ## 4. Strict official Inspector gate
 
 Run:
