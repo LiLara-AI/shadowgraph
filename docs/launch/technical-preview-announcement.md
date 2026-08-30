@@ -29,8 +29,8 @@ is gone:
 
 So you re-litigate a decision that was already settled, because nobody can remember whether it was
 settled *well*. And when the deployment finally goes multi-user, nothing anywhere notices that the
-entire reason for the original choice just evaporated. The decision quietly becomes wrong, and stays
-wrong until a human trips over it in production.
+entire reason for the original choice just evaporated. The original decision may no longer fit — but
+nothing flags it for another look.
 
 If you have worked with agents for more than a few weeks, you have lived some version of this:
 
