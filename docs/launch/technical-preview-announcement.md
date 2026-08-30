@@ -83,7 +83,7 @@ Weeks pass. Different sessions, different processes. Nobody remembers this rule 
 shadowgraph fact '{"project":"checkout-service","key":"deployment","value":"multi-user","sourceClass":"human_confirmed"}'
 ```
 
-**And the old decision comes back on its own:**
+**And the next time `review` runs, the old decision surfaces:**
 
 ```bash
 shadowgraph review '{"project":"checkout-service"}'
@@ -100,9 +100,11 @@ shadowgraph review '{"project":"checkout-service"}'
 ]
 ```
 
-Notice what is *not* in that last command: the fact that changed. You don't have to remember to ask.
-ShadowGraph matches stored conditions against stored facts, so it works cold, in a fresh process,
-long after everyone forgot the rule was there.
+Notice what is *not* in that last command: the fact that changed. When `review` runs, ShadowGraph
+checks stored facts against stored reconsideration rules and surfaces decisions worth revisiting.
+You call it — it does not run in the background — but you don't have to remember the rule, or
+re-supply what changed. It works cold, in a fresh process, long after everyone forgot the rule was
+there.
 
 ## Why this helps
 
@@ -110,9 +112,10 @@ In plain terms:
 
 - **Decisions stop getting re-argued.** The reasoning is right there, so "why did we do it this way"
   has an actual answer.
-- **Failed approaches stay dead.** What already broke is recorded as broken, not rediscovered.
-- **Stale decisions raise their hand.** When the ground shifts, the decisions that depended on it
-  come back for review instead of silently rotting.
+- **Failed approaches are easier to avoid** because the previous failure and lesson are
+  preserved.
+- **Stale decisions are findable.** When the ground shifts, running `review` surfaces the
+  decisions that depended on it, instead of leaving them to rot unnoticed.
 - **A new session starts informed.** It can load what was decided and what was ruled out, rather
   than reconstructing it from vibes.
 
@@ -133,10 +136,10 @@ The five-minute quick start and the full worked example:
 
 Node 20+. No build step, no runtime dependencies, no account.
 
-Everything stays on your machine — it is one local file. No cloud service, no telemetry, no
+Everything stays in local storage on your machine. No cloud service, no telemetry, no
 analytics, and no outbound request unless you configure one yourself.
 
-You can use it through **MCP** (any MCP-compatible client), a **CLI**, a local **HTTP API**, or the
+You can use it through an **MCP stdio interface**, a **CLI**, a local **HTTP API**, or the
 **JavaScript API**. MIT licensed.
 
 **On Windows:** each command takes one JSON argument, so quoting differs. PowerShell wants

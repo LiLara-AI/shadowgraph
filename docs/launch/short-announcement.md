@@ -44,10 +44,10 @@ named alternative, or "best". No comparative benchmark has been measured.
 > 5/ You record the trigger when you decide:
 > reopenWhen: deployment == "multi-user"
 >
-> Months later the fact changes, and `review` hands the decision back with PostgreSQL flagged. You
-> never have to remember to ask.
+> Months later the fact changes. Run `review` and ShadowGraph checks stored facts against stored
+> rules, and hands the decision back with PostgreSQL flagged.
 
-> 6/ Local-first: one file on your machine. No cloud, no account, no telemetry. MCP, CLI, HTTP, JS.
+> 6/ Local-first: local storage on your machine. No cloud, no account, no telemetry. MCP, CLI, HTTP, JS.
 > Node 20+, MIT.
 >
 > Technical Preview — install from GitHub, schema may still change, and no comparative benchmark has
@@ -59,8 +59,8 @@ named alternative, or "best". No comparative benchmark has been measured.
 
 > Your agent remembers what it decided. Not why, not what it rejected, not what already failed.
 >
-> ShadowGraph is local-first decision memory for agents — and it reopens a decision when the facts
-> change. Technical Preview:
+> ShadowGraph is local-first decision memory for agents. Run `review` and it surfaces the decisions
+> worth revisiting. Technical Preview:
 > github.com/LiLara-AI/shadowgraph
 
 ---
@@ -87,11 +87,13 @@ named alternative, or "best". No comparative benchmark has been measured.
 > That is the problem I have been working on. ShadowGraph is local-first decision memory for AI
 > agents. Alongside the decision, it keeps the rejected alternatives and the reasons for rejecting
 > them, the assumptions and evidence, the attempts that failed, the outcome, and — importantly — the
-> conditions that should make the decision worth revisiting. When a recorded fact later matches one
-> of those conditions, the decision comes back for review on its own, across restarts and sessions.
+> conditions that should make the decision worth revisiting. When you run a review, ShadowGraph
+> checks stored facts against those stored conditions and surfaces the decisions worth revisiting —
+> across restarts and sessions, without you re-supplying what changed.
 >
-> In practice that means settled decisions stop getting re-argued, failed approaches stay dead, and
-> stale decisions raise their hand instead of rotting silently.
+> In practice that means settled decisions stop getting re-argued, failed approaches are easier to
+> avoid because the previous failure and lesson are preserved, and decisions whose assumptions have
+> changed can be found instead of rotting unnoticed.
 >
 > It runs entirely on your machine — no cloud service, no account, no telemetry — and works through
 > MCP, a CLI, a local HTTP API, or a JavaScript API.
@@ -157,7 +159,7 @@ named alternative, or "best". No comparative benchmark has been measured.
 > The `review` call is never told what changed. It matches stored conditions against stored facts, so
 > it works cold, in a fresh process, long after everyone forgot the rule existed.
 >
-> Local-first: one file on your machine, no cloud, no account, no telemetry, no outbound request
+> Local-first: local storage on your machine, no cloud, no account, no telemetry, no outbound request
 > unless you configure one. MCP, CLI, local HTTP API, and a JavaScript API. Node 20+, no runtime
 > dependencies, MIT.
 >
@@ -186,7 +188,7 @@ named alternative, or "best". No comparative benchmark has been measured.
 > alternatives and reasons, and you attach a condition when you decide — change the fact months later
 > and `review` hands the decision back with the alternative flagged. Works cold after a restart.
 >
-> One local file, no telemetry. MCP + CLI + HTTP + JS, Node 20+, MIT.
+> Local storage on your machine, no telemetry. MCP + CLI + HTTP + JS, Node 20+, MIT.
 >
 > Technical Preview — from GitHub, not npm, and no comparative benchmark measured yet. Feedback on
 > install and MCP client compatibility very welcome: <https://github.com/LiLara-AI/shadowgraph>
@@ -194,8 +196,8 @@ named alternative, or "best". No comparative benchmark has been measured.
 **One-liner:**
 
 > Your agent remembers the answer, not why. ShadowGraph is local-first decision memory for agents —
-> keeps the rejected option and the reason, and reopens the decision when the facts change.
-> Technical Preview, MIT: <https://github.com/LiLara-AI/shadowgraph>
+> keeps the rejected option and the reason, and surfaces decisions worth revisiting when you run a
+> review. Technical Preview, MIT: <https://github.com/LiLara-AI/shadowgraph>
 
 ---
 
