@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability (private)
+    url: https://github.com/LiLara-AI/shadowgraph/security/advisories/new
+    about: Never report a suspected vulnerability in a public issue. Use GitHub private vulnerability reporting.
+  - name: Questions, ideas, and Technical Preview feedback
+    url: https://github.com/LiLara-AI/shadowgraph/discussions
+    about: Ask how something works, share whether decision memory was useful, or suggest a use case before filing an issue.
+  - name: Read the docs first
+    url: https://github.com/LiLara-AI/shadowgraph#readme
+    about: Quick start, the decision-memory demo, API reference, contracts, and the honest limitations list.

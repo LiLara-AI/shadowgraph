@@ -54,6 +54,7 @@
     "docs/adr/0007-canonical-journal-baseline-placement.md",
     "docs/api-reference.md",
     "docs/contracts/",
+    "docs/decision-memory-demo.md",
     "docs/benchmark-report.md",
     "docs/mcp-compatibility.md",
     "docs/shadowgraph-benchmark-plan.md",

@@ -54,7 +54,8 @@ The exact unscoped name `shadowgraph-unified-plugin` returned HTTP 404 from the 
 - The current seven-arm comparative run measured zero arms because no common local/free LLM and embedding endpoint was available. Dependency import probes are setup evidence only, not benchmark wins. This candidate makes no competitor-parity, answer-quality, cost, latency, token, ranking, `best`, or equivalent overall-superiority claim.
 - No default extractor, background watcher, hosted sync, or public-internet deployment model is included.
 - Remote embeddings require an explicit privacy opt-in because memory and query text leave the machine.
-- This remains a Technical Preview with `private: true` until independent security review and actual preregistered comparative measurement are complete and approved. The measured local journal benchmark does not replace either gate.
+- An AI-assisted independent security review (Antigravity Assistant, Gemini 3.7 Flash) of commit `4a5e076` / tree `62c1918e` completed on 2026-08-30 with a PASS result and no unresolved findings. **No human third-party security audit has been performed**; the AI-assisted review is a control, not a substitute. See [`SECURITY.md`](https://github.com/LiLara-AI/shadowgraph/blob/main/SECURITY.md#security-review-status).
+- This remains a Technical Preview with `private: true` until the actual preregistered comparative measurement and the human third-party security audit are complete and approved. The measured local journal benchmark does not replace either gate.
 
 The only preregistered marketing text allowed for the current benchmark evidence is:
 

@@ -19,8 +19,8 @@ const graph = createShadowGraph({ now });   // `now` is an injectable clock, use
 
 | Export | Value |
 | --- | --- |
-| `SCHEMA_VERSION` | `4` |
-| `SUPPORTED_SCHEMA_VERSIONS` | `[1, 2, 3, 4]` |
+| `SCHEMA_VERSION` | `5` |
+| `SUPPORTED_SCHEMA_VERSIONS` | `[1, 2, 3, 4, 5]` |
 | `SOURCE_CLASSES` | `agent_claimed`, `tool_observed`, `human_confirmed`, `production_verified` |
 | `VERIFICATION_STATUSES` | `unverified`, `verified`, `contradicted`, `expired` |
 | `DOCUMENTED_DECISION_STATUSES` | the nine execution states |
@@ -51,10 +51,10 @@ const graph = createShadowGraph({ now });   // `now` is an injectable clock, use
 | `applyMemoryPlan(input)` | Preflights and applies explicit `ADD` / `UPDATE` / `DELETE` / `NOOP` operations. Delete invalidates rather than erasing historical payloads. |
 | `addFact(input)` | **Rejects `verificationStatus: 'verified'` / `'expired'`.** Unknown `sourceClass` downgrades to `agent_claimed` with `sourceRaw` retained. Supersedes any prior fact for the same `(project, key)`. |
 | `setOutcome(id, outcome)` | Records an outcome and applies one evidence-weighted confidence contribution. |
-| `addConfidenceEvidence(id, evidence)` | Applies a keyed contribution. Re-applying the same key is a no-op — this is the double-count guard. |
+| `addConfidenceEvidence(input)` | Applies a keyed contribution. Re-applying the same key is a no-op — this is the double-count guard. |
 | `updateDecisionStatus(id, status)` | Accepts any of the thirteen states plus formatting aliases; stores the canonical form. Throws `Invalid decision status: <raw>` otherwise. |
-| `supersedeDecision(previousId, replacement)` | Same-project supersession with a persisted `supersedes` relation. |
-| `link(from, to, relation)` | Explainable relationship; both endpoints must exist and the new relation ID must be unused in the global schema-4 entity namespace before mutation. |
+| `supersedeDecision(input)` | Same-project supersession with a persisted `supersedes` relation. |
+| `link(input)` | Explainable relationship; both endpoints must exist and the new relation ID must be unused in the global schema-4 entity namespace before mutation. |
 
 ### Reading — all return `{ items, page, completeness }`
 
@@ -64,7 +64,7 @@ const graph = createShadowGraph({ now });   // `now` is an injectable clock, use
 
 `context(input)` returns named collections at their original keys plus a `completeness.collections` breakdown (backward compatible). It may create review signals; CLI, HTTP, MCP tools, and the MCP context resource persist those signals before returning success.
 
-`traverse(id, options)` · `projectSummary(project)` · `stats()` · `getReviewSignals()`
+`traverse(input)` · `projectSummary(project)` · `stats()` · `getReviewSignals()`
 
 ### Reconsideration
 
@@ -82,6 +82,7 @@ const graph = createShadowGraph({ now });   // `now` is an injectable clock, use
 | `purgeProject(project, options?)` | **Logical/tombstone by default.** `{ mode: 'hard' }` physically deletes and creates a declared `seq` gap. |
 | `redact(options?)` | Privacy-safe export; covers journal payloads. |
 | `exportData()` / `importData(data)` | Round-trip stable. Import preserves stored values and **never elevates trust**; legacy facts get `sourceClass` backfilled and collection-local ID remaps propagate through journal/idempotency dependencies. Direct import preflights final relation endpoints, journal type/identity/sequence/baseline placement, event IDs, review identities, idempotency namespaces, and plain-JSON values before mutation. Legacy orphaned idempotency payloads become explicit canonical entities rather than hidden cache-only state. Merge import cannot lower the live revision, journal high-water mark, or existing replay epoch. |
+
 ## 3. `validate()` diagnostics — four severities
 
 | Severity | Meaning | Affects `valid` |
@@ -142,9 +143,18 @@ MCP exposes `shadowgraph_verify_fact` only in full mode when `SHADOWGRAPH_VERIFI
 
 **Status: accepted provisional.** Acknowledgment is persisted in the projection/storage snapshot but is not journalled or replayed. Rebuild therefore reconstructs domain records/facts/relations/confidence/idempotency, not review-signal acknowledgment history. Actor/session audit for acknowledgment is deferred; the product currently requires review signals, not an immutable acknowledgment audit trail.
 
-**MCP** (`npm run mcp`) — dual-era legacy `2024-11-05` plus modern `2026-07-28`; see [MCP compatibility](mcp-compatibility.md).
-**HTTP** (`npm start`) — optional Bearer auth.
-**CLI** (`npx shadowgraph`).
+## 5. Interface entry points
+
+| Surface | Entry point | Notes |
+| --- | --- | --- |
+| MCP | `shadowgraph mcp` (from a clone: `npm run mcp`) | Dual-era legacy `2024-11-05` plus modern `2026-07-28`; see [MCP compatibility](mcp-compatibility.md). `SHADOWGRAPH_MCP_COMPACT=1` advertises 12 tools instead of 27. |
+| HTTP | `shadowgraph serve` (from a clone: `npm start`) | Binds `127.0.0.1`; optional Bearer auth via `SHADOWGRAPH_API_TOKEN`. |
+| CLI | `shadowgraph <command>` (from a clone: `node src/cli.js <command>`) | Each invocation is a separate process that reopens the store. |
+
+`npx shadowgraph` does **not** run this project. The package is named
+`shadowgraph-unified-plugin`, it is `private: true` and unpublished, and the bare name `shadowgraph`
+on the public registry belongs to an unrelated package. Install from GitHub as described in the
+[README](../README.md#1-install).
 
 ## 6. Errors thrown by input validation
 

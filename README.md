@@ -1,61 +1,52 @@
-# ShadowGraph v0.40.0 — Technical Preview
+# ShadowGraph
 
-ShadowGraph is a local-first, vendor-neutral learning layer for AI agents. It is not merely generic chat memory: its core remains an explainable decision graph that tracks what an agent chose, what it rejected, the assumptions and evidence behind it, what happened afterward, and when the decision should be reopened.
+[![CI](https://github.com/LiLara-AI/shadowgraph/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/LiLara-AI/shadowgraph/actions/workflows/ci.yml)
 
-> ShadowGraph remembers not only what an agent chose, but what it rejected, why it rejected it, and what evidence should make it think again.
+**Local-first decision memory for AI agents.** ShadowGraph remembers what an agent decided, what it
+rejected, why it rejected it, and when that decision should be reconsidered.
 
-## What it does
+> Status: **Technical Preview / Early Access.** Install from GitHub — it is not on npm.
+> See [Limitations and Technical Preview status](#limitations-and-technical-preview-status).
 
-When an AI agent starts an important task, ShadowGraph gives it relevant working context. During the task, the agent can save decisions, assumptions, evidence, rejected alternatives, failed attempts, observed facts, and scoped user/agent/run memory. After implementation, the agent records the outcome. ShadowGraph updates confidence, preserves superseded temporal history, and creates review signals when an old decision may no longer fit the current situation.
+## Why it matters
 
-The normal learning loop is:
+Chat memory remembers the conversation. It loses the decision.
 
-```text
-1. Context: load active decisions, stale facts, failed attempts, and open reviews.
-2. Decide: record the chosen approach, assumptions, evidence, and rejected alternatives.
-3. Work: record failed or informative attempts and link related graph entities.
-4. Observe: record project-scoped facts with `sourceClass` provenance claims. Agent/tool input cannot create `verified`.
-5. Evaluate: record a successful, mixed, failed, or unknown outcome.
-6. Reconsider: persist the fact, then call `review({ project })` or `context({ project })` after restart; do not pass the triggering fact again.
-```
+Ask an agent three months later why the project uses SQLite and the useful part is already gone:
 
-This lets an agent remember the reasoning behind work instead of blindly repeating old answers.
+- The choice may survive in a summary. **The rejected alternative and the reason for rejecting it do not.**
+- A fact changes — the deployment goes from single-user to multi-user — and **nothing reopens the decision.**
+- The same approach fails again, because **the failed attempt was never recorded as a failed attempt.**
 
-## Technical Preview status
+ShadowGraph stores that reasoning as structured, inspectable data instead of prose: what was chosen,
+what was rejected, why, the assumptions and evidence behind it, failed attempts, outcomes,
+provenance, confidence history, and the conditions that should trigger a rethink.
 
-ShadowGraph v0.40.0 is a **Technical Preview / Early Access** release. It is not Beta and not stable: interfaces and the storage schema may still change, and it is not yet recommended for production data you cannot reproduce. Install it from GitHub (see [Install](#install-technical-preview)); it is **not on npm**. It preserves the v0.31 decision journal and adds scoped general memory, bi-temporal facts/relations, explainable lexical/vector/graph/temporal RRF retrieval, a localhost-first embedding adapter, and conflict-aware Markdown push/pull. The npm name `shadowgraph-unified-plugin` returned 404 from the live registry on 2026-08-27, but names are not reserved by a lookup and must be rechecked immediately before publication. The package deliberately remains `private: true`; npm publication stays closed until an independent security review and an actual preregistered comparative measurement are complete and approved. The current seven-arm run could not measure any arm because no common local/free LLM and embedding endpoint was available; dependency import probes are setup evidence, not benchmark wins. The word `best` and equivalent comparative-superiority wording are prohibited for the current evidence. See [the benchmark report](docs/benchmark-report.md) and <https://github.com/LiLara-AI/shadowgraph/blob/main/RELEASE_CHECKLIST.md>. No npm publication, tag, or GitHub release is claimed.
+The promise is deliberately narrow: **important AI decisions should survive sessions and stay
+explainable, reviewable, and reconsiderable.**
 
-> Comparative benchmark infrastructure was executed, but no arm was measured because no common local/free LLM and embedding endpoint was available. No comparative performance, quality, token, cost, or 'best' claim is supported.
+**Who it is for:** developers building agents on MCP, a CLI, or a local HTTP API who need
+consequential decisions to outlive a session. It is a decision store, not a transcript store, and it
+keeps everything on your machine.
 
-## Unified memory kernel
+## Quick Start — 5 minutes
 
-- `remember()` stores `preference`, `profile`, `goal`, `instruction`, `procedure`, `episode`, or `note` memory under a non-empty project plus optional `userId`, `agentId`, and `runId` scope. Omitted recall project/scope means the `default` project plus all-null scope, never all projects or users.
-- Reusing a scope/type/key with identical content is `NOOP`; changed content is `UPDATE`, with the previous version retained and journalled. Explicit plans may also `DELETE` by invalidating rather than silently erasing history.
-- `recall()` unions lexical, optional vector, graph-distance, and temporal candidates, then applies weighted Reciprocal Rank Fusion. Results expose raw signal scores/ranks and state when a signal was unavailable; valid-time recall keeps a prior value visible until a future-effective replacement starts.
-- Markdown is an inspectable projection and validated write surface. `markdown-sync` uses stable identity paths, hashes, atomic writes, and refuses two-sided conflicts. Exported plaintext copies must be deleted separately after a canonical purge.
-- Embeddings are derived data, never canonical truth. No endpoint is configured by default; localhost works when explicitly configured, and remote endpoints require a separate privacy opt-in.
+### Requirements
 
-See [the unified-memory guide](docs/unified-memory.md) and [ADR-0006](docs/adr/0006-unified-memory-kernel.md).
+- Node.js 20+ (the optional SQLite backend needs Node 22.5+ for `node:sqlite`)
+- No runtime npm dependencies, no build step, no account, no network calls
 
-## Requirements
-
-- Node.js 20+ (SQLite backend requires Node 22.5+ with `node:sqlite`)
-- v0.40.0 is a Technical Preview; schema 5 imports schemas 1-5
-- No runtime npm dependencies
-- Python 3.10+ only for the optional Hermes wrapper
-
-## Install (Technical Preview)
+### 1. Install
 
 ShadowGraph is **not published to npm**. During the Technical Preview, install it from this
-GitHub repository. Both paths below work today and need no build step or runtime dependencies.
-
-**Global install (recommended — puts `shadowgraph` on your `PATH` for MCP clients):**
+repository. A global install puts `shadowgraph` on your `PATH`, which is what MCP clients need:
 
 ```bash
 npm install --global github:LiLara-AI/shadowgraph
 ```
 
-**Or clone and run from source:**
+<details>
+<summary>Or clone and run from source</summary>
 
 ```bash
 git clone https://github.com/LiLara-AI/shadowgraph.git
@@ -65,182 +56,161 @@ node src/cli.js setup
 node src/cli.js doctor
 ```
 
-`setup` creates a store in the current directory (`.shadowgraph/data.json`), so run it from
-where you want that store to live. `doctor` reports `Storage is not initialized` and exits `1`
-until `setup` has run — that is expected, not a failed install.
+Replace `shadowgraph` with `node src/cli.js` in every command below.
+</details>
 
-> `npm install shadowgraph-unified-plugin` does **not** work and will fail with `E404`.
-> The package is `private: true` and unpublished; the registry name is not reserved.
-> This README will change when publication is approved.
+> `npm install shadowgraph-unified-plugin` does **not** work and fails with `E404`. The package is
+> `private: true` and unpublished, and the registry name is not reserved. This README will change if
+> publication is ever approved.
 
-## Quick Start
+### 2. JSON arguments and your shell
 
-From any directory, after a global install:
+Every ShadowGraph command takes a single JSON argument, so **quoting depends on your shell.** Pick
+the row for the shell you are actually using — this is the most common reason a first command fails:
+
+| Shell | Form | Example |
+| --- | --- | --- |
+| bash / zsh / Git Bash (macOS, Linux, WSL) | single quotes, plain JSON | `shadowgraph recall '{"project":"demo"}'` |
+| Windows PowerShell | single quotes, `\"` inside | `shadowgraph recall '{\"project\":\"demo\"}'` |
+| Windows `cmd.exe` | double quotes, `\"` inside | `shadowgraph recall "{\"project\":\"demo\"}"` |
+
+The examples below use the bash form. All three are tested on every command in this README.
+
+### 3. Initialize a store
 
 ```bash
 mkdir shadowgraph-demo
 cd shadowgraph-demo
 shadowgraph setup
 shadowgraph doctor
-shadowgraph remember '{"project":"demo","memoryType":"note","key":"hello","text":"ShadowGraph survives restarts"}'
-shadowgraph recall '{"project":"demo","query":"what survives restarts?"}'
 ```
 
-`setup` initializes storage without rewriting an existing store. `doctor` checks Node compatibility, storage readability/writability, graph validity, and the installed MCP entry point; its failures say what to fix.
+`setup` creates `.shadowgraph/data.json` in the current directory, so run it where you want the
+store to live. It never rewrites an existing store. `doctor` then checks Node compatibility, storage
+readability and writability, graph validity, and the MCP entry point.
 
-Start the local HTTP API and inspect its health:
+Run `setup` **before** `doctor`: on a fresh directory `doctor` reports `Storage is not initialized`
+and exits `1` until a store exists. That is expected, not a failed install.
+
+### 4. Record a decision, restart, and get it back
 
 ```bash
-shadowgraph serve
-curl http://127.0.0.1:8787/health
+shadowgraph decision '{"project":"checkout-service","title":"Choose the datastore","chosen":"SQLite","confidence":0.8,"alternatives":[{"label":"PostgreSQL","reasonRejected":"Single-user local deployment does not justify running a server","reopenWhen":[{"key":"deployment","operator":"equals","value":"multi-user"}]}]}'
+
+shadowgraph fact '{"project":"checkout-service","key":"deployment","value":"single-user","sourceClass":"human_confirmed","confidence":1}'
+
+shadowgraph search '{"query":"datastore","project":"checkout-service"}'
 ```
 
-The API listens on `http://127.0.0.1:8787` and stores a versioned JSON graph in `.shadowgraph/data.json`. Set `SHADOWGRAPH_FILE` to choose another location. Set `SHADOWGRAPH_STORAGE=sqlite` on Node 22.5+ to use the WAL-backed relational SQLite adapter. JSON and SQLite restore use mandatory domain/journal consistency validation on direct JavaScript, HTTP, CLI, and MCP paths. Every save and restore for a destination shares the same cross-handle/process `.lock` fence: an overlapping writer waits and is revision-checked against restored state, or fails explicitly with a revision/lock/busy outcome; an acknowledged write cannot silently disappear. Lock waits are bounded, abandoned locks are recovered after a stale interval, and validation/activation callback reentry fails immediately rather than deadlocking. SQLite `backup` creates an atomic snapshot; SQLite `restore` additionally retains standalone source/rollback snapshots of committed WAL state and confirms the replacement through open/prepare/load/validation before cleanup. Recovery inspects candidates read-only before a write-capable reopen. Caught failures are rolled back and reopened; cleanup and recovery failures report retained artifacts honestly. HTTP rejects writes and mutating context requests before graph change while restore owns persistence. This is process-level rollback safety, not crash or power-loss durability. JSON restore remains available only for JSON storage.
+Each command runs in a new process and reopens the store from disk, so the `search` result comes
+back across a real restart, not from in-memory state. You now have a decision that carries its
+rejected alternative, the reason it was rejected, and the condition that should reopen it.
 
-For a shared local deployment, enable optional authentication:
+## The demo: a decision that reopens itself
+
+This is the whole point of ShadowGraph, in three commands. Continue in the same directory.
+
+**The decision is settled, so there is nothing to reconsider yet:**
 
 ```bash
-SHADOWGRAPH_API_TOKEN="use-a-random-token-at-least-16-characters" npm start
+shadowgraph review '{"project":"checkout-service"}'
 ```
 
-Then send this header with every HTTP request:
-
-```text
-Authorization: Bearer use-a-random-token-at-least-16-characters
+```json
+[]
 ```
 
-## How the graph works
+**Now the world changes. The deployment becomes multi-user:**
 
-The graph contains:
-
-- **Decision** — selected approach, goal, project, confidence, assumptions, alternatives, evidence, outcome.
-- **Alternative** — rejected proposal, rejection reason, and structured reopen rules.
-- **Fact** — observed value with `sourceClass` provenance claim, confidence, timestamp, project scope, and status. Ordinary tool input cannot create `verified`; an optional separately configured Ed25519 verifier can verify signed local evidence. Legacy unsigned `verified` values migrate to an untrusted audit marker.
-- **Evidence** — source, type, confidence, timestamp, and optional detail.
-- **Attempt** — approach, result, environment, lesson/reason, and relationships.
-- **Outcome** — successful, mixed, failed, or unknown result with lessons and confidence update.
-- **Relationship** — explainable link such as `depends_on`, `supports`, `tested_by`, or `supersedes`.
-- **Journal entry** — append-**oriented** record of a graph change, carrying a complete post-operation snapshot. Not append-only: an explicit hard purge deletes entries, which is why the term is "append-oriented with documented deletion semantics" (see `docs/contracts/journal-contract.md`). A replayable migration baseline is a guarded boundary, not a normal mutation: duplicate or history-resetting placement fails closed as `invalid_projection_baseline_placement` ([ADR-0007](docs/adr/0007-canonical-journal-baseline-placement.md)).
-
-Confidence has an initial value, a current value, a history of evidence-weighted updates, and a `basis` that counts supporting and contradicting evidence by source class. `sourceClass` is one of exactly four values — `agent_claimed`, `tool_observed`, `human_confirmed`, `production_verified` — and it records **what was claimed** about an observation's origin, never proof of it. Unrecognised labels downgrade to `agent_claimed` with the original string preserved in `sourceRaw` for audit only. Passing `verificationStatus: 'verified'` through an ordinary write is rejected. Verification requires a server-owned trust configuration plus a matching Ed25519-signed local attestation; see `docs/api-reference.md`.
-
-Example decision:
-
-```js
-import { createShadowGraph } from 'shadowgraph-unified-plugin';
-const graph = createShadowGraph();
-const decision = graph.addDecision({
-  project: 'my-app',
-  title: 'Choose a database',
-  chosen: 'PostgreSQL',
-  confidence: 0.8,
-  evidence: [{ source: 'load-test', type: 'tool_observed', confidence: 0.9 }],
-  alternatives: [{
-    label: 'SQLite',
-    reopenWhen: [{ key: 'deployment', operator: 'equals', value: 'local' }]
-  }]
-});
-graph.addFact({ project: 'my-app', key: 'deployment', value: 'local', sourceClass: 'human_confirmed', confidence: 1 });
-// After exporting/saving and loading this graph in a new process, call without
-// passing the triggering fact again. review() reads the project-scoped stored fact.
-console.log(graph.review({ project: 'my-app' }));
+```bash
+shadowgraph fact '{"project":"checkout-service","key":"deployment","value":"multi-user","sourceClass":"human_confirmed","confidence":1}'
 ```
+
+**Restart and ask again — passing only the project, never the triggering fact:**
+
+```bash
+shadowgraph review '{"project":"checkout-service"}'
+```
+
+```json
+[
+  {
+    "decisionId": "decision_1788079304730_yjawcg",
+    "title": "Choose the datastore",
+    "reason": "deployment",
+    "alternativesToReconsider": [
+      "PostgreSQL"
+    ]
+  }
+]
+```
+
+ShadowGraph read the stored fact, matched it against the rule saved with the decision, and surfaced
+the alternative that had been rejected for a reason that no longer holds. Your decision IDs will
+differ; nothing else does.
+
+That is decision memory: not "what did we talk about", but **"what did we decide, what did we rule
+out, and does that still hold?"**
+
+For the same story through MCP, the HTTP API, and the JavaScript API — plus recording failed
+attempts and outcomes — see the [decision-memory demo](docs/decision-memory-demo.md).
+
+## Key capabilities
+
+**Decision memory.** Decisions carry the chosen approach, rejected alternatives with their reasons,
+assumptions, evidence, and structured `reopenWhen` rules. Outcomes (successful, mixed, failed,
+unknown) feed back into confidence.
+
+**Reconsideration.** `review()` evaluates reopen rules against *stored* facts, so it works after a
+restart without the caller re-supplying what changed. Review signals are persisted and
+acknowledgeable.
+
+**Failed-attempt memory.** Attempts record the approach, the result, the environment, and the
+lesson, so an agent can discover that something was already tried and why it did not work.
+
+**Provenance you can audit.** Every claim carries a `sourceClass` — `agent_claimed`,
+`tool_observed`, `human_confirmed`, or `production_verified` — which records *what was claimed*
+about an observation's origin, never proof of it. Ordinary tool input cannot create `verified`; that
+requires a separately configured Ed25519 verifier.
+
+**Scoped memory and temporal recall.** `remember()` / `recall()` store preferences, profiles, goals,
+instructions, procedures, episodes, and notes under a project plus optional `userId` / `agentId` /
+`runId`. Facts, memories, and relations are bi-temporal, so you can ask what was true `asOf` a past
+moment. Retrieval fuses lexical, vector, graph-distance, and temporal signals and declares which
+signals were unavailable rather than silently degrading.
+
+**Project and scope isolation.** Omitted project and scope mean the `default` project and all-null
+scope — never every project or every user. Purge is previewable, logical by default, and explicitly
+irreversible in hard mode.
+
+**Explainable retrieval.** Results expose raw scores, ranks, and reasons, and every bounded response
+declares its total, pages, and omitted scope. Nothing is silently summarized away.
+
+## Local-first and privacy
+
+Everything is a local file. The HTTP server binds to `127.0.0.1` and rejects non-local browser
+origins. There is no cloud service, no account, no telemetry, and no analytics — ShadowGraph makes
+no outbound network request unless you explicitly configure one.
+
+The two opt-ins that can send data off the machine are both off by default:
+
+- **Embeddings.** No endpoint is configured. A localhost OpenAI-compatible server works once
+  configured; a remote endpoint additionally requires `SHADOWGRAPH_ALLOW_REMOTE_EMBEDDINGS=1`,
+  because that means memory and query text leave your machine.
+- **Markdown export.** `markdown-sync` writes plaintext copies you control. ShadowGraph cannot find
+  or delete those copies later — see [Storage, backup, and deletion](#storage-backup-and-deletion).
+
+For shared local use, set a Bearer token:
+
+```bash
+SHADOWGRAPH_API_TOKEN="use-a-random-token-at-least-16-characters" shadowgraph serve
+```
+
+Then send `Authorization: Bearer use-a-random-token-at-least-16-characters` with every request. This
+is defense in depth for a local deployment, not a public-internet security model. See
+[SECURITY.md](SECURITY.md).
 
 ## Interfaces
-
-### CLI
-
-```bash
-node src/cli.js stats
-node src/cli.js list
-node src/cli.js search '{"query":"database","project":"my-app","status":"validated","minConfidence":0.7}'
-node src/cli.js remember '{"project":"my-app","scope":{"userId":"alice"},"memoryType":"preference","key":"editor","text":"Prefers VS Code"}'
-node src/cli.js recall '{"project":"my-app","scope":{"userId":"alice"},"query":"development environment"}'
-node src/cli.js markdown-sync '{"directory":"./memory-notes","mode":"push"}'
-node src/cli.js context '{"project":"my-app","facts":{"deployment":"local"}}'
-node src/cli.js review '{"changedFacts":["local-single-user"]}'
-node src/cli.js fact '{"key":"deployment","value":"local","source":"human_confirmed","confidence":1}'
-node src/cli.js decision '{"project":"my-app","title":"Choose a database","chosen":"PostgreSQL"}'
-node src/cli.js outcome '{"decisionId":"DECISION_ID","outcome":{"status":"failed","lessons":["Assumption was wrong"]}}'
-node src/cli.js status '{"decisionId":"DECISION_ID","status":"validated"}'
-node src/cli.js link '{"from":"DECISION_ID","to":"FACT_ID","relation":"depends_on"}'
-node src/cli.js traverse '{"id":"DECISION_ID","depth":2,"direction":"out"}'
-node src/cli.js supersede '{"decisionId":"OLD_ID","replacementId":"NEW_ID"}'
-node src/cli.js redact '{"project":"my-app"}'
-node src/cli.js purge '{"project":"my-app"}'
-node src/cli.js attempt '{"solution":"Rewrite everything","result":"Regression"}'
-```
-
-### Complete restart and reconsideration example
-
-Every command below opens the installed store in a new process, so the recall and review steps exercise a real restart boundary:
-
-```bash
-# 1. Remember.
-shadowgraph remember '{"project":"release-demo","scope":{"userId":"alice"},"memoryType":"preference","key":"editor","text":"Alice prefers VS Code"}'
-
-# 2. Restart (the prior CLI process has exited), then recall stored memory.
-shadowgraph recall '{"project":"release-demo","scope":{"userId":"alice"},"query":"editor preference"}'
-
-# 3. Record a decision and its durable reconsideration rule.
-shadowgraph decision '{"project":"release-demo","title":"Choose deployment database","chosen":"SQLite","alternatives":[{"label":"PostgreSQL","reasonRejected":"Single-user deployment","reopenWhen":[{"key":"deployment","operator":"equals","value":"multi-user"}]}]}'
-shadowgraph fact '{"project":"release-demo","key":"deployment","value":"single-user","sourceClass":"human_confirmed"}'
-
-# 4. The fact changes in another process.
-shadowgraph fact '{"project":"release-demo","key":"deployment","value":"multi-user","sourceClass":"human_confirmed"}'
-
-# 5. Restart again and review only stored project state. Do not resend the fact.
-shadowgraph review '{"project":"release-demo"}'
-```
-
-The final result lists the database decision and `PostgreSQL` under `alternativesToReconsider`.
-
-### HTTP API
-
-```text
-GET  /health
-GET  /stats
-GET  /records
-GET  /search?q=database&project=my-app
-GET  /review-signals
-POST /decisions
-POST /attempts
-POST /memories
-POST /recall
-POST /facts
-POST /outcomes
-POST /review
-POST /context
-POST /status
-POST /relationships
-POST /traverse
-POST /redact
-POST /supersede
-POST /maintain
-POST /review-signals/ack
-POST /retrieve
-GET  /validate
-POST /repair-plan
-POST /backup
-POST /restore
-POST /confidence-evidence
-GET  /journal
-POST /rebuild
-POST /projects/purge-preview
-DELETE /projects
-```
-
-`/redact` is read-only and returns a privacy-safe export. `/review` evaluates rules and persists deduplicated review signals; use `/review-signals` to read them and `/review-signals/ack` to acknowledge them. `/repair-plan` is always non-destructive and returns `{apply:false, actions:[...]}`. `/projects/purge-preview` shows deletion counts without changing storage. `DELETE /projects` performs a logical/tombstone purge by default: project content is removed from the live projection and the auditable purge skeleton remains. Use `{ "mode": "hard" }` only for explicit physical journal deletion; hard purge creates a declared journal gap and cannot be undone. The server returns `401` when token authentication is enabled and missing, `403` for disallowed browser origins, `404` for missing decisions or routes, and `413` for oversized request bodies.
-
-Preview and delete projects explicitly:
-
-```bash
-shadowgraph purge-preview '{"project":"release-demo"}'
-shadowgraph purge '{"project":"release-demo"}'                 # logical default
-shadowgraph purge '{"project":"another-project","mode":"hard"}' # irreversible physical journal deletion
-```
-
-**External Markdown exports are not automatically deleted.** Logical and hard purge remove canonical project data according to their documented journal semantics, but ShadowGraph cannot discover plaintext exports in arbitrary workspaces, Git history, cloud sync, backups, or removable media. Delete every external copy separately.
 
 ### MCP
 
@@ -248,69 +218,30 @@ shadowgraph purge '{"project":"another-project","mode":"hard"}' # irreversible p
 shadowgraph mcp
 ```
 
-For lower prompt overhead without losing stored fidelity, set `SHADOWGRAPH_MCP_COMPACT=1`. Compact mode advertises 12 workflow tools while the full relational graph, memories, facts, events, alternatives, and outcomes remain stored unchanged. Retrieval supports `limit`/`offset` only as explicit pagination and returns `{items,page:{total,hasMore}}`; no records are silently summarized or discarded.
-
-The stdio server is dual-era: legacy clients negotiate `2024-11-05` through `initialize`; modern clients use `2026-07-28` per-request `_meta` and `server/discover`. Any valid JSON-RPC message without an `id` is a notification: it executes normally but emits no success or error response, regardless of method name. Explicit `id:null` requests and parse errors still receive `id:null` responses. Tools, resources, prompts, notifications, and JSON-RPC errors are covered in both contracts. `npm run check:mcp` runs the pinned official Inspector in strict mode and requires 27 full tools, 12 compact tools, and zero findings.
-
-To let MCP generate semantic vectors through a local OpenAI-compatible server (Ollama, llama.cpp, LM Studio, or equivalent), configure both values:
+Compact mode is recommended: it advertises 12 workflow tools while the full graph, memories, facts,
+alternatives, and outcomes stay stored at full fidelity. Compact mode is a tool-advertisement
+choice, not lossy storage.
 
 ```bash
-SHADOWGRAPH_EMBEDDING_URL="http://127.0.0.1:11434/v1" \
-SHADOWGRAPH_EMBEDDING_MODEL="nomic-embed-text" \
-npm run mcp
+SHADOWGRAPH_MCP_COMPACT=1 shadowgraph mcp
 ```
 
-Remote URLs are rejected unless `SHADOWGRAPH_ALLOW_REMOTE_EMBEDDINGS=1` is also set. That opt-in means memory/query text leaves the machine. Without an embedder or caller-supplied vectors, recall remains lexical/graph/temporal and explicitly returns `semantic.available=false`.
+The 12 compact tools are `shadowgraph_context`, `shadowgraph_remember`, `shadowgraph_recall`,
+`shadowgraph_record_decision`, `shadowgraph_record_attempt`, `shadowgraph_record_fact`,
+`shadowgraph_record_outcome`, `shadowgraph_retrieve`, `shadowgraph_search`, `shadowgraph_review`,
+`shadowgraph_validate`, and `shadowgraph_maintain`. Full mode advertises 27 — see the
+[MCP compatibility guide](docs/mcp-compatibility.md) for the complete inventory, both protocol
+revisions, and verified client behaviour.
 
-Optional signed offline fact verification is enabled only when `SHADOWGRAPH_VERIFIER_CONFIG` names a local JSON configuration containing an allowed evidence root and trusted Ed25519 public keys. Full mode then advertises `shadowgraph_verify_fact` as tool 28; compact mode remains exactly 12 tools. The caller supplies only `factId` and an evidence path inside the configured root—never verifier identity, key, signature, method, or target status.
+### AI tool setup
 
-MCP tools:
-
-- `shadowgraph_record_decision` (supports `project`)
-- `shadowgraph_record_attempt` (supports `project`)
-- `shadowgraph_review`
-- `shadowgraph_search`
-- `shadowgraph_context`
-- `shadowgraph_remember`
-- `shadowgraph_recall`
-- `shadowgraph_record_fact`
-- `shadowgraph_record_outcome`
-- `shadowgraph_update_status`
-- `shadowgraph_link`
-- `shadowgraph_traverse`
-- `shadowgraph_supersede`
-- `shadowgraph_redact`
-- `shadowgraph_purge`
-- `shadowgraph_maintain`
-- `shadowgraph_retrieve`
-- `shadowgraph_validate`
-- `shadowgraph_journal`
-- `shadowgraph_rebuild`
-- `shadowgraph_review_signals`
-- `shadowgraph_purge_preview`
-- `shadowgraph_ack_review`
-- `shadowgraph_repair_plan`
-- `shadowgraph_backup`
-- `shadowgraph_restore`
-- `shadowgraph_confidence_evidence`
-
-MCP exposes 27 tools by default (12 in compact mode) and also advertises a `shadowgraph://context` resource and a consequential-task prompt. Reading that context may generate review signals, so the MCP server serializes and persists it like a mutation. Search, retrieve, recall, context, and journal responses declare pagination and completeness; confidence evidence requires a stable caller-supplied `key`.
-
-Recommended agent policy:
-
-> Before a consequential task, call ShadowGraph context for the project. Search relevant decisions and failed attempts. Record decisions with assumptions, evidence, and rejected alternatives. Record outcomes after implementation. Treat every fact as a hypothesis unless it carries a verifier-checked signed attestation; a strong `sourceClass` is a strong claim, not a warrant.
-
-## AI tool setup
-
-Install globally from GitHub before configuring a GUI/agent client, so `shadowgraph` is on that client's `PATH`:
+Install globally first so the client can find `shadowgraph` on its `PATH`:
 
 ```bash
 npm install --global github:LiLara-AI/shadowgraph
 shadowgraph setup
 shadowgraph doctor
 ```
-
-Compact mode is recommended because it advertises the 12 workflow tools while preserving full-fidelity storage. Full mode remains available: remove `SHADOWGRAPH_MCP_COMPACT` or set it to `0`.
 
 **Claude Code** (user scope):
 
@@ -330,34 +261,208 @@ claude mcp add --scope user --env SHADOWGRAPH_MCP_COMPACT=1 --transport stdio sh
 codex mcp add shadowgraph --env SHADOWGRAPH_MCP_COMPACT=1 -- shadowgraph mcp
 ```
 
-**Hermes Agent** (prefer the CLI rather than hand-editing config):
+**Hermes Agent**:
 
 ```bash
 hermes mcp add shadowgraph --command shadowgraph --connect-timeout 30 --env SHADOWGRAPH_MCP_COMPACT=1 --args mcp
 ```
 
-Verified file forms are in `integrations/`: Claude/Cursor stdio JSON, Codex `config.toml`, and Hermes `config.yaml`. `npm run check:integrations` validates their launch fields; the real-tarball smoke launches that installed command in full and compact modes. Set an absolute `SHADOWGRAPH_FILE` in the client environment when one stable store is required across working directories.
+Verified file forms for all four live in [`integrations/`](integrations/README.md). Set an absolute
+`SHADOWGRAPH_FILE` in the client environment when one store must be shared across working
+directories.
 
-## Migration and storage
+### CLI
 
-The JSON store accepts both the v0.1 array format and later graph envelopes. Current exports use schema 5:
+The commands you will actually use:
 
-```json
-{
-  "schemaVersion": 5,
-  "records": [],
-  "facts": [],
-  "relations": [],
-  "events": [],
-  "journal": []
-}
+```bash
+shadowgraph setup
+shadowgraph doctor
+shadowgraph context '{"project":"my-app"}'
+shadowgraph decision '{"project":"my-app","title":"Choose the datastore","chosen":"SQLite"}'
+shadowgraph fact '{"project":"my-app","key":"deployment","value":"local","sourceClass":"human_confirmed"}'
+shadowgraph attempt '{"solution":"Rewrite everything","result":"Regression"}'
+shadowgraph outcome '{"decisionId":"DECISION_ID","outcome":{"status":"failed","lessons":["Assumption was wrong"]}}'
+shadowgraph review '{"project":"my-app"}'
+shadowgraph search '{"query":"database","project":"my-app"}'
+shadowgraph remember '{"project":"my-app","memoryType":"preference","key":"editor","text":"Prefers VS Code"}'
+shadowgraph recall '{"project":"my-app","query":"development environment"}'
 ```
 
-Schemas 1 through 4 remain importable. Schema 4's global entity-ID, relation-integrity, and project invariants remain enforced during migration; `active` migrates to `proposed` and `aging` to system-owned `stale` with an explicit migration marker. An unsupported future envelope schema is rejected before replacing live state; individual future entities are preserved and reported by validation. JSON is the zero-dependency portable default. v0.40.0 stores a monotonic revision and can reject stale `expectedRevision` saves to prevent lost updates; callers should reload and retry after a revision conflict. SQLite is selectable through `SHADOWGRAPH_STORAGE=sqlite` on Node 22.5+ and uses normalized relational tables with WAL, a busy timeout, transactional replacement, legacy envelope migration, and revision checks. Do not assume revision checks replace application-level conflict handling when multiple processes mutate stale in-memory graphs.
+<details>
+<summary>Full command list</summary>
 
-## Security and privacy
+`setup` · `doctor` · `serve` · `mcp` · `stats` · `list` · `search` · `retrieve` · `recall` ·
+`remember` · `markdown-sync` · `context` · `review` · `maintain` · `signals` · `ack` · `validate` ·
+`repair-plan` · `backup` · `restore` · `decision` · `attempt` · `fact` · `outcome` · `status` ·
+`link` · `traverse` · `redact` · `supersede` · `purge-preview` · `purge` · `journal` · `rebuild` ·
+`confidence-evidence`
 
-The HTTP server binds to `127.0.0.1` by default and rejects non-local browser origins. Set `SHADOWGRAPH_API_TOKEN` for Bearer authentication in shared local deployments. The read-only dashboard is served at `http://127.0.0.1:8787/dashboard`; the static page itself can load without the token, but every data request still receives `401` until the token is entered. The password field keeps the token only in page memory and never writes it to cookies, local storage, or ShadowGraph data. The dashboard reads the same local origin only. This is defense in depth, not a public internet security model. Do not expose the API publicly without TLS, rate limiting, and a deployment threat model. Do not store secrets or sensitive transcripts unless your local storage policy permits it. See `SECURITY.md`.
+Full argument shapes are in the [API reference](docs/api-reference.md).
+</details>
+
+### HTTP API
+
+```bash
+shadowgraph serve
+curl http://127.0.0.1:8787/health
+```
+
+A read-only dashboard is served at `http://127.0.0.1:8787/dashboard`. It talks only to the same
+local origin, and a token entered there is kept in page memory only — never in cookies, local
+storage, or ShadowGraph data.
+
+<details>
+<summary>All HTTP endpoints</summary>
+
+```text
+GET  /health                 GET  /stats               GET  /records
+GET  /search?q=&project=     GET  /review-signals      GET  /validate
+GET  /journal
+
+POST /decisions              POST /attempts            POST /memories
+POST /recall                 POST /facts               POST /outcomes
+POST /review                 POST /context             POST /status
+POST /relationships          POST /traverse            POST /redact
+POST /supersede              POST /maintain            POST /retrieve
+POST /review-signals/ack     POST /repair-plan         POST /backup
+POST /restore                POST /rebuild             POST /confidence-evidence
+POST /projects/purge-preview
+
+DELETE /projects
+```
+
+`/redact` returns a privacy-safe export and never mutates. `/repair-plan` is always non-destructive
+and returns `{apply:false, actions:[...]}`. `/projects/purge-preview` shows deletion counts without
+changing storage. The server returns `401` when token auth is enabled and missing, `403` for
+disallowed browser origins, `404` for missing decisions or routes, and `413` for oversized bodies.
+</details>
+
+### JavaScript
+
+```js
+import { createShadowGraph } from 'shadowgraph-unified-plugin';
+
+const graph = createShadowGraph();
+graph.addDecision({
+  project: 'checkout-service',
+  title: 'Choose the datastore',
+  chosen: 'SQLite',
+  confidence: 0.8,
+  alternatives: [{
+    label: 'PostgreSQL',
+    reasonRejected: 'Single-user local deployment does not justify running a server',
+    reopenWhen: [{ key: 'deployment', operator: 'equals', value: 'multi-user' }]
+  }]
+});
+graph.addFact({
+  project: 'checkout-service',
+  key: 'deployment',
+  value: 'multi-user',
+  sourceClass: 'human_confirmed',
+  confidence: 1
+});
+
+// review() reads stored facts, so this also works in a fresh process after an
+// export/save and load. Do not pass the triggering fact again.
+console.log(graph.review({ project: 'checkout-service' }));
+```
+
+The bare-specifier import resolves when ShadowGraph is a dependency of your project
+(`npm install github:LiLara-AI/shadowgraph`). With a `--global` install, use the CLI, HTTP, or MCP
+surfaces instead, or import from the installed path.
+
+## Storage, backup, and deletion
+
+JSON is the zero-dependency default and stores a versioned graph in `.shadowgraph/data.json`. Set
+`SHADOWGRAPH_FILE` to relocate it. Set `SHADOWGRAPH_STORAGE=sqlite` on Node 22.5+ for the WAL-backed
+relational adapter. Current exports use schema 5; schemas 1 through 4 remain importable.
+
+State and journal are written in one atomic operation, every save and restore for a destination
+shares a cross-process lock fence, and a stale write is rejected with a revision conflict rather
+than silently lost. `backup` takes a consistent snapshot; `restore` validates domain and journal
+consistency before replacing live state, and rolls back on failure. This is process-level rollback
+safety, **not** a claim of crash or power-loss durability. The full guarantees — lock timeouts,
+stale-lock recovery, revision arithmetic, and restore artifact reporting — are in the
+[API reference](docs/api-reference.md#4-storage) and the
+[SQLite restore contract](docs/contracts/sqlite-restore-contract.md).
+
+Deletion is explicit and previewable:
+
+```bash
+shadowgraph purge-preview '{"project":"release-demo"}'
+shadowgraph purge '{"project":"release-demo"}'
+shadowgraph purge '{"project":"another-project","mode":"hard"}'
+```
+
+Logical purge (the default) removes project content from the live projection and keeps an auditable,
+payload-free purge skeleton. Hard purge physically deletes journal entries, creates a declared gap,
+and cannot be undone.
+
+**Purge cannot delete external Markdown exports.** ShadowGraph has no way to find plaintext copies
+in arbitrary workspaces, Git history, cloud sync, backups, or removable media. Delete those
+separately.
+
+## Limitations and Technical Preview status
+
+ShadowGraph 0.40.0 is a **Technical Preview / Early Access** release. It is not Beta and not stable.
+
+- **Interfaces and the storage schema may still change.** Do not use it for data you cannot
+  reproduce.
+- **Not on npm.** The package is deliberately `private: true`. No npm publication, Git tag, or
+  GitHub release has been created, and none is authorized.
+- **No comparative benchmark has been measured.** Comparative benchmark infrastructure was executed,
+  but no arm was measured because no common local/free LLM and embedding endpoint was available. No
+  comparative performance, quality, token, cost, or 'best' claim is supported. ShadowGraph makes no
+  claim of being faster, cheaper, lower-token, more accurate, or better than any other memory
+  system. See the [benchmark report](docs/benchmark-report.md).
+- **Security review status.** An AI-assisted independent security review of commit `4a5e076` (tree
+  `62c1918e`) was completed on 2026-08-30 by Antigravity Assistant (Gemini 3.7 Flash), with a PASS
+  result and no unresolved findings. **No human third-party security audit has been performed.** See
+  [SECURITY.md](SECURITY.md#security-review-status).
+- **No default extractor, background watcher, or hosted sync.** ShadowGraph records what you tell it
+  to record.
+- **Single maintainer.** No paid support, no patch SLA, and no bug bounty.
+
+## Feedback and support
+
+Technical Preview feedback is the point of this release. Please tell us when something breaks.
+
+| What | Where |
+| --- | --- |
+| Bug or incorrect behaviour | [Open a bug report](https://github.com/LiLara-AI/shadowgraph/issues/new?template=bug_report.yml) |
+| Feature or capability request | [Open a feature request](https://github.com/LiLara-AI/shadowgraph/issues/new?template=feature_request.yml) |
+| Security vulnerability | [Report it privately](https://github.com/LiLara-AI/shadowgraph/security/advisories/new) — never in a public issue |
+| Questions, ideas, "is this useful?" | [Discussions](https://github.com/LiLara-AI/shadowgraph/discussions) |
+
+During the preview, these reports are the most valuable:
+
+- **Installation problems** — anything between `npm install --global` and a green `doctor`.
+- **MCP client compatibility** — which client, which mode, and what it did or did not discover.
+- **Memory usefulness** — did recalled context actually change what your agent did?
+- **Confusing workflows** — where the docs or a command shape sent you the wrong way.
+- **Missing decision-memory use cases** — decisions you wanted to store and could not.
+- **Performance** — where it felt slow, and roughly how large the store was.
+
+ShadowGraph has no telemetry and collects nothing automatically, so a report from you is the only
+signal there is. When pasting output, redact anything private: decision and memory content is your
+data, and `shadowgraph doctor` output is usually enough.
+
+## Documentation
+
+| Document | What it covers |
+| --- | --- |
+| [Decision-memory demo](docs/decision-memory-demo.md) | The full worked example through CLI, MCP, HTTP, and JavaScript |
+| [API reference](docs/api-reference.md) | JavaScript, CLI, HTTP, and MCP surfaces |
+| [Unified memory guide](docs/unified-memory.md) | `remember` / `recall`, scoping, temporal recall, Markdown sync |
+| [MCP compatibility](docs/mcp-compatibility.md) | Protocol revisions, tool inventory, verified client behaviour |
+| [Contracts](docs/contracts) | Authoritative guarantees: provenance, lifecycle, journal, completeness, search, confidence, SQLite restore |
+| [Architecture decisions](docs/adr) | ADR-0006 (memory kernel), ADR-0007 (journal baseline placement) |
+| [Vision and principles](docs/vision-and-principles.md) | What ShadowGraph is for, and what it deliberately will not do |
+| [Benchmark report](docs/benchmark-report.md) | Honest results — no arm was measured; no comparative claim is supported |
+| [Security policy](SECURITY.md) | Threat model, review status, and how to report a vulnerability privately |
+| [Contributing](CONTRIBUTING.md) | Development setup and pull-request expectations |
+| [Changelog](CHANGELOG.md) | Release history |
 
 ## Checks
 
@@ -367,31 +472,14 @@ npm test
 npm run check:integrations
 npm run check:mcp
 npm audit --omit=dev
-python -m py_compile integrations/hermes-agent.py
 npm run check:package
-npm pack --dry-run --json
 npm run smoke:package
 ```
 
-GitHub Actions covers Ubuntu and Windows with Node 20, 22, and 24. SQLite-specific gates run only on Node 22/24 where `node:sqlite` exists. The strict Inspector runs full and compact gates on Node 24 for both operating systems; the package smoke runs from a real clean install in every matrix cell.
-
-## Documentation
-
-| Document | What it covers |
-| --- | --- |
-| [API reference](docs/api-reference.md) | JavaScript, CLI, HTTP, and MCP surfaces |
-| [Unified memory guide](docs/unified-memory.md) | `remember` / `recall`, scoping, temporal recall, Markdown sync |
-| [MCP compatibility](docs/mcp-compatibility.md) | Implemented protocol revisions and verified client behaviour |
-| [Contracts](docs/contracts) | Authoritative guarantees: provenance, lifecycle, journal, completeness, search, confidence, SQLite restore |
-| [Architecture decisions](docs/adr) | ADR-0006 (memory kernel), ADR-0007 (journal baseline placement) |
-| [Vision and principles](docs/vision-and-principles.md) | What ShadowGraph is for, and what it deliberately will not do |
-| [Benchmark report](docs/benchmark-report.md) | Honest results — no arm was measured; no comparative claim is supported |
-| [Benchmark plan](docs/shadowgraph-benchmark-plan.md) | Frozen preregistration and measurement rules |
-| [Security and safety requirements](docs/shadowgraph-security-and-safety.md) | Threat model and data-integrity requirements |
-| [Security policy](SECURITY.md) | How to report a vulnerability privately |
-| [Contributing](CONTRIBUTING.md) | Development setup and pull-request expectations |
-| [Changelog](CHANGELOG.md) | Release history |
+GitHub Actions covers Ubuntu and Windows on Node 20, 22, and 24. SQLite gates run only where
+`node:sqlite` exists. The strict official MCP Inspector runs full and compact gates, and the package
+smoke test runs from a real clean install in every matrix cell.
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See [LICENSE](LICENSE).

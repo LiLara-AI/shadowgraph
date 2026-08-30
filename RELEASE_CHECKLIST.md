@@ -7,7 +7,7 @@ No publish, tag, GitHub release, commit, push, or release-branch action is part 
 - [x] Package and lockfile use the identical name/version: `shadowgraph-unified-plugin@0.40.0`.
 - [x] The exact name was syntactically accepted by `npm pack` and the live registry returned HTTP 404 / npm `E404` on 2026-08-27.
 - [x] Recheck the exact registry name immediately before publication; the 404 is evidence at one point in time, not a reservation.
-- [x] Keep `"private": true` and retain Technical Preview status while independent security review and actual preregistered comparative measurement remain open. The valid zero-measurement run and local journal benchmark do not satisfy those gates.
+- [x] Keep `"private": true` and retain Technical Preview status while the actual preregistered comparative measurement and the human third-party security audit remain open. The valid zero-measurement run and local journal benchmark do not satisfy the benchmark gate, and the recorded AI-assisted security review does not satisfy the human-audit gate.
 - [ ] After every remaining gate is approved, change `private` to `false`, regenerate/verify the lockfile, rerun every command below, inspect the real tarball, then obtain explicit publish authorization.
 
 ## Technical gates
@@ -44,7 +44,8 @@ No publish, tag, GitHub release, commit, push, or release-branch action is part 
 
 ## Remaining non-technical release gates — intentionally not performed here
 
-- [ ] **Independent security review.** Record reviewer, scope, commit/tree hash, findings, accepted risk, and remediation verification. Do not replace this with self-review or `npm audit`.
+- [x] **Independent security review — AI-assisted, recorded.** Antigravity Assistant (Gemini 3.7 Flash), 2026-08-30, commit `4a5e0761f2c0924ad8417ead39e1c5a596445daf`, tree `62c1918e42abf2059cbfab782d4be2cd8b461f83`. Result: PASS, no release-blocking vulnerabilities, no unresolved findings. Full scope and verified results are recorded in [`SECURITY.md`](SECURITY.md#security-review-status).
+- [ ] **Human third-party security audit — NOT performed.** The AI-assisted review above is a control, not a substitute. A human expert audit or penetration test remains outstanding and is required before any claim stronger than Technical Preview.
 - [ ] **Actual preregistered benchmark comparison.** The retained record is valid but has `MEASURED=0`, `NOT_MEASURED=7`, and `measurements=0` because no common local/free LLM and embedding endpoint existed. Run all seven arms under the frozen equal-configuration rules, retain raw outputs, validate/aggregate them, and obtain independent interpretation. Dependency import probes and the local journal benchmark do not satisfy this gate. Until then, `best` and equivalent overall-superiority wording are prohibited.
 - [ ] Maintainer signs off on release wording, package ownership/access, provenance, and support contact.
 - [ ] Explicit authorization to remove `private`, publish npm, create a Git tag, and create a GitHub release.
