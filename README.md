@@ -461,7 +461,7 @@ data, and `shadowgraph doctor` output is usually enough.
 | [Vision and principles](docs/vision-and-principles.md) | What ShadowGraph is for, and what it deliberately will not do |
 | [Benchmark report](docs/benchmark-report.md) | Honest results — no arm was measured; no comparative claim is supported |
 | [Security policy](SECURITY.md) | Threat model, review status, and how to report a vulnerability privately |
-| [Contributing](CONTRIBUTING.md) | Development setup and pull-request expectations |
+| [Contributing](https://github.com/LiLara-AI/shadowgraph/blob/main/CONTRIBUTING.md) | Development setup and pull-request expectations |
 | [Changelog](CHANGELOG.md) | Release history |
 
 ## Checks
