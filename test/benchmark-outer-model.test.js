@@ -12,6 +12,10 @@ import {
   validateAdapterRequest,
   validateAdapterResponse
 } from '../benchmark/lib/adapter-protocol.mjs';
+import {
+  namespaceRefFor,
+  recordContentSha256
+} from '../benchmark/lib/v11-contract.mjs';
 
 const RESPONSE_SCHEMA = {
   decisionId: 'string|null',
@@ -79,6 +83,38 @@ const ADAPTER_CORRELATION = {
 };
 
 const NAMESPACE = { projectId: 'project-a', userId: null };
+const ALTERNATE_NAMESPACE = { projectId: 'project-b', userId: null };
+
+function namespaceRef(namespace, correlation = ADAPTER_CORRELATION) {
+  return namespaceRefFor({
+    runId: correlation.runId,
+    armId: correlation.armId,
+    scenarioId: correlation.scenarioId,
+    repetition: correlation.repetition,
+    phase: correlation.phase
+  }, namespace);
+}
+
+function expectedDecisionRecord() {
+  return {
+    id: 'decision-generated-1',
+    type: 'decision',
+    contentSha256: recordContentSha256(VALID_DECISION)
+  };
+}
+
+function isolationVerifyPayload() {
+  return {
+    expectedRecord: expectedDecisionRecord(),
+    alternateNamespace: ALTERNATE_NAMESPACE,
+    alternateNamespaceRef: namespaceRef(ALTERNATE_NAMESPACE),
+    expectedAbsentRecord: {
+      id: 'decision-phase-a',
+      type: 'decision',
+      contentSha256: recordContentSha256({ phase: 'A', complete: true })
+    }
+  };
+}
 
 function retrievalPayload(task = 'persistence option') {
   return { query: { scenarioId: ADAPTER_CORRELATION.scenarioId, task } };
@@ -289,18 +325,35 @@ test('outer decision request records unavailable provider usage as null without 
   assert.equal(result.usage, null);
 });
 
-test('outer decision request performs zero retries after an HTTP failure', async () => {
-  let calls = 0;
-  const fetchImpl = async () => {
-    calls += 1;
-    return new Response('{"error":"rate limited"}', { status: 429 });
-  };
+test('outer HTTP failures expose only a stable code and integer status with zero retries', async () => {
+  for (const status of [408, 429, 500, 502, 503, 504]) {
+    let calls = 0;
+    const privateDetail = `private-provider-detail-${status}`;
+    const fetchImpl = async () => {
+      calls += 1;
+      return new Response(JSON.stringify({ error: privateDetail }), { status });
+    };
+    let thrown;
 
-  await assert.rejects(
-    requestOuterDecision({ fetchImpl, config: OUTER_CONFIG, correlation: OUTER_CORRELATION, request: outerRequest() }),
-    /HTTP 429/u
-  );
-  assert.equal(calls, 1);
+    try {
+      await requestOuterDecision({
+        fetchImpl,
+        config: OUTER_CONFIG,
+        correlation: OUTER_CORRELATION,
+        request: outerRequest()
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    assert.ok(thrown instanceof Error, `HTTP ${status} must reject`);
+    assert.equal(thrown.code, 'OUTER_HTTP_STATUS');
+    assert.equal(thrown.status, status);
+    assert.deepEqual(Object.keys(thrown).sort(), ['code', 'status']);
+    assert.equal(thrown.message.includes(privateDetail), false);
+    assert.equal(JSON.stringify(thrown).includes(privateDetail), false);
+    assert.equal(calls, 1);
+  }
 });
 
 test('outer decision timeout remains active while the provider response body is read', async () => {
@@ -385,10 +438,7 @@ test('adapter request protocol accepts only the four operation-specific memory p
       operation: 'verify',
       correlation: ADAPTER_CORRELATION,
       namespace: NAMESPACE,
-      payload: {
-        expectedRecord: { id: 'decision-generated-1', type: 'decision' },
-        alternateNamespace: { projectId: 'project-b', userId: null }
-      }
+      payload: isolationVerifyPayload()
     })
   ];
 
@@ -396,7 +446,7 @@ test('adapter request protocol accepts only the four operation-specific memory p
   for (const request of requests) assert.doesNotThrow(() => validateAdapterRequest(request));
   assert.deepEqual(Object.keys(requests[0]), [
     'schemaVersion', 'operation', 'runId', 'attemptId', 'phase', 'armId',
-    'scenarioId', 'repetition', 'namespace', 'payload'
+    'scenarioId', 'repetition', 'namespace', 'namespaceRef', 'payload'
   ]);
 
   assert.doesNotThrow(() => createAdapterRequest({
@@ -550,23 +600,23 @@ test('adapter verification response must prove the exact requested record and na
     operation: 'verify',
     correlation: ADAPTER_CORRELATION,
     namespace: NAMESPACE,
-    payload: {
-      expectedRecord: { id: 'decision-generated-1', type: 'decision' },
-      alternateNamespace: { projectId: 'project-b', userId: null }
-    }
+    payload: isolationVerifyPayload()
   });
   const result = {
     nativeContext: [],
     persistenceEvidence: {
       verified: true,
-      expectedRecord: { id: 'decision-generated-1', type: 'decision' },
+      expectedRecord: expectedDecisionRecord(),
       matchedRecordIds: ['decision-generated-1'],
-      namespace: NAMESPACE
+      observedContentSha256: expectedDecisionRecord().contentSha256,
+      namespaceRef: namespaceRef(NAMESPACE)
     },
     isolationEvidence: {
       verified: true,
-      alternateNamespace: { projectId: 'project-b', userId: null },
-      leakedRecordIds: []
+      expectedAbsentRecord: isolationVerifyPayload().expectedAbsentRecord,
+      alternateNamespaceRef: namespaceRef(ALTERNATE_NAMESPACE),
+      matchingRecordIdCount: 0,
+      matchingContentCount: 0
     }
   };
   const response = validAdapterEnvelope({ operation: 'verify', result });
@@ -581,7 +631,7 @@ test('adapter verification response must prove the exact requested record and na
           ...result,
           persistenceEvidence: {
             ...result.persistenceEvidence,
-            namespace: { projectId: 'project-other', userId: null }
+            namespaceRef: namespaceRef({ projectId: 'project-other', userId: null })
           }
         }
       }
@@ -597,7 +647,7 @@ test('adapter verification response must prove the exact requested record and na
           ...result,
           persistenceEvidence: {
             ...result.persistenceEvidence,
-            expectedRecord: { id: 'decision-other', type: 'decision' },
+            expectedRecord: { ...expectedDecisionRecord(), id: 'decision-other' },
             matchedRecordIds: ['decision-other']
           }
         }
@@ -615,7 +665,8 @@ test('adapter verification response must prove the exact requested record and na
           persistenceEvidence: {
             ...result.persistenceEvidence,
             verified: false,
-            matchedRecordIds: []
+            matchedRecordIds: [],
+            observedContentSha256: null
           }
         }
       }
@@ -629,15 +680,68 @@ test('adapter verification response must prove the exact requested record and na
         ...response,
         result: {
           ...result,
-          isolationEvidence: {
-            ...result.isolationEvidence,
-            verified: false,
-            leakedRecordIds: ['decision-generated-1']
+          persistenceEvidence: {
+            ...result.persistenceEvidence,
+            observedContentSha256: 'f'.repeat(64)
           }
         }
       }
     }),
-    /isolation.*verified/i
+    /exact expected record content hash|persistence.*verified/i
+  );
+  assert.throws(
+    () => validateAdapterResponse({
+      request,
+      response: {
+        ...response,
+        result: {
+          ...result,
+          isolationEvidence: {
+            ...result.isolationEvidence,
+            verified: false,
+            matchingRecordIdCount: 0,
+            matchingContentCount: 1
+          }
+        }
+      }
+    }),
+    /isolation.*verified|matching.*content/i
+  );
+
+  assert.throws(
+    () => validateAdapterResponse({
+      request,
+      response: {
+        ...response,
+        result: {
+          ...result,
+          isolationEvidence: {
+            ...result.isolationEvidence,
+            expectedAbsentRecord: {
+              ...result.isolationEvidence.expectedAbsentRecord,
+              id: 'different-phase-a-target'
+            }
+          }
+        }
+      }
+    }),
+    /requested.*absent record|isolation.*target/i
+  );
+  assert.throws(
+    () => validateAdapterResponse({
+      request,
+      response: {
+        ...response,
+        result: {
+          ...result,
+          persistenceEvidence: {
+            ...result.persistenceEvidence,
+            namespace: NAMESPACE
+          }
+        }
+      }
+    }),
+    /unknown persistenceEvidence field: namespace/i
   );
 });
 
@@ -646,10 +750,7 @@ test('adapter verification preserves honest failed and not-applicable responses 
     operation: 'verify',
     correlation: ADAPTER_CORRELATION,
     namespace: NAMESPACE,
-    payload: {
-      expectedRecord: { id: 'decision-generated-1', type: 'decision' },
-      alternateNamespace: { projectId: 'project-b', userId: null }
-    }
+    payload: isolationVerifyPayload()
   });
   const emptyResult = {
     nativeContext: [],
@@ -691,14 +792,17 @@ test('adapter verification preserves honest failed and not-applicable responses 
       nativeContext: [],
       persistenceEvidence: {
         verified: true,
-        expectedRecord: { id: 'decision-generated-1', type: 'decision' },
+        expectedRecord: expectedDecisionRecord(),
         matchedRecordIds: ['decision-generated-1'],
-        namespace: NAMESPACE
+        observedContentSha256: expectedDecisionRecord().contentSha256,
+        namespaceRef: namespaceRef(NAMESPACE)
       },
       isolationEvidence: {
         verified: true,
-        alternateNamespace: { projectId: 'project-b', userId: null },
-        leakedRecordIds: []
+        expectedAbsentRecord: isolationVerifyPayload().expectedAbsentRecord,
+        alternateNamespaceRef: namespaceRef(ALTERNATE_NAMESPACE),
+        matchingRecordIdCount: 0,
+        matchingContentCount: 0
       }
     },
     failure: { cause: 'OPERATION_FAILED', message: 'Contradictory failure' }
@@ -715,7 +819,7 @@ test('adapter verification preserves honest failed and not-applicable responses 
       isolationEvidence: {
         ...fullyVerifiedFailure.result.isolationEvidence,
         verified: false,
-        leakedRecordIds: ['decision-generated-1']
+        matchingRecordIdCount: 1
       }
     }
   };
@@ -744,5 +848,15 @@ test('adapter request protocol rejects unsupported operations, malformed namespa
       payload: {}
     }),
     /correlation.*field/i
+  );
+  const valid = createAdapterRequest({
+    operation: 'retrieve',
+    correlation: ADAPTER_CORRELATION,
+    namespace: NAMESPACE,
+    payload: retrievalPayload()
+  });
+  assert.throws(
+    () => validateAdapterRequest({ ...valid, namespaceRef: '0'.repeat(64) }),
+    /namespaceRef.*namespace.*correlation/i
   );
 });

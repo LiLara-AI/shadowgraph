@@ -1,4 +1,5 @@
 import { scoreScenario } from './scoring.mjs';
+import { validateV11RawRun } from './validate.mjs';
 
 const REQUIRED_PHASES = [
   'A', 'B', 'C', 'D_TRUE', 'D_FALSE_0', 'D_FALSE_1', 'D_FALSE_2',
@@ -9,6 +10,53 @@ const METRIC_NAMES = [
   'changedFactDetection', 'falseAlertRate', 'failedAttemptAvoidance',
   'projectIsolation', 'userIsolation'
 ];
+const V11_DECISION_PHASES = [
+  'A', 'B', 'C', 'D_TRUE', 'D_FALSE_0', 'D_FALSE_1', 'D_FALSE_2',
+  'E', 'ISOLATION_PROJECT', 'ISOLATION_USER'
+];
+const SHA256 = /^[a-f0-9]{64}$/u;
+const V11_SOURCE_HASH_FIELDS = [
+  'preregistrationSha256',
+  'amendment001Sha256',
+  'amendment002Sha256'
+];
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function requireTrustedV11SourceHashes(raw, trustedSourceHashes) {
+  if (!isPlainObject(trustedSourceHashes)) {
+    throw new Error('Trusted v1.1 source hashes are required for aggregation');
+  }
+  const fields = Object.keys(trustedSourceHashes);
+  if (fields.length !== V11_SOURCE_HASH_FIELDS.length
+    || fields.some((field) => !V11_SOURCE_HASH_FIELDS.includes(field))) {
+    throw new Error('Trusted v1.1 source hashes must contain exactly preregistrationSha256, amendment001Sha256, and amendment002Sha256');
+  }
+  for (const field of V11_SOURCE_HASH_FIELDS) {
+    if (!SHA256.test(trustedSourceHashes[field])) {
+      throw new Error(`Trusted v1.1 source hash ${field} must be a lowercase full SHA-256 digest`);
+    }
+    if (raw?.[field] !== trustedSourceHashes[field]) {
+      throw new Error(`v1.1 raw ${field} does not match the trusted source hash`);
+    }
+  }
+}
+
+function requireV11AggregationOptions(options) {
+  if (!isPlainObject(options)) {
+    throw new Error('Trusted v1.1 source hashes are required for aggregation');
+  }
+  const unknown = Object.keys(options).find((field) => field !== 'trustedSourceHashes');
+  if (unknown !== undefined) {
+    throw new Error(`Unknown v1.1 aggregation option ${unknown}; only trustedSourceHashes is allowed`);
+  }
+  if (!Object.hasOwn(options, 'trustedSourceHashes')) {
+    throw new Error('Trusted v1.1 source hashes are required for aggregation');
+  }
+  return options.trustedSourceHashes;
+}
 
 function mean(values) {
   const finite = values.filter(Number.isFinite);
@@ -171,7 +219,7 @@ function bestCandidate(armResults, preregistration) {
   return null;
 }
 
-export function aggregateRun(raw, preregistration) {
+function aggregateLegacyRun(raw, preregistration) {
   const counts = {
     measuredArms: raw.arms.filter((arm) => arm.status === 'MEASURED').length,
     notMeasuredArms: raw.arms.filter((arm) => arm.status === 'NOT_MEASURED').length,
@@ -213,4 +261,180 @@ export function aggregateRun(raw, preregistration) {
       ? `${raw.arms.find((arm) => arm.armId === candidate.armId)?.name ?? candidate.armId} was best on the preregistered ShadowGraph warm-lifecycle benchmark under the recorded model, machine, scenarios, and repetitions.`
       : preregistration.marketingThresholds.measuredOnlyText
   };
+}
+
+function v11IsolationLeak(unit) {
+  const evidence = unit?.adapterEvidence?.verify?.isolationEvidence;
+  return Array.isArray(evidence?.leakedRecordIds) && evidence.leakedRecordIds.length > 0;
+}
+
+function v11LifecycleFrom(units) {
+  const byPhase = new Map(units.map((unit) => [unit.phase, unit]));
+  return {
+    A: byPhase.get('A')?.decisionResponse,
+    B: byPhase.get('B')?.decisionResponse,
+    C: byPhase.get('C')?.decisionResponse,
+    D_TRUE: byPhase.get('D_TRUE')?.decisionResponse,
+    D_FALSE: [0, 1, 2].map((index) => byPhase.get(`D_FALSE_${index}`)?.decisionResponse),
+    E: byPhase.get('E')?.decisionResponse,
+    ISOLATION_PROJECT: {
+      response: byPhase.get('ISOLATION_PROJECT')?.decisionResponse,
+      persistedLeak: v11IsolationLeak(byPhase.get('ISOLATION_PROJECT'))
+    },
+    ISOLATION_USER: {
+      response: byPhase.get('ISOLATION_USER')?.decisionResponse,
+      persistedLeak: v11IsolationLeak(byPhase.get('ISOLATION_USER'))
+    }
+  };
+}
+
+function v11UsageTotal(usage) {
+  if (Number.isFinite(usage?.totalTokens)) return usage.totalTokens;
+  if (Number.isFinite(usage?.total_tokens)) return usage.total_tokens;
+  return null;
+}
+
+function v11ZeroResultText(zeroResult) {
+  return `No measured result is available. Recorded causes: ${zeroResult.causes.join(', ')}.`;
+}
+
+function summarizeV11Arm(arm, raw, preregistration) {
+  const scores = [];
+  const economics = [];
+  for (let repetition = 0; repetition < preregistration.commonExecution.repetitions; repetition += 1) {
+    for (const scenario of preregistration.scenarios) {
+      const units = raw.units.filter((unit) => (
+        unit.armId === arm.armId
+        && unit.scenarioId === scenario.id
+        && unit.repetition === repetition
+      ));
+      const byPhase = new Map(units.map((unit) => [unit.phase, unit]));
+      const complete = V11_DECISION_PHASES.every((phase) => {
+        const unit = byPhase.get(phase);
+        if (!unit) return false;
+        if (phase === 'ISOLATION_USER'
+          && arm.applicability.userIsolation.status === 'NOT_APPLICABLE') {
+          return unit.status === 'EXCLUDED';
+        }
+        return unit.status === 'MEASURED';
+      });
+      if (!complete) return null;
+
+      const scored = scoreScenario(
+        scenario,
+        v11LifecycleFrom(units),
+        { applicability: arm.applicability }
+      );
+      scores.push({ scenarioId: scenario.id, repetition, ...scored });
+      const measuredUnits = units.filter((unit) => unit.phase !== 'RESET' && unit.status === 'MEASURED');
+      const tokenValues = measuredUnits.map((unit) => v11UsageTotal(unit.providerUsage));
+      const storageMeasurements = measuredUnits.map((unit) => unit.storage);
+      economics.push({
+        scenarioId: scenario.id,
+        repetition,
+        outerDecisionTokens: tokenValues.every(Number.isFinite)
+          ? tokenValues.reduce((sum, value) => sum + value, 0)
+          : null,
+        mcpToolCalls: measuredUnits.reduce((sum, unit) => sum + unit.operations.mcpToolCalls, 0),
+        lifecycleLatencyMs: measuredUnits.reduce((sum, unit) => sum + unit.latencyMs, 0),
+        peakStorageBytes: storageMeasurements.length > 0
+          && storageMeasurements.every((storage) => storage?.status === 'MEASURED')
+          ? Math.max(...storageMeasurements.map((storage) => storage.bytes))
+          : null
+      });
+    }
+  }
+  const expected = preregistration.scenarios.length * preregistration.commonExecution.repetitions;
+  if (scores.length !== expected) return null;
+  const metrics = {};
+  for (const name of METRIC_NAMES) {
+    metrics[name] = round(macroScenarioMean(scores, preregistration.scenarios, (item) => item.metrics[name]));
+  }
+  metrics.efficacyComposite = round(mean([
+    metrics.decisionRetrievalAccuracy,
+    metrics.rejectedAlternativeRecall,
+    metrics.rejectionReasonRecall,
+    metrics.changedFactDetection,
+    metrics.failedAttemptAvoidance,
+    Number.isFinite(metrics.falseAlertRate) ? 1 - metrics.falseAlertRate : null
+  ]));
+  return {
+    armId: arm.armId,
+    rankEligible: true,
+    scenarioRepetitions: scores.length,
+    metrics,
+    quality: {
+      mean: round(macroScenarioMean(scores, preregistration.scenarios, (item) => item.quality.total)),
+      criteria: Object.fromEntries(Object.keys(scores[0]?.quality.criteria ?? {}).map((name) => [
+        name,
+        round(macroScenarioMean(scores, preregistration.scenarios, (item) => item.quality.criteria[name]))
+      ]))
+    },
+    economics: {
+      meanOuterDecisionTokens: round(macroScenarioMean(
+        economics,
+        preregistration.scenarios,
+        (item) => item.outerDecisionTokens
+      )),
+      // Total lifecycle tokens require the separately correlated internal-provider ledger.
+      meanLifecycleTokens: null,
+      meanLifecycleMcpToolCalls: round(macroScenarioMean(economics, preregistration.scenarios, (item) => item.mcpToolCalls)),
+      medianLifecycleLatencyMs: round(median(economics.map((item) => item.lifecycleLatencyMs))),
+      meanPeakStorageBytes: round(macroScenarioMean(economics, preregistration.scenarios, (item) => item.peakStorageBytes))
+    }
+  };
+}
+
+export function aggregateV11Run(raw, preregistration, options = {}) {
+  const trustedSourceHashes = requireV11AggregationOptions(options);
+  requireTrustedV11SourceHashes(raw, trustedSourceHashes);
+  validateV11RawRun(raw, preregistration, trustedSourceHashes.preregistrationSha256);
+  const counts = {
+    measuredArms: raw.arms.filter((arm) => arm.status === 'MEASURED').length,
+    partialFailedArms: raw.arms.filter((arm) => arm.status === 'PARTIAL_FAILED').length,
+    failedArms: raw.arms.filter((arm) => arm.status === 'FAILED').length,
+    notMeasuredArms: raw.arms.filter((arm) => arm.status === 'NOT_MEASURED').length,
+    excludedArms: raw.arms.filter((arm) => arm.status === 'EXCLUDED').length,
+    units: raw.units.length
+  };
+  const base = {
+    schemaVersion: 2,
+    benchmarkVersion: '1.1',
+    mode: raw.mode,
+    runId: raw.runId,
+    status: raw.status,
+    zeroResult: structuredClone(raw.zeroResult),
+    counts,
+    armStatuses: raw.arms.map((arm) => ({
+      armId: arm.armId,
+      status: arm.status,
+      applicability: structuredClone(arm.applicability)
+    }))
+  };
+  if (raw.mode === 'ACCEPTANCE') return base;
+
+  const armResults = raw.arms
+    .filter((arm) => arm.status === 'MEASURED')
+    .map((arm) => summarizeV11Arm(arm, raw, preregistration))
+    .filter((result) => result !== null);
+  counts.measuredCompleteArms = armResults.length;
+  const rankEligibleArms = armResults.map((result) => result.armId);
+  const candidate = bestCandidate(armResults, preregistration);
+  return {
+    ...base,
+    rankEligibleArms,
+    armResults,
+    bestClaimAllowed: candidate !== null,
+    allowedMarketingText: candidate
+      ? `${raw.arms.find((arm) => arm.armId === candidate.armId)?.name ?? candidate.armId} was best on the preregistered ShadowGraph warm-lifecycle benchmark under the recorded model, machine, scenarios, and repetitions.`
+      : raw.zeroResult !== null
+        ? v11ZeroResultText(raw.zeroResult)
+        : preregistration.marketingThresholds.measuredOnlyText
+  };
+}
+
+export function aggregateRun(raw, preregistration, options) {
+  return raw?.schemaVersion === 2
+    ? aggregateV11Run(raw, preregistration, options)
+    : aggregateLegacyRun(raw, preregistration);
 }

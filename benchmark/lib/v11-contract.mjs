@@ -1,5 +1,9 @@
 // v1.1 Contract Kernel - Amendment 002 Implementation
 
+import { createHash } from 'node:crypto';
+
+import { validateDecisionResponse } from './outer-model.mjs';
+
 export const UNIT_STATUSES = ['MEASURED', 'FAILED', 'NOT_MEASURED', 'EXCLUDED'];
 
 export const ARM_STATUSES = ['MEASURED', 'PARTIAL_FAILED', 'FAILED', 'NOT_MEASURED', 'EXCLUDED'];
@@ -50,6 +54,12 @@ function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+function isCanonicalObject(value) {
+  if (!isPlainObject(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
 function assertExactKeys(value, expectedKeys, label) {
   const expected = new Set(expectedKeys);
   for (const key of Object.keys(value)) {
@@ -68,6 +78,96 @@ function isNonEmptyString(value) {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
+function canonicalJsonValue(value, seen, label) {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
+    return JSON.stringify(value);
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new Error(`${label} must contain finite JSON numbers`);
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    if (seen.has(value)) throw new Error(`${label} must not contain circular data`);
+    for (let index = 0; index < value.length; index += 1) {
+      if (!Object.hasOwn(value, index)) throw new Error(`${label} must not contain sparse arrays`);
+    }
+    const indexKeys = new Set(Array.from({ length: value.length }, (_, index) => String(index)));
+    if (Object.keys(value).some((key) => !indexKeys.has(key))) {
+      throw new Error(`${label} arrays must not contain named properties`);
+    }
+    seen.add(value);
+    const serialized = value
+      .map((item, index) => canonicalJsonValue(item, seen, `${label}[${index}]`))
+      .join(',');
+    seen.delete(value);
+    return `[${serialized}]`;
+  }
+  if (!isCanonicalObject(value)) throw new Error(`${label} must contain JSON-compatible data`);
+  if (seen.has(value)) throw new Error(`${label} must not contain circular data`);
+  seen.add(value);
+  const serialized = Object.keys(value)
+    .sort()
+    .map((key) => {
+      const child = value[key];
+      if (child === undefined) throw new Error(`${label}.${key} must not be undefined`);
+      return `${JSON.stringify(key)}:${canonicalJsonValue(child, seen, `${label}.${key}`)}`;
+    })
+    .join(',');
+  seen.delete(value);
+  return `{${serialized}}`;
+}
+
+/** Canonical recursive JSON used only for cryptographic evidence binding. */
+export function canonicalJson(value) {
+  return canonicalJsonValue(value, new Set(), 'canonical JSON');
+}
+
+function domainSeparatedSha256(domain, value) {
+  return createHash('sha256')
+    .update(domain, 'utf8')
+    .update('\0', 'utf8')
+    .update(canonicalJson(value), 'utf8')
+    .digest('hex');
+}
+
+/** Hash record content independently of its storage id so content clones remain detectable. */
+export function recordContentSha256(content) {
+  return domainSeparatedSha256('shadowgraph:v1.1:record-content:v1', content);
+}
+
+export function decisionRecordId(correlation) {
+  if (!isPlainObject(correlation)) throw new Error('decision record correlation must be an object');
+  assertExactKeys(
+    correlation,
+    ['armId', 'scenarioId', 'repetition', 'phase'],
+    'decision record correlation'
+  );
+  for (const field of ['armId', 'scenarioId', 'phase']) {
+    if (!isNonEmptyString(correlation[field])) {
+      throw new Error(`decision record correlation.${field} must be a non-empty string`);
+    }
+  }
+  if (!Number.isSafeInteger(correlation.repetition) || correlation.repetition < 0) {
+    throw new Error('decision record correlation.repetition must be a non-negative safe integer');
+  }
+  const components = [
+    correlation.armId,
+    correlation.scenarioId,
+    String(correlation.repetition),
+    correlation.phase
+  ];
+  return `decision:${components.map((value) => `${value.length}:${value}`).join(':')}`;
+}
+
+export function standardizedDecisionRecord(correlation, decisionResponse) {
+  validateDecisionResponse(decisionResponse);
+  return {
+    id: decisionRecordId(correlation),
+    type: 'decision',
+    content: structuredClone(decisionResponse)
+  };
+}
+
 function validateNullableString(value, label) {
   if (value !== null && !isNonEmptyString(value)) {
     throw new Error(`${label} must be null or a non-empty string`);
@@ -81,11 +181,38 @@ function validateNamespace(namespace, label) {
   validateNullableString(namespace.userId, `${label}.userId`);
 }
 
+/** Opaque public namespace reference bound to the measured unit and actual native namespace. */
+export function namespaceRefFor(correlation, namespace) {
+  if (!isPlainObject(correlation)) throw new Error('namespace reference correlation must be an object');
+  assertExactKeys(
+    correlation,
+    ['runId', 'armId', 'scenarioId', 'repetition', 'phase'],
+    'namespace reference correlation'
+  );
+  for (const field of ['runId', 'armId', 'scenarioId', 'phase']) {
+    if (!isNonEmptyString(correlation[field])) {
+      throw new Error(`namespace reference correlation.${field} must be a non-empty string`);
+    }
+  }
+  if (!Number.isSafeInteger(correlation.repetition) || correlation.repetition < 0) {
+    throw new Error('namespace reference correlation.repetition must be a non-negative safe integer');
+  }
+  validateNamespace(namespace, 'namespace reference namespace');
+  return domainSeparatedSha256('shadowgraph:v1.1:namespace-ref:v1', { correlation, namespace });
+}
+
+function validateSha256(value, label) {
+  if (typeof value !== 'string' || !/^[a-f0-9]{64}$/u.test(value)) {
+    throw new Error(`${label} must be a lowercase full SHA-256 digest`);
+  }
+}
+
 function validateRecordReference(record, label) {
   if (!isPlainObject(record)) throw new Error(`${label} must be an object`);
-  assertExactKeys(record, ['id', 'type'], label);
+  assertExactKeys(record, ['id', 'type', 'contentSha256'], label);
   if (!isNonEmptyString(record.id)) throw new Error(`${label}.id must be a non-empty string`);
   if (!isNonEmptyString(record.type)) throw new Error(`${label}.type must be a non-empty string`);
+  validateSha256(record.contentSha256, `${label}.contentSha256`);
 }
 
 function validateStringArray(values, label) {
@@ -94,28 +221,56 @@ function validateStringArray(values, label) {
   }
 }
 
-function validatePersistenceEvidence(evidence) {
+export function validatePersistenceEvidence(evidence) {
   if (evidence === null) return;
   if (!isPlainObject(evidence)) throw new Error('persistenceEvidence must be null or an object');
-  assertExactKeys(evidence, ['verified', 'expectedRecord', 'matchedRecordIds', 'namespace'], 'persistenceEvidence');
+  assertExactKeys(
+    evidence,
+    ['verified', 'expectedRecord', 'matchedRecordIds', 'observedContentSha256', 'namespaceRef'],
+    'persistenceEvidence'
+  );
   if (typeof evidence.verified !== 'boolean') throw new Error('persistenceEvidence.verified must be boolean');
-  if (evidence.expectedRecord !== null) validateRecordReference(evidence.expectedRecord, 'persistenceEvidence.expectedRecord');
+  validateRecordReference(evidence.expectedRecord, 'persistenceEvidence.expectedRecord');
   validateStringArray(evidence.matchedRecordIds, 'persistenceEvidence.matchedRecordIds');
-  validateNamespace(evidence.namespace, 'persistenceEvidence.namespace');
-  if (evidence.verified && evidence.expectedRecord !== null && !evidence.matchedRecordIds.includes(evidence.expectedRecord.id)) {
-    throw new Error('verified persistenceEvidence requires expectedRecord.id in matchedRecordIds');
+  if (evidence.observedContentSha256 !== null) {
+    validateSha256(evidence.observedContentSha256, 'persistenceEvidence.observedContentSha256');
+  }
+  validateSha256(evidence.namespaceRef, 'persistenceEvidence.namespaceRef');
+  if (evidence.verified
+    && (evidence.matchedRecordIds.length !== 1
+      || evidence.matchedRecordIds[0] !== evidence.expectedRecord.id)) {
+    throw new Error('verified persistenceEvidence requires the expectedRecord.id as the only matched record');
+  }
+  if (evidence.verified && evidence.observedContentSha256 !== evidence.expectedRecord.contentSha256) {
+    throw new Error('verified persistenceEvidence requires the exact expected record content hash');
   }
 }
 
-function validateIsolationEvidence(evidence) {
+export function validateIsolationEvidence(evidence) {
   if (evidence === null) return;
   if (!isPlainObject(evidence)) throw new Error('isolationEvidence must be null or an object');
-  assertExactKeys(evidence, ['verified', 'alternateNamespace', 'leakedRecordIds'], 'isolationEvidence');
+  assertExactKeys(
+    evidence,
+    [
+      'verified',
+      'expectedAbsentRecord',
+      'alternateNamespaceRef',
+      'matchingRecordIdCount',
+      'matchingContentCount'
+    ],
+    'isolationEvidence'
+  );
   if (typeof evidence.verified !== 'boolean') throw new Error('isolationEvidence.verified must be boolean');
-  validateNamespace(evidence.alternateNamespace, 'isolationEvidence.alternateNamespace');
-  validateStringArray(evidence.leakedRecordIds, 'isolationEvidence.leakedRecordIds');
-  if (evidence.verified && evidence.leakedRecordIds.length > 0) {
-    throw new Error('verified isolationEvidence requires empty leakedRecordIds');
+  validateRecordReference(evidence.expectedAbsentRecord, 'isolationEvidence.expectedAbsentRecord');
+  validateSha256(evidence.alternateNamespaceRef, 'isolationEvidence.alternateNamespaceRef');
+  for (const field of ['matchingRecordIdCount', 'matchingContentCount']) {
+    if (!Number.isSafeInteger(evidence[field]) || evidence[field] < 0) {
+      throw new Error(`isolationEvidence.${field} must be a non-negative safe integer`);
+    }
+  }
+  if (evidence.verified
+    && (evidence.matchingRecordIdCount !== 0 || evidence.matchingContentCount !== 0)) {
+    throw new Error('verified isolationEvidence requires zero matching record ids and content hashes');
   }
 }
 

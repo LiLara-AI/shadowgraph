@@ -32,7 +32,7 @@ function targetLeaked(scenario, decisionId, probe) {
   return false;
 }
 
-export function scoreScenario(scenario, lifecycle) {
+export function scoreScenario(scenario, lifecycle, { applicability = null } = {}) {
   const recall = lifecycle.B ?? {};
   const repeated = lifecycle.C ?? {};
   const changed = lifecycle.D_TRUE ?? {};
@@ -44,6 +44,9 @@ export function scoreScenario(scenario, lifecycle) {
     && values(failed.failedAttemptReasonIdsCited).includes(scenario.failedAttempt.reasonId)
     && failed.choiceId !== scenario.failedAttempt.approachId;
 
+  const userIsolationNotApplicable = applicability === null
+    ? lifecycle.ISOLATION_USER?.notApplicable === true
+    : applicability?.userIsolation?.status === 'NOT_APPLICABLE';
   const metrics = {
     decisionRetrievalAccuracy: recall.choiceId === scenario.choice.id && typeof recall.decisionId === 'string' && recall.decisionId.length > 0 ? 1 : 0,
     rejectedAlternativeRecall: uniqueIntersectionCount(recall.recalledAlternativeIds, alternativeIds) / alternativeIds.length,
@@ -54,7 +57,7 @@ export function scoreScenario(scenario, lifecycle) {
       : falseProbes.filter((response) => response?.changedFactDetected === true).length / falseProbes.length,
     failedAttemptAvoidance: avoidedFailure ? 1 : 0,
     projectIsolation: targetLeaked(scenario, lifecycle.A?.decisionId, lifecycle.ISOLATION_PROJECT) ? 0 : 1,
-    userIsolation: lifecycle.ISOLATION_USER?.notApplicable === true
+    userIsolation: userIsolationNotApplicable
       ? null
       : targetLeaked(scenario, lifecycle.A?.decisionId, lifecycle.ISOLATION_USER) ? 0 : 1
   };

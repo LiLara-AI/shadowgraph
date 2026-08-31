@@ -1,5 +1,6 @@
 import {
   ADAPTER_OPERATIONS,
+  namespaceRefFor,
   validateAdapterEnvelope
 } from './v11-contract.mjs';
 import { validateDecisionResponse } from './outer-model.mjs';
@@ -14,6 +15,7 @@ const REQUEST_FIELDS = [
   'scenarioId',
   'repetition',
   'namespace',
+  'namespaceRef',
   'payload'
 ];
 
@@ -126,9 +128,12 @@ function validateNamespace(namespace, label = 'adapter request.namespace') {
 }
 
 function validateRecordReference(record, label) {
-  assertExactKeys(record, ['id', 'type'], label);
+  assertExactKeys(record, ['id', 'type', 'contentSha256'], label);
   if (!isNonEmptyString(record.id)) throw new Error(`${label}.id must be a non-empty string`);
   if (!isNonEmptyString(record.type)) throw new Error(`${label}.type must be a non-empty string`);
+  if (typeof record.contentSha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(record.contentSha256)) {
+    throw new Error(`${label}.contentSha256 must be a lowercase full SHA-256 digest`);
+  }
 }
 
 function validatePlainTask(value, label) {
@@ -203,12 +208,16 @@ function correlationFromRequest(request) {
   return Object.fromEntries(CORRELATION_FIELDS.map((field) => [field, request[field]]));
 }
 
-function sameNamespace(left, right) {
-  return left?.projectId === right?.projectId && left?.userId === right?.userId;
+function namespaceCorrelation(value) {
+  return Object.fromEntries(
+    ['runId', 'armId', 'scenarioId', 'repetition', 'phase'].map((field) => [field, value[field]])
+  );
 }
 
 function sameRecordReference(left, right) {
-  return left?.id === right?.id && left?.type === right?.type;
+  return left?.id === right?.id
+    && left?.type === right?.type
+    && left?.contentSha256 === right?.contentSha256;
 }
 
 function validatePayload(operation, payload, request) {
@@ -244,10 +253,28 @@ function validatePayload(operation, payload, request) {
       throw new Error('persist payload.record.type must be decision or failed_attempt');
     }
   } else if (operation === 'verify') {
-    assertExactKeys(payload, ['expectedRecord', 'alternateNamespace'], 'verify payload');
+    assertExactKeys(
+      payload,
+      ['expectedRecord', 'alternateNamespace', 'alternateNamespaceRef', 'expectedAbsentRecord'],
+      'verify payload'
+    );
     validateRecordReference(payload.expectedRecord, 'verify payload.expectedRecord');
-    if (payload.alternateNamespace !== null) {
+    const hasIsolationProbe = payload.alternateNamespace !== null;
+    if (hasIsolationProbe) {
       validateNamespace(payload.alternateNamespace, 'verify payload.alternateNamespace');
+      validateRecordReference(payload.expectedAbsentRecord, 'verify payload.expectedAbsentRecord');
+      const expectedAlternateRef = namespaceRefFor(
+        namespaceCorrelation(request),
+        payload.alternateNamespace
+      );
+      if (payload.alternateNamespaceRef !== expectedAlternateRef) {
+        throw new Error('verify payload.alternateNamespaceRef does not match the alternate namespace and correlation');
+      }
+      if (payload.alternateNamespaceRef === request.namespaceRef) {
+        throw new Error('verify payload alternate namespace must differ from the requested primary namespace');
+      }
+    } else if (payload.alternateNamespaceRef !== null || payload.expectedAbsentRecord !== null) {
+      throw new Error('non-isolation verify payload requires null alternateNamespaceRef and expectedAbsentRecord');
     }
   }
   validateAdapterData(payload, 'adapter request.payload');
@@ -265,6 +292,10 @@ export function validateAdapterRequest(request) {
   }
   validateCorrelation(correlationFromRequest(request));
   validateNamespace(request.namespace);
+  const expectedNamespaceRef = namespaceRefFor(namespaceCorrelation(request), request.namespace);
+  if (request.namespaceRef !== expectedNamespaceRef) {
+    throw new Error('adapter request.namespaceRef does not match its namespace and correlation');
+  }
   validatePayload(request.operation, request.payload, request);
 }
 
@@ -275,6 +306,7 @@ export function createAdapterRequest({ operation, correlation, namespace, payloa
     operation,
     ...correlation,
     namespace,
+    namespaceRef: namespaceRefFor(namespaceCorrelation(correlation), namespace),
     payload
   };
   validateAdapterRequest(request);
@@ -301,37 +333,55 @@ export function validateAdapterResponse({ request, response }) {
     }
   }
 
+  if (request.operation !== 'retrieve' && response.result.nativeContext.length !== 0) {
+    throw new Error('Adapter response nativeContext is only allowed for retrieve');
+  }
+  if (request.operation !== 'verify'
+    && (response.result.persistenceEvidence !== null || response.result.isolationEvidence !== null)) {
+    throw new Error('Adapter response evidence is only allowed for verify');
+  }
+
   const persistenceEvidence = response.result.persistenceEvidence;
-  if (persistenceEvidence !== null && !sameNamespace(persistenceEvidence.namespace, request.namespace)) {
-    throw new Error('Adapter response persistence evidence does not use the requested namespace');
+  if (persistenceEvidence !== null && persistenceEvidence.namespaceRef !== request.namespaceRef) {
+    throw new Error('Adapter response persistence evidence does not use the requested namespace reference');
   }
   if (request.operation === 'verify') {
     const expectedRecord = request.payload.expectedRecord;
+    const expectedAbsentRecord = request.payload.expectedAbsentRecord;
     const alternateNamespace = request.payload.alternateNamespace;
+    const alternateNamespaceRef = request.payload.alternateNamespaceRef;
     const isolationEvidence = response.result.isolationEvidence;
 
     if (persistenceEvidence !== null && !sameRecordReference(persistenceEvidence.expectedRecord, expectedRecord)) {
       throw new Error('Adapter verification response does not identify the requested record');
     }
     if (alternateNamespace !== null && isolationEvidence !== null
-      && !sameNamespace(isolationEvidence.alternateNamespace, alternateNamespace)) {
-      throw new Error('Adapter verification response does not use the requested alternate namespace');
+      && isolationEvidence.alternateNamespaceRef !== alternateNamespaceRef) {
+      throw new Error('Adapter verification response does not use the requested alternate namespace reference');
+    }
+    if (alternateNamespace !== null && isolationEvidence !== null
+      && !sameRecordReference(isolationEvidence.expectedAbsentRecord, expectedAbsentRecord)) {
+      throw new Error('Adapter verification response does not identify the requested absent record target');
     }
     if (alternateNamespace === null && isolationEvidence !== null) {
       throw new Error('Adapter verification response includes unrequested isolation evidence');
     }
 
     const persistenceVerified = persistenceEvidence?.verified === true
-      && persistenceEvidence.matchedRecordIds.includes(expectedRecord.id);
+      && persistenceEvidence.matchedRecordIds.length === 1
+      && persistenceEvidence.matchedRecordIds[0] === expectedRecord.id
+      && persistenceEvidence.observedContentSha256 === expectedRecord.contentSha256;
     const isolationVerified = alternateNamespace === null
-      || (isolationEvidence?.verified === true && isolationEvidence.leakedRecordIds.length === 0);
+      || (isolationEvidence?.verified === true
+        && isolationEvidence.matchingRecordIdCount === 0
+        && isolationEvidence.matchingContentCount === 0);
 
     if (response.status === 'SUCCEEDED') {
       if (!persistenceVerified) {
         throw new Error('SUCCEEDED adapter verification requires persistence verified for the requested record');
       }
       if (!isolationVerified) {
-        throw new Error('SUCCEEDED adapter verification requires isolation verified with no leaked records');
+        throw new Error('SUCCEEDED adapter verification requires isolation verified with no matching ids or content');
       }
     }
 

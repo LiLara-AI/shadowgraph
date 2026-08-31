@@ -585,6 +585,72 @@ function validAdapterEnvelope(overrides = {}) {
   };
 }
 
+const ADAPTER_PROTOCOL_CORRELATION = Object.freeze({
+  runId: 'run-1',
+  attemptId: 'attempt-1',
+  phase: 'B',
+  armId: 'shadowgraph-full',
+  scenarioId: 'S01',
+  repetition: 0
+});
+const ADAPTER_PROTOCOL_NAMESPACE = Object.freeze({
+  projectId: 'project-primary',
+  userId: null
+});
+
+function adapterPayload(operation) {
+  if (operation === 'reset') return {};
+  if (operation === 'retrieve') {
+    return { query: { scenarioId: 'S01', task: 'Choose the safe option.' } };
+  }
+  if (operation === 'persist') {
+    return {
+      record: {
+        id: 'failed-attempt-1',
+        type: 'failed_attempt',
+        content: {
+          id: 'failed-attempt-1',
+          approachId: 'unsafe-option',
+          reasonId: 'known-failure',
+          reason: 'The unsafe option failed previously.'
+        }
+      }
+    };
+  }
+  return {
+    expectedRecord: { id: 'decision-1', type: 'decision', contentSha256: 'a'.repeat(64) },
+    alternateNamespace: null,
+    alternateNamespaceRef: null,
+    expectedAbsentRecord: null
+  };
+}
+
+function adapterResponseFor(request, result) {
+  return validAdapterEnvelope({
+    operation: request.operation,
+    runId: request.runId,
+    attemptId: request.attemptId,
+    phase: request.phase,
+    armId: request.armId,
+    scenarioId: request.scenarioId,
+    repetition: request.repetition,
+    result
+  });
+}
+
+function verifiedPersistenceEvidence(request) {
+  const expectedRecord = request.operation === 'verify'
+    ? request.payload.expectedRecord
+    : { id: 'unexpected-record', type: 'decision', contentSha256: 'a'.repeat(64) };
+  return {
+    verified: true,
+    expectedRecord,
+    matchedRecordIds: [expectedRecord.id],
+    observedContentSha256: expectedRecord.contentSha256,
+    namespaceRef: request.namespaceRef
+  };
+}
+
 test('adapter protocol constants freeze the four memory-only operations and response statuses', async () => {
   const { ADAPTER_OPERATIONS, ADAPTER_STATUSES, ADAPTER_FAILURE_CAUSES } = await import('../benchmark/lib/v11-contract.mjs');
   assert.deepEqual(ADAPTER_OPERATIONS, ['reset', 'retrieve', 'persist', 'verify']);
@@ -605,20 +671,82 @@ test('validateAdapterEnvelope accepts a successful memory-only response', async 
   assert.doesNotThrow(() => validateAdapterEnvelope(validAdapterEnvelope()));
 });
 
+test('adapter protocol rejects persistence and isolation evidence outside verify', async () => {
+  const { createAdapterRequest, validateAdapterResponse } = await import('../benchmark/lib/adapter-protocol.mjs');
+  const isolationEvidence = {
+    verified: true,
+    expectedAbsentRecord: { id: 'decision-phase-a', type: 'decision', contentSha256: 'd'.repeat(64) },
+    alternateNamespaceRef: 'c'.repeat(64),
+    matchingRecordIdCount: 0,
+    matchingContentCount: 0
+  };
+
+  for (const operation of ['reset', 'retrieve', 'persist']) {
+    const request = createAdapterRequest({
+      operation,
+      correlation: ADAPTER_PROTOCOL_CORRELATION,
+      namespace: ADAPTER_PROTOCOL_NAMESPACE,
+      payload: adapterPayload(operation)
+    });
+    for (const [field, evidence] of [
+      ['persistenceEvidence', verifiedPersistenceEvidence(request)],
+      ['isolationEvidence', isolationEvidence]
+    ]) {
+      const result = {
+        nativeContext: [],
+        persistenceEvidence: null,
+        isolationEvidence: null,
+        [field]: evidence
+      };
+      assert.throws(
+        () => validateAdapterResponse({ request, response: adapterResponseFor(request, result) }),
+        /evidence.*verify|verify.*evidence/iu,
+        `${operation} must reject ${field}`
+      );
+    }
+  }
+});
+
+test('adapter protocol rejects native context outside retrieve', async () => {
+  const { createAdapterRequest, validateAdapterResponse } = await import('../benchmark/lib/adapter-protocol.mjs');
+
+  for (const operation of ['reset', 'persist', 'verify']) {
+    const request = createAdapterRequest({
+      operation,
+      correlation: ADAPTER_PROTOCOL_CORRELATION,
+      namespace: ADAPTER_PROTOCOL_NAMESPACE,
+      payload: adapterPayload(operation)
+    });
+    const result = {
+      nativeContext: [{ type: 'unexpected-context' }],
+      persistenceEvidence: operation === 'verify' ? verifiedPersistenceEvidence(request) : null,
+      isolationEvidence: null
+    };
+    assert.throws(
+      () => validateAdapterResponse({ request, response: adapterResponseFor(request, result) }),
+      /nativeContext.*retrieve|retrieve.*nativeContext/iu,
+      `${operation} must reject nativeContext`
+    );
+  }
+});
+
 test('validateAdapterEnvelope accepts record-specific persistence and isolation evidence', async () => {
   const { validateAdapterEnvelope } = await import('../benchmark/lib/v11-contract.mjs');
   const result = {
     nativeContext: [{ id: 'decision-1', type: 'decision' }],
     persistenceEvidence: {
       verified: true,
-      expectedRecord: { id: 'decision-1', type: 'decision' },
+      expectedRecord: { id: 'decision-1', type: 'decision', contentSha256: 'a'.repeat(64) },
       matchedRecordIds: ['decision-1'],
-      namespace: { projectId: 'atlas-api', userId: null }
+      observedContentSha256: 'a'.repeat(64),
+      namespaceRef: 'b'.repeat(64)
     },
     isolationEvidence: {
       verified: true,
-      alternateNamespace: { projectId: 'atlas-web', userId: null },
-      leakedRecordIds: []
+      expectedAbsentRecord: { id: 'decision-phase-a', type: 'decision', contentSha256: 'd'.repeat(64) },
+      alternateNamespaceRef: 'c'.repeat(64),
+      matchingRecordIdCount: 0,
+      matchingContentCount: 0
     }
   };
   assert.doesNotThrow(() => validateAdapterEnvelope(validAdapterEnvelope({ operation: 'verify', phase: 'ISOLATION_PROJECT', result })));
@@ -685,9 +813,10 @@ test('validateAdapterEnvelope rejects malformed native context and record eviden
         ...validAdapterEnvelope().result,
         persistenceEvidence: {
           verified: true,
-          expectedRecord: { id: 'decision-1', type: 'decision' },
+          expectedRecord: { id: 'decision-1', type: 'decision', contentSha256: 'a'.repeat(64) },
           matchedRecordIds: [7],
-          namespace: { projectId: 'atlas-api', userId: null }
+          observedContentSha256: 'a'.repeat(64),
+          namespaceRef: 'b'.repeat(64)
         }
       }
     })),
@@ -699,12 +828,14 @@ test('validateAdapterEnvelope rejects malformed native context and record eviden
         ...validAdapterEnvelope().result,
         isolationEvidence: {
           verified: true,
-          alternateNamespace: { projectId: 'atlas-web', userId: null },
-          leakedRecordIds: ['decision-1', 7]
+          expectedAbsentRecord: { id: 'decision-phase-a', type: 'decision', contentSha256: 'd'.repeat(64) },
+          alternateNamespaceRef: 'c'.repeat(64),
+          matchingRecordIdCount: -1,
+          matchingContentCount: 0
         }
       }
     })),
-    /leakedRecordIds/i
+    /matchingRecordIdCount/i
   );
   assert.throws(
     () => validateAdapterEnvelope(validAdapterEnvelope({
@@ -712,13 +843,14 @@ test('validateAdapterEnvelope rejects malformed native context and record eviden
         ...validAdapterEnvelope().result,
         persistenceEvidence: {
           verified: true,
-          expectedRecord: { id: 'decision-1', type: 'decision' },
+          expectedRecord: { id: 'decision-1', type: 'decision', contentSha256: 'a'.repeat(64) },
           matchedRecordIds: ['different-record'],
-          namespace: { projectId: 'atlas-api', userId: null }
+          observedContentSha256: 'a'.repeat(64),
+          namespaceRef: 'b'.repeat(64)
         }
       }
     })),
-    /expectedRecord.*matchedRecordIds/i
+    /expectedRecord.*only matched record/i
   );
   assert.throws(
     () => validateAdapterEnvelope(validAdapterEnvelope({
@@ -726,12 +858,14 @@ test('validateAdapterEnvelope rejects malformed native context and record eviden
         ...validAdapterEnvelope().result,
         isolationEvidence: {
           verified: true,
-          alternateNamespace: { projectId: 'atlas-web', userId: null },
-          leakedRecordIds: ['decision-1']
+          expectedAbsentRecord: { id: 'decision-phase-a', type: 'decision', contentSha256: 'd'.repeat(64) },
+          alternateNamespaceRef: 'c'.repeat(64),
+          matchingRecordIdCount: 0,
+          matchingContentCount: 1
         }
       }
     })),
-    /verified.*leakedRecordIds/i
+    /verified.*zero matching/i
   );
 });
 
@@ -780,4 +914,55 @@ test('validateAdapterEnvelope rejects null and non-object inputs', async () => {
   const { validateAdapterEnvelope } = await import('../benchmark/lib/v11-contract.mjs');
   assert.throws(() => validateAdapterEnvelope(null), /envelope.*object/i);
   assert.throws(() => validateAdapterEnvelope([]), /envelope.*object/i);
+});
+
+test('canonical record-content hashing is recursive, key-order independent, and domain separated', async () => {
+  const {
+    canonicalJson,
+    namespaceRefFor,
+    recordContentSha256
+  } = await import('../benchmark/lib/v11-contract.mjs');
+  const first = {
+    z: [{ beta: 2, alpha: 1 }],
+    a: { nested: true, nullable: null }
+  };
+  const reordered = {
+    a: { nullable: null, nested: true },
+    z: [{ alpha: 1, beta: 2 }]
+  };
+  const correlation = {
+    runId: 'run-1',
+    armId: 'arm-1',
+    scenarioId: 'scenario-1',
+    repetition: 0,
+    phase: 'A'
+  };
+  const namespace = { projectId: 'project-secret', userId: 'user-secret' };
+
+  assert.equal(canonicalJson(first), canonicalJson(reordered));
+  assert.equal(recordContentSha256(first), recordContentSha256(reordered));
+  assert.match(recordContentSha256(first), /^[a-f0-9]{64}$/u);
+  const namespaceRef = namespaceRefFor(correlation, namespace);
+  assert.match(namespaceRef, /^[a-f0-9]{64}$/u);
+  assert.notEqual(namespaceRef, recordContentSha256({ ...correlation, namespace }));
+  assert.equal(namespaceRef.includes('project-secret'), false);
+  assert.notEqual(namespaceRef, namespaceRefFor({ ...correlation, phase: 'B' }, namespace));
+});
+
+test('failed-attempt content gets an exact canonical content hash', async () => {
+  const { recordContentSha256 } = await import('../benchmark/lib/v11-contract.mjs');
+  const first = {
+    id: 'failed-1',
+    approachId: 'approach-1',
+    reasonId: 'reason-1',
+    reason: 'The approach failed.'
+  };
+  const reordered = {
+    reason: 'The approach failed.',
+    reasonId: 'reason-1',
+    approachId: 'approach-1',
+    id: 'failed-1'
+  };
+  assert.equal(recordContentSha256(first), recordContentSha256(reordered));
+  assert.notEqual(recordContentSha256(first), recordContentSha256({ ...first, reason: 'Different reason.' }));
 });

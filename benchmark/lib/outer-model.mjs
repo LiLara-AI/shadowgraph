@@ -22,6 +22,8 @@ const REQUEST_FIELDS = ['system', 'prompt', 'responseSchema'];
 const RESPONSE_TYPES = new Set(['string', 'string|null', 'string[]', 'boolean|null']);
 const HEADER_SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
 
+export const OUTER_HTTP_ERROR_CODE = 'OUTER_HTTP_STATUS';
+
 export const STANDARD_DECISION_RESPONSE_SCHEMA = Object.freeze({
   decisionId: 'string|null',
   choiceId: 'string|null',
@@ -356,7 +358,12 @@ export async function requestOuterDecision({ fetchImpl, config, correlation, req
     if (!response || typeof response.ok !== 'boolean' || !Number.isInteger(response.status) || typeof response.text !== 'function') {
       throw new Error('Outer model provider returned an invalid HTTP response');
     }
-    if (!response.ok) throw new Error(`Outer model provider HTTP ${response.status}`);
+    if (!response.ok) {
+      throw Object.assign(new Error('Outer model provider returned an HTTP error'), {
+        code: OUTER_HTTP_ERROR_CODE,
+        status: response.status
+      });
+    }
     responseText = await response.text();
   } finally {
     clearTimeout(timer);
