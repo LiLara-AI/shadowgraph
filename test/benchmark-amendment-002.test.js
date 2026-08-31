@@ -237,10 +237,35 @@ test('Amendment 002 exists with valid structure and sidecar', async () => {
   });
   assert.deepEqual(amendment.definitions.adapterProtocol.operations, ['reset', 'retrieve', 'persist', 'verify']);
   assert.deepEqual(amendment.definitions.adapterProtocol.commonEnvelope, {
-    fields: ['phase', 'armId', 'scenarioId', 'repetition', 'status', 'operations', 'applicability', 'storage'],
+    fields: [
+      'schemaVersion', 'operation', 'runId', 'attemptId', 'phase', 'armId', 'scenarioId', 'repetition',
+      'status', 'result', 'failure', 'operations', 'storage'
+    ],
     unknownTopLevelFieldsAllowed: false,
     adapterOuterDecisionModelCalls: 0
   });
+  assert.deepEqual(amendment.definitions.adapterProtocol.result, {
+    fields: ['nativeContext', 'persistenceEvidence', 'isolationEvidence'],
+    nativeContext: 'array of native record objects only',
+    persistenceEvidence: 'null or exact record-specific evidence with namespace',
+    isolationEvidence: 'null or exact alternate-namespace leak evidence'
+  });
+  assert.deepEqual(amendment.definitions.adapterProtocol.failure, {
+    causes: [
+      'ENDPOINT_UNAVAILABLE',
+      'ADAPTER_INVALID',
+      'INFRASTRUCTURE_FAILURE',
+      'CONTRACT_FAILURE',
+      'OPERATOR_INTERRUPTION',
+      'TIMEOUT',
+      'OPERATION_FAILED'
+    ],
+    requiredWhen: 'FAILED',
+    forbiddenWhen: ['SUCCEEDED', 'NOT_APPLICABLE']
+  });
+  assert.deepEqual(amendment.definitions.adapterProtocol.harnessOwnedUnitEvidence, [
+    'applicability', 'outerDecisionModelCalls', 'unitStatus', 'decisionResponse'
+  ]);
   assert.deepEqual(amendment.definitions.implementationLock.contents, [
     'original preregistration hash',
     'Amendment 001 hash',

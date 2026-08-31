@@ -547,341 +547,237 @@ test('validateStorageMeasurement requires typed descriptive fields', async () =>
   assert.throws(() => validateStorageMeasurement({ ...unavailable, blockedClaims: ['storage', 7] }), /blockedClaims/i);
 });
 
-test('validateAdapterEnvelope accepts valid common envelope', async () => {
-  const { validateAdapterEnvelope } = await import('../benchmark/lib/v11-contract.mjs');
-  const envelope = {
-    phase: 'A',
+function validAdapterEnvelope(overrides = {}) {
+  return {
+    schemaVersion: 1,
+    operation: 'retrieve',
+    runId: 'run-1',
+    attemptId: 'attempt-1',
+    phase: 'B',
     armId: 'shadowgraph-full',
     scenarioId: 'S01',
     repetition: 0,
-    status: 'MEASURED',
+    status: 'SUCCEEDED',
+    result: {
+      nativeContext: [],
+      persistenceEvidence: null,
+      isolationEvidence: null
+    },
+    failure: null,
     operations: {
-      memoryReadOperations: 0,
-      memoryWriteOperations: 1,
-      mcpToolCalls: 2,
+      memoryReadOperations: 1,
+      memoryWriteOperations: 0,
+      mcpToolCalls: 1,
       outerDecisionModelCalls: 0,
       internalMemoryModelCalls: 0,
       embeddingCalls: 0,
-      persistenceVerificationOperations: 1
-    },
-    applicability: {
-      userIsolation: { status: 'SUPPORTED', reason: null },
-      persistence: { status: 'SUPPORTED', reason: null }
+      persistenceVerificationOperations: 0
     },
     storage: {
       status: 'MEASURED',
       bytes: 512,
-      scope: 'project directory',
-      method: 'du -sb',
+      scope: 'isolated project directory',
+      method: 'recursive file bytes',
       reason: null,
       blockedClaims: []
+    },
+    ...overrides
+  };
+}
+
+test('adapter protocol constants freeze the four memory-only operations and response statuses', async () => {
+  const { ADAPTER_OPERATIONS, ADAPTER_STATUSES, ADAPTER_FAILURE_CAUSES } = await import('../benchmark/lib/v11-contract.mjs');
+  assert.deepEqual(ADAPTER_OPERATIONS, ['reset', 'retrieve', 'persist', 'verify']);
+  assert.deepEqual(ADAPTER_STATUSES, ['SUCCEEDED', 'FAILED', 'NOT_APPLICABLE']);
+  assert.deepEqual(ADAPTER_FAILURE_CAUSES, [
+    'ENDPOINT_UNAVAILABLE',
+    'ADAPTER_INVALID',
+    'INFRASTRUCTURE_FAILURE',
+    'CONTRACT_FAILURE',
+    'OPERATOR_INTERRUPTION',
+    'TIMEOUT',
+    'OPERATION_FAILED'
+  ]);
+});
+
+test('validateAdapterEnvelope accepts a successful memory-only response', async () => {
+  const { validateAdapterEnvelope } = await import('../benchmark/lib/v11-contract.mjs');
+  assert.doesNotThrow(() => validateAdapterEnvelope(validAdapterEnvelope()));
+});
+
+test('validateAdapterEnvelope accepts record-specific persistence and isolation evidence', async () => {
+  const { validateAdapterEnvelope } = await import('../benchmark/lib/v11-contract.mjs');
+  const result = {
+    nativeContext: [{ id: 'decision-1', type: 'decision' }],
+    persistenceEvidence: {
+      verified: true,
+      expectedRecord: { id: 'decision-1', type: 'decision' },
+      matchedRecordIds: ['decision-1'],
+      namespace: { projectId: 'atlas-api', userId: null }
+    },
+    isolationEvidence: {
+      verified: true,
+      alternateNamespace: { projectId: 'atlas-web', userId: null },
+      leakedRecordIds: []
     }
   };
+  assert.doesNotThrow(() => validateAdapterEnvelope(validAdapterEnvelope({ operation: 'verify', phase: 'ISOLATION_PROJECT', result })));
+});
+
+test('validateAdapterEnvelope accepts a structured actual-cause failure', async () => {
+  const { validateAdapterEnvelope } = await import('../benchmark/lib/v11-contract.mjs');
+  const envelope = validAdapterEnvelope({
+    status: 'FAILED',
+    failure: { cause: 'TIMEOUT', message: 'adapter operation exceeded the unit deadline' }
+  });
   assert.doesNotThrow(() => validateAdapterEnvelope(envelope));
 });
 
-test('validateAdapterEnvelope rejects envelope with invalid operations', async () => {
+test('validateAdapterEnvelope rejects unknown top-level fields and harness-owned applicability', async () => {
   const { validateAdapterEnvelope } = await import('../benchmark/lib/v11-contract.mjs');
-  const envelope = {
-    phase: 'A',
-    armId: 'test',
-    scenarioId: 'S01',
-    repetition: 0,
-    status: 'MEASURED',
-    operations: {
-      toolCalls: 5 // forbidden legacy field
-    },
-    applicability: {
-      userIsolation: { status: 'SUPPORTED', reason: null },
-      persistence: { status: 'SUPPORTED', reason: null }
-    },
-    storage: {
-      status: 'MEASURED',
-      bytes: 512,
-      scope: 'dir',
-      method: 'du',
-      reason: null,
-      blockedClaims: []
-    }
-  };
-  assert.throws(() => validateAdapterEnvelope(envelope), /toolCalls.*forbidden/i);
-});
-
-test('validateAdapterEnvelope always validates applicability and storage', async () => {
-  const { validateAdapterEnvelope } = await import('../benchmark/lib/v11-contract.mjs');
-  const envelope = {
-    phase: 'A',
-    armId: 'test',
-    scenarioId: 'S01',
-    repetition: 0,
-    status: 'MEASURED',
-    operations: {
-      memoryReadOperations: 0,
-      memoryWriteOperations: 1,
-      mcpToolCalls: 0,
-      outerDecisionModelCalls: 0,
-      internalMemoryModelCalls: 0,
-      embeddingCalls: 0,
-      persistenceVerificationOperations: 1
-    },
-    applicability: {
-      userIsolation: { status: 'SUPPORTED', reason: null },
-      persistence: { status: 'SUPPORTED', reason: null }
-    },
-    storage: {
-      status: 'MEASURED', bytes: 512, scope: 'directory', method: 'du', reason: null, blockedClaims: []
-    }
-  };
-
   assert.throws(
-    () => validateAdapterEnvelope({ ...envelope, applicability: { ...envelope.applicability, persistence: { status: 'NOT_APPLICABLE', reason: null } } }),
-    /NOT_APPLICABLE.*reason/i
+    () => validateAdapterEnvelope({ ...validAdapterEnvelope(), modelOutput: { choiceId: 'fixture-choice' } }),
+    /unknown.*adapter envelope.*field/i
   );
   assert.throws(
-    () => validateAdapterEnvelope({ ...envelope, storage: { ...envelope.storage, bytes: null } }),
-    /bytes.*required/i
+    () => validateAdapterEnvelope({
+      ...validAdapterEnvelope(),
+      applicability: {
+        userIsolation: { status: 'SUPPORTED', reason: null },
+        persistence: { status: 'SUPPORTED', reason: null }
+      }
+    }),
+    /unknown.*adapter envelope.*field/i
   );
 });
 
-test('validateAdapterEnvelope rejects unknown top-level fields', async () => {
+test('validateAdapterEnvelope rejects missing exact envelope and result fields', async () => {
   const { validateAdapterEnvelope } = await import('../benchmark/lib/v11-contract.mjs');
-  const envelope = {
-    phase: 'A',
-    armId: 'test',
-    scenarioId: 'S01',
-    repetition: 0,
-    status: 'MEASURED',
-    operations: {
-      memoryReadOperations: 0,
-      memoryWriteOperations: 1,
-      mcpToolCalls: 0,
-      outerDecisionModelCalls: 0,
-      internalMemoryModelCalls: 0,
-      embeddingCalls: 0,
-      persistenceVerificationOperations: 1
-    },
-    applicability: {
-      userIsolation: { status: 'SUPPORTED', reason: null },
-      persistence: { status: 'SUPPORTED', reason: null }
-    },
-    storage: {
-      status: 'MEASURED', bytes: 1, scope: 'directory', method: 'du', reason: null, blockedClaims: []
-    },
-    modelOutput: { choiceId: 'fixture-choice' }
-  };
-  assert.throws(() => validateAdapterEnvelope(envelope), /unknown.*envelope.*field/i);
+  const { storage, ...missingStorage } = validAdapterEnvelope();
+  const { isolationEvidence, ...missingEvidenceField } = validAdapterEnvelope().result;
+  assert.throws(() => validateAdapterEnvelope(missingStorage), /storage/i);
+  assert.throws(
+    () => validateAdapterEnvelope(validAdapterEnvelope({ result: missingEvidenceField })),
+    /isolationEvidence/i
+  );
+});
+
+test('validateAdapterEnvelope rejects invalid operation, status, correlation, and repetition', async () => {
+  const { validateAdapterEnvelope } = await import('../benchmark/lib/v11-contract.mjs');
+  assert.throws(() => validateAdapterEnvelope(validAdapterEnvelope({ operation: 'decide' })), /operation/i);
+  assert.throws(() => validateAdapterEnvelope(validAdapterEnvelope({ status: 'MEASURED' })), /status/i);
+  assert.throws(() => validateAdapterEnvelope(validAdapterEnvelope({ runId: '' })), /runId/i);
+  assert.throws(() => validateAdapterEnvelope(validAdapterEnvelope({ attemptId: '' })), /attemptId/i);
+  assert.throws(() => validateAdapterEnvelope(validAdapterEnvelope({ repetition: -1 })), /repetition/i);
+});
+
+test('validateAdapterEnvelope rejects malformed native context and record evidence', async () => {
+  const { validateAdapterEnvelope } = await import('../benchmark/lib/v11-contract.mjs');
+  assert.throws(
+    () => validateAdapterEnvelope(validAdapterEnvelope({
+      result: { ...validAdapterEnvelope().result, nativeContext: 'fixture answer' }
+    })),
+    /nativeContext/i
+  );
+  assert.throws(
+    () => validateAdapterEnvelope(validAdapterEnvelope({
+      result: {
+        ...validAdapterEnvelope().result,
+        persistenceEvidence: {
+          verified: true,
+          expectedRecord: { id: 'decision-1', type: 'decision' },
+          matchedRecordIds: [7],
+          namespace: { projectId: 'atlas-api', userId: null }
+        }
+      }
+    })),
+    /matchedRecordIds/i
+  );
+  assert.throws(
+    () => validateAdapterEnvelope(validAdapterEnvelope({
+      result: {
+        ...validAdapterEnvelope().result,
+        isolationEvidence: {
+          verified: true,
+          alternateNamespace: { projectId: 'atlas-web', userId: null },
+          leakedRecordIds: ['decision-1', 7]
+        }
+      }
+    })),
+    /leakedRecordIds/i
+  );
+  assert.throws(
+    () => validateAdapterEnvelope(validAdapterEnvelope({
+      result: {
+        ...validAdapterEnvelope().result,
+        persistenceEvidence: {
+          verified: true,
+          expectedRecord: { id: 'decision-1', type: 'decision' },
+          matchedRecordIds: ['different-record'],
+          namespace: { projectId: 'atlas-api', userId: null }
+        }
+      }
+    })),
+    /expectedRecord.*matchedRecordIds/i
+  );
+  assert.throws(
+    () => validateAdapterEnvelope(validAdapterEnvelope({
+      result: {
+        ...validAdapterEnvelope().result,
+        isolationEvidence: {
+          verified: true,
+          alternateNamespace: { projectId: 'atlas-web', userId: null },
+          leakedRecordIds: ['decision-1']
+        }
+      }
+    })),
+    /verified.*leakedRecordIds/i
+  );
+});
+
+test('validateAdapterEnvelope enforces status and structured failure consistency', async () => {
+  const { validateAdapterEnvelope } = await import('../benchmark/lib/v11-contract.mjs');
+  assert.throws(
+    () => validateAdapterEnvelope(validAdapterEnvelope({
+      status: 'FAILED',
+      failure: null
+    })),
+    /FAILED.*failure/i
+  );
+  assert.throws(
+    () => validateAdapterEnvelope(validAdapterEnvelope({
+      failure: { cause: 'TIMEOUT', message: 'unexpected failure on success' }
+    })),
+    /SUCCEEDED.*failure/i
+  );
+  assert.throws(
+    () => validateAdapterEnvelope(validAdapterEnvelope({
+      status: 'FAILED',
+      failure: { cause: 'MADE_UP', message: 'unknown cause' }
+    })),
+    /failure.*cause/i
+  );
 });
 
 test('validateAdapterEnvelope requires adapter outer-model calls to stay zero', async () => {
   const { validateAdapterEnvelope } = await import('../benchmark/lib/v11-contract.mjs');
-  const envelope = {
-    phase: 'A',
-    armId: 'test',
-    scenarioId: 'S01',
-    repetition: 0,
-    status: 'MEASURED',
-    operations: {
-      memoryReadOperations: 0,
-      memoryWriteOperations: 1,
-      mcpToolCalls: 0,
-      outerDecisionModelCalls: 1,
-      internalMemoryModelCalls: 0,
-      embeddingCalls: 0,
-      persistenceVerificationOperations: 1
-    },
-    applicability: {
-      userIsolation: { status: 'SUPPORTED', reason: null },
-      persistence: { status: 'SUPPORTED', reason: null }
-    },
-    storage: {
-      status: 'MEASURED', bytes: 1, scope: 'directory', method: 'du', reason: null, blockedClaims: []
-    }
-  };
-  assert.throws(() => validateAdapterEnvelope(envelope), /outerDecisionModelCalls.*zero/i);
+  const operations = { ...validAdapterEnvelope().operations, outerDecisionModelCalls: 1 };
+  assert.throws(
+    () => validateAdapterEnvelope(validAdapterEnvelope({ operations })),
+    /outerDecisionModelCalls.*zero/i
+  );
 });
 
-test('validateAdapterEnvelope rejects null input', async () => {
+test('validateAdapterEnvelope always validates operation metrics and storage', async () => {
   const { validateAdapterEnvelope } = await import('../benchmark/lib/v11-contract.mjs');
-  assert.throws(() => validateAdapterEnvelope(null), /envelope.*null/i);
+  const operations = { ...validAdapterEnvelope().operations, toolCalls: 1 };
+  const storage = { ...validAdapterEnvelope().storage, bytes: null };
+  assert.throws(() => validateAdapterEnvelope(validAdapterEnvelope({ operations })), /toolCalls.*forbidden/i);
+  assert.throws(() => validateAdapterEnvelope(validAdapterEnvelope({ storage })), /bytes.*required/i);
 });
 
-test('validateAdapterEnvelope rejects non-object input', async () => {
+test('validateAdapterEnvelope rejects null and non-object inputs', async () => {
   const { validateAdapterEnvelope } = await import('../benchmark/lib/v11-contract.mjs');
-  assert.throws(() => validateAdapterEnvelope('string'), /envelope.*object/i);
-});
-
-test('validateAdapterEnvelope rejects missing operations', async () => {
-  const { validateAdapterEnvelope } = await import('../benchmark/lib/v11-contract.mjs');
-  const envelope = {
-    phase: 'A',
-    armId: 'test',
-    scenarioId: 'S01',
-    repetition: 0,
-    status: 'MEASURED',
-    applicability: {
-      userIsolation: { status: 'SUPPORTED', reason: null },
-      persistence: { status: 'SUPPORTED', reason: null }
-    },
-    storage: {
-      status: 'MEASURED',
-      bytes: 512,
-      scope: 'dir',
-      method: 'du',
-      reason: null,
-      blockedClaims: []
-    }
-  };
-  assert.throws(() => validateAdapterEnvelope(envelope), /operations/i);
-});
-
-test('validateAdapterEnvelope rejects missing applicability', async () => {
-  const { validateAdapterEnvelope } = await import('../benchmark/lib/v11-contract.mjs');
-  const envelope = {
-    phase: 'A',
-    armId: 'test',
-    scenarioId: 'S01',
-    repetition: 0,
-    status: 'MEASURED',
-    operations: {
-      memoryReadOperations: 0,
-      memoryWriteOperations: 1,
-      mcpToolCalls: 0,
-      outerDecisionModelCalls: 1,
-      internalMemoryModelCalls: 0,
-      embeddingCalls: 0,
-      persistenceVerificationOperations: 1
-    },
-    storage: {
-      status: 'MEASURED',
-      bytes: 512,
-      scope: 'dir',
-      method: 'du',
-      reason: null,
-      blockedClaims: []
-    }
-  };
-  assert.throws(() => validateAdapterEnvelope(envelope), /applicability/i);
-});
-
-test('validateAdapterEnvelope rejects missing storage', async () => {
-  const { validateAdapterEnvelope } = await import('../benchmark/lib/v11-contract.mjs');
-  const envelope = {
-    phase: 'A',
-    armId: 'test',
-    scenarioId: 'S01',
-    repetition: 0,
-    status: 'MEASURED',
-    operations: {
-      memoryReadOperations: 0,
-      memoryWriteOperations: 1,
-      mcpToolCalls: 0,
-      outerDecisionModelCalls: 1,
-      internalMemoryModelCalls: 0,
-      embeddingCalls: 0,
-      persistenceVerificationOperations: 1
-    },
-    applicability: {
-      userIsolation: { status: 'SUPPORTED', reason: null },
-      persistence: { status: 'SUPPORTED', reason: null }
-    }
-  };
-  assert.throws(() => validateAdapterEnvelope(envelope), /storage/i);
-});
-
-test('validateAdapterEnvelope rejects invalid unit status (lowercase)', async () => {
-  const { validateAdapterEnvelope } = await import('../benchmark/lib/v11-contract.mjs');
-  const envelope = {
-    phase: 'A',
-    armId: 'test',
-    scenarioId: 'S01',
-    repetition: 0,
-    status: 'success', // invalid lowercase
-    operations: {
-      memoryReadOperations: 0,
-      memoryWriteOperations: 1,
-      mcpToolCalls: 0,
-      outerDecisionModelCalls: 1,
-      internalMemoryModelCalls: 0,
-      embeddingCalls: 0,
-      persistenceVerificationOperations: 1
-    },
-    applicability: {
-      userIsolation: { status: 'SUPPORTED', reason: null },
-      persistence: { status: 'SUPPORTED', reason: null }
-    },
-    storage: {
-      status: 'MEASURED',
-      bytes: 512,
-      scope: 'dir',
-      method: 'du',
-      reason: null,
-      blockedClaims: []
-    }
-  };
-  assert.throws(() => validateAdapterEnvelope(envelope), /invalid.*status|status.*invalid/i);
-});
-
-test('validateAdapterEnvelope rejects missing phase', async () => {
-  const { validateAdapterEnvelope } = await import('../benchmark/lib/v11-contract.mjs');
-  const envelope = {
-    armId: 'test',
-    scenarioId: 'S01',
-    repetition: 0,
-    status: 'MEASURED',
-    operations: {
-      memoryReadOperations: 0,
-      memoryWriteOperations: 1,
-      mcpToolCalls: 0,
-      outerDecisionModelCalls: 1,
-      internalMemoryModelCalls: 0,
-      embeddingCalls: 0,
-      persistenceVerificationOperations: 1
-    },
-    applicability: {
-      userIsolation: { status: 'SUPPORTED', reason: null },
-      persistence: { status: 'SUPPORTED', reason: null }
-    },
-    storage: {
-      status: 'MEASURED',
-      bytes: 512,
-      scope: 'dir',
-      method: 'du',
-      reason: null,
-      blockedClaims: []
-    }
-  };
-  assert.throws(() => validateAdapterEnvelope(envelope), /phase/i);
-});
-
-test('validateAdapterEnvelope rejects invalid repetition', async () => {
-  const { validateAdapterEnvelope } = await import('../benchmark/lib/v11-contract.mjs');
-  const envelope = {
-    phase: 'A',
-    armId: 'test',
-    scenarioId: 'S01',
-    repetition: -1,
-    status: 'MEASURED',
-    operations: {
-      memoryReadOperations: 0,
-      memoryWriteOperations: 1,
-      mcpToolCalls: 0,
-      outerDecisionModelCalls: 1,
-      internalMemoryModelCalls: 0,
-      embeddingCalls: 0,
-      persistenceVerificationOperations: 1
-    },
-    applicability: {
-      userIsolation: { status: 'SUPPORTED', reason: null },
-      persistence: { status: 'SUPPORTED', reason: null }
-    },
-    storage: {
-      status: 'MEASURED',
-      bytes: 512,
-      scope: 'dir',
-      method: 'du',
-      reason: null,
-      blockedClaims: []
-    }
-  };
-  assert.throws(() => validateAdapterEnvelope(envelope), /repetition.*non-negative/i);
+  assert.throws(() => validateAdapterEnvelope(null), /envelope.*object/i);
+  assert.throws(() => validateAdapterEnvelope([]), /envelope.*object/i);
 });

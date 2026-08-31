@@ -16,6 +16,36 @@ export const OPERATION_FIELDS = [
   'persistenceVerificationOperations'
 ];
 
+export const ADAPTER_OPERATIONS = ['reset', 'retrieve', 'persist', 'verify'];
+
+export const ADAPTER_STATUSES = ['SUCCEEDED', 'FAILED', 'NOT_APPLICABLE'];
+
+export const ADAPTER_FAILURE_CAUSES = [
+  'ENDPOINT_UNAVAILABLE',
+  'ADAPTER_INVALID',
+  'INFRASTRUCTURE_FAILURE',
+  'CONTRACT_FAILURE',
+  'OPERATOR_INTERRUPTION',
+  'TIMEOUT',
+  'OPERATION_FAILED'
+];
+
+const ADAPTER_ENVELOPE_FIELDS = [
+  'schemaVersion',
+  'operation',
+  'runId',
+  'attemptId',
+  'phase',
+  'armId',
+  'scenarioId',
+  'repetition',
+  'status',
+  'result',
+  'failure',
+  'operations',
+  'storage'
+];
+
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -36,6 +66,78 @@ function assertExactKeys(value, expectedKeys, label) {
 
 function isNonEmptyString(value) {
   return typeof value === 'string' && value.trim().length > 0;
+}
+
+function validateNullableString(value, label) {
+  if (value !== null && !isNonEmptyString(value)) {
+    throw new Error(`${label} must be null or a non-empty string`);
+  }
+}
+
+function validateNamespace(namespace, label) {
+  if (!isPlainObject(namespace)) throw new Error(`${label} must be an object`);
+  assertExactKeys(namespace, ['projectId', 'userId'], label);
+  validateNullableString(namespace.projectId, `${label}.projectId`);
+  validateNullableString(namespace.userId, `${label}.userId`);
+}
+
+function validateRecordReference(record, label) {
+  if (!isPlainObject(record)) throw new Error(`${label} must be an object`);
+  assertExactKeys(record, ['id', 'type'], label);
+  if (!isNonEmptyString(record.id)) throw new Error(`${label}.id must be a non-empty string`);
+  if (!isNonEmptyString(record.type)) throw new Error(`${label}.type must be a non-empty string`);
+}
+
+function validateStringArray(values, label) {
+  if (!Array.isArray(values) || !values.every(isNonEmptyString)) {
+    throw new Error(`${label} must be an array of non-empty strings`);
+  }
+}
+
+function validatePersistenceEvidence(evidence) {
+  if (evidence === null) return;
+  if (!isPlainObject(evidence)) throw new Error('persistenceEvidence must be null or an object');
+  assertExactKeys(evidence, ['verified', 'expectedRecord', 'matchedRecordIds', 'namespace'], 'persistenceEvidence');
+  if (typeof evidence.verified !== 'boolean') throw new Error('persistenceEvidence.verified must be boolean');
+  if (evidence.expectedRecord !== null) validateRecordReference(evidence.expectedRecord, 'persistenceEvidence.expectedRecord');
+  validateStringArray(evidence.matchedRecordIds, 'persistenceEvidence.matchedRecordIds');
+  validateNamespace(evidence.namespace, 'persistenceEvidence.namespace');
+  if (evidence.verified && evidence.expectedRecord !== null && !evidence.matchedRecordIds.includes(evidence.expectedRecord.id)) {
+    throw new Error('verified persistenceEvidence requires expectedRecord.id in matchedRecordIds');
+  }
+}
+
+function validateIsolationEvidence(evidence) {
+  if (evidence === null) return;
+  if (!isPlainObject(evidence)) throw new Error('isolationEvidence must be null or an object');
+  assertExactKeys(evidence, ['verified', 'alternateNamespace', 'leakedRecordIds'], 'isolationEvidence');
+  if (typeof evidence.verified !== 'boolean') throw new Error('isolationEvidence.verified must be boolean');
+  validateNamespace(evidence.alternateNamespace, 'isolationEvidence.alternateNamespace');
+  validateStringArray(evidence.leakedRecordIds, 'isolationEvidence.leakedRecordIds');
+  if (evidence.verified && evidence.leakedRecordIds.length > 0) {
+    throw new Error('verified isolationEvidence requires empty leakedRecordIds');
+  }
+}
+
+function validateAdapterResult(result) {
+  if (!isPlainObject(result)) throw new Error('adapter result must be an object');
+  assertExactKeys(result, ['nativeContext', 'persistenceEvidence', 'isolationEvidence'], 'adapter result');
+  if (!Array.isArray(result.nativeContext) || !result.nativeContext.every(isPlainObject)) {
+    throw new Error('adapter result.nativeContext must be an array of native record objects');
+  }
+  validatePersistenceEvidence(result.persistenceEvidence);
+  validateIsolationEvidence(result.isolationEvidence);
+}
+
+function validateAdapterFailure(status, failure) {
+  if (status === 'FAILED') {
+    if (!isPlainObject(failure)) throw new Error('FAILED adapter response requires a structured failure');
+    assertExactKeys(failure, ['cause', 'message'], 'adapter failure');
+    if (!ADAPTER_FAILURE_CAUSES.includes(failure.cause)) throw new Error(`Invalid adapter failure cause: ${failure.cause}`);
+    if (!isNonEmptyString(failure.message)) throw new Error('adapter failure.message must be a non-empty string');
+    return;
+  }
+  if (failure !== null) throw new Error(`${status} adapter response must have null failure`);
 }
 
 /**
@@ -272,81 +374,28 @@ export function validateStorageMeasurement(storage) {
 }
 
 /**
- * Validate common adapter envelope format.
- * Reject null/non-object input, missing core fields, invalid unit status, invalid repetition.
- * Require non-empty string phase/armId/scenarioId and integer repetition >= 0.
- * Always call all three nested validators - operations, applicability, and storage are required.
+ * Validate the raw memory-adapter response. Applicability, the decision response,
+ * the outer-model call count, and final unit status remain harness-owned evidence.
  */
 export function validateAdapterEnvelope(envelope) {
-  // Validate input type
-  if (envelope === null || envelope === undefined) {
-    throw new Error('envelope cannot be null or undefined');
+  if (!isPlainObject(envelope)) throw new Error('adapter envelope must be an object');
+  assertExactKeys(envelope, ADAPTER_ENVELOPE_FIELDS, 'adapter envelope');
+
+  if (envelope.schemaVersion !== 1) throw new Error('adapter envelope.schemaVersion must equal 1');
+  if (!ADAPTER_OPERATIONS.includes(envelope.operation)) throw new Error(`Invalid adapter operation: ${envelope.operation}`);
+  for (const field of ['runId', 'attemptId', 'phase', 'armId', 'scenarioId']) {
+    if (!isNonEmptyString(envelope[field])) throw new Error(`adapter envelope.${field} must be a non-empty string`);
   }
-
-  if (typeof envelope !== 'object' || Array.isArray(envelope)) {
-    throw new Error('envelope must be an object');
+  if (!Number.isSafeInteger(envelope.repetition) || envelope.repetition < 0) {
+    throw new Error('adapter envelope.repetition must be a non-negative safe integer');
   }
+  if (!ADAPTER_STATUSES.includes(envelope.status)) throw new Error(`Invalid adapter status: ${envelope.status}`);
 
-  assertExactKeys(envelope, [
-    'phase',
-    'armId',
-    'scenarioId',
-    'repetition',
-    'status',
-    'operations',
-    'applicability',
-    'storage'
-  ], 'adapter envelope');
-
-  // Validate required core fields
-  if (!envelope.phase || typeof envelope.phase !== 'string' || envelope.phase.trim() === '') {
-    throw new Error('Missing or invalid envelope.phase (must be non-empty string)');
-  }
-
-  if (!envelope.armId || typeof envelope.armId !== 'string' || envelope.armId.trim() === '') {
-    throw new Error('Missing or invalid envelope.armId (must be non-empty string)');
-  }
-
-  if (!envelope.scenarioId || typeof envelope.scenarioId !== 'string' || envelope.scenarioId.trim() === '') {
-    throw new Error('Missing or invalid envelope.scenarioId (must be non-empty string)');
-  }
-
-  if (typeof envelope.repetition !== 'number' || !Number.isInteger(envelope.repetition)) {
-    throw new Error('Missing or invalid envelope.repetition (must be integer)');
-  }
-
-  if (envelope.repetition < 0) {
-    throw new Error('envelope.repetition must be non-negative integer');
-  }
-
-  if (!envelope.status || typeof envelope.status !== 'string') {
-    throw new Error('Missing envelope.status');
-  }
-
-  // Validate unit status (must be one of the four valid statuses)
-  const validUnitStatuses = new Set(UNIT_STATUSES);
-  if (!validUnitStatuses.has(envelope.status)) {
-    throw new Error(`Invalid envelope.status: ${envelope.status}. Must be one of: ${UNIT_STATUSES.join(', ')}`);
-  }
-
-  // Require operations, applicability, and storage - these are NOT optional
-  if (!envelope.operations) {
-    throw new Error('envelope.operations is required');
-  }
-
-  if (!envelope.applicability) {
-    throw new Error('envelope.applicability is required');
-  }
-
-  if (!envelope.storage) {
-    throw new Error('envelope.storage is required');
-  }
-
-  // Always call all three nested validators
+  validateAdapterResult(envelope.result);
+  validateAdapterFailure(envelope.status, envelope.failure);
   validateOperationMetrics(envelope.operations);
   if (envelope.operations.outerDecisionModelCalls !== 0) {
     throw new Error('Adapter envelope outerDecisionModelCalls must be zero; the harness owns the outer decision model');
   }
-  validateApplicability(envelope.applicability);
   validateStorageMeasurement(envelope.storage);
 }
