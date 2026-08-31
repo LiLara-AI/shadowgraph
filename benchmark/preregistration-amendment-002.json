@@ -1,0 +1,350 @@
+{
+  "amendmentVersion": "1.1.0",
+  "amendmentId": "amendment-002",
+  "status": "PROPOSED_NOT_AUTHORIZED_FOR_SCORED_RUN",
+  "proposedAt": "2026-08-31T00:00:00Z",
+  "supersedes": {
+    "preregistrationFile": "benchmark/preregistration.json",
+    "preregistrationSha256": "738ee8b4813fab77da2e4e24582b12e756686650e4c39fad41c5337f831f5dac",
+    "amendment001File": "benchmark/preregistration-amendment-001.json",
+    "amendment001Sha256": "2b209df6ca46a179e332acd4ed0b16a35a089f5c14575dd86353db0dc7249c4a",
+    "historicalRunId": "20260830T180000Z-comparative",
+    "historicalRunStatus": "INCOMPLETE_NOT_MEASURED"
+  },
+  "reason": {
+    "amendment001Status": "Amendment 001 established unit/arm status model, progress, and adapter fairness. Amendment 002 specifies the integrated runner, centralized outer model, provider metering, mechanical arm derivation, and all F1-F17 requirements.",
+    "validComparativeResultObserved": false,
+    "partialStateReuse": false
+  },
+  "resolvedMethodologyChoices": {
+    "schemaTokenEconomics": {
+      "status": "REMOVED_FROM_V1_1",
+      "advertisedSchemas": "REPRODUCIBILITY_EVIDENCE_ONLY",
+      "commonOuterModelPrompt": false,
+      "claimEnabled": false
+    },
+    "notApplicableCapabilityHandling": {
+      "unitStatus": "EXCLUDED",
+      "blockedClaims": "CAPABILITY_SPECIFIC_ONLY",
+      "armRankEligibility": "UNAFFECTED_IF_OTHERWISE_MEASURED",
+      "supersedesAmendment001": true,
+      "noSyntheticUserNamespaces": true
+    },
+    "measuredOperationRetries": {
+      "outerModelMaxRetries": 0,
+      "memoryOperationMaxRetries": 0,
+      "libraryDefaultRetriesDisabled": true,
+      "providerRetryAttemptsRecordedAsFailures": true,
+      "diagnosticRetriesSubstituteMeasuredEvidence": false
+    },
+    "diagnosticResume": {
+      "sameRunId": true,
+      "requiresIdenticalImplementationEnvironmentLock": true,
+      "newAttemptId": true,
+      "runsOnlyNeverStartedUnits": true,
+      "infrastructureRepairRequiresNewRunId": true
+    },
+    "neo4jCogneeStorage": {
+      "status": "NOT_AVAILABLE",
+      "bytes": null,
+      "exactAttributableScopeRequiredForMeasured": true,
+      "blockedClaims": "STORAGE_DEPENDENT_ONLY"
+    },
+    "cogneeProviderMode": {
+      "mode": "OPENAI_COMPATIBLE_LOCALHOST_THROUGH_METERING_PROXY",
+      "mixedNativeOllamaAndV1Allowed": false
+    },
+    "modelDigestRequirement": {
+      "llmWeightDigestRequired": true,
+      "embeddingWeightDigestRequired": true,
+      "mutableTagSufficient": false,
+      "containerDigestSufficient": false,
+      "blocksRealAcceptance": true,
+      "blocksReadiness": true,
+      "blocksOfficialExecution": true
+    }
+  },
+  "invariants": {
+    "scenariosChanged": false,
+    "seedsChanged": false,
+    "repetitionsChanged": false,
+    "scoringThresholdsChanged": false,
+    "marketingThresholdsChanged": false,
+    "armSetChanged": false,
+    "historicalArtifactsOverwritten": false
+  },
+  "definitions": {
+    "unitStatuses": ["MEASURED", "FAILED", "NOT_MEASURED", "EXCLUDED"],
+    "armStatuses": ["MEASURED", "PARTIAL_FAILED", "FAILED", "NOT_MEASURED", "EXCLUDED"],
+    "armStatusDerivation": {
+      "rule": "Derive mechanically from unit statuses. All measured → MEASURED. Measured plus failed/unavailable → PARTIAL_FAILED. Failed with no measured units → FAILED. All unavailable → NOT_MEASURED. Explicitly excluded arm → EXCLUDED.",
+      "partialFailedEligibility": "PARTIAL_FAILED arms are not rank eligible but retain all measured units in raw evidence.",
+      "excludedUnitRule": "IGNORE_WHEN_DERIVING_APPLICABLE_ARM_STATUS",
+      "allUnitsExcludedRule": "EXCLUDED"
+    },
+    "applicability": {
+      "rule": "Product capabilities are harness metadata, not LLM output fields.",
+      "schema": {
+        "userIsolation": {
+          "status": "SUPPORTED | NOT_APPLICABLE",
+          "reason": "null for SUPPORTED | non-empty string for NOT_APPLICABLE"
+        },
+        "persistence": {
+          "status": "SUPPORTED | NOT_APPLICABLE",
+          "reason": "null for SUPPORTED | non-empty string for NOT_APPLICABLE"
+        }
+      },
+      "notApplicable": {
+        "unitStatus": "EXCLUDED",
+        "blockedClaims": "CAPABILITY_SPECIFIC_ONLY",
+        "armRankEligibility": "UNAFFECTED_IF_OTHERWISE_MEASURED",
+        "supersedesAmendment001": true
+      },
+      "noMemoryRules": {
+        "persistence": "NOT_APPLICABLE",
+        "expectedPersistedRecords": 0,
+        "phaseContext": "B/C/E receive no memory context",
+        "projectUserProbes": "must show no data leak",
+        "measurableMetrics": "decision quality, latency, outer model usage remain measurable"
+      }
+    },
+    "requestClasses": ["outer_decision_llm", "internal_memory_llm", "embedding"],
+    "operationMetrics": {
+      "memoryReadOperations": "Count of native memory retrieval operations",
+      "memoryWriteOperations": "Count of native memory write/persist operations",
+      "mcpToolCalls": "Count of MCP tool invocations",
+      "outerDecisionModelCalls": "Count of common outer decision model requests",
+      "internalMemoryModelCalls": "Count of product-internal LLM calls",
+      "embeddingCalls": "Count of embedding requests",
+      "persistenceVerificationOperations": "Count of verification probes (separate from scored operations)",
+      "rule": "Report exact non-negative integer counters. No generic 'toolCalls' hiding multiple native operations. Verification operations kept separate unless explicitly combined by amendment."
+    },
+    "storageMeasurement": {
+      "schema": {
+        "status": "MEASURED | NOT_AVAILABLE",
+        "bytes": "null | non-negative integer",
+        "scope": "description of what bytes measure",
+        "method": "measurement technique",
+        "reason": "explanation when NOT_AVAILABLE",
+        "blockedClaims": "list of claims unavailable storage blocks"
+      },
+      "rules": [
+        "Exact byte scope must be defined",
+        "Unsupported storage = null with NOT_AVAILABLE reason",
+        "Do not report fake zero bytes for Neo4j or external stores",
+        "Do not use response JSON size as database storage size"
+      ]
+    },
+    "truthfulZeroResult": "Zero-measured output reports the actual recorded cause (endpoint unavailable, adapter invalid, infrastructure failure, contract failure, operator interruption), not a generic missing-model reason when model capability was available.",
+    "progress": {
+      "format": "append-only NDJSON",
+      "events": ["run_started", "unit_started", "unit_finished", "unit_failed", "checkpoint", "heartbeat", "run_interrupted", "run_finished"],
+      "flushRule": "flush and fsync the progress record before the next unit begins",
+      "unitEvidence": "write unit_finished or unit_failed before starting next unit",
+      "retention": "Never delete, replace, zero-fill, or rerun-substitute a completed or failed unit"
+    },
+    "interruption": {
+      "attemptId": "unique identifier for each execution attempt",
+      "runId": "unique identifier for each logical run",
+      "resume": {
+        "sameRunId": true,
+        "newAttemptId": true,
+        "requiresIdenticalImplementationEnvironmentLock": true,
+        "runsOnlyNeverStartedUnits": true,
+        "replacesEarlierEvidence": false
+      },
+      "infrastructureRepairRequiresNewRunId": true,
+      "operatorInterruption": "recorded in progress log as run_interrupted",
+      "historicalSeparation": "The historical 20260830T180000Z-comparative run remains separate and INCOMPLETE_NOT_MEASURED"
+    },
+    "watchdog": {
+      "policy": "Uses monotonic elapsed time and most recent heartbeat/checkpoint timestamp. Lack of stdout alone is never a stall diagnosis.",
+      "unitTimeoutMs": 120000,
+      "runTimeoutPolicy": "No benchmark-wide timeout imposed; operator may stop, progress log records interruption",
+      "heartbeatRequired": true
+    },
+    "integratedRunner": {
+      "rule": "One integrated candidate runner uses Amendment 002, validator, aggregator, scorer, checkpoint writer, watchdog, centralized model client, metering layer, and implementation lock.",
+      "aggregatorRequirement": "Calculate real results for valid complete arms. Must not remain a placeholder returning empty arrays.",
+      "acceptanceMode": "Same runner with scored:false, no score/ranking/marketing fields in output"
+    },
+    "centralOuterModel": {
+      "ownership": "The harness, not adapters, owns outer decision model",
+      "responsibilities": [
+        "common prompt construction",
+        "context serialization",
+        "outer model HTTP request",
+        "model name, seed, temperature, token limits, timeout",
+        "retry policy",
+        "JSON parsing",
+        "usage capture"
+      ],
+      "measuredMaxRetries": 0,
+      "adapterProhibition": "Adapters must not independently call the outer decision model",
+      "adapterScope": "reset, record, retrieve, persistence verification, isolation verification, native operation evidence"
+    },
+    "providerMetering": {
+      "rule": "Product-internal LLM and embedding calls must be metered via local proxy or equivalent",
+      "correlation": ["runId", "attemptId", "armId", "scenarioId", "repetition", "phase", "requestClass"],
+      "capture": [
+        "request count",
+        "model identity",
+        "input/output tokens where provider metadata exists",
+        "latency",
+        "failure status"
+      ],
+      "unavailableUsage": "null (not estimated from string length)",
+      "blockingPolicy": "Unavailable token metrics block only related claims, not entire measurement"
+    },
+    "phaseAGroundTruth": {
+      "rule": "Common Phase A prompt provides every option/ID needed by scoring, equally for all arms",
+      "included": [
+        "option IDs and text",
+        "rejection reason IDs/text",
+        "assumption IDs",
+        "evidence IDs/text",
+        "risk IDs",
+        "review-trigger ID/key/operator/value",
+        "constraint IDs/text"
+      ],
+      "forbidden": [
+        "answer.choiceId || scenario.choice.id fallbacks",
+        "filling missing model fields from expected answers",
+        "storing frozen expected alternatives automatically",
+        "giving one adapter hidden fixture truth",
+        "preloading products with expected answer before Phase A"
+      ],
+      "storage": "Store only the standardized answer generated by common decision model"
+    },
+    "implementationLock": {
+      "contents": [
+        "original preregistration hash",
+        "Amendment 002 hash",
+        "runner hash",
+        "validator hash",
+        "aggregator hash",
+        "scorer hash",
+        "adapter/helper hashes",
+        "acceptance fixtures",
+        "model digests",
+        "service image digests"
+      ],
+      "timing": "Generated before any official execution"
+    },
+    "adapterProtocol": {
+      "commonEnvelope": "All adapters return one exact common envelope format",
+      "prohibitions": [
+        "calling common outer decision model",
+        "adding private arm-specific prompting",
+        "silently retrying measured operations",
+        "copying expected answers from fixtures"
+      ],
+      "requirements": [
+        "expose native context only",
+        "use exact requested namespaces",
+        "verify expected record specifically",
+        "expose internal provider traffic to metering"
+      ],
+      "shadowgraphSpecific": {
+        "mcp": "real MCP stdio",
+        "scopes": "native project/user scopes separately, never concatenate user ID into project",
+        "verification": "verify expected record after fresh server load",
+        "prohibitions": ["expected-choice fallback", "copying expected alternatives/reasons"],
+        "mcpCapture": "actual MCP call counts",
+        "schemaEconomics": {
+          "claimStatus": "REMOVED_FROM_V1_1",
+          "advertisedSchemas": "REPRODUCIBILITY_EVIDENCE_ONLY",
+          "includedInCommonOuterModelPrompt": false
+        }
+      },
+      "mem0Specific": {
+        "phaseAOrder": "Phase A model answer must precede persistence",
+        "prohibitions": ["full scenario preload", "adapter-specific outer LLM retry"],
+        "metering": "internal model/embedding calls",
+        "verification": "exact expected records after fresh load"
+      },
+      "graphitiSpecific": {
+        "prohibitions": ["extra arm-specific prompt"],
+        "metering": "internal Graphiti LLM/embedding calls",
+        "verification": "expected episode/entity, not any node",
+        "storage": "may be null only under approved NOT_AVAILABLE policy",
+        "versions": "pinned Graphiti and Neo4j versions"
+      },
+      "basicMemorySpecific": {
+        "phaseAOrder": "do not write Phase A expected record before model answer",
+        "namespace": "use actual queried namespace",
+        "userIsolation": "declare native user isolation NOT_APPLICABLE if using adapter directories without product feature",
+        "verification": "record-specific persistence verification"
+      },
+      "cogneeSpecific": {
+        "providerMode": "use one consistent OpenAI-compatible localhost mode for both model families, not native Ollama mixed with /v1",
+        "models": "use same underlying models",
+        "prohibitions": ["store full expected fixture before Phase A"],
+        "metering": "add/cognify/search/internal requests",
+        "verification": "expected records"
+      }
+    },
+    "reproducibility": {
+      "required": [
+        "Ollama version",
+        "full immutable LLM model digest",
+        "full immutable embedding model digest",
+        "architecture",
+        "parameter count",
+        "quantization",
+        "context length",
+        "embedding dimension",
+        "pinned service image digests",
+        "exact competitor versions",
+        "every source hash"
+      ],
+      "insufficient": "'latest' alone, or Ollama Docker image digest without model-weights digest",
+      "missingModelWeightDigestBlocks": {
+        "realAcceptance": true,
+        "readiness": true,
+        "officialExecution": true
+      }
+    },
+    "reviewBundle": {
+      "byteIdentical": "Source, tests, preregistration, amendments, and lock files must be byte-identical to tested files",
+      "noSourceSanitization": "Never sanitize executable source code",
+      "sanitizationScope": "Only runtime config values, logs, reports",
+      "secretRemoval": "Remove credentials from source by design, not during bundling"
+    }
+  },
+  "candidateAcceptance": {
+    "fixtureSet": "candidate-acceptance-non-scored-2026-08",
+    "scenarioIdsPrefix": "ACC_",
+    "scenarioCount": "at least 2 new ACC_ scenarios",
+    "repetitions": 2,
+    "scored": false,
+    "rankings": false,
+    "requiredArms": 7,
+    "requiresFullModelWeightDigests": true,
+    "requiredPhases": ["RESET", "A", "B", "C", "D_TRUE", "D_FALSE_0", "D_FALSE_1", "D_FALSE_2", "E", "ISOLATION_PROJECT", "ISOLATION_USER"],
+    "catches": [
+      "state leakage",
+      "bad reset",
+      "wrong namespace",
+      "fixture-answer leakage",
+      "inconsistent prompts",
+      "missing persistence",
+      "timeout",
+      "malformed envelopes",
+      "private output"
+    ],
+    "gate": "All seven arms must pass according to declared applicability before any scored run"
+  },
+  "greenGates": [
+    "all Node tests pass",
+    "all Python tests pass",
+    "integrated runner tests pass",
+    "validator tests pass",
+    "aggregator tests pass",
+    "checkpoint/interruption tests pass",
+    "privacy tests pass",
+    "all seven arms pass non-scored acceptance",
+    "implementation lock verifies",
+    "repository diff contains no secrets/private paths"
+  ]
+}

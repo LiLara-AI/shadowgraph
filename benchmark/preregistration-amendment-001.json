@@ -1,0 +1,78 @@
+{
+  "amendmentVersion": "1.1.0",
+  "amendmentId": "amendment-001",
+  "status": "PROPOSED_NOT_AUTHORIZED_FOR_SCORED_RUN",
+  "proposedAt": "2026-08-31T00:00:00Z",
+  "supersedes": {
+    "preregistrationFile": "benchmark/preregistration.json",
+    "preregistrationSha256": "738ee8b4813fab77da2e4e24582b12e756686650e4c39fad41c5337f831f5dac",
+    "historicalRunId": "20260830T180000Z-comparative",
+    "historicalRunStatus": "INCOMPLETE_NOT_MEASURED"
+  },
+  "reason": {
+    "firstRun": "The attempted run produced no complete raw result and must remain permanently INCOMPLETE / NOT MEASURED. Independent review found harness/adapters that could not represent unit failures, genuine user-isolation non-applicability, reliable progress, or the actual MCP Full/Compact distinction.",
+    "validComparativeResultObserved": false,
+    "partialStateReuse": false
+  },
+  "invariants": {
+    "scenariosChanged": false,
+    "seedsChanged": false,
+    "repetitionsChanged": false,
+    "scoringThresholdsChanged": false,
+    "marketingThresholdsChanged": false,
+    "armSetChanged": false,
+    "historicalArtifactsOverwritten": false
+  },
+  "definitions": {
+    "unitStatuses": ["MEASURED", "FAILED", "NOT_MEASURED", "EXCLUDED"],
+    "armStatuses": ["MEASURED", "PARTIAL_FAILED", "NOT_MEASURED", "EXCLUDED"],
+    "armStatusRule": "An arm may be PARTIAL_FAILED while retaining every successful MEASURED unit and every failed or unavailable unit in raw append-only evidence. PARTIAL_FAILED arms are not rank eligible.",
+    "userIsolationNotApplicable": {
+      "status": "NOT_APPLICABLE",
+      "responseField": "userIsolationStatus",
+      "responseValue": "NOT_APPLICABLE",
+      "persistenceField": "userIsolation",
+      "persistenceValue": {"status": "NOT_APPLICABLE", "reason": "product has no native user namespace"},
+      "unitStatus": "NOT_MEASURED",
+      "scoringValue": null,
+      "eligibility": "blocks rank eligibility and all best claims"
+    },
+    "partialResultRetention": "Write each unit result before starting the next unit. Never delete, replace, zero-fill, or rerun-substitute a completed or failed unit. A checkpoint may resume only an unstarted unit in a new diagnostic execution and may not alter the original evidence.",
+    "truthfulZeroResult": "Zero-measured output reports the recorded run reason and an evidence list. It must not substitute a generic no-model reason when model capability was available but adapters, timeout, configuration, or contract validation prevented measurement.",
+    "progress": {
+      "format": "append-only NDJSON",
+      "events": ["run_started", "unit_started", "unit_finished", "unit_failed", "checkpoint", "run_finished", "run_interrupted"],
+      "flushRule": "flush and fsync the progress record before the next unit begins"
+    },
+    "watchdog": {
+      "policy": "A watchdog uses monotonic elapsed time and the most recent heartbeat/checkpoint timestamp. Lack of stdout alone is never a stall diagnosis.",
+      "unitTimeoutMs": 120000,
+      "runTimeoutPolicy": "No unregistered whole-run timeout is imposed; an operator may stop the process, and the progress log records interruption. A unit timeout records FAILED without replacement.",
+      "heartbeatRequired": true
+    },
+    "warmup": {
+      "policy": "Dependency installation, service startup, model loading, schema/index creation, and adapter health checks occur before measurement and are reported separately. They are not scored lifecycle units.",
+      "stateRule": "Warmup state is isolated from measured state and is never reused as a measured answer or memory record."
+    },
+    "adapterFairness": {
+      "promptRule": "All arms receive the same expanded system and phase prompt. No adapter may add product-specific instructions, answer hints, schema instructions, or frozen fixture data before Phase A completes.",
+      "contextRule": "Phase A receives no prior-memory context. Post-Phase-A recording contains only the standardized decision response record. Later phases receive only native retrieval/context returned by that arm.",
+      "resetRule": "Reset removes or recreates only the arm's isolated state and verifies the target namespace is empty before the next lifecycle.",
+      "retryRule": "No transparent retry during measured units. Diagnostic retries are separately identified and never substituted.",
+      "timeoutRule": "The common unit timeout is enforced by the runner; adapter subprocesses may use a shorter internal timeout but may not exceed it.",
+      "isolationRule": "Use the product's native project/user namespace where present. A filesystem/config partition is not silently relabeled as a native user namespace.",
+      "outputRule": "Each phase returns the standard response schema plus persistence evidence; secrets and private paths are never retained."
+    },
+    "toolCalls": "Count every model-requested/native memory operation used by the adapter for the unit, including retrieval, recording, and MCP tool calls. Setup, health, model, and persistence verification probes are reported separately and excluded.",
+    "storage": "Report recursive bytes of the arm's isolated persisted data after the unit, excluding package installations, virtual environments, model weights, runtime caches, logs, and temporary diagnostics. Use null with an explicit NOT_AVAILABLE reason when the product cannot expose the declared scope.",
+    "persistenceVerification": "Verification must identify the expected record id/type and requested project/user namespace after a fresh load or native read-back. Existence of any unrelated node/file is insufficient. Isolation verification must prove target records are absent from the alternate namespace."
+  },
+  "candidateAcceptance": {
+    "fixtureSet": "candidate-acceptance-non-scored-2026-08",
+    "scenarioIdsPrefix": "ACC_",
+    "scored": false,
+    "rankings": false,
+    "requiredArms": 7,
+    "requiredPhases": ["RESET", "A", "B", "C", "D_TRUE", "D_FALSE_0", "D_FALSE_1", "D_FALSE_2", "E", "ISOLATION_PROJECT", "ISOLATION_USER"]
+  }
+}
