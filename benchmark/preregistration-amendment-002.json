@@ -100,6 +100,36 @@
         "armRankEligibility": "UNAFFECTED_IF_OTHERWISE_MEASURED",
         "supersedesAmendment001": true
       },
+      "armMatrix": {
+        "shadowgraph-full": {
+          "userIsolation": {"status": "NOT_APPLICABLE", "reason": "decision records have a native project namespace but no native user namespace"},
+          "persistence": {"status": "SUPPORTED", "reason": null}
+        },
+        "shadowgraph-compact": {
+          "userIsolation": {"status": "NOT_APPLICABLE", "reason": "decision records have a native project namespace but no native user namespace"},
+          "persistence": {"status": "SUPPORTED", "reason": null}
+        },
+        "mem0-oss": {
+          "userIsolation": {"status": "SUPPORTED", "reason": null},
+          "persistence": {"status": "SUPPORTED", "reason": null}
+        },
+        "graphiti": {
+          "userIsolation": {"status": "SUPPORTED", "reason": null},
+          "persistence": {"status": "SUPPORTED", "reason": null}
+        },
+        "basic-memory": {
+          "userIsolation": {"status": "NOT_APPLICABLE", "reason": "product exposes project namespaces but no native user namespace"},
+          "persistence": {"status": "SUPPORTED", "reason": null}
+        },
+        "cognee": {
+          "userIsolation": {"status": "SUPPORTED", "reason": null},
+          "persistence": {"status": "SUPPORTED", "reason": null}
+        },
+        "no-memory": {
+          "userIsolation": {"status": "NOT_APPLICABLE", "reason": "control has no memory system or native user namespace"},
+          "persistence": {"status": "NOT_APPLICABLE", "reason": "control intentionally persists no records"}
+        }
+      },
       "noMemoryRules": {
         "persistence": "NOT_APPLICABLE",
         "expectedPersistedRecords": 0,
@@ -181,7 +211,7 @@
       ],
       "measuredMaxRetries": 0,
       "adapterProhibition": "Adapters must not independently call the outer decision model",
-      "adapterScope": "reset, record, retrieve, persistence verification, isolation verification, native operation evidence"
+      "adapterScope": ["reset", "retrieve", "persist", "verify"]
     },
     "providerMetering": {
       "rule": "Product-internal LLM and embedding calls must be metered via local proxy or equivalent",
@@ -219,6 +249,7 @@
     "implementationLock": {
       "contents": [
         "original preregistration hash",
+        "Amendment 001 hash",
         "Amendment 002 hash",
         "runner hash",
         "validator hash",
@@ -232,7 +263,12 @@
       "timing": "Generated before any official execution"
     },
     "adapterProtocol": {
-      "commonEnvelope": "All adapters return one exact common envelope format",
+      "operations": ["reset", "retrieve", "persist", "verify"],
+      "commonEnvelope": {
+        "fields": ["phase", "armId", "scenarioId", "repetition", "status", "operations", "applicability", "storage"],
+        "unknownTopLevelFieldsAllowed": false,
+        "adapterOuterDecisionModelCalls": 0
+      },
       "prohibitions": [
         "calling common outer decision model",
         "adding private arm-specific prompting",
@@ -247,7 +283,7 @@
       ],
       "shadowgraphSpecific": {
         "mcp": "real MCP stdio",
-        "scopes": "native project/user scopes separately, never concatenate user ID into project",
+        "scopes": "use the native project scope for decision records; native user isolation is NOT_APPLICABLE unless a native user-scoped record API is proven; never concatenate user ID into project",
         "verification": "verify expected record after fresh server load",
         "prohibitions": ["expected-choice fallback", "copying expected alternatives/reasons"],
         "mcpCapture": "actual MCP call counts",

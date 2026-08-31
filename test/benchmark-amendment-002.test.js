@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 
 test('frozen preregistration hash remains unchanged', async () => {
-  const content = await readFile('benchmark/preregistration.json', 'utf8');
+  const content = await readFile('benchmark/preregistration.json');
   const hash = createHash('sha256').update(content).digest('hex');
   assert.equal(
     hash,
@@ -14,7 +14,7 @@ test('frozen preregistration hash remains unchanged', async () => {
 });
 
 test('Amendment 001 exists byte-identically with correct hash', async () => {
-  const content = await readFile('benchmark/preregistration-amendment-001.json', 'utf8');
+  const content = await readFile('benchmark/preregistration-amendment-001.json');
   const hash = createHash('sha256').update(content).digest('hex');
   assert.equal(
     hash,
@@ -22,8 +22,11 @@ test('Amendment 001 exists byte-identically with correct hash', async () => {
     'Amendment 001 must be byte-identical to frozen version'
   );
 
-  const sidecar = await readFile('benchmark/preregistration-amendment-001.sha256', 'utf8');
-  assert.match(sidecar, /^2b209df6ca46a179e332acd4ed0b16a35a089f5c14575dd86353db0dc7249c4a/);
+  const sidecar = await readFile('benchmark/preregistration-amendment-001.sha256');
+  assert.deepEqual(
+    sidecar,
+    Buffer.from('2b209df6ca46a179e332acd4ed0b16a35a089f5c14575dd86353db0dc7249c4a  preregistration-amendment-001.json\n')
+  );
 });
 
 test('Amendment 002 exists with valid structure and sidecar', async () => {
@@ -169,6 +172,36 @@ test('Amendment 002 exists with valid structure and sidecar', async () => {
   assert.equal(amendment.definitions.applicability.notApplicable.unitStatus, 'EXCLUDED');
   assert.equal(amendment.definitions.applicability.notApplicable.blockedClaims, 'CAPABILITY_SPECIFIC_ONLY');
   assert.equal(amendment.definitions.applicability.notApplicable.armRankEligibility, 'UNAFFECTED_IF_OTHERWISE_MEASURED');
+  assert.deepEqual(amendment.definitions.applicability.armMatrix, {
+    'shadowgraph-full': {
+      userIsolation: { status: 'NOT_APPLICABLE', reason: 'decision records have a native project namespace but no native user namespace' },
+      persistence: { status: 'SUPPORTED', reason: null }
+    },
+    'shadowgraph-compact': {
+      userIsolation: { status: 'NOT_APPLICABLE', reason: 'decision records have a native project namespace but no native user namespace' },
+      persistence: { status: 'SUPPORTED', reason: null }
+    },
+    'mem0-oss': {
+      userIsolation: { status: 'SUPPORTED', reason: null },
+      persistence: { status: 'SUPPORTED', reason: null }
+    },
+    graphiti: {
+      userIsolation: { status: 'SUPPORTED', reason: null },
+      persistence: { status: 'SUPPORTED', reason: null }
+    },
+    'basic-memory': {
+      userIsolation: { status: 'NOT_APPLICABLE', reason: 'product exposes project namespaces but no native user namespace' },
+      persistence: { status: 'SUPPORTED', reason: null }
+    },
+    cognee: {
+      userIsolation: { status: 'SUPPORTED', reason: null },
+      persistence: { status: 'SUPPORTED', reason: null }
+    },
+    'no-memory': {
+      userIsolation: { status: 'NOT_APPLICABLE', reason: 'control has no memory system or native user namespace' },
+      persistence: { status: 'NOT_APPLICABLE', reason: 'control intentionally persists no records' }
+    }
+  });
   assert.equal(
     amendment.definitions.applicability.schema.userIsolation.reason,
     'null for SUPPORTED | non-empty string for NOT_APPLICABLE'
@@ -178,6 +211,21 @@ test('Amendment 002 exists with valid structure and sidecar', async () => {
     'null for SUPPORTED | non-empty string for NOT_APPLICABLE'
   );
   assert.equal(amendment.definitions.centralOuterModel.measuredMaxRetries, 0);
+  assert.deepEqual(amendment.definitions.providerMetering.correlation, [
+    'runId', 'attemptId', 'armId', 'scenarioId', 'repetition', 'phase', 'requestClass'
+  ]);
+  assert.deepEqual(amendment.definitions.phaseAGroundTruth.included, [
+    'option IDs and text',
+    'rejection reason IDs/text',
+    'assumption IDs',
+    'evidence IDs/text',
+    'risk IDs',
+    'review-trigger ID/key/operator/value',
+    'constraint IDs/text'
+  ]);
+  assert.deepEqual(amendment.definitions.progress.events, [
+    'run_started', 'unit_started', 'unit_finished', 'unit_failed', 'checkpoint', 'heartbeat', 'run_interrupted', 'run_finished'
+  ]);
   assert.equal(amendment.definitions.interruption.resume.sameRunId, true);
   assert.equal(amendment.definitions.interruption.resume.requiresIdenticalImplementationEnvironmentLock, true);
   assert.equal(amendment.definitions.interruption.resume.runsOnlyNeverStartedUnits, true);
@@ -187,10 +235,52 @@ test('Amendment 002 exists with valid structure and sidecar', async () => {
     advertisedSchemas: 'REPRODUCIBILITY_EVIDENCE_ONLY',
     includedInCommonOuterModelPrompt: false
   });
+  assert.deepEqual(amendment.definitions.adapterProtocol.operations, ['reset', 'retrieve', 'persist', 'verify']);
+  assert.deepEqual(amendment.definitions.adapterProtocol.commonEnvelope, {
+    fields: ['phase', 'armId', 'scenarioId', 'repetition', 'status', 'operations', 'applicability', 'storage'],
+    unknownTopLevelFieldsAllowed: false,
+    adapterOuterDecisionModelCalls: 0
+  });
+  assert.deepEqual(amendment.definitions.implementationLock.contents, [
+    'original preregistration hash',
+    'Amendment 001 hash',
+    'Amendment 002 hash',
+    'runner hash',
+    'validator hash',
+    'aggregator hash',
+    'scorer hash',
+    'adapter/helper hashes',
+    'acceptance fixtures',
+    'model digests',
+    'service image digests'
+  ]);
   assert.equal(amendment.definitions.reproducibility.missingModelWeightDigestBlocks.realAcceptance, true);
   assert.equal(amendment.definitions.reproducibility.missingModelWeightDigestBlocks.readiness, true);
   assert.equal(amendment.definitions.reproducibility.missingModelWeightDigestBlocks.officialExecution, true);
   assert.equal(amendment.candidateAcceptance.requiresFullModelWeightDigests, true);
+  assert.deepEqual(amendment.candidateAcceptance.catches, [
+    'state leakage',
+    'bad reset',
+    'wrong namespace',
+    'fixture-answer leakage',
+    'inconsistent prompts',
+    'missing persistence',
+    'timeout',
+    'malformed envelopes',
+    'private output'
+  ]);
+  assert.deepEqual(amendment.greenGates, [
+    'all Node tests pass',
+    'all Python tests pass',
+    'integrated runner tests pass',
+    'validator tests pass',
+    'aggregator tests pass',
+    'checkpoint/interruption tests pass',
+    'privacy tests pass',
+    'all seven arms pass non-scored acceptance',
+    'implementation lock verifies',
+    'repository diff contains no secrets/private paths'
+  ]);
 
   // Verify sidecar exists and contains the hash
   const hash = createHash('sha256').update(content).digest('hex');

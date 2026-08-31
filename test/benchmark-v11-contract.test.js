@@ -334,6 +334,20 @@ test('validateOperationMetrics rejects non-integer values', async () => {
   assert.throws(() => validateOperationMetrics(metrics), /integer/i);
 });
 
+test('validateOperationMetrics rejects integers outside the exact safe range', async () => {
+  const { validateOperationMetrics } = await import('../benchmark/lib/v11-contract.mjs');
+  const metrics = {
+    memoryReadOperations: Number.MAX_SAFE_INTEGER + 1,
+    memoryWriteOperations: 2,
+    mcpToolCalls: 3,
+    outerDecisionModelCalls: 1,
+    internalMemoryModelCalls: 0,
+    embeddingCalls: 4,
+    persistenceVerificationOperations: 1
+  };
+  assert.throws(() => validateOperationMetrics(metrics), /safe integer/i);
+});
+
 test('validateOperationMetrics rejects missing required field', async () => {
   const { validateOperationMetrics } = await import('../benchmark/lib/v11-contract.mjs');
   const metrics = {
@@ -406,6 +420,19 @@ test('validateStorageMeasurement rejects MEASURED with null bytes', async () => 
     blockedClaims: []
   };
   assert.throws(() => validateStorageMeasurement(storage), /bytes.*required/i);
+});
+
+test('validateStorageMeasurement rejects byte counts outside the exact safe range', async () => {
+  const { validateStorageMeasurement } = await import('../benchmark/lib/v11-contract.mjs');
+  const storage = {
+    status: 'MEASURED',
+    bytes: Number.MAX_SAFE_INTEGER + 1,
+    scope: 'directory',
+    method: 'du',
+    reason: null,
+    blockedClaims: []
+  };
+  assert.throws(() => validateStorageMeasurement(storage), /safe integer/i);
 });
 
 test('validateStorageMeasurement rejects MEASURED with missing scope', async () => {
@@ -592,7 +619,7 @@ test('validateAdapterEnvelope always validates applicability and storage', async
       memoryReadOperations: 0,
       memoryWriteOperations: 1,
       mcpToolCalls: 0,
-      outerDecisionModelCalls: 1,
+      outerDecisionModelCalls: 0,
       internalMemoryModelCalls: 0,
       embeddingCalls: 0,
       persistenceVerificationOperations: 1
@@ -614,6 +641,63 @@ test('validateAdapterEnvelope always validates applicability and storage', async
     () => validateAdapterEnvelope({ ...envelope, storage: { ...envelope.storage, bytes: null } }),
     /bytes.*required/i
   );
+});
+
+test('validateAdapterEnvelope rejects unknown top-level fields', async () => {
+  const { validateAdapterEnvelope } = await import('../benchmark/lib/v11-contract.mjs');
+  const envelope = {
+    phase: 'A',
+    armId: 'test',
+    scenarioId: 'S01',
+    repetition: 0,
+    status: 'MEASURED',
+    operations: {
+      memoryReadOperations: 0,
+      memoryWriteOperations: 1,
+      mcpToolCalls: 0,
+      outerDecisionModelCalls: 0,
+      internalMemoryModelCalls: 0,
+      embeddingCalls: 0,
+      persistenceVerificationOperations: 1
+    },
+    applicability: {
+      userIsolation: { status: 'SUPPORTED', reason: null },
+      persistence: { status: 'SUPPORTED', reason: null }
+    },
+    storage: {
+      status: 'MEASURED', bytes: 1, scope: 'directory', method: 'du', reason: null, blockedClaims: []
+    },
+    modelOutput: { choiceId: 'fixture-choice' }
+  };
+  assert.throws(() => validateAdapterEnvelope(envelope), /unknown.*envelope.*field/i);
+});
+
+test('validateAdapterEnvelope requires adapter outer-model calls to stay zero', async () => {
+  const { validateAdapterEnvelope } = await import('../benchmark/lib/v11-contract.mjs');
+  const envelope = {
+    phase: 'A',
+    armId: 'test',
+    scenarioId: 'S01',
+    repetition: 0,
+    status: 'MEASURED',
+    operations: {
+      memoryReadOperations: 0,
+      memoryWriteOperations: 1,
+      mcpToolCalls: 0,
+      outerDecisionModelCalls: 1,
+      internalMemoryModelCalls: 0,
+      embeddingCalls: 0,
+      persistenceVerificationOperations: 1
+    },
+    applicability: {
+      userIsolation: { status: 'SUPPORTED', reason: null },
+      persistence: { status: 'SUPPORTED', reason: null }
+    },
+    storage: {
+      status: 'MEASURED', bytes: 1, scope: 'directory', method: 'du', reason: null, blockedClaims: []
+    }
+  };
+  assert.throws(() => validateAdapterEnvelope(envelope), /outerDecisionModelCalls.*zero/i);
 });
 
 test('validateAdapterEnvelope rejects null input', async () => {
@@ -647,7 +731,7 @@ test('validateAdapterEnvelope rejects missing operations', async () => {
       blockedClaims: []
     }
   };
-  assert.throws(() => validateAdapterEnvelope(envelope), /operations.*required/i);
+  assert.throws(() => validateAdapterEnvelope(envelope), /operations/i);
 });
 
 test('validateAdapterEnvelope rejects missing applicability', async () => {
@@ -676,7 +760,7 @@ test('validateAdapterEnvelope rejects missing applicability', async () => {
       blockedClaims: []
     }
   };
-  assert.throws(() => validateAdapterEnvelope(envelope), /applicability.*required/i);
+  assert.throws(() => validateAdapterEnvelope(envelope), /applicability/i);
 });
 
 test('validateAdapterEnvelope rejects missing storage', async () => {
@@ -701,7 +785,7 @@ test('validateAdapterEnvelope rejects missing storage', async () => {
       persistence: { status: 'SUPPORTED', reason: null }
     }
   };
-  assert.throws(() => validateAdapterEnvelope(envelope), /storage.*required/i);
+  assert.throws(() => validateAdapterEnvelope(envelope), /storage/i);
 });
 
 test('validateAdapterEnvelope rejects invalid unit status (lowercase)', async () => {

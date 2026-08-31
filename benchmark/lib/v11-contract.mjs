@@ -182,8 +182,8 @@ export function validateOperationMetrics(metrics) {
   for (const field of OPERATION_FIELDS) {
     const value = metrics[field];
 
-    if (!Number.isInteger(value)) {
-      throw new Error(`Operation metric ${field} must be an integer, got ${typeof value}`);
+    if (!Number.isSafeInteger(value)) {
+      throw new Error(`Operation metric ${field} must be a safe integer, got ${typeof value}`);
     }
 
     if (value < 0) {
@@ -218,8 +218,8 @@ export function validateStorageMeasurement(storage) {
     if (storage.bytes === null || storage.bytes === undefined) {
       throw new Error('MEASURED storage bytes required');
     }
-    if (!Number.isInteger(storage.bytes) || storage.bytes < 0) {
-      throw new Error('Storage bytes must be a non-negative integer');
+    if (!Number.isSafeInteger(storage.bytes) || storage.bytes < 0) {
+      throw new Error('Storage bytes must be a non-negative safe integer');
     }
 
     // MEASURED requires non-empty scope
@@ -287,6 +287,17 @@ export function validateAdapterEnvelope(envelope) {
     throw new Error('envelope must be an object');
   }
 
+  assertExactKeys(envelope, [
+    'phase',
+    'armId',
+    'scenarioId',
+    'repetition',
+    'status',
+    'operations',
+    'applicability',
+    'storage'
+  ], 'adapter envelope');
+
   // Validate required core fields
   if (!envelope.phase || typeof envelope.phase !== 'string' || envelope.phase.trim() === '') {
     throw new Error('Missing or invalid envelope.phase (must be non-empty string)');
@@ -333,6 +344,9 @@ export function validateAdapterEnvelope(envelope) {
 
   // Always call all three nested validators
   validateOperationMetrics(envelope.operations);
+  if (envelope.operations.outerDecisionModelCalls !== 0) {
+    throw new Error('Adapter envelope outerDecisionModelCalls must be zero; the harness owns the outer decision model');
+  }
   validateApplicability(envelope.applicability);
   validateStorageMeasurement(envelope.storage);
 }
