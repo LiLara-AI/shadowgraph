@@ -94,6 +94,17 @@ const MUTATIONS = {
   ]
 };
 
+// The harness has to back up exactly the files that can be written here. When
+// it kept its own list the two drifted: it copied validate.mjs, which no
+// mutation touches, implying a mutation that does not exist. A list that can
+// disagree with the thing it describes is the defect this whole tool exists to
+// remove, so the harness asks rather than remembers.
+if (process.argv[2] === '--files') {
+  const files = [...new Set(Object.values(MUTATIONS).map(([file]) => file))].sort();
+  for (const file of files) console.log(file);
+  process.exit(0);
+}
+
 const name = process.argv[2];
 const mutation = MUTATIONS[name];
 if (mutation === undefined) {

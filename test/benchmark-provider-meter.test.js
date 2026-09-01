@@ -108,7 +108,18 @@ async function listen(t, handler) {
     server.once('error', reject);
     server.listen(0, '127.0.0.1', resolve);
   });
-  t.after(() => new Promise((resolve) => server.close(resolve)));
+  // Registered before any meter hook, and hooks run in registration order, so
+  // an unbounded close here parks the whole teardown ahead of everything below.
+  // A lingering keep-alive connection is the usual cause and is reachable, so
+  // this closes them rather than only naming the stall.
+  t.after(() => boundedCleanup(
+    new Promise((resolve) => {
+      server.close(resolve);
+      setTimeout(() => server.closeAllConnections?.(), 1_000).unref();
+    }),
+    5_000,
+    'upstream test server did not close within 5s'
+  ));
   const address = server.address();
   return {
     server,
@@ -140,6 +151,32 @@ async function within(promise, timeoutMs, message) {
     ]);
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+/**
+ * Await a teardown step under a finite bound.
+ *
+ * On expiry this WARNS and resolves; it does not reject. A rejecting after hook
+ * aborts every hook registered after it, so one stuck close would take the rest
+ * of the teardown down with it and turn a single leaked handle into several.
+ * The warning reaches the run log, and a genuinely leaked handle still stalls
+ * the process, so nothing is concealed - the stall is simply made to say why
+ * without cancelling the cleanup that can still succeed.
+ */
+async function boundedCleanup(promise, timeoutMs, message) {
+  let timer;
+  const expiry = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      process.stderr.write(`cleanup warning: ${message}
+`);
+      resolve();
+    }, timeoutMs);
+  });
+  try {
+    await Promise.race([promise, expiry]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -199,24 +236,32 @@ async function sendIncompleteRequest(url, { method = 'POST', contentLength }) {
  * the temporary-directory hook still ran, the ledger it held became an
  * open-but-deleted file - which is exactly what a stuck run was found holding.
  *
- * Registering inside the helper makes the failure mode unreachable rather than
- * unlikely. `close()` is idempotent (provider-meter.mjs memoizes closePromise),
- * so a test may still close explicitly to assert shutdown behaviour.
+ * Registering inside the helper makes that unreachable for meters started
+ * through it - which, with meterFor() routed through here as well, is every
+ * meter in this file except the disconnect test's, whose hook has to do more
+ * than close. `close()` is idempotent (provider-meter.mjs memoizes
+ * closePromise), so a test may still close explicitly to assert shutdown.
  *
- * The close is bounded too. Registering a hook guarantees close() is CALLED,
+ * The close is bounded because registering a hook guarantees close() is CALLED,
  * not that it RETURNS: it awaits server.close(), which settles only once every
- * connection has drained. A cleanup hook that can park forever is the same
- * silent stall one layer up, so a meter that will not shut down names itself
- * instead. Requests carry their own deadlines, so a healthy close is
- * milliseconds; 5s is far above the sub-second budgets this file already holds
- * close to at its two explicit shutdown assertions.
+ * connection has drained. Be exact about what the bound buys. It does not
+ * rescue the run - when it expires the handle is still open, so the process
+ * still stalls - and Node reports only the first error per test, so on the path
+ * this helper exists for, where the body already threw, the warning is what
+ * survives rather than a second failure. What it buys is that the stall says
+ * why, in the log the mutation harness retains.
+ *
+ * The budget is derived from the request deadline the meter was configured
+ * with, so raising upstreamTimeoutMs cannot turn a healthy close into a
+ * failure; a fixed literal would drift away from the thing that justifies it.
  */
 async function startTrackedMeter(t, config) {
   const meter = await startProviderMeter(config);
-  t.after(() => within(
+  const budgetMs = Math.max(5_000, (config.upstreamTimeoutMs ?? 0) * 2 + 3_000);
+  t.after(() => boundedCleanup(
     meter.close(),
-    5_000,
-    'meter close did not finish within 5s; a socket or ledger handle is leaking'
+    budgetMs,
+    `meter close did not finish within ${budgetMs}ms; a socket or ledger handle is leaking`
   ));
   return meter;
 }
@@ -224,7 +269,7 @@ async function startTrackedMeter(t, config) {
 async function meterFor(t, upstreamBaseUrl, overrides = {}) {
   const directory = await temporaryDirectory(t);
   const ledgerPath = path.join(directory, 'provider-requests.ndjson');
-  const meter = await startProviderMeter({
+  const meter = await startTrackedMeter(t, {
     listenerUrl: 'http://127.0.0.1:0',
     upstreamBaseUrl,
     upstreamAuthorization: `Bearer ${UPSTREAM_SECRET}`,
@@ -232,7 +277,6 @@ async function meterFor(t, upstreamBaseUrl, overrides = {}) {
     upstreamTimeoutMs: 2_000,
     ...overrides
   });
-  t.after(() => meter.close());
   return { meter, ledgerPath };
 }
 
@@ -971,10 +1015,13 @@ test('downstream aborts are recorded and close drains in-flight handlers before 
     ledgerPath,
     upstreamTimeoutMs: 2_000
   });
-  // Not startTrackedMeter: close() drains in-flight handlers, and this test
-  // parks one deliberately. The release has to happen before the close, so this
-  // hook owns both. A second close-only hook could run first and deadlock
-  // against the handler this one is about to release.
+  // Not startTrackedMeter, and not for the reason first written here: there is
+  // no deadlock, as line 1003 below closes this meter within 1s while the
+  // handler is still parked. The reason is hook order. A tracked hook would be
+  // registered here, before any hook that releases the handler, and hooks run
+  // in registration order - so on the failure path it would run first, find the
+  // handler still parked, and spend its whole budget before the release could
+  // happen. One hook that releases and then closes keeps the order correct.
   t.after(() => {
     releaseUpstream?.();
     return meter.close();

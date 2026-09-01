@@ -50,8 +50,11 @@ the failure is environmental. It is recorded because a suite that can fail for a
 reason unrelated to the code under test is precisely what corrupts a mutation
 table, and because the host `/tmp` was found holding 83,833 leaked
 `shadowgraph-*` scratch directories occupying 8.7 GB of a 16 GB tmpfs,
-accumulated since 30 August 2026. That leak is in the suite's own scratch
-handling, it is unfixed, and it is a finding in its own right.
+accumulated since 30 August 2026. That glob undercounts. Independent review
+measured the tmpfs again after a few further hours of test runs and found 18,901
+leaked directories holding 7.82 GB, of which only 5,187 match `shadowgraph-*`;
+most are named with spaces rather than hyphens. The leak is in the suite's own
+scratch handling, it is unfixed, and it is a finding in its own right.
 
 ### Frozen bytes
 
@@ -377,14 +380,29 @@ and then the process sat there. The temporary-directory hook did run, unlinking
 the ledger while the descriptor stayed open, which is why the stuck process was
 found holding an open-but-deleted `concurrent.ndjson`.
 
-It was the only one of five meter creations in that file with no immediate
-cleanup hook; the other four register one on the next statement. Starting a
-meter and registering its shutdown are now the same call, so an unregistered
-meter is unreachable rather than unlikely, and that shutdown is bounded, because
-a hook that calls `close()` guarantees the call and not the return. The one
-meter that still owns its own hook is the disconnect test, which has to release
-a deliberately parked handler before closing; a second close-only hook would run
-first and deadlock against the handler this one is about to release.
+It was the only one of five creation sites in that file with no immediate
+cleanup hook. Counting sites understated it: `meterFor()` is one site but
+fifteen tests call it, so the file starts nineteen meters per run and the first
+version of this fix bounded three of them, while the paragraph describing it
+said "every". Independent review found that. Starting a meter and registering
+its shutdown are now the same call for every meter in the file but one.
+
+That shutdown is bounded, because a hook that calls `close()` guarantees the
+call and not the return. Be exact about what the bound buys. When it expires
+the handle is still open, so the process still stalls; and Node reports only
+the first error per test, so on the path this exists for - where the body
+already threw - what survives is a warning rather than a second failure. It
+makes the stall say why. It does not end it. The bound also warns rather than
+rejecting, because a rejecting hook aborts every hook registered after it, and
+one stuck close should not take the rest of the teardown with it.
+
+The one meter that still owns its hook is the disconnect test, and not for the
+reason first written here. There is no deadlock: that test closes its meter
+within a second while the handler is still parked, and the file passes. The
+reason is hook order. A tracked hook would be registered before any hook that
+releases the handler, and hooks run in registration order, so on the failure
+path it would run first and spend its whole budget before the release could
+happen.
 
 The attribution matters more than the leak. `serviceTag` was the mutation
 mounted when the stall was noticed, and it is the tenth of eleven cells, so it
@@ -404,6 +422,31 @@ been killed, the truncated log carried no failure lines, and absence of evidence
 was read as health — the broad-claim/narrow-inspection shape recorded above,
 inside the patch written to prevent it. A run with no test summary is now
 unmeasured at the baseline, at every cell, and at the final check.
+
+Adding that bound then silently broke something the paragraphs above claim.
+GNU `timeout` puts the suite in its own process group, which is what lets it
+kill npm's node children - and equally what removes them from the terminal's
+foreground group, so Ctrl-C stopped reaching them. The restore-on-interrupt
+verified before the timeout existed had quietly stopped working: the trap would
+not run until the suite ended on its own, up to ten minutes later, and an
+operator who escalated in that window would leave mutated source behind with
+the only backup in an orphaned temporary directory. Independent review found
+it. The harness now runs the suite as a job it can signal, kills that process
+group itself, and restores. Re-verified the way the original was: SIGINT during
+a mutated cell, harness gone in one second, all four mutable files
+byte-identical, `git status` clean. The first attempt at that fix cleaned up
+twice - once in the handler, once more through the EXIT trap - and printed
+"could not restore" for files it had just restored successfully, so cleanup now
+runs once.
+
+Three smaller findings from the same review. The summary check matched `^.`
+against a line the reporter prefixes with a three-byte character, so it held in
+a UTF-8 locale and failed under `LC_ALL=C`, reporting a run that finished as one
+that died; it now matches in both. The harness kept its own list of files to
+back up, and that list had drifted to include `validate.mjs`, which no mutation
+writes - it now asks `mutate.cjs` which files it can write, so the two cannot
+disagree. And the run printed the tree state at the end without checking it; a
+surviving modification under `benchmark/lib` now fails the run.
 
 It exists because three consecutive review rounds each caught one wrong number
 in a hand-written table. The last was a purity-rebuild figure of 3 that should

@@ -25,35 +25,80 @@ cd "$(dirname "$0")/.." || exit 1
 
 WORK="$(mktemp -d)"
 
-RUNNER=benchmark/lib/v11-runner.mjs
-BUNDLE=benchmark/lib/v11-evidence-bundle.mjs
-RUN=benchmark/lib/v11-run.mjs
-VALIDATE=benchmark/lib/validate.mjs
-LOCKS=benchmark/lib/v11-locks.mjs
+# Logs of runs that failed or timed out, kept so the next question is
+# answerable. Deliberately outside WORK, which the cleanup trap deletes; it is
+# removed on the way out only if nothing was written to it.
+DIAGNOSTICS="$(mktemp -d)"
 
-cp "$RUNNER" "$WORK/runner"
-cp "$BUNDLE" "$WORK/bundle"
-cp "$RUN" "$WORK/run"
-cp "$VALIDATE" "$WORK/validate"
-cp "$LOCKS" "$WORK/locks"
+# Back up exactly what mutate.cjs can write, by asking it. The hardcoded list
+# this replaced had drifted: it copied validate.mjs, which no mutation touches,
+# implying a mutation that does not exist, while nothing checked that every
+# mutated file was actually covered.
+MUTABLE_FILES="$(node tools/mutate.cjs --files)"
+if [ -z "$MUTABLE_FILES" ]; then
+  echo "ERROR: mutate.cjs listed no mutable files" >&2
+  exit 1
+fi
+
+backup_key() { echo "$1" | tr '/' '_'; }
+
+for file in $MUTABLE_FILES; do
+  cp "$file" "$WORK/$(backup_key "$file")" || exit 1
+done
 
 restore() {
-  cp "$WORK/runner" "$RUNNER"
-  cp "$WORK/bundle" "$BUNDLE"
-  cp "$WORK/run" "$RUN"
-  cp "$WORK/validate" "$VALIDATE"
-  cp "$WORK/locks" "$LOCKS"
+  local failed=0
+  for file in $MUTABLE_FILES; do
+    cp "$WORK/$(backup_key "$file")" "$file" || { echo "ERROR: could not restore $file" >&2; failed=1; }
+  done
+  return "$failed"
+}
+
+# The pid of the suite currently running, so a signal can reach it. GNU timeout
+# puts the suite in its own process group, which is what lets it kill npm's node
+# children - but that also removes them from the terminal's foreground group, so
+# Ctrl-C stops reaching them. Adding the timeout had therefore silently broken
+# the restore-on-interrupt that was verified before it existed: the trap would
+# not run until the suite ended on its own, up to RUN_TIMEOUT_SECONDS later, and
+# an operator who escalated in that window left mutated source behind.
+# Independent review caught it.
+SUITE_PID=""
+
+stop_suite() {
+  [ -n "$SUITE_PID" ] || return 0
+  kill -KILL "-$SUITE_PID" 2>/dev/null
+  kill -KILL "$SUITE_PID" 2>/dev/null
+  SUITE_PID=""
 }
 
 # Restore BEFORE discarding the backups, and on interrupt as well as exit. The
 # first version trapped EXIT only and deleted the backups without restoring, so
 # a Ctrl-C during any of the long test runs left mutated source behind and
 # destroyed the copy that would have fixed it.
+# Runs once. on_signal cleans up and then exits, which fires the EXIT trap and
+# would clean up a second time - restoring from backups the first pass had just
+# deleted, and printing "could not restore" for files it had in fact restored.
+# A teardown that reports failure on success is worse than one that says
+# nothing, and this one guards the very property it exists to guarantee.
+CLEANED=0
 cleanup() {
+  [ "$CLEANED" -eq 1 ] && return 0
+  CLEANED=1
+  stop_suite
   restore
   rm -rf "$WORK"
+  rmdir "$DIAGNOSTICS" 2>/dev/null
 }
-trap cleanup EXIT INT TERM
+
+on_signal() {
+  echo "" >&2
+  echo "interrupted - stopping the suite and restoring mutated sources" >&2
+  cleanup
+  exit 130
+}
+
+trap cleanup EXIT
+trap on_signal INT TERM
 
 # How long one npm test may take before it is declared hung. A healthy run is
 # about 90 seconds, so this is roughly six times headroom. It exists because a
@@ -62,16 +107,27 @@ trap cleanup EXIT INT TERM
 # nothing on stdout, and the harness waited with it.
 RUN_TIMEOUT_SECONDS="${RUN_TIMEOUT_SECONDS:-600}"
 
-# Logs of runs that failed or timed out, kept after the run so the next question
-# is answerable. Deliberately outside WORK, which the cleanup trap deletes.
-DIAGNOSTICS="$(mktemp -d)"
-
 # Run the suite into a log with a hard bound. GNU timeout puts the child in its
 # own process group and signals the group, so npm's node children die with it
 # rather than surviving to hold the port.
 # Returns: 0 completed, 124 timed out, other = npm's own failure.
 run_suite() {
-  timeout --signal=KILL --kill-after=15 "$RUN_TIMEOUT_SECONDS" npm test > "$1" 2>&1
+  timeout --signal=KILL --kill-after=15 "$RUN_TIMEOUT_SECONDS" npm test > "$1" 2>&1 &
+  SUITE_PID=$!
+  wait "$SUITE_PID"
+  local code=$?
+  SUITE_PID=""
+  return "$code"
+}
+
+# A finished run prints a summary line. Matching it with `^.` was wrong: the
+# reporter prefixes that line with U+2139, three UTF-8 bytes, so the pattern
+# matched only in a UTF-8 locale and failed under LC_ALL=C - reporting a run
+# that completed as one that died. `[^ ]*` matches those bytes in either
+# locale. It fails closed, but with the wrong diagnosis, which is its own kind
+# of wrong answer. Independent review found it.
+has_summary() {
+  grep -qE '^[^ ]* tests [0-9][0-9]*$' "$1"
 }
 
 names_from_log() {
@@ -98,7 +154,7 @@ fi
 # A finished run prints a summary. Its absence means the run died some other
 # way, and an empty failure list from a log that has no summary is silence, not
 # success.
-if ! grep -qE '^. tests [0-9]+' "$WORK/baseline.log"; then
+if ! has_summary "$WORK/baseline.log"; then
   cp "$WORK/baseline.log" "$DIAGNOSTICS/baseline.log" 2>/dev/null
   echo "ERROR: the baseline run produced no test summary (exit $code)" >&2
   echo "       log: $DIAGNOSTICS/baseline.log" >&2
@@ -154,7 +210,7 @@ for name in $MUTATIONS; do
       break
     fi
 
-    if ! grep -qE '^. tests [0-9]+' "$WORK/run.log"; then
+    if ! has_summary "$WORK/run.log"; then
       echo "NO SUMMARY (${ELAPSED}s)" >&2
       cp "$WORK/run.log" "$DIAGNOSTICS/$name.nosummary.log" 2>/dev/null
       printf '| %s | **NO SUMMARY** — the run died without reporting; log: %s |\n' \
@@ -198,12 +254,13 @@ MEASURED="$(wc -l < "$RESULTS")"
 if [ -n "$TIMED_OUT" ]; then
   echo "NOTE: stopped early after $TIMED_OUT timed out; $MEASURED of $DECLARED guards reached" >&2
 elif [ "$MEASURED" != "$DECLARED" ]; then
-  echo "ERROR: $DECLARED guards declared but $MEASURED measured - one is missing from MUTATIONS" >&2
+  echo "ERROR: $DECLARED guards declared but $MEASURED rows produced" >&2
+  echo "       either a guard is missing from MUTATIONS, or one failed its comparison above" >&2
   STATUS=1
 fi
 
 run_suite "$WORK/final.log" || true
-if ! grep -qE '^. tests [0-9]+' "$WORK/final.log"; then
+if ! has_summary "$WORK/final.log"; then
   cp "$WORK/final.log" "$DIAGNOSTICS/final.log" 2>/dev/null
   echo "ERROR: the final run produced no test summary; the tree state is unverified" >&2
   echo "       log: $DIAGNOSTICS/final.log" >&2
@@ -224,5 +281,14 @@ echo "| Guard removed | Tests that fail |"
 echo "| --- | --- |"
 cat "$RESULTS"
 echo
-git status --porcelain
+DIRT="$(git status --porcelain)"
+[ -n "$DIRT" ] && echo "$DIRT"
+
+# A table is only about the tree the reader has. The previous version printed
+# the status and left the reader to notice; a surviving mutation is the one
+# thing that would invalidate every row above, so it is checked.
+if printf '%s' "$DIRT" | grep -q 'benchmark/lib/'; then
+  echo "ERROR: a file under benchmark/lib/ is modified after the run - a mutation survived" >&2
+  STATUS=1
+fi
 exit "$STATUS"
