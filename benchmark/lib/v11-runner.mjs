@@ -1046,6 +1046,53 @@ function validateOuterUsage(usage) {
   }
 }
 
+/**
+ * Audit the outer request the harness is about to send.
+ *
+ * The runner is the one place every arm passes through, so it is the only
+ * place that can hold the outer decision path common. The prompt builder is
+ * injected, which is what makes the runner testable - and also what would let
+ * a caller hand one arm different instructions. Arms whose instructions
+ * differed would make every measured difference between them meaningless.
+ *
+ * What is checked is divergence, not a particular wording: the first measured
+ * unit of a run fixes the system instruction and response schema, and every
+ * later unit must match it. Pinning the text here instead would bind the
+ * runner to one prompt module without catching anything divergence does not,
+ * and `buildV11Prompt` already audits its own output.
+ *
+ * The arm-identity check is the other half: a prompt naming the arm it is
+ * running lets the model treat that arm differently, which is the same bias
+ * arriving by a shorter route.
+ *
+ * A resumed attempt starts a fresh baseline, because the requests the earlier
+ * attempt sent are not retained to compare against. Divergence within an
+ * attempt is caught; divergence between attempts is a lock-level question.
+ */
+function auditOuterRequest(request, spec, baseline) {
+  assertExactKeys(request, ['system', 'prompt', 'responseSchema'], 'outer request');
+  if (!isNonEmptyString(request.system)) {
+    throw new Error('Outer request system instruction must be a non-empty string');
+  }
+  if (!isNonEmptyString(request.prompt)) {
+    throw new Error('Outer request prompt must be a non-empty string');
+  }
+  if (baseline.system === null) {
+    baseline.system = request.system;
+    baseline.responseSchema = structuredClone(request.responseSchema);
+  } else if (request.system !== baseline.system) {
+    throw new Error('Outer request system instruction diverged from the common outer path');
+  } else if (!isDeepStrictEqual(request.responseSchema, baseline.responseSchema)) {
+    throw new Error('Outer request response schema diverged from the common outer path');
+  }
+  const prompt = request.prompt.toLowerCase();
+  for (const identity of [spec.arm.id, spec.arm.name]) {
+    if (isNonEmptyString(identity) && prompt.includes(identity.toLowerCase())) {
+      throw new Error('Outer request prompt must not identify the arm under measurement');
+    }
+  }
+}
+
 function validateOuterResult(outer, expectedCorrelation) {
   assertExactKeys(outer, OUTER_RESULT_FIELDS, 'outer result');
   if (outer.requestCount !== 1) throw new Error('outer result.requestCount must equal 1');
@@ -1108,7 +1155,7 @@ function phaseAExpectedAbsentRecord(spec, completedUnits) {
   };
 }
 
-async function executeDecision(options, spec, unit, signal, completedUnits) {
+async function executeDecision(options, spec, unit, signal, completedUnits, outerBaseline) {
   const expectedAbsentRecord = phaseAExpectedAbsentRecord(spec, completedUnits);
   const namespace = primaryNamespace(spec);
   const probeNamespace = alternateNamespace(spec);
@@ -1167,6 +1214,7 @@ async function executeDecision(options, spec, unit, signal, completedUnits) {
       namespace: structuredClone(retrievalNamespace),
       correlation: { ...outerCorrelation }
     });
+    auditOuterRequest(outerRequest, spec, outerBaseline);
     throwIfAborted(signal);
     unit.operations.outerDecisionModelCalls += 1;
     outer = await options.requestOuter({
@@ -1208,7 +1256,7 @@ async function executeDecision(options, spec, unit, signal, completedUnits) {
   unit.storage = structuredClone(verified.storage ?? persisted.storage);
 }
 
-async function executeUnit(options, spec, completedUnits) {
+async function executeUnit(options, spec, completedUnits, outerBaseline) {
   const startedAt = assertIsoTimestamp(options.now(), 'now');
   const startedMonotonic = readUnitMonotonic(options);
   const unit = baseUnit(options, spec, startedAt);
@@ -1232,7 +1280,7 @@ async function executeUnit(options, spec, completedUnits) {
   try {
     await runWithUnitWatchdog(options, spec, startedMonotonic, async (signal) => {
       if (spec.phase === 'RESET') await executeReset(options, spec, unit, signal);
-      else await executeDecision(options, spec, unit, signal, completedUnits);
+      else await executeDecision(options, spec, unit, signal, completedUnits, outerBaseline);
     });
     unit.status = 'MEASURED';
   } catch (error) {
@@ -1304,6 +1352,9 @@ async function executeV11Benchmark(options, closeResources) {
   const units = structuredClone(resume?.previousRaw.units ?? []);
   const priorUnitIds = new Set(units.map((unit) => unit.unitId));
   let interrupted = [...startedIds].some((unitId) => !priorUnitIds.has(unitId));
+  // Fixed by the first measured decision unit of this attempt; every later
+  // unit must match it. See auditOuterRequest.
+  const outerBaseline = { system: null, responseSchema: null };
   const startedAt = resume?.previousRaw.startedAt ?? assertIsoTimestamp(options.now(), 'now');
   const attemptIds = resume
     ? [...resume.previousRaw.attemptIds, options.attemptId]
@@ -1322,7 +1373,7 @@ async function executeV11Benchmark(options, closeResources) {
       break;
     }
     startedIds.add(spec.unitId);
-    units.push(await executeUnit(options, spec, units));
+    units.push(await executeUnit(options, spec, units, outerBaseline));
   }
   if (options.signal?.aborted) interrupted = true;
   await closeResources();
