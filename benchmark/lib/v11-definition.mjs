@@ -16,6 +16,10 @@ import {
   normalizedPublicDataKey,
   sealBoundary
 } from './v11-lexical.mjs';
+// One edge into the registry graph, for the shared exclusion predicate. That
+// graph reaches adapter-protocol, outer-model, python-adapter-executor and
+// v11-contract; none of them imports this module, so there is no cycle. Check
+// that again before adding an import to any of them.
 import { isExcludedFromUserIsolation } from './v11-registry.mjs';
 
 const FIXTURE_SET = 'candidate-acceptance-non-scored-2026-08';
@@ -705,6 +709,11 @@ function deepFreeze(value) {
  * static field name or a path the harness itself supplied, never scenario
  * content. Everything it returns still passes through validateV11PublicScenario
  * before it can become prompt material.
+ *
+ * What would invalidate this: if repositoryRoot ever became attacker- or
+ * config-influenced rather than derived from import.meta.url, the path in an
+ * ENOENT would start disclosing something, and this function would then need
+ * sealing like the rest.
  */
 export async function loadV11AcceptanceDefinition(options) {
   assertExactKeys(options, ['repositoryRoot'], 'acceptance definition loader options');
