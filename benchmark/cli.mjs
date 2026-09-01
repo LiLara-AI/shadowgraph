@@ -20,6 +20,8 @@ import {
   readCommonModelConfiguration
 } from './lib/capabilities.mjs';
 import { verifyPreregistration } from './lib/preregistration.mjs';
+import { loadV11AcceptanceDefinition } from './lib/v11-definition.mjs';
+import { createV11Registry } from './lib/v11-registry.mjs';
 import { validateRawRun } from './lib/validate.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -31,7 +33,11 @@ const HARNESS_VERSION = '1.0.0';
 const PHASES = ['A', 'B', 'C', 'D_TRUE', 'D_FALSE_0', 'D_FALSE_1', 'D_FALSE_2', 'E', 'ISOLATION_PROJECT', 'ISOLATION_USER'];
 
 function parseArgs(argv) {
-  if (argv.length === 0) throw new Error('Usage: benchmark/cli.mjs <preflight|run|validate|aggregate> [options]');
+  if (argv.length === 0) {
+    throw new Error(
+      'Usage: benchmark/cli.mjs <preflight|v11-preflight|run|validate|aggregate> [options]'
+    );
+  }
   const command = argv[0];
   const options = {};
   const tokens = [];
@@ -442,8 +448,85 @@ async function aggregateCommand(options) {
   if (aggregate.allowedMarketingText) process.stdout.write(`${aggregate.allowedMarketingText}\n`);
 }
 
+
+/**
+ * Offline readiness check for the v1.1 candidate.
+ *
+ * Binds the competitor lock, the frozen acceptance definition and the observed
+ * native isolation together, and reports whether they agree. It contacts no
+ * service, executes no arm and produces no result: a NOT READY verdict here is
+ * a statement about the candidate, not about any arm's behaviour.
+ */
+async function v11Preflight(options) {
+  const competitorLock = JSON.parse(await readFile(competitorLockPath, 'utf8'));
+  const containerImage = competitorLock.pythonImage;
+  const registry = createV11Registry({ competitorLock, containerImage });
+
+  const { definition, scenarios } = await loadV11AcceptanceDefinition({ repositoryRoot: root });
+  const declared = Object.fromEntries(
+    definition.arms.map((arm) => [arm.id, arm.applicability])
+  );
+  const satisfied = typeof options.preconditions === 'string' && options.preconditions.length > 0
+    ? options.preconditions.split(',').map((entry) => entry.trim()).filter(Boolean)
+    : [];
+
+  const applicability = registry.verifyApplicability(declared, satisfied);
+  const derivedCounts = registry.expectedCounts({
+    scenarios: scenarios.length,
+    repetitions: definition.commonExecution.repetitions,
+    phases: definition.phases,
+    declared
+  });
+
+  const declaredCounts = definition.expectedCounts;
+  const countMismatches = Object.keys(derivedCounts)
+    .filter((key) => derivedCounts[key] !== declaredCounts[key])
+    .map((key) => ({ count: key, declared: declaredCounts[key], derived: derivedCounts[key] }));
+
+  const blockers = [];
+  for (const finding of applicability.findings) {
+    blockers.push({ kind: 'applicability', ...finding });
+  }
+  for (const mismatch of countMismatches) {
+    blockers.push({ kind: 'expected-counts', ...mismatch });
+  }
+  for (const descriptor of registry.descriptors) {
+    if (descriptor.requiredService !== null) {
+      blockers.push({
+        kind: 'required-service',
+        armId: descriptor.armId,
+        service: descriptor.requiredService
+      });
+    }
+  }
+
+  const report = {
+    schema: 'shadowgraph.v11.preflight',
+    version: 1,
+    scored: false,
+    containerImage,
+    arms: registry.descriptors.map((descriptor) => ({
+      armId: descriptor.armId,
+      kind: descriptor.kind,
+      version: descriptor.version,
+      nativeProjectNamespace: descriptor.isolation.projectNamespace,
+      nativeUserNamespace: descriptor.isolation.userNamespace
+    })),
+    applicability,
+    declaredCounts,
+    derivedCounts,
+    readiness: blockers.length === 0 ? 'READY' : 'NOT READY',
+    blockers
+  };
+
+  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  if (blockers.length > 0) process.exitCode = 1;
+  return report;
+}
+
 const { command, options } = parseArgs(process.argv.slice(2));
 if (command === 'preflight') await preflight(options);
+else if (command === 'v11-preflight') await v11Preflight(options);
 else if (command === 'run') {
   const { raw, preregistration } = await createRun(options);
   const aggregate = aggregateRun(raw, preregistration);
