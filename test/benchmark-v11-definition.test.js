@@ -5,6 +5,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rename,
   rm,
   stat,
@@ -30,6 +31,9 @@ import {
 } from '../benchmark/lib/v11-definition.mjs';
 
 const execFileAsync = promisify(execFile);
+// What a benchmark artifact is called, used by both the index sweep and the
+// working-tree sweep so the two cannot diverge.
+const ARTIFACT_NAME = /\.(?:raw|aggregate)\.json$|\.(?:progress|units)\.ndjson$/u;
 const REPOSITORY_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const ACCEPTANCE_RELATIVE_FILES = [
   'benchmark/acceptance/definition.json',
@@ -691,22 +695,43 @@ test('this candidate has produced no benchmark result', async () => {
   assert.ok(tracked.length > 100, 'the index listing looks truncated');
 
   const artifacts = tracked.filter((relative) => (
-    /(^|\/)benchmark\/results\//u.test(relative)
-    || /\.raw\.json$/u.test(relative)
-    || /\.aggregate\.json$/u.test(relative)
-    || /\.progress\.ndjson$/u.test(relative)
-    || /\.units\.ndjson$/u.test(relative)
+    /(^|\/)results\//u.test(relative) || ARTIFACT_NAME.test(relative)
   ));
   assert.deepEqual(artifacts, [], 'a benchmark artifact is tracked in this repository');
 
-  // And nothing on disk either, tracked or not.
-  let resultsExists = true;
-  try {
-    await stat(path.join(REPOSITORY_ROOT, 'benchmark', 'results'));
-  } catch {
-    resultsExists = false;
-  }
-  assert.equal(resultsExists, false, 'benchmark/results exists; no run may have produced it');
+  // And nothing on disk either, tracked or not. This half was a single stat on
+  // benchmark/results while the comment above claimed the broader intent -
+  // stated broadly, implemented narrowly, which is the exact pattern this
+  // candidate keeps producing. Independent review demonstrated the gap:
+  // untracked artifacts at results/, benchmark/acceptance/results/ and
+  // docs/attempt.raw.json all walked past it. The working tree is now swept the
+  // same way the index is.
+  const skip = new Set(['node_modules', '.git', 'coverage']);
+  const offenders = [];
+  const walk = async (relative) => {
+    const absolute = relative === '' ? REPOSITORY_ROOT : path.join(REPOSITORY_ROOT, relative);
+    let entries;
+    try {
+      entries = await readdir(absolute, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const item of entries) {
+      const next = relative === '' ? item.name : `${relative}/${item.name}`;
+      if (item.isDirectory()) {
+        if (skip.has(item.name)) continue;
+        if (item.name === 'results') {
+          offenders.push(`${next}/`);
+          continue;
+        }
+        await walk(next);
+      } else if (ARTIFACT_NAME.test(item.name)) {
+        offenders.push(next);
+      }
+    }
+  };
+  await walk('');
+  assert.deepEqual(offenders, [], 'a benchmark artifact or results directory exists on disk');
 });
 
 test('no tracked file contains a NUL byte', async () => {
