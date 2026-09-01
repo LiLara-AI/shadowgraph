@@ -16,6 +16,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
 import {
   V11_ACCEPTANCE_ARM_IDS,
@@ -27,6 +29,7 @@ import {
   validateV11PublicScenario
 } from '../benchmark/lib/v11-definition.mjs';
 
+const execFileAsync = promisify(execFile);
 const REPOSITORY_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const ACCEPTANCE_RELATIVE_FILES = [
   'benchmark/acceptance/definition.json',
@@ -670,20 +673,30 @@ test('all public and loader boundary errors are static and non-disclosing', asyn
   });
 });
 
-test('all newly added Task 8A files have repository-safe non-executable modes', async () => {
-  const files = [
-    'benchmark/acceptance/definition.json',
-    'benchmark/acceptance/scenarios.json',
-    'benchmark/acceptance/README.md',
-    'benchmark/lib/v11-definition.mjs',
-    'benchmark/lib/v11-prompts.mjs',
-    'test/benchmark-v11-definition.test.js',
-    'test/benchmark-v11-prompts.test.js'
-  ];
-  for (const relative of files) {
-    const metadata = await stat(path.join(REPOSITORY_ROOT, relative));
-    assert.equal(metadata.mode & 0o777, 0o644, relative);
-  }
+test('no tracked file in the repository carries the executable bit', async () => {
+  // This was a hardcoded list of seven files, which is why it kept passing
+  // while ten unrelated files silently acquired mode 100755 - an artifact of
+  // editing through a Windows filesystem view. A named list only ever catches
+  // the files someone remembered to name.
+  //
+  // The index is the authority, not the working tree: filesystem modes under
+  // drvfs do not survive a round trip, so `stat` answers a different question
+  // than "what did this repository record".
+  const { stdout } = await execFileAsync('git', ['ls-files', '-s'], {
+    cwd: REPOSITORY_ROOT,
+    maxBuffer: 8 * 1024 * 1024
+  });
+  const tracked = stdout.trimEnd().split('\n').filter(Boolean);
+  assert.ok(tracked.length > 100, 'the index listing looks truncated');
+
+  const executable = tracked
+    .filter((line) => line.startsWith('100755'))
+    .map((line) => line.split('\t').slice(1).join('\t'));
+  assert.deepEqual(
+    executable,
+    [],
+    'tracked files gained the executable bit; run git update-index --chmod=-x on them'
+  );
 });
 
 test('loader rejects frozen-source drift, path escape, and symlinked inputs', async (t) => {

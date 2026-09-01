@@ -237,6 +237,106 @@ test('a bundle whose index was swapped after the fact does not verify', () => {
   assert.ok(result.findings.some((finding) => finding.code === 'INDEX_DIGEST_MISMATCH'));
 });
 
+test('a hand-made index is revalidated, not trusted for its schema tag', () => {
+  // buildReviewBundle used to check only index.schema, so every protection in
+  // buildEvidenceIndex was bypassable by constructing the index by hand.
+  // Independent review got all of these accepted at once.
+  const forged = (entries, extra = {}) => ({
+    schema: 'shadowgraph.v11.evidence-index',
+    version: 1,
+    entryCount: entries.length,
+    entries,
+    ...extra
+  });
+
+  const cases = [
+    ['UNSAFE_PATH', [entry({ path: '../../etc/passwd' })]],
+    ['INVALID_DIGEST', [entry({ sha256: 'NOT-A-DIGEST' })]],
+    ['CONTRACT_FAILURE', [entry({ bytes: -5 })]],
+    ['UNKNOWN_KIND', [entry({ kind: 'totally-made-up-kind' })]],
+    ['DUPLICATE_PATH', [entry(), entry({ sha256: 'e'.repeat(64) })]],
+    ['EMPTY_INDEX', []]
+  ];
+  for (const [code, entries] of cases) {
+    assert.throws(
+      () => buildReviewBundle({
+        commit: COMMIT,
+        implementationLockHash: '4'.repeat(64),
+        environmentLockHash: '5'.repeat(64),
+        sourceHashes: SOURCE_HASHES,
+        scored: false,
+        index: forged(entries)
+      }),
+      (error) => error instanceof EvidenceBundleError && error.code === code,
+      `a forged index passed for ${code}`
+    );
+  }
+
+  // A lying entryCount is a contradiction about the same index.
+  assert.throws(
+    () => buildReviewBundle({
+      commit: COMMIT,
+      implementationLockHash: '4'.repeat(64),
+      environmentLockHash: '5'.repeat(64),
+      sourceHashes: SOURCE_HASHES,
+      scored: false,
+      index: forged(sampleEntries(), { entryCount: 999 })
+    }),
+    (error) => error instanceof EvidenceBundleError && error.code === 'CONTRACT_FAILURE'
+  );
+});
+
+test('required coverage is checked against validated kinds, not claimed ones', () => {
+  // Coverage used to be satisfied by whatever kind strings the caller wrote,
+  // so a forged index could assert coverage it did not have.
+  assert.throws(
+    () => buildReviewBundle({
+      commit: COMMIT,
+      implementationLockHash: '4'.repeat(64),
+      environmentLockHash: '5'.repeat(64),
+      sourceHashes: SOURCE_HASHES,
+      scored: false,
+      index: {
+        schema: 'shadowgraph.v11.evidence-index',
+        version: 1,
+        entryCount: 1,
+        entries: [entry({ kind: 'implementation-lock', sha256: 'NOT-A-DIGEST' })]
+      },
+      requiredCoverage: ['implementation-lock']
+    }),
+    (error) => error instanceof EvidenceBundleError && error.code === 'INVALID_DIGEST'
+  );
+});
+
+test('byte-identity holds for a hand-made index too, not only a built one', () => {
+  // Determinism used to be a property of buildEvidenceIndex's sort rather than
+  // of the bundle, so two hand-made indexes with the same entries in different
+  // orders produced different bytes and different digests.
+  const handMade = (entries) => ({
+    schema: 'shadowgraph.v11.evidence-index',
+    version: 1,
+    entryCount: entries.length,
+    entries
+  });
+  const common = {
+    commit: COMMIT,
+    implementationLockHash: '4'.repeat(64),
+    environmentLockHash: '5'.repeat(64),
+    sourceHashes: SOURCE_HASHES,
+    scored: false
+  };
+
+  const forward = buildReviewBundle({ ...common, index: handMade(sampleEntries()) });
+  const reversed = buildReviewBundle({
+    ...common,
+    index: handMade([...sampleEntries()].reverse())
+  });
+  assert.equal(forward.bytes, reversed.bytes);
+  assert.equal(forward.digest, reversed.digest);
+  // And it agrees with the built-index path.
+  assert.equal(forward.digest, bundleOf(sampleEntries()).digest);
+});
+
 test('a verdict bound to one digest does not carry to a different bundle', () => {
   const original = bundleOf(sampleEntries());
   const other = bundleOf(sampleEntries(), { commit: 'c'.repeat(40) });

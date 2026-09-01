@@ -31,7 +31,7 @@ const V11_RAW_FIELDS = [
   'schemaVersion', 'benchmarkVersion', 'mode', 'runId', 'attemptId', 'attemptIds',
   'status', 'preregistrationSha256', 'amendment001Sha256', 'amendment002Sha256',
   'implementationLockHash', 'environmentLockHash', 'startedAt', 'finishedAt',
-  'zeroResult', 'arms', 'units'
+  'zeroResult', 'outerPromptBinding', 'arms', 'units'
 ];
 const V11_ARM_FIELDS = ['armId', 'name', 'status', 'applicability'];
 const V11_UNIT_FIELDS = [
@@ -684,6 +684,26 @@ function validateV11ZeroResult(raw) {
   }
 }
 
+/**
+ * The digest of the outer instruction every measured unit of this run received.
+ *
+ * Recorded so that a run whose instructions differed from an earlier attempt of
+ * the same run is answerable after the fact rather than merely undetected. It
+ * is null only when the run measured no decision unit at all.
+ */
+function validateOuterPromptBinding(binding) {
+  if (binding === null) return;
+  if (!isPlainObject(binding)) {
+    throw new Error('v1.1 raw run outerPromptBinding must be null or an object');
+  }
+  assertExactFields(binding, ['systemSha256', 'responseSchemaSha256'], 'outerPromptBinding');
+  for (const field of ['systemSha256', 'responseSchemaSha256']) {
+    if (typeof binding[field] !== 'string' || !/^[a-f0-9]{64}$/u.test(binding[field])) {
+      throw new Error(`outerPromptBinding.${field} must be a lowercase sha256 digest`);
+    }
+  }
+}
+
 export function validateV11RawRun(raw, preregistration, expectedSha256) {
   assertExactFields(raw, V11_RAW_FIELDS, 'v1.1 raw run');
   if (raw.schemaVersion !== 2 || raw.benchmarkVersion !== '1.1') {
@@ -692,6 +712,7 @@ export function validateV11RawRun(raw, preregistration, expectedSha256) {
   if (!['SCORED', 'ACCEPTANCE'].includes(raw.mode)) throw new Error(`Invalid v1.1 run mode ${raw.mode}`);
   if (raw.mode === 'ACCEPTANCE') assertAcceptanceFieldsAbsent(raw);
   if (!['COMPLETE', 'INTERRUPTED'].includes(raw.status)) throw new Error(`Invalid v1.1 run status ${raw.status}`);
+  validateOuterPromptBinding(raw.outerPromptBinding);
   if (!isNonEmptyString(raw.runId) || !isNonEmptyString(raw.attemptId)) {
     throw new Error('v1.1 raw run requires runId and attemptId');
   }

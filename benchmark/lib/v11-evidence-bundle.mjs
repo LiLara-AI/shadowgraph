@@ -164,7 +164,20 @@ export function buildReviewBundle(input) {
     reject('CONTRACT_FAILURE', 'review bundle requires an evidence index');
   }
 
-  const present = new Set(index.entries.map((entry) => entry.kind));
+  // Rebuild the index from its own entries rather than trusting the object
+  // handed in. Checking only the schema tag left every protection in
+  // buildEvidenceIndex bypassable by anyone who constructed the index by hand:
+  // a traversing path, a malformed digest, a duplicate path with two different
+  // digests, an unknown kind, or a lying entryCount all passed straight
+  // through, and requiredCoverage was then satisfied against those unvalidated
+  // kinds. Rebuilding also makes the byte-identity guarantee unconditional,
+  // since the entries are re-sorted here rather than assumed sorted.
+  const validated = buildEvidenceIndex({ entries: index.entries });
+  if (index.entryCount !== validated.entryCount) {
+    reject('CONTRACT_FAILURE', 'evidence index entryCount does not match its entries');
+  }
+
+  const present = new Set(validated.entries.map((entry) => entry.kind));
   const missing = [...requiredCoverage].filter((kind) => !present.has(kind)).sort();
   if (missing.length > 0) {
     reject('INCOMPLETE_COVERAGE', `review bundle is missing required evidence: ${missing.join(', ')}`);
@@ -182,8 +195,8 @@ export function buildReviewBundle(input) {
       amendment001Sha256: sourceHashes.amendment001Sha256,
       amendment002Sha256: sourceHashes.amendment002Sha256
     },
-    evidenceIndexDigest: evidenceIndexDigest(index),
-    index
+    evidenceIndexDigest: evidenceIndexDigest(validated),
+    index: validated
   };
   return { bundle, bytes: `${canonicalJson(bundle)}\n`, digest: bundleDigest(bundle) };
 }

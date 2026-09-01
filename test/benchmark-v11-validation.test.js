@@ -453,6 +453,7 @@ function rawRun({ mode = 'SCORED', armDefinitions, mutateUnit = null, zeroResult
     startedAt: '2026-08-31T00:00:00.000Z',
     finishedAt: '2026-08-31T00:01:00.000Z',
     zeroResult,
+    outerPromptBinding: { systemSha256: '6'.repeat(64), responseSchemaSha256: '7'.repeat(64) },
     arms: armDefinitions.map((arm) => ({
       armId: arm.id,
       name: arm.name,

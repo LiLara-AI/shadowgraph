@@ -15,9 +15,9 @@ All figures below were produced on the current branch with a clean working tree.
 
 | Gate | Command | Result |
 | --- | --- | --- |
-| Full repository | `npm test` | **2032 / 2032 pass**, 0 fail, 23 suites |
-| Benchmark focused | `npm run benchmark:test` | **877 / 877 pass**, 0 fail |
-| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **734 / 734 pass**, 0 fail |
+| Full repository | `npm test` | **2039 / 2039 pass**, 0 fail, 20 suites |
+| Benchmark focused | `npm run benchmark:test` | **884 / 884 pass**, 0 fail |
+| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **741 / 741 pass**, 0 fail |
 | Python adapters | `npm run benchmark:test:python` | **86 tests, OK** |
 | Node syntax | `npm run check`, `npm run benchmark:check` | pass |
 | Python syntax | `npm run benchmark:check:python` | pass |
@@ -211,16 +211,42 @@ This closes the **offline** half of requirement 7 only. It is a mock harness
 run. It is not evidence that any arm was measured, and B1 alone still prevents a
 real acceptance run.
 
-Building it found a real defect. The runner handed whatever `buildOuterRequest`
-returned straight to the model with no audit — the injection point that makes
-the runner testable is also what would let a caller give one arm different
-instructions. `auditOuterRequest` now closes it at the choke point: the first
-measured decision unit of an attempt fixes the system instruction and response
-schema, every later unit must match, and no prompt may name the arm it is
-running. It checks divergence rather than a particular wording; pinning the text
-would bind the runner to one prompt module without catching anything divergence
-does not, and `buildV11Prompt` already audits its own output. Removing the audit
-call fails exactly the two tests that claim to cover it.
+Building it found a real defect: the runner handed whatever `buildOuterRequest`
+returned straight to the model with no audit. The injection point that makes the
+runner testable is also what would let a caller give one arm different
+instructions.
+
+The first fix was incomplete, and independent review found it. It compared only
+the system instruction and the response schema, so the task prompt — where the
+instructions the model acts on actually live — was still free to differ per arm:
+a biased `prompt` for one arm passed all 36 of that arm's units with the run
+reporting 308/308 COMPLETE. The second attempt compared prompts across units
+sharing a phase, scenario and native context, which is weaker than it looks — in
+a real run each arm returns its own context, so almost every unit is the only one
+of its shape and has nothing to be compared against.
+
+`auditOuterRequest` now checks the property directly. It builds the request a
+second time with a probe arm substituted and nothing else changed; if the two
+differ, the builder consulted the arm, and the unit fails closed. That needs no
+cross-unit baseline, so it holds on the first unit and on a resumed attempt
+alike. The system instruction and response schema are separately pinned by the
+first measured unit, and no prompt may name the arm it is running.
+
+Divergence is checked rather than a particular wording: pinning the text would
+bind the runner to one prompt module without catching anything divergence does
+not, and `buildV11Prompt` already audits its own output. What this does **not**
+prevent is a uniformly bad prompt given to every arm — that is a lock-level
+question, not a fairness one.
+
+Review also found that a resumed attempt started with an empty baseline, so 84
+units were measured under a system instruction the first attempt never used,
+with nothing recorded either way. The raw run now carries `outerPromptBinding`,
+a digest pair for the system instruction and response schema, and a resume is
+held to the previous attempt's binding.
+
+Each guard is mutation-tested: removing the arm-invariance check fails 2 tests,
+removing the resume seeding fails 1, and the pre-existing checks fail on removal
+as recorded above.
 
 **6 — Runtime factories, and what the blocked three actually do.** Four arms
 have real pinned factories: no-memory, ShadowGraph Full, ShadowGraph Compact and
@@ -272,18 +298,31 @@ The evidence index and review bundle **builders** are now implemented in
 `benchmark/lib/v11-evidence-bundle.mjs`. The property they exist for is that a
 review verdict can be bound to exact bytes: the index is sorted by path so it is
 a function of its contents rather than of collection order, the bundle
-serializes canonically so two builds from the same inputs are byte-identical,
-and its digest covers the commit, both lock hashes, the three frozen source
-hashes and the index. Any change to any indexed artifact changes the digest, so
-a verdict quoting one digest cannot be carried to a different bundle.
+serializes canonically, and its digest covers the commit, both lock hashes, the
+three frozen source hashes and the index. Any change to any indexed artifact
+changes the digest, so a verdict quoting one digest cannot be carried to a
+different bundle.
 
-The builders refuse rather than paper over: a malformed or fabricated-shaped
-digest, a duplicate path with two digests, an absolute or traversing path, an
-empty index, an unrecognised evidence kind, a short commit id, a missing
-required evidence kind, and any attempt to bundle a scored run. They never hash
-files themselves — digests come from the caller that read the bytes — because a
-builder that hashed its own tree could be pointed at a different tree than the
-one under review.
+Independent review found that `buildReviewBundle` checked only the index's
+schema tag, so every protection below was bypassable by anyone who built the
+index by hand — a traversing path, a malformed digest, a duplicate path with two
+different digests, an unknown kind and a lying `entryCount` were all accepted at
+once, and `requiredCoverage` was then satisfied against those unvalidated kinds.
+Byte-identity was correspondingly conditional: it was a property of the index
+builder's sort, not of the bundle. `buildReviewBundle` now rebuilds the index
+from its own entries, which closes both. Removing that rebuild fails 3 tests.
+
+Refusals: a malformed or fabricated-shaped digest, a duplicate path with two
+digests, an absolute or traversing path, an empty index, an unrecognised
+evidence kind, a short commit id, a missing required evidence kind, an
+`entryCount` that disagrees with the entries, and any attempt to bundle a scored
+run. They never hash files themselves — digests come from the caller that read
+the bytes — because a builder that hashed its own tree could be pointed at a
+different tree than the one under review.
+
+Two known gaps, not yet closed: `verifyReviewBundle` treats `expectedDigest` as
+optional and reports `verified: true` without it, and the path check accepts
+`C:/x` and `a/./b` as repository-relative.
 
 Lock and bundle **artifacts** remain deliberately ungenerated.
 `implementation-lock.mjs` requires a fully clean tree (untracked files included)

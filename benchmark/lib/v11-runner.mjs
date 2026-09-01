@@ -9,6 +9,7 @@ import { validateV11RawRun } from './validate.mjs';
 import {
   OPERATION_FIELDS,
   V11_PHASES,
+  canonicalJson,
   deriveArmStatus,
   namespaceRefFor,
   recordContentSha256,
@@ -20,6 +21,14 @@ import {
 } from './v11-contract.mjs';
 
 export { V11_PHASES, unitIdFor };
+
+/**
+ * The arm id the runner substitutes when it checks that a prompt does not
+ * depend on the arm. A prompt builder must ignore the arm entirely, so it need
+ * not recognise this; it is exported so tests can tell the probe build apart
+ * from the request the harness will actually send.
+ */
+export const ARM_INVARIANCE_PROBE_ID = 'arm-invariance-probe';
 
 const HASH = /^[a-f0-9]{64}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
@@ -1046,6 +1055,31 @@ function validateOuterUsage(usage) {
   }
 }
 
+function domainDigest(domain, value) {
+  return createHash('sha256')
+    .update(domain, 'utf8')
+    .update('\0', 'utf8')
+    .update(canonicalJson(value), 'utf8')
+    .digest('hex');
+}
+
+/**
+ * An arm that is not the one under measurement.
+ *
+ * Handed to the prompt builder a second time, with everything else identical,
+ * to see whether the arm changed the answer. Nothing about it matches a real
+ * arm - id, name and applicability all differ - so a builder that consults any
+ * arm field at all produces a different request and is caught.
+ */
+const ARM_INVARIANCE_PROBE = Object.freeze({
+  id: ARM_INVARIANCE_PROBE_ID,
+  name: 'Arm invariance probe',
+  applicability: Object.freeze({
+    userIsolation: Object.freeze({ status: 'NOT_APPLICABLE', reason: 'probe' }),
+    persistence: Object.freeze({ status: 'NOT_APPLICABLE', reason: 'probe' })
+  })
+});
+
 /**
  * Audit the outer request the harness is about to send.
  *
@@ -1055,21 +1089,33 @@ function validateOuterUsage(usage) {
  * a caller hand one arm different instructions. Arms whose instructions
  * differed would make every measured difference between them meaningless.
  *
- * What is checked is divergence, not a particular wording: the first measured
- * unit of a run fixes the system instruction and response schema, and every
- * later unit must match it. Pinning the text here instead would bind the
- * runner to one prompt module without catching anything divergence does not,
- * and `buildV11Prompt` already audits its own output.
+ * Three things are held common, and the third is the one that matters most:
  *
- * The arm-identity check is the other half: a prompt naming the arm it is
- * running lets the model treat that arm differently, which is the same bias
- * arriving by a shorter route.
+ *  - the system instruction and the response schema, fixed by the first
+ *    measured decision unit and required to match thereafter;
+ *  - the prompt, which must not depend on the arm at all. This is checked by
+ *    building the request a second time with a probe arm substituted and
+ *    nothing else changed: if the two differ, the builder consulted the arm.
+ *    An earlier version audited only the system instruction, which left the
+ *    whole task prompt - where the instructions actually live - free to differ
+ *    per arm. The version after that compared prompts across units sharing a
+ *    phase, scenario and native context, which is weaker than it looks: in a
+ *    real run each arm returns its own context, so almost every unit is the
+ *    only one of its shape and has nothing to be compared against. Substituting
+ *    the arm tests the property directly and needs no other unit;
+ *  - the prompt must not name the arm it is running, which is the same bias
+ *    arriving by a shorter route.
  *
- * A resumed attempt starts a fresh baseline, because the requests the earlier
- * attempt sent are not retained to compare against. Divergence within an
- * attempt is caught; divergence between attempts is a lock-level question.
+ * What is checked is divergence, not a particular wording. Pinning the text
+ * here would bind the runner to one prompt module without catching anything
+ * divergence does not, and `buildV11Prompt` already audits its own output.
+ *
+ * The system and schema baseline is carried across a diagnostic resume through
+ * `outerPromptBinding` in the previous raw run, so a resumed attempt cannot
+ * quietly adopt a different instruction. The arm-invariance check needs no
+ * baseline at all, so it holds identically on a resumed attempt.
  */
-function auditOuterRequest(request, spec, baseline) {
+function auditOuterRequest(request, spec, rebuildWithProbeArm, baseline) {
   assertExactKeys(request, ['system', 'prompt', 'responseSchema'], 'outer request');
   if (!isNonEmptyString(request.system)) {
     throw new Error('Outer request system instruction must be a non-empty string');
@@ -1077,14 +1123,31 @@ function auditOuterRequest(request, spec, baseline) {
   if (!isNonEmptyString(request.prompt)) {
     throw new Error('Outer request prompt must be a non-empty string');
   }
-  if (baseline.system === null) {
-    baseline.system = request.system;
-    baseline.responseSchema = structuredClone(request.responseSchema);
-  } else if (request.system !== baseline.system) {
-    throw new Error('Outer request system instruction diverged from the common outer path');
-  } else if (!isDeepStrictEqual(request.responseSchema, baseline.responseSchema)) {
-    throw new Error('Outer request response schema diverged from the common outer path');
+
+  const systemSha256 = domainDigest('shadowgraph:v1.1:outer-system:v1', request.system);
+  const responseSchemaSha256 = domainDigest(
+    'shadowgraph:v1.1:outer-schema:v1',
+    request.responseSchema ?? null
+  );
+  if (baseline.systemSha256 === null) {
+    baseline.systemSha256 = systemSha256;
+    baseline.responseSchemaSha256 = responseSchemaSha256;
+  } else {
+    if (systemSha256 !== baseline.systemSha256) {
+      throw new Error('Outer request system instruction diverged from the common outer path');
+    }
+    if (responseSchemaSha256 !== baseline.responseSchemaSha256) {
+      throw new Error('Outer request response schema diverged from the common outer path');
+    }
   }
+
+  // Same phase, same scenario, same native context, different arm. Any
+  // difference means the arm reached the prompt.
+  const probe = rebuildWithProbeArm();
+  if (!isDeepStrictEqual(probe, request)) {
+    throw new Error('Outer request is not independent of the arm under measurement');
+  }
+
   const prompt = request.prompt.toLowerCase();
   for (const identity of [spec.arm.id, spec.arm.name]) {
     if (isNonEmptyString(identity) && prompt.includes(identity.toLowerCase())) {
@@ -1206,15 +1269,26 @@ async function executeDecision(options, spec, unit, signal, completedUnits, oute
   };
   let outer;
   try {
-    const outerRequest = options.buildOuterRequest({
-      arm: structuredClone(spec.arm),
+    const outerInput = () => ({
       scenario: structuredClone(spec.scenario),
       phase: spec.phase,
       nativeContext: structuredClone(retrieved.result.nativeContext),
       namespace: structuredClone(retrievalNamespace),
       correlation: { ...outerCorrelation }
     });
-    auditOuterRequest(outerRequest, spec, outerBaseline);
+    const outerRequest = options.buildOuterRequest({
+      arm: structuredClone(spec.arm),
+      ...outerInput()
+    });
+    auditOuterRequest(
+      outerRequest,
+      spec,
+      () => options.buildOuterRequest({
+        arm: structuredClone(ARM_INVARIANCE_PROBE),
+        ...outerInput()
+      }),
+      outerBaseline
+    );
     throwIfAborted(signal);
     unit.operations.outerDecisionModelCalls += 1;
     outer = await options.requestOuter({
@@ -1352,9 +1426,16 @@ async function executeV11Benchmark(options, closeResources) {
   const units = structuredClone(resume?.previousRaw.units ?? []);
   const priorUnitIds = new Set(units.map((unit) => unit.unitId));
   let interrupted = [...startedIds].some((unitId) => !priorUnitIds.has(unitId));
-  // Fixed by the first measured decision unit of this attempt; every later
-  // unit must match it. See auditOuterRequest.
-  const outerBaseline = { system: null, responseSchema: null };
+  // Fixed by the first measured decision unit and required to match
+  // thereafter. The system and schema half is seeded from the previous
+  // attempt's recorded binding, so a resume cannot quietly adopt a different
+  // instruction; the per-shape prompt half starts empty because prompt text is
+  // not retained in the raw run. See auditOuterRequest.
+  const priorBinding = resume?.previousRaw.outerPromptBinding ?? null;
+  const outerBaseline = {
+    systemSha256: priorBinding?.systemSha256 ?? null,
+    responseSchemaSha256: priorBinding?.responseSchemaSha256 ?? null
+  };
   const startedAt = resume?.previousRaw.startedAt ?? assertIsoTimestamp(options.now(), 'now');
   const attemptIds = resume
     ? [...resume.previousRaw.attemptIds, options.attemptId]
@@ -1395,6 +1476,12 @@ async function executeV11Benchmark(options, closeResources) {
     startedAt,
     finishedAt,
     zeroResult: zeroResultFor(units, interrupted),
+    outerPromptBinding: outerBaseline.systemSha256 === null
+      ? priorBinding
+      : {
+          systemSha256: outerBaseline.systemSha256,
+          responseSchemaSha256: outerBaseline.responseSchemaSha256
+        },
     arms,
     units
   };

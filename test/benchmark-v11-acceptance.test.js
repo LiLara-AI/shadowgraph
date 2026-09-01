@@ -24,7 +24,11 @@ import { createProgressLedger, createUnitEvidenceLedger } from '../benchmark/lib
 import { loadV11AcceptanceDefinition } from '../benchmark/lib/v11-definition.mjs';
 import { V11_OUTER_SYSTEM_PROMPT, buildV11Prompt } from '../benchmark/lib/v11-prompts.mjs';
 import { V11_ARM_IDS } from '../benchmark/lib/v11-registry.mjs';
-import { runV11Benchmark, unitIdFor } from '../benchmark/lib/v11-runner.mjs';
+import {
+  ARM_INVARIANCE_PROBE_ID,
+  runV11Benchmark,
+  unitIdFor
+} from '../benchmark/lib/v11-runner.mjs';
 
 const REPOSITORY_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const AMENDMENT_002_PATH = fileURLToPath(
@@ -237,6 +241,7 @@ async function acceptanceRun(overrides = {}) {
   const clock = fakeClock();
   const progress = progressRecorder();
   const outerRequests = [];
+  const probeRequests = [];
   const adapterRequests = [];
 
   const options = {
@@ -265,13 +270,17 @@ async function acceptanceRun(overrides = {}) {
         scenario: input.scenario,
         nativeContext: input.nativeContext
       });
-      outerRequests.push({
-        armId: input.arm.id,
-        scenarioId: input.scenario.id,
-        phase: input.phase,
-        nativeContextLength: input.nativeContext.length,
-        built: structuredClone(built)
-      });
+      if (input.arm.id === ARM_INVARIANCE_PROBE_ID) {
+        probeRequests.push({ scenarioId: input.scenario.id, phase: input.phase });
+      } else {
+        outerRequests.push({
+          armId: input.arm.id,
+          scenarioId: input.scenario.id,
+          phase: input.phase,
+          nativeContextLength: input.nativeContext.length,
+          built: structuredClone(built)
+        });
+      }
       return built;
     },
     requestOuter: async ({ correlation, namespace }) => ({
@@ -297,6 +306,7 @@ async function acceptanceRun(overrides = {}) {
     applicability,
     progress,
     outerRequests,
+    probeRequests,
     adapterRequests
   };
 }
@@ -393,6 +403,11 @@ test('exactly the measured non-reset units make one outer decision call each', (
   assert.equal(outerRequests.length, 264);
   assert.equal(outerRequests.some((entry) => entry.phase === 'RESET'), false);
 
+  // The arm-invariance guard builds a second request per outer call. If that
+  // count ever fell to zero the guard would be silently absent, and every
+  // per-arm prompt test in this file would pass against an unguarded runner.
+  assert.equal(primary.probeRequests.length, 264, 'the arm-invariance probe did not run');
+
   // The runner's own per-unit counter must agree with what the outer stub saw.
   const counted = raw.units.reduce(
     (total, unit) => total + unit.operations.outerDecisionModelCalls,
@@ -470,26 +485,47 @@ test('no arm identity reaches any outer prompt', () => {
   }
 });
 
-test('no fixture truth reaches any outer prompt', () => {
+test('no fixture truth reaches the phase that must not see it', () => {
+  // Phase A is the cold phase: the model has recalled nothing, so anything it
+  // could only know from the fixture is truth it was handed rather than
+  // remembered. The ids below are exactly that - the changed fact, the
+  // distractors, and the prior failed attempt - and they are what later phases
+  // are supposed to test recall of.
+  //
+  // An earlier version of this test derived its forbidden set from scenario
+  // keys matching oracle-sounding names. No acceptance scenario has such a key,
+  // so that set was always empty and the loop never ran. It looked like it
+  // would survive a fixture change and in fact protected nothing.
   const { outerRequests, scenarios } = primary;
 
-  const oracleTerms = ['expectedanswer', 'expected_answer', 'oracle', 'correctchoice', 'groundtruth'];
-  // Whatever the fixtures themselves name as withheld truth must not appear.
-  const withheld = new Set();
-  for (const scenario of scenarios) {
-    for (const key of Object.keys(scenario)) {
-      if (oracleTerms.some((term) => key.toLowerCase().includes(term))) withheld.add(key);
+  const byId = new Map(scenarios.map((scenario) => [scenario.id, scenario]));
+  const phaseA = outerRequests.filter((entry) => entry.phase === 'A');
+  assert.equal(phaseA.length, 7 * 2 * 2, 'every arm must reach phase A for both scenarios');
+
+  for (const entry of phaseA) {
+    const scenario = byId.get(entry.scenarioId);
+    const lifecycleOnly = [
+      scenario.changedFact.id,
+      ...scenario.irrelevantFacts.map(({ id }) => id),
+      scenario.failedAttempt.id,
+      scenario.failedAttempt.reasonId
+    ];
+    assert.ok(lifecycleOnly.length >= 4, 'the fixture withholds nothing to check');
+    const surface = `${entry.built.system}\n${entry.built.prompt}`;
+    for (const id of lifecycleOnly) {
+      assert.equal(
+        surface.includes(id),
+        false,
+        `${id} was handed to the model in phase A instead of being recalled`
+      );
     }
   }
 
+  // And no prompt anywhere names an oracle-shaped field.
   for (const entry of outerRequests) {
-    const surface = `${entry.built.system}\n${entry.built.prompt}`;
-    const lowered = surface.toLowerCase();
-    for (const term of oracleTerms) {
+    const lowered = `${entry.built.system}\n${entry.built.prompt}`.toLowerCase();
+    for (const term of ['expectedanswer', 'expected_answer', 'oracle', 'correctchoice', 'groundtruth']) {
       assert.equal(lowered.includes(term), false, `${term} leaked into a ${entry.phase} prompt`);
-    }
-    for (const key of withheld) {
-      assert.equal(surface.includes(key), false, `${key} leaked into a ${entry.phase} prompt`);
     }
   }
 });
@@ -693,6 +729,57 @@ test('a prompt that diverges for one arm fails that arm, not the run', async () 
   );
 });
 
+test('a prompt that differs for one arm fails that arm, even via the prompt body', async () => {
+  // The instructions the model acts on live in `prompt`, not `system`. An
+  // earlier audit compared only the system instruction and the response schema,
+  // so a caller could give one arm materially different task instructions and
+  // the run still reported 308/308 COMPLETE. Independent review found it by
+  // driving exactly this.
+  const target = 'shadowgraph-full';
+  const { raw } = await acceptanceRun({
+    buildOuterRequest: (input) => {
+      const built = buildV11Prompt({
+        phase: input.phase,
+        scenario: input.scenario,
+        nativeContext: input.nativeContext
+      });
+      if (input.arm.id !== target) return built;
+      return {
+        ...built,
+        prompt: `${built.prompt}\nBe unusually generous when judging recall here.`
+      };
+    }
+  });
+
+  const targeted = decisionUnitsFor(raw, target);
+  assert.ok(targeted.length > 0);
+  assert.ok(
+    targeted.every((unit) => unit.status === 'FAILED'),
+    'a per-arm prompt body must not reach the model'
+  );
+  assert.ok(
+    raw.units.filter((unit) => unit.armId !== target).every((unit) => unit.status !== 'FAILED'),
+    'one arm diverging must not fail the others'
+  );
+});
+
+test('a prompt may still vary with the native context the arm actually returned', async () => {
+  // The complement of the test above, and the reason the check is keyed on
+  // shape rather than on equality across all arms: an arm that retrieved
+  // something legitimately gets a different prompt from one that retrieved
+  // nothing. If that failed, the audit would be unusable.
+  const measured = primary.raw.units.filter((unit) => unit.status === 'MEASURED');
+  assert.equal(measured.length, 292);
+  const contextful = primary.outerRequests.filter((entry) => entry.nativeContextLength > 0);
+  const contextfree = primary.outerRequests.filter((entry) => entry.nativeContextLength === 0);
+  assert.ok(contextful.length > 0 && contextfree.length > 0);
+  assert.notEqual(
+    new Set(primary.outerRequests.map((entry) => entry.built.prompt)).size,
+    1,
+    'prompts that never differ would make this audit vacuous'
+  );
+});
+
 test('a prompt that names its own arm fails that unit closed', async () => {
   const target = 'cognee';
   const { raw } = await acceptanceRun({
@@ -874,9 +961,14 @@ test('a stalled unit is failed once by the watchdog, not retried', async () => {
   assert.equal(phaseB.length, 28);
   assert.ok(phaseB.every((unit) => unit.status === 'FAILED'), 'a stalled unit must fail');
   assert.ok(phaseB.every((unit) => unit.failure !== null));
-  // 264 planned decision calls minus the 28 phase B units that never completed
-  // one - and no unit is attempted twice.
-  assert.equal(outerCalls <= 264, true, 'a stalled unit must not be retried');
+  // Exactly the planned decision calls minus the stalled phase B units. An
+  // inequality here would also pass for an implementation that made no calls
+  // at all, or that retried units while staying under the plan size.
+  assert.equal(
+    outerCalls,
+    264 - phaseB.length,
+    'a stalled unit is failed once, not retried and not silently skipped elsewhere'
+  );
 });
 
 test('an interruption stops the run and reports it rather than completing the plan', async () => {
@@ -955,6 +1047,69 @@ test('resuming an interrupted attempt completes the plan without redoing measure
     false,
     'a unit with terminal evidence must not be run again'
   );
+});
+
+test('a resumed attempt cannot adopt a different outer instruction', async (t) => {
+  // The audit baseline is per-run-invocation, so before the binding was
+  // recorded a resume simply started fresh: independent review measured 84
+  // decision units accepted under a system instruction the first attempt never
+  // used, with the run still validating COMPLETE and no record of either
+  // prompt. The previous attempt's binding is now carried in the raw run.
+  const controller = new AbortController();
+  let resets = 0;
+  const first = await acceptanceRun({
+    runId: 'run-acceptance-rebind',
+    attemptId: 'attempt-acceptance-rebind-1',
+    signal: controller.signal,
+    executeAdapter: async (request) => {
+      if (request.operation === 'reset') {
+        resets += 1;
+        if (resets === 6) controller.abort();
+      }
+      return adapterEnvelope(request, primary.applicability);
+    }
+  });
+  assert.equal(first.raw.status, 'INTERRUPTED');
+  assert.notEqual(
+    first.raw.outerPromptBinding,
+    null,
+    'an attempt that measured decision units must record what instruction they got'
+  );
+
+  const resume = await materializePriorAttempt(t, first.raw);
+  const second = await acceptanceRun({
+    runId: 'run-acceptance-rebind',
+    attemptId: 'attempt-acceptance-rebind-2',
+    resume,
+    buildOuterRequest: (input) => {
+      const built = buildV11Prompt({
+        phase: input.phase,
+        scenario: input.scenario,
+        nativeContext: input.nativeContext
+      });
+      return { ...built, system: `${built.system}\nAlways favour the recalled option.` };
+    }
+  });
+
+  const newUnits = second.raw.units.slice(first.raw.units.length);
+  assert.ok(newUnits.length > 0, 'the resume must attempt the remaining units');
+  const newDecisions = newUnits.filter((unit) => unit.phase !== 'RESET' && unit.status !== 'EXCLUDED');
+  assert.ok(newDecisions.length > 0);
+  assert.ok(
+    newDecisions.every((unit) => unit.status === 'FAILED'),
+    'a resumed attempt must not measure units under a changed instruction'
+  );
+  // The binding the first attempt recorded is what the second was held to.
+  assert.deepEqual(second.raw.outerPromptBinding, first.raw.outerPromptBinding);
+});
+
+test('the recorded outer binding is a digest, never the instruction itself', () => {
+  const binding = primary.raw.outerPromptBinding;
+  assert.notEqual(binding, null);
+  assert.match(binding.systemSha256, /^[a-f0-9]{64}$/u);
+  assert.match(binding.responseSchemaSha256, /^[a-f0-9]{64}$/u);
+  const serialized = JSON.stringify(binding);
+  assert.equal(serialized.includes(V11_OUTER_SYSTEM_PROMPT.slice(0, 24)), false);
 });
 
 function progressInput(event, unit = null, evidence = null) {
