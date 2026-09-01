@@ -325,13 +325,22 @@ appears mid-table. The generator had removed transcription error and replaced
 it with attribution error — the same class of mistake one level up. A count is
 not a measurement when the population is flaky.
 
-The identity version caught it on its first run: the `purity` cell picked up
+Two things the identity version has caught that a count could not. First, the
+flake, on its first run: the `purity` cell picked up
 `DS-P1-003 SQLite: a child writer begun before restore either completes first
 or conflicts`, an unrelated concurrency test. Under the old harness that would
 have been published as `Purity rebuild | 2`. It was named, re-run, and
 resolved. **That test is genuinely flaky and is a finding in its own right** —
 it is what corrupted two of the reviewer’s runs, it is unrelated to v1.1, and
 it is recorded here rather than fixed because it sits outside this candidate.
+
+Second, a guard whose reach genuinely grew. Making the end-to-end connection
+test detect a collapsed plan — it had counted 308 units without checking any
+were measured, and stayed green with every one of them FAILED — gave the
+`narrowing` guard a second test. The harness refused to publish any table until
+`tools/expected-failures.json` was edited to say so. That is the difference
+between a widened guard and a flake, and a count cannot tell them apart: both
+read as `Narrowing | 2`.
 
 It lives under `tools/` rather than `scripts/` because `files` carries
 `scripts/`, and a tool whose whole purpose is rewriting `benchmark/lib` in place
@@ -350,7 +359,7 @@ confusion generating the table removes.
 
 | Guard removed | Tests that fail |
 | --- | --- |
-| Narrowing | 1 — the prompt builder is never told which arm it is serving |
+| Narrowing | 2 — the prompt builder is never told which arm it is serving; a ready candidate runs the plan and reaches the validator and the aggregator |
 | Purity | 1 — a builder whose output depends on anything but its input fails the unit |
 | Arm Identity | 1 — a prompt that names an arm fails the units of that arm |
 | Resume Seed | 1 — a resumed attempt cannot adopt a different outer instruction |

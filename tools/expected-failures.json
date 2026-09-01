@@ -12,10 +12,16 @@
     "Identities fix that. A mutation is measured by which named tests it breaks;",
     "an unexpected extra failure is a flake and the cell is re-run, and a missing",
     "expected failure is a guard that stopped being load-bearing. Both are",
-    "reported rather than silently folded into a number."
+    "reported rather than silently folded into a number.",
+    "",
+    "Widening a set is a deliberate edit, and that is the point. Strengthening",
+    "the end-to-end connection test so it detects a collapsed plan gave the",
+    "narrowing guard a second test, and the harness refused to publish anything",
+    "until this file said so rather than quietly absorbing the change."
   ],
   "narrowing": [
-    "the prompt builder is never told which arm it is serving"
+    "the prompt builder is never told which arm it is serving",
+    "a ready candidate runs the plan and reaches the validator and the aggregator"
   ],
   "purity": [
     "a builder whose output depends on anything but its input fails the unit"

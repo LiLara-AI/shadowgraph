@@ -6,12 +6,26 @@
 const fs = require('fs');
 
 const MUTATIONS = {
+  // Reverses the narrowing by bypassing the constant entirely, which is what
+  // "removing this guard" now has to mean.
+  //
+  // The earlier version added keys to the object literal handed to the builder.
+  // Once the call site began SELECTING fields by OUTER_REQUEST_INPUT_FIELDS,
+  // that mutation became a no-op - extra keys on `available` are simply not
+  // selected - so it would have reported the guard as no longer load-bearing.
+  // Fail-safe, but misleading, and independent review caught the anchor break
+  // before the no-op could be published. A guard that gets stronger changes what
+  // removing it means, and its mutation has to move with it.
   narrowing: [
     'benchmark/lib/v11-runner.mjs',
-    '      nativeContext: structuredClone(retrieved.result.nativeContext)\n    });',
-    '      nativeContext: structuredClone(retrieved.result.nativeContext),\n'
-    + '      namespace: structuredClone(retrievalNamespace),\n'
-    + '      correlation: { ...outerCorrelation }\n    });'
+    '      return options.buildOuterRequest(Object.fromEntries(\n'
+    + '        OUTER_REQUEST_INPUT_FIELDS.map((field) => [field, available[field]])\n'
+    + '      ));',
+    '      return options.buildOuterRequest({\n'
+    + '        ...available,\n'
+    + '        namespace: structuredClone(retrievalNamespace),\n'
+    + '        correlation: { ...outerCorrelation }\n'
+    + '      });'
   ],
   // Drops the comparison but keeps the rebuild call, so this isolates the
   // purity property. Removing the call as well fails 3 tests rather than 1,

@@ -357,6 +357,17 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
   assert.equal(outcome.validation.valid, true, 'the validator must accept the run it just produced');
   assert.equal(outcome.aggregate.mode, 'ACCEPTANCE');
 
+  // Counting units is not the same as measuring them. Without this, the test
+  // passed with every unit FAILED - found by mutating the prompt-input
+  // narrowing and watching this test stay green while the plan collapsed. A
+  // connection test that cannot tell a working pipeline from a broken one is
+  // asserting that the functions exist, not that they connect.
+  const measured = outcome.raw.units.filter((unit) => unit.status === 'MEASURED');
+  const excluded = outcome.raw.units.filter((unit) => unit.status === 'EXCLUDED');
+  assert.equal(measured.length, 292);
+  assert.equal(excluded.length, 16);
+  assert.equal(outcome.raw.units.some((unit) => unit.status === 'FAILED'), false);
+
   // The checkpoint ledger the resume path reads was written for every unit.
   const progressLines = (await (await import('node:fs/promises'))
     .readFile(progressPath, 'utf8')).trim().split('\n');
