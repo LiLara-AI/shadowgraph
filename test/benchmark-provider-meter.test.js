@@ -108,8 +108,9 @@ async function listen(t, handler) {
     server.once('error', reject);
     server.listen(0, '127.0.0.1', resolve);
   });
-  // Registered before any meter hook, and hooks run in registration order, so
-  // an unbounded close here parks the whole teardown ahead of everything below.
+  // Registered before the meter hook in nearly every test here, and hooks run
+  // in registration order, so an unbounded close parks the teardown ahead of
+  // them.
   // A lingering keep-alive connection is the usual cause and is reachable, so
   // this closes them rather than only naming the stall.
   t.after(() => boundedCleanup(
@@ -157,9 +158,13 @@ async function within(promise, timeoutMs, message) {
 /**
  * Await a teardown step under a finite bound.
  *
- * On expiry this WARNS and resolves; it does not reject. A rejecting after hook
- * aborts every hook registered after it, so one stuck close would take the rest
- * of the teardown down with it and turn a single leaked handle into several.
+ * This WARNS and resolves. It does not reject, on expiry OR on failure. A
+ * rejecting after hook aborts every hook registered after it, so one bad close
+ * would take the rest of the teardown with it and turn a single leaked handle
+ * into several - and two tests here register a meter hook that is not the last
+ * one. The first version caught only the expiry while this paragraph claimed
+ * the general property; independent review found the gap.
+ *
  * The warning reaches the run log, and a genuinely leaked handle still stalls
  * the process, so nothing is concealed - the stall is simply made to say why
  * without cancelling the cleanup that can still succeed.
@@ -175,6 +180,9 @@ async function boundedCleanup(promise, timeoutMs, message) {
   });
   try {
     await Promise.race([promise, expiry]);
+  } catch (error) {
+    process.stderr.write(`cleanup warning: ${message} - ${error?.message ?? error}
+`);
   } finally {
     clearTimeout(timer);
   }
@@ -251,9 +259,12 @@ async function sendIncompleteRequest(url, { method = 'POST', contentLength }) {
  * survives rather than a second failure. What it buys is that the stall says
  * why, in the log the mutation harness retains.
  *
- * The budget is derived from the request deadline the meter was configured
- * with, so raising upstreamTimeoutMs cannot turn a healthy close into a
- * failure; a fixed literal would drift away from the thing that justifies it.
+ * The budget is the meter's own request deadline doubled plus three seconds,
+ * floored at five: a close cannot outlast the deadlines its requests carry, so
+ * the bound tracks the thing that justifies it rather than drifting from a
+ * literal. Raising upstreamTimeoutMs therefore cannot make a healthy close look
+ * stuck. For the meters configured well under a second, the floor is what
+ * applies.
  */
 async function startTrackedMeter(t, config) {
   const meter = await startProviderMeter(config);
@@ -1016,8 +1027,9 @@ test('downstream aborts are recorded and close drains in-flight handlers before 
     upstreamTimeoutMs: 2_000
   });
   // Not startTrackedMeter, and not for the reason first written here: there is
-  // no deadlock, as line 1003 below closes this meter within 1s while the
-  // handler is still parked. The reason is hook order. A tracked hook would be
+  // no deadlock, since this test closes its meter within a second further down
+  // while the handler is still parked, and the file passes. The reason is that
+  // a tracked hook would cost a whole budget for nothing. It would be
   // registered here, before any hook that releases the handler, and hooks run
   // in registration order - so on the failure path it would run first, find the
   // handler still parked, and spend its whole budget before the release could

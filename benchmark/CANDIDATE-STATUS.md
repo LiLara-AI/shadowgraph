@@ -445,8 +445,32 @@ a UTF-8 locale and failed under `LC_ALL=C`, reporting a run that finished as one
 that died; it now matches in both. The harness kept its own list of files to
 back up, and that list had drifted to include `validate.mjs`, which no mutation
 writes - it now asks `mutate.cjs` which files it can write, so the two cannot
-disagree. And the run printed the tree state at the end without checking it; a
-surviving modification under `benchmark/lib` now fails the run.
+disagree. And the run printed the tree state at the end without checking it, so
+a surviving mutation was left for the reader to notice.
+
+A confirmation pass over those fixes found that the check written to close that
+last one had become the next instance of the same pattern, twice over. It ran
+after the table was printed, so the one condition that invalidates every row
+above could not reach the banner that says so: redirect stdout to a file and the
+table came out clean and unmarked, with the problem only on stderr. And it
+grepped `git status` for `benchmark/lib/` - a second remembered list, in the
+same commit that had just stopped remembering the first. That would miss a
+mutation to any file outside the directory, fail on unrelated dirt whose path
+merely contained the string, and pass silently with no git at all. Every mutable
+file is now compared against the copy taken before the run, before anything is
+printed.
+
+Three more from that pass. The bounded cleanup converted an expiry but not a
+failure while the paragraph above it claimed the general property, and two tests
+here register a meter hook that is not the last one, so a rejected close would
+have skipped the next meter's. The guard that stopped cleanup running twice had
+made it non-resumable: a second Ctrl-C during the restore re-entered the
+handler, took the guard's early return, and exited with the tree still mutated -
+the fix for one failure opening another. Interrupts are now ignored while the
+handler works, verified by sending three during a deliberately slowed restore
+and confirming both files came back. And the reconciliation counted rows where
+its own comment promised membership; it now names the guards that produced
+none.
 
 It exists because three consecutive review rounds each caught one wrong number
 in a hand-written table. The last was a purity-rebuild figure of 3 that should

@@ -85,12 +85,17 @@ cleanup() {
   [ "$CLEANED" -eq 1 ] && return 0
   CLEANED=1
   stop_suite
-  restore
+  restore || echo "ERROR: the tree may still be mutated - check $MUTABLE_FILES" >&2
   rm -rf "$WORK"
   rmdir "$DIAGNOSTICS" 2>/dev/null
 }
 
 on_signal() {
+  # Ignore further interrupts while cleaning up. The CLEANED guard stops
+  # cleanup running twice, but it also meant a second Ctrl-C landing during
+  # restore() re-entered here, took the guard's early return, and exited with
+  # the tree still mutated - the guard against one failure opening another.
+  trap '' INT TERM
   echo "" >&2
   echo "interrupted - stopping the suite and restoring mutated sources" >&2
   cleanup
@@ -127,7 +132,7 @@ run_suite() {
 # locale. It fails closed, but with the wrong diagnosis, which is its own kind
 # of wrong answer. Independent review found it.
 has_summary() {
-  grep -qE '^[^ ]* tests [0-9][0-9]*$' "$1"
+  grep -qE '^[^ ]+ tests [0-9][0-9]*$' "$1"
 }
 
 names_from_log() {
@@ -191,7 +196,7 @@ for name in $MUTATIONS; do
     STARTED="$SECONDS"
     run_suite "$WORK/run.log"
     code=$?
-    restore
+    restore || STATUS=1
     ELAPSED=$((SECONDS - STARTED))
 
     # A timeout is not a measurement and must never be mistaken for one. It is
@@ -221,6 +226,7 @@ for name in $MUTATIONS; do
     fi
     names_from_log "$WORK/run.log" > "$WORK/observed"
     if node tools/compare-failures.cjs "$name" "$WORK/observed" >> "$RESULTS" 2>"$WORK/err"; then
+      echo "$name" >> "$WORK/measured"
       echo "ok (${ELAPSED}s)" >&2
       break
     fi
@@ -243,19 +249,24 @@ for name in $MUTATIONS; do
   fi
 done
 
-restore
+restore || STATUS=1
 
 # Every guard declared in expected-failures.json must have been measured. The
 # per-cell check catches a mutation that fails to apply; it cannot catch one
 # that was never listed, and a guard nobody measures is a guard nobody knows
 # about.
-DECLARED="$(node -e 'const d=require("./tools/expected-failures.json");console.log(Object.keys(d).filter((k)=>!k.startsWith("_")).length)')"
-MEASURED="$(wc -l < "$RESULTS")"
+touch "$WORK/measured"
+node -e 'const d=require("./tools/expected-failures.json");for(const k of Object.keys(d)) if(!k.startsWith("_")) console.log(k)' | sort > "$WORK/declared"
+MISSING="$(comm -23 "$WORK/declared" <(sort "$WORK/measured"))"
 if [ -n "$TIMED_OUT" ]; then
-  echo "NOTE: stopped early after $TIMED_OUT timed out; $MEASURED of $DECLARED guards reached" >&2
-elif [ "$MEASURED" != "$DECLARED" ]; then
-  echo "ERROR: $DECLARED guards declared but $MEASURED rows produced" >&2
-  echo "       either a guard is missing from MUTATIONS, or one failed its comparison above" >&2
+  echo "NOTE: stopped early after $TIMED_OUT timed out; these guards are unmeasured:" >&2
+  printf '  %s
+' $MISSING >&2
+elif [ -n "$MISSING" ]; then
+  echo "ERROR: these declared guards produced no row:" >&2
+  printf '  %s
+' $MISSING >&2
+  echo "       either missing from MUTATIONS, or failed the comparison above" >&2
   STATUS=1
 fi
 
@@ -273,6 +284,26 @@ if [ -s "$WORK/final" ]; then
   STATUS=1
 fi
 
+# Every mutable file must be byte-identical to the copy taken before the run.
+#
+# Checked BEFORE anything is printed. The first version of this check ran after
+# the table, so the one condition that invalidates every row above could not
+# reach the banner that says so: redirect stdout to a file and you got a clean,
+# unmarked table with the problem only on stderr.
+#
+# It compares against the backups rather than grepping `git status` for
+# `benchmark/lib/`. That directory was a second remembered list, in the same
+# file that had just stopped remembering the first one - it would miss a
+# mutation to any file outside it, fail on unrelated dirt whose path merely
+# contains the string, and pass silently if git were unavailable. The backups
+# are the exact thing "unchanged" means here. Independent review found both.
+for file in $MUTABLE_FILES; do
+  if ! cmp -s "$file" "$WORK/$(backup_key "$file")"; then
+    echo "ERROR: $file differs from its pre-run copy - a mutation survived" >&2
+    STATUS=1
+  fi
+done
+
 echo
 if [ "$STATUS" -ne 0 ]; then
   echo "!! THIS TABLE IS NOT A MEASUREMENT - the harness exited non-zero. Do not publish it. !!"
@@ -281,14 +312,5 @@ echo "| Guard removed | Tests that fail |"
 echo "| --- | --- |"
 cat "$RESULTS"
 echo
-DIRT="$(git status --porcelain)"
-[ -n "$DIRT" ] && echo "$DIRT"
-
-# A table is only about the tree the reader has. The previous version printed
-# the status and left the reader to notice; a surviving mutation is the one
-# thing that would invalidate every row above, so it is checked.
-if printf '%s' "$DIRT" | grep -q 'benchmark/lib/'; then
-  echo "ERROR: a file under benchmark/lib/ is modified after the run - a mutation survived" >&2
-  STATUS=1
-fi
+git status --porcelain
 exit "$STATUS"
