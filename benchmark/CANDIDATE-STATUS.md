@@ -119,9 +119,12 @@ their proxy nested inside the sealed region and passed while the hole was open.
 `loadV11AcceptanceDefinition` is **deliberately outside** that sealed set, and
 is the only unsealed function that processes untrusted input. (Some exported
 helpers also throw uncoded on a caller's own bad argument - a non-string key, an
-empty arm vocabulary, an unknown boundary code. Their messages are static and
-none can receive scenario data, because the boundary only ever calls them with
-values it has already type-checked.) It reads harness-supplied paths, so
+empty arm vocabulary, an unknown boundary code. Their messages are static, and
+none of those throw paths is reachable from scenario data: the boundary only
+ever calls them with values it has already type-checked. Scenario data does
+reach one of them - every validated key is folded by normalizedPublicDataKey -
+but only ever as a string, which is the type its throw path requires it not to
+be.) It reads harness-supplied paths, so
 its failures are operator diagnostics: sealing it would replace "which file is
 missing, and where" with an opaque code while buying nothing, since an unhandled
 failure there carries a static field name or a path the harness itself supplied,
