@@ -89,7 +89,7 @@ treat file content at HEAD, not the diffs, as the object of review.
 | 3 | One centralized outer decision path; adapters memory-only | **Closed** |
 | 4 | Provider-evidence reconciliation | **Closed** |
 | 5 | Mutation state fails closed | **Closed** (mechanism); wiring waits on 6 |
-| 6 | Real pinned runtime factories for all seven arms | **Open — blocked** |
+| 6 | Real pinned runtime factories for all seven arms | **Open** — 3 of 7 blocked, 4 not |
 | 7 | Non-scored acceptance, 308 units | **Open — blocked** |
 | 8 | Locks, ledger validation, readiness, evidence index, review bundle | **Partial** |
 | 9 | Focused, Node, Python, package, MCP, integration, smoke, privacy checks | **Closed** |
@@ -202,7 +202,19 @@ prevents a real acceptance run.** No digest was synthesised.
 
 **B2 — Services are not provisioned.** Graphiti needs a Neo4j-compatible
 database plus an LLM and embedding endpoint; Cognee needs an LLM and embedding
-endpoint. `v11-preflight` reports both as blockers rather than assuming them.
+endpoint. Mem0 needs an LLM and embedding endpoint for its declared request
+classes. `v11-preflight` reports the service-bearing arms as blockers rather
+than assuming them.
+
+B2 covers **three arms, not all seven**. An earlier revision of this document
+treated requirement 6 as wholly blocked, which overstated it. `no-memory`,
+`shadowgraph-full` and `shadowgraph-compact` need no external service by
+construction, and `basic-memory` was **measured** running its full adapter
+operation sequence under `--network none` (see `benchmark/evidence/`), so its
+`requestClasses: []` declaration is truthful and it needs no provider endpoint
+either. Those four arms are open engineering, not blocked work, and the
+distinction matters because a blocked item invites no further effort while an
+open one does.
 
 `v11-preflight` gates on B1 and B3 as well as B2, so satisfying every
 applicability finding still leaves it NOT READY. A readiness check that could

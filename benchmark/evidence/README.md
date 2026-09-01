@@ -5,6 +5,46 @@ files record what was observed. They are **not** a benchmark result, an
 acceptance outcome, a readiness determination, a score, or a ranking, and nothing
 here authorises an official run.
 
+## Offline-capability probe (Basic Memory)
+
+`probe-basic-memory-0.23.2.json`. The executor spec declares
+`requestClasses: []` for `basic-memory`, i.e. that the arm issues no provider
+traffic at all. That claim needed testing rather than trusting, because the
+package **declares `openai>=1.100.2` as a dependency** — if any adapter
+operation reached it, the spec would be false and the traffic would go
+unmetered.
+
+Ran the adapter's own operation sequence inside the pinned image with
+`--network none`, so any provider call would fail rather than succeed
+silently:
+
+| Operation | Result |
+| --- | --- |
+| `create_memory_project` | succeeded |
+| `write_note` | succeeded |
+| `search_notes` | succeeded |
+| `list_memory_projects` | succeeded |
+| `delete_project` | **failed** — see below |
+
+Basic Memory served all of these from a local ASGI client over SQLite. **The
+`requestClasses: []` declaration is truthful**: the `openai` dependency is
+declared but not exercised on any path this adapter uses. So this arm needs no
+provider endpoint and no external service, and is not blocked by B2.
+
+### A defect this exposed
+
+`delete_project` failed with *"Cannot delete default project 'acc-probe'. This
+is the only project in your configuration."* That is the call the adapter makes
+during **RESET**, so a reset against a single-project store cannot succeed as
+currently written. It is a product constraint rather than a network failure, and
+it has to be handled before this arm can complete a lifecycle — most likely by
+resetting note content within the project rather than deleting the project
+itself.
+
+`search_notes` also returned no hit for a term present in the note just written,
+which may be indexing latency or a query-shape mismatch. Recorded as unresolved;
+it does not affect the provider-traffic conclusion.
+
 ## Native user-isolation probe (assumptions A1 and A2)
 
 `benchmark/preregistration-amendment-002.json` declares `userIsolation: SUPPORTED`

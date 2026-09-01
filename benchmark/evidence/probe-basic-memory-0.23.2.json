@@ -1,0 +1,35 @@
+{
+  "all_ok": false,
+  "probeConditions": {
+    "image": "python@sha256:47ae396f09c1303b8653019811a8498470603d7ffefc29cb07c88f1f8cb3d19f",
+    "network": "none",
+    "package": "basic-memory==0.23.2"
+  },
+  "steps": [
+    {
+      "detail": "",
+      "ok": true,
+      "step": "create_memory_project"
+    },
+    {
+      "detail": "",
+      "ok": true,
+      "step": "write_note"
+    },
+    {
+      "detail": "hit=False",
+      "ok": true,
+      "step": "search_notes"
+    },
+    {
+      "detail": "",
+      "ok": true,
+      "step": "list_memory_projects"
+    },
+    {
+      "detail": "ToolError: Cannot delete default project 'acc-probe'. This is the only project in your configuration.",
+      "ok": false,
+      "step": "delete_project"
+    }
+  ]
+}
