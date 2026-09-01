@@ -1,0 +1,67 @@
+// Remove one guard, so its absence can be measured.
+//
+// Every mutation asserts its anchor matches exactly once, so a mutation that
+// silently stopped applying would fail loudly instead of reporting zero
+// failures and looking like a guard nobody needs.
+const fs = require('fs');
+
+const MUTATIONS = {
+  narrowing: [
+    'benchmark/lib/v11-runner.mjs',
+    '      nativeContext: structuredClone(retrieved.result.nativeContext)\n    });',
+    '      nativeContext: structuredClone(retrieved.result.nativeContext),\n'
+    + '      namespace: structuredClone(retrievalNamespace),\n'
+    + '      correlation: { ...outerCorrelation }\n    });'
+  ],
+  // Drops the comparison but keeps the rebuild call, so this isolates the
+  // purity property. Removing the call as well fails 3 tests rather than 1,
+  // because two assertions count builder invocations - that larger number
+  // measures the counting assertions, not this guard. Independent review and
+  // this harness first disagreed here (1 against 3) for exactly that reason;
+  // both were right about what they actually mutated.
+  purity: [
+    'benchmark/lib/v11-runner.mjs',
+    "  if (!isDeepStrictEqual(rebuild(), request)) {\n"
+    + "    throw new Error('Outer request builder is not a pure function of its input');\n  }\n",
+    '  rebuild();\n'
+  ],
+  armIdentity: [
+    'benchmark/lib/v11-runner.mjs',
+    "      throw new Error('Outer request prompt must not identify the arm under measurement');",
+    '      void identity;'
+  ],
+  resumeSeed: [
+    'benchmark/lib/v11-runner.mjs',
+    'systemSha256: priorBinding?.systemSha256 ?? null',
+    'systemSha256: null'
+  ],
+  indexRebuild: [
+    'benchmark/lib/v11-evidence-bundle.mjs',
+    'const validated = buildEvidenceIndex({ entries: index.entries });',
+    'const validated = index;'
+  ],
+  requiredDigest: [
+    'benchmark/lib/v11-evidence-bundle.mjs',
+    "  assertDigest(input.expectedDigest, 'expected bundle digest');\n",
+    ''
+  ],
+  canonical: [
+    'benchmark/lib/v11-run.mjs',
+    '  if (buildOuterRequest !== buildV11Prompt) {',
+    '  if (false) {'
+  ]
+};
+
+const name = process.argv[2];
+const mutation = MUTATIONS[name];
+if (mutation === undefined) {
+  throw new Error(`unknown mutation: ${name}. Known: ${Object.keys(MUTATIONS).join(', ')}`);
+}
+const [file, from, to] = mutation;
+const source = fs.readFileSync(file, 'utf8');
+const occurrences = source.split(from).length - 1;
+if (occurrences !== 1) {
+  throw new Error(`mutation ${name}: anchor matched ${occurrences} times in ${file}`);
+}
+fs.writeFileSync(file, source.replace(from, to));
+console.log(`mutated: ${name}`);

@@ -15,6 +15,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { aggregateRun } from './aggregate.mjs';
+import { buildV11Prompt } from './v11-prompts.mjs';
 import { validateRawRun } from './validate.mjs';
 import { runV11Benchmark } from './v11-runner.mjs';
 
@@ -236,6 +237,30 @@ export async function executeV11AcceptanceRun(input) {
     signal = undefined,
     readFileImpl = readFile
   } = input;
+
+  // A real run uses the one prompt builder this methodology defines. Nothing
+  // else may be substituted here.
+  //
+  // The runner accepts an injected builder because that is what makes it
+  // testable, and three rounds of review went into narrowing what such a
+  // builder can see: it is handed phase, scenario and native context and
+  // nothing that identifies the arm. But no runtime check can make an arbitrary
+  // injected function pure. A builder that counts its own calls can recover the
+  // unit index, because the runner calls it a fixed number of times per unit,
+  // and from there the arm - the plan is ordered. The rebuild check below
+  // catches call-order dependence whose period is not aligned to that stride,
+  // and misses one that is.
+  //
+  // Rather than add a fifth detector to an arms race, the production path
+  // refuses anything but the canonical builder. Detection stays where it
+  // belongs, guarding the injected path the tests use; identity guards the path
+  // a measurement would actually be taken on.
+  if (buildOuterRequest !== buildV11Prompt) {
+    throw new V11RunError(
+      'NON_CANONICAL_PROMPT_BUILDER',
+      'an acceptance run may only use the frozen v1.1 prompt builder'
+    );
+  }
 
   const readinessReport = await computeV11Readiness({
     registry,

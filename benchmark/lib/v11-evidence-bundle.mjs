@@ -254,7 +254,7 @@ export function verifyReviewBundle(input) {
   }
 
   findings.sort((left, right) => {
-    const key = (finding) => `${finding.code} ${finding.path ?? ''}`;
+    const key = (finding) => `${finding.code}\u0000${finding.path ?? ''}`;
     return key(left) < key(right) ? -1 : key(left) > key(right) ? 1 : 0;
   });
   return { verified: findings.length === 0, findings };

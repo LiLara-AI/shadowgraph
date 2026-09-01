@@ -1090,12 +1090,19 @@ function domainDigest(domain, value) {
  *    bypass exactly.
  *
  *    The builder is now given `phase`, `scenario` and `nativeContext` and
- *    nothing else, so no channel identifying the arm reaches it at all. That is
- *    structural rather than detective - there is nothing left to detect - and
- *    it is why the input surface is exported and asserted. The rebuild check
- *    below stays, because a builder could still infer position from the order
- *    it is called in; the two builds are adjacent and identical, so a builder
- *    whose output depends on anything but its arguments is caught;
+ *    nothing else, so no field identifying the arm reaches it. That is
+ *    structural rather than detective, and it is why the input surface is
+ *    exported and asserted.
+ *
+ *    Two ways to tell the arms apart survive that, and being straight about
+ *    them matters more than another detector. A builder can count its own calls
+ *    and recover the unit index, and the plan is ordered, so that is the arm;
+ *    the production path answers it by accepting only the canonical builder.
+ *    And `nativeContext` is itself arm-correlated - it must be, because the
+ *    prompt depending on retrieved context IS the measurement - so a builder
+ *    can infer the arm from context shape. That one cannot be closed without
+ *    destroying what is being measured, and it is stated rather than papered
+ *    over;
  *  - the prompt must not name the arm it is running, which is the same bias
  *    arriving by a shorter route.
  *
@@ -1135,10 +1142,18 @@ function auditOuterRequest(request, spec, rebuild, baseline) {
   }
 
   // The same call again, with the same arguments. A prompt builder is a pure
-  // function of its input; one whose output drifts between adjacent calls is
-  // reading something the harness did not give it - a counter, a clock, the
-  // order the arms happen to run in - and that is a channel for per-arm
-  // variation the narrowed input cannot close.
+  // function of its input; one whose output drifts between calls is reading
+  // something the harness did not give it - a counter, a clock, the order the
+  // arms happen to run in.
+  //
+  // What this catches is call-order dependence whose period is NOT aligned to
+  // the two calls made per unit. An aligned period is constant within each pair,
+  // so every comparison here matches while every unit still receives a different
+  // prompt: independent review demonstrated exactly that, delivering a biased
+  // prompt to all 36 decision units of one named arm with the run reporting
+  // COMPLETE. Varying the stride would only relocate the arms race, so the real
+  // answer is upstream - executeV11AcceptanceRun accepts none but the canonical
+  // builder - and this check guards the injected path the tests use.
   if (!isDeepStrictEqual(rebuild(), request)) {
     throw new Error('Outer request builder is not a pure function of its input');
   }

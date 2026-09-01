@@ -192,9 +192,9 @@ test('the module refuses to run a candidate its own readiness check blocks', asy
       executeAdapter: async () => {
         throw new Error('an adapter must not be reached by a blocked run');
       },
-      buildOuterRequest: () => {
-        throw new Error('a prompt must not be built by a blocked run');
-      },
+      // The canonical builder, so this reaches the readiness gate rather than
+      // stopping at the builder-identity check that precedes it.
+      buildOuterRequest: buildV11Prompt,
       requestOuter: async () => {
         throw new Error('the outer model must not be called by a blocked run');
       },
@@ -203,6 +203,62 @@ test('the module refuses to run a candidate its own readiness check blocks', asy
       now: () => new Date().toISOString(),
       monotonicNow: () => 0
     }),
+    (error) => error instanceof V11RunError && error.code === 'NOT_READY'
+  );
+});
+
+test('a real run may use only the frozen prompt builder', async () => {
+  // No runtime check can make an arbitrary injected function pure. Three rounds
+  // of review went into narrowing what a builder can see - it gets phase,
+  // scenario and native context, nothing that names the arm - and a builder
+  // that counts its own calls still recovers the unit index, and from there the
+  // arm, because the plan is ordered and the runner calls it a fixed number of
+  // times per unit. Review demonstrated it: a biased prompt delivered to all 36
+  // decision units of one named arm, run reporting COMPLETE.
+  //
+  // Rather than add another detector to that arms race, a run refuses anything
+  // but the canonical builder. This is checked before readiness, so it holds
+  // whether or not the candidate could otherwise start.
+  const candidate = await realCandidate();
+  const common = {
+    ...candidate,
+    benchmarkRoot: BENCHMARK_ROOT,
+    runId: 'run-builder-identity',
+    attemptId: 'attempt-builder-identity',
+    sourceHashes: candidate.sourceHashes,
+    amendment002Path: AMENDMENT_002_PATH,
+    implementationLockHash: '4'.repeat(64),
+    environmentLockHash: '5'.repeat(64),
+    executeAdapter: async () => {
+      throw new Error('an adapter must not be reached');
+    },
+    requestOuter: async () => {
+      throw new Error('the outer model must not be reached');
+    },
+    progress: { async append() {}, async watchdogState() { return null; } },
+    persistUnit: async () => {},
+    now: () => new Date().toISOString(),
+    monotonicNow: () => 0
+  };
+
+  const impostors = [
+    ['a wrapper that merely forwards', (input) => buildV11Prompt(input)],
+    ['a stub', () => ({ system: 's', prompt: 'p', responseSchema: {} })],
+    ['nothing at all', undefined]
+  ];
+  for (const [label, buildOuterRequest] of impostors) {
+    await assert.rejects(
+      executeV11AcceptanceRun({ ...common, buildOuterRequest }),
+      (error) => error instanceof V11RunError
+        && error.code === 'NON_CANONICAL_PROMPT_BUILDER',
+      label
+    );
+  }
+
+  // The canonical builder gets past the identity check and is stopped by
+  // readiness instead, which is the next gate and the correct one.
+  await assert.rejects(
+    executeV11AcceptanceRun({ ...common, buildOuterRequest: buildV11Prompt }),
     (error) => error instanceof V11RunError && error.code === 'NOT_READY'
   );
 });
@@ -284,11 +340,7 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
     persistUnit: (unit) => unitEvidence.append(unit),
     now: () => new Date((wall += 1_000)).toISOString(),
     monotonicNow: () => (monotonic += 5),
-    buildOuterRequest: (input) => buildV11Prompt({
-      phase: input.phase,
-      scenario: input.scenario,
-      nativeContext: input.nativeContext
-    }),
+    buildOuterRequest: buildV11Prompt,
     requestOuter: async ({ correlation, namespace }) => ({
       decision: stubDecision(correlation.phase, namespace),
       usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },

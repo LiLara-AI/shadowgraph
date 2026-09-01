@@ -673,6 +673,35 @@ test('all public and loader boundary errors are static and non-disclosing', asyn
   });
 });
 
+test('no tracked file contains a NUL byte', async () => {
+  // One did, for three review rounds, in benchmark/lib/v11-evidence-bundle.mjs:
+  // a sort delimiter written as a literal byte rather than an escape, while the
+  // same delimiter twelve lines earlier was written correctly. Consequences are
+  // all in the tooling a review depends on - `file` reports the module as data,
+  // grep classifies it as binary and silently prints no matches, and git's own
+  // binary heuristic missed it only because the offset sat past its sniff
+  // window. A methodology that stakes its verdict on readable diffs cannot have
+  // source files that tooling treats as binary.
+  const { stdout } = await execFileAsync('git', ['ls-files', '-z'], {
+    cwd: REPOSITORY_ROOT,
+    maxBuffer: 8 * 1024 * 1024
+  });
+  const tracked = stdout.split('\0').filter(Boolean);
+  assert.ok(tracked.length > 100, 'the index listing looks truncated');
+
+  const offenders = [];
+  for (const relative of tracked) {
+    let bytes;
+    try {
+      bytes = await readFile(path.join(REPOSITORY_ROOT, relative));
+    } catch {
+      continue;
+    }
+    if (bytes.indexOf(0) >= 0) offenders.push(relative);
+  }
+  assert.deepEqual(offenders, [], 'write the byte as an escape instead');
+});
+
 test('no tracked file in the repository carries the executable bit', async () => {
   // This was a hardcoded list of seven files, which is why it kept passing
   // while ten unrelated files silently acquired mode 100755 - an artifact of
