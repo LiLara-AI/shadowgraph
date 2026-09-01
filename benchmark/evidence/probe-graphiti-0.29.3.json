@@ -1,0 +1,140 @@
+{
+  "EntityNode_fields": [
+    "attributes",
+    "created_at",
+    "group_id",
+    "labels",
+    "name",
+    "name_embedding",
+    "summary",
+    "uuid"
+  ],
+  "EntityNode_user_fields": [],
+  "EpisodicNode_fields": [
+    "content",
+    "created_at",
+    "entity_edges",
+    "episode_metadata",
+    "group_id",
+    "labels",
+    "name",
+    "source",
+    "source_description",
+    "uuid",
+    "valid_at"
+  ],
+  "EpisodicNode_user_fields": [],
+  "graphiti_core_version": "0.29.3",
+  "graphiti_methods": {
+    "add_episode": [
+      "self",
+      "name",
+      "episode_body",
+      "source_description",
+      "reference_time",
+      "source",
+      "group_id",
+      "uuid",
+      "update_communities",
+      "entity_types",
+      "excluded_entity_types",
+      "previous_episode_uuids",
+      "edge_types",
+      "edge_type_map",
+      "custom_extraction_instructions",
+      "saga",
+      "saga_previous_episode_uuid"
+    ],
+    "add_episode_bulk": [
+      "self",
+      "bulk_episodes",
+      "group_id",
+      "entity_types",
+      "excluded_entity_types",
+      "edge_types",
+      "edge_type_map",
+      "custom_extraction_instructions",
+      "saga"
+    ],
+    "add_triplet": [
+      "self",
+      "source_node",
+      "edge",
+      "target_node"
+    ],
+    "build_communities": [
+      "self",
+      "group_ids",
+      "driver"
+    ],
+    "build_indices_and_constraints": [
+      "self",
+      "delete_existing"
+    ],
+    "close": [
+      "self"
+    ],
+    "get_nodes_and_edges_by_episode": [
+      "self",
+      "episode_uuids"
+    ],
+    "remove_episode": [
+      "self",
+      "episode_uuid"
+    ],
+    "retrieve_episodes": [
+      "self",
+      "reference_time",
+      "last_n",
+      "group_ids",
+      "source",
+      "driver",
+      "saga"
+    ],
+    "search": [
+      "self",
+      "query",
+      "center_node_uuid",
+      "group_ids",
+      "num_results",
+      "search_filter",
+      "driver"
+    ],
+    "search_": [
+      "self",
+      "query",
+      "config",
+      "group_ids",
+      "center_node_uuid",
+      "bfs_origin_node_uuids",
+      "search_filter",
+      "driver"
+    ],
+    "summarize_saga": [
+      "self",
+      "saga_id"
+    ]
+  },
+  "httpx_version": "0.28.1",
+  "methods_accepting_group_scope": {
+    "add_episode": [
+      "group_id"
+    ],
+    "add_episode_bulk": [
+      "group_id"
+    ],
+    "build_communities": [
+      "group_ids"
+    ],
+    "retrieve_episodes": [
+      "group_ids"
+    ],
+    "search": [
+      "group_ids"
+    ],
+    "search_": [
+      "group_ids"
+    ]
+  },
+  "methods_accepting_user_scope": {}
+}

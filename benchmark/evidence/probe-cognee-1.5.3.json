@@ -1,0 +1,138 @@
+{
+  "User_columns": [
+    "email",
+    "hashed_password",
+    "id",
+    "is_active",
+    "is_superuser",
+    "is_verified",
+    "parent_user_id",
+    "tenant_id"
+  ],
+  "User_params": [
+    "kwargs"
+  ],
+  "User_present": true,
+  "cognee.modules.users.permissions.methods": [
+    "authorized_get_principal_datasets",
+    "authorized_give_permission_on_datasets",
+    "authorized_revoke_permission_on_datasets",
+    "check_permission_on_dataset",
+    "get_all_user_permission_datasets",
+    "get_document_ids_for_user",
+    "get_permitted_dataset_ids",
+    "get_principal",
+    "get_principal_datasets",
+    "get_readable_datasets",
+    "get_role",
+    "get_specific_user_permission_datasets",
+    "get_tenant",
+    "give_default_permission_to_role",
+    "give_default_permission_to_tenant",
+    "give_default_permission_to_user",
+    "give_permission_on_dataset",
+    "has_user_management_permission"
+  ],
+  "cognee.modules.users.roles.methods": [
+    "add_user_to_role",
+    "create_role",
+    "delete_role",
+    "remove_user_from_role"
+  ],
+  "cognee_version": "1.5.3",
+  "create_user_params": [
+    "email",
+    "password",
+    "is_superuser",
+    "is_active",
+    "is_verified",
+    "auto_login",
+    "parent_user_id"
+  ],
+  "create_user_present": true,
+  "entrypoints": {
+    "add": [
+      "data",
+      "dataset_name",
+      "user",
+      "node_set",
+      "vector_db_config",
+      "graph_db_config",
+      "dataset_id",
+      "preferred_loaders",
+      "incremental_loading",
+      "data_per_batch",
+      "importance_weight",
+      "run_in_background",
+      "llm_config",
+      "embedding_config",
+      "data_cache",
+      "kwargs"
+    ],
+    "cognify": [
+      "datasets",
+      "user",
+      "graph_model",
+      "chunker",
+      "chunk_size",
+      "chunks_per_batch",
+      "config",
+      "vector_db_config",
+      "graph_db_config",
+      "run_in_background",
+      "incremental_loading",
+      "custom_prompt",
+      "temporal_cognify",
+      "functional_relationships",
+      "data_per_batch",
+      "llm_config",
+      "embedding_config",
+      "data_cache",
+      "dry_run",
+      "kwargs"
+    ],
+    "prune": [],
+    "search": [
+      "query_text",
+      "query_type",
+      "user",
+      "datasets",
+      "dataset_ids",
+      "system_prompt_path",
+      "system_prompt",
+      "top_k",
+      "node_type",
+      "node_name",
+      "node_name_filter_operator",
+      "only_context",
+      "session_id",
+      "wide_search_top_k",
+      "triplet_distance_penalty",
+      "feedback_influence",
+      "verbose",
+      "retriever_specific_config",
+      "neighborhood_depth",
+      "neighborhood_seed_top_k",
+      "skills",
+      "tools",
+      "max_iter",
+      "include_references",
+      "llm_config",
+      "embedding_config",
+      "code_query"
+    ]
+  },
+  "entrypoints_accepting_user": {
+    "add": [
+      "user"
+    ],
+    "cognify": [
+      "user"
+    ],
+    "search": [
+      "user"
+    ]
+  },
+  "get_default_user_params": [],
+  "get_default_user_present": true
+}
