@@ -56,19 +56,29 @@ function lockDigest(kind, lock) {
     .digest('hex');
 }
 
-/** The environment facts a result depends on. All of them are required. */
-export const ENVIRONMENT_FIELDS = Object.freeze([
-  'osType',
-  'osRelease',
-  'arch',
-  'cpuModel',
-  'cpuCount',
-  'totalMemoryBytes',
-  'nodeVersion',
-  'npmVersion',
-  'pythonVersion',
-  'containerRuntimeVersion'
-]);
+/**
+ * The environment facts a result depends on, each with the shape it must have.
+ *
+ * Typed per field, not merely present. The first version accepted any non-empty
+ * string OR any positive number for every field, so `cpuCount: "unknown"` and
+ * `totalMemoryBytes: "lots"` both passed - a placeholder recorded as though it
+ * were an observation, by the builder whose stated purpose is refusing exactly
+ * that. Independent review demonstrated it. A count is a count.
+ */
+export const ENVIRONMENT_SHAPE = Object.freeze({
+  osType: 'string',
+  osRelease: 'string',
+  arch: 'string',
+  cpuModel: 'string',
+  cpuCount: 'count',
+  totalMemoryBytes: 'count',
+  nodeVersion: 'string',
+  npmVersion: 'string',
+  pythonVersion: 'string',
+  containerRuntimeVersion: 'string'
+});
+
+export const ENVIRONMENT_FIELDS = Object.freeze(Object.keys(ENVIRONMENT_SHAPE));
 
 /**
  * Build the environment lock.
@@ -86,7 +96,12 @@ export function buildEnvironmentLock(input) {
 
   const missing = ENVIRONMENT_FIELDS.filter((field) => {
     const value = observations[field];
-    if (typeof value === 'number') return !Number.isFinite(value) || value <= 0;
+    if (ENVIRONMENT_SHAPE[field] === 'count') {
+      return !Number.isSafeInteger(value) || value <= 0;
+    }
+    // A string field holds a description, and a number is not one. This is
+    // deliberately strict: it is the only thing standing between a real
+    // observation and "unknown" typed into the same slot.
     return typeof value !== 'string' || value.trim().length === 0;
   }).sort();
   if (missing.length > 0) {
@@ -131,13 +146,20 @@ export function buildServiceLock(input) {
     assertNonEmptyString(service.image, `service image for ${service.name}`);
     assertNonEmptyString(service.armId, `service armId for ${service.name}`);
 
-    const [repository, digest] = service.image.split('@');
-    if (digest === undefined) {
+    // Exactly one '@'. With two, split() destructured the first digest while
+    // `image` kept the whole string including the second, so a reader pulling
+    // the recorded image got something other than what the recorded digest
+    // named - inside a lock whose entire purpose is that those two agree.
+    const parts = service.image.split('@');
+    if (parts.length !== 2) {
       reject(
         'UNPINNED_SERVICE',
-        `service ${service.name} names an image by tag, not by digest: ${service.image}`
+        parts.length === 1
+          ? `service ${service.name} names an image by tag, not by digest: ${service.image}`
+          : `service ${service.name} names more than one digest: ${service.image}`
       );
     }
+    const [repository, digest] = parts;
     if (!PREFIXED_SHA256.test(digest)) {
       reject('INVALID_SERVICE_DIGEST', `service ${service.name} has a malformed image digest`);
     }

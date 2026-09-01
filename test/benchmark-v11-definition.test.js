@@ -33,7 +33,9 @@ import {
 const execFileAsync = promisify(execFile);
 // What a benchmark artifact is called, used by both the index sweep and the
 // working-tree sweep so the two cannot diverge.
-const ARTIFACT_NAME = /\.(?:raw|aggregate)\.json$|\.(?:progress|units)\.ndjson$/u;
+// Case-insensitive: ATTEMPT.RAW.JSON is the same artifact on a case-folding
+// filesystem and a distinct path on Linux, and neither should slip through.
+const ARTIFACT_NAME = /\.(?:raw|aggregate)\.json$|\.(?:progress|units)\.ndjson$/iu;
 const REPOSITORY_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const ACCEPTANCE_RELATIVE_FILES = [
   'benchmark/acceptance/definition.json',
@@ -708,6 +710,7 @@ test('this candidate has produced no benchmark result', async () => {
   // same way the index is.
   const skip = new Set(['node_modules', '.git', 'coverage']);
   const offenders = [];
+  let walked = 0;
   const walk = async (relative) => {
     const absolute = relative === '' ? REPOSITORY_ROOT : path.join(REPOSITORY_ROOT, relative);
     let entries;
@@ -725,12 +728,17 @@ test('this candidate has produced no benchmark result', async () => {
           continue;
         }
         await walk(next);
-      } else if (ARTIFACT_NAME.test(item.name)) {
-        offenders.push(next);
+      } else {
+        walked += 1;
+        if (ARTIFACT_NAME.test(item.name)) offenders.push(next);
       }
     }
   };
   await walk('');
+  // Without this the sweep degrades to the narrow version it replaced while
+  // still reporting green: a readdir failure at the root is swallowed by the
+  // catch, and the index assertion above says nothing about the walk.
+  assert.ok(walked > 100, `the working-tree walk found only ${walked} files`);
   assert.deepEqual(offenders, [], 'a benchmark artifact or results directory exists on disk');
 });
 
@@ -758,7 +766,11 @@ test('no tracked file contains a NUL byte', async () => {
   // listing serve as the assurance that the walk is not silently empty.
   const seen = new Set(tracked);
   const skip = new Set(['node_modules', '.git', 'coverage']);
+  // Untracked files are filtered by extension; every tracked file is swept
+  // whatever its name. An untracked .txt carrying a NUL would evade this, which
+  // is a stated boundary rather than an assumed one.
   const sources = /\.(?:mjs|cjs|js|json|md|py|sh|yml|yaml|ts)$/u;
+  let walked = 0;
   const walk = async (relative) => {
     const absolute = relative === '' ? REPOSITORY_ROOT : path.join(REPOSITORY_ROOT, relative);
     let entries;
@@ -772,11 +784,13 @@ test('no tracked file contains a NUL byte', async () => {
       if (item.isDirectory()) {
         if (!skip.has(item.name)) await walk(next);
       } else if (sources.test(item.name)) {
+        walked += 1;
         seen.add(next);
       }
     }
   };
   await walk('');
+  assert.ok(walked > 100, `the working-tree walk found only ${walked} files`);
 
   const offenders = [];
   for (const relative of [...seen].sort()) {

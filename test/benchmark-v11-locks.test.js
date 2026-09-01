@@ -11,6 +11,7 @@ import test from 'node:test';
 
 import {
   ENVIRONMENT_FIELDS,
+  ENVIRONMENT_SHAPE,
   LockError,
   buildEnvironmentLock,
   buildModelLock,
@@ -63,6 +64,54 @@ test('an environment lock records every field or refuses to exist', () => {
       `a missing ${field} was accepted`
     );
   }
+});
+
+test('a placeholder in a numeric field is not an observation', () => {
+  // The first version of this builder accepted any non-empty string OR any
+  // positive number for every field, so a count could be satisfied by prose.
+  // "unknown" recorded in cpuCount is precisely the gap the module header says
+  // an unexplained difference between two runs would hide - written by the
+  // builder that exists to refuse it. Independent review found it.
+  const counts = ENVIRONMENT_FIELDS.filter((field) => ENVIRONMENT_SHAPE[field] === 'count');
+  assert.ok(counts.length >= 2, 'the fixture must exercise more than one numeric field');
+
+  for (const field of counts) {
+    for (const placeholder of ['unknown', 'N/A', '-', '8', '  ', 8.5, Number.NaN, Infinity]) {
+      assert.throws(
+        () => buildEnvironmentLock({ observations: environment({ [field]: placeholder }) }),
+        (error) => error instanceof LockError && error.code === 'INCOMPLETE_ENVIRONMENT',
+        `${field}=${JSON.stringify(placeholder)} was accepted as a count`
+      );
+    }
+  }
+
+  // And the converse: a number is not a description.
+  const strings = ENVIRONMENT_FIELDS.filter((field) => ENVIRONMENT_SHAPE[field] === 'string');
+  for (const field of strings) {
+    assert.throws(
+      () => buildEnvironmentLock({ observations: environment({ [field]: 12345 }) }),
+      (error) => error instanceof LockError && error.code === 'INCOMPLETE_ENVIRONMENT',
+      `${field}=12345 was accepted as a description`
+    );
+  }
+});
+
+test('a service image and its recorded digest cannot disagree', () => {
+  // Two '@' sections destructured the first digest while the recorded image
+  // kept the whole string including the second, so image and digest named
+  // different things inside a lock whose purpose is that they agree.
+  const doubled = `neo4j@sha256:${'a'.repeat(64)}@sha256:${'b'.repeat(64)}`;
+  assert.throws(
+    () => buildServiceLock({ services: [{ ...SERVICE, image: doubled }] }),
+    (error) => error instanceof LockError
+      && error.code === 'UNPINNED_SERVICE'
+      && /more than one digest/u.test(error.message)
+  );
+
+  // What is recorded round-trips: repository + '@' + digest reconstructs image.
+  const { lock } = buildServiceLock({ services: [SERVICE] });
+  const [entry] = lock.services;
+  assert.equal(`${entry.repository}@${entry.digest}`, entry.image);
 });
 
 test('an empty or zero environment value is missing evidence, not evidence', () => {
