@@ -563,3 +563,17 @@ test('prompt boundary rejects malformed, cyclic, oversized, and non-array native
     );
   }
 });
+
+test('a hostile prompt options object cannot escape before the seal', async () => {
+  // buildV11Prompt read its own options through assertExactKeys before any seal
+  // was reached, so a Proxy passed as the options object escaped uncoded.
+  const scenario = await acceptanceScenario();
+  const marker = 'OPTIONSPROXYSENTINELQ7X';
+
+  for (const trap of ['get', 'ownKeys', 'getOwnPropertyDescriptor', 'getPrototypeOf']) {
+    const hostile = new Proxy({ phase: 'B', scenario, nativeContext: [] }, {
+      [trap]() { throw new TypeError(`options ${trap} ${marker}`); }
+    });
+    expectBoundaryThrow(() => buildV11Prompt(hostile), 'SHAPE', [marker]);
+  }
+});

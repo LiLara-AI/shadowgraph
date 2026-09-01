@@ -23,6 +23,7 @@ import {
   V11_ACCEPTANCE_PHASES,
   V11_ACCEPTANCE_SOURCE_HASHES,
   loadV11AcceptanceDefinition,
+  validateV11AcceptanceScenario,
   validateV11PublicScenario
 } from '../benchmark/lib/v11-definition.mjs';
 
@@ -769,4 +770,73 @@ test('the only enumerable property on a boundary error is its code', async () =>
   assert.equal(JSON.stringify(error), '{"code":"KEY"}');
   assert.equal(Object.prototype.propertyIsEnumerable.call(error, 'name'), false);
   assert.equal(error.cause, undefined);
+});
+
+/**
+ * Assert that an invocation leaks nothing.
+ *
+ * The property is not that a hostile value always throws - a trap the
+ * validator never invokes simply lets validation succeed, which leaks nothing.
+ * The property is that anything which *does* escape is a coded rejection
+ * carrying none of the attacker's material.
+ */
+function assertNoBoundaryLeak(invoke, marker, label) {
+  let error;
+  try {
+    invoke();
+  } catch (caught) {
+    error = caught;
+  }
+  if (error === undefined) return;
+  assert.equal(error?.name, 'V11BoundaryError', `${label} escaped uncoded`);
+  assert.equal(boundaryErrorSurface(error).includes(marker), false, `${label} disclosed material`);
+}
+
+test('a top-level hostile scenario cannot escape either public entry point', async () => {
+  // Sealing only the snapshot walk was not enough. The walk reads through
+  // descriptors, so a `get` trap never fires during it; the unsealed tail then
+  // read scenario.id and let a raw TypeError out carrying attacker text.
+  const { scenarios } = await loadV11AcceptanceDefinition({ repositoryRoot: REPOSITORY_ROOT });
+  const marker = 'TOPLEVELPROXYSENTINELQ7X';
+
+  // `get` is the vector that actually reached the unsealed tail, so it must
+  // both throw and be coded.
+  for (const entry of [validateV11PublicScenario, validateV11AcceptanceScenario]) {
+    const hostile = new Proxy(structuredClone(scenarios[0]), {
+      get() { throw new TypeError(`top-level get ${marker}`); }
+    });
+    expectBoundaryThrow(() => entry(hostile), 'SHAPE', [marker]);
+  }
+
+  for (const trap of ['ownKeys', 'getOwnPropertyDescriptor', 'getPrototypeOf', 'has']) {
+    for (const entry of [validateV11PublicScenario, validateV11AcceptanceScenario]) {
+      const hostile = new Proxy(structuredClone(scenarios[0]), {
+        [trap]() { throw new TypeError(`top-level ${trap} ${marker}`); }
+      });
+      assertNoBoundaryLeak(() => entry(hostile), marker, `top-level ${trap}`);
+    }
+  }
+});
+
+test('a trap that waits until the snapshot walk is over is still sealed', async () => {
+  // A stateful trap can behave through the sealed phase and fire afterwards,
+  // which is exactly what a seal placed around one internal call would miss.
+  const { scenarios } = await loadV11AcceptanceDefinition({ repositoryRoot: REPOSITORY_ROOT });
+  const marker = 'LATEFIRINGSENTINELQ7X';
+
+  for (const trap of ['get', 'getPrototypeOf', 'getOwnPropertyDescriptor']) {
+    let calls = 0;
+    const hostile = new Proxy(structuredClone(scenarios[0]), {
+      [trap](...args) {
+        calls += 1;
+        if (calls > 6) throw new TypeError(`late ${trap} ${marker}`);
+        return Reflect[trap](...args);
+      }
+    });
+    assertNoBoundaryLeak(
+      () => validateV11PublicScenario(hostile),
+      marker,
+      `late-firing ${trap}`
+    );
+  }
 });

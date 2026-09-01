@@ -15,9 +15,9 @@ All figures below were produced on the current branch with a clean working tree.
 
 | Gate | Command | Result |
 | --- | --- | --- |
-| Full repository | `npm test` | **1984 / 1984 pass**, 0 fail, 20 suites |
-| Benchmark focused | `npm run benchmark:test` | **829 / 829 pass**, 0 fail |
-| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **686 / 686 pass**, 0 fail |
+| Full repository | `npm test` | **1988 / 1988 pass**, 0 fail, 20 suites |
+| Benchmark focused | `npm run benchmark:test` | **833 / 833 pass**, 0 fail |
+| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **690 / 690 pass**, 0 fail |
 | Python adapters | `npm run benchmark:test:python` | **55 tests, OK** |
 | Node syntax | `npm run check`, `npm run benchmark:check` | pass |
 | Python syntax | `npm run benchmark:check:python` | pass |
@@ -84,7 +84,7 @@ treat file content at HEAD, not the diffs, as the object of review.
 
 | # | Requirement | Status |
 | --- | --- | --- |
-| 1 | Serialized-input safety and error non-disclosure | **Closed** |
+| 1 | Serialized-input safety and error non-disclosure | **Closed**, scoped — see below |
 | 2 | Registry, runner, CLI, validator, aggregator/scorer, truthful applicability | **Partial** |
 | 3 | One centralized outer decision path; adapters memory-only | **Closed** |
 | 4 | Provider-evidence reconciliation | **Closed** |
@@ -98,13 +98,32 @@ treat file content at HEAD, not the diffs, as the object of review.
 
 **1 — Boundary.** Unit ids are one bounded opaque `unit:<64 hex>` derived by a
 domain-separated digest, defined once in the contract kernel; the validator no
-longer carries a second copy and rejects the legacy composite. Every boundary
-rejection is a `V11BoundaryError` with a stable code and a static message. Its
-`code` is the sole enumerable own property, so `JSON.stringify` of the error is
-exactly `{"code":...}`; `name` is defined non-enumerably and no cause is
-attached. Reflection over a hostile value is sealed, so a Proxy whose `ownKeys`
-or `getOwnPropertyDescriptor` trap throws is converted into a coded rejection
-rather than escaping as a `TypeError` carrying attacker-controlled text. Per-example regexes were replaced by one structural classifier
+longer carries a second copy and rejects the legacy composite.
+
+The non-disclosure claim is scoped deliberately, because a broader version of it
+was written here once and turned out to be false. What is verified: **anything
+that escapes `validateV11PublicScenario`, `validateV11AcceptanceScenario` or
+`buildV11Prompt` is a `V11BoundaryError`** with a stable code and a static
+message. Its `code` is the sole enumerable own property, so `JSON.stringify` of
+the error is exactly `{"code":...}`; `name` is defined non-enumerably and no
+cause is attached.
+
+Each of those three functions is sealed around its **whole body**. An earlier
+attempt sealed only the snapshot walk, which was not enough: the walk reads
+through property descriptors, so a `get` trap never fires during it, and the
+unsealed remainder then read `scenario.id` and let a raw `TypeError` out
+carrying attacker-controlled text. Five such escapes existed and were found by
+review, not by the tests written alongside the first fix — those tests placed
+their proxy nested inside the sealed region and passed while the hole was open.
+
+Residual limitation, stated rather than resolved: a converted throw cannot be
+attributed. Hostile input and a harness fault are indistinguishable at the
+boundary, because every property that might tell them apart is itself
+attacker-controlled — so a `ReferenceError` or `RangeError` raised inside the
+sealed region is reported as `SHAPE`, the same code as a malformed input. That
+is the correct trade for the security property but the wrong answer for
+attribution, so `setSealedFaultSink` lets an operator observe converted throws
+out of band. Nothing the sink receives may reach a unit result. Per-example regexes were replaced by one structural classifier
 that normalises and decodes before classifying by shape. Public scenario and
 native-context data are walked inertly through property descriptors, so a getter
 is rejected rather than invoked, and validation returns an isolated
@@ -170,6 +189,14 @@ endpoint. `v11-preflight` reports both as blockers rather than assuming them.
 `v11-preflight` gates on B1 and B3 as well as B2, so satisfying every
 applicability finding still leaves it NOT READY. A readiness check that could
 go green while immutable prerequisites were missing would be worse than none.
+
+Those gates read file **content**, not merely file existence — an earlier
+version could be cleared by three files containing `{}` — and an unreadable or
+malformed prerequisite file counts as unsatisfied rather than aborting the
+command. What they cannot do is establish authenticity: a syntactically valid
+digest for a model nobody ran would satisfy the shape check. Every prerequisite
+blocker therefore carries that caveat in its own text, and confirming
+authenticity remains a reviewer's job.
 
 **B3 — Runtime bytes are version-pinned, not byte-pinned.**
 `competitors.lock.json` contains exactly one `sha256` — the base image. There is

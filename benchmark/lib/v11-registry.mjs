@@ -86,6 +86,15 @@ export const NATIVE_ISOLATION = Object.freeze({
   })
 });
 
+/**
+ * The single exclusion rule: an arm is excluded from ISOLATION_USER unless its
+ * declared user isolation is SUPPORTED. Exported so every count path uses this
+ * predicate rather than its own spelling of it.
+ */
+export function isExcludedFromUserIsolation(declaredArm) {
+  return declaredArm?.userIsolation?.status !== 'SUPPORTED';
+}
+
 /** Findings the registry can raise about a declared applicability matrix. */
 export const APPLICABILITY_FINDING_CODES = Object.freeze([
   'DECLARED_ISOLATION_UNAVAILABLE',
@@ -267,10 +276,8 @@ export function createV11Registry(options) {
 
     const perArm = scenarios * repetitions;
     const totalUnits = perArm * phases.length * V11_ARM_IDS.length;
-    // One spelling of the rule: an arm is excluded from ISOLATION_USER unless
-    // its declared user isolation is SUPPORTED.
     const excludedArms = V11_ARM_IDS.filter((armId) => (
-      declared[armId]?.userIsolation?.status !== 'SUPPORTED'
+      isExcludedFromUserIsolation(declared[armId])
     ));
     const excludedUnits = phases.includes('ISOLATION_USER') ? excludedArms.length * perArm : 0;
     const measuredUnits = totalUnits - excludedUnits;

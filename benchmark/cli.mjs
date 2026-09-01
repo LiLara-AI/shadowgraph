@@ -449,14 +449,47 @@ async function aggregateCommand(options) {
 }
 
 
-/** Read a JSON file, returning null when it does not exist. */
-async function readOptionalJson(filePath) {
+/**
+ * Read a JSON file for a readiness gate.
+ *
+ * Returns `{ state }` rather than throwing. A missing, unreadable or malformed
+ * prerequisite is an unsatisfied prerequisite: letting a SyntaxError escape
+ * would abort the command and emit no readiness report at all.
+ */
+async function readGateJson(filePath) {
+  let text;
   try {
-    return JSON.parse(await readFile(filePath, 'utf8'));
+    text = await readFile(filePath, 'utf8');
   } catch (error) {
-    if (error?.code === 'ENOENT') return null;
-    throw error;
+    if (error?.code === 'ENOENT') return { state: 'absent' };
+    return { state: 'unreadable' };
   }
+  try {
+    return { state: 'present', value: JSON.parse(text) };
+  } catch {
+    return { state: 'malformed' };
+  }
+}
+
+const FULL_SHA256 = /^sha256:[a-f0-9]{64}$/u;
+
+function isPlainRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * Describe why a prerequisite is unmet, or null when it is met.
+ *
+ * These gates confirm that evidence is present and well-formed. They cannot
+ * confirm it is authentic: a syntactically valid digest for a model nobody ran
+ * would satisfy the shape check. Authenticity is the reviewer's job, and the
+ * blocker text says so rather than implying the check proves more than it does.
+ */
+function unmetReason(gate, isSatisfied) {
+  if (gate.state === 'absent') return 'the declaring file does not exist';
+  if (gate.state === 'unreadable') return 'the declaring file could not be read';
+  if (gate.state === 'malformed') return 'the declaring file is not valid JSON';
+  return isSatisfied(gate.value) ? null : 'the declaring file contains no usable entry';
 }
 
 /**
@@ -514,40 +547,52 @@ async function v11Preflight(options) {
   // sha256:<64 hex> weight digest per model and a committed service manifest.
   // Neither exists, and neither may be synthesised, so readiness has to account
   // for them or it would report READY for a run that cannot lawfully start.
-  const modelLock = await readOptionalJson(join(root, 'benchmark', 'model-weights.lock.json'));
-  const modelDigests = Array.isArray(modelLock?.models) ? modelLock.models : [];
-  const validModelDigests = modelDigests.filter((model) => (
-    typeof model?.weightsDigest === 'string'
-    && /^sha256:[a-f0-9]{64}$/u.test(model.weightsDigest)
-    && model?.digestKind === 'model_weights'
-  ));
-  if (validModelDigests.length === 0) {
-    blockers.push({
-      kind: 'immutable-prerequisite',
+  const prerequisites = [
+    {
       requirement: 'model-weight-digests',
-      detail: 'no sha256:<64 hex> model_weights digest is available'
-    });
-  }
-
-  const serviceManifest = await readOptionalJson(join(root, 'benchmark', 'service-images.json'));
-  if (serviceManifest === null) {
-    blockers.push({
-      kind: 'immutable-prerequisite',
+      gate: await readGateJson(join(root, 'benchmark', 'model-weights.lock.json')),
+      isSatisfied: (value) => Array.isArray(value?.models) && value.models.length > 0
+        && value.models.every((model) => (
+          isPlainRecord(model)
+          && model.digestKind === 'model_weights'
+          && typeof model.weightsDigest === 'string'
+          && FULL_SHA256.test(model.weightsDigest)
+          && typeof model.modelId === 'string'
+          && model.modelId.length > 0
+        ))
+    },
+    {
       requirement: 'service-manifest',
-      detail: 'benchmark/service-images.json does not exist'
-    });
-  }
-
-  // Byte pinning. The competitor lock pins top-level versions and one base
-  // image digest; without wheel hashes the installed transitive bytes are not
-  // reproducible, so the clients are version-pinned rather than byte-pinned.
-  const wheelHashes = await readOptionalJson(join(root, 'benchmark', 'python-wheels.lock.json'));
-  if (wheelHashes === null) {
-    blockers.push({
-      kind: 'immutable-prerequisite',
+      gate: await readGateJson(join(root, 'benchmark', 'service-images.json')),
+      isSatisfied: (value) => Array.isArray(value?.serviceImages) && value.serviceImages.length > 0
+        && value.serviceImages.every((service) => (
+          isPlainRecord(service)
+          && typeof service.name === 'string' && service.name.length > 0
+          && typeof service.image === 'string' && service.image.length > 0
+        ))
+    },
+    {
       requirement: 'reproducible-runtime-bytes',
-      detail: 'no wheel-hash or derived-image evidence pins installed Python bytes'
-    });
+      gate: await readGateJson(join(root, 'benchmark', 'python-wheels.lock.json')),
+      isSatisfied: (value) => Array.isArray(value?.wheels) && value.wheels.length > 0
+        && value.wheels.every((wheel) => (
+          isPlainRecord(wheel)
+          && typeof wheel.name === 'string' && wheel.name.length > 0
+          && typeof wheel.sha256 === 'string' && /^[a-f0-9]{64}$/u.test(wheel.sha256)
+        ))
+    }
+  ];
+
+  for (const { requirement, gate, isSatisfied } of prerequisites) {
+    const reason = unmetReason(gate, isSatisfied);
+    if (reason !== null) {
+      blockers.push({
+        kind: 'immutable-prerequisite',
+        requirement,
+        detail: reason,
+        note: 'presence and shape only; this check cannot establish authenticity'
+      });
+    }
   }
 
   const report = {

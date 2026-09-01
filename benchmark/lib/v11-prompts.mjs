@@ -103,10 +103,6 @@ function validateNativeValue(value, label, state, depth) {
 }
 
 function serializeNativeContext(nativeContext) {
-  return sealBoundary(() => serializeNativeContextInner(nativeContext));
-}
-
-function serializeNativeContextInner(nativeContext) {
   if (!Array.isArray(nativeContext)) boundaryReject('SHAPE');
   if (nativeContext.length > MAX_NATIVE_RECORDS) {
     boundaryReject('LIMIT');
@@ -212,6 +208,10 @@ function auditPhaseARequest(request, scenario) {
 
 /** Build the single arm-independent outer request for every measured decision phase. */
 export function buildV11Prompt(options) {
+  return sealBoundary(() => buildV11PromptUnsealed(options));
+}
+
+function buildV11PromptUnsealed(options) {
   assertExactKeys(options, PROMPT_INPUT_FIELDS, 'v1.1 prompt input');
   const { phase, scenario, nativeContext } = options;
   if (phase === 'RESET') boundaryReject('SHAPE');

@@ -76,20 +76,54 @@ export function boundaryReject(code) {
   throw new V11BoundaryError(code);
 }
 
+let sealedFaultSink = null;
+
+/**
+ * Observe throws that the seal converted, without widening the error surface.
+ *
+ * A converted throw is either hostile input or a harness fault, and at the
+ * boundary those are indistinguishable: any property of the thrown value that
+ * could tell them apart is itself attacker-controlled. Security therefore wins
+ * and everything becomes a coded rejection - but a benchmark must not silently
+ * record a harness fault as an input rejection, so the original is offered to a
+ * sink the operator installs. The sink is diagnostic only: nothing it receives
+ * may reach a unit result or an error surface.
+ */
+export function setSealedFaultSink(sink) {
+  if (sink !== null && typeof sink !== 'function') {
+    throw new Error('sealed fault sink must be a function or null');
+  }
+  const previous = sealedFaultSink;
+  sealedFaultSink = sink;
+  return previous;
+}
+
 /**
  * Run untrusted-input handling so that nothing but a boundary rejection escapes.
  *
- * Reflection on a hostile value can throw on its own account - a Proxy whose
- * `ownKeys` or `getOwnPropertyDescriptor` trap throws raises a TypeError whose
- * message and stack the attacker controls. Converting any such throw into a
- * coded rejection keeps the guarantee unconditional: callers of the public
- * boundary see a V11BoundaryError or nothing.
+ * Reflection on a hostile value can throw on its own account: a Proxy trap
+ * raises whatever it likes, with a message and stack the attacker controls.
+ * Converting any such throw into a coded rejection is what makes the guarantee
+ * hold for every input rather than only for the ones that happen to be
+ * reachable today.
+ *
+ * Seal at the public entry point, not around one internal call. A seal placed
+ * around part of a function leaves the rest of that function reading the same
+ * untrusted value unprotected.
  */
 export function sealBoundary(operation, fallbackCode = 'SHAPE') {
   try {
     return operation();
   } catch (error) {
     if (error instanceof V11BoundaryError) throw error;
+    if (sealedFaultSink !== null) {
+      // Never let a faulty sink become a second escape route.
+      try {
+        sealedFaultSink(error);
+      } catch {
+        // ignored on purpose
+      }
+    }
     throw new V11BoundaryError(fallbackCode);
   }
 }

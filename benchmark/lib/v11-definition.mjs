@@ -349,9 +349,15 @@ function validateFact(value, label) {
 }
 
 export function validateV11PublicScenario(scenario) {
-  // Sealed: a hostile value can make reflection itself throw, and that throw
-  // must not reach the caller as an uncoded error carrying attacker text.
-  const snapshot = sealBoundary(() => neutralPublicSnapshot(scenario));
+  // Sealed around the entire body. Reading any property of a hostile value can
+  // throw, so sealing only the snapshot walk left every later read - starting
+  // with scenario.id - able to escape as an uncoded error carrying attacker
+  // text.
+  return sealBoundary(() => validateV11PublicScenarioUnsealed(scenario));
+}
+
+function validateV11PublicScenarioUnsealed(scenario) {
+  const snapshot = neutralPublicSnapshot(scenario);
   assertExactKeys(scenario, SCENARIO_FIELDS, 'acceptance scenario');
   assertSafeId(scenario.id, 'acceptance scenario.id');
   for (const field of [
@@ -453,6 +459,10 @@ export function validateV11PublicScenario(scenario) {
 }
 
 export function validateV11AcceptanceScenario(scenario) {
+  return sealBoundary(() => validateV11AcceptanceScenarioUnsealed(scenario));
+}
+
+function validateV11AcceptanceScenarioUnsealed(scenario) {
   validateV11PublicScenario(scenario);
   if (!ACCEPTANCE_ID.test(scenario.id) || MOCK_OR_REJECTED_SCENARIO_ID.test(scenario.id)) {
     boundaryReject('SHAPE');

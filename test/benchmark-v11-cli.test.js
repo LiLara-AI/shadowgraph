@@ -169,3 +169,18 @@ test('clearing every applicability blocker still leaves the run blocked', async 
   assert.equal(report.readiness, 'NOT READY');
   assert.ok(report.blockers.some((blocker) => blocker.kind === 'immutable-prerequisite'));
 });
+
+test('prerequisite blockers disclose that they check shape, not authenticity', async () => {
+  // These gates confirm evidence is present and well formed. A syntactically
+  // valid digest for a model nobody ran would satisfy them, so the report must
+  // not imply the check proves more than it does.
+  const { stdout } = await runCli(['v11-preflight']);
+  const report = JSON.parse(stdout);
+  const prerequisites = report.blockers.filter((b) => b.kind === 'immutable-prerequisite');
+
+  assert.equal(prerequisites.length, 3);
+  for (const blocker of prerequisites) {
+    assert.equal(typeof blocker.detail, 'string');
+    assert.match(blocker.note, /cannot establish authenticity/u);
+  }
+});
