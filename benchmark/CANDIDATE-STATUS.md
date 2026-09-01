@@ -1,0 +1,185 @@
+# ShadowGraph benchmark v1.1 — candidate status
+
+ShadowGraph the product remains at **0.40.0** and `"private": true`. "v1.1" names
+the benchmark methodology and candidate only. It is not a product release.
+
+**This candidate has produced no benchmark result.** No scored run was executed,
+no acceptance run was executed, no arm was ranked, and no comparative claim is
+made anywhere in this repository. The historical run
+`20260830T180000Z-comparative` remains permanently `INCOMPLETE / NOT MEASURED`;
+it was not rerun and its partial state was not reused.
+
+## Verification evidence
+
+All figures below were produced on the current branch with a clean working tree.
+
+| Gate | Command | Result |
+| --- | --- | --- |
+| Full repository | `npm test` | **1980 / 1980 pass**, 0 fail, 20 suites |
+| Benchmark focused | `npm run benchmark:test` | **825 / 825 pass**, 0 fail |
+| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **658 / 658 pass**, 0 fail |
+| Python adapters | `npm run benchmark:test:python` | **55 tests, OK** |
+| Node syntax | `npm run check`, `npm run benchmark:check` | pass |
+| Python syntax | `npm run benchmark:check:python` | pass |
+| Package privacy | `npm run check:package` | pass |
+| MCP | `npm run check:mcp` | pass |
+| Integrations | `npm run check:integrations` | pass |
+| Package smoke | `npm run smoke:package` | pass |
+
+`npm run benchmark:journal:validate` is **not** an argument-free gate. It
+requires `<raw-results.json>` and therefore only applies after a real run, which
+has not occurred.
+
+### Frozen bytes
+
+Unchanged throughout, verified by `sha256sum` and an empty `git diff`:
+
+```
+738ee8b4813fab77da2e4e24582b12e756686650e4c39fad41c5337f831f5dac  preregistration.json
+2b209df6ca46a179e332acd4ed0b16a35a089f5c14575dd86353db0dc7249c4a  preregistration-amendment-001.json
+08e12eca3f93bd67cfeaf90a2064f91beb240e78a8fd63ed8645da78c0d88f1b  preregistration-amendment-002.json
+```
+
+All three `.sha256` sidecars are unmodified.
+`preregistration-amendment-001.sha256` records a bare filename while the other
+two record `benchmark/`-prefixed paths. This is a pre-existing inconsistency in
+frozen bytes and is **deliberately preserved, not normalised**.
+
+Acceptance fixtures are also unchanged from the state in which they were found:
+
+```
+b48666efec93e4b7c6c6bebee66634546ccd991c66158d426d1547620720a596  acceptance/definition.json
+728dc6e3f12db8334d31d29641caee01d4b1c645c5b51bcb27caa3fff5b4b14a  acceptance/scenarios.json
+```
+
+Two digests asserted in `test/benchmark-v11-definition.test.js` never matched
+these files. `definition.json` already recorded the correct `scenarios.sha256`
+internally, so the fixtures were self-consistent and the **test literals** were
+wrong. The tests were corrected; the JSON bytes were not touched.
+
+## Requirement status
+
+| # | Requirement | Status |
+| --- | --- | --- |
+| 1 | Serialized-input safety and error non-disclosure | **Closed** |
+| 2 | Registry, runner, CLI, validator, aggregator/scorer, truthful applicability | **Partial** |
+| 3 | One centralized outer decision path; adapters memory-only | **Closed** |
+| 4 | Provider-evidence reconciliation | **Closed** |
+| 5 | Mutation state fails closed | **Closed** (mechanism); wiring waits on 6 |
+| 6 | Real pinned runtime factories for all seven arms | **Open — blocked** |
+| 7 | Non-scored acceptance, 308 units | **Open — blocked** |
+| 8 | Locks, ledger validation, readiness, evidence index, review bundle | **Partial** |
+| 9 | Focused, Node, Python, package, MCP, integration, smoke, privacy checks | **Closed** |
+
+### Closed
+
+**1 — Boundary.** Unit ids are one bounded opaque `unit:<64 hex>` derived by a
+domain-separated digest, defined once in the contract kernel; the validator no
+longer carries a second copy and rejects the legacy composite. Every boundary
+rejection is a `V11BoundaryError` with a stable code and a static message,
+carrying no cause and no enumerable payload, so no rejected material reaches the
+error surface. Per-example regexes were replaced by one structural classifier
+that normalises and decodes before classifying by shape. Public scenario and
+native-context data are walked inertly through property descriptors, so a getter
+is rejected rather than invoked, and validation returns an isolated
+null-prototype snapshot.
+
+**3 — Prompt fairness.** `buildV11Prompt` refuses an `armId` or a `system`
+override, refuses any fixture-truth or expected-answer key at any depth, and
+builds every measured phase from the same common path. Adapters receive memory
+operations only.
+
+**4 — Reconciliation.** `v11-provider-reconciler.mjs` matches ledger events to
+units on exact run/attempt/arm/scenario/repetition/phase plus request class, with
+length-prefixed key components so one field cannot impersonate another. It
+reports missing calls, unaccounted traffic, retries, model substitution, failed
+outcomes and absent usage, and checks ledger continuity separately so a numbering
+gap is caught even when counts agree. Malformed lines are retained as evidence.
+
+**5 — Fail-closed mutation.** A latch is fsynced before any native mutation and
+removed only on confirmed success. A surviving latch forces `FAILED` /
+`AMBIGUOUS` even against a reported success. No new unit status was introduced:
+`AMBIGUOUS` is a mutation state, not a unit status, and the four contract
+statuses are unchanged.
+
+### Partial
+
+**2 — Integration.** The registry binds all seven arms to pinned runtimes and to
+*observed* native isolation, refuses a lock that disagrees with an adapter spec,
+and derives expected counts from whichever matrix is in force. `benchmark/cli.mjs
+v11-preflight` reports readiness and exits non-zero when blocked. Not yet done:
+driving the v1.1 runner, aggregator and scorer through a full lifecycle, which
+depends on requirement 6.
+
+**8 — Locks and bundle.** The readiness check exists and the isolation probe is
+recorded under `benchmark/evidence/`. Lock and bundle **artifacts** are
+deliberately not generated: `implementation-lock.mjs` requires a fully clean tree
+(untracked files included) and an immutable HEAD, so generating them before the
+governed source set is final would be invalid. Model locks additionally require
+digests that do not exist (B1).
+
+## Blockers
+
+**B1 — Immutable model-weight digests do not exist.**
+`proposal-reference/MISSING-EVIDENCE.md` records: *"Complete immutable Ollama
+model digests: NOT CAPTURED; only short Ollama IDs were available."*
+`implementation-lock.mjs` requires `sha256:<64 hex>` with
+`digestKind: model_weights`. Short Ollama ids cannot satisfy that. **This alone
+prevents a real acceptance run.** No digest was synthesised.
+
+**B2 — Services are not provisioned.** Graphiti needs a Neo4j-compatible
+database plus an LLM and embedding endpoint; Cognee needs an LLM and embedding
+endpoint. `v11-preflight` reports both as blockers rather than assuming them.
+
+**B3 — Runtime bytes are version-pinned, not byte-pinned.**
+`competitors.lock.json` contains exactly one `sha256` — the base image. There is
+no requirements lock, no Dockerfile and no wheel hashes, so installed transitive
+bytes are not reproducible. Until wheel-hash or derived-image evidence exists,
+**no document may describe these clients as fully pinned.**
+
+Not blockers, only ordinary setup: `npm install`, and Python packages installed
+inside the pinned image.
+
+## Open methodology question
+
+Amendment 002 declares `userIsolation: SUPPORTED` for both `graphiti` and
+`cognee`, while both adapters reject a non-null `userId`. That contradiction
+determines how many `ISOLATION_USER` units are EXCLUDED, so it was settled by
+observation rather than assumption. The probe is recorded in
+`benchmark/evidence/`.
+
+The two arms resolve **differently**:
+
+- **Graphiti 0.29.3** exposes no user scope at all — no method parameter and no
+  user field on either node model. Expressing a user would mean folding one into
+  `group_id`, which is the manufactured isolation the methodology forbids. The
+  adapter is correct and the matrix entry is not.
+- **Cognee 1.5.3** does have a native user ACL, assignable programmatically. Its
+  adapter refusal records that this harness has not pinned that ACL, not a
+  missing product capability.
+
+If Graphiti alone moves to `NOT_APPLICABLE`, the counts become
+**308 / 20 EXCLUDED / 288 MEASURED / 28 RESET / 260 outer calls**, the delta
+being exactly Graphiti's four `ISOLATION_USER` units.
+
+**No amendment has been adopted and no count has been changed.** The acceptance
+definition still carries the Amendment 002 counts
+(308 / 16 / 292 / 28 / 264), and `v11-preflight` reports the disagreement as a
+blocker. Correcting a declared applicability entry requires an amendment reviewed
+under the methodology, which is not a decision this engineering work may take.
+
+## What independent review must confirm
+
+Review must be performed by a **different agent** than the one that wrote this,
+and bound to a specific commit. Offline green tests authorise nothing: not
+readiness, not acceptance, and not permission to execute.
+
+1. The frozen digests above, recomputed independently.
+2. That no scored or acceptance run exists anywhere in the tree.
+3. That the boundary discloses no rejected material — check the error surface,
+   not only the message.
+4. That no isolation is manufactured by concatenating identifiers.
+5. That the Graphiti and Cognee probe conclusions follow from the recorded
+   evidence.
+6. That B1, B2 and B3 are still open, since each one independently prevents an
+   acceptance run.
