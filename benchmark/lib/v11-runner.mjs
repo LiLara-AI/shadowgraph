@@ -23,12 +23,12 @@ import {
 export { V11_PHASES, unitIdFor };
 
 /**
- * The arm id the runner substitutes when it checks that a prompt does not
- * depend on the arm. A prompt builder must ignore the arm entirely, so it need
- * not recognise this; it is exported so tests can tell the probe build apart
- * from the request the harness will actually send.
+ * Everything a prompt builder is given.
+ *
+ * Exported so a caller can see the whole surface at a glance: there is nothing
+ * on it that identifies the arm, and that is the point.
  */
-export const ARM_INVARIANCE_PROBE_ID = 'arm-invariance-probe';
+export const OUTER_REQUEST_INPUT_FIELDS = Object.freeze(['phase', 'scenario', 'nativeContext']);
 
 const HASH = /^[a-f0-9]{64}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
@@ -1064,23 +1064,6 @@ function domainDigest(domain, value) {
 }
 
 /**
- * An arm that is not the one under measurement.
- *
- * Handed to the prompt builder a second time, with everything else identical,
- * to see whether the arm changed the answer. Nothing about it matches a real
- * arm - id, name and applicability all differ - so a builder that consults any
- * arm field at all produces a different request and is caught.
- */
-const ARM_INVARIANCE_PROBE = Object.freeze({
-  id: ARM_INVARIANCE_PROBE_ID,
-  name: 'Arm invariance probe',
-  applicability: Object.freeze({
-    userIsolation: Object.freeze({ status: 'NOT_APPLICABLE', reason: 'probe' }),
-    persistence: Object.freeze({ status: 'NOT_APPLICABLE', reason: 'probe' })
-  })
-});
-
-/**
  * Audit the outer request the harness is about to send.
  *
  * The runner is the one place every arm passes through, so it is the only
@@ -1093,16 +1076,26 @@ const ARM_INVARIANCE_PROBE = Object.freeze({
  *
  *  - the system instruction and the response schema, fixed by the first
  *    measured decision unit and required to match thereafter;
- *  - the prompt, which must not depend on the arm at all. This is checked by
- *    building the request a second time with a probe arm substituted and
- *    nothing else changed: if the two differ, the builder consulted the arm.
- *    An earlier version audited only the system instruction, which left the
- *    whole task prompt - where the instructions actually live - free to differ
- *    per arm. The version after that compared prompts across units sharing a
- *    phase, scenario and native context, which is weaker than it looks: in a
- *    real run each arm returns its own context, so almost every unit is the
- *    only one of its shape and has nothing to be compared against. Substituting
- *    the arm tests the property directly and needs no other unit;
+ *  - the prompt, which must not depend on the arm. This one took three
+ *    attempts and the first two are worth recording, because each looked
+ *    sufficient. Auditing only the system instruction left the task prompt -
+ *    where the instructions actually live - free to differ per arm. Comparing
+ *    prompts across units sharing a phase, scenario and native context is
+ *    weaker than it looks: in a real run each arm returns its own context, so
+ *    almost every unit is the only one of its shape and the arm that gets there
+ *    first sets its own baseline. Substituting a probe arm and requiring an
+ *    identical rebuild closed the `arm` field but left `correlation.armId` and
+ *    `namespace.userId` reaching the builder unsubstituted, and both were
+ *    exploitable: branching on `correlation.armId` reproduced the original
+ *    bypass exactly.
+ *
+ *    The builder is now given `phase`, `scenario` and `nativeContext` and
+ *    nothing else, so no channel identifying the arm reaches it at all. That is
+ *    structural rather than detective - there is nothing left to detect - and
+ *    it is why the input surface is exported and asserted. The rebuild check
+ *    below stays, because a builder could still infer position from the order
+ *    it is called in; the two builds are adjacent and identical, so a builder
+ *    whose output depends on anything but its arguments is caught;
  *  - the prompt must not name the arm it is running, which is the same bias
  *    arriving by a shorter route.
  *
@@ -1115,7 +1108,7 @@ const ARM_INVARIANCE_PROBE = Object.freeze({
  * quietly adopt a different instruction. The arm-invariance check needs no
  * baseline at all, so it holds identically on a resumed attempt.
  */
-function auditOuterRequest(request, spec, rebuildWithProbeArm, baseline) {
+function auditOuterRequest(request, spec, rebuild, baseline) {
   assertExactKeys(request, ['system', 'prompt', 'responseSchema'], 'outer request');
   if (!isNonEmptyString(request.system)) {
     throw new Error('Outer request system instruction must be a non-empty string');
@@ -1141,11 +1134,13 @@ function auditOuterRequest(request, spec, rebuildWithProbeArm, baseline) {
     }
   }
 
-  // Same phase, same scenario, same native context, different arm. Any
-  // difference means the arm reached the prompt.
-  const probe = rebuildWithProbeArm();
-  if (!isDeepStrictEqual(probe, request)) {
-    throw new Error('Outer request is not independent of the arm under measurement');
+  // The same call again, with the same arguments. A prompt builder is a pure
+  // function of its input; one whose output drifts between adjacent calls is
+  // reading something the harness did not give it - a counter, a clock, the
+  // order the arms happen to run in - and that is a channel for per-arm
+  // variation the narrowed input cannot close.
+  if (!isDeepStrictEqual(rebuild(), request)) {
+    throw new Error('Outer request builder is not a pure function of its input');
   }
 
   const prompt = request.prompt.toLowerCase();
@@ -1269,26 +1264,17 @@ async function executeDecision(options, spec, unit, signal, completedUnits, oute
   };
   let outer;
   try {
-    const outerInput = () => ({
-      scenario: structuredClone(spec.scenario),
+    // Exactly the fields a fair prompt may depend on. The arm, the namespace
+    // and the correlation are all deliberately absent: each identifies the arm
+    // under measurement, directly or by proxy, and a builder that cannot see
+    // which arm it is serving cannot favour one.
+    const buildOuter = () => options.buildOuterRequest({
       phase: spec.phase,
-      nativeContext: structuredClone(retrieved.result.nativeContext),
-      namespace: structuredClone(retrievalNamespace),
-      correlation: { ...outerCorrelation }
+      scenario: structuredClone(spec.scenario),
+      nativeContext: structuredClone(retrieved.result.nativeContext)
     });
-    const outerRequest = options.buildOuterRequest({
-      arm: structuredClone(spec.arm),
-      ...outerInput()
-    });
-    auditOuterRequest(
-      outerRequest,
-      spec,
-      () => options.buildOuterRequest({
-        arm: structuredClone(ARM_INVARIANCE_PROBE),
-        ...outerInput()
-      }),
-      outerBaseline
-    );
+    const outerRequest = buildOuter();
+    auditOuterRequest(outerRequest, spec, buildOuter, outerBaseline);
     throwIfAborted(signal);
     unit.operations.outerDecisionModelCalls += 1;
     outer = await options.requestOuter({

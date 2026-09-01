@@ -221,10 +221,16 @@ export function verifyReviewBundle(input) {
   if (!isPlainObject(input) || !isPlainObject(input.bundle) || !isPlainObject(input.observed)) {
     reject('CONTRACT_FAILURE', 'bundle verification requires a bundle and observed digests');
   }
+  // Required, not optional. This module exists to bind a verdict to exact
+  // bytes, and a function called verifyReviewBundle that answers verified:true
+  // for a bundle whose commit was swapped is the precise failure it was written
+  // to prevent. Independent review flagged it; the caller always knows which
+  // digest it means to check against, so there is no cost to demanding it.
+  assertDigest(input.expectedDigest, 'expected bundle digest');
   const { bundle, observed } = input;
   const findings = [];
 
-  if (bundleDigest(bundle) !== input.expectedDigest && input.expectedDigest !== undefined) {
+  if (bundleDigest(bundle) !== input.expectedDigest) {
     findings.push({ code: 'BUNDLE_DIGEST_MISMATCH' });
   }
   if (evidenceIndexDigest(bundle.index) !== bundle.evidenceIndexDigest) {

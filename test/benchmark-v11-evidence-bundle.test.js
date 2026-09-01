@@ -232,7 +232,11 @@ test('a bundle whose index was swapped after the fact does not verify', () => {
   const observed = Object.fromEntries(
     tampered.index.entries.map((item) => [item.path, item.sha256])
   );
-  const result = verifyReviewBundle({ bundle: tampered, observed });
+  const result = verifyReviewBundle({
+    bundle: tampered,
+    observed,
+    expectedDigest: bundleDigest(tampered)
+  });
   assert.equal(result.verified, false);
   assert.ok(result.findings.some((finding) => finding.code === 'INDEX_DIGEST_MISMATCH'));
 });
@@ -335,6 +339,23 @@ test('byte-identity holds for a hand-made index too, not only a built one', () =
   assert.equal(forward.digest, reversed.digest);
   // And it agrees with the built-index path.
   assert.equal(forward.digest, bundleOf(sampleEntries()).digest);
+});
+
+test('verification refuses to run without the digest it is meant to check', () => {
+  // Optional here meant a tampered bundle could come back verified: true,
+  // which is exactly the failure this module exists to prevent. Independent
+  // review demonstrated it by swapping the commit and omitting the digest.
+  const { bundle } = bundleOf(sampleEntries());
+  const observed = Object.fromEntries(
+    bundle.index.entries.map((item) => [item.path, item.sha256])
+  );
+  for (const missing of [undefined, null, '', 'not-a-digest']) {
+    assert.throws(
+      () => verifyReviewBundle({ bundle, observed, expectedDigest: missing }),
+      (error) => error instanceof EvidenceBundleError && error.code === 'INVALID_DIGEST',
+      JSON.stringify(missing)
+    );
+  }
 });
 
 test('a verdict bound to one digest does not carry to a different bundle', () => {

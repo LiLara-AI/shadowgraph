@@ -15,9 +15,9 @@ All figures below were produced on the current branch with a clean working tree.
 
 | Gate | Command | Result |
 | --- | --- | --- |
-| Full repository | `npm test` | **2039 / 2039 pass**, 0 fail, 20 suites |
-| Benchmark focused | `npm run benchmark:test` | **884 / 884 pass**, 0 fail |
-| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **741 / 741 pass**, 0 fail |
+| Full repository | `npm test` | **2040 / 2040 pass**, 0 fail, 20 suites |
+| Benchmark focused | `npm run benchmark:test` | **885 / 885 pass**, 0 fail |
+| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **742 / 742 pass**, 0 fail |
 | Python adapters | `npm run benchmark:test:python` | **86 tests, OK** |
 | Node syntax | `npm run check`, `npm run benchmark:check` | pass |
 | Python syntax | `npm run benchmark:check:python` | pass |
@@ -225,12 +225,27 @@ sharing a phase, scenario and native context, which is weaker than it looks — 
 a real run each arm returns its own context, so almost every unit is the only one
 of its shape and has nothing to be compared against.
 
-`auditOuterRequest` now checks the property directly. It builds the request a
-second time with a probe arm substituted and nothing else changed; if the two
-differ, the builder consulted the arm, and the unit fails closed. That needs no
-cross-unit baseline, so it holds on the first unit and on a resumed attempt
-alike. The system instruction and response schema are separately pinned by the
-first measured unit, and no prompt may name the arm it is running.
+The third attempt substituted a probe arm and required an identical rebuild.
+That closed the `arm` field and nothing else: `namespace` and `correlation` were
+still spread into both builds unchanged, and `correlation.armId` carries the
+real arm id. Independent review branched on it and reproduced the original
+bypass verbatim — 36 units of one named arm measured under a biased prompt, run
+reporting COMPLETE. `namespace.userId` was a second, coarser channel worth 240
+biased builds.
+
+The fix is not a fourth detector. The builder is now handed `phase`, `scenario`
+and `nativeContext` and nothing else, so no channel identifying the arm reaches
+it at all — a builder that cannot tell the arms apart cannot favour one. The
+field list is exported as `OUTER_REQUEST_INPUT_FIELDS` and asserted on every one
+of the 528 builder calls, and `arm`, `armId`, `namespace` and `correlation` are
+each named in that assertion so a regression says which channel it reopened.
+
+One detector remains, for the one thing narrowing cannot reach: the request is
+built twice with identical arguments and the two must match. A builder that
+inferred its position from call order would otherwise still vary per arm.
+
+The system instruction and response schema are separately pinned by the first
+measured unit, and no prompt may name the arm it is running.
 
 Divergence is checked rather than a particular wording: pinning the text would
 bind the runner to one prompt module without catching anything divergence does
@@ -244,9 +259,18 @@ with nothing recorded either way. The raw run now carries `outerPromptBinding`,
 a digest pair for the system instruction and response schema, and a resume is
 held to the previous attempt's binding.
 
-Each guard is mutation-tested: removing the arm-invariance check fails 2 tests,
-removing the resume seeding fails 1, and the pre-existing checks fail on removal
-as recorded above.
+Each guard is mutation-tested against the full repository suite, not the v1.1
+glob — an earlier version of this line said the arm check failed 2 tests when it
+failed 1, and independent review caught it:
+
+| Guard removed | Tests that fail |
+| --- | --- |
+| Builder input narrowing (namespace + correlation restored) | 1 |
+| Purity rebuild | 3 |
+| Arm-identity check | 1 |
+| Resume binding seeding | 1 |
+| Bundle index rebuild | 3 |
+| Required `expectedDigest` | 1 |
 
 **6 — Runtime factories, and what the blocked three actually do.** Four arms
 have real pinned factories: no-memory, ShadowGraph Full, ShadowGraph Compact and
@@ -320,9 +344,15 @@ run. They never hash files themselves — digests come from the caller that read
 the bytes — because a builder that hashed its own tree could be pointed at a
 different tree than the one under review.
 
-Two known gaps, not yet closed: `verifyReviewBundle` treats `expectedDigest` as
-optional and reports `verified: true` without it, and the path check accepts
-`C:/x` and `a/./b` as repository-relative.
+`verifyReviewBundle` used to treat `expectedDigest` as optional and reported
+`verified: true` for a bundle whose commit had been swapped — the precise failure
+a function of that name exists to prevent. It is now required.
+
+One known gap, deliberately left open: the path check accepts `C:/x` and
+`a/./b` as repository-relative. These are index labels that are never resolved
+against a filesystem, so the value of tightening them is low; independent review
+agreed. It is recorded here rather than fixed so that nobody has to rediscover
+it.
 
 Lock and bundle **artifacts** remain deliberately ungenerated.
 `implementation-lock.mjs` requires a fully clean tree (untracked files included)

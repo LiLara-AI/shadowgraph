@@ -25,7 +25,7 @@ import { loadV11AcceptanceDefinition } from '../benchmark/lib/v11-definition.mjs
 import { V11_OUTER_SYSTEM_PROMPT, buildV11Prompt } from '../benchmark/lib/v11-prompts.mjs';
 import { V11_ARM_IDS } from '../benchmark/lib/v11-registry.mjs';
 import {
-  ARM_INVARIANCE_PROBE_ID,
+  OUTER_REQUEST_INPUT_FIELDS,
   runV11Benchmark,
   unitIdFor
 } from '../benchmark/lib/v11-runner.mjs';
@@ -231,6 +231,10 @@ function progressRecorder() {
   };
 }
 
+function correlationKey({ armId, scenarioId, repetition, phase }) {
+  return `${armId}|${scenarioId}|${repetition}|${phase}`;
+}
+
 /** One full-plan acceptance run with every external dependency injected. */
 async function acceptanceRun(overrides = {}) {
   const loaded = await loadV11AcceptanceDefinition({ repositoryRoot: REPOSITORY_ROOT });
@@ -241,7 +245,8 @@ async function acceptanceRun(overrides = {}) {
   const clock = fakeClock();
   const progress = progressRecorder();
   const outerRequests = [];
-  const probeRequests = [];
+  const builderInputs = [];
+  const retrievedLengths = new Map();
   const adapterRequests = [];
 
   const options = {
@@ -264,35 +269,42 @@ async function acceptanceRun(overrides = {}) {
     monotonicNow: clock.monotonicNow,
     buildOuterRequest: (input) => {
       // The real builder. A stub here would make every fairness assertion in
-      // this file vacuous, because a stub cannot diverge between arms.
-      const built = buildV11Prompt({
+      // this file vacuous, because a stub cannot diverge between arms. The
+      // input surface is recorded because it is now the thing that closes
+      // per-arm divergence.
+      builderInputs.push(Object.keys(input).sort());
+      return buildV11Prompt({
         phase: input.phase,
         scenario: input.scenario,
         nativeContext: input.nativeContext
       });
-      if (input.arm.id === ARM_INVARIANCE_PROBE_ID) {
-        probeRequests.push({ scenarioId: input.scenario.id, phase: input.phase });
-      } else {
-        outerRequests.push({
-          armId: input.arm.id,
-          scenarioId: input.scenario.id,
-          phase: input.phase,
-          nativeContextLength: input.nativeContext.length,
-          built: structuredClone(built)
-        });
-      }
-      return built;
     },
-    requestOuter: async ({ correlation, namespace }) => ({
-      decision: decision(correlation.phase, namespace),
-      usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
-      providerModel: 'stub-outer-model',
-      requestCount: 1,
-      correlation: { ...correlation }
-    }),
+    requestOuter: async ({ correlation, namespace, request }) => {
+      // Recorded at the send. The builder is called twice per unit and is no
+      // longer told which arm it serves, so it is both the wrong place to count
+      // and the wrong place to learn the arm from.
+      outerRequests.push({
+        armId: correlation.armId,
+        scenarioId: correlation.scenarioId,
+        phase: correlation.phase,
+        nativeContextLength: retrievedLengths.get(correlationKey(correlation)) ?? 0,
+        built: structuredClone(request)
+      });
+      return {
+        decision: decision(correlation.phase, namespace),
+        usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+        providerModel: 'stub-outer-model',
+        requestCount: 1,
+        correlation: { ...correlation }
+      };
+    },
     executeAdapter: async (request) => {
       adapterRequests.push(structuredClone(request));
-      return adapterEnvelope(request, applicability);
+      const envelope = adapterEnvelope(request, applicability);
+      if (request.operation === 'retrieve') {
+        retrievedLengths.set(correlationKey(request), envelope.result.nativeContext.length);
+      }
+      return envelope;
     },
     ...overrides
   };
@@ -306,7 +318,7 @@ async function acceptanceRun(overrides = {}) {
     applicability,
     progress,
     outerRequests,
-    probeRequests,
+    builderInputs,
     adapterRequests
   };
 }
@@ -403,10 +415,10 @@ test('exactly the measured non-reset units make one outer decision call each', (
   assert.equal(outerRequests.length, 264);
   assert.equal(outerRequests.some((entry) => entry.phase === 'RESET'), false);
 
-  // The arm-invariance guard builds a second request per outer call. If that
-  // count ever fell to zero the guard would be silently absent, and every
-  // per-arm prompt test in this file would pass against an unguarded runner.
-  assert.equal(primary.probeRequests.length, 264, 'the arm-invariance probe did not run');
+  // The builder is called twice per outer call: once for the request, once to
+  // check it is a pure function of its input. If that fell to one, a builder
+  // reading a counter or the arm ordering would go undetected.
+  assert.equal(primary.builderInputs.length, 528, 'the purity rebuild did not run');
 
   // The runner's own per-unit counter must agree with what the outer stub saw.
   const counted = raw.units.reduce(
@@ -700,8 +712,46 @@ function decisionUnitsFor(raw, armId) {
   );
 }
 
-test('a prompt that diverges for one arm fails that arm, not the run', async () => {
-  const target = 'shadowgraph-full';
+test('the prompt builder is never told which arm it is serving', () => {
+  // This is what closes per-arm prompt divergence, and it closes it
+  // structurally: there is no channel to detect abuse on, because the builder
+  // cannot tell the arms apart.
+  //
+  // Three earlier attempts are worth remembering. Auditing the system
+  // instruction left the task prompt free to differ. Comparing prompts across
+  // units of the same shape failed because in a real run each arm returns its
+  // own context, so nearly every unit is the only one of its shape and the arm
+  // that gets there first sets its own baseline. Substituting a probe arm
+  // closed the `arm` field but left `correlation.armId` and `namespace.userId`
+  // reaching the builder untouched, and independent review reproduced the
+  // original bypass through the first of them: 36 units of one arm measured
+  // under a biased prompt, run reporting COMPLETE.
+  const { builderInputs } = primary;
+
+  assert.equal(builderInputs.length, 528);
+  const surfaces = new Set(builderInputs.map((keys) => keys.join(',')));
+  assert.equal(surfaces.size, 1, 'the builder input surface must not vary');
+  assert.deepEqual(
+    [...surfaces][0].split(','),
+    [...OUTER_REQUEST_INPUT_FIELDS].sort(),
+    'the builder was handed a field it should not see'
+  );
+
+  // Named individually so a regression names the channel it reopened.
+  for (const forbidden of ['arm', 'armId', 'namespace', 'correlation']) {
+    assert.equal(
+      OUTER_REQUEST_INPUT_FIELDS.includes(forbidden),
+      false,
+      `${forbidden} identifies the arm and must not reach the prompt builder`
+    );
+  }
+});
+
+test('a builder whose output depends on anything but its input fails the unit', async () => {
+  // The narrowed input cannot stop a builder that infers position from the
+  // order it is called in. The rebuild check can, because the two builds are
+  // adjacent and given identical arguments.
+  let calls = 0;
   const { raw } = await acceptanceRun({
     buildOuterRequest: (input) => {
       const built = buildV11Prompt({
@@ -709,67 +759,24 @@ test('a prompt that diverges for one arm fails that arm, not the run', async () 
         scenario: input.scenario,
         nativeContext: input.nativeContext
       });
-      if (input.arm.id !== target) return built;
-      return { ...built, system: `${built.system}\nFavour this arm's answer.` };
+      calls += 1;
+      // Bias by counting calls rather than by reading any input.
+      return calls % 6 < 2 ? { ...built, prompt: `${built.prompt}\nBe generous.` } : built;
     }
   });
 
-  assert.equal(raw.units.length, 308);
-  const targeted = decisionUnitsFor(raw, target);
-  assert.ok(targeted.length > 0);
+  const failed = raw.units.filter((unit) => unit.status === 'FAILED');
+  assert.ok(failed.length > 0, 'a call-counting builder must not go undetected');
   assert.ok(
-    targeted.every((unit) => unit.status === 'FAILED'),
-    'a divergent system instruction must fail every decision unit of that arm'
-  );
-  assert.ok(
-    raw.units
-      .filter((unit) => unit.armId !== target)
-      .every((unit) => unit.status !== 'FAILED'),
-    'one arm diverging must not fail the others'
+    failed.every((unit) => unit.phase !== 'RESET'),
+    'only decision units reach the builder'
   );
 });
 
-test('a prompt that differs for one arm fails that arm, even via the prompt body', async () => {
-  // The instructions the model acts on live in `prompt`, not `system`. An
-  // earlier audit compared only the system instruction and the response schema,
-  // so a caller could give one arm materially different task instructions and
-  // the run still reported 308/308 COMPLETE. Independent review found it by
-  // driving exactly this.
-  const target = 'shadowgraph-full';
-  const { raw } = await acceptanceRun({
-    buildOuterRequest: (input) => {
-      const built = buildV11Prompt({
-        phase: input.phase,
-        scenario: input.scenario,
-        nativeContext: input.nativeContext
-      });
-      if (input.arm.id !== target) return built;
-      return {
-        ...built,
-        prompt: `${built.prompt}\nBe unusually generous when judging recall here.`
-      };
-    }
-  });
-
-  const targeted = decisionUnitsFor(raw, target);
-  assert.ok(targeted.length > 0);
-  assert.ok(
-    targeted.every((unit) => unit.status === 'FAILED'),
-    'a per-arm prompt body must not reach the model'
-  );
-  assert.ok(
-    raw.units.filter((unit) => unit.armId !== target).every((unit) => unit.status !== 'FAILED'),
-    'one arm diverging must not fail the others'
-  );
-});
-
-test('a prompt may still vary with the native context the arm actually returned', async () => {
-  // The complement of the test above, and the reason the check is keyed on
-  // shape rather than on equality across all arms: an arm that retrieved
-  // something legitimately gets a different prompt from one that retrieved
-  // nothing. If that failed, the audit would be unusable.
-  const measured = primary.raw.units.filter((unit) => unit.status === 'MEASURED');
-  assert.equal(measured.length, 292);
+test('a prompt may still vary with the native context the arm actually returned', () => {
+  // The complement: an arm that retrieved something legitimately gets a
+  // different prompt from one that retrieved nothing. If that failed, the
+  // whole audit would be unusable.
   const contextful = primary.outerRequests.filter((entry) => entry.nativeContextLength > 0);
   const contextfree = primary.outerRequests.filter((entry) => entry.nativeContextLength === 0);
   assert.ok(contextful.length > 0 && contextfree.length > 0);
@@ -780,7 +787,11 @@ test('a prompt may still vary with the native context the arm actually returned'
   );
 });
 
-test('a prompt that names its own arm fails that unit closed', async () => {
+test('a prompt that names an arm fails the units of that arm', async () => {
+  // The builder cannot tell which arm it is serving, but it can still emit an
+  // arm name blindly - from a stale template, or a copied example. The audit
+  // compares the prompt against the arm actually under measurement, so only
+  // that arm's units fail.
   const target = 'cognee';
   const { raw } = await acceptanceRun({
     buildOuterRequest: (input) => {
@@ -789,8 +800,7 @@ test('a prompt that names its own arm fails that unit closed', async () => {
         scenario: input.scenario,
         nativeContext: input.nativeContext
       });
-      if (input.arm.id !== target) return built;
-      return { ...built, prompt: `${built.prompt}\nYou are running on ${input.arm.id}.` };
+      return { ...built, prompt: `${built.prompt}\nYou are running on ${target}.` };
     }
   });
 
@@ -798,9 +808,14 @@ test('a prompt that names its own arm fails that unit closed', async () => {
   assert.ok(targeted.length > 0);
   assert.ok(
     targeted.every((unit) => unit.status === 'FAILED'),
-    'a prompt naming its arm must not reach the model'
+    'a prompt naming an arm must not reach that arm'
+  );
+  assert.ok(
+    decisionUnitsFor(raw, 'graphiti').every((unit) => unit.status === 'MEASURED'),
+    'an arm the prompt does not name is unaffected'
   );
 });
+
 
 test('memory recalled before anything was stored fails the unit', async () => {
   // Phase A runs immediately after RESET, so an adapter returning native
