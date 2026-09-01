@@ -91,10 +91,14 @@ and retrieve returns the persisted decision record with its content intact.
 Two further mismatches had to be bridged to get there, both hidden by a fake
 that was shaped more conveniently than the product.
 
-**Search hits are not records.** Basic Memory's search returns entity
-references — `title`, `type`, `score`, `entity`, `external_id` — with no note
-body. Retrieve now reads each hit back through the same call verify uses, so
-retrieve and verify agree on what a stored record is.
+**A search hit is not a record.** A hit carries `content`, `entity`,
+`entity_id`, `external_id`, `file_path`, `metadata`, `permalink`, `score`,
+`title`, `type` and `updated_at` — so it *does* include the note body. What it
+lacks is the shadowgraph frontmatter: its `metadata` is only
+`{"note_type": "note"}`, with no record id, type or digest. A hit therefore
+cannot become a logical record however much body it carries. Retrieve reads each
+hit back through the same call verify uses, so retrieve and verify agree on what
+a stored record is.
 
 **A note is not shaped like a logical record.**
 `read_note(output_format="json", include_frontmatter=False)` returns
@@ -110,6 +114,38 @@ The body is stripped blind because the product adds the whitespace. That is only
 safe because the frontmatter carries the content digest, so a strip that ever
 changed meaning is rejected by `logical_record` rather than silently accepted.
 There is a test for exactly that.
+
+### The arm was not provider-free until the vector index was closed
+
+The claim that the empty declaration "becomes true" once retrieval names the
+text index was **wrong**, and only surfaced when independent review instrumented
+`socket.getaddrinfo` rather than checking whether operations succeeded.
+
+Basic Memory maintains a local vector index whose sync scheduler fetches an
+embedding model from `huggingface.co` on the **write** path — so
+`search_type="text"` does not prevent it. Under `--network none` the fetch fails
+and is swallowed as a background-task failure, which is why every operation
+still reported SUCCEEDED and the adapter's own counters stayed at zero. It is a
+model *download*, not a metered inference call, so the counters were honest and
+useless here.
+
+Two things made this worth closing rather than declaring. With a network
+available — which a real run needs for the other arms — the fetch succeeds and
+nothing accounts for it. And once the model lands, local vector sync starts
+working and behaviour diverges between networked and isolated runs, which is
+precisely the reproducibility hazard B3 exists for.
+
+The factory now sets `BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED=false` before import.
+Measured over a full `reset -> persist -> retrieve -> reset` cycle with a
+`getaddrinfo` guard counting every outbound attempt:
+
+| Configuration | Outbound attempts | Lifecycle | Records retrieved |
+| --- | --- | --- | --- |
+| Semantic index enabled | **2** to `huggingface.co:443` | all SUCCEEDED | 1 |
+| Disabled by the factory | **0** | all SUCCEEDED | 1 |
+
+Only now is `requestClasses: []` true, and it is true by measurement rather than
+by inference.
 
 Requirement 6 is therefore **closed for `basic-memory`**, making four of the
 seven arms real: the three that need no external service by construction, plus

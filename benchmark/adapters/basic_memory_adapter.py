@@ -48,6 +48,14 @@ def _persistent_state_root() -> str:
 # no other purpose: it keeps the count above one so the product permits the
 # delete. It never carries benchmark records and is never the arm namespace, so
 # no isolation is manufactured by it.
+#
+# There is a second, independent product rule: the *default* project cannot be
+# deleted whatever the count. This adapter satisfies it by creating the anchor
+# first, because a fresh store promotes its first project to default, so the
+# arm project is never the default. That ordering is load-bearing - creating
+# the arm project first would make it the default and reset would fail - and it
+# assumes a store this adapter established. A pre-existing store whose default
+# is already the arm project would still refuse the delete.
 RESET_ANCHOR_PROJECT = "shadowgraph-benchmark-reset-anchor"
 
 # Basic Memory defaults to embedding-backed hybrid retrieval, which reaches a
@@ -169,6 +177,24 @@ def _default_client_factory(config, _provider_call):
     # Set before import, for the reason above.
     os.environ["BASIC_MEMORY_HOME"] = project_root
 
+    # Basic Memory maintains a local vector index, and its sync scheduler
+    # fetches an embedding model from huggingface on the write path. That is a
+    # model download rather than a metered inference call, so the adapter
+    # counters stay at zero and it is invisible to them - which is exactly why
+    # it has to be closed here rather than measured.
+    #
+    # Left enabled it would mean undeclared network traffic on an arm whose
+    # request classes are empty, and worse, behaviour that differs between a
+    # networked and an isolated run: once the model lands, local vector sync
+    # starts working and retrieval changes. Disabling it is what makes the
+    # empty declaration true and the arm reproducible.
+    #
+    # Measured with a socket.getaddrinfo guard over a full
+    # reset/persist/retrieve/reset cycle: 2 outbound attempts to
+    # huggingface.co with this unset, 0 with it set, and the same single
+    # record retrieved either way.
+    os.environ["BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED"] = "false"
+
     try:
         from basic_memory.mcp import tools as basic_memory_tools
     except Exception as error:  # noqa: BLE001
@@ -201,6 +227,9 @@ def _search_hit_identifier(hit) -> str:
     Persist writes the record id as the note title, so a hit's title is the
     same identifier verify reads with. The permalink is accepted as a fallback
     for hits that omit it.
+
+    Observed hit keys on 0.23.2: content, entity, entity_id, external_id,
+    file_path, metadata, permalink, score, title, type, updated_at.
     """
     if not isinstance(hit, dict):
         raise ContractError("Basic Memory search returned an invalid result item")
@@ -209,10 +238,6 @@ def _search_hit_identifier(hit) -> str:
         if isinstance(value, str) and value.strip():
             return value
     raise ContractError("Basic Memory search result exposes no readable identifier")
-
-
-def _native_records(value) -> list[dict]:
-    return [logical_record(item) for item in result_items(value)]
 
 
 def _normalized_note(value):
@@ -334,10 +359,11 @@ async def execute(
                     search_type=LOCAL_SEARCH_TYPE,
                 )
             )
-            # A search hit is an entity reference carrying no note body, so it
-            # cannot be turned into a logical record on its own. Read each hit
-            # back through the same call verify uses, so retrieve and verify
-            # agree on what a stored record is.
+            # A hit does carry the note body, but its metadata is only
+            # {"note_type": "note"} - none of the shadowgraph frontmatter that
+            # identifies a record - so it cannot become a logical record on its
+            # own. Read each hit back through the same call verify uses, so
+            # retrieve and verify agree on what a stored record is.
             native_context = []
             for hit in result_items(raw):
                 operations["memoryReadOperations"] += 1

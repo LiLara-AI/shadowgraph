@@ -18,7 +18,7 @@ All figures below were produced on the current branch with a clean working tree.
 | Full repository | `npm test` | **1988 / 1988 pass**, 0 fail, 20 suites |
 | Benchmark focused | `npm run benchmark:test` | **833 / 833 pass**, 0 fail |
 | v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **690 / 690 pass**, 0 fail |
-| Python adapters | `npm run benchmark:test:python` | **55 tests, OK** |
+| Python adapters | `npm run benchmark:test:python` | **75 tests, OK** |
 | Node syntax | `npm run check`, `npm run benchmark:check` | pass |
 | Python syntax | `npm run benchmark:check:python` | pass |
 | Package privacy | `npm run check:package` | pass |
@@ -203,8 +203,12 @@ prevents a real acceptance run.** No digest was synthesised.
 **B2 — Services are not provisioned.** Graphiti needs a Neo4j-compatible
 database plus an LLM and embedding endpoint; Cognee needs an LLM and embedding
 endpoint. Mem0 needs an LLM and embedding endpoint for its declared request
-classes. `v11-preflight` reports the service-bearing arms as blockers rather
-than assuming them.
+classes. `v11-preflight` reports graphiti and cognee as blockers rather than
+assuming them. It cannot block on mem0-oss: the competitor lock records no
+`requiredService` for that arm even though its declared request classes need an
+LLM and an embedding endpoint, so the gate has nothing to key on. That gap is in
+the lock, not the gate, and it is why the readiness check names two arms while
+this paragraph names three.
 
 B2 covers **three arms, not all seven**. An earlier revision of this document
 treated requirement 6 as wholly blocked, which overstated it. `no-memory`,

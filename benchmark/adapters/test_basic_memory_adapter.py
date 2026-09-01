@@ -20,10 +20,11 @@ BASIC_ALT_REF = "45a5242b2a57d067616a55782a2170fda7bcf519fba3a4dbd179f634a52b5db
 
 
 class FakeBasicMemory:
-    def __init__(self, backend, *, fail_on=None):
+    def __init__(self, backend, *, fail_on=None, default_project=None):
         self.backend = backend
         self.fail_on = fail_on
         self.calls = []
+        self.default_project = default_project
 
     async def list_memory_projects(self, *, output_format="text", context=None):
         self.calls.append(("list_memory_projects", output_format, context))
@@ -49,10 +50,20 @@ class FakeBasicMemory:
                 "Cannot delete default project '%s'. This is the only project "
                 "in your configuration." % project_name
             )
+        if project_name == getattr(self, "default_project", None):
+            # A second, independent product rule, observed with two projects
+            # present: the default cannot be deleted whatever the count.
+            raise ValueError(
+                "Cannot delete default project '%s'. Set another project as "
+                "default first." % project_name
+            )
         self.backend.pop(project_name)
 
     async def create_memory_project(self, project_name, project_path, *, set_default=False, workspace=None, output_format="text"):
         self.calls.append(("create_memory_project", project_name, project_path, set_default, workspace, output_format))
+        if set_default or not self.backend:
+            # A fresh store promotes its first project to default.
+            self.default_project = project_name
         if self.fail_on == "create_memory_project":
             raise RuntimeError("create failed")
         if not isinstance(project_path, str) or not os.path.isabs(project_path):
@@ -61,11 +72,32 @@ class FakeBasicMemory:
             raise ValueError("project_path must already be an owned real directory")
         self.backend.setdefault(project_name, {})["__project_path__"] = project_path
 
-    async def search_notes(self, query=None, *, project=None, project_id=None, search_all_projects=False, output_format="text", **_kwargs):
-        self.calls.append(("search_notes", query, project, project_id, search_all_projects, output_format))
+    async def search_notes(self, query=None, *, project=None, project_id=None, search_all_projects=False, output_format="text", search_type=None, **_kwargs):
+        self.calls.append(("search_notes", query, project, project_id, search_all_projects, output_format, search_type))
         if self.fail_on == "search_notes":
             raise RuntimeError("search failed private/path")
-        return {"results": copy.deepcopy(list(self.backend.get(project, {}).values()))}
+        if search_type != "text":
+            # Basic Memory 0.23.2 defaults to embedding-backed hybrid retrieval,
+            # which reaches a provider. An arm declaring no request classes must
+            # name the local index rather than inherit that default.
+            raise ValueError(
+                "search_type must be 'text'; the default performs hybrid retrieval"
+            )
+        results = []
+        for title, note in sorted(self.backend.get(project, {}).items()):
+            if title.startswith("__"):
+                continue
+            # Product-shaped hit: carries the body, but its metadata holds no
+            # shadowgraph frontmatter, so it cannot become a logical record.
+            results.append({
+                "title": title,
+                "permalink": note.get("permalink"),
+                "content": note.get("content"),
+                "metadata": {"note_type": "note"},
+                "score": -1e-06,
+                "type": "entity",
+            })
+        return {"results": results, "total": len(results)}
 
     async def write_note(self, title, content, directory, *, project=None, project_id=None, metadata=None, overwrite=None, output_format="text", **_kwargs):
         self.calls.append(("write_note", title, content, directory, project, project_id, copy.deepcopy(metadata), overwrite, output_format))
@@ -192,12 +224,17 @@ class BasicMemoryAdapterTests(unittest.TestCase):
 
     def test_retrieve_is_project_scoped_local_and_uses_no_provider_or_outer_call(self) -> None:
         response = self.execute("retrieve")
-        self.assertEqual(response["operations"]["memoryReadOperations"], 1)
         self.assertEqual(response["operations"]["internalMemoryModelCalls"], 0)
         self.assertEqual(response["operations"]["embeddingCalls"], 0)
         self.assertEqual(response["operations"]["outerDecisionModelCalls"], 0)
+        # The search names the local text index. The product default is
+        # embedding-backed hybrid retrieval, which reaches a provider, so an arm
+        # declaring no request classes must not inherit it.
         call = self.clients[0].calls[0]
-        self.assertEqual(call, ("search_notes", "Choose the safe option.", "project-1", None, False, "json"))
+        self.assertEqual(
+            call,
+            ("search_notes", "Choose the safe option.", "project-1", None, False, "json", "text"),
+        )
         self.assertEqual(self.configs[0]["force_local"], True)
         self.assertEqual(self.configs[0]["auto_update"], False)
         self.assertEqual(self.configs[0]["logfire"], False)
@@ -360,3 +397,38 @@ class BasicMemoryProductShapeTests(unittest.TestCase):
         )
         with self.assertRaises(ContractError):
             basic_memory_adapter._search_hit_identifier({"score": 1})
+
+
+class BasicMemoryRetrieveReadBackTests(BasicMemoryAdapterTests):
+    """Retrieve must read each search hit back before it can build a record.
+
+    Measured on basic-memory 0.23.2: a search hit carries the note body but its
+    metadata is only `{"note_type": "note"}` - none of the shadowgraph
+    frontmatter that identifies a record. So a hit cannot become a logical
+    record on its own, however much of the body it happens to carry.
+
+    Nothing covered this until now, because no test persisted a record before
+    retrieving one: with an empty store the search returns nothing and the
+    read-back loop never runs.
+    """
+
+    def test_a_persisted_record_comes_back_through_a_per_hit_read(self) -> None:
+        self.execute("reset")
+        self.execute("persist")
+
+        self.clients[-1].calls.clear()
+        response = self.execute("retrieve")
+        self.assertEqual(response["status"], "SUCCEEDED")
+
+        records = response["result"]["nativeContext"]
+        self.assertEqual(len(records), 1, "the persisted record must be returned")
+        self.assertEqual(records[0]["type"], "decision")
+        self.assertIn("decisionId", records[0]["content"])
+
+        # One search plus one read per hit, and the read is what supplies the
+        # frontmatter the hit lacks.
+        performed = [call[0] for call in self.clients[-1].calls]
+        self.assertEqual(performed, ["search_notes", "read_note"])
+        self.assertEqual(response["operations"]["memoryReadOperations"], 2)
+        self.assertEqual(response["operations"]["embeddingCalls"], 0)
+        self.assertEqual(response["operations"]["internalMemoryModelCalls"], 0)
