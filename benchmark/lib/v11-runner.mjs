@@ -1292,11 +1292,19 @@ async function executeDecision(options, spec, unit, signal, completedUnits, oute
     // and the correlation are all deliberately absent: each identifies the arm
     // under measurement, directly or by proxy, and a builder that cannot see
     // which arm it is serving cannot favour one.
-    const buildOuter = () => options.buildOuterRequest({
-      phase: spec.phase,
-      scenario: structuredClone(spec.scenario),
-      nativeContext: structuredClone(retrieved.result.nativeContext)
-    });
+    // Built from OUTER_REQUEST_INPUT_FIELDS rather than restating it. The
+    // constant is what requirement 7 cites as closing the field channel, and a
+    // hand-written twin beside it is a second place for the contract to live.
+    const buildOuter = () => {
+      const available = {
+        phase: spec.phase,
+        scenario: structuredClone(spec.scenario),
+        nativeContext: structuredClone(retrieved.result.nativeContext)
+      };
+      return options.buildOuterRequest(Object.fromEntries(
+        OUTER_REQUEST_INPUT_FIELDS.map((field) => [field, available[field]])
+      ));
+    };
     const outerRequest = buildOuter();
     auditOuterRequest(outerRequest, spec, buildOuter, outerBaseline);
     throwIfAborted(signal);

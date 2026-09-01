@@ -1088,6 +1088,18 @@ test('schema v2 zero-result validation and aggregation preserve the actual recor
   // point: an acceptance aggregate carries no marketing claim at all.
   assert.equal(Object.hasOwn(aggregate, 'allowedMarketingText'), false);
 
+  // Non-disclosure, rehomed. The preregistration's noResultText names why the
+  // endpoints were unavailable; that is an operator diagnostic and must not
+  // reach public output. This assertion previously rode on the scored marketing
+  // string and was lost when that path became unreachable - it is requirement 1,
+  // not a scored-mode property, and the acceptance aggregate is public text too.
+  assert.match(document.marketingThresholds.noResultText, /endpoint/iu);
+  assert.doesNotMatch(
+    JSON.stringify(aggregate),
+    /endpoint/iu,
+    'an infrastructure cause must not leak into an acceptance aggregate'
+  );
+
   const substituted = structuredClone(raw);
   substituted.zeroResult.causes = ['ENDPOINT_UNAVAILABLE'];
   assert.throws(

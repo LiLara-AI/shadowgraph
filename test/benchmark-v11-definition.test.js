@@ -673,6 +673,42 @@ test('all public and loader boundary errors are static and non-disclosing', asyn
   });
 });
 
+test('this candidate has produced no benchmark result', async () => {
+  // The headline claim of CANDIDATE-STATUS.md, and constraint 3 of the goal:
+  // no scored run, no acceptance run, no artifact. It had no enforcement in the
+  // tree at all - it was verified by hand, by a reviewer, in six consecutive
+  // rounds. A claim that important should not depend on someone remembering to
+  // look.
+  //
+  // Same shape as the executable-bit and NUL-byte sweeps: ask the index, and
+  // also look at the working tree, because an untracked results directory is
+  // exactly as misleading to a reader as a committed one.
+  const { stdout } = await execFileAsync('git', ['ls-files', '-z'], {
+    cwd: REPOSITORY_ROOT,
+    maxBuffer: 8 * 1024 * 1024
+  });
+  const tracked = stdout.split('\0').filter(Boolean);
+  assert.ok(tracked.length > 100, 'the index listing looks truncated');
+
+  const artifacts = tracked.filter((relative) => (
+    /(^|\/)benchmark\/results\//u.test(relative)
+    || /\.raw\.json$/u.test(relative)
+    || /\.aggregate\.json$/u.test(relative)
+    || /\.progress\.ndjson$/u.test(relative)
+    || /\.units\.ndjson$/u.test(relative)
+  ));
+  assert.deepEqual(artifacts, [], 'a benchmark artifact is tracked in this repository');
+
+  // And nothing on disk either, tracked or not.
+  let resultsExists = true;
+  try {
+    await stat(path.join(REPOSITORY_ROOT, 'benchmark', 'results'));
+  } catch {
+    resultsExists = false;
+  }
+  assert.equal(resultsExists, false, 'benchmark/results exists; no run may have produced it');
+});
+
 test('no tracked file contains a NUL byte', async () => {
   // One did, for three review rounds, in benchmark/lib/v11-evidence-bundle.mjs:
   // a sort delimiter written as a literal byte rather than an escape, while the

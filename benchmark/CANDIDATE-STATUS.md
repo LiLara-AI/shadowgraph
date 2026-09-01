@@ -26,6 +26,13 @@ All figures below were produced on the current branch with a clean working tree.
 | Integrations | `npm run check:integrations` | pass |
 | Package smoke | `npm run smoke:package` | pass |
 
+That no result exists is now asserted by the suite rather than checked by hand.
+It is the single most important claim in this document and it had been verified
+only by a reviewer, six times. The check has the same shape as the executable-bit
+and NUL-byte assertions: a sweep over `git ls-files` plus the working tree,
+refusing any `benchmark/results/` directory and any tracked raw or aggregate
+artifact.
+
 `npm run benchmark:journal:validate` is **not** an argument-free gate. It
 requires `<raw-results.json>` and therefore only applies after a real run, which
 has not occurred.
@@ -235,9 +242,15 @@ biased builds.
 
 The fix is not a fourth detector. The builder is now handed `phase`, `scenario`
 and `nativeContext` and nothing else, so no *field* identifying the arm reaches
-it. The field list is exported as `OUTER_REQUEST_INPUT_FIELDS` and asserted on
-every builder call, with `arm`, `armId`, `namespace` and `correlation` each named
-in that assertion so a regression says which channel it reopened.
+it. The field list is exported as `OUTER_REQUEST_INPUT_FIELDS`, and the runner
+builds its call-site object from that constant rather than restating it, so the
+two cannot drift. The acceptance suite asserts the surface on every one of its
+builder calls, with `arm`, `armId`, `namespace` and `correlation` each named so
+a regression says which channel it reopened.
+
+To be exact about where that holds: the assertion runs in the offline suite. In
+a real run the enforcement is the derivation above, plus `buildV11Prompt`
+refusing any input key it does not expect.
 
 An earlier version of this paragraph continued "a builder that cannot tell the
 arms apart cannot favour one". That was false. Two ways to tell them apart
