@@ -34,6 +34,20 @@ export const ADAPTER_FAILURE_CAUSES = [
   'OPERATION_FAILED'
 ];
 
+export const V11_PHASES = Object.freeze([
+  'RESET',
+  'A',
+  'B',
+  'C',
+  'D_TRUE',
+  'D_FALSE_0',
+  'D_FALSE_1',
+  'D_FALSE_2',
+  'E',
+  'ISOLATION_PROJECT',
+  'ISOLATION_USER'
+]);
+
 const ADAPTER_ENVELOPE_FIELDS = [
   'schemaVersion',
   'operation',
@@ -128,6 +142,37 @@ function domainSeparatedSha256(domain, value) {
     .update('\0', 'utf8')
     .update(canonicalJson(value), 'utf8')
     .digest('hex');
+}
+
+const SAFE_UNIT_ID_COMPONENT = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
+
+/**
+ * Opaque, bounded identity for one planned v1.1 lifecycle unit.
+ *
+ * Attempt ids are deliberately excluded: diagnostic resumes retain the same
+ * logical unit identity while recording a distinct attempt separately.
+ */
+export function unitIdFor(correlation) {
+  if (!isPlainObject(correlation)) throw new Error('unit correlation must be an object');
+  assertExactKeys(correlation, ['armId', 'scenarioId', 'repetition', 'phase'], 'unit correlation');
+  for (const field of ['armId', 'scenarioId']) {
+    if (typeof correlation[field] !== 'string' || !SAFE_UNIT_ID_COMPONENT.test(correlation[field])) {
+      throw new Error(`unit correlation.${field} must be a header-safe non-empty identifier`);
+    }
+  }
+  if (!Number.isSafeInteger(correlation.repetition) || correlation.repetition < 0) {
+    throw new Error('unit correlation.repetition must be a non-negative safe integer');
+  }
+  if (!V11_PHASES.includes(correlation.phase)) {
+    throw new Error(`Unknown v1.1 phase: ${correlation.phase}`);
+  }
+  const digest = domainSeparatedSha256('shadowgraph:v1.1:unit-id:v1', {
+    armId: correlation.armId,
+    scenarioId: correlation.scenarioId,
+    repetition: correlation.repetition,
+    phase: correlation.phase
+  });
+  return `unit:${digest}`;
 }
 
 /** Hash record content independently of its storage id so content clones remain detectable. */

@@ -8,28 +8,18 @@ import { OUTER_HTTP_ERROR_CODE, validateDecisionResponse } from './outer-model.m
 import { validateV11RawRun } from './validate.mjs';
 import {
   OPERATION_FIELDS,
+  V11_PHASES,
   deriveArmStatus,
   namespaceRefFor,
   recordContentSha256,
   standardizedDecisionRecord,
+  unitIdFor,
   validateApplicability,
   validateOperationMetrics,
   validateStorageMeasurement
 } from './v11-contract.mjs';
 
-export const V11_PHASES = Object.freeze([
-  'RESET',
-  'A',
-  'B',
-  'C',
-  'D_TRUE',
-  'D_FALSE_0',
-  'D_FALSE_1',
-  'D_FALSE_2',
-  'E',
-  'ISOLATION_PROJECT',
-  'ISOLATION_USER'
-]);
+export { V11_PHASES, unitIdFor };
 
 const HASH = /^[a-f0-9]{64}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
@@ -718,17 +708,6 @@ function validateOptions(options) {
   ]) {
     if (typeof options[field] !== 'function') throw new Error(`${field} must be a function`);
   }
-}
-
-export function unitIdFor({ armId, scenarioId, repetition, phase }) {
-  requireSafeId(armId, 'unit armId');
-  requireSafeId(scenarioId, 'unit scenarioId');
-  if (!Number.isSafeInteger(repetition) || repetition < 0) {
-    throw new Error('unit repetition must be a non-negative safe integer');
-  }
-  if (!V11_PHASES.includes(phase)) throw new Error(`Unknown v1.1 phase: ${phase}`);
-  const components = [armId, scenarioId, String(repetition), phase];
-  return `unit:${components.map((value) => `${value.length}:${value}`).join(':')}`;
 }
 
 function rotatedArms(arms, seed) {

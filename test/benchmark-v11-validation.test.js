@@ -250,8 +250,12 @@ function decisionRecordReference(arm, phase) {
 }
 
 function testUnitId(armId, phase) {
-  const components = [armId, 'ACC_VALIDATION_1', '0', phase];
-  return `unit:${components.map((value) => `${value.length}:${value}`).join(':')}`;
+  return v11Contract.unitIdFor({
+    armId,
+    scenarioId: 'ACC_VALIDATION_1',
+    repetition: 0,
+    phase
+  });
 }
 
 function expectedNamespaceRef(arm, phase, namespace) {
@@ -668,12 +672,22 @@ test('decision storage identifiers are deterministic, unit-unique, and independe
   );
 });
 
-test('schema v2 validator shares the unambiguous length-prefixed unit id format', () => {
+test('schema v2 validator shares the bounded domain-separated unit id format and rejects legacy composites', () => {
   const arm = { id: 'arm:with:colons', name: 'Colon arm', applicability: applicability() };
   const raw = rawRun({ armDefinitions: [arm] });
-  assert.ok(raw.units.every((item) => item.unitId.startsWith('unit:')));
+  assert.ok(raw.units.every((item) => /^unit:[a-f0-9]{64}$/u.test(item.unitId)));
+  assert.ok(raw.units.every((item) => item.unitId.length <= 256));
   assert.equal(new Set(raw.units.map((item) => item.unitId)).size, raw.units.length);
   assert.doesNotThrow(() => validateRawRun(raw, preregistration([arm]), PREREGISTRATION_SHA));
+
+  const legacy = structuredClone(raw);
+  const legacyUnit = legacy.units[0];
+  const components = [legacyUnit.armId, legacyUnit.scenarioId, String(legacyUnit.repetition), legacyUnit.phase];
+  legacyUnit.unitId = `unit:${components.map((value) => `${value.length}:${value}`).join(':')}`;
+  assert.throws(
+    () => validateRawRun(legacy, preregistration([arm]), PREREGISTRATION_SHA),
+    /correlation does not match unitId/iu
+  );
 });
 
 test('schema v2 validation rejects model-id reuse as a persisted storage-id collision', () => {

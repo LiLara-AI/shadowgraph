@@ -5,10 +5,12 @@ import {
   ARM_STATUSES as V11_ARM_STATUSES,
   OPERATION_FIELDS,
   UNIT_STATUSES,
+  V11_PHASES,
   deriveArmStatus,
   namespaceRefFor,
   recordContentSha256,
   standardizedDecisionRecord,
+  unitIdFor,
   validateApplicability,
   validateIsolationEvidence,
   validateOperationMetrics,
@@ -24,10 +26,6 @@ const REQUIRED_MEASUREMENT_FIELDS = [
   'competitorVersion', 'status', 'statusReason', 'scenarioId', 'phase',
   'repetition', 'seed', 'startedAt', 'latencyMs', 'request', 'response',
   'usage', 'toolCalls', 'storageBytes', 'cost', 'scores', 'logs'
-];
-const V11_PHASES = [
-  'RESET', 'A', 'B', 'C', 'D_TRUE', 'D_FALSE_0', 'D_FALSE_1', 'D_FALSE_2',
-  'E', 'ISOLATION_PROJECT', 'ISOLATION_USER'
 ];
 const V11_RAW_FIELDS = [
   'schemaVersion', 'benchmarkVersion', 'mode', 'runId', 'attemptId', 'attemptIds',
@@ -120,11 +118,6 @@ function hasRecordedOperations(operations) {
 
 function hasAdapterEvidence(adapterEvidence) {
   return Object.values(adapterEvidence).some((value) => value !== null);
-}
-
-function v11UnitId(armId, scenarioId, repetition, phase) {
-  const components = [armId, scenarioId, String(repetition), phase];
-  return `unit:${components.map((value) => `${value.length}:${value}`).join(':')}`;
 }
 
 function validateV11AdapterEvidence(value, context) {
@@ -547,7 +540,9 @@ function expectedV11UnitIds(preregistration, armId) {
   const ids = new Set();
   for (let repetition = 0; repetition < preregistration.commonExecution.repetitions; repetition += 1) {
     for (const scenario of preregistration.scenarios) {
-      for (const phase of V11_PHASES) ids.add(v11UnitId(armId, scenario.id, repetition, phase));
+      for (const phase of V11_PHASES) {
+        ids.add(unitIdFor({ armId, scenarioId: scenario.id, repetition, phase }));
+      }
     }
   }
   return ids;
@@ -573,7 +568,12 @@ function validateV11Unit(unit, raw, preregistration, armsById, seenUnitIds) {
   if (unit.seed !== preregistration.commonExecution.randomSeeds[unit.repetition]) {
     throw new Error(`${context} seed does not match preregistration`);
   }
-  const expectedId = v11UnitId(unit.armId, unit.scenarioId, unit.repetition, unit.phase);
+  const expectedId = unitIdFor({
+    armId: unit.armId,
+    scenarioId: unit.scenarioId,
+    repetition: unit.repetition,
+    phase: unit.phase
+  });
   if (unit.unitId !== expectedId) throw new Error(`${context} correlation does not match unitId ${expectedId}`);
   if (seenUnitIds.has(unit.unitId)) throw new Error(`Duplicate v1.1 unit ${unit.unitId}`);
   seenUnitIds.add(unit.unitId);

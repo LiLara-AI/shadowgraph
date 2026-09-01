@@ -13,7 +13,10 @@ import {
 } from '../benchmark/lib/outer-model.mjs';
 import { createProgressLedger, createUnitEvidenceLedger } from '../benchmark/lib/progress.mjs';
 import { validateRawRun } from '../benchmark/lib/validate.mjs';
-import { recordContentSha256 } from '../benchmark/lib/v11-contract.mjs';
+import {
+  recordContentSha256,
+  unitIdFor as contractUnitIdFor
+} from '../benchmark/lib/v11-contract.mjs';
 import {
   V11_PHASES,
   runV11Benchmark,
@@ -50,6 +53,44 @@ test('unitIdFor is unambiguous when arm and scenario ids contain colons', () => 
   const right = unitIdFor({ armId: 'a', scenarioId: 'b:c', repetition: 0, phase: 'A' });
   assert.notEqual(left, right);
   assert.equal(new Set([left, right]).size, 2);
+});
+
+test('unitIdFor is one bounded domain-separated identity shared with the contract', () => {
+  assert.strictEqual(unitIdFor, contractUnitIdFor);
+  const correlation = {
+    armId: 'a'.repeat(256),
+    scenarioId: 'b'.repeat(256),
+    repetition: Number.MAX_SAFE_INTEGER,
+    phase: 'ISOLATION_PROJECT'
+  };
+  const id = unitIdFor(correlation);
+  assert.match(id, /^unit:[a-f0-9]{64}$/u);
+  assert.ok(id.length <= 256);
+  const canonicalCorrelation = JSON.stringify({
+    armId: correlation.armId,
+    phase: correlation.phase,
+    repetition: correlation.repetition,
+    scenarioId: correlation.scenarioId
+  });
+  const expectedDigest = createHash('sha256')
+    .update('shadowgraph:v1.1:unit-id:v1', 'utf8')
+    .update('\0', 'utf8')
+    .update(canonicalCorrelation, 'utf8')
+    .digest('hex');
+  assert.equal(id, `unit:${expectedDigest}`);
+  assert.equal(id, unitIdFor(structuredClone(correlation)));
+  for (const distinct of [
+    { ...correlation, armId: `${'a'.repeat(255)}b` },
+    { ...correlation, scenarioId: `${'b'.repeat(255)}a` },
+    { ...correlation, repetition: Number.MAX_SAFE_INTEGER - 1 },
+    { ...correlation, phase: 'ISOLATION_USER' }
+  ]) {
+    assert.notEqual(id, unitIdFor(distinct));
+  }
+  assert.throws(
+    () => unitIdFor({ ...correlation, attemptId: 'attempt-must-not-change-unit-state' }),
+    /unknown.*unit.*attemptId/iu
+  );
 });
 
 function applicability(userIsolation = 'SUPPORTED', persistence = 'SUPPORTED') {
