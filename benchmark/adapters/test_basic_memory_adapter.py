@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -491,3 +492,45 @@ class BasicMemoryRuntimeEnvironmentTests(unittest.TestCase):
             basic_memory_adapter._default_client_factory(
                 {"project_root": "relative/path"}, None
             )
+
+    def test_both_variables_are_set_before_the_import_not_merely_afterwards(self) -> None:
+        """Assert the ordering, which is the actual contract.
+
+        Asserting the end state of the environment is not enough. Basic Memory
+        reads its configuration lazily at import time, so an assignment made
+        after the import has no effect at all - yet the variables would still
+        be set by the time a test looked at them.
+
+        Checking the end state appears to cover this only where the package is
+        absent, because the import raises and the later assignments never run.
+        In the pinned container, where the package is present and the ordering
+        actually matters, a reordered factory would pass every other test in
+        this file.
+
+        A meta_path finder settles it either way: every finder is consulted
+        while the import machinery resolves the module, before any ImportError
+        is raised, so the environment can be snapshotted at exactly that moment
+        whether or not the package exists.
+        """
+        snapshots = []
+
+        class RecordingFinder:
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split(".")[0] == "basic_memory":
+                    snapshots.append(dict(os.environ))
+                return None
+
+        for name in [n for n in sys.modules if n.split(".")[0] == "basic_memory"]:
+            del sys.modules[name]
+
+        finder = RecordingFinder()
+        sys.meta_path.insert(0, finder)
+        try:
+            self.invoke_factory()
+        finally:
+            sys.meta_path.remove(finder)
+
+        self.assertTrue(snapshots, "the factory never attempted to import basic_memory")
+        at_import = snapshots[0]
+        self.assertEqual(at_import.get("BASIC_MEMORY_HOME"), self.project_root)
+        self.assertEqual(at_import.get("BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED"), "false")

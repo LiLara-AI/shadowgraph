@@ -18,7 +18,7 @@ All figures below were produced on the current branch with a clean working tree.
 | Full repository | `npm test` | **1988 / 1988 pass**, 0 fail, 20 suites |
 | Benchmark focused | `npm run benchmark:test` | **833 / 833 pass**, 0 fail |
 | v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **690 / 690 pass**, 0 fail |
-| Python adapters | `npm run benchmark:test:python` | **78 tests, OK** |
+| Python adapters | `npm run benchmark:test:python` | **79 tests, OK** |
 | Node syntax | `npm run check`, `npm run benchmark:check` | pass |
 | Python syntax | `npm run benchmark:check:python` | pass |
 | Package privacy | `npm run check:package` | pass |
