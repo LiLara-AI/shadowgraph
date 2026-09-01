@@ -605,6 +605,23 @@ test('an arm without native user isolation is never given a user namespace', () 
   }
 });
 
+test('the runner itself refuses a scored run, not merely the layer above it', async () => {
+  // Independent review produced a valid 308-unit SCORED run with a hostile
+  // prompt builder in a single direct call to runV11Benchmark. Both properties
+  // requirement 7 asserts about "a run" - canonical builder, non-scored - lived
+  // only in executeV11AcceptanceRun, one layer above where the artifact is
+  // actually produced. That is the same shape as the defect this whole sequence
+  // began with, so the mode constraint moved down to the runner.
+  //
+  // There was no live path to it: the CLI does not import the runner, and the
+  // only non-test caller sits behind the check. A constraint held by nobody
+  // happening to pass true is held by nothing.
+  await assert.rejects(
+    acceptanceRun({ scored: true }),
+    /may not execute a scored run/iu
+  );
+});
+
 test('the run reports itself as acceptance and produces no ranking', () => {
   const { raw } = primary;
 

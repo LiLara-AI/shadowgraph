@@ -671,6 +671,21 @@ function validateOptions(options) {
   requireSafeId(options.runId, 'runId');
   requireSafeId(options.attemptId, 'attemptId');
   if (typeof options.scored !== 'boolean') throw new Error('scored must be boolean');
+  // Refused here rather than one layer up. This candidate may not produce a
+  // scored run: the immutable prerequisites for one do not exist, and a mode
+  // enforced only by every caller remembering to pass false is enforced by
+  // nothing. The runner is exported and directly callable, so this is the last
+  // place that can hold the line for a caller who reaches it without going
+  // through executeV11AcceptanceRun.
+  if (options.scored) {
+    throw new Error('This candidate may not execute a scored run');
+  }
+  // Refused here rather than one layer up. This candidate may not produce a
+  // scored run: the immutable prerequisites for one do not exist, and a mode
+  // enforced only by every caller remembering to pass false is enforced by
+  // nothing. The runner is exported and directly callable, so this is the last
+  // place that can hold the line for a caller who reaches it without going
+  // through executeV11AcceptanceRun.
   if (!Array.isArray(options.arms) || options.arms.length === 0) throw new Error('arms must be non-empty');
   if (!Array.isArray(options.scenarios) || options.scenarios.length === 0) throw new Error('scenarios must be non-empty');
   const armIds = new Set();

@@ -49,6 +49,12 @@ const MUTATIONS = {
     'benchmark/lib/v11-run.mjs',
     '  if (buildOuterRequest !== buildV11Prompt) {',
     '  if (false) {'
+  ],
+  scoredRefusal: [
+    'benchmark/lib/v11-runner.mjs',
+    '  if (options.scored) {\n'
+    + "    throw new Error('This candidate may not execute a scored run');\n  }\n",
+    ''
   ]
 };
 
