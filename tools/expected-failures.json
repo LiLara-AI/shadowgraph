@@ -1,0 +1,43 @@
+{
+  "_comment": [
+    "Which tests each guard's absence must break, by name.",
+    "",
+    "The harness used to publish how MANY tests failed. Independent review ran it",
+    "twice at the same commit and got different tables - a flake anywhere in the",
+    "2043-test suite is attributed to whichever guard happened to be mutated at",
+    "that moment, and the baseline/final integrity checks cannot see it because",
+    "the flake only manifests mid-table. A count is not a measurement when the",
+    "population is flaky.",
+    "",
+    "Identities fix that. A mutation is measured by which named tests it breaks;",
+    "an unexpected extra failure is a flake and the cell is re-run, and a missing",
+    "expected failure is a guard that stopped being load-bearing. Both are",
+    "reported rather than silently folded into a number."
+  ],
+  "narrowing": [
+    "the prompt builder is never told which arm it is serving"
+  ],
+  "purity": [
+    "a builder whose output depends on anything but its input fails the unit"
+  ],
+  "armIdentity": [
+    "a prompt that names an arm fails the units of that arm"
+  ],
+  "resumeSeed": [
+    "a resumed attempt cannot adopt a different outer instruction"
+  ],
+  "indexRebuild": [
+    "a hand-made index is revalidated, not trusted for its schema tag",
+    "required coverage is checked against validated kinds, not claimed ones",
+    "byte-identity holds for a hand-made index too, not only a built one"
+  ],
+  "requiredDigest": [
+    "verification refuses to run without the digest it is meant to check"
+  ],
+  "canonical": [
+    "a real run may use only the frozen prompt builder"
+  ],
+  "scoredRefusal": [
+    "the runner itself refuses a scored run, not merely the layer above it"
+  ]
+}

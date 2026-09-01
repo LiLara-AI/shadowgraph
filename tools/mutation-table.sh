@@ -1,18 +1,25 @@
 #!/bin/bash
-# Measure every guard by removing it and counting failures against the FULL
-# repository suite. Emits a markdown table and a JSON line.
+# Measure every guard by removing it and recording WHICH tests break.
 #
-# This exists because three consecutive review rounds caught a wrong number in a
-# hand-written table. By the third round the methodology was right and the
-# transcription still was not, so the numbers that reach the documentation now
-# come from here.
+# The first version published how many tests failed. Independent review ran it
+# twice at the same commit and got two different tables, a different cell wrong
+# each time: a flake anywhere in the 2043-test suite is attributed to whichever
+# guard happens to be mutated at that moment, and the baseline/final checks
+# cannot catch it because the flake only shows up mid-table. It had removed
+# transcription error and replaced it with attribution error - the same class of
+# mistake, one level up.
+#
+# A cell is now a set of test names compared against tools/expected-failures.json.
+# An unexpected extra failure is treated as a flake and the cell is re-run once;
+# a missing expected failure is a guard that stopped being load-bearing. Either
+# way it is named rather than folded into a number.
 #
 # Backups go in a directory from mktemp rather than a literal path: a hardcoded
 # one is wrong on some platforms, and the packaged-text policy refuses absolute
-# POSIX temp paths in files the package ships. This tool lives outside
-# `scripts/` precisely so it is not one of them - `files` carries `scripts/`,
-# and a tool whose whole job is rewriting benchmark/lib in place has no business
-# in a distributable.
+# POSIX temp paths in files the package ships. This tool lives under tools/
+# rather than scripts/ precisely so it is not one of them - `files` carries
+# `scripts/`, and a tool whose whole job is rewriting benchmark/lib in place has
+# no business in a distributable.
 set -u
 cd "$(dirname "$0")/.." || exit 1
 
@@ -21,76 +28,86 @@ WORK="$(mktemp -d)"
 RUNNER=benchmark/lib/v11-runner.mjs
 BUNDLE=benchmark/lib/v11-evidence-bundle.mjs
 RUN=benchmark/lib/v11-run.mjs
+VALIDATE=benchmark/lib/validate.mjs
 
-cp "$RUNNER" "$WORK/runner"; cp "$BUNDLE" "$WORK/bundle"; cp "$RUN" "$WORK/run"
+cp "$RUNNER" "$WORK/runner"
+cp "$BUNDLE" "$WORK/bundle"
+cp "$RUN" "$WORK/run"
+cp "$VALIDATE" "$WORK/validate"
+
 restore() {
   cp "$WORK/runner" "$RUNNER"
   cp "$WORK/bundle" "$BUNDLE"
   cp "$WORK/run" "$RUN"
+  cp "$WORK/validate" "$VALIDATE"
 }
 
 # Restore BEFORE discarding the backups, and on interrupt as well as exit. The
-# first version trapped EXIT only and deleted the backup directory without
-# restoring, so a Ctrl-C during any of the nine ~90-second test runs left
-# mutated source behind and destroyed the copy that would have fixed it - the
-# safety net vanishing exactly when it was needed, across roughly thirteen of
-# the run's fourteen minutes.
+# first version trapped EXIT only and deleted the backups without restoring, so
+# a Ctrl-C during any of the long test runs left mutated source behind and
+# destroyed the copy that would have fixed it.
 cleanup() {
   restore
   rm -rf "$WORK"
 }
 trap cleanup EXIT INT TERM
 
-fails() {
-  npm test 2>&1 | grep -E '^# fail |^. fail ' | head -1 | grep -oE '[0-9]+$'
+failing_names() {
+  npm test 2>&1 | sed -n 's/^\xe2\x9c\x96 \(.*\) ([0-9.]*ms)$/\1/p' | sort -u
 }
 
-declare -a NAMES=()
-declare -a COUNTS=()
-
-measure() {
-  NAMES+=("$1")
-  COUNTS+=("$(fails)")
-  restore
-}
+MUTATIONS="narrowing purity armIdentity resumeSeed indexRebuild requiredDigest canonical scoredRefusal"
 
 echo "measuring baseline..."
-BASELINE="$(fails)"
-echo "baseline failures: $BASELINE"
-
-node tools/mutate.cjs narrowing      && measure "Builder input narrowing"
-node tools/mutate.cjs purity         && measure "Purity rebuild"
-node tools/mutate.cjs armIdentity    && measure "Arm-identity check"
-node tools/mutate.cjs resumeSeed     && measure "Resume binding seeding"
-node tools/mutate.cjs indexRebuild   && measure "Bundle index rebuild"
-node tools/mutate.cjs requiredDigest && measure "Required expectedDigest"
-node tools/mutate.cjs canonical      && measure "Canonical builder identity"
-node tools/mutate.cjs scoredRefusal  && measure "Scored-run refusal"
-
-restore
-FINAL="$(fails)"
-
-# A mutation whose anchor stopped matching would otherwise report zero failures
-# and read as a guard nobody needs.
-if [ "${#NAMES[@]}" -ne 8 ]; then
-  echo "ERROR: expected 8 measurements, got ${#NAMES[@]} - a mutation failed to apply" >&2
+failing_names > "$WORK/baseline"
+if [ -s "$WORK/baseline" ]; then
+  echo "ERROR: the tree is not green before measuring:" >&2
+  cat "$WORK/baseline" >&2
   exit 1
 fi
-if [ "$BASELINE" != "0" ] || [ "$FINAL" != "0" ]; then
-  echo "ERROR: baseline=$BASELINE final=$FINAL - the tree was not clean before or after" >&2
-  exit 1
+echo "baseline: green"
+
+RESULTS="$WORK/results"
+: > "$RESULTS"
+STATUS=0
+
+for name in $MUTATIONS; do
+  attempt=1
+  while : ; do
+    if ! node tools/mutate.cjs "$name" >/dev/null; then
+      echo "ERROR: mutation $name failed to apply" >&2
+      STATUS=1
+      break
+    fi
+    failing_names > "$WORK/observed"
+    restore
+    if node tools/compare-failures.cjs "$name" "$WORK/observed" >> "$RESULTS" 2>"$WORK/err"; then
+      break
+    fi
+    cat "$WORK/err" >&2
+    if [ "$attempt" -eq 1 ]; then
+      echo "  $name: mismatch, re-running once in case it was a flake" >&2
+      attempt=2
+      continue
+    fi
+    echo "ERROR: $name did not match its expected failures twice running" >&2
+    STATUS=1
+    break
+  done
+done
+
+restore
+failing_names > "$WORK/final"
+if [ -s "$WORK/final" ]; then
+  echo "ERROR: the tree is not green after measuring:" >&2
+  cat "$WORK/final" >&2
+  STATUS=1
 fi
 
 echo
 echo "| Guard removed | Tests that fail |"
 echo "| --- | --- |"
-for i in "${!NAMES[@]}"; do
-  echo "| ${NAMES[$i]} | ${COUNTS[$i]} |"
-done
+cat "$RESULTS"
 echo
-printf 'JSON {"baseline":%s,"final":%s' "$BASELINE" "$FINAL"
-for i in "${!NAMES[@]}"; do
-  printf ',"%s":%s' "${NAMES[$i]}" "${COUNTS[$i]}"
-done
-printf '}\n'
 git status --porcelain
+exit "$STATUS"
