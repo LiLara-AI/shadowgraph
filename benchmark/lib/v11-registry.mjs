@@ -88,8 +88,11 @@ export const NATIVE_ISOLATION = Object.freeze({
 
 /**
  * The single exclusion rule: an arm is excluded from ISOLATION_USER unless its
- * declared user isolation is SUPPORTED. Exported so every count path uses this
- * predicate rather than its own spelling of it.
+ * declared user isolation is SUPPORTED.
+ *
+ * Exported so that both count paths - this module and the acceptance
+ * definition's mechanical check - evaluate one predicate rather than each
+ * spelling the rule for itself.
  */
 export function isExcludedFromUserIsolation(declaredArm) {
   return declaredArm?.userIsolation?.status !== 'SUPPORTED';

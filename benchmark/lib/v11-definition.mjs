@@ -16,6 +16,7 @@ import {
   normalizedPublicDataKey,
   sealBoundary
 } from './v11-lexical.mjs';
+import { isExcludedFromUserIsolation } from './v11-registry.mjs';
 
 const FIXTURE_SET = 'candidate-acceptance-non-scored-2026-08';
 const HASH = /^[a-f0-9]{64}$/u;
@@ -475,8 +476,7 @@ function parseJson(bytes, label) {
     const value = JSON.parse(bytes.toString('utf8'));
     if (!isPlainObject(value)) boundaryReject('SHAPE');
     return value;
-  } catch (error) {
-    if (error.message.startsWith(label)) throw error;
+  } catch {
     boundaryReject('SHAPE');
   }
 }
@@ -673,7 +673,7 @@ function validateMechanicalCounts(definition, scenarioCount) {
   const repetitions = definition.commonExecution.repetitions;
   const totalUnits = scenarioCount * repetitions * definition.arms.length * definition.phases.length;
   const excludedArmCount = definition.arms.filter((arm) => (
-    arm.applicability.userIsolation.status === 'NOT_APPLICABLE'
+    isExcludedFromUserIsolation(arm.applicability)
   )).length;
   const excludedUnits = scenarioCount * repetitions * excludedArmCount;
   const measuredUnits = totalUnits - excludedUnits;
@@ -694,6 +694,18 @@ function deepFreeze(value) {
   return value;
 }
 
+/**
+ * Load and validate the frozen acceptance definition.
+ *
+ * Deliberately outside the sealed set. The three sealed entry points handle
+ * values that reach the outer prompt; this one reads harness-supplied paths, so
+ * its failures are operator diagnostics rather than attacker output. Sealing it
+ * would replace an actionable message - which file is missing, and where - with
+ * an opaque code, and would buy nothing: an unhandled failure here carries a
+ * static field name or a path the harness itself supplied, never scenario
+ * content. Everything it returns still passes through validateV11PublicScenario
+ * before it can become prompt material.
+ */
 export async function loadV11AcceptanceDefinition(options) {
   assertExactKeys(options, ['repositoryRoot'], 'acceptance definition loader options');
   assertNonEmptyString(options.repositoryRoot, 'acceptance definition loader repositoryRoot');

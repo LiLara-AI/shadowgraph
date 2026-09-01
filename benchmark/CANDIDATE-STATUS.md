@@ -116,6 +116,17 @@ carrying attacker-controlled text. Five such escapes existed and were found by
 review, not by the tests written alongside the first fix — those tests placed
 their proxy nested inside the sealed region and passed while the hole was open.
 
+`loadV11AcceptanceDefinition` is **deliberately outside** that sealed set, and
+is the only public v1.1 function that is. It reads harness-supplied paths, so
+its failures are operator diagnostics: sealing it would replace "which file is
+missing, and where" with an opaque code while buying nothing, since an unhandled
+failure there carries a static field name or a path the harness itself supplied,
+never scenario content. Independent review fuzzed it with 53 hostile-content
+mutations of the two acceptance files: 51 rejected with a code, 2 rejected with
+a static field name, none loaded, and no prototype pollution. Anything it
+returns still passes through `validateV11PublicScenario` before it can become
+prompt material.
+
 Residual limitation, stated rather than resolved: a converted throw cannot be
 attributed. Hostile input and a harness fault are indistinguishable at the
 boundary, because every property that might tell them apart is itself
