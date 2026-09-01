@@ -750,15 +750,43 @@ test('no tracked file contains a NUL byte', async () => {
   const tracked = stdout.split('\0').filter(Boolean);
   assert.ok(tracked.length > 100, 'the index listing looks truncated');
 
-  const offenders = [];
-  for (const relative of tracked) {
-    let bytes;
+  // The index is not enough. Asking git alone means a file added in the same
+  // commit as this check is invisible to it - and that is precisely when a NUL
+  // gets written. It happened: v11-locks.mjs went in with one, the gate ran
+  // green because the file was still untracked, and git reported it as binary
+  // in the commit diff. So sweep the working tree as well, and let the index
+  // listing serve as the assurance that the walk is not silently empty.
+  const seen = new Set(tracked);
+  const skip = new Set(['node_modules', '.git', 'coverage']);
+  const sources = /\.(?:mjs|cjs|js|json|md|py|sh|yml|yaml|ts)$/u;
+  const walk = async (relative) => {
+    const absolute = relative === '' ? REPOSITORY_ROOT : path.join(REPOSITORY_ROOT, relative);
+    let entries;
     try {
-      bytes = await readFile(path.join(REPOSITORY_ROOT, relative));
+      entries = await readdir(absolute, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const item of entries) {
+      const next = relative === '' ? item.name : `${relative}/${item.name}`;
+      if (item.isDirectory()) {
+        if (!skip.has(item.name)) await walk(next);
+      } else if (sources.test(item.name)) {
+        seen.add(next);
+      }
+    }
+  };
+  await walk('');
+
+  const offenders = [];
+  for (const relative of [...seen].sort()) {
+    let contents;
+    try {
+      contents = await readFile(path.join(REPOSITORY_ROOT, relative));
     } catch {
       continue;
     }
-    if (bytes.indexOf(0) >= 0) offenders.push(relative);
+    if (contents.indexOf(0) >= 0) offenders.push(relative);
   }
   assert.deepEqual(offenders, [], 'write the byte as an escape instead');
 });
