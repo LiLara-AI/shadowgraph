@@ -42,6 +42,15 @@ def _persistent_state_root() -> str:
     return normalized
 
 
+# Basic Memory declines to delete the only project in a configuration, and a
+# fresh store contains none, so the arm project would always be the only one and
+# RESET could never delete it. This is a second genuine native project held for
+# no other purpose: it keeps the count above one so the product permits the
+# delete. It never carries benchmark records and is never the arm namespace, so
+# no isolation is manufactured by it.
+RESET_ANCHOR_PROJECT = "shadowgraph-benchmark-reset-anchor"
+
+
 def _project_path(state_root: str, project: str) -> str:
     digest = hashlib.sha256(
         b"shadowgraph:basic-memory-project:v1\0" + project.encode("utf-8")
@@ -168,10 +177,23 @@ async def execute(
         client = await await_native(client_factory(_runtime_config(state_root), provider_calls))
         operation = request["operation"]
         if operation == "reset":
+            if project == RESET_ANCHOR_PROJECT:
+                raise ContractError("Basic Memory reset anchor is not a usable arm namespace")
             operations["memoryReadOperations"] += 1
             projects = await await_native(
                 client.list_memory_projects(output_format="json", context=None)
             )
+            if not _project_exists(projects, RESET_ANCHOR_PROJECT):
+                operations["memoryWriteOperations"] += 1
+                await await_native(
+                    client.create_memory_project(
+                        RESET_ANCHOR_PROJECT,
+                        _project_path(state_root, RESET_ANCHOR_PROJECT),
+                        set_default=False,
+                        workspace=None,
+                        output_format="json",
+                    )
+                )
             if _project_exists(projects, project):
                 operations["memoryWriteOperations"] += 1
                 await await_native(

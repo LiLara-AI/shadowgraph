@@ -31,19 +31,43 @@ Basic Memory served all of these from a local ASGI client over SQLite. **The
 declared but not exercised on any path this adapter uses. So this arm needs no
 provider endpoint and no external service, and is not blocked by B2.
 
-### A defect this exposed
+### A defect this exposed, confirmed against the adapter's own call shape
 
-`delete_project` failed with *"Cannot delete default project 'acc-probe'. This
-is the only project in your configuration."* That is the call the adapter makes
-during **RESET**, so a reset against a single-project store cannot succeed as
-currently written. It is a product constraint rather than a network failure, and
-it has to be handled before this arm can complete a lifecycle — most likely by
-resetting note content within the project rather than deleting the project
-itself.
+`delete_project` failed with *"Cannot delete default project … This is the only
+project in your configuration."* That is the call the adapter makes during
+**RESET**.
+
+The first probe used `set_default=True`, which the adapter does not, so the
+result could have been an artifact of an unfaithful test. It was re-run with the
+adapter's exact call shape — `create_memory_project(project, path,
+set_default=False, workspace=None, output_format="json")` then
+`delete_project(project, delete_notes=True, workspace=None)` — and the failure
+reproduced, on the first reset and again on a second cycle.
+
+The reason it always reproduces: a fresh store reports
+`{'projects': [], 'default_project': 'main'}`, i.e. **no projects at all**. The
+arm's project is therefore always the only project, so the product always
+refuses to delete it. RESET could never establish a clean namespace for this
+arm.
+
+Fixed at the source rather than worked around per-call: reset now ensures a
+second genuine native project — `shadowgraph-benchmark-reset-anchor` — exists
+before deleting the arm project, so the arm project is never the last one
+standing. The anchor is a real product project, never an arm namespace, and
+never carries benchmark records, so it manufactures no isolation.
+
+**Why the existing tests missed it:** the fake client in
+`test_basic_memory_adapter.py` deleted unconditionally, so it accepted a call
+the product refuses. A fake more permissive than the product cannot catch a
+sequence the product would reject. The fake now enforces the same constraint,
+and the reset path has regression cover.
 
 `search_notes` also returned no hit for a term present in the note just written,
-which may be indexing latency or a query-shape mismatch. Recorded as unresolved;
-it does not affect the provider-traffic conclusion.
+which may be indexing latency or a query-shape mismatch. **Unresolved**, and
+material to requirement 7: a retrieve that returns nothing would make the
+measured phases meaningless for this arm. It does not affect the
+provider-traffic conclusion, and it needs settling before this arm runs a
+lifecycle.
 
 ## Native user-isolation probe (assumptions A1 and A2)
 

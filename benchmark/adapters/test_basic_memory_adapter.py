@@ -40,6 +40,13 @@ class FakeBasicMemory:
             raise RuntimeError("delete failed")
         if project_name not in self.backend:
             raise ValueError("project not found")
+        if len(self.backend) == 1:
+            # Matches basic-memory 0.23.2, which refuses to remove the last
+            # project in a configuration.
+            raise ValueError(
+                "Cannot delete default project '%s'. This is the only project "
+                "in your configuration." % project_name
+            )
         self.backend.pop(project_name)
 
     async def create_memory_project(self, project_name, project_path, *, set_default=False, workspace=None, output_format="text"):
@@ -127,17 +134,20 @@ class BasicMemoryAdapterTests(unittest.TestCase):
     def test_reset_is_idempotent_and_uses_only_an_owned_persistent_project_path(self) -> None:
         first = self.execute("reset")
         self.assertEqual(first["status"], "SUCCEEDED")
+        # The anchor project is created before the arm project, so the arm
+        # project is never the only one and the product permits its deletion.
         self.assertEqual(
             [call[0] for call in self.clients[0].calls],
-            ["list_memory_projects", "create_memory_project"],
+            ["list_memory_projects", "create_memory_project", "create_memory_project"],
         )
-        create_call = self.clients[0].calls[1]
+        self.assertEqual(self.clients[0].calls[1][1], "shadowgraph-benchmark-reset-anchor")
+        create_call = self.clients[0].calls[2]
         self.assertEqual(create_call[1], "project-1")
         self.assertTrue(os.path.isabs(create_call[2]))
         self.assertEqual(os.path.commonpath([self.state_root, create_call[2]]), self.state_root)
         self.assertEqual(create_call[3:], (False, None, "json"))
         self.assertEqual(first["operations"]["memoryReadOperations"], 1)
-        self.assertEqual(first["operations"]["memoryWriteOperations"], 1)
+        self.assertEqual(first["operations"]["memoryWriteOperations"], 2)
 
         self.execute("persist")
         verified = self.execute(
@@ -246,3 +256,32 @@ class BasicMemoryAdapterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BasicMemoryResetAnchorTests(BasicMemoryAdapterTests):
+    """Regression cover for a defect the previous fake could not express.
+
+    A fresh Basic Memory store holds no projects, so without an anchor the arm
+    project is always the only one and the product refuses to delete it.
+    Measured against basic-memory 0.23.2 under --network none: the delete failed
+    on the first reset and again on the second.
+    """
+
+    def test_reset_deletes_an_arm_project_that_would_otherwise_be_the_only_one(self) -> None:
+        self.assertEqual(self.execute("reset")["status"], "SUCCEEDED")
+
+        # A second reset must genuinely delete and recreate rather than skip.
+        self.clients[0].calls.clear()
+        second = self.execute("reset")
+        self.assertEqual(second["status"], "SUCCEEDED")
+        performed = [call[0] for call in self.clients[-1].calls]
+        self.assertIn("delete_project", performed)
+        self.assertEqual(performed[-1], "create_memory_project")
+
+    def test_the_anchor_holds_no_records(self) -> None:
+        self.execute("reset")
+        self.assertIn("shadowgraph-benchmark-reset-anchor", self.backend)
+        anchor = dict(self.backend["shadowgraph-benchmark-reset-anchor"])
+        anchor.pop("__project_path__", None)
+        self.assertEqual(anchor, {}, "the anchor must never carry benchmark records")
+
