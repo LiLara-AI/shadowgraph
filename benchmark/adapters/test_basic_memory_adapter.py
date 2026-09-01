@@ -9,6 +9,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import basic_memory_adapter
+import python_runtime
+from envelope import ContractError
 
 from test_support import DECISION_SHA256, python_config, request_for
 
@@ -285,3 +287,76 @@ class BasicMemoryResetAnchorTests(BasicMemoryAdapterTests):
         anchor.pop("__project_path__", None)
         self.assertEqual(anchor, {}, "the anchor must never carry benchmark records")
 
+
+class BasicMemoryProductShapeTests(unittest.TestCase):
+    """The note shape the real product returns, not the one the fake returns.
+
+    Measured from basic-memory 0.23.2, `read_note(output_format="json",
+    include_frontmatter=False)` returns title/permalink/file_path/content/
+    frontmatter. Three things differ from what logical_record looks for: the
+    metadata is under `frontmatter` rather than `metadata`, the identifier is
+    `title` rather than `name`, and the body comes back with a leading newline
+    the writer did not supply. Before this was bridged, every retrieve and every
+    verify failed CONTRACT_FAILURE against the real product while passing
+    against the fake.
+    """
+
+    def product_note(self, record_id, encoded, digest):
+        return {
+            "title": record_id,
+            "permalink": "p1/notes/%s" % record_id.lower(),
+            "file_path": "notes/%s.md" % record_id,
+            # The product prepends a newline to the stored body.
+            "content": "\n%s" % encoded,
+            "frontmatter": {
+                "title": record_id,
+                "type": "note",
+                "shadowgraph_record_id": record_id,
+                "shadowgraph_record_type": "decision",
+                "shadowgraph_content_sha256": digest,
+            },
+        }
+
+    def test_a_product_shaped_note_becomes_one_logical_record(self) -> None:
+        content = {"decisionId": "decision-a", "choiceId": "choice-a"}
+        digest = python_runtime.record_content_sha256(content)
+        encoded = python_runtime.encode_content(content)
+
+        records = basic_memory_adapter._one_native_record(
+            self.product_note("REC-1", encoded, digest)
+        )
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["id"], "REC-1")
+        self.assertEqual(records[0]["type"], "decision")
+        self.assertEqual(records[0]["content"], content)
+
+    def test_a_body_that_stripping_would_alter_is_rejected_by_its_own_digest(self) -> None:
+        # Whitespace is stripped blind because the product adds it. That is only
+        # safe because the digest in the frontmatter catches any case where
+        # stripping changed the meaning.
+        content = {"decisionId": "decision-a"}
+        encoded = python_runtime.encode_content(content)
+        wrong_digest = "0" * 64
+
+        with self.assertRaises(ContractError):
+            basic_memory_adapter._one_native_record(
+                self.product_note("REC-1", encoded, wrong_digest)
+            )
+
+    def test_a_search_hit_is_read_back_by_its_title(self) -> None:
+        # Persist writes the record id as the note title, so that is the
+        # identifier a hit is read back with.
+        self.assertEqual(
+            basic_memory_adapter._search_hit_identifier(
+                {"title": "REC-1", "entity": "p1/notes/rec-1"}
+            ),
+            "REC-1",
+        )
+        # Falls back to the permalink when a hit omits its title.
+        self.assertEqual(
+            basic_memory_adapter._search_hit_identifier({"entity": "p1/notes/rec-1"}),
+            "p1/notes/rec-1",
+        )
+        with self.assertRaises(ContractError):
+            basic_memory_adapter._search_hit_identifier({"score": 1})

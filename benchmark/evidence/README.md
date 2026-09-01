@@ -82,22 +82,38 @@ the product refuses. A fake more permissive than the product cannot catch a
 sequence the product would reject. The fake now enforces the same constraint,
 and the reset path has regression cover.
 
-### Still open: retrieve does not complete
+### The full lifecycle now completes
 
-With a real client factory in place, the adapter now runs
-`reset -> persist -> reset` successfully under `--network none`. **Retrieve
-still fails**, with `CONTRACT_FAILURE` / "Basic Memory adapter contract failed
-closed".
+`reset -> persist -> retrieve -> reset` succeeds against the real product under
+`--network none`, with `embeddingCalls: 0` and `internalMemoryModelCalls: 0`,
+and retrieve returns the persisted decision record with its content intact.
 
-The cause is a shape mismatch rather than a network or reset problem. Basic
-Memory's search returns *entity references* — `title`, `type`, `score`,
-`entity`, `external_id` — not note content, so mapping a hit to a logical record
-needs a follow-up read per result. The adapter does not do that yet.
+Two further mismatches had to be bridged to get there, both hidden by a fake
+that was shaped more conveniently than the product.
 
-Until it does, this arm cannot complete a lifecycle, so requirement 6 is **not**
-closed for `basic-memory` even though it is no longer blocked: the factory is
-real, reset is repeatable, and the provider-traffic declaration is now true, but
-retrieve is unimplemented.
+**Search hits are not records.** Basic Memory's search returns entity
+references — `title`, `type`, `score`, `entity`, `external_id` — with no note
+body. Retrieve now reads each hit back through the same call verify uses, so
+retrieve and verify agree on what a stored record is.
+
+**A note is not shaped like a logical record.**
+`read_note(output_format="json", include_frontmatter=False)` returns
+`{title, permalink, file_path, content, frontmatter}`. Three things differ from
+what `logical_record` looks for: the metadata sits under `frontmatter` rather
+than `metadata`, the identifier is `title` rather than `name`, and the body
+comes back with a leading newline the writer never supplied. Until these were
+mapped, **every retrieve and every verify failed `CONTRACT_FAILURE` against the
+real product while passing against the fake** — so the verify path was broken
+too, not only retrieve.
+
+The body is stripped blind because the product adds the whitespace. That is only
+safe because the frontmatter carries the content digest, so a strip that ever
+changed meaning is rejected by `logical_record` rather than silently accepted.
+There is a test for exactly that.
+
+Requirement 6 is therefore **closed for `basic-memory`**, making four of the
+seven arms real: the three that need no external service by construction, plus
+this one.
 
 ## Native user-isolation probe (assumptions A1 and A2)
 

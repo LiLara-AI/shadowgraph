@@ -195,14 +195,59 @@ def _default_client_factory(config, _provider_call):
     return _PinnedBasicMemoryClient(exposed)
 
 
+def _search_hit_identifier(hit) -> str:
+    """The identifier a search hit can be read back by.
+
+    Persist writes the record id as the note title, so a hit's title is the
+    same identifier verify reads with. The permalink is accepted as a fallback
+    for hits that omit it.
+    """
+    if not isinstance(hit, dict):
+        raise ContractError("Basic Memory search returned an invalid result item")
+    for field in ("title", "entity", "permalink"):
+        value = hit.get(field)
+        if isinstance(value, str) and value.strip():
+            return value
+    raise ContractError("Basic Memory search result exposes no readable identifier")
+
+
 def _native_records(value) -> list[dict]:
     return [logical_record(item) for item in result_items(value)]
+
+
+def _normalized_note(value):
+    """Map a Basic Memory note onto the shape logical_record expects.
+
+    Measured against basic-memory 0.23.2, `read_note(output_format="json")`
+    returns `{title, permalink, file_path, content, frontmatter}`. Three things
+    differ from what logical_record looks for, and all three have to be bridged
+    here rather than by loosening the shared contract:
+
+    - the record metadata is under `frontmatter`, not `metadata`
+    - the identifier is `title`, not `name` or `id`
+    - the body is returned with a leading newline the writer did not supply
+
+    Whitespace is stripped from the body because the product adds it. That is
+    safe to do blind: the frontmatter carries the content digest, so
+    logical_record rejects the record if stripping ever changed its meaning.
+    """
+    if not isinstance(value, dict):
+        return value
+    frontmatter = value.get("frontmatter")
+    if not isinstance(frontmatter, dict):
+        return value
+    content = value.get("content")
+    return {
+        "name": frontmatter.get("shadowgraph_record_id") or value.get("title"),
+        "content": content.strip() if isinstance(content, str) else content,
+        "metadata": frontmatter,
+    }
 
 
 def _one_native_record(value) -> list[dict]:
     if value is None:
         return []
-    return [logical_record(value)]
+    return [logical_record(_normalized_note(value))]
 
 
 def _project_exists(value, project: str) -> bool:
@@ -289,9 +334,26 @@ async def execute(
                     search_type=LOCAL_SEARCH_TYPE,
                 )
             )
+            # A search hit is an entity reference carrying no note body, so it
+            # cannot be turned into a logical record on its own. Read each hit
+            # back through the same call verify uses, so retrieve and verify
+            # agree on what a stored record is.
+            native_context = []
+            for hit in result_items(raw):
+                operations["memoryReadOperations"] += 1
+                note = await await_native(
+                    client.read_note(
+                        _search_hit_identifier(hit),
+                        project=project,
+                        project_id=None,
+                        output_format="json",
+                        include_frontmatter=False,
+                    )
+                )
+                native_context.extend(_one_native_record(note))
             return build_envelope(
                 request,
-                native_context=_native_records(raw),
+                native_context=native_context,
                 operations=operations,
                 storage=STORAGE,
             )
