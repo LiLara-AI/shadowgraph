@@ -15,9 +15,9 @@ All figures below were produced on the current branch with a clean working tree.
 
 | Gate | Command | Result |
 | --- | --- | --- |
-| Full repository | `npm test` | **1988 / 1988 pass**, 0 fail, 20 suites |
-| Benchmark focused | `npm run benchmark:test` | **833 / 833 pass**, 0 fail |
-| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **690 / 690 pass**, 0 fail |
+| Full repository | `npm test` | **2032 / 2032 pass**, 0 fail, 23 suites |
+| Benchmark focused | `npm run benchmark:test` | **877 / 877 pass**, 0 fail |
+| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **734 / 734 pass**, 0 fail |
 | Python adapters | `npm run benchmark:test:python` | **79 tests, OK** |
 | Node syntax | `npm run check`, `npm run benchmark:check` | pass |
 | Python syntax | `npm run benchmark:check:python` | pass |
@@ -85,13 +85,13 @@ treat file content at HEAD, not the diffs, as the object of review.
 | # | Requirement | Status |
 | --- | --- | --- |
 | 1 | Serialized-input safety and error non-disclosure | **Closed**, scoped — see below |
-| 2 | Registry, runner, CLI, validator, aggregator/scorer, truthful applicability | **Partial** |
+| 2 | Registry, runner, CLI, validator, aggregator/scorer, truthful applicability | **Closed** offline; live execution waits on 6 |
 | 3 | One centralized outer decision path; adapters memory-only | **Closed** |
 | 4 | Provider-evidence reconciliation | **Closed** |
 | 5 | Mutation state fails closed | **Closed** (mechanism); wiring waits on 6 |
 | 6 | Real pinned runtime factories for all seven arms | **Open** — 4 of 7 real, 3 blocked |
-| 7 | Non-scored acceptance, 308 units | **Open — blocked** |
-| 8 | Locks, ledger validation, readiness, evidence index, review bundle | **Partial** |
+| 7 | Non-scored acceptance, 308 units | **Closed** offline; a real run is blocked by B1/B2 |
+| 8 | Locks, ledger validation, readiness, evidence index, review bundle | **Partial** — builders done, artifacts blocked |
 | 9 | Focused, Node, Python, package, MCP, integration, smoke, privacy checks | **Closed** |
 
 ### Closed
@@ -165,21 +165,93 @@ removed only on confirmed success. A surviving latch forces `FAILED` /
 `AMBIGUOUS` is a mutation state, not a unit status, and the four contract
 statuses are unchanged.
 
-### Partial
-
 **2 — Integration.** The registry binds all seven arms to pinned runtimes and to
 *observed* native isolation, refuses a lock that disagrees with an adapter spec,
-and derives expected counts from whichever matrix is in force. `benchmark/cli.mjs
-v11-preflight` reports readiness and exits non-zero when blocked. Not yet done:
-driving the v1.1 runner, aggregator and scorer through a full lifecycle, which
-depends on requirement 6.
+and derives expected counts from whichever matrix is in force.
 
-**8 — Locks and bundle.** The readiness check exists and the isolation probe is
-recorded under `benchmark/evidence/`. Lock and bundle **artifacts** are
-deliberately not generated: `implementation-lock.mjs` requires a fully clean tree
-(untracked files included) and an immutable HEAD, so generating them before the
-governed source set is final would be invalid. Model locks additionally require
-digests that do not exist (B1).
+Readiness now has exactly one implementation, in `benchmark/lib/v11-run.mjs`.
+`v11-preflight` and `v11-run` call the same function, and a test asserts their
+blocker lists are deeply equal — the failure worth preventing is a preflight
+that says NOT READY while a run starts anyway, and shared code is the only thing
+that makes that impossible rather than merely unlikely.
+
+`v11-run` refuses a blocked candidate, prints every blocker, exits non-zero and
+writes **no** artifact, so a refused attempt cannot leave a directory behind that
+later reads as evidence. Readiness is evaluated before the runtime binding is
+resolved, so the refusal names the actual blockers rather than failing to reach
+hosts that were never the point. There is no override flag.
+
+`createV11AdapterExecutor` routes each arm to the runtime kind the lock names
+for it and refuses an arm whose runtime host is not configured. It never falls
+back to another host: running an arm on a runtime the lock does not describe
+would report a measurement of software nobody pinned.
+
+The full path — runner to validator to aggregator, with the progress ledger
+supplying checkpoint and watchdog state and the unit-evidence ledger supplying
+`persistUnit` — is exercised end to end over all 308 units in
+`test/benchmark-v11-run.test.js`, with `validateRawRun` returning `valid: true`
+for the run it just produced and 308 checkpoints on disk. That test uses a
+**stub registry**, because a READY verdict is not reachable from the real one
+today (graphiti declares user isolation the product does not have, and three
+immutable prerequisites are absent). What it proves is that the pieces are
+connected, not that the candidate is ready; the readiness tests beside it cover
+the refusal against the real candidate.
+
+**7 — Offline acceptance.** `test/benchmark-v11-acceptance.test.js` drives all
+308 units through the real runner with the real prompt builder, adapters and
+outer model injected: 16 EXCLUDED, 292 MEASURED, 28 RESET, 264 outer calls, each
+count derived from the declared matrix and then cross-checked against the
+definition, the loader and the literal. Eleven fault injections assert
+fail-closed behaviour: prompt divergence, arm self-identification, memory
+recalled before anything was stored, failed reset, unverified persistence,
+malformed envelopes, outer failure with no fabricated fallback, watchdog stall,
+interruption, resume, and one arm failing without taking the others down.
+
+This closes the **offline** half of requirement 7 only. It is a mock harness
+run. It is not evidence that any arm was measured, and B1 alone still prevents a
+real acceptance run.
+
+Building it found a real defect. The runner handed whatever `buildOuterRequest`
+returned straight to the model with no audit — the injection point that makes
+the runner testable is also what would let a caller give one arm different
+instructions. `auditOuterRequest` now closes it at the choke point: the first
+measured decision unit of an attempt fixes the system instruction and response
+schema, every later unit must match, and no prompt may name the arm it is
+running. It checks divergence rather than a particular wording; pinning the text
+would bind the runner to one prompt module without catching anything divergence
+does not, and `buildV11Prompt` already audits its own output. Removing the audit
+call fails exactly the two tests that claim to cover it.
+
+### Partial
+
+**8 — Locks and bundle.** The readiness check exists, the isolation probe is
+recorded under `benchmark/evidence/`, and provider-ledger validation is closed
+under requirement 4.
+
+The evidence index and review bundle **builders** are now implemented in
+`benchmark/lib/v11-evidence-bundle.mjs`. The property they exist for is that a
+review verdict can be bound to exact bytes: the index is sorted by path so it is
+a function of its contents rather than of collection order, the bundle
+serializes canonically so two builds from the same inputs are byte-identical,
+and its digest covers the commit, both lock hashes, the three frozen source
+hashes and the index. Any change to any indexed artifact changes the digest, so
+a verdict quoting one digest cannot be carried to a different bundle.
+
+The builders refuse rather than paper over: a malformed or fabricated-shaped
+digest, a duplicate path with two digests, an absolute or traversing path, an
+empty index, an unrecognised evidence kind, a short commit id, a missing
+required evidence kind, and any attempt to bundle a scored run. They never hash
+files themselves — digests come from the caller that read the bytes — because a
+builder that hashed its own tree could be pointed at a different tree than the
+one under review.
+
+Lock and bundle **artifacts** remain deliberately ungenerated.
+`implementation-lock.mjs` requires a fully clean tree (untracked files included)
+and an immutable HEAD, so generating them before the governed source set is
+final would be invalid. Model locks additionally require digests that do not
+exist (B1), and `benchmark/service-images.json` cannot be authored without real
+image digests, which is why `v11-preflight` still reports all three immutable
+prerequisites as unmet.
 
 ## Known limitation: the `persistence` applicability field is inert
 

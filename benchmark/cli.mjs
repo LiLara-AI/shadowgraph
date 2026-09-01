@@ -22,6 +22,11 @@ import {
 import { verifyPreregistration } from './lib/preregistration.mjs';
 import { loadV11AcceptanceDefinition } from './lib/v11-definition.mjs';
 import { createV11Registry } from './lib/v11-registry.mjs';
+import {
+  V11RunError,
+  computeV11Readiness,
+  executeV11AcceptanceRun
+} from './lib/v11-run.mjs';
 import { validateRawRun } from './lib/validate.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -35,7 +40,7 @@ const PHASES = ['A', 'B', 'C', 'D_TRUE', 'D_FALSE_0', 'D_FALSE_1', 'D_FALSE_2', 
 function parseArgs(argv) {
   if (argv.length === 0) {
     throw new Error(
-      'Usage: benchmark/cli.mjs <preflight|v11-preflight|run|validate|aggregate> [options]'
+      'Usage: benchmark/cli.mjs <preflight|v11-preflight|v11-run|run|validate|aggregate> [options]'
     );
   }
   const command = argv[0];
@@ -456,40 +461,100 @@ async function aggregateCommand(options) {
  * prerequisite is an unsatisfied prerequisite: letting a SyntaxError escape
  * would abort the command and emit no readiness report at all.
  */
-async function readGateJson(filePath) {
-  let text;
-  try {
-    text = await readFile(filePath, 'utf8');
-  } catch (error) {
-    if (error?.code === 'ENOENT') return { state: 'absent' };
-    return { state: 'unreadable' };
-  }
-  try {
-    return { state: 'present', value: JSON.parse(text) };
-  } catch {
-    return { state: 'malformed' };
-  }
+/** Load the frozen candidate: competitor lock, registry, acceptance definition. */
+async function loadV11Candidate() {
+  const competitorLock = JSON.parse(await readFile(competitorLockPath, 'utf8'));
+  const containerImage = competitorLock.pythonImage;
+  const registry = createV11Registry({ competitorLock, containerImage });
+  const loaded = await loadV11AcceptanceDefinition({ repositoryRoot: root });
+  return { competitorLock, containerImage, registry, ...loaded };
 }
 
-const FULL_SHA256 = /^sha256:[a-f0-9]{64}$/u;
-
-function isPlainRecord(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+function parsePreconditions(options) {
+  return typeof options.preconditions === 'string' && options.preconditions.length > 0
+    ? options.preconditions.split(',').map((entry) => entry.trim()).filter(Boolean)
+    : [];
 }
 
 /**
- * Describe why a prerequisite is unmet, or null when it is met.
+ * Execute the non-scored acceptance plan.
  *
- * These gates confirm that evidence is present and well-formed. They cannot
- * confirm it is authentic: a syntactically valid digest for a model nobody ran
- * would satisfy the shape check. Authenticity is the reviewer's job, and the
- * blocker text says so rather than implying the check proves more than it does.
+ * The readiness gate is the same computation `v11-preflight` reports, and it
+ * is not overridable. There is deliberately no flag that runs over blockers:
+ * they describe evidence the numbers would be read against, so a run that
+ * ignored them would produce results nobody could hold to anything. A refusal
+ * writes no artifact, so a blocked attempt cannot leave behind a directory
+ * that later reads as evidence.
  */
-function unmetReason(gate, isSatisfied) {
-  if (gate.state === 'absent') return 'the declaring file does not exist';
-  if (gate.state === 'unreadable') return 'the declaring file could not be read';
-  if (gate.state === 'malformed') return 'the declaring file is not valid JSON';
-  return isSatisfied(gate.value) ? null : 'the declaring file contains no usable entry';
+async function v11RunCommand(options) {
+  const candidate = await loadV11Candidate();
+  const benchmarkRoot = join(root, 'benchmark');
+  const satisfiedPreconditions = parsePreconditions(options);
+
+  // Readiness is decided before anything else is touched, including the
+  // runtime binding. A blocked candidate must produce a refusal that names
+  // its blockers, not a failure to reach hosts that were never the point.
+  const readiness = await computeV11Readiness({
+    ...candidate,
+    benchmarkRoot,
+    satisfiedPreconditions
+  });
+  if (readiness.readiness !== 'READY') {
+    process.stdout.write(`${JSON.stringify({
+      schema: 'shadowgraph.v11.run',
+      version: 1,
+      status: 'REFUSED',
+      reason: 'the candidate is not ready to execute an acceptance run',
+      artifactsWritten: [],
+      readiness
+    }, null, 2)}`);
+    process.exitCode = 1;
+    return null;
+  }
+
+  const outputDirectory = optionPath(options.out, join(benchmarkRoot, 'results'));
+  const runId = safeRunId(options['run-id']);
+  const attemptId = safeRunId(options['attempt-id'] ?? `${runId}-attempt-1`);
+  const outcome = await executeV11AcceptanceRun({
+    ...candidate,
+    benchmarkRoot,
+    satisfiedPreconditions,
+    runId,
+    attemptId,
+    sourceHashes: candidate.sourceHashes,
+    amendment002Path: join(benchmarkRoot, 'preregistration-amendment-002.json'),
+    ...v11RuntimeDependencies()
+  });
+
+  const rawPath = join(outputDirectory, `${attemptId}.raw.json`);
+  const aggregatePath = join(outputDirectory, `${attemptId}.aggregate.json`);
+  await writeJson(rawPath, outcome.raw);
+  await writeJson(aggregatePath, outcome.aggregate);
+  process.stdout.write(`${JSON.stringify({
+    schema: 'shadowgraph.v11.run',
+    version: 1,
+    status: outcome.raw.status,
+    mode: outcome.raw.mode,
+    valid: outcome.validation.valid,
+    artifactsWritten: [rawPath, aggregatePath]
+  }, null, 2)}`);
+  if (!outcome.validation.valid) process.exitCode = 1;
+  return outcome;
+}
+
+/**
+ * Bind the runtime dependencies a real run needs.
+ *
+ * Deliberately unimplemented. Every arm that needs a service is already an
+ * unmet blocker in the readiness report, so this is unreachable today. A
+ * placeholder here would let a future readiness change start a run against
+ * hosts nobody provisioned, which is the failure this refusal exists to stop.
+ */
+function v11RuntimeDependencies() {
+  throw new V11RunError(
+    'RUNTIME_UNAVAILABLE',
+    'v1.1 runtime hosts are not provisioned; see v11-preflight blockers'
+  );
 }
 
 /**
@@ -501,99 +566,20 @@ function unmetReason(gate, isSatisfied) {
  * a statement about the candidate, not about any arm's behaviour.
  */
 async function v11Preflight(options) {
-  const competitorLock = JSON.parse(await readFile(competitorLockPath, 'utf8'));
-  const containerImage = competitorLock.pythonImage;
-  const registry = createV11Registry({ competitorLock, containerImage });
-
-  const { definition, scenarios } = await loadV11AcceptanceDefinition({ repositoryRoot: root });
-  const declared = Object.fromEntries(
-    definition.arms.map((arm) => [arm.id, arm.applicability])
-  );
-  const satisfied = typeof options.preconditions === 'string' && options.preconditions.length > 0
-    ? options.preconditions.split(',').map((entry) => entry.trim()).filter(Boolean)
-    : [];
-
-  const applicability = registry.verifyApplicability(declared, satisfied);
-  const derivedCounts = registry.expectedCounts({
-    scenarios: scenarios.length,
-    repetitions: definition.commonExecution.repetitions,
-    phases: definition.phases,
-    declared
+  const { registry, definition, scenarios, containerImage } = await loadV11Candidate();
+  const {
+    applicability,
+    declaredCounts,
+    derivedCounts,
+    readiness,
+    blockers
+  } = await computeV11Readiness({
+    registry,
+    definition,
+    scenarios,
+    benchmarkRoot: join(root, 'benchmark'),
+    satisfiedPreconditions: parsePreconditions(options)
   });
-
-  const declaredCounts = definition.expectedCounts;
-  const countMismatches = Object.keys(derivedCounts)
-    .filter((key) => derivedCounts[key] !== declaredCounts[key])
-    .map((key) => ({ count: key, declared: declaredCounts[key], derived: derivedCounts[key] }));
-
-  const blockers = [];
-  for (const finding of applicability.findings) {
-    blockers.push({ kind: 'applicability', ...finding });
-  }
-  for (const mismatch of countMismatches) {
-    blockers.push({ kind: 'expected-counts', ...mismatch });
-  }
-  for (const descriptor of registry.descriptors) {
-    if (descriptor.requiredService !== null) {
-      blockers.push({
-        kind: 'required-service',
-        armId: descriptor.armId,
-        service: descriptor.requiredService
-      });
-    }
-  }
-
-  // Immutable prerequisites. The implementation lock requires a full
-  // sha256:<64 hex> weight digest per model and a committed service manifest.
-  // Neither exists, and neither may be synthesised, so readiness has to account
-  // for them or it would report READY for a run that cannot lawfully start.
-  const prerequisites = [
-    {
-      requirement: 'model-weight-digests',
-      gate: await readGateJson(join(root, 'benchmark', 'model-weights.lock.json')),
-      isSatisfied: (value) => Array.isArray(value?.models) && value.models.length > 0
-        && value.models.every((model) => (
-          isPlainRecord(model)
-          && model.digestKind === 'model_weights'
-          && typeof model.weightsDigest === 'string'
-          && FULL_SHA256.test(model.weightsDigest)
-          && typeof model.modelId === 'string'
-          && model.modelId.length > 0
-        ))
-    },
-    {
-      requirement: 'service-manifest',
-      gate: await readGateJson(join(root, 'benchmark', 'service-images.json')),
-      isSatisfied: (value) => Array.isArray(value?.serviceImages) && value.serviceImages.length > 0
-        && value.serviceImages.every((service) => (
-          isPlainRecord(service)
-          && typeof service.name === 'string' && service.name.length > 0
-          && typeof service.image === 'string' && service.image.length > 0
-        ))
-    },
-    {
-      requirement: 'reproducible-runtime-bytes',
-      gate: await readGateJson(join(root, 'benchmark', 'python-wheels.lock.json')),
-      isSatisfied: (value) => Array.isArray(value?.wheels) && value.wheels.length > 0
-        && value.wheels.every((wheel) => (
-          isPlainRecord(wheel)
-          && typeof wheel.name === 'string' && wheel.name.length > 0
-          && typeof wheel.sha256 === 'string' && /^[a-f0-9]{64}$/u.test(wheel.sha256)
-        ))
-    }
-  ];
-
-  for (const { requirement, gate, isSatisfied } of prerequisites) {
-    const reason = unmetReason(gate, isSatisfied);
-    if (reason !== null) {
-      blockers.push({
-        kind: 'immutable-prerequisite',
-        requirement,
-        detail: reason,
-        note: 'presence and shape only; this check cannot establish authenticity'
-      });
-    }
-  }
 
   const report = {
     schema: 'shadowgraph.v11.preflight',
@@ -610,7 +596,7 @@ async function v11Preflight(options) {
     applicability,
     declaredCounts,
     derivedCounts,
-    readiness: blockers.length === 0 ? 'READY' : 'NOT READY',
+    readiness,
     blockers
   };
 
@@ -622,6 +608,7 @@ async function v11Preflight(options) {
 const { command, options } = parseArgs(process.argv.slice(2));
 if (command === 'preflight') await preflight(options);
 else if (command === 'v11-preflight') await v11Preflight(options);
+else if (command === 'v11-run') await v11RunCommand(options);
 else if (command === 'run') {
   const { raw, preregistration } = await createRun(options);
   const aggregate = aggregateRun(raw, preregistration);
