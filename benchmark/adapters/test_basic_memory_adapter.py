@@ -432,3 +432,62 @@ class BasicMemoryRetrieveReadBackTests(BasicMemoryAdapterTests):
         self.assertEqual(response["operations"]["memoryReadOperations"], 2)
         self.assertEqual(response["operations"]["embeddingCalls"], 0)
         self.assertEqual(response["operations"]["internalMemoryModelCalls"], 0)
+
+
+class BasicMemoryRuntimeEnvironmentTests(unittest.TestCase):
+    """The factory must pin its runtime environment before the package loads.
+
+    Basic Memory reads its configuration lazily at import time, so both of
+    these have to be set before the import or they have no effect: the state
+    root, or records land outside the measured directory, and the semantic
+    index, whose sync scheduler otherwise fetches an embedding model from the
+    network on the write path.
+
+    Measured with a getaddrinfo guard over a twelve-operation lifecycle:
+    5 outbound attempts to huggingface.co with the semantic flag removed,
+    0 with it set. That fetch is a model download rather than a metered
+    inference call, so no adapter counter moves and nothing else in this suite
+    would notice it coming back.
+
+    The factory sets both variables before the import that raises when the
+    package is absent, so this asserts the contract without needing it
+    installed.
+    """
+
+    def setUp(self) -> None:
+        self.state_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.state_directory.cleanup)
+        self.project_root = str(Path(self.state_directory.name).resolve())
+        self.environment = patch.dict(os.environ, {})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+        os.environ.pop("BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED", None)
+        os.environ.pop("BASIC_MEMORY_HOME", None)
+
+    def invoke_factory(self):
+        config = {"project_root": self.project_root, "automatic_retries": 0}
+        try:
+            basic_memory_adapter._default_client_factory(config, None)
+        except Exception:
+            # The package is not installed in this environment. The variables
+            # are set before that failure, which is the point.
+            pass
+
+    def test_the_semantic_index_is_disabled_before_the_package_loads(self) -> None:
+        self.invoke_factory()
+        self.assertEqual(
+            os.environ.get("BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED"),
+            "false",
+            "an enabled semantic index fetches an embedding model over the network, "
+            "on an arm that declares no request classes",
+        )
+
+    def test_the_state_root_is_pinned_before_the_package_loads(self) -> None:
+        self.invoke_factory()
+        self.assertEqual(os.environ.get("BASIC_MEMORY_HOME"), self.project_root)
+
+    def test_a_relative_project_root_is_refused(self) -> None:
+        with self.assertRaises(ContractError):
+            basic_memory_adapter._default_client_factory(
+                {"project_root": "relative/path"}, None
+            )
