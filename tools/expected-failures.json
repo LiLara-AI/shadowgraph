@@ -45,5 +45,15 @@
   ],
   "scoredRefusal": [
     "the runner itself refuses a scored run, not merely the layer above it"
+  ],
+  "envType": [
+    "a placeholder in a numeric field is not an observation"
+  ],
+  "serviceTag": [
+    "a service pinned by tag is not pinned",
+    "a service image and its recorded digest cannot disagree"
+  ],
+  "modelDigest": [
+    "a short model identifier cannot pin weights — this is blocker B1 in code"
   ]
 }

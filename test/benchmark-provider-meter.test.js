@@ -187,6 +187,40 @@ async function sendIncompleteRequest(url, { method = 'POST', contentLength }) {
   }
 }
 
+/**
+ * Start a meter with its shutdown already registered.
+ *
+ * A meter holds a listening socket and an open ledger descriptor, so one that
+ * is never closed keeps the Node event loop alive and the test process hangs
+ * forever - at near-zero CPU, with nothing on stdout, after every test in the
+ * file has already reported. That is not a hypothetical: the concurrent-provider
+ * test below created its meter and closed it only on the success path, eight
+ * assertions later. Any one of them throwing left the socket open, and because
+ * the temporary-directory hook still ran, the ledger it held became an
+ * open-but-deleted file - which is exactly what a stuck run was found holding.
+ *
+ * Registering inside the helper makes the failure mode unreachable rather than
+ * unlikely. `close()` is idempotent (provider-meter.mjs memoizes closePromise),
+ * so a test may still close explicitly to assert shutdown behaviour.
+ *
+ * The close is bounded too. Registering a hook guarantees close() is CALLED,
+ * not that it RETURNS: it awaits server.close(), which settles only once every
+ * connection has drained. A cleanup hook that can park forever is the same
+ * silent stall one layer up, so a meter that will not shut down names itself
+ * instead. Requests carry their own deadlines, so a healthy close is
+ * milliseconds; 5s is far above the sub-second budgets this file already holds
+ * close to at its two explicit shutdown assertions.
+ */
+async function startTrackedMeter(t, config) {
+  const meter = await startProviderMeter(config);
+  t.after(() => within(
+    meter.close(),
+    5_000,
+    'meter close did not finish within 5s; a socket or ledger handle is leaking'
+  ));
+  return meter;
+}
+
 async function meterFor(t, upstreamBaseUrl, overrides = {}) {
   const directory = await temporaryDirectory(t);
   const ledgerPath = path.join(directory, 'provider-requests.ndjson');
@@ -252,11 +286,10 @@ test('configuration is loopback-only, ledgers are collision-safe, and bindings r
   await assert.rejects(startProviderMeter(baseConfig), /ledger already exists/i);
   assert.equal(await readFile(baseConfig.ledgerPath, 'utf8'), 'preserve-me\n');
 
-  const fresh = await startProviderMeter({
+  const fresh = await startTrackedMeter(t, {
     ...baseConfig,
     ledgerPath: path.join(directory, 'fresh.ndjson')
   });
-  t.after(() => fresh.close());
 
   const { requestClass: _omitted, ...missingClass } = BASE_CORRELATION;
   assert.throws(() => fresh.bindEndpoint(missingClass), /requestClass/i);
@@ -491,14 +524,13 @@ test('early bound rejections close incomplete bodies and cannot block meter shut
   });
   const directory = await temporaryDirectory(t);
   const ledgerPath = path.join(directory, 'early-rejections.ndjson');
-  const meter = await startProviderMeter({
+  const meter = await startTrackedMeter(t, {
     listenerUrl: 'http://127.0.0.1:0',
     upstreamBaseUrl: upstream.origin,
     upstreamAuthorization: null,
     ledgerPath,
     upstreamTimeoutMs: 2_000
   });
-  t.after(() => meter.close());
   const endpoint = meter.bindEndpoint(BASE_CORRELATION);
 
   const wrongMethod = await sendIncompleteRequest(`${endpoint}/chat/completions`, {
@@ -939,6 +971,10 @@ test('downstream aborts are recorded and close drains in-flight handlers before 
     ledgerPath,
     upstreamTimeoutMs: 2_000
   });
+  // Not startTrackedMeter: close() drains in-flight handlers, and this test
+  // parks one deliberately. The release has to happen before the close, so this
+  // hook owns both. A second close-only hook could run first and deadlock
+  // against the handler this one is about to release.
   t.after(() => {
     releaseUpstream?.();
     return meter.close();
@@ -1048,7 +1084,7 @@ test('concurrent provider calls serialize as complete monotonically numbered NDJ
   });
   const directory = await temporaryDirectory(t);
   const ledgerPath = path.join(directory, 'concurrent.ndjson');
-  const meter = await startProviderMeter({
+  const meter = await startTrackedMeter(t, {
     listenerUrl: 'http://127.0.0.1:0',
     upstreamBaseUrl: upstream.origin,
     upstreamAuthorization: null,

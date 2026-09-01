@@ -15,9 +15,9 @@ All figures below were produced on the current branch with a clean working tree.
 
 | Gate | Command | Result |
 | --- | --- | --- |
-| Full repository | `npm test` | **2056 / 2056 pass**, 0 fail, 20 suites |
-| Benchmark focused | `npm run benchmark:test` | **901 / 901 pass**, 0 fail |
-| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **758 / 758 pass**, 0 fail |
+| Full repository | `npm test` | **2058 / 2058 pass**, 0 fail, 20 suites |
+| Benchmark focused | `npm run benchmark:test` | **903 / 903 pass**, 0 fail |
+| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **760 / 760 pass**, 0 fail |
 | Python adapters | `npm run benchmark:test:python` | **86 tests, OK** |
 | Node syntax | `npm run check`, `npm run benchmark:check` | pass |
 | Python syntax | `npm run benchmark:check:python` | pass |
@@ -36,6 +36,22 @@ artifact.
 `npm run benchmark:journal:validate` is **not** an argument-free gate. It
 requires `<raw-results.json>` and therefore only applies after a real run, which
 has not occurred.
+
+`npm run benchmark:test` runs at Node's default concurrency while `npm test`
+pins `--test-concurrency=1`, and the difference is load-bearing. One run of it
+failed a single test, `journal benchmark treats projection collection order as
+non-semantic at 1k`, which re-ran clean immediately after. The cause is not
+timing. `scripts/bench-journal.mjs` reported `json at 1000 was not measured` and
+`sqlite at 1000 was not measured`, and the backend evidence carried
+`ENOSPC: no space left on device`. Six copies in parallel reproduce it seven
+times in eight; run sequentially it is green three times in three. The tool is
+behaving correctly - it refuses to report a measurement it did not take - and
+the failure is environmental. It is recorded because a suite that can fail for a
+reason unrelated to the code under test is precisely what corrupts a mutation
+table, and because the host `/tmp` was found holding 83,833 leaked
+`shadowgraph-*` scratch directories occupying 8.7 GB of a 16 GB tmpfs,
+accumulated since 30 August 2026. That leak is in the suite's own scratch
+handling, it is unfixed, and it is a finding in its own right.
 
 ### Frozen bytes
 
@@ -350,6 +366,45 @@ interrupt without restoring — the safety net vanishing across roughly thirteen
 of the run's fourteen minutes. Both are fixed; the restore-on-interrupt is
 verified rather than asserted, by sending SIGINT mid-run and comparing digests.
 
+A third harness defect, found by running it. One `npm test` inside it stalled
+for over an hour at near-zero CPU with nothing on stdout, and the harness waited
+with it. The cause was one test in `test/benchmark-provider-meter.test.js` that
+started a provider meter and closed it only at the end of the test body, behind
+eight assertions and eighteen concurrent requests. A meter holds a listening
+socket and an open ledger descriptor, so any assertion that threw skipped the
+close and kept the event loop alive forever: every test in the file reported,
+and then the process sat there. The temporary-directory hook did run, unlinking
+the ledger while the descriptor stayed open, which is why the stuck process was
+found holding an open-but-deleted `concurrent.ndjson`.
+
+It was the only one of five meter creations in that file with no immediate
+cleanup hook; the other four register one on the next statement. Starting a
+meter and registering its shutdown are now the same call, so an unregistered
+meter is unreachable rather than unlikely, and that shutdown is bounded, because
+a hook that calls `close()` guarantees the call and not the return. The one
+meter that still owns its own hook is the disconnect test, which has to release
+a deliberately parked handler before closing; a second close-only hook would run
+first and deadlock against the handler this one is about to release.
+
+The attribution matters more than the leak. `serviceTag` was the mutation
+mounted when the stall was noticed, and it is the tenth of eleven cells, so it
+inherited the blame for a defect it has no path to: `node --test` runs each file
+in its own process, nothing outside `test/benchmark-v11-locks.test.js` imports
+`v11-locks.mjs`, and the mutation replaces one synchronous rejection with
+another. Measured, it takes the same 84 seconds as every other cell. An
+unbounded wait had reintroduced attribution error in the time dimension, which
+is the same mistake this file exists to remove in the count dimension. Every run
+is now bounded; a timeout is written as its own kind of row, never folded into a
+mismatch, its log is kept, and the harness stops rather than spending the
+remaining cells rediscovering the same thing.
+
+And a defect in that fix, found by probing it rather than by reading it: the
+first version printed `baseline: green` after a five-second timeout. The run had
+been killed, the truncated log carried no failure lines, and absence of evidence
+was read as health — the broad-claim/narrow-inspection shape recorded above,
+inside the patch written to prevent it. A run with no test summary is now
+unmeasured at the baseline, at every cell, and at the final check.
+
 It exists because three consecutive review rounds each caught one wrong number
 in a hand-written table. The last was a purity-rebuild figure of 3 that should
 have been 1: that mutation removed the rebuild *call* as well as the comparison,
@@ -367,6 +422,9 @@ confusion generating the table removes.
 | Required Digest | 1 — verification refuses to run without the digest it is meant to check |
 | Canonical | 1 — a real run may use only the frozen prompt builder |
 | Scored Refusal | 1 — the runner itself refuses a scored run, not merely the layer above it |
+| Env Type | 1 — a placeholder in a numeric field is not an observation |
+| Service Tag | 2 — a service pinned by tag is not pinned; a service image and its recorded digest cannot disagree |
+| Model Digest | 1 — a short model identifier cannot pin weights — this is blocker B1 in code |
 
 **6 — Runtime factories, and what the blocked three actually do.** Four arms
 have real pinned factories: no-memory, ShadowGraph Full, ShadowGraph Compact and

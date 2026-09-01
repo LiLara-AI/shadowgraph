@@ -64,6 +64,28 @@ const MUTATIONS = {
     '  if (buildOuterRequest !== buildV11Prompt) {',
     '  if (false) {'
   ],
+  // Reverts the per-field typing to the permissive check that accepted either
+  // a positive number or a non-empty string for every field, so a count could
+  // be satisfied by prose.
+  envType: [
+    'benchmark/lib/v11-locks.mjs',
+    "    if (ENVIRONMENT_SHAPE[field] === 'count') {\n"
+    + '      return !Number.isSafeInteger(value) || value <= 0;\n    }',
+    "    if (typeof value === 'number') return !Number.isFinite(value) || value <= 0;"
+  ],
+  // Lets a service be recorded against a moving tag rather than a digest.
+  serviceTag: [
+    'benchmark/lib/v11-locks.mjs',
+    '    if (parts.length !== 2) {',
+    '    if (false) {'
+  ],
+  // Lets a short Ollama identifier stand in for a weights digest, which is the
+  // one thing blocker B1 turns on.
+  modelDigest: [
+    'benchmark/lib/v11-locks.mjs',
+    "    if (typeof model.weightsDigest !== 'string' || !PREFIXED_SHA256.test(model.weightsDigest)) {",
+    "    if (typeof model.weightsDigest !== 'string') {"
+  ],
   scoredRefusal: [
     'benchmark/lib/v11-runner.mjs',
     '  if (options.scored) {\n'
