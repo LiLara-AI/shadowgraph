@@ -89,7 +89,7 @@ treat file content at HEAD, not the diffs, as the object of review.
 | 3 | One centralized outer decision path; adapters memory-only | **Closed** |
 | 4 | Provider-evidence reconciliation | **Closed** |
 | 5 | Mutation state fails closed | **Closed** (mechanism); wiring waits on 6 |
-| 6 | Real pinned runtime factories for all seven arms | **Open** — 3 of 7 blocked, 4 not |
+| 6 | Real pinned runtime factories for all seven arms | **Open** — 3 real, 1 partial, 3 blocked |
 | 7 | Non-scored acceptance, 308 units | **Open — blocked** |
 | 8 | Locks, ledger validation, readiness, evidence index, review bundle | **Partial** |
 | 9 | Focused, Node, Python, package, MCP, integration, smoke, privacy checks | **Closed** |

@@ -50,6 +50,12 @@ def _persistent_state_root() -> str:
 # no isolation is manufactured by it.
 RESET_ANCHOR_PROJECT = "shadowgraph-benchmark-reset-anchor"
 
+# Basic Memory defaults to embedding-backed hybrid retrieval, which reaches a
+# provider. This arm declares no request classes, so retrieval names the local
+# text index explicitly rather than inheriting whatever the product default
+# happens to be.
+LOCAL_SEARCH_TYPE = "text"
+
 
 def _project_path(state_root: str, project: str) -> str:
     digest = hashlib.sha256(
@@ -122,10 +128,71 @@ def _runtime_config(state_root: str) -> dict:
     }
 
 
-def _default_client_factory(_config, _provider_call):
-    raise RuntimeUnavailable(
-        "Basic Memory real runtime requires the Task 8 immutable local-state lock"
-    )
+class _PinnedBasicMemoryClient:
+    """The six product calls this adapter makes, and nothing else.
+
+    Basic Memory exposes its operations as MCP tool objects. The callable is on
+    their `fn` attribute, so it is unwrapped once here rather than at every call
+    site. Only these six are exposed: an adapter that could reach further would
+    be able to do more to the product than the contract describes.
+    """
+
+    __slots__ = ("_tools",)
+
+    def __init__(self, tools):
+        self._tools = tools
+
+    def __getattr__(self, name):
+        tool = self._tools.get(name)
+        if tool is None:
+            raise ContractError("Basic Memory adapter has no such native operation")
+        return tool
+
+
+def _default_client_factory(config, _provider_call):
+    """Bind the pinned Basic Memory package to this run's persistent state root.
+
+    Basic Memory resolves its store from the environment, so the state root has
+    to be in place before the package is imported: it reads configuration at
+    import time and would otherwise bind to the invoking user home directory,
+    putting benchmark records outside the measured state root.
+
+    No provider callback is used. Measured under `--network none`, the six
+    operations below complete entirely against a local store, which is what
+    makes this arm free of the request classes the executor spec declares empty.
+    """
+    project_root = config["project_root"]
+    if not isinstance(project_root, str) or not os.path.isabs(project_root):
+        raise ContractError("Basic Memory requires an absolute project root")
+    os.makedirs(project_root, exist_ok=True)
+
+    # Set before import, for the reason above.
+    os.environ["BASIC_MEMORY_HOME"] = project_root
+
+    try:
+        from basic_memory.mcp import tools as basic_memory_tools
+    except Exception as error:  # noqa: BLE001
+        raise RuntimeUnavailable(
+            "Basic Memory pinned package is not importable in this runtime"
+        ) from error
+
+    exposed = {}
+    for name in (
+        "list_memory_projects",
+        "create_memory_project",
+        "delete_project",
+        "write_note",
+        "read_note",
+        "search_notes",
+    ):
+        tool = getattr(basic_memory_tools, name, None)
+        if tool is None:
+            raise RuntimeUnavailable(
+                "Basic Memory pinned package does not expose a required operation"
+            )
+        exposed[name] = getattr(tool, "fn", tool)
+
+    return _PinnedBasicMemoryClient(exposed)
 
 
 def _native_records(value) -> list[dict]:
@@ -219,6 +286,7 @@ async def execute(
                     project_id=None,
                     search_all_projects=False,
                     output_format="json",
+                    search_type=LOCAL_SEARCH_TYPE,
                 )
             )
             return build_envelope(

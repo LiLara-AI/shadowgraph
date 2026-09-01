@@ -26,10 +26,30 @@ silently:
 | `list_memory_projects` | succeeded |
 | `delete_project` | **failed** — see below |
 
-Basic Memory served all of these from a local ASGI client over SQLite. **The
-`requestClasses: []` declaration is truthful**: the `openai` dependency is
-declared but not exercised on any path this adapter uses. So this arm needs no
-provider endpoint and no external service, and is not blocked by B2.
+**That table was wrong, and the conclusion drawn from it was wrong.** It is kept
+here because the mistake matters more than the tidy version.
+
+`search_notes` does not raise on failure — it returns a *rendered error string*.
+The probe recorded "succeeded" for a call that had actually failed, because it
+measured "did not throw" rather than "worked". Re-run with the returned text
+inspected for failure markers:
+
+| search type | outbound call attempted | result |
+| --- | --- | --- |
+| **default — what the adapter used** | **yes** | `Connection failed (ConnectError: Temporary failure in name resolution)` |
+| `hybrid` | yes | same failure |
+| `text` | **no** | `total: 1`, the written note returned |
+
+Basic Memory defaults to **embedding-backed hybrid retrieval**, which reaches a
+provider. So `requestClasses: []` was **false for the adapter as written**: a
+real run would have emitted provider traffic the spec says this arm does not
+have — therefore unmetered — or failed every retrieve once metering was
+enforced.
+
+Fixed at the source: retrieval now names `search_type="text"` explicitly rather
+than inheriting a product default. With that, `create`, `write`, `read`, `list`
+and `search` all complete under `--network none`, and the empty declaration
+becomes true. `write_note` and `read_note` were never network-dependent.
 
 ### A defect this exposed, confirmed against the adapter's own call shape
 
@@ -62,12 +82,22 @@ the product refuses. A fake more permissive than the product cannot catch a
 sequence the product would reject. The fake now enforces the same constraint,
 and the reset path has regression cover.
 
-`search_notes` also returned no hit for a term present in the note just written,
-which may be indexing latency or a query-shape mismatch. **Unresolved**, and
-material to requirement 7: a retrieve that returns nothing would make the
-measured phases meaningless for this arm. It does not affect the
-provider-traffic conclusion, and it needs settling before this arm runs a
-lifecycle.
+### Still open: retrieve does not complete
+
+With a real client factory in place, the adapter now runs
+`reset -> persist -> reset` successfully under `--network none`. **Retrieve
+still fails**, with `CONTRACT_FAILURE` / "Basic Memory adapter contract failed
+closed".
+
+The cause is a shape mismatch rather than a network or reset problem. Basic
+Memory's search returns *entity references* — `title`, `type`, `score`,
+`entity`, `external_id` — not note content, so mapping a hit to a logical record
+needs a follow-up read per result. The adapter does not do that yet.
+
+Until it does, this arm cannot complete a lifecycle, so requirement 6 is **not**
+closed for `basic-memory` even though it is no longer blocked: the factory is
+real, reset is repeatable, and the provider-traffic declaration is now true, but
+retrieve is unimplemented.
 
 ## Native user-isolation probe (assumptions A1 and A2)
 
