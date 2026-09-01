@@ -15,9 +15,9 @@ All figures below were produced on the current branch with a clean working tree.
 
 | Gate | Command | Result |
 | --- | --- | --- |
-| Full repository | `npm test` | **2043 / 2043 pass**, 0 fail, 20 suites |
-| Benchmark focused | `npm run benchmark:test` | **888 / 888 pass**, 0 fail |
-| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **745 / 745 pass**, 0 fail |
+| Full repository | `npm test` | **2056 / 2056 pass**, 0 fail, 20 suites |
+| Benchmark focused | `npm run benchmark:test` | **901 / 901 pass**, 0 fail |
+| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **758 / 758 pass**, 0 fail |
 | Python adapters | `npm run benchmark:test:python` | **86 tests, OK** |
 | Node syntax | `npm run check`, `npm run benchmark:check` | pass |
 | Python syntax | `npm run benchmark:check:python` | pass |
@@ -450,13 +450,41 @@ against a filesystem, so the value of tightening them is low; independent review
 agreed. It is recorded here rather than fixed so that nobody has to rediscover
 it.
 
-Lock and bundle **artifacts** remain deliberately ungenerated.
-`implementation-lock.mjs` requires a fully clean tree (untracked files included)
-and an immutable HEAD, so generating them before the governed source set is
-final would be invalid. Model locks additionally require digests that do not
-exist (B1), and `benchmark/service-images.json` cannot be authored without real
-image digests, which is why `v11-preflight` still reports all three immutable
-prerequisites as unmet.
+**The environment, service and model lock builders now exist.** Requirement 8
+names four locks; only the implementation lock had one. I had been describing
+this section as "builders done, artifacts blocked", which was true of the
+evidence index and the review bundle and false of three of the four locks.
+`benchmark/lib/v11-locks.mjs` closes that.
+
+Each refuses incomplete evidence rather than recording a placeholder, and the
+refusal is the point — a lock exists so a reader can tell whether two runs are
+comparable, and one built from whatever was available answers that wrongly while
+looking authoritative.
+
+- **Environment.** All ten fields required; empty strings and non-positive
+  numbers are missing evidence, not evidence; an observation the lock does not
+  record is refused rather than dropped, because silently ignoring one would let
+  a caller believe something was pinned that the lock never carried.
+- **Service.** A tag is not a pin. `neo4j:5.20` names whatever that tag points
+  at today and would silently become a different service tomorrow, which is the
+  thing a lock exists to prevent.
+- **Model.** Refuses anything but a full `sha256:` weights digest. **This is
+  blocker B1 expressed as code rather than as a sentence in this document.**
+  `MISSING-EVIDENCE.md` records that only short Ollama identifiers were
+  captured; a short id cannot distinguish two weight sets a registry labelled
+  the same way. Passing one is exactly what this candidate could do today, and
+  the builder refuses it.
+
+Verification requires the digest it is checking against, for the same reason the
+review bundle does.
+
+Lock and bundle **artifacts** remain ungenerated, and now for a reason the code
+enforces rather than merely states. `implementation-lock.mjs` requires a fully
+clean tree (untracked files included) and an immutable HEAD. The model lock
+requires digests that do not exist (B1). `benchmark/service-images.json` cannot
+be authored without real image digests (B2). `v11-preflight` reports all three
+immutable prerequisites as unmet, and the builders would refuse the inputs
+available today even if someone tried.
 
 ## Known limitation: the `persistence` applicability field is inert
 
