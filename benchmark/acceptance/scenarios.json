@@ -1,0 +1,193 @@
+{
+  "schemaVersion": 1,
+  "fixtureSet": "candidate-acceptance-non-scored-2026-08",
+  "scored": false,
+  "scenarios": [
+    {
+      "id": "ACC_INCIDENT_HANDOFF",
+      "domain": "incident handoff protocol",
+      "projectId": "lantern-operations",
+      "userId": "reviewer-north",
+      "isolationProjectId": "lantern-training",
+      "isolationUserId": "reviewer-south",
+      "task": "Choose a handoff protocol for a rotating customer-support team that must preserve unresolved-case context while keeping ownership changes auditable.",
+      "choice": {
+        "id": "time-boxed-handoff",
+        "label": "Time-boxed structured handoff"
+      },
+      "constraints": [
+        {
+          "id": "handoff-audit-trail",
+          "text": "each ownership change must leave a reviewable audit trail"
+        },
+        {
+          "id": "handoff-context-continuity",
+          "text": "unresolved customer context must survive a shift boundary"
+        },
+        {
+          "id": "handoff-low-overhead",
+          "text": "the protocol must fit a small rotating team"
+        }
+      ],
+      "alternatives": [
+        {
+          "id": "continuous-chat-stream",
+          "label": "Continuous unstructured team chat",
+          "reasonId": "chat-ownership-ambiguity",
+          "reason": "a continuous stream can make the current owner and acknowledged follow-up difficult to verify"
+        },
+        {
+          "id": "weekly-case-digest",
+          "label": "Weekly case digest",
+          "reasonId": "digest-delay-window",
+          "reason": "a weekly cadence can delay transfer of cases that cross daily shift boundaries"
+        }
+      ],
+      "assumptionIds": [
+        "handoff-shifts-overlap",
+        "handoff-case-system-available"
+      ],
+      "evidence": [
+        {
+          "id": "handoff-reopen-observation",
+          "text": "recently reopened cases often lacked a recorded next action after ownership changed"
+        },
+        {
+          "id": "handoff-shift-frequency",
+          "text": "the support owner changes twice during each operating day"
+        }
+      ],
+      "riskIds": [
+        "handoff-review-fatigue",
+        "handoff-stale-summary"
+      ],
+      "reviewTrigger": {
+        "id": "handoff-backlog-trigger",
+        "key": "unresolvedCaseCount",
+        "operator": "greaterThan",
+        "value": 24
+      },
+      "changedFact": {
+        "id": "handoff-backlog-rise",
+        "key": "unresolvedCaseCount",
+        "value": 31
+      },
+      "irrelevantFacts": [
+        {
+          "id": "handoff-dashboard-theme",
+          "key": "dashboardTheme",
+          "value": "sand"
+        },
+        {
+          "id": "handoff-avatar-shape",
+          "key": "avatarShape",
+          "value": "circle"
+        },
+        {
+          "id": "handoff-export-format",
+          "key": "weeklyExportFormat",
+          "value": "csv"
+        }
+      ],
+      "failedAttempt": {
+        "id": "handoff-chat-missed-owner",
+        "approachId": "continuous-chat-stream",
+        "reasonId": "handoff-no-acknowledged-owner",
+        "reason": "a high-priority case remained unowned because a chat handoff was never acknowledged"
+      }
+    },
+    {
+      "id": "ACC_SENSOR_REVIEW",
+      "domain": "field sensor review workflow",
+      "projectId": "mariner-field",
+      "userId": "inspector-east",
+      "isolationProjectId": "mariner-lab",
+      "isolationUserId": "inspector-west",
+      "task": "Choose a review workflow for a maintenance team that combines automated sensor readings with technician notes and must revisit decisions when calibration drift changes.",
+      "choice": {
+        "id": "scheduled-evidence-review",
+        "label": "Scheduled evidence review with exception checks"
+      },
+      "constraints": [
+        {
+          "id": "sensor-human-observations",
+          "text": "technician observations must remain visible beside automated readings"
+        },
+        {
+          "id": "sensor-review-trace",
+          "text": "maintenance decisions must retain the evidence used at review time"
+        },
+        {
+          "id": "sensor-limited-connectivity",
+          "text": "field staff may work through intermittent connectivity"
+        }
+      ],
+      "alternatives": [
+        {
+          "id": "alert-only-review",
+          "label": "Review only after automated alerts",
+          "reasonId": "alerts-miss-note-patterns",
+          "reason": "alert thresholds can omit patterns recorded only in technician notes"
+        },
+        {
+          "id": "technician-discretion",
+          "label": "Unscheduled technician discretion",
+          "reasonId": "discretion-inconsistent-cadence",
+          "reason": "an unscheduled cadence can make comparable equipment receive different review attention"
+        }
+      ],
+      "assumptionIds": [
+        "sensor-readings-time-aligned",
+        "sensor-notes-identifiable"
+      ],
+      "evidence": [
+        {
+          "id": "sensor-note-leading-signal",
+          "text": "technician vibration notes preceded two automated threshold alerts during the last quarter"
+        },
+        {
+          "id": "sensor-calibration-history",
+          "text": "calibration checks currently record drift percentages for each device"
+        }
+      ],
+      "riskIds": [
+        "sensor-review-queue-growth",
+        "sensor-stale-calibration"
+      ],
+      "reviewTrigger": {
+        "id": "sensor-drift-trigger",
+        "key": "calibrationDriftPercent",
+        "operator": "greaterThan",
+        "value": 4
+      },
+      "changedFact": {
+        "id": "sensor-drift-increase",
+        "key": "calibrationDriftPercent",
+        "value": 6.5
+      },
+      "irrelevantFacts": [
+        {
+          "id": "sensor-label-font",
+          "key": "labelFont",
+          "value": "sans-serif"
+        },
+        {
+          "id": "sensor-report-paper",
+          "key": "reportPaperSize",
+          "value": "A4"
+        },
+        {
+          "id": "sensor-map-pin-color",
+          "key": "mapPinColor",
+          "value": "orange"
+        }
+      ],
+      "failedAttempt": {
+        "id": "sensor-alert-missed-bearing",
+        "approachId": "alert-only-review",
+        "reasonId": "sensor-note-not-evaluated",
+        "reason": "a bearing issue progressed because repeated technician notes were not reviewed before the alert threshold fired"
+      }
+    }
+  ]
+}

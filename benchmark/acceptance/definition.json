@@ -1,0 +1,142 @@
+{
+  "schemaVersion": 1,
+  "benchmarkVersion": "1.1",
+  "fixtureSet": "candidate-acceptance-non-scored-2026-08",
+  "scored": false,
+  "sourceHashes": {
+    "preregistrationSha256": "738ee8b4813fab77da2e4e24582b12e756686650e4c39fad41c5337f831f5dac",
+    "amendment001Sha256": "2b209df6ca46a179e332acd4ed0b16a35a089f5c14575dd86353db0dc7249c4a",
+    "amendment002Sha256": "08e12eca3f93bd67cfeaf90a2064f91beb240e78a8fd63ed8645da78c0d88f1b"
+  },
+  "scenarios": {
+    "path": "scenarios.json",
+    "sha256": "728dc6e3f12db8334d31d29641caee01d4b1c645c5b51bcb27caa3fff5b4b14a"
+  },
+  "arms": [
+    {
+      "id": "no-memory",
+      "name": "No memory",
+      "applicability": {
+        "userIsolation": {
+          "status": "NOT_APPLICABLE",
+          "reason": "control has no memory system or native user namespace"
+        },
+        "persistence": {
+          "status": "NOT_APPLICABLE",
+          "reason": "control intentionally persists no records"
+        }
+      }
+    },
+    {
+      "id": "shadowgraph-full",
+      "name": "ShadowGraph Full",
+      "applicability": {
+        "userIsolation": {
+          "status": "NOT_APPLICABLE",
+          "reason": "decision records have a native project namespace but no native user namespace"
+        },
+        "persistence": {
+          "status": "SUPPORTED",
+          "reason": null
+        }
+      }
+    },
+    {
+      "id": "shadowgraph-compact",
+      "name": "ShadowGraph Compact",
+      "applicability": {
+        "userIsolation": {
+          "status": "NOT_APPLICABLE",
+          "reason": "decision records have a native project namespace but no native user namespace"
+        },
+        "persistence": {
+          "status": "SUPPORTED",
+          "reason": null
+        }
+      }
+    },
+    {
+      "id": "mem0-oss",
+      "name": "Mem0 OSS",
+      "applicability": {
+        "userIsolation": {
+          "status": "SUPPORTED",
+          "reason": null
+        },
+        "persistence": {
+          "status": "SUPPORTED",
+          "reason": null
+        }
+      }
+    },
+    {
+      "id": "graphiti",
+      "name": "Graphiti",
+      "applicability": {
+        "userIsolation": {
+          "status": "SUPPORTED",
+          "reason": null
+        },
+        "persistence": {
+          "status": "SUPPORTED",
+          "reason": null
+        }
+      }
+    },
+    {
+      "id": "basic-memory",
+      "name": "Basic Memory",
+      "applicability": {
+        "userIsolation": {
+          "status": "NOT_APPLICABLE",
+          "reason": "product exposes project namespaces but no native user namespace"
+        },
+        "persistence": {
+          "status": "SUPPORTED",
+          "reason": null
+        }
+      }
+    },
+    {
+      "id": "cognee",
+      "name": "Cognee",
+      "applicability": {
+        "userIsolation": {
+          "status": "SUPPORTED",
+          "reason": null
+        },
+        "persistence": {
+          "status": "SUPPORTED",
+          "reason": null
+        }
+      }
+    }
+  ],
+  "phases": [
+    "RESET",
+    "A",
+    "B",
+    "C",
+    "D_TRUE",
+    "D_FALSE_0",
+    "D_FALSE_1",
+    "D_FALSE_2",
+    "E",
+    "ISOLATION_PROJECT",
+    "ISOLATION_USER"
+  ],
+  "commonExecution": {
+    "repetitions": 2,
+    "randomSeeds": [
+      1729,
+      2718
+    ]
+  },
+  "expectedCounts": {
+    "totalUnits": 308,
+    "excludedUnits": 16,
+    "measuredUnits": 292,
+    "resetUnits": 28,
+    "outerDecisionCalls": 264
+  }
+}
