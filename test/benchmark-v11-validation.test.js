@@ -411,7 +411,11 @@ function notMeasuredUnit({ arm, phase }) {
   return result;
 }
 
-function rawRun({ mode = 'SCORED', armDefinitions, mutateUnit = null, zeroResult = null }) {
+// ACCEPTANCE is the only mode this candidate may produce or accept, so it is
+// the default every structural test runs under. It was SCORED, which was the
+// permissive path - ACCEPTANCE additionally asserts the forbidden-field sweep,
+// so this strengthens the fixtures rather than merely relabelling them.
+function rawRun({ mode = 'ACCEPTANCE', armDefinitions, mutateUnit = null, zeroResult = null }) {
   const units = [];
   for (const arm of armDefinitions) {
     for (const phase of PHASES) {
@@ -1023,19 +1027,41 @@ test('schema v2 aggregation excludes partial arms while harness-owned N/A stays 
   const aggregate = aggregateRun(raw, document, aggregationOptions());
 
   assert.equal(aggregate.schemaVersion, 2);
-  assert.equal(aggregate.mode, 'SCORED');
-  assert.deepEqual(aggregate.rankEligibleArms, ['arm-na']);
-  assert.deepEqual(aggregate.armResults.map((result) => result.armId), ['arm-na']);
-  assert.equal(aggregate.armResults[0].rankEligible, true);
-  assert.equal(aggregate.armResults[0].metrics.userIsolation, null);
-  assert.equal(aggregate.armResults[0].economics.meanOuterDecisionTokens, 108);
-  assert.equal(
-    aggregate.armResults[0].economics.meanLifecycleTokens,
-    null,
-    'outer-only usage must not be mislabeled as total lifecycle tokens'
+  assert.equal(aggregate.mode, 'ACCEPTANCE');
+
+  // The partially failed arm is still visible with its true status - acceptance
+  // retains evidence rather than dropping arms - while none of the scored
+  // ranking machinery appears at all.
+  assert.deepEqual(
+    aggregate.armStatuses.map((entry) => [entry.armId, entry.status]),
+    [['arm-partial', 'PARTIAL_FAILED'], ['arm-na', 'MEASURED']]
   );
-  assert.equal(aggregate.armResults.some((result) => result.armId === 'arm-partial'), false);
-  assert.equal(aggregate.bestClaimAllowed, false);
+  assert.equal(aggregate.counts.partialFailedArms, 1);
+  assert.equal(aggregate.counts.measuredArms, 1);
+  for (const scoredOnly of ['armResults', 'rankEligibleArms', 'bestClaimAllowed', 'allowedMarketingText']) {
+    assert.equal(
+      Object.hasOwn(aggregate, scoredOnly),
+      false,
+      `an acceptance aggregate must not carry ${scoredOnly}`
+    );
+  }
+
+  // The reader refuses SCORED, symmetric to the producer refusing to emit it.
+  // aggregateV11Run validates first, so one refusal covers both entry points -
+  // which also means the scored aggregation path (rankEligibleArms,
+  // bestClaimAllowed, allowedMarketingText) is unreachable and therefore
+  // untested while the candidate is in this state. That is a real coverage
+  // loss, recorded here rather than papered over: tests passing against a path
+  // the code refuses would imply a capability the candidate does not have.
+  const scoredRaw = { ...structuredClone(raw), mode: 'SCORED' };
+  assert.throws(
+    () => validateRawRun(scoredRaw, document, PREREGISTRATION_SHA),
+    /may not produce or accept a scored run/iu
+  );
+  assert.throws(
+    () => aggregateRun(scoredRaw, document, aggregationOptions()),
+    /may not produce or accept a scored run/iu
+  );
 });
 
 test('schema v2 zero-result validation and aggregation preserve the actual recorded causes', () => {
@@ -1058,8 +1084,9 @@ test('schema v2 zero-result validation and aggregation preserve the actual recor
   assert.doesNotThrow(() => validateRawRun(raw, document, PREREGISTRATION_SHA));
   const aggregate = aggregateRun(raw, document, aggregationOptions());
   assert.deepEqual(aggregate.zeroResult, zeroResult);
-  assert.equal(aggregate.allowedMarketingText, 'No measured result is available. Recorded causes: TIMEOUT.');
-  assert.doesNotMatch(aggregate.allowedMarketingText, /endpoint/iu);
+  // allowedMarketingText is a scored-mode field, and its absence here is the
+  // point: an acceptance aggregate carries no marketing claim at all.
+  assert.equal(Object.hasOwn(aggregate, 'allowedMarketingText'), false);
 
   const substituted = structuredClone(raw);
   substituted.zeroResult.causes = ['ENDPOINT_UNAVAILABLE'];

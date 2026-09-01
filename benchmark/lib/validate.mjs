@@ -710,6 +710,17 @@ export function validateV11RawRun(raw, preregistration, expectedSha256) {
     throw new Error('v1.1 raw run requires schemaVersion 2 and benchmarkVersion 1.1');
   }
   if (!['SCORED', 'ACCEPTANCE'].includes(raw.mode)) throw new Error(`Invalid v1.1 run mode ${raw.mode}`);
+  // The producer refuses to emit a scored run; the reader must refuse to
+  // accept one, or the invariant holds on only one side. A hand-authored
+  // artifact declaring SCORED used to validate as valid:true and aggregate into
+  // rank-eligibility and marketing fields - and `benchmark/cli.mjs validate`
+  // reads from disk, so a reviewer pointed at one would have been told it was
+  // valid for a mode this candidate may not produce. The mode stays in the
+  // schema because the schema outlives this candidate's state; what changes is
+  // that no artifact carrying it is accepted while that state holds.
+  if (raw.mode === 'SCORED') {
+    throw new Error('This candidate may not produce or accept a scored run');
+  }
   if (raw.mode === 'ACCEPTANCE') assertAcceptanceFieldsAbsent(raw);
   if (!['COMPLETE', 'INTERRUPTED'].includes(raw.status)) throw new Error(`Invalid v1.1 run status ${raw.status}`);
   validateOuterPromptBinding(raw.outerPromptBinding);
