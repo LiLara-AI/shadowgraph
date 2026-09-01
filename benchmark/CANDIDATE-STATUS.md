@@ -18,7 +18,7 @@ All figures below were produced on the current branch with a clean working tree.
 | Full repository | `npm test` | **2032 / 2032 pass**, 0 fail, 23 suites |
 | Benchmark focused | `npm run benchmark:test` | **877 / 877 pass**, 0 fail |
 | v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **734 / 734 pass**, 0 fail |
-| Python adapters | `npm run benchmark:test:python` | **79 tests, OK** |
+| Python adapters | `npm run benchmark:test:python` | **86 tests, OK** |
 | Node syntax | `npm run check`, `npm run benchmark:check` | pass |
 | Python syntax | `npm run benchmark:check:python` | pass |
 | Package privacy | `npm run check:package` | pass |
@@ -89,7 +89,7 @@ treat file content at HEAD, not the diffs, as the object of review.
 | 3 | One centralized outer decision path; adapters memory-only | **Closed** |
 | 4 | Provider-evidence reconciliation | **Closed** |
 | 5 | Mutation state fails closed | **Closed** (mechanism); wiring waits on 6 |
-| 6 | Real pinned runtime factories for all seven arms | **Open** — 4 of 7 real, 3 blocked |
+| 6 | Real pinned runtime factories for all seven arms | **Open** — 4 of 7 real, 3 blocked; the 3 now covered |
 | 7 | Non-scored acceptance, 308 units | **Closed** offline; a real run is blocked by B1/B2 |
 | 8 | Locks, ledger validation, readiness, evidence index, review bundle | **Partial** — builders done, artifacts blocked |
 | 9 | Focused, Node, Python, package, MCP, integration, smoke, privacy checks | **Closed** |
@@ -221,6 +221,46 @@ running. It checks divergence rather than a particular wording; pinning the text
 would bind the runner to one prompt module without catching anything divergence
 does not, and `buildV11Prompt` already audits its own output. Removing the audit
 call fails exactly the two tests that claim to cover it.
+
+**6 — Runtime factories, and what the blocked three actually do.** Four arms
+have real pinned factories: no-memory, ShadowGraph Full, ShadowGraph Compact and
+Basic Memory. Mem0 OSS, Graphiti and Cognee do not, because each needs a service
+and a model lock that do not exist (B1, B2). That part is unchanged and is not
+closeable offline.
+
+What *was* closeable was the coverage gap. `_default_client_factory` is the code
+path that actually runs today for those three arms, on every operation, and
+nothing exercised it: every other adapter test injects a fake client, so a
+default that crashed the adapter process, returned a SUCCEEDED envelope, or
+counted work it never did would have passed the entire suite.
+`benchmark/adapters/test_unprovisioned_runtimes.py` now covers it.
+
+Writing that coverage surfaced the more interesting half. Each of the three
+refuses, before reaching its runtime, the namespace shape its product cannot
+natively honour:
+
+| Arm | Native user scope | Project-only namespace | User-scoped namespace |
+| --- | --- | --- | --- |
+| Mem0 OSS | `user_id` | `CONTRACT_FAILURE` | `ENDPOINT_UNAVAILABLE` |
+| Graphiti | none (`group_id` only) | `ENDPOINT_UNAVAILABLE` | `CONTRACT_FAILURE` |
+| Cognee | ACL, not locked | `ENDPOINT_UNAVAILABLE` | `CONTRACT_FAILURE` |
+
+Read across, that is "genuine native namespaces only, never manufacture
+isolation" holding per arm, and holding whether or not the runtime exists. Mem0
+will not silently widen a user scope it was asked for into a project-wide one;
+Graphiti will not fold a user id into its group scope; Cognee will not run
+against unpinned access control. The `ENDPOINT_UNAVAILABLE` cause in the
+supported column is itself load-bearing: it tells a reviewer the arm is blocked
+on provisioning rather than on its own contract.
+
+In every combination the envelope is `FAILED` with a public cause, carries no
+persistence or isolation evidence, counts zero operations of every kind, and
+reports a static public message that is not the internal reason.
+
+Note the consequence for Graphiti: the frozen matrix declares its user isolation
+`SUPPORTED`, so the runner would send it a user-scoped namespace, and the
+adapter would refuse every unit. That is the same contradiction `v11-preflight`
+reports as a blocker, observed from the adapter side.
 
 ### Partial
 
