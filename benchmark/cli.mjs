@@ -449,6 +449,16 @@ async function aggregateCommand(options) {
 }
 
 
+/** Read a JSON file, returning null when it does not exist. */
+async function readOptionalJson(filePath) {
+  try {
+    return JSON.parse(await readFile(filePath, 'utf8'));
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
 /**
  * Offline readiness check for the v1.1 candidate.
  *
@@ -498,6 +508,46 @@ async function v11Preflight(options) {
         service: descriptor.requiredService
       });
     }
+  }
+
+  // Immutable prerequisites. The implementation lock requires a full
+  // sha256:<64 hex> weight digest per model and a committed service manifest.
+  // Neither exists, and neither may be synthesised, so readiness has to account
+  // for them or it would report READY for a run that cannot lawfully start.
+  const modelLock = await readOptionalJson(join(root, 'benchmark', 'model-weights.lock.json'));
+  const modelDigests = Array.isArray(modelLock?.models) ? modelLock.models : [];
+  const validModelDigests = modelDigests.filter((model) => (
+    typeof model?.weightsDigest === 'string'
+    && /^sha256:[a-f0-9]{64}$/u.test(model.weightsDigest)
+    && model?.digestKind === 'model_weights'
+  ));
+  if (validModelDigests.length === 0) {
+    blockers.push({
+      kind: 'immutable-prerequisite',
+      requirement: 'model-weight-digests',
+      detail: 'no sha256:<64 hex> model_weights digest is available'
+    });
+  }
+
+  const serviceManifest = await readOptionalJson(join(root, 'benchmark', 'service-images.json'));
+  if (serviceManifest === null) {
+    blockers.push({
+      kind: 'immutable-prerequisite',
+      requirement: 'service-manifest',
+      detail: 'benchmark/service-images.json does not exist'
+    });
+  }
+
+  // Byte pinning. The competitor lock pins top-level versions and one base
+  // image digest; without wheel hashes the installed transitive bytes are not
+  // reproducible, so the clients are version-pinned rather than byte-pinned.
+  const wheelHashes = await readOptionalJson(join(root, 'benchmark', 'python-wheels.lock.json'));
+  if (wheelHashes === null) {
+    blockers.push({
+      kind: 'immutable-prerequisite',
+      requirement: 'reproducible-runtime-bytes',
+      detail: 'no wheel-hash or derived-image evidence pins installed Python bytes'
+    });
   }
 
   const report = {

@@ -137,3 +137,35 @@ test('the existing command surface still resolves', async () => {
   const usage = await runCli([]);
   assert.match(usage.stderr, /v11-preflight/u);
 });
+
+test('readiness gates on immutable prerequisites, not only on applicability', async () => {
+  // A gate that can report READY while model-weight digests, a service
+  // manifest or byte-pinning evidence are missing would let an operator start a
+  // run that cannot lawfully begin.
+  const { stdout } = await runCli(['v11-preflight']);
+  const report = JSON.parse(stdout);
+
+  const requirements = report.blockers
+    .filter((blocker) => blocker.kind === 'immutable-prerequisite')
+    .map((blocker) => blocker.requirement)
+    .sort();
+
+  assert.deepEqual(requirements, [
+    'model-weight-digests',
+    'reproducible-runtime-bytes',
+    'service-manifest'
+  ]);
+  assert.equal(report.readiness, 'NOT READY');
+});
+
+test('clearing every applicability blocker still leaves the run blocked', async () => {
+  // Satisfying the cognee precondition removes one finding but must not make
+  // the candidate look runnable while B1 and B3 stand.
+  const { stdout } = await runCli([
+    'v11-preflight',
+    '--preconditions=pinned backend access-control configuration'
+  ]);
+  const report = JSON.parse(stdout);
+  assert.equal(report.readiness, 'NOT READY');
+  assert.ok(report.blockers.some((blocker) => blocker.kind === 'immutable-prerequisite'));
+});

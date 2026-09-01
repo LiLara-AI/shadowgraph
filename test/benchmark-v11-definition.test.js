@@ -733,3 +733,40 @@ test('loader rejects frozen-source drift, path escape, and symlinked inputs', as
     await unlink(definitionPath);
   });
 });
+
+test('a hostile proxy cannot escape the boundary through a throwing trap', async () => {
+  // Reflection on a hostile value can throw on its own account: a Proxy whose
+  // ownKeys or getOwnPropertyDescriptor trap throws raises a TypeError whose
+  // message and stack the attacker controls. Before sealing, that TypeError
+  // reached the caller and carried the payload with it.
+  const { scenarios } = await loadV11AcceptanceDefinition({ repositoryRoot: REPOSITORY_ROOT });
+  const marker = 'PROXYTRAPSENTINELQ7X';
+
+  for (const trap of ['ownKeys', 'getOwnPropertyDescriptor', 'getPrototypeOf']) {
+    const scenario = structuredClone(scenarios[0]);
+    scenario.reviewTrigger.value = new Proxy({ safe: true }, {
+      [trap]() { throw new TypeError(`trap leak ${marker}`); }
+    });
+    expectBoundaryThrow(() => validateV11PublicScenario(scenario), 'SHAPE', [marker]);
+  }
+});
+
+test('the only enumerable property on a boundary error is its code', async () => {
+  // `this.name = ...` would create an enumerable own property and quietly widen
+  // the surface that JSON.stringify exposes.
+  const { scenarios } = await loadV11AcceptanceDefinition({ repositoryRoot: REPOSITORY_ROOT });
+  const scenario = structuredClone(scenarios[0]);
+  scenario.expectedAnswer = 'anything';
+
+  let error;
+  try {
+    validateV11PublicScenario(scenario);
+  } catch (caught) {
+    error = caught;
+  }
+  assert.equal(error?.name, 'V11BoundaryError');
+  assert.deepEqual(Object.keys(error), ['code']);
+  assert.equal(JSON.stringify(error), '{"code":"KEY"}');
+  assert.equal(Object.prototype.propertyIsEnumerable.call(error, 'name'), false);
+  assert.equal(error.cause, undefined);
+});

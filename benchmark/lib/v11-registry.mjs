@@ -267,6 +267,8 @@ export function createV11Registry(options) {
 
     const perArm = scenarios * repetitions;
     const totalUnits = perArm * phases.length * V11_ARM_IDS.length;
+    // One spelling of the rule: an arm is excluded from ISOLATION_USER unless
+    // its declared user isolation is SUPPORTED.
     const excludedArms = V11_ARM_IDS.filter((armId) => (
       declared[armId]?.userIsolation?.status !== 'SUPPORTED'
     ));

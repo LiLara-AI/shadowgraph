@@ -14,7 +14,8 @@ import {
 import {
   assertDenseArray,
   assertOwnDataProperties,
-  boundaryReject
+  boundaryReject,
+  sealBoundary
 } from './v11-lexical.mjs';
 
 const PROMPT_INPUT_FIELDS = ['phase', 'scenario', 'nativeContext'];
@@ -102,6 +103,10 @@ function validateNativeValue(value, label, state, depth) {
 }
 
 function serializeNativeContext(nativeContext) {
+  return sealBoundary(() => serializeNativeContextInner(nativeContext));
+}
+
+function serializeNativeContextInner(nativeContext) {
   if (!Array.isArray(nativeContext)) boundaryReject('SHAPE');
   if (nativeContext.length > MAX_NATIVE_RECORDS) {
     boundaryReject('LIMIT');

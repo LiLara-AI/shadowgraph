@@ -13,7 +13,8 @@ import {
   assertOwnDataProperties,
   boundaryReject,
   createV11LexicalClassifier,
-  normalizedPublicDataKey
+  normalizedPublicDataKey,
+  sealBoundary
 } from './v11-lexical.mjs';
 
 const FIXTURE_SET = 'candidate-acceptance-non-scored-2026-08';
@@ -348,7 +349,9 @@ function validateFact(value, label) {
 }
 
 export function validateV11PublicScenario(scenario) {
-  const snapshot = neutralPublicSnapshot(scenario);
+  // Sealed: a hostile value can make reflection itself throw, and that throw
+  // must not reach the caller as an uncoded error carrying attacker text.
+  const snapshot = sealBoundary(() => neutralPublicSnapshot(scenario));
   assertExactKeys(scenario, SCENARIO_FIELDS, 'acceptance scenario');
   assertSafeId(scenario.id, 'acceptance scenario.id');
   for (const field of [

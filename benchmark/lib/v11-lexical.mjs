@@ -45,9 +45,10 @@ const STATIC_MESSAGES = new Map([
 /**
  * A boundary rejection.
  *
- * `code` is the only channel of information. No `cause` is attached and no
- * enumerable own property other than `code` is defined, so JSON.stringify of
- * the error yields nothing about the input.
+ * `code` is the only channel of information: it is the sole enumerable own
+ * property, so JSON.stringify of the error yields nothing about the input. No
+ * cause is attached. `name` is defined non-enumerably because a plain
+ * assignment would make it enumerable and quietly widen that surface.
  */
 export class V11BoundaryError extends Error {
   constructor(code) {
@@ -55,7 +56,12 @@ export class V11BoundaryError extends Error {
       throw new Error(`Unknown v1.1 boundary code: ${code}`);
     }
     super(STATIC_MESSAGES.get(code));
-    this.name = 'V11BoundaryError';
+    Object.defineProperty(this, 'name', {
+      value: 'V11BoundaryError',
+      enumerable: false,
+      writable: false,
+      configurable: false
+    });
     Object.defineProperty(this, 'code', {
       value: code,
       enumerable: true,
@@ -70,6 +76,24 @@ export function boundaryReject(code) {
   throw new V11BoundaryError(code);
 }
 
+/**
+ * Run untrusted-input handling so that nothing but a boundary rejection escapes.
+ *
+ * Reflection on a hostile value can throw on its own account - a Proxy whose
+ * `ownKeys` or `getOwnPropertyDescriptor` trap throws raises a TypeError whose
+ * message and stack the attacker controls. Converting any such throw into a
+ * coded rejection keeps the guarantee unconditional: callers of the public
+ * boundary see a V11BoundaryError or nothing.
+ */
+export function sealBoundary(operation, fallbackCode = 'SHAPE') {
+  try {
+    return operation();
+  } catch (error) {
+    if (error instanceof V11BoundaryError) throw error;
+    throw new V11BoundaryError(fallbackCode);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Inert traversal
 // ---------------------------------------------------------------------------
@@ -81,9 +105,9 @@ export function boundaryReject(code) {
  * without ever being invoked.
  */
 export function assertOwnDataProperties(value) {
-  if (Object.getOwnPropertySymbols(value).length > 0) boundaryReject('SHAPE');
-  for (const field of Object.getOwnPropertyNames(value)) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, field);
+  if (sealBoundary(() => Object.getOwnPropertySymbols(value)).length > 0) boundaryReject('SHAPE');
+  for (const field of sealBoundary(() => Object.getOwnPropertyNames(value))) {
+    const descriptor = sealBoundary(() => Object.getOwnPropertyDescriptor(value, field));
     if (descriptor === undefined) boundaryReject('SHAPE');
     if (typeof descriptor.get === 'function' || typeof descriptor.set === 'function') {
       boundaryReject('SHAPE');
@@ -94,8 +118,8 @@ export function assertOwnDataProperties(value) {
 
 /** Reject sparse arrays and arrays carrying non-index properties. */
 export function assertDenseArray(value) {
-  if (Object.getOwnPropertySymbols(value).length > 0) boundaryReject('SHAPE');
-  for (const field of Object.getOwnPropertyNames(value)) {
+  if (sealBoundary(() => Object.getOwnPropertySymbols(value)).length > 0) boundaryReject('SHAPE');
+  for (const field of sealBoundary(() => Object.getOwnPropertyNames(value))) {
     if (field === 'length') continue;
     const index = Number(field);
     if (!Number.isInteger(index) || index < 0 || index >= value.length) boundaryReject('SHAPE');

@@ -15,9 +15,9 @@ All figures below were produced on the current branch with a clean working tree.
 
 | Gate | Command | Result |
 | --- | --- | --- |
-| Full repository | `npm test` | **1980 / 1980 pass**, 0 fail, 20 suites |
-| Benchmark focused | `npm run benchmark:test` | **825 / 825 pass**, 0 fail |
-| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **658 / 658 pass**, 0 fail |
+| Full repository | `npm test` | **1984 / 1984 pass**, 0 fail, 20 suites |
+| Benchmark focused | `npm run benchmark:test` | **829 / 829 pass**, 0 fail |
+| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **686 / 686 pass**, 0 fail |
 | Python adapters | `npm run benchmark:test:python` | **55 tests, OK** |
 | Node syntax | `npm run check`, `npm run benchmark:check` | pass |
 | Python syntax | `npm run benchmark:check:python` | pass |
@@ -45,17 +45,40 @@ All three `.sha256` sidecars are unmodified.
 two record `benchmark/`-prefixed paths. This is a pre-existing inconsistency in
 frozen bytes and is **deliberately preserved, not normalised**.
 
-Acceptance fixtures are also unchanged from the state in which they were found:
+### Acceptance fixtures — weaker provenance, stated plainly
 
 ```
 b48666efec93e4b7c6c6bebee66634546ccd991c66158d426d1547620720a596  acceptance/definition.json
 728dc6e3f12db8334d31d29641caee01d4b1c645c5b51bcb27caa3fff5b4b14a  acceptance/scenarios.json
 ```
 
-Two digests asserted in `test/benchmark-v11-definition.test.js` never matched
-these files. `definition.json` already recorded the correct `scenarios.sha256`
-internally, so the fixtures were self-consistent and the **test literals** were
-wrong. The tests were corrected; the JSON bytes were not touched.
+These two digests do **not** carry the same guarantee as the three above, and
+should not be read as if they did. The files did not exist at `d493cd3` and have
+no prior tracked version on any ref, so git cannot prove they were unmodified:
+they arrived as untracked work from the interrupted session and were committed
+as found. The claim that their bytes were never edited is supported by
+filesystem mtimes predating this session's first commit, which is corroboration,
+not proof.
+
+What *is* provable from the repository: `definition.json` already recorded the
+correct `scenarios.sha256` internally, so the two files were self-consistent
+before anything was touched, and two digests asserted in
+`test/benchmark-v11-definition.test.js` matched neither file. The **test
+literals** were corrected; the JSON bytes were not.
+
+### How to read the commit series
+
+Much of the v1.1 work already existed as untracked files when this session
+began, and was committed in stages. Several commits therefore appear in git as
+pure additions while their messages describe repairing something that was
+already there — `a442809` and `8c56e0b` are both new files with zero deletions,
+and `e799342` also introduces the acceptance fixtures alongside the boundary
+change.
+
+The messages describe the change to the *candidate*, not the change to the
+tracked tree. Reviewing this branch by diff alone will therefore understate what
+was pre-existing and overstate what this session authored. Reviewers should
+treat file content at HEAD, not the diffs, as the object of review.
 
 ## Requirement status
 
@@ -76,9 +99,12 @@ wrong. The tests were corrected; the JSON bytes were not touched.
 **1 — Boundary.** Unit ids are one bounded opaque `unit:<64 hex>` derived by a
 domain-separated digest, defined once in the contract kernel; the validator no
 longer carries a second copy and rejects the legacy composite. Every boundary
-rejection is a `V11BoundaryError` with a stable code and a static message,
-carrying no cause and no enumerable payload, so no rejected material reaches the
-error surface. Per-example regexes were replaced by one structural classifier
+rejection is a `V11BoundaryError` with a stable code and a static message. Its
+`code` is the sole enumerable own property, so `JSON.stringify` of the error is
+exactly `{"code":...}`; `name` is defined non-enumerably and no cause is
+attached. Reflection over a hostile value is sealed, so a Proxy whose `ownKeys`
+or `getOwnPropertyDescriptor` trap throws is converted into a coded rejection
+rather than escaping as a `TypeError` carrying attacker-controlled text. Per-example regexes were replaced by one structural classifier
 that normalises and decodes before classifying by shape. Public scenario and
 native-context data are walked inertly through property descriptors, so a getter
 is rejected rather than invoked, and validation returns an isolated
@@ -118,6 +144,16 @@ deliberately not generated: `implementation-lock.mjs` requires a fully clean tre
 governed source set is final would be invalid. Model locks additionally require
 digests that do not exist (B1).
 
+## Known limitation: the `persistence` applicability field is inert
+
+Both count implementations key exclusively off `userIsolation`. `no-memory`
+declares `persistence: NOT_APPLICABLE` yet no persistence unit is excluded
+anywhere, and `validateApplicability` shape-checks the field without it ever
+affecting a count. Either the field is genuinely decorative — in which case
+declaring it invites a false reading of the matrix — or a second exclusion rule
+is missing. This is recorded rather than resolved, because changing which units
+are excluded is a methodology decision.
+
 ## Blockers
 
 **B1 — Immutable model-weight digests do not exist.**
@@ -130,6 +166,10 @@ prevents a real acceptance run.** No digest was synthesised.
 **B2 — Services are not provisioned.** Graphiti needs a Neo4j-compatible
 database plus an LLM and embedding endpoint; Cognee needs an LLM and embedding
 endpoint. `v11-preflight` reports both as blockers rather than assuming them.
+
+`v11-preflight` gates on B1 and B3 as well as B2, so satisfying every
+applicability finding still leaves it NOT READY. A readiness check that could
+go green while immutable prerequisites were missing would be worse than none.
 
 **B3 — Runtime bytes are version-pinned, not byte-pinned.**
 `competitors.lock.json` contains exactly one `sha256` — the base image. There is
