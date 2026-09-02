@@ -467,10 +467,37 @@ have skipped the next meter's. The guard that stopped cleanup running twice had
 made it non-resumable: a second Ctrl-C during the restore re-entered the
 handler, took the guard's early return, and exited with the tree still mutated -
 the fix for one failure opening another. Interrupts are now ignored while the
-handler works, verified by sending three during a deliberately slowed restore
-and confirming both files came back. And the reconciliation counted rows where
+handler works, verified on a two-file replica of this teardown by sending three
+signals during a deliberately slowed restore and confirming both came back; the
+real four-file restore was verified separately, on the harness itself, by one
+interrupt mid-cell. And the reconciliation counted rows where
 its own comment promised membership; it now names the guards that produced
 none.
+
+A third pass found the pattern again, in both of those fixes. The comparison of
+each mutable file against its pre-run copy is exact, but narrower than the check
+it replaced: a suite writing to any other file under `benchmark/lib` walked past
+it, and the tree listing was once more printed without being checked. It is now
+compared against the listing taken before the run - the first version of this
+check that is a superset of the earlier ones rather than a different narrow one.
+
+The worse half was the restore on the exit path. It ran after that comparison had
+already established byte-identity, and `cp` truncates before it writes, so the
+only thing that pass could ever change was a file that was already correct - and
+it ran too late for its own error status to reach the exit code. Review executed
+it: four guard sources truncated to zero bytes, an eleven-row table published
+with no banner, exit 0, and the backups deleted a line later. Restore now copies
+only what differs, so the ordinary path writes nothing at all, and a failed
+restore keeps the backups and exits non-zero.
+
+Three smaller ones from the same pass. The bounded cleanup took its argument as a
+promise, so the call was evaluated outside the try meant to guard it and a
+synchronous throw still aborted the later hooks; it takes a thunk now. The
+backups shared a flat directory with the harness's own working files, where a
+future key collision would have been invisible to a check that reads the same key
+it wrote. And a guard whose cell times out does appear in the table, so reporting
+that it "produced no row" contradicted the rows above it - it now says no
+measurement.
 
 It exists because three consecutive review rounds each caught one wrong number
 in a hand-written table. The last was a purity-rebuild figure of 3 that should

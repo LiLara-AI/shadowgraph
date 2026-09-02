@@ -114,8 +114,14 @@ async function listen(t, handler) {
   // A lingering keep-alive connection is the usual cause and is reachable, so
   // this closes them rather than only naming the stall.
   t.after(() => boundedCleanup(
-    new Promise((resolve) => {
-      server.close(resolve);
+    () => new Promise((resolve) => {
+      // close() hands its error to the callback, and passing `resolve` directly
+      // discarded it - a failing server close had always been silent here.
+      server.close((error) => {
+        if (error) process.stderr.write(`cleanup warning: upstream server close failed - ${error.message}
+`);
+        resolve();
+      });
       setTimeout(() => server.closeAllConnections?.(), 1_000).unref();
     }),
     5_000,
@@ -168,8 +174,13 @@ async function within(promise, timeoutMs, message) {
  * The warning reaches the run log, and a genuinely leaked handle still stalls
  * the process, so nothing is concealed - the stall is simply made to say why
  * without cancelling the cleanup that can still succeed.
+ *
+ * The trade, stated rather than left implicit: a genuine close failure becomes a
+ * warning rather than a failed test. Nothing currently asserted is lost, because
+ * every test that asserts shutdown behaviour does so in its own body; teardown
+ * here is teardown, not an assertion site.
  */
-async function boundedCleanup(promise, timeoutMs, message) {
+async function boundedCleanup(start, timeoutMs, message) {
   let timer;
   const expiry = new Promise((resolve) => {
     timer = setTimeout(() => {
@@ -179,7 +190,11 @@ async function boundedCleanup(promise, timeoutMs, message) {
     }, timeoutMs);
   });
   try {
-    await Promise.race([promise, expiry]);
+    // start() is called inside the try. Taking a promise instead meant the call
+    // was evaluated as an argument, outside it, so a teardown step that threw
+    // synchronously still aborted every later hook - the guard unable to guard
+    // its own argument.
+    await Promise.race([Promise.resolve().then(start), expiry]);
   } catch (error) {
     process.stderr.write(`cleanup warning: ${message} - ${error?.message ?? error}
 `);
@@ -270,7 +285,7 @@ async function startTrackedMeter(t, config) {
   const meter = await startProviderMeter(config);
   const budgetMs = Math.max(5_000, (config.upstreamTimeoutMs ?? 0) * 2 + 3_000);
   t.after(() => boundedCleanup(
-    meter.close(),
+    () => meter.close(),
     budgetMs,
     `meter close did not finish within ${budgetMs}ms; a socket or ledger handle is leaking`
   ));

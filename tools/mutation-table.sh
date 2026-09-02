@@ -29,27 +29,62 @@ WORK="$(mktemp -d)"
 # answerable. Deliberately outside WORK, which the cleanup trap deletes; it is
 # removed on the way out only if nothing was written to it.
 DIAGNOSTICS="$(mktemp -d)"
+trap 'rm -rf "$WORK"; rmdir "$DIAGNOSTICS" 2>/dev/null' EXIT
+
+# What the tree looked like before anything was mutated. Comparing the whole
+# porcelain listing to this at the end is the only check here that is a superset
+# of both earlier ones: the first grepped a hardcoded `benchmark/lib/`, the
+# second compared only the four files mutate.cjs writes, and a suite that
+# created or modified anything else walked past both. Independent review
+# demonstrated exactly that, twice.
+if git rev-parse --git-dir >/dev/null 2>&1; then
+  BASELINE_DIRT="$(git status --porcelain)"
+  GIT_TREE_CHECK=1
+else
+  BASELINE_DIRT=""
+  GIT_TREE_CHECK=0
+  echo "WARNING: not a git worktree; only the byte check on mutable files applies" >&2
+fi
 
 # Back up exactly what mutate.cjs can write, by asking it. The hardcoded list
 # this replaced had drifted: it copied validate.mjs, which no mutation touches,
 # implying a mutation that does not exist, while nothing checked that every
 # mutated file was actually covered.
-MUTABLE_FILES="$(node tools/mutate.cjs --files)"
-if [ -z "$MUTABLE_FILES" ]; then
+mapfile -t MUTABLE_FILES < <(node tools/mutate.cjs --files)
+if [ "${#MUTABLE_FILES[@]}" -eq 0 ]; then
   echo "ERROR: mutate.cjs listed no mutable files" >&2
   exit 1
 fi
 
+# Backups live in their own directory. A flat $WORK shares a namespace with
+# baseline, results, observed, measured, declared and the logs, and a key that
+# collided with one of those would be overwritten silently - after which restore
+# writes the wrong bytes and the byte check compares the file against the same
+# wrong key and passes, unable to see its own collision.
+BACKUP="$WORK/backup"
+mkdir -p "$BACKUP" || exit 1
 backup_key() { echo "$1" | tr '/' '_'; }
 
-for file in $MUTABLE_FILES; do
-  cp "$file" "$WORK/$(backup_key "$file")" || exit 1
+for file in "${MUTABLE_FILES[@]}"; do
+  cp "$file" "$BACKUP/$(backup_key "$file")" || exit 1
 done
 
+# Restore only what actually differs.
+#
+# `cp` truncates its destination before writing, so copying over a file that is
+# already byte-identical to its backup is pure downside: a failure there destroys
+# content that was already correct. That is not hypothetical - the EXIT trap runs
+# a restore after the byte check has already established identity, so the only
+# way that pass could ever change anything was to damage it, and it ran too late
+# for its own error status to reach the exit code. Independent review executed it:
+# four guard sources truncated to zero bytes, an eleven-row table published with
+# no banner, exit 0, and the backups deleted immediately afterwards.
 restore() {
-  local failed=0
-  for file in $MUTABLE_FILES; do
-    cp "$WORK/$(backup_key "$file")" "$file" || { echo "ERROR: could not restore $file" >&2; failed=1; }
+  local failed=0 file key
+  for file in "${MUTABLE_FILES[@]}"; do
+    key="$BACKUP/$(backup_key "$file")"
+    cmp -s "$file" "$key" && continue
+    cp "$key" "$file" || { echo "ERROR: could not restore $file" >&2; failed=1; }
   done
   return "$failed"
 }
@@ -85,7 +120,14 @@ cleanup() {
   [ "$CLEANED" -eq 1 ] && return 0
   CLEANED=1
   stop_suite
-  restore || echo "ERROR: the tree may still be mutated - check $MUTABLE_FILES" >&2
+  if ! restore; then
+    # Keep the backups: they are the only copies, and the message that tells the
+    # operator to use them used to be followed by their deletion. Exit non-zero
+    # from the trap, because by this point the script's own status is settled.
+    echo "ERROR: the tree may still be mutated; backups kept in $BACKUP" >&2
+    rmdir "$DIAGNOSTICS" 2>/dev/null
+    exit 1
+  fi
   rm -rf "$WORK"
   rmdir "$DIAGNOSTICS" 2>/dev/null
 }
@@ -263,10 +305,11 @@ if [ -n "$TIMED_OUT" ]; then
   printf '  %s
 ' $MISSING >&2
 elif [ -n "$MISSING" ]; then
-  echo "ERROR: these declared guards produced no row:" >&2
+  echo "ERROR: these declared guards produced no measurement:" >&2
   printf '  %s
 ' $MISSING >&2
-  echo "       either missing from MUTATIONS, or failed the comparison above" >&2
+  echo "       missing from MUTATIONS, or failed the comparison, or produced a" >&2
+  echo "       timed-out / no-summary row above, which is not a measurement" >&2
   STATUS=1
 fi
 
@@ -297,12 +340,25 @@ fi
 # mutation to any file outside it, fail on unrelated dirt whose path merely
 # contains the string, and pass silently if git were unavailable. The backups
 # are the exact thing "unchanged" means here. Independent review found both.
-for file in $MUTABLE_FILES; do
-  if ! cmp -s "$file" "$WORK/$(backup_key "$file")"; then
+for file in "${MUTABLE_FILES[@]}"; do
+  if ! cmp -s "$file" "$BACKUP/$(backup_key "$file")"; then
     echo "ERROR: $file differs from its pre-run copy - a mutation survived" >&2
     STATUS=1
   fi
 done
+
+# And nothing else moved either. The byte check above is exact but narrow, and
+# narrowing was how the previous two versions of this check failed.
+if [ "$GIT_TREE_CHECK" -eq 1 ]; then
+  FINAL_DIRT="$(git status --porcelain)"
+  if [ "$FINAL_DIRT" != "$BASELINE_DIRT" ]; then
+    echo "ERROR: the working tree changed during the run:" >&2
+    diff <(printf '%s
+' "$BASELINE_DIRT") <(printf '%s
+' "$FINAL_DIRT") >&2
+    STATUS=1
+  fi
+fi
 
 echo
 if [ "$STATUS" -ne 0 ]; then
@@ -311,6 +367,4 @@ fi
 echo "| Guard removed | Tests that fail |"
 echo "| --- | --- |"
 cat "$RESULTS"
-echo
-git status --porcelain
 exit "$STATUS"
