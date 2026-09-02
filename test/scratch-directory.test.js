@@ -248,7 +248,7 @@ test('makes its own root unwritable', async (t) => {
   await assertSwept(result.temporary);
 });
 
-test('a wedged teardown is bounded by the hook timeout, not left to hang', async (t) => {
+test('a wedged teardown ends the run and gives the directory up anyway', async (t) => {
   const result = await runFixture(t, `
 test('registers a hook that never settles', async (t) => {
   const directory = await scratchDirectory(t, 'shadowgraph-wedged-');
@@ -256,8 +256,15 @@ test('registers a hook that never settles', async (t) => {
   t.after(() => new Promise(() => {}), { timeout: 50 });
 });
 `);
+  // How the runner words a hook that never settles differs between supported
+  // Node versions - a failed hook on 24, a cancelled test on 20 and 22 - so what
+  // is asserted here is the part that must hold on all of them: the run ends, it
+  // ends unsuccessfully, and the directory does not survive it.
   assert.equal(result.code, 1);
-  assert.match(result.stdout, /hookFailed|test timed out/u);
+  const counts = summary(result.stdout);
+  assert.equal(counts.pass, 0, result.stdout);
+  assert.ok((counts.fail ?? 0) + (counts.cancelled ?? 0) >= 1, result.stdout);
+  assert.ok(result.elapsedMs < 20_000, `the wedged hook held the run for ${result.elapsedMs} ms`);
   await assertSwept(result.temporary);
 });
 
