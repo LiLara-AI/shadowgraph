@@ -12,6 +12,7 @@ import test, { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
+import { existsSync } from 'node:fs';
 import { copyFile, mkdir, readFile, readdir, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -625,6 +626,55 @@ describe('the supervisor refuses every target that is not its own root', () => {
     assert.deepEqual(await entries(outside), ['.owner.json']);
     assert.deepEqual((await entries(temporary)).length > 0, true);
   });
+});
+
+test('the supervisor re-checks its target when the owner ends, not only when it starts', async (t) => {
+  const { temporary } = await sandboxFor(t, 'shadowgraph-scratch-recheck-');
+  const nonce = 'c'.repeat(32);
+  const victim = join(temporary, 'victim');
+  await mkdir(victim);
+  await writeFile(join(victim, 'precious.txt'), 'untouched', 'utf8');
+
+  // Everything the supervisor was told is true when it arms. What it was told
+  // stops being true afterwards, which is the window a check made only at
+  // startup would miss.
+  const tampering = [
+    ['the marker no longer matches', async (root) => {
+      await writeFile(join(root, '.owner.json'), JSON.stringify({ pid: DEAD_PID, nonce: 'd'.repeat(32) }), 'utf8');
+    }, /owner marker does not match the handshake/u],
+    ['the marker is gone', async (root) => { await rm(join(root, '.owner.json')); }, /owner marker is missing or unreadable/u]
+  ];
+  if (!posixOnly) {
+    tampering.push(['the directory became a link to somewhere else', async (root) => {
+      await rm(root, { recursive: true, force: true });
+      await symlink(victim, root);
+    }, /target is a symbolic link/u]);
+  }
+
+  for (const [name, tamper, expected] of tampering) {
+    const root = await fabricateRoot(temporary, DEAD_PID, 'zzzzzz', JSON.stringify({ pid: DEAD_PID, nonce }));
+    await writeFile(join(root, 'state.json'), '{}', 'utf8');
+    const child = spawn(process.execPath, [SUPERVISOR, root, String(DEAD_PID), nonce, temporary], {
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    for (let attempt = 0; attempt < 500 && !stdout.includes('READY'); attempt += 1) await sleep(10);
+    assert.equal(stdout.trim(), `READY ${nonce}`, `${name}: the supervisor must arm on a legitimate root`);
+
+    await tamper(root);
+    child.stdin.end();
+    const [code] = await once(child, 'close');
+    assert.equal(code, 2, `${name}: expected a refusal, got ${code}\n${stderr}`);
+    assert.equal(diagnostics(stderr).length, 1, `${name}: ${stderr}`);
+    assert.match(stderr, expected, name);
+    assert.equal(existsSync(root), true, `${name}: a refused target must be left alone`);
+    await rm(root, { recursive: true, force: true });
+  }
+  assert.equal(await readFile(join(victim, 'precious.txt'), 'utf8'), 'untouched');
+  assert.deepEqual(await entries(victim), ['precious.txt']);
 });
 
 test('the janitor removes only roots whose owner is provably gone', { skip: posixOnly }, async (t) => {

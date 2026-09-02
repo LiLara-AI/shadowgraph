@@ -386,6 +386,10 @@ test('the same absolute lifecycle deadline covers provider route allocation befo
   await assert.rejects(() => stat(marker), { code: 'ENOENT' });
 });
 
+// This test repoints TMPDIR at its own directory and then asserts that nothing
+// remains there, so no scratch directory may be created while that is in force:
+// tools/scratch-directory.js reads os.tmpdir() at call time, and would put a
+// root of its own inside tempParent.
 test('successful execution removes only its isolated invocation cwd and temp tree', async (t) => {
   const tempParent = await scratchDirectory(t, 'shadowgraph-python-cleanup-test-');
   const { hostPath } = await makeHost(t, successHostSource());

@@ -12,9 +12,16 @@
 //   4. an external supervisor - SIGKILL, a crash, or a group kill
 //   5. the janitor          - a root whose owner died before its supervisor was armed
 //
-// Nothing here redirects TMPDIR, forces Node to exit, or deletes a path it did
-// not create: every fallback names what it removed, and a failure to remove is
-// reported rather than swallowed.
+// Nothing here redirects TMPDIR or forces Node to exit: no call to
+// `process.exit`, no `--test-force-exit`, and an interrupted process still dies
+// by its own signal. Every fallback names what it removed, and a failure to
+// remove is reported rather than swallowed.
+//
+// Two exceptions to "only ever deletes what it created", both deliberate. The
+// supervisor is a separate process whose whole job is to remove one root and
+// exit, and the janitor removes a root belonging to a process that is provably
+// gone - the only path here that touches a directory this process did not make,
+// guarded by the checks at `staleReason`.
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { lstatSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
@@ -295,6 +302,10 @@ function staleReason(path, namePid, stats) {
   return 'owner is gone and the marker is unusable';
 }
 
+// Liveness is answered in this process's own pid namespace. Where a temp
+// directory is shared across namespaces - a container with /tmp bind-mounted
+// from its host - a pid that is alive on the other side reads as gone here, so
+// a root could be removed while its owner is still running.
 function pidState(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return 'unknown';
   try {
