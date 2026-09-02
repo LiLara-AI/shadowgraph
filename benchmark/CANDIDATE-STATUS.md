@@ -744,8 +744,36 @@ observation is worse than the hole it closes, so:
 **An asymmetry in the folding.** The trailing-period strip ran before the
 punctuation-run collapse, so `...` reduced to the empty string and was accepted
 while `---` and `???` were refused, and the `.` entry in the list was
-unreachable. The strip now uses a lookbehind so it cannot consume a string that
-is entirely punctuation.
+unreachable. The strip now uses a lookbehind, and what that buys is narrower
+than first written here: not that an all-punctuation string is untouched -
+`-.` does lose its period and is then refused as `-`, while `.-` is left alone -
+but that nothing normalises away to nothing.
+
+**A guard applied to something that is not an observation.** The same commit
+routed `repoRoot` through the predicate. It is a locator, never recorded in the
+lock - only `repository.headCommit` is - so `.` is an ordinary way to name the
+current directory, and an operator producing the requirement 8 artifact from the
+repository root was told their working directory "is a placeholder, not an
+observation". That is the over-breadth this section calls worse than the hole it
+closes, produced while writing the section. Locators now use a check that
+asserts a non-empty trimmed string and nothing more.
+
+Two further precisions. `none` was removed from the list for every field, while
+the reasoning above covers only version-shaped ones; a service or model *named*
+`none` is now accepted too, which is consistent with the denylist being
+deliberately incomplete but is not what the reasoning argued. And the removal was
+justified by `competitors.lock.json`, whose `version` field no lock builder ever
+reads - the reachable cases are `containerRuntimeVersion` and Docker's `none`
+network mode in `python-container-runtime.mjs`, which is a real value of that
+spelling in live code.
+
+**What the guard does not reach.** `benchmark/cli.mjs` and
+`scripts/bench-journal.mjs` both record `cpu.model` as `cpuList[0]?.model ??
+'unknown'`. Those write the literal placeholder into collected evidence, they
+are the collectors that actually run today, and no lock builder sees them. The
+guard covers the four lock builders and nothing else, which bounds what it is
+worth: it refuses a placeholder at the point evidence is *sealed*, not at the
+point it is *gathered*.
 
 The guard is measured across all four builders, and its declared set has grown
 to three tests, which the harness refused to publish until the declaration said

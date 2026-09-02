@@ -33,10 +33,12 @@ const PLACEHOLDER_VALUES = new Set([
  * the exact string missed all three. This never changes what a lock records: it
  * exists only inside the predicate below.
  *
- * The trailing-period strip uses a lookbehind so it cannot consume a string
- * that is entirely punctuation. Without it, `...` reduced to the empty string
- * and was accepted, while `---` and `???` were refused - and the `.` entry
- * above was unreachable. Independent review found that asymmetry.
+ * The trailing-period strip uses a lookbehind so it can never reduce a string
+ * to the empty string. Without it, `...` became empty and was accepted while
+ * `---` and `???` were refused, and the `.` entry above was unreachable. Be
+ * precise about what the lookbehind buys: it is not that an all-punctuation
+ * string is never touched - `-.` does lose its period and is then refused as
+ * `-`, while `.-` is left alone. It is that nothing normalises away to nothing.
  */
 function normalizePlaceholder(value) {
   return value

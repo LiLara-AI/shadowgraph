@@ -324,6 +324,22 @@ test('a placeholder cannot stand in for public model or service metadata', async
       `serviceImages[0].name = ${JSON.stringify(value)} was accepted`
     );
   }
+
+  // repoRoot locates the repository and is never recorded in the lock - only
+  // repository.headCommit is - so "." is an ordinary way to name a directory,
+  // not a placeholder. Guarding it told an operator running from the repository
+  // root that their working directory was one, which is a guard refusing a real
+  // input: the failure this change calls worse than the hole it closes.
+  let locatorError = null;
+  try {
+    await createImplementationLock({ ...fixture.input, repoRoot: '.' });
+  } catch (error) {
+    locatorError = error;
+  }
+  assert.ok(
+    locatorError === null || !/is a placeholder, not an observation/u.test(locatorError.message),
+    `repoRoot "." was refused as a placeholder: ${locatorError?.message}`
+  );
 });
 
 test('file manifest is fail-closed across benchmark, runtime, script, package, and test sources', async (t) => {

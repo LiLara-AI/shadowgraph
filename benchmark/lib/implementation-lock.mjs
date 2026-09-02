@@ -152,15 +152,34 @@ function assertExactKeys(value, expectedKeys, label) {
   }
 }
 
-function assertNonEmptyString(value, label) {
+/**
+ * A non-empty trimmed string, with no judgement about what it means.
+ *
+ * For inputs that locate something rather than record it. `repoRoot` is the
+ * clearest case: it never appears in the lock - only `repository.headCommit`
+ * does - so `.` is an ordinary way to name the current directory, not a
+ * placeholder. Guarding it told an operator running from the repository root
+ * that their working directory "is a placeholder, not an observation", which is
+ * a guard refusing a real input: the failure this whole change calls worse than
+ * the hole it closes. Independent review caught it.
+ */
+function assertNonEmptyLocator(value, label) {
   if (typeof value !== 'string' || value.trim().length === 0 || value !== value.trim()) {
     throw new Error(`${label} must be a non-empty trimmed string`);
   }
-  // Requirement 8 names four locks. The v1.1 three refused a placeholder while
-  // this one, which governs the source tree itself, took `unknown` for a model
-  // architecture or a service name - the same "fixed here, open next door"
-  // shape review has now found three times. The predicate is shared rather than
-  // copied, because two lists that can disagree is the defect it prevents.
+}
+
+/**
+ * A non-empty trimmed string that is an observation and not a stand-in for one.
+ *
+ * Requirement 8 names four locks. The v1.1 three refused a placeholder while
+ * this one, which governs the source tree itself, took `unknown` for a model
+ * architecture or a service name - the same "fixed here, open next door" shape
+ * review has now found three times. The predicate is shared rather than copied,
+ * because two lists that can disagree is the defect it prevents.
+ */
+function assertNonEmptyString(value, label) {
+  assertNonEmptyLocator(value, label);
   if (isPlaceholder(value)) {
     throw new Error(`${label} is a placeholder, not an observation`);
   }
@@ -279,7 +298,7 @@ function describePaths(paths) {
 }
 
 async function inspectRepository(repoRoot) {
-  assertNonEmptyString(repoRoot, 'repoRoot');
+  assertNonEmptyLocator(repoRoot, 'repoRoot');
   const resolved = await realpath(path.resolve(repoRoot));
   if (!(await stat(resolved)).isDirectory()) throw new Error('repoRoot must be a directory');
 
