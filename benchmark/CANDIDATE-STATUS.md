@@ -532,9 +532,31 @@ restored and byte-checked only the files it had heard about, while `mutate.cjs`
 could still write the ones it had not. Verified by making the producer emit two
 of four paths and exit non-zero - previously accepted, now refused with no table
 and the sources untouched. The reconciliation discarded `comm`'s status the same
-way, where a failure would have read as "nothing missing". Both are checked now,
-which is what makes the sentence above about covering every file mutation can
-write true rather than nearly true.
+way, where a failure would have read as "nothing missing". Both are checked now.
+That is narrower than it first read here: the `comm` fix concerns declared
+against measured *guards*, not file coverage, and only the producer check bears
+on the sentence above - which it makes no longer defeatable by a failing
+producer, rather than simply true.
+
+A final pass then found three more members, two by execution, including the
+first instance the header of `tools/mutation-table.sh` names. The extractor that
+pulls failing test names out of a log is a pipeline, so its status was the status
+of `sort` alone: a failing `sed` yielded an empty file, and an empty file of
+failing test names is exactly what a green run looks like. The harness printed
+`baseline: green` and published a table. It now returns the whole pipeline's
+status, and every one of its three call sites is checked. Verified by making
+`sed` fail: no table, no `green`, exit 1 - where before it was a published,
+unbannered table. The sorts feeding the reconciliation were unchecked the same
+way, one of them added by the commit that claimed to close the class.
+
+One member stays open by design, and is recorded rather than fixed. A producer
+that emits a *partial* file list and exits zero is indistinguishable from an
+honest short list, because avoiding a second remembered list to check it against
+was the point. It is still caught - by the whole-tree comparison, not the byte
+check - but the harness exits with those unlisted files still mutated, since
+restore only walks the list it was given. The exit is non-zero and the table
+carries its banner, so nothing false is published; the tree needs `git checkout`
+by hand.
 
 It exists because three consecutive review rounds each caught one wrong number
 in a hand-written table. The last was a purity-rebuild figure of 3 that should

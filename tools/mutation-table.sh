@@ -188,7 +188,10 @@ has_summary() {
 }
 
 names_from_log() {
+  local statuses
   sed -n 's/^\xe2\x9c\x96 \(.*\) ([0-9.]*ms)$/\1/p' "$1" | sort -u
+  statuses=("${PIPESTATUS[@]}")
+  [ "${statuses[0]}" -eq 0 ] && [ "${statuses[1]}" -eq 0 ]
 }
 
 # Every guard with a declared expectation. A name missing from this list is a
@@ -218,7 +221,12 @@ if ! has_summary "$WORK/baseline.log"; then
   exit 1
 fi
 
-names_from_log "$WORK/baseline.log" > "$WORK/baseline"
+if ! names_from_log "$WORK/baseline.log" > "$WORK/baseline"; then
+  echo "ERROR: could not read failing test names out of the baseline log" >&2
+  echo "       an empty result here would have read as a green baseline, which" >&2
+  echo "       is the first instance of the class this file's header names" >&2
+  exit 1
+fi
 if [ -s "$WORK/baseline" ]; then
   echo "ERROR: the tree is not green before measuring:" >&2
   cat "$WORK/baseline" >&2
@@ -276,7 +284,12 @@ for name in $MUTATIONS; do
       STATUS=1
       break
     fi
-    names_from_log "$WORK/run.log" > "$WORK/observed"
+    if ! names_from_log "$WORK/run.log" > "$WORK/observed"; then
+      echo "EXTRACTION FAILED" >&2
+      echo "ERROR: could not read failing test names out of $name's log" >&2
+      STATUS=1
+      break
+    fi
     if node tools/compare-failures.cjs "$name" "$WORK/observed" >> "$RESULTS" 2>"$WORK/err"; then
       echo "$name" >> "$WORK/measured"
       echo "ok (${ELAPSED}s)" >&2
@@ -312,13 +325,21 @@ if ! node -e 'const d=require("./tools/expected-failures.json");for(const k of O
   echo "ERROR: could not read tools/expected-failures.json" >&2
   STATUS=1
 fi
-sort "$WORK/declared.raw" > "$WORK/declared" 2>/dev/null
+if ! sort "$WORK/declared.raw" > "$WORK/declared"; then
+  # A partial declaration makes fewer guards look missing: the same shape as a
+  # partial file list, at the site next door to where that was just fixed.
+  echo "ERROR: could not sort the declared guard list" >&2
+  STATUS=1
+fi
 if [ ! -s "$WORK/declared" ]; then
   # An empty declaration would make every guard look measured.
   echo "ERROR: no declared guards were read; nothing can be reconciled" >&2
   STATUS=1
 fi
-sort "$WORK/measured" > "$WORK/measured.sorted"
+if ! sort "$WORK/measured" > "$WORK/measured.sorted"; then
+  echo "ERROR: could not sort the measured guard list" >&2
+  STATUS=1
+fi
 if ! MISSING="$(comm -23 "$WORK/declared" "$WORK/measured.sorted")"; then
   echo "ERROR: could not reconcile declared guards against measured ones" >&2
   STATUS=1
@@ -358,7 +379,10 @@ elif ! has_summary "$WORK/final.log"; then
   echo "       log: $DIAGNOSTICS/final.log" >&2
   STATUS=1
 fi
-names_from_log "$WORK/final.log" > "$WORK/final"
+if ! names_from_log "$WORK/final.log" > "$WORK/final"; then
+  echo "ERROR: could not read failing test names out of the final log" >&2
+  STATUS=1
+fi
 if [ -s "$WORK/final" ]; then
   echo "ERROR: the tree is not green after measuring:" >&2
   cat "$WORK/final" >&2
