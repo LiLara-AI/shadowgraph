@@ -15,9 +15,9 @@ All figures below were produced on the current branch with a clean working tree.
 
 | Gate | Command | Result |
 | --- | --- | --- |
-| Full repository | `npm test` | **2059 / 2059 pass**, 0 fail, 20 suites |
-| Benchmark focused | `npm run benchmark:test` | **904 / 904 pass**, 0 fail |
-| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **761 / 761 pass**, 0 fail |
+| Full repository | `npm test` | **2060 / 2060 pass**, 0 fail, 20 suites |
+| Benchmark focused | `npm run benchmark:test` | **905 / 905 pass**, 0 fail |
+| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **762 / 762 pass**, 0 fail |
 | Python adapters | `npm run benchmark:test:python` | **86 tests, OK** |
 | Node syntax | `npm run check`, `npm run benchmark:check` | pass |
 | Python syntax | `npm run benchmark:check:python` | pass |
@@ -578,7 +578,7 @@ confusion generating the table removes.
 | Env Type | 1 — a placeholder in a numeric field is not an observation |
 | Service Tag | 2 — a service pinned by tag is not pinned; a service image and its recorded digest cannot disagree |
 | Model Digest | 1 — a short model identifier cannot pin weights — this is blocker B1 in code |
-| Env Placeholder | 1 — a placeholder in a description field is not an observation |
+| Placeholder | 2 — a placeholder in a description field is not an observation; a service or model named by a placeholder is not identified |
 
 **6 — Runtime factories, and what the blocked three actually do.** Four arms
 have real pinned factories: no-memory, ShadowGraph Full, ShadowGraph Compact and
@@ -695,9 +695,24 @@ between a real observation and 'unknown' typed into the same slot"* - while the
 code rejected only empty strings and numbers. An environment lock with **every**
 description field set to `unknown`, `N/A`, `TODO` or `not captured` was accepted
 and returned a digest that reads as authoritative, which is precisely what this
-module's header says it exists to refuse. It now refuses the values that mean
+module's header says it exists to refuse. It now refuses the spellings that mean
 "we did not look", while still accepting a real version string that merely
-contains such a word. That is the twelfth measured guard.
+contains such a word - it refuses the value, not the substring.
+
+Two corrections from the review of that fix, because the first version was the
+review example rather than the defect. The identifier check one function away
+still took any non-empty string, so a service lock naming `unknown` and a model
+lock with `modelId: "N/A"` both built and digested; all three builders now share
+the predicate. And the denylist missed the spellings people actually type -
+`undefined` above all, which is what a collector emits for a property it never
+read, plus `NaN`, `N / A`, `N.A.`, `???` and `---`. Spacing and punctuation are
+folded before comparison.
+
+This is a denylist and cannot be complete, which is worth stating plainly rather
+than implying otherwise: a version string is not checkable, so anything unlisted
+is taken at face value. It closes the spellings that mean nothing was observed,
+not every possible one. The guard is measured across all three builders as the
+twelfth entry in the table.
 
 The other three artifacts refuse, and the refusals are mechanical rather than
 declarative. Attempted here with the best evidence that exists:

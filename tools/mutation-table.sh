@@ -197,7 +197,7 @@ names_from_log() {
 # Every guard with a declared expectation. A name missing from this list is a
 # guard nobody measures, so the row count is asserted against the declaration
 # file below rather than against a number written here.
-MUTATIONS="narrowing purity armIdentity resumeSeed indexRebuild requiredDigest canonical scoredRefusal envType serviceTag modelDigest envPlaceholder"
+MUTATIONS="narrowing purity armIdentity resumeSeed indexRebuild requiredDigest canonical scoredRefusal envType serviceTag modelDigest placeholder"
 
 TOTAL="$(printf '%s\n' $MUTATIONS | wc -l)"
 echo "measuring baseline (timeout ${RUN_TIMEOUT_SECONDS}s per run, $TOTAL guards)..." >&2

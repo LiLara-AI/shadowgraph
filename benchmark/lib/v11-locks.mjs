@@ -47,13 +47,40 @@ const BARE_SHA256 = /^[a-f0-9]{64}$/u;
  * something.
  */
 const PLACEHOLDER_VALUES = new Set([
-  '-', '--', '?', 'n/a', 'na', 'nil', 'none', 'null', 'tbd', 'todo',
-  'unavailable', 'unknown', 'not applicable', 'not available',
-  'not captured', 'not measured', 'not recorded'
+  '-', '?', '.', 'empty', 'missing', 'n/a', 'n.a', 'na', 'nan', 'nil', 'none',
+  'null', 'pending', 'tbd', 'to do', 'todo', 'unavailable', 'undefined',
+  'unknown', 'unset', 'unspecified', '[object object]',
+  'not applicable', 'not available', 'not captured', 'not known',
+  'not measured', 'not recorded', 'not set'
 ]);
 
+/**
+ * Fold the spellings of one placeholder together before comparing.
+ *
+ * `N / A`, `N.A.` and `???` are the same answer typed three ways, and matching
+ * the exact string missed all three. This never changes what a lock records: it
+ * exists only inside the comparison below.
+ */
+function normalizePlaceholder(value) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/gu, ' ')
+    .replace(/\s*([/.])\s*/gu, '$1')
+    .replace(/\.+$/u, '')
+    .replace(/^[-?.]+$/u, (run) => (new Set(run).size === 1 ? run[0] : run));
+}
+
+/**
+ * A value that records the absence of an observation rather than an observation.
+ *
+ * This is a denylist and therefore cannot be complete - a version string is not
+ * otherwise checkable, so anything not listed here is taken at face value. It
+ * refuses the spellings that mean "we did not look", including `undefined`,
+ * which is what a collector emits for a property it never read.
+ */
 function isPlaceholder(value) {
-  return PLACEHOLDER_VALUES.has(value.trim().toLowerCase().replace(/\s+/gu, ' '));
+  return PLACEHOLDER_VALUES.has(normalizePlaceholder(value));
 }
 const PREFIXED_SHA256 = /^sha256:[a-f0-9]{64}$/u;
 
@@ -68,6 +95,9 @@ function reject(code, message) {
 function assertNonEmptyString(value, label) {
   if (typeof value !== 'string' || value.trim().length === 0) {
     reject('CONTRACT_FAILURE', `${label} must be a non-empty string`);
+  }
+  if (isPlaceholder(value)) {
+    reject('CONTRACT_FAILURE', `${label} is a placeholder, not an observation`);
   }
 }
 
@@ -131,7 +161,10 @@ export function buildEnvironmentLock(input) {
     return isPlaceholder(value);
   }).sort();
   if (missing.length > 0) {
-    reject('INCOMPLETE_ENVIRONMENT', `environment lock is missing: ${missing.join(', ')}`);
+    reject(
+      'INCOMPLETE_ENVIRONMENT',
+      `environment lock is missing or holds a placeholder for: ${missing.join(', ')}`
+    );
   }
 
   const unknown = Object.keys(observations)

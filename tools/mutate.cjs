@@ -75,10 +75,12 @@ const MUTATIONS = {
   ],
   // Reverts the description-field check to the version that accepted any
   // non-empty string, so "unknown" typed into every slot produced a lock.
-  envPlaceholder: [
+  // Neuters the predicate itself, so this measures the property across the
+  // environment, service and model builders rather than at one call site.
+  placeholder: [
     'benchmark/lib/v11-locks.mjs',
-    '    return isPlaceholder(value);',
-    '    return false;'
+    '  return PLACEHOLDER_VALUES.has(normalizePlaceholder(value));',
+    '  return false;'
   ],
   // Lets a service be recorded against a moving tag rather than a digest.
   serviceTag: [

@@ -105,7 +105,13 @@ test('a placeholder in a description field is not an observation', () => {
   const strings = ENVIRONMENT_FIELDS.filter((field) => ENVIRONMENT_SHAPE[field] === 'string');
   assert.ok(strings.length >= 2, 'the fixture must exercise more than one description field');
 
-  for (const placeholder of ['unknown', 'UNKNOWN', 'N/A', 'n/a', ' - ', 'TODO', 'none', 'not captured']) {
+  for (const placeholder of [
+    'unknown', 'UNKNOWN', 'N/A', 'n/a', ' - ', 'TODO', 'none', 'not captured',
+    // Independent review named these: `undefined` is what a collector emits for
+    // a property it never read, and the rest are one answer typed several ways.
+    'undefined', 'NaN', '[object Object]', 'N / A', 'N.A.', 'To Do', '???', '---',
+    'missing', 'pending', 'unspecified', 'unset'
+  ]) {
     for (const field of strings) {
       assert.throws(
         () => buildEnvironmentLock({ observations: environment({ [field]: placeholder }) }),
@@ -120,6 +126,39 @@ test('a placeholder in a description field is not an observation', () => {
   assert.doesNotThrow(() => buildEnvironmentLock({
     observations: environment({ containerRuntimeVersion: 'Docker 29.7.1 (none-rootless)' })
   }));
+});
+
+test('a service or model named by a placeholder is not identified', () => {
+  // The environment lock refused placeholders while the identifier check next
+  // door still took any non-empty string, so a service lock naming "unknown"
+  // built and digested. Fixing one builder and not the others would have been
+  // the review example rather than the defect.
+  for (const value of ['unknown', 'N/A', 'TODO', 'not captured', 'undefined', '???']) {
+    assert.throws(
+      () => buildServiceLock({ services: [{ ...SERVICE, name: value }] }),
+      (error) => error instanceof LockError && error.code === 'CONTRACT_FAILURE',
+      `service name ${JSON.stringify(value)} was accepted`
+    );
+    assert.throws(
+      () => buildServiceLock({ services: [{ ...SERVICE, armId: value }] }),
+      (error) => error instanceof LockError && error.code === 'CONTRACT_FAILURE',
+      `service armId ${JSON.stringify(value)} was accepted`
+    );
+    assert.throws(
+      () => buildModelLock({ models: [{ ...MODEL, modelId: value }] }),
+      (error) => error instanceof LockError && error.code === 'CONTRACT_FAILURE',
+      `model id ${JSON.stringify(value)} was accepted`
+    );
+    assert.throws(
+      () => buildModelLock({ models: [{ ...MODEL, requestClass: value }] }),
+      (error) => error instanceof LockError && error.code === 'CONTRACT_FAILURE',
+      `model requestClass ${JSON.stringify(value)} was accepted`
+    );
+  }
+
+  // Real identifiers are unaffected.
+  assert.doesNotThrow(() => buildServiceLock({ services: [SERVICE] }));
+  assert.doesNotThrow(() => buildModelLock({ models: [MODEL] }));
 });
 
 test('a service image and its recorded digest cannot disagree', () => {

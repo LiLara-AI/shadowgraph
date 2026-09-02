@@ -49,8 +49,9 @@
   "envType": [
     "a placeholder in a numeric field is not an observation"
   ],
-  "envPlaceholder": [
-    "a placeholder in a description field is not an observation"
+  "placeholder": [
+    "a placeholder in a description field is not an observation",
+    "a service or model named by a placeholder is not identified"
   ],
   "serviceTag": [
     "a service pinned by tag is not pinned",
