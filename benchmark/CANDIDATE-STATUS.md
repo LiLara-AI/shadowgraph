@@ -522,6 +522,20 @@ comparison over the mutable files needs no git, covers every file any mutation
 can write, and runs before anything is printed. None of them can put a wrong
 number in a published cell.
 
+A scoped pass over that class fix then found two members of the class still
+open, in the commit whose message said it closed the class - which is the
+broader-claim-than-code shape one more time, and worth writing down rather than
+quietly patching. The list of mutable files was read through a process
+substitution, which discards the producer's exit status, so a *partial* list
+would have passed the count guard: the harness would then have backed up,
+restored and byte-checked only the files it had heard about, while `mutate.cjs`
+could still write the ones it had not. Verified by making the producer emit two
+of four paths and exit non-zero - previously accepted, now refused with no table
+and the sources untouched. The reconciliation discarded `comm`'s status the same
+way, where a failure would have read as "nothing missing". Both are checked now,
+which is what makes the sentence above about covering every file mutation can
+write true rather than nearly true.
+
 It exists because three consecutive review rounds each caught one wrong number
 in a hand-written table. The last was a purity-rebuild figure of 3 that should
 have been 1: that mutation removed the rebuild *call* as well as the comparison,

@@ -56,7 +56,11 @@ fi
 # this replaced had drifted: it copied validate.mjs, which no mutation touches,
 # implying a mutation that does not exist, while nothing checked that every
 # mutated file was actually covered.
-mapfile -t MUTABLE_FILES < <(node tools/mutate.cjs --files)
+if ! node tools/mutate.cjs --files > "$WORK/mutable"; then
+  echo "ERROR: could not list the files mutate.cjs can write" >&2
+  exit 1
+fi
+mapfile -t MUTABLE_FILES < "$WORK/mutable"
 if [ "${#MUTABLE_FILES[@]}" -eq 0 ]; then
   echo "ERROR: mutate.cjs listed no mutable files" >&2
   exit 1
@@ -314,8 +318,13 @@ if [ ! -s "$WORK/declared" ]; then
   echo "ERROR: no declared guards were read; nothing can be reconciled" >&2
   STATUS=1
 fi
-MISSING="$(comm -23 "$WORK/declared" <(sort "$WORK/measured"))"
-if [ -n "$TIMED_OUT" ]; then
+sort "$WORK/measured" > "$WORK/measured.sorted"
+if ! MISSING="$(comm -23 "$WORK/declared" "$WORK/measured.sorted")"; then
+  echo "ERROR: could not reconcile declared guards against measured ones" >&2
+  STATUS=1
+  MISSING=""
+fi
+if [ -n "$TIMED_OUT" ] && [ -n "$MISSING" ]; then
   echo "NOTE: stopped early after $TIMED_OUT timed out; these guards are unmeasured:" >&2
   printf '%s
 ' "$MISSING" | while IFS= read -r guard; do
