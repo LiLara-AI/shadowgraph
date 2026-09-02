@@ -584,19 +584,28 @@ describe('the supervisor refuses every target that is not its own root', () => {
     const mismatched = await fabricateRoot(temporary, DEAD_PID, 'cccccc', marker(DEAD_PID, 'b'.repeat(32)));
     const wrongName = join(temporary, 'shadowgraph-scratch-not-a-pid');
     await mkdir(wrongName);
-    const linked = join(temporary, `shadowgraph-scratch-${DEAD_PID}-dddddd`);
-    await symlink(decoy, linked);
 
     const cases = [
       ['a missing target', [join(temporary, `shadowgraph-scratch-${DEAD_PID}-eeeeee`), DEAD_PID, nonce, temporary], /target does not exist/u],
       ['the temp root itself', [temporary, DEAD_PID, nonce, temporary], /basename is not a scratch root name/u],
       ['the filesystem root', ['/', DEAD_PID, nonce, temporary], /basename is not a scratch root name/u],
       ['a malformed basename', [wrongName, DEAD_PID, nonce, temporary], /basename is not a scratch root name/u],
-      ['a symbolic link', [linked, DEAD_PID, nonce, temporary], /target is a symbolic link/u],
       ['a pid that is not the owner', [valid, DEAD_PID - 1, nonce, temporary], /basename pid does not match the owner pid/u],
       ['a nonce that does not match', [mismatched, DEAD_PID, nonce, temporary], /owner marker does not match the handshake/u],
       ['a root outside the temp root', [outside, DEAD_PID, nonce, temporary], /not an immediate child of the temp root/u]
     ];
+    // Creating one needs a privilege Windows does not grant by default, so the
+    // link case joins the rest only where it can be built.
+    const linked = join(temporary, `shadowgraph-scratch-${DEAD_PID}-dddddd`);
+    let linkable = true;
+    try {
+      await symlink(decoy, linked);
+    } catch (error) {
+      if (error.code !== 'EPERM' && error.code !== 'EACCES') throw error;
+      linkable = false;
+      t.diagnostic(`symbolic links are not available here (${error.code}); that case is not covered`);
+    }
+    if (linkable) cases.push(['a symbolic link', [linked, DEAD_PID, nonce, temporary], /target is a symbolic link/u]);
     for (const [name, argv, expected] of cases) {
       const child = spawn(process.execPath, [SUPERVISOR, ...argv.map(String)], { stdio: ['pipe', 'pipe', 'pipe'] });
       let stderr = '';
