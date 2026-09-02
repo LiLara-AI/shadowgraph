@@ -49,6 +49,9 @@
   "envType": [
     "a placeholder in a numeric field is not an observation"
   ],
+  "envPlaceholder": [
+    "a placeholder in a description field is not an observation"
+  ],
   "serviceTag": [
     "a service pinned by tag is not pinned",
     "a service image and its recorded digest cannot disagree"

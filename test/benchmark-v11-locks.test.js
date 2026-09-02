@@ -96,6 +96,32 @@ test('a placeholder in a numeric field is not an observation', () => {
   }
 });
 
+test('a placeholder in a description field is not an observation', () => {
+  // The typed-field guard closed the count half of this. The string half stayed
+  // open under a comment claiming it was shut: every description field accepted
+  // "unknown", so a lock with nothing actually observed still produced a digest
+  // that reads as authoritative. Found by trying to build the requirement-8
+  // artifacts and watching one succeed that should not have.
+  const strings = ENVIRONMENT_FIELDS.filter((field) => ENVIRONMENT_SHAPE[field] === 'string');
+  assert.ok(strings.length >= 2, 'the fixture must exercise more than one description field');
+
+  for (const placeholder of ['unknown', 'UNKNOWN', 'N/A', 'n/a', ' - ', 'TODO', 'none', 'not captured']) {
+    for (const field of strings) {
+      assert.throws(
+        () => buildEnvironmentLock({ observations: environment({ [field]: placeholder }) }),
+        (error) => error instanceof LockError && error.code === 'INCOMPLETE_ENVIRONMENT',
+        `${field}=${JSON.stringify(placeholder)} was accepted as an observation`
+      );
+    }
+  }
+
+  // A real version string that merely contains such a word is still an
+  // observation: this refuses the value, not the substring.
+  assert.doesNotThrow(() => buildEnvironmentLock({
+    observations: environment({ containerRuntimeVersion: 'Docker 29.7.1 (none-rootless)' })
+  }));
+});
+
 test('a service image and its recorded digest cannot disagree', () => {
   // Two '@' sections destructured the first digest while the recorded image
   // kept the whole string including the second, so image and digest named

@@ -73,6 +73,13 @@ const MUTATIONS = {
     + '      return !Number.isSafeInteger(value) || value <= 0;\n    }',
     "    if (typeof value === 'number') return !Number.isFinite(value) || value <= 0;"
   ],
+  // Reverts the description-field check to the version that accepted any
+  // non-empty string, so "unknown" typed into every slot produced a lock.
+  envPlaceholder: [
+    'benchmark/lib/v11-locks.mjs',
+    '    return isPlaceholder(value);',
+    '    return false;'
+  ],
   // Lets a service be recorded against a moving tag rather than a digest.
   serviceTag: [
     'benchmark/lib/v11-locks.mjs',

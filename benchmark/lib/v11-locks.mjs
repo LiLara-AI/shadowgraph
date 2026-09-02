@@ -31,6 +31,30 @@ export class LockError extends Error {
 }
 
 const BARE_SHA256 = /^[a-f0-9]{64}$/u;
+
+/**
+ * Values that record the absence of an observation rather than an observation.
+ *
+ * The typed-field guard closed half of this: a count may not be prose. The
+ * other half stayed open, under a comment claiming it was shut - a string field
+ * accepted "unknown", "N/A", "TODO" or "not captured", and an environment lock
+ * with every string field set to one of them produced a digest that reads as
+ * authoritative. That is the exact failure this module's header says it exists
+ * to refuse, reached by typing the placeholder into the slot the comment named.
+ *
+ * A version string is not otherwise checkable, so this refuses the tokens that
+ * mean "we did not look" rather than trying to validate the ones that mean
+ * something.
+ */
+const PLACEHOLDER_VALUES = new Set([
+  '-', '--', '?', 'n/a', 'na', 'nil', 'none', 'null', 'tbd', 'todo',
+  'unavailable', 'unknown', 'not applicable', 'not available',
+  'not captured', 'not measured', 'not recorded'
+]);
+
+function isPlaceholder(value) {
+  return PLACEHOLDER_VALUES.has(value.trim().toLowerCase().replace(/\s+/gu, ' '));
+}
 const PREFIXED_SHA256 = /^sha256:[a-f0-9]{64}$/u;
 
 function isPlainObject(value) {
@@ -99,10 +123,12 @@ export function buildEnvironmentLock(input) {
     if (ENVIRONMENT_SHAPE[field] === 'count') {
       return !Number.isSafeInteger(value) || value <= 0;
     }
-    // A string field holds a description, and a number is not one. This is
-    // deliberately strict: it is the only thing standing between a real
-    // observation and "unknown" typed into the same slot.
-    return typeof value !== 'string' || value.trim().length === 0;
+    // A string field holds a description, and neither a number nor a
+    // placeholder is one. This is what stands between a real observation and
+    // "unknown" typed into the same slot - which the previous version of this
+    // comment claimed while accepting it.
+    if (typeof value !== 'string' || value.trim().length === 0) return true;
+    return isPlaceholder(value);
   }).sort();
   if (missing.length > 0) {
     reject('INCOMPLETE_ENVIRONMENT', `environment lock is missing: ${missing.join(', ')}`);
