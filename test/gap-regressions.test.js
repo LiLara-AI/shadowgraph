@@ -20,8 +20,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
-import { mkdtemp, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   createShadowGraph,
@@ -34,6 +33,7 @@ import {
 import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createFactAttestation, createLocalEvidenceVerifier } from '../src/verification.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 // Smallest decision that carries a machine-checkable reopen condition.
 function decisionWithReopenRule(graph, project = 'p') {
@@ -86,8 +86,8 @@ describe('G1 (S1) — FIXED: reconsideration reads facts that are already stored
     assert.deepEqual(due[0].alternativesToReconsider, ['postgres']);
   });
 
-  it('ACCEPTANCE: reconsideration survives persist + reload (JSON backend)', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'shadowgraph-g1-json-'));
+  it('ACCEPTANCE: reconsideration survives persist + reload (JSON backend)', async (t) => {
+    const dir = await scratchDirectory(t, 'shadowgraph-g1-json-');
     const store = createJsonFileStore(join(dir, 'data.json'));
 
     const original = createShadowGraph();
@@ -109,7 +109,7 @@ describe('G1 (S1) — FIXED: reconsideration reads facts that are already stored
   it('ACCEPTANCE: reconsideration survives a real SQLite store close + reopen', async (t) => {
     // Uses the same skip guard as test/sqlite.test.js: node:sqlite needs Node 22.5+.
     const { createSqliteStore } = await import('../src/sqlite-storage.js');
-    const dir = await mkdtemp(join(tmpdir(), 'shadowgraph-g1-sqlite-'));
+    const dir = await scratchDirectory(t, 'shadowgraph-g1-sqlite-');
     const file = join(dir, 'graph.db');
 
     let store;
@@ -379,8 +379,8 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
     assert.deepEqual([decision.actor, decision.client, decision.sessionId], ['codex', 'codex-cli', 's2']);
   });
 
-  it('ACCEPTANCE: provenance survives a JSON store persist + reload', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'shadowgraph-g2-json-'));
+  it('ACCEPTANCE: provenance survives a JSON store persist + reload', async (t) => {
+    const dir = await scratchDirectory(t, 'shadowgraph-g2-json-');
     const store = createJsonFileStore(join(dir, 'data.json'));
 
     const original = createShadowGraph();
@@ -399,7 +399,7 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
 
   it('ACCEPTANCE: provenance survives a real SQLite close + reopen', async (t) => {
     const { createSqliteStore } = await import('../src/sqlite-storage.js');
-    const dir = await mkdtemp(join(tmpdir(), 'shadowgraph-g2-sqlite-'));
+    const dir = await scratchDirectory(t, 'shadowgraph-g2-sqlite-');
     const file = join(dir, 'graph.db');
 
     let store;
@@ -449,8 +449,8 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
     assert.equal(fact.source, fact.sourceClass);
   });
 
-  it('ACCEPTANCE U-1: a separately trusted Ed25519 verifier can legitimately mark a fact verified', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-u1-channel-'));
+  it('ACCEPTANCE U-1: a separately trusted Ed25519 verifier can legitimately mark a fact verified', async (t) => {
+    const directory = await scratchDirectory(t, 'shadowgraph-u1-channel-');
     const keys = generateKeyPairSync('ed25519');
     const verifier = createLocalEvidenceVerifier({ allowedEvidenceRoot: directory, trustedVerifiers: { approver: keys.publicKey } });
     const graph = createShadowGraph({ verifier });
@@ -469,8 +469,8 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
     assert.equal(result.fact.verification.verifiedAt, '2026-08-27T00:00:00.000Z');
   });
 
-  it('ACCEPTANCE U-1: offline evidence is re-checkable and rejects a modified document or missing reference', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-u1-offline-'));
+  it('ACCEPTANCE U-1: offline evidence is re-checkable and rejects a modified document or missing reference', async (t) => {
+    const directory = await scratchDirectory(t, 'shadowgraph-u1-offline-');
     const keys = generateKeyPairSync('ed25519');
     const verifier = createLocalEvidenceVerifier({ allowedEvidenceRoot: directory, trustedVerifiers: { approver: keys.publicKey } });
     const graph = createShadowGraph({ verifier });
@@ -692,8 +692,8 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
     assert.equal(reloaded.validate().valid, true);
   });
 
-  it('ACCEPTANCE: the status survives a JSON store persist + reload', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'shadowgraph-g3-json-'));
+  it('ACCEPTANCE: the status survives a JSON store persist + reload', async (t) => {
+    const dir = await scratchDirectory(t, 'shadowgraph-g3-json-');
     const store = createJsonFileStore(join(dir, 'data.json'));
 
     const original = createShadowGraph();
@@ -719,7 +719,7 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
     assert.equal(new Set(DECISION_STATUSES).size, DECISION_STATUSES.length);
   });
 
-  it('ACCEPTANCE L-1: new decisions enter proposed and remain current in context across migration and restart', async () => {
+  it('ACCEPTANCE L-1: new decisions enter proposed and remain current in context across migration and restart', async (t) => {
     const graph = createShadowGraph();
     const created = graph.addDecision({ id: 'new-entry', project: 'app', title: 'Entry', chosen: 'A' });
     assert.equal(created.status, 'proposed');
@@ -733,7 +733,7 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
     assert.equal(legacy.exportData().records[0].status, 'proposed');
     assert.equal(legacy.exportData().records[0].migration.legacyDecisionStatus, 'active');
 
-    const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-l1-restart-'));
+    const directory = await scratchDirectory(t, 'shadowgraph-l1-restart-');
     const store = createJsonFileStore(join(directory, 'data.json'));
     await store.save(graph.exportData());
     const restarted = createShadowGraph();
@@ -1010,8 +1010,8 @@ describe('G4 (S2) — FIXED: the journal carries complete payloads and rebuilds 
     assert.equal(graph.addFact({ key: 'fresh', value: 1, source: 'human_confirmed' }).verificationStatus, 'unverified');
   });
 
-  it('ACCEPTANCE: the journal survives a JSON persist + reload and still rebuilds', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'shadowgraph-g4-json-'));
+  it('ACCEPTANCE: the journal survives a JSON persist + reload and still rebuilds', async (t) => {
+    const dir = await scratchDirectory(t, 'shadowgraph-g4-json-');
     const store = createJsonFileStore(join(dir, 'data.json'));
     const graph = createShadowGraph();
     graph.addDecision({ project: 'p', title: 'Persisted', chosen: 'C' });
@@ -1028,7 +1028,7 @@ describe('G4 (S2) — FIXED: the journal carries complete payloads and rebuilds 
 
   it('ACCEPTANCE: JSON and SQLite produce the same rebuilt projection', async (t) => {
     let sqliteStore;
-    const dir = await mkdtemp(join(tmpdir(), 'shadowgraph-g4-parity-'));
+    const dir = await scratchDirectory(t, 'shadowgraph-g4-parity-');
     try { sqliteStore = await createSqliteStore(join(dir, 'graph.db')); }
     catch (error) { if (/requires Node/.test(error.message)) return t.skip(error.message); throw error; }
 
@@ -1622,8 +1622,8 @@ describe('G8 (S2) — FIXED: confidence has an auditable, evidence-weighted basi
     assert.equal(stored.confidence.basis.contributions.length, 0);
   });
 
-  it('ACCEPTANCE: confidence and its basis survive export/import', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'shadowgraph-g8-'));
+  it('ACCEPTANCE: confidence and its basis survive export/import', async (t) => {
+    const dir = await scratchDirectory(t, 'shadowgraph-g8-');
     const store = createJsonFileStore(join(dir, 'data.json'));
     const graph = createShadowGraph();
     const decision = graph.addDecision({ title: 'T', chosen: 'C' });

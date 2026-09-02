@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const exec = promisify(execFile);
 
@@ -15,8 +15,8 @@ async function cli(file, command, payload) {
   return JSON.parse(stdout);
 }
 
-test('CLI remembers, recalls, and synchronizes Markdown memory', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-cli-memory-'));
+test('CLI remembers, recalls, and synchronizes Markdown memory', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-cli-memory-');
   const file = join(directory, 'data.json');
   const workspace = join(directory, 'notes');
   const remembered = await cli(file, 'remember', {
@@ -37,8 +37,8 @@ test('CLI remembers, recalls, and synchronizes Markdown memory', async () => {
   assert.match(markdown, /Prefers dark mode/);
 });
 
-test('CLI context persists review signals that it creates', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-cli-context-'));
+test('CLI context persists review signals that it creates', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-cli-context-');
   const file = join(directory, 'data.json');
   await cli(file, 'decision', {
     id: 'cli-due', project: 'app', title: 'CLI due review', chosen: 'A',

@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { open, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -22,6 +21,7 @@ import {
   runV11Benchmark,
   unitIdFor
 } from '../benchmark/lib/v11-runner.mjs';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const OPERATION_FIELDS = [
   'memoryReadOperations',
@@ -348,8 +348,7 @@ async function ledgerArtifact(progressPath, unitEvidencePath, attemptId) {
 }
 
 async function materializePriorAttempt(t, raw, extraStarted = []) {
-  const directory = await mkdtemp(path.join(tmpdir(), 'shadowgraph-v11-resume-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-resume-');
   const progressPath = path.join(directory, `${raw.attemptId}.progress.ndjson`);
   const unitEvidencePath = path.join(directory, `${raw.attemptId}.units.ndjson`);
   const previousRawPath = path.join(directory, `${raw.attemptId}.raw.json`);
@@ -635,8 +634,7 @@ test('resume validates prior evidence before side effects and preserves the full
     phase: 'A',
     seed: 17
   }]);
-  const directory = await mkdtemp(path.join(tmpdir(), 'shadowgraph-v11-repeat-resume-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-repeat-resume-');
   const secondProgressPath = path.join(directory, 'attempt-v11-2.progress.ndjson');
   const secondUnitsPath = path.join(directory, 'attempt-v11-2.units.ndjson');
   const secondRawPath = path.join(directory, 'attempt-v11-2.raw.json');
@@ -918,8 +916,8 @@ test('persist failure retains measured outer evidence and prevents verify withou
   );
 });
 
-test('runner writes a complete durable lifecycle through the real progress ledger contract', async () => {
-  const directory = await mkdtemp(path.join(tmpdir(), 'shadowgraph-v11-runner-'));
+test('runner writes a complete durable lifecycle through the real progress ledger contract', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-runner-');
   const ledgerPath = path.join(directory, 'progress.ndjson');
   const unitPath = path.join(directory, 'units.ndjson');
   const progress = await createProgressLedger({
@@ -965,7 +963,6 @@ test('runner writes a complete durable lifecycle through the real progress ledge
   } finally {
     await progress.close();
     await unitEvidence.close();
-    await rm(directory, { recursive: true, force: true });
   }
 });
 
@@ -1077,11 +1074,10 @@ for (const [field, fakeHash] of [
 test('runner rejects changed Amendment 002 bytes and arm-matrix contradictions before side effects', async (t) => {
   const source = await readFile(AMENDMENT_002_PATH);
   assert.equal(sha256(source), HASHES.amendment002Sha256);
-  const directory = await mkdtemp(path.join(tmpdir(), 'shadowgraph-v11-amendment-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-amendment-');
   const changedPath = path.join(directory, 'amendment-002.changed.json');
   await writeFile(changedPath, Buffer.concat([source, Buffer.from('\n')]));
   const changedHash = sha256(await readFile(changedPath));
-  t.after(() => rm(directory, { recursive: true, force: true }));
 
   for (const overrides of [
     { amendment002Path: changedPath },

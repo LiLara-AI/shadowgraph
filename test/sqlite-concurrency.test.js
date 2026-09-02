@@ -1,10 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createSqliteStore } from '../src/sqlite-storage.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 function worker(file, id) {
   return new Promise((resolve, reject) => {
@@ -18,7 +17,7 @@ function worker(file, id) {
 test('SQLite concurrent processes preserve a valid relational database and reject stale writers', async (t) => {
   let store;
   try {
-    const dir = await mkdtemp(join(tmpdir(), 'shadowgraph-sqlite-concurrency-'));
+    const dir = await scratchDirectory(t, 'shadowgraph-sqlite-concurrency-');
     const file = join(dir, 'graph.db'); store = await createSqliteStore(file);
     await store.save({ schemaVersion: 2, records: [], facts: [], relations: [], events: [] }); store.close(); store = null;
     const results = await Promise.all([worker(file, 'p1'), worker(file, 'p2')]);

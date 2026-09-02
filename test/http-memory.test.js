@@ -1,10 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createShadowGraphServer } from '../src/server.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 async function post(base, path, body) {
   const response = await fetch(`${base}${path}`, {
@@ -14,7 +13,7 @@ async function post(base, path, body) {
 }
 
 test('HTTP exposes scoped remember and hybrid recall routes', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-http-memory-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-http-memory-');
   const app = await createShadowGraphServer({ file: join(directory, 'data.json') });
   await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve));
   t.after(() => app.server.close());

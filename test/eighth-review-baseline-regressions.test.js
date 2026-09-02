@@ -3,8 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { restoreFile } from '../src/backup.js';
 import { rebuildProjection } from '../src/journal.js';
@@ -17,6 +16,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { createFactAttestation, createLocalEvidenceVerifier } from '../src/verification.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const NOW = '2026-08-27T12:00:00.000Z';
 const EXPIRES_AT = '2026-09-30T00:00:00.000Z';
@@ -278,8 +278,8 @@ function startMcp(file, verifierConfig) {
   };
 }
 
-test('DS-P1-006 eighth review: matching-live midstream baselines cannot resurrect expired or superseded signed facts', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-eighth-review-core-'));
+test('DS-P1-006 eighth review: matching-live midstream baselines cannot resurrect expired or superseded signed facts', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-eighth-review-core-');
   const fixture = await verifierFixture(directory);
 
   for (const terminal of ['expired', 'superseded']) {
@@ -366,8 +366,8 @@ test('DS-P1-006 eighth review: schema 1-5 and baseline-only migrations remain ca
   }
 });
 
-test('DS-P1-006 eighth review: baseline-only signed snapshots preserve verifier downgrade rules', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-eighth-review-baseline-only-signed-'));
+test('DS-P1-006 eighth review: baseline-only signed snapshots preserve verifier downgrade rules', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-eighth-review-baseline-only-signed-');
   const fixture = await verifierFixture(directory);
   const active = await signedMidstreamBaselineAttack(directory, fixture, 'expired', 'baseline-only-source');
   const copied = active.payload.journal.at(-1).payload;
@@ -409,8 +409,8 @@ test('DS-P1-006 eighth review: baseline-only signed snapshots preserve verifier 
   assert.equal(unconfigured.rebuild().projection.facts[0].verificationStatus, 'unverified');
 });
 
-test('DS-P1-006 eighth review: a monotonic migration extension preserves the signed terminal lifecycle and original replay epoch', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-eighth-review-migration-extension-'));
+test('DS-P1-006 eighth review: a monotonic migration extension preserves the signed terminal lifecycle and original replay epoch', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-eighth-review-migration-extension-');
   const fixture = await verifierFixture(directory);
   for (const terminal of ['expired', 'superseded']) {
     const source = await signedMidstreamBaselineAttack(directory, fixture, terminal, `migration-extension-${terminal}`);
@@ -575,8 +575,8 @@ test('DS-P1-006 journal-less multi-memory overwrite uses recorded, superseded, a
   assert.equal(/old-(?:active|superseded|invalidated)-private/.test(JSON.stringify(report.projection)), false);
 });
 
-test('DS-P1-006 journal-less merge rejects terminal verified fact resurrection atomically', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-ds-p1-006-journal-less-resurrection-'));
+test('DS-P1-006 journal-less merge rejects terminal verified fact resurrection atomically', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-ds-p1-006-journal-less-resurrection-');
   const fixture = await verifierFixture(directory);
   for (const terminal of ['expired', 'superseded']) {
     const attack = await signedMidstreamBaselineAttack(directory, fixture, terminal, `journal-less-${terminal}`);
@@ -642,7 +642,7 @@ test('DS-P1-006 journal-less merge preflights sequence overflow and snapshot pos
 });
 
 test('DS-P1-006 journal-less overwrite survives JSON and SQLite restart with rebuild parity', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-ds-p1-006-journal-less-restart-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-ds-p1-006-journal-less-restart-');
   const graph = createShadowGraph({ now: () => NOW });
   const memory = graph.remember({
     id: 'ds-p1-006-restart-memory', project: 'ds-p1-006-restart',
@@ -706,7 +706,7 @@ test('DS-P1-006 eighth review: hard-purge leading gaps and sequence ledgers rema
 });
 
 test('DS-P1-006 eighth review: JSON and SQLite restore reject both terminal resurrection snapshots atomically', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-eighth-review-restore-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-eighth-review-restore-');
   const fixture = await verifierFixture(directory);
 
   for (const terminal of ['expired', 'superseded']) {
@@ -749,7 +749,7 @@ test('DS-P1-006 eighth review: JSON and SQLite restore reject both terminal resu
 });
 
 test('DS-P1-006 eighth review: CLI, HTTP, and MCP restore reject the same baseline code and preserve destinations', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-eighth-review-interfaces-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-eighth-review-interfaces-');
   const fixture = await verifierFixture(directory);
   const { payload } = await signedMidstreamBaselineAttack(directory, fixture, 'expired', 'interfaces');
   const source = join(directory, 'attack.json');

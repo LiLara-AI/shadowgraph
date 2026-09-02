@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { backupFile, restoreFile } from '../src/backup.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 test('normalizes common MCP aliases for rejection reasons and human sources', () => {
   const graph = createShadowGraph();
@@ -60,8 +60,8 @@ test('validation and retrieval provide graph-aware explanations', () => {
   assert.equal(graph.validate().valid, true);
 });
 
-test('backup and restore round-trip a graph export', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'shadowgraph-backup-'));
+test('backup and restore round-trip a graph export', async (t) => {
+  const dir = await scratchDirectory(t, 'shadowgraph-backup-');
   const source = join(dir, 'source.json'); const backup = join(dir, 'backup.json'); const restored = join(dir, 'restored.json');
   const graph = createShadowGraph(); graph.addDecision({ title: 'Backup', chosen: 'A' });
   await import('node:fs/promises').then(({ writeFile }) => writeFile(source, JSON.stringify(graph.exportData())));

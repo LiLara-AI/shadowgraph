@@ -2,13 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { gunzip } from 'node:zlib';
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  writeFile
-} from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,6 +14,7 @@ import {
   runAdapterRequest
 } from '../benchmark/lib/adapters.mjs';
 import { inspectPackagedText, parseNpmTarball } from '../scripts/check-package.mjs';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const execFileAsync = promisify(execFile);
 const gunzipAsync = promisify(gunzip);
@@ -81,218 +76,210 @@ async function readRuntimeOracle(path) {
   return JSON.parse(await readFile(path, 'utf8'));
 }
 
-test('follow-up: subprocess-only bearer/basic/header/arg/query/userinfo credentials are absent from every retained artifact', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-followup-runtime-artifacts-'));
-  try {
-    const adapterPath = join(directory, 'runtime-secret-adapter.mjs');
-    await writeFile(adapterPath, String.raw`
-      import { randomBytes } from 'node:crypto';
-      import { writeFileSync } from 'node:fs';
+test('follow-up: subprocess-only bearer/basic/header/arg/query/userinfo credentials are absent from every retained artifact', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-followup-runtime-artifacts-');
+  const adapterPath = join(directory, 'runtime-secret-adapter.mjs');
+  await writeFile(adapterPath, String.raw`
+    import { randomBytes } from 'node:crypto';
+    import { writeFileSync } from 'node:fs';
 
-      let input = '';
-      for await (const chunk of process.stdin) input += chunk;
-      JSON.parse(input);
-      const mode = process.argv[2];
-      const oraclePath = process.argv[3];
-      const nonce = randomBytes(24).toString('base64url');
-      const generated = {
-        bearer: 'followup-bearer.' + nonce + '+/%',
-        basic: Buffer.from('followup-user-' + nonce + ':followup pass+/' + nonce).toString('base64'),
-        header: 'followup-header ' + nonce + '+/%',
-        argument: 'followup-argument ' + nonce + '+/%',
-        query: 'followup-query ' + nonce + '+/%',
-        username: 'followup-user ' + nonce + '+',
-        password: 'followup-password ' + nonce + '+/%FF%2G'
-      };
-      writeFileSync(oraclePath, JSON.stringify(generated));
-      const forms = (value) => {
-        const output = [value, new URLSearchParams({ value }).toString().slice('value='.length)];
-        let encoded = value;
-        for (let round = 0; round < 3; round += 1) {
-          encoded = encodeURIComponent(encoded);
-          output.push(encoded, new URLSearchParams({ value: encoded }).toString().slice('value='.length));
-        }
-        return [...new Set(output)];
-      };
-      const endpoint = new URL('https://provider.example.invalid/benchmark/v1');
-      endpoint.username = generated.username;
-      endpoint.password = generated.password;
-      endpoint.searchParams.set('access_token', generated.query);
-      endpoint.searchParams.set('api-version', '2026-08-28');
-      const command = [
-        'provider-cli',
-        '--api-key', generated.argument,
-        '--auth-token=' + generated.header,
-        endpoint.href
-      ];
-      const nested = {
-        headers: {
-          authorization: 'Bearer ' + generated.bearer,
-          proxyAuthorization: 'Basic ' + generated.basic,
-          xApiKey: generated.header
-        },
-        commandMetadata: { command },
-        endpoint,
-        echoForms: [
-          ...forms(generated.bearer),
-          ...forms(generated.basic),
-          ...forms(generated.header),
-          ...forms(generated.argument),
-          ...forms(generated.query),
-          ...forms(generated.username),
-          ...forms(generated.password)
-        ],
-        harmless: {
-          model: 'followup-model-token-preview-v3',
-          version: '2026-08-28',
-          digest: '87cf2ad06882bf2aaf432bd5718f48033447ec5f14e42ad71eaa3c325af32796'
-        }
-      };
-      const diagnostic = [
-        'Authorization: Bearer ' + generated.bearer,
-        'Authorization: Basic ' + generated.basic,
-        'x-api-key="' + generated.header + '"',
-        'command=' + JSON.stringify(command),
-        'endpoint=' + endpoint.href,
-        'forms=' + nested.echoForms.join('|')
-      ].join(' ; ');
-      if (mode === 'success') {
-        process.stderr.write('success stderr ' + diagnostic + '\n');
-        process.stdout.write(JSON.stringify({
-          response: { recommendation: 'safe', nested },
-          usage: { totalTokens: 1, nested },
-          toolCalls: 1,
-          storageBytes: 1,
-          persistedVerified: true,
-          logs: ['success log ' + diagnostic]
-        }));
-      } else if (mode === 'nonzero') {
-        process.stdout.write(JSON.stringify({ error: { nested, diagnostic } }));
-        process.stderr.write('nonzero stderr ' + diagnostic + '\n');
-        process.exitCode = 19;
-      } else if (mode === 'malformed') {
-        process.stdout.write('{"error":{"nested":' + JSON.stringify(nested));
-        process.stderr.write('malformed stderr ' + diagnostic + '\n');
-      } else if (mode === 'timeout') {
-        process.stdout.write('token="' + generated.argument + '"\n' + diagnostic);
-        process.stderr.write('timeout stderr ' + diagnostic + '\n');
-        setInterval(() => {}, 1000);
+    let input = '';
+    for await (const chunk of process.stdin) input += chunk;
+    JSON.parse(input);
+    const mode = process.argv[2];
+    const oraclePath = process.argv[3];
+    const nonce = randomBytes(24).toString('base64url');
+    const generated = {
+      bearer: 'followup-bearer.' + nonce + '+/%',
+      basic: Buffer.from('followup-user-' + nonce + ':followup pass+/' + nonce).toString('base64'),
+      header: 'followup-header ' + nonce + '+/%',
+      argument: 'followup-argument ' + nonce + '+/%',
+      query: 'followup-query ' + nonce + '+/%',
+      username: 'followup-user ' + nonce + '+',
+      password: 'followup-password ' + nonce + '+/%FF%2G'
+    };
+    writeFileSync(oraclePath, JSON.stringify(generated));
+    const forms = (value) => {
+      const output = [value, new URLSearchParams({ value }).toString().slice('value='.length)];
+      let encoded = value;
+      for (let round = 0; round < 3; round += 1) {
+        encoded = encodeURIComponent(encoded);
+        output.push(encoded, new URLSearchParams({ value: encoded }).toString().slice('value='.length));
       }
-    `, 'utf8');
-
-    const modes = ['success', 'nonzero', 'malformed', 'timeout'];
-    const specs = {};
-    const oracles = {};
-    for (const mode of modes) {
-      const oraclePath = join(directory, `${mode}-oracle.json`);
-      specs[mode] = {
-        command: [process.execPath, adapterPath, mode, oraclePath],
-        timeoutMs: mode === 'timeout' ? 750 : 10_000
-      };
-    }
-
-    const request = { action: 'probe', model: 'followup-model-token-preview-v3' };
-    const success = await runAdapterRequest(specs.success, request, {
-      inheritedEnvironment: { PATH: process.env.PATH ?? '', TEMP: process.env.TEMP ?? tmpdir() }
-    });
-    const nonzero = await captureAdapterFailure(specs.nonzero, request);
-    const malformed = await captureAdapterFailure(specs.malformed, request);
-    const timeout = await captureAdapterFailure(specs.timeout, request);
-    assert.ok(nonzero instanceof Error);
-    assert.ok(malformed instanceof Error);
-    assert.ok(timeout instanceof Error);
-    assert.equal(nonzero.exitCode, 19);
-    assert.match(malformed.message, /invalid JSON output/u);
-    assert.match(timeout.message, /timeout/u);
-    for (const mode of modes) oracles[mode] = await readRuntimeOracle(join(directory, `${mode}-oracle.json`));
-
-    const configuredInputs = JSON.stringify({ specs, request });
-    for (const generated of Object.values(oracles)) {
-      for (const value of Object.values(generated)) {
-        assert.equal(configuredInputs.includes(value), false, 'runtime credential existed before subprocess execution');
+      return [...new Set(output)];
+    };
+    const endpoint = new URL('https://provider.example.invalid/benchmark/v1');
+    endpoint.username = generated.username;
+    endpoint.password = generated.password;
+    endpoint.searchParams.set('access_token', generated.query);
+    endpoint.searchParams.set('api-version', '2026-08-28');
+    const command = [
+      'provider-cli',
+      '--api-key', generated.argument,
+      '--auth-token=' + generated.header,
+      endpoint.href
+    ];
+    const nested = {
+      headers: {
+        authorization: 'Bearer ' + generated.bearer,
+        proxyAuthorization: 'Basic ' + generated.basic,
+        xApiKey: generated.header
+      },
+      commandMetadata: { command },
+      endpoint,
+      echoForms: [
+        ...forms(generated.bearer),
+        ...forms(generated.basic),
+        ...forms(generated.header),
+        ...forms(generated.argument),
+        ...forms(generated.query),
+        ...forms(generated.username),
+        ...forms(generated.password)
+      ],
+      harmless: {
+        model: 'followup-model-token-preview-v3',
+        version: '2026-08-28',
+        digest: '87cf2ad06882bf2aaf432bd5718f48033447ec5f14e42ad71eaa3c325af32796'
       }
+    };
+    const diagnostic = [
+      'Authorization: Bearer ' + generated.bearer,
+      'Authorization: Basic ' + generated.basic,
+      'x-api-key="' + generated.header + '"',
+      'command=' + JSON.stringify(command),
+      'endpoint=' + endpoint.href,
+      'forms=' + nested.echoForms.join('|')
+    ].join(' ; ');
+    if (mode === 'success') {
+      process.stderr.write('success stderr ' + diagnostic + '\n');
+      process.stdout.write(JSON.stringify({
+        response: { recommendation: 'safe', nested },
+        usage: { totalTokens: 1, nested },
+        toolCalls: 1,
+        storageBytes: 1,
+        persistedVerified: true,
+        logs: ['success log ' + diagnostic]
+      }));
+    } else if (mode === 'nonzero') {
+      process.stdout.write(JSON.stringify({ error: { nested, diagnostic } }));
+      process.stderr.write('nonzero stderr ' + diagnostic + '\n');
+      process.exitCode = 19;
+    } else if (mode === 'malformed') {
+      process.stdout.write('{"error":{"nested":' + JSON.stringify(nested));
+      process.stderr.write('malformed stderr ' + diagnostic + '\n');
+    } else if (mode === 'timeout') {
+      process.stdout.write('token="' + generated.argument + '"\n' + diagnostic);
+      process.stderr.write('timeout stderr ' + diagnostic + '\n');
+      setInterval(() => {}, 1000);
     }
+  `, 'utf8');
 
-    const recordedCommand = adapterCommandForRecord(specs.success, request);
-    const returned = {
-      success,
-      nonzero: errorArtifact(nonzero),
-      malformed: errorArtifact(malformed),
-      timeout: errorArtifact(timeout),
-      recordedCommand
+  const modes = ['success', 'nonzero', 'malformed', 'timeout'];
+  const specs = {};
+  const oracles = {};
+  for (const mode of modes) {
+    const oraclePath = join(directory, `${mode}-oracle.json`);
+    specs[mode] = {
+      command: [process.execPath, adapterPath, mode, oraclePath],
+      timeoutMs: mode === 'timeout' ? 750 : 10_000
     };
-    const logArtifact = {
-      successLogs: success.logs,
-      failureLogs: [nonzero.message, nonzero.stdout, nonzero.stderr, malformed.message, timeout.message]
-    };
-    const rawArtifact = {
-      schemaVersion: 1,
-      arms: modes.map((mode) => ({ armId: mode, command: returned[mode]?.command ?? recordedCommand })),
-      returned,
-      logArtifact
-    };
-    const aggregateArtifact = redactConfiguredSecrets({
-      schemaVersion: 1,
-      generatedFromRaw: true,
-      rawArtifact,
-      summary: { status: 'FOLLOWUP_PROBE_ONLY' }
-    }, request, ...Object.values(specs));
-    const artifactDirectory = join(directory, 'artifacts');
-    await mkdir(artifactDirectory, { recursive: true });
-    await writeFile(join(artifactDirectory, 'adapter.log'), JSON.stringify(logArtifact), 'utf8');
-    await writeFile(join(artifactDirectory, 'raw-run.json'), JSON.stringify(rawArtifact), 'utf8');
-    await writeFile(join(artifactDirectory, 'aggregate.json'), JSON.stringify(aggregateArtifact), 'utf8');
-
-    const artifacts = {
-      successReturn: success,
-      successNested: success.response?.nested,
-      successLogs: success.logs,
-      nonzeroThrown: errorArtifact(nonzero),
-      malformedThrown: errorArtifact(malformed),
-      timeoutThrown: errorArtifact(timeout),
-      returnedCommands: [nonzero.command, malformed.command, timeout.command, recordedCommand],
-      logFile: await readFile(join(artifactDirectory, 'adapter.log'), 'utf8'),
-      rawFile: await readFile(join(artifactDirectory, 'raw-run.json'), 'utf8'),
-      aggregateFile: await readFile(join(artifactDirectory, 'aggregate.json'), 'utf8')
-    };
-    assertNoRuntimeValues(artifacts, oracles);
-    assert.match(JSON.stringify(artifacts), /\[REDACTED\]/u);
-    assert.equal(success.response.nested.harmless.model, 'followup-model-token-preview-v3');
-    assert.equal(success.response.nested.harmless.version, '2026-08-28');
-  } finally {
-    await rm(directory, { recursive: true, force: true });
   }
+
+  const request = { action: 'probe', model: 'followup-model-token-preview-v3' };
+  const success = await runAdapterRequest(specs.success, request, {
+    inheritedEnvironment: { PATH: process.env.PATH ?? '', TEMP: process.env.TEMP ?? tmpdir() }
+  });
+  const nonzero = await captureAdapterFailure(specs.nonzero, request);
+  const malformed = await captureAdapterFailure(specs.malformed, request);
+  const timeout = await captureAdapterFailure(specs.timeout, request);
+  assert.ok(nonzero instanceof Error);
+  assert.ok(malformed instanceof Error);
+  assert.ok(timeout instanceof Error);
+  assert.equal(nonzero.exitCode, 19);
+  assert.match(malformed.message, /invalid JSON output/u);
+  assert.match(timeout.message, /timeout/u);
+  for (const mode of modes) oracles[mode] = await readRuntimeOracle(join(directory, `${mode}-oracle.json`));
+
+  const configuredInputs = JSON.stringify({ specs, request });
+  for (const generated of Object.values(oracles)) {
+    for (const value of Object.values(generated)) {
+      assert.equal(configuredInputs.includes(value), false, 'runtime credential existed before subprocess execution');
+    }
+  }
+
+  const recordedCommand = adapterCommandForRecord(specs.success, request);
+  const returned = {
+    success,
+    nonzero: errorArtifact(nonzero),
+    malformed: errorArtifact(malformed),
+    timeout: errorArtifact(timeout),
+    recordedCommand
+  };
+  const logArtifact = {
+    successLogs: success.logs,
+    failureLogs: [nonzero.message, nonzero.stdout, nonzero.stderr, malformed.message, timeout.message]
+  };
+  const rawArtifact = {
+    schemaVersion: 1,
+    arms: modes.map((mode) => ({ armId: mode, command: returned[mode]?.command ?? recordedCommand })),
+    returned,
+    logArtifact
+  };
+  const aggregateArtifact = redactConfiguredSecrets({
+    schemaVersion: 1,
+    generatedFromRaw: true,
+    rawArtifact,
+    summary: { status: 'FOLLOWUP_PROBE_ONLY' }
+  }, request, ...Object.values(specs));
+  const artifactDirectory = join(directory, 'artifacts');
+  await mkdir(artifactDirectory, { recursive: true });
+  await writeFile(join(artifactDirectory, 'adapter.log'), JSON.stringify(logArtifact), 'utf8');
+  await writeFile(join(artifactDirectory, 'raw-run.json'), JSON.stringify(rawArtifact), 'utf8');
+  await writeFile(join(artifactDirectory, 'aggregate.json'), JSON.stringify(aggregateArtifact), 'utf8');
+
+  const artifacts = {
+    successReturn: success,
+    successNested: success.response?.nested,
+    successLogs: success.logs,
+    nonzeroThrown: errorArtifact(nonzero),
+    malformedThrown: errorArtifact(malformed),
+    timeoutThrown: errorArtifact(timeout),
+    returnedCommands: [nonzero.command, malformed.command, timeout.command, recordedCommand],
+    logFile: await readFile(join(artifactDirectory, 'adapter.log'), 'utf8'),
+    rawFile: await readFile(join(artifactDirectory, 'raw-run.json'), 'utf8'),
+    aggregateFile: await readFile(join(artifactDirectory, 'aggregate.json'), 'utf8')
+  };
+  assertNoRuntimeValues(artifacts, oracles);
+  assert.match(JSON.stringify(artifacts), /\[REDACTED\]/u);
+  assert.equal(success.response.nested.harmless.model, 'followup-model-token-preview-v3');
+  assert.equal(success.response.nested.harmless.version, '2026-08-28');
 });
 
-test('follow-up: credential context does not disclose a subprocess-only value below the discovery minimum', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-followup-short-secret-'));
-  try {
-    const adapterPath = join(directory, 'short-secret-adapter.mjs');
-    const oraclePath = join(directory, 'oracle.json');
-    await writeFile(adapterPath, String.raw`
-      import { randomBytes } from 'node:crypto';
-      import { writeFileSync } from 'node:fs';
-      for await (const _chunk of process.stdin) {}
-      const token = randomBytes(12).toString('base64url').slice(0, 7);
-      writeFileSync(process.argv[2], JSON.stringify({ token }));
-      process.stdout.write(JSON.stringify({
-        response: { recommendation: 'safe', nested: { token, echoed: token } },
-        usage: null,
-        toolCalls: 0,
-        storageBytes: 0,
-        persistedVerified: true,
-        logs: ['token="' + token + '"']
-      }));
-    `, 'utf8');
-    const spec = { command: [process.execPath, adapterPath, oraclePath], timeoutMs: 5000 };
-    const output = await runAdapterRequest(spec, { action: 'short-secret-probe' });
-    const generated = await readRuntimeOracle(oraclePath);
-    const serialized = JSON.stringify({ output, raw: { measurements: [output] }, aggregate: { raw: output } });
-    assert.equal(serialized.includes(generated.token), false, 'short runtime credential leaked');
-    assert.match(serialized, /\[REDACTED\]/u);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+test('follow-up: credential context does not disclose a subprocess-only value below the discovery minimum', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-followup-short-secret-');
+  const adapterPath = join(directory, 'short-secret-adapter.mjs');
+  const oraclePath = join(directory, 'oracle.json');
+  await writeFile(adapterPath, String.raw`
+    import { randomBytes } from 'node:crypto';
+    import { writeFileSync } from 'node:fs';
+    for await (const _chunk of process.stdin) {}
+    const token = randomBytes(12).toString('base64url').slice(0, 7);
+    writeFileSync(process.argv[2], JSON.stringify({ token }));
+    process.stdout.write(JSON.stringify({
+      response: { recommendation: 'safe', nested: { token, echoed: token } },
+      usage: null,
+      toolCalls: 0,
+      storageBytes: 0,
+      persistedVerified: true,
+      logs: ['token="' + token + '"']
+    }));
+  `, 'utf8');
+  const spec = { command: [process.execPath, adapterPath, oraclePath], timeoutMs: 5000 };
+  const output = await runAdapterRequest(spec, { action: 'short-secret-probe' });
+  const generated = await readRuntimeOracle(oraclePath);
+  const serialized = JSON.stringify({ output, raw: { measurements: [output] }, aggregate: { raw: output } });
+  assert.equal(serialized.includes(generated.token), false, 'short runtime credential leaked');
+  assert.match(serialized, /\[REDACTED\]/u);
 });
 
 function stringLeaves(value, output = []) {
@@ -327,166 +314,162 @@ const DISCOVERY_BOUND_CASES = [
 ];
 
 test('follow-up: every dynamic discovery/output bound is useful below and fail-closed above', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-followup-boundaries-'));
-  try {
-    const adapterPath = join(directory, 'boundary-adapter.mjs');
-    await writeFile(adapterPath, String.raw`
-      import { randomBytes } from 'node:crypto';
-      import { writeFileSync } from 'node:fs';
+  const directory = await scratchDirectory(t, 'shadowgraph-followup-boundaries-');
+  const adapterPath = join(directory, 'boundary-adapter.mjs');
+  await writeFile(adapterPath, String.raw`
+    import { randomBytes } from 'node:crypto';
+    import { writeFileSync } from 'node:fs';
 
-      for await (const _chunk of process.stdin) {}
-      const caseName = process.argv[2];
-      const side = process.argv[3];
-      const oraclePath = process.argv[4];
-      const nonce = randomBytes(18).toString('base64url');
-      const secret = (label, length) => {
-        const prefix = 'followup-' + label + '-' + nonce + '-';
-        if (length === undefined) return prefix + 'credential';
-        return (prefix + 'Q'.repeat(length)).slice(0, length);
+    for await (const _chunk of process.stdin) {}
+    const caseName = process.argv[2];
+    const side = process.argv[3];
+    const oraclePath = process.argv[4];
+    const nonce = randomBytes(18).toString('base64url');
+    const secret = (label, length) => {
+      const prefix = 'followup-' + label + '-' + nonce + '-';
+      if (length === undefined) return prefix + 'credential';
+      return (prefix + 'Q'.repeat(length)).slice(0, length);
+    };
+    const harmless = 'preserved-' + caseName + '-' + side;
+    let oracle;
+    let payload;
+    let stderr = '';
+
+    if (caseName === 'credential-count') {
+      const count = side === 'below' ? 64 : 65;
+      const credentials = Array.from({ length: count }, (_, index) => secret('count-' + index));
+      oracle = { credentials };
+      payload = { credentials, harmless };
+    } else if (caseName === 'credential-chars') {
+      const token = secret('chars', side === 'below' ? 512 : 513);
+      oracle = { token };
+      payload = { token, echo: token, harmless };
+    } else if (caseName === 'variant-count') {
+      const count = side === 'below' ? 12 : 64;
+      const credentials = Array.from(
+        { length: count },
+        (_, index) => secret('variant-' + index) + ' space+slash/percent%'
+      );
+      oracle = { credentials };
+      payload = { credentials, harmless };
+    } else if (caseName === 'encoding-rounds') {
+      const raw = secret('rounds') + ' space/slash';
+      let encoded = raw;
+      const rounds = side === 'below' ? 3 : 4;
+      for (let round = 0; round < rounds; round += 1) encoded = encodeURIComponent(encoded);
+      oracle = { raw };
+      payload = { credentials: [encoded], rawEcho: raw, harmless };
+    } else if (caseName === 'url-chars') {
+      const token = secret('url');
+      const target = side === 'below' ? 8192 : 8193;
+      const prefix = 'https://provider.example.invalid/';
+      const suffix = '?access_token=' + encodeURIComponent(token);
+      const endpoint = prefix + 'p'.repeat(target - prefix.length - suffix.length) + suffix;
+      if (endpoint.length !== target) throw new Error('url boundary fixture length mismatch');
+      oracle = { token };
+      payload = { endpoint, harmless };
+    } else if (caseName === 'depth') {
+      const token = secret('depth');
+      let nested = { credentials: [token], harmless };
+      const count = side === 'below' ? 24 : 40;
+      for (let depth = 0; depth < count; depth += 1) nested = { child: nested };
+      oracle = { token };
+      payload = { nested, harmless };
+    } else if (caseName === 'nodes') {
+      const token = secret('nodes');
+      const count = side === 'below' ? 8000 : 10050;
+      oracle = { token };
+      payload = {
+        credentials: [token],
+        harmlessNodes: Array.from({ length: count }, (_, index) => ({ index })),
+        harmless
       };
-      const harmless = 'preserved-' + caseName + '-' + side;
-      let oracle;
-      let payload;
-      let stderr = '';
-
-      if (caseName === 'credential-count') {
-        const count = side === 'below' ? 64 : 65;
-        const credentials = Array.from({ length: count }, (_, index) => secret('count-' + index));
-        oracle = { credentials };
-        payload = { credentials, harmless };
-      } else if (caseName === 'credential-chars') {
-        const token = secret('chars', side === 'below' ? 512 : 513);
-        oracle = { token };
-        payload = { token, echo: token, harmless };
-      } else if (caseName === 'variant-count') {
-        const count = side === 'below' ? 12 : 64;
-        const credentials = Array.from(
-          { length: count },
-          (_, index) => secret('variant-' + index) + ' space+slash/percent%'
-        );
-        oracle = { credentials };
-        payload = { credentials, harmless };
-      } else if (caseName === 'encoding-rounds') {
-        const raw = secret('rounds') + ' space/slash';
-        let encoded = raw;
-        const rounds = side === 'below' ? 3 : 4;
-        for (let round = 0; round < rounds; round += 1) encoded = encodeURIComponent(encoded);
-        oracle = { raw };
-        payload = { credentials: [encoded], rawEcho: raw, harmless };
-      } else if (caseName === 'url-chars') {
-        const token = secret('url');
-        const target = side === 'below' ? 8192 : 8193;
-        const prefix = 'https://provider.example.invalid/';
-        const suffix = '?access_token=' + encodeURIComponent(token);
-        const endpoint = prefix + 'p'.repeat(target - prefix.length - suffix.length) + suffix;
-        if (endpoint.length !== target) throw new Error('url boundary fixture length mismatch');
-        oracle = { token };
-        payload = { endpoint, harmless };
-      } else if (caseName === 'depth') {
-        const token = secret('depth');
-        let nested = { credentials: [token], harmless };
-        const count = side === 'below' ? 24 : 40;
-        for (let depth = 0; depth < count; depth += 1) nested = { child: nested };
-        oracle = { token };
-        payload = { nested, harmless };
-      } else if (caseName === 'nodes') {
-        const token = secret('nodes');
-        const count = side === 'below' ? 8000 : 10050;
-        oracle = { token };
-        payload = {
-          credentials: [token],
-          harmlessNodes: Array.from({ length: count }, (_, index) => ({ index })),
-          harmless
-        };
-      } else if (caseName === 'matches') {
-        const token = secret('matches');
-        const count = side === 'below' ? 512 : 513;
-        oracle = { token };
-        payload = {
-          credentials: [token],
-          diagnostic: Array.from({ length: count }, () => 'token="' + token + '"').join('\n'),
-          harmless
-        };
-      } else if (caseName === 'text') {
-        const token = secret('text');
-        const fillerLength = side === 'below'
-          ? 4 * 1024 * 1024 - 128 * 1024
-          : 4 * 1024 * 1024 - 16 * 1024;
-        oracle = { token };
-        payload = {
-          credentials: [token],
-          commandMetadata: { command: ['provider-cli', '--model', 'H'.repeat(fillerLength)] },
-          harmless
-        };
-        stderr = side === 'below' ? 'S'.repeat(4096) : 'S'.repeat(32 * 1024);
-      } else if (caseName === 'output-bytes') {
-        const token = secret('output');
-        oracle = { token };
-        payload = { credentials: [token], tokenEcho: token, padding: '', harmless };
-      } else {
-        throw new Error('unknown boundary fixture');
-      }
-
-      writeFileSync(oraclePath, JSON.stringify(oracle));
-      const output = {
-        response: { recommendation: 'safe', payload },
-        usage: null,
-        toolCalls: 0,
-        storageBytes: 0,
-        persistedVerified: true,
-        logs: ['boundary fixture ' + harmless]
+    } else if (caseName === 'matches') {
+      const token = secret('matches');
+      const count = side === 'below' ? 512 : 513;
+      oracle = { token };
+      payload = {
+        credentials: [token],
+        diagnostic: Array.from({ length: count }, () => 'token="' + token + '"').join('\n'),
+        harmless
       };
-      if (caseName === 'output-bytes') {
-        const target = 4 * 1024 * 1024 + (side === 'below' ? -1 : 1);
-        let serialized = JSON.stringify(output);
-        output.response.payload.padding = 'P'.repeat(target - Buffer.byteLength(serialized));
-        serialized = JSON.stringify(output);
-        if (Buffer.byteLength(serialized) !== target) throw new Error('output boundary fixture length mismatch');
-        process.stdout.write(serialized);
-      } else {
-        if (stderr) process.stderr.write(stderr);
-        process.stdout.write(JSON.stringify(output));
-      }
-    `, 'utf8');
-
-    for (const caseName of DISCOVERY_BOUND_CASES) {
-      for (const side of ['below', 'above']) {
-        await t.test(`${caseName} is safe ${side} its bound`, async () => {
-          const oraclePath = join(directory, `${caseName}-${side}-oracle.json`);
-          const spec = {
-            command: [process.execPath, adapterPath, caseName, side, oraclePath],
-            timeoutMs: 30_000
-          };
-          let returned;
-          let failure;
-          try {
-            returned = await runAdapterRequest(spec, { action: 'boundary-probe' });
-          } catch (error) {
-            failure = error;
-          }
-          const oracle = await readRuntimeOracle(oraclePath);
-          if (side === 'below') {
-            assert.equal(failure, undefined, `${caseName} rejected below-bound output`);
-            assert.equal(returned.response.payload.harmless, `preserved-${caseName}-${side}`);
-          } else {
-            assert.ok(failure instanceof Error, `${caseName} accepted above-bound output`);
-            if (caseName === 'output-bytes') assert.match(failure.message, /exceeded the 4 MiB limit/u);
-            else assert.equal(failure.message, BUDGET_ERROR);
-          }
-          const retained = failure ? errorArtifact(failure) : returned;
-          const rawArtifact = { schemaVersion: 1, status: failure ? 'FAILED' : 'MEASURED', retained };
-          const aggregateArtifact = { schemaVersion: 1, generatedFromRaw: true, rawArtifact };
-          const artifactPath = join(directory, `${caseName}-${side}-retained.json`);
-          await writeFile(artifactPath, JSON.stringify({ retained, rawArtifact, aggregateArtifact }), 'utf8');
-          assertOracleAbsent(retained, oracle, `${caseName}:${side}:returned`);
-          assertOracleAbsent(rawArtifact, oracle, `${caseName}:${side}:raw`);
-          assertOracleAbsent(aggregateArtifact, oracle, `${caseName}:${side}:aggregate`);
-          assertOracleAbsent(await readFile(artifactPath, 'utf8'), oracle, `${caseName}:${side}:file`);
-        });
-      }
+    } else if (caseName === 'text') {
+      const token = secret('text');
+      const fillerLength = side === 'below'
+        ? 4 * 1024 * 1024 - 128 * 1024
+        : 4 * 1024 * 1024 - 16 * 1024;
+      oracle = { token };
+      payload = {
+        credentials: [token],
+        commandMetadata: { command: ['provider-cli', '--model', 'H'.repeat(fillerLength)] },
+        harmless
+      };
+      stderr = side === 'below' ? 'S'.repeat(4096) : 'S'.repeat(32 * 1024);
+    } else if (caseName === 'output-bytes') {
+      const token = secret('output');
+      oracle = { token };
+      payload = { credentials: [token], tokenEcho: token, padding: '', harmless };
+    } else {
+      throw new Error('unknown boundary fixture');
     }
-  } finally {
-    await rm(directory, { recursive: true, force: true });
+
+    writeFileSync(oraclePath, JSON.stringify(oracle));
+    const output = {
+      response: { recommendation: 'safe', payload },
+      usage: null,
+      toolCalls: 0,
+      storageBytes: 0,
+      persistedVerified: true,
+      logs: ['boundary fixture ' + harmless]
+    };
+    if (caseName === 'output-bytes') {
+      const target = 4 * 1024 * 1024 + (side === 'below' ? -1 : 1);
+      let serialized = JSON.stringify(output);
+      output.response.payload.padding = 'P'.repeat(target - Buffer.byteLength(serialized));
+      serialized = JSON.stringify(output);
+      if (Buffer.byteLength(serialized) !== target) throw new Error('output boundary fixture length mismatch');
+      process.stdout.write(serialized);
+    } else {
+      if (stderr) process.stderr.write(stderr);
+      process.stdout.write(JSON.stringify(output));
+    }
+  `, 'utf8');
+
+  for (const caseName of DISCOVERY_BOUND_CASES) {
+    for (const side of ['below', 'above']) {
+      await t.test(`${caseName} is safe ${side} its bound`, async () => {
+        const oraclePath = join(directory, `${caseName}-${side}-oracle.json`);
+        const spec = {
+          command: [process.execPath, adapterPath, caseName, side, oraclePath],
+          timeoutMs: 30_000
+        };
+        let returned;
+        let failure;
+        try {
+          returned = await runAdapterRequest(spec, { action: 'boundary-probe' });
+        } catch (error) {
+          failure = error;
+        }
+        const oracle = await readRuntimeOracle(oraclePath);
+        if (side === 'below') {
+          assert.equal(failure, undefined, `${caseName} rejected below-bound output`);
+          assert.equal(returned.response.payload.harmless, `preserved-${caseName}-${side}`);
+        } else {
+          assert.ok(failure instanceof Error, `${caseName} accepted above-bound output`);
+          if (caseName === 'output-bytes') assert.match(failure.message, /exceeded the 4 MiB limit/u);
+          else assert.equal(failure.message, BUDGET_ERROR);
+        }
+        const retained = failure ? errorArtifact(failure) : returned;
+        const rawArtifact = { schemaVersion: 1, status: failure ? 'FAILED' : 'MEASURED', retained };
+        const aggregateArtifact = { schemaVersion: 1, generatedFromRaw: true, rawArtifact };
+        const artifactPath = join(directory, `${caseName}-${side}-retained.json`);
+        await writeFile(artifactPath, JSON.stringify({ retained, rawArtifact, aggregateArtifact }), 'utf8');
+        assertOracleAbsent(retained, oracle, `${caseName}:${side}:returned`);
+        assertOracleAbsent(rawArtifact, oracle, `${caseName}:${side}:raw`);
+        assertOracleAbsent(aggregateArtifact, oracle, `${caseName}:${side}:aggregate`);
+        assertOracleAbsent(await readFile(artifactPath, 'utf8'), oracle, `${caseName}:${side}:file`);
+      });
+    }
   }
 });
 
@@ -511,8 +494,7 @@ async function runNpmPack(cwd, destination) {
 }
 
 async function actualPackedEntries(t) {
-  const destination = await mkdtemp(join(tmpdir(), 'shadowgraph-followup-real-pack-'));
-  t.after(() => rm(destination, { recursive: true, force: true }));
+  const destination = await scratchDirectory(t, 'shadowgraph-followup-real-pack-');
   const run = await runNpmPack(repositoryRoot, destination);
   const report = JSON.parse(run.stdout);
   assert.equal(Array.isArray(report), true);

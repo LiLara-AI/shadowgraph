@@ -2,8 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { backupFile, restoreFile } from '../src/backup.js';
 import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
@@ -12,6 +11,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { journalGaps, rebuildProjection } from '../src/journal.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const NOW = '2026-08-28T00:00:00.000Z';
 const RAW_ID = 'DS_P1_007_RAW_PURGED_ENTITY_SENTINEL';
@@ -375,7 +375,7 @@ async function seedDestination(path) {
 }
 
 test('DS-P1-007 ninth review RED: raw schema-4 restores are normalized in JSON/SQLite, backups, CLI, HTTP, and MCP bytes', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-ninth-review-restore-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-ninth-review-restore-');
   const raw = schema4RawLedgerFixture({ mode: 'logical' });
   const rawJson = join(directory, 'raw.json');
   await writeFile(rawJson, `${JSON.stringify(raw, null, 2)}\n`, 'utf8');
@@ -595,8 +595,8 @@ function assertBaselineRebuildParity(payload, label) {
 
 async function assertBaselineAcrossPersistence(t, payload, label, expectedRecordIds) {
   for (const backend of ['json', 'sqlite']) {
-    await t.test(`${label} ${backend} restart, backup, and restore`, backend === 'sqlite' ? SQLITE_TEST_OPTIONS : {}, async () => {
-      const directory = await mkdtemp(join(tmpdir(), `shadowgraph-ds-p1-008-${backend}-`));
+    await t.test(`${label} ${backend} restart, backup, and restore`, backend === 'sqlite' ? SQLITE_TEST_OPTIONS : {}, async (t) => {
+      const directory = await scratchDirectory(t, `shadowgraph-ds-p1-008-${backend}-`);
       const extension = backend === 'sqlite' ? 'db' : 'json';
       const live = join(directory, `live.${extension}`);
       const backup = join(directory, `backup.${extension}`);

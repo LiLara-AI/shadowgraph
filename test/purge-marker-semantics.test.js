@@ -2,8 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { restoreFile } from '../src/backup.js';
 import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
@@ -18,6 +17,7 @@ import { createShadowGraphServer } from '../src/server.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const NOW = '2026-08-28T12:00:00.000Z';
 const PROJECT = 'semantic-purge-project';
@@ -398,7 +398,7 @@ async function writeOldDestination(path) {
 }
 
 test('malformed marker rejection is atomic across JSON and SQLite restore', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-semantic-purge-restore-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-semantic-purge-restore-');
   const payload = malformedRestorePayload();
 
   await t.test('JSON restore', async () => {
@@ -430,7 +430,7 @@ test('malformed marker rejection is atomic across JSON and SQLite restore', asyn
 });
 
 test('malformed marker rejection is atomic across CLI, HTTP, and MCP restore', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-semantic-purge-interfaces-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-semantic-purge-interfaces-');
   const source = join(directory, 'malformed.json');
   await writeFile(source, `${JSON.stringify(malformedRestorePayload(), null, 2)}\n`, 'utf8');
 

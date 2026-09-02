@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { copyFile, cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { copyFile, cp, mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const exec = promisify(execFile);
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -46,8 +46,7 @@ const requiredFixtureFiles = [
 ];
 
 async function packageFixture(t, auditText) {
-  const root = await mkdtemp(join(tmpdir(), 'shadowgraph package audit '));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  const root = await scratchDirectory(t, 'shadowgraph package audit ');
   const manifest = {
     name: 'shadowgraph-package-audit-fixture',
     version: '1.2.3',
@@ -140,8 +139,7 @@ test('check-package allows harmless packaged URLs, URL metadata, versions, and i
 
 test('check-package reports why npm pack failed without disclosing any absolute path', async (t) => {
   const root = await packageFixture(t, '# Harmless diagnosable package\n');
-  const missingRoot = await mkdtemp(join(tmpdir(), 'shadowgraph missing npm cli '));
-  t.after(() => rm(missingRoot, { recursive: true, force: true }));
+  const missingRoot = await scratchDirectory(t, 'shadowgraph missing npm cli ');
   const missingNpmCli = join(missingRoot, 'definitely missing npm-cli.js');
 
   await assert.rejects(runChecker(root, { env: { npm_execpath: missingNpmCli } }), (error) => {
@@ -164,8 +162,7 @@ test('check-package reports why npm pack failed without disclosing any absolute 
 });
 
 test('check-package npm fallback safely packs metacharacter paths without DEP0190', async (t) => {
-  const metacharacterTemp = await mkdtemp(join(tmpdir(), 'shadowgraph npm pack &()!^%-'));
-  t.after(() => rm(metacharacterTemp, { recursive: true, force: true }));
+  const metacharacterTemp = await scratchDirectory(t, 'shadowgraph npm pack &()!^%-');
   const root = await packageFixture(t, '# Harmless metacharacter-path package\n');
   const metacharacterRoot = join(metacharacterTemp, 'safe repo copy &()!^%');
   await cp(root, metacharacterRoot, { recursive: true });

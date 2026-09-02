@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { link, lstat, mkdir, mkdtemp, open, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises';
-import os from 'node:os';
+import { link, lstat, mkdir, open, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -10,6 +9,7 @@ import test from 'node:test';
 import { createAdapterRequest, validateAdapterResponse } from '../benchmark/lib/adapter-protocol.mjs';
 import { namespaceRefFor, OPERATION_FIELDS, recordContentSha256 } from '../benchmark/lib/v11-contract.mjs';
 import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const mcpEntry = path.join(repositoryRoot, 'src', 'mcp.js');
@@ -133,8 +133,7 @@ function requestFor(operation, overrides = {}) {
 }
 
 test('MCP schemas expose optional non-empty explicit ids for v1.1 records', async (t) => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-v11-schema-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-schema-');
   const responses = await runMcp({
     file: path.join(directory, 'state.json'),
     requests: [
@@ -160,8 +159,7 @@ for (const storage of ['json', 'sqlite']) {
       t.skip((await getRuntimeCapabilities()).nodeSqlite.reason);
       return;
     }
-    const directory = await mkdtemp(path.join(os.tmpdir(), `shadowgraph-v11-${storage}-`));
-    t.after(() => rm(directory, { recursive: true, force: true }));
+    const directory = await scratchDirectory(t, `shadowgraph-v11-${storage}-`);
     const file = path.join(directory, storage === 'sqlite' ? 'state.sqlite' : 'state.json');
     const first = await runMcp({
       file,
@@ -208,8 +206,7 @@ for (const storage of ['json', 'sqlite']) {
 
 test('node adapter host negotiates legacy MCP and enforces exact full and compact tool surfaces', async (t) => {
   const { withMcpSession } = await import('../benchmark/lib/node-adapter-host.mjs');
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-v11-host-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-host-');
   const full = await withMcpSession({
     file: path.join(directory, 'full.json'),
     storage: 'json',
@@ -229,8 +226,7 @@ test('node adapter host negotiates legacy MCP and enforces exact full and compac
 test('ShadowGraph adapter binds each exact arm to its explicitly configured MCP mode before state or process effects', async (t) => {
   const { createShadowGraphAdapter } = await import('../benchmark/adapters/shadowgraph.mjs');
   const { COMPACT_TOOL_NAMES, FULL_TOOL_NAMES, statePaths } = await import('../benchmark/lib/node-adapter-host.mjs');
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-v11-arm-mode-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-arm-mode-');
   const entryPath = await writeMcpFixture(directory, 'mode-probe', `
     import { writeFileSync } from 'node:fs';
     import { createInterface } from 'node:readline';
@@ -384,9 +380,8 @@ for (const backend of ['json', 'sqlite']) {
     const { createShadowGraphAdapter } = await import('../benchmark/adapters/shadowgraph.mjs');
     const { measureStateLeaf, statePaths } = await import('../benchmark/lib/node-adapter-host.mjs');
     const { createStorage } = await import('../src/storage.js');
-    const directory = await mkdtemp(path.join(os.tmpdir(), `shadowgraph-v11-adapter-${backend}-`));
+    const directory = await scratchDirectory(t, `shadowgraph-v11-adapter-${backend}-`);
     const stateRoot = path.join(directory, 'owned-state');
-    t.after(() => rm(directory, { recursive: true, force: true }));
     const adapter = createShadowGraphAdapter({ stateRoot, backend, mode: 'full', timeoutMs: 10_000 });
 
     const reset = requestFor('reset', { phase: 'SETUP' });
@@ -533,8 +528,7 @@ for (const backend of ['json', 'sqlite']) {
 
 test('ShadowGraph adapter rejects user namespaces and invalid requests before creating state', async (t) => {
   const { createShadowGraphAdapter } = await import('../benchmark/adapters/shadowgraph.mjs');
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-v11-preflight-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-preflight-');
   const stateRoot = path.join(directory, 'must-not-exist');
   const adapter = createShadowGraphAdapter({ stateRoot, backend: 'json', mode: 'full' });
   const userRequest = requestFor('reset', {
@@ -558,8 +552,7 @@ for (const backend of ['json', 'sqlite']) {
     }
     const { createShadowGraphAdapter } = await import('../benchmark/adapters/shadowgraph.mjs');
     const { statePaths } = await import('../benchmark/lib/node-adapter-host.mjs');
-    const directory = await mkdtemp(path.join(os.tmpdir(), `shadowgraph-v11-state-symlink-${backend}-`));
-    t.after(() => rm(directory, { recursive: true, force: true }));
+    const directory = await scratchDirectory(t, `shadowgraph-v11-state-symlink-${backend}-`);
     const stateRoot = path.join(directory, 'owned-state');
     const adapter = createShadowGraphAdapter({ stateRoot, backend, mode: 'full', timeoutMs: 10_000 });
     const reset = requestFor('reset', { armId: 'shadowgraph-full', phase: 'SETUP' });
@@ -590,8 +583,7 @@ test('ShadowGraph rejects SQLite sidecar symlinks and hard-linked leaf entries b
   }
   const { createShadowGraphAdapter } = await import('../benchmark/adapters/shadowgraph.mjs');
   const { statePaths } = await import('../benchmark/lib/node-adapter-host.mjs');
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-v11-state-entries-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-state-entries-');
   const stateRoot = path.join(directory, 'owned-state');
   const adapter = createShadowGraphAdapter({ stateRoot, backend: 'sqlite', mode: 'full', timeoutMs: 10_000 });
   const reset = requestFor('reset', { armId: 'shadowgraph-full', phase: 'SETUP' });
@@ -660,8 +652,7 @@ ${closeHandler}
 
 test('host correlates concurrent MCP responses by id rather than FIFO order', async (t) => {
   const { COMPACT_TOOL_NAMES, withMcpSession } = await import('../benchmark/lib/node-adapter-host.mjs');
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-v11-correlation-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-correlation-');
   const entryPath = await writeMcpFixture(directory, 'out-of-order', fixtureServerSource(
     COMPACT_TOOL_NAMES,
     `
@@ -689,8 +680,7 @@ test('host correlates concurrent MCP responses by id rather than FIFO order', as
 
 test('host fails closed on wrong ids, malformed NDJSON, and bounded stdout or stderr', async (t) => {
   const { withMcpSession } = await import('../benchmark/lib/node-adapter-host.mjs');
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-v11-wire-faults-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-wire-faults-');
   const cases = [
     ['wrong-id', `
       import { createInterface } from 'node:readline';
@@ -779,8 +769,7 @@ test('host fails closed on wrong ids, malformed NDJSON, and bounded stdout or st
 
 test('host rejects trailing unterminated output after all responses have resolved', async (t) => {
   const { COMPACT_TOOL_NAMES, withMcpSession } = await import('../benchmark/lib/node-adapter-host.mjs');
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-v11-trailing-output-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-trailing-output-');
   const entryPath = await writeMcpFixture(directory, 'trailing-after-close', fixtureServerSource(
     COMPACT_TOOL_NAMES,
     `send(request.id, { content: [{ type: 'text', text: '{}' }] });`,
@@ -800,8 +789,7 @@ test('host rejects trailing unterminated output after all responses have resolve
 
 test('host accepts only the exact JSON-RPC error object shape and keeps server detail private', async (t) => {
   const { withMcpSession } = await import('../benchmark/lib/node-adapter-host.mjs');
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-v11-exact-error-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-exact-error-');
   const entryPath = await writeMcpFixture(directory, 'exact-error', `
     import { createInterface } from 'node:readline';
     createInterface({ input: process.stdin }).once('line', (line) => {
@@ -825,8 +813,7 @@ test('host accepts only the exact JSON-RPC error object shape and keeps server d
 
 test('host rejects a non-zero child exit after an otherwise valid exchange', async (t) => {
   const { COMPACT_TOOL_NAMES, withMcpSession } = await import('../benchmark/lib/node-adapter-host.mjs');
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-v11-exit-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-exit-');
   const entryPath = await writeMcpFixture(directory, 'nonzero-close', fixtureServerSource(
     COMPACT_TOOL_NAMES,
     `send(request.id, { content: [{ type: 'text', text: '{}' }] });`,
@@ -849,8 +836,7 @@ test('host enforces one monotonic operation deadline and a non-configurable outp
     MAX_NDJSON_BYTES,
     withMcpSession
   } = await import('../benchmark/lib/node-adapter-host.mjs');
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-v11-deadline-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-deadline-');
   const entryPath = await writeMcpFixture(directory, 'slow-each-step', `
     import { createInterface } from 'node:readline';
     const tools = ${JSON.stringify(COMPACT_TOOL_NAMES)}.map((name) => ({ name }));
@@ -884,8 +870,7 @@ test('host enforces one monotonic operation deadline and a non-configurable outp
 
 test('host hard timeout bounds normal close, termination grace, and kill wait under one deadline', async (t) => {
   const { COMPACT_TOOL_NAMES, withMcpSession } = await import('../benchmark/lib/node-adapter-host.mjs');
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-v11-lifecycle-deadline-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-lifecycle-deadline-');
   const entryPath = await writeMcpFixture(directory, 'nonclosing-child', fixtureServerSource(
     COMPACT_TOOL_NAMES,
     `send(request.id, { content: [{ type: 'text', text: '{}' }] });`,
@@ -911,8 +896,7 @@ test('host hard timeout bounds normal close, termination grace, and kill wait un
 for (const mode of ['timeout', 'abort']) {
   test(`host ${mode} terminates, kills, and reaps a noncooperative child`, async (t) => {
     const { COMPACT_TOOL_NAMES, withMcpSession } = await import('../benchmark/lib/node-adapter-host.mjs');
-    const directory = await mkdtemp(path.join(os.tmpdir(), `shadowgraph-v11-${mode}-`));
-    t.after(() => rm(directory, { recursive: true, force: true }));
+    const directory = await scratchDirectory(t, `shadowgraph-v11-${mode}-`);
     const pidFile = path.join(directory, 'child.pid');
     const entryPath = await writeMcpFixture(directory, mode, mode === 'timeout'
       ? `
@@ -949,8 +933,7 @@ for (const mode of ['timeout', 'abort']) {
 
 test('host child environment is a strict allowlist and excludes ambient credentials and feature controls', async (t) => {
   const { COMPACT_TOOL_NAMES, withMcpSession } = await import('../benchmark/lib/node-adapter-host.mjs');
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-v11-env-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-env-');
   const entryPath = await writeMcpFixture(directory, 'environment', fixtureServerSource(
     COMPACT_TOOL_NAMES,
     `send(request.id, { content: [{ type: 'text', text: JSON.stringify(Object.keys(process.env).sort()) }] });`
@@ -1000,8 +983,7 @@ test('nested endpoint failures retain only the endpoint-unavailable classificati
 test('ambiguous persist is attempted once, poisons only control state, and is never rerun', async (t) => {
   const { createShadowGraphAdapter } = await import('../benchmark/adapters/shadowgraph.mjs');
   const { COMPACT_TOOL_NAMES, statePaths } = await import('../benchmark/lib/node-adapter-host.mjs');
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-v11-poison-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-poison-');
   const stateRoot = path.join(directory, 'owned-state');
   const callsFile = path.join(directory, 'persist-calls.txt');
   const entryPath = await writeMcpFixture(directory, 'ambiguous-persist', fixtureServerSource(
@@ -1046,8 +1028,7 @@ test('ambiguous persist is attempted once, poisons only control state, and is ne
 test('poison control directory cannot be redirected through a parent symlink', async (t) => {
   const { createShadowGraphAdapter } = await import('../benchmark/adapters/shadowgraph.mjs');
   const { statePaths } = await import('../benchmark/lib/node-adapter-host.mjs');
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-v11-poison-symlink-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-poison-symlink-');
   const stateRoot = path.join(directory, 'owned-state');
   const adapter = createShadowGraphAdapter({ stateRoot, backend: 'json', mode: 'full' });
   const reset = requestFor('reset', { armId: 'shadowgraph-full', phase: 'SETUP' });
@@ -1073,8 +1054,7 @@ test('poison control directory cannot be redirected through a parent symlink', a
 test('successful persist response followed by nonzero exit poisons and blocks duplicate commit until reset', async (t) => {
   const { createShadowGraphAdapter } = await import('../benchmark/adapters/shadowgraph.mjs');
   const { COMPACT_TOOL_NAMES, statePaths } = await import('../benchmark/lib/node-adapter-host.mjs');
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-v11-post-response-exit-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-post-response-exit-');
   const stateRoot = path.join(directory, 'owned-state');
   const callsFile = path.join(directory, 'persist-calls.txt');
   const entryPath = await writeMcpFixture(directory, 'post-response-exit', fixtureServerSource(
@@ -1121,8 +1101,7 @@ test('successful persist response followed by nonzero exit poisons and blocks du
 test('a malformed persist result is ambiguous and poisons the leaf without retry', async (t) => {
   const { createShadowGraphAdapter } = await import('../benchmark/adapters/shadowgraph.mjs');
   const { COMPACT_TOOL_NAMES, statePaths } = await import('../benchmark/lib/node-adapter-host.mjs');
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-v11-malformed-persist-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-malformed-persist-');
   const stateRoot = path.join(directory, 'owned-state');
   const callsFile = path.join(directory, 'persist-calls.txt');
   const entryPath = await writeMcpFixture(directory, 'malformed-persist', fixtureServerSource(
@@ -1165,8 +1144,7 @@ function fallbackPoisonPath(paths) {
 
 test('default durability resets JSON state and publishes a poison marker on the host filesystem', async (t) => {
   const { poisonStateLeaf, requireStateLeaf, resetStateLeaf } = await import('../benchmark/lib/node-adapter-host.mjs');
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-v11-default-durability-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-default-durability-');
   const stateRoot = path.join(directory, 'owned-state');
   const reset = requestFor('reset', { armId: 'shadowgraph-compact', phase: 'SETUP' });
   let paths;
@@ -1233,8 +1211,7 @@ function durabilityProbe({ beforeDirectorySync = async () => {}, failDirectorySy
 
 test('poison directory and primary marker are durably published in crash-safe order', async (t) => {
   const { poisonStateLeaf, statePaths } = await import('../benchmark/lib/node-adapter-host.mjs');
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-v11-poison-durability-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-poison-durability-');
   const stateRoot = path.join(directory, 'owned-state');
   const reset = requestFor('reset', { armId: 'shadowgraph-compact', phase: 'SETUP' });
   let poisonDirectoryExistedAtRootSync = false;
@@ -1269,8 +1246,7 @@ test('poison directory and primary marker are durably published in crash-safe or
 
 test('primary marker directory-sync failure falls back to a root-synced marker', async (t) => {
   const { poisonStateLeaf, statePaths } = await import('../benchmark/lib/node-adapter-host.mjs');
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-v11-poison-sync-fallback-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-poison-sync-fallback-');
   const stateRoot = path.join(directory, 'owned-state');
   const reset = requestFor('reset', { armId: 'shadowgraph-compact', phase: 'SETUP' });
   await statePaths({ stateRoot, backend: 'json', request: reset });
@@ -1305,8 +1281,7 @@ test('primary marker directory-sync failure falls back to a root-synced marker',
 
 test('directory-sync failure for both markers propagates while the in-memory latch stays fail-closed', async (t) => {
   const { poisonStateLeaf, requireStateLeaf, resetStateLeaf, statePaths } = await import('../benchmark/lib/node-adapter-host.mjs');
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-v11-poison-sync-latch-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-poison-sync-latch-');
   const stateRoot = path.join(directory, 'owned-state');
   const reset = requestFor('reset', { armId: 'shadowgraph-compact', phase: 'SETUP' });
   await resetStateLeaf({ stateRoot, backend: 'json', request: reset });
@@ -1357,8 +1332,7 @@ test('directory-sync failure for both markers propagates while the in-memory lat
 test('a failed primary poison write preserves the original failure and durable fallback blocks a restarted adapter', async (t) => {
   const { createShadowGraphAdapter } = await import('../benchmark/adapters/shadowgraph.mjs');
   const { COMPACT_TOOL_NAMES, statePaths } = await import('../benchmark/lib/node-adapter-host.mjs');
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-v11-poison-fallback-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-poison-fallback-');
   const stateRoot = path.join(directory, 'owned-state');
   const callsFile = path.join(directory, 'persist-calls.txt');
   const reset = requestFor('reset', { armId: 'shadowgraph-compact', phase: 'SETUP' });
@@ -1413,8 +1387,7 @@ test('a failed primary poison write preserves the original failure and durable f
 test('an in-memory poison latch blocks reuse when both durable marker writes fail and survives a failed reset', async (t) => {
   const { createShadowGraphAdapter } = await import('../benchmark/adapters/shadowgraph.mjs');
   const { COMPACT_TOOL_NAMES, statePaths } = await import('../benchmark/lib/node-adapter-host.mjs');
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-v11-poison-latch-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-poison-latch-');
   const stateRoot = path.join(directory, 'owned-state');
   const callsFile = path.join(directory, 'persist-calls.txt');
   const reset = requestFor('reset', { armId: 'shadowgraph-compact', phase: 'SETUP' });

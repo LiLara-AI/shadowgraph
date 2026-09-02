@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
-import os from 'node:os';
+import { chmod, mkdir, readFile, readdir, stat, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 
@@ -11,6 +10,7 @@ import {
   PythonAdapterExecutorError,
   createPythonAdapterExecutor
 } from '../benchmark/lib/python-adapter-executor.mjs';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 function decisionContent() {
   return {
@@ -104,8 +104,7 @@ sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
 }
 
 async function makeHost(t, source) {
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-python-executor-test-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-python-executor-test-');
   const hostPath = path.join(directory, 'fake_host.py');
   await writeFile(hostPath, source, { encoding: 'utf8', mode: 0o644 });
   await chmod(hostPath, 0o644);
@@ -371,8 +370,7 @@ raise SystemExit(9)
 });
 
 test('the same absolute lifecycle deadline covers provider route allocation before spawn', async (t) => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-python-route-timeout-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-python-route-timeout-');
   const marker = path.join(directory, 'spawned');
   const { hostPath } = await makeHost(t, `from pathlib import Path\nPath(${JSON.stringify(marker)}).write_text("spawned")\n`);
   const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
@@ -389,8 +387,7 @@ test('the same absolute lifecycle deadline covers provider route allocation befo
 });
 
 test('successful execution removes only its isolated invocation cwd and temp tree', async (t) => {
-  const tempParent = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-python-cleanup-test-'));
-  t.after(() => rm(tempParent, { recursive: true, force: true }));
+  const tempParent = await scratchDirectory(t, 'shadowgraph-python-cleanup-test-');
   const { hostPath } = await makeHost(t, successHostSource());
   const previous = process.env.TMPDIR;
   process.env.TMPDIR = tempParent;
@@ -517,8 +514,7 @@ test('state-root creation rejects a symlinked ancestor before any outside write'
 });
 
 test('absolute timeout terminates and reaps the child process tree within the configured lifecycle budget', async (t) => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), 'shadowgraph-python-timeout-test-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-python-timeout-test-');
   const pidPath = path.join(directory, 'pid');
   const grandchildPidPath = path.join(directory, 'grandchild-pid');
   const { hostPath } = await makeHost(t, String.raw`import os

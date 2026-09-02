@@ -3,8 +3,7 @@ import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { restoreFile } from '../src/backup.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
@@ -12,6 +11,7 @@ import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createFactAttestation, createLocalEvidenceVerifier } from '../src/verification.js';
 import { createRestoreValidator } from '../src/restore-validation.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 function startMcp(file, extraEnv = {}) {
   const child = spawn(process.execPath, ['src/mcp.js'], {
@@ -119,7 +119,7 @@ function liveRecordsFromSearch(response) {
 }
 
 async function assertMcpRestorePreflightIsAtomic(t, backend) {
-  const directory = await mkdtemp(join(tmpdir(), `shadowgraph-independent-p1-restore-${backend}-`));
+  const directory = await scratchDirectory(t, `shadowgraph-independent-p1-restore-${backend}-`);
   const fixture = await verifierFixture(directory);
   const extension = backend === 'sqlite' ? 'db' : 'json';
   const destination = join(directory, `destination.${extension}`);
@@ -186,8 +186,8 @@ test('P1-1 independent review: configured MCP SQLite restore rejects tampered si
   await assertMcpRestorePreflightIsAtomic(t, 'sqlite');
 });
 
-test('P1-1 independent review: JSON restore rolls durable bytes back when post-replacement activation fails', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-independent-p1-json-rollback-'));
+test('P1-1 independent review: JSON restore rolls durable bytes back when post-replacement activation fails', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-independent-p1-json-rollback-');
   const destination = join(directory, 'destination.json');
   const source = join(directory, 'source.json');
   const original = createShadowGraph({ now: () => '2026-08-27T10:00:00.000Z' });
@@ -275,8 +275,8 @@ function assertConfiguredImportRejects(payload, verifier, pattern) {
   assert.deepEqual(target.exportData(), before, 'configured import rejection must be atomic');
 }
 
-test('P1-2 independent review: signed claims reject declared and effective validity extensions on configured import', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-independent-p1-validity-import-'));
+test('P1-2 independent review: signed claims reject declared and effective validity extensions on configured import', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-independent-p1-validity-import-');
   const fixture = await verifierFixture(directory);
   const declared = extendDeclaredExpiration(
     await verifiedSnapshot(directory, fixture, { id: 'declared-expiry' }),
@@ -294,8 +294,8 @@ test('P1-2 independent review: signed claims reject declared and effective valid
   assertConfiguredImportRejects(effective, fixture.verifier, /verification.*invalid|validity/i);
 });
 
-test('P1-2 independent review: configured import rejects resurrection of an expired signed live fact and journal payload', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-independent-p1-expired-import-'));
+test('P1-2 independent review: configured import rejects resurrection of an expired signed live fact and journal payload', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-independent-p1-expired-import-');
   const fixture = await verifierFixture(directory);
   const resurrected = resurrectExpired(
     await verifiedSnapshot(directory, fixture, { id: 'expired-resurrection', expire: true }),
@@ -305,7 +305,7 @@ test('P1-2 independent review: configured import rejects resurrection of an expi
 });
 
 async function assertConfiguredRestoreRejects(t, backend, attack) {
-  const directory = await mkdtemp(join(tmpdir(), `shadowgraph-independent-p1-validity-${backend}-${attack}-`));
+  const directory = await scratchDirectory(t, `shadowgraph-independent-p1-validity-${backend}-${attack}-`);
   const fixture = await verifierFixture(directory);
   const factId = `${backend}-${attack}`;
   const signed = await verifiedSnapshot(directory, fixture, {
@@ -361,8 +361,8 @@ test('P1-2 independent review: configured SQLite restore rejects validity extens
   await assertConfiguredRestoreRejects(t, 'sqlite', 'resurrection');
 });
 
-test('P1-2 independent review: fact verification, expiration, and supersession journal postconditions reject contradictions', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-independent-p1-journal-postconditions-'));
+test('P1-2 independent review: fact verification, expiration, and supersession journal postconditions reject contradictions', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-independent-p1-journal-postconditions-');
   const fixture = await verifierFixture(directory);
 
   const verified = await verifiedSnapshot(directory, fixture, { id: 'journal-verified' });
@@ -387,8 +387,8 @@ test('P1-2 independent review: fact verification, expiration, and supersession j
   assertConfiguredImportRejects(superseded, fixture.verifier, /fact\.superseded|postcondition|status/i);
 });
 
-test('P1-2 independent review: legitimate system expiration and supersession narrowing preserve signed attestations', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-independent-p1-legitimate-narrowing-'));
+test('P1-2 independent review: legitimate system expiration and supersession narrowing preserve signed attestations', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-independent-p1-legitimate-narrowing-');
   const fixture = await verifierFixture(directory);
   for (const payload of [
     await verifiedSnapshot(directory, fixture, { id: 'legitimate-expired', expire: true }),
@@ -411,8 +411,8 @@ function rebuiltPayload(report) {
   };
 }
 
-test('P1-3 independent review: verifier-less core reopen, rebuild, and rebuild-import stay effectively unverified', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-independent-p1-core-rebuild-policy-'));
+test('P1-3 independent review: verifier-less core reopen, rebuild, and rebuild-import stay effectively unverified', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-independent-p1-core-rebuild-policy-');
   const fixture = await verifierFixture(directory);
   const payload = await verifiedSnapshot(directory, fixture, { id: 'core-rebuild-policy' });
   const rawJournal = structuredClone(payload.journal);
@@ -434,7 +434,7 @@ test('P1-3 independent review: verifier-less core reopen, rebuild, and rebuild-i
 });
 
 test('P1-3 independent review: verifier-less MCP rebuild cannot re-elevate a genuinely signed durable fact', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-independent-p1-mcp-rebuild-policy-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-independent-p1-mcp-rebuild-policy-');
   const fixture = await verifierFixture(directory);
   const file = join(directory, 'signed.json');
   const payload = await verifiedSnapshot(directory, fixture, { id: 'mcp-rebuild-policy' });
@@ -484,7 +484,7 @@ test('P1-3 independent review: exposed rebuild migrates pre-schema-5 lifecycle v
 });
 
 test('P1-3 independent review: invalid verified journal payload makes core and configured MCP rebuild incomplete without trust elevation', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-independent-p1-invalid-rebuild-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-independent-p1-invalid-rebuild-');
   const fixture = await verifierFixture(directory);
   const payload = await verifiedSnapshot(directory, fixture, { id: 'invalid-rebuild-payload' });
   const invalidEntry = payload.journal.find((entry) => entry.type === 'fact.verified');

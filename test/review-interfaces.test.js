@@ -8,15 +8,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtemp, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createShadowGraphServer } from '../src/server.js';
 import { VERSION } from '../src/version.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
-async function startServer(options = {}) {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-review-http-'));
+async function startServer(t, options = {}) {
+  const directory = await scratchDirectory(t, 'shadowgraph-review-http-');
   const app = await createShadowGraphServer({ file: join(directory, 'data.json'), ...options });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
@@ -31,9 +31,9 @@ async function startServer(options = {}) {
 // src/mcp.js each carried their own literal. A version a client reads over HTTP
 // is a contract, so a stale copy misreports which build is running.
 
-test('P1-3: /health version matches package.json exactly', async () => {
+test('P1-3: /health version matches package.json exactly', async (t) => {
   const packaged = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
-  const { base, close } = await startServer();
+  const { base, close } = await startServer(t);
   try {
     const health = await (await fetch(`${base}/health`)).json();
     assert.equal(health.version, packaged, 'health must not carry its own copy of the version');
@@ -52,8 +52,8 @@ test('P1-3: /health version matches package.json exactly', async () => {
 // "2". Number.isInteger('2') is false, so a perfectly valid request FAILED — and
 // an untyped minConfidence would have silently compared a string to a number.
 
-test('P1-4: GET /search?limit=2 is honoured instead of rejected', async () => {
-  const { base, close } = await startServer();
+test('P1-4: GET /search?limit=2 is honoured instead of rejected', async (t) => {
+  const { base, close } = await startServer(t);
   try {
     for (let index = 0; index < 5; index += 1) {
       await fetch(`${base}/decisions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'p', title: `D${index}`, chosen: 'c' }) });
@@ -71,8 +71,8 @@ test('P1-4: GET /search?limit=2 is honoured instead of rejected', async () => {
   }
 });
 
-test('P1-4: GET /journal?limit=2 pages the journal', async () => {
-  const { base, close } = await startServer();
+test('P1-4: GET /journal?limit=2 pages the journal', async (t) => {
+  const { base, close } = await startServer(t);
   try {
     for (let index = 0; index < 4; index += 1) {
       await fetch(`${base}/decisions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'p', title: `D${index}`, chosen: 'c' }) });
@@ -87,8 +87,8 @@ test('P1-4: GET /journal?limit=2 pages the journal', async () => {
   }
 });
 
-test('P1-4: offset and minConfidence are coerced to numbers', async () => {
-  const { base, close } = await startServer();
+test('P1-4: offset and minConfidence are coerced to numbers', async (t) => {
+  const { base, close } = await startServer(t);
   try {
     const post = (body) => fetch(`${base}/decisions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     await post({ project: 'p', title: 'Low', chosen: 'c', confidence: 0.2 });
@@ -106,8 +106,8 @@ test('P1-4: offset and minConfidence are coerced to numbers', async () => {
   }
 });
 
-test('P1-4: an uncoercible query parameter is a clear 400, never a silent guess', async () => {
-  const { base, close } = await startServer();
+test('P1-4: an uncoercible query parameter is a clear 400, never a silent guess', async (t) => {
+  const { base, close } = await startServer(t);
   try {
     for (const query of ['limit=abc', 'limit=1.5', 'offset=xyz', 'minConfidence=high']) {
       const response = await fetch(`${base}/search?${query}`);
@@ -120,10 +120,10 @@ test('P1-4: an uncoercible query parameter is a clear 400, never a silent guess'
   }
 });
 
-test('P1-4: an invalid page limit from the core still surfaces as 400', async () => {
+test('P1-4: an invalid page limit from the core still surfaces as 400', async (t) => {
   // Coercible but out of contract: 0 is an integer, so the transport passes it
   // and the CORE rejects it. Both layers must refuse, not one silently clamp.
-  const { base, close } = await startServer();
+  const { base, close } = await startServer(t);
   try {
     const response = await fetch(`${base}/search?limit=0`);
     assert.equal(response.status, 400);
@@ -136,10 +136,11 @@ test('P1-4: an invalid page limit from the core still surfaces as 400', async ()
 // ---------------------------------------------------------------------------
 // MCP stdio harness
 // ---------------------------------------------------------------------------
-function spawnMcp(label) {
+async function spawnMcp(t, label) {
+  const directory = await scratchDirectory(t, `shadowgraph-review-${label}-`);
   return spawn(process.execPath, ['src/mcp.js'], {
     cwd: process.cwd(),
-    env: { ...process.env, SHADOWGRAPH_FILE: join(tmpdir(), `shadowgraph-review-${label}-${Date.now()}.json`) }
+    env: { ...process.env, SHADOWGRAPH_FILE: join(directory, 'data.json') }
   });
 }
 
@@ -190,8 +191,8 @@ const send = (child, message) => child.stdin.write(JSON.stringify(message) + '\n
 // every distinct failure flattened into one opaque code. A client could not tell
 // "no such tool" from a genuine internal error.
 
-test('P1-5: an unknown TOOL returns -32601 (method not found)', async () => {
-  const child = spawnMcp('unknown-tool');
+test('P1-5: an unknown TOOL returns -32601 (method not found)', async (t) => {
+  const child = await spawnMcp(t, 'unknown-tool');
   try {
     send(child, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'shadowgraph_does_not_exist', arguments: {} } });
     const [response] = await collect(child, 1);
@@ -203,8 +204,8 @@ test('P1-5: an unknown TOOL returns -32601 (method not found)', async () => {
   }
 });
 
-test('P1-5: an unknown METHOD returns -32601, not an empty result', async () => {
-  const child = spawnMcp('unknown-method');
+test('P1-5: an unknown METHOD returns -32601, not an empty result', async (t) => {
+  const child = await spawnMcp(t, 'unknown-method');
   try {
     send(child, { jsonrpc: '2.0', id: 2, method: 'totally/unknown' });
     const [response] = await collect(child, 1);
@@ -216,8 +217,8 @@ test('P1-5: an unknown METHOD returns -32601, not an empty result', async () => 
   }
 });
 
-test('P1-5: malformed params return -32602 (invalid params)', async () => {
-  const child = spawnMcp('invalid-params');
+test('P1-5: malformed params return -32602 (invalid params)', async (t) => {
+  const child = await spawnMcp(t, 'invalid-params');
   try {
     // params must be an object, arguments must be an object, tools/call needs params.
     send(child, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: [] });
@@ -234,8 +235,8 @@ test('P1-5: malformed params return -32602 (invalid params)', async () => {
   }
 });
 
-test('P1-5: a genuine tool failure stays distinguishable from a protocol error', async () => {
-  const child = spawnMcp('tool-failure');
+test('P1-5: a genuine tool failure stays distinguishable from a protocol error', async (t) => {
+  const child = await spawnMcp(t, 'tool-failure');
   try {
     send(child, { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'shadowgraph_update_status', arguments: { decisionId: 'nope', status: 'validated' } } });
     const [response] = await collect(child, 1);
@@ -247,8 +248,8 @@ test('P1-5: a genuine tool failure stays distinguishable from a protocol error',
   }
 });
 
-test('P1-5: unparseable JSON returns -32700', async () => {
-  const child = spawnMcp('parse-error');
+test('P1-5: unparseable JSON returns -32700', async (t) => {
+  const child = await spawnMcp(t, 'parse-error');
   try {
     child.stdin.write('{not json\n');
     const [response] = await collect(child, 1);
@@ -267,8 +268,8 @@ test('P1-5: unparseable JSON returns -32700', async () => {
 // has no `id` and MUST NOT receive a response; a strict client can treat the
 // stray message as a protocol violation.
 
-test('P1-6: notifications/initialized receives NO response', async () => {
-  const child = spawnMcp('notification');
+test('P1-6: notifications/initialized receives NO response', async (t) => {
+  const child = await spawnMcp(t, 'notification');
   try {
     send(child, { jsonrpc: '2.0', method: 'notifications/initialized' });
     send(child, { jsonrpc: '2.0', id: 77, method: 'tools/list' });
@@ -281,8 +282,8 @@ test('P1-6: notifications/initialized receives NO response', async () => {
   }
 });
 
-test('P1-6: an UNKNOWN notification is also unanswered', async () => {
-  const child = spawnMcp('unknown-notification');
+test('P1-6: an UNKNOWN notification is also unanswered', async (t) => {
+  const child = await spawnMcp(t, 'unknown-notification');
   try {
     send(child, { jsonrpc: '2.0', method: 'notifications/somethingNew' });
     // A method with no id that is not under notifications/ is still a notification.
@@ -303,8 +304,8 @@ test('P1-6: an UNKNOWN notification is also unanswered', async () => {
 // prompts/get returned the policy text for ANY name. That told a client its
 // request had succeeded when the server had actually ignored what was asked for.
 
-test('P1-7: resources/read rejects an unknown URI instead of substituting context', async () => {
-  const child = spawnMcp('resource-unknown');
+test('P1-7: resources/read rejects an unknown URI instead of substituting context', async (t) => {
+  const child = await spawnMcp(t, 'resource-unknown');
   try {
     send(child, { jsonrpc: '2.0', id: 10, method: 'resources/read', params: { uri: 'shadowgraph://not-a-real-resource' } });
     send(child, { jsonrpc: '2.0', id: 11, method: 'resources/read', params: {} });
@@ -319,8 +320,8 @@ test('P1-7: resources/read rejects an unknown URI instead of substituting contex
   }
 });
 
-test('P1-7: resources/read still serves the KNOWN URI', async () => {
-  const child = spawnMcp('resource-known');
+test('P1-7: resources/read still serves the KNOWN URI', async (t) => {
+  const child = await spawnMcp(t, 'resource-known');
   try {
     send(child, { jsonrpc: '2.0', id: 12, method: 'resources/read', params: { uri: 'shadowgraph://context' } });
     const [response] = await collect(child, 1);
@@ -332,8 +333,8 @@ test('P1-7: resources/read still serves the KNOWN URI', async () => {
   }
 });
 
-test('P1-7: prompts/get rejects an unknown prompt name', async () => {
-  const child = spawnMcp('prompt-unknown');
+test('P1-7: prompts/get rejects an unknown prompt name', async (t) => {
+  const child = await spawnMcp(t, 'prompt-unknown');
   try {
     send(child, { jsonrpc: '2.0', id: 13, method: 'prompts/get', params: { name: 'not_a_prompt' } });
     send(child, { jsonrpc: '2.0', id: 14, method: 'prompts/get', params: {} });
@@ -348,8 +349,8 @@ test('P1-7: prompts/get rejects an unknown prompt name', async () => {
   }
 });
 
-test('P1-7: prompts/get still serves the KNOWN prompt, and it tells the truth about verification', async () => {
-  const child = spawnMcp('prompt-known');
+test('P1-7: prompts/get still serves the KNOWN prompt, and it tells the truth about verification', async (t) => {
+  const child = await spawnMcp(t, 'prompt-known');
   try {
     send(child, { jsonrpc: '2.0', id: 15, method: 'prompts/get', params: { name: 'shadowgraph_consequential_task' } });
     const [response] = await collect(child, 1);
@@ -365,9 +366,9 @@ test('P1-7: prompts/get still serves the KNOWN prompt, and it tells the truth ab
 // ---------------------------------------------------------------------------
 // P1-3 / protocol honesty at the MCP layer
 // ---------------------------------------------------------------------------
-test('P1-3/P1-7: initialize reports the implemented protocol and the single version', async () => {
+test('P1-3/P1-7: initialize reports the implemented protocol and the single version', async (t) => {
   const packaged = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
-  const child = spawnMcp('initialize');
+  const child = await spawnMcp(t, 'initialize');
   try {
     // A client asking for a NEWER revision is answered with what this server
     // actually implements, never an echo of a version it does not support.

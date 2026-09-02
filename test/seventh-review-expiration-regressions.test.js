@@ -3,8 +3,7 @@ import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { createShadowGraph } from '../src/shadowgraph.js';
@@ -13,11 +12,12 @@ import { journalEntryPostconditionIssue } from '../src/journal.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createShadowGraphServer } from '../src/server.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const exec = promisify(execFile);
 
-async function signedFixture(options = {}) {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-seventh-review-expiration-'));
+async function signedFixture(t, options = {}) {
+  const directory = await scratchDirectory(t, 'shadowgraph-seventh-review-expiration-');
   const evidenceRoot = join(directory, 'evidence');
   await mkdir(evidenceRoot);
   const keys = generateKeyPairSync('ed25519');
@@ -124,9 +124,9 @@ async function loadJson(file) {
   finally { store.close(); }
 }
 
-test('DS-P1-005 seventh review: signed validTo is the exact effective boundary and repeat maintain is idempotent', async () => {
+test('DS-P1-005 seventh review: signed validTo is the exact effective boundary and repeat maintain is idempotent', async (t) => {
   const boundary = '2026-08-28T00:00:00.000Z';
-  const { graph, fact, clock } = await signedFixture({
+  const { graph, fact, clock } = await signedFixture(t, {
     validTo: boundary,
     expiresAt: '2026-09-30T00:00:00.000Z'
   });
@@ -161,8 +161,8 @@ test('DS-P1-005 seventh review: signed validTo is the exact effective boundary a
   assert.equal(expirationEntries(graph, fact.id).length, 1, 'terminal expiration must not be journalled twice');
 });
 
-test('DS-P1-005 seventh review: validTo-only, expiresAt-first, timezone offsets, and unsigned facts share one boundary rule', async () => {
-  const validToOnly = await signedFixture({
+test('DS-P1-005 seventh review: validTo-only, expiresAt-first, timezone offsets, and unsigned facts share one boundary rule', async (t) => {
+  const validToOnly = await signedFixture(t, {
     id: 'signed-valid-to-only',
     validTo: '2026-08-28T03:00:00+03:00'
   });
@@ -174,7 +174,7 @@ test('DS-P1-005 seventh review: validTo-only, expiresAt-first, timezone offsets,
   assert.equal(expiredValidToOnly.temporal.validTo, '2026-08-28T03:00:00+03:00');
   assert.equal(journalEntryPostconditionIssue(expirationEntries(validToOnly.graph, validToOnly.fact.id)[0]), null);
 
-  const expiresFirst = await signedFixture({
+  const expiresFirst = await signedFixture(t, {
     id: 'signed-expires-first',
     expiresAt: '2026-08-27T20:00:00-04:00',
     validTo: '2026-09-30T00:00:00.000Z'
@@ -227,8 +227,8 @@ test('DS-P1-005 seventh review: fact migration backfills canonical validity and 
   assert.equal(expirationEntries(graph, expired.id).length, 1);
 });
 
-test('DS-P1-005 seventh review: an earlier current narrowing expires, while a superseded fact stays terminal', async () => {
-  const narrowedSource = await signedFixture({
+test('DS-P1-005 seventh review: an earlier current narrowing expires, while a superseded fact stays terminal', async (t) => {
+  const narrowedSource = await signedFixture(t, {
     id: 'signed-narrowed-active',
     validTo: '2026-09-15T00:00:00.000Z',
     expiresAt: '2026-09-30T00:00:00.000Z'
@@ -247,7 +247,7 @@ test('DS-P1-005 seventh review: an earlier current narrowing expires, while a su
   assert.equal(factById(narrowed, narrowedSource.fact.id).status, 'expired');
   assert.equal(factById(narrowed, narrowedSource.fact.id).temporal.validTo, narrowedAt);
 
-  const superseded = await signedFixture({
+  const superseded = await signedFixture(t, {
     id: 'signed-superseded-before-expiry',
     key: 'superseded-boundary',
     expiresAt: '2026-09-30T00:00:00.000Z'
@@ -266,7 +266,7 @@ test('DS-P1-005 seventh review: an earlier current narrowing expires, while a su
 });
 
 test('DS-P1-005 seventh review: expired attestation survives import, rebuild, verifier policy, and JSON/SQLite restart', async (t) => {
-  const fixture = await signedFixture({
+  const fixture = await signedFixture(t, {
     id: 'signed-persistence-valid-to-only',
     validTo: '2026-08-28T00:00:00.000Z'
   });
@@ -318,7 +318,7 @@ test('DS-P1-005 seventh review: expired attestation survives import, rebuild, ve
 });
 
 test('DS-P1-005 seventh review: JS, CLI, HTTP, and MCP maintain expire validTo-only facts durably', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-seventh-review-interfaces-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-seventh-review-interfaces-');
   const boundary = '2030-01-01T00:00:00.000Z';
 
   const js = createShadowGraph({ now: () => '2029-01-01T00:00:00.000Z' });
@@ -360,8 +360,8 @@ test('DS-P1-005 seventh review: JS, CLI, HTTP, and MCP maintain expire validTo-o
   assert.equal((await loadJson(mcpFile)).facts.find((fact) => fact.id === 'mcp-valid-to-only').status, 'expired');
 });
 
-test('DS-P1-005 seventh review: persisted lifecycle contradictions and validity extensions fail atomically', async () => {
-  const fixture = await signedFixture({
+test('DS-P1-005 seventh review: persisted lifecycle contradictions and validity extensions fail atomically', async (t) => {
+  const fixture = await signedFixture(t, {
     id: 'signed-contradiction',
     validTo: '2026-08-28T00:00:00.000Z',
     expiresAt: '2026-09-30T00:00:00.000Z'

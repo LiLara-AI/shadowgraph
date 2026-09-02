@@ -1,15 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NODE_SQLITE_NOT_APPLICABLE_REASON } from '../src/runtime-capabilities.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 test('SQLite migrates legacy single-payload files into relational tables', async (t) => {
   let DatabaseSync;
   try { ({ DatabaseSync } = await import('node:sqlite')); } catch { return t.skip(NODE_SQLITE_NOT_APPLICABLE_REASON); }
-  const dir = await mkdtemp(join(tmpdir(), 'shadowgraph-sqlite-migration-'));
+  const dir = await scratchDirectory(t, 'shadowgraph-sqlite-migration-');
   const file = join(dir, 'legacy.db');
   const db = new DatabaseSync(file);
   const payload = { schemaVersion: 2, revision: 4, records: [{ id: 'd1', kind: 'decision', title: 'Legacy', chosen: 'A' }], facts: [], relations: [], events: [] };

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { tmpdir } from 'node:os';
@@ -20,6 +20,7 @@ import * as adaptersModule from '../benchmark/lib/adapters.mjs';
 import { scoreScenario } from '../benchmark/lib/scoring.mjs';
 import { aggregateRun } from '../benchmark/lib/aggregate.mjs';
 import { validateRawRun } from '../benchmark/lib/validate.mjs';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const { loadAdapterConfiguration, runAdapterRequest } = adaptersModule;
 
@@ -160,139 +161,127 @@ test('common model configuration keeps distinct LLM and embedding credentials ou
   assert.equal(Object.hasOwn(configuration, 'apiKey'), false);
 });
 
-test('bounded adapter recursively redacts configured secrets and does not inherit unrelated parent environment', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph adapter security test '));
+test('bounded adapter recursively redacts configured secrets and does not inherit unrelated parent environment', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph adapter security test ');
+  const adapterPath = join(directory, 'fake bounded adapter.mjs');
+  await writeFile(adapterPath, `
+    let input = '';
+    for await (const chunk of process.stdin) input += chunk;
+    const request = JSON.parse(input);
+    const parentName = ${JSON.stringify(SENTINELS.parentName)};
+    const parentPresent = Object.hasOwn(process.env, parentName);
+    const parentValue = process.env[parentName] ?? 'absent';
+    process.stderr.write('diagnostic llm=' + request.commonModel.llm.apiKey + '\\n');
+    process.stdout.write(JSON.stringify({
+      response: {
+        recommendation: 'safe',
+        nested: {
+          llmKey: request.commonModel.llm.apiKey,
+          endpointWithUserinfo: request.commonModel.llm.endpoint,
+          adapterSecret: process.env.ADAPTER_PRIVATE_TOKEN,
+          adapterConfigSecretField: process.argv[3],
+          inheritedName: parentPresent ? parentName : 'absent',
+          inheritedValue: parentValue,
+          model: request.commonModel.llm.model,
+          safeEndpoint: 'http://127.0.0.1:18080/v1'
+        }
+      },
+      usage: {
+        totalTokens: 1,
+        source: 'provider',
+        nested: { embeddingKey: request.commonModel.embedding.apiKey }
+      },
+      toolCalls: 0,
+      storageBytes: 0,
+      persistedVerified: true,
+      logs: [
+        'adapter=' + process.env.ADAPTER_PRIVATE_TOKEN,
+        'endpoint=' + request.commonModel.llm.endpoint,
+        'parent=' + parentValue
+      ],
+      toolMetadata: { authorization: 'Bearer ' + request.commonModel.llm.apiKey },
+      storageMetadata: { password: process.env.ADAPTER_PRIVATE_TOKEN }
+    }));
+  `);
+  const output = await runAdapterRequest({
+    command: [process.execPath, adapterPath, '--opaque-field', SENTINELS.adapterField],
+    timeoutMs: 1000,
+    environment: { ADAPTER_PRIVATE_TOKEN: SENTINELS.adapter },
+    credentials: { opaqueField: SENTINELS.adapterField }
+  }, {
+    action: 'phase',
+    commonModel: commonModelWithSentinels()
+  }, {
+    inheritedEnvironment: {
+      ...process.env,
+      [SENTINELS.parentName]: SENTINELS.parentValue
+    }
+  });
+
+  assertNoSentinels(output, 'adapter output');
+  assert.equal(JSON.stringify(output).includes('[REDACTED]'), true);
+  assert.equal(output.response.nested.inheritedName, 'absent');
+  assert.equal(output.response.nested.inheritedValue, 'absent');
+  assert.equal(output.response.nested.model, 'harmless-llm-model-id');
+  assert.equal(output.response.nested.safeEndpoint, 'http://127.0.0.1:18080/v1');
+  assert.equal(output.response.nested.endpointWithUserinfo.includes('127.0.0.1:18080/v1'), true);
+  assert.equal(output.logs.some((line) => line.includes('diagnostic llm=[REDACTED]')), true);
+});
+
+test('bounded adapter failure retains sanitized stderr, stdout, error, and command evidence', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph adapter failure test ');
+  const adapterPath = join(directory, 'failing adapter.mjs');
+  await writeFile(adapterPath, `
+    let input = '';
+    for await (const chunk of process.stdin) input += chunk;
+    const request = JSON.parse(input);
+    process.stdout.write('partial=' + request.commonModel.embedding.apiKey + '\\n');
+    process.stderr.write('provider rejected ' + request.commonModel.llm.apiKey + '\\n');
+    throw new Error('adapter threw ' + process.env.ADAPTER_PRIVATE_TOKEN);
+  `);
+  let failure;
   try {
-    const adapterPath = join(directory, 'fake bounded adapter.mjs');
-    await writeFile(adapterPath, `
-      let input = '';
-      for await (const chunk of process.stdin) input += chunk;
-      const request = JSON.parse(input);
-      const parentName = ${JSON.stringify(SENTINELS.parentName)};
-      const parentPresent = Object.hasOwn(process.env, parentName);
-      const parentValue = process.env[parentName] ?? 'absent';
-      process.stderr.write('diagnostic llm=' + request.commonModel.llm.apiKey + '\\n');
-      process.stdout.write(JSON.stringify({
-        response: {
-          recommendation: 'safe',
-          nested: {
-            llmKey: request.commonModel.llm.apiKey,
-            endpointWithUserinfo: request.commonModel.llm.endpoint,
-            adapterSecret: process.env.ADAPTER_PRIVATE_TOKEN,
-            adapterConfigSecretField: process.argv[3],
-            inheritedName: parentPresent ? parentName : 'absent',
-            inheritedValue: parentValue,
-            model: request.commonModel.llm.model,
-            safeEndpoint: 'http://127.0.0.1:18080/v1'
-          }
-        },
-        usage: {
-          totalTokens: 1,
-          source: 'provider',
-          nested: { embeddingKey: request.commonModel.embedding.apiKey }
-        },
-        toolCalls: 0,
-        storageBytes: 0,
-        persistedVerified: true,
-        logs: [
-          'adapter=' + process.env.ADAPTER_PRIVATE_TOKEN,
-          'endpoint=' + request.commonModel.llm.endpoint,
-          'parent=' + parentValue
-        ],
-        toolMetadata: { authorization: 'Bearer ' + request.commonModel.llm.apiKey },
-        storageMetadata: { password: process.env.ADAPTER_PRIVATE_TOKEN }
-      }));
-    `);
-    const output = await runAdapterRequest({
-      command: [process.execPath, adapterPath, '--opaque-field', SENTINELS.adapterField],
+    await runAdapterRequest({
+      command: [process.execPath, adapterPath, '--api-key', SENTINELS.llm],
       timeoutMs: 1000,
-      environment: { ADAPTER_PRIVATE_TOKEN: SENTINELS.adapter },
-      credentials: { opaqueField: SENTINELS.adapterField }
-    }, {
-      action: 'phase',
+      environment: { ADAPTER_PRIVATE_TOKEN: SENTINELS.adapter }
+    }, { commonModel: commonModelWithSentinels() });
+  } catch (error) {
+    failure = error;
+  }
+  assert.ok(failure instanceof Error);
+  const evidence = [failure.message, failure.stdout, failure.stderr, failure.command].join('\n');
+  assertNoSentinels(evidence, 'adapter failure evidence');
+  assert.match(evidence, /provider rejected \[REDACTED\]/u);
+  assert.match(evidence, /adapter threw \[REDACTED\]/u);
+  assert.match(evidence, /partial=\[REDACTED\]/u);
+  assert.match(evidence, /exited with code 1/u);
+  assert.equal(JSON.parse(failure.command).includes(adapterPath), true);
+});
+
+test('bounded adapter malformed output never exposes secrets in its thrown error', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph adapter malformed test ');
+  const adapterPath = join(directory, 'malformed adapter.mjs');
+  await writeFile(adapterPath, `
+    let input = '';
+    for await (const chunk of process.stdin) input += chunk;
+    const request = JSON.parse(input);
+    process.stdout.write('{"response":"' + request.commonModel.llm.apiKey);
+    process.stderr.write('malformed output for ' + request.commonModel.embedding.apiKey);
+  `);
+  let failure;
+  try {
+    await runAdapterRequest({ command: [process.execPath, adapterPath], timeoutMs: 1000 }, {
       commonModel: commonModelWithSentinels()
-    }, {
-      inheritedEnvironment: {
-        ...process.env,
-        [SENTINELS.parentName]: SENTINELS.parentValue
-      }
     });
-
-    assertNoSentinels(output, 'adapter output');
-    assert.equal(JSON.stringify(output).includes('[REDACTED]'), true);
-    assert.equal(output.response.nested.inheritedName, 'absent');
-    assert.equal(output.response.nested.inheritedValue, 'absent');
-    assert.equal(output.response.nested.model, 'harmless-llm-model-id');
-    assert.equal(output.response.nested.safeEndpoint, 'http://127.0.0.1:18080/v1');
-    assert.equal(output.response.nested.endpointWithUserinfo.includes('127.0.0.1:18080/v1'), true);
-    assert.equal(output.logs.some((line) => line.includes('diagnostic llm=[REDACTED]')), true);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
+  } catch (error) {
+    failure = error;
   }
-});
-
-test('bounded adapter failure retains sanitized stderr, stdout, error, and command evidence', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph adapter failure test '));
-  try {
-    const adapterPath = join(directory, 'failing adapter.mjs');
-    await writeFile(adapterPath, `
-      let input = '';
-      for await (const chunk of process.stdin) input += chunk;
-      const request = JSON.parse(input);
-      process.stdout.write('partial=' + request.commonModel.embedding.apiKey + '\\n');
-      process.stderr.write('provider rejected ' + request.commonModel.llm.apiKey + '\\n');
-      throw new Error('adapter threw ' + process.env.ADAPTER_PRIVATE_TOKEN);
-    `);
-    let failure;
-    try {
-      await runAdapterRequest({
-        command: [process.execPath, adapterPath, '--api-key', SENTINELS.llm],
-        timeoutMs: 1000,
-        environment: { ADAPTER_PRIVATE_TOKEN: SENTINELS.adapter }
-      }, { commonModel: commonModelWithSentinels() });
-    } catch (error) {
-      failure = error;
-    }
-    assert.ok(failure instanceof Error);
-    const evidence = [failure.message, failure.stdout, failure.stderr, failure.command].join('\n');
-    assertNoSentinels(evidence, 'adapter failure evidence');
-    assert.match(evidence, /provider rejected \[REDACTED\]/u);
-    assert.match(evidence, /adapter threw \[REDACTED\]/u);
-    assert.match(evidence, /partial=\[REDACTED\]/u);
-    assert.match(evidence, /exited with code 1/u);
-    assert.equal(JSON.parse(failure.command).includes(adapterPath), true);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test('bounded adapter malformed output never exposes secrets in its thrown error', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph adapter malformed test '));
-  try {
-    const adapterPath = join(directory, 'malformed adapter.mjs');
-    await writeFile(adapterPath, `
-      let input = '';
-      for await (const chunk of process.stdin) input += chunk;
-      const request = JSON.parse(input);
-      process.stdout.write('{"response":"' + request.commonModel.llm.apiKey);
-      process.stderr.write('malformed output for ' + request.commonModel.embedding.apiKey);
-    `);
-    let failure;
-    try {
-      await runAdapterRequest({ command: [process.execPath, adapterPath], timeoutMs: 1000 }, {
-        commonModel: commonModelWithSentinels()
-      });
-    } catch (error) {
-      failure = error;
-    }
-    assert.ok(failure instanceof Error);
-    const evidence = [failure.message, failure.stdout, failure.stderr, failure.command].join('\n');
-    assertNoSentinels(evidence, 'malformed adapter evidence');
-    assert.match(evidence, /invalid JSON output/u);
-    assert.match(evidence, /\[REDACTED\]/u);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  assert.ok(failure instanceof Error);
+  const evidence = [failure.message, failure.stdout, failure.stderr, failure.command].join('\n');
+  assertNoSentinels(evidence, 'malformed adapter evidence');
+  assert.match(evidence, /invalid JSON output/u);
+  assert.match(evidence, /\[REDACTED\]/u);
 });
 
 test('recorded adapter command redacts credential arguments but preserves paths and harmless identifiers', () => {
@@ -320,22 +309,18 @@ test('recorded adapter command redacts credential arguments but preserves paths 
   assert.equal(recorded.includes('http://127.0.0.1:18080/v1'), true);
 });
 
-test('bounded adapter timeout remains enforced with sanitized failure evidence', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph adapter timeout test '));
-  try {
-    const adapterPath = join(directory, 'timeout adapter.mjs');
-    await writeFile(adapterPath, 'setInterval(() => {}, 1000);\n');
-    await assert.rejects(
-      runAdapterRequest({ command: [process.execPath, adapterPath], timeoutMs: 50 }, {}),
-      (error) => {
-        assertNoSentinels([error.message, error.stdout, error.stderr, error.command].join('\n'), 'timeout evidence');
-        assert.match(error.message, /exceeded its 50ms timeout/u);
-        return true;
-      }
-    );
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+test('bounded adapter timeout remains enforced with sanitized failure evidence', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph adapter timeout test ');
+  const adapterPath = join(directory, 'timeout adapter.mjs');
+  await writeFile(adapterPath, 'setInterval(() => {}, 1000);\n');
+  await assert.rejects(
+    runAdapterRequest({ command: [process.execPath, adapterPath], timeoutMs: 50 }, {}),
+    (error) => {
+      assertNoSentinels([error.message, error.stdout, error.stderr, error.command].join('\n'), 'timeout evidence');
+      assert.match(error.message, /exceeded its 50ms timeout/u);
+      return true;
+    }
+  );
 });
 
 test('RRV-05: credential-like endpoint query values are secrets while harmless URL metadata remains visible', () => {
@@ -367,8 +352,8 @@ test('RRV-05: credential-like endpoint query values are secrets while harmless U
   assert.equal(serialized.includes('harmless-llm-model-id'), true);
 });
 
-test('RRV-05: local adapter/server sanitizes raw and encoded secrets at every output and artifact boundary', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-rrv05-adapter-'));
+test('RRV-05: local adapter/server sanitizes raw and encoded secrets at every output and artifact boundary', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-rrv05-adapter-');
   const server = createServer((request, response) => {
     response.writeHead(200, { 'content-type': 'application/json' });
     response.end(JSON.stringify({ url: request.url, source: 'harmless-local-fake-server' }));
@@ -512,171 +497,37 @@ test('RRV-05: local adapter/server sanitizes raw and encoded secrets at every ou
     assert.equal(records.successOutput.logs.some((line) => line.includes('Adapter stderr: success-stderr=')), true);
   } finally {
     await new Promise((resolveClose) => server.close(resolveClose));
-    await rm(directory, { recursive: true, force: true });
   }
 });
 
-test('P1: bounded adapter discovers and redacts credentials created only in subprocess output', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-dynamic-adapter-credential-'));
-  try {
-    const adapterPath = join(directory, 'dynamic credential fake adapter.mjs');
-    const successOraclePath = join(directory, 'success-oracle.json');
-    const failureOraclePath = join(directory, 'failure-oracle.json');
-    const malformedOraclePath = join(directory, 'malformed-oracle.json');
-    await writeFile(adapterPath, `
-      import { randomBytes } from 'node:crypto';
-      import { writeFile } from 'node:fs/promises';
+test('P1: bounded adapter discovers and redacts credentials created only in subprocess output', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-dynamic-adapter-credential-');
+  const adapterPath = join(directory, 'dynamic credential fake adapter.mjs');
+  const successOraclePath = join(directory, 'success-oracle.json');
+  const failureOraclePath = join(directory, 'failure-oracle.json');
+  const malformedOraclePath = join(directory, 'malformed-oracle.json');
+  await writeFile(adapterPath, `
+    import { randomBytes } from 'node:crypto';
+    import { writeFile } from 'node:fs/promises';
 
-      let input = '';
-      for await (const chunk of process.stdin) input += chunk;
-      JSON.parse(input);
-      const mode = process.argv[2];
-      const oraclePath = process.argv[3];
-      const nonce = randomBytes(18).toString('base64url');
-      const values = {
-        bearer: 'runtime-bearer-' + nonce + '.A_Z-9',
-        basic: Buffer.from('runtime-user-' + nonce + ':runtime basic+pass/' + nonce).toString('base64'),
-        apiKey: 'runtime api+key/' + nonce,
-        token: 'runtime token+value/' + nonce,
-        password: 'runtime password+value/' + nonce,
-        urlUser: 'runtime user+' + nonce,
-        urlPassword: 'runtime url+password/' + nonce
-      };
-      if (mode === 'failure') values.commandOnly = 'runtime command+credential/' + nonce;
-      if (mode === 'malformed') values.malformedOnly = 'runtime malformed+password/' + nonce;
-      const form = (value) => {
-        const variants = [value, new URLSearchParams({ value }).toString().slice('value='.length)];
-        let encoded = value;
-        for (let round = 0; round < 3; round += 1) {
-          encoded = encodeURIComponent(encoded);
-          variants.push(encoded, new URLSearchParams({ value: encoded }).toString().slice('value='.length));
-        }
-        return [...new Set(variants)];
-      };
-      const endpoint = new URL('https://provider.example.invalid/benchmark/v1');
-      endpoint.username = values.urlUser;
-      endpoint.password = values.urlPassword;
-      endpoint.searchParams.set('access_token', values.token);
-      endpoint.searchParams.set('api-version', '2026-08-28');
-      endpoint.searchParams.set('model', 'model-token-preview-v2');
-      const command = [
-        'provider-cli', '--api-key', values.apiKey, '--token=' + values.token,
-        '--password', values.password, endpoint.href
-      ];
-      const variants = Object.entries(values).flatMap(([name, value]) => (
-        form(value).map((variant, index) => name + '[' + index + ']=' + variant)
-      ));
-      const harmless = {
-        modelId: 'model-token-preview-v2',
-        apiVersion: '2026-08-28',
-        sha256: '8f4c7e4a037b2f8284e1d572f37792bbd3f963dbd521253568c6f8f6f9f9d4a1',
-        ordinaryBearerWords: 'The bearer carries an ordinary benchmark result.',
-        path: 'C:/benchmarks/bearer/results/raw-run.json',
-        measurement: { latencyMs: 12.345, totalTokens: 128, storageBytes: 4096 }
-      };
-      await writeFile(oraclePath, JSON.stringify(values));
-      const diagnosticLines = [
-        'Authorization: Bearer ' + values.bearer,
-        'Authorization: Basic ' + values.basic,
-        'api_key="' + values.apiKey + '"',
-        'token=' + encodeURIComponent(values.token) + '&api-version=2026-08-28',
-        'password="' + values.password + '"',
-        'endpoint=' + endpoint.href,
-        'command_metadata=' + JSON.stringify(command),
-        'variants=' + variants.join('|')
-      ];
-      if (mode === 'success') {
-        process.stderr.write('success-stderr ' + diagnosticLines.join(' ; ') + '\\n');
-        process.stdout.write(JSON.stringify({
-          response: {
-            recommendation: 'safe',
-            nested: {
-              authorization: { bearer: 'Bearer ' + values.bearer, basic: 'Basic ' + values.basic },
-              apiKey: values.apiKey,
-              token: values.token,
-              password: values.password,
-              endpoint: endpoint.href,
-              variants,
-              commandMetadata: { command },
-              harmless
-            }
-          },
-          usage: {
-            totalTokens: 128,
-            providerMetadata: { apiKey: values.apiKey, note: 'token="' + values.token + '"' },
-            benchmarkMeasurement: harmless.measurement
-          },
-          toolCalls: 2,
-          storageBytes: 4096,
-          persistedVerified: true,
-          logs: diagnosticLines
-        }));
-      } else if (mode === 'malformed') {
-        process.stdout.write('{"error":{"password":"' + values.malformedOnly + '","nested":{"variants":' + JSON.stringify(form(values.malformedOnly)));
-        process.stderr.write('malformed local fake adapter output\\n');
-      } else {
-        process.stdout.write(JSON.stringify({
-          error: {
-            message: 'local fake provider failed',
-            nested: { variants },
-            commandMetadata: { command: ['provider-cli', '--api-key', values.commandOnly] }
-          }
-        }));
-        process.stderr.write('failure-error ' + diagnosticLines.join(' ; ') + '\\n');
-        process.exitCode = 7;
-      }
-    `);
-
-    const harmless = {
-      modelId: 'model-token-preview-v2',
-      apiVersion: '2026-08-28',
-      sha256: '8f4c7e4a037b2f8284e1d572f37792bbd3f963dbd521253568c6f8f6f9f9d4a1',
-      ordinaryBearerWords: 'The bearer carries an ordinary benchmark result.',
-      path: 'C:/benchmarks/bearer/results/raw-run.json',
-      measurement: { latencyMs: 12.345, totalTokens: 128, storageBytes: 4096 }
+    let input = '';
+    for await (const chunk of process.stdin) input += chunk;
+    JSON.parse(input);
+    const mode = process.argv[2];
+    const oraclePath = process.argv[3];
+    const nonce = randomBytes(18).toString('base64url');
+    const values = {
+      bearer: 'runtime-bearer-' + nonce + '.A_Z-9',
+      basic: Buffer.from('runtime-user-' + nonce + ':runtime basic+pass/' + nonce).toString('base64'),
+      apiKey: 'runtime api+key/' + nonce,
+      token: 'runtime token+value/' + nonce,
+      password: 'runtime password+value/' + nonce,
+      urlUser: 'runtime user+' + nonce,
+      urlPassword: 'runtime url+password/' + nonce
     };
-    const request = { action: 'phase', model: harmless.modelId, apiVersion: harmless.apiVersion };
-    const inheritedEnvironment = {
-      PATH: process.env.PATH ?? '',
-      TEMP: process.env.TEMP ?? tmpdir()
-    };
-    const specFor = (mode, oraclePath) => ({
-      command: [process.execPath, adapterPath, mode, oraclePath],
-      timeoutMs: 5000,
-      environment: { BENCHMARK_MODE: 'local-fake' }
-    });
-    const successSpec = specFor('success', successOraclePath);
-    const failureSpec = specFor('failure', failureOraclePath);
-    const malformedSpec = specFor('malformed', malformedOraclePath);
-    const success = await runAdapterRequest(successSpec, request, { inheritedEnvironment });
-    const captureFailure = async (spec) => {
-      try {
-        await runAdapterRequest(spec, request, { inheritedEnvironment });
-        return null;
-      } catch (error) {
-        return error;
-      }
-    };
-    const failure = await captureFailure(failureSpec);
-    const malformedFailure = await captureFailure(malformedSpec);
-    assert.ok(failure instanceof Error);
-    assert.equal(failure.exitCode, 7);
-    assert.ok(malformedFailure instanceof Error);
-    assert.match(malformedFailure.message, /invalid JSON output/u);
-
-    const generated = {
-      success: JSON.parse(await readFile(successOraclePath, 'utf8')),
-      failure: JSON.parse(await readFile(failureOraclePath, 'utf8')),
-      malformed: JSON.parse(await readFile(malformedOraclePath, 'utf8'))
-    };
-    const configured = JSON.stringify({ successSpec, failureSpec, malformedSpec, request, inheritedEnvironment });
-    for (const values of Object.values(generated)) {
-      for (const value of Object.values(values)) {
-        assert.equal(configured.includes(value), false, 'runtime credential unexpectedly existed in adapter inputs');
-      }
-    }
-
-    const dynamicForms = (value) => {
+    if (mode === 'failure') values.commandOnly = 'runtime command+credential/' + nonce;
+    if (mode === 'malformed') values.malformedOnly = 'runtime malformed+password/' + nonce;
+    const form = (value) => {
       const variants = [value, new URLSearchParams({ value }).toString().slice('value='.length)];
       let encoded = value;
       for (let round = 0; round < 3; round += 1) {
@@ -685,64 +536,193 @@ test('P1: bounded adapter discovers and redacts credentials created only in subp
       }
       return [...new Set(variants)];
     };
-    const errorEvidence = (error) => ({
-      message: error.message,
-      stdout: error.stdout,
-      stderr: error.stderr,
-      command: error.command,
-      exitCode: error.exitCode,
-      signal: error.signal
-    });
-    const failureEvidence = errorEvidence(failure);
-    const malformedEvidence = errorEvidence(malformedFailure);
-    const rawRun = {
-      schemaVersion: 1,
-      arms: [{ armId: 'local-fake', command: failure.command }],
-      measurements: [{ response: success.response, usage: success.usage, logs: success.logs }],
-      failures: [failureEvidence, malformedEvidence]
+    const endpoint = new URL('https://provider.example.invalid/benchmark/v1');
+    endpoint.username = values.urlUser;
+    endpoint.password = values.urlPassword;
+    endpoint.searchParams.set('access_token', values.token);
+    endpoint.searchParams.set('api-version', '2026-08-28');
+    endpoint.searchParams.set('model', 'model-token-preview-v2');
+    const command = [
+      'provider-cli', '--api-key', values.apiKey, '--token=' + values.token,
+      '--password', values.password, endpoint.href
+    ];
+    const variants = Object.entries(values).flatMap(([name, value]) => (
+      form(value).map((variant, index) => name + '[' + index + ']=' + variant)
+    ));
+    const harmless = {
+      modelId: 'model-token-preview-v2',
+      apiVersion: '2026-08-28',
+      sha256: '8f4c7e4a037b2f8284e1d572f37792bbd3f963dbd521253568c6f8f6f9f9d4a1',
+      ordinaryBearerWords: 'The bearer carries an ordinary benchmark result.',
+      path: 'C:/benchmarks/bearer/results/raw-run.json',
+      measurement: { latencyMs: 12.345, totalTokens: 128, storageBytes: 4096 }
     };
-    const aggregate = {
-      schemaVersion: 1,
-      generatedFromRaw: true,
-      diagnostic: { rawRun, benchmarkMeasurement: harmless.measurement }
-    };
-    const perArmPath = join(directory, 'local-fake.log');
-    const rawPath = join(directory, 'raw-run.json');
-    const aggregatePath = join(directory, 'aggregate.json');
-    await writeFile(perArmPath, JSON.stringify({ failures: [failureEvidence, malformedEvidence] }));
-    await writeFile(rawPath, JSON.stringify(rawRun));
-    await writeFile(aggregatePath, JSON.stringify(aggregate));
-
-    const records = {
-      successOutput: success,
-      successNestedReturn: success.response.nested,
-      successLogsAndStderr: success.logs,
-      failureErrorAndMetadata: failureEvidence,
-      malformedFailureEvidence: malformedEvidence,
-      returnedCommandMetadata: success.response.nested.commandMetadata,
-      perArmLogArtifact: await readFile(perArmPath, 'utf8'),
-      rawRunArtifact: await readFile(rawPath, 'utf8'),
-      aggregateArtifact: await readFile(aggregatePath, 'utf8')
-    };
-    const leaks = [];
-    for (const [context, record] of Object.entries(records)) {
-      const serialized = typeof record === 'string' ? record : JSON.stringify(record);
-      for (const [mode, values] of Object.entries(generated)) {
-        for (const [name, value] of Object.entries(values)) {
-          dynamicForms(value).forEach((form, index) => {
-            if (serialized.includes(form)) leaks.push(`${context}:${mode}:${name}[${index}]`);
-          });
+    await writeFile(oraclePath, JSON.stringify(values));
+    const diagnosticLines = [
+      'Authorization: Bearer ' + values.bearer,
+      'Authorization: Basic ' + values.basic,
+      'api_key="' + values.apiKey + '"',
+      'token=' + encodeURIComponent(values.token) + '&api-version=2026-08-28',
+      'password="' + values.password + '"',
+      'endpoint=' + endpoint.href,
+      'command_metadata=' + JSON.stringify(command),
+      'variants=' + variants.join('|')
+    ];
+    if (mode === 'success') {
+      process.stderr.write('success-stderr ' + diagnosticLines.join(' ; ') + '\\n');
+      process.stdout.write(JSON.stringify({
+        response: {
+          recommendation: 'safe',
+          nested: {
+            authorization: { bearer: 'Bearer ' + values.bearer, basic: 'Basic ' + values.basic },
+            apiKey: values.apiKey,
+            token: values.token,
+            password: values.password,
+            endpoint: endpoint.href,
+            variants,
+            commandMetadata: { command },
+            harmless
+          }
+        },
+        usage: {
+          totalTokens: 128,
+          providerMetadata: { apiKey: values.apiKey, note: 'token="' + values.token + '"' },
+          benchmarkMeasurement: harmless.measurement
+        },
+        toolCalls: 2,
+        storageBytes: 4096,
+        persistedVerified: true,
+        logs: diagnosticLines
+      }));
+    } else if (mode === 'malformed') {
+      process.stdout.write('{"error":{"password":"' + values.malformedOnly + '","nested":{"variants":' + JSON.stringify(form(values.malformedOnly)));
+      process.stderr.write('malformed local fake adapter output\\n');
+    } else {
+      process.stdout.write(JSON.stringify({
+        error: {
+          message: 'local fake provider failed',
+          nested: { variants },
+          commandMetadata: { command: ['provider-cli', '--api-key', values.commandOnly] }
         }
+      }));
+      process.stderr.write('failure-error ' + diagnosticLines.join(' ; ') + '\\n');
+      process.exitCode = 7;
+    }
+  `);
+
+  const harmless = {
+    modelId: 'model-token-preview-v2',
+    apiVersion: '2026-08-28',
+    sha256: '8f4c7e4a037b2f8284e1d572f37792bbd3f963dbd521253568c6f8f6f9f9d4a1',
+    ordinaryBearerWords: 'The bearer carries an ordinary benchmark result.',
+    path: 'C:/benchmarks/bearer/results/raw-run.json',
+    measurement: { latencyMs: 12.345, totalTokens: 128, storageBytes: 4096 }
+  };
+  const request = { action: 'phase', model: harmless.modelId, apiVersion: harmless.apiVersion };
+  const inheritedEnvironment = {
+    PATH: process.env.PATH ?? '',
+    TEMP: process.env.TEMP ?? tmpdir()
+  };
+  const specFor = (mode, oraclePath) => ({
+    command: [process.execPath, adapterPath, mode, oraclePath],
+    timeoutMs: 5000,
+    environment: { BENCHMARK_MODE: 'local-fake' }
+  });
+  const successSpec = specFor('success', successOraclePath);
+  const failureSpec = specFor('failure', failureOraclePath);
+  const malformedSpec = specFor('malformed', malformedOraclePath);
+  const success = await runAdapterRequest(successSpec, request, { inheritedEnvironment });
+  const captureFailure = async (spec) => {
+    try {
+      await runAdapterRequest(spec, request, { inheritedEnvironment });
+      return null;
+    } catch (error) {
+      return error;
+    }
+  };
+  const failure = await captureFailure(failureSpec);
+  const malformedFailure = await captureFailure(malformedSpec);
+  assert.ok(failure instanceof Error);
+  assert.equal(failure.exitCode, 7);
+  assert.ok(malformedFailure instanceof Error);
+  assert.match(malformedFailure.message, /invalid JSON output/u);
+
+  const generated = {
+    success: JSON.parse(await readFile(successOraclePath, 'utf8')),
+    failure: JSON.parse(await readFile(failureOraclePath, 'utf8')),
+    malformed: JSON.parse(await readFile(malformedOraclePath, 'utf8'))
+  };
+  const configured = JSON.stringify({ successSpec, failureSpec, malformedSpec, request, inheritedEnvironment });
+  for (const values of Object.values(generated)) {
+    for (const value of Object.values(values)) {
+      assert.equal(configured.includes(value), false, 'runtime credential unexpectedly existed in adapter inputs');
+    }
+  }
+
+  const dynamicForms = (value) => {
+    const variants = [value, new URLSearchParams({ value }).toString().slice('value='.length)];
+    let encoded = value;
+    for (let round = 0; round < 3; round += 1) {
+      encoded = encodeURIComponent(encoded);
+      variants.push(encoded, new URLSearchParams({ value: encoded }).toString().slice('value='.length));
+    }
+    return [...new Set(variants)];
+  };
+  const errorEvidence = (error) => ({
+    message: error.message,
+    stdout: error.stdout,
+    stderr: error.stderr,
+    command: error.command,
+    exitCode: error.exitCode,
+    signal: error.signal
+  });
+  const failureEvidence = errorEvidence(failure);
+  const malformedEvidence = errorEvidence(malformedFailure);
+  const rawRun = {
+    schemaVersion: 1,
+    arms: [{ armId: 'local-fake', command: failure.command }],
+    measurements: [{ response: success.response, usage: success.usage, logs: success.logs }],
+    failures: [failureEvidence, malformedEvidence]
+  };
+  const aggregate = {
+    schemaVersion: 1,
+    generatedFromRaw: true,
+    diagnostic: { rawRun, benchmarkMeasurement: harmless.measurement }
+  };
+  const perArmPath = join(directory, 'local-fake.log');
+  const rawPath = join(directory, 'raw-run.json');
+  const aggregatePath = join(directory, 'aggregate.json');
+  await writeFile(perArmPath, JSON.stringify({ failures: [failureEvidence, malformedEvidence] }));
+  await writeFile(rawPath, JSON.stringify(rawRun));
+  await writeFile(aggregatePath, JSON.stringify(aggregate));
+
+  const records = {
+    successOutput: success,
+    successNestedReturn: success.response.nested,
+    successLogsAndStderr: success.logs,
+    failureErrorAndMetadata: failureEvidence,
+    malformedFailureEvidence: malformedEvidence,
+    returnedCommandMetadata: success.response.nested.commandMetadata,
+    perArmLogArtifact: await readFile(perArmPath, 'utf8'),
+    rawRunArtifact: await readFile(rawPath, 'utf8'),
+    aggregateArtifact: await readFile(aggregatePath, 'utf8')
+  };
+  const leaks = [];
+  for (const [context, record] of Object.entries(records)) {
+    const serialized = typeof record === 'string' ? record : JSON.stringify(record);
+    for (const [mode, values] of Object.entries(generated)) {
+      for (const [name, value] of Object.entries(values)) {
+        dynamicForms(value).forEach((form, index) => {
+          if (serialized.includes(form)) leaks.push(`${context}:${mode}:${name}[${index}]`);
+        });
       }
     }
-    assert.deepEqual(leaks, []);
-    assert.deepEqual(success.response.nested.harmless, harmless);
-    assert.deepEqual(success.usage.benchmarkMeasurement, harmless.measurement);
-    assert.equal(JSON.parse(failure.command).includes(adapterPath), true);
-    assert.match(JSON.stringify(records), /\[REDACTED\]/u);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
   }
+  assert.deepEqual(leaks, []);
+  assert.deepEqual(success.response.nested.harmless, harmless);
+  assert.deepEqual(success.usage.benchmarkMeasurement, harmless.measurement);
+  assert.equal(JSON.parse(failure.command).includes(adapterPath), true);
+  assert.match(JSON.stringify(records), /\[REDACTED\]/u);
 });
 
 const ADAPTER_SANITIZATION_BUDGET_ERROR = 'Adapter output could not be safely sanitized';
@@ -808,253 +788,241 @@ function assertBudgetFailureIsClosed(error, forbidden, expectedExitCode) {
 }
 
 test('P1: every dynamic sanitization budget fails closed across success, failure, malformed protocol, command, and nested artifacts', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-dynamic-budget-'));
-  try {
-    const adapterPath = join(directory, 'dynamic budget adapter.mjs');
-    await writeFile(adapterPath, `
-      let input = '';
-      for await (const chunk of process.stdin) input += chunk;
-      JSON.parse(input);
+  const directory = await scratchDirectory(t, 'shadowgraph-dynamic-budget-');
+  const adapterPath = join(directory, 'dynamic budget adapter.mjs');
+  await writeFile(adapterPath, `
+    let input = '';
+    for await (const chunk of process.stdin) input += chunk;
+    JSON.parse(input);
 
-      const caseName = process.argv[2];
-      const mode = process.argv[3];
-      const marker = (name, index = 0) =>
-        'DYNAMIC_BUDGET_' + name.replaceAll('-', '_').toUpperCase() + '_' + String(index).padStart(5, '0') + '_SENTINEL';
-      const untrustedMarker = 'UNTRUSTED_DYNAMIC_BUDGET_OUTPUT:' + caseName + ':' + mode;
-      const commandMetadata = { command: ['provider-cli', '--model', 'harmless-budget-model'] };
-      let nestedArtifact;
+    const caseName = process.argv[2];
+    const mode = process.argv[3];
+    const marker = (name, index = 0) =>
+      'DYNAMIC_BUDGET_' + name.replaceAll('-', '_').toUpperCase() + '_' + String(index).padStart(5, '0') + '_SENTINEL';
+    const untrustedMarker = 'UNTRUSTED_DYNAMIC_BUDGET_OUTPUT:' + caseName + ':' + mode;
+    const commandMetadata = { command: ['provider-cli', '--model', 'harmless-budget-model'] };
+    let nestedArtifact;
 
-      if (caseName === 'credentials') {
-        const credentials = Array.from({ length: 65 }, (_, index) => marker(caseName, index));
-        for (const value of credentials) commandMetadata.command.push('--token', value);
-        nestedArtifact = {
-          credentials,
-          untrustedMarker
-        };
-      } else if (caseName === 'credential-chars') {
-        const overlong = marker(caseName) + 'X'.repeat(513);
-        nestedArtifact = { diagnostic: 'token="' + overlong + '"', untrustedMarker };
-      } else if (caseName === 'variants') {
-        const credentials = Array.from(
-          { length: 24 },
-          (_, index) => marker(caseName, index) + ' space+slash/' + index
-        );
-        const variants = credentials.flatMap((value) => {
-          const output = [value, new URLSearchParams({ value }).toString().slice('value='.length)];
-          let encoded = value;
-          for (let round = 0; round < 3; round += 1) {
-            encoded = encodeURIComponent(encoded);
-            output.push(encoded, new URLSearchParams({ value: encoded }).toString().slice('value='.length));
-          }
-          return [...new Set(output)];
-        });
-        nestedArtifact = { credentials, variants, untrustedMarker };
-      } else if (caseName === 'encoded-rounds') {
-        const raw = marker(caseName) + ' space+slash/percent%';
-        let encoded = raw;
-        for (let round = 0; round < 5; round += 1) encoded = encodeURIComponent(encoded);
-        nestedArtifact = {
-          credentials: [encoded],
-          decodedArtifact: { raw },
-          untrustedMarker
-        };
-      } else if (caseName === 'depth') {
-        const secret = marker(caseName);
-        nestedArtifact = { credentials: [secret], untrustedMarker };
-        for (let depth = 0; depth < 40; depth += 1) nestedArtifact = { child: nestedArtifact };
-      } else if (caseName === 'nodes') {
-        nestedArtifact = {
-          harmlessNodes: Array.from({ length: 20_050 }, (_, index) => ({ index })),
-          credentials: [marker(caseName)],
-          untrustedMarker
-        };
-      } else if (caseName === 'matches') {
-        const secret = marker(caseName);
-        nestedArtifact = {
-          diagnostic: Array.from({ length: 513 }, () => 'token="' + secret + '"').join('\\n'),
-          untrustedMarker
-        };
-      } else if (caseName === 'text') {
-        const nearOutputLimit = 'H'.repeat(4 * 1024 * 1024 - 4096);
-        commandMetadata.command.push(nearOutputLimit);
-        nestedArtifact = { credentials: [marker(caseName)], untrustedMarker };
-        process.stderr.write('S'.repeat(16 * 1024));
-      } else {
-        throw new Error('unknown budget fixture');
-      }
-
-      const payload = { commandMetadata, nestedArtifacts: nestedArtifact, untrustedMarker };
-      if (mode === 'success') {
-        process.stdout.write(JSON.stringify({
-          response: { recommendation: 'safe', payload },
-          usage: null,
-          toolCalls: 0,
-          storageBytes: 0,
-          persistedVerified: true,
-          logs: ['adapter-log:' + untrustedMarker]
-        }));
-      } else if (mode === 'nonzero') {
-        process.stdout.write(JSON.stringify({ error: { payload, message: untrustedMarker } }));
-        process.exitCode = 7;
-      } else if (mode === 'malformed-protocol') {
-        process.stdout.write(JSON.stringify({ protocolMalformed: true, payload, message: untrustedMarker }));
-      } else {
-        throw new Error('unknown fixture mode');
-      }
-    `);
-
-    const inheritedEnvironment = { PATH: process.env.PATH ?? '', TEMP: process.env.TEMP ?? tmpdir() };
-    const modes = [
-      ['success', 0],
-      ['nonzero', 7],
-      ['malformed-protocol', 0]
-    ];
-    for (const caseName of ADAPTER_SANITIZATION_BUDGET_CASES) {
-      for (const [mode, expectedExitCode] of modes) {
-        await t.test(`${caseName} budget rejects ${mode} output without retaining evidence`, async () => {
-          let failure;
-          try {
-            await runAdapterRequest({
-              command: [process.execPath, adapterPath, caseName, mode],
-              timeoutMs: 10_000
-            }, { action: 'budget-probe' }, { inheritedEnvironment });
-          } catch (error) {
-            failure = error;
-          }
-          const forbidden = [...budgetFixtureForbidden(caseName), `UNTRUSTED_DYNAMIC_BUDGET_OUTPUT:${caseName}:${mode}`];
-          const evidence = assertBudgetFailureIsClosed(failure, forbidden, expectedExitCode);
-          const failureLog = {
-            status: 'FAILED',
-            logs: [failure.message, failure.stdout, failure.stderr],
-            evidence
-          };
-          const rawArtifact = {
-            schemaVersion: 1,
-            status: 'FAILED',
-            failures: [failureLog],
-            command: failure.command
-          };
-          const aggregateArtifact = {
-            schemaVersion: 1,
-            status: 'FAILED',
-            rawArtifact: { status: rawArtifact.status, failures: rawArtifact.failures }
-          };
-          const artifactPath = join(directory, `${caseName}-${mode}-raw-run.json`);
-          const logPath = join(directory, `${caseName}-${mode}.log`);
-          await writeFile(artifactPath, JSON.stringify(rawArtifact));
-          await writeFile(logPath, JSON.stringify(failureLog));
-          const retained = JSON.stringify({
-            thrownError: evidence,
-            stdout: failure.stdout,
-            stderr: failure.stderr,
-            logs: await readFile(logPath, 'utf8'),
-            returnedObjects: { rawArtifact, aggregateArtifact },
-            rawArtifacts: await readFile(artifactPath, 'utf8')
-          });
-          for (const value of forbidden) {
-            assert.equal(retained.includes(value), false, `retained artifact leaked ${value}`);
-          }
-        });
-      }
-    }
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test('P1: outputs below dynamic sanitization bounds remain useful while credentials are redacted', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-dynamic-budget-below-'));
-  try {
-    const adapterPath = join(directory, 'below budget adapter.mjs');
-    await writeFile(adapterPath, `
-      let input = '';
-      for await (const chunk of process.stdin) input += chunk;
-      JSON.parse(input);
+    if (caseName === 'credentials') {
+      const credentials = Array.from({ length: 65 }, (_, index) => marker(caseName, index));
+      for (const value of credentials) commandMetadata.command.push('--token', value);
+      nestedArtifact = {
+        credentials,
+        untrustedMarker
+      };
+    } else if (caseName === 'credential-chars') {
+      const overlong = marker(caseName) + 'X'.repeat(513);
+      nestedArtifact = { diagnostic: 'token="' + overlong + '"', untrustedMarker };
+    } else if (caseName === 'variants') {
       const credentials = Array.from(
-        { length: 64 },
-        (_, index) => 'DYNAMIC_BELOW_BOUND_' + String(index).padStart(5, '0') + '_SENTINEL'
+        { length: 24 },
+        (_, index) => marker(caseName, index) + ' space+slash/' + index
       );
-      let nested = { harmless: 'preserve-this-harmless-output' };
-      for (let depth = 0; depth < 16; depth += 1) nested = { child: nested };
-      process.stderr.write('harmless below-bound stderr');
-      process.stdout.write(JSON.stringify({
-        response: {
-          recommendation: 'safe',
-          payload: {
-            credentials,
-            diagnostic: Array.from({ length: 512 }, () => 'token="' + credentials[0] + '"').join('\\n'),
-            commandMetadata: { command: ['provider-cli', '--model', 'model-token-preview-v2'] },
-            nested,
-            harmless: {
-              modelId: 'model-token-preview-v2',
-              sentence: 'The bearer carries an ordinary benchmark result.',
-              status: 'MEASURED'
-            }
-          }
-        },
-        usage: { totalTokens: 128 },
-        toolCalls: 0,
-        storageBytes: 4096,
-        persistedVerified: true,
-        logs: ['harmless adapter log']
-      }));
-    `);
-    const output = await runAdapterRequest({
-      command: [process.execPath, adapterPath],
-      timeoutMs: 5000
-    }, { action: 'below-budget-probe' });
-    const serialized = JSON.stringify(output);
-    for (let index = 0; index < 64; index += 1) {
-      assert.equal(serialized.includes(`DYNAMIC_BELOW_BOUND_${String(index).padStart(5, '0')}_SENTINEL`), false);
+      const variants = credentials.flatMap((value) => {
+        const output = [value, new URLSearchParams({ value }).toString().slice('value='.length)];
+        let encoded = value;
+        for (let round = 0; round < 3; round += 1) {
+          encoded = encodeURIComponent(encoded);
+          output.push(encoded, new URLSearchParams({ value: encoded }).toString().slice('value='.length));
+        }
+        return [...new Set(output)];
+      });
+      nestedArtifact = { credentials, variants, untrustedMarker };
+    } else if (caseName === 'encoded-rounds') {
+      const raw = marker(caseName) + ' space+slash/percent%';
+      let encoded = raw;
+      for (let round = 0; round < 5; round += 1) encoded = encodeURIComponent(encoded);
+      nestedArtifact = {
+        credentials: [encoded],
+        decodedArtifact: { raw },
+        untrustedMarker
+      };
+    } else if (caseName === 'depth') {
+      const secret = marker(caseName);
+      nestedArtifact = { credentials: [secret], untrustedMarker };
+      for (let depth = 0; depth < 40; depth += 1) nestedArtifact = { child: nestedArtifact };
+    } else if (caseName === 'nodes') {
+      nestedArtifact = {
+        harmlessNodes: Array.from({ length: 20_050 }, (_, index) => ({ index })),
+        credentials: [marker(caseName)],
+        untrustedMarker
+      };
+    } else if (caseName === 'matches') {
+      const secret = marker(caseName);
+      nestedArtifact = {
+        diagnostic: Array.from({ length: 513 }, () => 'token="' + secret + '"').join('\\n'),
+        untrustedMarker
+      };
+    } else if (caseName === 'text') {
+      const nearOutputLimit = 'H'.repeat(4 * 1024 * 1024 - 4096);
+      commandMetadata.command.push(nearOutputLimit);
+      nestedArtifact = { credentials: [marker(caseName)], untrustedMarker };
+      process.stderr.write('S'.repeat(16 * 1024));
+    } else {
+      throw new Error('unknown budget fixture');
     }
-    assert.equal(output.response.payload.credentials.every((value) => value === '[REDACTED]'), true);
-    assert.deepEqual(output.response.payload.harmless, {
-      modelId: 'model-token-preview-v2',
-      sentence: 'The bearer carries an ordinary benchmark result.',
-      status: 'MEASURED'
-    });
-    let nested = output.response.payload.nested;
-    for (let depth = 0; depth < 16; depth += 1) nested = nested.child;
-    assert.deepEqual(nested, { harmless: 'preserve-this-harmless-output' });
-    assert.equal(output.logs.includes('harmless adapter log'), true);
-    assert.equal(output.logs.includes('Adapter stderr: harmless below-bound stderr'), true);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
 
-test('all seven required arms accept bounded real command-adapter configuration', async () => {
-  const { document } = await verifyPreregistration(preregistrationPath, preregistrationHashPath);
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-adapter-test-'));
-  try {
-    const adapterPath = join(directory, 'adapter.mjs');
-    await writeFile(adapterPath, `
-      let input = '';
-      for await (const chunk of process.stdin) input += chunk;
-      const request = JSON.parse(input);
+    const payload = { commandMetadata, nestedArtifacts: nestedArtifact, untrustedMarker };
+    if (mode === 'success') {
       process.stdout.write(JSON.stringify({
-        response: { recommendation: request.phase, literalArgument: process.argv[2] },
+        response: { recommendation: 'safe', payload },
         usage: null,
         toolCalls: 0,
         storageBytes: 0,
         persistedVerified: true,
-        logs: []
+        logs: ['adapter-log:' + untrustedMarker]
       }));
-    `);
-    const configPath = join(directory, 'adapters.json');
-    await writeFile(configPath, JSON.stringify(Object.fromEntries(document.arms.map((arm) => [
-      arm.id,
-      { command: [process.execPath, adapterPath, 'literal;echo shell-must-not-run'], timeoutMs: 1000 }
-    ]))));
-    const config = await loadAdapterConfiguration(configPath, document.arms.map((arm) => arm.id));
-    assert.deepEqual(Object.keys(config), document.arms.map((arm) => arm.id));
-    const output = await runAdapterRequest(config['no-memory'], { phase: 'B' });
-    assert.equal(output.response.recommendation, 'B');
-    assert.equal(output.response.literalArgument, 'literal;echo shell-must-not-run');
-    assert.equal(output.persistedVerified, true);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
+    } else if (mode === 'nonzero') {
+      process.stdout.write(JSON.stringify({ error: { payload, message: untrustedMarker } }));
+      process.exitCode = 7;
+    } else if (mode === 'malformed-protocol') {
+      process.stdout.write(JSON.stringify({ protocolMalformed: true, payload, message: untrustedMarker }));
+    } else {
+      throw new Error('unknown fixture mode');
+    }
+  `);
+
+  const inheritedEnvironment = { PATH: process.env.PATH ?? '', TEMP: process.env.TEMP ?? tmpdir() };
+  const modes = [
+    ['success', 0],
+    ['nonzero', 7],
+    ['malformed-protocol', 0]
+  ];
+  for (const caseName of ADAPTER_SANITIZATION_BUDGET_CASES) {
+    for (const [mode, expectedExitCode] of modes) {
+      await t.test(`${caseName} budget rejects ${mode} output without retaining evidence`, async () => {
+        let failure;
+        try {
+          await runAdapterRequest({
+            command: [process.execPath, adapterPath, caseName, mode],
+            timeoutMs: 10_000
+          }, { action: 'budget-probe' }, { inheritedEnvironment });
+        } catch (error) {
+          failure = error;
+        }
+        const forbidden = [...budgetFixtureForbidden(caseName), `UNTRUSTED_DYNAMIC_BUDGET_OUTPUT:${caseName}:${mode}`];
+        const evidence = assertBudgetFailureIsClosed(failure, forbidden, expectedExitCode);
+        const failureLog = {
+          status: 'FAILED',
+          logs: [failure.message, failure.stdout, failure.stderr],
+          evidence
+        };
+        const rawArtifact = {
+          schemaVersion: 1,
+          status: 'FAILED',
+          failures: [failureLog],
+          command: failure.command
+        };
+        const aggregateArtifact = {
+          schemaVersion: 1,
+          status: 'FAILED',
+          rawArtifact: { status: rawArtifact.status, failures: rawArtifact.failures }
+        };
+        const artifactPath = join(directory, `${caseName}-${mode}-raw-run.json`);
+        const logPath = join(directory, `${caseName}-${mode}.log`);
+        await writeFile(artifactPath, JSON.stringify(rawArtifact));
+        await writeFile(logPath, JSON.stringify(failureLog));
+        const retained = JSON.stringify({
+          thrownError: evidence,
+          stdout: failure.stdout,
+          stderr: failure.stderr,
+          logs: await readFile(logPath, 'utf8'),
+          returnedObjects: { rawArtifact, aggregateArtifact },
+          rawArtifacts: await readFile(artifactPath, 'utf8')
+        });
+        for (const value of forbidden) {
+          assert.equal(retained.includes(value), false, `retained artifact leaked ${value}`);
+        }
+      });
+    }
   }
+});
+
+test('P1: outputs below dynamic sanitization bounds remain useful while credentials are redacted', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-dynamic-budget-below-');
+  const adapterPath = join(directory, 'below budget adapter.mjs');
+  await writeFile(adapterPath, `
+    let input = '';
+    for await (const chunk of process.stdin) input += chunk;
+    JSON.parse(input);
+    const credentials = Array.from(
+      { length: 64 },
+      (_, index) => 'DYNAMIC_BELOW_BOUND_' + String(index).padStart(5, '0') + '_SENTINEL'
+    );
+    let nested = { harmless: 'preserve-this-harmless-output' };
+    for (let depth = 0; depth < 16; depth += 1) nested = { child: nested };
+    process.stderr.write('harmless below-bound stderr');
+    process.stdout.write(JSON.stringify({
+      response: {
+        recommendation: 'safe',
+        payload: {
+          credentials,
+          diagnostic: Array.from({ length: 512 }, () => 'token="' + credentials[0] + '"').join('\\n'),
+          commandMetadata: { command: ['provider-cli', '--model', 'model-token-preview-v2'] },
+          nested,
+          harmless: {
+            modelId: 'model-token-preview-v2',
+            sentence: 'The bearer carries an ordinary benchmark result.',
+            status: 'MEASURED'
+          }
+        }
+      },
+      usage: { totalTokens: 128 },
+      toolCalls: 0,
+      storageBytes: 4096,
+      persistedVerified: true,
+      logs: ['harmless adapter log']
+    }));
+  `);
+  const output = await runAdapterRequest({
+    command: [process.execPath, adapterPath],
+    timeoutMs: 5000
+  }, { action: 'below-budget-probe' });
+  const serialized = JSON.stringify(output);
+  for (let index = 0; index < 64; index += 1) {
+    assert.equal(serialized.includes(`DYNAMIC_BELOW_BOUND_${String(index).padStart(5, '0')}_SENTINEL`), false);
+  }
+  assert.equal(output.response.payload.credentials.every((value) => value === '[REDACTED]'), true);
+  assert.deepEqual(output.response.payload.harmless, {
+    modelId: 'model-token-preview-v2',
+    sentence: 'The bearer carries an ordinary benchmark result.',
+    status: 'MEASURED'
+  });
+  let nested = output.response.payload.nested;
+  for (let depth = 0; depth < 16; depth += 1) nested = nested.child;
+  assert.deepEqual(nested, { harmless: 'preserve-this-harmless-output' });
+  assert.equal(output.logs.includes('harmless adapter log'), true);
+  assert.equal(output.logs.includes('Adapter stderr: harmless below-bound stderr'), true);
+});
+
+test('all seven required arms accept bounded real command-adapter configuration', async (t) => {
+  const { document } = await verifyPreregistration(preregistrationPath, preregistrationHashPath);
+  const directory = await scratchDirectory(t, 'shadowgraph-adapter-test-');
+  const adapterPath = join(directory, 'adapter.mjs');
+  await writeFile(adapterPath, `
+    let input = '';
+    for await (const chunk of process.stdin) input += chunk;
+    const request = JSON.parse(input);
+    process.stdout.write(JSON.stringify({
+      response: { recommendation: request.phase, literalArgument: process.argv[2] },
+      usage: null,
+      toolCalls: 0,
+      storageBytes: 0,
+      persistedVerified: true,
+      logs: []
+    }));
+  `);
+  const configPath = join(directory, 'adapters.json');
+  await writeFile(configPath, JSON.stringify(Object.fromEntries(document.arms.map((arm) => [
+    arm.id,
+    { command: [process.execPath, adapterPath, 'literal;echo shell-must-not-run'], timeoutMs: 1000 }
+  ]))));
+  const config = await loadAdapterConfiguration(configPath, document.arms.map((arm) => arm.id));
+  assert.deepEqual(Object.keys(config), document.arms.map((arm) => arm.id));
+  const output = await runAdapterRequest(config['no-memory'], { phase: 'B' });
+  assert.equal(output.response.recommendation, 'B');
+  assert.equal(output.response.literalArgument, 'literal;echo shell-must-not-run');
+  assert.equal(output.persistedVerified, true);
 });
 
 test('fixed scorer implements every preregistered lifecycle metric without an LLM judge', async () => {
@@ -1201,35 +1169,31 @@ test('unavailable arms are validated, counted, and never awarded inferred scores
   assert.throws(() => validateRawRun(wrongReason, document, sha256), /exact no-common-model reason/u);
 });
 
-test('no-model CLI writes a machine-readable seven-arm run and prints only frozen no-result marketing text', async () => {
+test('no-model CLI writes a machine-readable seven-arm run and prints only frozen no-result marketing text', async (t) => {
   const { document } = await verifyPreregistration(preregistrationPath, preregistrationHashPath);
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-benchmark-cli-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-benchmark-cli-');
   const rawPath = join(directory, 'raw-run.json');
-  try {
-    const cleanEnvironment = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('SHADOWGRAPH_BENCH_')));
-    const run = await execFileAsync(process.execPath, [
-      join(repositoryRoot, 'benchmark', 'cli.mjs'),
-      'run', '--run-id', 'test-no-model-cli', '--output', rawPath,
-      '--probe-timeout-ms', '1'
-    ], { cwd: repositoryRoot, env: cleanEnvironment, timeout: 30_000 });
-    assert.equal(run.stderr, '');
-    assert.equal(run.stdout, `${document.marketingThresholds.noResultText}\n`);
-    const raw = JSON.parse(await readFile(rawPath, 'utf8'));
-    assert.equal(raw.configuration.commonModelAvailable, false);
-    assert.equal(raw.arms.length, 7);
-    assert.equal(raw.arms.every((arm) => arm.status === 'NOT_MEASURED' && arm.reason === NO_COMMON_MODEL_REASON), true);
-    assert.deepEqual(raw.measurements, []);
-    assert.deepEqual(validateRawRun(raw, document, raw.preregistrationSha256).counts, {
-      arms: 7,
-      measuredArms: 0,
-      notMeasuredArms: 7,
-      failedArms: 0,
-      excludedArms: 0,
-      measurements: 0
-    });
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  const cleanEnvironment = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('SHADOWGRAPH_BENCH_')));
+  const run = await execFileAsync(process.execPath, [
+    join(repositoryRoot, 'benchmark', 'cli.mjs'),
+    'run', '--run-id', 'test-no-model-cli', '--output', rawPath,
+    '--probe-timeout-ms', '1'
+  ], { cwd: repositoryRoot, env: cleanEnvironment, timeout: 30_000 });
+  assert.equal(run.stderr, '');
+  assert.equal(run.stdout, `${document.marketingThresholds.noResultText}\n`);
+  const raw = JSON.parse(await readFile(rawPath, 'utf8'));
+  assert.equal(raw.configuration.commonModelAvailable, false);
+  assert.equal(raw.arms.length, 7);
+  assert.equal(raw.arms.every((arm) => arm.status === 'NOT_MEASURED' && arm.reason === NO_COMMON_MODEL_REASON), true);
+  assert.deepEqual(raw.measurements, []);
+  assert.deepEqual(validateRawRun(raw, document, raw.preregistrationSha256).counts, {
+    arms: 7,
+    measuredArms: 0,
+    notMeasuredArms: 7,
+    failedArms: 0,
+    excludedArms: 0,
+    measurements: 0
+  });
 });
 
 test('deterministic aggregation macro-averages complete measured lifecycles and does not call ties best', async () => {

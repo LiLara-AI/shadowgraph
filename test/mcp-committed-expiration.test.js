@@ -3,13 +3,13 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import * as shadowgraph from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createFactAttestation } from '../src/verification.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const BEFORE_BOUNDARY = '2099-08-28T00:00:00.999Z';
 const BOUNDARY = '2099-08-28T00:00:01.000Z';
@@ -129,7 +129,7 @@ async function loadBackend(backend, file) {
 }
 
 async function setupVerifiedMcp(t, backend, label) {
-  const directory = await mkdtemp(join(tmpdir(), `shadowgraph-mcp-${label}-${backend}-`));
+  const directory = await scratchDirectory(t, `shadowgraph-mcp-${label}-${backend}-`);
   const file = join(directory, backend === 'sqlite' ? 'data.db' : 'data.json');
   const fixture = await realVerifierFixture(directory);
   if (backend === 'sqlite') {
@@ -213,7 +213,7 @@ test('committed expiration rejection is tagged for persistence adapters', async 
 });
 
 test('MCP JSON persists a committed expiration before returning the legacy verification rejection', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-mcp-committed-expiration-json-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-mcp-committed-expiration-json-');
   const file = join(directory, 'data.json');
   const fixture = await realVerifierFixture(directory);
   let rpc = startMcp(file, {
@@ -289,7 +289,7 @@ test('MCP JSON persists a committed expiration before returning the legacy verif
 });
 
 test('MCP SQLite persists a committed expiration with JSON-equivalent restart and rebuild state', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-mcp-committed-expiration-sqlite-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-mcp-committed-expiration-sqlite-');
   const file = join(directory, 'data.db');
   const fixture = await realVerifierFixture(directory);
   let probe;

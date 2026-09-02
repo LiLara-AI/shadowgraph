@@ -1,11 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createShadowGraph, SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 function seedGraph() {
   const graph = createShadowGraph({ now: () => '2026-10-01T00:00:00.000Z' });
@@ -36,10 +35,10 @@ function assertMemoryState(graph) {
   assert.equal(rebuilt.projection.records.filter((item) => item.kind === 'memory').length, 2);
 }
 
-test('schema 5 memory state survives JSON restart and journal rebuild', async () => {
+test('schema 5 memory state survives JSON restart and journal rebuild', async (t) => {
   assert.equal(SCHEMA_VERSION, 5);
   assert.deepEqual(SUPPORTED_SCHEMA_VERSIONS, [1, 2, 3, 4, 5]);
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-memory-json-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-memory-json-');
   const store = createJsonFileStore(join(directory, 'data.json'));
   const graph = seedGraph();
   await store.save(graph.exportData());
@@ -50,7 +49,7 @@ test('schema 5 memory state survives JSON restart and journal rebuild', async ()
 });
 
 test('schema 5 memory state has JSON and SQLite restart parity', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-memory-sqlite-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-memory-sqlite-');
   let store;
   try { store = await createSqliteStore(join(directory, 'data.db')); }
   catch (error) { if (/requires Node/.test(error.message)) return t.skip(error.message); throw error; }
@@ -66,7 +65,7 @@ test('schema 5 memory state has JSON and SQLite restart parity', async (t) => {
 });
 
 test('schema 4 lifecycle snapshots migrate atomically to schema 5 with JSON and SQLite parity', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-schema4-lifecycle-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-schema4-lifecycle-');
   const legacy = {
     schemaVersion: 4,
     revision: 0,

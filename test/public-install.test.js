@@ -2,11 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { createShadowGraphServer } from '../src/server.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const exec = promisify(execFile);
 
@@ -34,8 +34,7 @@ function readOneResponse(child) {
 }
 
 test('CLI setup initializes a clean store and doctor reports actionable health', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph public install '));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph public install ');
   const file = join(directory, 'state folder', 'data.json');
   const env = { SHADOWGRAPH_FILE: file };
 
@@ -78,8 +77,7 @@ test('CLI setup rejects an unsupported storage selector with a fix', async () =>
 });
 
 test('CLI mcp launches the compact stdio server used by client configurations', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph cli mcp '));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph cli mcp ');
   const child = spawn(process.execPath, ['src/cli.js', 'mcp'], {
     cwd: process.cwd(),
     env: {
@@ -96,8 +94,7 @@ test('CLI mcp launches the compact stdio server used by client configurations', 
 });
 
 test('dashboard is served locally, explains token handling, and does not bypass API auth', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph dashboard '));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph dashboard ');
   const app = await createShadowGraphServer({
     file: join(directory, 'data.json'),
     apiToken: '1234567890123456'

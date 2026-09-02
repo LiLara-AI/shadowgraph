@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createJsonFileStore } from '../src/storage.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 test('facts are superseded per project, not globally', () => {
   const graph = createShadowGraph();
@@ -24,8 +24,8 @@ test('fact scope keys cannot collide across project and key delimiters', () => {
   assert.equal(graph.context({ project: 'a' }).staleAssumptions.length, 1);
 });
 
-test('malformed JSON storage fails safely', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'shadowgraph-bad-'));
+test('malformed JSON storage fails safely', async (t) => {
+  const dir = await scratchDirectory(t, 'shadowgraph-bad-');
   const store = createJsonFileStore(join(dir, 'data.json'));
   await writeFile(join(dir, 'data.json'), '{broken');
   await assert.rejects(store.load(), /storage is invalid or unreadable/);

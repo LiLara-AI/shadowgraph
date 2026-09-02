@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createShadowGraph, SCHEMA_VERSION } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 test('stores one decision and reopens it when facts change', () => {
   const graph = createShadowGraph({ now: () => '2026-01-01T00:00:00.000Z' });
@@ -22,8 +22,8 @@ test('keeps attempts searchable and exportable', () => {
   assert.equal(graph.stats().attempts, 1);
 });
 
-test('persists records in a portable JSON file', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-'));
+test('persists records in a portable JSON file', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-');
   const store = createJsonFileStore(join(directory, 'data.json'));
   const graph = createShadowGraph();
   graph.addDecision({ title: 'Use tests', chosen: 'Yes' });

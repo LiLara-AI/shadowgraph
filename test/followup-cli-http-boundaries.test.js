@@ -2,13 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { request as httpRequest } from 'node:http';
-import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { getRuntimeCapabilities, NODE_SQLITE_NOT_APPLICABLE_REASON } from '../src/runtime-capabilities.js';
 import { createShadowGraphServer } from '../src/server.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const API_TOKEN = 'followup-boundary-token';
 const FIXED_NOW = '2026-08-28T12:00:00.000Z';
@@ -97,8 +97,7 @@ function assertNoRecoveryDisclosure(text, sensitiveValues) {
 }
 
 test('follow-up CLI: doctor observes missing SQLite without materializing storage and setup/JSON contracts stay intact', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-followup-cli-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-followup-cli-');
   const missingParent = join(directory, 'classified-sqlite-parent', 'nested');
   const sqliteFile = join(missingParent, 'private-doctor-state.sqlite');
   const sqliteEnv = { SHADOWGRAPH_STORAGE: 'sqlite', SHADOWGRAPH_FILE: sqliteFile };
@@ -312,8 +311,7 @@ test('follow-up HTTP P2: real IPv6 listener accepts only canonical loopback Host
 });
 
 test('follow-up HTTP: recovery paths stay behind local host/origin and bearer boundaries', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-followup-http-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-followup-http-');
   const sensitiveDirectory = join(directory, 'classified-client-recovery-DO-NOT-LEAK');
   const destination = join(sensitiveDirectory, 'private-live-state.json');
   const source = join(sensitiveDirectory, 'private-restore-source.json');

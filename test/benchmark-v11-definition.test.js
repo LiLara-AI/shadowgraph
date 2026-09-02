@@ -1,19 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import {
-  copyFile,
-  mkdir,
-  mkdtemp,
-  readFile,
-  readdir,
-  rename,
-  rm,
-  stat,
-  symlink,
-  unlink,
-  writeFile
-} from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { copyFile, mkdir, readFile, readdir, rename, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -29,6 +16,7 @@ import {
   validateV11AcceptanceScenario,
   validateV11PublicScenario
 } from '../benchmark/lib/v11-definition.mjs';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const execFileAsync = promisify(execFile);
 // What a benchmark artifact is called, used by both the index sweep and the
@@ -60,8 +48,7 @@ async function writeJson(filePath, value) {
 }
 
 async function cloneDefinitionFixture(t) {
-  const root = await mkdtemp(path.join(tmpdir(), 'shadowgraph-v11-definition-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  const root = await scratchDirectory(t, 'shadowgraph-v11-definition-');
   await mkdir(path.join(root, 'benchmark', 'acceptance'), { recursive: true });
   for (const relative of [...FROZEN_RELATIVE_FILES, ...ACCEPTANCE_RELATIVE_FILES]) {
     await copyFile(path.join(REPOSITORY_ROOT, relative), path.join(root, relative));

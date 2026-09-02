@@ -1,15 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, stat, unlink } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readdir, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { NODE_SQLITE_NOT_APPLICABLE_REASON } from '../src/runtime-capabilities.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 test('SQLite storage round-trips relational graph and rejects stale revisions', async (t) => {
   let store;
   try {
-    const dir = await mkdtemp(join(tmpdir(), 'shadowgraph-sqlite-'));
+    const dir = await scratchDirectory(t, 'shadowgraph-sqlite-');
     store = await createSqliteStore(join(dir, 'graph.db'));
   } catch (error) {
     if (/requires Node/.test(error.message)) return t.skip(error.message);
@@ -30,7 +30,7 @@ test('SQLite storage round-trips relational graph and rejects stale revisions', 
 test('SQLite backup uses a consistent database snapshot', async (t) => {
   let store;
   try {
-    const dir = await mkdtemp(join(tmpdir(), 'shadowgraph-sqlite-backup-'));
+    const dir = await scratchDirectory(t, 'shadowgraph-sqlite-backup-');
     store = await createSqliteStore(join(dir, 'graph.db'));
     await store.save({ schemaVersion: 2, records: [{ id: 'd1', kind: 'decision', project: 'default', status: 'active', title: 'Backup decision', chosen: 'SQLite' }], facts: [], relations: [], events: [] });
     const destination = join(dir, 'copy.db');
@@ -49,7 +49,7 @@ test('SQLite create, load, save, backup, restore, rollback, and close leave no l
   let DatabaseSync;
   try { ({ DatabaseSync } = await import('node:sqlite')); }
   catch { return t.skip(NODE_SQLITE_NOT_APPLICABLE_REASON); }
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph sqlite handle lifecycle '));
+  const directory = await scratchDirectory(t, 'shadowgraph sqlite handle lifecycle ');
   const file = join(directory, 'live state with spaces.db');
   const backup = join(directory, 'backup source with spaces.db');
   const active = new Set();

@@ -1,13 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const MODERN_PROTOCOL = '2026-07-28';
 const LEGACY_PROTOCOL = '2024-11-05';
@@ -25,7 +25,7 @@ function modernParams(values = {}, { clientInfo } = {}) {
 }
 
 async function startMcp(t, extraEnv = {}) {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-followup-mcp-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-followup-mcp-');
   const file = join(directory, 'data.json');
   const configuredEnv = typeof extraEnv === 'function'
     ? await extraEnv({ directory, file })
@@ -90,7 +90,6 @@ async function startMcp(t, extraEnv = {}) {
       const timer = setTimeout(() => { child.kill('SIGKILL'); resolve(); }, 2000);
       child.once('exit', () => { clearTimeout(timer); resolve(); });
     });
-    await rm(directory, { recursive: true, force: true });
   }
   t.after(stop);
 

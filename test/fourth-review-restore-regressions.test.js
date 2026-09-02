@@ -2,20 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import {
-  mkdtemp,
-  readFile,
-  readdir,
-  stat as realStat,
-  unlink,
-  writeFile
-} from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, readdir, stat as realStat, unlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { restoreFile } from '../src/backup.js';
 import { createShadowGraphServer } from '../src/server.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const FIXED_NOW = '2026-08-27T12:00:00.000Z';
 const API_TOKEN = 'fourth-review-token';
@@ -131,7 +124,7 @@ function authHeaders(extra = {}) {
 }
 
 test('DS-P1-001 direct JSON: unconfirmed recovery stays authoritative when rollback inventory stat is denied', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-ds-p1-001-direct-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-ds-p1-001-direct-');
   const destination = join(directory, 'live.json');
   const source = join(directory, 'source.json');
   const original = graphPayload('ds-p1-direct-old', 'DS P1 DIRECT OLD');
@@ -171,7 +164,7 @@ test('DS-P1-001 direct JSON: unconfirmed recovery stays authoritative when rollb
 });
 
 test('DS-P1-001 HTTP: stat-denied inventory returns the fatal code and latches authenticated fail-closed state', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-ds-p1-001-http-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-ds-p1-001-http-');
   const destination = join(directory, 'live.json');
   const source = join(directory, 'source.json');
   await writePayload(destination, graphPayload('ds-p1-http-old', 'DS P1 HTTP OLD'));
@@ -248,7 +241,7 @@ test('DS-P1-001 HTTP: stat-denied inventory returns the fatal code and latches a
 });
 
 test('DS-P1-001 MCP: stat-denied inventory latches all graph tools while protocol diagnostics remain available', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-ds-p1-001-mcp-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-ds-p1-001-mcp-');
   const destination = join(directory, 'live.json');
   const source = join(directory, 'source.json');
   await writePayload(destination, graphPayload('ds-p1-mcp-old', 'DS P1 MCP OLD'));
@@ -324,7 +317,7 @@ test('DS-P1-001 MCP: stat-denied inventory latches all graph tools while protoco
 });
 
 test('DS-P2-002 direct JSON: successful restore reports a retained complete rollback artifact after unlink denial', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-ds-p2-002-success-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-ds-p2-002-success-');
   const destination = join(directory, 'live.json');
   const source = join(directory, 'source.json');
   await writePayload(destination, graphPayload('ds-p2-success-old', 'DS P2 SUCCESS OLD'));
@@ -365,7 +358,7 @@ test('DS-P2-002 direct JSON: successful restore reports a retained complete roll
 });
 
 test('DS-P2-002 direct JSON: confirmed rollback reports cleanup retention and restarts with exact old bytes', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-ds-p2-002-rolled-back-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-ds-p2-002-rolled-back-');
   const destination = join(directory, 'live.json');
   const source = join(directory, 'source.json');
   await writePayload(destination, graphPayload('ds-p2-rollback-old', 'DS P2 ROLLBACK OLD'));
@@ -404,8 +397,8 @@ test('DS-P2-002 direct JSON: confirmed rollback reports cleanup retention and re
   restarted.close();
 });
 
-test('DS-P2-002 direct JSON: delete-then-throw cleanup is confirmed complete and never falsely retained', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-ds-p2-002-delete-throw-'));
+test('DS-P2-002 direct JSON: delete-then-throw cleanup is confirmed complete and never falsely retained', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-ds-p2-002-delete-throw-');
   const destination = join(directory, 'live.json');
   const source = join(directory, 'source.json');
   await writePayload(destination, graphPayload('ds-p2-delete-old', 'DS P2 DELETE OLD'));
@@ -438,7 +431,7 @@ test('DS-P2-002 direct JSON: delete-then-throw cleanup is confirmed complete and
 });
 
 test('DS-P2-002 HTTP: successful restore propagates retained rollback cleanup evidence', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-ds-p2-002-http-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-ds-p2-002-http-');
   const destination = join(directory, 'live.json');
   const source = join(directory, 'source.json');
   await writePayload(destination, graphPayload('ds-p2-http-old', 'DS P2 HTTP OLD'));
@@ -483,7 +476,7 @@ test('DS-P2-002 HTTP: successful restore propagates retained rollback cleanup ev
 });
 
 test('DS-P2-002 HTTP: confirmed rollback propagates retained cleanup evidence without degrading the server', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-ds-p2-002-http-rollback-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-ds-p2-002-http-rollback-');
   const destination = join(directory, 'live.json');
   const source = join(directory, 'source.json');
   await writePayload(destination, graphPayload('ds-p2-http-rollback-old', 'DS P2 HTTP ROLLBACK OLD'));
@@ -532,7 +525,7 @@ test('DS-P2-002 HTTP: confirmed rollback propagates retained cleanup evidence wi
 });
 
 test('DS-P2-002 MCP: successful restore propagates retained rollback cleanup evidence across restart', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-ds-p2-002-mcp-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-ds-p2-002-mcp-');
   const destination = join(directory, 'live.json');
   const source = join(directory, 'source.json');
   await writePayload(destination, graphPayload('ds-p2-mcp-old', 'DS P2 MCP OLD'));
@@ -568,7 +561,7 @@ test('DS-P2-002 MCP: successful restore propagates retained rollback cleanup evi
 });
 
 test('DS-P2-002 MCP: confirmed rollback keeps cleanup evidence private and remains usable with old state', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-ds-p2-002-mcp-rollback-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-ds-p2-002-mcp-rollback-');
   const destination = join(directory, 'live.json');
   const source = join(directory, 'source.json');
   await writePayload(destination, graphPayload('ds-p2-mcp-rollback-old', 'DS P2 MCP ROLLBACK OLD'));

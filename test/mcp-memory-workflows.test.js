@@ -2,10 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdir, mkdtemp, readFile, unlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createShadowGraph } from '../src/shadowgraph.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 function startJsonRpcChild(file, embeddingUrl, compact = true) {
   const child = spawn(process.execPath, ['src/mcp.js'], {
@@ -58,7 +58,7 @@ test('MCP exposes simple remember/recall workflows and uses an explicit local em
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(() => server.close());
   const address = server.address();
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-mcp-memory-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-mcp-memory-');
   const rpc = startJsonRpcChild(join(directory, 'data.json'), `http://127.0.0.1:${address.port}/v1`);
   t.after(() => rpc.child.kill());
 
@@ -105,7 +105,7 @@ test('MCP exposes simple remember/recall workflows and uses an explicit local em
 });
 
 test('MCP rolls live memory back when ordinary persistence fails', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-mcp-persist-fail-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-mcp-persist-fail-');
   const file = join(directory, 'data.json');
   const rpc = startJsonRpcChild(file);
   t.after(() => rpc.child.kill());
@@ -145,7 +145,7 @@ test('MCP rolls live memory back when ordinary persistence fails', async (t) => 
 });
 
 test('MCP context persists review signals that it creates', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-mcp-context-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-mcp-context-');
   const file = join(directory, 'data.json');
   const seed = createShadowGraph({ now: () => '2026-08-27T00:00:00.000Z' });
   seed.addDecision({
@@ -170,7 +170,7 @@ test('MCP context persists review signals that it creates', async (t) => {
 });
 
 test('MCP context resource persists review signals that it creates', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-mcp-resource-context-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-mcp-resource-context-');
   const file = join(directory, 'data.json');
   const seed = createShadowGraph({ now: () => '2026-08-27T00:00:00.000Z' });
   seed.addDecision({
@@ -193,7 +193,7 @@ test('MCP context resource persists review signals that it creates', async (t) =
 });
 
 test('MCP serializes restore with a concurrent acknowledged memory write', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-mcp-restore-race-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-mcp-restore-race-');
   const file = join(directory, 'data.json');
   const sourceFile = join(directory, 'source.json');
   const empty = createShadowGraph();

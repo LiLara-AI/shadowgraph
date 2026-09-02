@@ -1,16 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtemp, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createShadowGraphServer } from '../src/server.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { SCHEMA_VERSION } from '../src/shadowgraph.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
-async function startServer(options = {}) {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-http-'));
+async function startServer(t, options = {}) {
+  const directory = await scratchDirectory(t, 'shadowgraph-http-');
   const app = await createShadowGraphServer({ file: join(directory, 'data.json'), ...options });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
@@ -18,8 +18,8 @@ async function startServer(options = {}) {
   return { app, base: `http://127.0.0.1:${port}` };
 }
 
-test('HTTP API records and reviews decisions without wildcard CORS', async () => {
-  const { app, base } = await startServer();
+test('HTTP API records and reviews decisions without wildcard CORS', async (t) => {
+  const { app, base } = await startServer(t);
   try {
     const create = await fetch(`${base}/decisions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: 'Database', chosen: 'PostgreSQL', alternatives: [{ label: 'SQLite', reopenWhen: ['local'] }] }) });
     assert.equal(create.status, 200);
@@ -31,8 +31,8 @@ test('HTTP API records and reviews decisions without wildcard CORS', async () =>
   }
 });
 
-test('HTTP API scopes idempotency keys by project and persists retry behavior', async () => {
-  const { app, base } = await startServer();
+test('HTTP API scopes idempotency keys by project and persists retry behavior', async (t) => {
+  const { app, base } = await startServer(t);
   try {
     const post = (body) => fetch(`${base}/decisions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     const first = await (await post({ project: 'p1', title: 'One', chosen: 'A', idempotencyKey: 'same' })).json();
@@ -47,8 +47,8 @@ test('HTTP API scopes idempotency keys by project and persists retry behavior', 
   }
 });
 
-test('HTTP API enforces optional bearer authentication', async () => {
-  const { app, base } = await startServer({ apiToken: '1234567890123456' });
+test('HTTP API enforces optional bearer authentication', async (t) => {
+  const { app, base } = await startServer(t, { apiToken: '1234567890123456' });
   try {
     assert.equal((await fetch(`${base}/health`)).status, 401);
     assert.equal((await fetch(`${base}/health`, { headers: { authorization: 'Bearer 1234567890123456' } })).status, 200);
@@ -57,8 +57,8 @@ test('HTTP API enforces optional bearer authentication', async () => {
   }
 });
 
-test('HTTP API returns a useful status for unknown decisions', async () => {
-  const { app, base } = await startServer();
+test('HTTP API returns a useful status for unknown decisions', async (t) => {
+  const { app, base } = await startServer(t);
   try {
     const response = await fetch(`${base}/status`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decisionId: 'missing', status: 'failed' }) });
     assert.equal(response.status, 404);
@@ -68,8 +68,8 @@ test('HTTP API returns a useful status for unknown decisions', async () => {
   }
 });
 
-test('HTTP API preserves Unicode request text', async () => {
-  const { app, base } = await startServer();
+test('HTTP API preserves Unicode request text', async (t) => {
+  const { app, base } = await startServer(t);
   try {
     const response = await fetch(`${base}/decisions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: 'قرار عربي 🚀', chosen: 'حل محلي' }) });
     assert.equal((await response.json()).title, 'قرار عربي 🚀');
@@ -78,8 +78,8 @@ test('HTTP API preserves Unicode request text', async () => {
   }
 });
 
-test('HTTP API exposes traversal, supersession, redaction, and project purge', async () => {
-  const { app, base } = await startServer();
+test('HTTP API exposes traversal, supersession, redaction, and project purge', async (t) => {
+  const { app, base } = await startServer(t);
   try {
     const post = async (path, body, method = 'POST') => fetch(`${base}${path}`, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     const first = await (await post('/decisions', { project: 'private', title: 'Old', chosen: 'Bearer private-token' })).json();
@@ -96,8 +96,8 @@ test('HTTP API exposes traversal, supersession, redaction, and project purge', a
   }
 });
 
-test('HTTP API rejects oversized request bodies', async () => {
-  const { app, base } = await startServer();
+test('HTTP API rejects oversized request bodies', async (t) => {
+  const { app, base } = await startServer(t);
   try {
     const response = await fetch(`${base}/attempts`, { method: 'POST', body: 'x'.repeat(1024 * 1024 + 1) });
     assert.equal(response.status, 413);
@@ -106,8 +106,8 @@ test('HTTP API rejects oversized request bodies', async () => {
   }
 });
 
-test('CLI persists a decision and reports stats', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-cli-'));
+test('CLI persists a decision and reports stats', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-cli-');
   const file = join(directory, 'data.json');
   const env = { ...process.env, SHADOWGRAPH_FILE: file };
   const run = (args) => new Promise((resolve, reject) => {
@@ -125,8 +125,8 @@ test('CLI persists a decision and reports stats', async () => {
   assert.equal((await readFile(file, 'utf8')).includes('Testing'), true);
 });
 
-test('HTTP API rejects disallowed browser origins', async () => {
-  const { app, base } = await startServer();
+test('HTTP API rejects disallowed browser origins', async (t) => {
+  const { app, base } = await startServer(t);
   try {
     const response = await fetch(`${base}/health`, { headers: { origin: 'https://evil.example' } });
     assert.equal(response.status, 403);
@@ -135,8 +135,8 @@ test('HTTP API rejects disallowed browser origins', async () => {
   }
 });
 
-test('HTTP restore rejects malformed JSON without replacing the valid store', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-http-restore-'));
+test('HTTP restore rejects malformed JSON without replacing the valid store', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-http-restore-');
   const file = join(directory, 'data.json');
   const backup = join(directory, 'bad.json');
   const { writeFile, readFile } = await import('node:fs/promises');
@@ -159,7 +159,7 @@ test('HTTP SQLite restore rejects a missing source without replacing the valid d
   let createSqliteStore;
   try { ({ createSqliteStore } = await import('../src/sqlite-storage.js')); }
   catch (error) { if (/requires Node/.test(error.message)) return t.skip(error.message); throw error; }
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-http-sqlite-missing-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-http-sqlite-missing-');
   const file = join(directory, 'data.db');
   const missing = join(directory, 'does-not-exist.db');
   let app;
@@ -182,7 +182,7 @@ test('HTTP SQLite restore rejects malformed snapshots without replacing the vali
   let createSqliteStore;
   try { ({ createSqliteStore } = await import('../src/sqlite-storage.js')); }
   catch (error) { if (/requires Node/.test(error.message)) return t.skip(error.message); throw error; }
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-http-sqlite-restore-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-http-sqlite-restore-');
   const file = join(directory, 'data.db');
   const backup = join(directory, 'bad.db');
   let sourceStore;
@@ -232,8 +232,9 @@ function readMcpResponses(child, expected) {
   });
 }
 
-test('MCP correlates validation errors to request ids', async () => {
-  const child = spawn(process.execPath, ['src/mcp.js'], { cwd: process.cwd(), env: { ...process.env, SHADOWGRAPH_FILE: join(tmpdir(), 'shadowgraph-mcp-validation.json') } });
+test('MCP correlates validation errors to request ids', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-mcp-validation-');
+  const child = spawn(process.execPath, ['src/mcp.js'], { cwd: process.cwd(), env: { ...process.env, SHADOWGRAPH_FILE: join(directory, 'data.json') } });
   child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'shadowgraph_record_decision', arguments: { title: '' } } }) + '\n');
   const [response] = await readMcpResponses(child, 1);
   child.kill();
@@ -241,8 +242,9 @@ test('MCP correlates validation errors to request ids', async () => {
   assert.equal(response.error.code, -32000);
 });
 
-test('MCP lists tools and returns parse errors', async () => {
-  const child = spawn(process.execPath, ['src/mcp.js'], { cwd: process.cwd(), env: { ...process.env, SHADOWGRAPH_FILE: join(tmpdir(), 'shadowgraph-mcp-test.json') } });
+test('MCP lists tools and returns parse errors', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-mcp-test-');
+  const child = spawn(process.execPath, ['src/mcp.js'], { cwd: process.cwd(), env: { ...process.env, SHADOWGRAPH_FILE: join(directory, 'data.json') } });
   child.stdin.write('{bad json\n');
   child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) + '\n');
   const responses = await readMcpResponses(child, 2);

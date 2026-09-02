@@ -2,8 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { restoreFile } from '../src/backup.js';
@@ -12,6 +11,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createDestinationFence } from '../src/revision-store.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const FIXED_NOW = '2026-08-27T12:00:00.000Z';
 
@@ -247,8 +247,8 @@ async function closeServer(server) {
   if (server.listening) await new Promise((resolveClose) => server.close(resolveClose));
 }
 
-test('DS-P1-003 JSON: an independent handle cannot acknowledge a save during restore and lose it', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph fifth review json '));
+test('DS-P1-003 JSON: an independent handle cannot acknowledge a save during restore and lose it', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph fifth review json ');
   const destination = join(directory, 'live state.json');
   const source = join(directory, 'restore source.json');
   const restoreStore = createJsonFileStore(destination, { staleLockMs: 60 });
@@ -285,7 +285,7 @@ test('DS-P1-003 JSON: an independent handle cannot acknowledge a save during res
 });
 
 test('DS-P1-003 SQLite: an independent handle cannot acknowledge a save during restore and lose it', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph fifth review sqlite '));
+  const directory = await scratchDirectory(t, 'shadowgraph fifth review sqlite ');
   const destination = join(directory, 'live state.db');
   const source = join(directory, 'restore source.db');
   let restoreStore;
@@ -340,7 +340,7 @@ test('DS-P1-003 SQLite: an independent handle cannot acknowledge a save during r
 });
 
 test('DS-P1-003 SQLite: an idle child handle cannot block restore replacement', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph fifth review sqlite deterministic child '));
+  const directory = await scratchDirectory(t, 'shadowgraph fifth review sqlite deterministic child ');
   const destination = join(directory, 'live state.db');
   const source = join(directory, 'restore source.db');
   let destinationStore;
@@ -393,7 +393,7 @@ test('DS-P1-003 SQLite: an idle child handle cannot block restore replacement', 
 
 test('DS-P1-003/004 SQLite stress: child writers, two restores, rollback, idle handles, and ABA remain durable', async (t) => {
   for (let repetition = 0; repetition < 3; repetition += 1) {
-    const directory = await mkdtemp(join(tmpdir(), `shadowgraph sqlite lifecycle stress ${repetition} `));
+    const directory = await scratchDirectory(t, `shadowgraph sqlite lifecycle stress ${repetition} `);
     const destination = join(directory, 'live state with spaces.db');
     const firstSource = join(directory, 'first restore source.db');
     const secondSource = join(directory, 'second restore source.db');
@@ -490,7 +490,7 @@ test('DS-P1-003/004 SQLite stress: child writers, two restores, rollback, idle h
 });
 
 test('DS-P1-003 SQLite: an independent restore waiter releases its stale live handle before replacement', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph fifth review sqlite restore waiter '));
+  const directory = await scratchDirectory(t, 'shadowgraph fifth review sqlite restore waiter ');
   const destination = join(directory, 'live state.db');
   const firstSource = join(directory, 'first source.db');
   const secondSource = join(directory, 'second source.db');
@@ -540,8 +540,8 @@ test('DS-P1-003 SQLite: an independent restore waiter releases its stale live ha
   reopened.close();
 });
 
-test('DS-P1-003 JSON: validation callback reentry fails explicitly instead of deadlocking the destination fence', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph fifth review json reentry '));
+test('DS-P1-003 JSON: validation callback reentry fails explicitly instead of deadlocking the destination fence', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph fifth review json reentry ');
   const destination = join(directory, 'live state.json');
   const source = join(directory, 'restore source.json');
   const destinationStore = createJsonFileStore(destination, { lockTimeoutMs: 2000 });
@@ -569,7 +569,7 @@ test('DS-P1-003 JSON: validation callback reentry fails explicitly instead of de
 });
 
 test('DS-P1-003 SQLite: activation callback reentry fails explicitly and the replacement remains usable', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph fifth review sqlite reentry '));
+  const directory = await scratchDirectory(t, 'shadowgraph fifth review sqlite reentry ');
   const destination = join(directory, 'live state.db');
   const source = join(directory, 'restore source.db');
   let destinationStore;
@@ -613,7 +613,7 @@ test('DS-P1-003 SQLite: activation callback reentry fails explicitly and the rep
 
 for (const backend of ['json', 'sqlite']) {
   test(`DS-P1-003 ${backend}: destination fence times out explicitly and then recovers a stale lock`, async (t) => {
-    const directory = await mkdtemp(join(tmpdir(), `shadowgraph fifth review ${backend} lock `));
+    const directory = await scratchDirectory(t, `shadowgraph fifth review ${backend} lock `);
     const destination = join(directory, backend === 'sqlite' ? 'live state.db' : 'live state.json');
     let store;
     try {
@@ -651,7 +651,7 @@ for (const backend of ['json', 'sqlite']) {
 
 for (const backend of ['json', 'sqlite']) {
   test(`DS-P1-003 ${backend}: a child-process writer waits behind restore and is checked against restored state`, async (t) => {
-    const directory = await mkdtemp(join(tmpdir(), `shadowgraph fifth review ${backend} child `));
+    const directory = await scratchDirectory(t, `shadowgraph fifth review ${backend} child `);
     const destination = join(directory, backend === 'sqlite' ? 'live state.db' : 'live state.json');
     const source = join(directory, backend === 'sqlite' ? 'restore source.db' : 'restore source.json');
     let destinationStore;
@@ -714,8 +714,8 @@ for (const backend of ['json', 'sqlite']) {
   });
 }
 
-test('DS-P1-003 JSON: restore waits when a child writer already owns the destination fence', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph fifth review json writer first '));
+test('DS-P1-003 JSON: restore waits when a child writer already owns the destination fence', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph fifth review json writer first ');
   const destination = join(directory, 'live state.json');
   const source = join(directory, 'restore source.json');
   const seed = createJsonFileStore(destination);
@@ -735,7 +735,7 @@ test('DS-P1-003 JSON: restore waits when a child writer already owns the destina
 });
 
 test('DS-P1-003 SQLite: a child writer begun before restore either completes first or conflicts', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph fifth review sqlite writer first '));
+  const directory = await scratchDirectory(t, 'shadowgraph fifth review sqlite writer first ');
   const destination = join(directory, 'live state.db');
   const source = join(directory, 'restore source.db');
   let destinationStore;
@@ -785,7 +785,7 @@ test('DS-P1-003 SQLite: a child writer begun before restore either completes fir
 });
 
 test('DS-P1-003 HTTP restore fences an external JSON writer through activation and fresh reopen', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph fifth review HTTP external writer '));
+  const directory = await scratchDirectory(t, 'shadowgraph fifth review HTTP external writer ');
   const destination = join(directory, 'live state.json');
   const source = join(directory, 'restore source.json');
   const seed = createJsonFileStore(destination);
@@ -833,7 +833,7 @@ test('DS-P1-003 HTTP restore fences an external JSON writer through activation a
 });
 
 test('DS-P1-003 MCP restore fences an external JSON writer in a separate server process', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph fifth review MCP external writer '));
+  const directory = await scratchDirectory(t, 'shadowgraph fifth review MCP external writer ');
   const destination = join(directory, 'live state.json');
   const source = join(directory, 'restore source.json');
   const seed = createJsonFileStore(destination);
@@ -869,7 +869,7 @@ test('DS-P1-003 MCP restore fences an external JSON writer in a separate server 
 });
 
 test('DS-P1-003 destination fence treats a transiently unopenable lock as contention and still fails closed', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph fence contention '));
+  const directory = await scratchDirectory(t, 'shadowgraph fence contention ');
   const destination = join(directory, 'live state.json');
   const lockPath = `${resolve(destination)}.lock`;
 
@@ -902,5 +902,4 @@ test('DS-P1-003 destination fence treats a transiently unopenable lock as conten
   // The fence is reusable and leaves no lock behind.
   assert.equal(await patient.run(async () => 'reacquired'), 'reacquired');
   assert.deepEqual((await readdir(directory)).filter((name) => name.endsWith('.lock')), []);
-  await rm(directory, { recursive: true, force: true });
 });

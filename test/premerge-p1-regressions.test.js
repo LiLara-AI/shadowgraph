@@ -2,8 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { restoreFile } from '../src/backup.js';
 import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
@@ -13,6 +12,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { JOURNAL_TYPE_ENTITY_KIND, REPLAYABLE_ENTRY_TYPES } from '../src/journal.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const BOUNDARY = '2026-08-28T00:00:01.000Z';
 const NODE_SQLITE = (await getRuntimeCapabilities()).nodeSqlite;
@@ -455,7 +455,7 @@ async function seedJsonRestoreDestination(path, id) {
 test('P1 follow-up schema surfaces: redacted false, omitted, or replayable:false purge skeletons fail closed on every restore path', async (t) => {
   const rejection = /schema 5.*purge|noncanonical.*purge|redacted true|replayable.*(?:false|type)/i;
   for (const redactedMode of ['false', 'omitted', 'replayable-false']) {
-    const directory = await mkdtemp(join(tmpdir(), `shadowgraph-premerge-purge-${redactedMode}-`));
+    const directory = await scratchDirectory(t, `shadowgraph-premerge-purge-${redactedMode}-`);
     const payload = schema5DisguisedPurgeSkeleton(redactedMode === 'replayable-false' ? 'payload-null-no-reason' : redactedMode);
     if (redactedMode === 'replayable-false') payload.journal[0].replayable = false;
     const sourceJson = join(directory, 'malicious.json');
@@ -1073,8 +1073,8 @@ async function seedOverflowStore(store, id) {
 
 test('P1 journal overflow persistence: JSON/SQLite HTTP plus CLI and MCP reject without changing live or durable state', async (t) => {
   for (const backend of ['json', 'sqlite']) {
-    await t.test(`${backend} HTTP persistence`, backend === 'sqlite' ? SQLITE_TEST_OPTIONS : {}, async () => {
-      const directory = await mkdtemp(join(tmpdir(), `shadowgraph-premerge-overflow-http-${backend}-`));
+    await t.test(`${backend} HTTP persistence`, backend === 'sqlite' ? SQLITE_TEST_OPTIONS : {}, async (t) => {
+      const directory = await scratchDirectory(t, `shadowgraph-premerge-overflow-http-${backend}-`);
       const destination = join(directory, backend === 'sqlite' ? 'live.db' : 'live.json');
       const store = backend === 'sqlite' ? await createSqliteStore(destination) : createJsonFileStore(destination);
       const durableBefore = await seedOverflowStore(store, `http-${backend}-kept`);
@@ -1098,7 +1098,7 @@ test('P1 journal overflow persistence: JSON/SQLite HTTP plus CLI and MCP reject 
     });
   }
 
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-premerge-overflow-transports-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-premerge-overflow-transports-');
   const cliDestination = join(directory, 'cli.json');
   const cliStore = createJsonFileStore(cliDestination);
   await seedOverflowStore(cliStore, 'cli-kept');

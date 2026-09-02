@@ -2,8 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { restoreFile } from '../src/backup.js';
 import { validateRestorePayload } from '../src/restore-validation.js';
@@ -18,6 +17,7 @@ import {
 import { createShadowGraph, rebuildProjection } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const NOW = '2026-08-28T12:00:00.000Z';
 const INVALID_SEQUENCE = /invalid_journal_sequence|journal\[1\]\.seq must be a positive safe integer/i;
@@ -425,9 +425,9 @@ async function closeServer(server) {
   await new Promise((resolve) => server.close(resolve));
 }
 
-test('DS-P1-009 JSON restore rejects schemas 1/2 before replacement and preserves exact destination bytes across restart', async () => {
+test('DS-P1-009 JSON restore rejects schemas 1/2 before replacement and preserves exact destination bytes across restart', async (t) => {
   for (const schemaVersion of [1, 2]) {
-    const directory = await mkdtemp(join(tmpdir(), `shadowgraph-ds-p1-009-json-${schemaVersion}-`));
+    const directory = await scratchDirectory(t, `shadowgraph-ds-p1-009-json-${schemaVersion}-`);
     const source = join(directory, 'unsafe.json');
     const destination = join(directory, 'live.json');
     await writeJson(source, withJournalSequence(schemaVersion, Number.MAX_SAFE_INTEGER + 1));
@@ -443,9 +443,9 @@ test('DS-P1-009 JSON restore rejects schemas 1/2 before replacement and preserve
   }
 });
 
-test('DS-P1-009 SQLite restore rejects schemas 1/2 before replacement and preserves exact database bytes and state across restart', SQLITE_TEST_OPTIONS, async () => {
+test('DS-P1-009 SQLite restore rejects schemas 1/2 before replacement and preserves exact database bytes and state across restart', SQLITE_TEST_OPTIONS, async (t) => {
   for (const schemaVersion of [1, 2]) {
-    const directory = await mkdtemp(join(tmpdir(), `shadowgraph-ds-p1-009-sqlite-${schemaVersion}-`));
+    const directory = await scratchDirectory(t, `shadowgraph-ds-p1-009-sqlite-${schemaVersion}-`);
     const source = join(directory, 'unsafe.db');
     const destination = join(directory, 'live.db');
 
@@ -472,7 +472,7 @@ test('DS-P1-009 SQLite restore rejects schemas 1/2 before replacement and preser
 
 test('DS-P1-009 CLI, HTTP, and MCP restore reject schemas 1/2 atomically and restart on the original JSON state', async (t) => {
   for (const schemaVersion of [1, 2]) {
-    const directory = await mkdtemp(join(tmpdir(), `shadowgraph-ds-p1-009-surfaces-${schemaVersion}-`));
+    const directory = await scratchDirectory(t, `shadowgraph-ds-p1-009-surfaces-${schemaVersion}-`);
     const source = join(directory, 'unsafe.json');
     await writeJson(source, withJournalSequence(schemaVersion, Number.MAX_SAFE_INTEGER + 1));
 
@@ -588,9 +588,9 @@ test('DS-P1-009 canonical journal-less and hard-gap schema 1/2 data retains migr
   }
 });
 
-test('DS-P1-009 canonical schema 1/2 data restores through JSON and migrates after restart', async () => {
+test('DS-P1-009 canonical schema 1/2 data restores through JSON and migrates after restart', async (t) => {
   for (const schemaVersion of [1, 2]) {
-    const directory = await mkdtemp(join(tmpdir(), `shadowgraph-ds-p1-009-valid-json-${schemaVersion}-`));
+    const directory = await scratchDirectory(t, `shadowgraph-ds-p1-009-valid-json-${schemaVersion}-`);
     const source = join(directory, 'legacy.json');
     const destination = join(directory, 'live.json');
     await writeJson(source, journalLessLegacyPayload(schemaVersion));
@@ -607,9 +607,9 @@ test('DS-P1-009 canonical schema 1/2 data restores through JSON and migrates aft
   }
 });
 
-test('DS-P1-009 canonical schema 1/2 data restores through SQLite and migrates after restart', SQLITE_TEST_OPTIONS, async () => {
+test('DS-P1-009 canonical schema 1/2 data restores through SQLite and migrates after restart', SQLITE_TEST_OPTIONS, async (t) => {
   for (const schemaVersion of [1, 2]) {
-    const directory = await mkdtemp(join(tmpdir(), `shadowgraph-ds-p1-009-valid-sqlite-${schemaVersion}-`));
+    const directory = await scratchDirectory(t, `shadowgraph-ds-p1-009-valid-sqlite-${schemaVersion}-`);
     const source = join(directory, 'legacy.db');
     const destination = join(directory, 'live.db');
     const sourceStore = await createSqliteStore(source);
@@ -909,9 +909,9 @@ function fixtureName(scenario, index) {
   return `${index}-${scenario.label.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase()}`;
 }
 
-test('DS-P1-010 JSON restore rejects every schema 1/2 duplicate table row before replacement and preserves exact bytes across restart', async () => {
+test('DS-P1-010 JSON restore rejects every schema 1/2 duplicate table row before replacement and preserves exact bytes across restart', async (t) => {
   for (const schemaVersion of [1, 2]) {
-    const directory = await mkdtemp(join(tmpdir(), `shadowgraph-ds-p1-010-json-${schemaVersion}-`));
+    const directory = await scratchDirectory(t, `shadowgraph-ds-p1-010-json-${schemaVersion}-`);
     const destination = join(directory, 'live.json');
     const beforeState = await seedJson(destination, `json-duplicate-kept-${schemaVersion}`);
     const beforeBytes = await readFile(destination);
@@ -931,9 +931,9 @@ test('DS-P1-010 JSON restore rejects every schema 1/2 duplicate table row before
   }
 });
 
-test('DS-P1-010 SQLite restore rejects every schema 1/2 duplicate table row before replacement and preserves exact bytes across restart', SQLITE_TEST_OPTIONS, async () => {
+test('DS-P1-010 SQLite restore rejects every schema 1/2 duplicate table row before replacement and preserves exact bytes across restart', SQLITE_TEST_OPTIONS, async (t) => {
   for (const schemaVersion of [1, 2]) {
-    const directory = await mkdtemp(join(tmpdir(), `shadowgraph-ds-p1-010-sqlite-${schemaVersion}-`));
+    const directory = await scratchDirectory(t, `shadowgraph-ds-p1-010-sqlite-${schemaVersion}-`);
     const destination = join(directory, 'live.db');
     const seedStore = await createSqliteStore(destination);
     await seedStore.save(livePayload(`sqlite-duplicate-kept-${schemaVersion}`));
@@ -974,7 +974,7 @@ test('DS-P1-010 SQLite restore rejects every schema 1/2 duplicate table row befo
 
 test('DS-P1-010 CLI, HTTP, and MCP reject the schema 1/2 duplicate table with exact live/durable atomicity and restart', async (t) => {
   for (const schemaVersion of [1, 2]) {
-    const directory = await mkdtemp(join(tmpdir(), `shadowgraph-ds-p1-010-surfaces-${schemaVersion}-`));
+    const directory = await scratchDirectory(t, `shadowgraph-ds-p1-010-surfaces-${schemaVersion}-`);
     const sources = [];
     for (const [index, scenario] of DUPLICATE_SEQUENCE_CASES.entries()) {
       const source = join(directory, `${fixtureName(scenario, index)}.json`);
@@ -1384,8 +1384,8 @@ function sequenceSurfaceScenarios() {
   ];
 }
 
-test('DS-P1-011 JSON restore rejects seq-less replay and unsafe schema-5 purge ordering before replacement, with exact restart atomicity', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-ds-p1-011-json-'));
+test('DS-P1-011 JSON restore rejects seq-less replay and unsafe schema-5 purge ordering before replacement, with exact restart atomicity', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-ds-p1-011-json-');
   const destination = join(directory, 'live.json');
   const beforeState = await seedJson(destination, 'json-sequence-order-kept');
   const beforeBytes = await readFile(destination);
@@ -1400,8 +1400,8 @@ test('DS-P1-011 JSON restore rejects seq-less replay and unsafe schema-5 purge o
   }
 });
 
-test('DS-P1-011 SQLite restore rejects seq-less replay and unsafe schema-5 purge ordering before replacement, with exact restart atomicity', SQLITE_TEST_OPTIONS, async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-ds-p1-011-sqlite-'));
+test('DS-P1-011 SQLite restore rejects seq-less replay and unsafe schema-5 purge ordering before replacement, with exact restart atomicity', SQLITE_TEST_OPTIONS, async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-ds-p1-011-sqlite-');
   const destination = join(directory, 'live.db');
   const seedStore = await createSqliteStore(destination);
   await seedStore.save(livePayload('sqlite-sequence-order-kept'));
@@ -1429,7 +1429,7 @@ test('DS-P1-011 SQLite restore rejects seq-less replay and unsafe schema-5 purge
 });
 
 test('DS-P1-011 CLI, HTTP, and MCP reject seq-less replay and unsafe schema-5 purge ordering atomically across restart', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-ds-p1-011-surfaces-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-ds-p1-011-surfaces-');
   const sources = [];
   for (const [label, payload] of sequenceSurfaceScenarios()) {
     const source = join(directory, `${label}.json`);

@@ -2,8 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { backupFile, restoreFile } from '../src/backup.js';
 import { RevisionConflictError } from '../src/revision-store.js';
@@ -11,6 +10,7 @@ import { createShadowGraphServer } from '../src/server.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const NOW = '2026-08-27T12:00:00.000Z';
 
@@ -191,7 +191,7 @@ function startMcp(backend, path) {
 
 for (const backend of ['json', 'sqlite']) {
   test(`DS-P1-004 ${backend}: restore mints a monotonic revision and rejects the retained ABA payload`, async (t) => {
-    const directory = await mkdtemp(join(tmpdir(), `shadowgraph ds-p1-004 ${backend} aba `));
+    const directory = await scratchDirectory(t, `shadowgraph ds-p1-004 ${backend} aba `);
     const destination = join(directory, backend === 'sqlite' ? 'live.db' : 'live.json');
     const source = join(directory, backend === 'sqlite' ? 'backup.db' : 'backup.json');
     let destinationStore;
@@ -256,7 +256,7 @@ for (const backend of ['json', 'sqlite']) {
 
 for (const backend of ['json', 'sqlite']) {
   test(`DS-P1-004 ${backend}: a newer source still installs max(source,destination) + 1`, async (t) => {
-    const directory = await mkdtemp(join(tmpdir(), `shadowgraph ds-p1-004 ${backend} newer source `));
+    const directory = await scratchDirectory(t, `shadowgraph ds-p1-004 ${backend} newer source `);
     const destination = join(directory, backend === 'sqlite' ? 'live.db' : 'live.json');
     const source = join(directory, backend === 'sqlite' ? 'source.db' : 'source.json');
     let destinationStore;
@@ -294,7 +294,7 @@ for (const backend of ['json', 'sqlite']) {
 for (const backend of ['json', 'sqlite']) {
   test(`DS-P1-004 ${backend}: zero and missing legacy source revisions are high-water mark zero`, async (t) => {
     for (const legacyRevision of [0, undefined]) {
-      const directory = await mkdtemp(join(tmpdir(), `shadowgraph ds-p1-004 ${backend} legacy revision `));
+      const directory = await scratchDirectory(t, `shadowgraph ds-p1-004 ${backend} legacy revision `);
       const destination = join(directory, backend === 'sqlite' ? 'live.db' : 'live.json');
       const source = join(directory, backend === 'sqlite' ? 'source.db' : 'source.json');
       let destinationStore;
@@ -330,7 +330,7 @@ for (const backend of ['json', 'sqlite']) {
 
 for (const backend of ['json', 'sqlite']) {
   test(`DS-P1-004 ${backend}: same-path restore remains byte-for-byte and revision unchanged`, async (t) => {
-    const directory = await mkdtemp(join(tmpdir(), `shadowgraph ds-p1-004 ${backend} same path `));
+    const directory = await scratchDirectory(t, `shadowgraph ds-p1-004 ${backend} same path `);
     const path = join(directory, backend === 'sqlite' ? 'state.db' : 'state.json');
     let store;
     try { store = await createStore(backend, path); }
@@ -350,7 +350,7 @@ for (const backend of ['json', 'sqlite']) {
 
 for (const backend of ['json', 'sqlite']) {
   test(`DS-P1-004 ${backend}: MAX_SAFE_INTEGER rejects restore and save without rounding or replacement`, async (t) => {
-    const directory = await mkdtemp(join(tmpdir(), `shadowgraph ds-p1-004 ${backend} overflow `));
+    const directory = await scratchDirectory(t, `shadowgraph ds-p1-004 ${backend} overflow `);
     const destination = join(directory, backend === 'sqlite' ? 'live.db' : 'live.json');
     const source = join(directory, backend === 'sqlite' ? 'source.db' : 'source.json');
     let destinationStore;
@@ -399,7 +399,7 @@ for (const backend of ['json', 'sqlite']) {
 
 for (const backend of ['json', 'sqlite']) {
   test(`DS-P1-004 ${backend}: post-install failure rolls back the exact old revision and leaves source bytes unchanged`, async (t) => {
-    const directory = await mkdtemp(join(tmpdir(), `shadowgraph ds-p1-004 ${backend} rollback `));
+    const directory = await scratchDirectory(t, `shadowgraph ds-p1-004 ${backend} rollback `);
     const destination = join(directory, backend === 'sqlite' ? 'live.db' : 'live.json');
     const source = join(directory, backend === 'sqlite' ? 'source.db' : 'source.json');
     let destinationStore;
@@ -444,7 +444,7 @@ for (const backend of ['json', 'sqlite']) {
 
 for (const backend of ['json', 'sqlite']) {
   test(`DS-P1-004 ${backend}: a separate process retained at the pre-restore revision cannot erase a later write`, async (t) => {
-    const directory = await mkdtemp(join(tmpdir(), `shadowgraph ds-p1-004 ${backend} process aba `));
+    const directory = await scratchDirectory(t, `shadowgraph ds-p1-004 ${backend} process aba `);
     let scenario;
     try { scenario = await prepareRestoreScenario(backend, directory); }
     catch (error) {
@@ -475,7 +475,7 @@ for (const backend of ['json', 'sqlite']) {
 
 for (const backend of ['json', 'sqlite']) {
   test(`DS-P1-004 HTTP ${backend}: success activates exactly the fresh durable revision`, async (t) => {
-    const directory = await mkdtemp(join(tmpdir(), `shadowgraph ds-p1-004 HTTP ${backend} `));
+    const directory = await scratchDirectory(t, `shadowgraph ds-p1-004 HTTP ${backend} `);
     let scenario;
     let app;
     try {
@@ -527,7 +527,7 @@ for (const backend of ['json', 'sqlite']) {
 
 for (const backend of ['json', 'sqlite']) {
   test(`DS-P1-004 MCP ${backend}: success exposes the exact fresh revision in graph and durable storage`, async (t) => {
-    const directory = await mkdtemp(join(tmpdir(), `shadowgraph ds-p1-004 MCP ${backend} `));
+    const directory = await scratchDirectory(t, `shadowgraph ds-p1-004 MCP ${backend} `);
     let scenario;
     try { scenario = await prepareRestoreScenario(backend, directory); }
     catch (error) {

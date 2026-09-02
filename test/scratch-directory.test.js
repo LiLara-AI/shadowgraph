@@ -12,7 +12,7 @@ import test, { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { copyFile, mkdir, readdir, readFile, stat, symlink, utimes, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, readdir, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';

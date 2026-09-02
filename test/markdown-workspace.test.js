@@ -1,13 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, unlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { parseMemoryMarkdown, syncMarkdownWorkspace } from '../src/markdown-workspace.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
-test('Markdown push and pull round-trip scoped Unicode memory through validated graph operations', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-markdown-'));
+test('Markdown push and pull round-trip scoped Unicode memory through validated graph operations', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-markdown-');
   const graph = createShadowGraph({ now: () => '2026-08-27T12:00:00.000Z' });
   const original = graph.remember({
     project: 'travel',
@@ -51,8 +51,8 @@ test('Markdown push and pull round-trip scoped Unicode memory through validated 
   assert.equal(history.items[1].text, 'تفضّل الفنادق الصغيرة والهادئة 🏨');
 });
 
-test('Markdown sync reports a two-sided conflict and changes neither side', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-markdown-conflict-'));
+test('Markdown sync reports a two-sided conflict and changes neither side', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-markdown-conflict-');
   const graph = createShadowGraph({ now: () => '2026-08-27T13:00:00.000Z' });
   graph.remember({
     project: 'app', scope: { userId: 'alice' }, memoryType: 'preference', key: 'theme', text: 'Dark mode'
@@ -75,8 +75,8 @@ test('Markdown sync reports a two-sided conflict and changes neither side', asyn
   assert.equal(await readFile(path, 'utf8'), fileBefore);
 });
 
-test('Markdown sync bounds user-controlled path segments while retaining stable identity', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-markdown-long-key-'));
+test('Markdown sync bounds user-controlled path segments while retaining stable identity', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-markdown-long-key-');
   const graph = createShadowGraph();
   graph.remember({
     project: 'project/'.repeat(30), memoryType: 'note', key: 'x'.repeat(500), text: 'Long identity'
@@ -87,8 +87,8 @@ test('Markdown sync bounds user-controlled path segments while retaining stable 
   assert.match(await readFile(pushed.files[0].path, 'utf8'), /Long identity/);
 });
 
-test('Markdown pull refuses identity edits instead of duplicating the canonical memory', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-markdown-identity-'));
+test('Markdown pull refuses identity edits instead of duplicating the canonical memory', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-markdown-identity-');
   const graph = createShadowGraph({ now: () => '2026-08-27T14:00:00.000Z' });
   graph.remember({ project: 'app', scope: { userId: 'alice' }, memoryType: 'preference', key: 'theme', text: 'Dark' });
   const pushed = await syncMarkdownWorkspace({ graph, directory, mode: 'push' });
@@ -103,8 +103,8 @@ test('Markdown pull refuses identity edits instead of duplicating the canonical 
   assert.deepEqual(graph.exportData(), before);
 });
 
-test('Markdown pull refuses shadowgraph_id edits as immutable identity changes', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-markdown-id-'));
+test('Markdown pull refuses shadowgraph_id edits as immutable identity changes', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-markdown-id-');
   const graph = createShadowGraph({ now: () => '2026-08-27T14:00:00.000Z' });
   graph.remember({ project: 'app', memoryType: 'note', key: 'identity', text: 'Original' });
   const pushed = await syncMarkdownWorkspace({ graph, directory, mode: 'push' });
@@ -119,8 +119,8 @@ test('Markdown pull refuses shadowgraph_id edits as immutable identity changes',
   assert.deepEqual(graph.exportData(), before);
 });
 
-test('Markdown pull refuses status edits instead of marking divergent state synchronized', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-markdown-status-'));
+test('Markdown pull refuses status edits instead of marking divergent state synchronized', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-markdown-status-');
   const graph = createShadowGraph({ now: () => '2026-08-27T14:00:00.000Z' });
   graph.remember({ project: 'app', memoryType: 'note', key: 'status', text: 'Original' });
   const pushed = await syncMarkdownWorkspace({ graph, directory, mode: 'push' });
@@ -135,8 +135,8 @@ test('Markdown pull refuses status edits instead of marking divergent state sync
   assert.deepEqual(graph.exportData(), before);
 });
 
-test('Markdown pull cannot resurrect a purged canonical memory', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-markdown-purge-'));
+test('Markdown pull cannot resurrect a purged canonical memory', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-markdown-purge-');
   const graph = createShadowGraph({ now: () => '2026-08-27T15:00:00.000Z' });
   graph.remember({ project: 'private', memoryType: 'profile', key: 'email', text: 'old@example.test' });
   const pushed = await syncMarkdownWorkspace({ graph, directory, mode: 'push' });
@@ -151,8 +151,8 @@ test('Markdown pull cannot resurrect a purged canonical memory', async () => {
   assert.equal(graph.exportData().records.some((record) => record.project === 'private'), false);
 });
 
-test('Markdown pull validates every file before committing any graph mutation', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-markdown-batch-'));
+test('Markdown pull validates every file before committing any graph mutation', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-markdown-batch-');
   const graph = createShadowGraph({ now: () => '2026-08-27T15:00:00.000Z' });
   graph.remember({ project: 'app', memoryType: 'note', key: 'first', text: 'First' });
   graph.remember({ project: 'app', memoryType: 'note', key: 'second', text: 'Second' });
@@ -167,8 +167,8 @@ test('Markdown pull validates every file before committing any graph mutation', 
   assert.deepEqual(graph.exportData(), before);
 });
 
-test('Markdown parse conflicts roll back otherwise valid edits in the same pull batch', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-markdown-parse-conflict-'));
+test('Markdown parse conflicts roll back otherwise valid edits in the same pull batch', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-markdown-parse-conflict-');
   const graph = createShadowGraph({ now: () => '2026-08-27T15:00:00.000Z' });
   graph.remember({ project: 'app', memoryType: 'note', key: 'a-first', text: 'First' });
   graph.remember({ project: 'app', memoryType: 'note', key: 'z-last', text: 'Last' });
@@ -186,8 +186,8 @@ test('Markdown parse conflicts roll back otherwise valid edits in the same pull 
   assert.deepEqual(graph.exportData(), before);
 });
 
-test('Markdown pull advances sync state only after canonical persistence succeeds', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-markdown-persist-'));
+test('Markdown pull advances sync state only after canonical persistence succeeds', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-markdown-persist-');
   const graph = createShadowGraph({ now: () => '2026-08-27T15:00:00.000Z' });
   graph.remember({ project: 'app', memoryType: 'note', key: 'persist', text: 'Before' });
   const pushed = await syncMarkdownWorkspace({ graph, directory, mode: 'push' });
@@ -206,8 +206,8 @@ test('Markdown pull advances sync state only after canonical persistence succeed
   assert.equal(await readFile(statePath, 'utf8'), stateBefore);
 });
 
-test('Markdown pull reloads durable state when persistence commits and then throws', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-markdown-post-commit-'));
+test('Markdown pull reloads durable state when persistence commits and then throws', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-markdown-post-commit-');
   const graph = createShadowGraph({ now: () => '2026-08-27T15:00:00.000Z' });
   graph.remember({ project: 'app', memoryType: 'note', key: 'post-commit', text: 'Before' });
   const pushed = await syncMarkdownWorkspace({ graph, directory, mode: 'push' });
@@ -227,8 +227,8 @@ test('Markdown pull reloads durable state when persistence commits and then thro
   assert.equal(graph.recall('', { project: 'app' }).items[0].record.text, 'After');
 });
 
-test('Markdown pull requires a durable read-back when a persistence callback is supplied', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-markdown-persist-contract-'));
+test('Markdown pull requires a durable read-back when a persistence callback is supplied', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-markdown-persist-contract-');
   const graph = createShadowGraph({ now: () => '2026-08-27T15:00:00.000Z' });
   graph.remember({ project: 'app', memoryType: 'note', key: 'contract', text: 'Before' });
   const pushed = await syncMarkdownWorkspace({ graph, directory, mode: 'push' });
@@ -240,8 +240,8 @@ test('Markdown pull requires a durable read-back when a persistence callback is 
   assert.deepEqual(graph.exportData(), before);
 });
 
-test('Markdown pull does not misclassify an unchanged file after a graph-only update', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-markdown-graph-only-'));
+test('Markdown pull does not misclassify an unchanged file after a graph-only update', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-markdown-graph-only-');
   const graph = createShadowGraph({ now: () => '2026-08-27T15:00:00.000Z' });
   graph.remember({ project: 'app', memoryType: 'note', key: 'graph-only', text: 'Before' });
   await syncMarkdownWorkspace({ graph, directory, mode: 'push' });
@@ -254,8 +254,8 @@ test('Markdown pull does not misclassify an unchanged file after a graph-only up
   assert.deepEqual(graph.exportData(), before);
 });
 
-test('Markdown state-write failure after canonical persistence does not roll live state behind durable state', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-markdown-state-fail-'));
+test('Markdown state-write failure after canonical persistence does not roll live state behind durable state', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-markdown-state-fail-');
   const graph = createShadowGraph({ now: () => '2026-08-27T15:00:00.000Z' });
   graph.remember({ project: 'app', memoryType: 'note', key: 'state-fail', text: 'Before' });
   const pushed = await syncMarkdownWorkspace({ graph, directory, mode: 'push' });

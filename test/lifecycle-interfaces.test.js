@@ -2,11 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { createShadowGraphServer } from '../src/server.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const exec = promisify(execFile);
 const MODERN_PROTOCOL = '2026-07-28';
@@ -22,8 +22,8 @@ function modernParams(values = {}) {
   };
 }
 
-test('lifecycle CLI accepts legal transitions and rejects illegal transitions without a durable write', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-lifecycle-cli-'));
+test('lifecycle CLI accepts legal transitions and rejects illegal transitions without a durable write', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-lifecycle-cli-');
   const file = join(directory, 'data.json');
   const env = { ...process.env, SHADOWGRAPH_FILE: file };
   const run = async (command, payload) => {
@@ -42,7 +42,7 @@ test('lifecycle CLI accepts legal transitions and rejects illegal transitions wi
 });
 
 test('lifecycle HTTP rejects before state, event, journal, or durable mutation', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-lifecycle-http-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-lifecycle-http-');
   const app = await createShadowGraphServer({ file: join(directory, 'data.json') });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
@@ -61,7 +61,7 @@ test('lifecycle HTTP rejects before state, event, journal, or durable mutation',
 });
 
 test('lifecycle MCP modern tool errors preserve the durable graph exactly', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-lifecycle-mcp-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-lifecycle-mcp-');
   const file = join(directory, 'data.json');
   const child = spawn(process.execPath, ['src/mcp.js'], {
     cwd: process.cwd(), env: { ...process.env, SHADOWGRAPH_FILE: file }, stdio: ['pipe', 'pipe', 'inherit']

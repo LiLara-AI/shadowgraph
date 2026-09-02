@@ -2,20 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
-import {
-  copyFile as realCopyFile,
-  mkdtemp,
-  readdir,
-  rename as realRename,
-  stat as realStat,
-  unlink as realUnlink
-} from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { copyFile as realCopyFile, readdir, rename as realRename, stat as realStat, unlink as realUnlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
 import { createShadowGraphServer } from '../src/server.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const snapshot = (id) => ({
   schemaVersion: 3,
@@ -47,7 +40,7 @@ async function artifacts(directory) {
 }
 
 async function createPair(t, prefix, options = {}) {
-  const directory = await mkdtemp(join(tmpdir(), prefix));
+  const directory = await scratchDirectory(t, prefix);
   const livePath = join(directory, 'live.db');
   const sourcePath = join(directory, 'source.db');
   let live;
@@ -332,7 +325,7 @@ test('SQLite restore closes its source handle when validation fails', async (t) 
 test('SQLite restore closes its source handle when reading the source fails', async (t) => {
   const DatabaseSync = await databaseSync(t);
   if (!DatabaseSync) return;
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-sqlite-restore-source-read-failure-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-sqlite-restore-source-read-failure-');
   const livePath = join(directory, 'live.db');
   const sourcePath = join(directory, 'source.db');
   const openedPaths = new WeakMap();

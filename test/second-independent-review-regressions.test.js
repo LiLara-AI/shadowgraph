@@ -3,18 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
 import { once } from 'node:events';
-import {
-  copyFile as realCopyFile,
-  mkdir,
-  mkdtemp,
-  readFile,
-  readdir,
-  rename as realRename,
-  stat,
-  unlink,
-  writeFile
-} from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { copyFile as realCopyFile, mkdir, readFile, readdir, rename as realRename, stat, unlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { restoreFile } from '../src/backup.js';
 import { createShadowGraphServer } from '../src/server.js';
@@ -24,6 +13,7 @@ import { createJsonFileStore } from '../src/storage.js';
 import { createRestoreValidator } from '../src/restore-validation.js';
 import { rebuildProjection } from '../src/journal.js';
 import { createFactAttestation, createLocalEvidenceVerifier } from '../src/verification.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const FIXED_NOW = '2026-08-27T12:00:00.000Z';
 const JSON_ARTIFACT = /^\.restore\..+\.(?:tmp|rollback)$/;
@@ -243,8 +233,8 @@ function runCli(file, command, argument) {
   });
 }
 
-test('RRV-01: JSON restore verifies a complete rollback artifact before installation and cleans it after success', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-rrv01-json-preinstall-'));
+test('RRV-01: JSON restore verifies a complete rollback artifact before installation and cleans it after success', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-rrv01-json-preinstall-');
   const destination = join(directory, 'live.json');
   const source = join(directory, 'source.json');
   const original = graphPayload('rrv01-old', 'RRV01 OLD');
@@ -281,7 +271,7 @@ test('RRV-01: JSON restore verifies a complete rollback artifact before installa
 });
 
 test('RRV-01: JSON unconfirmed recovery retains and reports the exact complete rollback artifact', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-rrv01-json-unconfirmed-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-rrv01-json-unconfirmed-');
   const destination = join(directory, 'live.json');
   const source = join(directory, 'source.json');
   const original = graphPayload('rrv01-retained-old', 'RRV01 RETAINED OLD');
@@ -314,8 +304,8 @@ test('RRV-01: JSON unconfirmed recovery retains and reports the exact complete r
   assert.deepEqual((await jsonArtifacts(directory)).filter((name) => name.endsWith('.rollback')), [recoveryError.rollbackArtifact.split(/[\\/]/).pop()]);
 });
 
-test('RRV-01: ordinary JSON rollback restores old bytes and cleans every artifact', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-rrv01-json-rollback-clean-'));
+test('RRV-01: ordinary JSON rollback restores old bytes and cleans every artifact', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-rrv01-json-rollback-clean-');
   const destination = join(directory, 'live.json');
   const source = join(directory, 'source.json');
   await writePayload(destination, graphPayload('rrv01-clean-old', 'RRV01 CLEAN OLD'));
@@ -331,7 +321,7 @@ test('RRV-01: ordinary JSON rollback restores old bytes and cleans every artifac
 });
 
 test('RRV-01: real HTTP JSON restore latches degraded state, exposes retained evidence, and blocks later reads and writes', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-rrv01-http-json-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-rrv01-http-json-');
   const destination = join(directory, 'live.json');
   const source = join(directory, 'source.json');
   await writePayload(destination, graphPayload('rrv01-http-old', 'RRV01 HTTP OLD'));
@@ -386,7 +376,7 @@ test('RRV-01: real HTTP JSON restore latches degraded state, exposes retained ev
 });
 
 test('RRV-01: real MCP JSON restore fail-closes after unconfirmed recovery and preserves retained evidence', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-rrv01-mcp-json-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-rrv01-mcp-json-');
   const destination = join(directory, 'live.json');
   const source = join(directory, 'source.json');
   await writePayload(destination, graphPayload('rrv01-mcp-old', 'RRV01 MCP OLD'));
@@ -441,7 +431,7 @@ test('RRV-01: real MCP JSON restore fail-closes after unconfirmed recovery and p
 });
 
 test('RRV-01: real MCP SQLite unconfirmed recovery uses the same fail-closed latch', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-rrv01-mcp-sqlite-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-rrv01-mcp-sqlite-');
   const destination = join(directory, 'live.db');
   const source = join(directory, 'source.db');
   let live;
@@ -503,8 +493,8 @@ test('RRV-01: real MCP SQLite unconfirmed recovery uses the same fail-closed lat
   for (const name of retainedNames) await unlink(join(directory, name)).catch(() => {});
 });
 
-test('RRV-02: core import and journal rebuild reject rewritten, duplicate, and post-terminal fact verification', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-rrv02-core-lifecycle-'));
+test('RRV-02: core import and journal rebuild reject rewritten, duplicate, and post-terminal fact verification', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-rrv02-core-lifecycle-');
   const fixture = await verifierFixture(directory);
   const attacks = [];
   for (const terminal of ['expired', 'superseded']) {
@@ -543,8 +533,8 @@ test('RRV-02: core import and journal rebuild reject rewritten, duplicate, and p
   }
 });
 
-test('RRV-02: an active signed fact is trusted before but never at or after its signed effective expiration boundary', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-rrv02-trusted-instant-'));
+test('RRV-02: an active signed fact is trusted before but never at or after its signed effective expiration boundary', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-rrv02-trusted-instant-');
   const fixture = await verifierFixture(directory);
   const boundary = '2026-08-28T00:00:00.000Z';
   const payload = await signedFactPayload(directory, fixture, {
@@ -576,7 +566,7 @@ test('RRV-02: an active signed fact is trusted before but never at or after its 
 });
 
 test('RRV-02: JSON and SQLite restore reject lifecycle resurrection before replacing either destination', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-rrv02-direct-restore-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-rrv02-direct-restore-');
   const fixture = await verifierFixture(directory);
   const factId = 'rrv02-direct-restore-fact';
   const attack = rewriteTerminalAsDuplicateVerification(
@@ -619,7 +609,7 @@ test('RRV-02: JSON and SQLite restore reject lifecycle resurrection before repla
 });
 
 test('RRV-02: real HTTP and MCP restore reject lifecycle resurrection atomically', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-rrv02-interfaces-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-rrv02-interfaces-');
   const fixture = await verifierFixture(directory);
   const factId = 'rrv02-interface-fact';
   const attack = rewriteTerminalAsDuplicateVerification(
@@ -668,8 +658,8 @@ test('RRV-02: real HTTP and MCP restore reject lifecycle resurrection atomically
   assert.equal(JSON.parse(search.result.content[0].text).page.total, 1);
 });
 
-test('RRV-02: legitimate signed expiration and supersession remain importable and rebuildable', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-rrv02-legitimate-'));
+test('RRV-02: legitimate signed expiration and supersession remain importable and rebuildable', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-rrv02-legitimate-');
   const fixture = await verifierFixture(directory);
   for (const terminal of ['expired', 'superseded']) {
     const payload = await signedFactPayload(directory, fixture, { id: `rrv02-legitimate-${terminal}`, terminal });
@@ -716,7 +706,7 @@ test('RRV-03: unexplained idempotency semantic mismatches are rejected atomicall
 });
 
 test('RRV-03: schemas 1-5 keep canonical unverified retries across JSON and SQLite restart', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-rrv03-restarts-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-rrv03-restarts-');
   for (const schemaVersion of [1, 2, 3, 4, 5]) {
     const payload = legacyVerifiedIdempotencyPayload(schemaVersion);
     const jsonPath = join(directory, `schema-${schemaVersion}.json`);
@@ -744,7 +734,7 @@ test('RRV-03: schemas 1-5 keep canonical unverified retries across JSON and SQLi
 });
 
 test('RRV-03: CLI, HTTP, and real MCP retries expose only the canonical unverified fact', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-rrv03-interfaces-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-rrv03-interfaces-');
   const retryInput = (suffix) => ({
     project: 'rrv03', key: 'ignored-on-retry', value: 'ignored', idempotencyKey: `retry-${suffix}`
   });
@@ -792,8 +782,8 @@ test('RRV-03: CLI, HTTP, and real MCP retries expose only the canonical unverifi
   assert.deepEqual(durable.idempotency[0].value, durable.facts[0]);
 });
 
-test('RRV-03: valid signed facts return the final verified entity on retry when the verifier is configured', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-rrv03-valid-verifier-'));
+test('RRV-03: valid signed facts return the final verified entity on retry when the verifier is configured', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-rrv03-valid-verifier-');
   const fixture = await verifierFixture(directory);
   const graph = createShadowGraph({ verifier: fixture.verifier, now: () => FIXED_NOW });
   const fact = graph.addFact({

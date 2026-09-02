@@ -2,13 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createShadowGraphServer } from '../src/server.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const NOW = '2026-08-28T00:00:00.000Z';
 const LATER = '2026-08-29T00:00:00.000Z';
@@ -518,7 +518,7 @@ async function postJson(base, path, body) {
 }
 
 async function durableServerFaultScenario(backend, t) {
-  const directory = await mkdtemp(join(tmpdir(), `shadowgraph-transaction-${backend}-`));
+  const directory = await scratchDirectory(t, `shadowgraph-transaction-${backend}-`);
   const destination = join(directory, backend === 'sqlite' ? 'data.db' : 'data.json');
   let store;
   try {
@@ -663,8 +663,8 @@ function assertPersistedRebuildParity(data, label) {
   assertRebuildParity(restarted, label);
 }
 
-test('transaction boundary: CLI rejection preserves bytes, then a smaller successful write restarts with rebuild parity', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-transaction-cli-'));
+test('transaction boundary: CLI rejection preserves bytes, then a smaller successful write restarts with rebuild parity', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-transaction-cli-');
   const file = join(directory, 'data.json');
   const decisionId = 'transaction-cli-decision';
   await seedNearBoundaryFile(file, decisionId);
@@ -682,8 +682,8 @@ test('transaction boundary: CLI rejection preserves bytes, then a smaller succes
   assertPersistedRebuildParity(persisted, 'CLI later successful write');
 });
 
-test('transaction boundary: MCP rejection preserves bytes, then a smaller successful write restarts with rebuild parity', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-transaction-mcp-'));
+test('transaction boundary: MCP rejection preserves bytes, then a smaller successful write restarts with rebuild parity', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-transaction-mcp-');
   const file = join(directory, 'data.json');
   const decisionId = 'transaction-mcp-decision';
   await seedNearBoundaryFile(file, decisionId);

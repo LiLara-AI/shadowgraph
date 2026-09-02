@@ -1,10 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createShadowGraph, rebuildProjection } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 function decision(id = 'd1') {
   return { id, kind: 'decision', schemaVersion: 3, project: 'p', title: 'T', chosen: 'C', status: 'active', alternatives: [] };
@@ -109,8 +108,8 @@ test('final review: known confidence policy is internally consistent after migra
   assert.equal(confidence.policy, confidence.basis.policy);
 });
 
-test('final review: separate JSON store instances cannot both commit the same revision', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'shadowgraph-json-collision-'));
+test('final review: separate JSON store instances cannot both commit the same revision', async (t) => {
+  const dir = await scratchDirectory(t, 'shadowgraph-json-collision-');
   const file = join(dir, 'graph.json');
   const first = createJsonFileStore(file);
   const second = createJsonFileStore(file);

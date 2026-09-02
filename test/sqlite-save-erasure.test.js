@@ -3,13 +3,13 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { NODE_SQLITE_NOT_APPLICABLE_REASON } from '../src/runtime-capabilities.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const SQLITE_SIDECAR_SUFFIXES = ['-wal', '-shm', '-journal'];
 
@@ -26,8 +26,7 @@ test('normal SQLite save physically erases bytes removed by a graph hard purge',
   try { ({ DatabaseSync } = await import('node:sqlite')); }
   catch { return t.skip(NODE_SQLITE_NOT_APPLICABLE_REASON); }
 
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph sqlite normal save erasure '));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph sqlite normal save erasure ');
   const file = join(directory, 'live state with spaces.db');
   const sentinel = `SQLITE-NORMAL-SAVE-PURGE-${randomUUID()}-${'secret'.repeat(15)}`;
   const graph = createShadowGraph({ now: () => '2026-08-28T00:00:00.000Z' });
@@ -105,8 +104,7 @@ test('normal SQLite save physically erases bytes removed by a graph logical purg
   let DatabaseSync;
   try { ({ DatabaseSync } = await import('node:sqlite')); }
   catch { return t.skip(NODE_SQLITE_NOT_APPLICABLE_REASON); }
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph sqlite logical erasure '));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph sqlite logical erasure ');
   const file = join(directory, 'logical live.db');
   const sentinel = `SQLITE-LOGICAL-PURGE-${randomUUID()}-${'private'.repeat(12)}`;
   const graph = secretGraph(sentinel);
@@ -126,8 +124,7 @@ test('destructive SQLite save rolls back before COMMIT and reconciles an injecte
   let DatabaseSync;
   try { ({ DatabaseSync } = await import('node:sqlite')); }
   catch { return t.skip(NODE_SQLITE_NOT_APPLICABLE_REASON); }
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph sqlite save faults '));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph sqlite save faults ');
   const file = join(directory, 'fault live.db');
   const sentinel = `SQLITE-SAVE-FAULT-${randomUUID()}-${'secret'.repeat(12)}`;
   const graph = secretGraph(sentinel);
@@ -181,8 +178,7 @@ test('append-only SQLite saves do not pay the destructive VACUUM path', async (t
   let DatabaseSync;
   try { ({ DatabaseSync } = await import('node:sqlite')); }
   catch { return t.skip(NODE_SQLITE_NOT_APPLICABLE_REASON); }
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph sqlite append only '));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph sqlite append only ');
   const file = join(directory, 'append live.db');
   const statements = [];
   const store = await createSqliteStore(file, {
@@ -210,8 +206,7 @@ test('destructive save serializes across idle stores and rejects the stale write
   let DatabaseSync;
   try { ({ DatabaseSync } = await import('node:sqlite')); }
   catch { return t.skip(NODE_SQLITE_NOT_APPLICABLE_REASON); }
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph sqlite destructive concurrency '));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph sqlite destructive concurrency ');
   const file = join(directory, 'concurrent live.db');
   const sentinel = `SQLITE-CONCURRENT-PURGE-${randomUUID()}-${'secret'.repeat(10)}`;
   const graph = secretGraph(sentinel);
@@ -235,8 +230,7 @@ test('destructive save fences a separate stale writer process', async (t) => {
   let DatabaseSync;
   try { ({ DatabaseSync } = await import('node:sqlite')); }
   catch { return t.skip(NODE_SQLITE_NOT_APPLICABLE_REASON); }
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph sqlite destructive process '));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph sqlite destructive process ');
   const file = join(directory, 'process live.db');
   const sentinel = `SQLITE-PROCESS-PURGE-${randomUUID()}-${'secret'.repeat(10)}`;
   const graph = secretGraph(sentinel);
@@ -298,8 +292,7 @@ test('normal destructive save stays erased through SQLite backup and restore', a
   let DatabaseSync;
   try { ({ DatabaseSync } = await import('node:sqlite')); }
   catch { return t.skip(NODE_SQLITE_NOT_APPLICABLE_REASON); }
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph sqlite purge backup restore '));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph sqlite purge backup restore ');
   const live = join(directory, 'live source.db');
   const backup = join(directory, 'purged backup.db');
   const restored = join(directory, 'restored destination.db');

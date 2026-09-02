@@ -13,8 +13,7 @@
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, open, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { open, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -29,6 +28,7 @@ import {
   runV11Benchmark,
   unitIdFor
 } from '../benchmark/lib/v11-runner.mjs';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const REPOSITORY_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const AMENDMENT_002_PATH = fileURLToPath(
@@ -1167,8 +1167,7 @@ async function writeDurableJson(filePath, value) {
 
 /** Write the ledgers a diagnostic resume reads, exactly as the CLI would. */
 async function materializePriorAttempt(t, raw) {
-  const directory = await mkdtemp(path.join(tmpdir(), 'shadowgraph-v11-acceptance-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-acceptance-');
   const progressPath = path.join(directory, `${raw.attemptId}.progress.ndjson`);
   const unitEvidencePath = path.join(directory, `${raw.attemptId}.units.ndjson`);
   const previousRawPath = path.join(directory, `${raw.attemptId}.raw.json`);

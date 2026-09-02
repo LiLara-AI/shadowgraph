@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFile as execFileCallback } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
@@ -11,6 +10,7 @@ import {
   createImplementationLock,
   verifyImplementationLock
 } from '../benchmark/lib/implementation-lock.mjs';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const execFile = promisify(execFileCallback);
 const FIXTURE_DATE = '2000-01-01T00:00:00Z';
@@ -94,8 +94,7 @@ function sha256(value) {
 }
 
 async function temporaryDirectory(t, prefix = 'shadowgraph-lock-') {
-  const directory = await mkdtemp(path.join(tmpdir(), prefix));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, prefix);
   return directory;
 }
 

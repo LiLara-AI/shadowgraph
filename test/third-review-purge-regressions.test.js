@@ -2,8 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { backupFile, restoreFile } from '../src/backup.js';
 import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
@@ -13,6 +12,7 @@ import { rebuildProjection } from '../src/journal.js';
 import { validateRestorePayload } from '../src/restore-validation.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const NOW = '2026-08-27T15:00:00.000Z';
 const NODE_SQLITE = (await getRuntimeCapabilities()).nodeSqlite;
@@ -277,8 +277,8 @@ async function createStore(backend, path) {
 
 async function assertPayloadAcrossRestartBackupRestore(t, payload, assertSafe, label) {
   for (const backend of ['json', 'sqlite']) {
-    await t.test(`${label} ${backend}`, backend === 'sqlite' ? SQLITE_TEST_OPTIONS : {}, async () => {
-      const directory = await mkdtemp(join(tmpdir(), `shadowgraph-third-review-${backend}-`));
+    await t.test(`${label} ${backend}`, backend === 'sqlite' ? SQLITE_TEST_OPTIONS : {}, async (t) => {
+      const directory = await scratchDirectory(t, `shadowgraph-third-review-${backend}-`);
       const extension = backend === 'sqlite' ? 'db' : 'json';
       const livePath = join(directory, `live.${extension}`);
       const backupPath = join(directory, `backup.${extension}`);
@@ -523,7 +523,7 @@ function startMcp(file) {
 }
 
 test('RRV-07: forged future ledgers fail closed in JSON/SQLite restore and CLI/HTTP/MCP', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-rrv07-surfaces-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-rrv07-surfaces-');
   const payload = forgedFutureLedgerPayload();
   const sourceJson = join(directory, 'forged.json');
   await writeFile(sourceJson, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');

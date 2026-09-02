@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createJsonFileStore } from '../src/storage.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 test('superseding a fact exposes the old fact as stale context', () => {
   const graph = createShadowGraph();
@@ -23,8 +23,8 @@ test('review returns only alternatives whose rules matched', () => {
   assert.deepEqual(graph.review({ changedFacts: ['local'] })[0].alternativesToReconsider, ['B']);
 });
 
-test('loads a v0.1 array file through the storage boundary', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-migration-'));
+test('loads a v0.1 array file through the storage boundary', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-migration-');
   const file = join(directory, 'data.json');
   await writeFile(file, JSON.stringify([{ id: 'legacy', kind: 'decision', title: 'Legacy', chosen: 'A', confidence: 0.7, alternatives: [] }]));
   const store = createJsonFileStore(file);

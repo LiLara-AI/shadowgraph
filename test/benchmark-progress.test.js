@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 
@@ -10,6 +9,7 @@ import {
   createUnitEvidenceLedger,
   evaluateWatchdog
 } from '../benchmark/lib/progress.mjs';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const EVENT_FIELDS = [
   'schema',
@@ -57,8 +57,7 @@ function unitEvent(event, correlation = UNIT_A, evidence = {}) {
 }
 
 async function temporaryDirectory(t) {
-  const directory = await mkdtemp(path.join(tmpdir(), 'shadowgraph-progress-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-progress-');
   return directory;
 }
 

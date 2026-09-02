@@ -2,8 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { restoreFile } from '../src/backup.js';
@@ -12,6 +11,7 @@ import { validateRestorePayload } from '../src/restore-validation.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const FIXED_NOW = '2026-08-27T12:00:00.000Z';
 const DUE_AT = '2026-08-27T11:00:00.000Z';
@@ -141,7 +141,7 @@ test('P1-4 independent review: review and maintain preflight every caller input 
 });
 
 test('P1-4 independent review: real MCP maintain rejection rolls live graph back before a later valid persistence', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-independent-p1-4-mcp-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-independent-p1-4-mcp-');
   const file = join(directory, 'state.json');
   const store = createJsonFileStore(file);
   const seed = maintenanceFixture();
@@ -243,8 +243,8 @@ async function createStore(backend, file) {
   return backend === 'sqlite' ? createSqliteStore(file) : createJsonFileStore(file);
 }
 
-async function assertPurgeErasureAcrossBackend(backend, mode) {
-  const directory = await mkdtemp(join(tmpdir(), `shadowgraph-independent-p2-5-${backend}-${mode}-`));
+async function assertPurgeErasureAcrossBackend(t, backend, mode) {
+  const directory = await scratchDirectory(t, `shadowgraph-independent-p2-5-${backend}-${mode}-`);
   const extension = backend === 'sqlite' ? 'db' : 'json';
   const sourcePath = join(directory, `source.${extension}`);
   const destinationPath = join(directory, `destination.${extension}`);
@@ -334,15 +334,15 @@ async function assertPurgeErasureAcrossBackend(backend, mode) {
 test('P2-5 independent review: logical and hard purge erase secret-bearing ids across JSON and SQLite restart/restore', async (t) => {
   for (const backend of ['json', 'sqlite']) {
     for (const mode of ['logical', 'hard']) {
-      await t.test(`${backend} ${mode}`, backend === 'sqlite' ? SQLITE_TEST_OPTIONS : {}, async () => {
-        await assertPurgeErasureAcrossBackend(backend, mode);
+      await t.test(`${backend} ${mode}`, backend === 'sqlite' ? SQLITE_TEST_OPTIONS : {}, async (subtest) => {
+        await assertPurgeErasureAcrossBackend(subtest, backend, mode);
       });
     }
   }
 });
 
 test('P2-6 independent review: all valid no-id stdio requests execute but emit only the later identified response', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-independent-p2-6-notifications-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-independent-p2-6-notifications-');
   const file = join(directory, 'state.json');
   const rpc = startMcp(file);
   t.after(async () => { await rpc.stop(); });
@@ -388,7 +388,7 @@ test('P2-6 independent review: all valid no-id stdio requests execute but emit o
 });
 
 test('P2-6 independent review: id:null remains a request and malformed JSON still receives a parse error', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-independent-p2-6-null-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-independent-p2-6-null-');
   const rpc = startMcp(join(directory, 'state.json'));
   t.after(async () => { await rpc.stop(); });
 

@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 
@@ -14,6 +13,7 @@ import {
   pendingMutationLatches,
   resolveMutationOutcome
 } from '../benchmark/lib/v11-mutation-fence.mjs';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const CORRELATION = {
   runId: 'run-1',
@@ -25,8 +25,7 @@ const CORRELATION = {
 };
 
 async function stateRoot(t) {
-  const root = await mkdtemp(path.join(tmpdir(), 'sg-fence-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  const root = await scratchDirectory(t, 'sg-fence-');
   return root;
 }
 

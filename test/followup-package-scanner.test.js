@@ -2,14 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { gunzip } from 'node:zlib';
 
 import { checkPackage, inspectPackagedText, parseNpmTarball } from '../scripts/check-package.mjs';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const repositoryRoot = fileURLToPath(new URL('..', import.meta.url));
 const fixturePath = 'docs/followup-package-scanner-fixture.md';
@@ -70,8 +70,7 @@ function assertCredentialFixtureAccepted(line, label) {
 }
 
 async function actualPackedEntries(t) {
-  const destination = await mkdtemp(join(tmpdir(), 'shadowgraph-followup-scanner-pack-'));
-  t.after(() => rm(destination, { recursive: true, force: true }));
+  const destination = await scratchDirectory(t, 'shadowgraph-followup-scanner-pack-');
   const args = ['pack', '--json', '--ignore-scripts', '--pack-destination', destination];
   const options = { cwd: repositoryRoot, maxBuffer: 10 * 1024 * 1024, windowsHide: true };
   const run = process.env.npm_execpath

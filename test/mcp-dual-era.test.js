@@ -1,10 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { VERSION } from '../src/version.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const LEGACY_PROTOCOL = '2024-11-05';
 const MODERN_PROTOCOL = '2026-07-28';
@@ -21,7 +20,7 @@ function modernParams(values = {}, protocolVersion = MODERN_PROTOCOL) {
 }
 
 async function startMcp(t, extraEnv = {}) {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-dual-era-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-dual-era-');
   const child = spawn(process.execPath, ['src/mcp.js'], {
     cwd: process.cwd(),
     env: { ...process.env, SHADOWGRAPH_FILE: join(directory, 'data.json'), ...extraEnv },

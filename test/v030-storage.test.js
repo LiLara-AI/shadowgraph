@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createJsonFileStore, createStorage } from '../src/storage.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
-test('JSON storage assigns revisions and rejects stale expected revisions', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'shadowgraph-revision-'));
+test('JSON storage assigns revisions and rejects stale expected revisions', async (t) => {
+  const dir = await scratchDirectory(t, 'shadowgraph-revision-');
   const store = createJsonFileStore(join(dir, 'data.json'));
   const first = await store.load();
   await store.save({ ...first, expectedRevision: 0, records: [{ id: 'a', kind: 'decision' }] });
@@ -17,17 +17,17 @@ test('JSON storage assigns revisions and rejects stale expected revisions', asyn
   assert.equal((await store.load()).revision, 2);
 });
 
-test('JSON restore refuses SQLite-looking destinations', async () => {
+test('JSON restore refuses SQLite-looking destinations', async (t) => {
   const { restoreFile } = await import('../src/backup.js');
-  const dir = await mkdtemp(join(tmpdir(), 'shadowgraph-restore-'));
+  const dir = await scratchDirectory(t, 'shadowgraph-restore-');
   const source = join(dir, 'backup.json');
   await writeFile(source, JSON.stringify({ schemaVersion: 2, records: [] }));
   await assert.rejects(restoreFile(source, join(dir, 'graph.db'), { storage: 'sqlite' }), /SQLite database/);
 });
 
-test('direct JSON restore always validates domain data and preserves the destination on rejection', async () => {
+test('direct JSON restore always validates domain data and preserves the destination on rejection', async (t) => {
   const { restoreFile } = await import('../src/backup.js');
-  const dir = await mkdtemp(join(tmpdir(), 'shadowgraph-json-restore-validation-'));
+  const dir = await scratchDirectory(t, 'shadowgraph-json-restore-validation-');
   const source = join(dir, 'source.json');
   const destination = join(dir, 'live.json');
   const oldPayload = { schemaVersion: 3, records: [{ id: 'OLD', kind: 'decision', project: 'default', status: 'active', title: 'OLD', chosen: 'OLD' }], facts: [], relations: [], reviewSignals: [], idempotency: [], events: [], journal: [], journalSeq: 0, journalEpoch: null };
@@ -46,7 +46,7 @@ test('direct JSON restore always validates domain data and preserves the destina
 });
 
 test('JSON and SQLite stores expose the same close interface', async (t) => {
-  const dir = await mkdtemp(join(tmpdir(), 'shadowgraph-store-interface-'));
+  const dir = await scratchDirectory(t, 'shadowgraph-store-interface-');
   const json = createJsonFileStore(join(dir, 'nested', 'data.json'));
   assert.equal(typeof json.close, 'function');
   json.close();

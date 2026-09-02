@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { createServer, request as httpRequest } from 'node:http';
 import { connect as netConnect } from 'node:net';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 
 import { requestOuterDecision, STANDARD_DECISION_RESPONSE_SCHEMA } from '../benchmark/lib/outer-model.mjs';
 import { startProviderMeter } from '../benchmark/lib/provider-meter.mjs';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const EVENT_FIELDS = [
   'schema',
@@ -97,8 +97,7 @@ function providerPayload({
 }
 
 async function temporaryDirectory(t) {
-  const directory = await mkdtemp(path.join(tmpdir(), 'shadowgraph-provider-meter-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-provider-meter-');
   return directory;
 }
 

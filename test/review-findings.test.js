@@ -9,13 +9,12 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { NODE_SQLITE_NOT_APPLICABLE_REASON } from '../src/runtime-capabilities.js';
 import { createShadowGraph, rebuildProjection, SUPPORTED_SCHEMA_VERSIONS } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 // Canonical comparison: array order by id AND object keys sorted. JSON key
 // INSERTION order is not part of the data's meaning, so comparing raw
@@ -240,9 +239,9 @@ describe('P0-2 — a failed replace/import leaves the live graph untouched', () 
     assert.equal(exported.facts.length, 0, 'old facts are gone after a successful replace');
   });
 
-  it('a failed reload from disk leaves the in-memory graph intact (recovery path)', async () => {
+  it('a failed reload from disk leaves the in-memory graph intact (recovery path)', async (t) => {
     // This is the revision-conflict / restore scenario in miniature.
-    const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-p02-'));
+    const directory = await scratchDirectory(t, 'shadowgraph-p02-');
     const store = createJsonFileStore(join(directory, 'data.json'));
 
     const graph = seeded();
@@ -413,7 +412,7 @@ describe('P1-10 — SQLite/JSON confidence parity across close and reopen', () =
   // through the relational backend, which is exactly where a nested structure
   // is most likely to be flattened or dropped.
 
-  async function roundTrip(makeStore) {
+  async function roundTrip(t, makeStore) {
     const graph = createShadowGraph();
     const decision = graph.addDecision({ title: 'Storage', chosen: 'sqlite', confidence: 0.4 });
     graph.addConfidenceEvidence({ decisionId: decision.id, key: 'e1', supports: true, sourceClass: 'human_confirmed', reason: 'reviewed' });
@@ -421,7 +420,7 @@ describe('P1-10 — SQLite/JSON confidence parity across close and reopen', () =
     graph.setOutcome(decision.id, { status: 'successful', sourceClass: 'tool_observed' });
     graph.setOutcome(decision.id, { status: 'failed', sourceClass: 'tool_observed' });
 
-    const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-parity-'));
+    const directory = await scratchDirectory(t, 'shadowgraph-parity-');
     const store = await makeStore(directory);
     await store.save(graph.exportData());
     await store.close?.();
@@ -451,14 +450,14 @@ describe('P1-10 — SQLite/JSON confidence parity across close and reopen', () =
     assert.equal(after.basis.humanConfirmations, 1);
   };
 
-  it('JSON backend preserves the whole confidence structure', async () => {
-    const { live, reloaded } = await roundTrip((directory) => createJsonFileStore(join(directory, 'data.json')));
+  it('JSON backend preserves the whole confidence structure', async (t) => {
+    const { live, reloaded } = await roundTrip(t, (directory) => createJsonFileStore(join(directory, 'data.json')));
     assertParity(live, reloaded);
   });
 
   it('SQLite backend preserves the whole confidence structure', async (t) => {
     try {
-      const { live, reloaded } = await roundTrip((directory) => createSqliteStore(join(directory, 'data.sqlite')));
+      const { live, reloaded } = await roundTrip(t, (directory) => createSqliteStore(join(directory, 'data.sqlite')));
       assertParity(live, reloaded);
     } catch (error) {
       if (/requires Node/.test(error.message)) return t.skip(NODE_SQLITE_NOT_APPLICABLE_REASON);
@@ -468,8 +467,8 @@ describe('P1-10 — SQLite/JSON confidence parity across close and reopen', () =
 
   it('both backends agree with each other, not merely with themselves', async (t) => {
     try {
-      const viaJson = await roundTrip((directory) => createJsonFileStore(join(directory, 'data.json')));
-      const viaSqlite = await roundTrip((directory) => createSqliteStore(join(directory, 'data.sqlite')));
+      const viaJson = await roundTrip(t, (directory) => createJsonFileStore(join(directory, 'data.json')));
+      const viaSqlite = await roundTrip(t, (directory) => createSqliteStore(join(directory, 'data.sqlite')));
       const confidenceOf = (exported) => canonical(exported.records.find((item) => item.kind === 'decision').confidence);
       // Ids, timestamps AND id-derived dedupe keys differ between two independent
       // runs (`outcome:<decisionId>` embeds a random id). The confidence NUMBERS,

@@ -10,8 +10,7 @@
 
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -28,6 +27,7 @@ import {
   createV11AdapterExecutor,
   executeV11AcceptanceRun
 } from '../benchmark/lib/v11-run.mjs';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const execFileAsync = promisify(execFile);
 const REPOSITORY_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -77,8 +77,7 @@ test('the run command and the preflight command answer readiness identically', a
 });
 
 test('a refused run writes no artifact and exits non-zero', async (t) => {
-  const directory = await mkdtemp(path.join(tmpdir(), 'shadowgraph-v11-run-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-run-');
 
   const result = await runCli(['v11-run', '--out', directory]);
   assert.equal(result.code, 1);
@@ -106,8 +105,7 @@ test('readiness names every unmet immutable prerequisite, not only applicability
 });
 
 test('a prerequisite file that exists but is empty is not treated as satisfied', async (t) => {
-  const directory = await mkdtemp(path.join(tmpdir(), 'shadowgraph-v11-gates-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-gates-');
   for (const gate of V11_PREREQUISITE_GATES) {
     await writeFile(path.join(directory, gate.file), '{}\n', 'utf8');
   }
@@ -120,8 +118,7 @@ test('a prerequisite file that exists but is empty is not treated as satisfied',
 });
 
 test('a malformed prerequisite file blocks rather than crashing readiness', async (t) => {
-  const directory = await mkdtemp(path.join(tmpdir(), 'shadowgraph-v11-gates-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-gates-');
   for (const gate of V11_PREREQUISITE_GATES) {
     await writeFile(path.join(directory, gate.file), 'not json', 'utf8');
   }
@@ -270,10 +267,8 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
   const loaded = await loadV11AcceptanceDefinition({ repositoryRoot: REPOSITORY_ROOT });
   const { definition, scenarios, sourceHashes } = loaded;
 
-  const gateDirectory = await mkdtemp(path.join(tmpdir(), 'shadowgraph-v11-ready-'));
-  const outputDirectory = await mkdtemp(path.join(tmpdir(), 'shadowgraph-v11-out-'));
-  t.after(() => rm(gateDirectory, { recursive: true, force: true }));
-  t.after(() => rm(outputDirectory, { recursive: true, force: true }));
+  const gateDirectory = await scratchDirectory(t, 'shadowgraph-v11-ready-');
+  const outputDirectory = await scratchDirectory(t, 'shadowgraph-v11-out-');
   await writeFile(
     path.join(gateDirectory, 'model-weights.lock.json'),
     JSON.stringify({
