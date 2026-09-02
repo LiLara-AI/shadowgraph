@@ -78,7 +78,7 @@ const MUTATIONS = {
   // Neuters the predicate itself, so this measures the property across the
   // environment, service and model builders rather than at one call site.
   placeholder: [
-    'benchmark/lib/v11-locks.mjs',
+    'benchmark/lib/placeholder.mjs',
     '  return PLACEHOLDER_VALUES.has(normalizePlaceholder(value));',
     '  return false;'
   ],

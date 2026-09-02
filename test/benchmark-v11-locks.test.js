@@ -106,7 +106,7 @@ test('a placeholder in a description field is not an observation', () => {
   assert.ok(strings.length >= 2, 'the fixture must exercise more than one description field');
 
   for (const placeholder of [
-    'unknown', 'UNKNOWN', 'N/A', 'n/a', ' - ', 'TODO', 'none', 'not captured',
+    'unknown', 'UNKNOWN', 'N/A', 'n/a', ' - ', 'TODO', 'not captured',
     // Independent review named these: `undefined` is what a collector emits for
     // a property it never read, and the rest are one answer typed several ways.
     'undefined', 'NaN', '[object Object]', 'N / A', 'N.A.', 'To Do', '???', '---',
@@ -125,6 +125,32 @@ test('a placeholder in a description field is not an observation', () => {
   // observation: this refuses the value, not the substring.
   assert.doesNotThrow(() => buildEnvironmentLock({
     observations: environment({ containerRuntimeVersion: 'Docker 29.7.1 (none-rootless)' })
+  }));
+
+  // `none` is deliberately NOT refused. `benchmark/competitors.lock.json`
+  // records `"version": "none"` for the no-memory control arm - a true answer,
+  // committed, and this repository's own convention. A machine with no
+  // container runtime is in the same position. Where a token is genuinely
+  // ambiguous between "absent" and "we did not look", refusing it would reject
+  // a real observation, which is worse than the hole the guard closes.
+  assert.doesNotThrow(() => buildEnvironmentLock({
+    observations: environment({ containerRuntimeVersion: 'none' })
+  }));
+
+  // An all-period string is refused like any other punctuation run. The
+  // trailing-period strip used to reduce it to nothing and let it through,
+  // while `---` and `???` were refused.
+  for (const dots of ['.', '..', '...']) {
+    assert.throws(
+      () => buildEnvironmentLock({ observations: environment({ pythonVersion: dots }) }),
+      (error) => error instanceof LockError && error.code === 'INCOMPLETE_ENVIRONMENT',
+      `${JSON.stringify(dots)} was accepted`
+    );
+  }
+
+  // A mixed punctuation run is not a known placeholder and is left alone.
+  assert.doesNotThrow(() => buildEnvironmentLock({
+    observations: environment({ pythonVersion: '?-.' })
   }));
 });
 

@@ -15,8 +15,8 @@ All figures below were produced on the current branch with a clean working tree.
 
 | Gate | Command | Result |
 | --- | --- | --- |
-| Full repository | `npm test` | **2060 / 2060 pass**, 0 fail, 20 suites |
-| Benchmark focused | `npm run benchmark:test` | **905 / 905 pass**, 0 fail |
+| Full repository | `npm test` | **2061 / 2061 pass**, 0 fail, 20 suites |
+| Benchmark focused | `npm run benchmark:test` | **906 / 906 pass**, 0 fail |
 | v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **762 / 762 pass**, 0 fail |
 | Python adapters | `npm run benchmark:test:python` | **86 tests, OK** |
 | Node syntax | `npm run check`, `npm run benchmark:check` | pass |
@@ -578,7 +578,7 @@ confusion generating the table removes.
 | Env Type | 1 — a placeholder in a numeric field is not an observation |
 | Service Tag | 2 — a service pinned by tag is not pinned; a service image and its recorded digest cannot disagree |
 | Model Digest | 1 — a short model identifier cannot pin weights — this is blocker B1 in code |
-| Placeholder | 2 — a placeholder in a description field is not an observation; a service or model named by a placeholder is not identified |
+| Placeholder | 3 — a placeholder in a description field is not an observation; a service or model named by a placeholder is not identified; a placeholder cannot stand in for public model or service metadata |
 
 **6 — Runtime factories, and what the blocked three actually do.** Four arms
 have real pinned factories: no-memory, ShadowGraph Full, ShadowGraph Compact and
@@ -711,8 +711,45 @@ folded before comparison.
 This is a denylist and cannot be complete, which is worth stating plainly rather
 than implying otherwise: a version string is not checkable, so anything unlisted
 is taken at face value. It closes the spellings that mean nothing was observed,
-not every possible one. The guard is measured across all three builders as the
-twelfth entry in the table.
+not every possible one.
+
+Review of that commit found the class open in a fourth place and the guard wrong
+in two others, and caught a false claim in the commit message itself.
+
+**The fourth lock.** Requirement 8 names four locks. The v1.1 three refused a
+placeholder while `implementation-lock.mjs`, which governs the source tree,
+still took `unknown` for a model architecture or a service name - the same
+"fixed here, open next door" shape, one module away from where the last one was
+found. The predicate now lives in `benchmark/lib/placeholder.mjs` and all four
+import it, because two copies that can disagree about what counts as evidence is
+the defect it exists to prevent.
+
+**Over-breadth, which the previous commit message said was written down and was
+not.** It claimed the caveats were recorded here; they were not, and a grep for
+`cpuModel` would have shown that. They are now. A guard that refuses a real
+observation is worse than the hole it closes, so:
+
+- `none` has been **removed** from the list. `benchmark/competitors.lock.json`
+  records `"version": "none"` for the no-memory control arm - a true answer,
+  committed, and this repository's own convention. A machine with no container
+  runtime is in the same position. Where a token is genuinely ambiguous between
+  "absent" and "we did not look", it is left out.
+- `cpuModel` can legitimately be the literal `unknown` on hosts where libuv
+  finds no model-name line in `/proc/cpuinfo`, which is common on aarch64. That
+  value is still refused. The refusal is arguably correct - a lock claiming to
+  pin an unrecordable CPU model would answer the comparability question wrongly
+  - but it is a real observation being refused, it is loud, and it is written
+  here rather than left to be rediscovered.
+
+**An asymmetry in the folding.** The trailing-period strip ran before the
+punctuation-run collapse, so `...` reduced to the empty string and was accepted
+while `---` and `???` were refused, and the `.` entry in the list was
+unreachable. The strip now uses a lookbehind so it cannot consume a string that
+is entirely punctuation.
+
+The guard is measured across all four builders, and its declared set has grown
+to three tests, which the harness refused to publish until the declaration said
+so.
 
 The other three artifacts refuse, and the refusals are mechanical rather than
 declarative. Attempted here with the best evidence that exists:

@@ -4,6 +4,8 @@ import { lstat, readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
+import { isPlaceholder } from './placeholder.mjs';
+
 const execFile = promisify(execFileCallback);
 
 const INPUT_FIELDS = ['repoRoot', 'files', 'models', 'serviceImages'];
@@ -153,6 +155,14 @@ function assertExactKeys(value, expectedKeys, label) {
 function assertNonEmptyString(value, label) {
   if (typeof value !== 'string' || value.trim().length === 0 || value !== value.trim()) {
     throw new Error(`${label} must be a non-empty trimmed string`);
+  }
+  // Requirement 8 names four locks. The v1.1 three refused a placeholder while
+  // this one, which governs the source tree itself, took `unknown` for a model
+  // architecture or a service name - the same "fixed here, open next door"
+  // shape review has now found three times. The predicate is shared rather than
+  // copied, because two lists that can disagree is the defect it prevents.
+  if (isPlaceholder(value)) {
+    throw new Error(`${label} is a placeholder, not an observation`);
   }
 }
 

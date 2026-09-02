@@ -291,6 +291,41 @@ test('lock is deterministic, comprehensive, path-portable, and verifies in a byt
   });
 });
 
+test('a placeholder cannot stand in for public model or service metadata', async (t) => {
+  // The v1.1 locks refused a placeholder while this one, which governs the
+  // source tree, accepted `unknown` for a model architecture or a service name.
+  // Requirement 8 names four locks; the guard covered three. Independent review
+  // found it one module away from where the last one was found.
+  const fixture = await createFixture(t);
+  await createImplementationLock(fixture.input);
+
+  const placeholders = ['unknown', 'N/A', 'TODO', 'undefined', 'not captured'];
+  for (const value of placeholders) {
+    for (const field of ['architecture', 'quantization', 'modelId']) {
+      await assert.rejects(
+        createImplementationLock(replaceModel(
+          fixture.input,
+          'decision_llm',
+          (model) => ({ ...model, [field]: value })
+        )),
+        /is a placeholder, not an observation/u,
+        `models[].${field} = ${JSON.stringify(value)} was accepted`
+      );
+    }
+
+    await assert.rejects(
+      createImplementationLock({
+        ...fixture.input,
+        serviceImages: fixture.input.serviceImages.map((service, index) => (
+          index === 0 ? { ...service, name: value } : { ...service }
+        ))
+      }),
+      /is a placeholder, not an observation/u,
+      `serviceImages[0].name = ${JSON.stringify(value)} was accepted`
+    );
+  }
+});
+
 test('file manifest is fail-closed across benchmark, runtime, script, package, and test sources', async (t) => {
   const fixture = await createFixture(t);
   await createImplementationLock(fixture.input);

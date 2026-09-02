@@ -20,6 +20,7 @@
 
 import { createHash } from 'node:crypto';
 
+import { isPlaceholder } from './placeholder.mjs';
 import { canonicalJson } from './v11-contract.mjs';
 
 export class LockError extends Error {
@@ -32,56 +33,6 @@ export class LockError extends Error {
 
 const BARE_SHA256 = /^[a-f0-9]{64}$/u;
 
-/**
- * Values that record the absence of an observation rather than an observation.
- *
- * The typed-field guard closed half of this: a count may not be prose. The
- * other half stayed open, under a comment claiming it was shut - a string field
- * accepted "unknown", "N/A", "TODO" or "not captured", and an environment lock
- * with every string field set to one of them produced a digest that reads as
- * authoritative. That is the exact failure this module's header says it exists
- * to refuse, reached by typing the placeholder into the slot the comment named.
- *
- * A version string is not otherwise checkable, so this refuses the tokens that
- * mean "we did not look" rather than trying to validate the ones that mean
- * something.
- */
-const PLACEHOLDER_VALUES = new Set([
-  '-', '?', '.', 'empty', 'missing', 'n/a', 'n.a', 'na', 'nan', 'nil', 'none',
-  'null', 'pending', 'tbd', 'to do', 'todo', 'unavailable', 'undefined',
-  'unknown', 'unset', 'unspecified', '[object object]',
-  'not applicable', 'not available', 'not captured', 'not known',
-  'not measured', 'not recorded', 'not set'
-]);
-
-/**
- * Fold the spellings of one placeholder together before comparing.
- *
- * `N / A`, `N.A.` and `???` are the same answer typed three ways, and matching
- * the exact string missed all three. This never changes what a lock records: it
- * exists only inside the comparison below.
- */
-function normalizePlaceholder(value) {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/gu, ' ')
-    .replace(/\s*([/.])\s*/gu, '$1')
-    .replace(/\.+$/u, '')
-    .replace(/^[-?.]+$/u, (run) => (new Set(run).size === 1 ? run[0] : run));
-}
-
-/**
- * A value that records the absence of an observation rather than an observation.
- *
- * This is a denylist and therefore cannot be complete - a version string is not
- * otherwise checkable, so anything not listed here is taken at face value. It
- * refuses the spellings that mean "we did not look", including `undefined`,
- * which is what a collector emits for a property it never read.
- */
-function isPlaceholder(value) {
-  return PLACEHOLDER_VALUES.has(normalizePlaceholder(value));
-}
 const PREFIXED_SHA256 = /^sha256:[a-f0-9]{64}$/u;
 
 function isPlainObject(value) {
