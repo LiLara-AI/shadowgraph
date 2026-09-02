@@ -499,6 +499,29 @@ it wrote. And a guard whose cell times out does appear in the table, so reportin
 that it "produced no row" contradicted the rows above it - it now says no
 measurement.
 
+A fourth pass signed the work off and named the thing worth fixing anyway: **an
+empty result read as a healthy result** had by then appeared four times in this
+one file. A truncated log read as a green baseline. A missing summary read as no
+failures. Git unavailable read as a clean tree. Git failing mid-run read as an
+unchanged tree - the last of those inside the check written to close the second.
+Each had been fixed as an instance. This pass treats the class: `mktemp`, both
+`git status` calls, the declaration read, and the final run's timeout are all
+checked, and none of them may report success by returning nothing. Verified by
+running the harness with a git that fails: it exits 1 having printed **no table
+at all**, rather than an unmarked one.
+
+The same pass found the final run alone did not distinguish a timeout from a
+dead run, so a hung suite was reported as one that produced no summary - failing
+closed, but with the wrong diagnosis, which this harness elsewhere calls its own
+kind of wrong answer. It now checks both, as the baseline and every cell already
+did.
+
+What the reviewer declined to call a defect is worth recording too. The residual
+findings are all second layers failing while the primary layer holds: the byte
+comparison over the mutable files needs no git, covers every file any mutation
+can write, and runs before anything is printed. None of them can put a wrong
+number in a published cell.
+
 It exists because three consecutive review rounds each caught one wrong number
 in a hand-written table. The last was a purity-rebuild figure of 3 that should
 have been 1: that mutation removed the rebuild *call* as well as the comparison,

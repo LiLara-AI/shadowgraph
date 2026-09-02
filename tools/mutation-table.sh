@@ -23,12 +23,17 @@
 set -u
 cd "$(dirname "$0")/.." || exit 1
 
-WORK="$(mktemp -d)"
+# Every check below refuses to read an empty or absent result as a healthy one.
+# That single mistake has now appeared four times in this file's history: a
+# truncated log read as a green baseline, a missing summary read as no failures,
+# git unavailable read as a clean tree, and git failing mid-run read as an
+# unchanged tree. Each was fixed in isolation; this pass treats the class.
+WORK="$(mktemp -d)" || { echo "ERROR: could not create a working directory" >&2; exit 1; }
 
 # Logs of runs that failed or timed out, kept so the next question is
 # answerable. Deliberately outside WORK, which the cleanup trap deletes; it is
 # removed on the way out only if nothing was written to it.
-DIAGNOSTICS="$(mktemp -d)"
+DIAGNOSTICS="$(mktemp -d)" || { echo "ERROR: could not create a diagnostics directory" >&2; rm -rf "$WORK"; exit 1; }
 trap 'rm -rf "$WORK"; rmdir "$DIAGNOSTICS" 2>/dev/null' EXIT
 
 # What the tree looked like before anything was mutated. Comparing the whole
@@ -37,13 +42,14 @@ trap 'rm -rf "$WORK"; rmdir "$DIAGNOSTICS" 2>/dev/null' EXIT
 # second compared only the four files mutate.cjs writes, and a suite that
 # created or modified anything else walked past both. Independent review
 # demonstrated exactly that, twice.
-if git rev-parse --git-dir >/dev/null 2>&1; then
-  BASELINE_DIRT="$(git status --porcelain)"
-  GIT_TREE_CHECK=1
-else
-  BASELINE_DIRT=""
-  GIT_TREE_CHECK=0
-  echo "WARNING: not a git worktree; only the byte check on mutable files applies" >&2
+# Note the limits, so the check is not read as broader than it is: porcelain
+# collapses an untracked directory to one line whatever appears inside it, and
+# says nothing about ignored files. Both were equally true of the checks this
+# replaced.
+if ! BASELINE_DIRT="$(git status --porcelain)"; then
+  echo "ERROR: git status failed, so the tree cannot be compared before and after" >&2
+  echo "       this harness rewrites source in place; it will not run unverified" >&2
+  exit 1
 fi
 
 # Back up exactly what mutate.cjs can write, by asking it. The hardcoded list
@@ -298,23 +304,46 @@ restore || STATUS=1
 # that was never listed, and a guard nobody measures is a guard nobody knows
 # about.
 touch "$WORK/measured"
-node -e 'const d=require("./tools/expected-failures.json");for(const k of Object.keys(d)) if(!k.startsWith("_")) console.log(k)' | sort > "$WORK/declared"
+if ! node -e 'const d=require("./tools/expected-failures.json");for(const k of Object.keys(d)) if(!k.startsWith("_")) console.log(k)' > "$WORK/declared.raw"; then
+  echo "ERROR: could not read tools/expected-failures.json" >&2
+  STATUS=1
+fi
+sort "$WORK/declared.raw" > "$WORK/declared" 2>/dev/null
+if [ ! -s "$WORK/declared" ]; then
+  # An empty declaration would make every guard look measured.
+  echo "ERROR: no declared guards were read; nothing can be reconciled" >&2
+  STATUS=1
+fi
 MISSING="$(comm -23 "$WORK/declared" <(sort "$WORK/measured"))"
 if [ -n "$TIMED_OUT" ]; then
   echo "NOTE: stopped early after $TIMED_OUT timed out; these guards are unmeasured:" >&2
-  printf '  %s
-' $MISSING >&2
+  printf '%s
+' "$MISSING" | while IFS= read -r guard; do
+    [ -n "$guard" ] && echo "  $guard" >&2
+  done
 elif [ -n "$MISSING" ]; then
   echo "ERROR: these declared guards produced no measurement:" >&2
-  printf '  %s
-' $MISSING >&2
+  printf '%s
+' "$MISSING" | while IFS= read -r guard; do
+    [ -n "$guard" ] && echo "  $guard" >&2
+  done
   echo "       missing from MUTATIONS, or failed the comparison, or produced a" >&2
   echo "       timed-out / no-summary row above, which is not a measurement" >&2
   STATUS=1
 fi
 
-run_suite "$WORK/final.log" || true
-if ! has_summary "$WORK/final.log"; then
+run_suite "$WORK/final.log"
+code=$?
+if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then
+  # The baseline and every cell distinguish a timeout from a dead run. The final
+  # run did not, so a hung suite was reported as one that produced no summary -
+  # fail-closed, but with the wrong diagnosis, which this file elsewhere calls
+  # its own kind of wrong answer.
+  cp "$WORK/final.log" "$DIAGNOSTICS/final.log" 2>/dev/null
+  echo "ERROR: the final run timed out after ${RUN_TIMEOUT_SECONDS}s; the tree is unverified" >&2
+  echo "       log: $DIAGNOSTICS/final.log" >&2
+  STATUS=1
+elif ! has_summary "$WORK/final.log"; then
   cp "$WORK/final.log" "$DIAGNOSTICS/final.log" 2>/dev/null
   echo "ERROR: the final run produced no test summary; the tree state is unverified" >&2
   echo "       log: $DIAGNOSTICS/final.log" >&2
@@ -349,15 +378,18 @@ done
 
 # And nothing else moved either. The byte check above is exact but narrow, and
 # narrowing was how the previous two versions of this check failed.
-if [ "$GIT_TREE_CHECK" -eq 1 ]; then
-  FINAL_DIRT="$(git status --porcelain)"
-  if [ "$FINAL_DIRT" != "$BASELINE_DIRT" ]; then
-    echo "ERROR: the working tree changed during the run:" >&2
-    diff <(printf '%s
+if ! FINAL_DIRT="$(git status --porcelain)"; then
+  # An empty result here used to compare equal to a clean baseline and pass. The
+  # byte check above is git-independent and still holds, but a check that cannot
+  # run has not passed.
+  echo "ERROR: git status failed after the run; the tree comparison is unverified" >&2
+  STATUS=1
+elif [ "$FINAL_DIRT" != "$BASELINE_DIRT" ]; then
+  echo "ERROR: the working tree changed during the run:" >&2
+  diff <(printf '%s
 ' "$BASELINE_DIRT") <(printf '%s
 ' "$FINAL_DIRT") >&2
-    STATUS=1
-  fi
+  STATUS=1
 fi
 
 echo
