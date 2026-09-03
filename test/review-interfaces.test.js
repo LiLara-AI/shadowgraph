@@ -366,18 +366,19 @@ test('P1-7: prompts/get still serves the KNOWN prompt, and it tells the truth ab
 // ---------------------------------------------------------------------------
 // P1-3 / protocol honesty at the MCP layer
 // ---------------------------------------------------------------------------
-test('P1-3/P1-7: initialize reports the implemented protocol and the single version', async (t) => {
+test('P1-3/P1-7: initialize never echoes a revision the server does not implement, and reports one version', async (t) => {
   const packaged = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
   const child = await spawnMcp(t, 'initialize');
   try {
-    // A client asking for a NEWER revision is answered with what this server
-    // actually implements, never an echo of a version it does not support.
+    // A client asking for a revision this server does not implement is answered
+    // with the latest one it does, never an echo of the request. 2026-07-28 has no
+    // handshake at all, so it can only be reached through per-request metadata.
     send(child, { jsonrpc: '2.0', id: 20, method: 'initialize', params: { protocolVersion: '2026-07-28' } });
     send(child, { jsonrpc: '2.0', id: 21, method: 'initialize', params: { protocolVersion: 42 } });
     const responses = await collect(child, 2);
 
     const initialized = responses.find((item) => item.id === 20);
-    assert.equal(initialized.result.protocolVersion, '2024-11-05', 'no false claim of modern-era support');
+    assert.equal(initialized.result.protocolVersion, '2025-11-25', 'no false claim of modern-era support');
     assert.equal(initialized.result.serverInfo.version, packaged, 'one version, from package.json');
 
     assert.equal(responses.find((item) => item.id === 21).error.code, -32602, 'a non-string protocolVersion is invalid params');

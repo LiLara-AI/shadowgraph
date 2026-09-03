@@ -33,7 +33,7 @@ jobs:
       - run: npm test
       - run: npm audit --omit=dev
       - run: npm run check:integrations
-      - name: Strict official MCP Inspector (27 full / 12 compact)
+      - name: Strict MCP Inspector (27 full / 12 compact) and pinned Glama mcp-proxy gate
         if: matrix.node-version == 24
         run: npm run check:mcp
       - name: Assert SQLite coverage (zero skips, todos, or failures)

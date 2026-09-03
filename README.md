@@ -226,12 +226,19 @@ choice, not lossy storage.
 SHADOWGRAPH_MCP_COMPACT=1 shadowgraph mcp
 ```
 
+Tool metadata follows the revision `initialize` negotiates: a session negotiated at `2025-03-26`
+also receives behavioural annotations, and one at `2025-06-18` or `2025-11-25` also receives output
+schemas and structured results, while a session at `2024-11-05` keeps the tool members and
+serialized results it always had. A request for a revision this server does not implement is
+answered with `2025-11-25`, the latest it does. See the
+[MCP compatibility guide](docs/mcp-compatibility.md) for the full table.
+
 The 12 compact tools are `shadowgraph_context`, `shadowgraph_remember`, `shadowgraph_recall`,
 `shadowgraph_record_decision`, `shadowgraph_record_attempt`, `shadowgraph_record_fact`,
 `shadowgraph_record_outcome`, `shadowgraph_retrieve`, `shadowgraph_search`, `shadowgraph_review`,
 `shadowgraph_validate`, and `shadowgraph_maintain`. Full mode advertises 27 — see the
-[MCP compatibility guide](docs/mcp-compatibility.md) for the complete inventory, both protocol
-revisions, and verified client behaviour.
+[MCP compatibility guide](docs/mcp-compatibility.md) for the complete inventory, every protocol
+revision, and verified client behaviour.
 
 ### AI tool setup
 
@@ -477,8 +484,10 @@ npm run smoke:package
 ```
 
 GitHub Actions covers Ubuntu and Windows on Node 20, 22, and 24. SQLite gates run only where
-`node:sqlite` exists. The strict official MCP Inspector runs full and compact gates, and the package
-smoke test runs from a real clean install in every matrix cell.
+`node:sqlite` exists. The strict official MCP Inspector runs full and compact gates, the pinned Glama
+`mcp-proxy@6.4.3` gate proves the revision this server negotiates with it and that the tool list
+reaches an HTTP scanner unchanged, and the package smoke test runs from a real clean install in
+every matrix cell.
 
 ## License
 

@@ -2,11 +2,12 @@ import { createInterface } from 'node:readline';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { stat as fsStat, unlink as fsUnlink } from 'node:fs/promises';
 import { createStorage } from './storage.js';
-import { createShadowGraph, isCommittedRejection, SOURCE_CLASSES, DECISION_STATUSES, OUTCOME_STATUSES, CONTENT_SEARCH_FIELDS, MEMORY_TYPES } from './shadowgraph.js';
+import { createShadowGraph, isCommittedRejection } from './shadowgraph.js';
 import { createEmbeddingClient } from './embedding.js';
 import { VERSION } from './version.js';
 import { createRestoreValidator } from './restore-validation.js';
 import { loadLocalEvidenceVerifier } from './verification.js';
+import { BATCH_PROTOCOL_VERSIONS, LEGACY_PROTOCOL_VERSIONS, METADATA_TIER, buildToolCatalog, metadataTierForProtocolVersion, negotiateLegacyProtocolVersion, projectTool, selectTools, toolResult } from './mcp-tools.js';
 
 const file = process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json';
 const injectedRestoreFaultStages = process.env.NODE_ENV === 'test'
@@ -65,11 +66,12 @@ const restoreValidator = createRestoreValidator({ verifier });
 const store = await createStorage({ file, restoreValidator, restoreFault: injectedRestoreFault, saveFault: injectedSaveFault });
 // P1-3: single source of truth — package.json via src/version.js.
 const MCP_VERSION = VERSION;
-// Dual-era protocol support: initialize selects the legacy contract, while
-// per-request io.modelcontextprotocol metadata selects the modern contract.
-const LEGACY_PROTOCOL_VERSION = '2024-11-05';
+// Dual-era protocol support: `initialize` negotiates one of the handshake
+// revisions in LEGACY_PROTOCOL_VERSIONS, while per-request
+// io.modelcontextprotocol metadata selects the modern contract. Newest first,
+// modern ahead of the handshake revisions.
 const MODERN_PROTOCOL_VERSION = '2026-07-28';
-const SUPPORTED_PROTOCOL_VERSIONS = Object.freeze([MODERN_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION]);
+const SUPPORTED_PROTOCOL_VERSIONS = Object.freeze([MODERN_PROTOCOL_VERSION, ...LEGACY_PROTOCOL_VERSIONS]);
 const JSON_RPC_ERROR = Symbol('shadowgraph.jsonRpcError');
 const PUBLIC_ERROR = Symbol('shadowgraph.publicError');
 const graph = createShadowGraph({ verifier, ...(injectedNow ? { now: injectedNow } : {}) });
@@ -156,132 +158,34 @@ async function persistCommittedRejection(rejection) {
   throw committedPersistenceError(persistenceError, durable, reconciliationError);
 }
 
-// Provenance properties shared by every write tool. `sourceClass` records WHAT WAS
-// CLAIMED about origin — it is never proof and never produces a verified fact.
-const provenanceProperties = {
-  sourceClass: { type: 'string', enum: [...SOURCE_CLASSES], description: 'Claimed origin class. A claim, not proof: no value here can make a fact verified.' },
-  actor: { type: 'string', description: 'Who performed this write, e.g. an agent name.' },
-  client: { type: 'string', description: 'Which client performed this write.' },
-  sessionId: { type: 'string', description: 'Session identifier for this write.' }
-};
-const pageProperties = {
-  limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'Page size. Omitted means a declared default, never silent truncation.' },
-  offset: { type: 'integer', minimum: 0, description: 'Page offset.' }
-};
-const nullableStringProperty = { anyOf: [{ type: 'string' }, { type: 'null' }] };
-const jsonValueProperty = {
-  description: 'Any lossless JSON value: string, finite number, boolean, null, array, or object.',
-  anyOf: [
-    { type: 'string' },
-    { type: 'number' },
-    { type: 'boolean' },
-    { type: 'null' },
-    { type: 'array', items: { $ref: '#/$defs/jsonValue' } },
-    { type: 'object', additionalProperties: { $ref: '#/$defs/jsonValue' } }
-  ]
-};
-const evidenceItemProperty = {
-  anyOf: [
-    { type: 'string' },
-    {
-      type: 'object',
-      properties: {
-        source: { type: 'string' },
-        type: { type: 'string' },
-        sourceClass: { type: 'string', enum: [...SOURCE_CLASSES] },
-        confidence: { type: 'number', minimum: 0, maximum: 1 },
-        observedAt: { type: 'string' },
-        detail: { type: 'string' }
-      },
-      additionalProperties: true
-    }
-  ]
-};
-const memoryScopeProperty = {
-  type: 'object',
-  properties: {
-    userId: nullableStringProperty,
-    agentId: nullableStringProperty,
-    runId: nullableStringProperty
-  },
-  additionalProperties: false
-};
-const embeddingProperty = { type: 'array', minItems: 1, items: { type: 'number' }, description: 'Optional caller-supplied vector. When omitted, the configured embedding provider is used.' };
-const memoryProperties = {
-  memoryType: { type: 'string', enum: [...MEMORY_TYPES] },
-  key: { type: 'string' },
-  text: { type: 'string' },
-  scope: memoryScopeProperty,
-  tags: { type: 'array', items: { type: 'string' } },
-  metadata: { type: 'object' },
-  validFrom: { type: 'string' },
-  validTo: nullableStringProperty,
-  embedding: embeddingProperty
-};
-const RESULT_ENVELOPE = 'Returns { items, page: { offset, limit, total, hasMore }, completeness } — completeness always declares what was omitted.';
-
-const baseTools = [
-  { name: 'shadowgraph_record_decision', description: 'Record a decision, its assumptions, evidence, and rejected alternatives.', inputSchema: { type: 'object', required: ['title', 'chosen'], properties: { id: { type: 'string', minLength: 1 }, title: { type: 'string' }, chosen: { type: 'string' }, project: { type: 'string' }, goal: { type: 'string' }, confidence: { type: 'number', minimum: 0, maximum: 1 }, assumptions: { type: 'array', items: { type: 'string' } }, evidence: { type: 'array', items: evidenceItemProperty }, alternatives: { type: 'array', items: { type: 'object', properties: { id: { type: 'string', minLength: 1 }, label: { type: 'string' }, reasonRejected: { type: 'string' }, reason: { type: 'string' }, reopenWhen: { type: 'array' } } } }, idempotencyKey: { type: 'string', maxLength: 200, description: 'Retry key scoped by project and operation; reuse only for the same logical write.' }, ...provenanceProperties } } },
-  { name: 'shadowgraph_record_attempt', description: 'Record a failed or informative attempt so the agent does not repeat it blindly.', inputSchema: { type: 'object', required: ['solution', 'result'], properties: { id: { type: 'string', minLength: 1 }, solution: { type: 'string' }, result: { type: 'string' }, project: { type: 'string' }, reason: { type: 'string' }, environment: { type: 'string' }, idempotencyKey: { type: 'string', maxLength: 200, description: 'Retry key scoped by project and operation; reuse only for the same logical write.' }, ...provenanceProperties } } },
-  { name: 'shadowgraph_review', description: 'Find decisions whose rejected alternatives should be reconsidered. Evaluates reopenWhen rules against STORED facts, so it works after a restart without re-supplying them.', inputSchema: { type: 'object', properties: { project: { type: 'string' }, changedFacts: { type: 'array', items: { type: 'string' } }, facts: { type: 'object', description: 'Optional overrides; these take precedence over stored facts.' } } } },
-  { name: 'shadowgraph_search', description: `Search decision and attempt memory. A query term matches DECLARED CONTENT FIELDS only (${CONTENT_SEARCH_FIELDS.join(', ')}) — schema keys and internal metadata never match. ${RESULT_ENVELOPE}`, inputSchema: { type: 'object', properties: { query: { type: 'string' }, project: { type: 'string' }, status: { type: 'string', enum: [...DECISION_STATUSES] }, kind: { type: 'string', enum: ['decision', 'attempt'] }, sourceClass: { type: 'string', enum: [...SOURCE_CLASSES] }, minConfidence: { type: 'number', minimum: 0, maximum: 1 }, ...pageProperties } } },
-  { name: 'shadowgraph_context', description: 'Build working context before a consequential task. Every collection declares its total in `completeness.collections`, so truncation is never silent.', inputSchema: { type: 'object', properties: { project: { type: 'string' }, limit: { type: 'integer', minimum: 1, maximum: 1000 }, changedFacts: { type: 'array', items: { type: 'string' } }, facts: { type: 'object' } } } },
-  {
-    name: 'shadowgraph_remember',
-    description: 'Add or reconcile scoped user, agent, run, procedure, episode, or note memory without flattening decision records. Accepts one memory or an explicit ADD/UPDATE/DELETE/NOOP plan.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        project: { type: 'string' },
-        ...memoryProperties,
-        operations: { type: 'array', items: { type: 'object', required: ['action', 'memoryType', 'key'], properties: { action: { type: 'string', enum: ['ADD', 'UPDATE', 'DELETE', 'NOOP'] }, ...memoryProperties } } },
-        ...provenanceProperties
-      },
-      oneOf: [{ required: ['memoryType', 'key', 'text'] }, { required: ['operations'] }]
-    }
-  },
-  {
-    name: 'shadowgraph_recall',
-    description: `Explainable hybrid recall across decisions, facts, attempts, and scoped memories. Fuses lexical, optional vector, graph-distance, and temporal ranks and declares unavailable signals. ${RESULT_ENVELOPE}`,
-    inputSchema: { type: 'object', properties: { query: { type: 'string' }, project: { type: 'string' }, scope: memoryScopeProperty, memoryType: { type: 'string', enum: [...MEMORY_TYPES] }, asOf: { type: 'string' }, focalId: { type: 'string' }, preferRecent: { type: 'boolean' }, queryEmbedding: embeddingProperty, ...pageProperties } }
-  },
-  { name: 'shadowgraph_record_fact', description: 'Record an observed fact with provenance. IMPORTANT: no input can mark a fact `verified` — a source label is a claim about origin, not proof.', inputSchema: { type: 'object', $defs: { jsonValue: jsonValueProperty }, required: ['key'], properties: { key: { type: 'string' }, value: jsonValueProperty, source: { type: 'string', description: 'Legacy alias for sourceClass. Unknown labels downgrade to agent_claimed with the raw label kept in sourceRaw.' }, confidence: { type: 'number', minimum: 0, maximum: 1 }, project: { type: 'string' }, expiresAt: { type: 'string' }, verificationStatus: { type: 'string', enum: ['unverified', 'contradicted'], description: 'Only `contradicted` may be set by a caller; `verified` and `expired` are rejected.' }, idempotencyKey: { type: 'string', maxLength: 200, description: 'Retry key scoped by project and operation; reuse only for the same logical write.' }, ...provenanceProperties } } },
-  { name: 'shadowgraph_record_outcome', description: 'Record what happened after a decision. Confidence moves by an evidence-weighted amount derived from the outcome\'s claimed source class; it never sets a verification status.', inputSchema: { type: 'object', required: ['decisionId', 'outcome'], properties: { decisionId: { type: 'string' }, outcome: { type: 'object', required: ['status'], properties: { status: { type: 'string', enum: [...OUTCOME_STATUSES] }, sourceClass: { type: 'string', enum: [...SOURCE_CLASSES] }, lessons: { type: 'array', items: { type: 'string' } }, observedAt: { type: 'string' } } } } } },
-  { name: 'shadowgraph_confidence_evidence', description: 'Record evidence for or against a decision and move its confidence by a weighted, auditable amount. `key` is REQUIRED and must be stable: it is the dedupe key, so a retry with the same key is a no-op and cannot double-count.', inputSchema: { type: 'object', required: ['decisionId', 'reason', 'key'], properties: { decisionId: { type: 'string' }, reason: { type: 'string' }, supports: { type: 'boolean', description: 'Defaults to true. false records contradicting evidence.' }, key: { type: 'string', description: 'REQUIRED stable dedupe key. Reuse the same key for the same observation so retries do not double-count; use a NEW key for a genuinely new observation.' }, observedAt: { type: 'string' }, ...provenanceProperties } } },
-  { name: 'shadowgraph_update_status', description: 'Move a decision through the explicit schema-5 lifecycle. stale and superseded are system-owned; archived is an explicit terminal disposition. Formatting variants like in-progress are accepted and stored canonically.', inputSchema: { type: 'object', required: ['decisionId', 'status'], properties: { decisionId: { type: 'string' }, status: { type: 'string', enum: [...DECISION_STATUSES] } } } },
-  { name: 'shadowgraph_link', description: 'Create an explainable relationship between graph entities.', inputSchema: { type: 'object', required: ['from', 'to', 'relation'], properties: { from: { type: 'string' }, to: { type: 'string' }, relation: { type: 'string' } } } },
-  { name: 'shadowgraph_traverse', description: 'Traverse related decisions, facts, attempts, and relationships.', inputSchema: { type: 'object', required: ['id'], properties: { id: { type: 'string' }, depth: { type: 'integer', minimum: 1, maximum: 10 }, direction: { type: 'string', enum: ['in', 'out', 'both'] }, relation: { type: 'string' } } } },
-  { name: 'shadowgraph_supersede', description: 'Mark one decision superseded by a replacement decision in the same project.', inputSchema: { type: 'object', required: ['decisionId', 'replacementId'], properties: { decisionId: { type: 'string' }, replacementId: { type: 'string' } } } },
-  { name: 'shadowgraph_redact', description: 'Return a redacted export without changing stored data. Redaction covers journal payloads too.', inputSchema: { type: 'object', properties: { project: { type: 'string' }, patterns: { type: 'array', items: { type: 'string' } } } } },
-  { name: 'shadowgraph_purge', description: 'Remove a project. Default mode `logical` keeps an auditable, payload-free journal skeleton. Mode `hard` physically deletes journal entries too, which creates a sequence gap that validate() reports.', inputSchema: { type: 'object', required: ['project'], properties: { project: { type: 'string' }, mode: { type: 'string', enum: ['logical', 'hard'], description: 'Defaults to logical. `hard` is irreversible and removes audit history.' } } } },
-  { name: 'shadowgraph_maintain', description: 'Age due decisions, expire facts, and generate persistent review signals.', inputSchema: { type: 'object', properties: { now: { type: 'string' }, changedFacts: { type: 'array' }, facts: { type: 'object' } } } },
-  { name: 'shadowgraph_retrieve', description: `Retrieve relevant records plus one-hop related graph context. ${RESULT_ENVELOPE}`, inputSchema: { type: 'object', properties: { query: { type: 'string' }, project: { type: 'string' }, status: { type: 'string', enum: [...DECISION_STATUSES] }, kind: { type: 'string', enum: ['decision', 'attempt'] }, minConfidence: { type: 'number', minimum: 0, maximum: 1 }, ...pageProperties } } },
-  { name: 'shadowgraph_validate', description: 'Validate graph integrity without modifying storage. Issues carry a severity: error (invalid data), legacy (readable but pre-contract), unsupported (newer schema), info.', inputSchema: { type: 'object' } },
-  { name: 'shadowgraph_journal', description: `Read the append-oriented journal of complete post-operation snapshots. ${RESULT_ENVELOPE} completeness.gaps lists sequence gaps left by hard purges.`, inputSchema: { type: 'object', properties: { project: { type: 'string' }, ...pageProperties } } },
-  { name: 'shadowgraph_rebuild', description: 'Rebuild a projection from the journal alone and report whether it was complete. Returns rebuildable:false with a reason rather than a silently partial graph.', inputSchema: { type: 'object', properties: { requireFullHistory: { type: 'boolean', description: 'When true, refuse to rebuild if pre-journal metadata-only entries exist.' } } } },
-  { name: 'shadowgraph_review_signals', description: 'List persistent review signals.', inputSchema: { type: 'object', properties: { project: { type: 'string' }, status: { type: 'string', enum: ['open', 'acknowledged'] } } } },
-  { name: 'shadowgraph_purge_preview', description: 'Preview project deletion counts without modifying storage.', inputSchema: { type: 'object', required: ['project'], properties: { project: { type: 'string' } } } },
-  { name: 'shadowgraph_ack_review', description: 'Acknowledge one persistent review signal.', inputSchema: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } } },
-  { name: 'shadowgraph_repair_plan', description: 'Return a non-destructive graph repair plan. Never mutates data.', inputSchema: { type: 'object' } },
-  { name: 'shadowgraph_backup', description: 'Create a consistent backup snapshot at a destination path.', inputSchema: { type: 'object', required: ['destination'], properties: { destination: { type: 'string' } } } },
-  { name: 'shadowgraph_restore', description: 'Restore a JSON or SQLite backup using the configured storage backend.', inputSchema: { type: 'object', required: ['source'], properties: { source: { type: 'string' } } } }
-];
-const verificationTool = {
-  name: 'shadowgraph_verify_fact',
-  description: 'Verify an active fact using a signed local evidence file checked by the server\'s separately preconfigured Ed25519 trust store. The caller cannot supply verifier identity, key, signature, method, or verified status.',
-  inputSchema: {
-    type: 'object',
-    required: ['factId', 'evidencePath'],
-    additionalProperties: false,
-    properties: {
-      factId: { type: 'string' },
-      evidencePath: { type: 'string', description: 'Path inside the verifier-configured evidence root.' }
-    }
-  }
-};
-const allTools = verifier ? [...baseTools, verificationTool] : baseTools;
-const compactNames = new Set(['shadowgraph_context','shadowgraph_remember','shadowgraph_recall','shadowgraph_record_decision','shadowgraph_record_attempt','shadowgraph_record_fact','shadowgraph_record_outcome','shadowgraph_retrieve','shadowgraph_search','shadowgraph_review','shadowgraph_validate','shadowgraph_maintain']);
-const tools = process.env.SHADOWGRAPH_MCP_COMPACT === '1' ? allTools.filter((tool) => compactNames.has(tool.name)) : allTools;
+// Tool metadata — names, descriptions, input/output schemas, behavioural
+// annotations, compact membership, and which tools persist — lives in ONE place,
+// src/mcp-tools.js. The advertised list, the unknown-tool guard, and the
+// post-call persistence decision are all derived from it here, so the three
+// cannot drift apart the way three hand-maintained string lists could.
+const toolCatalog = buildToolCatalog({
+  verifier: Boolean(verifier),
+  embeddingConfigured: Boolean(process.env.SHADOWGRAPH_EMBEDDING_URL)
+});
+const tools = selectTools(toolCatalog, { compact: process.env.SHADOWGRAPH_MCP_COMPACT === '1' });
+const toolsByName = new Map(tools.map((tool) => [tool.name, tool]));
+const persistingTools = new Set(tools.filter((tool) => tool.persists).map((tool) => tool.name));
+// One frozen projection per capability tier, built once. tools/list is answered
+// from these, so two calls in a session — and two processes with the same
+// configuration — return byte-identical bytes.
+const toolLists = Object.freeze([METADATA_TIER.BARE, METADATA_TIER.ANNOTATED, METADATA_TIER.STRUCTURED]
+  .map((tier) => Object.freeze(tools.map((tool) => projectTool(tool, tier)))));
+// Capability tier of the current handshake session, derived ONLY from the
+// revision `initialize` NEGOTIATED, never from the one the client asked for: a
+// requested version is a preference, and only the returned one is agreed. Until
+// initialize arrives, and in a session negotiated at 2024-11-05, the wire shape
+// carries exactly the members that revision defines. A later initialize
+// renegotiates and replaces both of these.
+let legacyTier = METADATA_TIER.BARE;
+// JSON-RPC batches are accepted only in a session negotiated at a revision whose
+// base protocol requires them. 2025-03-26 is the only such revision: 2024-11-05
+// never defined batching and 2025-06-18 removed it.
+let batchesAccepted = false;
 
 async function addConfiguredEmbeddings(args = {}) {
   if (!embeddingClient) return args;
@@ -298,7 +202,7 @@ async function addConfiguredEmbeddings(args = {}) {
     : args;
 }
 
-async function callUnqueued(name, args) {
+async function callUnqueued(name, args, tier) {
   if (persistenceUnavailable) throw unavailableError();
   const before = graph.exportData();
   let value;
@@ -390,7 +294,10 @@ async function callUnqueued(name, args) {
     graph.replaceData(before);
     throw error;
   }
-  if (name.includes('record_') || name === 'shadowgraph_verify_fact' || name === 'shadowgraph_context' || name === 'shadowgraph_remember' || name === 'shadowgraph_confidence_evidence' || name === 'shadowgraph_update_status' || name === 'shadowgraph_link' || name === 'shadowgraph_supersede' || name === 'shadowgraph_purge' || name === 'shadowgraph_maintain' || name === 'shadowgraph_review' || name === 'shadowgraph_ack_review' || name === 'shadowgraph_backup') {
+  // Which tools need a durable save is declared once, per tool, in the catalog.
+  // shadowgraph_restore is deliberately absent: the storage backend commits the
+  // replacement itself. See src/mcp-tools.js.
+  if (persistingTools.has(name)) {
     try { await persist(); }
     catch (error) {
       try { graph.replaceData(await store.load()); }
@@ -398,10 +305,10 @@ async function callUnqueued(name, args) {
       throw error;
     }
   }
-  return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }] };
+  return toolResult(toolsByName.get(name), value, tier);
 }
 
-function call(name, args) { return queueCall(() => callUnqueued(name, args)); }
+function call(name, args, tier) { return queueCall(() => callUnqueued(name, args, tier)); }
 
 // The single resource and prompt this server actually serves. Requests for
 // anything else are errors, not silent substitutions (P1-7).
@@ -433,7 +340,7 @@ const PUBLIC_PROTOCOL_MESSAGES = new Set([
   `Invalid params: _meta.${PROTOCOL_VERSION_META} must be a string`,
   `Invalid params: _meta.${CLIENT_INFO_META} requires name and version strings when present`,
   `Invalid params: _meta.${CLIENT_CAPABILITIES_META} must be an object`,
-  'Invalid params: protocolVersion must be a string',
+  'Invalid params: protocolVersion must be a non-empty string',
   'Invalid params: clientInfo requires name and version strings when present',
   'Invalid params: capabilities must be an object when present',
   'Invalid params: uri is required',
@@ -564,19 +471,27 @@ function publicErrorMessage(error) {
   return publicErrorDetails(error).message;
 }
 
-function reply(id, result, error) {
+// The wire shape of one JSON-RPC response. Building it separately from writing
+// it is what lets a batch collect several before one write; the object literal
+// and its key order are unchanged, so a single response is serialized exactly as
+// it was before batching existed.
+function responseFor(id, result, error) {
   const errorCode = Number.isFinite(error?.code) && Number.isInteger(error.code)
     ? error.code
     : -32000;
   const publicFailure = error ? publicErrorDetails(error) : null;
-  process.stdout.write(JSON.stringify({
+  return {
     jsonrpc: '2.0', id: id ?? null,
     ...(error ? { error: {
       code: errorCode,
       message: publicFailure.message,
       ...(publicFailure.data === undefined ? {} : { data: publicFailure.data })
     } } : { result })
-  }) + '\n');
+  };
+}
+
+function writeLine(value) {
+  process.stdout.write(JSON.stringify(value) + '\n');
 }
 
 function requestUsesModernProtocol(request) {
@@ -588,7 +503,10 @@ function requestUsesModernProtocol(request) {
   if (!meta || typeof meta !== 'object' || Array.isArray(meta)) throw rpcError(-32602, 'Invalid params: modern requests require params._meta');
   const protocolVersion = meta[PROTOCOL_VERSION_META];
   if (typeof protocolVersion !== 'string' || !protocolVersion) throw rpcError(-32602, `Invalid params: _meta.${PROTOCOL_VERSION_META} must be a string`);
-  if (!SUPPORTED_PROTOCOL_VERSIONS.includes(protocolVersion) || protocolVersion !== MODERN_PROTOCOL_VERSION) {
+  // Only the modern revision is usable per request. The handshake revisions are
+  // negotiated through `initialize` and appear in `supported` so a client can
+  // see everything this server implements.
+  if (protocolVersion !== MODERN_PROTOCOL_VERSION) {
     throw rpcError(-32022, 'Unsupported protocol version', { supported: [...SUPPORTED_PROTOCOL_VERSIONS], requested: protocolVersion });
   }
   const clientInfo = meta[CLIENT_INFO_META];
@@ -621,17 +539,17 @@ const promptText = verifier
   ? 'Before consequential work call context and retrieve. Record decisions, assumptions, evidence, alternatives, failed attempts, facts, and outcomes. Review open signals before continuing. Treat agent_claimed and unverified facts as hypotheses. Only the separately configured signed local-evidence verifier can mark an active fact verified.'
   : 'Before consequential work call context and retrieve. Record decisions, assumptions, evidence, alternatives, failed attempts, facts, and outcomes. Review open signals before continuing. Treat agent_claimed and unverified facts as hypotheses: without a separately configured verifier, nothing in ShadowGraph can be marked verified, so never present a stored claim as confirmed.';
 
-const input = createInterface({ input: process.stdin });
-input.on('line', async (line) => {
-  if (!line.trim()) return;
-  let request;
-  // P1-6: a JSON-RPC NOTIFICATION has no `id` member and MUST NOT be answered.
-  // The old code fell through to `reply(request.id, {})` for any unrecognised
-  // method, emitting `{"id": null, "result": {}}` for notifications — a protocol
-  // violation that a strict client can treat as a spurious response.
+// Handles one already-parsed JSON-RPC message. `emit` receives the response
+// object exactly once for a request and never for a notification, so a single
+// line can write its response straight out while a batch collects several.
+//
+// P1-6: a JSON-RPC NOTIFICATION has no `id` member and MUST NOT be answered.
+// The old code fell through to `reply(request.id, {})` for any unrecognised
+// method, emitting `{"id": null, "result": {}}` for notifications — a protocol
+// violation that a strict client can treat as a spurious response.
+async function handleMessage(request, emit) {
   let isNotification = false;
   try {
-    request = JSON.parse(line);
     if (!request || typeof request !== 'object' || Array.isArray(request)) throw rpcError(-32600, 'Invalid Request');
     if (request.jsonrpc !== '2.0') throw rpcError(-32600, 'Invalid Request: jsonrpc must be 2.0');
     if (typeof request.method !== 'string') throw rpcError(-32600, 'Invalid Request: method must be a string');
@@ -642,18 +560,18 @@ input.on('line', async (line) => {
       throw rpcError(-32602, 'Invalid params: params must be an object');
     }
     const respond = (result, error) => {
-      if (!isNotification) reply(request.id, result, error);
+      if (!isNotification) emit(responseFor(request.id, result, error));
     };
     const modern = requestUsesModernProtocol(request);
 
     if (persistenceUnavailable && request.method === 'resources/read') throw unavailableError();
 
     if (request.method === 'initialize') {
-      // Legacy 2024-11-05 handshake. A client may ask for a different revision;
-      // per that spec the server answers with the version it actually implements
-      // rather than echoing a version it does not support.
+      // Handshake negotiation. `protocolVersion` is a required string in every
+      // revision of InitializeRequest, so a missing, non-string, or empty value
+      // is invalid params rather than something to guess a revision from.
       const requested = request.params?.protocolVersion;
-      if (requested !== undefined && typeof requested !== 'string') throw rpcError(-32602, 'Invalid params: protocolVersion must be a string');
+      if (typeof requested !== 'string' || !requested) throw rpcError(-32602, 'Invalid params: protocolVersion must be a non-empty string');
       const clientInfo = request.params?.clientInfo;
       if (clientInfo !== undefined && (!clientInfo || typeof clientInfo !== 'object' || Array.isArray(clientInfo) || typeof clientInfo.name !== 'string' || !clientInfo.name || typeof clientInfo.version !== 'string' || !clientInfo.version)) {
         throw rpcError(-32602, 'Invalid params: clientInfo requires name and version strings when present');
@@ -662,7 +580,22 @@ input.on('line', async (line) => {
       if (capabilities !== undefined && (!capabilities || typeof capabilities !== 'object' || Array.isArray(capabilities))) {
         throw rpcError(-32602, 'Invalid params: capabilities must be an object when present');
       }
-      respond({ protocolVersion: LEGACY_PROTOCOL_VERSION, capabilities: SERVER_CAPABILITIES, serverInfo: SERVER_INFO });
+      // Every check above runs first, so a rejected handshake leaves the session
+      // exactly as it was. The revision this server answers with — the requested
+      // one when implemented, otherwise the latest it implements — is what selects
+      // the optional tool metadata and whether batches are accepted. The requested
+      // value selects nothing on its own.
+      const negotiated = negotiateLegacyProtocolVersion(requested);
+      // A handshake is an exchange. An initialize with no id is a notification:
+      // it receives no response, so the client never learns what was agreed and
+      // nothing was agreed. Changing what this session emits on the strength of
+      // it would let a message that negotiated nothing silently downgrade a
+      // session that had, so the state is left exactly as it was.
+      if (!isNotification) {
+        legacyTier = metadataTierForProtocolVersion(negotiated);
+        batchesAccepted = BATCH_PROTOCOL_VERSIONS.includes(negotiated);
+      }
+      respond({ protocolVersion: negotiated, capabilities: SERVER_CAPABILITIES, serverInfo: SERVER_INFO });
     } else if (request.method.startsWith('notifications/')) {
       // Method names do not define notifications; absence of id does. A client
       // that explicitly supplies id:null sent a request and still gets a reply.
@@ -674,7 +607,7 @@ input.on('line', async (line) => {
         capabilities: SERVER_CAPABILITIES,
         instructions: 'Local-first explainable decision and scoped temporal memory. Use context/retrieve before consequential work and record outcomes afterward.'
       }, 'public'));
-    } else if (request.method === 'tools/list') respond(eraResult(modern, { tools }, 'public'));
+    } else if (request.method === 'tools/list') respond(eraResult(modern, { tools: toolLists[modern ? METADATA_TIER.STRUCTURED : legacyTier] }, 'public'));
     else if (request.method === 'resources/list') respond(eraResult(modern, { resources: resourceList }, 'public'));
     else if (request.method === 'resources/read') {
       // P1-7: an unknown URI used to receive the real context payload anyway,
@@ -683,6 +616,14 @@ input.on('line', async (line) => {
       if (typeof uri !== 'string' || !uri) throw rpcError(-32602, 'Invalid params: uri is required');
       if (!RESOURCE_URIS.has(uri)) throw rpcError(-32602, 'Unknown resource URI');
       const context = await queueCall(async () => {
+        // Recheck inside the queue, before touching the graph. The check above
+        // runs while the request is being dispatched, and a restore that
+        // degrades the server may still have been in flight then — in one batch
+        // both are dispatched together, so both clear that check before either
+        // runs. Only here has the restore necessarily finished, which is what
+        // makes the latch closed rather than merely early. callUnqueued does the
+        // same for tools/call.
+        if (persistenceUnavailable) throw unavailableError();
         const before = graph.exportData();
         let value;
         try { value = graph.context({}); }
@@ -708,11 +649,15 @@ input.on('line', async (line) => {
       if (typeof request.params.name !== 'string' || !request.params.name) throw rpcError(-32602, 'Invalid params: name is required for tools/call');
       const args = request.params.arguments ?? {};
       if (typeof args !== 'object' || args === null || Array.isArray(args)) throw rpcError(-32602, 'Invalid params: arguments must be an object');
-      if (!tools.some((tool) => tool.name === request.params.name)) {
+      if (!toolsByName.has(request.params.name)) {
         throw rpcError(modern ? -32602 : -32601, 'Unknown tool');
       }
       try {
-        const result = await call(request.params.name, args);
+        // Structured content is emitted only in a session negotiated at a
+        // revision that defines it, or to a modern `_meta` request, and only for
+        // a tool that advertises an output schema at that tier. A failed call
+        // stays content-only.
+        const result = await call(request.params.name, args, modern ? METADATA_TIER.STRUCTURED : legacyTier);
         respond(eraResult(modern, modern ? { ...result, isError: false } : result));
       } catch (error) {
         if (!modern || isRpcError(error)) throw error;
@@ -725,9 +670,49 @@ input.on('line', async (line) => {
     // flattened and a client could not distinguish "no such tool" from a genuine
     // internal failure.
     if (isNotification) return;
-    const parseError = request === undefined && error instanceof SyntaxError;
-    reply(request?.id ?? null, null, parseError
-      ? rpcError(-32700, 'Parse error')
-      : error);
+    emit(responseFor(request?.id ?? null, null, error));
   }
+}
+
+// 2025-03-26 base protocol: "MCP implementations MAY support sending JSON-RPC
+// batches, but MUST support receiving JSON-RPC batches." The responses for
+// members that carry an id are written as one array in member order; a batch of
+// notifications alone writes nothing.
+//
+// Members are dispatched synchronously, in order, rather than awaited one at a
+// time. Awaiting between them would return to the readline callback mid-batch,
+// and readline delivers every line of one stdin chunk synchronously, so a
+// message sent after the batch could reach the shared call queue ahead of a
+// member still to be dispatched — reordering the domain operations themselves,
+// not just the replies. Dispatching up front puts every member on that queue in
+// its own position before any later line is read; each reply is collected by
+// index, so completion order cannot disturb the order they are written in.
+async function handleBatch(batch) {
+  if (batch.length === 0) {
+    writeLine(responseFor(null, null, rpcError(-32600, 'Invalid Request')));
+    return;
+  }
+  const collected = batch.map(() => []);
+  const settled = batch.map((member, index) => handleMessage(member, (response) => collected[index].push(response)));
+  await Promise.all(settled);
+  const responses = collected.flat();
+  if (responses.length) writeLine(responses);
+}
+
+const input = createInterface({ input: process.stdin });
+input.on('line', (line) => {
+  if (!line.trim()) return;
+  let parsed;
+  // A parse failure is answered before anything else can look at the message, so
+  // an unparseable line - batch or not - is the one case that cannot carry an id.
+  try { parsed = JSON.parse(line); }
+  catch { writeLine(responseFor(null, null, rpcError(-32700, 'Parse error'))); return; }
+  // Dispatch stays synchronous from here, for a single message and for every
+  // member of a batch alike, so the order in which tool calls register on the
+  // shared queue still follows the order the lines arrived in.
+  if (!Array.isArray(parsed)) { void handleMessage(parsed, writeLine); return; }
+  // An array is a batch only where the negotiated revision requires one to be
+  // accepted; anywhere else it is exactly what it was before: an invalid request.
+  if (!batchesAccepted) { writeLine(responseFor(null, null, rpcError(-32600, 'Invalid Request'))); return; }
+  void handleBatch(parsed);
 });

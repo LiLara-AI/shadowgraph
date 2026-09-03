@@ -146,9 +146,15 @@ test('MCP schemas expose optional non-empty explicit ids for v1.1 records', asyn
   const decision = tools.find((tool) => tool.name === 'shadowgraph_record_decision').inputSchema;
   const attempt = tools.find((tool) => tool.name === 'shadowgraph_record_attempt').inputSchema;
 
-  assert.deepEqual(decision.properties.id, { type: 'string', minLength: 1 });
-  assert.deepEqual(decision.properties.alternatives.items.properties.id, { type: 'string', minLength: 1 });
-  assert.deepEqual(attempt.properties.id, { type: 'string', minLength: 1 });
+  for (const schema of [
+    decision.properties.id,
+    decision.properties.alternatives.items.properties.id,
+    attempt.properties.id
+  ]) {
+    assert.equal(schema.type, 'string');
+    assert.equal(schema.minLength, 1);
+    assert.match(schema.description, /\S/, 'the Glama-facing schema keeps a meaningful parameter description');
+  }
   assert.equal(decision.required.includes('id'), false);
   assert.equal(attempt.required.includes('id'), false);
 });

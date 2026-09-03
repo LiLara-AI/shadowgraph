@@ -120,7 +120,7 @@ Restart Hermes after registration. Hermes exposes discovered tools with its `mcp
 
 - `scripts/check-integrations.mjs` validates every JSON template and the required Codex TOML/Hermes YAML launch fields.
 - `scripts/smoke-package.mjs` builds a real tarball, installs it into a new directory whose path contains spaces, launches `shadowgraph mcp` only from that installed package, verifies 27 full and 12 compact tools, and performs MCP remember/restart/recall.
-- `npm run check:mcp` runs pinned official Inspector strict checks in both modes.
+- `npm run check:mcp` runs pinned official Inspector strict checks in both modes, then the pinned Glama `mcp-proxy@6.4.3` gate.
 - Product config shapes and commands follow the current official Claude Code, Cursor, Codex, and Hermes MCP documentation. A host application still needs to be installed locally to measure its own discovery UI and lifecycle.
 
 ## HTTP, dashboard, and optional Python wrapper

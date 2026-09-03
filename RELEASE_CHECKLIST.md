@@ -22,7 +22,7 @@ No publish, tag, GitHub release, commit, push, or release-branch action is part 
 - [ ] `npm test` with no failures, skipped tests, todos, or weakened coverage
 - [ ] `npm run check`
 - [ ] `npm run check:integrations`
-- [ ] `npm run check:mcp` (strict official Inspector, full and compact)
+- [ ] `npm run check:mcp` (strict official Inspector, full and compact, then the pinned Glama mcp-proxy gate)
 - [ ] `npm audit --omit=dev`
 - [ ] `npm run check:package`
 - [ ] `npm pack --dry-run --json`; inspect every path and exact count

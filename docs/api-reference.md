@@ -147,7 +147,7 @@ MCP exposes `shadowgraph_verify_fact` only in full mode when `SHADOWGRAPH_VERIFI
 
 | Surface | Entry point | Notes |
 | --- | --- | --- |
-| MCP | `shadowgraph mcp` (from a clone: `npm run mcp`) | Dual-era legacy `2024-11-05` plus modern `2026-07-28`; see [MCP compatibility](mcp-compatibility.md). `SHADOWGRAPH_MCP_COMPACT=1` advertises 12 tools instead of 27. |
+| MCP | `shadowgraph mcp` (from a clone: `npm run mcp`) | Dual-era: `initialize` negotiates `2024-11-05`, `2025-03-26`, `2025-06-18`, or `2025-11-25`, and modern `2026-07-28` is served per request; see [MCP compatibility](mcp-compatibility.md). `SHADOWGRAPH_MCP_COMPACT=1` advertises 12 tools instead of 27. |
 | HTTP | `shadowgraph serve` (from a clone: `npm start`) | Binds `127.0.0.1`; optional Bearer auth via `SHADOWGRAPH_API_TOKEN`. |
 | CLI | `shadowgraph <command>` (from a clone: `node src/cli.js <command>`) | Each invocation is a separate process that reopens the store. |
 
@@ -158,6 +158,6 @@ on the public registry belongs to an unrelated package. Install from GitHub as d
 
 ## 6. Errors thrown by input validation
 
-`A caller cannot set fact verificationStatus to verified` · `... to expired` · `Invalid fact verificationStatus` · `Invalid decision status: <raw>` · `Unknown journal entry type: <type>` · `Purge mode must be logical or hard` · `Outcome status must be successful, mixed, failed, or unknown` · `<field> must be a string when provided` · `Decision not found`.
+`A caller cannot set fact verificationStatus to verified` · `... to expired` · `Invalid fact verificationStatus` · `Invalid decision status: <raw>` · `Unknown journal entry type: <type>` · `Purge mode must be logical or hard` · `Outcome status must be successful, mixed, failed, or unknown` · `<field> must be a string when provided` · `Decision not found` · `Illegal decision status transition: <from> -> <to>` · `Relation endpoints must exist before linking` · `A traversal requires an existing id` · `Review signal not found`.
 
 The first four message shapes pre-date this release and are preserved for compatibility.
