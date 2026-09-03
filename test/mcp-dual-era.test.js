@@ -8,6 +8,9 @@ import { VERSION } from '../src/version.js';
 
 const LEGACY_PROTOCOL = '2024-11-05';
 const MODERN_PROTOCOL = '2026-07-28';
+// Every revision this server implements, newest first, as server/discover and
+// the -32022 error data report them.
+const SUPPORTED_PROTOCOLS = [MODERN_PROTOCOL, '2025-11-25', '2025-06-18', '2025-03-26', LEGACY_PROTOCOL];
 
 function modernParams(values = {}, protocolVersion = MODERN_PROTOCOL) {
   return {
@@ -66,7 +69,7 @@ function assertModernComplete(result) {
   assert.deepEqual(result._meta['io.modelcontextprotocol/serverInfo'], { name: 'shadowgraph', version: VERSION });
 }
 
-test('MCP legacy initialize negotiates 2024-11-05 while preserving legacy result shapes', async (t) => {
+test('MCP initialize answers a per-request-only revision with the latest handshake revision it implements', async (t) => {
   const rpc = await startMcp(t);
   const initialized = await rpc.call({
     jsonrpc: '2.0', id: 'legacy-init', method: 'initialize', params: {
@@ -75,7 +78,9 @@ test('MCP legacy initialize negotiates 2024-11-05 while preserving legacy result
       clientInfo: { name: 'legacy-test', version: '1.0.0' }
     }
   });
-  assert.equal(initialized.result.protocolVersion, LEGACY_PROTOCOL);
+  // 2026-07-28 removed the handshake, so it is not one this server can negotiate
+  // here; the answer is the latest handshake revision it does implement.
+  assert.equal(initialized.result.protocolVersion, '2025-11-25');
   assert.deepEqual(Object.keys(initialized.result.capabilities).sort(), ['prompts', 'resources', 'tools']);
 
   const listed = await rpc.call({ jsonrpc: '2.0', id: 'legacy-tools', method: 'tools/list', params: {} });
@@ -94,7 +99,7 @@ test('MCP modern discovery and every advertised primitive use 2026-07-28 result 
   const discovered = await rpc.call({
     jsonrpc: '2.0', id: 'discover', method: 'server/discover', params: modernParams()
   });
-  assert.deepEqual(discovered.result.supportedVersions, [MODERN_PROTOCOL, LEGACY_PROTOCOL]);
+  assert.deepEqual(discovered.result.supportedVersions, SUPPORTED_PROTOCOLS);
   assert.deepEqual(Object.keys(discovered.result.capabilities).sort(), ['prompts', 'resources', 'tools']);
   assert.equal(discovered.result.cacheScope, 'public');
   assert.equal(discovered.result.ttlMs, 0);
@@ -153,7 +158,7 @@ test('MCP modern metadata, version, JSON-RPC, and tool errors remain distinguish
   });
   assert.equal(unsupported.error.code, -32022);
   assert.deepEqual(unsupported.error.data, {
-    supported: [MODERN_PROTOCOL, LEGACY_PROTOCOL], requested: '2099-01-01'
+    supported: SUPPORTED_PROTOCOLS, requested: '2099-01-01'
   });
 
   const invalidRpc = await rpc.call({ jsonrpc: '1.0', id: 3, method: 'tools/list', params: modernParams() });

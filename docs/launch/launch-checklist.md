@@ -54,8 +54,8 @@ decision or action.
 ## 4. Verification gates
 
 - [x] `npm run check`
-- [x] `npm test` — 1204/1204, zero skips, todos, or failures
-- [x] `npm run check:mcp` — strict official Inspector, full and compact
+- [x] `npm test` — 1250/1250, zero skips, todos, or failures
+- [x] `npm run check:mcp` — strict official Inspector, full and compact, then the pinned Glama mcp-proxy gate
 - [x] `npm run check:integrations`
 - [x] `npm run check:package` — passes with `private: true`
 - [x] `npm run smoke:package` — real tarball, clean install, path containing spaces

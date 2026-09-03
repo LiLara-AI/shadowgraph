@@ -11,6 +11,8 @@ import { createJsonFileStore } from '../src/storage.js';
 
 const MODERN_PROTOCOL = '2026-07-28';
 const LEGACY_PROTOCOL = '2024-11-05';
+// Every revision this server implements, newest first.
+const SUPPORTED_PROTOCOLS = [MODERN_PROTOCOL, '2025-11-25', '2025-06-18', '2025-03-26', LEGACY_PROTOCOL];
 const PROTOCOL_VERSION_META = 'io.modelcontextprotocol/protocolVersion';
 const CLIENT_INFO_META = 'io.modelcontextprotocol/clientInfo';
 const CLIENT_CAPABILITIES_META = 'io.modelcontextprotocol/clientCapabilities';
@@ -277,7 +279,7 @@ test('modern request metadata permits omitted clientInfo but validates it when p
     jsonrpc: '2.0', id: 'discover-anonymous', method: 'server/discover', params: modernParams()
   });
   assert.equal(omitted.error, undefined, omitted.error?.message);
-  assert.deepEqual(omitted.result.supportedVersions, [MODERN_PROTOCOL, LEGACY_PROTOCOL]);
+  assert.deepEqual(omitted.result.supportedVersions, SUPPORTED_PROTOCOLS);
   assert.equal(omitted.result.resultType, 'complete');
   assert.equal(Object.hasOwn(omitted.result, 'serverInfo'), false, 'modern server identity belongs only in result metadata');
   assert.deepEqual(Object.keys(omitted.result.capabilities).sort(), ['prompts', 'resources', 'tools']);
@@ -312,7 +314,7 @@ test('modern request metadata permits omitted clientInfo but validates it when p
   });
   assertRpcCode(unsupported, -32022);
   assert.deepEqual(unsupported.error.data, {
-    supported: [MODERN_PROTOCOL, LEGACY_PROTOCOL],
+    supported: SUPPORTED_PROTOCOLS,
     requested: '2099-01-01'
   });
 
@@ -327,7 +329,7 @@ test('modern request metadata permits omitted clientInfo but validates it when p
   });
   assertRpcCode(privateUnsupported, -32022);
   assert.deepEqual(privateUnsupported.error.data, {
-    supported: [MODERN_PROTOCOL, LEGACY_PROTOCOL]
+    supported: SUPPORTED_PROTOCOLS
   });
   assert.equal(JSON.stringify(privateUnsupported).includes('PRIVATE_UNSUPPORTED_VERSION_SENTINEL'), false);
 
@@ -377,19 +379,32 @@ test('modern tool execution failures use CallToolResult while malformed calls re
   assertRpcCode(unknown, -32602);
 });
 
-test('initialize selects legacy semantics, accepts omitted optional fields, and rejects malformed fields when present', async (t) => {
+test('initialize negotiates a handshake revision, requires protocolVersion, and rejects malformed optional fields', async (t) => {
   const rpc = await startMcp(t);
 
-  const empty = await rpc.call({ jsonrpc: '2.0', id: 'init-empty', method: 'initialize', params: {} });
-  assert.equal(empty.error, undefined, empty.error?.message);
-  assert.equal(empty.result.protocolVersion, LEGACY_PROTOCOL);
+  // protocolVersion is a required string in every revision of InitializeRequest.
+  for (const [label, params] of [
+    ['omitted', {}],
+    ['empty', { protocolVersion: '' }],
+    ['non-string', { protocolVersion: 42 }]
+  ]) {
+    const response = await rpc.call({ jsonrpc: '2.0', id: `init-version-${label}`, method: 'initialize', params });
+    assertRpcCode(response, -32602);
+    assert.equal(response.error.message, 'Invalid params: protocolVersion must be a non-empty string', label);
+  }
 
   const missingClientInfo = await rpc.call({
     jsonrpc: '2.0', id: 'init-anonymous', method: 'initialize',
     params: { protocolVersion: MODERN_PROTOCOL, capabilities: {} }
   });
   assert.equal(missingClientInfo.error, undefined, missingClientInfo.error?.message);
-  assert.equal(missingClientInfo.result.protocolVersion, LEGACY_PROTOCOL, 'initialize always selects the documented legacy era');
+  assert.equal(missingClientInfo.result.protocolVersion, '2025-11-25', 'a revision with no handshake falls back to the latest handshake revision');
+
+  const legacyRequest = await rpc.call({
+    jsonrpc: '2.0', id: 'init-legacy', method: 'initialize',
+    params: { protocolVersion: LEGACY_PROTOCOL, capabilities: {} }
+  });
+  assert.equal(legacyRequest.result.protocolVersion, LEGACY_PROTOCOL, 'an implemented revision is echoed unchanged');
 
   const presentClientInfo = await rpc.call({
     jsonrpc: '2.0', id: 'init-identified', method: 'initialize',
@@ -400,6 +415,7 @@ test('initialize selects legacy semantics, accepts omitted optional fields, and 
     }
   });
   assert.equal(presentClientInfo.error, undefined, presentClientInfo.error?.message);
+  assert.equal(presentClientInfo.result.protocolVersion, LEGACY_PROTOCOL);
 
   for (const [label, clientInfo] of [
     ['null', null],
@@ -409,7 +425,7 @@ test('initialize selects legacy semantics, accepts omitted optional fields, and 
   ]) {
     const response = await rpc.call({
       jsonrpc: '2.0', id: `init-malformed-${label}`, method: 'initialize',
-      params: { clientInfo }
+      params: { protocolVersion: LEGACY_PROTOCOL, clientInfo }
     });
     assertRpcCode(response, -32602);
   }
@@ -417,7 +433,7 @@ test('initialize selects legacy semantics, accepts omitted optional fields, and 
   for (const [label, capabilities] of [['null', null], ['array', []], ['string', 'tools']]) {
     const response = await rpc.call({
       jsonrpc: '2.0', id: `init-capabilities-${label}`, method: 'initialize',
-      params: { capabilities }
+      params: { protocolVersion: LEGACY_PROTOCOL, capabilities }
     });
     assertRpcCode(response, -32602);
   }

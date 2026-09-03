@@ -1,5 +1,84 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- MCP tool metadata now has one source, `src/mcp-tools.js`, which also supplies the advertised tool
+  list, the unknown-tool guard, and the set of tools that persist after a successful call. Tool
+  names and the 27/12/28 inventories are unchanged, as is what every tool does to the store.
+- Every tool description states what it does, which sibling to use instead, and what it persists,
+  destroys, or does on a retry, in at most 350 characters. Field rules moved into the input-schema
+  property descriptions, result shapes into the output schemas, and longer explanations into
+  `docs/mcp-compatibility.md`. Every input property, including nested ones, carries a description:
+  top-level coverage went from 29% to 100%.
+- `tools/list` is materially smaller. In full mode it is now 41,680 bytes bare, 44,514 annotated and
+  155,847 structured, down from 52,215 / 55,043 / 166,376 on this branch; compact mode is 28,254 and
+  90,356, down from 33,454 and 95,553. Description text across the 27 full-mode tools fell from
+  18,429 to 8,515 characters. All figures are UTF-8 bytes of `JSON.stringify(result.tools)`, the same
+  boundary used for the 17,839-byte pre-metadata baseline, and exclude the constant 44-byte JSON-RPC
+  envelope. `npm run size:mcp` reproduces them with a per-member breakdown, and the metadata tests
+  enforce per-tool, aggregate, and per-tier budgets.
+- Output schemas were not changed. They account for 111,308 of the 155,847 structured bytes, and an
+  advertised schema is a promise a validating client enforces, so none was trimmed to reduce a number.
+- Tools declare `readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint`, derived
+  from what each handler actually does, and 25 of the 27 full-mode tools declare an `outputSchema`
+  and return matching `structuredContent` beside the unchanged serialized text.
+  `shadowgraph_review` and `shadowgraph_review_signals` return bare JSON arrays and therefore
+  declare neither; the omission is documented and asserted by tests.
+- Tool annotations were corrected against what the handlers observably do. Every tool that persists,
+  and `shadowgraph_restore`, is now `idempotentHint: false`: each successful call commits a new
+  durable revision even when the domain result is a no-op, and that revision is the concurrency token
+  other writers compare. That changes `shadowgraph_review`, `shadowgraph_context`,
+  `shadowgraph_remember`, `shadowgraph_confidence_evidence`, `shadowgraph_update_status`,
+  `shadowgraph_supersede`, `shadowgraph_ack_review`, and `shadowgraph_verify_fact`.
+  `shadowgraph_ack_review` is additionally `destructiveHint: true`, because it rewrites a signal's
+  status and `acknowledgedAt` in place with no journal entry, so the previous acknowledgement cannot
+  be recovered. `shadowgraph_verify_fact` is additionally `openWorldHint: true`, because the caller
+  chooses the evidence path the server reads, as with backup and restore.
+- `test/mcp-tool-effects.test.js` now proves those annotations rather than restating them: it drives
+  the real stdio server, calls every advertised tool twice with identical arguments, records the
+  durable revision, the journal, the stored entities, the timestamps, and the files written, and
+  derives all four hints from what changed. An annotation that stops matching the handler fails the
+  suite.
+- `initialize` now genuinely negotiates the protocol revision. A request for `2025-11-25`,
+  `2025-06-18`, `2025-03-26`, or `2024-11-05` is echoed, and any other value is answered with
+  `2025-11-25`, the latest revision this server implements. `protocolVersion` is required: a missing,
+  non-string, or empty value is `-32602` rather than a revision to guess from. Previously every
+  handshake answered `2024-11-05` no matter what was asked for.
+- Optional tool members follow the revision the server returned, not the one the client asked for:
+  `annotations` from `2025-03-26`, `outputSchema` and `structuredContent` from `2025-06-18`, and both
+  for modern `_meta` requests. A future or unrecognised value can no longer unlock metadata by
+  itself, because it first negotiates a revision both peers agree on. See
+  `docs/mcp-compatibility.md` §4.
+- A session negotiated at `2024-11-05` keeps the top-level tool members (`name`, `description`,
+  `inputSchema`), the tool names and counts, and the serialized text result. Tool objects are not
+  byte-identical to earlier releases: descriptions were rewritten and input-schema properties gained
+  descriptions, as the bullets above and below describe.
+- The stdio server accepts JSON-RPC batches in a session negotiated at `2025-03-26`, whose base
+  protocol requires it, and only there: 2024-11-05 never defined batching and 2025-06-18 removed it.
+  Responses for members carrying an `id` come back as one array on one line, and a batch of
+  notifications alone produces no output.
+- `server/discover` and the `-32022` error data now list every implemented revision, newest first:
+  `2026-07-28`, `2025-11-25`, `2025-06-18`, `2025-03-26`, `2024-11-05`. Only `2026-07-28` is usable
+  as a per-request `_meta` version.
+- `shadowgraph_traverse` now documents its `project` and `scope` parameters, which the handler
+  already accepted, and `shadowgraph_maintain` declares that `changedFacts` holds strings, which
+  the server already enforced. No constraint was added or removed anywhere else.
+- The strict official Inspector gate additionally fails when a tool is missing an annotation or an
+  expected output schema.
+- `npm run check:mcp` now also runs `scripts/check-glama-proxy.mjs` (`npm run check:glama`), which
+  starts the pinned `mcp-proxy@6.4.3` that fronts Glama’s generated container, puts a transparent
+  stdio recorder between it and the server, and scans over streamable HTTP as Glama does. It asserts
+  that the proxy requests `2025-11-25`, that this server negotiates `2025-11-25` with it, and that
+  the 27-tool list the scanner receives, annotations and output schemas included, is deep-equal to
+  the one the server wrote. No dependency was added: the proxy is fetched through `npx`, exactly as
+  the Inspector already is. What used to be a dated sentence in the compatibility document is now a
+  gate that fails when it stops being true.
+- `npm run size:mcp` reports `tools/list` wire sizes with a per-member breakdown, and
+  `test/check-glama-proxy.test.js` covers the new gate’s recorder, event-stream parser, and
+  assertions offline.
+
 ## 0.40.0 — Technical Preview (unreleased on npm)
 
 This release keeps ShadowGraph's decision-first model and adds the everyday memory capabilities needed for user personalization, temporal recall, hybrid retrieval, and human-readable Markdown workflows. The implementation is independent; no competitor source code was copied.

@@ -76,8 +76,9 @@
     "setup": "node src/cli.js setup",
     "doctor": "node src/cli.js doctor",
     "mcp": "node src/mcp.js",
-    "check": "node --check src/shadowgraph.js && node --check src/hybrid-search.js && node --check src/embedding.js && node --check src/markdown-workspace.js && node --check src/storage.js && node --check src/sqlite-storage.js && node --check src/restore-validation.js && node --check src/server.js && node --check src/cli.js && node --check src/mcp.js && node --check src/verification.js && node --check src/backup.js && node --check src/revision-store.js && node --check src/journal.js && node --check src/confidence.js && node --check scripts/bench-journal.mjs && node --check scripts/validate-bench-journal.mjs && node --check scripts/check-package.mjs && node --check scripts/check-mcp.mjs && node --check scripts/check-integrations.mjs && node --check scripts/smoke-package.mjs && npm run benchmark:check",
+    "check": "node --check src/shadowgraph.js && node --check src/hybrid-search.js && node --check src/embedding.js && node --check src/markdown-workspace.js && node --check src/storage.js && node --check src/sqlite-storage.js && node --check src/restore-validation.js && node --check src/server.js && node --check src/cli.js && node --check src/mcp.js && node --check src/mcp-tools.js && node --check src/verification.js && node --check src/backup.js && node --check src/revision-store.js && node --check src/journal.js && node --check src/confidence.js && node --check scripts/bench-journal.mjs && node --check scripts/validate-bench-journal.mjs && node --check scripts/check-package.mjs && node --check scripts/check-mcp.mjs && node --check scripts/check-glama-proxy.mjs && node --check scripts/check-integrations.mjs && node --check scripts/smoke-package.mjs && node --check scripts/mcp-wire-size.mjs && npm run benchmark:check",
     "bench": "node scripts/bench-journal.mjs",
+    "size:mcp": "node scripts/mcp-wire-size.mjs",
     "benchmark:preflight": "node benchmark/cli.mjs preflight",
     "benchmark:run": "node benchmark/cli.mjs run",
     "benchmark:validate": "node benchmark/cli.mjs validate",
@@ -86,7 +87,8 @@
     "benchmark:check": "node --check benchmark/cli.mjs && node --check benchmark/lib/preregistration.mjs && node --check benchmark/lib/capabilities.mjs && node --check benchmark/lib/adapters.mjs && node --check benchmark/lib/scoring.mjs && node --check benchmark/lib/validate.mjs && node --check benchmark/lib/aggregate.mjs && node --check benchmark/lib/journal-validation.mjs && node --check scripts/bench-journal.mjs && node --check scripts/validate-bench-journal.mjs",
     "benchmark:journal:validate": "node scripts/validate-bench-journal.mjs",
     "check:package": "node scripts/check-package.mjs",
-    "check:mcp": "node scripts/check-mcp.mjs",
+    "check:mcp": "node scripts/check-mcp.mjs && node scripts/check-glama-proxy.mjs",
+    "check:glama": "node scripts/check-glama-proxy.mjs",
     "check:integrations": "node scripts/check-integrations.mjs",
     "smoke:package": "node scripts/smoke-package.mjs"
   }

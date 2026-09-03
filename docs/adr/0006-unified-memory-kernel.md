@@ -115,6 +115,20 @@ Keep all existing tools. Add two high-level workflow tools:
 
 Expose explicit Markdown push/pull through CLI after the core behavior is proven. Bidirectional one-command and HTTP file sync are deferred below because their cross-file/canonical commit boundary needs a separate transaction contract. MCP schemas must mark destructive/idempotent/read-only behavior only when the negotiated protocol supports those annotations.
 
+**Amendment, 2026-09-03.** An earlier amendment read this sentence as permitting *declared-capability
+gating*, where the revision a client asked for selected the optional members it received. That was
+wrong: a requested revision is a client's preference, not an agreed contract, and it let an
+unimplemented value such as `2099-01-01` unlock members no peer had agreed on. The sentence above is
+now satisfied literally. `initialize` genuinely negotiates one of `2024-11-05`, `2025-03-26`,
+`2025-06-18`, or `2025-11-25` — echoing the requested revision when this server implements it and
+otherwise answering `2025-11-25`, the latest it implements — and optional tool members follow that
+**negotiated** revision: `annotations` from `2025-03-26`, `outputSchema` and `structuredContent` from
+`2025-06-18`, and both for modern `2026-07-28` `_meta` requests. A session negotiated at `2024-11-05`
+keeps the top-level member set of every tool object, the tool names and counts, and the serialized
+text result; descriptions and input-schema descriptions were improved for every revision, which
+changes how the tools are described rather than what they accept or return. See
+[MCP compatibility §4](../mcp-compatibility.md).
+
 ## Rejected alternatives
 
 | Alternative | Decision | Reason |
