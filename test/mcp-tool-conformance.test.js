@@ -10,6 +10,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createFactAttestation } from '../src/verification.js';
@@ -40,6 +41,63 @@ function modernParams(values = {}) {
   };
 }
 
+// Teardown deadlines. A child is asked to leave first; if it will not, SIGKILL
+// follows and the exit is still WAITED FOR, because the store must not be
+// removed out from under a process that is merely scheduled to die. The wait is
+// bounded a second time so a wedged child fails one teardown, not the run.
+const GRACEFUL_STOP_MS = 2_000;
+const FORCED_STOP_MS = 5_000;
+
+// A signal death leaves `exitCode` null forever and reports itself in
+// `signalCode`, so reading only the first mistakes a killed child for a live one.
+const hasTerminated = (child) => child.exitCode !== null || child.signalCode !== null;
+
+// Resolves true once the child's death is confirmed by an event, false when the
+// deadline passes first. The listeners go on BEFORE the state is read, so an
+// exit landing in that gap is still seen, and the timer and both listeners are
+// dropped on every path out.
+function waitForExit(child, timeoutMs) {
+  return new Promise((resolve) => {
+    let timer;
+    const settle = (confirmed) => {
+      clearTimeout(timer);
+      child.off('exit', onTermination);
+      child.off('close', onTermination);
+      resolve(confirmed);
+    };
+    const onTermination = () => settle(true);
+    child.on('exit', onTermination);
+    child.on('close', onTermination);
+    timer = setTimeout(() => settle(false), timeoutMs);
+    // A child that died before this call will never emit again, so its recorded
+    // state is the only evidence left.
+    if (hasTerminated(child)) settle(true);
+  });
+}
+
+// The teardown contract for a spawned server: it resolves only once the child's
+// death is CONFIRMED. Sending SIGKILL is not the same as observing the exit it
+// causes - the signal is delivered asynchronously - and resolving at the send
+// reported success while the child was still running, still holding its store
+// open, and still able to write into a directory being removed underneath it.
+async function terminateChild(child, { gracefulMs = GRACEFUL_STOP_MS, forcedMs = FORCED_STOP_MS } = {}) {
+  if (hasTerminated(child)) return;
+  child.kill('SIGTERM');
+  if (await waitForExit(child, gracefulMs)) return;
+  child.kill('SIGKILL');
+  if (await waitForExit(child, forcedMs)) return;
+  // Nothing survives SIGKILL, so reaching here means the process is unreapable
+  // or the platform lied. Either way its store is not safe to remove, and a
+  // teardown that cannot keep its promise says so instead of resolving.
+  // Throwing also stops the hooks queued behind this one, so the removal the
+  // helper appended does not run against a live child; the root is still swept
+  // by the helper's own exit-time and supervisor nets, which outlive this test.
+  throw new Error(
+    `MCP child ${child.pid} did not exit within ${forcedMs}ms of SIGKILL; ` +
+    'its scratch directory cannot be removed while the process may still be writing'
+  );
+}
+
 async function startMcp(t, extraEnv = {}) {
   const directory = await scratchDirectory(t, 'shadowgraph-conformance-');
   const child = spawn(process.execPath, ['src/mcp.js'], {
@@ -50,17 +108,10 @@ async function startMcp(t, extraEnv = {}) {
   // Registered after the directory is taken, so it runs before the removal the
   // helper appends: the child must be gone before its store is taken away, or it
   // writes into a directory that is being removed underneath it.
-  let stopped = false;
-  async function stop() {
-    if (stopped) return;
-    stopped = true;
-    if (child.exitCode === null) child.kill();
-    await new Promise((resolve) => {
-      if (child.exitCode !== null) return resolve();
-      const timer = setTimeout(() => { child.kill('SIGKILL'); resolve(); }, 2000);
-      child.once('exit', () => { clearTimeout(timer); resolve(); });
-    });
-  }
+  // Memoized rather than flagged: a second caller awaits the same termination
+  // instead of returning early while the first is still in flight.
+  let stopping;
+  const stop = () => (stopping ??= terminateChild(child));
   t.after(stop);
   let buffer = '';
   const pending = [];
@@ -472,4 +523,126 @@ test('tools/list is deterministic within a session and across processes', async 
   for (const tool of one.tools) {
     assert.equal(tool.description.includes('\r'), false, `${tool.name} description must not carry a carriage return`);
   }
+});
+
+// The teardown above is what keeps a live child away from a directory that is
+// being removed, so it is exercised directly rather than only in passing.
+//
+// A stand-in child carries most of that: SIGTERM cannot be ignored on Windows,
+// where `kill` terminates outright, and nothing anywhere survives SIGKILL, so
+// the branch that has to fail loudly has no live equivalent to spawn.
+class FakeChild extends EventEmitter {
+  constructor({ diesOn = 'SIGTERM', synchronously = false } = {}) {
+    super();
+    this.pid = 1234;
+    this.exitCode = null;
+    this.signalCode = null;
+    this.signalled = [];
+    this.diesOn = diesOn;
+    this.synchronously = synchronously;
+  }
+
+  // The default matches `ChildProcess.kill()`, so a caller that omits the
+  // signal is modelled the way the real thing behaves.
+  kill(signal = 'SIGTERM') {
+    this.signalled.push(signal);
+    if (signal !== this.diesOn) return true;
+    // Delivery is asynchronous unless a case is specifically about a death that
+    // lands inside the `kill` call itself.
+    if (this.synchronously) this.die(signal);
+    else setTimeout(() => this.die(signal), 1);
+    return true;
+  }
+
+  // Shaped like a real signal death: `exitCode` stays null, `signalCode` names
+  // the signal, and `exit` is followed by `close`.
+  die(signal) {
+    if (this.signalCode !== null) return;
+    this.signalCode = signal;
+    this.emit('exit', null, signal);
+    this.emit('close', null, signal);
+  }
+}
+
+const attachedListeners = (child) => child.listenerCount('exit') + child.listenerCount('close');
+
+test('teardown resolves on a graceful exit and never escalates', async () => {
+  const child = new FakeChild({ diesOn: 'SIGTERM' });
+  await terminateChild(child, { gracefulMs: 1_000, forcedMs: 1_000 });
+  assert.deepEqual(child.signalled, ['SIGTERM'], 'a child that leaves when asked is never SIGKILLed');
+  assert.equal(child.signalCode, 'SIGTERM');
+  assert.equal(attachedListeners(child), 0, 'the bounded wait must drop its listeners and its timer');
+});
+
+test('teardown waits for the confirmed exit after SIGKILL, not for the send that causes it', async () => {
+  // The regression. Resolving at the moment SIGKILL was SENT reported a
+  // finished teardown while `exitCode` and `signalCode` were both still null,
+  // so the removal that runs next could start on a store the child still held.
+  const child = new FakeChild({ diesOn: 'SIGKILL' });
+  let settled = false;
+  const settledWhenExitLanded = [];
+  child.on('exit', () => settledWhenExitLanded.push(settled));
+
+  const stopping = terminateChild(child, { gracefulMs: 25, forcedMs: 2_000 });
+  stopping.then(() => { settled = true; }, () => { settled = true; });
+  await stopping;
+
+  assert.deepEqual(child.signalled, ['SIGTERM', 'SIGKILL'], 'an ignored SIGTERM must escalate');
+  assert.equal(child.signalCode, 'SIGKILL', 'the child must be confirmed dead at the moment teardown resolves');
+  assert.deepEqual(settledWhenExitLanded, [false], 'teardown must still be pending when the exit it waits for lands');
+  assert.equal(attachedListeners(child), 1, 'only the observer this test attached is left behind');
+});
+
+test('teardown fails loudly when even SIGKILL is not confirmed within the secondary deadline', async () => {
+  const child = new FakeChild({ diesOn: null });
+  await assert.rejects(
+    terminateChild(child, { gracefulMs: 25, forcedMs: 25 }),
+    /did not exit within 25ms of SIGKILL/u,
+    'an unconfirmed termination must fail the teardown rather than resolve successfully'
+  );
+  assert.deepEqual(child.signalled, ['SIGTERM', 'SIGKILL']);
+  assert.equal(attachedListeners(child), 0, 'the failing path cleans up after itself too');
+});
+
+test('teardown handles a child that is already gone, and one that dies inside the kill call', async () => {
+  const exitedNormally = new FakeChild();
+  exitedNormally.exitCode = 0;
+  await terminateChild(exitedNormally, { gracefulMs: 25, forcedMs: 25 });
+  assert.deepEqual(exitedNormally.signalled, [], 'a child that is already gone is not signalled again');
+
+  // `exitCode` alone is not "gone": a child killed by a signal reports itself
+  // only in `signalCode`, and a teardown reading the first member would signal
+  // a corpse and then wait out its whole deadline for an event long since past.
+  const killedBySignal = new FakeChild();
+  killedBySignal.signalCode = 'SIGTERM';
+  await terminateChild(killedBySignal, { gracefulMs: 25, forcedMs: 25 });
+  assert.deepEqual(killedBySignal.signalled, []);
+
+  // The exit lands inside `kill` itself, before the wait has attached anything;
+  // it is still seen, because the recorded state is read after the listeners go
+  // on rather than instead of them.
+  const diesInKill = new FakeChild({ diesOn: 'SIGTERM', synchronously: true });
+  await terminateChild(diesInKill, { gracefulMs: 25, forcedMs: 25 });
+  assert.deepEqual(diesInKill.signalled, ['SIGTERM']);
+  assert.equal(diesInKill.signalCode, 'SIGTERM');
+  assert.equal(attachedListeners(diesInKill), 0);
+});
+
+test('a real child that ignores SIGTERM is confirmed dead before teardown resolves', {
+  skip: process.platform === 'win32' ? 'SIGTERM is not deliverable on Windows: kill() terminates outright' : false
+}, async (t) => {
+  // The child announces itself only once its handler is installed. Signalling
+  // any earlier is answered by the default disposition, which takes the
+  // graceful path and proves nothing about the forced one.
+  const ignoresSigterm = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000); process.stdout.write('ready');";
+  const child = spawn(process.execPath, ['-e', ignoresSigterm], { stdio: ['ignore', 'pipe', 'inherit'] });
+  t.after(() => { if (!hasTerminated(child)) child.kill('SIGKILL'); });
+  child.stdout.setEncoding('utf8');
+  await new Promise((resolve) => child.stdout.on('data', function ready(chunk) {
+    if (chunk.includes('ready')) { child.stdout.off('data', ready); resolve(); }
+  }));
+
+  await terminateChild(child, { gracefulMs: 250, forcedMs: 10_000 });
+  assert.equal(child.signalCode, 'SIGKILL', 'the forced path must be taken and the exit it causes observed');
+  assert.equal(child.exitCode, null, 'a signal death never sets an exit code');
 });
