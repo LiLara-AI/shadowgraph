@@ -70,6 +70,30 @@ async function waitForFile(path, timeoutMs = 5000) {
   throw new Error(`Timed out waiting for ${path}`);
 }
 
+async function waitForFileOrOutcome(path, outcome, timeoutMs = 5000) {
+  let outcomeSettled = false;
+  let outcomeError;
+  outcome.then(
+    () => { outcomeSettled = true; },
+    (error) => { outcomeError = error; outcomeSettled = true; }
+  );
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (outcomeSettled) {
+      if (outcomeError !== undefined) throw outcomeError;
+      return;
+    }
+    try { await stat(path); return; }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    await delay(5);
+  }
+  if (outcomeSettled) {
+    if (outcomeError !== undefined) throw outcomeError;
+    return;
+  }
+  throw new Error(`Timed out waiting for ${path} or writer outcome`);
+}
+
 async function writePayload(path, payload) {
   await writeFile(path, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
 }
@@ -734,6 +758,25 @@ test('DS-P1-003 JSON: restore waits when a child writer already owns the destina
   reopened.close();
 });
 
+test('DS-P1-003 SQLite: a completed writer does not require its released lock to remain observable', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph fifth review sqlite completed writer ');
+  const destination = join(directory, 'live state.db');
+  let store;
+  try {
+    store = await createSqliteStore(destination);
+  } catch (error) {
+    if (/requires Node/.test(error.message)) return t.skip(error.message);
+    throw error;
+  }
+  await store.save(graphPayload('sqlite-completed-writer-old'));
+  store.close();
+
+  const child = externalWriter('sqlite', destination, 'sqlite-completed-writer');
+  const outcome = await child.outcome;
+  assert.equal(outcome.status, 'fulfilled');
+  await waitForFileOrOutcome(`${resolve(destination)}.lock`, child.outcome, 50);
+});
+
 test('DS-P1-003 SQLite: a child writer begun before restore either completes first or conflicts', async (t) => {
   const directory = await scratchDirectory(t, 'shadowgraph fifth review sqlite writer first ');
   const destination = join(directory, 'live state.db');
@@ -753,7 +796,7 @@ test('DS-P1-003 SQLite: a child writer begun before restore either completes fir
   sourceStore.close();
 
   const child = externalWriter('sqlite', destination, 'sqlite-writer-first', 2000);
-  await waitForFile(`${resolve(destination)}.lock`);
+  await waitForFileOrOutcome(`${resolve(destination)}.lock`, child.outcome);
   const restoring = destinationStore.restore(source);
   const [writerOutcome, restoreOutcome] = await Promise.all([child.outcome, restoring]);
   if (writerOutcome.status === 'rejected') assert.match(writerOutcome.message, /revision conflict|lock/i);
