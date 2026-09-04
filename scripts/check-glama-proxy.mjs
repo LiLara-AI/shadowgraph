@@ -44,7 +44,10 @@ const ANNOTATION_HINTS = ['readOnlyHint', 'destructiveHint', 'idempotentHint', '
 
 const SELF = fileURLToPath(import.meta.url);
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
-const READY_TIMEOUT_MS = 120_000;
+// A cold npx cache has taken more than two minutes to fetch this pinned package
+// on GitHub-hosted runners. The gate remains bounded, while allowing the same
+// five-minute installation window as the pinned Inspector gate.
+const READY_TIMEOUT_MS = 300_000;
 const POLL_INTERVAL_MS = 250;
 const HTTP_TIMEOUT_MS = 30_000;
 const SHUTDOWN_GRACE_MS = 5_000;
