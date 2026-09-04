@@ -628,6 +628,43 @@ test('teardown handles a child that is already gone, and one that dies inside th
   assert.equal(attachedListeners(diesInKill), 0);
 });
 
+const READY_TIMEOUT_MS = 10_000;
+
+// Bounded like every other wait here, and for the same reason: a child that
+// never announces itself - a failed spawn, a child killed from outside - would
+// otherwise leave this waiting forever, turning a broken setup into a hung run
+// rather than a failed test. Every way the child can fail to say `ready` is an
+// answer, so `error`, `exit` and `close` all settle it.
+function waitForReady(child, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let timer;
+    let seen = '';
+    const settle = (error) => {
+      clearTimeout(timer);
+      child.stdout.off('data', onData);
+      child.off('error', onFailure);
+      child.off('exit', onDeparture);
+      child.off('close', onDeparture);
+      if (error) reject(error); else resolve();
+    };
+    // Accumulated rather than tested chunk by chunk: a pipe may split even a
+    // short write, and a token seen in halves is still the token.
+    const onData = (chunk) => { seen += chunk; if (seen.includes('ready')) settle(); };
+    const wrote = () => `it wrote ${JSON.stringify(seen)}`;
+    const onFailure = (error) => settle(new Error(`the child could not be started: ${error.message}`, { cause: error }));
+    const onDeparture = (code, signal) => settle(new Error(
+      `the child left before reporting ready (code ${code}, signal ${signal}); ${wrote()}`
+    ));
+    // Attached in the same tick as the spawn that precedes it, so none of these
+    // events can have been emitted and missed already.
+    child.stdout.on('data', onData);
+    child.on('error', onFailure);
+    child.on('exit', onDeparture);
+    child.on('close', onDeparture);
+    timer = setTimeout(() => settle(new Error(`the child did not report ready within ${timeoutMs}ms; ${wrote()}`)), timeoutMs);
+  });
+}
+
 test('a real child that ignores SIGTERM is confirmed dead before teardown resolves', {
   skip: process.platform === 'win32' ? 'SIGTERM is not deliverable on Windows: kill() terminates outright' : false
 }, async (t) => {
@@ -636,11 +673,12 @@ test('a real child that ignores SIGTERM is confirmed dead before teardown resolv
   // graceful path and proves nothing about the forced one.
   const ignoresSigterm = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000); process.stdout.write('ready');";
   const child = spawn(process.execPath, ['-e', ignoresSigterm], { stdio: ['ignore', 'pipe', 'inherit'] });
-  t.after(() => { if (!hasTerminated(child)) child.kill('SIGKILL'); });
   child.stdout.setEncoding('utf8');
-  await new Promise((resolve) => child.stdout.on('data', function ready(chunk) {
-    if (chunk.includes('ready')) { child.stdout.off('data', ready); resolve(); }
-  }));
+  // Registered before the first thing that can throw, and confirming rather
+  // than only signalling: if the handshake below fails, the child is still
+  // brought down and observed leaving before this test is done with it.
+  t.after(() => terminateChild(child));
+  await waitForReady(child, READY_TIMEOUT_MS);
 
   await terminateChild(child, { gracefulMs: 250, forcedMs: 10_000 });
   assert.equal(child.signalCode, 'SIGKILL', 'the forced path must be taken and the exit it causes observed');
