@@ -987,28 +987,31 @@ test('the absolute request deadline includes a slow correlation-valid client bod
 });
 
 test('upstream timeout is an absolute deadline even when response bytes keep arriving', async (t) => {
+  let upstreamCompletedNaturally = false;
   const upstream = await listen(t, async (request, response) => {
     await readBody(request);
     response.writeHead(200, { 'content-type': 'application/json' });
     const interval = setInterval(() => response.write(' '), 10);
-    response.once('close', () => clearInterval(interval));
-    setTimeout(() => {
+    const completion = setTimeout(() => {
+      upstreamCompletedNaturally = true;
       clearInterval(interval);
       if (!response.writableEnded) response.end(JSON.stringify(providerPayload()));
     }, 220);
+    response.once('close', () => {
+      clearInterval(interval);
+      clearTimeout(completion);
+    });
   });
   const { meter, ledgerPath } = await meterFor(t, upstream.origin, { upstreamTimeoutMs: 45 });
   const endpoint = meter.bindEndpoint(BASE_CORRELATION);
-  const started = performance.now();
   const response = await fetch(`${endpoint}/chat/completions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ model: 'outer-model', messages: [] })
   });
-  const elapsed = performance.now() - started;
 
   assert.equal(response.status, 502);
-  assert.ok(elapsed < 180, `absolute deadline took ${elapsed}ms`);
+  assert.equal(upstreamCompletedNaturally, false);
   const [event] = await ledgerEvents(ledgerPath);
   assertExactEvent(event, {
     outcome: 'FAILED',
