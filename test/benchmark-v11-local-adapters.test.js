@@ -14,6 +14,19 @@ import { scratchDirectory } from '../tools/scratch-directory.js';
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const mcpEntry = path.join(repositoryRoot, 'src', 'mcp.js');
 
+async function symlinkOrSkip(t, target, linkPath, type) {
+  try {
+    await symlink(target, linkPath, type);
+    return true;
+  } catch (error) {
+    if (process.platform === 'win32' && ['EACCES', 'EPERM'].includes(error?.code)) {
+      t.skip('Symbolic-link creation is unavailable without Windows developer privileges');
+      return false;
+    }
+    throw error;
+  }
+}
+
 function mcpEnvironment(file, storage = 'json', extra = {}) {
   const inherited = Object.fromEntries(
     ['HOME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'PATH', 'TEMP', 'TMP', 'TMPDIR', 'TZ']
@@ -565,7 +578,7 @@ for (const backend of ['json', 'sqlite']) {
     assert.equal((await adapter.execute(reset, {})).status, 'SUCCEEDED');
     const paths = await statePaths({ stateRoot, backend, request: reset });
     const outsideTarget = path.join(directory, `outside-${backend}-must-not-exist`);
-    await symlink(outsideTarget, paths.file, 'file');
+    if (!await symlinkOrSkip(t, outsideTarget, paths.file, 'file')) return;
 
     const persist = requestFor('persist', {
       armId: 'shadowgraph-full',
@@ -597,7 +610,7 @@ test('ShadowGraph rejects SQLite sidecar symlinks and hard-linked leaf entries b
   const paths = await statePaths({ stateRoot, backend: 'sqlite', request: reset });
   const outsideSidecar = path.join(directory, 'outside-sidecar-must-not-exist');
   const sidecar = `${paths.file}-wal`;
-  await symlink(outsideSidecar, sidecar, 'file');
+  if (!await symlinkOrSkip(t, outsideSidecar, sidecar, 'file')) return;
   const persist = requestFor('persist', {
     armId: 'shadowgraph-full',
     phase: 'A',
@@ -636,6 +649,19 @@ async function captureRejection(operation) {
     return error;
   }
   assert.fail('Expected operation to reject');
+}
+
+async function waitForFileContents(filePath, timeoutMs = 2_000) {
+  const deadline = performance.now() + timeoutMs;
+  while (performance.now() < deadline) {
+    try {
+      return await readFile(filePath, 'utf8');
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('Timed out waiting for the child startup marker');
 }
 
 function fixtureServerSource(toolNames, toolHandler, setup = '', closeHandler = '') {
@@ -922,17 +948,18 @@ for (const mode of ['timeout', 'abort']) {
           `
         ));
     const controller = new AbortController();
-    if (mode === 'abort') setTimeout(() => controller.abort(), 50);
-    const error = await captureRejection(() => withMcpSession({
+    const execution = captureRejection(() => withMcpSession({
       file: path.join(directory, 'unused.json'),
       storage: 'json',
       compact: true,
       entryPath,
-      timeoutMs: mode === 'timeout' ? 50 : 5_000,
+      timeoutMs: mode === 'timeout' ? 1_000 : 5_000,
       signal: controller.signal
     }, async (client) => client.callTool('shadowgraph_search', {})));
+    const pid = Number(await waitForFileContents(pidFile));
+    if (mode === 'abort') controller.abort();
+    const error = await execution;
     assert.equal(error.adapterCause, mode === 'timeout' ? 'TIMEOUT' : 'OPERATOR_INTERRUPTION');
-    const pid = Number(await readFile(pidFile, 'utf8'));
     assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
   });
 }
@@ -1047,7 +1074,7 @@ test('poison control directory cannot be redirected through a parent symlink', a
   const outsideMarker = path.join(outside, path.basename(paths.poison));
   await writeFile(outsideMarker, 'outside sentinel\n', 'utf8');
   await writeFile(path.join(outside, 'unrelated-sentinel'), 'must remain\n', 'utf8');
-  await symlink(outside, poisonDirectory, 'dir');
+  if (!await symlinkOrSkip(t, outside, poisonDirectory, 'dir')) return;
 
   const response = await adapter.execute(reset, {});
   assert.equal(response.status, 'FAILED');

@@ -1,2 +1,3 @@
-benchmark/preregistration.json text eol=lf
-benchmark/preregistration.sha256 text eol=lf
+# Benchmark contracts and evidence are byte-addressed, so Windows checkouts must
+# preserve the same LF bytes used to calculate their recorded SHA-256 digests.
+benchmark/** text eol=lf

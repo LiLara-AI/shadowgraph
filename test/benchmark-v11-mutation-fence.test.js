@@ -24,12 +24,18 @@ const CORRELATION = {
   phase: 'B'
 };
 
+const DIRECTORY_FSYNC_OPTIONS = {
+  skip: process.platform === 'win32'
+    ? 'Windows cannot provide the directory fsync durability this fence requires'
+    : false
+};
+
 async function stateRoot(t) {
   const root = await scratchDirectory(t, 'sg-fence-');
   return root;
 }
 
-test('a latch is durable before the mutation is attempted', async (t) => {
+test('a latch is durable before the mutation is attempted', DIRECTORY_FSYNC_OPTIONS, async (t) => {
   const root = await stateRoot(t);
   const fence = await armMutationFence({
     stateRoot: root, correlation: CORRELATION, operation: 'persist'
@@ -46,7 +52,7 @@ test('a latch is durable before the mutation is attempted', async (t) => {
   assert.deepEqual(await pendingMutationLatches(root), []);
 });
 
-test('only an explicit confirmation clears the latch', async (t) => {
+test('only an explicit confirmation clears the latch', DIRECTORY_FSYNC_OPTIONS, async (t) => {
   const root = await stateRoot(t);
   const fence = await armMutationFence({
     stateRoot: root, correlation: CORRELATION, operation: 'reset'
@@ -136,7 +142,7 @@ test('a confirmed success on untouched state is the only path to MEASURED', () =
   assert.equal(measured.failureCause, null);
 });
 
-test('resume sees latches left by a previous attempt', async (t) => {
+test('resume sees latches left by a previous attempt', DIRECTORY_FSYNC_OPTIONS, async (t) => {
   const root = await stateRoot(t);
   // A previous attempt armed a fence and never returned.
   await armMutationFence({ stateRoot: root, correlation: CORRELATION, operation: 'persist' });
@@ -179,7 +185,7 @@ test('the fence introduces no unit status and no failure cause of its own', () =
   assert.equal(approvedFailureCauses().length, 6);
 });
 
-test('latch names are bounded and disclose no caller-supplied identifier', async (t) => {
+test('latch names are bounded and disclose no caller-supplied identifier', DIRECTORY_FSYNC_OPTIONS, async (t) => {
   const root = await stateRoot(t);
   const hostile = {
     ...CORRELATION,

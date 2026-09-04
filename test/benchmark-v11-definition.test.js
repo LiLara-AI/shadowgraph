@@ -47,6 +47,19 @@ async function writeJson(filePath, value) {
   await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
 
+async function symlinkOrSkip(t, target, linkPath) {
+  try {
+    await symlink(target, linkPath);
+    return true;
+  } catch (error) {
+    if (process.platform === 'win32' && ['EACCES', 'EPERM'].includes(error?.code)) {
+      t.skip('Symbolic-link creation is unavailable without Windows developer privileges');
+      return false;
+    }
+    throw error;
+  }
+}
+
 async function cloneDefinitionFixture(t) {
   const root = await scratchDirectory(t, 'shadowgraph-v11-definition-');
   await mkdir(path.join(root, 'benchmark', 'acceptance'), { recursive: true });
@@ -846,7 +859,7 @@ test('loader rejects frozen-source drift, path escape, and symlinked inputs', as
     const scenariosPath = path.join(root, 'benchmark', 'acceptance', 'scenarios.json');
     const savedPath = path.join(root, 'benchmark', 'acceptance', 'scenarios.saved.json');
     await rename(scenariosPath, savedPath);
-    await symlink(savedPath, scenariosPath);
+    if (!await symlinkOrSkip(t, savedPath, scenariosPath)) return;
     await expectBoundaryReject(
       () => loadV11AcceptanceDefinition({ repositoryRoot: root }),
       'LOCAL_REFERENCE'
@@ -858,7 +871,7 @@ test('loader rejects frozen-source drift, path escape, and symlinked inputs', as
     const definitionPath = path.join(root, 'benchmark', 'acceptance', 'definition.json');
     const savedPath = path.join(root, 'benchmark', 'acceptance', 'definition.saved.json');
     await rename(definitionPath, savedPath);
-    await symlink(savedPath, definitionPath);
+    if (!await symlinkOrSkip(t, savedPath, definitionPath)) return;
     await expectBoundaryReject(
       () => loadV11AcceptanceDefinition({ repositoryRoot: root }),
       'LOCAL_REFERENCE'

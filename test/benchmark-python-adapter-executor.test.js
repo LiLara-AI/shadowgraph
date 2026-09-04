@@ -135,6 +135,14 @@ function executorOptions(hostPath, overrides = {}) {
   };
 }
 
+function processGroupTest(name, fn) {
+  return test(name, {
+    skip: process.platform === 'win32'
+      ? 'Python adapter execution requires POSIX process-group isolation'
+      : false
+  }, fn);
+}
+
 test('public adapter specs bind four exact ids, arms, versions, and provider requirements', () => {
   assert.deepEqual(PYTHON_ADAPTER_SPECS, {
     'mem0-oss': {
@@ -177,7 +185,17 @@ test('competitor ids are exactly compatible with the frozen preregistration and 
   }), PythonAdapterExecutorError);
 });
 
-test('executor validates request, binds exact arm, obtains fresh correlation routes, and validates response', async (t) => {
+if (process.platform === 'win32') {
+  test('executor fails closed when POSIX process-group isolation is unavailable', () => {
+    assert.throws(() => createPythonAdapterExecutor(executorOptions(path.resolve('unused-host.py'))), (error) => {
+      assert.equal(error.adapterCause, 'CONTRACT_FAILURE');
+      assert.match(error.message, /process-group isolation/u);
+      return true;
+    });
+  });
+}
+
+processGroupTest('executor validates request, binds exact arm, obtains fresh correlation routes, and validates response', async (t) => {
   const calls = [];
   const { hostPath } = await makeHost(t, successHostSource({
     assertions: String.raw`assert wrapper["providerRoutes"]["internal_memory_llm"].startswith("http://127.")
@@ -239,7 +257,7 @@ assert os.path.realpath(os.environ["TEMP"]).startswith(os.path.dirname(os.path.r
   assert.doesNotMatch(JSON.stringify(first), /provider-meter|43100/u);
 });
 
-test('basic-memory launches with both provider routes null and never invokes route callback', async (t) => {
+processGroupTest('basic-memory launches with both provider routes null and never invokes route callback', async (t) => {
   const request = requestFor('retrieve', {
     armId: 'basic-memory',
     namespace: { projectId: 'project-python-1', userId: null }
@@ -257,7 +275,7 @@ test('basic-memory launches with both provider routes null and never invokes rou
   assert.equal(response.armId, 'basic-memory');
 });
 
-test('wrong arm and invalid requests fail before provider lookup or child spawn', async (t) => {
+processGroupTest('wrong arm and invalid requests fail before provider lookup or child spawn', async (t) => {
   const marker = path.join((await makeHost(t, '')).directory, 'spawned');
   const { hostPath } = await makeHost(t, `from pathlib import Path\nPath(${JSON.stringify(marker)}).write_text("spawned")\n`);
   let providerCalls = 0;
@@ -282,7 +300,7 @@ test('wrong arm and invalid requests fail before provider lookup or child spawn'
   await assert.rejects(() => stat(marker), { code: 'ENOENT' });
 });
 
-test('missing, cloud, credentialed, queried, and reused provider routes fail before spawn', async (t) => {
+processGroupTest('missing, cloud, credentialed, queried, and reused provider routes fail before spawn', async (t) => {
   const marker = path.join((await makeHost(t, '')).directory, 'spawned');
   const { hostPath } = await makeHost(t, `from pathlib import Path\nPath(${JSON.stringify(marker)}).write_text("spawned")\n`);
   const routes = [
@@ -336,7 +354,7 @@ for (const fixture of [
     })
   }
 ]) {
-  test(`executor rejects ${fixture.name} without exposing output`, async (t) => {
+  processGroupTest(`executor rejects ${fixture.name} without exposing output`, async (t) => {
     const { hostPath } = await makeHost(t, fixture.source);
     const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
       providerEndpointFor: endpointFactory([])
@@ -350,7 +368,7 @@ for (const fixture of [
   });
 }
 
-test('stderr and nonzero exit are sanitized with no path, body, endpoint, or credential leak', async (t) => {
+processGroupTest('stderr and nonzero exit are sanitized with no path, body, endpoint, or credential leak', async (t) => {
   const { hostPath } = await makeHost(t, String.raw`import sys
 sys.stdin.buffer.read()
 sys.stderr.write("Bearer secret-token /private/profile/path http://127.0.0.1:43100/private-route")
@@ -369,7 +387,7 @@ raise SystemExit(9)
   });
 });
 
-test('the same absolute lifecycle deadline covers provider route allocation before spawn', async (t) => {
+processGroupTest('the same absolute lifecycle deadline covers provider route allocation before spawn', async (t) => {
   const directory = await scratchDirectory(t, 'shadowgraph-python-route-timeout-');
   const marker = path.join(directory, 'spawned');
   const { hostPath } = await makeHost(t, `from pathlib import Path\nPath(${JSON.stringify(marker)}).write_text("spawned")\n`);
@@ -390,7 +408,7 @@ test('the same absolute lifecycle deadline covers provider route allocation befo
 // remains there, so no scratch directory may be created while that is in force:
 // tools/scratch-directory.js reads os.tmpdir() at call time, and would put a
 // root of its own inside tempParent.
-test('successful execution removes only its isolated invocation cwd and temp tree', async (t) => {
+processGroupTest('successful execution removes only its isolated invocation cwd and temp tree', async (t) => {
   const tempParent = await scratchDirectory(t, 'shadowgraph-python-cleanup-test-');
   const { hostPath } = await makeHost(t, successHostSource());
   const previous = process.env.TMPDIR;
@@ -406,7 +424,7 @@ test('successful execution removes only its isolated invocation cwd and temp tre
   assert.deepEqual(await readdir(tempParent), []);
 });
 
-test('persistent runtime state crosses fresh Python processes while cwd and temp remain ephemeral', async (t) => {
+processGroupTest('persistent runtime state crosses fresh Python processes while cwd and temp remain ephemeral', async (t) => {
   const { directory, hostPath } = await makeHost(t, successHostSource({
     adapterId: 'basic-memory',
     assertions: String.raw`from pathlib import Path
@@ -463,7 +481,7 @@ elif request["operation"] == "retrieve":
   await assert.rejects(() => stat(audit.temp), { code: 'ENOENT' });
 });
 
-test('persistent state root is mandatory, absolute, owned, and cannot be a symlink', async (t) => {
+processGroupTest('persistent state root is mandatory, absolute, owned, and cannot be a symlink', async (t) => {
   const { directory, hostPath } = await makeHost(t, successHostSource());
   const missing = executorOptions(hostPath, { providerEndpointFor: endpointFactory([]) });
   delete missing.stateRoot;
@@ -499,7 +517,7 @@ test('persistent state root is mandatory, absolute, owned, and cannot be a symli
   });
 });
 
-test('state-root creation rejects a symlinked ancestor before any outside write', async (t) => {
+processGroupTest('state-root creation rejects a symlinked ancestor before any outside write', async (t) => {
   const { directory, hostPath } = await makeHost(t, successHostSource());
   const outside = path.join(directory, 'outside-ancestor');
   const linkedAncestor = path.join(directory, 'linked-ancestor');
@@ -517,7 +535,7 @@ test('state-root creation rejects a symlinked ancestor before any outside write'
   assert.deepEqual(await readdir(outside), []);
 });
 
-test('absolute timeout terminates and reaps the child process tree within the configured lifecycle budget', async (t) => {
+processGroupTest('absolute timeout terminates and reaps the child process tree within the configured lifecycle budget', async (t) => {
   const directory = await scratchDirectory(t, 'shadowgraph-python-timeout-test-');
   const pidPath = path.join(directory, 'pid');
   const grandchildPidPath = path.join(directory, 'grandchild-pid');
@@ -554,7 +572,7 @@ time.sleep(3)
   assert.throws(() => process.kill(grandchildPid, 0), { code: 'ESRCH' });
 });
 
-test('abort signal terminates the child and reports operator interruption once', async (t) => {
+processGroupTest('abort signal terminates the child and reports operator interruption once', async (t) => {
   const { hostPath } = await makeHost(t, 'import sys, time\nsys.stdin.buffer.read()\ntime.sleep(30)\n');
   const controller = new AbortController();
   const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
@@ -569,7 +587,7 @@ test('abort signal terminates the child and reports operator interruption once',
   });
 });
 
-test('absolute lifecycle deadline settles even when a child seam never emits close', async (t) => {
+processGroupTest('absolute lifecycle deadline settles even when a child seam never emits close', async (t) => {
   const { hostPath } = await makeHost(t, successHostSource());
   const kills = [];
   const spawnProcess = () => {
@@ -598,7 +616,7 @@ test('absolute lifecycle deadline settles even when a child seam never emits clo
   assert.deepEqual(kills, ['SIGTERM', 'SIGKILL', 'SIGKILL']);
 });
 
-test('request and output limits fail closed and every created source file stays non-executable', async (t) => {
+processGroupTest('request and output limits fail closed and every created source file stays non-executable', async (t) => {
   const hugeOutput = `import sys\nsys.stdin.buffer.read()\nsys.stdout.write("x" * 2048 + "\\n")\n`;
   const { hostPath } = await makeHost(t, hugeOutput);
   const outputBounded = createPythonAdapterExecutor(executorOptions(hostPath, {
