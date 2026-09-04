@@ -2,11 +2,11 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const INSPECTOR_VERSION = '2.4.0';
-// The first npx invocation may have to populate a cold GitHub runner cache.
-// Keep the external gate bounded, but do not confuse a two-minute registry
-// fetch with an Inspector protocol failure.
+// CI installs the exact client through tooling/mcp-gates/package-lock.json.
+// npx remains a bounded fallback for a source checkout without those tools.
 const INSPECTOR_TIMEOUT_MS = 300_000;
 const expected = [
   { name: 'Full', count: 27, env: [] },
@@ -36,16 +36,24 @@ function assertToolMetadata(modeName, tools) {
   return tools.length - tools.filter((tool) => outputSchemaOmitted.has(tool.name)).length;
 }
 const directory = mkdtempSync(join(tmpdir(), 'shadowgraph-mcp-inspector-'));
+const localInspectorCli = join(
+  fileURLToPath(new URL('..', import.meta.url)),
+  'tooling', 'mcp-gates', 'node_modules', '@modelcontextprotocol', 'inspector',
+  'clients', 'launcher', 'build', 'index.js'
+);
+const useLocalInspector = existsSync(localInspectorCli);
 const npxCli = process.env.npm_execpath ? join(dirname(process.env.npm_execpath), 'npx-cli.js') : null;
 const useNpxCli = Boolean(npxCli && existsSync(npxCli));
-const runner = useNpxCli ? process.execPath : (process.platform === 'win32' ? 'npx.cmd' : 'npx');
+const runner = useLocalInspector || useNpxCli ? process.execPath : (process.platform === 'win32' ? 'npx.cmd' : 'npx');
 
 try {
   for (const mode of expected) {
     const dataFile = join(directory, `${mode.name.toLowerCase()}.json`);
     const args = [
-      ...(useNpxCli ? [npxCli] : []),
-      '-y', '--loglevel=error', `@modelcontextprotocol/inspector@${INSPECTOR_VERSION}`, '--cli',
+      ...(useLocalInspector
+        ? [localInspectorCli]
+        : [...(useNpxCli ? [npxCli] : []), '-y', '--loglevel=error', `@modelcontextprotocol/inspector@${INSPECTOR_VERSION}`]),
+      '--cli',
       process.execPath, 'src/mcp.js',
       '--method', 'tools/list', '--strict', '--format', 'json',
       '-e', `SHADOWGRAPH_FILE=${dataFile}`,

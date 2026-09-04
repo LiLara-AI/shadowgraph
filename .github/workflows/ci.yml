@@ -33,6 +33,9 @@ jobs:
       - run: npm test
       - run: npm audit --omit=dev
       - run: npm run check:integrations
+      - name: Install pinned MCP gate clients
+        if: matrix.node-version == 24
+        run: npm ci --prefix tooling/mcp-gates --ignore-scripts
       - name: Strict MCP Inspector (27 full / 12 compact) and pinned Glama mcp-proxy gate
         if: matrix.node-version == 24
         run: npm run check:mcp

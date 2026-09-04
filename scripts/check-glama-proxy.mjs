@@ -9,11 +9,11 @@
 // `src/mcp.js` directly, so whatever the CLI does before handing over is under
 // test too.
 //
-// So this gate starts the exact pinned proxy through `npx`, with no dependency
-// added to the package, on the loopback interface only, and puts a transparent
-// recorder between the proxy and the server. It then behaves as the scanner
-// does, over streamable HTTP, and asserts the recording and the HTTP replies
-// against each other.
+// So this gate starts the exact pinned proxy on the loopback interface only and
+// puts a transparent recorder between the proxy and the server. CI installs the
+// proxy from an isolated tooling lock; a source checkout can still fall back to
+// npx. The gate then behaves as the scanner does, over streamable HTTP, and
+// asserts the recording and the HTTP replies against each other.
 //
 // Two modes in one file, because the recorder has to be a program the proxy can
 // spawn:
@@ -44,9 +44,12 @@ const ANNOTATION_HINTS = ['readOnlyHint', 'destructiveHint', 'idempotentHint', '
 
 const SELF = fileURLToPath(import.meta.url);
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
-// A cold npx cache has taken more than two minutes to fetch this pinned package
-// on GitHub-hosted runners. The gate remains bounded, while allowing the same
-// five-minute installation window as the pinned Inspector gate.
+const LOCAL_MCP_PROXY_CLI = join(
+  REPO_ROOT, 'tooling', 'mcp-gates', 'node_modules', 'mcp-proxy',
+  'dist', 'bin', 'mcp-proxy.mjs'
+);
+// This bounds proxy startup and the npx fallback; CI performs installation in a
+// separate step so a registry delay cannot masquerade as a protocol timeout.
 const READY_TIMEOUT_MS = 300_000;
 const POLL_INTERVAL_MS = 250;
 const HTTP_TIMEOUT_MS = 30_000;
@@ -121,17 +124,25 @@ function runRecorder(argv) {
 
 // --- gate mode -------------------------------------------------------------
 
-function resolveNpx() {
+function resolveProxyRunner() {
+  if (existsSync(LOCAL_MCP_PROXY_CLI)) {
+    return { command: process.execPath, prefix: [LOCAL_MCP_PROXY_CLI] };
+  }
   const candidates = [];
   if (process.env.npm_execpath) candidates.push(join(dirname(process.env.npm_execpath), 'npx-cli.js'));
   candidates.push(join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npx-cli.js'));
   const npxCli = candidates.find((candidate) => existsSync(candidate));
-  if (npxCli) return { command: process.execPath, prefix: [npxCli] };
+  if (npxCli) {
+    return {
+      command: process.execPath,
+      prefix: [npxCli, '-y', '--loglevel=error', `mcp-proxy@${MCP_PROXY_VERSION}`]
+    };
+  }
   if (process.platform === 'win32') {
     // npx.cmd cannot be spawned without a shell on current Node versions.
     throw new EnvironmentError('npx-cli.js could not be resolved; run this gate through npm, as `npm run check:glama`');
   }
-  return { command: 'npx', prefix: [] };
+  return { command: 'npx', prefix: ['-y', '--loglevel=error', `mcp-proxy@${MCP_PROXY_VERSION}`] };
 }
 
 // A configuration variable leaking in from the caller's shell would change the
@@ -160,16 +171,15 @@ function freePort() {
 }
 
 function startProxy({ port, recordFile, storeFile }) {
-  const npx = resolveNpx();
+  const runner = resolveProxyRunner();
   const args = [
-    ...npx.prefix,
-    '-y', '--loglevel=error', `mcp-proxy@${MCP_PROXY_VERSION}`,
+    ...runner.prefix,
     '--host', '127.0.0.1', '--port', String(port), '--server', 'stream',
     // The container's CMD, verbatim: cli.js validates its configuration and
     // prints nothing before handing over, and that has to keep being true.
     '--', process.execPath, SELF, '--record', recordFile, '--', process.execPath, join(REPO_ROOT, 'src', 'cli.js'), 'mcp'
   ];
-  const child = spawn(npx.command, args, {
+  const child = spawn(runner.command, args, {
     cwd: REPO_ROOT,
     env: gateEnvironment(storeFile),
     stdio: ['ignore', 'pipe', 'pipe'],

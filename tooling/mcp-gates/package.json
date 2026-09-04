@@ -1,0 +1,13 @@
+{
+  "name": "shadowgraph-mcp-gate-tools",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Exact external clients used only by ShadowGraph's MCP conformance gates",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/inspector": "2.4.0",
+    "mcp-proxy": "6.4.3"
+  }
+}

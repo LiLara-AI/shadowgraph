@@ -1,10 +1,10 @@
 // Offline cover for the Glama proxy gate's own logic.
 //
-// The gate itself needs the network, so it runs from `npm run check:mcp` rather
-// than from the suite. What is checked here is everything that would otherwise
-// only be exercised by that network run: the recorder's byte transparency, the
-// event-stream parser, and the two assertion functions, including that they
-// reject the failures they exist to catch.
+// The live gate uses the external proxy client, so it runs from
+// `npm run check:mcp` rather than from the suite. What is checked here is
+// everything that would otherwise only be exercised by that live run: the
+// recorder's byte transparency, the event-stream parser, and the two assertion
+// functions, including that they reject the failures they exist to catch.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';

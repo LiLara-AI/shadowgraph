@@ -374,7 +374,9 @@ npm run check:mcp
 ```
 
 That runs two scripts, both against pinned versions, and both fail loudly rather than skipping when
-they cannot run.
+they cannot run. CI installs those external clients from the isolated
+`tooling/mcp-gates/package-lock.json` before the live gates; in a source checkout without that local
+tooling install, the scripts fall back to the same exact versions through `npx`.
 
 `scripts/check-mcp.mjs` invokes pinned official `@modelcontextprotocol/inspector@2.4.0` twice with `tools/list --strict --format json`. It fails when:
 
@@ -393,7 +395,7 @@ implements and echoes, so the strict run exercises the structured tier by genuin
 command that container runs, with a stdio recorder between them, and drives it over streamable HTTP as Glama's scanner would (§4). It
 fails when:
 
-- the proxy cannot be started, or does not serve on the loopback interface within two minutes;
+- the proxy cannot be started, or does not serve on the loopback interface within five minutes;
 - the proxy sends anything other than exactly one `initialize`, or requests a revision other than
   `2025-11-25`;
 - this server negotiates anything other than `2025-11-25` with it;
@@ -401,10 +403,12 @@ fails when:
   coverage above;
 - that list is not deep-equal to the one the server wrote to stdio.
 
-The CI matrix runs both gates on Node 24 on both Ubuntu and Windows. `test/check-glama-proxy.test.js`
-covers the gate's own recorder, event-stream parser, and assertions offline, including that each
-assertion rejects the failure it exists to catch. Unit/integration tests separately prove the
-configured-verifier full count is 28 and compact remains 12.
+The CI matrix installs the locked gate clients and runs both gates on Node 24 on both Ubuntu and
+Windows. `test/check-glama-proxy.test.js` covers the gate's own recorder, event-stream parser, and
+assertions offline, including that each assertion rejects the failure it exists to catch;
+`test/mcp-gate-tooling.test.js` binds the scripts and CI workflow to the exact tooling lock.
+Unit/integration tests separately prove the configured-verifier full count is 28 and compact
+remains 12.
 
 ## 6. Primary sources consulted
 
