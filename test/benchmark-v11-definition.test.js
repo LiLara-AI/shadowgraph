@@ -336,6 +336,17 @@ test('acceptance definition is frozen to A002 sources, exact topology, and mecha
   );
 });
 
+if (process.platform === 'win32') {
+  test('loader accepts an equivalent Windows spelling of its trusted repository root', async (t) => {
+    const root = await cloneDefinitionFixture(t);
+    const alternateCaseRoot = root.toUpperCase();
+    assert.notEqual(alternateCaseRoot, root);
+    await assert.doesNotReject(() => loadV11AcceptanceDefinition({
+      repositoryRoot: alternateCaseRoot
+    }));
+  });
+}
+
 test('public serialized boundary applies the complete finite lexical corpus to deep keys and values', async (t) => {
   const { scenarios } = await loadV11AcceptanceDefinition({ repositoryRoot: REPOSITORY_ROOT });
   const base = scenarios[0];

@@ -718,7 +718,11 @@ function deepFreeze(value) {
 export async function loadV11AcceptanceDefinition(options) {
   assertExactKeys(options, ['repositoryRoot'], 'acceptance definition loader options');
   assertNonEmptyString(options.repositoryRoot, 'acceptance definition loader repositoryRoot');
-  const repositoryRoot = path.resolve(options.repositoryRoot);
+  // Windows may expose the trusted temp/repository root through an 8.3 alias
+  // (for example RUNNER~1) or different casing. Canonicalize that trusted root
+  // once, then keep the strict realpath equality checks for every descendant;
+  // this accepts filesystem aliases without making parent/file symlinks valid.
+  const repositoryRoot = await realpath(path.resolve(options.repositoryRoot));
   const benchmarkRoot = path.join(repositoryRoot, 'benchmark');
   const acceptanceRoot = path.join(benchmarkRoot, 'acceptance');
   const definitionPath = path.join(acceptanceRoot, 'definition.json');

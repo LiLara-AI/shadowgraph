@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { link, lstat, mkdir, open, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises';
+import { link, lstat, mkdir, open, readFile, readdir, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -523,7 +523,7 @@ for (const backend of ['json', 'sqlite']) {
 
     const paths = await statePaths({ stateRoot, backend, request: reset });
     assert.match(path.basename(paths.leaf), /^[a-f0-9]{64}$/u);
-    assert.equal(path.dirname(paths.leaf), path.resolve(stateRoot));
+    assert.equal(path.dirname(paths.leaf), await realpath(stateRoot));
     assert.equal(paths.leaf, (await statePaths({ stateRoot, backend, request: alternateRetrieve })).leaf);
     const measured = await measureStateLeaf(paths.leaf);
     assert.equal(isolationResponse.storage.bytes, measured.bytes);
@@ -1247,10 +1247,12 @@ test('poison directory and primary marker are durably published in crash-safe or
   const directory = await scratchDirectory(t, 'shadowgraph-v11-poison-durability-');
   const stateRoot = path.join(directory, 'owned-state');
   const reset = requestFor('reset', { armId: 'shadowgraph-compact', phase: 'SETUP' });
+  await mkdir(stateRoot);
+  const canonicalStateRoot = await realpath(stateRoot);
   let poisonDirectoryExistedAtRootSync = false;
   const probe = durabilityProbe({
     async beforeDirectorySync(candidate) {
-      if (candidate === stateRoot) {
+      if (candidate === canonicalStateRoot) {
         poisonDirectoryExistedAtRootSync = (await lstat(path.join(candidate, '.poison'))).isDirectory();
       }
     }

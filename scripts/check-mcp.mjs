@@ -4,6 +4,10 @@ import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const INSPECTOR_VERSION = '2.4.0';
+// The first npx invocation may have to populate a cold GitHub runner cache.
+// Keep the external gate bounded, but do not confuse a two-minute registry
+// fetch with an Inspector protocol failure.
+const INSPECTOR_TIMEOUT_MS = 300_000;
 const expected = [
   { name: 'Full', count: 27, env: [] },
   { name: 'Compact', count: 12, env: ['SHADOWGRAPH_MCP_COMPACT=1'] }
@@ -50,7 +54,7 @@ try {
     const run = spawnSync(runner, args, {
       cwd: new URL('..', import.meta.url),
       encoding: 'utf8',
-      timeout: 120_000,
+      timeout: INSPECTOR_TIMEOUT_MS,
       windowsHide: true
     });
     if (run.error) throw run.error;
