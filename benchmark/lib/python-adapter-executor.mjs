@@ -162,7 +162,6 @@ function waitBounded(operation, deadlineAt, signal, rejectionError = new PythonA
       'TIMEOUT',
       'Python adapter lifecycle timed out'
     )), remaining);
-    timer.unref?.();
     signal?.addEventListener('abort', onAbort, { once: true });
     Promise.resolve(operation).then(
       (value) => finish(resolve, value),
@@ -616,7 +615,6 @@ function runChild({
       child.stderr.destroy?.();
       finish(reject, failure);
     }, processBudget);
-    hardSettleTimer.unref?.();
 
     child.stdout.on('data', (chunk) => {
       const buffer = Buffer.from(chunk);
