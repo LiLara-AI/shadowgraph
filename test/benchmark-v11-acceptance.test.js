@@ -34,6 +34,9 @@ const REPOSITORY_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const AMENDMENT_002_PATH = fileURLToPath(
   new URL('../benchmark/preregistration-amendment-002.json', import.meta.url)
 );
+const AMENDMENT_003_PATH = fileURLToPath(
+  new URL('../benchmark/preregistration-amendment-003.json', import.meta.url)
+);
 
 // The frozen source digests, stated so a change to the frozen bytes fails this
 // suite instead of silently re-baselining it.
@@ -41,6 +44,7 @@ const HASHES = Object.freeze({
   preregistrationSha256: '738ee8b4813fab77da2e4e24582b12e756686650e4c39fad41c5337f831f5dac',
   amendment001Sha256: '2b209df6ca46a179e332acd4ed0b16a35a089f5c14575dd86353db0dc7249c4a',
   amendment002Sha256: '08e12eca3f93bd67cfeaf90a2064f91beb240e78a8fd63ed8645da78c0d88f1b',
+  amendment003Sha256: '726de2018584aca399fc27d2bba15585d8b6fb9454bc24083578daed22f0be0a',
   implementationLockHash: '4'.repeat(64),
   environmentLockHash: '5'.repeat(64)
 });
@@ -263,6 +267,7 @@ async function acceptanceRun(overrides = {}) {
     seeds: [...definition.commonExecution.randomSeeds],
     ...HASHES,
     amendment002Path: AMENDMENT_002_PATH,
+    amendment003Path: AMENDMENT_003_PATH,
     progress,
     persistUnit: async () => {},
     now: clock.now,
@@ -402,30 +407,30 @@ test('measured, excluded and reset counts match the applicability matrix in forc
   assert.deepEqual(observed, loaded.expectedCounts);
   assert.deepEqual(observed, {
     totalUnits: 308,
-    excludedUnits: 16,
-    measuredUnits: 292,
+    excludedUnits: 20,
+    measuredUnits: 288,
     resetUnits: 28,
-    outerDecisionCalls: 264
+    outerDecisionCalls: 260
   });
 });
 
 test('exactly the measured non-reset units make one outer decision call each', () => {
   const { raw, outerRequests } = primary;
 
-  assert.equal(outerRequests.length, 264);
+  assert.equal(outerRequests.length, 260);
   assert.equal(outerRequests.some((entry) => entry.phase === 'RESET'), false);
 
   // The builder is called twice per outer call: once for the request, once to
   // check it is a pure function of its input. If that fell to one, a builder
   // reading a counter or the arm ordering would go undetected.
-  assert.equal(primary.builderInputs.length, 528, 'the purity rebuild did not run');
+  assert.equal(primary.builderInputs.length, 520, 'the purity rebuild did not run');
 
   // The runner's own per-unit counter must agree with what the outer stub saw.
   const counted = raw.units.reduce(
     (total, unit) => total + unit.operations.outerDecisionModelCalls,
     0
   );
-  assert.equal(counted, 264);
+  assert.equal(counted, 260);
   for (const unit of raw.units) {
     const expected = unit.status === 'MEASURED' && unit.phase !== 'RESET' ? 1 : 0;
     assert.equal(
@@ -443,7 +448,7 @@ test('every arm receives an identical outer prompt for the same phase and scenar
   const { outerRequests } = primary;
 
   const systems = new Set(outerRequests.map((entry) => entry.built.system));
-  assert.equal(systems.size, 1, 'all 264 outer calls must share one system prompt');
+  assert.equal(systems.size, 1, 'all 260 outer calls must share one system prompt');
 
   // Every arm reaches every phase except ISOLATION_USER, where the arms the
   // matrix declares NOT_APPLICABLE are excluded before any prompt is built.
@@ -640,9 +645,11 @@ test('the frozen source digests are carried through the run unchanged', () => {
   assert.equal(raw.preregistrationSha256, loaded.sourceHashes.preregistrationSha256);
   assert.equal(raw.amendment001Sha256, loaded.sourceHashes.amendment001Sha256);
   assert.equal(raw.amendment002Sha256, loaded.sourceHashes.amendment002Sha256);
+  assert.equal(raw.amendment003Sha256, loaded.sourceHashes.amendment003Sha256);
   assert.equal(raw.preregistrationSha256, HASHES.preregistrationSha256);
   assert.equal(raw.amendment001Sha256, HASHES.amendment001Sha256);
   assert.equal(raw.amendment002Sha256, HASHES.amendment002Sha256);
+  assert.equal(raw.amendment003Sha256, HASHES.amendment003Sha256);
 });
 
 test('every unit is checkpointed, and no unit reports an unapproved status', () => {
@@ -690,14 +697,14 @@ test('an adapter failure fails its own units closed without shrinking the plan',
     assert.ok(unit.failure !== null && typeof unit.failure.cause === 'string');
   }
 
-  // The other six arms are untouched: 292 measured minus graphiti's own share.
+  // The other six arms are untouched: 288 measured minus graphiti's own share.
   const otherArmsMeasured = raw.units.filter(
     (unit) => unit.armId !== 'graphiti' && unit.status === 'MEASURED'
   );
   const graphitiMeasured = primary.raw.units.filter(
     (unit) => unit.armId === 'graphiti' && unit.status === 'MEASURED'
   ).length;
-  assert.equal(otherArmsMeasured.length, 292 - graphitiMeasured);
+  assert.equal(otherArmsMeasured.length, 288 - graphitiMeasured);
 });
 
 // --- Fault injection ---------------------------------------------------------
@@ -745,7 +752,7 @@ test('the prompt builder is never told which arm it is serving', () => {
   // under a biased prompt, run reporting COMPLETE.
   const { builderInputs } = primary;
 
-  assert.equal(builderInputs.length, 528);
+  assert.equal(builderInputs.length, 520);
   const surfaces = new Set(builderInputs.map((keys) => keys.join(',')));
   assert.equal(surfaces.size, 1, 'the builder input surface must not vary');
   assert.deepEqual(
@@ -998,7 +1005,7 @@ test('a stalled unit is failed once by the watchdog, not retried', async () => {
   // at all, or that retried units while staying under the plan size.
   assert.equal(
     outerCalls,
-    264 - phaseB.length,
+    260 - phaseB.length,
     'a stalled unit is failed once, not retried and not silently skipped elsewhere'
   );
 });

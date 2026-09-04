@@ -33,6 +33,7 @@ export const OUTER_REQUEST_INPUT_FIELDS = Object.freeze(['phase', 'scenario', 'n
 const HASH = /^[a-f0-9]{64}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
 const AMENDMENT_002_SHA256 = '08e12eca3f93bd67cfeaf90a2064f91beb240e78a8fd63ed8645da78c0d88f1b';
+const AMENDMENT_003_SHA256 = '726de2018584aca399fc27d2bba15585d8b6fb9454bc24083578daed22f0be0a';
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
 const UNIT_TIMEOUT_MS = 120_000;
 const RESUME_PROGRESS_EVENTS = new Set([
@@ -238,7 +239,7 @@ function throwIfAborted(signal) {
   throw Object.assign(new Error('Measured operation was aborted'), { name: 'AbortError' });
 }
 
-async function loadAmendment002(options) {
+async function loadAmendments(options) {
   if (options.amendment002Sha256 !== AMENDMENT_002_SHA256) {
     throw new Error('Amendment 002 hash is not the exact locked v1.1 source digest');
   }
@@ -275,19 +276,64 @@ async function loadAmendment002(options) {
       throw new Error(`Amendment 002 armMatrix entry ${armId} is invalid`, { cause: error });
     }
   }
+  if (options.amendment003Sha256 !== AMENDMENT_003_SHA256) {
+    throw new Error('Amendment 003 hash is not the exact locked v1.1 source digest');
+  }
+  let amendment003Source;
+  try {
+    amendment003Source = await readFile(options.amendment003Path);
+  } catch {
+    throw new Error('Unable to read Amendment 003 source');
+  }
+  const amendment003ActualHash = createHash('sha256').update(amendment003Source).digest('hex');
+  if (amendment003ActualHash !== options.amendment003Sha256) {
+    throw new Error('Amendment 003 source bytes do not match amendment003Sha256');
+  }
+  let amendment003;
+  try {
+    amendment003 = JSON.parse(amendment003Source.toString('utf8'));
+  } catch {
+    throw new Error('Amendment 003 source is not valid JSON');
+  }
+  const correction = amendment003?.applicabilityCorrection;
+  if (amendment003?.amendmentId !== 'amendment-003'
+    || amendment003?.status !== 'AUTHORIZED_FOR_NON_SCORED_V1_1_ACCEPTANCE'
+    || amendment003?.supersedes?.preregistrationSha256 !== options.preregistrationSha256
+    || amendment003?.supersedes?.amendment001Sha256 !== options.amendment001Sha256
+    || amendment003?.supersedes?.amendment002Sha256 !== options.amendment002Sha256
+    || correction?.armId !== 'graphiti'
+    || correction?.capability !== 'userIsolation'
+    || correction?.evidence?.userIdEncodedIntoGroupId !== false
+    || amendment003?.executionConstraints?.noSyntheticNamespaces !== true
+    || amendment003?.executionConstraints?.noUserIdIntoGraphitiGroupId !== true) {
+    throw new Error('Amendment 003 does not match the authorized applicability correction');
+  }
+  const historical = matrix[correction.armId]?.[correction.capability];
+  if (!isDeepStrictEqual(historical, correction.from)) {
+    throw new Error('Amendment 003 correction does not match Amendment 002 armMatrix');
+  }
+  const effectiveMatrix = structuredClone(matrix);
+  effectiveMatrix[correction.armId][correction.capability] = structuredClone(correction.to);
+  for (const [armId, declared] of Object.entries(effectiveMatrix)) {
+    try {
+      validateApplicability(declared);
+    } catch (error) {
+      throw new Error(`Effective applicability entry ${armId} is invalid`, { cause: error });
+    }
+  }
   for (const arm of options.arms) {
-    const declared = matrix[arm.id];
-    if (!Object.hasOwn(matrix, arm.id)) {
-      throw new Error(`Arm ${arm.id} is absent from Amendment 002 armMatrix`);
+    const declared = effectiveMatrix[arm.id];
+    if (!Object.hasOwn(effectiveMatrix, arm.id)) {
+      throw new Error(`Arm ${arm.id} is absent from the effective applicability matrix`);
     }
     for (const capability of ['userIsolation', 'persistence']) {
       if (arm.applicability[capability].status !== declared[capability].status
         || arm.applicability[capability].reason !== declared[capability].reason) {
-        throw new Error(`Arm ${arm.id} applicability contradicts Amendment 002 armMatrix`);
+        throw new Error(`Arm ${arm.id} applicability contradicts the effective amendment matrix`);
       }
     }
   }
-  return amendment;
+  return { amendment002: amendment, amendment003, effectiveMatrix };
 }
 
 function validateArm(arm, seen) {
@@ -609,7 +655,12 @@ async function validateResume(options, plannedIds) {
   if (previousRaw.environmentLockHash !== options.environmentLockHash) {
     throw new Error('Changed environment lock requires a new runId');
   }
-  for (const field of ['preregistrationSha256', 'amendment001Sha256', 'amendment002Sha256']) {
+  for (const field of [
+    'preregistrationSha256',
+    'amendment001Sha256',
+    'amendment002Sha256',
+    'amendment003Sha256'
+  ]) {
     if (previousRaw[field] !== options[field]) {
       throw new Error(`Changed ${field} requires a new runId`);
     }
@@ -698,11 +749,15 @@ function validateOptions(options) {
     'preregistrationSha256',
     'amendment001Sha256',
     'amendment002Sha256',
+    'amendment003Sha256',
     'implementationLockHash',
     'environmentLockHash'
   ]) requireHash(options[field], field);
   if (!isNonEmptyString(options.amendment002Path)) {
     throw new Error('amendment002Path must identify the exact Amendment 002 source file');
+  }
+  if (!isNonEmptyString(options.amendment003Path)) {
+    throw new Error('amendment003Path must identify the exact Amendment 003 source file');
   }
   if (!isPlainObject(options.progress)
     || typeof options.progress.append !== 'function'
@@ -1436,7 +1491,7 @@ function zeroResultFor(units, interrupted) {
  * receive memory-only requests; the outer decision call remains centralized.
  */
 async function executeV11Benchmark(options, closeResources) {
-  await loadAmendment002(options);
+  await loadAmendments(options);
   const plan = createPlan(options);
   const plannedIds = new Set(plan.map((spec) => spec.unitId));
   const resume = await validateResume(options, plannedIds);
@@ -1489,6 +1544,7 @@ async function executeV11Benchmark(options, closeResources) {
     preregistrationSha256: options.preregistrationSha256,
     amendment001Sha256: options.amendment001Sha256,
     amendment002Sha256: options.amendment002Sha256,
+    amendment003Sha256: options.amendment003Sha256,
     implementationLockHash: options.implementationLockHash,
     environmentLockHash: options.environmentLockHash,
     startedAt,

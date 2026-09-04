@@ -523,6 +523,7 @@ async function v11RunCommand(options) {
     attemptId,
     sourceHashes: candidate.sourceHashes,
     amendment002Path: join(benchmarkRoot, 'preregistration-amendment-002.json'),
+    amendment003Path: join(benchmarkRoot, 'preregistration-amendment-003.json'),
     ...v11RuntimeDependencies()
   });
 

@@ -67,16 +67,14 @@ test('every frozen arm is bound to a runtime and its observed isolation', async 
   assert.equal(byId['mem0-oss'].nativeUserNamespace, 'user_id');
 });
 
-test('the declared applicability contradiction is surfaced as a blocker', async () => {
+test('the Amendment 003 applicability correction removes the Graphiti contradiction', async () => {
   const { stdout } = await runCli(['v11-preflight']);
   const report = JSON.parse(stdout);
 
   assert.equal(report.applicability.status, 'INCONSISTENT');
-  const graphiti = report.blockers.find((blocker) => (
+  assert.equal(report.blockers.some((blocker) => (
     blocker.kind === 'applicability' && blocker.armId === 'graphiti'
-  ));
-  assert.equal(graphiti.code, 'DECLARED_ISOLATION_UNAVAILABLE');
-  assert.equal(graphiti.declared, 'SUPPORTED');
+  )), false);
 
   // Cognee is a different case and must not be collapsed into the same one: the
   // capability exists but its configuration is not pinned.
@@ -125,7 +123,7 @@ test('a satisfied precondition clears only its own blocker', async () => {
   );
   // Graphiti has no precondition to satisfy: its capability is absent, so the
   // blocker must survive.
-  assert.ok(report.blockers.some((blocker) => blocker.code === 'DECLARED_ISOLATION_UNAVAILABLE'));
+  assert.equal(report.blockers.some((blocker) => blocker.code === 'DECLARED_ISOLATION_UNAVAILABLE'), false);
   assert.equal(report.readiness, 'NOT READY');
 });
 
@@ -150,11 +148,11 @@ test('authenticated immutable prerequisites clear their own gates', async () => 
     .sort();
 
   assert.deepEqual(requirements, []);
-  assert.ok(report.blockers.some((blocker) => blocker.code === 'DECLARED_ISOLATION_UNAVAILABLE'));
+  assert.equal(report.blockers.some((blocker) => blocker.code === 'DECLARED_ISOLATION_UNAVAILABLE'), false);
   assert.equal(report.readiness, 'NOT READY');
 });
 
-test('clearing every applicability precondition still leaves Graphiti blocked', async () => {
+test('clearing every applicability precondition still leaves required services blocked', async () => {
   // Cognee's ACL precondition and the immutable prerequisites are satisfied, but
   // Graphiti's declared native user isolation is still unavailable.
   const { stdout } = await runCli([
@@ -164,10 +162,10 @@ test('clearing every applicability precondition still leaves Graphiti blocked', 
   const report = JSON.parse(stdout);
   assert.equal(report.readiness, 'NOT READY');
   assert.equal(report.blockers.some((blocker) => blocker.kind === 'immutable-prerequisite'), false);
-  assert.ok(report.blockers.some((blocker) => blocker.code === 'DECLARED_ISOLATION_UNAVAILABLE'));
+  assert.equal(report.blockers.some((blocker) => blocker.code === 'DECLARED_ISOLATION_UNAVAILABLE'), false);
 });
 
-test('v11-preflight reports exactly the four current blockers', async () => {
+test('v11-preflight reports exactly the three post-Amendment-003 blockers', async () => {
   const { code, stdout } = await runCli(['v11-preflight']);
   const report = JSON.parse(stdout);
 
@@ -182,7 +180,6 @@ test('v11-preflight reports exactly the four current blockers', async () => {
     }).sort(),
     [
       'applicability:DECLARED_ISOLATION_PRECONDITION_UNMET:cognee',
-      'applicability:DECLARED_ISOLATION_UNAVAILABLE:graphiti',
       'required-service:cognee:common LLM and embedding endpoint',
       'required-service:graphiti:Neo4j-compatible graph database plus common LLM and embedding endpoint'
     ].sort()

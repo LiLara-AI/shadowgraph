@@ -37,11 +37,15 @@ const HASHES = Object.freeze({
   preregistrationSha256: '738ee8b4813fab77da2e4e24582b12e756686650e4c39fad41c5337f831f5dac',
   amendment001Sha256: '2b209df6ca46a179e332acd4ed0b16a35a089f5c14575dd86353db0dc7249c4a',
   amendment002Sha256: '08e12eca3f93bd67cfeaf90a2064f91beb240e78a8fd63ed8645da78c0d88f1b',
+  amendment003Sha256: '726de2018584aca399fc27d2bba15585d8b6fb9454bc24083578daed22f0be0a',
   implementationLockHash: '4'.repeat(64),
   environmentLockHash: '5'.repeat(64)
 });
 const AMENDMENT_002_PATH = fileURLToPath(
   new URL('../benchmark/preregistration-amendment-002.json', import.meta.url)
+);
+const AMENDMENT_003_PATH = fileURLToPath(
+  new URL('../benchmark/preregistration-amendment-003.json', import.meta.url)
 );
 
 function sha256(value) {
@@ -278,6 +282,7 @@ function baseOptions(overrides = {}) {
     seeds: [17],
     ...HASHES,
     amendment002Path: AMENDMENT_002_PATH,
+    amendment003Path: AMENDMENT_003_PATH,
     progress,
     persistUnit: async () => {},
     now: clock.now,
@@ -1102,6 +1107,38 @@ test('runner rejects changed Amendment 002 bytes and arm-matrix contradictions b
   }
 });
 
+test('runner binds Amendment 003 bytes and its effective Graphiti correction before side effects', async (t) => {
+  const source = await readFile(AMENDMENT_003_PATH);
+  assert.equal(sha256(source), HASHES.amendment003Sha256);
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-amendment-003-');
+  const changedPath = path.join(directory, 'amendment-003.changed.json');
+  await writeFile(changedPath, Buffer.concat([source, Buffer.from('\n')]));
+  const changedHash = sha256(await readFile(changedPath));
+  const graphitiSupported = arm({ id: 'graphiti', name: 'Graphiti' });
+
+  for (const overrides of [
+    { amendment003Path: changedPath },
+    { amendment003Path: changedPath, amendment003Sha256: changedHash },
+    { arms: [graphitiSupported] }
+  ]) {
+    let adapterCalls = 0;
+    const progress = progressRecorder();
+    await assert.rejects(
+      runV11Benchmark(baseOptions({
+        ...overrides,
+        progress,
+        executeAdapter: async (request) => {
+          adapterCalls += 1;
+          return adapterEnvelope(request);
+        }
+      })),
+      /Amendment 003|effective amendment matrix|applicability/iu
+    );
+    assert.equal(progress.events.length, 0);
+    assert.equal(adapterCalls, 0);
+  }
+});
+
 test('watchdog aborts and races a non-cooperative unit once with exact correlation', async () => {
   let watchdogCalls = 0;
   let resetCalls = 0;
@@ -1443,7 +1480,8 @@ test('one acceptance artifact flows through the integrated runner, validator, an
     trustedSourceHashes: {
       preregistrationSha256: HASHES.preregistrationSha256,
       amendment001Sha256: HASHES.amendment001Sha256,
-      amendment002Sha256: HASHES.amendment002Sha256
+      amendment002Sha256: HASHES.amendment002Sha256,
+      amendment003Sha256: HASHES.amendment003Sha256
     }
   });
   assert.equal(aggregate.mode, 'ACCEPTANCE');

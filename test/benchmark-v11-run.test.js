@@ -34,6 +34,7 @@ const REPOSITORY_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const CLI = path.join(REPOSITORY_ROOT, 'benchmark', 'cli.mjs');
 const BENCHMARK_ROOT = path.join(REPOSITORY_ROOT, 'benchmark');
 const AMENDMENT_002_PATH = path.join(BENCHMARK_ROOT, 'preregistration-amendment-002.json');
+const AMENDMENT_003_PATH = path.join(BENCHMARK_ROOT, 'preregistration-amendment-003.json');
 
 async function realCandidate() {
   const competitorLock = JSON.parse(
@@ -295,6 +296,7 @@ test('the module refuses to run a candidate its own readiness check blocks', asy
       attemptId: 'attempt-should-not-start',
       sourceHashes: candidate.sourceHashes,
       amendment002Path: AMENDMENT_002_PATH,
+      amendment003Path: AMENDMENT_003_PATH,
       implementationLockHash: '4'.repeat(64),
       environmentLockHash: '5'.repeat(64),
       executeAdapter: async () => {
@@ -335,6 +337,7 @@ test('a real run may use only the frozen prompt builder', async () => {
     attemptId: 'attempt-builder-identity',
     sourceHashes: candidate.sourceHashes,
     amendment002Path: AMENDMENT_002_PATH,
+    amendment003Path: AMENDMENT_003_PATH,
     implementationLockHash: '4'.repeat(64),
     environmentLockHash: '5'.repeat(64),
     executeAdapter: async () => {
@@ -442,6 +445,7 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
     attemptId: 'attempt-v11-connected',
     sourceHashes,
     amendment002Path: AMENDMENT_002_PATH,
+    amendment003Path: AMENDMENT_003_PATH,
     implementationLockHash: '4'.repeat(64),
     environmentLockHash: '5'.repeat(64),
     progress,
@@ -472,8 +476,8 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
   // asserting that the functions exist, not that they connect.
   const measured = outcome.raw.units.filter((unit) => unit.status === 'MEASURED');
   const excluded = outcome.raw.units.filter((unit) => unit.status === 'EXCLUDED');
-  assert.equal(measured.length, 292);
-  assert.equal(excluded.length, 16);
+  assert.equal(measured.length, 288);
+  assert.equal(excluded.length, 20);
   assert.equal(outcome.raw.units.some((unit) => unit.status === 'FAILED'), false);
 
   // The checkpoint ledger the resume path reads was written for every unit.

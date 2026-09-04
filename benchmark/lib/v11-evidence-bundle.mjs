@@ -152,7 +152,7 @@ export function buildReviewBundle(input) {
   if (!isPlainObject(sourceHashes)) {
     reject('CONTRACT_FAILURE', 'review bundle requires the frozen source hashes');
   }
-  for (const field of ['preregistrationSha256', 'amendment001Sha256', 'amendment002Sha256']) {
+  for (const field of ['preregistrationSha256', 'amendment001Sha256', 'amendment002Sha256', 'amendment003Sha256']) {
     assertDigest(sourceHashes[field], `frozen source hash ${field}`);
   }
   if (scored !== false) {
@@ -193,7 +193,8 @@ export function buildReviewBundle(input) {
     sourceHashes: {
       preregistrationSha256: sourceHashes.preregistrationSha256,
       amendment001Sha256: sourceHashes.amendment001Sha256,
-      amendment002Sha256: sourceHashes.amendment002Sha256
+      amendment002Sha256: sourceHashes.amendment002Sha256,
+      amendment003Sha256: sourceHashes.amendment003Sha256
     },
     evidenceIndexDigest: evidenceIndexDigest(validated),
     index: validated

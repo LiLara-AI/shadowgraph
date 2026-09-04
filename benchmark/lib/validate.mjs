@@ -30,7 +30,7 @@ const REQUIRED_MEASUREMENT_FIELDS = [
 const V11_RAW_FIELDS = [
   'schemaVersion', 'benchmarkVersion', 'mode', 'runId', 'attemptId', 'attemptIds',
   'status', 'preregistrationSha256', 'amendment001Sha256', 'amendment002Sha256',
-  'implementationLockHash', 'environmentLockHash', 'startedAt', 'finishedAt',
+  'amendment003Sha256', 'implementationLockHash', 'environmentLockHash', 'startedAt', 'finishedAt',
   'zeroResult', 'outerPromptBinding', 'arms', 'units'
 ];
 const V11_ARM_FIELDS = ['armId', 'name', 'status', 'applicability'];
@@ -736,7 +736,7 @@ export function validateV11RawRun(raw, preregistration, expectedSha256) {
   }
   for (const field of [
     'preregistrationSha256', 'amendment001Sha256', 'amendment002Sha256',
-    'implementationLockHash', 'environmentLockHash'
+    'amendment003Sha256', 'implementationLockHash', 'environmentLockHash'
   ]) assertHash(raw[field], `v1.1 raw run.${field}`);
   if (raw.preregistrationSha256 !== expectedSha256) {
     throw new Error('Raw run preregistration hash does not match the frozen preregistration');

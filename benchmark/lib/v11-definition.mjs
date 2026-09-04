@@ -132,7 +132,8 @@ const FORBIDDEN_PUBLIC_DATA_KEYS = new Set([
 export const V11_ACCEPTANCE_SOURCE_HASHES = Object.freeze({
   preregistrationSha256: '738ee8b4813fab77da2e4e24582b12e756686650e4c39fad41c5337f831f5dac',
   amendment001Sha256: '2b209df6ca46a179e332acd4ed0b16a35a089f5c14575dd86353db0dc7249c4a',
-  amendment002Sha256: '08e12eca3f93bd67cfeaf90a2064f91beb240e78a8fd63ed8645da78c0d88f1b'
+  amendment002Sha256: '08e12eca3f93bd67cfeaf90a2064f91beb240e78a8fd63ed8645da78c0d88f1b',
+  amendment003Sha256: '726de2018584aca399fc27d2bba15585d8b6fb9454bc24083578daed22f0be0a'
 });
 
 export const V11_ACCEPTANCE_ARM_IDS = Object.freeze([
@@ -149,10 +150,10 @@ export const V11_ACCEPTANCE_PHASES = V11_PHASES;
 
 export const V11_ACCEPTANCE_EXPECTED_COUNTS = Object.freeze({
   totalUnits: 308,
-  excludedUnits: 16,
-  measuredUnits: 292,
+  excludedUnits: 20,
+  measuredUnits: 288,
   resetUnits: 28,
-  outerDecisionCalls: 264
+  outerDecisionCalls: 260
 });
 
 const EXPECTED_APPLICABILITY = Object.freeze({
@@ -185,7 +186,10 @@ const EXPECTED_APPLICABILITY = Object.freeze({
     persistence: Object.freeze({ status: 'SUPPORTED', reason: null })
   }),
   graphiti: Object.freeze({
-    userIsolation: Object.freeze({ status: 'SUPPORTED', reason: null }),
+    userIsolation: Object.freeze({
+      status: 'NOT_APPLICABLE',
+      reason: 'Graphiti 0.29.3 exposes only native group_id scope and no native user namespace'
+    }),
     persistence: Object.freeze({ status: 'SUPPORTED', reason: null })
   }),
   'basic-memory': Object.freeze({
@@ -639,7 +643,7 @@ function validateScenarioDocument(document, preregistration) {
   }
 }
 
-function validateFrozenSources(preregistration, amendment001, amendment002, definition) {
+function validateFrozenSources(preregistration, amendment001, amendment002, amendment003, definition) {
   if (!Array.isArray(preregistration.arms)
     || !isDeepStrictEqual(preregistration.arms.map(({ id }) => id), [...V11_ACCEPTANCE_ARM_IDS])) {
     boundaryReject('SHAPE');
@@ -667,9 +671,25 @@ function validateFrozenSources(preregistration, amendment001, amendment002, defi
     boundaryReject('SHAPE');
   }
   for (const armId of V11_ACCEPTANCE_ARM_IDS) {
-    if (!isDeepStrictEqual(matrix[armId], EXPECTED_APPLICABILITY[armId])) {
+    if (armId !== 'graphiti' && !isDeepStrictEqual(matrix[armId], EXPECTED_APPLICABILITY[armId])) {
       boundaryReject('SHAPE');
     }
+  }
+  if (amendment003?.amendmentId !== 'amendment-003'
+    || amendment003?.status !== 'AUTHORIZED_FOR_NON_SCORED_V1_1_ACCEPTANCE'
+    || amendment003?.supersedes?.amendment002Sha256 !== definition.sourceHashes.amendment002Sha256) {
+    boundaryReject('SHAPE');
+  }
+  const correction = amendment003?.applicabilityCorrection;
+  if (!isPlainObject(correction)
+    || correction.armId !== 'graphiti'
+    || correction.capability !== 'userIsolation'
+    || correction.from?.status !== 'SUPPORTED'
+    || correction.to?.status !== 'NOT_APPLICABLE'
+    || correction.evidence?.observedNativeProjectNamespace !== 'group_id'
+    || correction.evidence?.observedNativeUserNamespace !== null
+    || correction.evidence?.userIdEncodedIntoGroupId !== false) {
+    boundaryReject('SHAPE');
   }
 }
 
@@ -733,7 +753,8 @@ export async function loadV11AcceptanceDefinition(options) {
   const sourceFiles = [
     ['preregistrationSha256', 'preregistration.json', 'frozen preregistration'],
     ['amendment001Sha256', 'preregistration-amendment-001.json', 'frozen Amendment 001'],
-    ['amendment002Sha256', 'preregistration-amendment-002.json', 'frozen Amendment 002']
+    ['amendment002Sha256', 'preregistration-amendment-002.json', 'frozen Amendment 002'],
+    ['amendment003Sha256', 'preregistration-amendment-003.json', 'authorized Amendment 003']
   ];
   const parsedSources = [];
   for (const [hashField, filename, label] of sourceFiles) {
@@ -745,8 +766,8 @@ export async function loadV11AcceptanceDefinition(options) {
     }
     parsedSources.push(parseJson(bytes, label));
   }
-  const [preregistration, amendment001, amendment002] = parsedSources;
-  validateFrozenSources(preregistration, amendment001, amendment002, definition);
+  const [preregistration, amendment001, amendment002, amendment003] = parsedSources;
+  validateFrozenSources(preregistration, amendment001, amendment002, amendment003, definition);
 
   const scenariosPath = path.resolve(acceptanceRoot, definition.scenarios.path);
   if (!inside(acceptanceRoot, scenariosPath) || path.dirname(scenariosPath) !== acceptanceRoot) {
