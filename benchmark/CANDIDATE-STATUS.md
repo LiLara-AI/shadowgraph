@@ -15,9 +15,9 @@ All figures below were produced on the current branch with a clean working tree.
 
 | Gate | Command | Result |
 | --- | --- | --- |
-| Full repository | `npm test` | **2061 / 2061 pass**, 0 fail, 20 suites |
-| Benchmark focused | `npm run benchmark:test` | **906 / 906 pass**, 0 fail |
-| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **762 / 762 pass**, 0 fail |
+| Full repository | `npm test` | **2145 / 2145 pass**, 0 fail, 22 suites |
+| Benchmark focused | `npm run benchmark:test` | **911 / 911 pass**, 0 fail |
+| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **767 / 767 pass**, 0 fail |
 | Python adapters | `npm run benchmark:test:python` | **86 tests, OK** |
 | Node syntax | `npm run check`, `npm run benchmark:check` | pass |
 | Python syntax | `npm run benchmark:check:python` | pass |
@@ -38,23 +38,20 @@ requires `<raw-results.json>` and therefore only applies after a real run, which
 has not occurred.
 
 `npm run benchmark:test` runs at Node's default concurrency while `npm test`
-pins `--test-concurrency=1`, and the difference is load-bearing. One run of it
-failed a single test, `journal benchmark treats projection collection order as
-non-semantic at 1k`, which re-ran clean immediately after. The cause is not
-timing. `scripts/bench-journal.mjs` reported `json at 1000 was not measured` and
-`sqlite at 1000 was not measured`, and the backend evidence carried
-`ENOSPC: no space left on device`. Six copies in parallel reproduce it seven
-times in eight; run sequentially it is green three times in three. The tool is
-behaving correctly - it refuses to report a measurement it did not take - and
-the failure is environmental. It is recorded because a suite that can fail for a
-reason unrelated to the code under test is precisely what corrupts a mutation
-table, and because the host `/tmp` was found holding 83,833 leaked
-`shadowgraph-*` scratch directories occupying 8.7 GB of a 16 GB tmpfs,
-accumulated since 30 August 2026. That glob undercounts. Independent review
-measured the tmpfs again after a few further hours of test runs and found 18,901
-leaked directories holding 7.82 GB, of which only 5,187 match `shadowgraph-*`;
-most are named with spaces rather than hyphens. The leak is in the suite's own
-scratch handling, it is unfixed, and it is a finding in its own right.
+pins `--test-concurrency=1`, and the difference is load-bearing. A prior run
+correctly refused to publish a journal measurement after the host `/tmp` filled:
+historical investigation found 83,833 leaked `shadowgraph-*` directories using
+8.7 GB, then a broader count found 18,901 directories using 7.82 GB, including
+space-named prefixes the first glob missed. Those figures describe the incident,
+not the current state.
+
+The suite-wide scratch leak is now closed. Test scratch creation is routed
+through the owned cleanup helper, and the MCP conformance teardown confirms child
+exit and bounds its readiness handshake. A fresh full-suite run in an isolated
+temporary root left zero `shadowgraph*` entries and no related child process.
+The SQLite writer-first regression also no longer depends on observing a
+short-lived lock file: writer completion is an equally valid readiness outcome,
+matching the test's stated "completes first or conflicts" contract.
 
 ### Frozen bytes
 
@@ -115,9 +112,9 @@ treat file content at HEAD, not the diffs, as the object of review.
 | 3 | One centralized outer decision path; adapters memory-only | **Closed** |
 | 4 | Provider-evidence reconciliation | **Closed** |
 | 5 | Mutation state fails closed | **Closed** (mechanism); wiring waits on 6 |
-| 6 | Real pinned runtime factories for all seven arms | **Open** — 4 of 7 real, 3 blocked; the 3 now covered |
-| 7 | Non-scored acceptance, 308 units | **Closed** offline; a real run is blocked by B1/B2 |
-| 8 | Locks, ledger validation, readiness, evidence index, review bundle | **Partial** — builders done, artifacts blocked |
+| 6 | Real pinned runtime factories for all seven arms | **Partial** — contracts and offline adapters exist; official metered runtime hosts remain unimplemented |
+| 7 | Non-scored acceptance, 308 units | **Closed** offline; an official run is blocked by the four current preflight findings |
+| 8 | Locks, ledger validation, readiness, evidence index, review bundle | **Partial** — prerequisite locks are committed; the implementation lock and run-bound bundle remain pending |
 | 9 | Focused, Node, Python, package, MCP, integration, smoke, privacy checks | **Closed** |
 
 ### Closed
@@ -344,14 +341,17 @@ appears mid-table. The generator had removed transcription error and replaced
 it with attribution error — the same class of mistake one level up. A count is
 not a measurement when the population is flaky.
 
-Two things the identity version has caught that a count could not. First, the
-flake, on its first run: the `purity` cell picked up
-`DS-P1-003 SQLite: a child writer begun before restore either completes first
-or conflicts`, an unrelated concurrency test. Under the old harness that would
-have been published as `Purity rebuild | 2`. It was named, re-run, and
-resolved. **That test is genuinely flaky and is a finding in its own right** —
-it is what corrupted two of the reviewer’s runs, it is unrelated to v1.1, and
-it is recorded here rather than fixed because it sits outside this candidate.
+Two things the identity version caught that a count could not. First, the
+`purity` cell picked up `DS-P1-003 SQLite: a child writer begun before restore
+either completes first or conflicts`, an unrelated concurrency test. Under the
+old harness that would have been published as `Purity rebuild | 2`.
+
+That test-harness race is now closed. The writer's lock is intentionally
+short-lived, so polling for file existence could miss both its creation and
+removal and then report a false timeout. The test now proceeds when either the
+lock is observed or the writer has already completed, which are the two valid
+states its title describes. A deterministic regression failed before the fix,
+then passed; the original case also passed 20 consecutive repetitions afterward.
 
 Second, a guard whose reach genuinely grew. Making the end-to-end connection
 test detect a collapsed plan — it had counted 308 units without checking any
@@ -622,6 +622,24 @@ reports as a blocker, observed from the adapter side.
 
 ### Partial
 
+**Current requirement 8 status.** The immutable prerequisite files now exist and
+their content gates pass:
+
+- `benchmark/service-images.json` —
+  `17d4f223c4c2e887db45e15552a0e0e85e871ea1e50567e375c35d8cb7c4a051`
+- `benchmark/model-weights.lock.json` —
+  `f086d7d97084ad410573369b687034f28c2416711b2de8e325287070fb1c7f39`
+- `benchmark/python-wheels.lock.json` —
+  `8ea4a19d0d8fe3736be2793dc8603a2843f30cad48d83928b74a3ac0f1f4cc86`
+
+The implementation lock, evidence index, and review bundle are still ungenerated.
+They must bind a clean committed execution tree and real operator-supplied
+service digests; there is no official run to bundle. The authoritative current
+split between four preflight blockers and three later implementation blockers is
+recorded in `benchmark/evidence/v11-blocker-matrix-2026-09-03.md`.
+
+#### Historical lock-builder review (superseded by the current status above)
+
 **8 — Locks and bundle.** The readiness check exists, the isolation probe is
 recorded under `benchmark/evidence/`, and provider-ledger validation is closed
 under requirement 4.
@@ -830,6 +848,25 @@ are excluded is a methodology decision.
 
 ## Blockers
 
+`node benchmark/cli.mjs v11-preflight` currently exits non-zero with exactly
+four blockers:
+
+1. **CB1 — Graphiti isolation contradiction.** Graphiti 0.29.3 has no native
+   user namespace although frozen Amendment 002 declares it `SUPPORTED`.
+2. **CB2 — Cognee ACL precondition.** Native ACL capability exists, but the
+   pinned backend access-control configuration and enforcement evidence do not.
+3. **CB3 — Graphiti services.** A verified Neo4j-compatible database and common
+   LLM/embedding endpoint are not provisioned and bound to the run.
+4. **CB4 — Cognee services.** The verified common LLM/embedding endpoint is not
+   provisioned and bound to the run.
+
+After those are cleared, the harness still needs a verified service-health input
+and real metered runtime hosts before an official run can start. The complete
+evidence and required actions are in
+`benchmark/evidence/v11-blocker-matrix-2026-09-03.md` under CB1-CB4 and LB1-LB3.
+
+### Historical blocker record (resolved or superseded)
+
 **B1 — Immutable model-weight digests do not exist.**
 `proposal-reference/MISSING-EVIDENCE.md` records: *"Complete immutable Ollama
 model digests: NOT CAPTURED; only short Ollama IDs were available."*
@@ -919,5 +956,5 @@ readiness, not acceptance, and not permission to execute.
 4. That no isolation is manufactured by concatenating identifiers.
 5. That the Graphiti and Cognee probe conclusions follow from the recorded
    evidence.
-6. That B1, B2 and B3 are still open, since each one independently prevents an
-   acceptance run.
+6. That CB1-CB4 and the later LB1-LB3 follow from the current implementation and
+   evidence, and that the old B1-B3 narrative is not treated as current state.

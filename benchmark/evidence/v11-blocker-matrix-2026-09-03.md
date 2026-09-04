@@ -110,6 +110,5 @@ Those replacement counts are **inferred from the frozen plan topology**, not mea
 - No temporary Ollama process remains running.
 - No credentials were created or stored in repository files.
 - No package version changed; it remains `0.40.0`.
-- The benchmark prerequisite/evidence work is committed locally on `benchmark/v1.1-methodology-repair-glama-sync` only. No push, merge, rebase, tag, publish, or history rewrite occurred, and no worktree was deleted.
+- The prerequisite/evidence capture was originally committed locally on `benchmark/v1.1-methodology-repair-glama-sync`; that capture itself performed no push, merge, rebase, tag, publication, history rewrite, or worktree deletion. Later integration is recorded by git history rather than retroactively attributed to the capture session.
 - Frozen methodology files were not edited: `benchmark/preregistration.json`, `benchmark/preregistration-amendment-002.json`, `benchmark/acceptance/definition.json`, and `benchmark/acceptance/scenarios.json` are unchanged.
-
