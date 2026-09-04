@@ -14,7 +14,7 @@
     },
     {
       "kind": "embedding",
-      "modelId": "nomic-embed-text:latest",
+      "modelId": "nomic-embed-text:v1.5",
       "digestKind": "model_weights",
       "weightsDigest": "sha256:970aa74c0a90ef7482477cf803618e776e173c007bf957f635f1015bfcfef0e6",
       "architecture": "nomic-bert",

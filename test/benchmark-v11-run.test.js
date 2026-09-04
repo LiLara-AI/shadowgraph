@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { readdir, writeFile } from 'node:fs/promises';
+import { readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -118,8 +118,8 @@ test('a prerequisite file that exists but is empty is not treated as satisfied',
   assert.ok(unmet.every((blocker) => blocker.detail === 'the declaring file contains no usable entry'));
 });
 
-test('a tagged canonical service manifest does not satisfy the immutable service gate', async (t) => {
-  const directory = await scratchDirectory(t, 'shadowgraph-v11-tagged-service-manifest-');
+test('a mutable service manifest reference does not satisfy the service gate', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-mutable-service-manifest-');
   await writeFile(path.join(directory, 'service-images.json'), JSON.stringify({
     schema: 'shadowgraph.service-images',
     version: 1,
@@ -144,12 +144,40 @@ test('a tagged canonical service manifest does not satisfy the immutable service
   )));
 });
 
-test('the strict service manifest shape satisfies the service prerequisite gate', async (t) => {
-  const directory = await scratchDirectory(t, 'shadowgraph-v11-service-manifest-');
+test('a digest-suffixed service reference does not satisfy the service gate', async (t) => {
+  // implementation-lock.mjs refuses an image containing '@', so a manifest that
+  // inlines a digest could clear readiness and still never produce a lock.
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-digest-service-manifest-');
   await writeFile(path.join(directory, 'service-images.json'), JSON.stringify({
     schema: 'shadowgraph.service-images',
     version: 1,
     services: [{ name: 'ollama', image: 'ollama/ollama@sha256:' + 'a'.repeat(64) }]
+  }), 'utf8');
+  await writeFile(path.join(directory, 'model-weights.lock.json'), JSON.stringify({
+    models: [{ modelId: 'fixture', digestKind: 'model_weights', weightsDigest: 'sha256:' + 'b'.repeat(64) }]
+  }), 'utf8');
+  await writeFile(path.join(directory, 'python-wheels.lock.json'), JSON.stringify({
+    wheels: [{ name: 'fixture', sha256: 'c'.repeat(64) }]
+  }), 'utf8');
+
+  const candidate = await realCandidate();
+  const report = await computeV11Readiness({
+    ...candidate,
+    benchmarkRoot: directory,
+    satisfiedPreconditions: ['pinned backend access-control configuration']
+  });
+
+  assert.ok(report.blockers.some((blocker) => (
+    blocker.kind === 'immutable-prerequisite' && blocker.requirement === 'service-manifest'
+  )));
+});
+
+test('the canonical tagged service manifest satisfies the service prerequisite gate', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-service-manifest-');
+  await writeFile(path.join(directory, 'service-images.json'), JSON.stringify({
+    schema: 'shadowgraph.service-images',
+    version: 1,
+    services: [{ name: 'ollama', image: 'ollama/ollama:0.33.2' }]
   }), 'utf8');
   await writeFile(path.join(directory, 'model-weights.lock.json'), JSON.stringify({
     models: [{ modelId: 'fixture', digestKind: 'model_weights', weightsDigest: 'sha256:' + 'b'.repeat(64) }]
@@ -171,6 +199,33 @@ test('the strict service manifest shape satisfies the service prerequisite gate'
     )),
     false
   );
+});
+
+test('the committed service manifest uses references the implementation lock can pin', async () => {
+  // benchmark/lib/implementation-lock.mjs is the authority for this file. Its
+  // assertLockableImage refuses any reference containing '@' ("must be an image
+  // repository/name, not an image ID") and any mutable `latest`. A readiness
+  // gate that demanded an inline digest would accept a manifest that can never
+  // produce an implementation lock, so the two validators are checked together.
+  const manifest = JSON.parse(await readFile(path.join(BENCHMARK_ROOT, 'service-images.json'), 'utf8'));
+
+  assert.equal(manifest.schema, 'shadowgraph.service-images');
+  assert.ok(Array.isArray(manifest.services) && manifest.services.length > 0);
+  for (const service of manifest.services) {
+    assert.equal(service.image.includes('@'), false, `${service.name} names an image ID, not a repository`);
+    assert.equal(/(?:^|[/:@])latest(?:$|[/:@])/iu.test(service.image), false, `${service.name} is mutable`);
+    assert.match(service.image, /^[^@\s]+:[^@\s:]+$/u, `${service.name} must carry an explicit tag`);
+  }
+});
+
+test('the committed model lock names no mutable model reference', async () => {
+  // validateModels in implementation-lock.mjs rejects a `latest` model ID, so a
+  // weights digest recorded against one could never be locked.
+  const lock = JSON.parse(await readFile(path.join(BENCHMARK_ROOT, 'model-weights.lock.json'), 'utf8'));
+  assert.ok(Array.isArray(lock.models) && lock.models.length > 0);
+  for (const model of lock.models) {
+    assert.equal(/(?:^|[/:@])latest(?:$|[/:@])/iu.test(model.modelId), false, `${model.modelId} is mutable`);
+  }
 });
 
 test('a malformed prerequisite file blocks rather than crashing readiness', async (t) => {
@@ -334,7 +389,9 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
   );
   await writeFile(
     path.join(gateDirectory, 'service-images.json'),
-    JSON.stringify({ serviceImages: [{ name: 'fixture-service', image: `fixture@sha256:${'b'.repeat(64)}` }] }),
+    // The legacy `serviceImages` key is still accepted, but the image must be a
+    // reference implementation-lock.mjs could pin: repository plus explicit tag.
+    JSON.stringify({ serviceImages: [{ name: 'fixture-service', image: 'fixture/service:1.0.0' }] }),
     'utf8'
   );
   await writeFile(

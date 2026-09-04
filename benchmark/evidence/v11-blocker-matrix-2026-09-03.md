@@ -25,20 +25,22 @@ Separate later implementation blockers are recorded in their own section below s
 | Graphiti node user fields | None | Captured in `benchmark/evidence/probe-graphiti-0.29.3.json` |
 | Graphiti usable scope | `group_id` / `group_ids` only | Captured in probe evidence |
 | Qwen model weight layer | `sha256:c5396e06af294bd101b30dce59131a76d2b773e76950acc870eda801d3ab0515` | Captured from the local Ollama model manifest |
-| Nomic embedding weight layer | `sha256:970aa74c0a90ef7482477cf803618e776e173c007bf957f635f1015bfcfef0e6` | Captured from the local Ollama model manifest |
-| Ollama image | `ollama/ollama@sha256:020e4134285e2ef4d8fd801234176de3b4faadc992a3eb06c8e66a2f9d4c4ba2` | Captured by Docker image inspection |
-| Neo4j image | `neo4j@sha256:52d3dec8d45585b21edeca8517d752b2512e52aa94f80fc36a5788c88c95f8e4` | Captured by Docker image inspection |
+| Nomic embedding weight layer | `sha256:970aa74c0a90ef7482477cf803618e776e173c007bf957f635f1015bfcfef0e6` | Captured from the local Ollama model manifest; the registry serves the same layer for tags `latest`, `v1.5`, and `137m-v1.5-fp16`, so the immutable `v1.5` tag is recorded |
+| Ollama service reference | `ollama/ollama:0.33.2`, amd64 digest `sha256:9e7d782e99880c70f9563c51633da875ca605518a8f8d95c2532bda70a027b7a` | Captured with `docker manifest inspect --verbose` |
+| Neo4j service reference | `neo4j:5.20`, amd64 digest `sha256:99a767ef6f5573cd72d6d7f32c5266233af3c58efdc71577349a7c251d8ecb3b` | Captured with `docker manifest inspect --verbose` |
 | Python adapter image | `python@sha256:47ae396f09c1303b8653019811a8498470603d7ffefc29cb07c88f1f8cb3d19f` | Captured by Docker image inspection; matches competitor lock |
 | Common model endpoint | Docker Ollama `/v1/chat/completions` and `/v1/embeddings` returned HTTP 200 | Captured during temporary local provisioning |
 | Cognee ACL capability | Native user ACL exists; exact harness precondition is `pinned backend access-control configuration` | Captured from `benchmark/evidence/probe-cognee-1.5.3.json` and registry |
 | Wheel resolution | 227 packages, 3,885 SHA-256 entries | Captured from `uv pip compile --python-version 3.12 --generate-hashes` |
 
+Service digests are deliberately **not** written into `benchmark/service-images.json`. `benchmark/lib/implementation-lock.mjs` treats that file as the committed statement of which services must carry a digest and rejects any reference containing `@`; digests are operator-supplied run evidence passed to the lock builder. A read-only fixture confirmed that the committed manifest bytes plus these captured digests produce a valid implementation lock and verify byte-for-byte.
+
 ## Lock Files Written
 
 | File | SHA-256 | Contents |
 | --- | --- | --- |
-| `benchmark/service-images.json` | `338e52faa1e8b16009b48f5c00531c508bac90da8971357d15a358add28eb592` | Canonical digest-pinned service manifest: Neo4j 5.20 and Ollama |
-| `benchmark/model-weights.lock.json` | `73ba075195e769e5ba0c198548a03ca8917d056bab47b132ed7e379e1a9379bd` | Full LLM and embedding model weight-layer identities |
+| `benchmark/service-images.json` | `17d4f223c4c2e887db45e15552a0e0e85e871ea1e50567e375c35d8cb7c4a051` | Canonical committed service manifest: `neo4j:5.20` and `ollama/ollama:0.33.2` |
+| `benchmark/model-weights.lock.json` | `f086d7d97084ad410573369b687034f28c2416711b2de8e325287070fb1c7f39` | LLM and embedding weight-layer identities against immutable model tags |
 | `benchmark/python-wheels.lock.json` | `8ea4a19d0d8fe3736be2793dc8603a2843f30cad48d83928b74a3ac0f1f4cc86` | 3,885 wheel hashes from the 227-package resolver output |
 
 ## Current v11-preflight Blockers
@@ -90,9 +92,10 @@ Those replacement counts are **inferred from the frozen plan topology**, not mea
 - The common local/free model and embedding endpoint can be served by a digest-pinned Docker Ollama image.
 - Model weight layers, Docker images, and Python wheel hashes were captured without fabricating identities.
 - The three immutable-prerequisite gates clear when their truthful files are present.
-- The service-manifest gate rejects a mutable tag and accepts only `repository@sha256:<64-hex>`, proven by a regression test that failed before the gate change.
-- `node --test test/benchmark-v11-cli.test.js test/benchmark-v11-run.test.js`: 21 passed, 0 failed, 0 skipped, 0 todo.
-- `npm run benchmark:test`: 908 Node benchmark tests passed and 86 Python adapter tests passed, 0 failed, 0 skipped, 0 todo.
+- The service-manifest gate rejects a mutable `latest` reference and a digest-suffixed reference, and accepts a repository plus explicit tag — the only form `implementation-lock.mjs` can pin. Each direction has a regression test that failed before the gate was corrected.
+- A read-only git fixture proved the committed manifest bytes plus the captured amd64 digests produce a valid implementation lock (`createImplementationLock` accepted, `verifyImplementationLock` returned `valid=true`). An earlier digest-suffixed manifest was rejected by that same builder.
+- `node --test test/benchmark-v11-cli.test.js test/benchmark-v11-run.test.js`: 24 passed, 0 failed, 0 skipped, 0 todo.
+- `npm run benchmark:test`: 911 Node benchmark tests passed and 86 Python adapter tests passed, 0 failed, 0 skipped, 0 todo.
 
 ### Not Measured
 

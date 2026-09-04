@@ -30,6 +30,12 @@ export class V11RunError extends Error {
 const FULL_SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const BARE_SHA256 = /^[a-f0-9]{64}$/u;
 
+// A lockable service reference: a repository plus an explicit tag, with no
+// digest suffix. Kept deliberately in step with `assertLockableImage` and
+// `MUTABLE_LATEST` in implementation-lock.mjs, which owns this file's contract.
+const LOCKABLE_IMAGE = /^[A-Za-z0-9][A-Za-z0-9._/-]*:[A-Za-z0-9][A-Za-z0-9._-]*$/u;
+const MUTABLE_LATEST = /(?:^|[/:@])latest(?:$|[/:@])/iu;
+
 function isPlainRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -59,6 +65,14 @@ export const V11_PREREQUISITE_GATES = Object.freeze([
   Object.freeze({
     requirement: 'service-manifest',
     file: 'service-images.json',
+    // The canonical `services` array is what implementation-lock.mjs parses at
+    // this path; `serviceImages` is accepted for the older shape. An image must
+    // be a lockable repository reference - a repository plus an explicit,
+    // non-`latest` tag. Requiring an inline `@sha256:` digest here would be
+    // wrong: assertLockableImage refuses a reference containing '@', so such a
+    // manifest could satisfy readiness and still never produce a lock. Digests
+    // are operator-supplied run evidence; the manifest is the committed
+    // statement of which services must carry one.
     isSatisfied: (value) => {
       const services = Array.isArray(value?.services) ? value.services : value?.serviceImages;
       return Array.isArray(services) && services.length > 0
@@ -66,7 +80,8 @@ export const V11_PREREQUISITE_GATES = Object.freeze([
           isPlainRecord(service)
           && typeof service.name === 'string' && service.name.length > 0
           && typeof service.image === 'string'
-          && /^[^@\s]+@sha256:[a-f0-9]{64}$/u.test(service.image)
+          && LOCKABLE_IMAGE.test(service.image)
+          && !MUTABLE_LATEST.test(service.image)
         ));
     }
   }),
