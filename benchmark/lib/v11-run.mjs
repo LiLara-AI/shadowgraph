@@ -59,12 +59,16 @@ export const V11_PREREQUISITE_GATES = Object.freeze([
   Object.freeze({
     requirement: 'service-manifest',
     file: 'service-images.json',
-    isSatisfied: (value) => Array.isArray(value?.serviceImages) && value.serviceImages.length > 0
-      && value.serviceImages.every((service) => (
-        isPlainRecord(service)
-        && typeof service.name === 'string' && service.name.length > 0
-        && typeof service.image === 'string' && service.image.length > 0
-      ))
+    isSatisfied: (value) => {
+      const services = Array.isArray(value?.services) ? value.services : value?.serviceImages;
+      return Array.isArray(services) && services.length > 0
+        && services.every((service) => (
+          isPlainRecord(service)
+          && typeof service.name === 'string' && service.name.length > 0
+          && typeof service.image === 'string'
+          && /^[^@\s]+@sha256:[a-f0-9]{64}$/u.test(service.image)
+        ));
+    }
   }),
   Object.freeze({
     requirement: 'reproducible-runtime-bytes',

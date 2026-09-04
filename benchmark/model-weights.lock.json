@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "models": [
+    {
+      "kind": "decision_llm",
+      "modelId": "qwen2.5:0.5b",
+      "digestKind": "model_weights",
+      "weightsDigest": "sha256:c5396e06af294bd101b30dce59131a76d2b773e76950acc870eda801d3ab0515",
+      "architecture": "qwen2",
+      "parameterCount": 494030000,
+      "quantization": "Q4_K_M",
+      "contextLength": 32768,
+      "embeddingDimension": null
+    },
+    {
+      "kind": "embedding",
+      "modelId": "nomic-embed-text:latest",
+      "digestKind": "model_weights",
+      "weightsDigest": "sha256:970aa74c0a90ef7482477cf803618e776e173c007bf957f635f1015bfcfef0e6",
+      "architecture": "nomic-bert",
+      "parameterCount": 137000000,
+      "quantization": "F16",
+      "contextLength": 2048,
+      "embeddingDimension": 768
+    }
+  ]
+}

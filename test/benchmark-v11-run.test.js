@@ -88,11 +88,12 @@ test('a refused run writes no artifact and exits non-zero', async (t) => {
   assert.deepEqual(await readdir(directory), [], 'a blocked run must leave nothing behind');
 });
 
-test('readiness names every unmet immutable prerequisite, not only applicability', async () => {
+test('readiness names every unmet immutable prerequisite, not only applicability', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-missing-gates-');
   const candidate = await realCandidate();
   const report = await computeV11Readiness({
     ...candidate,
-    benchmarkRoot: BENCHMARK_ROOT
+    benchmarkRoot: directory
   });
 
   const unmet = report.blockers.filter((blocker) => blocker.kind === 'immutable-prerequisite');
@@ -115,6 +116,61 @@ test('a prerequisite file that exists but is empty is not treated as satisfied',
   const unmet = report.blockers.filter((blocker) => blocker.kind === 'immutable-prerequisite');
   assert.equal(unmet.length, V11_PREREQUISITE_GATES.length);
   assert.ok(unmet.every((blocker) => blocker.detail === 'the declaring file contains no usable entry'));
+});
+
+test('a tagged canonical service manifest does not satisfy the immutable service gate', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-tagged-service-manifest-');
+  await writeFile(path.join(directory, 'service-images.json'), JSON.stringify({
+    schema: 'shadowgraph.service-images',
+    version: 1,
+    services: [{ name: 'ollama', image: 'ollama/ollama:latest' }]
+  }), 'utf8');
+  await writeFile(path.join(directory, 'model-weights.lock.json'), JSON.stringify({
+    models: [{ modelId: 'fixture', digestKind: 'model_weights', weightsDigest: 'sha256:' + 'b'.repeat(64) }]
+  }), 'utf8');
+  await writeFile(path.join(directory, 'python-wheels.lock.json'), JSON.stringify({
+    wheels: [{ name: 'fixture', sha256: 'c'.repeat(64) }]
+  }), 'utf8');
+
+  const candidate = await realCandidate();
+  const report = await computeV11Readiness({
+    ...candidate,
+    benchmarkRoot: directory,
+    satisfiedPreconditions: ['pinned backend access-control configuration']
+  });
+
+  assert.ok(report.blockers.some((blocker) => (
+    blocker.kind === 'immutable-prerequisite' && blocker.requirement === 'service-manifest'
+  )));
+});
+
+test('the strict service manifest shape satisfies the service prerequisite gate', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-service-manifest-');
+  await writeFile(path.join(directory, 'service-images.json'), JSON.stringify({
+    schema: 'shadowgraph.service-images',
+    version: 1,
+    services: [{ name: 'ollama', image: 'ollama/ollama@sha256:' + 'a'.repeat(64) }]
+  }), 'utf8');
+  await writeFile(path.join(directory, 'model-weights.lock.json'), JSON.stringify({
+    models: [{ modelId: 'fixture', digestKind: 'model_weights', weightsDigest: 'sha256:' + 'b'.repeat(64) }]
+  }), 'utf8');
+  await writeFile(path.join(directory, 'python-wheels.lock.json'), JSON.stringify({
+    wheels: [{ name: 'fixture', sha256: 'c'.repeat(64) }]
+  }), 'utf8');
+
+  const candidate = await realCandidate();
+  const report = await computeV11Readiness({
+    ...candidate,
+    benchmarkRoot: directory,
+    satisfiedPreconditions: ['pinned backend access-control configuration']
+  });
+
+  assert.equal(
+    report.blockers.some((blocker) => (
+      blocker.kind === 'immutable-prerequisite' && blocker.requirement === 'service-manifest'
+    )),
+    false
+  );
 });
 
 test('a malformed prerequisite file blocks rather than crashing readiness', async (t) => {

@@ -138,10 +138,9 @@ test('the existing command surface still resolves', async () => {
   assert.match(usage.stderr, /v11-preflight/u);
 });
 
-test('readiness gates on immutable prerequisites, not only on applicability', async () => {
-  // A gate that can report READY while model-weight digests, a service
-  // manifest or byte-pinning evidence are missing would let an operator start a
-  // run that cannot lawfully begin.
+test('authenticated immutable prerequisites clear their own gates', async () => {
+  // Real prerequisite evidence is now committed. Readiness must still remain
+  // blocked by the independent Graphiti applicability contradiction.
   const { stdout } = await runCli(['v11-preflight']);
   const report = JSON.parse(stdout);
 
@@ -150,37 +149,42 @@ test('readiness gates on immutable prerequisites, not only on applicability', as
     .map((blocker) => blocker.requirement)
     .sort();
 
-  assert.deepEqual(requirements, [
-    'model-weight-digests',
-    'reproducible-runtime-bytes',
-    'service-manifest'
-  ]);
+  assert.deepEqual(requirements, []);
+  assert.ok(report.blockers.some((blocker) => blocker.code === 'DECLARED_ISOLATION_UNAVAILABLE'));
   assert.equal(report.readiness, 'NOT READY');
 });
 
-test('clearing every applicability blocker still leaves the run blocked', async () => {
-  // Satisfying the cognee precondition removes one finding but must not make
-  // the candidate look runnable while B1 and B3 stand.
+test('clearing every applicability precondition still leaves Graphiti blocked', async () => {
+  // Cognee's ACL precondition and the immutable prerequisites are satisfied, but
+  // Graphiti's declared native user isolation is still unavailable.
   const { stdout } = await runCli([
     'v11-preflight',
     '--preconditions=pinned backend access-control configuration'
   ]);
   const report = JSON.parse(stdout);
   assert.equal(report.readiness, 'NOT READY');
-  assert.ok(report.blockers.some((blocker) => blocker.kind === 'immutable-prerequisite'));
+  assert.equal(report.blockers.some((blocker) => blocker.kind === 'immutable-prerequisite'), false);
+  assert.ok(report.blockers.some((blocker) => blocker.code === 'DECLARED_ISOLATION_UNAVAILABLE'));
 });
 
-test('prerequisite blockers disclose that they check shape, not authenticity', async () => {
-  // These gates confirm evidence is present and well formed. A syntactically
-  // valid digest for a model nobody ran would satisfy them, so the report must
-  // not imply the check proves more than it does.
-  const { stdout } = await runCli(['v11-preflight']);
+test('v11-preflight reports exactly the four current blockers', async () => {
+  const { code, stdout } = await runCli(['v11-preflight']);
   const report = JSON.parse(stdout);
-  const prerequisites = report.blockers.filter((b) => b.kind === 'immutable-prerequisite');
 
-  assert.equal(prerequisites.length, 3);
-  for (const blocker of prerequisites) {
-    assert.equal(typeof blocker.detail, 'string');
-    assert.match(blocker.note, /cannot establish authenticity/u);
-  }
+  assert.notEqual(code, 0);
+  assert.equal(report.readiness, 'NOT READY');
+  assert.deepEqual(
+    report.blockers.map((blocker) => {
+      if (blocker.kind === 'applicability') {
+        return `${blocker.kind}:${blocker.code}:${blocker.armId}`;
+      }
+      return `${blocker.kind}:${blocker.armId}:${blocker.service}`;
+    }).sort(),
+    [
+      'applicability:DECLARED_ISOLATION_PRECONDITION_UNMET:cognee',
+      'applicability:DECLARED_ISOLATION_UNAVAILABLE:graphiti',
+      'required-service:cognee:common LLM and embedding endpoint',
+      'required-service:graphiti:Neo4j-compatible graph database plus common LLM and embedding endpoint'
+    ].sort()
+  );
 });
