@@ -10,10 +10,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createFactAttestation } from '../src/verification.js';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const LEGACY_PROTOCOL = '2024-11-05';
 const MODERN_PROTOCOL = '2026-07-28';
@@ -41,13 +41,27 @@ function modernParams(values = {}) {
 }
 
 async function startMcp(t, extraEnv = {}) {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-conformance-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-conformance-');
   const child = spawn(process.execPath, ['src/mcp.js'], {
     cwd: process.cwd(),
     env: { ...process.env, SHADOWGRAPH_FILE: join(directory, 'data.json'), ...extraEnv },
     stdio: ['pipe', 'pipe', 'inherit']
   });
-  t.after(() => child.kill());
+  // Registered after the directory is taken, so it runs before the removal the
+  // helper appends: the child must be gone before its store is taken away, or it
+  // writes into a directory that is being removed underneath it.
+  let stopped = false;
+  async function stop() {
+    if (stopped) return;
+    stopped = true;
+    if (child.exitCode === null) child.kill();
+    await new Promise((resolve) => {
+      if (child.exitCode !== null) return resolve();
+      const timer = setTimeout(() => { child.kill('SIGKILL'); resolve(); }, 2000);
+      child.once('exit', () => { clearTimeout(timer); resolve(); });
+    });
+  }
+  t.after(stop);
   let buffer = '';
   const pending = [];
   child.stdout.setEncoding('utf8');
@@ -277,7 +291,7 @@ test('a legacy tool-execution failure stays a protocol error and carries no stru
 });
 
 test('the verifier build advertises and satisfies the verification tool contract', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-conformance-verifier-'));
+  const directory = await scratchDirectory(t, 'shadowgraph-conformance-verifier-');
   const evidenceRoot = join(directory, 'evidence');
   await mkdir(evidenceRoot, { recursive: true });
   const keys = generateKeyPairSync('ed25519');
