@@ -15,10 +15,10 @@ All figures below were produced on the current branch with a clean working tree.
 
 | Gate | Command | Result |
 | --- | --- | --- |
-| Full repository | `npm test` | **2336 / 2336 pass**, 0 fail, 22 suites |
-| Benchmark focused | `npm run benchmark:test` | **1100 / 1100 pass**, 0 fail |
-| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **938 / 938 pass**, 0 fail |
-| Python adapters | `npm run benchmark:test:python` | **136 / 136 pass**, 0 fail |
+| Full repository | `npm test` | **2344 / 2344 pass**, 0 fail, 22 suites |
+| Benchmark focused | `npm run benchmark:test` | **1108 / 1108 pass**, 0 fail |
+| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **946 / 946 pass**, 0 fail |
+| Python adapters | `npm run benchmark:test:python` | **139 / 139 pass**, 0 fail |
 | Node syntax | `npm run check`, `npm run benchmark:check` | pass |
 | Python syntax | `npm run benchmark:check:python` | pass |
 | Package privacy | `npm run check:package` | pass |
@@ -124,7 +124,7 @@ treat file content at HEAD, not the diffs, as the object of review.
 | 5 | Mutation state fails closed | **Closed** (mechanism); wiring waits on 6 |
 | 6 | Real pinned runtime factories for all seven arms | **Partial** — the metered runtime hosts are bound and six of seven arms execute; Graphiti's factory is LB2f, an open owner decision |
 | 7 | Non-scored acceptance, 308 units | **Closed** offline; an official run is blocked by the three current preflight findings and by F2 |
-| 8 | Locks, ledger validation, readiness, evidence index, review bundle | **Partial** — prerequisite locks are committed; the implementation lock and run-bound bundle remain pending |
+| 8 | Locks, ledger validation, readiness, evidence index, review bundle | **Partial** — every builder exists, and the run path takes the implementation and environment locks before it opens a file; the service and model locks and the review bundle are run-bound and cannot exist until a run does |
 | 9 | Focused, Node, Python, package, MCP, integration, smoke, privacy checks | **Closed** |
 
 ### Closed
@@ -909,6 +909,10 @@ run being meaningful are different questions, and only the first is answered.
 | F5 | The loopback network fence guarded four connection-oriented entry points and described itself as closing egress by construction; a datagram and `gethostbyname` both left the process | Cleared |
 | F6 | The run wrote a provider ledger nothing reconciled, so `RETRY_OBSERVED`, `MODEL_MISMATCH` and `UNEXPECTED_CALL` were codes a run could not emit | Cleared |
 | F7 | The Python site directory the arms import was never checked against the wheel lock, so two runs on different library sets produced identical lock hashes | Cleared |
+| F8 | The F4 fix was made in a module and *chosen* in the CLI, on a line no test executes: putting the full teardown back at the call site reproduced the whole defect with 2336 tests green | Cleared, the pairing is made where it is tested |
+| F9 | The widened fence guarded only the `socket` module, so the same datagram left through `_socket`, the C accelerator it wraps | Cleared |
+| F10 | The new provider reconciliation expected zero calls from units the harness did not measure, so one adapter failure or one interruption would have reported a metering violation against the run's own record | Cleared |
+| F11 | The bind-time Python runtime check verified a manifest and never read the site it gates, and `v11-python-runtime --verify only` rewrote the manifest before verifying it | Cleared |
 
 The evidence and the required next decisions are in
 `benchmark/evidence/v11-blocker-matrix-2026-09-03.md` (CB1-CB4, LB1-LB3, as of
@@ -916,9 +920,10 @@ that date) and, superseding its blocker states,
 `benchmark/evidence/v11-service-readiness-2026-09-05.md`,
 `benchmark/evidence/v11-adapter-runtime-blockers-2026-09-05.md`,
 `benchmark/evidence/v11-cb2-acl-demonstration-2026-09-05.md`,
-`benchmark/evidence/v11-runtime-binding-2026-09-05.md` (LB2a, F1-F3) and
-`benchmark/evidence/v11-adversarial-review-2026-09-05.md` (F4-F7, and the
-guards, tests and documents the same review found wrong).
+`benchmark/evidence/v11-runtime-binding-2026-09-05.md` (LB2a, F1-F3),
+`benchmark/evidence/v11-adversarial-review-2026-09-05.md` (F4-F7) and
+`benchmark/evidence/v11-adversarial-review-round-2-2026-09-05.md` (F8-F11 -
+the review of the fixes, which found four of them incomplete).
 
 ### Historical blocker record (resolved or superseded)
 

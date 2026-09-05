@@ -34,6 +34,7 @@ import {
   PYTHON_IMPORT_MODULES,
   PYTHON_RUNTIME_SCHEMA,
   PYTHON_RUNTIME_VERSION,
+  readPythonSiteDistributions,
   renderRequirements,
   verifyPythonRuntime
 } from './lib/v11-python-runtime.mjs';
@@ -619,12 +620,15 @@ async function v11RunCommand(options) {
       amendment002Path: join(benchmarkRoot, 'preregistration-amendment-002.json'),
       amendment003Path: join(benchmarkRoot, 'preregistration-amendment-003.json'),
       ...runtime.dependencies,
-      // The meter, and only the meter. The runner calls this after the plan loop
-      // and before the terminal progress event; left to the `finally` below, the
-      // provider ledger would still be open at the moment the run declares
-      // itself complete, and closing the progress ledger here would take the
-      // terminal event with it.
-      closeResources: runtime.closeMeasurement
+      // Judged inside the run rather than after it, so a caller cannot omit it.
+      // Reached only once `closeResources` has closed the meter, which is what
+      // makes the ledger complete at the moment it is read.
+      reconcileProviderEvidence: (raw) => reconcileRunProviderEvidence({
+        ledgerPath: providerLedgerPath(ledgerDirectory, attemptId),
+        raw,
+        attemptId,
+        pinnedModels: runtime.pinnedModels
+      })
     });
   } catch (error) {
     failure = error;
@@ -647,21 +651,7 @@ async function v11RunCommand(options) {
   }
   if (failure !== null) throw failure;
 
-  // The ledger the meter wrote, read back and compared against what the run
-  // says it did. This is the only moment it can happen: the meter is closed,
-  // so the ledger is complete, and the record exists to be compared against.
-  //
-  // Until this call the run opened a ledger, filled it, and never looked -
-  // `RETRY_OBSERVED`, `MODEL_MISMATCH` and `UNEXPECTED_CALL` were codes an
-  // acceptance run could not produce, while the arm probe's comment claimed
-  // it was rehearsing 'the comparison the run will use'.
-  const reconciliation = await reconcileRunProviderEvidence({
-    ledgerPath: join(ledgerDirectory, `${attemptId}.provider-requests.ndjson`),
-    raw: outcome.raw,
-    attemptId,
-    pinnedModels: runtime.pinnedModels
-  });
-
+  const reconciliation = outcome.providerEvidence;
   const rawPath = join(outputDirectory, `${attemptId}.raw.json`);
   const aggregatePath = join(outputDirectory, `${attemptId}.aggregate.json`);
   const reconciliationPath = join(outputDirectory, `${attemptId}.provider-reconciliation.json`);
@@ -673,13 +663,20 @@ async function v11RunCommand(options) {
     version: 1,
     status: outcome.raw.status,
     mode: outcome.raw.mode,
+    // Always true where it is reachable: `validateRawRun` throws on an invalid
+    // run rather than returning a verdict, so reaching this line is the
+    // verdict. Reported because an artifact that does not say it was validated
+    // is indistinguishable from one that was not.
     valid: outcome.validation.valid,
     providerEvidence: reconciliation.status,
     artifactsWritten: [rawPath, aggregatePath, reconciliationPath]
   }, null, 2)}`);
-  if (!outcome.validation.valid) process.exitCode = 1;
   // A run whose own provider traffic does not match its record is not a clean
   // result reported alongside a caveat. It is a discrepancy, and it exits so.
+  //
+  // The `!outcome.validation.valid` guard that used to stand beside this one is
+  // gone: `validateRawRun` throws on an invalid run, so the guard could not
+  // fire and read as a check that was not one.
   if (reconciliation.status !== 'RECONCILED') process.exitCode = 1;
   return outcome;
 }
@@ -703,10 +700,28 @@ async function reconcileRunProviderEvidence({ ledgerPath, raw, attemptId, pinned
   }
   return runProviderReconciliation({ ledgerText, ledgerPath, raw, attemptId, pinnedModels });
 }
+/**
+ * The ledger this attempt's meter writes and this attempt's run reads.
+ *
+ * One function, because the two call sites are 200 lines apart: a path that
+ * drifted would make every run report `UNAVAILABLE` and exit non-zero for a
+ * reason that has nothing to do with its traffic.
+ */
+function providerLedgerPath(ledgerDirectory, attemptId) {
+  return join(ledgerDirectory, `${attemptId}.provider-requests.ndjson`);
+}
+
 /** Whether a thrown error already reports `candidate`, directly or as a cause. */
 function carries(error, candidate) {
   if (error === candidate) return true;
-  return error instanceof AggregateError && error.errors.some((each) => carries(each, candidate));
+  if (error === null || typeof error !== 'object') return false;
+  if (error instanceof AggregateError && error.errors.some((each) => carries(each, candidate))) {
+    return true;
+  }
+  // `cause` as well as `errors`: the docstring said 'directly or as a cause'
+  // while the body walked only AggregateError, so a teardown failure wrapped
+  // by anything else was reported twice.
+  return 'cause' in error && carries(error.cause, candidate);
 }
 
 /**
@@ -729,12 +744,12 @@ function carries(error, candidate) {
  * close over its endpoint minting. And everything comes before the runner, which
  * constructs nothing.
  *
- * Teardown is returned rather than performed, and it is returned twice.
- * `closeMeasurement` is what the runner calls after the plan loop and *before*
- * the terminal progress event - the only moment at which the provider ledger is
- * complete and the run has not yet declared itself finished. `close` is the
- * caller's `finally` and shuts the run's own ledgers as well. Both are memoized:
- * closing twice must be closing once.
+ * Teardown is returned rather than performed, and the run's own half of it is
+ * not this function's to choose: `runnerResources` carries the progress ledger,
+ * the unit ledger's append and the *measurement* close already paired, so this
+ * caller cannot hand the runner a close that would shut the ledger the terminal
+ * event goes into. `close` is the caller's `finally` and shuts all three.
+ * Both are memoized: closing twice must be closing once.
  */
 async function v11RuntimeDependencies(options, context) {
   const {
@@ -812,8 +827,20 @@ async function v11RuntimeDependencies(options, context) {
       `--python-runtime must name a site directory built by v11-python-runtime; ${runtimeManifestPath} could not be read: ${error?.message ?? error}`
     );
   }
+  // The distributions come from the site the arms will import, and everything
+  // else - the image, the wheel-lock hash, the recorded import probes - from the
+  // manifest that claims to describe it. Verifying only the manifest was the
+  // defect a review found here: `pip install --target <site> --upgrade httpx`
+  // left the manifest untouched and the bind-time check reported valid, which is
+  // precisely the in-place upgrade this refusal was written for.
+  let siteDistributions;
+  try {
+    siteDistributions = await readPythonSiteDistributions(pythonRuntimeSite);
+  } catch (error) {
+    throw new V11RunError('RUNTIME_UNAVAILABLE', error?.message ?? String(error));
+  }
   const runtimeVerification = verifyPythonRuntime({
-    manifest: runtimeManifest,
+    manifest: { ...runtimeManifest, distributions: siteDistributions },
     wheelsLock: JSON.parse(wheelsLockText),
     wheelsLockSha256: createHash('sha256').update(wheelsLockText, 'utf8').digest('hex'),
     image: competitorLock.pythonImage
@@ -885,7 +912,7 @@ async function v11RuntimeDependencies(options, context) {
       listenerUrl: 'http://127.0.0.1:0',
       upstreamBaseUrl: providerUpstream,
       upstreamAuthorization: null,
-      ledgerPath: join(ledgerDirectory, `${attemptId}.provider-requests.ndjson`),
+      ledgerPath: providerLedgerPath(ledgerDirectory, attemptId),
       upstreamTimeoutMs: execution.requestTimeoutMs
     });
     closers.push(() => meter.close());
@@ -934,21 +961,26 @@ async function v11RuntimeDependencies(options, context) {
     // Two closes, not one: the runner's hook may only reach the meter, because
     // the terminal progress event it has not written yet goes into a ledger the
     // same call would otherwise shut. See v11-run-resources.mjs.
-    const { closeMeasurement, close } = createV11RunResources({ meter, progress, unitEvidence });
+    const { close, runnerResources } = createV11RunResources({
+      meter,
+      progress,
+      unitEvidence
+    });
 
     return {
       dependencies: {
         executeAdapter,
         buildOuterRequest: buildV11Prompt,
         requestOuter,
-        progress,
-        persistUnit: unitEvidence.append,
+        // The progress ledger, the unit ledger's append and the *measurement*
+        // close, paired in v11-run-resources.mjs rather than here. F4 was this
+        // caller pairing them wrongly on a line no test executes.
+        ...runnerResources,
         now: () => Date.now(),
         monotonicNow: () => performance.now(),
         implementationLockHash: implementationLock.lockSha256,
         environmentLockHash: environmentLock.digest
       },
-      closeMeasurement,
       close,
       // Returned so the reconciliation below compares the ledger against the
       // models this run was actually bound to, rather than against a second
@@ -1147,16 +1179,39 @@ async function v11PythonRuntimeCommand(options) {
     });
   }
 
-  const manifest = {
-    schema: PYTHON_RUNTIME_SCHEMA,
-    version: PYTHON_RUNTIME_VERSION,
-    builtAt: new Date().toISOString(),
-    image,
-    wheelsLockSha256,
-    distributions,
-    importProbes
-  };
-  await writeJson(manifestPath, manifest);
+  // A build writes what it built. A verification reads what is there.
+  //
+  // Both used to write: `--verify only` skipped the install and still stamped
+  // the current `image` and `wheelsLockSha256` onto the manifest before checking
+  // them, so RUNTIME_IMAGE_MISMATCH and RUNTIME_WHEELS_LOCK_MISMATCH compared
+  // each value with itself and could never fire - and the one command for
+  // re-attesting an existing runtime silently repaired a manifest that
+  // misdescribed its own build inputs. The run path trusts exactly those two
+  // fields.
+  let manifest;
+  if (options.verify === 'only') {
+    try {
+      manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+    } catch (error) {
+      throw new Error(
+        `--verify only requires the manifest the build wrote; ${manifestPath} could not be read: ${error?.message ?? error}`
+      );
+    }
+    // The recorded claim, held against what the site now contains: a runtime
+    // upgraded in place after it was attested is the case this catches.
+    manifest = { ...manifest, distributions };
+  } else {
+    manifest = {
+      schema: PYTHON_RUNTIME_SCHEMA,
+      version: PYTHON_RUNTIME_VERSION,
+      builtAt: new Date().toISOString(),
+      image,
+      wheelsLockSha256,
+      distributions,
+      importProbes
+    };
+    await writeJson(manifestPath, manifest);
+  }
 
   const verification = verifyPythonRuntime({ manifest, wheelsLock, wheelsLockSha256, image });
   process.stdout.write(`${JSON.stringify({

@@ -100,18 +100,37 @@ the pinned image:
   a public hostname and returned its address while `getaddrinfo` in the same
   block raised `NetworkFenceError`.
 
-The fence now guards ten entry points, named once in `FENCED_ENTRY_POINTS` and
-read from that one list by the save, the guard table and the restore:
-`socket.connect`, `socket.connect_ex`, `socket.sendto`, `socket.sendmsg`,
-`create_connection`, `getaddrinfo`, `gethostbyname`, `gethostbyname_ex`,
-`gethostbyaddr` and `getnameinfo`. `send` and `sendall` are deliberately
-absent: reaching them requires a `connect` the fence refuses.
+A second review then found the same datagram leaving through `_socket`, the C
+accelerator `socket` wraps and `socket.socket` subclasses:
+`_socket.socket(AF_INET, SOCK_DGRAM).sendto(payload, ("192.0.2.1", 9))`
+returned eleven bytes while the identical call through `socket.socket` was
+refused.
 
-The honest description is that list, and the part that *is* by construction is
-the container's own network namespace - which is the stronger guarantee, and is
-available only to an arm that meters nothing (`--network none`). A metered arm
-shares the host namespace so the meter and the pinned endpoints are reachable
-on 127.0.0.1, and for that arm this fence is the barrier.
+The fence now guards **fifteen entry points**, named once in
+`FENCED_ENTRY_POINTS` and read from that one list by the save, the guard table
+and the restore - the ten on `socket` (`socket.connect`, `socket.connect_ex`,
+`socket.sendto`, `socket.sendmsg`, `create_connection`, `getaddrinfo`,
+`gethostbyname`, `gethostbyname_ex`, `gethostbyaddr`, `getnameinfo`) and the
+five module functions on `_socket`. `_socket.socket` is an immutable C type
+whose methods cannot be replaced, so the *name* is rebound to a guarded
+subclass for the duration; `socket.socket` was built from the real base at
+import time and is unaffected.
+
+`send` and `sendall` are deliberately absent: reaching them requires a
+`connect` the fence refuses.
+
+The honest description is that list, and what it leaves open is worth naming
+rather than leaving to be found a third time: a reference to `_socket.socket`
+taken before the fence was installed, the base type reached through
+`socket.socket.__base__`, and anything that skips Python's socket API
+altogether - `ctypes` into libc, a raw syscall, a C extension holding its own
+descriptor. No monkeypatch closes those.
+
+The part that *is* by construction is the container's own network namespace -
+the stronger guarantee, and available only to an arm that meters nothing
+(`--network none`). A metered arm shares the host namespace so the meter and
+the pinned endpoints are reachable on 127.0.0.1, and for that arm this fence
+is the barrier.
 
 Name resolution is fenced for its own reason. Refusing the connection but
 allowing the lookup would still put the hostname on a resolver's wire, which is

@@ -4,12 +4,15 @@ Runs inside the pinned image with the pinned 227-package runtime and the real
 `python_host`, on `--network host` - which is what the three metered arms get,
 and therefore the configuration in which this fence is the only barrier.
 
-The fence was widened from four entry points to ten after a review demonstrated
-that a datagram and `gethostbyname` both left the process. Widening a fence that
-sits in the execution path of four arms is exactly the change that can break a
-measurement silently, so it is checked in both directions against the real
-libraries rather than against a stub: every loopback path a metered arm actually
-uses must still work, and every non-loopback path must still be refused.
+The fence has been widened twice. First from four entry points to ten, after a
+review demonstrated that a datagram and `gethostbyname` both left the process;
+then to fifteen names plus a guarded `_socket.socket`, after a second review
+demonstrated the same datagram leaving through the C accelerator `socket`
+wraps. Widening a fence that sits in the execution path of four arms is
+exactly the change that can break a measurement silently, so it is checked in
+both directions against the real libraries rather than against a stub: every
+loopback path a metered arm actually uses must still work, and every
+non-loopback path must still be refused.
 
 Not a run. No plan, no ledger, no lock, no artifact - one process, no adapter.
 """
@@ -86,14 +89,17 @@ with python_host._loopback_only_network():
     check("getnameinfo(('127.0.0.1', 80))", lambda: socket.getnameinfo(("127.0.0.1", 80), 0))
     check("gethostbyaddr('127.0.0.1')", lambda: socket.gethostbyaddr("127.0.0.1")[0])
 
-    # 3. A connected datagram socket: sendto with one argument, and send().
+    # 3. A connected datagram socket. `send` carries no address, which is why
+    #    the fence leaves it alone: reaching it required a `connect` that was
+    #    judged. `sendto` on the same socket still names a peer and is still
+    #    checked. (CPython has no one-argument `sendto`; it is a TypeError.)
     def connected_datagram():
         handle = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         handle.connect(("127.0.0.1", 9))
         sent = handle.send(b"connected")
-        again = handle.sendto(b"connected", ("127.0.0.1", 9))
+        addressed = handle.sendto(b"connected", ("127.0.0.1", 9))
         handle.close()
-        return f"send={sent} sendto={again}"
+        return f"send={sent} sendto={addressed}"
 
     check("connected loopback datagram", connected_datagram)
 
@@ -103,6 +109,11 @@ with python_host._loopback_only_network():
         handle = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             handle.connect("/run/shadowgraph/state/no-such-socket")
+        except python_host.NetworkFenceError:
+            # Re-raised rather than swallowed: NetworkFenceError is an OSError,
+            # so catching OSError first reported a fenced AF_UNIX as working -
+            # the regression this check exists to catch, hidden by the check.
+            raise
         except OSError as error:
             return f"AF_UNIX reached the kernel: {type(error).__name__}"
         finally:
@@ -111,7 +122,39 @@ with python_host._loopback_only_network():
 
     check("AF_UNIX is not a network call", unix_socket)
 
-    # 4. And the things that must still be refused.
+    # 4. The C accelerator `socket` wraps. Its type is immutable, so the fence
+    #    rebinds the name to a guarded subclass; a caller reaching for
+    #    `_socket.socket` gets that, and the module's resolvers are guarded
+    #    directly. Under the previous fence this datagram left the process.
+    def raw_socket_loopback():
+        import _socket
+
+        handle = _socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sent = handle.sendto(b"raw", ("127.0.0.1", 9))
+            return f"_socket sendto loopback={sent}"
+        finally:
+            handle.close()
+
+    check("_socket datagram -> 127.0.0.1", raw_socket_loopback)
+
+    def raw_socket_egress():
+        import _socket
+
+        handle = _socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            return handle.sendto(b"raw", ("192.0.2.1", 9))
+        finally:
+            handle.close()
+
+    def raw_module_resolver():
+        import _socket
+
+        return _socket.gethostbyname("huggingface.co")
+
+    # 5. And the things that must still be refused.
+    check("_socket sendto -> 192.0.2.1:9", raw_socket_egress, True)
+    check("_socket.gethostbyname('huggingface.co')", raw_module_resolver, True)
     check("connect -> 192.0.2.1:80", lambda: socket.create_connection(("192.0.2.1", 80), timeout=2), True)
     check("sendto -> 192.0.2.1:9", lambda: socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b"x", ("192.0.2.1", 9)), True)
     check("getaddrinfo('huggingface.co')", lambda: socket.getaddrinfo("huggingface.co", 443), True)

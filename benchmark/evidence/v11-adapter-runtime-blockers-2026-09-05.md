@@ -4,6 +4,16 @@
 - **Worktree:** `benchmark/v1.1-nonscored-acceptance`
 - **Scope:** the three pinned Python adapters that refuse at their client factory
 - **Official run status:** **NOT STARTED**
+- **Status:** superseded for Mem0 and Cognee. Standing for Graphiti.
+
+> **Superseded in part.** This record's Decision below was the state on
+> 2026-09-05 and is no longer true of two of its three arms. Mem0 and Cognee
+> now have real client factories on their pinned libraries and both execute a
+> real operation against the pinned services; LB2b is recorded Cleared for
+> both in `CANDIDATE-STATUS.md`. The C2 section's Cognee user-scope refusal
+> was removed with F3. What still stands is the Graphiti finding, which is
+> LB2f and remains an open owner decision. The analysis below is kept because
+> it is what the owner decision was taken against; read it as of its date.
 
 ## Decision
 

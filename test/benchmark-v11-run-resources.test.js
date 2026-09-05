@@ -84,17 +84,54 @@ test('the full close shuts the run ledgers, and the measurement close stays clos
   assert.deepEqual(closed, ['meter']);
 });
 
-test('both closes are memoized, and the full close does not close the meter twice', async (t) => {
+test('every close is memoized, not only the meter', async (t) => {
+  // Counting the meter alone left `close` free to be de-memoised: the ledgers
+  // it shuts are idempotent enough not to complain, so nothing observed the
+  // second call. All three are recorded here.
+  const closed = [];
+  const resources = createV11RunResources({
+    meter: { close: async () => closed.push('meter') },
+    progress: { close: async () => closed.push('progress') },
+    unitEvidence: { append: () => {}, close: async () => closed.push('unitEvidence') }
+  });
+
+  await Promise.all([resources.closeMeasurement(), resources.closeMeasurement()]);
+  assert.deepEqual(closed, ['meter']);
+
+  await Promise.all([resources.close(), resources.close()]);
+  await resources.close();
+  await resources.closeMeasurement();
+
+  assert.deepEqual(
+    closed,
+    ['meter', 'progress', 'unitEvidence'],
+    'closing twice must be closing once, for each of the three'
+  );
+});
+
+test('the runner is given the measurement close, and this module is what pairs them', async (t) => {
+  // F4 was the *caller* pairing these wrongly, on a line no test executes:
+  // handing the runner the full teardown closed the progress ledger the
+  // terminal event still had to be written to. Splitting the closes here did
+  // not fix that by itself - putting `close` back at the call site reproduced
+  // the whole defect with the suite green - so the pairing is made here.
   const closed = [];
   const { progress, unitEvidence } = await realLedgers(t, closed);
   const resources = createV11RunResources({ meter: meterDouble(closed), progress, unitEvidence });
 
-  await Promise.all([resources.closeMeasurement(), resources.closeMeasurement()]);
-  await resources.close();
-  await resources.close();
-  await resources.closeMeasurement();
+  assert.deepEqual(Object.keys(resources.runnerResources), [
+    'progress',
+    'persistUnit',
+    'closeResources'
+  ]);
+  assert.equal(resources.runnerResources.progress, progress);
+  assert.equal(resources.runnerResources.closeResources, resources.closeMeasurement);
+  assert.notEqual(resources.runnerResources.closeResources, resources.close);
 
-  assert.deepEqual(closed, ['meter'], 'closing twice must be closing once');
+  // And it survives the hook being called: the ledger is still writable.
+  await resources.runnerResources.closeResources();
+  await progress.append(runEvent('run_started'));
+  await resources.close();
 });
 
 test('a resource that fails to close is reported as itself', async (t) => {

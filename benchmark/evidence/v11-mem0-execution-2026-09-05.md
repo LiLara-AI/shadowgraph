@@ -137,15 +137,21 @@ was otherwise succeeding. The fenced runs make no such request.
 
 ## What this does not claim
 
-- **No run was executed and no artifact exists.** `v11-run` still refuses.
+- **No run was executed and no artifact exists.** `v11-run` refuses without
+  its runtime flags and evidence records; given both it binds, and F2 is why
+  a run would still measure nothing.
 - **Nothing here is a measurement.** The scenario content is a fixture, one
   record, one namespace pair. Nothing about Mem0's quality, latency or cost is
   observed or implied.
-- **The other three arms have still never executed.** Graphiti remains blocked
-  on its backend, and Cognee on D3.
+- **Only Graphiti has never executed.** When this was written the other three
+  had not either; Basic Memory and Cognee have since executed a real operation
+  in the pinned container. Graphiti is held by LB2f - the exact group driver,
+  an open owner decision - not by its backend: the pinned Neo4j is running and
+  the arm reaches its runtime and refuses there.
 - **This is not the harness's meter.** The proxy is a second observer built for
-  the demonstration. Wiring the real meter into the run path is D4, and it is
-  not done.
+  the demonstration. Wiring the real meter into the run path was open when this
+  was written and is done: `v11RuntimeDependencies` starts the real meter, and
+  the run reconciles its own ledger against its own record.
 - **One embedding request per operation is what this configuration produced**,
   not a general property. Mem0's `search` was called at its library defaults.
 

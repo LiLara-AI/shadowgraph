@@ -10,6 +10,7 @@ import ipaddress
 import json
 import os
 import re
+import _socket
 import socket
 import sys
 from urllib.parse import urlsplit
@@ -74,29 +75,49 @@ GATES = {
 }
 LOOPBACK_FAMILIES = (socket.AF_INET, socket.AF_INET6)
 
-# Every entry point in `socket` by which an address or a name can leave this
-# process. Named once, because the saved originals, the guards that replace
-# them and the restore all read from this list: an entry point added to one
-# of the three and forgotten in the others is the shape of the hole this
-# fence has already had. A `socket.` prefix means the method on the socket
-# type; everything else is a module-level function.
+# Every entry point by which an address or a name can leave this process
+# through Python's socket API - in both of its spellings.
+#
+# `socket` is a pure-Python module wrapping the C accelerator `_socket`, and
+# `socket.socket` subclasses `_socket.socket`. Guarding only the first spelling
+# left the second open: under the previous fence,
+# `_socket.socket(AF_INET, SOCK_DGRAM).sendto(payload, ("192.0.2.1", 9))` put
+# eleven bytes on the wire while the same call through `socket.socket` was
+# refused. Both spellings are closed now - the module functions through this
+# list, and `_socket.socket` through the substitution below, because the C type
+# itself is immutable and its methods cannot be replaced.
+#
+# Each name here is saved, guarded and restored from this one list: an entry
+# point added to one of the three steps and forgotten in the others is the
+# shape of the hole this fence has had twice.
 FENCED_ENTRY_POINTS = (
-    "socket.connect",
-    "socket.connect_ex",
-    "socket.sendto",
-    "socket.sendmsg",
-    "create_connection",
-    "getaddrinfo",
-    "gethostbyname",
-    "gethostbyname_ex",
-    "gethostbyaddr",
-    "getnameinfo",
+    "socket.socket.connect",
+    "socket.socket.connect_ex",
+    "socket.socket.sendto",
+    "socket.socket.sendmsg",
+    "socket.create_connection",
+    "socket.getaddrinfo",
+    "socket.gethostbyname",
+    "socket.gethostbyname_ex",
+    "socket.gethostbyaddr",
+    "socket.getnameinfo",
+    "_socket.getaddrinfo",
+    "_socket.gethostbyname",
+    "_socket.gethostbyname_ex",
+    "_socket.gethostbyaddr",
+    "_socket.getnameinfo",
 )
+
+_FENCE_OWNERS = {
+    "socket": socket,
+    "socket.socket": socket.socket,
+    "_socket": _socket,
+}
 
 
 def _fence_owner(name):
     owner, _, attribute = name.rpartition(".")
-    return (socket.socket if owner == "socket" else socket), attribute
+    return _FENCE_OWNERS[owner], attribute
 
 
 def _entry_point(name):
@@ -136,16 +157,33 @@ def _loopback_only_network():
     adapter that cannot address a non-loopback peer cannot make an unmetered
     call, whatever it intended.
 
-    It is an enumeration, and calling it anything else was the defect. The
-    first version of this fence guarded `connect`, `connect_ex`,
-    `create_connection` and `getaddrinfo` and described itself as closing
-    egress 'by construction'. It did not: a datagram needs no connection, so
+    It is an enumeration, and calling it anything else was the defect - twice.
+    The first version guarded `connect`, `connect_ex`, `create_connection` and
+    `getaddrinfo` and described itself as closing egress 'by construction'. It
+    did not: a datagram needs no connection, so
     `sock.sendto(payload, ("192.0.2.1", 9))` left the process untouched, and
-    `socket.gethostbyname` resolves without going through `getaddrinfo` at all
-    - both demonstrated against this module. What follows is every entry point
-    in `socket` by which an address or a name can leave this process, and the
-    honest description of the fence is that list. `send` and `sendall` are
-    absent deliberately: reaching them requires a `connect` this fence refuses.
+    `socket.gethostbyname` resolves without going through `getaddrinfo` at all.
+    The second version fixed both and still guarded only the `socket` module,
+    so the same datagram left through `_socket`, the C accelerator `socket`
+    wraps. All three were demonstrated against this module inside the pinned
+    image.
+
+    So: `FENCED_ENTRY_POINTS` is the fence, and the honest description of it is
+    that list. `send` and `sendall` are absent deliberately - reaching them
+    requires a `connect` this fence refuses.
+
+    **What it does not cover.** `_socket.socket` is an immutable C type, so its
+    methods cannot be replaced; the name is rebound to a guarded subclass, which
+    closes every caller that constructs one after the fence is installed but not
+    one holding a reference taken before it (`from _socket import socket`), nor
+    one reaching the base type through `socket.socket.__base__` or an instance's
+    MRO. Nor does it cover anything that skips Python's socket API entirely:
+    `ctypes` into libc, a raw syscall, a C extension holding its own descriptor.
+
+    No monkeypatch can close those, and claiming otherwise is how this fence has
+    been wrong twice. The control that does close them is the container's
+    network namespace, which is by construction and is what an arm that meters
+    nothing gets.
 
     The container's own network namespace is the part that *is* by
     construction, and it is the stronger guarantee - but it is available only
@@ -178,79 +216,161 @@ def _loopback_only_network():
     def refuse_name():
         raise NetworkFenceError("Adapter name resolution is limited to loopback")
 
-    def guarded_connect(self, address):
-        if not permitted(self.family, address):
-            refuse_address()
-        return originals["socket.connect"](self, address)
+    def peer_guard(key):
+        original = originals[key]
 
-    def guarded_connect_ex(self, address):
-        if not permitted(self.family, address):
-            refuse_address()
-        return originals["socket.connect_ex"](self, address)
+        def guarded(self, address):
+            if not permitted(self.family, address):
+                refuse_address()
+            return original(self, address)
 
-    def guarded_sendto(self, *args):
+        return guarded
+
+    def sendto_guard(key):
         # sendto(data, address) and sendto(data, flags, address): the peer is
-        # always the last argument, and a datagram needs no connection - which
-        # is how the first version of this fence let one out.
-        if len(args) >= 2 and not permitted(self.family, args[-1]):
-            refuse_address()
-        return originals["socket.sendto"](self, *args)
+        # always the last argument. A datagram needs no connection, which is
+        # how the first version of this fence let one out. On a *connected*
+        # datagram socket sendto takes no address at all, and then there is
+        # nothing to check here - the connect it required was already judged.
+        original = originals[key]
 
-    def guarded_sendmsg(self, *args):
+        def guarded(self, *args):
+            if len(args) >= 2 and not permitted(self.family, args[-1]):
+                refuse_address()
+            return original(self, *args)
+
+        return guarded
+
+    def sendmsg_guard(key):
         # sendmsg(buffers[, ancdata[, flags[, address]]]): the address is the
         # fourth argument, and present only when the socket is unconnected.
-        if len(args) >= 4 and args[3] is not None and not permitted(self.family, args[3]):
-            refuse_address()
-        return originals["socket.sendmsg"](self, *args)
+        original = originals[key]
 
-    def guarded_create_connection(address, *args, **kwargs):
-        if not (isinstance(address, tuple) and address and _loopback_host(address[0])):
-            refuse_address()
-        return originals["create_connection"](address, *args, **kwargs)
+        def guarded(self, *args):
+            if len(args) >= 4 and args[3] is not None and not permitted(self.family, args[3]):
+                refuse_address()
+            return original(self, *args)
+
+        return guarded
+
+    def create_connection_guard(key):
+        original = originals[key]
+
+        def guarded(address, *args, **kwargs):
+            if not (isinstance(address, tuple) and address and _loopback_host(address[0])):
+                refuse_address()
+            return original(address, *args, **kwargs)
+
+        return guarded
 
     def name_guard(key):
         # gethostbyname and its siblings do not route through getaddrinfo, so
         # fencing that one alone still left a resolver query on the wire.
+        original = originals[key]
+
         def guarded(host, *args, **kwargs):
             if not _loopback_host(host):
                 refuse_name()
-            return originals[key](host, *args, **kwargs)
+            return original(host, *args, **kwargs)
 
         return guarded
 
-    def guarded_getnameinfo(sockaddr, *args, **kwargs):
-        if not (isinstance(sockaddr, tuple) and sockaddr and _loopback_host(sockaddr[0])):
-            refuse_name()
-        return originals["getnameinfo"](sockaddr, *args, **kwargs)
+    def nameinfo_guard(key):
+        original = originals[key]
 
-    fenced = {
-        "socket.connect": guarded_connect,
-        "socket.connect_ex": guarded_connect_ex,
-        "socket.sendto": guarded_sendto,
-        "socket.sendmsg": guarded_sendmsg,
-        "create_connection": guarded_create_connection,
-        "getaddrinfo": name_guard("getaddrinfo"),
-        "gethostbyname": name_guard("gethostbyname"),
-        "gethostbyname_ex": name_guard("gethostbyname_ex"),
-        "gethostbyaddr": name_guard("gethostbyaddr"),
-        "getnameinfo": guarded_getnameinfo,
+        def guarded(sockaddr, *args, **kwargs):
+            if not (isinstance(sockaddr, tuple) and sockaddr and _loopback_host(sockaddr[0])):
+                refuse_name()
+            return original(sockaddr, *args, **kwargs)
+
+        return guarded
+
+    # Built from FENCED_ENTRY_POINTS rather than written out beside it, so the
+    # saved originals and the guards that replace them cannot drift apart: an
+    # entry point added to the list gets a guard or fails here by name.
+    GUARDS = {
+        "connect": peer_guard,
+        "connect_ex": peer_guard,
+        "sendto": sendto_guard,
+        "sendmsg": sendmsg_guard,
+        "create_connection": create_connection_guard,
+        "getaddrinfo": name_guard,
+        "gethostbyname": name_guard,
+        "gethostbyname_ex": name_guard,
+        "gethostbyaddr": name_guard,
+        "getnameinfo": nameinfo_guard,
     }
+    fenced = {}
+    for name in FENCED_ENTRY_POINTS:
+        _owner, attribute = _fence_owner(name)
+        if attribute not in GUARDS:
+            raise RuntimeError(f"the loopback fence has no guard for {name}")
+        fenced[name] = GUARDS[attribute](name)
     # Every saved original is replaced and every replacement is restored: the
     # two tables share one key set, so an entry point added to one and
     # forgotten in the other is a failure here rather than a hole at runtime.
     if set(fenced) != set(originals):
         raise RuntimeError("the loopback fence must guard exactly the entry points it saved")
 
+    # Most of these are inherited rather than owned - `socket.socket` does not
+    # define `connect`, it gets it from `_socket.socket`. Setting one creates an
+    # own attribute that would outlive the fence, so the restore removes what it
+    # created and reassigns only what was already there.
+    owned = {
+        name: attribute in vars(owner)
+        for name, (owner, attribute) in (
+            (name, _fence_owner(name)) for name in FENCED_ENTRY_POINTS
+        )
+    }
+
     def install(table):
         for key, value in table.items():
             owner, attribute = _fence_owner(key)
             setattr(owner, attribute, value)
 
+    def uninstall():
+        for key, value in originals.items():
+            owner, attribute = _fence_owner(key)
+            if owned[key]:
+                setattr(owner, attribute, value)
+            elif attribute in vars(owner):
+                delattr(owner, attribute)
+
+    # The C accelerator's socket type is immutable, so its methods cannot be
+    # guarded - but the *name* a caller reaches for can be. `_socket.socket` is
+    # bound to a guarded subclass for the duration; `socket.socket` was built
+    # from the real base at import time and is unaffected, and every guard above
+    # still applies to it.
+    raw_socket_type = _socket.socket
+
+    class GuardedRawSocket(raw_socket_type):
+        def connect(self, address):
+            if not permitted(self.family, address):
+                refuse_address()
+            return raw_socket_type.connect(self, address)
+
+        def connect_ex(self, address):
+            if not permitted(self.family, address):
+                refuse_address()
+            return raw_socket_type.connect_ex(self, address)
+
+        def sendto(self, *args):
+            if len(args) >= 2 and not permitted(self.family, args[-1]):
+                refuse_address()
+            return raw_socket_type.sendto(self, *args)
+
+        def sendmsg(self, *args):
+            if len(args) >= 4 and args[3] is not None and not permitted(self.family, args[3]):
+                refuse_address()
+            return raw_socket_type.sendmsg(self, *args)
+
     install(fenced)
+    _socket.socket = GuardedRawSocket
     try:
         yield
     finally:
-        install(originals)
+        _socket.socket = raw_socket_type
+        uninstall()
 
 
 class _BoundedSink(io.TextIOBase):

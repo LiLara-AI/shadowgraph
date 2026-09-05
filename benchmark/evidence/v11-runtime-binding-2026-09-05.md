@@ -98,7 +98,7 @@ between litellm completions and its own embedding engine.
 | N1 | `benchmark/lib/v11-python-hosts.mjs` | Binds the four Python arms. Carries `adapterCause` across the throw/return boundary, and gives an arm with no metered request class a container with no network. |
 | N2 | `benchmark/lib/v11-outer-transport.mjs` | The metered `requestOuter`. Fresh capability per call; bridges the runner's watchdog signal into the fetch. |
 | N3 | `benchmark/lib/v11-environment.mjs` | The ten observations the environment lock accepts, with no fallback for a command that does not answer. |
-| N4 | `benchmark/cli.mjs` | `v11RuntimeDependencies` - async, returning `{dependencies, close}` - plus `--provider-upstream`, `--state-root`, `--python-state-root`, `--python-runtime`, `--ledger-dir`. |
+| N4 | `benchmark/cli.mjs` | `v11RuntimeDependencies` - async, returning `{dependencies, close, pinnedModels}`, where `dependencies` carries the progress ledger, the unit ledger's append and the *measurement* close already paired by `v11-run-resources.mjs` - plus `--provider-upstream`, `--state-root`, `--python-state-root`, `--python-runtime`, `--ledger-dir`. |
 
 Four existing modules had to change before any of it could work:
 
@@ -184,5 +184,13 @@ SHADOWGRAPH_PROVIDER_UPSTREAM=http://127.0.0.1:11434/v1 \
 node benchmark/probes/runtime_binding_demonstration.mjs
 ```
 
-Exit status is non-zero if any arm fails to reach its runtime. An arm that
-reaches its runtime and refuses is reported, not hidden.
+Exit status is non-zero if any arm fails to reach its runtime, or if the
+provider ledger is not empty. A reset makes no provider call by contract, so
+an event there would mean an arm reached the model for an operation that must
+not - and the two conditions together are what make the empty ledger mean
+something, since a ledger nothing reached is also empty.
+
+An arm that reaches its runtime and refuses is reported, not hidden. An arm
+whose container never launched is *not* counted as having reached it: the
+executor turns every launch failure into a returned envelope, so the count
+asks who wrote the envelope rather than whether one came back.

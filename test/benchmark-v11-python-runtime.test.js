@@ -13,19 +13,23 @@
 // it completely.
 
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
   PYTHON_IMPORT_MODULES,
   PYTHON_RUNTIME_SCHEMA,
+  PYTHON_RUNTIME_VERSION,
   PythonRuntimeError,
   lockedDistributions,
   normalizeDistributionName,
+  readPythonSiteDistributions,
   renderRequirements,
   verifyPythonRuntime
 } from '../benchmark/lib/v11-python-runtime.mjs';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const IMAGE = 'python@sha256:47ae396f09c1303b8653019811a8498470603d7ffefc29cb07c88f1f8cb3d19f';
 const LOCK_SHA256 = 'a'.repeat(64);
@@ -269,4 +273,69 @@ test('every pinned Python arm declares the module its distribution imports', asy
   // derived: a mapping that could be computed would not need declaring.
   assert.equal(PYTHON_IMPORT_MODULES['mem0-oss'], 'mem0');
   assert.equal(PYTHON_IMPORT_MODULES.graphiti, 'graphiti_core');
+});
+
+test('the site is read from its own metadata, so an in-place upgrade is visible', async (t) => {
+  // A manifest is a claim about a directory. Verifying the claim and never
+  // opening the directory is what let `pip install --target <site> --upgrade
+  // httpx` pass the run path's bind-time refusal - the one case that refusal was
+  // written for.
+  const site = await scratchDirectory(t, 'shadowgraph-v11-site-');
+  const write = async (directory, metadata) => {
+    await mkdir(path.join(site, directory), { recursive: true });
+    await writeFile(path.join(site, directory, 'METADATA'), metadata, 'utf8');
+  };
+  await write('httpx-0.28.1.dist-info', 'Metadata-Version: 2.1\nName: httpx\nVersion: 0.28.1\n\nSummary: x\n');
+  await write('mem0ai-2.0.19.dist-info', 'Metadata-Version: 2.1\nName: mem0ai\nVersion: 2.0.19\n');
+  // A .dist-info with no METADATA names nothing, and guessing a version from the
+  // directory would be inventing evidence.
+  await mkdir(path.join(site, 'orphan-9.9.9.dist-info'), { recursive: true });
+  // And an ordinary package directory is not a distribution.
+  await mkdir(path.join(site, 'httpx'), { recursive: true });
+
+  assert.deepEqual(await readPythonSiteDistributions(site), [
+    { name: 'httpx', version: '0.28.1' },
+    { name: 'mem0ai', version: '2.0.19' }
+  ]);
+
+  // The upgrade the review demonstrated: the directory renamed and METADATA
+  // rewritten, with the manifest left untouched.
+  await rm(path.join(site, 'httpx-0.28.1.dist-info'), { recursive: true });
+  await write('httpx-9.9.9.dist-info', 'Metadata-Version: 2.1\nName: httpx\nVersion: 9.9.9\n');
+
+  const upgraded = await readPythonSiteDistributions(site);
+  assert.deepEqual(upgraded.find((each) => each.name === 'httpx'), { name: 'httpx', version: '9.9.9' });
+
+  // And that is what the bind-time verification is handed, so it is what fails.
+  const verification = verifyPythonRuntime({
+    manifest: {
+      schema: PYTHON_RUNTIME_SCHEMA,
+      version: PYTHON_RUNTIME_VERSION,
+      image: 'python@sha256:' + 'a'.repeat(64),
+      wheelsLockSha256: 'b'.repeat(64),
+      distributions: upgraded
+    },
+    wheelsLock: { wheels: [
+      { name: 'httpx==0.28.1', sha256: 'c'.repeat(64) },
+      { name: 'mem0ai==2.0.19', sha256: 'd'.repeat(64) }
+    ] },
+    wheelsLockSha256: 'b'.repeat(64),
+    image: 'python@sha256:' + 'a'.repeat(64)
+  });
+  assert.equal(verification.valid, false);
+  assert.deepEqual(
+    verification.findings.filter((finding) => finding.distribution === 'httpx'),
+    [{ code: 'DISTRIBUTION_VERSION_MISMATCH', distribution: 'httpx', locked: '0.28.1', installed: '9.9.9' }]
+  );
+});
+
+test('a site that cannot be read is refused rather than reported as empty', async () => {
+  // An empty list would verify as "every locked distribution absent", which is a
+  // finding - but it would be the wrong finding, and a caller reading it would
+  // look for a broken build rather than a wrong path.
+  await assert.rejects(
+    readPythonSiteDistributions(path.join(fileURLToPath(new URL('.', import.meta.url)), 'no-such-site-directory')),
+    /site could not be read/u
+  );
+  await assert.rejects(readPythonSiteDistributions(''), /site path is required/u);
 });

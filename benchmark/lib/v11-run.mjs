@@ -340,8 +340,18 @@ export async function executeV11AcceptanceRun(input) {
     // evidence of that run.
     closeResources = undefined,
     heartbeatIntervalMs = undefined,
+    // The run's own provider evidence, judged before the run is reported.
+    //
+    // Required rather than optional, and called here rather than by the
+    // caller, for the reason the reconciliation exists at all: the meter wrote
+    // a ledger on every run and nothing read it back, so three of the
+    // reconciler's discrepancy codes were unreachable in production. Making it
+    // the caller's step would leave the same hole one level up - a review
+    // deleted exactly that call from the CLI and the whole suite stayed green.
+    reconcileProviderEvidence,
     readFileImpl = readFile
   } = input;
+
 
   // A real run uses the one prompt builder this methodology defines. Nothing
   // else may be substituted here.
@@ -383,6 +393,13 @@ export async function executeV11AcceptanceRun(input) {
       new V11RunError('NOT_READY', 'The v1.1 candidate is not ready to execute an acceptance run'),
       { readiness: readinessReport }
     );
+  }
+
+  // After the readiness refusal, so a blocked candidate still refuses by name,
+  // and before the plan loop, so a run cannot execute 308 units and only then
+  // discover it has no way to judge its own provider traffic.
+  if (typeof reconcileProviderEvidence !== 'function') {
+    throw new Error('a v1.1 acceptance run must reconcile its own provider evidence');
   }
 
   const raw = await runV11Benchmark({
@@ -436,5 +453,13 @@ export async function executeV11AcceptanceRun(input) {
   const validation = validateRawRun(raw, resolvedDefinition, sourceHashes.preregistrationSha256);
   const aggregate = aggregateRun(raw, resolvedDefinition, { trustedSourceHashes: sourceHashes });
 
-  return { readiness: readinessReport, raw, validation, aggregate };
+  // After `closeResources`, so the ledger is complete, and after the record,
+  // so there is something to compare it against.
+  const providerEvidence = await reconcileProviderEvidence(raw);
+  if (providerEvidence === null || typeof providerEvidence !== 'object'
+    || typeof providerEvidence.status !== 'string') {
+    throw new Error('provider evidence reconciliation must report a status');
+  }
+
+  return { readiness: readinessReport, raw, validation, aggregate, providerEvidence };
 }

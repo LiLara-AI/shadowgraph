@@ -37,7 +37,7 @@ import { createAdapterRequest } from '../lib/adapter-protocol.mjs';
 import { startProviderMeter } from '../lib/provider-meter.mjs';
 import { loadV11AcceptanceDefinition } from '../lib/v11-definition.mjs';
 import { createV11NodeHosts } from '../lib/v11-node-hosts.mjs';
-import { HOST_SYNTHESIZED_FAILURE, createV11PythonHosts } from '../lib/v11-python-hosts.mjs';
+import { armReachedItsRuntime, createV11PythonHosts } from '../lib/v11-python-hosts.mjs';
 import { parseProviderLedger } from '../lib/v11-provider-reconciler.mjs';
 import { createV11Registry } from '../lib/v11-registry.mjs';
 import { createV11AdapterExecutor } from '../lib/v11-run.mjs';
@@ -119,12 +119,10 @@ try {
         elapsedMs: Date.now() - started,
         status: envelope.status,
         failureCause: envelope.failure?.cause ?? null,
-        // Whether the *product* answered. A container that never launched
-        // also produces a FAILED envelope carrying an adapter cause, so
-        // 'did not throw' is not evidence that anything ran: with the
-        // pre-F1 image pattern all four container arms failed this way and
-        // a count of non-throwing arms would still have read 7 of 7.
-        reachedItsRuntime: envelope.failure?.message !== HOST_SYNTHESIZED_FAILURE,
+        // Whether the *product* answered, decided by the module that writes
+        // the envelopes rather than by a comparison kept here. See
+        // `armReachedItsRuntime`.
+        reachedItsRuntime: armReachedItsRuntime(envelope),
         storageStatus: envelope.storage.status,
         operations: envelope.operations
       };
@@ -158,6 +156,10 @@ report.executed = report.arms.filter((arm) => arm.status === 'SUCCEEDED').length
 // A reset makes no provider call. An event here would mean an arm reached the
 // model for an operation the contract says it must not - which is a finding,
 // not a footnote, so it decides the exit status alongside the arm counts.
+//
+// Empty on its own would prove nothing - a ledger no arm ever reached is also
+// empty. It is the conjunction below that means something: every bound arm
+// reached its runtime *and* none of them called the model.
 report.providerLedgerIsEmpty = events.length === 0 && malformed.length === 0;
 
 console.log(JSON.stringify(report, null, 2));

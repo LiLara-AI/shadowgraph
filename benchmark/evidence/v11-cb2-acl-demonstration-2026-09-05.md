@@ -4,6 +4,21 @@
 - **Worktree:** `benchmark/v1.1-nonscored-acceptance`
 - **Commit:** `dc1f901`
 - **Official run status:** **NOT STARTED**
+- **Status:** the CB2 result stands. Everything this record says about the
+  *rest* of the tree was true on 2026-09-05 and has since been overtaken -
+  see the note below.
+
+> **Overtaken in part.** This record's CB2 finding - Cognee 1.5.3 enforcing
+> its native per-user ACL under the pinned backend pairing - is unchanged and
+> is what `v11-preflight` still consumes. Four of its surrounding claims are
+> no longer true of the tree: `cognee_adapter.py` no longer refuses a
+> user-scoped request (it resolves the benchmark's user to a Cognee principal,
+> and refuses a namespace *without* one); Mem0's and Cognee's client factories
+> exist and both arms execute; LB2a and LB2b are cleared in
+> `CANDIDATE-STATUS.md`; and a run given its runtime flags binds rather than
+> refusing at `RUNTIME_UNAVAILABLE`. The current state is
+> `v11-runtime-binding-2026-09-05.md` and
+> `v11-adversarial-review-2026-09-05.md`.
 
 ## Decision
 

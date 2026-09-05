@@ -53,6 +53,28 @@ export const PYTHON_RUNTIME_KIND = 'python-container';
  */
 export const HOST_SYNTHESIZED_FAILURE = 'Pinned Python adapter operation failed';
 
+/**
+ * Whether an envelope came back from the arm's runtime or from this module.
+ *
+ * 'Did not throw' is not evidence that anything ran: every
+ * `PythonAdapterExecutorError` becomes a returned FAILED envelope, so a
+ * container that could not launch - a stopped daemon, an image that is not
+ * present, the F1 image-pattern defect - is indistinguishable from a product
+ * refusing, by status alone. It is distinguishable by *who wrote the
+ * envelope*, which is what this asks.
+ *
+ * Exported because the binding demonstration rests its headline count on it,
+ * and a probe is exactly where a distinction like this goes unchecked: with
+ * the pre-F1 image pattern the probe would have reported seven of seven
+ * arms reaching their runtime while no container had started.
+ */
+export function armReachedItsRuntime(envelope) {
+  if (envelope === null || typeof envelope !== 'object') return false;
+  if (typeof envelope.status !== 'string') return false;
+  if (envelope.status !== 'FAILED') return true;
+  return envelope.failure?.message !== HOST_SYNTHESIZED_FAILURE;
+}
+
 export class PythonHostError extends Error {
   constructor(message) {
     super(message);

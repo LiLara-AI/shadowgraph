@@ -11,10 +11,32 @@ from unittest.mock import patch
 
 import python_host
 
-# Every gate, not a fixed handful. Sampling a subset let six gates be
-# declared in GATES and never written to the environment an adapter runs in,
-# with the only test of them comparing the dictionary to itself.
-_SAMPLED_ENVIRONMENT = tuple(python_host.GATES) + (
+# What every gate must be, written out rather than read back from the
+# dictionary under test.
+#
+# Two defects live here and only both assertions together close them. The
+# first version sampled six fixed names, so six gates could be declared and
+# never applied. Replacing the sample with `tuple(GATES)` fixed that and
+# opened the other: the expectation then came from the same dictionary as
+# the value, so inverting MEM0_TELEMETRY to `true` or TELEMETRY_DISABLED to
+# `0` passed. These are literals, and the key set is asserted against GATES
+# so a gate added there and forgotten here is a failure rather than a hole.
+REQUIRED_GATES = {
+    "MEM0_TELEMETRY": "false",
+    "GRAPHITI_TELEMETRY_ENABLED": "false",
+    "TELEMETRY_DISABLED": "1",
+    "BASIC_MEMORY_FORCE_LOCAL": "true",
+    "BASIC_MEMORY_MODE": "local",
+    "COGNEE_TRACING_ENABLED": "false",
+    "OTEL_SDK_DISABLED": "true",
+    "BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED": "false",
+    "BASIC_MEMORY_RERANKER_ENABLED": "false",
+    "LITELLM_LOCAL_MODEL_COST_MAP": "True",
+    "HF_HUB_OFFLINE": "1",
+    "HF_DATASETS_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1",
+}
+_SAMPLED_ENVIRONMENT = tuple(REQUIRED_GATES) + (
     "OPENAI_API_KEY",
     "OTEL_EXPORTER_OTLP_HEADERS",
 )
@@ -154,13 +176,14 @@ class PythonHostTests(unittest.TestCase):
             )
         self.assertEqual(code, 0)
         self.assertEqual(_FakeAdapterModule.calls, 1)
-        # Read out of the environment the adapter was actually given, so a gate
-        # that is declared and not applied fails here. The sibling test pins the
-        # values themselves; this one is about whether they arrive.
+        # Read out of the environment the adapter was actually given, against
+        # literals rather than against the dictionary that produced it: a gate
+        # declared and not applied fails here, and so does a gate whose value
+        # was changed to the opposite of its intent.
         self.assertEqual(
             _FakeAdapterModule.observed_environment,
             {
-                **python_host.GATES,
+                **REQUIRED_GATES,
                 "OPENAI_API_KEY": None,
                 "OTEL_EXPORTER_OTLP_HEADERS": None,
             },
@@ -403,13 +426,11 @@ class NetworkFenceTests(unittest.TestCase):
             self.assertEqual(socket.gethostbyname("localhost"), "127.0.0.1")
             self.assertTrue(socket.getnameinfo(("127.0.0.1", 80), 0))
 
-    def test_the_gates_close_every_unpinned_model_path_that_has_an_environment_switch(self) -> None:
-        self.assertEqual(python_host.GATES["BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED"], "false")
-        self.assertEqual(python_host.GATES["BASIC_MEMORY_RERANKER_ENABLED"], "false")
-        self.assertEqual(python_host.GATES["LITELLM_LOCAL_MODEL_COST_MAP"], "True")
-        self.assertEqual(python_host.GATES["HF_HUB_OFFLINE"], "1")
-        self.assertEqual(python_host.GATES["HF_DATASETS_OFFLINE"], "1")
-        self.assertEqual(python_host.GATES["TRANSFORMERS_OFFLINE"], "1")
+    def test_the_gates_are_exactly_the_ones_this_benchmark_requires(self) -> None:
+        # The declaration itself, against the same literals the applied
+        # environment is held to. A gate removed from GATES, added without a
+        # decision, or edited to the opposite of its intent fails here.
+        self.assertEqual(python_host.GATES, REQUIRED_GATES)
 
     def test_the_fence_is_actually_applied_around_the_adapter_call(self) -> None:
         # The obvious version of this test - let the adapter reach out, assert a
@@ -486,6 +507,55 @@ class NetworkFenceTests(unittest.TestCase):
             python_host.process_stream(io.StringIO(json.dumps(record) + "\n"), io.StringIO())
         self.assertEqual(_ResolvingAdapterModule.observed, "NetworkFenceError")
 
+
+
+class RawSocketFenceTests(unittest.TestCase):
+    """The C accelerator is a second spelling of the same calls.
+
+    `socket` wraps `_socket`, and `socket.socket` subclasses `_socket.socket`.
+    Guarding only the first left the second open, demonstrated in the pinned
+    image: `_socket.socket(AF_INET, SOCK_DGRAM).sendto(payload, ("192.0.2.1", 9))`
+    put eleven bytes on the wire while the identical call through `socket.socket`
+    was refused.
+    """
+
+    def test_the_raw_socket_type_a_caller_reaches_for_is_guarded(self) -> None:
+        import _socket
+
+        with python_host._loopback_only_network():
+            handle = _socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.addCleanup(handle.close)
+            with self.assertRaises(python_host.NetworkFenceError):
+                handle.sendto(b"shadowgraph-fence", ("192.0.2.1", 9))
+            with self.assertRaises(python_host.NetworkFenceError):
+                handle.connect(("192.0.2.1", 80))
+            # And loopback still works through the same type.
+            self.assertEqual(handle.sendto(b"shadowgraph-fence", ("127.0.0.1", 9)), 17)
+
+    def test_the_raw_module_resolvers_are_guarded(self) -> None:
+        import _socket
+
+        with python_host._loopback_only_network():
+            with self.assertRaises(python_host.NetworkFenceError):
+                _socket.gethostbyname("huggingface.co")
+            with self.assertRaises(python_host.NetworkFenceError):
+                _socket.getaddrinfo("huggingface.co", 443)
+            self.assertEqual(_socket.gethostbyname("localhost"), "127.0.0.1")
+
+    def test_the_raw_socket_type_is_restored_exactly(self) -> None:
+        # A guarded subclass left bound after the adapter call would make every
+        # later socket in this process a different type than the one the runtime
+        # ships - including in the harness's own tests.
+        import _socket
+
+        before = _socket.socket
+        with python_host._loopback_only_network():
+            self.assertIsNot(_socket.socket, before)
+        self.assertIs(_socket.socket, before)
+        # And nothing was left behind on the pure-Python type either: these are
+        # inherited, so writing one creates an attribute that outlives the fence.
+        self.assertNotIn("connect", vars(socket.socket))
+        self.assertNotIn("sendto", vars(socket.socket))
 
 if __name__ == "__main__":
     unittest.main()

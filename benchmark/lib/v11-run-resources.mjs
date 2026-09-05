@@ -19,6 +19,14 @@
  * built from the meter and can reach nothing else, and `close` - the caller's
  * `finally` - closes all three. Both are memoized, because the two are called
  * on every successful run and closing twice must be closing once.
+ *
+ * That was not enough on its own, and a review said so: splitting the closes
+ * here left the *choice* of which one to hand the runner in the CLI, on a line
+ * no test executes, and putting `close` back there reproduced the whole defect
+ * with 2336 tests green. So the choice is made here too. `runnerResources` is
+ * the three options the runner takes from this module, already paired; a caller
+ * that spreads it cannot pair them wrongly, and this module's own tests are
+ * what check the pairing.
  */
 
 function assertClosable(value, name) {
@@ -74,5 +82,16 @@ export function createV11RunResources(resources) {
     }
   });
 
-  return Object.freeze({ closeMeasurement, close });
+  return Object.freeze({
+    closeMeasurement,
+    close,
+    // What the runner is given. `closeResources` is the measurement close and
+    // can be nothing else: the ledgers beside it are the ones the runner is
+    // still writing to when it calls that hook.
+    runnerResources: Object.freeze({
+      progress,
+      persistUnit: (unit) => unitEvidence.append(unit),
+      closeResources: closeMeasurement
+    })
+  });
 }

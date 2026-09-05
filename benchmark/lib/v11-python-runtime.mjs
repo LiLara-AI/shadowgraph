@@ -20,6 +20,11 @@
 // broken in a way that is easy to miss and worse, because the reproducibility
 // claim is that the lock describes the runtime completely. Both are findings.
 
+// The one place this module touches a filesystem: `readPythonSiteDistributions`
+// reads a built site's own metadata, because a manifest is a claim about a
+// directory and verifying the claim is not verifying the directory.
+import { readdir, readFile } from 'node:fs/promises';
+
 const REQUIREMENT = /^([A-Za-z0-9][A-Za-z0-9._-]*)==([A-Za-z0-9][A-Za-z0-9._+!-]*)$/u;
 const BARE_SHA256 = /^[a-f0-9]{64}$/u;
 
@@ -253,4 +258,54 @@ export function verifyPythonRuntime(input) {
   }
 
   return Object.freeze({ valid: findings.length === 0, findings: Object.freeze(findings) });
+}
+
+/**
+ * The distributions a built site actually contains, read off the site.
+ *
+ * A manifest is a claim about a directory, and until this existed the run path
+ * verified the claim and never opened the directory: upgrading `httpx` in place
+ * inside the mounted site, leaving the manifest untouched, passed the bind-time
+ * check while the arms imported the upgraded package. The one case the refusal
+ * was written for was the one it did not cover.
+ *
+ * Read from each `*.dist-info/METADATA` rather than from the directory name,
+ * because that is where `importlib.metadata` - and therefore every arm's own
+ * `require_versions` - reads the version from. Nothing is imported and nothing
+ * is executed; this is a directory listing and some header lines.
+ */
+export async function readPythonSiteDistributions(sitePath, { readdirImpl = readdir, readFileImpl = readFile } = {}) {
+  if (!isNonEmptyString(sitePath)) {
+    throw new PythonRuntimeError('a Python site path is required');
+  }
+  let entries;
+  try {
+    entries = await readdirImpl(sitePath, { withFileTypes: true });
+  } catch (error) {
+    throw new PythonRuntimeError(`the pinned Python site could not be read: ${error?.message ?? error}`);
+  }
+  const distributions = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.endsWith('.dist-info')) continue;
+    let metadata;
+    try {
+      metadata = await readFileImpl(`${sitePath}/${entry.name}/METADATA`, 'utf8');
+    } catch {
+      // A .dist-info without METADATA is not a distribution this can name, and
+      // guessing from the directory name would be inventing evidence.
+      continue;
+    }
+    let name = null;
+    let version = null;
+    for (const line of metadata.split(String.fromCharCode(10))) {
+      if (line.length === 0) break;
+      if (name === null && line.startsWith('Name:')) name = line.slice(5).trim();
+      else if (version === null && line.startsWith('Version:')) version = line.slice(8).trim();
+      if (name !== null && version !== null) break;
+    }
+    if (isNonEmptyString(name) && isNonEmptyString(version)) {
+      distributions.push({ name, version });
+    }
+  }
+  return distributions;
 }

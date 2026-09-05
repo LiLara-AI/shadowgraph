@@ -5,6 +5,14 @@
 - **Under review:** `git diff 1d005fe..36e8ce2` — the seven commits that bound the run path
 - **Official run status:** **NOT STARTED**
 
+> **Four of the fixes below were incomplete, and a second review of this very
+> commit found them.** The close-ordering fix was made in a module and *chosen*
+> in the CLI on an untested line; the widened fence still let a datagram out
+> through `_socket`; the new reconciliation contradicted the record it was
+> reconciling; and the new runtime refusal never read the directory it gates.
+> See `v11-adversarial-review-round-2-2026-09-05.md` (F8-F11). This record is
+> kept as written, because what it got wrong is the point of the one after it.
+
 ## Decision
 
 The range that cleared LB2a shipped with a defect that made every bound run
@@ -249,9 +257,9 @@ the failure mode this candidate keeps finding in itself.
   three. The blocker section said "there is still no runtime that could run it",
   masking the real reason a run today would be meaningless, which is F2. And the
   open-methodology section said no amendment had been adopted and the definition
-  still carried the Amendment 002 counts (308/16/292/28/264) — four hundred lines
-  after the same document recorded adopting Amendment 003, and against a
-  definition and a preflight that both report 308/20/288/28/260.
+  still carried the Amendment 002 counts (308/16/292/28/264) — at line 979, 890
+  lines after the same document recorded adopting Amendment 003 at line 89, and
+  against a definition and a preflight that both report 308/20/288/28/260.
 - **`v11-runtime-binding-2026-09-05.md`** — the bolded headline claimed all seven
   arms execute a real operation where the table beneath it records six; a scope
   bullet still said five after the table moved to six; and the section written to
@@ -288,8 +296,8 @@ the failure mode this candidate keeps finding in itself.
 ## Reproduce
 
 ```
-npm test                      # 2336 / 2336, 0 fail
-npm run benchmark:test        # 1100 JS, then 136 Python
+npm test                      # 2344 / 2344, 0 fail
+npm run benchmark:test        # 1108 JS, then 139 Python
 npm run benchmark:check
 node benchmark/cli.mjs v11-preflight
 ```

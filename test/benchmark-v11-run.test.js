@@ -436,6 +436,7 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
 
   let wall = Date.parse('2026-08-31T00:00:00.000Z');
   const applicability = new Map(definition.arms.map((arm) => [arm.id, arm.applicability]));
+  const reconciled = [];
   const outcome = await executeV11AcceptanceRun({
     registry,
     definition,
@@ -460,10 +461,22 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
       requestCount: 1,
       correlation: { ...correlation }
     }),
-    executeAdapter: async (request) => stubEnvelope(request, applicability)
+    executeAdapter: async (request) => stubEnvelope(request, applicability),
+    // Required, and handed the record it is to judge. The run refuses without
+    // it: a run that wrote a provider ledger nobody read is how three of the
+    // reconciler's discrepancy codes became unreachable in production.
+    reconcileProviderEvidence: (raw) => {
+      reconciled.push(raw);
+      return { status: 'RECONCILED', findings: [] };
+    }
   });
 
   assert.equal(outcome.readiness.readiness, 'READY');
+  // The reconciliation ran, saw this run's own record, and its verdict is
+  // carried out with the artifact rather than left to the caller to ask for.
+  assert.equal(reconciled.length, 1);
+  assert.equal(reconciled[0], outcome.raw);
+  assert.equal(outcome.providerEvidence.status, 'RECONCILED');
   assert.equal(outcome.raw.units.length, 308);
   assert.equal(outcome.raw.mode, 'ACCEPTANCE');
   assert.equal(outcome.validation.valid, true, 'the validator must accept the run it just produced');

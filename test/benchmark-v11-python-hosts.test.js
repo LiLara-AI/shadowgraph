@@ -44,6 +44,7 @@ import { NETWORK_MODES } from '../benchmark/lib/python-container-runtime.mjs';
 import {
   PYTHON_RUNTIME_KIND,
   PythonHostError,
+  armReachedItsRuntime,
   createV11PythonHosts
 } from '../benchmark/lib/v11-python-hosts.mjs';
 import { createV11Registry } from '../benchmark/lib/v11-registry.mjs';
@@ -684,4 +685,33 @@ processGroupTest('an arm that meters nothing is handed no model and no network',
     invocation[invocation.indexOf('--network') + 1],
     NETWORK_MODES.none.dockerValue
   );
+});
+
+test('a failure the harness wrote is not evidence that the arm ran', async (t) => {
+  // The distinction the binding demonstration rests its headline count on. Every
+  // `PythonAdapterExecutorError` becomes a returned FAILED envelope, so counting
+  // arms that "did not throw" counted a container that never launched: with the
+  // pre-F1 image pattern all four container arms failed this way and the probe
+  // would have reported seven of seven while no container had started.
+  const recorder = await recordingContainerExecutable(t);
+  const bound = await hosts(t, { dockerExecutable: '/nonexistent/docker-binary' });
+  const execute = bound[PYTHON_RUNTIME_KIND](descriptorFor('basic-memory', {
+    containerImage: LAUNCHABLE_IMAGE
+  }));
+
+  const response = await execute(requestFor('reset', 'basic-memory'));
+  assert.equal(response.status, 'FAILED');
+  assert.equal(armReachedItsRuntime(response), false, 'no container was launched');
+  assert.deepEqual(recorder.invocations(), []);
+
+  // A failure the product reported does count: it came back from inside.
+  assert.equal(armReachedItsRuntime({
+    status: 'FAILED',
+    failure: { cause: 'ENDPOINT_UNAVAILABLE', message: 'the graph database refused the connection' }
+  }), true);
+  assert.equal(armReachedItsRuntime({ status: 'SUCCEEDED' }), true);
+  // And nothing at all is not a runtime that was reached.
+  for (const absent of [null, undefined, {}, { status: 42 }]) {
+    assert.equal(armReachedItsRuntime(absent), false);
+  }
 });

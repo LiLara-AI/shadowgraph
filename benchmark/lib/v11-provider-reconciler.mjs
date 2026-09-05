@@ -29,6 +29,10 @@ const CORRELATION_FIELDS = Object.freeze([
 
 /** Every discrepancy this reconciler can report. */
 export const RECONCILIATION_CODES = Object.freeze([
+  // Not produced by `reconcileProviderEvidence` - a ledger it cannot read is a
+  // ledger it is never handed - but produced by `runProviderReconciliation`
+  // above it, and this list is documented as the complete set.
+  'LEDGER_UNREADABLE',
   'MALFORMED_EVENT',
   'LEDGER_GAP',
   'DUPLICATE_REQUEST_NUMBER',
@@ -302,15 +306,40 @@ const OPERATION_FIELD_BY_REQUEST_CLASS = Object.freeze({
  * `MODEL_MISMATCH` and `UNEXPECTED_CALL` were codes no run could emit.
  *
  * One expectation per (unit, request class), including the classes a unit
- * reports as zero - an arm that meters nothing still has to be *checked* to
- * have metered nothing, and an expectation of zero is what turns a stray event
- * into `UNEXPECTED_CALL` instead of into silence.
+ * reports as zero. An unmatched event is reported whether or not an
+ * expectation names its correlation, so the zero is not what makes a stray
+ * call visible - what it adds is the run's own statement that this arm meters
+ * nothing, carried in `totals.expectedCalls` and checked rather than assumed.
  *
  * Only this attempt's units, because the ledger is opened per attempt: a
  * resumed run carries units from earlier attempts whose provider traffic is in
  * an earlier ledger, and expecting them here would report every one of them
  * missing.
+ *
+ * And only units the harness actually measured. A unit that failed inside its
+ * container, or that was interrupted, carries counts the harness wrote rather
+ * than counts the adapter reported: a host-synthesised failure envelope zeroes
+ * them, and an abort observed between the adapter returning and the counts
+ * being added discards them. The provider calls the container had already made
+ * are in the ledger either way, so expecting zero for those correlations would
+ * report `UNEXPECTED_CALL` and `RETRY_OBSERVED` on every run containing one
+ * adapter failure - a reconciliation contradicting the record beside it, and a
+ * fail-closed refusal firing on a correct run.
+ *
+ * Those units are returned separately as `unattributed`. Not silence: the
+ * caller reports how many events belong to correlations whose counts the record
+ * cannot vouch for. What is honest here is that the harness does not know what
+ * a crashed container did, and saying zero would be a claim the record cannot
+ * support.
  */
+/** A unit's correlation, without the request class: one key per unit. */
+function correlationPrefix(value) {
+  return CORRELATION_FIELDS
+    .filter((field) => field !== 'requestClass')
+    .map((field) => String(value[field]))
+    .join(String.fromCharCode(31));
+}
+
 export function providerExpectationsFromRun(raw, attemptId) {
   if (!isPlainObject(raw) || !Array.isArray(raw.units)) {
     throw new Error('provider expectations require a raw run record with units');
@@ -319,9 +348,25 @@ export function providerExpectationsFromRun(raw, attemptId) {
     throw new Error('provider expectations require the attempt whose ledger is being read');
   }
   const expectations = [];
+  const unattributed = [];
   for (const unit of raw.units) {
     if (!isPlainObject(unit)) throw new Error('every unit must be an object');
     if (unit.attemptId !== attemptId) continue;
+    if (unit.status !== 'MEASURED') {
+      unattributed.push({
+        unitId: unit.unitId,
+        status: unit.status,
+        correlation: {
+          runId: unit.runId,
+          attemptId: unit.attemptId,
+          armId: unit.armId,
+          scenarioId: unit.scenarioId,
+          repetition: unit.repetition,
+          phase: unit.phase
+        }
+      });
+      continue;
+    }
     if (!isPlainObject(unit.operations)) {
       throw new Error(`unit ${String(unit.unitId)} records no operation metrics`);
     }
@@ -343,7 +388,7 @@ export function providerExpectationsFromRun(raw, attemptId) {
       });
     }
   }
-  return expectations;
+  return { expectations, unattributed };
 }
 
 /**
@@ -363,10 +408,15 @@ export function runProviderReconciliation(input) {
   if (!isNonEmptyString(ledgerPath)) {
     throw new Error('a run reconciliation must name the ledger it read');
   }
+  // The *ids*, not merely the descriptors. A descriptor present and nameless
+  // passed the earlier check, made every entry of `expectedModels` undefined,
+  // and `expectedModels[requestClass] ?? null` then turned the whole model
+  // comparison off - a ledger recording an unpinned model reconciled clean.
+  const named = (descriptor) => isPlainObject(descriptor) && isNonEmptyString(descriptor.modelId);
   if (!isPlainObject(pinnedModels)
-    || !isPlainObject(pinnedModels.internal_memory_llm)
-    || !isPlainObject(pinnedModels.embedding)) {
-    throw new Error('a run reconciliation requires the pinned models the run was bound to');
+    || !named(pinnedModels.internal_memory_llm)
+    || !named(pinnedModels.embedding)) {
+    throw new Error('a run reconciliation requires the pinned model ids the run was bound to');
   }
   const envelope = (status, totals, findings) => Object.freeze({
     schema: 'shadowgraph.v11.provider-reconciliation',
@@ -389,10 +439,22 @@ export function runProviderReconciliation(input) {
   }
 
   const { events, malformed } = parseProviderLedger(ledgerText);
+  const { expectations, unattributed } = providerExpectationsFromRun(raw, attemptId);
+  // Events belonging to a unit whose counts the record cannot vouch for are
+  // held out of the comparison and counted instead. Leaving them in would make
+  // one adapter failure enough to report a metering violation for a run that
+  // had none.
+  const unattributedKeys = new Set(unattributed.map((unit) => correlationPrefix(unit.correlation)));
+  const attributable = [];
+  let unattributedEvents = 0;
+  for (const event of events) {
+    if (unattributedKeys.has(correlationPrefix(event))) unattributedEvents += 1;
+    else attributable.push(event);
+  }
   const report = reconcileProviderEvidence({
-    events,
+    events: attributable,
     malformed,
-    expectations: providerExpectationsFromRun(raw, attemptId),
+    expectations,
     expectedModels: {
       // The outer decision and an arm's own internal calls are the same pinned
       // chat model: the lock states it once and both routes use it.
@@ -401,5 +463,11 @@ export function runProviderReconciliation(input) {
       embedding: pinnedModels.embedding.modelId
     }
   });
-  return envelope(report.status, report.totals, report.findings);
+  return envelope(report.status, {
+    ...report.totals,
+    // Named rather than hidden: how much traffic this run could not hold its
+    // own record to, and how many units it belongs to.
+    unattributedUnits: unattributed.length,
+    unattributedEvents
+  }, report.findings);
 }
