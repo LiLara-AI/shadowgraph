@@ -896,16 +896,51 @@ expire six hours after they were observed. Neither can be replaced by an
 assertion: `--preconditions`, which used to stand in for the second, is now
 refused by name.
 
+**Observed on 2026-09-06, not inferred.** Against the live stack: neo4j 3 of 3
+checks PASS, ollama 3 of 3 with both pinned models' weight digests matching the
+lock, the Cognee ACL demonstration 10 of 10 steps PASS, and preflight
+`"readiness": "READY", "blockers": []` with declared and derived counts agreeing
+at 20 / 288 / 260. Recorded in
+`benchmark/evidence/v11-readiness-and-f2-2026-09-06.md`, which also records the
+one failure on the way there — an operator mistake, refused precisely: the
+container's `NEO4J_AUTH` is Neo4j's `user/password`, and HTTP Basic needs
+`user:password`, so the raw form returns `400 Invalid authentication header`.
+
 A run started without the runtime flags refuses at `RUNTIME_UNAVAILABLE` and
 writes no artifact; one started without evidence refuses on readiness, naming
 its blockers. Given both, the run path binds: the meter, the ledgers, the
 environment observation, the implementation lock and all seven arms.
 
 That is the honest state, and it is not that nothing could run. It is **F2**:
-the pinned `qwen2.5:0.5b` returned a decision the frozen schema rejects on 4 of
-4 Phase A attempts, and Phase A is the first thing every unit does, so every
-measured unit would fail at the outer model. The harness being runnable and the
-run being meaningful are different questions, and only the first is answered.
+the pinned `qwen2.5:0.5b` returns a decision the frozen schema rejects, and Phase
+A is the first thing every unit does, so every measured unit would fail at the
+outer model. The harness being runnable and the run being meaningful are
+different questions, and only the first is answered.
+
+F2 was re-measured on 2026-09-06 through the shipped `buildV11Prompt` and
+`requestOuterDecision`, over both scenarios at all three frozen seeds, with the
+definition loaded through its hash gate
+(`benchmark/probes/v11_phase_a_decision_probe.mjs`):
+
+| Decision model | Phase A accepted | Rejected by |
+| --- | --- | --- |
+| `qwen2.5:0.5b`, the pinned one | **0 / 6** | `failedAttemptIdsAvoided`: wrong shape on one scenario, absent on the other |
+| `qwen2.5:3b` | **0 / 6** | `failedAttemptIdsAvoided` must be an array of strings |
+| `qwen2.5:7b` | **6 / 6** | — |
+
+So F2 is a model-capacity limit, not a prompt or schema defect: the same prompt
+and the same schema are satisfied on every attempt at 7B. And the remedy looks
+to be inside the frozen methodology rather than an amendment to it — the
+preregistration froze the decision LLM identity as `null` and permits a later run
+to fill it "only from a successful capability probe", and
+`model-weights.lock.json` is not one of the four hash-gated frozen sources.
+
+**The lock is not changed, and that remains the owner's decision.** What changed
+is that it is now a decision with a measured answer rather than an open question.
+Choosing a model requires editing `model-weights.lock.json` with its weight
+digest, re-running `v11-service-probe` (the current record names `qwen2.5:0.5b`
+as served), and re-running the Phase A probe against the committed lock so the
+record describes the pinned model rather than a candidate.
 
 | ID | Blocker | State |
 | --- | --- | --- |
@@ -923,7 +958,7 @@ run being meaningful are different questions, and only the first is answered.
 | LB2g | Control and MCP runtime hosts unbound | Cleared |
 | LB3 | Implementation lock requires a clean tree | Cleared |
 | F1 | The container runtime refused the tag the competitor lock pins, so every Python arm would have been recorded as a contract failure of the product | Cleared |
-| F2 | The pinned decision model returns a decision the frozen schema rejects, 0 of 4 attempts | **Open**, owner decision |
+| F2 | The pinned decision model returns a decision the frozen schema rejects: 0 of 6 Phase A attempts over both scenarios at all three frozen seeds, every one on `failedAttemptIdsAvoided`. `qwen2.5:3b` also 0 of 6; `qwen2.5:7b` 6 of 6 | **Open**, owner decision, with the candidate measurement in `benchmark/evidence/v11-readiness-and-f2-2026-09-06.md` |
 | F3 | Cognee refuses the user namespace the definition declares it supports, on a precondition CB2 has since demonstrated | Cleared |
 | F4 | The run's teardown closed the progress ledger before the runner wrote its terminal event, so every bound run would have executed all 308 units and then written no artifact | Cleared |
 | F5 | The loopback network fence guarded four connection-oriented entry points and described itself as closing egress by construction; a datagram and `gethostbyname` both left the process | Cleared |
