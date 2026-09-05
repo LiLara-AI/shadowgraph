@@ -20,7 +20,6 @@ from envelope import ContractError, build_envelope, canonical_json, record_conte
 ENCODING_PREFIX = "shadowgraph-benchmark-record:v2:"
 PINNED_MODEL_ID = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}\Z")
 BENCHMARK_UUID_NAMESPACE = uuid.UUID("2533a762-6523-53c2-bbd9-6f533c197a44")
-COGNEE_DATASET_UUID_NAMESPACE = uuid.UUID("f266d968-ec78-5e9b-b767-b78eb418b156")
 ENDPOINT_ERRNOS = {
     errno.ECONNREFUSED,
     errno.ECONNRESET,
@@ -196,12 +195,6 @@ def deterministic_native_uuid(adapter_id: str, logical_record_id: str) -> str:
     if not isinstance(adapter_id, str) or not adapter_id or not isinstance(logical_record_id, str) or not logical_record_id:
         raise ContractError("Native UUID inputs must be non-empty strings")
     return str(uuid.uuid5(BENCHMARK_UUID_NAMESPACE, f"{adapter_id}:{logical_record_id}"))
-
-
-def deterministic_dataset_uuid(adapter_id: str, project_id: str) -> uuid.UUID:
-    if not isinstance(adapter_id, str) or not adapter_id or not isinstance(project_id, str) or not project_id:
-        raise ContractError("Dataset UUID inputs must be non-empty strings")
-    return uuid.uuid5(COGNEE_DATASET_UUID_NAMESPACE, f"{adapter_id}:{project_id}")
 
 
 def decode_content(value: Any) -> dict:

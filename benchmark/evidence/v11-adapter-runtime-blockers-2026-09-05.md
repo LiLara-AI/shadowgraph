@@ -167,7 +167,7 @@ then provably the ACL and not an accident of configuration.
 | --- | --- | --- |
 | D1 | ~~May a factory rebind mem0's constructed SDK clients to set `max_retries=0` and count real requests?~~ **Answered 2026-09-05:** yes, and it is implemented. The arm now executes reset/persist/verify/retrieve against the real service, metered, with one request per call. See `v11-mem0-execution-2026-09-05.md` | resolved |
 | D2 | ~~Which vector store may Mem0 use, given the pinned Qdrant path makes an unmetered external fetch?~~ **Answered 2026-09-05:** its own default local Qdrant in `path=` mode. The store was never the problem - the runtime was not closed. See `v11-unpinned-model-fence-2026-09-05.md` | resolved |
-| D3 | Does the Cognee arm adopt library-assigned dataset ids, which requires amending the frozen deterministic-uuid scheme? | Cognee stays blocked |
+| D3 | ~~Does the Cognee arm adopt library-assigned dataset ids, which requires amending the frozen deterministic-uuid scheme?~~ **Answered 2026-09-05:** yes, and no amendment was needed - no frozen file mentions datasets or uuids. The computed id did not merely differ: it made every write fail with a 403 against an empty store. See `v11-cognee-dataset-identity-2026-09-05.md` | resolved |
 | D4 | Is a retry floor the library does not let us disable acceptable, or does `automatic_retries: 0` stand? | Cognee, and Mem0 under D1, stay blocked |
 | D5 | Should the CB2 demonstration be built and run under the file-backed pairing, to clear the last preflight blocker even though the arm cannot execute? | CB2 stays open and readiness stays NOT READY |
 

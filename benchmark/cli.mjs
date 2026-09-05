@@ -1037,10 +1037,44 @@ async function v11FenceProbeCommand(options) {
   return evidence;
 }
 
-// Which demonstration proves an arm executes. One entry per arm that has one;
-// an arm without an entry is refused rather than silently skipped.
-const ARM_EXECUTION_PROBES = Object.freeze({
-  'mem0-oss': 'mem0_execution_demonstration.py'
+// What each arm's runtime has to be shown doing, and what its demonstration
+// needs to do it. One entry per arm that has one; an arm without an entry is
+// refused rather than silently skipped.
+//
+// The environments differ because the questions do. Mem0's is about execution,
+// so it needs the pinned model endpoint. Cognee's is about who assigns a
+// dataset its id, which is answered entirely inside the file-backed stores the
+// ACL demonstration established - and asking it without a model endpoint is
+// part of the answer being narrow.
+const ARM_PROBES = Object.freeze({
+  'mem0-oss': Object.freeze({
+    script: 'mem0_execution_demonstration.py',
+    requiresModelEndpoint: true,
+    environment: (work) => ({
+      SHADOWGRAPH_STATE_ROOT: `${work}/state`
+    }),
+    directories: ['state']
+  }),
+  cognee: Object.freeze({
+    script: 'cognee_dataset_identity_demonstration.py',
+    // Even a question about dataset identity needs one: Cognee's `add` runs a
+    // pipeline that tests the LLM connection before it will ingest anything.
+    requiresModelEndpoint: true,
+    environment: (work) => ({
+      HOME: `${work}/home`,
+      VECTOR_DB_PROVIDER: 'lancedb',
+      VECTOR_DATASET_DATABASE_HANDLER: 'lancedb',
+      GRAPH_DATABASE_PROVIDER: 'ladybug',
+      GRAPH_DATASET_DATABASE_HANDLER: 'ladybug',
+      DATA_ROOT_DIRECTORY: `${work}/data`,
+      SYSTEM_ROOT_DIRECTORY: `${work}/system`,
+      TELEMETRY_DISABLED: '1',
+      COGNEE_TRACING_ENABLED: 'false',
+      OTEL_SDK_DISABLED: 'true',
+      LITELLM_LOCAL_MODEL_COST_MAP: 'True'
+    }),
+    directories: ['home', 'data', 'system/databases']
+  })
 });
 
 /**
@@ -1058,19 +1092,20 @@ const ARM_EXECUTION_PROBES = Object.freeze({
  */
 async function v11ArmProbeCommand(options) {
   const armId = options.arm;
-  if (typeof armId !== 'string' || !Object.hasOwn(ARM_EXECUTION_PROBES, armId)) {
+  if (typeof armId !== 'string' || !Object.hasOwn(ARM_PROBES, armId)) {
     throw new Error(
-      `v11-arm-probe requires --arm <${Object.keys(ARM_EXECUTION_PROBES).join('|')}>`
+      `v11-arm-probe requires --arm <${Object.keys(ARM_PROBES).join('|')}>`
     );
   }
+  const probe = ARM_PROBES[armId];
   const runtimeRoot = optionPath(options.runtime);
   const workRoot = optionPath(options.work);
   if (runtimeRoot === null || workRoot === null) {
     throw new Error('v11-arm-probe requires --runtime <runtime-site> and --work <writable-root>');
   }
   const modelEndpoint = options['model-endpoint'];
-  if (typeof modelEndpoint !== 'string' || modelEndpoint.length === 0) {
-    throw new Error('v11-arm-probe requires --model-endpoint <openai-compatible base url>');
+  if (probe.requiresModelEndpoint && (typeof modelEndpoint !== 'string' || modelEndpoint.length === 0)) {
+    throw new Error(`v11-arm-probe --arm ${armId} requires --model-endpoint <openai-compatible base url>`);
   }
   if (typeof process.getuid !== 'function' || typeof process.getgid !== 'function') {
     throw new Error('v11-arm-probe requires a POSIX host so the demonstration state is owned by the invoking user');
@@ -1095,7 +1130,9 @@ async function v11ArmProbeCommand(options) {
   const containerProbes = '/opt/shadowgraph/probes';
   const containerWork = '/run/shadowgraph/demonstration';
 
-  await mkdir(join(workRoot, 'state'), { recursive: true });
+  for (const directory of probe.directories) {
+    await mkdir(join(workRoot, ...directory.split('/')), { recursive: true });
+  }
   const demonstrationPath = join(workRoot, 'execution-evidence.json');
   await rm(demonstrationPath, { force: true });
 
@@ -1103,13 +1140,13 @@ async function v11ArmProbeCommand(options) {
     PYTHONPATH: `${CONTAINER_PATHS.runtime}:${CONTAINER_PATHS.adapters}`,
     PYTHONDONTWRITEBYTECODE: '1',
     HOME: containerWork,
-    SHADOWGRAPH_MODEL_ENDPOINT: modelEndpoint,
-    SHADOWGRAPH_STATE_ROOT: `${containerWork}/state`,
     SHADOWGRAPH_LLM_MODEL: pinned.internal_memory_llm.modelId,
     SHADOWGRAPH_EMBEDDING_MODEL: pinned.embedding.modelId,
     SHADOWGRAPH_EMBEDDING_DIMENSION: String(pinned.embedding.embeddingDimension),
-    SHADOWGRAPH_DEMONSTRATION_OUTPUT: `${containerWork}/execution-evidence.json`
+    SHADOWGRAPH_DEMONSTRATION_OUTPUT: `${containerWork}/execution-evidence.json`,
+    ...probe.environment(containerWork)
   };
+  if (probe.requiresModelEndpoint) environment.SHADOWGRAPH_MODEL_ENDPOINT = modelEndpoint;
 
   const args = [
     'run', '--rm', '--init',
@@ -1124,7 +1161,7 @@ async function v11ArmProbeCommand(options) {
   for (const name of Object.keys(environment).sort()) {
     args.push('--env', `${name}=${environment[name]}`);
   }
-  args.push(competitorLock.pythonImage, 'python', `${containerProbes}/${ARM_EXECUTION_PROBES[armId]}`);
+  args.push(competitorLock.pythonImage, 'python', `${containerProbes}/${probe.script}`);
 
   let demonstrationFailed = false;
   try {

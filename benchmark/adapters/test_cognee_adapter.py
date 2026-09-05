@@ -4,7 +4,7 @@ import asyncio
 import copy
 import unittest
 from enum import Enum
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 import cognee_adapter
 
@@ -13,7 +13,21 @@ from test_support import DECISION_SHA256, models_for, python_config, python_mode
 
 COGNEE_REF = "b72f98aea2a794c87f25b3c65d1643224c3666380e9d5bbcf03ce59f11f883a7"
 COGNEE_ALT_REF = "2cf7dd566405472a39d399f63526e54a4e9022d9565e77524f4a3f2dc96e7449"
-COGNEE_DATASET_ID = UUID("f68d9708-304c-57b8-80a7-09ef1e12a274")
+# The id this adapter used to compute for "project-1", kept so a test can
+# assert it is never used. Cognee derives its own from the dataset name, the
+# owning user and the tenant, and reads a supplied id as a reference to an
+# existing dataset the caller may write to - against the real library the
+# computed id raised PermissionDeniedError and created nothing.
+ADAPTER_INVENTED_DATASET_ID = UUID("f68d9708-304c-57b8-80a7-09ef1e12a274")
+LIBRARY_NAMESPACE = UUID("6ba7b811-9dad-11d1-80b4-00c04fd430c8")
+
+
+def library_dataset_id(name: str) -> UUID:
+    """The id Cognee assigns, modelled as one this adapter cannot compute."""
+    return uuid5(LIBRARY_NAMESPACE, f"cognee-library:{name}")
+
+
+COGNEE_DATASET_ID = library_dataset_id("project-1")
 
 
 class FakeSearchType(str, Enum):
@@ -148,12 +162,27 @@ class FakeCognee:
             self.provider_call("embedding")
         if self.fail_on == "add":
             raise RuntimeError("cognee add failed")
-        dataset = self.backend.setdefault(dataset_id, {"name": dataset_name, "rows": []})
+        # Cognee reads a supplied dataset id as a reference to a dataset that
+        # already exists and that the caller holds write permission on. Against
+        # the real library an id the store had never seen raised
+        # PermissionDeniedError and created nothing at all, so this refuses it
+        # rather than quietly creating one under the caller's id.
+        if dataset_id is not None and dataset_id not in self.backend:
+            raise PermissionError(
+                "Request owner does not have necessary permission: [write] for all datasets requested"
+            )
+        resolved = dataset_id
+        if resolved is None:
+            resolved = next(
+                (key for key, value in self.backend.items() if value["name"] == dataset_name),
+                library_dataset_id(dataset_name),
+            )
+        dataset = self.backend.setdefault(resolved, {"name": dataset_name, "rows": []})
         if dataset["name"] != dataset_name:
             raise ValueError("dataset identity contradiction")
         location = f"file:///owned/{data.data_id}.txt"
         self.raw_files[location] = data.data.encode("utf-8")
-        dataset["rows"].append(FakeDataRow(data.data_id, dataset_id, location, data.external_metadata))
+        dataset["rows"].append(FakeDataRow(data.data_id, resolved, location, data.external_metadata))
 
     async def cognify(self, *, datasets=None, user=None, llm_config=None, embedding_config=None, **_kwargs):
         self.calls.append(("cognify", list(datasets or []), user, copy.deepcopy(llm_config), copy.deepcopy(embedding_config)))
@@ -202,26 +231,53 @@ class CogneeAdapterTests(unittest.TestCase):
         self.assertEqual(response["operations"]["memoryReadOperations"], 1)
         self.assertEqual(response["operations"]["memoryWriteOperations"], 1)
 
-    def test_dataset_uuid_or_name_contradictions_fail_closed_before_empty(self) -> None:
-        contradictions = [
-            {COGNEE_DATASET_ID: {"name": "wrong-project", "rows": []}},
-            {uuid4(): {"name": "project-1", "rows": []}},
-        ]
-        for backend in contradictions:
-            with self.subTest(backend=backend):
-                self.backend.clear()
-                self.clients.clear()
-                self.backend.update(backend)
-                response = self.execute("reset")
-                self.assertEqual(response["status"], "FAILED")
-                self.assertEqual(response["failure"]["cause"], "CONTRACT_FAILURE")
-                self.assertEqual([call[0] for call in self.clients[0].calls], ["list_datasets"])
+    def test_the_arm_adopts_the_id_cognee_assigned_and_never_computes_one(self) -> None:
+        # The name is the arm's; the id is the library's. A dataset carrying the
+        # id this adapter used to compute is not the arm's dataset, and one
+        # carrying the arm's name is, whatever id it has.
+        self.assertNotEqual(COGNEE_DATASET_ID, ADAPTER_INVENTED_DATASET_ID)
+        self.backend[ADAPTER_INVENTED_DATASET_ID] = {"name": "someone-elses", "rows": []}
+        self.backend[COGNEE_DATASET_ID] = {"name": "project-1", "rows": []}
+        response = self.execute("reset")
+        self.assertEqual(response["status"], "SUCCEEDED")
+        self.assertEqual(
+            self.clients[0].calls,
+            [("list_datasets", None), ("empty_dataset", COGNEE_DATASET_ID, None)],
+        )
+
+    def test_a_dataset_under_another_name_is_not_the_arm_s_dataset(self) -> None:
+        self.backend[uuid4()] = {"name": "wrong-project", "rows": []}
+        response = self.execute("reset")
+        self.assertEqual(response["status"], "SUCCEEDED")
+        self.assertEqual([call[0] for call in self.clients[0].calls], ["list_datasets"])
+        self.assertEqual(response["operations"]["memoryWriteOperations"], 0)
+
+    def test_two_datasets_sharing_the_arm_s_name_are_ambiguous_not_a_choice(self) -> None:
+        self.backend[uuid4()] = {"name": "project-1", "rows": []}
+        self.backend[uuid4()] = {"name": "project-1", "rows": []}
+        response = self.execute("reset")
+        self.assertEqual(response["status"], "FAILED")
+        self.assertEqual(response["failure"]["cause"], "CONTRACT_FAILURE")
+        self.assertEqual([call[0] for call in self.clients[0].calls], ["list_datasets"])
+
+    def test_retrieve_before_anything_is_persisted_searches_nothing_and_says_so(self) -> None:
+        # Naming the dataset to Cognee's search would create it, and inventing
+        # an embedding call to satisfy the traffic contract would be worse than
+        # reporting what happened.
+        response = self.execute("retrieve")
+        self.assertEqual(response["status"], "SUCCEEDED")
+        self.assertEqual(response["result"]["nativeContext"], [])
+        self.assertEqual(response["operations"]["embeddingCalls"], 0)
+        self.assertEqual(response["operations"]["internalMemoryModelCalls"], 0)
+        self.assertEqual(response["operations"]["memoryReadOperations"], 1)
+        self.assertEqual([call[0] for call in self.clients[0].calls], ["list_datasets"])
 
     def test_retrieve_maps_search_result_context_and_skips_internal_llm_in_context_mode(self) -> None:
+        self.backend[COGNEE_DATASET_ID] = {"name": "project-1", "rows": []}
         self.search_results = [FakeSearchResult({"fact": "Use the reversible option."}, COGNEE_DATASET_ID, "project-1")]
         response = self.execute("retrieve")
         self.assertEqual(response["status"], "SUCCEEDED")
-        self.assertEqual(response["operations"]["memoryReadOperations"], 1)
+        self.assertEqual(response["operations"]["memoryReadOperations"], 2)
         self.assertEqual(response["operations"]["internalMemoryModelCalls"], 0)
         self.assertEqual(response["operations"]["embeddingCalls"], 1)
         self.assertEqual(response["result"]["nativeContext"], [{"search_result": {"fact": "Use the reversible option."}, "dataset_id": str(COGNEE_DATASET_ID), "dataset_name": "project-1"}])
@@ -241,7 +297,7 @@ class CogneeAdapterTests(unittest.TestCase):
         self.assertEqual(config["automatic_retries"], 0)
         self.assertEqual(config["retry_proof"], "task8_runtime_meter_required")
         self.assertNotIn("ollama", str(config).lower())
-        search_call = self.clients[0].calls[0]
+        search_call = self.clients[0].calls[1]
         self.assertIs(search_call[2], FakeSearchType.GRAPH_COMPLETION)
         self.assertIsNone(search_call[4])
         self.assertEqual(search_call[5], [COGNEE_DATASET_ID])
@@ -250,19 +306,29 @@ class CogneeAdapterTests(unittest.TestCase):
     def test_persist_adds_deterministic_data_item_then_cognifies_without_fixture_preload(self) -> None:
         response = self.execute("persist")
         self.assertEqual(response["status"], "SUCCEEDED")
-        self.assertEqual([call[0] for call in self.clients[0].calls], ["add", "cognify"])
+        # The listing between the two writes is how the id is adopted: Cognee
+        # assigns it while handling the add, and nothing before that call can
+        # know it.
+        self.assertEqual(
+            [call[0] for call in self.clients[0].calls], ["add", "list_datasets", "cognify"]
+        )
         item = self.clients[0].calls[0][1]
         self.assertIsInstance(item.data_id, UUID)
         self.assertEqual(str(item.data_id), "2c06c6a7-6772-5711-8f12-054e8b4c4a6b")
         self.assertEqual(item.external_metadata["shadowgraph_content_sha256"], DECISION_SHA256)
         self.assertIn("Use the reversible option.", item.data)
-        self.assertEqual(self.clients[0].calls[0][3], COGNEE_DATASET_ID)
-        self.assertEqual(self.clients[0].calls[1][1], [COGNEE_DATASET_ID])
+        # By name only. An id here would be a reference to an existing dataset.
+        self.assertIsNone(self.clients[0].calls[0][3])
+        self.assertEqual(self.clients[0].calls[0][2], "project-1")
+        self.assertEqual(self.clients[0].calls[2][1], [COGNEE_DATASET_ID])
+        self.assertNotIn(ADAPTER_INVENTED_DATASET_ID, self.backend)
         self.assertEqual(response["operations"]["memoryWriteOperations"], 2)
+        self.assertEqual(response["operations"]["memoryReadOperations"], 1)
         self.assertEqual(response["operations"]["internalMemoryModelCalls"], 2)
         self.assertEqual(response["operations"]["embeddingCalls"], 2)
 
     def test_multiple_legitimate_cognee_provider_calls_are_preserved(self) -> None:
+        self.backend[COGNEE_DATASET_ID] = {"name": "project-1", "rows": []}
         self.provider_counts = {"internal_memory_llm": 2, "embedding": 3}
         response = self.execute("retrieve")
         self.assertEqual(response["status"], "SUCCEEDED")
@@ -326,11 +392,12 @@ class CogneeAdapterTests(unittest.TestCase):
         self.assertNotIn("applicability", serialized)
 
     def test_failed_search_counts_embedding_traffic_but_no_skipped_llm_call(self) -> None:
+        self.backend[COGNEE_DATASET_ID] = {"name": "project-1", "rows": []}
         self.fail_on = "search"
         response = self.execute("retrieve")
         self.assertEqual(response["status"], "FAILED")
-        self.assertEqual(len(self.clients[0].calls), 1)
-        self.assertEqual(response["operations"]["memoryReadOperations"], 1)
+        self.assertEqual(len(self.clients[0].calls), 2)
+        self.assertEqual(response["operations"]["memoryReadOperations"], 2)
         self.assertEqual(response["operations"]["internalMemoryModelCalls"], 0)
         self.assertEqual(response["operations"]["embeddingCalls"], 1)
         self.assertNotIn("secret-cognee", str(response))

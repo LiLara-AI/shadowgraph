@@ -12,7 +12,6 @@ from python_runtime import (
     RuntimeUnavailable,
     await_native,
     classify_native_error,
-    deterministic_dataset_uuid,
     deterministic_native_uuid,
     encode_content,
     failed_response,
@@ -82,17 +81,29 @@ def _dataset_identity(item) -> tuple[UUID, str]:
     return dataset_id, dataset_name
 
 
-def _resolve_dataset(value, expected_id: UUID, expected_name: str):
-    exact = []
-    for item in result_items(value):
-        dataset_id, dataset_name = _dataset_identity(item)
-        if dataset_id == expected_id or dataset_name == expected_name:
-            if dataset_id != expected_id or dataset_name != expected_name:
-                raise ContractError("Cognee dataset identity is contradictory")
-            exact.append(item)
-    if len(exact) > 1:
+def _resolve_dataset(value, expected_name: str):
+    """Find the arm's dataset by name and adopt whatever id Cognee gave it.
+
+    This adapter used to compute the id itself, with a uuid5 of the arm and the
+    project. Cognee does not work that way, and the difference is not cosmetic.
+    `create_dataset` derives the id from `get_unique_dataset_id`, which
+    namespaces the name by the owning user and tenant, and a UUID handed to
+    `add` is read as a reference to an *existing* dataset the caller must
+    already hold write permission on. Against the real library the invented id
+    produced `PermissionDeniedError` and created nothing at all.
+
+    So the name is the arm's, and the id is the library's. Two datasets sharing
+    the name would make "the arm's dataset" ambiguous, which is a refusal
+    rather than a choice.
+    """
+    matches = [item for item in result_items(value) if _dataset_identity(item)[1] == expected_name]
+    if len(matches) > 1:
         raise ContractError("Cognee dataset identity is ambiguous")
-    return exact[0] if exact else None
+    return matches[0] if matches else None
+
+
+def _dataset_id_of(item) -> UUID:
+    return _dataset_identity(item)[0]
 
 
 def _safe_json_value(value, *, depth=0):
@@ -232,15 +243,34 @@ async def execute(
         runtime = _runtime_config(config, models)
         client = await await_native(client_factory(runtime, provider_calls))
         dataset_name = namespace["projectId"]
-        dataset_id = deterministic_dataset_uuid(ADAPTER_ID, dataset_name)
         operation = request["operation"]
         if operation == "reset":
             operations["memoryReadOperations"] += 1
             datasets = await await_native(client.datasets.list_datasets(user=None))
-            if _resolve_dataset(datasets, dataset_id, dataset_name) is not None:
+            existing = _resolve_dataset(datasets, dataset_name)
+            if existing is not None:
                 operations["memoryWriteOperations"] += 1
-                await await_native(client.datasets.empty_dataset(dataset_id, user=None))
+                await await_native(
+                    client.datasets.empty_dataset(_dataset_id_of(existing), user=None)
+                )
         elif operation == "retrieve":
+            operations["memoryReadOperations"] += 1
+            datasets = await await_native(client.datasets.list_datasets(user=None))
+            existing = _resolve_dataset(datasets, dataset_name)
+            if existing is None:
+                # Nothing to search. Naming the dataset to Cognee's search would
+                # create it, and inventing an embedding call to satisfy the
+                # traffic contract would be worse than reporting the truth: no
+                # dataset, no search, no provider call, no context.
+                provider_calls.require_zero()
+                provider_calls.apply(operations)
+                return build_envelope(
+                    request,
+                    native_context=[],
+                    operations=operations,
+                    storage=STORAGE,
+                )
+            dataset_id = _dataset_id_of(existing)
             operations["memoryReadOperations"] += 1
             raw = await await_native(
                 client.search(
@@ -278,21 +308,27 @@ async def execute(
                 data_id=UUID(deterministic_native_uuid(ADAPTER_ID, record["id"])),
             )
             operations["memoryWriteOperations"] += 1
+            # By name only. A dataset id here is a reference to one that already
+            # exists and that the caller may write to, not a request to use it.
             await await_native(
                 client.add(
                     item,
                     dataset_name=dataset_name,
-                    dataset_id=dataset_id,
                     user=None,
                     incremental_loading=True,
                     llm_config=runtime["llm_config"],
                     embedding_config=runtime["embedding_config"],
                 )
             )
+            operations["memoryReadOperations"] += 1
+            datasets = await await_native(client.datasets.list_datasets(user=None))
+            written = _resolve_dataset(datasets, dataset_name)
+            if written is None:
+                raise ContractError("Cognee did not record the dataset the record was added to")
             operations["memoryWriteOperations"] += 1
             await await_native(
                 client.cognify(
-                    datasets=[dataset_id],
+                    datasets=[_dataset_id_of(written)],
                     user=None,
                     llm_config=runtime["llm_config"],
                     embedding_config=runtime["embedding_config"],
@@ -302,7 +338,9 @@ async def execute(
             operations["persistenceVerificationOperations"] += 1
             datasets = await await_native(client.datasets.list_datasets(user=None))
             primary = []
-            if _resolve_dataset(datasets, dataset_id, dataset_name) is not None:
+            existing = _resolve_dataset(datasets, dataset_name)
+            if existing is not None:
+                dataset_id = _dataset_id_of(existing)
                 operations["persistenceVerificationOperations"] += 1
                 primary_raw = await await_native(
                     client.datasets.list_data(dataset_id, user=None)
@@ -313,15 +351,12 @@ async def execute(
                 alternate_namespace = request["payload"]["alternateNamespace"]
                 if alternate_namespace["userId"] is not None:
                     raise ContractError("Cognee alternate user ACL is not locked")
-                alternate_dataset_id = deterministic_dataset_uuid(
-                    ADAPTER_ID, alternate_namespace["projectId"]
-                )
                 alternate = []
-                if _resolve_dataset(
-                    datasets,
-                    alternate_dataset_id,
-                    alternate_namespace["projectId"],
-                ) is not None:
+                alternate_existing = _resolve_dataset(
+                    datasets, alternate_namespace["projectId"]
+                )
+                if alternate_existing is not None:
+                    alternate_dataset_id = _dataset_id_of(alternate_existing)
                     operations["persistenceVerificationOperations"] += 1
                     alternate_raw = await await_native(
                         client.datasets.list_data(alternate_dataset_id, user=None)
