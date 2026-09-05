@@ -55,6 +55,7 @@ The blockers are in the transport, and they are structural:
 | M2 | No supported extension point on the side that carries the traffic. `LlmFactory` exposes a provider registry; `EmbedderFactory` exposes only `create` and a plain class dict | `mem0/utils/factory.py:152-168` |
 | M3 | No retry control. Both clients run at the OpenAI SDK default of two retries, and no config field reaches it. The adapter's own `_runtime_config` declares `automatic_retries: 0` | pinned library; `mem0_adapter.py` runtime config |
 | M4 | The Qdrant store lazily loads `fastembed` BM25 weights from a hardcoded external host on the write path, unmetered, and swallows failure into a warning | `mem0/vector_stores/qdrant.py:93-108` |
+| M4 (closed) | Closed 2026-09-05 by the loopback-only network fence and the offline gates in `python_host`, demonstrated by `v11-fence-probe`. M4 turned out to be one of four such paths, one of them in basic-memory | `v11-unpinned-model-fence-2026-09-05.md` |
 
 M4 deserves emphasis because it fails *soft*. The benchmark would record a run
 in which an arm silently fetched model weights from a host that appears in
@@ -165,7 +166,7 @@ then provably the ACL and not an accident of configuration.
 | # | Decision | Consequence if declined |
 | --- | --- | --- |
 | D1 | May a factory rebind mem0's constructed SDK clients to set `max_retries=0` and count real requests? | Mem0 stays blocked |
-| D2 | Which vector store may Mem0 use, given the pinned Qdrant path makes an unmetered external fetch? | Mem0 stays blocked even if D1 is granted |
+| D2 | ~~Which vector store may Mem0 use, given the pinned Qdrant path makes an unmetered external fetch?~~ **Answered 2026-09-05:** its own default local Qdrant in `path=` mode. The store was never the problem - the runtime was not closed. See `v11-unpinned-model-fence-2026-09-05.md` | resolved |
 | D3 | Does the Cognee arm adopt library-assigned dataset ids, which requires amending the frozen deterministic-uuid scheme? | Cognee stays blocked |
 | D4 | Is a retry floor the library does not let us disable acceptable, or does `automatic_retries: 0` stand? | Cognee, and Mem0 under D1, stay blocked |
 | D5 | Should the CB2 demonstration be built and run under the file-backed pairing, to clear the last preflight blocker even though the arm cannot execute? | CB2 stays open and readiness stays NOT READY |

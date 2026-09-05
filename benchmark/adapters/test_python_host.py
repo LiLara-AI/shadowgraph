@@ -4,6 +4,8 @@ import copy
 import io
 import json
 import os
+import socket
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -246,6 +248,208 @@ class PythonHostTests(unittest.TestCase):
                 0,
             )
         importer.assert_not_called()
+
+
+class NetworkFenceTests(unittest.TestCase):
+    """The fence that keeps a measured unit from reaching an unpinned model.
+
+    Every arm in this runtime has a path to model weights the benchmark does not
+    pin and the provider meter cannot see. Basic Memory enables semantic search
+    whenever fastembed is importable - which it is, because Basic Memory itself
+    requires it and all four arms share one runtime - and then downloads
+    bge-small-en-v1.5 to embed every note locally. Mem0's Qdrant store always
+    creates a bm25 sparse slot and pulls Qdrant/bm25 on the write path, swallowing
+    failure into a warning. LiteLLM fetches its model-cost map at import. Cognee
+    resolves an embedding tokenizer from HuggingFace and, when that fails, from
+    tiktoken's CDN.
+
+    The environment gates close the paths that are known. This closes the rest,
+    by construction: loopback is the whole of what a measured unit needs, because
+    the container shares the host network namespace precisely so the provider
+    meter and the pinned services answer on 127.0.0.1.
+    """
+
+    def test_a_connection_outside_loopback_is_refused(self) -> None:
+        # NetworkFenceError specifically, not OSError. A weaker assertion passes
+        # on a connection that was attempted and merely failed - a timeout, a
+        # refused port, an unresolvable name - so a fence that had stopped
+        # fencing would still look green on any machine without a route out.
+        # Asserting the fence's own error means only the fence can satisfy it.
+        for address in (
+            ("huggingface.co", 443),
+            ("140.82.121.4", 443),
+            ("0.0.0.0", 80),
+            ("::", 80),
+            ("2606:4700:4700::1111", 443),
+            (b"huggingface.co", 443),
+            ("", 443),
+            "not-a-tuple",
+            None,
+        ):
+            with self.subTest(address=address):
+                with python_host._loopback_only_network():
+                    handle = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    handle.settimeout(0.25)
+                    self.addCleanup(handle.close)
+                    with self.assertRaises(python_host.NetworkFenceError):
+                        handle.connect(address)
+                    with self.assertRaises(python_host.NetworkFenceError):
+                        handle.connect_ex(address)
+                    with self.assertRaises(python_host.NetworkFenceError):
+                        socket.create_connection(address, timeout=0.25)
+
+    def test_loopback_still_reaches_the_meter_and_the_pinned_services(self) -> None:
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(listener.close)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+
+        with python_host._loopback_only_network():
+            for host in ("127.0.0.1", "localhost"):
+                with self.subTest(host=host):
+                    client = socket.create_connection((host, port), timeout=2)
+                    client.close()
+                    accepted, _ = listener.accept()
+                    accepted.close()
+
+            # The whole 127/8 block and ::1 are loopback, not just the one
+            # address a service happens to bind. Nothing listens here, so the
+            # refusal must come from the kernel rather than from the fence.
+            for host in ("127.0.0.53", "127.9.9.9", "::1"):
+                with self.subTest(host=host):
+                    with self.assertRaises(OSError) as caught:
+                        socket.create_connection((host, port), timeout=2)
+                    self.assertNotIsInstance(
+                        caught.exception, python_host.NetworkFenceError, host
+                    )
+
+    def test_name_resolution_is_fenced_so_a_hostname_never_reaches_a_resolver(self) -> None:
+        # Refusing the connection but allowing the lookup would still put the
+        # hostname on the wire.
+        with python_host._loopback_only_network():
+            with self.assertRaises(python_host.NetworkFenceError):
+                socket.getaddrinfo("huggingface.co", 443)
+            self.assertTrue(socket.getaddrinfo("127.0.0.1", 80))
+            self.assertTrue(socket.getaddrinfo("localhost", 80))
+
+    def test_a_unix_socket_is_not_a_network_call(self) -> None:
+        # AF_UNIX never leaves the machine, and SQLite, LanceDB and Kuzu are all
+        # file-backed: fencing it would break local storage for no gain.
+        if not hasattr(socket, "AF_UNIX"):  # pragma: no cover - POSIX only
+            self.skipTest("AF_UNIX is unavailable on this platform")
+        with tempfile.TemporaryDirectory() as directory:
+            absent = os.path.join(directory, "shadowgraph-no-such-socket")
+            with python_host._loopback_only_network():
+                handle = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                self.addCleanup(handle.close)
+                with self.assertRaises(OSError) as caught:
+                    handle.connect(absent)
+        self.assertNotIsInstance(caught.exception, python_host.NetworkFenceError)
+
+    def test_the_fence_is_lifted_even_when_the_adapter_raises(self) -> None:
+        before = (
+            socket.socket.connect,
+            socket.socket.connect_ex,
+            socket.create_connection,
+            socket.getaddrinfo,
+        )
+        with self.assertRaises(RuntimeError):
+            with python_host._loopback_only_network():
+                self.assertIsNot(socket.getaddrinfo, before[3])
+                raise RuntimeError("adapter failed")
+        self.assertEqual(
+            (
+                socket.socket.connect,
+                socket.socket.connect_ex,
+                socket.create_connection,
+                socket.getaddrinfo,
+            ),
+            before,
+        )
+
+    def test_the_gates_close_every_unpinned_model_path_that_has_an_environment_switch(self) -> None:
+        self.assertEqual(python_host.GATES["BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED"], "false")
+        self.assertEqual(python_host.GATES["BASIC_MEMORY_RERANKER_ENABLED"], "false")
+        self.assertEqual(python_host.GATES["LITELLM_LOCAL_MODEL_COST_MAP"], "True")
+        self.assertEqual(python_host.GATES["HF_HUB_OFFLINE"], "1")
+        self.assertEqual(python_host.GATES["HF_DATASETS_OFFLINE"], "1")
+        self.assertEqual(python_host.GATES["TRANSFORMERS_OFFLINE"], "1")
+
+    def test_the_fence_is_actually_applied_around_the_adapter_call(self) -> None:
+        # The obvious version of this test - let the adapter reach out, assert a
+        # FAILED envelope - proves nothing, and a mutation showed it: with the
+        # fence removed the connection succeeds and the adapter raises anyway, or
+        # fails some other way, and the host turns every one of those into the
+        # same INFRASTRUCTURE_FAILURE. Identical green either way.
+        #
+        # So the adapter records the exception *type* it saw and returns a
+        # successful envelope. NetworkFenceError can only come from the fence:
+        # an unfenced call gets a real connection, a gaierror or a timeout, none
+        # of which satisfy this.
+        class _ReachingAdapterModule:
+            observed = None
+
+            @classmethod
+            async def execute(cls, request, config, models):
+                from envelope import build_envelope, not_available_storage
+
+                try:
+                    socket.create_connection(("huggingface.co", 443), timeout=0.25).close()
+                    cls.observed = "connected"
+                except BaseException as error:  # noqa: BLE001 - the type is the observation
+                    cls.observed = type(error).__name__
+                return build_envelope(
+                    request,
+                    storage=not_available_storage("Fake native scope", "No exact byte scope"),
+                )
+
+        record = {
+            "schemaVersion": 2,
+            "adapterId": "mem0-oss",
+            "request": request_for("retrieve"),
+            "providerRoutes": python_config(),
+            "providerModels": python_models(),
+        }
+        output = io.StringIO()
+        with patch.object(
+            python_host.importlib, "import_module", return_value=_ReachingAdapterModule
+        ):
+            code = python_host.process_stream(io.StringIO(json.dumps(record) + "\n"), output)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output.getvalue())["status"], "SUCCEEDED")
+        self.assertEqual(_ReachingAdapterModule.observed, "NetworkFenceError")
+
+    def test_a_name_lookup_inside_the_adapter_call_is_fenced_too(self) -> None:
+        class _ResolvingAdapterModule:
+            observed = None
+
+            @classmethod
+            async def execute(cls, request, config, models):
+                from envelope import build_envelope, not_available_storage
+
+                try:
+                    socket.getaddrinfo("huggingface.co", 443)
+                    cls.observed = "resolved"
+                except BaseException as error:  # noqa: BLE001
+                    cls.observed = type(error).__name__
+                return build_envelope(
+                    request,
+                    storage=not_available_storage("Fake native scope", "No exact byte scope"),
+                )
+
+        record = {
+            "schemaVersion": 2,
+            "adapterId": "mem0-oss",
+            "request": request_for("retrieve"),
+            "providerRoutes": python_config(),
+            "providerModels": python_models(),
+        }
+        with patch.object(
+            python_host.importlib, "import_module", return_value=_ResolvingAdapterModule
+        ):
+            python_host.process_stream(io.StringIO(json.dumps(record) + "\n"), io.StringIO())
+        self.assertEqual(_ResolvingAdapterModule.observed, "NetworkFenceError")
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ import ipaddress
 import json
 import os
 import re
+import socket
 import sys
 from urllib.parse import urlsplit
 
@@ -41,7 +42,123 @@ GATES = {
     "BASIC_MEMORY_MODE": "local",
     "COGNEE_TRACING_ENABLED": "false",
     "OTEL_SDK_DISABLED": "true",
+    # No arm may reach a model the benchmark has not pinned. Each of these
+    # closes a path that fetches weights or reference data at measure time,
+    # outside the provider meter:
+    #
+    #   Basic Memory turns semantic search on by default whenever `fastembed`
+    #   and `sqlite_vec` are importable, then embeds and searches with its own
+    #   `bge-small-en-v1.5`. Both are importable here - Basic Memory itself
+    #   requires fastembed, and all four arms share one runtime - so the arm
+    #   the definition records as making no provider call would have been
+    #   embedding every note with an unpinned model.
+    #
+    #   LiteLLM downloads its model-cost map at import unless told to use the
+    #   copy in the wheel.
+    #
+    #   HuggingFace Hub is how Mem0's Qdrant store reaches `Qdrant/bm25` and
+    #   how Cognee resolves an embedding tokenizer. Offline mode makes both
+    #   fail where they are already written to degrade.
+    #
+    # The frozen rules require this rather than merely permit it: provider
+    # metering says internal LLM and embedding calls must go through the local
+    # proxy, and sameConfigurationRule says every measured arm uses the same
+    # embedding id. An arm embedding locally with its own model satisfies
+    # neither.
+    "BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED": "false",
+    "BASIC_MEMORY_RERANKER_ENABLED": "false",
+    "LITELLM_LOCAL_MODEL_COST_MAP": "True",
+    "HF_HUB_OFFLINE": "1",
+    "HF_DATASETS_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1",
 }
+LOOPBACK_FAMILIES = (socket.AF_INET, socket.AF_INET6)
+
+
+class NetworkFenceError(OSError):
+    """An adapter attempted to reach an address outside loopback."""
+
+
+def _loopback_host(host) -> bool:
+    if isinstance(host, bytes):
+        try:
+            host = host.decode("ascii")
+        except UnicodeDecodeError:
+            return False
+    if not isinstance(host, str) or not host:
+        return False
+    if host in ("localhost", "localhost.localdomain"):
+        return True
+    try:
+        return ipaddress.ip_address(host.split("%", 1)[0]).is_loopback
+    except ValueError:
+        return False
+
+
+@contextlib.contextmanager
+def _loopback_only_network():
+    """Refuse every outbound connection that is not to loopback.
+
+    The environment gates above close the paths that are known today. This
+    closes the rest, including the ones a library adds tomorrow, and it does so
+    by construction rather than by enumeration: an adapter that cannot open a
+    non-loopback socket cannot make an unmetered call, whatever it intended.
+
+    Loopback is the whole of what a measured unit legitimately needs. The
+    container shares the host network namespace precisely so that the provider
+    meter, the pinned model endpoint and the pinned graph database are reachable
+    on 127.0.0.1 - so this fence costs the benchmark nothing and costs an
+    unpinned fetch everything.
+
+    Name resolution is fenced too. Refusing the connection but allowing the
+    lookup would still put the hostname on the wire, and a resolver query is an
+    observation of what this process is doing that the benchmark did not
+    sanction.
+    """
+    original_connect = socket.socket.connect
+    original_connect_ex = socket.socket.connect_ex
+    original_create_connection = socket.create_connection
+    original_getaddrinfo = socket.getaddrinfo
+
+    def permitted(family, address) -> bool:
+        if family not in LOOPBACK_FAMILIES:
+            # AF_UNIX and the rest never leave the machine.
+            return True
+        if not isinstance(address, tuple) or not address:
+            return False
+        return _loopback_host(address[0])
+
+    def guarded_connect(self, address):
+        if not permitted(self.family, address):
+            raise NetworkFenceError("Adapter network access is limited to loopback")
+        return original_connect(self, address)
+
+    def guarded_connect_ex(self, address):
+        if not permitted(self.family, address):
+            raise NetworkFenceError("Adapter network access is limited to loopback")
+        return original_connect_ex(self, address)
+
+    def guarded_create_connection(address, *args, **kwargs):
+        if not (isinstance(address, tuple) and address and _loopback_host(address[0])):
+            raise NetworkFenceError("Adapter network access is limited to loopback")
+        return original_create_connection(address, *args, **kwargs)
+
+    def guarded_getaddrinfo(host, *args, **kwargs):
+        if not _loopback_host(host):
+            raise NetworkFenceError("Adapter name resolution is limited to loopback")
+        return original_getaddrinfo(host, *args, **kwargs)
+
+    socket.socket.connect = guarded_connect
+    socket.socket.connect_ex = guarded_connect_ex
+    socket.create_connection = guarded_create_connection
+    socket.getaddrinfo = guarded_getaddrinfo
+    try:
+        yield
+    finally:
+        socket.socket.connect = original_connect
+        socket.socket.connect_ex = original_connect_ex
+        socket.create_connection = original_create_connection
+        socket.getaddrinfo = original_getaddrinfo
 
 
 class _BoundedSink(io.TextIOBase):
@@ -225,7 +342,7 @@ def process_stream(input_stream, output_stream) -> int:
         return 2
 
     response = None
-    with _sanitized_environment():
+    with _sanitized_environment(), _loopback_only_network():
         sink = _BoundedSink()
         try:
             with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):

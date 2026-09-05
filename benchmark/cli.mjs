@@ -48,13 +48,20 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const preregistrationPath = join(root, 'benchmark', 'preregistration.json');
 const preregistrationHashPath = join(root, 'benchmark', 'preregistration.sha256');
 const competitorLockPath = join(root, 'benchmark', 'competitors.lock.json');
+
+// Probe records are evidence about the environment, not results of a run. They
+// were written under `benchmark/results/`, where the candidate's own no-result
+// sweep forbids any directory of that name on disk, tracked or not - so running
+// a documented probe command made the test that guards the headline claim fail.
+// Keeping `results/` to mean "a run happened" is what makes that claim checkable.
+const PROBE_RECORDS = 'probe-records';
 const HARNESS_VERSION = '1.0.0';
 const PHASES = ['A', 'B', 'C', 'D_TRUE', 'D_FALSE_0', 'D_FALSE_1', 'D_FALSE_2', 'E', 'ISOLATION_PROJECT', 'ISOLATION_USER'];
 
 function parseArgs(argv) {
   if (argv.length === 0) {
     throw new Error(
-      'Usage: benchmark/cli.mjs <preflight|v11-preflight|v11-service-probe|v11-precondition-probe|v11-python-runtime|v11-run|run|validate|aggregate> [options]'
+      'Usage: benchmark/cli.mjs <preflight|v11-preflight|v11-service-probe|v11-precondition-probe|v11-fence-probe|v11-python-runtime|v11-run|run|validate|aggregate> [options]'
     );
   }
   const command = argv[0];
@@ -840,7 +847,7 @@ async function v11PreconditionProbeCommand(options) {
     return model.modelId;
   };
 
-  const outputPath = optionPath(options.out, join(benchmarkRoot, 'results', 'precondition-evidence.json'));
+  const outputPath = optionPath(options.out, join(benchmarkRoot, PROBE_RECORDS, 'precondition-evidence.json'));
   const probeDirectory = join(benchmarkRoot, 'probes');
   const containerProbes = '/opt/shadowgraph/probes';
   const containerWork = '/run/shadowgraph/demonstration';
@@ -931,6 +938,104 @@ async function v11PreconditionProbeCommand(options) {
   return evidence;
 }
 
+/**
+ * Demonstrate that no measured arm can reach a model the benchmark has not
+ * pinned.
+ *
+ * Unlike the ACL demonstration this one is not about a single arm's capability.
+ * Every Python arm in the shared runtime has a path to unpinned weights that the
+ * provider meter cannot see - Basic Memory enables semantic search whenever
+ * `fastembed` is importable and embeds locally with `bge-small-en-v1.5`, Mem0's
+ * Qdrant store pulls `Qdrant/bm25` on the write path, LiteLLM fetches its cost
+ * map at import, and Cognee resolves tokenizers from HuggingFace and tiktoken.
+ * The frozen `providerMetering.rule` and `sameConfigurationRule` already forbid
+ * all of it, so closing these is conformance rather than a change of method.
+ *
+ * The probe runs the real libraries against the pinned runtime and reports what
+ * happened, including failure. It mounts the adapters directory as well as the
+ * probes directory so that the gate under demonstration is the one `python_host`
+ * actually applies rather than a restatement of it.
+ */
+async function v11FenceProbeCommand(options) {
+  const runtimeRoot = optionPath(options.runtime);
+  const workRoot = optionPath(options.work);
+  if (runtimeRoot === null || workRoot === null) {
+    throw new Error('v11-fence-probe requires --runtime <runtime-site> and --work <writable-root>');
+  }
+  if (typeof process.getuid !== 'function' || typeof process.getgid !== 'function') {
+    throw new Error('v11-fence-probe requires a POSIX host so the demonstration state is owned by the invoking user');
+  }
+
+  const benchmarkRoot = join(root, 'benchmark');
+  const competitorLock = JSON.parse(await readFile(competitorLockPath, 'utf8'));
+  const outputPath = optionPath(options.out, join(benchmarkRoot, PROBE_RECORDS, 'fence-evidence.json'));
+  const probeDirectory = join(benchmarkRoot, 'probes');
+  const adapterDirectory = join(benchmarkRoot, 'adapters');
+  const containerProbes = '/opt/shadowgraph/probes';
+  const containerWork = '/run/shadowgraph/demonstration';
+
+  await mkdir(workRoot, { recursive: true });
+
+  // A record left by an earlier run would otherwise be read back and presented
+  // as the outcome of a run that never started.
+  const demonstrationPath = join(workRoot, 'fence-evidence.json');
+  await rm(demonstrationPath, { force: true });
+
+  const environment = {
+    PYTHONPATH: `${CONTAINER_PATHS.runtime}:${CONTAINER_PATHS.adapters}`,
+    PYTHONDONTWRITEBYTECODE: '1',
+    HOME: containerWork,
+    SHADOWGRAPH_DEMONSTRATION_OUTPUT: `${containerWork}/fence-evidence.json`
+  };
+
+  // The host network namespace is what the measured units get, so it is what
+  // the demonstration has to run in: a fence proven under `--network none`
+  // would prove nothing about the configuration that is actually measured.
+  const args = [
+    'run', '--rm', '--init',
+    '--network', 'host',
+    '--user', `${process.getuid()}:${process.getgid()}`,
+    '--mount', `type=bind,source=${runtimeRoot},target=${CONTAINER_PATHS.runtime},readonly`,
+    '--mount', `type=bind,source=${probeDirectory},target=${containerProbes},readonly`,
+    '--mount', `type=bind,source=${adapterDirectory},target=${CONTAINER_PATHS.adapters},readonly`,
+    '--mount', `type=bind,source=${workRoot},target=${containerWork}`,
+    '--workdir', containerWork
+  ];
+  for (const name of Object.keys(environment).sort()) {
+    args.push('--env', `${name}=${environment[name]}`);
+  }
+  args.push(competitorLock.pythonImage, 'python', `${containerProbes}/unpinned_model_fence_demonstration.py`);
+
+  let demonstrationFailed = false;
+  try {
+    await execFileAsync('docker', args, { maxBuffer: 64 * 1024 * 1024 });
+  } catch (error) {
+    demonstrationFailed = true;
+    if (typeof error?.stderr === 'string' && error.stderr.length > 0) process.stderr.write(error.stderr);
+  }
+
+  let evidence;
+  try {
+    evidence = JSON.parse(await readFile(demonstrationPath, 'utf8'));
+  } catch (error) {
+    throw new Error(
+      `the demonstration wrote no record; the probe did not run to completion: ${error?.message ?? error}`
+    );
+  }
+  await writeJson(outputPath, evidence);
+  process.stdout.write(`${JSON.stringify({
+    schema: 'shadowgraph.v11.fence-probe',
+    version: 1,
+    precondition: evidence.precondition ?? null,
+    observedAt: evidence.observedAt ?? null,
+    outcome: evidence.outcome ?? 'FAIL',
+    outputPath,
+    steps: (evidence.steps ?? []).map((entry) => ({ step: entry.step, outcome: entry.outcome }))
+  }, null, 2)}\n`);
+  if (demonstrationFailed || evidence.outcome !== 'PASS') process.exitCode = 1;
+  return evidence;
+}
+
 /** Ask the local container runtime one question and return its trimmed answer. */
 async function dockerField(args) {
   const { stdout } = await execFileAsync('docker', args);
@@ -1010,7 +1115,7 @@ async function v11ServiceProbeCommand(options) {
     now: Date.now()
   });
 
-  const outputPath = optionPath(options.out, join(benchmarkRoot, 'results', 'service-evidence.json'));
+  const outputPath = optionPath(options.out, join(benchmarkRoot, PROBE_RECORDS, 'service-evidence.json'));
   await writeJson(outputPath, evidence);
 
   const failedChecks = evidence.services.flatMap((service) => service.checks
@@ -1039,6 +1144,7 @@ else if (command === 'v11-preflight') await v11Preflight(options);
 else if (command === 'v11-service-probe') await v11ServiceProbeCommand(options);
 else if (command === 'v11-python-runtime') await v11PythonRuntimeCommand(options);
 else if (command === 'v11-precondition-probe') await v11PreconditionProbeCommand(options);
+else if (command === 'v11-fence-probe') await v11FenceProbeCommand(options);
 else if (command === 'v11-run') await v11RunCommand(options);
 else if (command === 'run') {
   const { raw, preregistration } = await createRun(options);
