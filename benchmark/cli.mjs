@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { cpus, totalmem, type as osType, release as osRelease } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import path, { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -20,7 +20,14 @@ import {
   probeCommonCapabilities,
   readCommonModelConfiguration
 } from './lib/capabilities.mjs';
+import {
+  createImplementationLock,
+  discoverImplementationLockFiles
+} from './lib/implementation-lock.mjs';
+import { requestOuterDecision } from './lib/outer-model.mjs';
 import { verifyPreregistration } from './lib/preregistration.mjs';
+import { createProgressLedger, createUnitEvidenceLedger } from './lib/progress.mjs';
+import { startProviderMeter } from './lib/provider-meter.mjs';
 import { CONTAINER_PATHS } from './lib/python-container-runtime.mjs';
 import { loadV11AcceptanceDefinition } from './lib/v11-definition.mjs';
 import {
@@ -32,10 +39,18 @@ import {
 } from './lib/v11-python-runtime.mjs';
 import { providerModelsFromLock } from './lib/v11-provider-models.mjs';
 import { parseProviderLedger, reconcileProviderEvidence } from './lib/v11-provider-reconciler.mjs';
+import { buildEnvironmentLock } from './lib/v11-locks.mjs';
+import { observeEnvironment } from './lib/v11-environment.mjs';
+import { createV11NodeHosts } from './lib/v11-node-hosts.mjs';
+import { createMeteredOuterTransport } from './lib/v11-outer-transport.mjs';
+import { buildV11Prompt } from './lib/v11-prompts.mjs';
+import { createV11PythonHosts } from './lib/v11-python-hosts.mjs';
 import { createV11Registry } from './lib/v11-registry.mjs';
+import { UNIT_TIMEOUT_MS } from './lib/v11-runner.mjs';
 import {
   V11RunError,
   computeV11Readiness,
+  createV11AdapterExecutor,
   executeV11AcceptanceRun
 } from './lib/v11-run.mjs';
 import {
@@ -574,18 +589,38 @@ async function v11RunCommand(options) {
   const outputDirectory = optionPath(options.out, join(benchmarkRoot, 'results'));
   const runId = safeRunId(options['run-id']);
   const attemptId = safeRunId(options['attempt-id'] ?? `${runId}-attempt-1`);
-  const outcome = await executeV11AcceptanceRun({
+  const ledgerDirectory = optionPath(options['ledger-dir'], outputDirectory);
+
+  const runtime = await v11RuntimeDependencies(options, {
     ...candidate,
     benchmarkRoot,
-    preconditionEvidencePath,
-    serviceEvidencePath,
     runId,
     attemptId,
-    sourceHashes: candidate.sourceHashes,
-    amendment002Path: join(benchmarkRoot, 'preregistration-amendment-002.json'),
-    amendment003Path: join(benchmarkRoot, 'preregistration-amendment-003.json'),
-    ...v11RuntimeDependencies()
+    serviceEvidencePath,
+    ledgerDirectory
   });
+
+  let outcome;
+  try {
+    outcome = await executeV11AcceptanceRun({
+      ...candidate,
+      benchmarkRoot,
+      preconditionEvidencePath,
+      serviceEvidencePath,
+      runId,
+      attemptId,
+      sourceHashes: candidate.sourceHashes,
+      amendment002Path: join(benchmarkRoot, 'preregistration-amendment-002.json'),
+      amendment003Path: join(benchmarkRoot, 'preregistration-amendment-003.json'),
+      ...runtime.dependencies,
+      // The runner closes these after the plan loop and before the terminal
+      // progress event. Left to the `finally` below, the provider ledger would
+      // still be open at the moment the run declares itself complete.
+      closeResources: runtime.close
+    });
+  } finally {
+    await runtime.close();
+  }
 
   const rawPath = join(outputDirectory, `${attemptId}.raw.json`);
   const aggregatePath = join(outputDirectory, `${attemptId}.aggregate.json`);
@@ -606,16 +641,246 @@ async function v11RunCommand(options) {
 /**
  * Bind the runtime dependencies a real run needs.
  *
- * Deliberately unimplemented. Every arm that needs a service is already an
- * unmet blocker in the readiness report, so this is unreachable today. A
- * placeholder here would let a future readiness change start a run against
- * hosts nobody provisioned, which is the failure this refusal exists to stop.
+ * This threw `RUNTIME_UNAVAILABLE` for the whole life of the candidate, and the
+ * refusal was correct while it stood: a placeholder here would have let a
+ * readiness change start a run against hosts nobody provisioned. What replaces
+ * it has to keep that property - everything below either resolves to a real,
+ * pinned thing or refuses by name.
+ *
+ * The order is not arbitrary.
+ *
+ * The implementation lock is taken **first**, before any file is created,
+ * because it refuses a repository with any untracked file. Opening a ledger
+ * first would make the run unlockable and the failure would look like a lock
+ * defect rather than an ordering one.
+ *
+ * The meter comes before the hosts and before the outer transport, because both
+ * close over its endpoint minting. And everything comes before the runner, which
+ * constructs nothing.
+ *
+ * Teardown is returned rather than performed. The runner closes resources after
+ * the plan loop and *before* the terminal progress event, which is the only
+ * moment at which the provider ledger is complete and the run has not yet
+ * declared itself finished. The caller also closes in a `finally`, so this is
+ * memoized: closing twice must be closing once.
  */
-function v11RuntimeDependencies() {
-  throw new V11RunError(
-    'RUNTIME_UNAVAILABLE',
-    'v1.1 runtime hosts are not provisioned; see v11-preflight blockers'
+async function v11RuntimeDependencies(options, context) {
+  const {
+    benchmarkRoot,
+    competitorLock,
+    definition,
+    runId,
+    attemptId,
+    serviceEvidencePath,
+    ledgerDirectory
+  } = context;
+
+  // The Python executor refuses win32 outright, and its container launch reads
+  // POSIX uid/gid. Saying so here names the real constraint instead of
+  // surfacing an executor error about process groups.
+  if (process.platform === 'win32') {
+    throw new V11RunError(
+      'RUNTIME_UNAVAILABLE',
+      'a v1.1 acceptance run requires a POSIX host: the pinned Python arms run in containers owned by the invoking user'
+    );
+  }
+
+  const providerUpstream = options['provider-upstream'];
+  if (typeof providerUpstream !== 'string' || providerUpstream.length === 0) {
+    throw new V11RunError(
+      'RUNTIME_UNAVAILABLE',
+      'a v1.1 acceptance run requires --provider-upstream <loopback OpenAI-compatible base url>'
+    );
+  }
+  // The meter refuses a non-loopback upstream itself, but by then a ledger has
+  // been opened and a socket bound. Refusing here names the flag.
+  assertLoopbackUpstream(providerUpstream);
+
+  const stateRoot = optionPath(options['state-root']);
+  const pythonStateRoot = optionPath(options['python-state-root']);
+  const pythonRuntimeSite = optionPath(options['python-runtime']);
+  if (stateRoot === null || pythonStateRoot === null || pythonRuntimeSite === null) {
+    throw new V11RunError(
+      'RUNTIME_UNAVAILABLE',
+      'a v1.1 acceptance run requires --state-root, --python-state-root and --python-runtime (the installed site directory)'
+    );
+  }
+  // The Python executor adopts its root by writing an ownership marker and
+  // refuses a non-empty root without one; the node adapters write no marker. One
+  // shared root therefore makes whichever arm runs second refuse, at a point
+  // where the message would describe the state root rather than the collision.
+  if (path.resolve(stateRoot) === path.resolve(pythonStateRoot)) {
+    throw new V11RunError(
+      'RUNTIME_UNAVAILABLE',
+      'the node and Python arms need separate state roots: the Python executor takes ownership of its own'
+    );
+  }
+
+  const modelWeights = JSON.parse(
+    await readFile(join(benchmarkRoot, 'model-weights.lock.json'), 'utf8')
   );
+  const pinnedModels = providerModelsFromLock(modelWeights);
+  const preregistration = JSON.parse(
+    await readFile(join(benchmarkRoot, 'preregistration.json'), 'utf8')
+  );
+  const execution = preregistration.commonExecution;
+
+  // The digests the lock records are the ones the service probe verified, not
+  // ones resolved again here. Two independent resolutions could disagree, and
+  // the run would be locked to the one nobody checked.
+  if (serviceEvidencePath === null) {
+    throw new V11RunError(
+      'RUNTIME_UNAVAILABLE',
+      'the implementation lock records the service digests the probe verified, so --service-evidence is required to start a run'
+    );
+  }
+  const serviceEvidence = JSON.parse(await readFile(serviceEvidencePath, 'utf8'));
+  const serviceImages = (serviceEvidence.services ?? []).map((service) => ({
+    name: service.name,
+    image: service.image,
+    digest: service.resolvedDigest
+  }));
+
+  // 1. The lock, before anything creates a file.
+  const implementationLock = await createImplementationLock({
+    repoRoot: root,
+    files: await discoverImplementationLockFiles(root),
+    models: modelWeights.models,
+    serviceImages
+  });
+
+  // 2. The machine, observed rather than asserted.
+  const environmentLock = buildEnvironmentLock({
+    observations: await observeEnvironment({ pythonImage: competitorLock.pythonImage })
+  });
+
+  // 3. Now files may be created.
+  await mkdir(ledgerDirectory, { recursive: true });
+  await mkdir(stateRoot, { recursive: true });
+  await mkdir(pythonStateRoot, { recursive: true });
+
+  const closers = [];
+  const disposeOnFailure = async () => {
+    for (const close of closers.reverse()) {
+      try {
+        await close();
+      } catch {
+        // A failed construction is already being reported; a teardown error on
+        // top of it would replace the reason with a symptom.
+      }
+    }
+  };
+
+  try {
+    const meter = await startProviderMeter({
+      listenerUrl: 'http://127.0.0.1:0',
+      upstreamBaseUrl: providerUpstream,
+      upstreamAuthorization: null,
+      ledgerPath: join(ledgerDirectory, `${attemptId}.provider-requests.ndjson`),
+      upstreamTimeoutMs: execution.requestTimeoutMs
+    });
+    closers.push(() => meter.close());
+
+    const progress = await createProgressLedger({
+      path: join(ledgerDirectory, `${attemptId}.progress.ndjson`),
+      runId,
+      attemptId,
+      unitTimeoutMs: UNIT_TIMEOUT_MS
+    });
+    closers.push(() => progress.close());
+
+    const unitEvidence = await createUnitEvidenceLedger({
+      path: join(ledgerDirectory, `${attemptId}.units.ndjson`),
+      runId,
+      attemptId,
+      sensitiveValues: []
+    });
+    closers.push(() => unitEvidence.close());
+
+    const providerEndpointFor = (_requestClass, correlation) => meter.bindEndpoint({ ...correlation });
+
+    const executeAdapter = createV11AdapterExecutor({
+      registry: context.registry,
+      hosts: {
+        ...createV11NodeHosts({ stateRoot }),
+        ...createV11PythonHosts({
+          stateRoot: pythonStateRoot,
+          runtimeRoot: pythonRuntimeSite,
+          providerEndpointFor,
+          modelWeights
+        })
+      }
+    });
+
+    const requestOuter = createMeteredOuterTransport({
+      meter,
+      model: pinnedModels.internal_memory_llm.modelId,
+      seeds: definition.commonExecution.randomSeeds,
+      temperature: execution.temperature,
+      maxOutputTokens: execution.maxOutputTokens,
+      timeoutMs: execution.requestTimeoutMs,
+      requestDecision: requestOuterDecision
+    });
+
+    let closed = null;
+    const close = () => {
+      if (closed === null) {
+        closed = (async () => {
+          const failures = [];
+          // The meter first: closing it drains in-flight handlers and the ledger
+          // append chain, and a request still being recorded after the ledgers
+          // shut would be traffic the run cannot account for.
+          for (const dispose of [() => meter.close(), () => progress.close(), () => unitEvidence.close()]) {
+            try {
+              await dispose();
+            } catch (error) {
+              failures.push(error);
+            }
+          }
+          if (failures.length > 0) {
+            throw new AggregateError(failures, 'a v1.1 run resource failed to close');
+          }
+        })();
+      }
+      return closed;
+    };
+
+    return {
+      dependencies: {
+        executeAdapter,
+        buildOuterRequest: buildV11Prompt,
+        requestOuter,
+        progress,
+        persistUnit: unitEvidence.append,
+        now: () => Date.now(),
+        monotonicNow: () => performance.now(),
+        implementationLockHash: implementationLock.lockSha256,
+        environmentLockHash: environmentLock.digest
+      },
+      close
+    };
+  } catch (error) {
+    await disposeOnFailure();
+    throw error;
+  }
+}
+
+/** Refuse a provider upstream that is not literally on loopback. */
+function assertLoopbackUpstream(value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new V11RunError('RUNTIME_UNAVAILABLE', '--provider-upstream must be an absolute http URL');
+  }
+  const host = parsed.hostname.replace(/^\[|\]$/gu, '');
+  const loopback = host === '::1' || /^127(?:\.\d{1,3}){3}$/u.test(host);
+  if (parsed.protocol !== 'http:' || !loopback) {
+    throw new V11RunError(
+      'RUNTIME_UNAVAILABLE',
+      '--provider-upstream must be a literal loopback http URL: a measured run may not reach a remote provider'
+    );
+  }
 }
 
 /**

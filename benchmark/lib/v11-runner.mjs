@@ -35,7 +35,11 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
 const AMENDMENT_002_SHA256 = '08e12eca3f93bd67cfeaf90a2064f91beb240e78a8fd63ed8645da78c0d88f1b';
 const AMENDMENT_003_SHA256 = '726de2018584aca399fc27d2bba15585d8b6fb9454bc24083578daed22f0be0a';
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
-const UNIT_TIMEOUT_MS = 120_000;
+// Exported because a production caller has to build the progress ledger with
+// the same deadline. Restating it there would make the ledger's `stalled`
+// verdict and this hard deadline agree by coincidence rather than by
+// construction.
+export const UNIT_TIMEOUT_MS = 120_000;
 const RESUME_PROGRESS_EVENTS = new Set([
   'run_started',
   'unit_started',

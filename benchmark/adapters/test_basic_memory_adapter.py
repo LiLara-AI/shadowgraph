@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -280,13 +281,61 @@ class BasicMemoryAdapterTests(unittest.TestCase):
         self.assertEqual(response["failure"]["cause"], "CONTRACT_FAILURE")
         self.assertEqual(self.clients, [])
 
-    def test_storage_is_not_available_pending_a_task8_attribution_method(self) -> None:
+    def test_storage_bytes_are_the_owned_project_directory_and_nothing_else(self) -> None:
+        # This arm is the one that can answer exactly. Basic Memory keeps a
+        # directory per project, named by a digest of the project id, so the
+        # bytes under it belong to this namespace and to no other. The arms with
+        # shared stores still declare NOT_AVAILABLE, and should.
         response = self.execute("persist")
-        self.assertEqual(response["storage"]["status"], "NOT_AVAILABLE")
-        self.assertIsNone(response["storage"]["bytes"])
-        self.assertIsNone(response["storage"]["method"])
-        self.assertNotIn("supplied", response["storage"]["reason"].lower())
-        self.assertIn("Task 8", response["storage"]["reason"])
+        storage = response["storage"]
+        self.assertEqual(storage["status"], "MEASURED")
+        self.assertIsNone(storage["reason"])
+        self.assertEqual(storage["blockedClaims"], [])
+        self.assertIsInstance(storage["bytes"], int)
+        self.assertGreaterEqual(storage["bytes"], 0)
+
+        # The number is the directory, checked against the filesystem rather
+        # than against the adapter's own walk.
+        project_path = basic_memory_adapter._project_path(
+            self.state_root, self.request("persist")["namespace"]["projectId"]
+        )
+        expected = sum(
+            os.lstat(os.path.join(directory, name)).st_size
+            for directory, _subdirectories, names in os.walk(project_path)
+            for name in names
+            if stat.S_ISREG(os.lstat(os.path.join(directory, name)).st_mode)
+        )
+        self.assertEqual(storage["bytes"], expected)
+
+        # And the scope says what it leaves out, because a number that quietly
+        # folded in the shared SQLite index would be a different measurement
+        # wearing this one's name.
+        self.assertIn("SQLite index", storage["scope"])
+        self.assertIn("excluded", storage["scope"])
+        self.assertIn("project directory", storage["method"])
+
+    def test_an_absent_project_directory_is_refused_rather_than_reported_as_zero(self) -> None:
+        # os.walk over a path that is not there yields nothing, so the naive
+        # implementation reports 0 bytes measured - a claim about a store nobody
+        # looked at, which is the exact shape of fail-open this candidate keeps
+        # finding in itself.
+        missing = os.path.join(self.state_root, "no-such-project-directory")
+        self.assertFalse(os.path.exists(missing))
+        with self.assertRaises(ContractError):
+            basic_memory_adapter._measured_storage(missing)
+
+    def test_a_symlink_into_another_namespace_is_counted_nowhere(self) -> None:
+        if not hasattr(os, "symlink"):
+            self.skipTest("requires symlink support")
+        project_path = basic_memory_adapter._project_path(
+            self.state_root, self.request("persist")["namespace"]["projectId"]
+        )
+        elsewhere = Path(self.state_root) / "not-this-namespace.md"
+        elsewhere.write_bytes(b"x" * 4096)
+        before = basic_memory_adapter._measured_storage(project_path)["bytes"]
+        os.symlink(elsewhere, os.path.join(project_path, "borrowed.md"))
+        after = basic_memory_adapter._measured_storage(project_path)["bytes"]
+        self.assertEqual(after, before)
 
     @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink support")
     def test_project_path_rejects_an_interior_symlink_without_outside_writes(self) -> None:

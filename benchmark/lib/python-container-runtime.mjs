@@ -22,7 +22,23 @@
 
 import path from 'node:path';
 
-const DIGEST_PINNED_IMAGE = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*@sha256:[a-f0-9]{64}$/u;
+// A digest-pinned reference, with the optional tag OCI allows before the
+// digest. The tag was forbidden here and nowhere else, and the competitor lock
+// pins `python:3.12.11-slim@sha256:...` - so this module refused the only image
+// the benchmark has. It never showed up because the two sides had never been
+// composed: every executor test used a tagless image, and the probe commands
+// hand the lock's string straight to `docker run`, where it works.
+//
+// The consequence was not a crash. `containerLaunch` turns this refusal into a
+// PythonAdapterExecutorError, the host binding faithfully translates it into a
+// FAILED envelope, and all four container arms would have been recorded as
+// contract failures of the products for a disagreement between two of our own
+// regexes.
+//
+// Permitting the tag weakens nothing: the digest still decides which image
+// runs, and `--mount`/`run` are given the whole reference exactly as the lock
+// spells it. A reference with a tag and no digest is still refused.
+export const DIGEST_PINNED_IMAGE = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?@sha256:[a-f0-9]{64}$/u;
 const SAFE_CONTAINER_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/u;
 const SAFE_ENVIRONMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 

@@ -630,6 +630,28 @@ function validateModels(models) {
  * requires. The returned object contains no timestamps or absolute paths and
  * binds exact file bytes plus immutable runtime identities.
  */
+/**
+ * The governed-source manifest `createImplementationLock` will accept.
+ *
+ * The lock refuses a manifest that omits any tracked governed source, declares
+ * anything outside the governed surface, or gives a file the wrong role - and
+ * the table that decides all three is private to this module. So until now no
+ * caller could produce a valid `files` array without keeping a second copy of
+ * the coverage table, which is exactly the drift the table exists to prevent.
+ *
+ * This returns what the repository currently tracks, classified by that same
+ * table. It is deliberately not a shortcut around the validation: the lock
+ * still discovers independently and still refuses a manifest that disagrees, so
+ * a caller passing this in is asking the same question twice and getting the
+ * same answer, rather than being trusted.
+ */
+export async function discoverImplementationLockFiles(repoRoot) {
+  const { trackedPaths } = await inspectRepository(repoRoot);
+  return [...discoverGovernedSources(trackedPaths).entries()]
+    .map(([trackedPath, role]) => ({ role, path: trackedPath }))
+    .sort((left, right) => compareText(left.path, right.path));
+}
+
 export async function createImplementationLock(input) {
   assertExactKeys(input, INPUT_FIELDS, 'implementation-lock input');
   const before = await inspectRepository(input.repoRoot);

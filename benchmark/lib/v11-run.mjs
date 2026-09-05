@@ -331,6 +331,15 @@ export async function executeV11AcceptanceRun(input) {
     amendment003Path,
     resume = null,
     signal = undefined,
+    // A production run owns a provider meter and two ledgers. The runner already
+    // knows how to close them at the right moment - after the plan loop and
+    // before the terminal progress event - but this function did not forward the
+    // hook, so the only place left to close them was the caller's `finally`,
+    // i.e. after the run record had already been written. A provider ledger that
+    // is still being appended to when the run declares itself COMPLETE is not
+    // evidence of that run.
+    closeResources = undefined,
+    heartbeatIntervalMs = undefined,
     readFileImpl = readFile
   } = input;
 
@@ -404,7 +413,9 @@ export async function executeV11AcceptanceRun(input) {
     buildOuterRequest,
     requestOuter,
     ...(resume === null ? {} : { resume }),
-    ...(signal === undefined ? {} : { signal })
+    ...(signal === undefined ? {} : { signal }),
+    ...(closeResources === undefined ? {} : { closeResources }),
+    ...(heartbeatIntervalMs === undefined ? {} : { heartbeatIntervalMs })
   });
 
   // The validator and the aggregator take the resolved plan, not the acceptance

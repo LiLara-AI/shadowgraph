@@ -6,7 +6,7 @@ import hashlib
 import os
 import stat
 
-from envelope import ContractError, build_envelope, empty_operations, not_available_storage, record_content_sha256, validate_request
+from envelope import ContractError, build_envelope, empty_operations, measured_storage, not_available_storage, record_content_sha256, validate_request
 from python_runtime import (
     ProviderCalls,
     RuntimeUnavailable,
@@ -59,6 +59,48 @@ RESET_ANCHOR_PROJECT = "shadowgraph-benchmark-reset-anchor"
 # text index explicitly rather than inheriting whatever the product default
 # happens to be.
 LOCAL_SEARCH_TYPE = "text"
+
+
+STORAGE_SCOPE = (
+    "Basic Memory owned project directory; the shared SQLite index and the "
+    "reset anchor project are excluded because neither is attributable to one "
+    "benchmark namespace"
+)
+STORAGE_METHOD = (
+    "recursive sum of regular file sizes under the project directory this "
+    "namespace owns, following no symlink"
+)
+
+
+def _measured_storage(project_path: str) -> dict:
+    """Exact bytes under the directory this namespace owns.
+
+    Basic Memory keeps one directory per project, named by a digest of the
+    project id, and the arm's records are the files in it. That makes an exact
+    attributable byte scope available for this arm in a way it is not for the
+    others, whose stores are shared across namespaces - which is why they
+    declare NOT_AVAILABLE and this one no longer has to.
+
+    The scope names what is left out as well as what is counted. Basic Memory's
+    SQLite index lives outside this directory and is shared by every project, so
+    no part of it belongs to one namespace; a number that quietly folded it in
+    would be a different measurement wearing this one's name. Symlinks are
+    followed nowhere and counted nowhere, so nothing outside the owned directory
+    can be attributed to it.
+    """
+    if not os.path.isdir(project_path):
+        raise ContractError("Basic Memory project directory is absent, so there is no byte scope")
+    total = 0
+    for directory, _subdirectories, names in os.walk(project_path, followlinks=False):
+        for name in names:
+            path = os.path.join(directory, name)
+            try:
+                stat_result = os.lstat(path)
+            except OSError as error:
+                raise ContractError("Basic Memory storage scope could not be measured") from error
+            if stat.S_ISREG(stat_result.st_mode):
+                total += stat_result.st_size
+    return measured_storage(total, STORAGE_SCOPE, STORAGE_METHOD)
 
 
 def _project_path(state_root: str, project: str) -> str:
@@ -379,7 +421,7 @@ async def execute(
                 request,
                 native_context=native_context,
                 operations=operations,
-                storage=STORAGE,
+                storage=_measured_storage(project_path),
             )
         elif operation == "persist":
             record = request["payload"]["record"]
@@ -438,7 +480,7 @@ async def execute(
                     "OPERATION_FAILED",
                     "Exact Basic Memory persistence or isolation verification failed",
                     operations,
-                    STORAGE,
+                    _measured_storage(project_path),
                     persistence=persistence,
                     isolation=isolation,
                 )
@@ -447,9 +489,12 @@ async def execute(
                 persistence_evidence=persistence,
                 isolation_evidence=isolation,
                 operations=operations,
-                storage=STORAGE,
+                storage=_measured_storage(project_path),
             )
-        return build_envelope(request, operations=operations, storage=STORAGE)
+        # Reset and persist both leave the owned directory in place.
+        return build_envelope(
+            request, operations=operations, storage=_measured_storage(project_path)
+        )
     except RuntimeUnavailable:
         return failed_response(
             request,
