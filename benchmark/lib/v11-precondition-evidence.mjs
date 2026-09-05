@@ -156,7 +156,11 @@ export function verifyPreconditionEvidence(input) {
     }]);
   }
 
-  const declared = declaredPreconditions[armId] ?? null;
+  // `Object.hasOwn` rather than indexing: an armId of `constructor` or
+  // `toString` resolves through the prototype chain to a truthy value, which
+  // would sail past a null check and then be compared, iterated or reported as
+  // if it were a declared precondition.
+  const declared = Object.hasOwn(declaredPreconditions, armId) ? declaredPreconditions[armId] : null;
   if (declared === null) {
     return empty([{
       code: 'PRECONDITION_ARM_UNDECLARED',
@@ -173,7 +177,7 @@ export function verifyPreconditionEvidence(input) {
     });
   }
 
-  const pinned = pinnedPackages[armId] ?? null;
+  const pinned = Object.hasOwn(pinnedPackages, armId) ? pinnedPackages[armId] : null;
   if (!isPlainRecord(pinned)
     || evidence.package.name !== pinned.name
     || evidence.package.version !== pinned.version) {
@@ -199,15 +203,34 @@ export function verifyPreconditionEvidence(input) {
     findings.push({ code: 'DEMONSTRATION_FAILED', armId, outcome: evidence.outcome ?? null });
   }
 
+  // A step recorded twice is refused rather than resolved. Keeping the last
+  // occurrence would let a record shadow its own failure: a genuine
+  // `cross-user-read-refused: FAIL` followed by a duplicate `PASS` would
+  // satisfy every required step and produce no finding at all. Which of two
+  // contradictory records of one step is true is not a question this module can
+  // answer, so it declines to pick.
   const observed = new Map();
+  const duplicated = new Set();
   for (const entry of evidence.steps) {
     if (!isPlainRecord(entry) || !isNonEmptyString(entry.step)) {
       findings.push({ code: 'PRECONDITION_EVIDENCE_MALFORMED', armId, detail: 'every step needs a name' });
       continue;
     }
+    if (observed.has(entry.step)) duplicated.add(entry.step);
     observed.set(entry.step, entry.outcome);
   }
-  for (const required of REQUIRED_DEMONSTRATION_STEPS[armId] ?? []) {
+  for (const step of duplicated) {
+    findings.push({
+      code: 'DEMONSTRATION_STEP_DUPLICATED',
+      armId,
+      demonstrationStep: step,
+      detail: 'the record describes this step more than once, so neither record of it is used'
+    });
+  }
+  for (const required of Object.hasOwn(REQUIRED_DEMONSTRATION_STEPS, armId)
+    ? REQUIRED_DEMONSTRATION_STEPS[armId]
+    : []) {
+    if (duplicated.has(required)) continue;
     if (!observed.has(required)) {
       findings.push({ code: 'DEMONSTRATION_STEP_MISSING', armId, demonstrationStep: required });
     } else if (observed.get(required) !== 'PASS') {

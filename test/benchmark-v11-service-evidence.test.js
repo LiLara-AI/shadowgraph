@@ -263,3 +263,47 @@ test('the result records that it cannot establish the probe actually ran', () =>
   const result = verify();
   assert.match(result.note, /cannot establish/iu);
 });
+
+test('a service described twice verifies neither description', () => {
+  // Found by attacking this module rather than by reading it. A record can pair
+  // a healthy entry with a broken duplicate of the same service: the healthy one
+  // used to add the name to the verified set while the broken one only added a
+  // finding, so the blocker cleared. Which of two contradictory descriptions is
+  // true is not answerable here, so neither is used.
+  const document = evidence();
+  const ollama = document.services.find((service) => service.name === 'ollama');
+  document.services.push({
+    ...structuredClone(ollama),
+    checks: [{
+      kind: 'openai-chat-completions',
+      endpoint: 'http://127.0.0.1:11434/v1/chat/completions',
+      observedAt: OBSERVED_AT,
+      outcome: 'FAIL',
+      detail: 'connection refused'
+    }]
+  });
+
+  const result = verify({ evidence: document });
+  assert.ok(!result.verifiedServices.has('ollama'), 'a contradicted service must not verify');
+  assert.ok(result.findings.some((finding) => (
+    finding.code === 'SERVICE_DUPLICATE_ENTRY' && finding.service === 'ollama'
+  )));
+});
+
+test('two identical healthy entries for one service are still refused', () => {
+  // Not only contradictions. A duplicate is a record this module cannot reason
+  // about, whatever the two copies happen to say.
+  const document = evidence();
+  const neo4j = document.services.find((service) => service.name === 'neo4j');
+  document.services.push(structuredClone(neo4j));
+
+  const result = verify({ evidence: document });
+  assert.ok(!result.verifiedServices.has('neo4j'));
+  assert.ok(result.findings.some((finding) => finding.code === 'SERVICE_DUPLICATE_ENTRY'));
+});
+
+test('evidence exactly at the freshness window has already expired', () => {
+  const result = verify({ now: NOW + SERVICE_EVIDENCE_MAX_AGE_MS });
+  assert.deepEqual([...result.verifiedServices], []);
+  assert.ok(result.findings.some((finding) => finding.code === 'SERVICE_EVIDENCE_STALE'));
+});

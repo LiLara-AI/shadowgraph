@@ -185,7 +185,7 @@ function serviceFindings(service, { images, weights, now }) {
         push('SERVICE_CHECK_FUTURE_DATED', { check: check.kind });
         continue;
       }
-      if (now - observedAt > SERVICE_EVIDENCE_MAX_AGE_MS) {
+      if (now - observedAt >= SERVICE_EVIDENCE_MAX_AGE_MS) {
         push('SERVICE_CHECK_STALE', { check: check.kind, observedAt: check.observedAt });
       }
     }
@@ -287,7 +287,9 @@ export function verifyServiceEvidence(input) {
   if (observedAt > now) {
     return empty([{ code: 'SERVICE_EVIDENCE_FUTURE_DATED', observedAt: evidence.observedAt }]);
   }
-  if (now - observedAt > SERVICE_EVIDENCE_MAX_AGE_MS) {
+  // Expires at the window rather than after it, matching
+  // v11-precondition-evidence. One boundary rule for both gates.
+  if (now - observedAt >= SERVICE_EVIDENCE_MAX_AGE_MS) {
     return empty([{
       code: 'SERVICE_EVIDENCE_STALE',
       observedAt: evidence.observedAt,
@@ -295,10 +297,28 @@ export function verifyServiceEvidence(input) {
     }]);
   }
 
+  // A name that appears twice is refused outright, before any entry is judged.
+  // Without this, a record could pair a healthy entry with a broken duplicate of
+  // the same service: the healthy one would verify the name, the broken one
+  // would only add a finding, and the blocker would clear. Which of two
+  // contradictory descriptions of one service is true is not a question this
+  // module can answer, so it declines to pick.
+  const duplicated = new Set();
+  const namesSeen = new Set();
+  for (const service of evidence.services) {
+    const name = isPlainRecord(service) ? service.name : null;
+    if (!isNonEmptyString(name)) continue;
+    if (namesSeen.has(name)) duplicated.add(name);
+    namesSeen.add(name);
+  }
+
   const findings = [];
   const verifiedServices = new Set();
   let servesLockedModels = false;
   for (const service of evidence.services) {
+    if (isPlainRecord(service) && duplicated.has(service.name)) {
+      continue;
+    }
     const serviceResult = serviceFindings(service, { images, weights, now });
     if (serviceResult.length === 0) {
       verifiedServices.add(service.name);
@@ -306,6 +326,13 @@ export function verifyServiceEvidence(input) {
         servesLockedModels = true;
       }
     } else findings.push(...serviceResult);
+  }
+  for (const name of duplicated) {
+    findings.push({
+      code: 'SERVICE_DUPLICATE_ENTRY',
+      service: name,
+      detail: 'the record describes this service more than once, so neither description is used'
+    });
   }
 
   // The locked weights have to be served in full by one verified endpoint. A

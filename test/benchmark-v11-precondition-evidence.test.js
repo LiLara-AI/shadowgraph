@@ -211,3 +211,43 @@ test('the result records what this verification cannot establish', () => {
   const result = verify();
   assert.match(result.note, /cannot establish/iu);
 });
+
+test('a step recorded twice cannot shadow its own failure', () => {
+  // Found by attacking this module. A record could carry a genuine
+  // cross-user-read-refused FAIL and then a duplicate PASS; the later entry
+  // overwrote the earlier one, every required step was present and passing, and
+  // the precondition was satisfied with an empty findings list. That is the
+  // worst shape a gate can have: silently satisfied.
+  const document = evidence({
+    steps: [
+      { step: 'cross-user-read-refused', outcome: 'FAIL', detail: 'the boundary did not hold' },
+      ...steps()
+    ]
+  });
+
+  const result = verify({ evidence: document });
+  assert.deepEqual([...result.satisfiedPreconditions], []);
+  assert.ok(result.findings.some((finding) => (
+    finding.code === 'DEMONSTRATION_STEP_DUPLICATED'
+    && finding.demonstrationStep === 'cross-user-read-refused'
+  )));
+});
+
+test('two identical passing records of one step are still refused', () => {
+  const document = evidence({ steps: [...steps(), { step: 'grant', outcome: 'PASS', detail: 'again' }] });
+  const result = verify({ evidence: document });
+  assert.deepEqual([...result.satisfiedPreconditions], []);
+  assert.ok(result.findings.some((finding) => finding.code === 'DEMONSTRATION_STEP_DUPLICATED'));
+});
+
+test('an arm id that resolves through the prototype chain is refused, not thrown on', () => {
+  // `constructor` and `toString` are truthy on any plain object, so indexing the
+  // declared matrix with one used to yield a function that sailed past the null
+  // check and was then iterated as a step list.
+  for (const armId of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+    let result;
+    assert.doesNotThrow(() => { result = verify({ evidence: evidence({ armId }) }); }, `${armId} must not throw`);
+    assert.deepEqual([...result.satisfiedPreconditions], [], `${armId} must establish nothing`);
+    assert.ok(result.findings.some((finding) => finding.code === 'PRECONDITION_ARM_UNDECLARED'));
+  }
+});
