@@ -625,9 +625,6 @@ async function v11RunCommand(options) {
     // Which site the arms imported, and how much of it was checked. Neither
     // lock can carry this, so the run says it.
     pythonRuntime: runtime.runtime,
-    // Which site the arms imported, and how much of it was checked. Neither
-    // lock can carry this, so the run says it.
-    pythonRuntime: runtime.runtime,
     artifactsWritten: [rawPath, aggregatePath, reconciliationPath]
   }, null, 2)}`);
   // A run whose own provider traffic does not match its record is not a clean

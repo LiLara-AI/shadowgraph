@@ -130,7 +130,7 @@ reached neither, which the fourth review found.)
 
 | Finding | Answer |
 | --- | --- |
-| `RawSocketFenceTests` exercised 4 of the 9 new `_socket` guards; deleting the other 5 left 139/139 green | every one is exercised, and the reviewer's deletion now fails 2 tests and errors a third. (Three were still exercised only in the *refusing* direction, which the fourth review found; both directions now.) |
+| `RawSocketFenceTests` exercised 4 of the 9 new `_socket` guards; deleting the other 5 left 139/139 green | every one is exercised. Measured on the current tree, one deletion at a time and restored between: deleting the five module-level `_socket.*` entries fails 2 and errors 2; unbinding `GuardedRawSocket` fails 2; deleting all nine moves 6. (This row twice carried a count nobody had run — "fails 3", then "fails 2 and errors a third". Two of these guards were also exercised only in the *refusing* direction, which the fourth review found; both directions now.) |
 | `runnerResources.persistUnit` was asserted by key name only; a no-op passed | it is called, and what it wrote is asserted |
 | Both new refusals in `executeV11AcceptanceRun` were untested, and a test comment claimed one of them fires | both are tested, against the same READY candidate |
 | `assert.deepEqual(recorder.invocations(), [])` compared two absent things — the recorder was built and never bound | the test now binds *both* executables and contrasts them, which is the property |

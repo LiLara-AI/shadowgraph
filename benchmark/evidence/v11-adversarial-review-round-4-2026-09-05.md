@@ -11,10 +11,11 @@
 
 Round three's diagnosis was right and its fix was half of one. Moving the
 composition into `benchmark/lib/v11-runtime-binding.mjs` made the run path
-*reachable*; it did not make it *asserted*. Every constructor in the new test was
-a bare stub that recorded nothing, so the argument wiring — which is the only
-thing that function does — was still unchecked. A reviewer changed one token at a
-time and ran the suite:
+*reachable*; it did not make it *asserted*. Two of the doubles in the new test did
+record — `verifyPythonRuntime` pushed its whole input and `createProviderMeter`
+its whole config — and the rest recorded a fixed string or nothing at all, so most
+of the argument wiring, which is the only thing that function does, was still
+unchecked. A reviewer changed one token at a time and ran the suite:
 
 | One token, in `bindV11Runtime` | Suite |
 | --- | --- |
@@ -55,32 +56,42 @@ and `httpx-0.28.1.dist-info`: the script returned one entry.
 it now returns both, and the test runs the real script through `python3` (and
 skips where there is none) rather than reading its source.
 
-## F19 — `--verify only` judged the probes it had just replaced
+## F19 — the rule `--verify only` follows was correct and unreachable
 
-Round three fixed `--verify only` reading the recorded manifest instead of
-rewriting it, and overrode `distributions` with what the site now holds. It did
-not override `importProbes`. So the command ran four fresh import probes inside
-the container, printed them, and handed the *build-time* probes to
-`verifyPythonRuntime`.
+**This section was wrong in the commit that first published it, and the
+correction is now the finding.** As published it said round three's fix "did not
+override `importProbes`", and told the story of a reviewer renaming
+`site/graphiti_core` to get `valid: true` out of a command that printed
+`graphiti FAIL observed=None` in the same object. That experiment is real, but
+it is round *three's* — its own F14, run against `d61c8c1`. At `f465fff`, the
+commit this review actually covers, `benchmark/cli.mjs:881` already read:
 
-A reviewer renamed `site/graphiti_core` — leaving its `.dist-info` intact so the
-distribution checks still passed — and ran it: exit 0, `valid: true`,
-`findings: []`, with `graphiti FAIL observed=None` printed in the same JSON
-object. The previous commit exited 1 with `IMPORT_PROBE_FAILED`. Fixing one
-fail-open had opened another, on the same line.
+```js
+manifest = { ...manifest, distributions, importProbes };
+```
 
-**Fixed, and the rule is now stated once** in `pythonRuntimeManifest`: what the
-site can be asked now is measured now; only what it cannot be asked — the image
-it was built against, the wheel lock it was built from — comes from the record.
-The function is exported and tested, because the command that calls it is
-entered by no test.
+The override was there. Restating a fixed defect as a fresh one, against the
+commit that fixed it, is the overstatement this benchmark treats as a defect in
+its own right — and it reached a published record because no one checked the
+claim against the tree, myself included.
+
+What *was* true at `f465fff` is narrower, and worth its own line: the rule lived
+inline in `v11PythonRuntimeCommand`, a function no test enters, so
+`if (options.verify === 'only')` could be reverted to `if (false)` with the whole
+suite green. Correct, and unreachable — the same shape as everything round three
+had just moved out of the CLI, in the one place round three left behind.
+
+**Fixed by extracting it.** `pythonRuntimeManifest` states the rule once — what
+the site can be asked now is measured now; only what it cannot be asked, the
+image it was built against and the wheel lock it was built from, comes from the
+record — and it is exported and tested, all three of its refusals included.
 
 ## The tests that could not fail
 
 | Test | What it was satisfied by | Now |
 | --- | --- | --- |
 | "read past a byte-order mark and CRLF line endings" | the mark sat before `Metadata-Version:`, a line the parser skips, and the `\r` was already removed by the value's `.trim()` — both new guards could be deleted | the mark sits before `Name:`, and a CRLF description begins with a line that looks like a header, so the scan must stop at the blank line |
-| three of the nine `_socket` guards | only the refusing direction — making them refuse *everything*, loopback included, was invisible | both directions, on every one |
+| three guards: `_socket.socket.sendmsg`, `_socket.socket.connect`, `socket.socket.sendmsg` | only the refusing direction — making them refuse *everything*, loopback included, was invisible. (This row first called all three `_socket` guards. Two are; the third belongs to the `socket` family, per the diff of `test_python_host.py` across this commit.) | both directions, on every one |
 | the two totals the reconciler change touched | `expectedCalls` and `matchedCalls` were the two the diff altered and the two the test skipped | asserted |
 | "the image still comes from the competitor lock" | the fixture made both sources equal | distinct fixtures throughout |
 
@@ -115,6 +126,15 @@ belongs: neither lock can name the site the arms imported.
 - **The binding test asserts the composition, not the constructors.** The doubles
   record; they do not enforce what the real ones refuse. A composition that is
   correctly *wired* to a constructor that would reject it still passes here.
+- **Bind-time verification re-reads the distributions and trusts the recorded
+  import probes.** `bindV11Runtime` hands `verifyPythonRuntime` a manifest whose
+  `distributions` come from the site the arms will mount, but whose
+  `importProbes` come from the record — running a probe needs a container the
+  bind path does not start. So a build that recorded a failing probe is refused
+  (`IMPORT_PROBE_FAILED`), and a site that *degraded after* its build is not:
+  F14's own case, `site/graphiti_core` renamed with its `.dist-info` intact,
+  passes bind time. `v11-python-runtime --verify only` is the command that
+  catches it, and it has to be run separately.
 - **Seven findings were refuted** and are not here.
 - **F2 and LB2f are untouched.**
 

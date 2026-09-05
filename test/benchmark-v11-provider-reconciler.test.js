@@ -109,6 +109,29 @@ test('correlation components cannot impersonate one another across the key bound
   assert.deepEqual(codes(left).sort(), ['MISSING_CALL', 'UNEXPECTED_CALL']);
 });
 
+test('matched calls are clamped to what was expected, not to what arrived', () => {
+  // Every test that asserted both totals asserted them equal, so the
+  // `Math.min` between them was pinned by nothing: a retry would also have
+  // counted as a matched call, and the summary line would say the run made
+  // exactly the calls it claimed while the findings below it said otherwise.
+  const report = reconcileProviderEvidence({
+    events: [event({ requestNumber: 0 }), event({ requestNumber: 1 })],
+    expectations: [expectation({ expectedCalls: 1 })]
+  });
+  assert.equal(report.totals.expectedCalls, 1);
+  assert.equal(report.totals.observedEvents, 2);
+  assert.equal(report.totals.matchedCalls, 1, 'one call was claimed, so one can match');
+  assert.ok(report.findings.some((finding) => finding.code === 'RETRY_OBSERVED'));
+
+  // And the other direction: fewer arrived than were claimed.
+  const short = reconcileProviderEvidence({
+    events: [],
+    expectations: [expectation({ expectedCalls: 2 })]
+  });
+  assert.equal(short.totals.expectedCalls, 2);
+  assert.equal(short.totals.matchedCalls, 0);
+});
+
 test('a missing call is reported with its expected and observed counts', () => {
   const report = reconcileProviderEvidence({
     events: [],

@@ -549,8 +549,16 @@ class RawSocketFenceTests(unittest.TestCase):
                 self.assertEqual(
                     handle.sendmsg([b"shadowgraph-fence"], [], 0, ("127.0.0.1", 9)), 17
                 )
+            # `connect` to loopback is permitted - that is the assertion, and it is
+            # where this stops. A `send` was asserted here too and had to come out:
+            # on a connected datagram socket to an unlistened port the kernel queues
+            # the ICMP port-unreachable from one datagram and delivers it to the
+            # *next* call, so a repeated send alternates 17, ECONNREFUSED, 17,
+            # ECONNREFUSED (reproduced on this host). By the time a `send` ran here
+            # three datagrams had already gone to port 9, which makes it a race on
+            # what is queued rather than a property. `send` carries no address, so
+            # the fence does not guard it and it was never this test's subject.
             handle.connect(("127.0.0.1", 9))
-            self.assertEqual(handle.send(b"shadowgraph-fence"), 17)
 
     def test_every_raw_module_resolver_is_guarded(self) -> None:
         # Every `_socket.*` name in FENCED_ENTRY_POINTS, not a sample of it. A

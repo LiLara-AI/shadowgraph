@@ -362,8 +362,12 @@ export const LIST_DISTRIBUTIONS_SCRIPT = [
   'found = []',
   'for distribution in Distribution.discover(context=context):',
   '    name = distribution.metadata["Name"]',
-  '    if name:',
-  '        found.append({"name": name, "version": distribution.version})',
+  '    version = distribution.version',
+  '    # Both or neither. A .dist-info with no Version line names no version,',
+  '    # and sorting one against a string is a TypeError that loses the whole',
+  '    # listing - including the duplicate it was there to report.',
+  '    if name and version:',
+  '        found.append({"name": name, "version": version})',
   'found.sort(key=lambda entry: (entry["name"], entry["version"]))',
   'print(json.dumps(found))'
 ].join(String.fromCharCode(10));

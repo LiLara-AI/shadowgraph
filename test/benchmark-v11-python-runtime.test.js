@@ -521,3 +521,40 @@ test('the listing the build command runs reports two versions of one distributio
     { name: 'httpx', version: '0.28.1' }
   ]);
 });
+
+test('a distribution with no version does not take the listing down with it', async (t) => {
+  // The sort is what makes the duplicate visible, and it compares versions. A
+  // .dist-info with no Version line yields None, sorting None against a string
+  // is a TypeError, and the command dies with no listing at all - on exactly
+  // the site whose duplicate it existed to report.
+  const python = await pythonInterpreter();
+  if (python === null) {
+    t.skip('no python3 interpreter on PATH');
+    return;
+  }
+
+  const site = await scratchDirectory(t, 'shadowgraph-v11-listing-noversion-');
+  await mkdir(path.join(site, 'broken-0.0.0.dist-info'), { recursive: true });
+  await writeFile(
+    path.join(site, 'broken-0.0.0.dist-info', 'METADATA'),
+    'Metadata-Version: 2.1\nName: broken\n',
+    'utf8'
+  );
+  for (const version of ['0.27.2', '0.28.1']) {
+    await mkdir(path.join(site, `httpx-${version}.dist-info`), { recursive: true });
+    await writeFile(
+      path.join(site, `httpx-${version}.dist-info`, 'METADATA'),
+      `Metadata-Version: 2.1\nName: httpx\nVersion: ${version}\n`,
+      'utf8'
+    );
+  }
+
+  const { stdout } = await execFileAsync(python, ['-c', LIST_DISTRIBUTIONS_SCRIPT, site]);
+  // The unversioned one is dropped - a name with no version pins nothing, which
+  // is the same rule `readPythonSiteDistributions` applies - and the duplicate
+  // it would have hidden is still reported.
+  assert.deepEqual(JSON.parse(stdout), [
+    { name: 'httpx', version: '0.27.2' },
+    { name: 'httpx', version: '0.28.1' }
+  ]);
+});

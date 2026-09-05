@@ -616,15 +616,26 @@ natively honour:
 | --- | --- | --- | --- |
 | Mem0 OSS | `user_id` | `CONTRACT_FAILURE` | `ENDPOINT_UNAVAILABLE` |
 | Graphiti | none (`group_id` only) | `ENDPOINT_UNAVAILABLE` | `CONTRACT_FAILURE` |
-| Cognee | ACL, not locked | `ENDPOINT_UNAVAILABLE` | `CONTRACT_FAILURE` |
+| Cognee | native ACL, demonstrated under CB2 | `CONTRACT_FAILURE` | `ENDPOINT_UNAVAILABLE` |
 
 Read across, that is "genuine native namespaces only, never manufacture
 isolation" holding per arm, and holding whether or not the runtime exists. Mem0
-will not silently widen a user scope it was asked for into a project-wide one;
-Graphiti will not fold a user id into its group scope; Cognee will not run
-against unpinned access control. The `ENDPOINT_UNAVAILABLE` cause in the
-supported column is itself load-bearing: it tells a reviewer the arm is blocked
-on provisioning rather than on its own contract.
+and Cognee both have a native user scope, so for both of them the user-scoped
+namespace is the one that reaches the runtime and the project-only namespace is
+the contract refusal — neither will silently widen a user scope into a
+project-wide one. Graphiti has no user scope at all, so its columns are the
+other way round: it will not fold a user id into its group scope.
+
+(The Cognee row was inverted here until the fifth review. `cognee` is listed in
+`test_unprovisioned_runtimes.py` with `has_native_user_namespace=True`, which
+makes `user-1` its *native* shape and `None` its foreign one — so
+`ENDPOINT_UNAVAILABLE` belongs in the user-scoped column, as it does for Mem0.
+The row read as though the adapter still refused a user namespace, which it
+stopped doing when CB2 demonstrated the ACL.)
+
+Whichever column it lands in per arm, the `ENDPOINT_UNAVAILABLE` cause is
+load-bearing: it tells a reviewer that arm is blocked on provisioning rather
+than on its own contract.
 
 In every combination the envelope is `FAILED` with a public cause, carries no
 persistence or isolation evidence, counts zero operations of every kind, and
@@ -929,7 +940,12 @@ run being meaningful are different questions, and only the first is answered.
 | F16 | No test entered the run path at all: a `throw` at the top of `v11RuntimeDependencies` left 2344 tests green, which is why F4, F6 and F11 could each be reverted at their own call site | Cleared, the composition moved to `v11-runtime-binding.mjs` |
 | F17 | Moving the composition made it reachable and not asserted: six single-token mis-wirings of `bindV11Runtime` - the arms mounting the wrong site, the two state roots swapped, a self-comparing wheel-lock hash, the wrong outer model, the two lock hashes swapped - all passed the suite | Cleared, every argument is pinned |
 | F18 | `DISTRIBUTION_DUPLICATED` could not fire from the only command that builds a manifest: the container listing collapsed duplicates by name before verification, so F15's fix closed the hole on the run path alone | Cleared |
-| F19 | `v11-python-runtime --verify only` measured four fresh import probes, printed a failing one, and verified the ones recorded at build time - a fail-open the F14 fix created | Cleared |
+| F19 | `v11-python-runtime --verify only` measured four fresh import probes, printed a failing one, and verified the ones recorded at build time | **Corrected by F20.** As published this restated F14 against the commit that fixed it. What was true at `f465fff` is that the rule was correct and unreachable; extracting it into `pythonRuntimeManifest` cleared that |
+| F20 | A fabricated finding in my own evidence: the round-4 record's F19, and the commit message carrying it, described a fail-open that `f465fff:benchmark/cli.mjs:881` had already closed. Three skeptics passed it because none compared the claim with the tree | Cleared, the record says what was actually true and why the claim was wrong |
+| F21 | The binding test's fixture made the manifest's image and the competitor lock's image the same value, and three doubles discarded their arguments, so `verifyPythonRuntime` could be made self-comparing, the site the arms mount went unasserted, and the one wire between a metered arm and the meter was pinned by a URL suffix | Cleared, with four mutations caught |
+| F22 | The container listing crashed on a `.dist-info` carrying no `Version`: the sort compared `None` with a string, so a site holding the duplicate the script exists to report produced no listing at all | Cleared, and the drop rule now matches `readPythonSiteDistributions` |
+| F23 | `matchedCalls` is clamped against `expectedCalls`, and every test asserting both asserted them equal, so a retry could have been counted as a matched call while the same report named it a retry | Cleared, both directions of the clamp are asserted |
+| F24 | Two documents described a tree that no longer exists: requirement 6's refusal table gave Cognee the columns of an arm with no native user scope, and `benchmark/evidence/README.md` still said amendment 003 was proposed and not adopted | Cleared |
 
 The evidence and the required next decisions are in
 `benchmark/evidence/v11-blocker-matrix-2026-09-03.md` (CB1-CB4, LB1-LB3, as of
@@ -942,7 +958,9 @@ that date) and, superseding its blocker states,
 `benchmark/evidence/v11-adversarial-review-round-2-2026-09-05.md` (F8-F11) and
 `benchmark/evidence/v11-adversarial-review-round-3-2026-09-05.md` (F12-F16) and
 `benchmark/evidence/v11-adversarial-review-round-4-2026-09-05.md` (F17-F19 - the
-fourth round, which found that reachable is not the same as asserted).
+fourth round, which found that reachable is not the same as asserted) and
+`benchmark/evidence/v11-adversarial-review-round-5-2026-09-06.md` (F20-F24 - the
+fifth, which found a fabricated finding in the fourth round's own record).
 
 ### Historical blocker record (resolved or superseded)
 

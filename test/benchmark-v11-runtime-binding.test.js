@@ -22,16 +22,23 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { createProgressLedger } from '../benchmark/lib/progress.mjs';
+import { buildV11Prompt } from '../benchmark/lib/v11-prompts.mjs';
 import { UNIT_TIMEOUT_MS } from '../benchmark/lib/v11-runner.mjs';
 import { bindV11Runtime, providerLedgerPath } from '../benchmark/lib/v11-runtime-binding.mjs';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const IMAGE = `python:3.12.11-slim@sha256:${'4'.repeat(64)}`;
+// Distinct from IMAGE on purpose. The manifest records the image a site was
+// *built* against; the competitor lock names the image the benchmark pins.
+// `verifyPythonRuntime` compares them, and while the fixture made them equal
+// the comparison could be made self-comparing on the run path with the whole
+// suite green - which is the same shape as the wheel-lock hash beside it.
+const MANIFEST_IMAGE = `python:3.12.11-slim@sha256:${'5'.repeat(64)}`;
 const WHEELS_LOCK = { schemaVersion: 1, wheels: [{ name: 'httpx==0.28.1', sha256: 'c'.repeat(64) }] };
 const MANIFEST = {
   schema: 'shadowgraph.v11.python-runtime',
   version: 1,
-  image: IMAGE,
+  image: MANIFEST_IMAGE,
   wheelsLockSha256: 'ignored - the double verifies',
   distributions: [{ name: 'httpx', version: '0.28.1' }]
 };
@@ -83,10 +90,21 @@ async function harness(t, overrides = {}) {
     close: async () => {
       closed.push('meter');
     },
-    bindEndpoint: (correlation) => `http://127.0.0.1:43100/v1/${correlation.requestClass}`
+    // Records what it was asked to bind. The meter mints one capability per
+    // (correlation, request class), so what the arm is handed is only as
+    // attributable as the correlation that was passed - and a double that
+    // dropped it left the single wire between a metered arm and the meter
+    // asserted by its URL suffix alone.
+    bindEndpoint: (correlation) => {
+      seen.endpoints.push(correlation);
+      return `http://127.0.0.1:43100/v1/${correlation.requestClass}`;
+    }
   };
 
   const seen = {
+    created: [],
+    siteRead: [],
+    endpoints: [],
     nodeHosts: [],
     pythonHosts: [],
     adapterExecutor: [],
@@ -109,9 +127,11 @@ async function harness(t, overrides = {}) {
     },
     mkdir: async (target) => {
       trace.push(`mkdir:${path.basename(target)}`);
+      seen.created.push(target);
     },
-    readPythonSiteDistributions: async () => {
+    readPythonSiteDistributions: async (sitePath) => {
       trace.push('read-site');
+      seen.siteRead.push(sitePath);
       return MANIFEST.distributions;
     },
     verifyPythonRuntime: (input) => {
@@ -410,8 +430,16 @@ test('every argument of the composition, because the composition is all this doe
   assert.deepEqual(verified[0].wheelsLock, WHEELS_LOCK);
   assert.equal(verified[0].wheelsLockSha256, wheelsLockSha256);
   assert.notEqual(verified[0].wheelsLockSha256, MANIFEST.wheelsLockSha256);
-  assert.equal(verified[0].image, IMAGE);
+  assert.equal(verified[0].image, IMAGE, 'the image the benchmark pins');
+  assert.notEqual(verified[0].image, MANIFEST.image,
+    'not the one the manifest says it was built against - that is the comparison');
   assert.deepEqual(verified[0].manifest.distributions, MANIFEST.distributions);
+  // And the site those distributions were read from is the one the arms mount.
+  assert.deepEqual(seen.siteRead, [input.pythonRuntimeSite]);
+
+  // The meter listens on loopback. Every other loopback constraint in this
+  // binding is asserted; this one decides what the meter is reachable *from*.
+  assert.equal(meterConfig[0].listenerUrl, 'http://127.0.0.1:0');
 
   // The implementation lock: this repository, the files discovered in it, the
   // models the weight lock pins, and the digests the service probe verified -
@@ -480,6 +508,30 @@ test('every argument of the composition, because the composition is all this doe
   assert.equal(bound.dependencies.implementationLockHash, IMPLEMENTATION_LOCK_HASH);
   assert.equal(bound.dependencies.environmentLockHash, ENVIRONMENT_LOCK_HASH);
 
+  // The directories a run creates, and no others: its ledger directory and
+  // one state root per host family, in that order because the two locks are
+  // built before anything is written. Asserted by full path - a basename says
+  // nothing about which root was made, and the two roots were swappable.
+  assert.deepEqual(seen.created, [
+    input.ledgerDirectory,
+    input.stateRoot,
+    input.pythonStateRoot
+  ]);
+
+  // The prompt builder is the one this methodology froze, not an injected one.
+  // The runner accepts a builder because that is what makes the runner
+  // testable; the run path is where that freedom has to end.
+  assert.equal(bound.dependencies.buildOuterRequest, buildV11Prompt);
+
+  // And what the run reports about the site it measured. Neither lock can
+  // name it: the environment lock's fields are frozen, and the implementation
+  // lock covers tracked repository sources.
+  assert.deepEqual({ ...bound.runtime }, {
+    manifestPath: path.join(path.dirname(path.resolve(input.pythonRuntimeSite)), 'runtime-manifest.json'),
+    sitePath: input.pythonRuntimeSite,
+    distributions: MANIFEST.distributions.length
+  });
+
   await bound.close();
 });
 
@@ -500,6 +552,11 @@ test('the endpoint the Python arms are given is minted per correlation by the me
   };
   const endpoint = seen.pythonHosts[0].providerEndpointFor('embedding', correlation);
   assert.equal(endpoint, 'http://127.0.0.1:43100/v1/embedding');
+  // The whole correlation reaches the meter, not just the class it is keyed
+  // by: the capability is minted per (correlation, request class), and a
+  // correlation that arrived short would attribute the call to the wrong unit.
+  assert.deepEqual(seen.endpoints, [correlation]);
+  assert.notEqual(seen.endpoints[0], correlation, 'and it is copied, not aliased');
 
   await bound.close();
 });
