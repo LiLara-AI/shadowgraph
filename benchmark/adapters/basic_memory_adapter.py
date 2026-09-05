@@ -16,6 +16,7 @@ from python_runtime import (
     failed_response,
     installed_version,
     logical_record,
+    require_models,
     require_routes,
     require_versions,
     result_items,
@@ -289,6 +290,7 @@ def _project_exists(value, project: str) -> bool:
 async def execute(
     request: dict,
     config: dict,
+    models: dict,
     *,
     client_factory=_default_client_factory,
     version_getter=installed_version,
@@ -307,6 +309,7 @@ async def execute(
         if namespace["userId"] is not None:
             raise ContractError("Basic Memory has no native user namespace")
         require_routes(config, required=False)
+        require_models(models, required=False)
         require_versions(PINNED_PACKAGES, version_getter)
         state_root = _persistent_state_root()
         project = namespace["projectId"]

@@ -15,6 +15,7 @@ from python_runtime import (
     failed_response,
     installed_version,
     logical_record,
+    require_models,
     require_routes,
     require_versions,
     result_items,
@@ -31,11 +32,14 @@ STORAGE = not_available_storage(
 REFERENCE_TIME = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
-def _runtime_config(routes: dict) -> dict:
+def _runtime_config(routes: dict, models: dict) -> dict:
     return {
         "packages": copy.deepcopy(PINNED_PACKAGES),
         "llm_endpoint": routes["internal_memory_llm"],
+        "llm_model": models["internal_memory_llm"]["modelId"],
         "embedding_endpoint": routes["embedding"],
+        "embedding_model": models["embedding"]["modelId"],
+        "embedding_dimension": models["embedding"]["embeddingDimension"],
         "max_retries": 0,
         "automatic_retries": 0,
         "retry_proof": "task8_runtime_meter_required",
@@ -133,6 +137,7 @@ def _text_episode_type(client):
 async def execute(
     request: dict,
     config: dict,
+    models: dict,
     *,
     client_factory=_default_client_factory,
     version_getter=installed_version,
@@ -151,8 +156,11 @@ async def execute(
         if namespace["userId"] is not None:
             raise ContractError("Graphiti has no native user namespace")
         require_routes(config, required=True)
+        require_models(models, required=True)
         require_versions(PINNED_PACKAGES, version_getter)
-        client = await await_native(client_factory(_runtime_config(config), provider_calls))
+        client = await await_native(
+            client_factory(_runtime_config(config, models), provider_calls)
+        )
         group_id = namespace["projectId"]
         operation = request["operation"]
         if operation == "reset":

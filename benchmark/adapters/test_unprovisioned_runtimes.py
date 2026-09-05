@@ -38,7 +38,7 @@ import mem0_adapter
 
 from envelope import namespace_ref_for
 from python_runtime import RuntimeUnavailable
-from test_support import python_config, request_for
+from test_support import models_for, python_config, request_for
 
 
 # Whether the product exposes a native user-scoped record API at its pinned
@@ -78,7 +78,7 @@ def _request(arm_id: str, operation: str, *, user_id: str | None) -> dict:
 
 def _execute(module, arm_id: str, operation: str, *, user_id: str | None) -> dict:
     return asyncio.run(
-        module.execute(_request(arm_id, operation, user_id=user_id), python_config())
+        module.execute(_request(arm_id, operation, user_id=user_id), python_config(), models_for(python_config()))
     )
 
 

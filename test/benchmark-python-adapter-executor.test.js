@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { readFileSync } from 'node:fs';
 import { chmod, mkdir, readFile, readdir, stat, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
@@ -10,7 +11,16 @@ import {
   PythonAdapterExecutorError,
   createPythonAdapterExecutor
 } from '../benchmark/lib/python-adapter-executor.mjs';
+import { providerModelsFor } from '../benchmark/lib/v11-provider-models.mjs';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+
+// The real lock, not a fixture. What crosses this protocol has to be the
+// model the benchmark actually pins, and a test that invented its own ids
+// would keep passing if the wiring quietly stopped reading the lock.
+const MODEL_WEIGHTS = JSON.parse(readFileSync(
+  new URL('../benchmark/model-weights.lock.json', import.meta.url),
+  'utf8'
+));
 
 function decisionContent() {
   return {
@@ -63,8 +73,8 @@ import sys
 
 raw = sys.stdin.buffer.read()
 wrapper = json.loads(raw.decode("utf-8"))
-assert set(wrapper) == {"schemaVersion", "adapterId", "request", "providerRoutes"}
-assert wrapper["schemaVersion"] == 1
+assert set(wrapper) == {"schemaVersion", "adapterId", "request", "providerRoutes", "providerModels"}
+assert wrapper["schemaVersion"] == 2
 assert wrapper["adapterId"] == ${JSON.stringify(adapterId)}
 ${assertions}
 request = wrapper["request"]
@@ -120,14 +130,20 @@ function endpointFactory(calls) {
   };
 }
 
+function pinnedModelsFor(armId) {
+  return providerModelsFor(MODEL_WEIGHTS, PYTHON_ADAPTER_SPECS[armId].requestClasses);
+}
+
 function executorOptions(hostPath, overrides = {}) {
+  const armId = overrides.armId ?? 'mem0-oss';
   return {
     adapterId: overrides.adapterId ?? 'mem0-oss',
-    armId: overrides.armId ?? 'mem0-oss',
+    armId,
     pythonExecutable: overrides.pythonExecutable ?? 'python3',
     hostPath,
     stateRoot: overrides.stateRoot ?? path.join(path.dirname(hostPath), 'persistent-state'),
     providerEndpointFor: overrides.providerEndpointFor,
+    providerModels: 'providerModels' in overrides ? overrides.providerModels : pinnedModelsFor(armId),
     spawnProcess: overrides.spawnProcess,
     container: overrides.container,
     timeoutMs: overrides.timeoutMs ?? 2_000,
@@ -955,4 +971,112 @@ processGroupTest('two invocations for one unit get two different container names
   const [first, second] = runs.map((call) => flagValues(call.args, '--name')[0]);
   assert.match(first, /^shadowgraph-v11-[0-9a-f]{32}$/u);
   assert.notEqual(first, second, 'two invocations must not contend for one container name');
+});
+
+
+// --------------------------------------------------------------------------
+// The pinned models the wrapper carries.
+//
+// Routes say where an internal call goes. Until the wrapper carried models,
+// nothing said what to ask for, so each library used its own default: mem0
+// 2.0.19 asks for gpt-5-mini and text-embedding-3-small, and sizes its vector
+// collection to the latter's 1536 dimensions. Against the pinned Ollama - which
+// serves qwen2.5:0.5b and a 768-wide nomic-embed-text - the first is a model
+// that is not there and the second is a collection the wrong width for the
+// vectors written into it. Neither is visible in a route.
+
+processGroupTest('the wrapper carries the locked model and dimension for every metered class', async (t) => {
+  const { hostPath } = await makeHost(t, successHostSource({
+    assertions: String.raw`assert wrapper["providerModels"] == {
+    "internal_memory_llm": {"modelId": "qwen2.5:0.5b", "embeddingDimension": None},
+    "embedding": {"modelId": "nomic-embed-text:v1.5", "embeddingDimension": 768},
+}`
+  }));
+  const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
+    providerEndpointFor: endpointFactory([])
+  }));
+  const response = await executor.execute(requestFor('retrieve'));
+  assert.equal(response.status, 'SUCCEEDED');
+
+  // And the literals above are the lock's, not this test's.
+  const locked = pinnedModelsFor('mem0-oss');
+  assert.equal(locked.internal_memory_llm.modelId, 'qwen2.5:0.5b');
+  assert.equal(locked.embedding.modelId, 'nomic-embed-text:v1.5');
+  assert.equal(locked.embedding.embeddingDimension, 768);
+});
+
+processGroupTest('an arm that meters nothing is handed no model either', async (t) => {
+  const { hostPath } = await makeHost(t, successHostSource({
+    adapterId: 'basic-memory',
+    assertions: 'assert wrapper["providerModels"] == {"internal_memory_llm": None, "embedding": None}'
+  }));
+  const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
+    adapterId: 'basic-memory',
+    armId: 'basic-memory'
+  }));
+  const response = await executor.execute(requestFor('retrieve', { armId: 'basic-memory' }));
+  assert.equal(response.status, 'SUCCEEDED');
+});
+
+test('a metered arm without its pinned models cannot be constructed', () => {
+  const hostPath = path.resolve('unused-host.py');
+  const bad = [
+    undefined,
+    null,
+    'qwen2.5:0.5b',
+    {},
+    // A model for one class and not the other.
+    { internal_memory_llm: { modelId: 'qwen2.5:0.5b', embeddingDimension: null }, embedding: null },
+    // The embedding width missing, which is the half that fails silently.
+    {
+      internal_memory_llm: { modelId: 'qwen2.5:0.5b', embeddingDimension: null },
+      embedding: { modelId: 'nomic-embed-text:v1.5', embeddingDimension: null }
+    },
+    // A width on the chat model, which would mean the two were transposed.
+    {
+      internal_memory_llm: { modelId: 'qwen2.5:0.5b', embeddingDimension: 768 },
+      embedding: { modelId: 'nomic-embed-text:v1.5', embeddingDimension: 768 }
+    },
+    // Ids that are not ids.
+    {
+      internal_memory_llm: { modelId: 'qwen 2.5', embeddingDimension: null },
+      embedding: { modelId: 'nomic-embed-text:v1.5', embeddingDimension: 768 }
+    },
+    {
+      internal_memory_llm: { modelId: '', embeddingDimension: null },
+      embedding: { modelId: 'nomic-embed-text:v1.5', embeddingDimension: 768 }
+    }
+  ];
+  for (const providerModels of bad) {
+    assert.throws(
+      () => createPythonAdapterExecutor(executorOptions(hostPath, {
+        providerEndpointFor: async () => 'http://127.0.0.1:43100/provider-meter/v1/aaaa',
+        providerModels
+      })),
+      PythonAdapterExecutorError,
+      `${JSON.stringify(providerModels)} must not construct`
+    );
+  }
+});
+
+test('an arm that meters nothing may not be handed a model for something', () => {
+  const hostPath = path.resolve('unused-host.py');
+  assert.throws(() => createPythonAdapterExecutor(executorOptions(hostPath, {
+    adapterId: 'basic-memory',
+    armId: 'basic-memory',
+    providerModels: pinnedModelsFor('mem0-oss')
+  })), PythonAdapterExecutorError);
+
+  // Explicit nulls are the same statement as saying nothing, and both stand.
+  for (const providerModels of [
+    undefined,
+    { internal_memory_llm: null, embedding: null }
+  ]) {
+    const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
+      adapterId: 'basic-memory',
+      armId: 'basic-memory',
+      providerModels
+    }));
+    assert.equal(typeof executor.execute, 'function');
+  }
 });

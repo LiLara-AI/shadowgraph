@@ -9,6 +9,7 @@ import io
 import ipaddress
 import json
 import os
+import re
 import sys
 from urllib.parse import urlsplit
 
@@ -22,6 +23,7 @@ from envelope import (
 )
 
 
+PINNED_MODEL_ID = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}\Z")
 MAX_INPUT_BYTES = 1_048_576
 MAX_OUTPUT_BYTES = 1_048_576
 ADAPTER_MODULES = {
@@ -133,13 +135,25 @@ def _read_one_record(input_stream) -> dict:
         "adapterId",
         "request",
         "providerRoutes",
+        "providerModels",
     }:
         raise ContractError("Python host wrapper fields are invalid")
     return wrapper
 
 
-def _validate_wrapper(wrapper: dict) -> tuple[str, dict, dict]:
-    if wrapper["schemaVersion"] != 1:
+def _is_pinned_model(value, *, embedding: bool) -> bool:
+    if not isinstance(value, dict) or set(value) != {"modelId", "embeddingDimension"}:
+        return False
+    if not isinstance(value["modelId"], str) or not PINNED_MODEL_ID.match(value["modelId"]):
+        return False
+    dimension = value["embeddingDimension"]
+    if embedding:
+        return isinstance(dimension, int) and not isinstance(dimension, bool) and dimension > 0
+    return dimension is None
+
+
+def _validate_wrapper(wrapper: dict) -> tuple[str, dict, dict, dict]:
+    if wrapper["schemaVersion"] != 2:
         raise ContractError("Python host wrapper version is invalid")
     adapter_id = wrapper["adapterId"]
     if adapter_id not in ADAPTER_MODULES:
@@ -160,7 +174,21 @@ def _validate_wrapper(wrapper: dict) -> tuple[str, dict, dict]:
             raise ContractError("Python host provider routes are invalid")
     elif routes != {"internal_memory_llm": None, "embedding": None}:
         raise ContractError("Basic Memory must not receive provider routes")
-    return adapter_id, request, routes
+    models = wrapper["providerModels"]
+    if not isinstance(models, dict) or set(models) != {"internal_memory_llm", "embedding"}:
+        raise ContractError("Python host pinned model fields are invalid")
+    # An arm is handed a model for a class exactly when it is handed a route for
+    # it. Stating the correspondence rather than repeating the arm list is what
+    # makes a route added without a model - the case that would silently reach a
+    # library default - a refusal here instead of a measurement later.
+    for request_class in ("internal_memory_llm", "embedding"):
+        metered = routes[request_class] is not None
+        model = models[request_class]
+        if metered != (model is not None):
+            raise ContractError("Python host pinned models do not match the routes")
+        if metered and not _is_pinned_model(model, embedding=request_class == "embedding"):
+            raise ContractError("Python host pinned model is invalid")
+    return adapter_id, request, routes, models
 
 
 def _failure_response(request: dict, adapter_id: str) -> dict:
@@ -192,7 +220,7 @@ def _write_response(output_stream, response: dict, routes: dict) -> None:
 def process_stream(input_stream, output_stream) -> int:
     try:
         wrapper = _read_one_record(input_stream)
-        adapter_id, request, routes = _validate_wrapper(wrapper)
+        adapter_id, request, routes, models = _validate_wrapper(wrapper)
     except Exception:
         return 2
 
@@ -202,7 +230,7 @@ def process_stream(input_stream, output_stream) -> int:
         try:
             with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
                 module = importlib.import_module(ADAPTER_MODULES[adapter_id])
-                operation = module.execute(request, routes)
+                operation = module.execute(request, routes, models)
                 response = asyncio.run(operation)
             validate_response(request, response)
         except Exception:

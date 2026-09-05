@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import python_host
 
-from test_support import python_config, request_for
+from test_support import models_for, python_config, python_models, request_for
 
 
 class _FakeAdapterModule:
@@ -17,7 +17,7 @@ class _FakeAdapterModule:
     calls = 0
 
     @classmethod
-    async def execute(cls, request, config):
+    async def execute(cls, request, config, models):
         from envelope import build_envelope, not_available_storage
 
         cls.calls += 1
@@ -38,18 +38,102 @@ class _FakeAdapterModule:
         )
 
 
+class _RecordingAdapterModule:
+    observed_models = None
+
+    @classmethod
+    async def execute(cls, request, config, models):
+        from envelope import build_envelope, not_available_storage
+
+        cls.observed_models = copy.deepcopy(models)
+        return build_envelope(
+            request,
+            storage=not_available_storage("Fake native scope", "No exact byte scope"),
+        )
+
+
 class PythonHostTests(unittest.TestCase):
     def setUp(self) -> None:
         _FakeAdapterModule.calls = 0
         _FakeAdapterModule.observed_environment = None
+        _RecordingAdapterModule.observed_models = None
 
-    def wrapper(self, adapter_id="mem0-oss", request=None, routes=None):
+    def wrapper(self, adapter_id="mem0-oss", request=None, routes=None, models=None):
+        resolved_routes = python_config() if routes is None else routes
         return {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "adapterId": adapter_id,
             "request": request or request_for("retrieve"),
-            "providerRoutes": routes or python_config(),
+            "providerRoutes": resolved_routes,
+            "providerModels": models_for(resolved_routes) if models is None else models,
         }
+
+    def test_a_metered_route_without_its_pinned_model_never_reaches_an_adapter(self) -> None:
+        # The failure this refuses is silent by construction: mem0 defaults to
+        # gpt-5-mini and text-embedding-3-small at 1536 dimensions, so an arm
+        # handed routes and no models does not error, it measures other weights
+        # against a collection of the wrong width.
+        for models in (
+            python_models(llm=None),
+            python_models(embedding=None),
+            python_models(dimension=None),
+            python_models(llm="qwen 2.5"),
+            {"internal_memory_llm": None, "embedding": None},
+            {"internal_memory_llm": "qwen2.5:0.5b", "embedding": "nomic-embed-text:v1.5"},
+            {"internal_memory_llm": {"modelId": "qwen2.5:0.5b"}, "embedding": None},
+        ):
+            record = self.wrapper(models=models)
+            with patch.object(python_host.importlib, "import_module") as importer:
+                self.assertNotEqual(
+                    python_host.process_stream(
+                        io.StringIO(json.dumps(record) + "\n"), io.StringIO()
+                    ),
+                    0,
+                    repr(models),
+                )
+            importer.assert_not_called()
+
+    def test_an_unmetered_arm_that_is_handed_a_model_is_refused(self) -> None:
+        basic_request = request_for(
+            "retrieve",
+            arm_id="basic-memory",
+            project_id="project-1",
+            user_id=None,
+            namespace_ref="df8bfcf3fb8f56f2e8144f81e6db609ffa86190e3534f99393e85d687016ac6e",
+        )
+        record = self.wrapper(
+            adapter_id="basic-memory",
+            request=basic_request,
+            routes={"internal_memory_llm": None, "embedding": None},
+            models=python_models(),
+        )
+        with patch.object(python_host.importlib, "import_module") as importer:
+            self.assertNotEqual(
+                python_host.process_stream(io.StringIO(json.dumps(record) + "\n"), io.StringIO()),
+                0,
+            )
+        importer.assert_not_called()
+
+    def test_the_previous_wrapper_version_is_refused_rather_than_defaulted(self) -> None:
+        record = self.wrapper()
+        del record["providerModels"]
+        record["schemaVersion"] = 1
+        with patch.object(python_host.importlib, "import_module") as importer:
+            self.assertNotEqual(
+                python_host.process_stream(io.StringIO(json.dumps(record) + "\n"), io.StringIO()),
+                0,
+            )
+        importer.assert_not_called()
+
+    def test_the_pinned_models_reach_the_adapter_unaltered(self) -> None:
+        with patch.object(
+            python_host.importlib, "import_module", return_value=_RecordingAdapterModule
+        ):
+            code = python_host.process_stream(
+                io.StringIO(json.dumps(self.wrapper()) + "\n"), io.StringIO()
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(_RecordingAdapterModule.observed_models, python_models())
 
     def test_dispatches_one_allowlisted_adapter_after_telemetry_is_disabled(self) -> None:
         output = io.StringIO()

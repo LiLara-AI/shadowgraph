@@ -14,6 +14,7 @@ from python_runtime import (
     failed_response,
     installed_version,
     logical_record,
+    require_models,
     require_routes,
     require_versions,
     result_items,
@@ -33,16 +34,31 @@ def _filters(namespace: dict) -> dict:
     return {"agent_id": namespace["projectId"], "user_id": namespace["userId"]}
 
 
-def _runtime_config(routes: dict) -> dict:
+def _runtime_config(routes: dict, models: dict) -> dict:
+    embedding = models["embedding"]
     return {
         "package": {"name": "mem0ai", "version": "2.0.19"},
         "llm": {
             "provider": "openai",
-            "config": {"openai_base_url": routes["internal_memory_llm"]},
+            "config": {
+                "openai_base_url": routes["internal_memory_llm"],
+                # Left unset, mem0 2.0.19 asks for "gpt-5-mini", which the pinned
+                # Ollama does not serve.
+                "model": models["internal_memory_llm"]["modelId"],
+            },
         },
         "embedder": {
             "provider": "openai",
-            "config": {"openai_base_url": routes["embedding"]},
+            "config": {
+                "openai_base_url": routes["embedding"],
+                # And here it asks for "text-embedding-3-small" and, more
+                # quietly, sizes its vector collection to that model's 1536
+                # dimensions. The pinned embedder returns 768: unset, the
+                # collection is built the wrong width for the vectors that will
+                # be written into it.
+                "model": embedding["modelId"],
+                "embedding_dims": embedding["embeddingDimension"],
+            },
         },
         "automatic_retries": 0,
         "retry_proof": "task8_runtime_meter_required",
@@ -62,6 +78,7 @@ def _native_records(value) -> list[dict]:
 async def execute(
     request: dict,
     config: dict,
+    models: dict,
     *,
     client_factory=_default_client_factory,
     version_getter=installed_version,
@@ -80,8 +97,11 @@ async def execute(
         if not isinstance(namespace["userId"], str) or not namespace["userId"].strip():
             raise ContractError("Mem0 requires a native user scope")
         require_routes(config, required=True)
+        require_models(models, required=True)
         require_versions(PINNED_PACKAGES, version_getter)
-        client = await await_native(client_factory(_runtime_config(config), provider_calls))
+        client = await await_native(
+            client_factory(_runtime_config(config, models), provider_calls)
+        )
         operation = request["operation"]
         if operation == "reset":
             operations["memoryWriteOperations"] += 1

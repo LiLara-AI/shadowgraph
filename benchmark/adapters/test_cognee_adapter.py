@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 import cognee_adapter
 
-from test_support import DECISION_SHA256, python_config, request_for
+from test_support import DECISION_SHA256, models_for, python_config, python_models, request_for
 
 
 COGNEE_REF = "b72f98aea2a794c87f25b3c65d1643224c3666380e9d5bbcf03ce59f11f883a7"
@@ -185,7 +185,7 @@ class CogneeAdapterTests(unittest.TestCase):
         return request_for(operation, arm_id="cognee", project_id="project-1", user_id=None, namespace_ref=COGNEE_REF, **overrides)
 
     def execute(self, operation, **overrides):
-        return asyncio.run(cognee_adapter.execute(self.request(operation, **overrides), python_config(), client_factory=self.factory, version_getter=lambda name: "1.5.3" if name == "cognee" else None))
+        return asyncio.run(cognee_adapter.execute(self.request(operation, **overrides), python_config(), models_for(python_config()), client_factory=self.factory, version_getter=lambda name: "1.5.3" if name == "cognee" else None))
 
     def test_first_reset_is_idempotent_when_exact_dataset_is_absent(self) -> None:
         response = self.execute("reset")
@@ -229,6 +229,13 @@ class CogneeAdapterTests(unittest.TestCase):
         self.assertEqual(config["mode"], "openai_compatible")
         self.assertEqual(config["llm_config"]["endpoint"], "http://127.0.0.1:43100/llm-a")
         self.assertEqual(config["embedding_config"]["endpoint"], "http://127.0.0.1:43100/embed-a")
+        # Cognee's completion path goes through litellm, which needs the
+        # provider prefix to resolve a model it has not seen; the embedding path
+        # uses the OpenAI-compatible engine directly and takes the bare id. The
+        # ACL demonstration established both against the live service.
+        self.assertEqual(config["llm_config"]["model"], "openai/qwen2.5:0.5b")
+        self.assertEqual(config["embedding_config"]["model"], "nomic-embed-text:v1.5")
+        self.assertEqual(config["embedding_config"]["dimensions"], 768)
         self.assertEqual(config["llm_config"]["max_retries"], 0)
         self.assertEqual(config["embedding_config"]["max_retries"], 0)
         self.assertEqual(config["automatic_retries"], 0)
@@ -278,9 +285,36 @@ class CogneeAdapterTests(unittest.TestCase):
 
     def test_native_user_acl_is_a_task8_gate_not_a_synthetic_namespace(self) -> None:
         bad = request_for("retrieve", arm_id="cognee", project_id="project-1", user_id="user-1", namespace_ref="f9e9c35ee8ababe775bc20289baaebd4f4be29d3b52e7130a4642d517ca6dccf")
-        response = asyncio.run(cognee_adapter.execute(bad, python_config(), client_factory=self.factory, version_getter=lambda _name: "1.5.3"))
+        response = asyncio.run(cognee_adapter.execute(bad, python_config(), models_for(python_config()), client_factory=self.factory, version_getter=lambda _name: "1.5.3"))
         self.assertEqual(response["status"], "FAILED")
         self.assertEqual(response["failure"]["cause"], "CONTRACT_FAILURE")
+        self.assertEqual(self.clients, [])
+
+
+    def test_routes_without_their_pinned_models_never_reach_the_library(self) -> None:
+        # Left to itself this library picks a default model, so the failure is
+        # not an error - it is a measurement of other weights. It has to be
+        # refused before a client is ever constructed.
+        for models in (
+            python_models(llm=None),
+            python_models(embedding=None),
+            python_models(dimension=None),
+            {"internal_memory_llm": None, "embedding": None},
+            {},
+            None,
+        ):
+            with self.subTest(models=models):
+                response = asyncio.run(
+                    cognee_adapter.execute(
+                        self.request("retrieve"),
+                        python_config(),
+                        models,
+                        client_factory=self.factory,
+                        version_getter=lambda name: {"cognee": "1.5.3"}.get(name),
+                    )
+                )
+                self.assertEqual(response["status"], "FAILED")
+                self.assertEqual(response["failure"]["cause"], "CONTRACT_FAILURE")
         self.assertEqual(self.clients, [])
 
     def test_storage_is_not_available_and_no_usage_or_applicability_is_invented(self) -> None:
@@ -302,7 +336,7 @@ class CogneeAdapterTests(unittest.TestCase):
         self.assertNotIn("secret-cognee", str(response))
 
     def test_wrong_cognee_version_fails_before_dotenv_import_or_client_creation(self) -> None:
-        response = asyncio.run(cognee_adapter.execute(self.request("retrieve"), python_config(), client_factory=self.factory, version_getter=lambda _name: "1.5.2"))
+        response = asyncio.run(cognee_adapter.execute(self.request("retrieve"), python_config(), models_for(python_config()), client_factory=self.factory, version_getter=lambda _name: "1.5.2"))
         self.assertEqual(response["status"], "FAILED")
         self.assertEqual(response["failure"]["cause"], "ENDPOINT_UNAVAILABLE")
         self.assertEqual(self.clients, [])

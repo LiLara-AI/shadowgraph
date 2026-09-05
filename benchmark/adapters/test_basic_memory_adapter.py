@@ -13,7 +13,7 @@ import basic_memory_adapter
 import python_runtime
 from envelope import ContractError
 
-from test_support import DECISION_SHA256, python_config, request_for
+from test_support import DECISION_SHA256, models_for, python_config, python_models, request_for
 
 
 BASIC_REF = "df8bfcf3fb8f56f2e8144f81e6db609ffa86190e3534f99393e85d687016ac6e"
@@ -161,10 +161,29 @@ class BasicMemoryAdapterTests(unittest.TestCase):
             basic_memory_adapter.execute(
                 self.request(operation, **overrides),
                 python_config(llm=None, embedding=None),
+                models_for(python_config(llm=None, embedding=None)),
                 client_factory=self.factory,
                 version_getter=lambda name: "0.23.2" if name == "basic-memory" else None,
             )
         )
+
+    def test_an_arm_that_meters_nothing_refuses_a_pinned_model(self) -> None:
+        # The mirror of the metered case. A model here would mean this arm had
+        # been handed a provider capability it is defined not to have.
+        for models in (python_models(), python_models(embedding=None), {}, None):
+            with self.subTest(models=models):
+                response = asyncio.run(
+                    basic_memory_adapter.execute(
+                        self.request("retrieve"),
+                        python_config(llm=None, embedding=None),
+                        models,
+                        client_factory=self.factory,
+                        version_getter=lambda _name: "0.23.2",
+                    )
+                )
+                self.assertEqual(response["status"], "FAILED")
+                self.assertEqual(response["failure"]["cause"], "CONTRACT_FAILURE")
+        self.assertEqual(self.clients, [])
 
     def test_reset_is_idempotent_and_uses_only_an_owned_persistent_project_path(self) -> None:
         first = self.execute("reset")
@@ -252,6 +271,7 @@ class BasicMemoryAdapterTests(unittest.TestCase):
             basic_memory_adapter.execute(
                 bad,
                 python_config(llm=None, embedding=None),
+                models_for(python_config(llm=None, embedding=None)),
                 client_factory=self.factory,
                 version_getter=lambda _name: "0.23.2",
             )

@@ -7,7 +7,7 @@ import unittest
 import mem0_adapter
 
 from python_runtime import encode_content
-from test_support import DECISION_CONTENT, DECISION_SHA256, python_config, request_for
+from test_support import DECISION_CONTENT, DECISION_SHA256, models_for, python_config, python_models, request_for
 
 
 class FakeMem0:
@@ -77,6 +77,7 @@ class Mem0AdapterTests(unittest.TestCase):
             mem0_adapter.execute(
                 request_for(operation, **request_overrides),
                 python_config(),
+                models_for(python_config()),
                 client_factory=self.factory,
                 version_getter=lambda name: "2.0.19" if name == "mem0ai" else None,
             )
@@ -161,6 +162,7 @@ class Mem0AdapterTests(unittest.TestCase):
                     mem0_adapter.execute(
                         request_for("retrieve"),
                         python_config(),
+                        models_for(python_config()),
                         client_factory=lambda _config, provider_call: BadMeterMem0(
                             self.backend, provider_call, count
                         ),
@@ -178,10 +180,43 @@ class Mem0AdapterTests(unittest.TestCase):
         self.assertEqual(config["package"], {"name": "mem0ai", "version": "2.0.19"})
         self.assertEqual(config["llm"]["config"]["openai_base_url"], "http://127.0.0.1:43100/llm-a")
         self.assertEqual(config["embedder"]["config"]["openai_base_url"], "http://127.0.0.1:43100/embed-a")
+        # Unset, mem0 2.0.19 asks for gpt-5-mini and text-embedding-3-small and
+        # sizes its vector collection to the latter's 1536 dimensions. The
+        # pinned Ollama serves neither, and returns 768-wide vectors.
+        self.assertEqual(config["llm"]["config"]["model"], "qwen2.5:0.5b")
+        self.assertEqual(config["embedder"]["config"]["model"], "nomic-embed-text:v1.5")
+        self.assertEqual(config["embedder"]["config"]["embedding_dims"], 768)
         self.assertNotIn("max_retries", config["llm"]["config"])
         self.assertNotIn("max_retries", config["embedder"]["config"])
         self.assertEqual(config["automatic_retries"], 0)
         self.assertEqual(config["retry_proof"], "task8_runtime_meter_required")
+
+
+    def test_routes_without_their_pinned_models_never_reach_the_library(self) -> None:
+        # Left to itself this library picks a default model, so the failure is
+        # not an error - it is a measurement of other weights. It has to be
+        # refused before a client is ever constructed.
+        for models in (
+            python_models(llm=None),
+            python_models(embedding=None),
+            python_models(dimension=None),
+            {"internal_memory_llm": None, "embedding": None},
+            {},
+            None,
+        ):
+            with self.subTest(models=models):
+                response = asyncio.run(
+                    mem0_adapter.execute(
+                        request_for("retrieve"),
+                        python_config(),
+                        models,
+                        client_factory=self.factory,
+                        version_getter=lambda name: {"mem0ai": "2.0.19"}.get(name),
+                    )
+                )
+                self.assertEqual(response["status"], "FAILED")
+                self.assertEqual(response["failure"]["cause"], "CONTRACT_FAILURE")
+        self.assertEqual(self.clients, [])
 
     def test_legacy_mem0_arm_is_rejected_before_client_creation(self) -> None:
         response = asyncio.run(
@@ -192,6 +227,7 @@ class Mem0AdapterTests(unittest.TestCase):
                     namespace_ref="0b356d5be525189d430e9f07061153bc2da9545ddad22f960934a940b99d13ba",
                 ),
                 python_config(),
+                models_for(python_config()),
                 client_factory=self.factory,
                 version_getter=lambda _name: "2.0.19",
             )
@@ -205,6 +241,7 @@ class Mem0AdapterTests(unittest.TestCase):
             mem0_adapter.execute(
                 request_for("retrieve"),
                 python_config(),
+                models_for(python_config()),
                 client_factory=self.factory,
                 version_getter=lambda _name: "2.0.18",
             )

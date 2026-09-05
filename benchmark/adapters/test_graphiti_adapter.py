@@ -7,7 +7,7 @@ from enum import Enum
 
 import graphiti_adapter
 
-from test_support import DECISION_SHA256, python_config, request_for
+from test_support import DECISION_SHA256, models_for, python_config, python_models, request_for
 
 
 GRAPHITI_REF = "664420cbcbeafd7fb0ea677738f75786c24b40bb47def18120fc87197270528c"
@@ -162,6 +162,7 @@ class GraphitiAdapterTests(unittest.TestCase):
             graphiti_adapter.execute(
                 self.request(operation, **overrides),
                 python_config(),
+                models_for(python_config()),
                 client_factory=self.factory,
                 version_getter=lambda name: {
                     "graphiti-core": "0.29.3",
@@ -169,6 +170,41 @@ class GraphitiAdapterTests(unittest.TestCase):
                 }.get(name),
             )
         )
+
+    def test_runtime_config_carries_the_pinned_models_and_the_embedding_width(self) -> None:
+        self.execute("retrieve")
+        config = self.configs[0]
+        self.assertEqual(config["llm_endpoint"], "http://127.0.0.1:43100/llm-a")
+        self.assertEqual(config["embedding_endpoint"], "http://127.0.0.1:43100/embed-a")
+        self.assertEqual(config["llm_model"], "qwen2.5:0.5b")
+        self.assertEqual(config["embedding_model"], "nomic-embed-text:v1.5")
+        self.assertEqual(config["embedding_dimension"], 768)
+
+    def test_routes_without_their_pinned_models_never_reach_the_library(self) -> None:
+        # Left to itself this library picks a default model, so the failure is
+        # not an error - it is a measurement of other weights. It has to be
+        # refused before a client is ever constructed.
+        for models in (
+            python_models(llm=None),
+            python_models(embedding=None),
+            python_models(dimension=None),
+            {"internal_memory_llm": None, "embedding": None},
+            {},
+            None,
+        ):
+            with self.subTest(models=models):
+                response = asyncio.run(
+                    graphiti_adapter.execute(
+                        self.request("retrieve"),
+                        python_config(),
+                        models,
+                        client_factory=self.factory,
+                        version_getter=lambda name: {"graphiti-core": "0.29.3", "httpx": "0.28.1"}.get(name),
+                    )
+                )
+                self.assertEqual(response["status"], "FAILED")
+                self.assertEqual(response["failure"]["cause"], "CONTRACT_FAILURE")
+        self.assertEqual(self.clients, [])
 
     def test_reset_uses_native_delete_by_exact_group_and_not_global_clear(self) -> None:
         response = self.execute("reset")
@@ -282,6 +318,7 @@ class GraphitiAdapterTests(unittest.TestCase):
             graphiti_adapter.execute(
                 bad,
                 python_config(),
+                models_for(python_config()),
                 client_factory=self.factory,
                 version_getter=lambda name: {"graphiti-core": "0.29.3", "httpx": "0.28.1"}.get(name),
             )
@@ -305,6 +342,7 @@ class GraphitiAdapterTests(unittest.TestCase):
             graphiti_adapter.execute(
                 self.request("retrieve"),
                 python_config(),
+                models_for(python_config()),
                 client_factory=self.factory,
                 version_getter=lambda name: {"graphiti-core": "0.29.3", "httpx": "0.28.0"}.get(name),
             )

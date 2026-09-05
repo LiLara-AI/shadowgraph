@@ -24,6 +24,7 @@ import {
   buildContainerKillInvocation
 } from './python-container-runtime.mjs';
 import { canonicalJson } from './v11-contract.mjs';
+import { PROVIDER_MODEL_CLASSES, isPinnedModelId } from './v11-provider-models.mjs';
 
 const DEFAULT_HOST_PATH = fileURLToPath(new URL('../adapters/python_host.py', import.meta.url));
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -73,6 +74,72 @@ function isNonEmptyString(value) {
 
 function isPlainRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+// The pinned model for each class the arm meters, in the same shape as the
+// route record: present and null for a class this arm does not use. Validated
+// here rather than trusted from the caller, because the wrapper this produces
+// is the only thing standing between a library's default model and a
+// measurement that silently describes different weights than the lock pins.
+function normalizeProviderModels(value, requestClasses) {
+  if (requestClasses.length === 0) {
+    if (value !== undefined && value !== null) {
+      const declared = isPlainRecord(value)
+        && PROVIDER_MODEL_CLASSES.every((requestClass) => value[requestClass] === null);
+      if (!declared) {
+        throw new PythonAdapterExecutorError(
+          'CONTRACT_FAILURE',
+          'This Python adapter does not accept pinned provider models'
+        );
+      }
+    }
+    return Object.fromEntries(PROVIDER_MODEL_CLASSES.map((requestClass) => [requestClass, null]));
+  }
+  if (!isPlainRecord(value)) {
+    throw new PythonAdapterExecutorError(
+      'CONTRACT_FAILURE',
+      'Python adapter pinned provider models are required'
+    );
+  }
+  const normalized = {};
+  for (const requestClass of PROVIDER_MODEL_CLASSES) {
+    const model = value[requestClass];
+    if (!requestClasses.includes(requestClass)) {
+      if (model !== null && model !== undefined) {
+        throw new PythonAdapterExecutorError(
+          'CONTRACT_FAILURE',
+          'Python adapter received a model for a class it does not meter'
+        );
+      }
+      normalized[requestClass] = null;
+      continue;
+    }
+    if (!isPlainRecord(model) || !isPinnedModelId(model.modelId)) {
+      throw new PythonAdapterExecutorError(
+        'CONTRACT_FAILURE',
+        'Python adapter pinned provider model is invalid'
+      );
+    }
+    const dimension = model.embeddingDimension ?? null;
+    // Only the embedding class carries a width, and it must carry one: a
+    // client told the model but not its dimension sizes its own storage from
+    // a default, which is how a 768-wide vector meets a 1536-wide collection.
+    if (requestClass === 'embedding') {
+      if (!Number.isSafeInteger(dimension) || dimension <= 0) {
+        throw new PythonAdapterExecutorError(
+          'CONTRACT_FAILURE',
+          'Python adapter pinned embedding model must record its dimension'
+        );
+      }
+    } else if (dimension !== null) {
+      throw new PythonAdapterExecutorError(
+        'CONTRACT_FAILURE',
+        'Only the pinned embedding model may record a dimension'
+      );
+    }
+    normalized[requestClass] = { modelId: model.modelId, embeddingDimension: dimension };
+  }
+  return normalized;
 }
 
 function boundedInteger(value, fallback, { minimum, maximum, label }) {
@@ -904,6 +971,7 @@ export function createPythonAdapterExecutor(options) {
   if (spec.requestClasses.length > 0 && typeof options.providerEndpointFor !== 'function') {
     throw new PythonAdapterExecutorError('CONTRACT_FAILURE', 'Python adapter provider routing is required');
   }
+  const providerModels = normalizeProviderModels(options.providerModels, spec.requestClasses);
 
   // Container execution is opt-in. Without it the adapter runs on whatever
   // interpreter the host carries, which is right for the unit tests and wrong
@@ -973,10 +1041,11 @@ export function createPythonAdapterExecutor(options) {
     }
     const routes = await routesFor(request, deadlineAt, signal);
     const wrapper = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       adapterId: options.adapterId,
       request,
-      providerRoutes: routes
+      providerRoutes: routes,
+      providerModels
     };
     let input;
     try {

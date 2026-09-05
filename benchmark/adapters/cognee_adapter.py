@@ -18,6 +18,7 @@ from python_runtime import (
     failed_response,
     installed_version,
     logical_record,
+    require_models,
     require_routes,
     require_versions,
     result_items,
@@ -33,15 +34,23 @@ STORAGE = not_available_storage(
 )
 
 
-def _runtime_config(routes: dict) -> dict:
+def _runtime_config(routes: dict, models: dict) -> dict:
     llm = {
         "provider": "openai",
         "endpoint": routes["internal_memory_llm"],
+        # Cognee sends completions through litellm, which needs the provider
+        # prefix to resolve a model it has not seen before; the embedding path
+        # uses the OpenAI-compatible engine directly and takes the bare id. Both
+        # are derived here from the one pinned id, so the prefix stays a fact
+        # about this library rather than something the protocol has to carry.
+        "model": "openai/" + models["internal_memory_llm"]["modelId"],
         "max_retries": 0,
     }
     embedding = {
         "provider": "openai",
         "endpoint": routes["embedding"],
+        "model": models["embedding"]["modelId"],
+        "dimensions": models["embedding"]["embeddingDimension"],
         "max_retries": 0,
     }
     return {
@@ -199,6 +208,7 @@ async def _data_records(client, value, dataset_id: UUID, operations: dict) -> li
 async def execute(
     request: dict,
     config: dict,
+    models: dict,
     *,
     client_factory=_default_client_factory,
     version_getter=installed_version,
@@ -217,8 +227,9 @@ async def execute(
         if namespace["userId"] is not None:
             raise ContractError("Cognee user ACL is not locked for benchmark execution")
         require_routes(config, required=True)
+        require_models(models, required=True)
         require_versions(PINNED_PACKAGES, version_getter)
-        runtime = _runtime_config(config)
+        runtime = _runtime_config(config, models)
         client = await await_native(client_factory(runtime, provider_calls))
         dataset_name = namespace["projectId"]
         dataset_id = deterministic_dataset_uuid(ADAPTER_ID, dataset_name)

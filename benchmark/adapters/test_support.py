@@ -93,6 +93,44 @@ def python_config(*, llm: str | None = "http://127.0.0.1:43100/llm-a", embedding
     }
 
 
+def python_models(
+    *,
+    llm: str | None = "qwen2.5:0.5b",
+    embedding: str | None = "nomic-embed-text:v1.5",
+    dimension: int | None = 768,
+) -> dict:
+    """The pinned models, in the shape the host hands an adapter.
+
+    The ids here are the ones `model-weights.lock.json` pins, so a test that
+    asserts what a runtime config carries is asserting against the real lock
+    rather than against a placeholder that would keep passing if the wiring
+    dropped the value on the floor.
+    """
+    return {
+        "internal_memory_llm": None if llm is None else {
+            "modelId": llm,
+            "embeddingDimension": None,
+        },
+        "embedding": None if embedding is None else {
+            "modelId": embedding,
+            "embeddingDimension": dimension,
+        },
+    }
+
+
+def models_for(config: dict) -> dict:
+    """The models matching a route record, class for class.
+
+    Adapter tests care about one or the other, never about the pairing, so
+    deriving it keeps every one of them correct by construction - and leaves a
+    deliberately mismatched pair something a test has to ask for.
+    """
+    return python_models(
+        llm=None if config["internal_memory_llm"] is None else "qwen2.5:0.5b",
+        embedding=None if config["embedding"] is None else "nomic-embed-text:v1.5",
+    )
+
+
 class ProviderCounter:
     def __init__(self) -> None:
         self.calls = []
