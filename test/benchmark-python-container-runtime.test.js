@@ -200,3 +200,40 @@ test('the launch contract is frozen against accidental mutation', () => {
   assert.ok(Object.isFrozen(NETWORK_MODES));
   assert.ok(Object.isFrozen(CONTAINER_PATHS));
 });
+
+test('the pinned wheel runtime is mounted read-only, and only when one is supplied', () => {
+  // The pinned image is a bare interpreter. Without this mount every Python arm
+  // fails at import, and with it writable the arm could rewrite the packages it
+  // is being measured on.
+  const withoutRuntime = buildContainerInvocation(options());
+  assert.ok(
+    !withoutRuntime.args.some((argument) => argument.includes(CONTAINER_PATHS.runtime)),
+    'no runtime mount unless one is supplied'
+  );
+
+  const { args } = buildContainerInvocation(options({ runtimeRoot: '/srv/shadowgraph/runtime' }));
+  assert.ok(args.includes(
+    `type=bind,source=/srv/shadowgraph/runtime,target=${CONTAINER_PATHS.runtime},readonly`
+  ));
+});
+
+test('a relative or control-bearing runtime root is refused', () => {
+  for (const runtimeRoot of ['relative/runtime', '/injected\nflag', '']) {
+    assert.throws(
+      () => buildContainerInvocation(options({ runtimeRoot })),
+      ContainerRuntimeError,
+      `${JSON.stringify(runtimeRoot)} must be refused`
+    );
+  }
+});
+
+test('the container is given stdin, because the adapter protocol arrives on it', () => {
+  // Regression: the invocation was written before anything called it, and
+  // omitted --interactive. Every real invocation then failed with the host
+  // script reading EOF, which surfaces as an adapter fault rather than as the
+  // launch defect it is.
+  const { args } = buildContainerInvocation(options());
+  assert.ok(args.includes('--interactive'), 'stdin must be attached');
+  assert.ok(!args.includes('--tty') && !args.includes('-t'), 'a TTY would corrupt the protocol stream');
+  assert.ok(args.indexOf('--interactive') < args.indexOf(PINNED_IMAGE), 'flags precede the image');
+});

@@ -41,8 +41,10 @@ const SCRATCH_MOUNT = `${SCRATCH_TARGET}:rw,noexec,nosuid,size=64m`;
  */
 export const CONTAINER_PATHS = Object.freeze({
   adapters: '/opt/shadowgraph/adapters',
+  runtime: '/opt/shadowgraph/runtime',
   cwd: '/run/shadowgraph/cwd',
-  state: '/run/shadowgraph/state'
+  state: '/run/shadowgraph/state',
+  scratch: SCRATCH_TARGET
 });
 
 /** Resolve the in-container path of a host script that lives in the mount. */
@@ -114,6 +116,13 @@ export function buildContainerInvocation(options) {
     containerName,
     hostPath,
     adaptersDirectory,
+    // The pinned image is a bare interpreter. The packages the wheel lock pins
+    // are installed beside it and mounted read-only, rather than baked into a
+    // derived image: a derived image would carry a local id and no registry
+    // digest, so it could not satisfy the digest-pinned reference above, and it
+    // would replace the interpreter the competitor lock names. Optional, because
+    // an arm that imports nothing outside the standard library needs no runtime.
+    runtimeRoot = null,
     invocationRoot,
     stateRoot,
     uid,
@@ -139,6 +148,7 @@ export function buildContainerInvocation(options) {
   if (path.dirname(hostPath) !== adaptersDirectory.replace(/\/+$/u, '')) {
     throw new ContainerRuntimeError('hostPath must be a direct child of adaptersDirectory');
   }
+  if (runtimeRoot !== null) requireAbsolute(runtimeRoot, 'runtimeRoot');
   requireAbsolute(invocationRoot, 'invocationRoot');
   requireAbsolute(stateRoot, 'stateRoot');
   requireNonNegativeInteger(uid, 'uid');
@@ -151,6 +161,12 @@ export function buildContainerInvocation(options) {
     'run',
     '--rm',
     '--init',
+    // The adapter protocol is one JSON request on stdin and one response on
+    // stdout. Without --interactive the container gets no stdin at all, so the
+    // host script reads EOF and every invocation fails for a reason that looks
+    // like an adapter fault. No --tty: a TTY would line-buffer and echo the
+    // protocol stream.
+    '--interactive',
     '--name', containerName,
     '--network', NETWORK_MODES[networkMode].dockerValue,
     // The adapter runs as the invoking user so files it writes into the state
@@ -165,6 +181,10 @@ export function buildContainerInvocation(options) {
     '--mount', `type=bind,source=${path.join(invocationRoot, 'cwd')},target=${CONTAINER_PATHS.cwd}`,
     '--mount', `type=bind,source=${stateRoot},target=${CONTAINER_PATHS.state}`
   ];
+
+  if (runtimeRoot !== null) {
+    args.push('--mount', `type=bind,source=${runtimeRoot},target=${CONTAINER_PATHS.runtime},readonly`);
+  }
 
   for (const name of Object.keys(environment).sort()) {
     if (!SAFE_ENVIRONMENT_NAME.test(name)) {

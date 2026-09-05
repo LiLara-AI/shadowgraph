@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   lstat,
   mkdir,
@@ -18,6 +18,11 @@ import { TextDecoder } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
 import { validateAdapterRequest, validateAdapterResponse } from './adapter-protocol.mjs';
+import {
+  CONTAINER_PATHS,
+  buildContainerInvocation,
+  buildContainerKillInvocation
+} from './python-container-runtime.mjs';
 import { canonicalJson } from './v11-contract.mjs';
 
 const DEFAULT_HOST_PATH = fileURLToPath(new URL('../adapters/python_host.py', import.meta.url));
@@ -64,6 +69,10 @@ export const PYTHON_ADAPTER_SPECS = Object.freeze({
 
 function isNonEmptyString(value) {
   return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isPlainRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function boundedInteger(value, fallback, { minimum, maximum, label }) {
@@ -209,6 +218,120 @@ function childEnvironment(stateLeaf, invocationRoot) {
     OTEL_SDK_DISABLED: 'true'
   });
   return environment;
+}
+
+/**
+ * The environment the adapter sees inside the pinned container.
+ *
+ * The same variables `childEnvironment` sets, resolved to the in-container
+ * layout, plus the one the host path deliberately blanks: `PYTHONPATH` names
+ * the read-only mount holding the wheel set the lock pins, because the pinned
+ * image is a bare interpreter and every arm would otherwise fail at import.
+ *
+ * Nothing is inherited from the host here. `childEnvironment` forwards an
+ * allowlist because a host interpreter needs the host's PATH; a container has
+ * the image's own, and forwarding the host's would make the run depend on the
+ * machine it was started from.
+ */
+function containerAdapterEnvironment(stateLeafName) {
+  const stateLeaf = path.posix.join(CONTAINER_PATHS.state, stateLeafName);
+  const homeRoot = path.posix.join(stateLeaf, 'home');
+  const configRoot = path.posix.join(stateLeaf, 'config');
+  const cacheRoot = path.posix.join(stateLeaf, 'cache');
+  const dataRoot = path.posix.join(stateLeaf, 'data');
+  const tempRoot = CONTAINER_PATHS.scratch;
+  return {
+    HOME: homeRoot,
+    XDG_CONFIG_HOME: configRoot,
+    XDG_CACHE_HOME: cacheRoot,
+    XDG_DATA_HOME: dataRoot,
+    TEMP: tempRoot,
+    TMP: tempRoot,
+    TMPDIR: tempRoot,
+    SHADOWGRAPH_PYTHON_ADAPTER_STATE_ROOT: stateLeaf,
+    PYTHONNOUSERSITE: '1',
+    PYTHONDONTWRITEBYTECODE: '1',
+    PYTHONUNBUFFERED: '1',
+    PYTHONHASHSEED: '0',
+    PYTHONPATH: CONTAINER_PATHS.runtime,
+    PYTHONSTARTUP: '',
+    PIP_CONFIG_FILE: '/dev/null',
+    MEM0_TELEMETRY: 'false',
+    GRAPHITI_TELEMETRY_ENABLED: 'false',
+    TELEMETRY_DISABLED: '1',
+    BASIC_MEMORY_FORCE_LOCAL: 'true',
+    BASIC_MEMORY_MODE: 'local',
+    BASIC_MEMORY_CONFIG_DIR: path.posix.join(configRoot, 'basic-memory'),
+    COGNEE_TRACING_ENABLED: 'false',
+    COGNEE_SYSTEM_ROOT_DIRECTORY: path.posix.join(dataRoot, 'cognee-system'),
+    COGNEE_DATA_ROOT_DIRECTORY: path.posix.join(dataRoot, 'cognee-data'),
+    OTEL_SDK_DISABLED: 'true'
+  };
+}
+
+/**
+ * The environment the container *client* runs with.
+ *
+ * Not the adapter's environment - that travels as explicit `--env` arguments.
+ * This is only what the local `docker` binary needs to find its daemon.
+ */
+function containerClientEnvironment() {
+  const environment = {};
+  for (const name of [...ENVIRONMENT_ALLOWLIST, 'DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_CONFIG', 'HOME']) {
+    if (process.env[name] !== undefined) environment[name] = process.env[name];
+  }
+  return environment;
+}
+
+/**
+ * Assemble the one invocation that runs an adapter inside the pinned image.
+ *
+ * The container gets a fresh name per invocation rather than one derived from
+ * the unit: a reset and a persist for the same unit share a state leaf, so a
+ * name derived from that leaf would collide with a container that had not
+ * finished being removed, and Docker would refuse the second one for a reason
+ * that has nothing to do with the measurement.
+ */
+function containerLaunch({ container, hostPath, invocationRoot, stateRoot, stateLeafName }) {
+  const containerName = `shadowgraph-v11-${randomUUID().replaceAll('-', '')}`;
+  const environment = containerAdapterEnvironment(stateLeafName);
+  let invocation;
+  try {
+    invocation = buildContainerInvocation({
+      image: container.image,
+      containerName,
+      hostPath,
+      adaptersDirectory: path.dirname(hostPath),
+      runtimeRoot: container.runtimeRoot ?? null,
+      invocationRoot,
+      stateRoot,
+      uid: process.getuid(),
+      gid: process.getgid(),
+      networkMode: container.networkMode ?? 'host',
+      environment,
+      dockerExecutable: container.dockerExecutable ?? 'docker'
+    });
+  } catch (error) {
+    throw new PythonAdapterExecutorError(
+      'CONTRACT_FAILURE',
+      `Python adapter container invocation is invalid: ${error?.message ?? 'unknown reason'}`
+    );
+  }
+  return {
+    command: invocation.command,
+    commandArgs: [...invocation.args],
+    childEnv: containerClientEnvironment(),
+    containerName,
+    dockerExecutable: container.dockerExecutable ?? 'docker',
+    // The adapter sees container paths, so those are the strings that could
+    // appear in its output and must be redacted alongside the host ones.
+    fragments: [
+      environment.SHADOWGRAPH_PYTHON_ADAPTER_STATE_ROOT,
+      CONTAINER_PATHS.state,
+      CONTAINER_PATHS.runtime,
+      containerName
+    ]
+  };
 }
 
 function protectedVariants(value) {
@@ -500,10 +623,12 @@ function parseStrictResponse(stdout, request, protectedFragments) {
 function runChild({
   spawnProcess,
   processGroupIsolation,
-  pythonExecutable,
-  hostPath,
+  command,
+  commandArgs,
+  childEnv,
+  containerName,
+  dockerExecutable,
   invocationRoot,
-  environment,
   input,
   request,
   maxOutputBytes,
@@ -514,9 +639,9 @@ function runChild({
   return new Promise((resolve, reject) => {
     let child;
     try {
-      child = spawnProcess(pythonExecutable, [hostPath], {
+      child = spawnProcess(command, commandArgs, {
         cwd: path.join(invocationRoot, 'cwd'),
-        env: environment,
+        env: childEnv,
         detached: processGroupIsolation,
         shell: false,
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -575,10 +700,34 @@ function runChild({
       }
     };
 
+    // Signalling the foreground `docker run` client does not reach the
+    // container if that client is SIGKILLed, so cleanup addresses the container
+    // by name as well. Fire-and-forget: the invocation's own settlement path
+    // stays authoritative, and a removal that fails must not turn a completed
+    // measurement into a failed one.
+    let containerRemoved = false;
+    const removeContainer = () => {
+      if (containerName === null || containerRemoved) return;
+      containerRemoved = true;
+      try {
+        const kill = buildContainerKillInvocation(containerName, dockerExecutable);
+        const remover = spawnProcess(kill.command, [...kill.args], {
+          stdio: 'ignore',
+          shell: false,
+          windowsHide: true
+        });
+        remover?.unref?.();
+        remover?.on?.('error', () => {});
+      } catch {
+        // The hard-settlement timer remains authoritative.
+      }
+    };
+
     const beginTermination = (error) => {
       if (failure === null) failure = error;
       if (closed || settled) return;
       signalProcessTree('SIGTERM');
+      removeContainer();
       if (closed || settled) return;
       if (killTimer === null) {
         killTimer = setTimeout(() => {
@@ -610,6 +759,7 @@ function runChild({
         );
       }
       signalProcessTree('SIGKILL');
+      removeContainer();
       child.stdin.destroy?.();
       child.stdout.destroy?.();
       child.stderr.destroy?.();
@@ -747,6 +897,28 @@ export function createPythonAdapterExecutor(options) {
   if (spec.requestClasses.length > 0 && typeof options.providerEndpointFor !== 'function') {
     throw new PythonAdapterExecutorError('CONTRACT_FAILURE', 'Python adapter provider routing is required');
   }
+
+  // Container execution is opt-in. Without it the adapter runs on whatever
+  // interpreter the host carries, which is right for the unit tests and wrong
+  // for a measurement: the competitor lock pins an image precisely so that a
+  // recorded number describes software somebody can reconstruct.
+  const container = options.container ?? null;
+  if (container !== null) {
+    if (!isPlainRecord(container)) {
+      throw new PythonAdapterExecutorError('CONTRACT_FAILURE', 'Python adapter container options must be an object');
+    }
+    if (!isNonEmptyString(container.image)) {
+      throw new PythonAdapterExecutorError('CONTRACT_FAILURE', 'Python adapter container requires a pinned image');
+    }
+    if (container.runtimeRoot !== undefined
+      && container.runtimeRoot !== null
+      && (!isNonEmptyString(container.runtimeRoot) || !path.isAbsolute(container.runtimeRoot))) {
+      throw new PythonAdapterExecutorError('CONTRACT_FAILURE', 'Python adapter runtime root must be an absolute path');
+    }
+    if (container.dockerExecutable !== undefined && !isNonEmptyString(container.dockerExecutable)) {
+      throw new PythonAdapterExecutorError('CONTRACT_FAILURE', 'Python adapter container executable is invalid');
+    }
+  }
   const usedEndpoints = new Set();
 
   async function routesFor(request, deadlineAt, signal) {
@@ -821,14 +993,31 @@ export function createPythonAdapterExecutor(options) {
         signal
       );
       invocationRoot = await prepareInvocationRoot(deadlineAt, signal);
-      const environment = childEnvironment(stateLeaf, invocationRoot);
+      const launch = container === null
+        ? {
+            command: pythonExecutable,
+            commandArgs: [hostPath],
+            childEnv: childEnvironment(stateLeaf, invocationRoot),
+            containerName: null,
+            dockerExecutable: 'docker',
+            fragments: []
+          }
+        : containerLaunch({
+            container,
+            hostPath,
+            invocationRoot,
+            stateRoot,
+            stateLeafName: path.basename(stateLeaf)
+          });
       result = await runChild({
         spawnProcess,
         processGroupIsolation,
-        pythonExecutable,
-        hostPath,
+        command: launch.command,
+        commandArgs: launch.commandArgs,
+        childEnv: launch.childEnv,
+        containerName: launch.containerName,
+        dockerExecutable: launch.dockerExecutable,
         invocationRoot,
-        environment,
         input,
         request,
         maxOutputBytes,
@@ -839,7 +1028,8 @@ export function createPythonAdapterExecutor(options) {
           stateRoot,
           stateLeaf,
           invocationRoot,
-          hostPath
+          hostPath,
+          ...launch.fragments
         ].flatMap(protectedVariants)
       });
     } catch (error) {

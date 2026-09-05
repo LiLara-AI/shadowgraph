@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { cpus, totalmem, type as osType, release as osRelease } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -20,7 +21,14 @@ import {
   readCommonModelConfiguration
 } from './lib/capabilities.mjs';
 import { verifyPreregistration } from './lib/preregistration.mjs';
+import { CONTAINER_PATHS } from './lib/python-container-runtime.mjs';
 import { loadV11AcceptanceDefinition } from './lib/v11-definition.mjs';
+import {
+  PYTHON_RUNTIME_SCHEMA,
+  PYTHON_RUNTIME_VERSION,
+  renderRequirements,
+  verifyPythonRuntime
+} from './lib/v11-python-runtime.mjs';
 import { createV11Registry } from './lib/v11-registry.mjs';
 import {
   V11RunError,
@@ -45,7 +53,7 @@ const PHASES = ['A', 'B', 'C', 'D_TRUE', 'D_FALSE_0', 'D_FALSE_1', 'D_FALSE_2', 
 function parseArgs(argv) {
   if (argv.length === 0) {
     throw new Error(
-      'Usage: benchmark/cli.mjs <preflight|v11-preflight|v11-service-probe|v11-run|run|validate|aggregate> [options]'
+      'Usage: benchmark/cli.mjs <preflight|v11-preflight|v11-service-probe|v11-python-runtime|v11-run|run|validate|aggregate> [options]'
     );
   }
   const command = argv[0];
@@ -632,6 +640,135 @@ async function v11Preflight(options) {
   return report;
 }
 
+// Listing is restricted to the runtime directory. The pinned image carries its
+// own pip and setuptools, and a listing that swept the whole import path would
+// report those as distributions the wheel lock does not pin - a finding about
+// the interpreter rather than about the runtime being built.
+const LIST_DISTRIBUTIONS_SCRIPT = [
+  'import json, sys',
+  'from importlib.metadata import Distribution, DistributionFinder',
+  'context = DistributionFinder.Context(path=[sys.argv[1]])',
+  'found = {}',
+  'for distribution in Distribution.discover(context=context):',
+  '    name = distribution.metadata["Name"]',
+  '    if name:',
+  '        found[name] = distribution.version',
+  'print(json.dumps([{"name": n, "version": v} for n, v in sorted(found.items())]))'
+].join('\n');
+
+/**
+ * Build the reproducible Python runtime the container arms execute against.
+ *
+ * Installed into a directory rather than baked into a derived image: a derived
+ * image would have a local id and no registry digest, so it could not satisfy
+ * the digest-pinned reference the container runtime requires, and it would
+ * replace the interpreter the competitor lock names. Mounting the directory
+ * read-only keeps the image exactly what the lock pins.
+ */
+async function v11PythonRuntimeCommand(options) {
+  const runtimeRoot = optionPath(options.out);
+  if (runtimeRoot === null) {
+    throw new Error('v11-python-runtime requires --out <runtime-root>');
+  }
+  // The runtime is written by a container and read by the harness, so it has to
+  // come out owned by the invoking user rather than by root.
+  if (typeof process.getuid !== 'function' || typeof process.getgid !== 'function') {
+    throw new Error('v11-python-runtime requires a POSIX host so the built runtime is owned by the invoking user');
+  }
+  const benchmarkRoot = join(root, 'benchmark');
+  const wheelsLockPath = join(benchmarkRoot, 'python-wheels.lock.json');
+  const [competitorLock, wheelsLockText] = await Promise.all([
+    readFile(competitorLockPath, 'utf8').then(JSON.parse),
+    readFile(wheelsLockPath, 'utf8')
+  ]);
+  const wheelsLock = JSON.parse(wheelsLockText);
+  const wheelsLockSha256 = createHash('sha256').update(wheelsLockText, 'utf8').digest('hex');
+  const image = competitorLock.pythonImage;
+  const sitePath = join(runtimeRoot, 'site');
+  const manifestPath = join(runtimeRoot, 'runtime-manifest.json');
+
+  const dockerRun = (extraArgs, command) => execFileAsync('docker', [
+    'run', '--rm', '--init',
+    '--user', `${process.getuid()}:${process.getgid()}`,
+    '--mount', `type=bind,source=${runtimeRoot},target=/runtime`,
+    '--env', 'HOME=/runtime',
+    '--env', 'PIP_DISABLE_PIP_VERSION_CHECK=1',
+    ...extraArgs,
+    image,
+    ...command
+  ], { maxBuffer: 64 * 1024 * 1024 });
+
+  if (options.verify !== 'only') {
+    await mkdir(sitePath, { recursive: true });
+    await writeFile(join(runtimeRoot, 'requirements.txt'), renderRequirements(wheelsLock), 'utf8');
+    // Network is needed to fetch the pinned wheels and nothing else; every
+    // artifact it may accept is fixed by --require-hashes.
+    await dockerRun(['--network', 'host'], [
+      'python', '-m', 'pip', 'install',
+      '--require-hashes', '--no-cache-dir', '--no-warn-script-location',
+      '--target', '/runtime/site',
+      '-r', '/runtime/requirements.txt'
+    ]);
+  }
+
+  const { stdout: listed } = await dockerRun(['--network', 'none'], [
+    'python', '-c', LIST_DISTRIBUTIONS_SCRIPT, '/runtime/site'
+  ]);
+  const distributions = JSON.parse(listed);
+
+  // The lock records an import probe per Python arm because a present
+  // distribution does not imply a working import.
+  const importProbes = [];
+  for (const [armId, entry] of Object.entries(competitorLock.arms)) {
+    if (typeof entry.importProbe !== 'string' || entry.type !== 'pypi') continue;
+    let observed = null;
+    try {
+      const { stdout } = await dockerRun(
+        ['--network', 'none', '--env', `PYTHONPATH=${CONTAINER_PATHS.runtime}`,
+          '--mount', `type=bind,source=${sitePath},target=${CONTAINER_PATHS.runtime},readonly`],
+        ['python', '-c', entry.importProbe]
+      );
+      observed = stdout.trim();
+    } catch (error) {
+      observed = null;
+      process.stderr.write(`${armId} import probe failed: ${error?.message ?? error}\n`);
+    }
+    importProbes.push({
+      armId,
+      package: entry.package,
+      expected: entry.version,
+      observed,
+      outcome: observed === entry.version ? 'PASS' : 'FAIL'
+    });
+  }
+
+  const manifest = {
+    schema: PYTHON_RUNTIME_SCHEMA,
+    version: PYTHON_RUNTIME_VERSION,
+    builtAt: new Date().toISOString(),
+    image,
+    wheelsLockSha256,
+    distributions,
+    importProbes
+  };
+  await writeJson(manifestPath, manifest);
+
+  const verification = verifyPythonRuntime({ manifest, wheelsLock, wheelsLockSha256, image });
+  process.stdout.write(`${JSON.stringify({
+    schema: 'shadowgraph.v11.python-runtime-build',
+    version: 1,
+    image,
+    runtimeRoot,
+    manifestPath,
+    distributions: distributions.length,
+    importProbes,
+    valid: verification.valid,
+    findings: verification.findings
+  }, null, 2)}\n`);
+  if (!verification.valid) process.exitCode = 1;
+  return manifest;
+}
+
 /** Ask the local container runtime one question and return its trimmed answer. */
 async function dockerField(args) {
   const { stdout } = await execFileAsync('docker', args);
@@ -738,6 +875,7 @@ const { command, options } = parseArgs(process.argv.slice(2));
 if (command === 'preflight') await preflight(options);
 else if (command === 'v11-preflight') await v11Preflight(options);
 else if (command === 'v11-service-probe') await v11ServiceProbeCommand(options);
+else if (command === 'v11-python-runtime') await v11PythonRuntimeCommand(options);
 else if (command === 'v11-run') await v11RunCommand(options);
 else if (command === 'run') {
   const { raw, preregistration } = await createRun(options);

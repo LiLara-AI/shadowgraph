@@ -129,6 +129,7 @@ function executorOptions(hostPath, overrides = {}) {
     stateRoot: overrides.stateRoot ?? path.join(path.dirname(hostPath), 'persistent-state'),
     providerEndpointFor: overrides.providerEndpointFor,
     spawnProcess: overrides.spawnProcess,
+    container: overrides.container,
     timeoutMs: overrides.timeoutMs ?? 2_000,
     maxRequestBytes: overrides.maxRequestBytes,
     maxOutputBytes: overrides.maxOutputBytes
@@ -638,4 +639,237 @@ processGroupTest('request and output limits fail closed and every created source
     return true;
   });
   assert.equal((await stat(hostPath)).mode & 0o111, 0);
+});
+
+// --- pinned-container execution ------------------------------------------
+//
+// The competitor lock pins an interpreter image so that a recorded number
+// describes software somebody can reconstruct. Until now the executor spawned
+// whatever `python3` the host carried, and set PYTHONPATH empty against a bare
+// image, so no Python arm could have imported its library at all. These tests
+// pin the invocation that fixes both.
+
+const PINNED_IMAGE = 'python@sha256:47ae396f09c1303b8653019811a8498470603d7ffefc29cb07c88f1f8cb3d19f';
+
+function successResponse(request) {
+  return {
+    schemaVersion: 1,
+    operation: request.operation,
+    runId: request.runId,
+    attemptId: request.attemptId,
+    phase: request.phase,
+    armId: request.armId,
+    scenarioId: request.scenarioId,
+    repetition: request.repetition,
+    status: 'SUCCEEDED',
+    result: { nativeContext: [], persistenceEvidence: null, isolationEvidence: null },
+    failure: null,
+    operations: {
+      memoryReadOperations: 0,
+      memoryWriteOperations: 0,
+      mcpToolCalls: 0,
+      outerDecisionModelCalls: 0,
+      internalMemoryModelCalls: 0,
+      embeddingCalls: 0,
+      persistenceVerificationOperations: 0
+    },
+    storage: {
+      status: 'NOT_AVAILABLE',
+      bytes: null,
+      scope: 'Fake Python native scope',
+      method: null,
+      reason: 'No exact attributable byte scope',
+      blockedClaims: ['storage bytes']
+    }
+  };
+}
+
+/** A spawn seam that records every invocation and answers the first one. */
+function recordingSpawn(request, { answer = true } = {}) {
+  const calls = [];
+  const spawnProcess = (command, args, options = {}) => {
+    calls.push({ command, args: [...args], options });
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = new EventEmitter();
+    child.stdin.end = () => {
+      if (!answer || calls.length > 1) return;
+      setImmediate(() => {
+        child.stdout.emit('data', Buffer.from(`${JSON.stringify(successResponse(request))}\n`, 'utf8'));
+        child.emit('close', 0, null);
+      });
+    };
+    child.kill = () => true;
+    child.unref = () => {};
+    return child;
+  };
+  return { calls, spawnProcess };
+}
+
+function flagValues(args, flag) {
+  const values = [];
+  for (let index = 0; index < args.length - 1; index += 1) {
+    if (args[index] === flag) values.push(args[index + 1]);
+  }
+  return values;
+}
+
+function envMap(args) {
+  return Object.fromEntries(flagValues(args, '--env').map((entry) => {
+    const separator = entry.indexOf('=');
+    return [entry.slice(0, separator), entry.slice(separator + 1)];
+  }));
+}
+
+processGroupTest('a container-bound executor runs the pinned image, not the host interpreter', async (t) => {
+  const { hostPath } = await makeHost(t, successHostSource());
+  const request = requestFor();
+  const { calls, spawnProcess } = recordingSpawn(request);
+  const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
+    providerEndpointFor: endpointFactory([]),
+    spawnProcess,
+    container: { image: PINNED_IMAGE, runtimeRoot: '/srv/shadowgraph/runtime' }
+  }));
+
+  const response = await executor.execute(request);
+  assert.equal(response.status, 'SUCCEEDED');
+
+  const [launch] = calls;
+  assert.equal(launch.command, 'docker');
+  assert.equal(launch.args[0], 'run');
+  assert.ok(launch.args.includes(PINNED_IMAGE));
+  assert.ok(launch.args.includes('--read-only'));
+  assert.deepEqual(flagValues(launch.args, '--network'), ['host']);
+});
+
+processGroupTest('the wheel runtime is mounted read-only and named by PYTHONPATH', async (t) => {
+  // The two halves have to agree. A mount nobody points PYTHONPATH at, or a
+  // PYTHONPATH naming a path nobody mounted, both fail at import - and only one
+  // of them looks wrong when you read it.
+  const { hostPath } = await makeHost(t, successHostSource());
+  const request = requestFor();
+  const { calls, spawnProcess } = recordingSpawn(request);
+  const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
+    providerEndpointFor: endpointFactory([]),
+    spawnProcess,
+    container: { image: PINNED_IMAGE, runtimeRoot: '/srv/shadowgraph/runtime' }
+  }));
+  await executor.execute(request);
+
+  const { args } = calls[0];
+  const mounts = flagValues(args, '--mount');
+  const runtimeMount = mounts.find((mount) => mount.includes('/srv/shadowgraph/runtime'));
+  assert.ok(runtimeMount, 'the runtime must be mounted');
+  assert.ok(runtimeMount.endsWith(',readonly'), 'an arm must not rewrite the packages it is measured on');
+
+  const target = runtimeMount.split('target=')[1].split(',')[0];
+  assert.equal(envMap(args).PYTHONPATH, target);
+});
+
+processGroupTest('the adapter environment travels as arguments and names container paths', async (t) => {
+  const { hostPath } = await makeHost(t, successHostSource());
+  const request = requestFor();
+  const { calls, spawnProcess } = recordingSpawn(request);
+  const stateRoot = path.join(path.dirname(hostPath), 'persistent-state');
+  const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
+    providerEndpointFor: endpointFactory([]),
+    spawnProcess,
+    stateRoot,
+    container: { image: PINNED_IMAGE, runtimeRoot: '/srv/shadowgraph/runtime' }
+  }));
+  await executor.execute(request);
+
+  const { args, options } = calls[0];
+  const environment = envMap(args);
+  const stateLeaf = environment.SHADOWGRAPH_PYTHON_ADAPTER_STATE_ROOT;
+  assert.ok(stateLeaf.startsWith('/run/shadowgraph/state/'), stateLeaf);
+  assert.ok(!stateLeaf.includes(stateRoot), 'the adapter must not be handed a host path');
+  assert.equal(environment.HOME, `${stateLeaf}/home`);
+  assert.equal(environment.BASIC_MEMORY_CONFIG_DIR, `${stateLeaf}/config/basic-memory`);
+  assert.equal(environment.TMPDIR, '/tmp');
+  assert.equal(environment.PYTHONHASHSEED, '0');
+
+  // The docker client's own environment is not the adapter's. Passing the
+  // adapter environment to the client would leak the host's PATH into a run
+  // whose whole point is not to depend on the host.
+  assert.equal(options.env.SHADOWGRAPH_PYTHON_ADAPTER_STATE_ROOT, undefined);
+  assert.equal(options.env.PYTHONPATH, undefined);
+});
+
+processGroupTest('each invocation gets its own container name, and a timeout removes it', async (t) => {
+  const { hostPath } = await makeHost(t, successHostSource());
+  const request = requestFor();
+  const { calls, spawnProcess } = recordingSpawn(request, { answer: false });
+  const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
+    providerEndpointFor: endpointFactory([]),
+    spawnProcess,
+    timeoutMs: 120,
+    container: { image: PINNED_IMAGE, runtimeRoot: '/srv/shadowgraph/runtime' }
+  }));
+
+  await assert.rejects(() => executor.execute(request), (error) => {
+    assert.equal(error.adapterCause, 'TIMEOUT');
+    return true;
+  });
+
+  const launch = calls[0];
+  const containerName = flagValues(launch.args, '--name')[0];
+  assert.match(containerName, /^shadowgraph-v11-[0-9a-f]{32}$/u);
+
+  // Signalling the foreground client is not enough: a SIGKILLed client leaves
+  // the container running.
+  const removal = calls.find((call) => call.args[0] === 'rm');
+  assert.ok(removal, 'a timed-out invocation must remove its container by name');
+  assert.deepEqual(removal.args, ['rm', '--force', containerName]);
+});
+
+processGroupTest('a container image that is not digest-pinned is refused', async (t) => {
+  const { hostPath } = await makeHost(t, successHostSource());
+  const request = requestFor();
+  const { spawnProcess } = recordingSpawn(request);
+  const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
+    providerEndpointFor: endpointFactory([]),
+    spawnProcess,
+    container: { image: 'python:3.12.11-slim' }
+  }));
+  await assert.rejects(() => executor.execute(request), (error) => {
+    assert.equal(error.adapterCause, 'CONTRACT_FAILURE');
+    assert.match(error.message, /container invocation is invalid/u);
+    return true;
+  });
+});
+
+test('malformed container options are refused at construction', async (t) => {
+  const { hostPath } = await makeHost(t, successHostSource());
+  for (const container of [
+    'python',
+    { runtimeRoot: '/srv/runtime' },
+    { image: PINNED_IMAGE, runtimeRoot: 'relative/runtime' },
+    { image: PINNED_IMAGE, dockerExecutable: '' }
+  ]) {
+    assert.throws(
+      () => createPythonAdapterExecutor(executorOptions(hostPath, {
+        providerEndpointFor: endpointFactory([]),
+        container
+      })),
+      PythonAdapterExecutorError,
+      `${JSON.stringify(container)} must be refused`
+    );
+  }
+});
+
+processGroupTest('without container options the executor still runs the host interpreter', async (t) => {
+  const { hostPath } = await makeHost(t, successHostSource());
+  const request = requestFor();
+  const { calls, spawnProcess } = recordingSpawn(request);
+  const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
+    providerEndpointFor: endpointFactory([]),
+    spawnProcess
+  }));
+  await executor.execute(request);
+
+  assert.equal(calls[0].command, 'python3');
+  assert.deepEqual(calls[0].args, [hostPath]);
+  assert.equal(calls[0].options.env.PYTHONPATH, '', 'the host path still blanks PYTHONPATH');
 });
