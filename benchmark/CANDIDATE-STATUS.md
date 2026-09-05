@@ -18,7 +18,7 @@ All figures below were produced on the current branch with a clean working tree.
 | Full repository | `npm test` | **2317 / 2317 pass**, 0 fail, 22 suites |
 | Benchmark focused | `npm run benchmark:test` | **1081 / 1081 pass**, 0 fail |
 | v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **919 / 919 pass**, 0 fail |
-| Python adapters | `npm run benchmark:test:python` | **116 / 116 pass**, 0 fail |
+| Python adapters | `npm run benchmark:test:python` | **134 / 134 pass**, 0 fail |
 | Node syntax | `npm run check`, `npm run benchmark:check` | pass |
 | Python syntax | `npm run benchmark:check:python` | pass |
 | Package privacy | `npm run check:package` | pass |
@@ -886,7 +886,7 @@ no runtime that could run it.
 | CB4 | Cognee required service | Cleared, verified service record |
 | LB1 | Required-service blockers emitted unconditionally | Cleared |
 | LB2a | `v11RuntimeDependencies()` unimplemented | Cleared, all seven arms bound and reached |
-| LB2b | Mem0, Graphiti and Cognee client factories refuse | **Open** for Graphiti and Cognee; Mem0 cleared and executing |
+| LB2b | Mem0, Graphiti and Cognee client factories refuse | Cleared for Mem0 and Cognee, both executing; **Open** for Graphiti, which is LB2f |
 | LB2c | Basic Memory storage attribution deferred | Cleared, exact bytes of the owned project directory |
 | LB2d | Pinned Python runtime never installed into the pinned image | Cleared |
 | LB2e | Adapters never routed through the pinned container | Cleared |
@@ -895,7 +895,7 @@ no runtime that could run it.
 | LB3 | Implementation lock requires a clean tree | Cleared |
 | F1 | The container runtime refused the tag the competitor lock pins, so every Python arm would have been recorded as a contract failure of the product | Cleared |
 | F2 | The pinned decision model returns a decision the frozen schema rejects, 0 of 4 attempts | **Open**, owner decision |
-| F3 | Cognee refuses the user namespace the definition declares it supports, on a precondition CB2 has since demonstrated | **Open** |
+| F3 | Cognee refuses the user namespace the definition declares it supports, on a precondition CB2 has since demonstrated | Cleared |
 
 The evidence and the required next decisions are in
 `benchmark/evidence/v11-blocker-matrix-2026-09-03.md` (CB1-CB4, LB1-LB3, as of

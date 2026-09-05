@@ -2,17 +2,30 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import os
+import tempfile
+import types
 import unittest
 from enum import Enum
+from pathlib import Path
+from unittest.mock import patch
 from uuid import UUID, uuid4, uuid5
 
 import cognee_adapter
+from python_runtime import RuntimeUnavailable, await_native
 
 from test_support import DECISION_SHA256, models_for, python_config, python_models, request_for
 
 
-COGNEE_REF = "b72f98aea2a794c87f25b3c65d1643224c3666380e9d5bbcf03ce59f11f883a7"
-COGNEE_ALT_REF = "2cf7dd566405472a39d399f63526e54a4e9022d9565e77524f4a3f2dc96e7449"
+# The arm's namespace now names a user. The definition has declared this arm
+# `userIsolation: SUPPORTED` throughout; the adapter refused one until CB2
+# demonstrated Cognee 1.5.3 enforcing its native ACL under the pinned backend
+# configuration, and was failing every unit on that stale precondition.
+COGNEE_USER_ID = "user-1"
+COGNEE_ALT_USER_ID = "user-2"
+COGNEE_REF = "f9e9c35ee8ababe775bc20289baaebd4f4be29d3b52e7130a4642d517ca6dccf"
+COGNEE_ALT_REF = "9817434ec6fda24120554682cab7b2869cebadca8df6cb436243ab154d8c6644"
+COGNEE_NO_USER_REF = "b72f98aea2a794c87f25b3c65d1643224c3666380e9d5bbcf03ce59f11f883a7"
 # The id this adapter used to compute for "project-1", kept so a test can
 # assert it is never used. Cognee derives its own from the dataset name, the
 # owning user and the tenant, and reads a supplied id as a reference to an
@@ -27,7 +40,8 @@ def library_dataset_id(name: str) -> UUID:
     return uuid5(LIBRARY_NAMESPACE, f"cognee-library:{name}")
 
 
-COGNEE_DATASET_ID = library_dataset_id("project-1")
+COGNEE_DATASET_ID = library_dataset_id(f"project-1:{COGNEE_USER_ID}")
+COGNEE_ALT_DATASET_ID = library_dataset_id(f"project-1:{COGNEE_ALT_USER_ID}")
 
 
 class FakeSearchType(str, Enum):
@@ -85,6 +99,22 @@ class FakeOpenDataFile:
         return False
 
 
+class FakeUser:
+    """A principal, modelled the way Cognee's is: datasets are namespaced by it."""
+
+    def __init__(self, user_id):
+        self.id = user_id
+
+    def __eq__(self, other):
+        return isinstance(other, FakeUser) and other.id == self.id
+
+    def __hash__(self):
+        return hash(("FakeUser", self.id))
+
+    def __repr__(self):
+        return f"FakeUser({self.id!r})"
+
+
 class FakeDatasets:
     def __init__(self, owner):
         self.owner = owner
@@ -98,6 +128,7 @@ class FakeDatasets:
             for dataset_id, value in sorted(
                 self.owner.backend.items(), key=lambda item: str(item[0])
             )
+            if value.get("owner") == user
         ]
 
     async def empty_dataset(self, dataset_id, user=None):
@@ -132,6 +163,12 @@ class FakeCognee:
         self.search_results = search_results or []
         self.calls = []
         self.datasets = FakeDatasets(self)
+
+    async def user_for(self, user_id):
+        self.calls.append(("user_for", user_id))
+        if self.fail_on == "user_for":
+            raise RuntimeError("user resolution failed")
+        return None if user_id is None else FakeUser(user_id)
 
     def open_data_file(self, file_path, mode="rb", encoding=None):
         self.calls.append(("open_data_file", file_path, mode, encoding))
@@ -174,10 +211,19 @@ class FakeCognee:
         resolved = dataset_id
         if resolved is None:
             resolved = next(
-                (key for key, value in self.backend.items() if value["name"] == dataset_name),
-                library_dataset_id(dataset_name),
+                (
+                    key for key, value in self.backend.items()
+                    if value["name"] == dataset_name and value.get("owner") == user
+                ),
+                # Cognee namespaces a name-derived id by the owning principal, so
+                # the same project name is a different dataset for a different
+                # user. A fake that ignored the owner would make the isolation
+                # check pass for the wrong reason.
+                library_dataset_id(f"{dataset_name}:{None if user is None else user.id}"),
             )
-        dataset = self.backend.setdefault(resolved, {"name": dataset_name, "rows": []})
+        dataset = self.backend.setdefault(
+            resolved, {"name": dataset_name, "rows": [], "owner": user}
+        )
         if dataset["name"] != dataset_name:
             raise ValueError("dataset identity contradiction")
         location = f"file:///owned/{data.data_id}.txt"
@@ -196,6 +242,18 @@ class FakeCognee:
 
 class CogneeAdapterTests(unittest.TestCase):
     def setUp(self) -> None:
+        # Cognee keeps real file-backed stores now, so the adapter demands the
+        # owned root the executor prepares per unit before it will build a
+        # client - the same requirement Basic Memory and Mem0 already carry.
+        self.state_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.state_directory.cleanup)
+        self.state_root = str(Path(self.state_directory.name).resolve())
+        self.environment = patch.dict(
+            os.environ,
+            {"SHADOWGRAPH_PYTHON_ADAPTER_STATE_ROOT": self.state_root},
+        )
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
         self.backend = {}
         self.raw_files = {}
         self.clients = []
@@ -211,7 +269,7 @@ class CogneeAdapterTests(unittest.TestCase):
         return client
 
     def request(self, operation, **overrides):
-        return request_for(operation, arm_id="cognee", project_id="project-1", user_id=None, namespace_ref=COGNEE_REF, **overrides)
+        return request_for(operation, arm_id="cognee", project_id="project-1", user_id=COGNEE_USER_ID, namespace_ref=COGNEE_REF, **overrides)
 
     def execute(self, operation, **overrides):
         return asyncio.run(cognee_adapter.execute(self.request(operation, **overrides), python_config(), models_for(python_config()), client_factory=self.factory, version_getter=lambda name: "1.5.3" if name == "cognee" else None))
@@ -219,15 +277,25 @@ class CogneeAdapterTests(unittest.TestCase):
     def test_first_reset_is_idempotent_when_exact_dataset_is_absent(self) -> None:
         response = self.execute("reset")
         self.assertEqual(response["status"], "SUCCEEDED")
-        self.assertEqual(self.clients[0].calls, [("list_datasets", None)])
+        # The user is resolved before anything is addressed, because with a
+        # user-namespaced dataset id there is no dataset to name until there is
+        # a principal to name it for.
+        self.assertEqual(
+            self.clients[0].calls,
+            [("user_for", COGNEE_USER_ID), ("list_datasets", FakeUser(COGNEE_USER_ID))],
+        )
         self.assertEqual(response["operations"]["memoryReadOperations"], 1)
         self.assertEqual(response["operations"]["memoryWriteOperations"], 0)
 
     def test_reset_empties_only_an_exact_resolved_dataset_uuid(self) -> None:
-        self.backend[COGNEE_DATASET_ID] = {"name": "project-1", "rows": []}
+        self.backend[COGNEE_DATASET_ID] = {"name": "project-1", "rows": [], "owner": FakeUser(COGNEE_USER_ID)}
         response = self.execute("reset")
         self.assertEqual(response["status"], "SUCCEEDED")
-        self.assertEqual(self.clients[0].calls, [("list_datasets", None), ("empty_dataset", COGNEE_DATASET_ID, None)])
+        self.assertEqual(self.clients[0].calls, [
+            ("user_for", COGNEE_USER_ID),
+            ("list_datasets", FakeUser(COGNEE_USER_ID)),
+            ("empty_dataset", COGNEE_DATASET_ID, FakeUser(COGNEE_USER_ID)),
+        ])
         self.assertEqual(response["operations"]["memoryReadOperations"], 1)
         self.assertEqual(response["operations"]["memoryWriteOperations"], 1)
 
@@ -236,29 +304,37 @@ class CogneeAdapterTests(unittest.TestCase):
         # id this adapter used to compute is not the arm's dataset, and one
         # carrying the arm's name is, whatever id it has.
         self.assertNotEqual(COGNEE_DATASET_ID, ADAPTER_INVENTED_DATASET_ID)
-        self.backend[ADAPTER_INVENTED_DATASET_ID] = {"name": "someone-elses", "rows": []}
-        self.backend[COGNEE_DATASET_ID] = {"name": "project-1", "rows": []}
+        self.backend[ADAPTER_INVENTED_DATASET_ID] = {"name": "someone-elses", "rows": [], "owner": FakeUser(COGNEE_USER_ID)}
+        self.backend[COGNEE_DATASET_ID] = {"name": "project-1", "rows": [], "owner": FakeUser(COGNEE_USER_ID)}
         response = self.execute("reset")
         self.assertEqual(response["status"], "SUCCEEDED")
         self.assertEqual(
             self.clients[0].calls,
-            [("list_datasets", None), ("empty_dataset", COGNEE_DATASET_ID, None)],
+            [
+                ("user_for", COGNEE_USER_ID),
+                ("list_datasets", FakeUser(COGNEE_USER_ID)),
+                ("empty_dataset", COGNEE_DATASET_ID, FakeUser(COGNEE_USER_ID)),
+            ],
         )
 
     def test_a_dataset_under_another_name_is_not_the_arm_s_dataset(self) -> None:
-        self.backend[uuid4()] = {"name": "wrong-project", "rows": []}
+        self.backend[uuid4()] = {"name": "wrong-project", "rows": [], "owner": FakeUser(COGNEE_USER_ID)}
         response = self.execute("reset")
         self.assertEqual(response["status"], "SUCCEEDED")
-        self.assertEqual([call[0] for call in self.clients[0].calls], ["list_datasets"])
+        self.assertEqual(
+            [call[0] for call in self.clients[0].calls], ["user_for", "list_datasets"]
+        )
         self.assertEqual(response["operations"]["memoryWriteOperations"], 0)
 
     def test_two_datasets_sharing_the_arm_s_name_are_ambiguous_not_a_choice(self) -> None:
-        self.backend[uuid4()] = {"name": "project-1", "rows": []}
-        self.backend[uuid4()] = {"name": "project-1", "rows": []}
+        self.backend[uuid4()] = {"name": "project-1", "rows": [], "owner": FakeUser(COGNEE_USER_ID)}
+        self.backend[uuid4()] = {"name": "project-1", "rows": [], "owner": FakeUser(COGNEE_USER_ID)}
         response = self.execute("reset")
         self.assertEqual(response["status"], "FAILED")
         self.assertEqual(response["failure"]["cause"], "CONTRACT_FAILURE")
-        self.assertEqual([call[0] for call in self.clients[0].calls], ["list_datasets"])
+        self.assertEqual(
+            [call[0] for call in self.clients[0].calls], ["user_for", "list_datasets"]
+        )
 
     def test_retrieve_before_anything_is_persisted_searches_nothing_and_says_so(self) -> None:
         # Naming the dataset to Cognee's search would create it, and inventing
@@ -270,10 +346,12 @@ class CogneeAdapterTests(unittest.TestCase):
         self.assertEqual(response["operations"]["embeddingCalls"], 0)
         self.assertEqual(response["operations"]["internalMemoryModelCalls"], 0)
         self.assertEqual(response["operations"]["memoryReadOperations"], 1)
-        self.assertEqual([call[0] for call in self.clients[0].calls], ["list_datasets"])
+        self.assertEqual(
+            [call[0] for call in self.clients[0].calls], ["user_for", "list_datasets"]
+        )
 
     def test_retrieve_maps_search_result_context_and_skips_internal_llm_in_context_mode(self) -> None:
-        self.backend[COGNEE_DATASET_ID] = {"name": "project-1", "rows": []}
+        self.backend[COGNEE_DATASET_ID] = {"name": "project-1", "rows": [], "owner": FakeUser(COGNEE_USER_ID)}
         self.search_results = [FakeSearchResult({"fact": "Use the reversible option."}, COGNEE_DATASET_ID, "project-1")]
         response = self.execute("retrieve")
         self.assertEqual(response["status"], "SUCCEEDED")
@@ -297,7 +375,7 @@ class CogneeAdapterTests(unittest.TestCase):
         self.assertEqual(config["automatic_retries"], 0)
         self.assertEqual(config["retry_proof"], "task8_runtime_meter_required")
         self.assertNotIn("ollama", str(config).lower())
-        search_call = self.clients[0].calls[1]
+        search_call = self.clients[0].calls[2]
         self.assertIs(search_call[2], FakeSearchType.GRAPH_COMPLETION)
         self.assertIsNone(search_call[4])
         self.assertEqual(search_call[5], [COGNEE_DATASET_ID])
@@ -310,17 +388,18 @@ class CogneeAdapterTests(unittest.TestCase):
         # assigns it while handling the add, and nothing before that call can
         # know it.
         self.assertEqual(
-            [call[0] for call in self.clients[0].calls], ["add", "list_datasets", "cognify"]
+            [call[0] for call in self.clients[0].calls],
+            ["user_for", "add", "list_datasets", "cognify"],
         )
-        item = self.clients[0].calls[0][1]
+        item = self.clients[0].calls[1][1]
         self.assertIsInstance(item.data_id, UUID)
         self.assertEqual(str(item.data_id), "2c06c6a7-6772-5711-8f12-054e8b4c4a6b")
         self.assertEqual(item.external_metadata["shadowgraph_content_sha256"], DECISION_SHA256)
         self.assertIn("Use the reversible option.", item.data)
         # By name only. An id here would be a reference to an existing dataset.
-        self.assertIsNone(self.clients[0].calls[0][3])
-        self.assertEqual(self.clients[0].calls[0][2], "project-1")
-        self.assertEqual(self.clients[0].calls[2][1], [COGNEE_DATASET_ID])
+        self.assertIsNone(self.clients[0].calls[1][3])
+        self.assertEqual(self.clients[0].calls[1][2], "project-1")
+        self.assertEqual(self.clients[0].calls[3][1], [COGNEE_DATASET_ID])
         self.assertNotIn(ADAPTER_INVENTED_DATASET_ID, self.backend)
         self.assertEqual(response["operations"]["memoryWriteOperations"], 2)
         self.assertEqual(response["operations"]["memoryReadOperations"], 1)
@@ -328,7 +407,7 @@ class CogneeAdapterTests(unittest.TestCase):
         self.assertEqual(response["operations"]["embeddingCalls"], 2)
 
     def test_multiple_legitimate_cognee_provider_calls_are_preserved(self) -> None:
-        self.backend[COGNEE_DATASET_ID] = {"name": "project-1", "rows": []}
+        self.backend[COGNEE_DATASET_ID] = {"name": "project-1", "rows": [], "owner": FakeUser(COGNEE_USER_ID)}
         self.provider_counts = {"internal_memory_llm": 2, "embedding": 3}
         response = self.execute("retrieve")
         self.assertEqual(response["status"], "SUCCEEDED")
@@ -339,18 +418,55 @@ class CogneeAdapterTests(unittest.TestCase):
         self.execute("persist")
         row = self.backend[COGNEE_DATASET_ID]["rows"][0]
         self.assertFalse(hasattr(row, "data"))
-        response = self.execute("verify", alternate_namespace={"projectId": "project-alt", "userId": None}, alternate_namespace_ref=COGNEE_ALT_REF)
+        # The alternate is the same project under a different principal, which
+        # is the isolation CB2 unblocked and the definition declares.
+        response = self.execute(
+            "verify",
+            alternate_namespace={"projectId": "project-1", "userId": COGNEE_ALT_USER_ID},
+            alternate_namespace_ref=COGNEE_ALT_REF,
+        )
         self.assertEqual(len(self.clients), 2)
         self.assertEqual(response["status"], "SUCCEEDED")
         self.assertEqual(response["result"]["persistenceEvidence"]["observedContentSha256"], DECISION_SHA256)
         self.assertTrue(response["result"]["isolationEvidence"]["verified"])
-        self.assertEqual(response["operations"]["persistenceVerificationOperations"], 3)
-        self.assertEqual([call[0] for call in self.clients[1].calls], ["list_datasets", "list_data", "open_data_file"])
-        self.assertEqual(self.clients[1].calls[1][1], COGNEE_DATASET_ID)
-        self.assertEqual(self.clients[1].calls[2][2:], ("rb", None))
+        # Four now: the initial listing, the owner's data read, the other
+        # principal's listing, and its data read had there been one.
+        self.assertEqual(response["operations"]["persistenceVerificationOperations"], 4)
+        self.assertEqual(
+            [call[0] for call in self.clients[1].calls],
+            [
+                "user_for", "list_datasets", "list_data", "open_data_file",
+                "user_for", "list_datasets",
+            ],
+        )
+        # The other principal's listing is made as that principal. Reusing the
+        # owner's would answer the isolation question with the one view
+        # guaranteed to contain the record.
+        self.assertEqual(self.clients[1].calls[4], ("user_for", COGNEE_ALT_USER_ID))
+        self.assertEqual(
+            self.clients[1].calls[5], ("list_datasets", FakeUser(COGNEE_ALT_USER_ID))
+        )
+        self.assertEqual(self.clients[1].calls[2][1], COGNEE_DATASET_ID)
+        self.assertEqual(self.clients[1].calls[3][2:], ("rb", None))
 
-    def test_native_user_acl_is_a_task8_gate_not_a_synthetic_namespace(self) -> None:
-        bad = request_for("retrieve", arm_id="cognee", project_id="project-1", user_id="user-1", namespace_ref="f9e9c35ee8ababe775bc20289baaebd4f4be29d3b52e7130a4642d517ca6dccf")
+    def test_a_namespace_without_a_user_is_refused_rather_than_given_a_default(self) -> None:
+        """The mirror of the refusal this adapter used to make.
+
+        It refused a user namespace outright, on a precondition CB2 has since
+        demonstrated, and so failed every unit before reaching its factory. The
+        property that survives is the other direction: the definition declares
+        this arm `userIsolation: SUPPORTED`, so the runner always names a user,
+        and a namespace without one is a shape this arm does not produce.
+        Resolving it to Cognee's default principal would silently measure a
+        different isolation than the one declared.
+        """
+        bad = request_for(
+            "retrieve",
+            arm_id="cognee",
+            project_id="project-1",
+            user_id=None,
+            namespace_ref=COGNEE_NO_USER_REF,
+        )
         response = asyncio.run(cognee_adapter.execute(bad, python_config(), models_for(python_config()), client_factory=self.factory, version_getter=lambda _name: "1.5.3"))
         self.assertEqual(response["status"], "FAILED")
         self.assertEqual(response["failure"]["cause"], "CONTRACT_FAILURE")
@@ -392,11 +508,11 @@ class CogneeAdapterTests(unittest.TestCase):
         self.assertNotIn("applicability", serialized)
 
     def test_failed_search_counts_embedding_traffic_but_no_skipped_llm_call(self) -> None:
-        self.backend[COGNEE_DATASET_ID] = {"name": "project-1", "rows": []}
+        self.backend[COGNEE_DATASET_ID] = {"name": "project-1", "rows": [], "owner": FakeUser(COGNEE_USER_ID)}
         self.fail_on = "search"
         response = self.execute("retrieve")
         self.assertEqual(response["status"], "FAILED")
-        self.assertEqual(len(self.clients[0].calls), 2)
+        self.assertEqual(len(self.clients[0].calls), 3)
         self.assertEqual(response["operations"]["memoryReadOperations"], 2)
         self.assertEqual(response["operations"]["internalMemoryModelCalls"], 0)
         self.assertEqual(response["operations"]["embeddingCalls"], 1)
@@ -407,6 +523,219 @@ class CogneeAdapterTests(unittest.TestCase):
         self.assertEqual(response["status"], "FAILED")
         self.assertEqual(response["failure"]["cause"], "ENDPOINT_UNAVAILABLE")
         self.assertEqual(self.clients, [])
+
+
+class _StubHttpxClient:
+    def __init__(self, recorder):
+        self.recorder = recorder
+
+    def send(self, request, *args, **kwargs):
+        self.recorder.append(("sync", str(request.url)))
+        return ("sent", request)
+
+    async def asend(self, request, *args, **kwargs):
+        self.recorder.append(("async", str(request.url)))
+        return ("sent", request)
+
+
+class _StubRequest:
+    def __init__(self, url):
+        self.url = url
+
+
+class _StubHttpx:
+    """Enough of httpx for the counting patch to bind to."""
+
+    def __init__(self):
+        self.sent = []
+        parent = self
+
+        class Client:
+            def send(self, request, *args, **kwargs):
+                parent.sent.append(("sync", str(request.url)))
+                return ("sent", request)
+
+        class AsyncClient:
+            async def send(self, request, *args, **kwargs):
+                parent.sent.append(("async", str(request.url)))
+                return ("sent", request)
+
+        self.Client = Client
+        self.AsyncClient = AsyncClient
+
+
+class CogneeRuntimeConfigTests(unittest.TestCase):
+    """What the adapter declares it is running, and what the factory does with it."""
+
+    def setUp(self) -> None:
+        self.state_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.state_directory.cleanup)
+        self.state_root = str(Path(self.state_directory.name).resolve())
+
+    def config(self):
+        return cognee_adapter._runtime_config(
+            python_config(), models_for(python_config()), self.state_root
+        )
+
+    def test_the_declaration_names_the_pairing_the_acl_was_demonstrated_under(self) -> None:
+        # CB2 did not demonstrate an ACL in general; it demonstrated one under a
+        # backend pairing that can physically carry per-dataset isolation.
+        # Inheriting the pairing from the environment would mean running under a
+        # configuration nobody has evidence for.
+        backend = self.config()["backend"]
+        self.assertEqual(backend["ENABLE_BACKEND_ACCESS_CONTROL"], "true")
+        self.assertEqual(backend["VECTOR_DB_PROVIDER"], "lancedb")
+        self.assertEqual(backend["GRAPH_DATABASE_PROVIDER"], "ladybug")
+
+    def test_the_store_lives_under_the_root_the_executor_owns(self) -> None:
+        config = self.config()
+        self.assertEqual(config["system_root"], os.path.join(self.state_root, "system"))
+        self.assertEqual(config["data_root"], os.path.join(self.state_root, "data"))
+
+    def test_a_configuration_the_factory_cannot_use_is_reported_as_an_unavailable_runtime(self) -> None:
+        # The caller is deciding whether the arm can execute. A KeyError escaping
+        # here would be classified by the adapter's generic handler as
+        # OPERATION_FAILED - the product blamed for the harness's own bad input.
+        for config in ({}, {"backend": {}}, None, {"llm_config": {}, "backend": {}}):
+            with self.subTest(config=config):
+                with self.assertRaises(RuntimeUnavailable):
+                    asyncio.run(
+                        await_native(cognee_adapter._default_client_factory(config, lambda _c: None))
+                    )
+
+
+class CogneeMeteredRequestTests(unittest.TestCase):
+    """The counting seam, where Cognee gives no other one.
+
+    Mem0 exposes its SDK clients so its adapter rebinds them. Cognee does not:
+    completions go through litellm and embeddings through its own engine, each
+    building a client the public API never hands over. What both share is httpx,
+    so the count is taken there - on requests actually sent, which is the same
+    principle Mem0's transport uses and the only one a retry cannot hide from.
+    """
+
+    def setUp(self) -> None:
+        self.httpx = _StubHttpx()
+        self.original_send = self.httpx.Client.send
+        self.original_async_send = self.httpx.AsyncClient.send
+        self.counted = []
+        cognee_adapter._count_metered_requests(
+            self.httpx,
+            {
+                "internal_memory_llm": "http://127.0.0.1:43100/llm-a",
+                "embedding": "http://127.0.0.1:43100/embed-a",
+            },
+            self.counted.append,
+        )
+
+    def test_a_request_to_a_metered_route_is_counted_once_under_its_class(self) -> None:
+        client = self.httpx.Client()
+        client.send(_StubRequest("http://127.0.0.1:43100/llm-a/chat/completions"))
+        client.send(_StubRequest("http://127.0.0.1:43100/embed-a/embeddings"))
+        self.assertEqual(self.counted, ["internal_memory_llm", "embedding"])
+        # And the request is still sent: counting must observe, not intercept.
+        self.assertEqual(len(self.httpx.sent), 2)
+
+    def test_the_async_client_is_counted_the_same_way(self) -> None:
+        # Cognee's ingestion path is async throughout; a patch that covered only
+        # the synchronous client would report zero for every real call.
+        client = self.httpx.AsyncClient()
+        asyncio.run(client.send(_StubRequest("http://127.0.0.1:43100/embed-a/embeddings")))
+        self.assertEqual(self.counted, ["embedding"])
+        self.assertEqual(self.httpx.sent, [("async", "http://127.0.0.1:43100/embed-a/embeddings")])
+
+    def test_a_request_to_anything_else_is_left_alone(self) -> None:
+        client = self.httpx.Client()
+        for url in [
+            "http://127.0.0.1:43100/llm-b/chat/completions",
+            "http://127.0.0.1:11434/v1/chat/completions",
+            "http://example.com/",
+        ]:
+            client.send(_StubRequest(url))
+        self.assertEqual(self.counted, [])
+        self.assertEqual(len(self.httpx.sent), 3)
+
+    def test_every_request_counts_because_a_retry_is_a_second_request(self) -> None:
+        client = self.httpx.Client()
+        for _index in range(3):
+            client.send(_StubRequest("http://127.0.0.1:43100/llm-a/chat/completions"))
+        self.assertEqual(self.counted, ["internal_memory_llm"] * 3)
+
+
+class CogneeClientSeamTests(unittest.TestCase):
+    def build(self, existing=None):
+        self.created = []
+        self.looked_up = []
+
+        async def get_user_by_email(email):
+            self.looked_up.append(email)
+            return existing
+
+        async def create_user(email, password):
+            self.created.append((email, password))
+            return FakeUser(email)
+
+        module = types.SimpleNamespace(
+            SearchType=FakeSearchType,
+            datasets=object(),
+            add=None,
+            search=None,
+            cognify=None,
+        )
+        return cognee_adapter._CogneeClient(
+            module, FakeDataItem, lambda *args, **kwargs: None, create_user, get_user_by_email
+        )
+
+    def test_a_user_is_looked_up_before_it_is_created(self) -> None:
+        # A unit is one process and a scenario is many units. The second process
+        # must find the principal the first one made, or every unit would own a
+        # different dataset and the isolation the definition declares would be
+        # measured against a store that had just been created empty.
+        client = self.build(existing=FakeUser("already-there"))
+        user = asyncio.run(client.user_for("user-1"))
+        self.assertEqual(user.id, "already-there")
+        self.assertEqual(self.created, [])
+        self.assertEqual(
+            self.looked_up, ["shadowgraph-benchmark-user-1@example.com"]
+        )
+
+    def test_a_user_that_does_not_exist_yet_is_created_once(self) -> None:
+        client = self.build(existing=None)
+        asyncio.run(client.user_for("user-1"))
+        self.assertEqual(len(self.created), 1)
+        self.assertEqual(self.created[0][0], "shadowgraph-benchmark-user-1@example.com")
+        # The password is not a benchmark input and is never reused.
+        self.assertGreater(len(self.created[0][1]), 16)
+
+    def test_the_address_is_reserved_and_could_not_reach_a_person(self) -> None:
+        # `.invalid` would say this more plainly and is refused: Cognee validates
+        # the address with pydantic's email validator, which rejects special-use
+        # names outright.
+        self.assertEqual(cognee_adapter.BENCHMARK_USER_DOMAIN, "example.com")
+        self.assertTrue(cognee_adapter.BENCHMARK_USER_PREFIX.startswith("shadowgraph"))
+
+    def test_no_user_id_resolves_to_no_principal_rather_than_a_default(self) -> None:
+        client = self.build()
+        self.assertIsNone(asyncio.run(client.user_for(None)))
+        self.assertEqual(self.looked_up, [])
+        self.assertEqual(self.created, [])
+
+    def test_only_the_per_call_model_configuration_is_dropped(self) -> None:
+        # Cognee takes these settings globally and they are applied once at
+        # construction from exactly these values, so passing them again per call
+        # would hand the library the same fact twice in a shape its signature
+        # does not accept. Everything else must survive untouched.
+        kept = cognee_adapter._CogneeClient._without_call_config({
+            "dataset_name": "project-1",
+            "user": "principal",
+            "incremental_loading": True,
+            "llm_config": {"endpoint": "x"},
+            "embedding_config": {"endpoint": "y"},
+        })
+        self.assertEqual(
+            kept,
+            {"dataset_name": "project-1", "user": "principal", "incremental_loading": True},
+        )
 
 
 if __name__ == "__main__":

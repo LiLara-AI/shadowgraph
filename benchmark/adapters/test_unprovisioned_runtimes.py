@@ -37,7 +37,7 @@ import graphiti_adapter
 import mem0_adapter
 
 from envelope import namespace_ref_for
-from python_runtime import RuntimeUnavailable
+from python_runtime import RuntimeUnavailable, await_native
 from test_support import models_for, python_config, request_for
 
 
@@ -48,7 +48,10 @@ from test_support import models_for, python_config, request_for
 UNPROVISIONED_ARMS = (
     ("mem0-oss", mem0_adapter, True),
     ("graphiti", graphiti_adapter, False),
-    ("cognee", cognee_adapter, False),
+    # Cognee has a native user namespace. The adapter refused one until CB2
+    # demonstrated its ACL under the pinned backend configuration; the frozen
+    # definition has declared it SUPPORTED throughout.
+    ("cognee", cognee_adapter, True),
 )
 
 OPERATIONS = ("reset", "retrieve", "persist", "verify")
@@ -92,12 +95,23 @@ def _foreign_user_id(has_native_user_namespace: bool) -> str | None:
     return None if has_native_user_namespace else "user-1"
 
 
+def _build_client(module):
+    """Call a default factory, whichever shape it has.
+
+    Mem0's and Graphiti's are synchronous; Cognee's has to await its own store
+    setup, so it is a coroutine. `await_native` is the seam the adapters already
+    drive factories through, so a test that handled only one shape would be
+    exercising that seam less thoroughly than production does.
+    """
+    return asyncio.run(await_native(module._default_client_factory({}, None)))
+
+
 class UnprovisionedRuntimeTests(unittest.TestCase):
     def test_the_default_factory_refuses_rather_than_returning_a_client(self) -> None:
         for arm_id, module, _ in UNPROVISIONED_ARMS:
             with self.subTest(arm=arm_id):
                 with self.assertRaises(RuntimeUnavailable):
-                    module._default_client_factory({}, None)
+                    _build_client(module)
 
     def test_a_supported_namespace_reaches_the_runtime_and_reports_it_missing(self) -> None:
         # ENDPOINT_UNAVAILABLE rather than CONTRACT_FAILURE matters: it tells a
@@ -174,7 +188,7 @@ class UnprovisionedRuntimeTests(unittest.TestCase):
         for arm_id, module, native in UNPROVISIONED_ARMS:
             with self.subTest(arm=arm_id):
                 try:
-                    module._default_client_factory({}, None)
+                    _build_client(module)
                 except RuntimeUnavailable as error:
                     internal = str(error)
                 else:

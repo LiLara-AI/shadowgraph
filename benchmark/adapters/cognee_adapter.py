@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import os
+import secrets
 import math
 from uuid import UUID
 
@@ -17,6 +19,7 @@ from python_runtime import (
     failed_response,
     installed_version,
     logical_record,
+    persistent_state_root,
     require_models,
     require_routes,
     require_versions,
@@ -33,7 +36,7 @@ STORAGE = not_available_storage(
 )
 
 
-def _runtime_config(routes: dict, models: dict) -> dict:
+def _runtime_config(routes: dict, models: dict, state_root: str) -> dict:
     llm = {
         "provider": "openai",
         "endpoint": routes["internal_memory_llm"],
@@ -55,6 +58,13 @@ def _runtime_config(routes: dict, models: dict) -> dict:
     return {
         "package": {"name": "cognee", "version": "1.5.3"},
         "mode": "openai_compatible",
+        # The pinned backend pairing and the roots it writes into, stated here
+        # rather than inherited from the environment: the pairing *is* the
+        # precondition CB2 demonstrated the native ACL under, and a run under a
+        # different one would be a run nobody has evidence for.
+        "backend": dict(COGNEE_BACKEND),
+        "system_root": os.path.join(state_root, "system"),
+        "data_root": os.path.join(state_root, "data"),
         "llm_config": llm,
         "embedding_config": embedding,
         "automatic_retries": 0,
@@ -63,10 +73,225 @@ def _runtime_config(routes: dict, models: dict) -> dict:
     }
 
 
-def _default_client_factory(_config, _provider_call):
-    raise RuntimeUnavailable(
-        "Cognee real runtime requires the Task 8 ACL, service, and model lock"
+# The pinned backend pairing, which is the precondition itself.
+#
+# CB2 demonstrated Cognee 1.5.3 enforcing its native per-user ACL, and what made
+# that possible was not a flag but a pairing: LanceDB and Ladybug are both
+# file-backed and both able to carry per-dataset isolation, which is what
+# `multi_user_support_possible()` checks before it will enable access control at
+# all. Naming the pairing here rather than inheriting whatever the environment
+# happens to hold is the difference between running under the configuration the
+# demonstration covered and running under one nobody has evidence for.
+COGNEE_BACKEND = {
+    "ENABLE_BACKEND_ACCESS_CONTROL": "true",
+    "VECTOR_DB_PROVIDER": "lancedb",
+    "VECTOR_DATASET_DATABASE_HANDLER": "lancedb",
+    "GRAPH_DATABASE_PROVIDER": "ladybug",
+    "GRAPH_DATASET_DATABASE_HANDLER": "ladybug",
+}
+
+# Cognee refuses to configure without a value in the key slot, and the endpoint
+# it is given is the benchmark's own metered proxy, which authenticates nothing.
+# The spelling is the package scanner's own for a value that is demonstrably not
+# a credential, so the gate that catches a real key in the tarball holds this too.
+UNUSED_API_KEY = "not-a-secret"
+
+# Reserved by RFC 2606 for documentation and examples, so a principal named this
+# way cannot be mistaken for a person or reach one. `.invalid` would say that
+# more plainly and is refused: Cognee validates the address with pydantic's
+# email validator, which rejects special-use names outright.
+BENCHMARK_USER_DOMAIN = "example.com"
+BENCHMARK_USER_PREFIX = "shadowgraph-benchmark"
+
+
+def _count_metered_requests(httpx_module, routes: dict, provider_call) -> None:
+    """Count every request this process sends to a metered route.
+
+    Mem0 exposes its SDK clients, so its adapter rebinds them and counts on a
+    transport it owns. Cognee does not: completions go through litellm and
+    embeddings through its own engine, each building its own client, and neither
+    is reachable from the public API. What both paths do share is httpx.
+
+    So the count is taken there, which is the same place and the same principle
+    as Mem0's - requests on the wire, not calls into a library, because a retry
+    is a second request for one call and a ledger that could not tell them apart
+    would have nothing to reconcile against the meter.
+
+    This patches the module rather than an instance, and does not undo it. That
+    is safe here for a specific reason and not in general: the executor gives
+    each invocation its own container and its own interpreter, which exits after
+    one operation. A request to anything other than a metered route is left
+    entirely alone - and cannot happen anyway, since the host fences this
+    process to loopback.
+    """
+    metered = {endpoint: request_class for request_class, endpoint in routes.items() if endpoint}
+    original_send = httpx_module.Client.send
+    original_async_send = httpx_module.AsyncClient.send
+
+    def request_class_for(url) -> str | None:
+        text = str(url)
+        for endpoint, request_class in metered.items():
+            if text.startswith(endpoint):
+                return request_class
+        return None
+
+    def send(self, request, *args, **kwargs):
+        request_class = request_class_for(request.url)
+        if request_class is not None:
+            provider_call(request_class)
+        return original_send(self, request, *args, **kwargs)
+
+    async def async_send(self, request, *args, **kwargs):
+        request_class = request_class_for(request.url)
+        if request_class is not None:
+            provider_call(request_class)
+        return await original_async_send(self, request, *args, **kwargs)
+
+    httpx_module.Client.send = send
+    httpx_module.AsyncClient.send = async_send
+
+
+class _CogneeClient:
+    """The narrow seam this adapter drives Cognee through.
+
+    Everything here is Cognee's own public API. The class exists so the adapter
+    has one object to hold - and so `user_for` has somewhere to live, since
+    resolving a benchmark user id to a Cognee principal is the one thing the
+    module does not offer directly.
+    """
+
+    def __init__(self, module, data_item, opener, create_user, get_user_by_email):
+        self._module = module
+        self._opener = opener
+        self._create_user = create_user
+        self._get_user_by_email = get_user_by_email
+        self.DataItem = data_item
+        self.SearchType = module.SearchType
+        self.datasets = module.datasets
+
+    async def user_for(self, user_id):
+        """Resolve a benchmark user id to the Cognee principal that owns its data.
+
+        Idempotent by lookup-then-create, because a unit is one process and a
+        scenario is many units: the second process must find the principal the
+        first one made, or every unit would own a different dataset and the
+        isolation the definition declares would be measured against a store that
+        had just been created empty.
+        """
+        if user_id is None:
+            return None
+        email = f"{BENCHMARK_USER_PREFIX}-{user_id}@{BENCHMARK_USER_DOMAIN}"
+        existing = await self._get_user_by_email(email)
+        if existing is not None:
+            return existing
+        return await self._create_user(email, secrets.token_urlsafe(24))
+
+    def open_data_file(self, file_path, mode="rb", encoding=None):
+        return self._opener(file_path, mode=mode, encoding=encoding)
+
+    async def add(self, data, **kwargs):
+        return await self._module.add(data, **self._without_call_config(kwargs))
+
+    async def search(self, **kwargs):
+        return await self._module.search(**self._without_call_config(kwargs))
+
+    async def cognify(self, **kwargs):
+        return await self._module.cognify(**self._without_call_config(kwargs))
+
+    @staticmethod
+    def _without_call_config(kwargs: dict) -> dict:
+        """Drop the per-call model configuration, which is already applied.
+
+        The adapter states its model configuration on every call, and that
+        statement is what its runtime config records. Cognee takes the same
+        settings globally, through `cognee.config`, and they are set once at
+        construction from exactly those values - so passing them again per call
+        would be handing the same fact to the library twice, in a shape its own
+        signature does not accept.
+
+        This is only equivalent because of how the executor runs an adapter: one
+        container, one interpreter, one operation, one arm. Global and per-call
+        are the same scope here, and a process that hosted two arms would need
+        this reconsidered rather than reused.
+        """
+        return {key: value for key, value in kwargs.items()
+                if key not in ("llm_config", "embedding_config")}
+
+
+async def _default_client_factory(config, provider_call):
+    """The real pinned Cognee, on its file-backed stores, with its ACL active."""
+    # A configuration this factory cannot use is a runtime it cannot provide,
+    # and it says so in those terms: the caller is deciding whether the arm can
+    # execute, not debugging a dictionary.
+    try:
+        backend = config["backend"]
+        llm = config["llm_config"]
+        embedding = config["embedding_config"]
+        system_root = config["system_root"]
+        data_root = config["data_root"]
+    except (TypeError, KeyError, IndexError) as error:
+        raise RuntimeUnavailable(
+            "Cognee runtime configuration does not describe a usable pinned runtime"
+        ) from error
+
+    # Set before Cognee is imported: the access-control posture is read from the
+    # environment when its context is first built, and a later assignment would
+    # be a setting nobody applied.
+    for name, value in backend.items():
+        os.environ[name] = value
+
+    try:
+        import httpx
+        import cognee
+        from cognee.context_global_variables import backend_access_control_enabled
+        from cognee.infrastructure.files.utils.open_data_file import open_data_file
+        from cognee.modules.engine.operations.setup import setup as cognee_setup
+        from cognee.modules.users.methods import create_user, get_user_by_email
+        from cognee.tasks.ingestion.data_item import DataItem
+    except ImportError as error:
+        raise RuntimeUnavailable(
+            "Cognee 1.5.3 and its file-backed stores are not importable from the pinned runtime"
+        ) from error
+
+    # Cognee resolves these paths but does not create them.
+    os.makedirs(os.path.join(system_root, "databases"), exist_ok=True)
+    os.makedirs(data_root, exist_ok=True)
+
+    try:
+        cognee.config.system_root_directory(system_root)
+        cognee.config.data_root_directory(data_root)
+        cognee.config.set_vector_db_provider(backend["VECTOR_DB_PROVIDER"])
+        cognee.config.set_graph_database_provider(backend["GRAPH_DATABASE_PROVIDER"])
+        cognee.config.set_llm_provider(llm["provider"])
+        cognee.config.set_llm_endpoint(llm["endpoint"])
+        cognee.config.set_llm_model(llm["model"])
+        cognee.config.set_llm_api_key(UNUSED_API_KEY)
+        cognee.config.set_embedding_provider("openai_compatible")
+        cognee.config.set_embedding_endpoint(embedding["endpoint"])
+        cognee.config.set_embedding_model(embedding["model"])
+        cognee.config.set_embedding_dimensions(embedding["dimensions"])
+        cognee.config.set_embedding_api_key(UNUSED_API_KEY)
+        await cognee_setup()
+    except Exception as error:
+        raise RuntimeUnavailable(
+            "Cognee could not be configured against the pinned stores and metered routes"
+        ) from error
+
+    # The precondition, checked rather than assumed. CB2 demonstrated the ACL
+    # under this pairing; if the posture is off, this arm's declared user
+    # isolation would be measured against a store that does not enforce it, and
+    # every isolation result would be a false negative.
+    if not backend_access_control_enabled():
+        raise RuntimeUnavailable(
+            "Cognee backend access control is not active under the pinned stores"
+        )
+
+    _count_metered_requests(
+        httpx,
+        {"internal_memory_llm": llm["endpoint"], "embedding": embedding["endpoint"]},
+        provider_call,
     )
+    return _CogneeClient(cognee, DataItem, open_data_file, create_user, get_user_by_email)
 
 
 def _dataset_identity(item) -> tuple[UUID, str]:
@@ -235,27 +460,44 @@ async def execute(
         namespace = request["namespace"]
         if not isinstance(namespace["projectId"], str) or not namespace["projectId"].strip():
             raise ContractError("Cognee requires a native dataset namespace")
-        if namespace["userId"] is not None:
-            raise ContractError("Cognee user ACL is not locked for benchmark execution")
+        # The definition declares this arm `userIsolation: SUPPORTED`, so the
+        # runner always names a user. A namespace without one is a namespace
+        # this arm's declared shape does not produce, and synthesizing a default
+        # principal for it would measure a different isolation than the one
+        # declared.
+        if not isinstance(namespace["userId"], str) or not namespace["userId"].strip():
+            raise ContractError("Cognee requires a native user scope")
         require_routes(config, required=True)
         require_models(models, required=True)
         require_versions(PINNED_PACKAGES, version_getter)
-        runtime = _runtime_config(config, models)
+        runtime = _runtime_config(config, models, persistent_state_root("Cognee"))
         client = await await_native(client_factory(runtime, provider_calls))
+        # The arm's user, as Cognee knows one.
+        #
+        # This adapter used to refuse a user namespace outright, on the grounds
+        # that Cognee's ACL was not locked for benchmark execution. That was
+        # true when it was written and is not any more: CB2 demonstrated Cognee
+        # 1.5.3 enforcing its native per-user ACL under the pinned backend
+        # configuration. Meanwhile the acceptance definition declares this arm
+        # `userIsolation: SUPPORTED`, so the runner hands it a user - and the
+        # refusal was failing every unit before the client factory was reached,
+        # for a precondition that had since been met.
+        #
+        user = await await_native(client.user_for(namespace["userId"]))
         dataset_name = namespace["projectId"]
         operation = request["operation"]
         if operation == "reset":
             operations["memoryReadOperations"] += 1
-            datasets = await await_native(client.datasets.list_datasets(user=None))
+            datasets = await await_native(client.datasets.list_datasets(user=user))
             existing = _resolve_dataset(datasets, dataset_name)
             if existing is not None:
                 operations["memoryWriteOperations"] += 1
                 await await_native(
-                    client.datasets.empty_dataset(_dataset_id_of(existing), user=None)
+                    client.datasets.empty_dataset(_dataset_id_of(existing), user=user)
                 )
         elif operation == "retrieve":
             operations["memoryReadOperations"] += 1
-            datasets = await await_native(client.datasets.list_datasets(user=None))
+            datasets = await await_native(client.datasets.list_datasets(user=user))
             existing = _resolve_dataset(datasets, dataset_name)
             if existing is None:
                 # Nothing to search. Naming the dataset to Cognee's search would
@@ -276,7 +518,7 @@ async def execute(
                 client.search(
                     query_text=request["payload"]["query"]["task"],
                     query_type=client.SearchType.GRAPH_COMPLETION,
-                    user=None,
+                    user=user,
                     datasets=None,
                     dataset_ids=[dataset_id],
                     top_k=15,
@@ -314,14 +556,14 @@ async def execute(
                 client.add(
                     item,
                     dataset_name=dataset_name,
-                    user=None,
+                    user=user,
                     incremental_loading=True,
                     llm_config=runtime["llm_config"],
                     embedding_config=runtime["embedding_config"],
                 )
             )
             operations["memoryReadOperations"] += 1
-            datasets = await await_native(client.datasets.list_datasets(user=None))
+            datasets = await await_native(client.datasets.list_datasets(user=user))
             written = _resolve_dataset(datasets, dataset_name)
             if written is None:
                 raise ContractError("Cognee did not record the dataset the record was added to")
@@ -329,37 +571,51 @@ async def execute(
             await await_native(
                 client.cognify(
                     datasets=[_dataset_id_of(written)],
-                    user=None,
+                    user=user,
                     llm_config=runtime["llm_config"],
                     embedding_config=runtime["embedding_config"],
                 )
             )
         else:
             operations["persistenceVerificationOperations"] += 1
-            datasets = await await_native(client.datasets.list_datasets(user=None))
+            datasets = await await_native(client.datasets.list_datasets(user=user))
             primary = []
             existing = _resolve_dataset(datasets, dataset_name)
             if existing is not None:
                 dataset_id = _dataset_id_of(existing)
                 operations["persistenceVerificationOperations"] += 1
                 primary_raw = await await_native(
-                    client.datasets.list_data(dataset_id, user=None)
+                    client.datasets.list_data(dataset_id, user=user)
                 )
                 primary = await _data_records(client, primary_raw, dataset_id, operations)
             alternate = None
             if request["payload"]["alternateNamespace"] is not None:
                 alternate_namespace = request["payload"]["alternateNamespace"]
-                if alternate_namespace["userId"] is not None:
-                    raise ContractError("Cognee alternate user ACL is not locked")
+                if not isinstance(alternate_namespace["projectId"], str) or not isinstance(
+                    alternate_namespace["userId"], str
+                ):
+                    raise ContractError("Cognee isolation requires native dataset and user scopes")
+                alternate_user = await await_native(
+                    client.user_for(alternate_namespace["userId"])
+                )
                 alternate = []
+                # A second listing, made as the other principal. Reusing the
+                # primary's listing would answer the isolation question with the
+                # primary's own view, which is the one view guaranteed to show
+                # the record - and Cognee namespaces a dataset id by its owner,
+                # so the same project name is a different dataset here.
+                operations["persistenceVerificationOperations"] += 1
+                alternate_datasets = await await_native(
+                    client.datasets.list_datasets(user=alternate_user)
+                )
                 alternate_existing = _resolve_dataset(
-                    datasets, alternate_namespace["projectId"]
+                    alternate_datasets, alternate_namespace["projectId"]
                 )
                 if alternate_existing is not None:
                     alternate_dataset_id = _dataset_id_of(alternate_existing)
                     operations["persistenceVerificationOperations"] += 1
                     alternate_raw = await await_native(
-                        client.datasets.list_data(alternate_dataset_id, user=None)
+                        client.datasets.list_data(alternate_dataset_id, user=alternate_user)
                     )
                     alternate = await _data_records(
                         client, alternate_raw, alternate_dataset_id, operations

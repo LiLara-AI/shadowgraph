@@ -70,10 +70,24 @@ runner hands it a `userId`. The adapter refuses on sight:
 
 That refusal was correct when it was written, because CB2 was open. **CB2 is
 cleared** - `v11-cb2-acl-demonstration-2026-09-05.md` shows Cognee 1.5.3
-enforcing its native user ACL under the pinned configuration - so the refusal now
-encodes a precondition that has been demonstrated. Cognee fails every unit with
-`CONTRACT_FAILURE` before reaching its client factory, which is a different
-blocker from the one LB2b records for it.
+enforcing its native user ACL under the pinned configuration - so the refusal
+encoded a precondition that had been demonstrated, and Cognee failed every unit
+with `CONTRACT_FAILURE` before reaching its client factory.
+
+**Fixed here.** The adapter resolves the benchmark's user id to a Cognee
+principal and names it on every call, and the mirror property replaces the
+refusal: a namespace *without* a user is now what gets refused, because the
+definition declares this arm supports user isolation and resolving a missing
+user to Cognee's default principal would measure a different isolation than the
+one declared. The alternate namespace in a verify is listed as the other
+principal rather than through the owner's view, since Cognee namespaces a
+dataset id by its owner and the owner's view is the one guaranteed to contain
+the record.
+
+Its client factory followed, so LB2b is cleared for Cognee too: the real library
+on its pinned file-backed stores, with the access-control posture checked rather
+than assumed, and provider calls counted at httpx - the only seam Cognee shares
+between litellm completions and its own embedding engine.
 
 ## What was built
 
@@ -118,10 +132,19 @@ does first.
 | `mem0-oss` | python-container | **SUCCEEDED** | NOT_AVAILABLE |
 | `graphiti` | python-container | FAILED (`ENDPOINT_UNAVAILABLE`) | NOT_AVAILABLE |
 | `basic-memory` | python-container | **SUCCEEDED** | **MEASURED** |
-| `cognee` | python-container | FAILED (`CONTRACT_FAILURE`) | NOT_AVAILABLE |
+| `cognee` | python-container | **SUCCEEDED** | NOT_AVAILABLE |
 
-Seven bound, seven reached their runtime, five executed. Zero provider ledger
-events, which is correct: a reset makes no provider call, and a ledger that had
+Seven bound, seven reached their runtime, **six executed**. Only Graphiti
+refuses, which is LB2f's recorded owner decision rather than an open question.
+
+Cognee reached that state in three steps over this record's life, and the first
+two are F3 and its own client factory: it began at `CONTRACT_FAILURE` (refusing
+the user namespace the definition declares it supports), moved to
+`ENDPOINT_UNAVAILABLE` once that stale refusal was lifted and it could reach its
+factory, and reached `SUCCEEDED` when the factory was implemented. The table
+above is the last of those runs.
+
+The provider ledger recorded zero events, which is correct: a reset makes no provider call, and a ledger that had
 recorded one would mean an arm was reaching the model for an operation the
 contract says it must not.
 
