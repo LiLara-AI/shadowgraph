@@ -437,7 +437,7 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
   let wall = Date.parse('2026-08-31T00:00:00.000Z');
   const applicability = new Map(definition.arms.map((arm) => [arm.id, arm.applicability]));
   const reconciled = [];
-  const outcome = await executeV11AcceptanceRun({
+  const readyInput = {
     registry,
     definition,
     scenarios,
@@ -469,7 +469,59 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
       reconciled.push(raw);
       return { status: 'RECONCILED', findings: [] };
     }
-  });
+  };
+
+  // The two refusals this input has to pass through, checked against the same
+  // READY candidate rather than against a fixture of their own - they fire
+  // before the plan loop, so asking costs one readiness computation each.
+  //
+  // A review deleted both guards and watched 2344 tests stay green, and deleted
+  // the CLI's call and watched the same. The requirement is what makes the
+  // reconciliation a property of a run rather than of a caller, so the
+  // requirement is what has to be tested.
+  await assert.rejects(
+    executeV11AcceptanceRun({ ...readyInput, reconcileProviderEvidence: undefined }),
+    /must reconcile its own provider evidence/u
+  );
+  await assert.rejects(
+    executeV11AcceptanceRun({ ...readyInput, reconcileProviderEvidence: 'yes please' }),
+    /must reconcile its own provider evidence/u
+  );
+  // An answer that is not a verdict is not a reconciliation: an artifact would
+  // be written beside a run nobody judged. This guard sits after the plan loop -
+  // there is nothing to reconcile before it - so each case is a whole run and
+  // needs its own ledgers; two cover the shapes, an answer that is not an object
+  // and one whose status is not a string.
+  let spare = 0;
+  for (const answer of [undefined, { status: 42 }]) {
+    spare += 1;
+    const spareProgress = await createProgressLedger({
+      path: path.join(outputDirectory, `spare-${spare}.progress.ndjson`),
+      runId: 'run-v11-connected',
+      attemptId: 'attempt-v11-connected',
+      monotonicNow: () => (monotonic += 5)
+    });
+    const spareUnits = await createUnitEvidenceLedger({
+      path: path.join(outputDirectory, `spare-${spare}.units.ndjson`),
+      runId: 'run-v11-connected',
+      attemptId: 'attempt-v11-connected',
+      sensitiveValues: []
+    });
+    await assert.rejects(
+      executeV11AcceptanceRun({
+        ...readyInput,
+        progress: spareProgress,
+        persistUnit: (unit) => spareUnits.append(unit),
+        reconcileProviderEvidence: () => answer
+      }),
+      /must report a status/u,
+      JSON.stringify(answer ?? null)
+    );
+    await spareProgress.close();
+    await spareUnits.close();
+  }
+
+  const outcome = await executeV11AcceptanceRun(readyInput);
 
   assert.equal(outcome.readiness.readiness, 'READY');
   // The reconciliation ran, saw this run's own record, and its verdict is

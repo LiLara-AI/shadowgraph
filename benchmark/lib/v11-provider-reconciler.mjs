@@ -151,10 +151,31 @@ function validateExpectation(expectation, index) {
  */
 export function reconcileProviderEvidence(input) {
   if (!isPlainObject(input)) throw new Error('reconciliation input must be an object');
-  const { events, malformed = [], expectations, expectedModels = null } = input;
+  const {
+    events,
+    malformed = [],
+    expectations,
+    expectedModels = null,
+    // Correlations whose *counts* the run record cannot vouch for. Everything
+    // else about their traffic still is: the model it named, the outcome it
+    // reported, the usage it returned, and its place in the ledger's numbering.
+    //
+    // The first attempt at this removed those events from `events` entirely,
+    // which was wrong three ways at once: it left a hole in the request
+    // numbering so LEDGER_GAP fired on the very run it meant to stop failing;
+    // it skipped MODEL_MISMATCH, FAILED_OUTCOME and INCOMPLETE_USAGE, none of
+    // which read a count; and it therefore let an arm reach an unpinned model
+    // and crash, and reported RECONCILED.
+    unverifiedCounts = []
+  } = input;
   if (!Array.isArray(events)) throw new Error('events must be an array');
   if (!Array.isArray(expectations)) throw new Error('expectations must be an array');
   expectations.forEach(validateExpectation);
+  if (!Array.isArray(unverifiedCounts)) throw new Error('unverifiedCounts must be an array');
+  const unverified = new Set(unverifiedCounts.map((correlation) => {
+    if (!isPlainObject(correlation)) throw new Error('every unverified count must name a correlation');
+    return correlationPrefix(correlation);
+  }));
 
   const findings = [];
 
@@ -192,13 +213,20 @@ export function reconcileProviderEvidence(input) {
   }
 
   const expectedKeys = new Set();
+  let unverifiedObserved = 0;
   for (const expectation of expectations) {
     const key = expectationKey(expectation);
     expectedKeys.add(key);
     const matched = observed.get(key) ?? [];
     const correlation = readableCorrelation(expectation);
+    const countsAreVerifiable = !unverified.has(correlationPrefix(expectation));
 
-    if (matched.length < expectation.expectedCalls) {
+    if (!countsAreVerifiable) {
+      // No count comparison, and no UNEXPECTED_CALL either: the events are
+      // matched to this correlation, so they are accounted for. Every per-event
+      // check below still runs on them.
+      unverifiedObserved += matched.length;
+    } else if (matched.length < expectation.expectedCalls) {
       findings.push({
         code: 'MISSING_CALL',
         correlation,
@@ -264,8 +292,11 @@ export function reconcileProviderEvidence(input) {
     });
   }
 
-  const expectedCalls = expectations.reduce((total, entry) => total + entry.expectedCalls, 0);
+  const expectedCalls = expectations.reduce((total, entry) => (
+    unverified.has(correlationPrefix(entry)) ? total : total + entry.expectedCalls
+  ), 0);
   const matchedCalls = expectations.reduce((total, entry) => {
+    if (unverified.has(correlationPrefix(entry))) return total;
     const matched = observed.get(expectationKey(entry)) ?? [];
     return total + Math.min(matched.length, entry.expectedCalls);
   }, 0);
@@ -280,7 +311,13 @@ export function reconcileProviderEvidence(input) {
       expectedCalls,
       observedEvents: events.length,
       matchedCalls,
-      malformedLines: malformed.length
+      malformedLines: malformed.length,
+      // Traffic this run could not hold its own record's counts to. Named and
+      // counted rather than removed - every other check still applied to it.
+      // The set is keyed by unit, since a correlation's request class is not part
+      // of what makes its counts unverifiable.
+      unverifiedCountUnits: unverified.size,
+      unverifiedCountEvents: unverifiedObserved
     }),
     findings: Object.freeze(findings)
   });
@@ -316,21 +353,27 @@ const OPERATION_FIELD_BY_REQUEST_CLASS = Object.freeze({
  * an earlier ledger, and expecting them here would report every one of them
  * missing.
  *
- * And only units the harness actually measured. A unit that failed inside its
- * container, or that was interrupted, carries counts the harness wrote rather
- * than counts the adapter reported: a host-synthesised failure envelope zeroes
- * them, and an abort observed between the adapter returning and the counts
- * being added discards them. The provider calls the container had already made
- * are in the ledger either way, so expecting zero for those correlations would
- * report `UNEXPECTED_CALL` and `RETRY_OBSERVED` on every run containing one
- * adapter failure - a reconciliation contradicting the record beside it, and a
- * fail-closed refusal firing on a correct run.
+ * Every unit of the attempt gets expectations, including the ones that failed.
+ * What a FAILED unit does not get is a *count* the reconciler will hold it to,
+ * and it is returned in `unverifiedCounts` for that: a host-synthesised failure
+ * envelope zeroes the operation metrics, and an abort observed between the
+ * adapter returning and the counts being added discards them, while the calls
+ * the container had already made are in the ledger either way. Holding those
+ * correlations to zero would report `UNEXPECTED_CALL` and `RETRY_OBSERVED` on
+ * every run containing one adapter failure.
  *
- * Those units are returned separately as `unattributed`. Not silence: the
- * caller reports how many events belong to correlations whose counts the record
- * cannot vouch for. What is honest here is that the harness does not know what
- * a crashed container did, and saying zero would be a claim the record cannot
- * support.
+ * Only the count. Everything else about that traffic is still checked - the
+ * model it named, the outcome it reported, the usage it returned, its place in
+ * the ledger's numbering - because none of those read a count. An earlier
+ * version of this dropped the events instead and let an arm reach an unpinned
+ * model and crash while the run reported `RECONCILED`.
+ *
+ * And only FAILED. `EXCLUDED` and `NOT_MEASURED` units are not units the
+ * harness failed to observe: `validateRawRun` *forbids* them from recording any
+ * operation at all, so their zero is structural and the record does know the
+ * answer. Excusing them excused the 20 excluded units every acceptance plan
+ * schedules - a fifteenth of the run, on correlations an arm can still reach a
+ * model from.
  */
 /** A unit's correlation, without the request class: one key per unit. */
 function correlationPrefix(value) {
@@ -348,24 +391,20 @@ export function providerExpectationsFromRun(raw, attemptId) {
     throw new Error('provider expectations require the attempt whose ledger is being read');
   }
   const expectations = [];
-  const unattributed = [];
+  const unverifiedCounts = [];
   for (const unit of raw.units) {
     if (!isPlainObject(unit)) throw new Error('every unit must be an object');
     if (unit.attemptId !== attemptId) continue;
-    if (unit.status !== 'MEASURED') {
-      unattributed.push({
-        unitId: unit.unitId,
-        status: unit.status,
-        correlation: {
-          runId: unit.runId,
-          attemptId: unit.attemptId,
-          armId: unit.armId,
-          scenarioId: unit.scenarioId,
-          repetition: unit.repetition,
-          phase: unit.phase
-        }
-      });
-      continue;
+    const correlation = {
+      runId: unit.runId,
+      attemptId: unit.attemptId,
+      armId: unit.armId,
+      scenarioId: unit.scenarioId,
+      repetition: unit.repetition,
+      phase: unit.phase
+    };
+    if (unit.status === 'FAILED') {
+      unverifiedCounts.push({ unitId: unit.unitId, status: unit.status, ...correlation });
     }
     if (!isPlainObject(unit.operations)) {
       throw new Error(`unit ${String(unit.unitId)} records no operation metrics`);
@@ -376,19 +415,10 @@ export function providerExpectationsFromRun(raw, attemptId) {
       if (!Number.isSafeInteger(expectedCalls) || expectedCalls < 0) {
         throw new Error(`unit ${String(unit.unitId)} records no ${field}`);
       }
-      expectations.push({
-        runId: unit.runId,
-        attemptId: unit.attemptId,
-        armId: unit.armId,
-        scenarioId: unit.scenarioId,
-        repetition: unit.repetition,
-        phase: unit.phase,
-        requestClass,
-        expectedCalls
-      });
+      expectations.push({ ...correlation, requestClass, expectedCalls });
     }
   }
-  return { expectations, unattributed };
+  return { expectations, unverifiedCounts };
 }
 
 /**
@@ -439,22 +469,12 @@ export function runProviderReconciliation(input) {
   }
 
   const { events, malformed } = parseProviderLedger(ledgerText);
-  const { expectations, unattributed } = providerExpectationsFromRun(raw, attemptId);
-  // Events belonging to a unit whose counts the record cannot vouch for are
-  // held out of the comparison and counted instead. Leaving them in would make
-  // one adapter failure enough to report a metering violation for a run that
-  // had none.
-  const unattributedKeys = new Set(unattributed.map((unit) => correlationPrefix(unit.correlation)));
-  const attributable = [];
-  let unattributedEvents = 0;
-  for (const event of events) {
-    if (unattributedKeys.has(correlationPrefix(event))) unattributedEvents += 1;
-    else attributable.push(event);
-  }
+  const { expectations, unverifiedCounts } = providerExpectationsFromRun(raw, attemptId);
   const report = reconcileProviderEvidence({
-    events: attributable,
+    events,
     malformed,
     expectations,
+    unverifiedCounts,
     expectedModels: {
       // The outer decision and an arm's own internal calls are the same pinned
       // chat model: the lock states it once and both routes use it.
@@ -463,11 +483,5 @@ export function runProviderReconciliation(input) {
       embedding: pinnedModels.embedding.modelId
     }
   });
-  return envelope(report.status, {
-    ...report.totals,
-    // Named rather than hidden: how much traffic this run could not hold its
-    // own record to, and how many units it belongs to.
-    unattributedUnits: unattributed.length,
-    unattributedEvents
-  }, report.findings);
+  return envelope(report.status, report.totals, report.findings);
 }

@@ -214,7 +214,23 @@ export function verifyPythonRuntime(input) {
   const locked = lockedDistributions(wheelsLock);
   const installed = new Map();
   for (const distribution of manifest.distributions) {
-    installed.set(normalizeDistributionName(distribution.name), distribution.version);
+    const name = normalizeDistributionName(distribution.name);
+    const already = installed.get(name);
+    if (already !== undefined && already !== distribution.version) {
+      // `pip install --target <site> --upgrade` does not remove the superseded
+      // `.dist-info`, so a site upgraded in place carries both. Collapsing them
+      // last-wins made the verdict depend on directory order, and reported
+      // valid for exactly the in-place upgrade this verification exists to
+      // catch. Two versions of one distribution is not a runtime anything can
+      // be pinned against - which of them an import resolves to is pip's
+      // business, not the lock's.
+      findings.push({
+        code: 'DISTRIBUTION_DUPLICATED',
+        distribution: name,
+        versions: [already, distribution.version].sort()
+      });
+    }
+    installed.set(name, distribution.version);
   }
 
   for (const [name, version] of locked) {
@@ -269,10 +285,18 @@ export function verifyPythonRuntime(input) {
  * check while the arms imported the upgraded package. The one case the refusal
  * was written for was the one it did not cover.
  *
- * Read from each `*.dist-info/METADATA` rather than from the directory name,
- * because that is where `importlib.metadata` - and therefore every arm's own
- * `require_versions` - reads the version from. Nothing is imported and nothing
- * is executed; this is a directory listing and some header lines.
+ * Read from each `*.dist-info/METADATA` and each `*.egg-info/PKG-INFO` rather
+ * than from the directory name, because that is where `importlib.metadata` -
+ * and therefore every arm's own `require_versions` - reads the version from.
+ * Reading only `.dist-info` enumerated less than the interpreter does, so a
+ * distribution installed the other way was invisible to the verification and
+ * present to the arms. Nothing is imported and nothing is executed; this is a
+ * directory listing and some header lines.
+ *
+ * Duplicates are returned rather than collapsed. A real in-place
+ * `pip install --target ... --upgrade` leaves the superseded `.dist-info` in
+ * place, so a site upgraded that way contains both versions, and whichever one
+ * a reader kept decided the verdict. `verifyPythonRuntime` reports the pair.
  */
 export async function readPythonSiteDistributions(sitePath, { readdirImpl = readdir, readFileImpl = readFile } = {}) {
   if (!isNonEmptyString(sitePath)) {
@@ -286,18 +310,27 @@ export async function readPythonSiteDistributions(sitePath, { readdirImpl = read
   }
   const distributions = [];
   for (const entry of entries) {
-    if (!entry.isDirectory() || !entry.name.endsWith('.dist-info')) continue;
+    if (!entry.isDirectory()) continue;
+    const metadataFile = entry.name.endsWith('.dist-info')
+      ? 'METADATA'
+      : entry.name.endsWith('.egg-info') ? 'PKG-INFO' : null;
+    if (metadataFile === null) continue;
     let metadata;
     try {
-      metadata = await readFileImpl(`${sitePath}/${entry.name}/METADATA`, 'utf8');
+      metadata = await readFileImpl(`${sitePath}/${entry.name}/${metadataFile}`, 'utf8');
     } catch {
-      // A .dist-info without METADATA is not a distribution this can name, and
-      // guessing from the directory name would be inventing evidence.
+      // A metadata directory without its metadata file is not a distribution
+      // this can name, and guessing from the directory name would be inventing
+      // evidence.
       continue;
     }
     let name = null;
     let version = null;
-    for (const line of metadata.split(String.fromCharCode(10))) {
+    // The headers end at the first blank line; a carriage return is stripped
+    // with the rest of the whitespace, and a byte-order mark on the first line
+    // is dropped so `Name:` is still recognised there.
+    for (const raw of metadata.replace(/^\uFEFF/u, '').split(String.fromCharCode(10))) {
+      const line = raw.trimEnd();
       if (line.length === 0) break;
       if (name === null && line.startsWith('Name:')) name = line.slice(5).trim();
       else if (version === null && line.startsWith('Version:')) version = line.slice(8).trim();

@@ -693,7 +693,18 @@ test('a failure the harness wrote is not evidence that the arm ran', async (t) =
   // arms that "did not throw" counted a container that never launched: with the
   // pre-F1 image pattern all four container arms failed this way and the probe
   // would have reported seven of seven while no container had started.
+  // Two executables, and the difference between them is the property. The
+  // recorder launches and fails, so the *container* ran; the missing binary
+  // never launches at all. Both come back as FAILED envelopes carrying an
+  // adapter cause, which is why 'did not throw' was not evidence of anything.
   const recorder = await recordingContainerExecutable(t);
+  const launched = await hosts(t, { dockerExecutable: recorder.executable });
+  const ranAndFailed = await launched[PYTHON_RUNTIME_KIND](descriptorFor('basic-memory', {
+    containerImage: LAUNCHABLE_IMAGE
+  }))(requestFor('reset', 'basic-memory'));
+  assert.equal(ranAndFailed.status, 'FAILED');
+  assert.equal(recorder.invocations().length, 1, 'the executable was launched');
+
   const bound = await hosts(t, { dockerExecutable: '/nonexistent/docker-binary' });
   const execute = bound[PYTHON_RUNTIME_KIND](descriptorFor('basic-memory', {
     containerImage: LAUNCHABLE_IMAGE
@@ -702,7 +713,7 @@ test('a failure the harness wrote is not evidence that the arm ran', async (t) =
   const response = await execute(requestFor('reset', 'basic-memory'));
   assert.equal(response.status, 'FAILED');
   assert.equal(armReachedItsRuntime(response), false, 'no container was launched');
-  assert.deepEqual(recorder.invocations(), []);
+  assert.equal(recorder.invocations().length, 1, 'and nothing else launched either');
 
   // A failure the product reported does count: it came back from inside.
   assert.equal(armReachedItsRuntime({

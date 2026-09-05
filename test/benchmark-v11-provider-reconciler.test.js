@@ -65,7 +65,9 @@ test('exact agreement reconciles', () => {
     expectedCalls: 1,
     observedEvents: 1,
     matchedCalls: 1,
-    malformedLines: 0
+    malformedLines: 0,
+    unverifiedCountUnits: 0,
+    unverifiedCountEvents: 0
   });
 });
 
@@ -290,8 +292,8 @@ function unit(overrides = {}) {
 }
 
 test('a run record becomes one expectation per unit and request class', () => {
-  const { expectations, unattributed } = providerExpectationsFromRun({ units: [unit()] }, ATTEMPT);
-  assert.deepEqual(unattributed, []);
+  const { expectations, unverifiedCounts } = providerExpectationsFromRun({ units: [unit()] }, ATTEMPT);
+  assert.deepEqual(unverifiedCounts, []);
 
   assert.deepEqual(expectations.map((each) => [each.requestClass, each.expectedCalls]), [
     ['outer_decision_llm', 1],
@@ -546,38 +548,59 @@ test('a reconciliation that cannot name its ledger or its models is refused', ()
   assert.throws(() => runProviderReconciliation(), /name the ledger/u);
 });
 
-test('a unit the harness did not measure is held out of the comparison and counted', () => {
-  // A unit that failed inside its container, or was interrupted, carries counts
-  // the harness wrote rather than counts the adapter reported: the synthesised
-  // failure envelope zeroes them, and an abort between the adapter returning and
-  // the counts being added discards them. The provider calls the container had
-  // already made are in the ledger either way. Expecting zero for those
-  // correlations made one adapter failure enough to report a metering violation.
-  const failed = unit({
-    unitId: 'mem0-oss:ACC_ONE:1:B',
-    repetition: 1,
-    status: 'FAILED',
-    operations: {
-      memoryReadOperations: 0,
-      memoryWriteOperations: 0,
-      mcpToolCalls: 0,
-      outerDecisionModelCalls: 0,
-      internalMemoryModelCalls: 0,
-      embeddingCalls: 0,
-      persistenceVerificationOperations: 0
-    }
-  });
-  const { expectations, unattributed } = providerExpectationsFromRun(
-    { units: [unit(), failed] },
-    ATTEMPT
-  );
+test('a failed unit is held to everything except its counts', () => {
+  // A container that fails mid-operation gets a host-synthesised envelope whose
+  // counts are all zero, and an abort discards counts the adapter had already
+  // reported - while the calls are in the ledger either way. Holding those
+  // correlations to zero reported a metering violation on a run that had none.
+  //
+  // The first attempt removed the events instead, and was wrong three ways: it
+  // left a hole in the request numbering so LEDGER_GAP fired on the very run it
+  // meant to save; it skipped every per-event check; and it therefore let an arm
+  // reach an unpinned model and crash while the run reported RECONCILED. So the
+  // count is what is unverifiable, and only the count.
+  const failed = unit({ unitId: 'mem0-oss:ACC_ONE:1:B', repetition: 1, status: 'FAILED' });
+  const record = { units: [unit(), failed] };
+  const { expectations, unverifiedCounts } = providerExpectationsFromRun(record, ATTEMPT);
 
-  assert.equal(expectations.length, 3, 'only the measured unit is expected');
-  assert.ok(expectations.every((each) => each.repetition === 0));
-  assert.deepEqual(unattributed.map((each) => [each.unitId, each.status]), [
+  assert.equal(expectations.length, 6, 'a failed unit still gets expectations');
+  assert.deepEqual(unverifiedCounts.map((each) => [each.unitId, each.status]), [
     ['mem0-oss:ACC_ONE:1:B', 'FAILED']
   ]);
 
+  // The failed unit's events sit in the MIDDLE of the ledger's numbering, which
+  // is the case the removal broke: requestNumber is one counter for the whole
+  // attempt, so dropping a contiguous block leaves a gap.
+  const report = runProviderReconciliation({
+    ledgerText: ledgerLines([
+      event({ requestNumber: 0, requestClass: 'outer_decision_llm' }),
+      event({ requestNumber: 1, repetition: 1, requestClass: 'internal_memory_llm' }),
+      event({ requestNumber: 2, repetition: 1, requestClass: 'internal_memory_llm' }),
+      event({ requestNumber: 3, requestClass: 'internal_memory_llm' }),
+      event({ requestNumber: 4, requestClass: 'internal_memory_llm' }),
+      event({ requestNumber: 5, requestClass: 'embedding', requestedModel: 'pinned-embedding-model', providerModel: 'pinned-embedding-model' }),
+      event({ requestNumber: 6, requestClass: 'embedding', requestedModel: 'pinned-embedding-model', providerModel: 'pinned-embedding-model' }),
+      event({ requestNumber: 7, requestClass: 'embedding', requestedModel: 'pinned-embedding-model', providerModel: 'pinned-embedding-model' })
+    ]),
+    ledgerPath: '/ledgers/attempt-1.provider-requests.ndjson',
+    raw: record,
+    attemptId: ATTEMPT,
+    pinnedModels: PINNED
+  });
+
+  assert.equal(report.status, 'RECONCILED');
+  assert.deepEqual(report.findings, [], 'no LEDGER_GAP: the events were never removed');
+  assert.equal(report.totals.observedEvents, 8);
+  assert.equal(report.totals.unverifiedCountEvents, 2);
+  assert.equal(report.totals.unverifiedCountUnits, 1);
+});
+
+test('a failed unit reaching an unpinned model is still a finding', () => {
+  // The hole the removal opened. MODEL_MISMATCH, FAILED_OUTCOME and
+  // INCOMPLETE_USAGE read no count, so a unit whose counts cannot be verified is
+  // still fully answerable for what its traffic actually was.
+  const failed = unit({ unitId: 'mem0-oss:ACC_ONE:1:B', repetition: 1, status: 'FAILED' });
+  const record = { units: [unit(), failed] };
   const report = runProviderReconciliation({
     ledgerText: ledgerLines([
       event({ requestNumber: 0, requestClass: 'outer_decision_llm' }),
@@ -586,49 +609,72 @@ test('a unit the harness did not measure is held out of the comparison and count
       event({ requestNumber: 3, requestClass: 'embedding', requestedModel: 'pinned-embedding-model', providerModel: 'pinned-embedding-model' }),
       event({ requestNumber: 4, requestClass: 'embedding', requestedModel: 'pinned-embedding-model', providerModel: 'pinned-embedding-model' }),
       event({ requestNumber: 5, requestClass: 'embedding', requestedModel: 'pinned-embedding-model', providerModel: 'pinned-embedding-model' }),
-      // Two calls the failed unit's container had already made before it died.
-      event({ requestNumber: 6, repetition: 1, requestClass: 'internal_memory_llm' }),
-      event({ requestNumber: 7, repetition: 1, requestClass: 'internal_memory_llm' })
+      event({
+        requestNumber: 6,
+        repetition: 1,
+        requestClass: 'internal_memory_llm',
+        requestedModel: 'gpt-4o-from-the-internet',
+        providerModel: 'gpt-4o-from-the-internet'
+      }),
+      event({ requestNumber: 7, repetition: 1, requestClass: 'embedding', outcome: 'FAILED', usage: null })
     ]),
     ledgerPath: '/ledgers/attempt-1.provider-requests.ndjson',
-    raw: { units: [unit(), failed] },
-    attemptId: ATTEMPT,
-    pinnedModels: PINNED
-  });
-
-  // The run is not reported as a metering violation for traffic its own record
-  // never claimed to describe...
-  assert.equal(report.status, 'RECONCILED');
-  // ...and the traffic is not hidden either.
-  assert.equal(report.totals.unattributedUnits, 1);
-  assert.equal(report.totals.unattributedEvents, 2);
-});
-
-test('a measured unit is still held to its counts when an unmeasured one is beside it', () => {
-  // The exclusion must be per unit, not a licence for the whole run: a retry in
-  // the measured unit is still a finding while the failed unit's traffic is set
-  // aside.
-  const failed = unit({ unitId: 'mem0-oss:ACC_ONE:1:B', repetition: 1, status: 'FAILED' });
-  const report = runProviderReconciliation({
-    ledgerText: ledgerLines([
-      event({ requestNumber: 0, requestClass: 'outer_decision_llm' }),
-      event({ requestNumber: 1, requestClass: 'internal_memory_llm' }),
-      event({ requestNumber: 2, requestClass: 'internal_memory_llm' }),
-      event({ requestNumber: 3, requestClass: 'internal_memory_llm' }),
-      event({ requestNumber: 4, requestClass: 'embedding', requestedModel: 'pinned-embedding-model', providerModel: 'pinned-embedding-model' }),
-      event({ requestNumber: 5, requestClass: 'embedding', requestedModel: 'pinned-embedding-model', providerModel: 'pinned-embedding-model' }),
-      event({ requestNumber: 6, requestClass: 'embedding', requestedModel: 'pinned-embedding-model', providerModel: 'pinned-embedding-model' }),
-      event({ requestNumber: 7, repetition: 1, requestClass: 'embedding' })
-    ]),
-    ledgerPath: '/ledgers/attempt-1.provider-requests.ndjson',
-    raw: { units: [unit(), failed] },
+    raw: record,
     attemptId: ATTEMPT,
     pinnedModels: PINNED
   });
 
   assert.equal(report.status, 'DISCREPANT');
-  assert.ok(report.findings.some((finding) => finding.code === 'RETRY_OBSERVED'));
-  assert.equal(report.totals.unattributedEvents, 1);
+  const codes = report.findings.map((finding) => finding.code);
+  assert.ok(codes.includes('MODEL_MISMATCH'), 'an unpinned model is a finding whoever made the call');
+  assert.ok(codes.includes('FAILED_OUTCOME'));
+  assert.ok(codes.includes('INCOMPLETE_USAGE'));
+  // And none of them is a count finding, which is the part that was excused.
+  assert.ok(!codes.includes('RETRY_OBSERVED'));
+  assert.ok(!codes.includes('UNEXPECTED_CALL'));
+});
+
+test('an excluded unit is structurally zero and is still held to it', () => {
+  // EXCLUDED and NOT_MEASURED units are not units the harness failed to observe:
+  // `validateRawRun` forbids them from recording any operation, so the record
+  // does know the answer. Excusing them excused the 20 excluded units every
+  // acceptance plan schedules - on correlations an arm can still reach a model
+  // from.
+  const zeroes = {
+    memoryReadOperations: 0,
+    memoryWriteOperations: 0,
+    mcpToolCalls: 0,
+    outerDecisionModelCalls: 0,
+    internalMemoryModelCalls: 0,
+    embeddingCalls: 0,
+    persistenceVerificationOperations: 0
+  };
+  for (const status of ['EXCLUDED', 'NOT_MEASURED']) {
+    const excluded = unit({ unitId: `graphiti:ACC_ONE:0:ISOLATION_USER`, armId: 'graphiti', status, operations: zeroes });
+    const { unverifiedCounts } = providerExpectationsFromRun({ units: [excluded] }, ATTEMPT);
+    assert.deepEqual(unverifiedCounts, [], status);
+
+    const report = runProviderReconciliation({
+      ledgerText: ledgerLines([
+        event({
+          requestNumber: 0,
+          armId: 'graphiti',
+          requestClass: 'internal_memory_llm',
+          requestedModel: 'a-model-from-the-internet',
+          providerModel: 'a-model-from-the-internet'
+        })
+      ]),
+      ledgerPath: '/ledgers/attempt-1.provider-requests.ndjson',
+      raw: { units: [excluded] },
+      attemptId: ATTEMPT,
+      pinnedModels: PINNED
+    });
+
+    assert.equal(report.status, 'DISCREPANT', status);
+    const codes = report.findings.map((finding) => finding.code);
+    assert.ok(codes.includes('UNEXPECTED_CALL'), status);
+    assert.ok(codes.includes('MODEL_MISMATCH'), status);
+  }
 });
 
 test('the declared model is checked for every request class, not only the outer one', () => {

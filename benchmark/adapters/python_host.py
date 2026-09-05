@@ -228,10 +228,11 @@ def _loopback_only_network():
 
     def sendto_guard(key):
         # sendto(data, address) and sendto(data, flags, address): the peer is
-        # always the last argument. A datagram needs no connection, which is
-        # how the first version of this fence let one out. On a *connected*
-        # datagram socket sendto takes no address at all, and then there is
-        # nothing to check here - the connect it required was already judged.
+        # always the last argument, and a datagram needs no connection - which
+        # is how the first version of this fence let one out. CPython has no
+        # address-free `sendto`, on a connected socket or any other; it raises
+        # TypeError. The length test is therefore about the two real forms,
+        # not about a third one this comment used to invent.
         original = originals[key]
 
         def guarded(self, *args):

@@ -339,3 +339,65 @@ test('a site that cannot be read is refused rather than reported as empty', asyn
   );
   await assert.rejects(readPythonSiteDistributions(''), /site path is required/u);
 });
+
+test('an in-place upgrade leaves two dist-info directories, and both are reported', async (t) => {
+  // What `pip install --target <site> --upgrade` actually does: it writes the new
+  // distribution and leaves the superseded `.dist-info` in place. Demonstrated in
+  // the pinned image - installing httpx 0.28.1 then upgrading to 0.27.2 left both
+  // directories, with the interpreter resolving 0.27.2.
+  //
+  // Collapsing them last-wins made the verdict depend on readdir order, and
+  // reported valid for exactly the case this verification exists to catch.
+  const site = await scratchDirectory(t, 'shadowgraph-v11-site-dup-');
+  const write = async (directory, file, metadata) => {
+    await mkdir(path.join(site, directory), { recursive: true });
+    await writeFile(path.join(site, directory, file), metadata, 'utf8');
+  };
+  await write('httpx-0.28.1.dist-info', 'METADATA', 'Name: httpx\nVersion: 0.28.1\n');
+  await write('httpx-0.27.2.dist-info', 'METADATA', 'Name: httpx\nVersion: 0.27.2\n');
+  // And a distribution installed the other way, which `importlib.metadata` sees
+  // and a `.dist-info`-only reader did not.
+  await write('mem0ai-2.0.19.egg-info', 'PKG-INFO', 'Name: mem0ai\nVersion: 2.0.19\n');
+
+  const distributions = await readPythonSiteDistributions(site);
+  assert.deepEqual(
+    distributions.map((each) => `${each.name}==${each.version}`).sort(),
+    ['httpx==0.27.2', 'httpx==0.28.1', 'mem0ai==2.0.19']
+  );
+
+  const verification = verifyPythonRuntime({
+    manifest: {
+      schema: PYTHON_RUNTIME_SCHEMA,
+      version: PYTHON_RUNTIME_VERSION,
+      image: IMAGE,
+      wheelsLockSha256: LOCK_SHA256,
+      distributions
+    },
+    wheelsLock: { wheels: [
+      { name: 'httpx==0.28.1', sha256: 'c'.repeat(64) },
+      { name: 'mem0ai==2.0.19', sha256: 'd'.repeat(64) }
+    ] },
+    wheelsLockSha256: LOCK_SHA256,
+    image: IMAGE
+  });
+
+  assert.equal(verification.valid, false, 'two versions of one distribution is not a pinned runtime');
+  assert.deepEqual(
+    verification.findings.filter((finding) => finding.code === 'DISTRIBUTION_DUPLICATED'),
+    [{ code: 'DISTRIBUTION_DUPLICATED', distribution: 'httpx', versions: ['0.27.2', '0.28.1'] }]
+  );
+});
+
+test('metadata headers are read past a byte-order mark and CRLF line endings', async (t) => {
+  // A site written on, or copied through, a system that added either would have
+  // been silently enumerated as empty - which verifies as "every locked
+  // distribution absent", the right verdict for the wrong reason.
+  const site = await scratchDirectory(t, 'shadowgraph-v11-site-bom-');
+  await mkdir(path.join(site, 'httpx-0.28.1.dist-info'), { recursive: true });
+  await writeFile(
+    path.join(site, 'httpx-0.28.1.dist-info', 'METADATA'),
+    '﻿Metadata-Version: 2.1\r\nName: httpx\r\nVersion: 0.28.1\r\n\r\nSummary: x\r\n',
+    'utf8'
+  );
+  assert.deepEqual(await readPythonSiteDistributions(site), [{ name: 'httpx', version: '0.28.1' }]);
+});

@@ -4,17 +4,21 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { createProgressLedger, createUnitEvidenceLedger } from '../benchmark/lib/progress.mjs';
-import { createV11RunResources } from '../benchmark/lib/v11-run-resources.mjs';
+import { combineRunFailure, createV11RunResources } from '../benchmark/lib/v11-run-resources.mjs';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
 /**
- * The real ledgers, not doubles.
+ * The real ledgers, not doubles - except where the assertion is about calls.
  *
  * The defect this module exists to close was invisible to a fake: the fake
  * progress recorder had no close() and accepted appends forever, so a test
  * could assert the exact teardown ordering that made every real run die on its
- * last line. Every assertion here goes through `createProgressLedger`, whose
- * append rejects once closed.
+ * last line. So every assertion about *ordering or closedness* here goes
+ * through `createProgressLedger`, whose append rejects once closed.
+ *
+ * One test counts calls instead, and uses recorders for all three resources
+ * because a real ledger's close is idempotent and would report nothing. It is
+ * marked where it is, so nobody reads it as evidence about ledger behaviour.
  */
 
 const RUN_ID = 'run-v11-resources-1';
@@ -84,10 +88,11 @@ test('the full close shuts the run ledgers, and the measurement close stays clos
   assert.deepEqual(closed, ['meter']);
 });
 
-test('every close is memoized, not only the meter', async (t) => {
-  // Counting the meter alone left `close` free to be de-memoised: the ledgers
-  // it shuts are idempotent enough not to complain, so nothing observed the
-  // second call. All three are recorded here.
+test('every close is memoized, not only the meter', async () => {
+  // Recorders, not ledgers - the one test in this file that uses them, because
+  // the question is how many times close was called and a real ledger's close
+  // is idempotent. Counting the meter alone left `close` free to be
+  // de-memoised: nothing observed the second call.
   const closed = [];
   const resources = createV11RunResources({
     meter: { close: async () => closed.push('meter') },
@@ -127,6 +132,18 @@ test('the runner is given the measurement close, and this module is what pairs t
   assert.equal(resources.runnerResources.progress, progress);
   assert.equal(resources.runnerResources.closeResources, resources.closeMeasurement);
   assert.notEqual(resources.runnerResources.closeResources, resources.close);
+
+  // And `persistUnit` actually persists. The CLI takes it exclusively from
+  // here, so a no-op would silently stop writing the unit ledger a run's
+  // durable evidence lives in - and the key being present is not that.
+  const written = [];
+  const paired = createV11RunResources({
+    meter: meterDouble(closed),
+    progress,
+    unitEvidence: { append: (unit) => written.push(unit), close: async () => {} }
+  });
+  await paired.runnerResources.persistUnit({ unitId: 'arm:scenario:0:A' });
+  assert.deepEqual(written, [{ unitId: 'arm:scenario:0:A' }]);
 
   // And it survives the hook being called: the ledger is still writable.
   await resources.runnerResources.closeResources();
@@ -210,4 +227,44 @@ test('a resource that is not closable, or the same one passed twice, is refused'
 
   await progress.close();
   await unitEvidence.close();
+});
+
+test('a run failure and a teardown failure are reported once, whichever carries which', () => {
+  const runFailure = new Error('a unit could not be persisted');
+  const teardownFailure = new Error('the meter socket refused to close');
+
+  // Neither alone.
+  assert.equal(combineRunFailure(runFailure, null), runFailure);
+  assert.equal(combineRunFailure(null, teardownFailure), teardownFailure);
+  assert.equal(combineRunFailure(null, null), null);
+  assert.equal(combineRunFailure(undefined, undefined), null);
+
+  // Two unrelated failures: both, once.
+  const both = combineRunFailure(runFailure, teardownFailure);
+  assert.ok(both instanceof AggregateError);
+  assert.deepEqual(both.errors, [runFailure, teardownFailure]);
+
+  // The runner already combined them, and `close()` memoizes its rejection, so
+  // the caller is handed an error it already carries.
+  const runnerCombined = new AggregateError([runFailure, teardownFailure], 'runner');
+  assert.equal(combineRunFailure(runnerCombined, teardownFailure), runnerCombined);
+
+  // A cause chain counts as carrying, which an `AggregateError`-only walk missed.
+  const wrapped = new Error('the run stopped', { cause: teardownFailure });
+  assert.equal(combineRunFailure(wrapped, teardownFailure), wrapped);
+
+  // And the direction this path actually produces: when `meter.close()` rejects,
+  // the runner surfaces THAT as its primary failure, and the teardown close then
+  // re-collects the same memoized rejection alongside a second one. The teardown
+  // error is the one carrying the run failure. Asking only the other way round
+  // put the meter error in the report twice.
+  const ledgerFailure = new Error('the unit ledger could not be flushed');
+  const teardownAggregate = new AggregateError([teardownFailure, ledgerFailure], 'teardown');
+  const combined = combineRunFailure(teardownFailure, teardownAggregate);
+  assert.equal(combined, teardownAggregate);
+  assert.equal(
+    JSON.stringify(combined.errors.map((each) => each.message)),
+    JSON.stringify([teardownFailure.message, ledgerFailure.message]),
+    'the meter error appears once'
+  );
 });

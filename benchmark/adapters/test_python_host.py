@@ -529,18 +529,41 @@ class RawSocketFenceTests(unittest.TestCase):
                 handle.sendto(b"shadowgraph-fence", ("192.0.2.1", 9))
             with self.assertRaises(python_host.NetworkFenceError):
                 handle.connect(("192.0.2.1", 80))
-            # And loopback still works through the same type.
+            with self.assertRaises(python_host.NetworkFenceError):
+                handle.connect_ex(("192.0.2.1", 80))
+            if hasattr(handle, "sendmsg"):  # pragma: no branch - POSIX
+                with self.assertRaises(python_host.NetworkFenceError):
+                    handle.sendmsg([b"shadowgraph-fence"], [], 0, ("192.0.2.1", 9))
+            # And loopback still works through the same type, on every one of them.
             self.assertEqual(handle.sendto(b"shadowgraph-fence", ("127.0.0.1", 9)), 17)
+            self.assertEqual(handle.connect_ex(("127.0.0.1", 9)), 0)
 
-    def test_the_raw_module_resolvers_are_guarded(self) -> None:
+    def test_every_raw_module_resolver_is_guarded(self) -> None:
+        # Every `_socket.*` name in FENCED_ENTRY_POINTS, not a sample of it. A
+        # sample is what let five of these be listed and exercised by nothing:
+        # deleting them from the list is self-consistent, so the list's own
+        # save/guard/restore agreement check cannot see it.
         import _socket
 
         with python_host._loopback_only_network():
+            for resolve in (
+                _socket.getaddrinfo,
+                _socket.gethostbyname,
+                _socket.gethostbyname_ex,
+            ):
+                with self.subTest(resolve=resolve.__name__):
+                    with self.assertRaises(python_host.NetworkFenceError):
+                        resolve("huggingface.co")
             with self.assertRaises(python_host.NetworkFenceError):
-                _socket.gethostbyname("huggingface.co")
+                _socket.gethostbyaddr("93.184.216.34")
             with self.assertRaises(python_host.NetworkFenceError):
-                _socket.getaddrinfo("huggingface.co", 443)
+                _socket.getnameinfo(("93.184.216.34", 80), 0)
+
             self.assertEqual(_socket.gethostbyname("localhost"), "127.0.0.1")
+            self.assertEqual(_socket.gethostbyname_ex("localhost")[0], "localhost")
+            self.assertTrue(_socket.getaddrinfo("127.0.0.1", 80))
+            self.assertTrue(_socket.getnameinfo(("127.0.0.1", 80), 0))
+            self.assertTrue(_socket.gethostbyaddr("127.0.0.1"))
 
     def test_the_raw_socket_type_is_restored_exactly(self) -> None:
         # A guarded subclass left bound after the adapter call would make every

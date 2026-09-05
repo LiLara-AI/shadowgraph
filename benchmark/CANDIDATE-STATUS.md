@@ -15,9 +15,9 @@ All figures below were produced on the current branch with a clean working tree.
 
 | Gate | Command | Result |
 | --- | --- | --- |
-| Full repository | `npm test` | **2344 / 2344 pass**, 0 fail, 22 suites |
-| Benchmark focused | `npm run benchmark:test` | **1108 / 1108 pass**, 0 fail |
-| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **946 / 946 pass**, 0 fail |
+| Full repository | `npm test` | **2357 / 2357 pass**, 0 fail, 22 suites |
+| Benchmark focused | `npm run benchmark:test` | **1121 / 1121 pass**, 0 fail |
+| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **959 / 959 pass**, 0 fail |
 | Python adapters | `npm run benchmark:test:python` | **139 / 139 pass**, 0 fail |
 | Node syntax | `npm run check`, `npm run benchmark:check` | pass |
 | Python syntax | `npm run benchmark:check:python` | pass |
@@ -120,7 +120,7 @@ treat file content at HEAD, not the diffs, as the object of review.
 | 1 | Serialized-input safety and error non-disclosure | **Closed**, scoped — see below |
 | 2 | Registry, runner, CLI, validator, aggregator/scorer, truthful applicability | **Closed** offline; live execution waits on 6 |
 | 3 | One centralized outer decision path; adapters memory-only | **Closed** |
-| 4 | Provider-evidence reconciliation | **Closed** |
+| 4 | Provider-evidence reconciliation | **Closed**, with one stated limit: a FAILED unit's call *count* is not compared, because the harness wrote it rather than the adapter |
 | 5 | Mutation state fails closed | **Closed** (mechanism); wiring waits on 6 |
 | 6 | Real pinned runtime factories for all seven arms | **Partial** — the metered runtime hosts are bound and six of seven arms execute; Graphiti's factory is LB2f, an open owner decision |
 | 7 | Non-scored acceptance, 308 units | **Closed** offline; an official run is blocked by the three current preflight findings and by F2 |
@@ -913,6 +913,11 @@ run being meaningful are different questions, and only the first is answered.
 | F9 | The widened fence guarded only the `socket` module, so the same datagram left through `_socket`, the C accelerator it wraps | Cleared |
 | F10 | The new provider reconciliation expected zero calls from units the harness did not measure, so one adapter failure or one interruption would have reported a metering violation against the run's own record | Cleared |
 | F11 | The bind-time Python runtime check verified a manifest and never read the site it gates, and `v11-python-runtime --verify only` rewrote the manifest before verifying it | Cleared |
+| F12 | The clock the run path handed the runner returned a number where the runner requires an ISO string, so no unit could have executed | Cleared |
+| F13 | F10's fix removed a failed unit's events instead of its counts, which broke ledger continuity, skipped every per-event check, and excused the 20 excluded units of every plan | Cleared |
+| F14 | `v11-python-runtime --verify only` ran four fresh import probes, printed a failing one, and verified the ones recorded at build time | Cleared |
+| F15 | A real in-place `pip --upgrade` leaves two `.dist-info` directories, and the site read collapsed them last-wins, so F11's own named case still verified valid | Cleared |
+| F16 | No test entered the run path at all: a `throw` at the top of `v11RuntimeDependencies` left 2344 tests green, which is why F4, F6 and F11 could each be reverted at their own call site | Cleared, the composition moved to `v11-runtime-binding.mjs` |
 
 The evidence and the required next decisions are in
 `benchmark/evidence/v11-blocker-matrix-2026-09-03.md` (CB1-CB4, LB1-LB3, as of
@@ -921,9 +926,11 @@ that date) and, superseding its blocker states,
 `benchmark/evidence/v11-adapter-runtime-blockers-2026-09-05.md`,
 `benchmark/evidence/v11-cb2-acl-demonstration-2026-09-05.md`,
 `benchmark/evidence/v11-runtime-binding-2026-09-05.md` (LB2a, F1-F3),
-`benchmark/evidence/v11-adversarial-review-2026-09-05.md` (F4-F7) and
-`benchmark/evidence/v11-adversarial-review-round-2-2026-09-05.md` (F8-F11 -
-the review of the fixes, which found four of them incomplete).
+`benchmark/evidence/v11-adversarial-review-2026-09-05.md` (F4-F7),
+`benchmark/evidence/v11-adversarial-review-round-2-2026-09-05.md` (F8-F11) and
+`benchmark/evidence/v11-adversarial-review-round-3-2026-09-05.md` (F12-F16 -
+the third round, which found why the same class kept recurring: no test entered
+the run path).
 
 ### Historical blocker record (resolved or superseded)
 
@@ -1005,8 +1012,8 @@ applicability blocker for Graphiti; the one applicability finding it still emits
 is Cognee's `DECLARED_ISOLATION_PRECONDITION_UNMET`, which CB2 clears with a
 verified precondition record.
 
-The paragraph this replaces said no amendment had been adopted, four hundred
-lines after the same document recorded adopting one. Correcting a declared
+The paragraph this replaces said no amendment had been adopted, 890 lines
+after the same document recorded adopting one. Correcting a declared
 applicability entry still requires an amendment reviewed under the methodology,
 and that is still not a decision this engineering work may take - it was taken
 by the owner, and Cognee's entry remains where the definition puts it.

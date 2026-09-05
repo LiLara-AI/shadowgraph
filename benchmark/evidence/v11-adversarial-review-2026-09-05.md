@@ -159,7 +159,7 @@ runtime and the live pinned services -
 | `litellm.embedding` -> pinned Ollama | OK - 768 dimensions |
 | Bolt -> pinned Neo4j on 127.0.0.1:7687 | OK - connected |
 | `getaddrinfo`, `gethostbyname`, `gethostbyname_ex`, `getnameinfo`, `gethostbyaddr` for loopback | OK - all five resolve |
-| connected loopback datagram (`send` and one-argument `sendto`) | OK - 9 bytes each |
+| connected loopback datagram (`send`, and `sendto` naming the peer) | OK - 9 bytes each |
 | `AF_UNIX` | OK - reaches the kernel, `FileNotFoundError` |
 | `connect` -> 192.0.2.1:80 | **Refused** |
 | `sendto` -> 192.0.2.1:9 | **Refused** |

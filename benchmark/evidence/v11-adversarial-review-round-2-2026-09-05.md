@@ -25,7 +25,12 @@ untested and would have carried the original defect straight through.
 But F4 was never a defect *in a module*: it was `benchmark/cli.mjs` handing the
 runner `runtime.close` where it should have handed `runtime.closeMeasurement`.
 That line is executed by no test. A reviewer changed it back — verbatim, at the
-exact line — and ran the suite: **2336 / 2336 pass**, and 139 Python tests OK.
+exact line — and ran the suite: **2336 / 2336 JS tests pass**, and the 136
+Python adapter tests that tree had.
+
+(This first read "139 Python tests", which is the count at the *next* commit.
+2336 JS and 139 Python is a pair no tree has ever had, and a record whose
+subject is uncounted claims cannot afford one of its own.)
 
 The new runner test the last commit added is called "closed the way the CLI
 closes them" and does not read the CLI: it constructs `resources.closeMeasurement`
@@ -89,16 +94,30 @@ have reported `UNEXPECTED_CALL` and `RETRY_OBSERVED` against traffic its own
 record never claimed to describe — a fail-closed refusal firing on a correct
 run, and a new artifact contradicting the one beside it.
 
-**Fixed by expecting only what the record can state.** Expectations come from
-`MEASURED` units. Every other unit is returned as `unattributed`, its events are
-held out of the comparison, and the totals carry `unattributedUnits` and
-`unattributedEvents` — named and counted, not hidden. The exclusion is per unit:
-a retry in a measured unit is still a finding while a failed unit's traffic is
-set aside.
+**Fixed by expecting only what the record can state** — and then fixed again,
+because the first version of that was wrong three ways.
 
-This is a real weakening of F6's guarantee and it is the honest one: the harness
-does not know what a crashed container did, and saying zero would be a claim the
-record cannot support.
+What shipped here took expectations from `MEASURED` units only and *removed*
+every other unit's events from the comparison. A third review showed that:
+
+- `requestNumber` is one counter across the whole attempt, so removing a
+  contiguous block belonging to a unit in the middle of the plan left a hole
+  and `LEDGER_GAP` fired — on precisely the run this was meant to stop failing;
+- the removed events also escaped `MODEL_MISMATCH`, `FAILED_OUTCOME` and
+  `INCOMPLETE_USAGE`, none of which reads a count, so an arm could reach an
+  unpinned model and crash and the run reported `RECONCILED`;
+- `EXCLUDED` and `NOT_MEASURED` units were excused too, though
+  `validateRawRun` *forbids* them from recording any operation — their zero is
+  structural, and 20 of every 308 units are excluded.
+
+What stands now: every unit gets expectations, nothing is removed from the
+ledger, and a `FAILED` unit's *count* alone is not compared - reported as
+`unverifiedCountUnits` and `unverifiedCountEvents` in the totals. See
+`v11-adversarial-review-round-3-2026-09-05.md`.
+
+The limit that remains is the honest one: the harness does not know how many
+calls a crashed container made, and saying zero would be a claim the record
+cannot support. What it does still know is what those calls *were*.
 
 ## F11 — The runtime refusal never read the directory it gates
 
@@ -139,7 +158,7 @@ valid with zero findings.
 | `close()` memoisation was observed only through the meter | de-memoising it passed | all three closes are counted |
 | The binding probe's runtime/product distinction was in a probe nothing tests | reverting it to "did not throw" was invisible | it is `armReachedItsRuntime` in the host module now, with tests |
 | The probe's AF_UNIX check reported OK when AF_UNIX was fenced | `NetworkFenceError` is an `OSError`, caught by the branch meant for a missing socket | the fence error is re-raised |
-| "One-argument `sendto`" was claimed in three places | it is a `TypeError` in CPython, and not what the probe called | the claim is withdrawn and the comment says what is actually exercised |
+| "One-argument `sendto`" was claimed in three places | it is a `TypeError` in CPython, and not what the probe called | withdrawn — though not completely: a third review found it restated in `python_host.py`'s own guard comment and left standing in the round-1 record's results table, both since corrected |
 
 ## The documents, again
 

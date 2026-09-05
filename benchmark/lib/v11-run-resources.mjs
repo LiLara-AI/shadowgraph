@@ -95,3 +95,38 @@ export function createV11RunResources(resources) {
     })
   });
 }
+
+/** Whether a thrown error already reports `candidate`, directly or as a cause. */
+function carries(error, candidate) {
+  if (error === candidate) return true;
+  if (error === null || typeof error !== 'object') return false;
+  if (error instanceof AggregateError && error.errors.some((each) => carries(each, candidate))) {
+    return true;
+  }
+  // `cause` as well as `errors`: a teardown failure wrapped by anything but an
+  // AggregateError was otherwise reported twice.
+  return 'cause' in error && carries(error.cause, candidate);
+}
+
+/**
+ * One error for a run that failed, a teardown that failed, or both.
+ *
+ * Neither may hide the other, and neither may be reported twice. The second
+ * half is what a naive `finally` gets wrong in both directions: `close()`
+ * memoizes its rejection, and the runner combines its own primary and cleanup
+ * errors, so by the time the caller asks, either error can already contain the
+ * other. When `meter.close()` rejects the runner surfaces *that* as its primary
+ * failure and the teardown error is the one carrying the run failure - the
+ * direction an asymmetric check missed, which put the same error in the report
+ * twice.
+ */
+export function combineRunFailure(runFailure, teardownFailure) {
+  if (teardownFailure === undefined || teardownFailure === null) return runFailure ?? null;
+  if (runFailure === undefined || runFailure === null) return teardownFailure;
+  if (carries(runFailure, teardownFailure)) return runFailure;
+  if (carries(teardownFailure, runFailure)) return teardownFailure;
+  return new AggregateError(
+    [runFailure, teardownFailure],
+    `Run failure (${runFailure.message}) and resource cleanup failure (${teardownFailure.message})`
+  );
+}
