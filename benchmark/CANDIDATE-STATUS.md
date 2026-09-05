@@ -15,9 +15,9 @@ All figures below were produced on the current branch with a clean working tree.
 
 | Gate | Command | Result |
 | --- | --- | --- |
-| Full repository | `npm test` | **2145 / 2145 pass**, 0 fail, 22 suites |
-| Benchmark focused | `npm run benchmark:test` | **911 / 911 pass**, 0 fail |
-| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **767 / 767 pass**, 0 fail |
+| Full repository | `npm test` | **2251 / 2251 pass**, 0 fail, 22 suites |
+| Benchmark focused | `npm run benchmark:test` | **1015 / 1015 pass**, 0 fail |
+| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **861 / 861 pass**, 0 fail |
 | Python adapters | `npm run benchmark:test:python` | **86 tests, OK** |
 | Node syntax | `npm run check`, `npm run benchmark:check` | pass |
 | Python syntax | `npm run benchmark:check:python` | pass |
@@ -848,22 +848,48 @@ are excluded is a methodology decision.
 
 ## Blockers
 
-`node benchmark/cli.mjs v11-preflight` currently exits non-zero with exactly
-four blockers:
+**Readiness and runnability are two different questions, and the answers now
+differ.** `v11-preflight` can reach READY. `v11-run` still cannot start.
 
-1. **CB1 — Graphiti isolation contradiction.** Graphiti 0.29.3 has no native
-   user namespace although frozen Amendment 002 declares it `SUPPORTED`.
-2. **CB2 — Cognee ACL precondition.** Native ACL capability exists, but the
-   pinned backend access-control configuration and enforcement evidence do not.
-3. **CB3 — Graphiti services.** A verified Neo4j-compatible database and common
-   LLM/embedding endpoint are not provisioned and bound to the run.
-4. **CB4 — Cognee services.** The verified common LLM/embedding endpoint is not
-   provisioned and bound to the run.
+`node benchmark/cli.mjs v11-preflight` with no evidence presented exits non-zero
+with three blockers: the Cognee ACL precondition and the two required-service
+blockers. Owner-approved Amendment 003 cleared CB1 by correcting Graphiti's
+declared applicability against what the product actually exposes.
 
-After those are cleared, the harness still needs a verified service-health input
-and real metered runtime hosts before an official run can start. The complete
-evidence and required actions are in
-`benchmark/evidence/v11-blocker-matrix-2026-09-03.md` under CB1-CB4 and LB1-LB3.
+Presented with a verified service record and a verified precondition
+demonstration, the same command reports **READY with zero blockers**. Both
+records are produced by the harness itself — `v11-service-probe` and
+`v11-precondition-probe` — and both are checked against committed bytes and
+expire six hours after they were observed. Neither can be replaced by an
+assertion: `--preconditions`, which used to stand in for the second, is now
+refused by name.
+
+An attempted run then refuses at `RUNTIME_UNAVAILABLE` and writes no artifact.
+That is the honest state: the candidate is ready to be run, and there is still
+no runtime that could run it.
+
+| ID | Blocker | State |
+| --- | --- | --- |
+| CB1 | Graphiti declared isolation the product lacks | Cleared, Amendment 003 |
+| CB2 | Cognee pinned backend access-control configuration | Cleared, behavioural demonstration |
+| CB3 | Graphiti required services | Cleared, verified service record |
+| CB4 | Cognee required service | Cleared, verified service record |
+| LB1 | Required-service blockers emitted unconditionally | Cleared |
+| LB2a | `v11RuntimeDependencies()` unimplemented | **Open** |
+| LB2b | Mem0, Graphiti and Cognee client factories refuse | **Open** |
+| LB2c | Basic Memory storage attribution deferred | **Open** |
+| LB2d | Pinned Python runtime never installed into the pinned image | Cleared |
+| LB2e | Adapters never routed through the pinned container | Cleared |
+| LB2f | Graphiti exact group driver unavailable | **Open**, owner decision recorded |
+| LB2g | Control and MCP runtime hosts unbound | Cleared |
+| LB3 | Implementation lock requires a clean tree | Cleared |
+
+The evidence and the required next decisions are in
+`benchmark/evidence/v11-blocker-matrix-2026-09-03.md` (CB1-CB4, LB1-LB3, as of
+that date) and, superseding its blocker states,
+`benchmark/evidence/v11-service-readiness-2026-09-05.md`,
+`benchmark/evidence/v11-adapter-runtime-blockers-2026-09-05.md` and
+`benchmark/evidence/v11-cb2-acl-demonstration-2026-09-05.md`.
 
 ### Historical blocker record (resolved or superseded)
 
