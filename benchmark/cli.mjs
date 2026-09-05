@@ -27,6 +27,11 @@ import {
   computeV11Readiness,
   executeV11AcceptanceRun
 } from './lib/v11-run.mjs';
+import {
+  ollamaManifestPath,
+  ollamaWeightsDigest,
+  probeServices
+} from './lib/v11-service-probe.mjs';
 import { validateRawRun } from './lib/validate.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -40,7 +45,7 @@ const PHASES = ['A', 'B', 'C', 'D_TRUE', 'D_FALSE_0', 'D_FALSE_1', 'D_FALSE_2', 
 function parseArgs(argv) {
   if (argv.length === 0) {
     throw new Error(
-      'Usage: benchmark/cli.mjs <preflight|v11-preflight|v11-run|run|validate|aggregate> [options]'
+      'Usage: benchmark/cli.mjs <preflight|v11-preflight|v11-service-probe|v11-run|run|validate|aggregate> [options]'
     );
   }
   const command = argv[0];
@@ -477,6 +482,20 @@ function parsePreconditions(options) {
 }
 
 /**
+ * Where a service probe record is read from, if the operator names one.
+ *
+ * Null when no `--service-evidence` is given, and null is the state that leaves
+ * every required-service blocker standing. There is no default path: a run that
+ * picked one up from a well-known location would clear its own blockers with a
+ * file nobody chose to present.
+ */
+function parseServiceEvidencePath(options) {
+  return typeof options['service-evidence'] === 'string'
+    ? optionPath(options['service-evidence'])
+    : null;
+}
+
+/**
  * Execute the non-scored acceptance plan.
  *
  * The readiness gate is the same computation `v11-preflight` reports, and it
@@ -494,10 +513,12 @@ async function v11RunCommand(options) {
   // Readiness is decided before anything else is touched, including the
   // runtime binding. A blocked candidate must produce a refusal that names
   // its blockers, not a failure to reach hosts that were never the point.
+  const serviceEvidencePath = parseServiceEvidencePath(options);
   const readiness = await computeV11Readiness({
     ...candidate,
     benchmarkRoot,
-    satisfiedPreconditions
+    satisfiedPreconditions,
+    serviceEvidencePath
   });
   if (readiness.readiness !== 'READY') {
     process.stdout.write(`${JSON.stringify({
@@ -519,6 +540,7 @@ async function v11RunCommand(options) {
     ...candidate,
     benchmarkRoot,
     satisfiedPreconditions,
+    serviceEvidencePath,
     runId,
     attemptId,
     sourceHashes: candidate.sourceHashes,
@@ -572,6 +594,7 @@ async function v11Preflight(options) {
     applicability,
     declaredCounts,
     derivedCounts,
+    serviceEvidence,
     readiness,
     blockers
   } = await computeV11Readiness({
@@ -579,7 +602,8 @@ async function v11Preflight(options) {
     definition,
     scenarios,
     benchmarkRoot: join(root, 'benchmark'),
-    satisfiedPreconditions: parsePreconditions(options)
+    satisfiedPreconditions: parsePreconditions(options),
+    serviceEvidencePath: parseServiceEvidencePath(options)
   });
 
   const report = {
@@ -592,11 +616,13 @@ async function v11Preflight(options) {
       kind: descriptor.kind,
       version: descriptor.version,
       nativeProjectNamespace: descriptor.isolation.projectNamespace,
-      nativeUserNamespace: descriptor.isolation.userNamespace
+      nativeUserNamespace: descriptor.isolation.userNamespace,
+      requiredServiceNames: descriptor.requiredServiceNames
     })),
     applicability,
     declaredCounts,
     derivedCounts,
+    serviceEvidence,
     readiness,
     blockers
   };
@@ -606,9 +632,112 @@ async function v11Preflight(options) {
   return report;
 }
 
+/** Ask the local container runtime one question and return its trimmed answer. */
+async function dockerField(args) {
+  const { stdout } = await execFileAsync('docker', args);
+  return stdout.trim();
+}
+
+/**
+ * The container-runtime side of the probe.
+ *
+ * Each of these is one `docker` question with a fixed format string. They are
+ * separated from the probe so that the probe's behaviour on an unreachable
+ * service is testable without a container runtime.
+ */
+const IMAGE_IDENTITY_FORMAT = '{{.Id}}\t{{json .RootFS.Layers}}';
+
+async function inspectImageIdentity(reference) {
+  const [id, layers] = (await dockerField(['image', 'inspect', reference, '--format', IMAGE_IDENTITY_FORMAT]))
+    .split('\t');
+  return { id, layers: JSON.parse(layers) };
+}
+
+const containerRuntimeProbes = {
+  inspectContainer: async (name) => {
+    const answer = await dockerField(['container', 'inspect', name, '--format', '{{.Id}} {{.Image}}']);
+    const [id, image] = answer.split(' ');
+    return { id, image, layers: (await inspectImageIdentity(image)).layers };
+  },
+  inspectImage: inspectImageIdentity,
+  readModelWeightsDigest: async (container, modelId) => ollamaWeightsDigest(
+    await dockerField(['exec', container, 'cat', ollamaManifestPath(modelId)])
+  )
+};
+
+/**
+ * Resolve a service's credential from the environment, never from a file.
+ *
+ * The evidence record carries endpoints and outcomes and no credential, and
+ * this is why: the secret is read here, used for one request, and never enters
+ * anything that is written down.
+ */
+function serviceAuthorization(service) {
+  const variable = service.authEnvironmentVariable;
+  if (typeof variable !== 'string' || variable.length === 0) return null;
+  const value = process.env[variable];
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`service ${service.name} declares ${variable}, which is not set in the environment`);
+  }
+  return `Basic ${Buffer.from(value, 'utf8').toString('base64')}`;
+}
+
+/**
+ * Probe the services an operator has provisioned and write the evidence record.
+ *
+ * This command decides nothing. It writes what the services answered, including
+ * when they answered badly, and `v11-preflight --service-evidence` is where that
+ * record is judged. Keeping the two apart is what stops a probe from being able
+ * to clear its own blocker.
+ */
+async function v11ServiceProbeCommand(options) {
+  const endpointsPath = optionPath(options.endpoints);
+  if (endpointsPath === null) {
+    throw new Error('v11-service-probe requires --endpoints <service-endpoints.json>');
+  }
+  const benchmarkRoot = join(root, 'benchmark');
+  const [endpoints, serviceManifest, modelWeights] = await Promise.all([
+    readFile(endpointsPath, 'utf8').then(JSON.parse),
+    readFile(join(benchmarkRoot, 'service-images.json'), 'utf8').then(JSON.parse),
+    readFile(join(benchmarkRoot, 'model-weights.lock.json'), 'utf8').then(JSON.parse)
+  ]);
+
+  const evidence = await probeServices({
+    endpoints,
+    serviceManifest,
+    modelWeights,
+    ...containerRuntimeProbes,
+    readAuthorization: serviceAuthorization,
+    now: Date.now()
+  });
+
+  const outputPath = optionPath(options.out, join(benchmarkRoot, 'results', 'service-evidence.json'));
+  await writeJson(outputPath, evidence);
+
+  const failedChecks = evidence.services.flatMap((service) => service.checks
+    .filter((entry) => entry.outcome !== 'PASS')
+    .map((entry) => ({ service: service.name, check: entry.kind, detail: entry.detail })));
+  process.stdout.write(`${JSON.stringify({
+    schema: 'shadowgraph.v11.service-probe',
+    version: 1,
+    observedAt: evidence.observedAt,
+    outputPath,
+    services: evidence.services.map((service) => ({
+      name: service.name,
+      checks: service.checks.length,
+      failed: service.checks.filter((entry) => entry.outcome !== 'PASS').length,
+      servedModels: service.servedModels.map((model) => model.modelId)
+    })),
+    failedChecks
+  }, null, 2)}\n`);
+  if (failedChecks.length > 0) process.exitCode = 1;
+  return evidence;
+}
+
 const { command, options } = parseArgs(process.argv.slice(2));
 if (command === 'preflight') await preflight(options);
 else if (command === 'v11-preflight') await v11Preflight(options);
+else if (command === 'v11-service-probe') await v11ServiceProbeCommand(options);
 else if (command === 'v11-run') await v11RunCommand(options);
 else if (command === 'run') {
   const { raw, preregistration } = await createRun(options);

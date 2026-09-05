@@ -87,6 +87,25 @@ export const NATIVE_ISOLATION = Object.freeze({
 });
 
 /**
+ * Which committed services each arm cannot run without.
+ *
+ * `competitors.lock.json` states the requirement in prose, which names the
+ * dependency for a reader but cannot be matched against anything. These are the
+ * same requirement written as the service names `benchmark/service-images.json`
+ * declares, so readiness can ask whether a specific pinned service was verified
+ * rather than trying to parse a sentence.
+ *
+ * The two are held in step by an invariant at registry construction: an arm has
+ * prose in the lock or names here, never one without the other. A lock edit that
+ * adds or drops a required service and does not touch this map fails the build
+ * rather than leaving a requirement silently unenforced.
+ */
+export const V11_REQUIRED_SERVICES = Object.freeze({
+  graphiti: Object.freeze(['neo4j', 'ollama']),
+  cognee: Object.freeze(['ollama'])
+});
+
+/**
  * The single exclusion rule: an arm is excluded from ISOLATION_USER unless its
  * declared user isolation is SUPPORTED.
  *
@@ -178,6 +197,18 @@ export function createV11Registry(options) {
       throw new RegistryError(`arm ${armId} must not carry a Python adapter spec`);
     }
 
+    // Prose requirement and named requirement must agree. Either is a claim
+    // that this arm needs a provisioned service, and a claim that appears in
+    // only one of the two cannot be both reported to a reader and checked
+    // against evidence.
+    const requiredService = lockEntry.requiredService ?? null;
+    const requiredServiceNames = V11_REQUIRED_SERVICES[armId] ?? Object.freeze([]);
+    if ((requiredService !== null) !== (requiredServiceNames.length > 0)) {
+      throw new RegistryError(
+        `arm ${armId} disagrees about whether it requires a service: the competitor lock and the named service requirements must both say so or neither`
+      );
+    }
+
     descriptors.set(armId, Object.freeze({
       armId,
       kind,
@@ -187,7 +218,8 @@ export function createV11Registry(options) {
       packages: spec === null ? Object.freeze({}) : spec.packages,
       requestClasses: spec === null ? Object.freeze([]) : spec.requestClasses,
       containerImage: kind === 'python-container' ? containerImage : null,
-      requiredService: lockEntry.requiredService ?? null,
+      requiredService,
+      requiredServiceNames,
       isolation: NATIVE_ISOLATION[armId]
     }));
   }

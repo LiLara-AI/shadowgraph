@@ -605,3 +605,237 @@ function stubEnvelope(request, applicability) {
     }
   };
 }
+
+// --- verified service evidence -------------------------------------------
+//
+// Two arms need a service the repository does not contain. These tests fix the
+// direction of the default: the blocker stands unless a fresh probe record
+// agrees with the committed manifest and the committed weight lock, and it
+// stands again the moment any single part of that agreement is removed.
+
+async function committedGateDirectory(t, prefix) {
+  const directory = await scratchDirectory(t, prefix);
+  for (const file of ['service-images.json', 'model-weights.lock.json', 'python-wheels.lock.json']) {
+    await writeFile(path.join(directory, file), await readFile(path.join(BENCHMARK_ROOT, file), 'utf8'), 'utf8');
+  }
+  return directory;
+}
+
+const EVIDENCE_OBSERVED_AT = '2026-09-05T02:55:00.000Z';
+const EVIDENCE_NOW = Date.parse('2026-09-05T03:00:00.000Z');
+
+function evidenceChecks(name) {
+  if (name === 'neo4j') {
+    return [
+      { kind: 'http-status', endpoint: 'http://127.0.0.1:7474/', observedAt: EVIDENCE_OBSERVED_AT, outcome: 'PASS', detail: 'HTTP 200' },
+      { kind: 'cypher-statement', endpoint: 'http://127.0.0.1:7474/db/neo4j/tx/commit', observedAt: EVIDENCE_OBSERVED_AT, outcome: 'PASS', detail: 'RETURN 1 AS ok' }
+    ];
+  }
+  return [
+    { kind: 'openai-chat-completions', endpoint: 'http://127.0.0.1:11434/v1/chat/completions', observedAt: EVIDENCE_OBSERVED_AT, outcome: 'PASS', detail: 'HTTP 200' },
+    { kind: 'openai-embeddings', endpoint: 'http://127.0.0.1:11434/v1/embeddings', observedAt: EVIDENCE_OBSERVED_AT, outcome: 'PASS', detail: 'HTTP 200' }
+  ];
+}
+
+async function committedServiceEvidence(overrides = {}) {
+  const manifest = JSON.parse(await readFile(path.join(BENCHMARK_ROOT, 'service-images.json'), 'utf8'));
+  const weights = JSON.parse(await readFile(path.join(BENCHMARK_ROOT, 'model-weights.lock.json'), 'utf8'));
+  const servedModels = weights.models.map((model) => ({
+    modelId: model.modelId,
+    weightsDigest: model.weightsDigest
+  }));
+  return {
+    schema: 'shadowgraph.v11.service-evidence',
+    version: 1,
+    observedAt: EVIDENCE_OBSERVED_AT,
+    services: manifest.services.map((service, index) => ({
+      name: service.name,
+      image: service.image,
+      resolvedDigest: 'sha256:' + String(index + 1).repeat(64).slice(0, 64),
+      containerId: 'container-' + service.name,
+      servedModels: service.name === 'neo4j' ? [] : servedModels,
+      checks: evidenceChecks(service.name)
+    })),
+    ...overrides
+  };
+}
+
+async function readinessWithEvidence(t, prefix, evidence, extra = {}) {
+  const directory = await committedGateDirectory(t, prefix);
+  let serviceEvidencePath = null;
+  if (evidence !== null) {
+    serviceEvidencePath = path.join(directory, 'service-evidence.json');
+    await writeFile(serviceEvidencePath, JSON.stringify(evidence), 'utf8');
+  }
+  const candidate = await realCandidate();
+  return await computeV11Readiness({
+    ...candidate,
+    benchmarkRoot: directory,
+    serviceEvidencePath,
+    verificationInstant: EVIDENCE_NOW,
+    ...extra
+  });
+}
+
+function serviceBlockers(report) {
+  return report.blockers.filter((blocker) => blocker.kind === 'required-service');
+}
+
+test('without service evidence every required service is still a blocker', async (t) => {
+  const report = await readinessWithEvidence(t, 'shadowgraph-v11-no-evidence-', null);
+  const services = serviceBlockers(report);
+  assert.deepEqual(services.map((blocker) => blocker.armId).sort(), ['cognee', 'graphiti']);
+  for (const blocker of services) {
+    assert.ok(blocker.unverified.length > 0, 'the blocker must name what is unverified');
+  }
+  assert.ok(report.serviceEvidence.findings.some((finding) => finding.code === 'SERVICE_EVIDENCE_ABSENT'));
+  assert.deepEqual(report.serviceEvidence.verifiedServices, []);
+});
+
+test('a fresh probe record that agrees with the committed locks clears both required services', async (t) => {
+  const report = await readinessWithEvidence(
+    t,
+    'shadowgraph-v11-evidence-ok-',
+    await committedServiceEvidence()
+  );
+  assert.deepEqual(serviceBlockers(report), [], 'a verified service is no longer a blocker');
+  assert.deepEqual([...report.serviceEvidence.verifiedServices].sort(), ['neo4j', 'ollama']);
+  assert.match(report.serviceEvidence.note, /cannot establish/iu);
+});
+
+test('evidence for the common endpoint alone clears Cognee and not Graphiti', async (t) => {
+  const evidence = await committedServiceEvidence();
+  evidence.services = evidence.services.filter((service) => service.name !== 'neo4j');
+  const report = await readinessWithEvidence(t, 'shadowgraph-v11-evidence-partial-', evidence);
+
+  const services = serviceBlockers(report);
+  assert.deepEqual(services.map((blocker) => blocker.armId), ['graphiti']);
+  assert.deepEqual(services[0].unverified, ['neo4j']);
+});
+
+test('a stale probe record clears nothing', async (t) => {
+  const report = await readinessWithEvidence(
+    t,
+    'shadowgraph-v11-evidence-stale-',
+    await committedServiceEvidence(),
+    { verificationInstant: EVIDENCE_NOW + 7 * 60 * 60 * 1000 }
+  );
+  assert.deepEqual(serviceBlockers(report).map((blocker) => blocker.armId).sort(), ['cognee', 'graphiti']);
+  assert.ok(report.serviceEvidence.findings.some((finding) => finding.code === 'SERVICE_EVIDENCE_STALE'));
+});
+
+test('a probe record whose served weights disagree with the committed lock clears nothing', async (t) => {
+  const evidence = await committedServiceEvidence();
+  const endpoint = evidence.services.find((service) => service.servedModels.length > 0);
+  endpoint.servedModels[0].weightsDigest = 'sha256:' + 'd'.repeat(64);
+  const report = await readinessWithEvidence(t, 'shadowgraph-v11-evidence-weights-', evidence);
+
+  assert.deepEqual(serviceBlockers(report).map((blocker) => blocker.armId).sort(), ['cognee', 'graphiti']);
+  assert.ok(report.serviceEvidence.findings.some((finding) => (
+    finding.code === 'SERVICE_MODEL_DIGEST_MISMATCH'
+  )));
+});
+
+test('a probe record that names an image the committed manifest does not pin clears nothing', async (t) => {
+  const evidence = await committedServiceEvidence();
+  for (const service of evidence.services) service.image = service.image + '-modified';
+  const report = await readinessWithEvidence(t, 'shadowgraph-v11-evidence-image-', evidence);
+  assert.deepEqual(serviceBlockers(report).map((blocker) => blocker.armId).sort(), ['cognee', 'graphiti']);
+});
+
+test('an unreadable or malformed probe record blocks rather than crashing readiness', async (t) => {
+  const directory = await committedGateDirectory(t, 'shadowgraph-v11-evidence-malformed-');
+  const serviceEvidencePath = path.join(directory, 'service-evidence.json');
+  await writeFile(serviceEvidencePath, '{ not json', 'utf8');
+  const candidate = await realCandidate();
+
+  const report = await computeV11Readiness({
+    ...candidate,
+    benchmarkRoot: directory,
+    serviceEvidencePath,
+    verificationInstant: EVIDENCE_NOW
+  });
+  assert.equal(report.readiness, 'NOT READY');
+  assert.deepEqual(serviceBlockers(report).map((blocker) => blocker.armId).sort(), ['cognee', 'graphiti']);
+});
+
+test('a required service the committed manifest does not declare cannot be verified away', async (t) => {
+  // Registry and manifest can drift. If the manifest stops declaring a service
+  // an arm requires, no probe record may stand in for the missing declaration.
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-evidence-drift-');
+  const manifest = JSON.parse(await readFile(path.join(BENCHMARK_ROOT, 'service-images.json'), 'utf8'));
+  manifest.services = manifest.services.filter((service) => service.name !== 'neo4j');
+  await writeFile(path.join(directory, 'service-images.json'), JSON.stringify(manifest), 'utf8');
+  for (const file of ['model-weights.lock.json', 'python-wheels.lock.json']) {
+    await writeFile(path.join(directory, file), await readFile(path.join(BENCHMARK_ROOT, file), 'utf8'), 'utf8');
+  }
+  const evidence = await committedServiceEvidence();
+  const serviceEvidencePath = path.join(directory, 'service-evidence.json');
+  await writeFile(serviceEvidencePath, JSON.stringify(evidence), 'utf8');
+
+  const candidate = await realCandidate();
+  const report = await computeV11Readiness({
+    ...candidate,
+    benchmarkRoot: directory,
+    serviceEvidencePath,
+    verificationInstant: EVIDENCE_NOW
+  });
+  const graphiti = serviceBlockers(report).find((blocker) => blocker.armId === 'graphiti');
+  assert.ok(graphiti, 'graphiti must remain blocked');
+  assert.deepEqual(graphiti.unverified, ['neo4j']);
+});
+
+test('clearing the services does not clear the other blockers', async (t) => {
+  // The Cognee ACL precondition is a separate claim about the product, not
+  // about a host. Provisioning must not silently satisfy it.
+  const report = await readinessWithEvidence(
+    t,
+    'shadowgraph-v11-evidence-acl-',
+    await committedServiceEvidence()
+  );
+  assert.equal(report.readiness, 'NOT READY');
+  assert.ok(report.blockers.some((blocker) => (
+    blocker.kind === 'applicability' && blocker.code === 'DECLARED_ISOLATION_PRECONDITION_UNMET'
+  )));
+});
+
+test('preflight and run answer readiness identically when evidence is presented', async (t) => {
+  // The readiness input grew a second operator-supplied path. A flag that
+  // reached preflight and not the run would put the two commands back into
+  // disagreement, which is the one thing sharing this computation exists to
+  // prevent - and the no-argument symmetry test above cannot see it.
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-cli-symmetry-');
+  const outputDirectory = await scratchDirectory(t, 'shadowgraph-v11-cli-symmetry-out-');
+  const observedAt = new Date().toISOString();
+  const evidence = await committedServiceEvidence({ observedAt });
+  for (const service of evidence.services) {
+    for (const entry of service.checks) entry.observedAt = observedAt;
+  }
+  const serviceEvidencePath = path.join(directory, 'service-evidence.json');
+  await writeFile(serviceEvidencePath, JSON.stringify(evidence), 'utf8');
+
+  const preflight = await runCli(['v11-preflight', '--service-evidence', serviceEvidencePath]);
+  const run = await runCli([
+    'v11-run',
+    '--service-evidence', serviceEvidencePath,
+    '--out', outputDirectory
+  ]);
+
+  const preflightReport = JSON.parse(preflight.stdout);
+  const runReport = JSON.parse(run.stdout);
+
+  assert.deepEqual(runReport.readiness.blockers, preflightReport.blockers);
+  assert.equal(runReport.readiness.readiness, preflightReport.readiness);
+  assert.deepEqual(
+    runReport.readiness.serviceEvidence.verifiedServices,
+    preflightReport.serviceEvidence.verifiedServices
+  );
+
+  // Presented evidence really does clear the services it covers, and really
+  // does not clear anything else.
+  assert.deepEqual(preflightReport.serviceEvidence.verifiedServices, ['neo4j', 'ollama']);
+  assert.deepEqual(preflightReport.blockers.filter((blocker) => blocker.kind === 'required-service'), []);
+  assert.equal(preflightReport.readiness, 'NOT READY');
+  assert.deepEqual(preflightReport.blockers.map((blocker) => blocker.code), ['DECLARED_ISOLATION_PRECONDITION_UNMET']);
+  assert.deepEqual(await readdir(outputDirectory), [], 'a still-blocked run writes nothing');
+});

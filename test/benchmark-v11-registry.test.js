@@ -221,3 +221,58 @@ test('count derivation refuses malformed shapes', async () => {
     scenarios: 2, repetitions: 2, phases: PHASES, declared: null
   }), RegistryError);
 });
+
+test('every arm that requires a service names which committed services it requires', async () => {
+  const built = await registry();
+  for (const descriptor of built.descriptors) {
+    assert.equal(
+      descriptor.requiredService !== null,
+      descriptor.requiredServiceNames.length > 0,
+      `${descriptor.armId} states a service requirement in prose or by name but not both`
+    );
+  }
+  assert.deepEqual(
+    built.descriptorFor('graphiti').requiredServiceNames,
+    ['neo4j', 'ollama'],
+    'the prose requirement bundles a database and the common endpoint; both must be named'
+  );
+  assert.deepEqual(built.descriptorFor('cognee').requiredServiceNames, ['ollama']);
+  assert.deepEqual(built.descriptorFor('mem0-oss').requiredServiceNames, []);
+});
+
+test('every named required service is declared by the committed service manifest', async () => {
+  // The names exist so readiness can ask about a specific pinned service. A
+  // name the manifest never declares could never be verified, so it would be a
+  // permanent blocker that reads like a provisioning problem.
+  const manifest = JSON.parse(await readFile(
+    fileURLToPath(new URL('../benchmark/service-images.json', import.meta.url)),
+    'utf8'
+  ));
+  const declared = new Set(manifest.services.map((service) => service.name));
+  const built = await registry();
+  for (const descriptor of built.descriptors) {
+    for (const name of descriptor.requiredServiceNames) {
+      assert.ok(declared.has(name), `${descriptor.armId} requires undeclared service ${name}`);
+    }
+  }
+});
+
+test('a lock that adds a service requirement without naming its services is refused', async () => {
+  const competitorLock = await realLock();
+  competitorLock.arms['basic-memory'].requiredService = 'a service nobody named';
+  assert.throws(
+    () => createV11Registry({ competitorLock, containerImage: IMAGE }),
+    RegistryError,
+    'prose and named requirements must be added together'
+  );
+});
+
+test('a lock that drops a service requirement the registry still names is refused', async () => {
+  const competitorLock = await realLock();
+  delete competitorLock.arms.cognee.requiredService;
+  assert.throws(
+    () => createV11Registry({ competitorLock, containerImage: IMAGE }),
+    RegistryError,
+    'prose and named requirements must be removed together'
+  );
+});

@@ -16,6 +16,7 @@ import path from 'node:path';
 
 import { aggregateRun } from './aggregate.mjs';
 import { buildV11Prompt } from './v11-prompts.mjs';
+import { verifyServiceEvidence } from './v11-service-evidence.mjs';
 import { validateRawRun } from './validate.mjs';
 import { runV11Benchmark } from './v11-runner.mjs';
 
@@ -135,6 +136,12 @@ export async function computeV11Readiness(input) {
     scenarios,
     benchmarkRoot,
     satisfiedPreconditions = [],
+    serviceEvidencePath = null,
+    // Deliberately not called `now`: elsewhere in this module `now` is the
+    // clock function a run is given, and freshness here is an instant, not a
+    // clock. One name for two types is how a run would end up handing a
+    // function to a comparison and getting a silent answer.
+    verificationInstant = Date.now(),
     readFileImpl = readFile
   } = input;
 
@@ -158,20 +165,19 @@ export async function computeV11Readiness(input) {
   for (const mismatch of countMismatches) {
     blockers.push({ kind: 'expected-counts', ...mismatch });
   }
-  for (const descriptor of registry.descriptors) {
-    if (descriptor.requiredService !== null) {
-      blockers.push({
-        kind: 'required-service',
-        armId: descriptor.armId,
-        service: descriptor.requiredService
-      });
-    }
-  }
+  // The prerequisite gates are read first because two of the files they check -
+  // the service manifest and the model weight lock - are also the committed
+  // baseline a service probe record is checked against. Reading them once means
+  // readiness cannot end up comparing evidence to one version of the manifest
+  // while reporting the gate against another.
+  const gateValues = new Map();
+  const prerequisiteBlockers = [];
   for (const { requirement, file, isSatisfied } of V11_PREREQUISITE_GATES) {
     const gate = await readGateJson(path.join(benchmarkRoot, file), readFileImpl);
+    gateValues.set(file, gate.state === 'present' ? gate.value : null);
     const reason = unmetReason(gate, isSatisfied);
     if (reason !== null) {
-      blockers.push({
+      prerequisiteBlockers.push({
         kind: 'immutable-prerequisite',
         requirement,
         detail: reason,
@@ -180,10 +186,45 @@ export async function computeV11Readiness(input) {
     }
   }
 
+  // A required service is cleared only by a probe record that agrees with those
+  // committed files. Absent evidence verifies nothing, which is the state the
+  // repository is in by default and the reason this cannot quietly become a
+  // pass: `serviceEvidencePath` is null unless an operator names a file, and a
+  // named file still has to survive verifyServiceEvidence.
+  const serviceEvidenceGate = serviceEvidencePath === null
+    ? { state: 'absent' }
+    : await readGateJson(serviceEvidencePath, readFileImpl);
+  const serviceEvidence = verifyServiceEvidence({
+    evidence: serviceEvidenceGate.state === 'present' ? serviceEvidenceGate.value : null,
+    serviceManifest: gateValues.get('service-images.json'),
+    modelWeights: gateValues.get('model-weights.lock.json'),
+    now: verificationInstant
+  });
+
+  for (const descriptor of registry.descriptors) {
+    if (descriptor.requiredService === null) continue;
+    const unverified = descriptor.requiredServiceNames
+      .filter((name) => !serviceEvidence.verifiedServices.has(name));
+    if (unverified.length === 0) continue;
+    blockers.push({
+      kind: 'required-service',
+      armId: descriptor.armId,
+      service: descriptor.requiredService,
+      unverified,
+      note: serviceEvidence.note
+    });
+  }
+  blockers.push(...prerequisiteBlockers);
+
   return {
     applicability,
     declaredCounts,
     derivedCounts,
+    serviceEvidence: {
+      verifiedServices: [...serviceEvidence.verifiedServices].sort(),
+      findings: serviceEvidence.findings,
+      note: serviceEvidence.note
+    },
     readiness: blockers.length === 0 ? 'READY' : 'NOT READY',
     blockers
   };
@@ -239,6 +280,8 @@ export async function executeV11AcceptanceRun(input) {
     scenarios,
     benchmarkRoot,
     satisfiedPreconditions = [],
+    serviceEvidencePath = null,
+    verificationInstant = undefined,
     runId,
     attemptId,
     executeAdapter,
@@ -288,6 +331,8 @@ export async function executeV11AcceptanceRun(input) {
     scenarios,
     benchmarkRoot,
     satisfiedPreconditions,
+    serviceEvidencePath,
+    verificationInstant,
     readFileImpl
   });
   if (readinessReport.readiness !== 'READY') {
