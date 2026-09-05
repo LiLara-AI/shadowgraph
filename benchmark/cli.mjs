@@ -24,6 +24,7 @@ import { verifyPreregistration } from './lib/preregistration.mjs';
 import { CONTAINER_PATHS } from './lib/python-container-runtime.mjs';
 import { loadV11AcceptanceDefinition } from './lib/v11-definition.mjs';
 import {
+  PYTHON_IMPORT_MODULES,
   PYTHON_RUNTIME_SCHEMA,
   PYTHON_RUNTIME_VERSION,
   renderRequirements,
@@ -739,28 +740,39 @@ async function v11PythonRuntimeCommand(options) {
   ]);
   const distributions = JSON.parse(listed);
 
-  // The lock records an import probe per Python arm because a present
-  // distribution does not imply a working import.
+  // A present distribution does not imply a working import, so the probe does
+  // both: it imports the arm's module and then reads the distribution version
+  // the lock pins. The lock's own probe string is metadata-only - it resolves a
+  // .dist-info directory without executing the package - so on its own it would
+  // report PASS for exactly the Graphiti failure the lock documents.
   const importProbes = [];
   for (const [armId, entry] of Object.entries(competitorLock.arms)) {
     if (typeof entry.importProbe !== 'string' || entry.type !== 'pypi') continue;
+    const importModule = PYTHON_IMPORT_MODULES[armId];
+    if (importModule === undefined) {
+      throw new Error(`arm ${armId} is a pinned Python arm with no import module declared`);
+    }
     let observed = null;
+    let failure = null;
     try {
       const { stdout } = await dockerRun(
         ['--network', 'none', '--env', `PYTHONPATH=${CONTAINER_PATHS.runtime}`,
           '--mount', `type=bind,source=${sitePath},target=${CONTAINER_PATHS.runtime},readonly`],
-        ['python', '-c', entry.importProbe]
+        ['python', '-c', `import ${importModule}\n${entry.importProbe}`]
       );
       observed = stdout.trim();
     } catch (error) {
       observed = null;
-      process.stderr.write(`${armId} import probe failed: ${error?.message ?? error}\n`);
+      failure = String(error?.message ?? error).split('\n').slice(-3).join(' ').slice(0, 240);
+      process.stderr.write(`${armId} import probe failed: ${failure}\n`);
     }
     importProbes.push({
       armId,
       package: entry.package,
+      importModule,
       expected: entry.version,
       observed,
+      failure,
       outcome: observed === entry.version ? 'PASS' : 'FAIL'
     });
   }

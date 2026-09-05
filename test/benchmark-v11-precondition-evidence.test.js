@@ -251,3 +251,18 @@ test('an arm id that resolves through the prototype chain is refused, not thrown
     assert.ok(result.findings.some((finding) => finding.code === 'PRECONDITION_ARM_UNDECLARED'));
   }
 });
+
+test('the freshness boundary is measured from the record, and expires at the window', () => {
+  // As in the service gate: the earlier test advanced `now` by the whole window
+  // from NOW while the record was stamped five minutes earlier, so it asserted
+  // an age of window+5min and held under both > and >=.
+  const observedAt = Date.parse(OBSERVED_AT);
+
+  const atWindow = verify({ now: observedAt + PRECONDITION_EVIDENCE_MAX_AGE_MS });
+  assert.deepEqual([...atWindow.satisfiedPreconditions], []);
+  assert.ok(atWindow.findings.some((finding) => finding.code === 'PRECONDITION_EVIDENCE_STALE'));
+
+  const justInside = verify({ now: observedAt + PRECONDITION_EVIDENCE_MAX_AGE_MS - 1 });
+  assert.deepEqual([...justInside.satisfiedPreconditions], [PRECONDITION]);
+  assert.deepEqual(justInside.findings, []);
+});

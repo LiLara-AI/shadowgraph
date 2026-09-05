@@ -165,6 +165,33 @@ function serviceFindings(service, { images, weights, now }) {
   if (checks === null || checks.length === 0) {
     push('SERVICE_UNCHECKED', { detail: 'a service with no recorded check establishes nothing' });
   } else {
+    // Which kinds are present matters, not only that some passed. The kind list
+    // is an allow-list, so without this a record could drop a whole probe - or a
+    // refactor could stop performing one - and still verify on what remained.
+    //
+    // The requirement is derived from the record's own model claim rather than
+    // from a self-declared service kind, because a self-declared kind is
+    // another thing an operator could choose. A service claiming to serve the
+    // locked weights is claiming to be the common endpoint, and the endpoint has
+    // to answer on both surfaces the arms use.
+    const kinds = new Set(checks.filter(isPlainRecord).map((check) => check.kind));
+    const servesModels = Array.isArray(service.servedModels) && service.servedModels.length > 0;
+    if (servesModels) {
+      for (const required of ['openai-chat-completions', 'openai-embeddings']) {
+        if (!kinds.has(required)) {
+          push('SERVICE_ENDPOINT_CHECKS_MISSING', {
+            check: required,
+            detail: 'a service that claims to serve the locked weights must answer on both endpoints'
+          });
+        }
+      }
+    } else if ([...kinds].every((kind) => kind === 'image-identity')) {
+      // Identity says which image is running. It says nothing about whether the
+      // thing inside it responds.
+      push('SERVICE_LIVENESS_UNPROVEN', {
+        detail: 'an image-identity check alone does not establish that the service answers'
+      });
+    }
     for (const check of checks) {
       if (!isPlainRecord(check)
         || !SERVICE_CHECK_KINDS.includes(check.kind)

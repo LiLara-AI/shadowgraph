@@ -336,3 +336,88 @@ test('a service that serves the weights but is otherwise broken cannot be the en
   assert.deepEqual([...result.verifiedServices], [], 'neo4j must not verify on a record with no working endpoint');
   assert.ok(result.findings.some((finding) => finding.code === 'SERVICE_MODEL_ENDPOINT_ABSENT'));
 });
+
+test('a service claiming the locked weights must answer on both endpoint surfaces', () => {
+  // Found by review, and the concrete regression it defends: a refactor that
+  // swallowed the chat call left `ollama` with an embeddings check, correct
+  // served models, and no findings at all - because the served digests come
+  // from the container manifest, not from the chat probe. The record verified
+  // without ever establishing that the decision model generates.
+  for (const dropped of ['openai-chat-completions', 'openai-embeddings']) {
+    const document = mutateService('ollama', (service) => {
+      service.checks = service.checks.filter((check) => check.kind !== dropped);
+    });
+    const result = verify({ evidence: document });
+    assert.ok(!result.verifiedServices.has('ollama'), `dropping ${dropped} must withhold verification`);
+    assert.ok(result.findings.some((finding) => (
+      finding.code === 'SERVICE_ENDPOINT_CHECKS_MISSING' && finding.check === dropped
+    )));
+  }
+});
+
+test('an identity check alone does not establish that a service answers', () => {
+  // Identity says which image is running. A container can be the right image
+  // and be wedged.
+  const document = mutateService('neo4j', (service) => {
+    service.checks = [{
+      kind: 'image-identity',
+      endpoint: 'shadowgraph-v11-neo4j',
+      observedAt: OBSERVED_AT,
+      outcome: 'PASS',
+      detail: 'layers match'
+    }];
+  });
+  const result = verify({ evidence: document });
+  assert.ok(!result.verifiedServices.has('neo4j'));
+  assert.ok(result.findings.some((finding) => finding.code === 'SERVICE_LIVENESS_UNPROVEN'));
+});
+
+test('a check kind this module does not define is refused, not ignored', () => {
+  // The kind list is an allow-list and nothing else enforced it. Without this
+  // a record could verify a service on the strength of a check nobody defined.
+  const document = mutateService('neo4j', (service) => {
+    service.checks[0] = { ...service.checks[0], kind: 'looks-fine-to-me' };
+  });
+  const result = verify({ evidence: document });
+  assert.ok(!result.verifiedServices.has('neo4j'));
+  assert.ok(result.findings.some((finding) => finding.code === 'SERVICE_CHECK_MALFORMED'));
+});
+
+test('the freshness boundary is measured from the record, and expires at the window', () => {
+  // The earlier boundary test stamped the record five minutes before NOW and
+  // then advanced NOW by the whole window, so it asserted an age of
+  // window+5min and held identically under > and >=. Reverting the comparison
+  // left it green. This drives both sides from the record's own instant.
+  const observedAt = Date.parse(OBSERVED_AT);
+
+  const atWindow = verify({ now: observedAt + SERVICE_EVIDENCE_MAX_AGE_MS });
+  assert.deepEqual([...atWindow.verifiedServices], [], 'evidence expires at the window, not after it');
+  assert.ok(atWindow.findings.some((finding) => finding.code === 'SERVICE_EVIDENCE_STALE'));
+
+  const justInside = verify({ now: observedAt + SERVICE_EVIDENCE_MAX_AGE_MS - 1 });
+  assert.deepEqual([...justInside.verifiedServices].sort(), ['neo4j', 'ollama']);
+  assert.deepEqual(justInside.findings, []);
+});
+
+test('a single check expires at the window even while the record around it is fresh', () => {
+  // The record-level and check-level boundaries are separate comparisons, and
+  // only the record-level one was pinned. This drives the check-level one on its
+  // own: a document stamped a second ago, carrying a check stamped exactly a
+  // window ago.
+  const recordAt = new Date(NOW - 1_000).toISOString();
+  const checkAt = new Date(NOW - SERVICE_EVIDENCE_MAX_AGE_MS).toISOString();
+
+  const document = evidence({ observedAt: recordAt });
+  for (const service of document.services) {
+    for (const check of service.checks) check.observedAt = recordAt;
+  }
+  const neo4j = document.services.find((service) => service.name === 'neo4j');
+  neo4j.checks[1].observedAt = checkAt;
+
+  const result = verify({ evidence: document });
+  assert.ok(!result.verifiedServices.has('neo4j'), 'a check expires at the window, not after it');
+  assert.ok(result.findings.some((finding) => (
+    finding.code === 'SERVICE_CHECK_STALE' && finding.service === 'neo4j'
+  )));
+  assert.ok(result.verifiedServices.has('ollama'), 'and only its own service is withheld');
+});

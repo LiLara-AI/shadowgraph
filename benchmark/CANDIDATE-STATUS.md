@@ -61,9 +61,14 @@ Unchanged throughout, verified by `sha256sum` and an empty `git diff`:
 738ee8b4813fab77da2e4e24582b12e756686650e4c39fad41c5337f831f5dac  preregistration.json
 2b209df6ca46a179e332acd4ed0b16a35a089f5c14575dd86353db0dc7249c4a  preregistration-amendment-001.json
 08e12eca3f93bd67cfeaf90a2064f91beb240e78a8fd63ed8645da78c0d88f1b  preregistration-amendment-002.json
+726de2018584aca399fc27d2bba15585d8b6fb9454bc24083578daed22f0be0a  preregistration-amendment-003.json
 ```
 
-All three `.sha256` sidecars are unmodified.
+Amendment 003 is the owner-approved correction that cleared CB1. Its bytes are
+not merely listed here: `v11-runner.mjs` rehashes the file at run time and
+throws on a mismatch, and five test files assert the digest.
+
+All four `.sha256` sidecars are unmodified.
 `preregistration-amendment-001.sha256` records a bare filename while the other
 two record `benchmark/`-prefixed paths. This is a pre-existing inconsistency in
 frozen bytes and is **deliberately preserved, not normalised**.
@@ -71,23 +76,28 @@ frozen bytes and is **deliberately preserved, not normalised**.
 ### Acceptance fixtures — weaker provenance, stated plainly
 
 ```
-b48666efec93e4b7c6c6bebee66634546ccd991c66158d426d1547620720a596  acceptance/definition.json
+79bda68c52c0f60983bf224ea17400b95dc1aa78eeacea5042d4b13596ac99ca  acceptance/definition.json
 728dc6e3f12db8334d31d29641caee01d4b1c645c5b51bcb27caa3fff5b4b14a  acceptance/scenarios.json
 ```
 
 These two digests do **not** carry the same guarantee as the three above, and
-should not be read as if they did. The files did not exist at `d493cd3` and have
-no prior tracked version on any ref, so git cannot prove they were unmodified:
-they arrived as untracked work from the interrupted session and were committed
-as found. The claim that their bytes were never edited is supported by
-filesystem mtimes predating this session's first commit, which is corroboration,
-not proof.
+should not be read as if they did. The files did not exist at `d493cd3`, so git
+cannot prove their original bytes were unmodified: they arrived as untracked
+work from the interrupted session and were committed as found.
+
+`scenarios.json` has not been edited since. `definition.json` **has**: commit
+`1ba20a8` adopted owner-approved Amendment 003, changing Graphiti's declared
+`userIsolation` and the derived counts, and the digest above is the post-
+amendment one. The earlier value `b48666ef…` recorded here until 2026-09-05 was
+the pre-amendment file; it was left standing when the amendment landed, so an
+independent reviewer recomputing it would have found a mismatch and had no way
+to tell an authorised amendment from tampering. The canonical digest is enforced
+in `v11-definition.mjs` and asserted in `test/benchmark-v11-definition.test.js`,
+both of which were updated with the amendment.
 
 What *is* provable from the repository: `definition.json` already recorded the
 correct `scenarios.sha256` internally, so the two files were self-consistent
-before anything was touched, and two digests asserted in
-`test/benchmark-v11-definition.test.js` matched neither file. The **test
-literals** were corrected; the JSON bytes were not.
+before anything was touched.
 
 ### How to read the commit series
 

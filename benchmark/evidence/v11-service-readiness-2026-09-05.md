@@ -164,9 +164,23 @@ Observed on 2026-09-05:
 - 227 distributions installed, matching the lock exactly. No missing
   distribution, no version drift, nothing extra.
 - All four Python arms' import probes passed: `mem0ai` 2.0.19,
-  `graphiti-core` 0.29.3, `basic-memory` 0.23.2, `cognee` 1.5.3. The Graphiti
-  probe is the one that matters most here - its wheel installs a package it does
-  not import, which is why the lock also pins `httpx` 0.28.1.
+  `graphiti-core` 0.29.3, `basic-memory` 0.23.2, `cognee` 1.5.3.
+
+  **This sentence was wrong when first written, and the correction is worth
+  stating.** As originally built, the probe ran only the competitor lock's
+  `importProbe` string, which is `importlib.metadata.version(...)`. That
+  resolves a `.dist-info` directory and never executes the package, so it could
+  not have observed an import failure at all - least of all the Graphiti case
+  this record went on to cite as the one that mattered, where the wheel installs
+  `httpx2` and no `httpx` and the first clean import raises
+  `ModuleNotFoundError` while the metadata resolves perfectly. The record
+  claimed a property the harness did not check.
+
+  The probe now imports the arm's module before reading its version, and the
+  four results above are from that corrected probe, re-run in full. The
+  distribution-to-module mapping is declared in `v11-python-runtime.mjs` and
+  pinned by a test against the lock, because `mem0ai` imports `mem0` and
+  `graphiti-core` imports `graphiti_core` and neither is derivable.
 - All four adapters then executed **inside the pinned image**, importing from
   the read-only runtime mount, and returned well-formed protocol envelopes.
 
@@ -213,7 +227,8 @@ any product behaves. It says the transport works and the adapters refuse.
   presented, which is asserted by running both commands with the flag.
 - The pinned 227-package wheel set installs under `--require-hashes` into the
   pinned Python image, contains exactly what the lock names, and all four arms
-  import from it.
+  import from it - observed by a probe that performs the import, after the
+  original metadata-only probe was corrected.
 - All four Python adapters execute inside the pinned image against that runtime
   and return well-formed protocol envelopes.
 - Frozen methodology files are byte-unchanged: `preregistration.json`,

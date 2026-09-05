@@ -873,3 +873,86 @@ processGroupTest('without container options the executor still runs the host int
   assert.deepEqual(calls[0].args, [hostPath]);
   assert.equal(calls[0].options.env.PYTHONPATH, '', 'the host path still blanks PYTHONPATH');
 });
+
+processGroupTest('a client killed from outside still has its container removed', async (t) => {
+  // Found by review. The timeout and abort paths removed the container, but a
+  // client that dies without this harness asking - an operator kill, the OOM
+  // killer, a broken attach to a remote daemon - reached the close handler with
+  // no failure latched and nothing addressed the container. `--rm` does not
+  // help: it fires when the container exits, which is exactly what has not
+  // happened, and least of all when the adapter is hung.
+  const { hostPath } = await makeHost(t, successHostSource());
+  const request = requestFor();
+  const calls = [];
+  const spawnProcess = (command, args, options = {}) => {
+    calls.push({ command, args: [...args], options });
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = new EventEmitter();
+    child.stdin.end = () => {
+      if (calls.length > 1) return;
+      // The client is killed; the container it started is not.
+      setImmediate(() => child.emit('close', null, 'SIGKILL'));
+    };
+    child.kill = () => true;
+    child.unref = () => {};
+    return child;
+  };
+
+  const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
+    providerEndpointFor: endpointFactory([]),
+    spawnProcess,
+    container: { image: PINNED_IMAGE, runtimeRoot: '/srv/shadowgraph/runtime' }
+  }));
+
+  await assert.rejects(() => executor.execute(request));
+
+  const containerName = flagValues(calls[0].args, '--name')[0];
+  const removal = calls.find((call) => call.args[0] === 'rm');
+  assert.ok(removal, 'a client killed from outside must still remove its container');
+  assert.deepEqual(removal.args, ['rm', '--force', containerName]);
+});
+
+processGroupTest('two invocations for one unit get two different container names', async (t) => {
+  // The previous test performed a single invocation and asserted the name
+  // matched a pattern, so deriving the name from the state leaf - which a reset
+  // and a persist for one unit share - kept it green while reintroducing the
+  // collision the random name exists to prevent.
+  const { hostPath } = await makeHost(t, successHostSource());
+  const calls = [];
+  const spawnProcess = (command, args, options = {}) => {
+    calls.push({ command, args: [...args], options });
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = new EventEmitter();
+    const index = calls.length;
+    child.stdin.end = () => {
+      setImmediate(() => {
+        const forRequest = index === 1 ? requestFor('reset') : requestFor('persist');
+        child.stdout.emit('data', Buffer.from(`${JSON.stringify(successResponse(forRequest))}\n`, 'utf8'));
+        child.emit('close', 0, null);
+      });
+    };
+    child.kill = () => true;
+    child.unref = () => {};
+    return child;
+  };
+
+  const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
+    providerEndpointFor: endpointFactory([]),
+    spawnProcess,
+    container: { image: PINNED_IMAGE, runtimeRoot: '/srv/shadowgraph/runtime' }
+  }));
+
+  // A reset and a persist for the same unit resolve to the same state leaf.
+  await executor.execute(requestFor('reset'));
+  await executor.execute(requestFor('persist'));
+
+  const runs = calls.filter((call) => call.args[0] === 'run');
+  assert.equal(runs.length, 2);
+  const [first, second] = runs.map((call) => flagValues(call.args, '--name')[0]);
+  assert.match(first, /^shadowgraph-v11-[0-9a-f]{32}$/u);
+  assert.notEqual(first, second, 'two invocations must not contend for one container name');
+});

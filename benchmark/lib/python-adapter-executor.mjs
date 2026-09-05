@@ -798,6 +798,13 @@ function runChild({
     child.on('close', (code, exitSignal) => {
       closed = true;
       if (settled) return;
+      // The client can die without this harness having asked it to: an operator
+      // kill, the OOM killer, a session teardown, a broken attach to a remote
+      // daemon. `beginTermination` never ran, so nothing has addressed the
+      // container, and `--rm` cannot help because the container did not exit -
+      // least of all when the adapter is hung, which is exactly when it matters.
+      // Removal by name is the only thing that reaches it.
+      if (exitSignal !== null) removeContainer();
       if (failure !== null) {
         finish(reject, failure);
         return;

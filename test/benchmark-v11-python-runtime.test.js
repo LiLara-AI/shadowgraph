@@ -13,9 +13,12 @@
 // it completely.
 
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
+  PYTHON_IMPORT_MODULES,
   PYTHON_RUNTIME_SCHEMA,
   PythonRuntimeError,
   lockedDistributions,
@@ -201,9 +204,8 @@ test('an absent or malformed manifest verifies nothing', () => {
 });
 
 test('a recorded import probe that failed is a finding', () => {
-  // A present distribution does not imply a working import: the pinned
-  // graphiti-core wheel installs a package it does not import, which is why the
-  // lock also pins httpx.
+  // A recorded probe outcome is held to, whatever produced it. What the probe
+  // observes is the runtime build's business, not this verifier's.
   const failed = verify({
     manifest: manifest({
       importProbes: [
@@ -240,4 +242,31 @@ test('normalization applies to the installed side too, so basic_memory satisfies
   const result = verify({ manifest: document });
   assert.deepEqual(result.findings, []);
   assert.equal(result.valid, true);
+});
+
+test('every pinned Python arm declares the module its distribution imports', async () => {
+  // The lock's own importProbe reads distribution metadata, which resolves a
+  // .dist-info directory without executing the package. It would report PASS for
+  // exactly the failure the lock documents for Graphiti: a wheel that installed
+  // httpx2 and no httpx, where the first clean import raised ModuleNotFoundError
+  // while the metadata resolved perfectly. The probe therefore imports the
+  // module too, and the mapping has to cover every arm that has a probe.
+  const competitorLock = JSON.parse(await readFile(
+    fileURLToPath(new URL('../benchmark/competitors.lock.json', import.meta.url)),
+    'utf8'
+  ));
+
+  const probed = Object.entries(competitorLock.arms)
+    .filter(([, entry]) => entry.type === 'pypi' && typeof entry.importProbe === 'string')
+    .map(([armId]) => armId)
+    .sort();
+
+  assert.deepEqual(Object.keys(PYTHON_IMPORT_MODULES).sort(), probed);
+  for (const armId of probed) {
+    assert.match(PYTHON_IMPORT_MODULES[armId], /^[a-z][a-z0-9_]*$/u, `${armId} module name`);
+  }
+  // The two that differ from their distribution name are why this cannot be
+  // derived: a mapping that could be computed would not need declaring.
+  assert.equal(PYTHON_IMPORT_MODULES['mem0-oss'], 'mem0');
+  assert.equal(PYTHON_IMPORT_MODULES.graphiti, 'graphiti_core');
 });

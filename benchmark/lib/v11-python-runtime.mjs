@@ -31,6 +31,28 @@ export const PYTHON_RUNTIME_VERSION = 1;
 // deliberately not restated here: two spellings of one path is how a mount and
 // the PYTHONPATH that is supposed to name it drift apart.
 
+/**
+ * The module each Python arm's distribution actually imports.
+ *
+ * The competitor lock's `importProbe` reads distribution *metadata*:
+ * `importlib.metadata.version(...)` resolves a `.dist-info` directory and never
+ * executes a line of the package. On its own it cannot observe the failure the
+ * lock itself records for Graphiti - a wheel that installed `httpx2` and no
+ * `httpx`, where the first clean import raised `ModuleNotFoundError` while the
+ * metadata resolved perfectly.
+ *
+ * Distribution names and module names differ often enough that this cannot be
+ * derived: `mem0ai` imports `mem0`, `graphiti-core` imports `graphiti_core`.
+ * The mapping is stated here so it is reviewed in a diff rather than guessed at
+ * runtime.
+ */
+export const PYTHON_IMPORT_MODULES = Object.freeze({
+  'mem0-oss': 'mem0',
+  graphiti: 'graphiti_core',
+  'basic-memory': 'basic_memory',
+  cognee: 'cognee'
+});
+
 export class PythonRuntimeError extends Error {
   constructor(message) {
     super(message);

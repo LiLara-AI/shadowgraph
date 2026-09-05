@@ -207,8 +207,12 @@ export function buildContainerInvocation(options) {
  *
  * Signalling the foreground `docker run` client is not sufficient on its own:
  * if that client is SIGKILLed the container survives it. Cleanup therefore
- * addresses the container by its deterministic name so an invocation cannot
- * leave a running adapter behind.
+ * addresses the container by the name fixed for the invocation, on every path
+ * where the client goes away without the container having exited - a timeout,
+ * an abort, and a client killed from outside this harness.
+ *
+ * `--rm` is not a substitute. It fires when the *container* exits, which is
+ * precisely what has not happened in the case this exists for.
  */
 export function buildContainerKillInvocation(containerName, dockerExecutable = 'docker') {
   if (typeof containerName !== 'string' || !SAFE_CONTAINER_NAME.test(containerName)) {
