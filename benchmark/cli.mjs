@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { cpus, totalmem, type as osType, release as osRelease } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -837,6 +837,13 @@ async function v11PreconditionProbeCommand(options) {
   await mkdir(join(workRoot, 'data'), { recursive: true });
   await mkdir(join(workRoot, 'home'), { recursive: true });
 
+  // Remove any record a previous demonstration left in this working root before
+  // running. Without this, a probe that never started - an unreachable
+  // container runtime, an image that will not pull - would read the earlier
+  // record back and present it as the outcome of a run that did not happen.
+  const demonstrationPath = join(workRoot, 'precondition-evidence.json');
+  await rm(demonstrationPath, { force: true });
+
   const environment = {
     PYTHONPATH: CONTAINER_PATHS.runtime,
     PYTHONDONTWRITEBYTECODE: '1',
@@ -887,7 +894,16 @@ async function v11PreconditionProbeCommand(options) {
     if (typeof error?.stderr === 'string' && error.stderr.length > 0) process.stderr.write(error.stderr);
   }
 
-  const evidence = JSON.parse(await readFile(join(workRoot, 'precondition-evidence.json'), 'utf8'));
+  let evidence;
+  try {
+    evidence = JSON.parse(await readFile(demonstrationPath, 'utf8'));
+  } catch (error) {
+    // No record at all means the demonstration never reached the point of
+    // writing one. That is a failure to report, not a record to invent.
+    throw new Error(
+      `the demonstration wrote no record; the probe did not run to completion: ${error?.message ?? error}`
+    );
+  }
   await writeJson(outputPath, evidence);
   process.stdout.write(`${JSON.stringify({
     schema: 'shadowgraph.v11.precondition-probe',
