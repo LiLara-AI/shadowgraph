@@ -30,6 +30,7 @@ import {
   renderRequirements,
   verifyPythonRuntime
 } from './lib/v11-python-runtime.mjs';
+import { providerModelsFromLock } from './lib/v11-provider-models.mjs';
 import { createV11Registry } from './lib/v11-registry.mjs';
 import {
   V11RunError,
@@ -61,7 +62,7 @@ const PHASES = ['A', 'B', 'C', 'D_TRUE', 'D_FALSE_0', 'D_FALSE_1', 'D_FALSE_2', 
 function parseArgs(argv) {
   if (argv.length === 0) {
     throw new Error(
-      'Usage: benchmark/cli.mjs <preflight|v11-preflight|v11-service-probe|v11-precondition-probe|v11-fence-probe|v11-python-runtime|v11-run|run|validate|aggregate> [options]'
+      'Usage: benchmark/cli.mjs <preflight|v11-preflight|v11-service-probe|v11-precondition-probe|v11-fence-probe|v11-arm-probe|v11-python-runtime|v11-run|run|validate|aggregate> [options]'
     );
   }
   const command = argv[0];
@@ -1036,6 +1037,126 @@ async function v11FenceProbeCommand(options) {
   return evidence;
 }
 
+// Which demonstration proves an arm executes. One entry per arm that has one;
+// an arm without an entry is refused rather than silently skipped.
+const ARM_EXECUTION_PROBES = Object.freeze({
+  'mem0-oss': 'mem0_execution_demonstration.py'
+});
+
+/**
+ * Demonstrate that one arm executes a real benchmark unit.
+ *
+ * `v11-run` cannot answer this yet: the run path has no provider meter and no
+ * bound Python hosts, so an attempted run refuses at RUNTIME_UNAVAILABLE and
+ * measures nothing. This asks the narrower question the blocker record actually
+ * poses - can the arm's pinned library be driven through the adapter contract,
+ * metered, with retries off - and answers it against the real service rather
+ * than against a fake.
+ *
+ * The probe runs its own loopback proxy and counts what crosses it, so the
+ * count in the envelope is checked against one the adapter did not produce.
+ */
+async function v11ArmProbeCommand(options) {
+  const armId = options.arm;
+  if (typeof armId !== 'string' || !Object.hasOwn(ARM_EXECUTION_PROBES, armId)) {
+    throw new Error(
+      `v11-arm-probe requires --arm <${Object.keys(ARM_EXECUTION_PROBES).join('|')}>`
+    );
+  }
+  const runtimeRoot = optionPath(options.runtime);
+  const workRoot = optionPath(options.work);
+  if (runtimeRoot === null || workRoot === null) {
+    throw new Error('v11-arm-probe requires --runtime <runtime-site> and --work <writable-root>');
+  }
+  const modelEndpoint = options['model-endpoint'];
+  if (typeof modelEndpoint !== 'string' || modelEndpoint.length === 0) {
+    throw new Error('v11-arm-probe requires --model-endpoint <openai-compatible base url>');
+  }
+  if (typeof process.getuid !== 'function' || typeof process.getgid !== 'function') {
+    throw new Error('v11-arm-probe requires a POSIX host so the demonstration state is owned by the invoking user');
+  }
+
+  const benchmarkRoot = join(root, 'benchmark');
+  const [competitorLock, modelWeights] = await Promise.all([
+    readFile(competitorLockPath, 'utf8').then(JSON.parse),
+    readFile(join(benchmarkRoot, 'model-weights.lock.json'), 'utf8').then(JSON.parse)
+  ]);
+  // The lock is the authority on which models an arm may use, here as
+  // everywhere else: a probe that named its own would be demonstrating
+  // something other than the benchmark.
+  const pinned = providerModelsFromLock(modelWeights);
+
+  const outputPath = optionPath(
+    options.out,
+    join(benchmarkRoot, PROBE_RECORDS, `${armId}-execution-evidence.json`)
+  );
+  const probeDirectory = join(benchmarkRoot, 'probes');
+  const adapterDirectory = join(benchmarkRoot, 'adapters');
+  const containerProbes = '/opt/shadowgraph/probes';
+  const containerWork = '/run/shadowgraph/demonstration';
+
+  await mkdir(join(workRoot, 'state'), { recursive: true });
+  const demonstrationPath = join(workRoot, 'execution-evidence.json');
+  await rm(demonstrationPath, { force: true });
+
+  const environment = {
+    PYTHONPATH: `${CONTAINER_PATHS.runtime}:${CONTAINER_PATHS.adapters}`,
+    PYTHONDONTWRITEBYTECODE: '1',
+    HOME: containerWork,
+    SHADOWGRAPH_MODEL_ENDPOINT: modelEndpoint,
+    SHADOWGRAPH_STATE_ROOT: `${containerWork}/state`,
+    SHADOWGRAPH_LLM_MODEL: pinned.internal_memory_llm.modelId,
+    SHADOWGRAPH_EMBEDDING_MODEL: pinned.embedding.modelId,
+    SHADOWGRAPH_EMBEDDING_DIMENSION: String(pinned.embedding.embeddingDimension),
+    SHADOWGRAPH_DEMONSTRATION_OUTPUT: `${containerWork}/execution-evidence.json`
+  };
+
+  const args = [
+    'run', '--rm', '--init',
+    '--network', 'host',
+    '--user', `${process.getuid()}:${process.getgid()}`,
+    '--mount', `type=bind,source=${runtimeRoot},target=${CONTAINER_PATHS.runtime},readonly`,
+    '--mount', `type=bind,source=${probeDirectory},target=${containerProbes},readonly`,
+    '--mount', `type=bind,source=${adapterDirectory},target=${CONTAINER_PATHS.adapters},readonly`,
+    '--mount', `type=bind,source=${workRoot},target=${containerWork}`,
+    '--workdir', containerWork
+  ];
+  for (const name of Object.keys(environment).sort()) {
+    args.push('--env', `${name}=${environment[name]}`);
+  }
+  args.push(competitorLock.pythonImage, 'python', `${containerProbes}/${ARM_EXECUTION_PROBES[armId]}`);
+
+  let demonstrationFailed = false;
+  try {
+    await execFileAsync('docker', args, { maxBuffer: 64 * 1024 * 1024 });
+  } catch (error) {
+    demonstrationFailed = true;
+    if (typeof error?.stderr === 'string' && error.stderr.length > 0) process.stderr.write(error.stderr);
+  }
+
+  let evidence;
+  try {
+    evidence = JSON.parse(await readFile(demonstrationPath, 'utf8'));
+  } catch (error) {
+    throw new Error(
+      `the demonstration wrote no record; the probe did not run to completion: ${error?.message ?? error}`
+    );
+  }
+  await writeJson(outputPath, evidence);
+  process.stdout.write(`${JSON.stringify({
+    schema: 'shadowgraph.v11.arm-execution-probe',
+    version: 1,
+    armId,
+    precondition: evidence.precondition ?? null,
+    observedAt: evidence.observedAt ?? null,
+    outcome: evidence.outcome ?? 'FAIL',
+    outputPath,
+    steps: (evidence.steps ?? []).map((entry) => ({ step: entry.step, outcome: entry.outcome }))
+  }, null, 2)}\n`);
+  if (demonstrationFailed || evidence.outcome !== 'PASS') process.exitCode = 1;
+  return evidence;
+}
+
 /** Ask the local container runtime one question and return its trimmed answer. */
 async function dockerField(args) {
   const { stdout } = await execFileAsync('docker', args);
@@ -1145,6 +1266,7 @@ else if (command === 'v11-service-probe') await v11ServiceProbeCommand(options);
 else if (command === 'v11-python-runtime') await v11PythonRuntimeCommand(options);
 else if (command === 'v11-precondition-probe') await v11PreconditionProbeCommand(options);
 else if (command === 'v11-fence-probe') await v11FenceProbeCommand(options);
+else if (command === 'v11-arm-probe') await v11ArmProbeCommand(options);
 else if (command === 'v11-run') await v11RunCommand(options);
 else if (command === 'run') {
   const { raw, preregistration } = await createRun(options);

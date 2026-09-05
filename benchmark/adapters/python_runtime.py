@@ -8,6 +8,7 @@ import importlib.metadata
 import inspect
 import ipaddress
 import json
+import os
 import re
 import uuid
 from typing import Any, Callable
@@ -88,6 +89,23 @@ def _is_pinned_model(value: Any, *, embedding: bool) -> bool:
     if embedding:
         return isinstance(dimension, int) and not isinstance(dimension, bool) and dimension > 0
     return dimension is None
+
+
+def persistent_state_root(product: str) -> str:
+    """The owned directory an arm's native storage lives in, across processes.
+
+    The executor prepares one leaf per unit and names it in the environment. An
+    arm that persisted anywhere else would be measured on state the harness did
+    not create and cannot clean, so an absent, relative or symlinked root is a
+    refusal rather than a fallback.
+    """
+    configured = os.environ.get("SHADOWGRAPH_PYTHON_ADAPTER_STATE_ROOT")
+    if not isinstance(configured, str) or not configured or not os.path.isabs(configured):
+        raise ContractError(f"{product} requires an owned persistent state root")
+    normalized = os.path.abspath(configured)
+    if os.path.realpath(normalized) != normalized:
+        raise ContractError(f"{product} persistent state root is unsafe")
+    return normalized
 
 
 def require_models(models: Any, *, required: bool) -> None:

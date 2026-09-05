@@ -16,6 +16,7 @@ from python_runtime import (
     failed_response,
     installed_version,
     logical_record,
+    persistent_state_root,
     require_models,
     require_routes,
     require_versions,
@@ -34,13 +35,7 @@ STORAGE = not_available_storage(
 
 
 def _persistent_state_root() -> str:
-    configured = os.environ.get("SHADOWGRAPH_PYTHON_ADAPTER_STATE_ROOT")
-    if not isinstance(configured, str) or not configured or not os.path.isabs(configured):
-        raise ContractError("Basic Memory requires an owned persistent state root")
-    normalized = os.path.abspath(configured)
-    if os.path.realpath(normalized) != normalized:
-        raise ContractError("Basic Memory persistent state root is unsafe")
-    return normalized
+    return persistent_state_root("Basic Memory")
 
 
 # Basic Memory declines to delete the only project in a configuration, and a
