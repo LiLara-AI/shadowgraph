@@ -14,7 +14,7 @@ import { NO_COMMON_MODEL_REASON, probeCommonCapabilities, readCommonModelConfigu
 import { verifyPreregistration } from './lib/preregistration.mjs';
 import { CONTAINER_PATHS } from './lib/python-container-runtime.mjs';
 import { loadV11AcceptanceDefinition } from './lib/v11-definition.mjs';
-import { PYTHON_IMPORT_MODULES, PYTHON_RUNTIME_SCHEMA, PYTHON_RUNTIME_VERSION, renderRequirements, verifyPythonRuntime } from './lib/v11-python-runtime.mjs';
+import { LIST_DISTRIBUTIONS_SCRIPT, PYTHON_IMPORT_MODULES, pythonRuntimeManifest, renderRequirements, verifyPythonRuntime } from './lib/v11-python-runtime.mjs';
 import { providerModelsFromLock } from './lib/v11-provider-models.mjs';
 import { parseProviderLedger, reconcileProviderEvidence, runProviderReconciliation } from './lib/v11-provider-reconciler.mjs';
 import { createV11Registry } from './lib/v11-registry.mjs';
@@ -622,6 +622,12 @@ async function v11RunCommand(options) {
     // is indistinguishable from one that was not.
     valid: outcome.validation.valid,
     providerEvidence: reconciliation.status,
+    // Which site the arms imported, and how much of it was checked. Neither
+    // lock can carry this, so the run says it.
+    pythonRuntime: runtime.runtime,
+    // Which site the arms imported, and how much of it was checked. Neither
+    // lock can carry this, so the run says it.
+    pythonRuntime: runtime.runtime,
     artifactsWritten: [rawPath, aggregatePath, reconciliationPath]
   }, null, 2)}`);
   // A run whose own provider traffic does not match its record is not a clean
@@ -741,18 +747,6 @@ async function v11Preflight(options) {
 // own pip and setuptools, and a listing that swept the whole import path would
 // report those as distributions the wheel lock does not pin - a finding about
 // the interpreter rather than about the runtime being built.
-const LIST_DISTRIBUTIONS_SCRIPT = [
-  'import json, sys',
-  'from importlib.metadata import Distribution, DistributionFinder',
-  'context = DistributionFinder.Context(path=[sys.argv[1]])',
-  'found = {}',
-  'for distribution in Distribution.discover(context=context):',
-  '    name = distribution.metadata["Name"]',
-  '    if name:',
-  '        found[name] = distribution.version',
-  'print(json.dumps([{"name": n, "version": v} for n, v in sorted(found.items())]))'
-].join('\n');
-
 /**
  * Build the reproducible Python runtime the container arms execute against.
  *
@@ -850,47 +844,31 @@ async function v11PythonRuntimeCommand(options) {
     });
   }
 
-  // A build writes what it built. A verification reads what is there.
-  //
-  // Both used to write: `--verify only` skipped the install and still stamped
-  // the current `image` and `wheelsLockSha256` onto the manifest before checking
-  // them, so RUNTIME_IMAGE_MISMATCH and RUNTIME_WHEELS_LOCK_MISMATCH compared
-  // each value with itself and could never fire - and the one command for
-  // re-attesting an existing runtime silently repaired a manifest that
-  // misdescribed its own build inputs. The run path trusts exactly those two
-  // fields.
-  let manifest;
-  if (options.verify === 'only') {
+  // A build writes what it built; a verification reads what the build wrote and
+  // replaces only what it can re-observe. `pythonRuntimeManifest` owns that rule,
+  // because this command is entered by no test and the rule has been wrong here
+  // in both directions.
+  const verifyOnly = options.verify === 'only';
+  let recorded = null;
+  if (verifyOnly) {
     try {
-      manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+      recorded = JSON.parse(await readFile(manifestPath, 'utf8'));
     } catch (error) {
       throw new Error(
         `--verify only requires the manifest the build wrote; ${manifestPath} could not be read: ${error?.message ?? error}`
       );
     }
-    // The recorded claim, held against what the site now contains: a runtime
-    // upgraded in place after it was attested is the case this catches. The
-    // import probes are this run's, not the recorded ones - reading the manifest
-    // instead of rewriting it fixed one fail-open and opened another, where the
-    // command ran four fresh probes, printed a failing one, and reported valid
-    // because `verifyPythonRuntime` was judging the probes from build time.
-    //
-    // What comes from the recorded manifest is what this command cannot
-    // re-observe: the image it was built against and the wheel-lock hash it was
-    // built from. Everything else is measured now.
-    manifest = { ...manifest, distributions, importProbes };
-  } else {
-    manifest = {
-      schema: PYTHON_RUNTIME_SCHEMA,
-      version: PYTHON_RUNTIME_VERSION,
-      builtAt: new Date().toISOString(),
-      image,
-      wheelsLockSha256,
-      distributions,
-      importProbes
-    };
-    await writeJson(manifestPath, manifest);
   }
+  const manifest = pythonRuntimeManifest({
+    recorded,
+    verifyOnly,
+    image,
+    wheelsLockSha256,
+    distributions,
+    importProbes,
+    builtAt: new Date().toISOString()
+  });
+  if (!verifyOnly) await writeJson(manifestPath, manifest);
 
   const verification = verifyPythonRuntime({ manifest, wheelsLock, wheelsLockSha256, image });
   process.stdout.write(`${JSON.stringify({

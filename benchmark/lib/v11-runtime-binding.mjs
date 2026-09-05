@@ -353,8 +353,9 @@ export async function bindV11Runtime(input, injections = {}) {
       // this run was actually bound to, rather than against a second reading of
       // the lock that could drift from it.
       pinnedModels,
-      // Recorded so a caller can say which site it verified, and a test can see
-      // that it verified one at all.
+      // Reported in the run's summary, so the artifact is not the only place
+      // that says which site was measured - the environment lock's ten fields
+      // cannot name it and the implementation lock covers tracked sources only.
       runtime: Object.freeze({
         manifestPath: runtimeManifestPath,
         sitePath: pythonRuntimeSite,

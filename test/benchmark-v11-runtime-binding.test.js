@@ -17,10 +17,12 @@
 // things that would otherwise need a container, a socket and a clean worktree.
 
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import test from 'node:test';
 
 import { createProgressLedger } from '../benchmark/lib/progress.mjs';
+import { UNIT_TIMEOUT_MS } from '../benchmark/lib/v11-runner.mjs';
 import { bindV11Runtime, providerLedgerPath } from '../benchmark/lib/v11-runtime-binding.mjs';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
@@ -58,6 +60,11 @@ const MODEL_WEIGHTS = {
 const SERVICE_EVIDENCE = {
   services: [{ name: 'ollama', image: 'ollama/ollama:0.12.3', resolvedDigest: `sha256:${'d'.repeat(64)}` }]
 };
+// Distinct, so a swap is visible: the run record carries both, and they say
+// different things about what was measured.
+const IMPLEMENTATION_LOCK_HASH = '1'.repeat(64);
+const ENVIRONMENT_LOCK_HASH = '2'.repeat(64);
+const REQUEST_OUTER_DECISION = async () => ({ decision: null });
 
 
 /**
@@ -77,6 +84,17 @@ async function harness(t, overrides = {}) {
       closed.push('meter');
     },
     bindEndpoint: (correlation) => `http://127.0.0.1:43100/v1/${correlation.requestClass}`
+  };
+
+  const seen = {
+    nodeHosts: [],
+    pythonHosts: [],
+    adapterExecutor: [],
+    outerTransport: [],
+    implementationLock: [],
+    environmentLock: [],
+    progressLedger: [],
+    unitLedger: []
   };
 
   const injections = {
@@ -101,16 +119,20 @@ async function harness(t, overrides = {}) {
       verified.push(input);
       return { valid: true, findings: [] };
     },
-    createImplementationLock: async () => {
+    createImplementationLock: async (config) => {
       trace.push('implementation-lock');
-      return { lockSha256: '1'.repeat(64) };
+      seen.implementationLock.push(config);
+      return { lockSha256: IMPLEMENTATION_LOCK_HASH };
     },
-    discoverImplementationLockFiles: async () => [],
-    observeEnvironment: async () => {
+    discoverImplementationLockFiles: async (repoRoot) => [`${repoRoot}/benchmark/cli.mjs`],
+    observeEnvironment: async (config) => {
       trace.push('observe-environment');
-      return {};
+      return { observedFor: config.pythonImage };
     },
-    buildEnvironmentLock: () => ({ digest: '2'.repeat(64) }),
+    buildEnvironmentLock: (config) => {
+      seen.environmentLock.push(config);
+      return { digest: ENVIRONMENT_LOCK_HASH };
+    },
     startProviderMeter: async (config) => {
       trace.push('meter');
       meterConfig.push(config);
@@ -118,17 +140,31 @@ async function harness(t, overrides = {}) {
     },
     createProgressLedger: async (config) => {
       trace.push('progress');
+      seen.progressLedger.push(config);
       return await createProgressLedger({ ...config, path: progressPath });
     },
-    createUnitEvidenceLedger: async () => {
+    createUnitEvidenceLedger: async (config) => {
       trace.push('unit-evidence');
+      seen.unitLedger.push(config);
       return { append: async () => {}, close: async () => closed.push('unitEvidence') };
     },
-    createV11NodeHosts: () => ({ control: () => {}, 'node-mcp': () => {} }),
-    createV11PythonHosts: () => ({ 'python-container': () => {} }),
-    createV11AdapterExecutor: () => async () => {},
-    createMeteredOuterTransport: () => async () => {},
-    requestOuterDecision: async () => {},
+    createV11NodeHosts: (config) => {
+      seen.nodeHosts.push(config);
+      return { control: () => {}, 'node-mcp': () => {} };
+    },
+    createV11PythonHosts: (config) => {
+      seen.pythonHosts.push(config);
+      return { 'python-container': () => {} };
+    },
+    createV11AdapterExecutor: (config) => {
+      seen.adapterExecutor.push(config);
+      return async () => {};
+    },
+    createMeteredOuterTransport: (config) => {
+      seen.outerTransport.push(config);
+      return async () => {};
+    },
+    requestOuterDecision: REQUEST_OUTER_DECISION,
     ...overrides
   };
   const verified = [];
@@ -151,7 +187,7 @@ async function harness(t, overrides = {}) {
     platform: 'linux'
   };
 
-  return { input, injections, trace, closed, verified, meterConfig, progressPath, directory };
+  return { input, injections, trace, closed, verified, meterConfig, progressPath, directory, seen };
 }
 
 test('the runner is handed the measurement close, and can still write its terminal event', async (t) => {
@@ -346,4 +382,124 @@ test('the refusals that keep a run off a machine it cannot measure on', async (t
     const bound = await bindV11Runtime({ ...fresh.input, providerUpstream: upstream }, fresh.injections);
     await bound.close();
   }
+});
+
+test('every argument of the composition, because the composition is all this does', async (t) => {
+  // A review changed one token at a time in `bindV11Runtime` and ran the suite:
+  // the Python arms mounting the node state root, the two state roots swapped
+  // between host families, the wheel-lock hash made self-comparing, the outer
+  // model and seeds and temperature, the two lock hashes swapped - six
+  // mis-wirings, all green. Moving the function out of the CLI made it
+  // reachable; nothing made it *asserted*. The doubles recorded their arguments
+  // and no test read them.
+  //
+  // This asserts the wiring, argument by argument. It is long because the
+  // function is a composition and there is no shorter honest way to pin one.
+  const { input, injections, seen, meterConfig, verified } = await harness(t);
+  const bound = await bindV11Runtime(input, injections);
+
+  const wheelsLockSha256 = createHash('sha256')
+    .update(JSON.stringify(WHEELS_LOCK), 'utf8')
+    .digest('hex');
+
+  // The runtime verification: the site's distributions, the lock read from the
+  // repository, the hash computed from that text, and the image the competitor
+  // lock pins. Taking the hash from the manifest instead would make
+  // RUNTIME_WHEELS_LOCK_MISMATCH compare a value with itself.
+  assert.equal(verified.length, 1);
+  assert.deepEqual(verified[0].wheelsLock, WHEELS_LOCK);
+  assert.equal(verified[0].wheelsLockSha256, wheelsLockSha256);
+  assert.notEqual(verified[0].wheelsLockSha256, MANIFEST.wheelsLockSha256);
+  assert.equal(verified[0].image, IMAGE);
+  assert.deepEqual(verified[0].manifest.distributions, MANIFEST.distributions);
+
+  // The implementation lock: this repository, the files discovered in it, the
+  // models the weight lock pins, and the digests the service probe verified -
+  // not the tags it started from.
+  assert.deepEqual(seen.implementationLock, [{
+    repoRoot: input.repositoryRoot,
+    files: [`${input.repositoryRoot}/benchmark/cli.mjs`],
+    models: MODEL_WEIGHTS.models,
+    serviceImages: [{
+      name: 'ollama',
+      image: 'ollama/ollama:0.12.3',
+      digest: SERVICE_EVIDENCE.services[0].resolvedDigest
+    }]
+  }]);
+
+  // The environment lock is built from what was observed, not asserted.
+  assert.deepEqual(seen.environmentLock, [{ observations: { observedFor: IMAGE } }]);
+
+  // The two host families get their own state roots. Swapping them mounts the
+  // node arms' directory into the container while the Python executor writes its
+  // ownership marker where the node adapters read.
+  assert.deepEqual(seen.nodeHosts, [{ stateRoot: input.stateRoot }]);
+  assert.equal(seen.pythonHosts.length, 1);
+  assert.equal(seen.pythonHosts[0].stateRoot, input.pythonStateRoot);
+  assert.equal(seen.pythonHosts[0].runtimeRoot, input.pythonRuntimeSite,
+    'the arms mount the site that was verified');
+  assert.deepEqual(seen.pythonHosts[0].modelWeights, MODEL_WEIGHTS);
+  assert.equal(typeof seen.pythonHosts[0].providerEndpointFor, 'function');
+
+  // The executor routes by the registry it was given, to both families.
+  assert.equal(seen.adapterExecutor.length, 1);
+  assert.equal(seen.adapterExecutor[0].registry, input.registry);
+  assert.deepEqual(Object.keys(seen.adapterExecutor[0].hosts).sort(), [
+    'control',
+    'node-mcp',
+    'python-container'
+  ]);
+
+  // The outer transport is the frozen execution parameters, and the pinned chat
+  // model - the same one the internal memory route uses.
+  assert.equal(seen.outerTransport.length, 1);
+  const outer = seen.outerTransport[0];
+  assert.equal(outer.model, 'qwen2.5:0.5b');
+  assert.deepEqual(outer.seeds, [11, 22]);
+  assert.equal(outer.temperature, PREREGISTRATION.commonExecution.temperature);
+  assert.equal(outer.maxOutputTokens, PREREGISTRATION.commonExecution.maxOutputTokens);
+  assert.equal(outer.timeoutMs, PREREGISTRATION.commonExecution.requestTimeoutMs);
+  assert.equal(outer.requestDecision, REQUEST_OUTER_DECISION);
+  assert.equal(outer.meter.bindEndpoint !== undefined, true);
+
+  // The meter's deadline is the frozen one too.
+  assert.equal(meterConfig[0].upstreamTimeoutMs, PREREGISTRATION.commonExecution.requestTimeoutMs);
+
+  // The ledgers are named for this attempt, and the progress ledger's stall
+  // deadline is the runner's own unit timeout rather than a restated number.
+  assert.equal(seen.progressLedger[0].runId, input.runId);
+  assert.equal(seen.progressLedger[0].attemptId, input.attemptId);
+  assert.equal(seen.progressLedger[0].unitTimeoutMs, UNIT_TIMEOUT_MS);
+  assert.match(seen.progressLedger[0].path, /attempt-binding-1\.progress\.ndjson$/u);
+  assert.equal(seen.unitLedger[0].runId, input.runId);
+  assert.equal(seen.unitLedger[0].attemptId, input.attemptId);
+  assert.match(seen.unitLedger[0].path, /attempt-binding-1\.units\.ndjson$/u);
+  assert.deepEqual(seen.unitLedger[0].sensitiveValues, []);
+
+  // And the two hashes the run record carries, each from its own lock.
+  assert.equal(bound.dependencies.implementationLockHash, IMPLEMENTATION_LOCK_HASH);
+  assert.equal(bound.dependencies.environmentLockHash, ENVIRONMENT_LOCK_HASH);
+
+  await bound.close();
+});
+
+test('the endpoint the Python arms are given is minted per correlation by the meter', async (t) => {
+  // `providerEndpointFor` is the only thing connecting a metered arm to the
+  // meter, and it is a closure the double could not otherwise see into.
+  const { input, injections, seen } = await harness(t);
+  const bound = await bindV11Runtime(input, injections);
+
+  const correlation = {
+    runId: input.runId,
+    attemptId: input.attemptId,
+    armId: 'mem0-oss',
+    scenarioId: 'ACC_ONE',
+    repetition: 0,
+    phase: 'B',
+    requestClass: 'embedding'
+  };
+  const endpoint = seen.pythonHosts[0].providerEndpointFor('embedding', correlation);
+  assert.equal(endpoint, 'http://127.0.0.1:43100/v1/embedding');
+
+  await bound.close();
 });

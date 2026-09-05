@@ -593,6 +593,11 @@ test('a failed unit is held to everything except its counts', () => {
   assert.equal(report.totals.observedEvents, 8);
   assert.equal(report.totals.unverifiedCountEvents, 2);
   assert.equal(report.totals.unverifiedCountUnits, 1);
+  // The measured unit claimed 1 + 2 + 3; the failed unit's three expectations
+  // are not counted, because they are not being compared. Leaving them in the
+  // totals would report six expected calls the run was never held to.
+  assert.equal(report.totals.expectedCalls, 6);
+  assert.equal(report.totals.matchedCalls, 6);
 });
 
 test('a failed unit reaching an unpinned model is still a finding', () => {

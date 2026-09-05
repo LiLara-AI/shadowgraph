@@ -342,3 +342,77 @@ export async function readPythonSiteDistributions(sitePath, { readdirImpl = read
   }
   return distributions;
 }
+
+/**
+ * Every distribution the interpreter can discover in a site, as JSON.
+ *
+ * Run inside the pinned image by the build command, and exported here so it can
+ * be run against a directory a test controls. It reports a *list*, not a
+ * dictionary keyed by name: a real `pip install --target <site> --upgrade`
+ * leaves the superseded `.dist-info` in place, so an upgraded site holds two
+ * versions of one distribution, and collapsing them last-discover-wins made the
+ * verdict depend on discovery order. With that collapse,
+ * `DISTRIBUTION_DUPLICATED` could never fire from the only command that builds a
+ * manifest - which is where the manifest the run path trusts comes from.
+ */
+export const LIST_DISTRIBUTIONS_SCRIPT = [
+  'import json, sys',
+  'from importlib.metadata import Distribution, DistributionFinder',
+  'context = DistributionFinder.Context(path=[sys.argv[1]])',
+  'found = []',
+  'for distribution in Distribution.discover(context=context):',
+  '    name = distribution.metadata["Name"]',
+  '    if name:',
+  '        found.append({"name": name, "version": distribution.version})',
+  'found.sort(key=lambda entry: (entry["name"], entry["version"]))',
+  'print(json.dumps(found))'
+].join(String.fromCharCode(10));
+
+/**
+ * The manifest a build writes, or the one a verification holds a site to.
+ *
+ * A build records what it built. A verification records nothing - it reads the
+ * manifest the build wrote and replaces only what it can re-observe.
+ *
+ * Both used to write, and `--verify only` therefore stamped the current image
+ * and wheel-lock hash onto the manifest before checking them, so two of
+ * `verifyPythonRuntime`'s findings compared each value with itself. Reading
+ * instead fixed that and opened the opposite hole: the command ran four fresh
+ * import probes, printed a failing one, and verified the ones recorded at build
+ * time. So the rule is stated once, here: **what the site can be asked now is
+ * measured now; only what it cannot be asked comes from the record.**
+ */
+export function pythonRuntimeManifest(input) {
+  const {
+    recorded = null,
+    verifyOnly = false,
+    image,
+    wheelsLockSha256,
+    distributions,
+    importProbes,
+    builtAt
+  } = input ?? {};
+  if (!Array.isArray(distributions) || !Array.isArray(importProbes)) {
+    throw new PythonRuntimeError('a runtime manifest needs the distributions and import probes just observed');
+  }
+  if (!verifyOnly) {
+    if (!isNonEmptyString(image) || !isNonEmptyString(wheelsLockSha256) || !isNonEmptyString(builtAt)) {
+      throw new PythonRuntimeError('a built runtime manifest records the image, the wheel lock hash and when it was built');
+    }
+    return {
+      schema: PYTHON_RUNTIME_SCHEMA,
+      version: PYTHON_RUNTIME_VERSION,
+      builtAt,
+      image,
+      wheelsLockSha256,
+      distributions,
+      importProbes
+    };
+  }
+  if (!isPlainRecord(recorded)) {
+    throw new PythonRuntimeError('--verify only requires the manifest the build wrote');
+  }
+  // The image it was built against and the wheel lock it was built from are the
+  // two things a verification cannot re-observe, so they are the two it keeps.
+  return { ...recorded, distributions, importProbes };
+}

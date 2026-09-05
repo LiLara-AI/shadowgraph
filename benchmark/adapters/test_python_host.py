@@ -403,8 +403,13 @@ class NetworkFenceTests(unittest.TestCase):
                 with self.assertRaises(python_host.NetworkFenceError):
                     handle.sendmsg([payload], [], 0, peer)
             # And loopback still works, or the fence would have cost the
-            # benchmark the meter it exists to protect.
+            # benchmark the meter it exists to protect. Both directions, because
+            # a guard that refuses everything passes a refusal-only test.
             self.assertEqual(handle.sendto(payload, ("127.0.0.1", 9)), len(payload))
+            if hasattr(handle, "sendmsg"):  # pragma: no branch - POSIX
+                self.assertEqual(
+                    handle.sendmsg([payload], [], 0, ("127.0.0.1", 9)), len(payload)
+                )
 
     def test_every_resolver_is_fenced_not_only_getaddrinfo(self) -> None:
         # gethostbyname does not route through getaddrinfo. Fencing that one
@@ -534,9 +539,18 @@ class RawSocketFenceTests(unittest.TestCase):
             if hasattr(handle, "sendmsg"):  # pragma: no branch - POSIX
                 with self.assertRaises(python_host.NetworkFenceError):
                     handle.sendmsg([b"shadowgraph-fence"], [], 0, ("192.0.2.1", 9))
-            # And loopback still works through the same type, on every one of them.
+            # And loopback still works through the same type, on every one of
+            # them. A guard tested only in the refusing direction is a guard that
+            # can be made to refuse everything without anyone noticing - which is
+            # the more expensive failure, because it stops a measured arm.
             self.assertEqual(handle.sendto(b"shadowgraph-fence", ("127.0.0.1", 9)), 17)
             self.assertEqual(handle.connect_ex(("127.0.0.1", 9)), 0)
+            if hasattr(handle, "sendmsg"):  # pragma: no branch - POSIX
+                self.assertEqual(
+                    handle.sendmsg([b"shadowgraph-fence"], [], 0, ("127.0.0.1", 9)), 17
+                )
+            handle.connect(("127.0.0.1", 9))
+            self.assertEqual(handle.send(b"shadowgraph-fence"), 17)
 
     def test_every_raw_module_resolver_is_guarded(self) -> None:
         # Every `_socket.*` name in FENCED_ENTRY_POINTS, not a sample of it. A

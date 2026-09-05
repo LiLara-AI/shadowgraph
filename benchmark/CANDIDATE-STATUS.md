@@ -15,9 +15,9 @@ All figures below were produced on the current branch with a clean working tree.
 
 | Gate | Command | Result |
 | --- | --- | --- |
-| Full repository | `npm test` | **2357 / 2357 pass**, 0 fail, 22 suites |
-| Benchmark focused | `npm run benchmark:test` | **1121 / 1121 pass**, 0 fail |
-| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **959 / 959 pass**, 0 fail |
+| Full repository | `npm test` | **2361 / 2361 pass**, 0 fail, 22 suites |
+| Benchmark focused | `npm run benchmark:test` | **1125 / 1125 pass**, 0 fail |
+| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **963 / 963 pass**, 0 fail |
 | Python adapters | `npm run benchmark:test:python` | **139 / 139 pass**, 0 fail |
 | Node syntax | `npm run check`, `npm run benchmark:check` | pass |
 | Python syntax | `npm run benchmark:check:python` | pass |
@@ -224,15 +224,18 @@ supplying checkpoint and watchdog state and the unit-evidence ledger supplying
 `persistUnit` — is exercised end to end over all 308 units in
 `test/benchmark-v11-run.test.js`, with `validateRawRun` returning `valid: true`
 for the run it just produced and 308 checkpoints on disk. That test uses a
-**stub registry**, because a READY verdict is not reachable from the real one
-today (graphiti declares user isolation the product does not have, and three
-immutable prerequisites are absent). What it proves is that the pieces are
+**stub registry**, because a READY verdict needs evidence records this test does
+not produce - the verified service record and the precondition demonstration,
+both of which expire six hours after they were observed. It is not because the
+matrix is inconsistent: Amendment 003 moved Graphiti's declared user isolation
+to `NOT_APPLICABLE`, and the immutable prerequisites are committed. What it
+proves is that the pieces are
 connected, not that the candidate is ready; the readiness tests beside it cover
 the refusal against the real candidate.
 
 **7 — Offline acceptance.** `test/benchmark-v11-acceptance.test.js` drives all
 308 units through the real runner with the real prompt builder, adapters and
-outer model injected: 16 EXCLUDED, 292 MEASURED, 28 RESET, 264 outer calls, each
+outer model injected: 20 EXCLUDED, 288 MEASURED, 28 RESET, 260 outer calls, each
 count derived from the declared matrix and then cross-checked against the
 definition, the loader and the literal. Eleven fault injections assert
 fail-closed behaviour: prompt divergence, arm self-identification, memory
@@ -241,8 +244,10 @@ malformed envelopes, outer failure with no fabricated fallback, watchdog stall,
 interruption, resume, and one arm failing without taking the others down.
 
 This closes the **offline** half of requirement 7 only. It is a mock harness
-run. It is not evidence that any arm was measured, and B1 alone still prevents a
-real acceptance run.
+run. It is not evidence that any arm was measured. What prevents a real
+acceptance run today is the three preflight findings and F2 - not B1: the model
+lock carries full `sha256:` weights digests for both pinned models, and B1 is
+filed under the historical record below.
 
 Building it found a real defect: the runner handed whatever `buildOuterRequest`
 returned straight to the model with no audit. The injection point that makes the
@@ -625,10 +630,12 @@ In every combination the envelope is `FAILED` with a public cause, carries no
 persistence or isolation evidence, counts zero operations of every kind, and
 reports a static public message that is not the internal reason.
 
-Note the consequence for Graphiti: the frozen matrix declares its user isolation
-`SUPPORTED`, so the runner would send it a user-scoped namespace, and the
-adapter would refuse every unit. That is the same contradiction `v11-preflight`
-reports as a blocker, observed from the adapter side.
+Note what this used to mean for Graphiti, and no longer does: the frozen matrix
+declared its user isolation `SUPPORTED`, so the runner would have sent it a
+user-scoped namespace and the adapter would have refused every unit - the
+contradiction `v11-preflight` reported as a blocker, seen from the adapter side.
+Amendment 003 resolved it by declaring `NOT_APPLICABLE`, which is what the
+product exposes, and preflight reports no Graphiti applicability blocker now.
 
 ### Partial
 
@@ -644,9 +651,11 @@ their content gates pass:
 
 The implementation lock, evidence index, and review bundle are still ungenerated.
 They must bind a clean committed execution tree and real operator-supplied
-service digests; there is no official run to bundle. The authoritative current
-split between four preflight blockers and three later implementation blockers is
-recorded in `benchmark/evidence/v11-blocker-matrix-2026-09-03.md`.
+service digests; there is no official run to bundle. The blocker matrix in this
+document is the authoritative split.
+`benchmark/evidence/v11-blocker-matrix-2026-09-03.md` records the state on that
+date - four preflight blockers and three implementation blockers - and its
+blocker states are superseded by the records the matrix names.
 
 #### Historical lock-builder review (superseded by the current status above)
 
@@ -918,6 +927,9 @@ run being meaningful are different questions, and only the first is answered.
 | F14 | `v11-python-runtime --verify only` ran four fresh import probes, printed a failing one, and verified the ones recorded at build time | Cleared |
 | F15 | A real in-place `pip --upgrade` leaves two `.dist-info` directories, and the site read collapsed them last-wins, so F11's own named case still verified valid | Cleared |
 | F16 | No test entered the run path at all: a `throw` at the top of `v11RuntimeDependencies` left 2344 tests green, which is why F4, F6 and F11 could each be reverted at their own call site | Cleared, the composition moved to `v11-runtime-binding.mjs` |
+| F17 | Moving the composition made it reachable and not asserted: six single-token mis-wirings of `bindV11Runtime` - the arms mounting the wrong site, the two state roots swapped, a self-comparing wheel-lock hash, the wrong outer model, the two lock hashes swapped - all passed the suite | Cleared, every argument is pinned |
+| F18 | `DISTRIBUTION_DUPLICATED` could not fire from the only command that builds a manifest: the container listing collapsed duplicates by name before verification, so F15's fix closed the hole on the run path alone | Cleared |
+| F19 | `v11-python-runtime --verify only` measured four fresh import probes, printed a failing one, and verified the ones recorded at build time - a fail-open the F14 fix created | Cleared |
 
 The evidence and the required next decisions are in
 `benchmark/evidence/v11-blocker-matrix-2026-09-03.md` (CB1-CB4, LB1-LB3, as of
@@ -928,9 +940,9 @@ that date) and, superseding its blocker states,
 `benchmark/evidence/v11-runtime-binding-2026-09-05.md` (LB2a, F1-F3),
 `benchmark/evidence/v11-adversarial-review-2026-09-05.md` (F4-F7),
 `benchmark/evidence/v11-adversarial-review-round-2-2026-09-05.md` (F8-F11) and
-`benchmark/evidence/v11-adversarial-review-round-3-2026-09-05.md` (F12-F16 -
-the third round, which found why the same class kept recurring: no test entered
-the run path).
+`benchmark/evidence/v11-adversarial-review-round-3-2026-09-05.md` (F12-F16) and
+`benchmark/evidence/v11-adversarial-review-round-4-2026-09-05.md` (F17-F19 - the
+fourth round, which found that reachable is not the same as asserted).
 
 ### Historical blocker record (resolved or superseded)
 

@@ -14,15 +14,19 @@
 
 import assert from 'node:assert/strict';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
   PYTHON_IMPORT_MODULES,
   PYTHON_RUNTIME_SCHEMA,
+  LIST_DISTRIBUTIONS_SCRIPT,
   PYTHON_RUNTIME_VERSION,
   PythonRuntimeError,
+  pythonRuntimeManifest,
   lockedDistributions,
   normalizeDistributionName,
   readPythonSiteDistributions,
@@ -30,6 +34,21 @@ import {
   verifyPythonRuntime
 } from '../benchmark/lib/v11-python-runtime.mjs';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+
+const execFileAsync = promisify(execFile);
+
+/** The interpreter this machine has, or null. The script is Python, not JS. */
+async function pythonInterpreter() {
+  for (const candidate of ['python3', 'python']) {
+    try {
+      await execFileAsync(candidate, ['-c', 'import importlib.metadata']);
+      return candidate;
+    } catch {
+      // try the next spelling
+    }
+  }
+  return null;
+}
 
 const IMAGE = 'python@sha256:47ae396f09c1303b8653019811a8498470603d7ffefc29cb07c88f1f8cb3d19f';
 const LOCK_SHA256 = 'a'.repeat(64);
@@ -388,16 +407,117 @@ test('an in-place upgrade leaves two dist-info directories, and both are reporte
   );
 });
 
-test('metadata headers are read past a byte-order mark and CRLF line endings', async (t) => {
-  // A site written on, or copied through, a system that added either would have
-  // been silently enumerated as empty - which verifies as "every locked
-  // distribution absent", the right verdict for the wrong reason.
-  const site = await scratchDirectory(t, 'shadowgraph-v11-site-bom-');
-  await mkdir(path.join(site, 'httpx-0.28.1.dist-info'), { recursive: true });
-  await writeFile(
-    path.join(site, 'httpx-0.28.1.dist-info', 'METADATA'),
-    '﻿Metadata-Version: 2.1\r\nName: httpx\r\nVersion: 0.28.1\r\n\r\nSummary: x\r\n',
-    'utf8'
+test('the header scan stops at the blank line, and a leading mark is not part of a name', async (t) => {
+  // Two guards, each with a fixture that actually reaches it. The first version
+  // of this test reached neither: it put the byte-order mark in front of
+  // `Metadata-Version:`, a line the parser skips, and its CR was already removed
+  // by the `.trim()` on the extracted value. Both guards could be deleted and it
+  // passed.
+  const site = await scratchDirectory(t, 'shadowgraph-v11-site-headers-');
+  const write = async (directory, metadata) => {
+    await mkdir(path.join(site, directory), { recursive: true });
+    await writeFile(path.join(site, directory, 'METADATA'), metadata, 'utf8');
+  };
+
+  // A byte-order mark immediately before `Name:` - the only position where it can
+  // hide the header - so the strip is what makes this distribution nameable.
+  await write('httpx-0.28.1.dist-info', '\ufeffName: httpx\nVersion: 0.28.1\n\nSummary: x\n');
+
+  // CRLF, and a description beginning with a line that looks like a header. The
+  // scan must stop at the blank line: without `trimEnd()` the carriage return
+  // keeps that line from comparing equal to empty, the scan runs on into the
+  // body, and the reader reports prose as the installed version.
+  await write(
+    'mem0ai-2.0.19.dist-info',
+    'Metadata-Version: 2.1\r\nName: mem0ai\r\n\r\nVersion: 9.9.9 is what the changelog says\r\n'
   );
-  assert.deepEqual(await readPythonSiteDistributions(site), [{ name: 'httpx', version: '0.28.1' }]);
+
+  assert.deepEqual(
+    await readPythonSiteDistributions(site),
+    [{ name: 'httpx', version: '0.28.1' }],
+    'the second names no version, and prose is not one'
+  );
+});
+
+test('a build records what it built; a verification records nothing', async () => {
+  // The rule that has now been wrong here in both directions. Writing the current
+  // image and wheel-lock hash before checking them made two of
+  // `verifyPythonRuntime`'s findings compare each value with itself; reading the
+  // recorded manifest instead fixed that and left the *import probes* recorded,
+  // so the command ran four fresh probes, printed a failing one, and reported
+  // valid. What the site can be asked now is measured now.
+  const distributions = [{ name: 'httpx', version: '0.28.1' }];
+  const importProbes = [{ armId: 'graphiti', outcome: 'FAIL', observed: null }];
+
+  const built = pythonRuntimeManifest({
+    verifyOnly: false,
+    image: IMAGE,
+    wheelsLockSha256: LOCK_SHA256,
+    distributions,
+    importProbes,
+    builtAt: '2026-09-05T03:00:00.000Z'
+  });
+  assert.deepEqual(built, {
+    schema: PYTHON_RUNTIME_SCHEMA,
+    version: PYTHON_RUNTIME_VERSION,
+    builtAt: '2026-09-05T03:00:00.000Z',
+    image: IMAGE,
+    wheelsLockSha256: LOCK_SHA256,
+    distributions,
+    importProbes
+  });
+
+  // A verification keeps only what it cannot re-observe.
+  const recorded = {
+    schema: PYTHON_RUNTIME_SCHEMA,
+    version: PYTHON_RUNTIME_VERSION,
+    builtAt: '2026-08-01T00:00:00.000Z',
+    image: 'python@sha256:' + '9'.repeat(64),
+    wheelsLockSha256: '8'.repeat(64),
+    distributions: [{ name: 'httpx', version: '0.27.2' }],
+    importProbes: [{ armId: 'graphiti', outcome: 'PASS', observed: '0.29.3' }]
+  };
+  const verified = pythonRuntimeManifest({ recorded, verifyOnly: true, distributions, importProbes });
+
+  assert.equal(verified.image, recorded.image, 'the image it was built against cannot be re-observed');
+  assert.equal(verified.wheelsLockSha256, recorded.wheelsLockSha256, 'nor the lock it was built from');
+  assert.equal(verified.builtAt, recorded.builtAt);
+  assert.deepEqual(verified.distributions, distributions, 'what the site holds now');
+  assert.deepEqual(verified.importProbes, importProbes, 'and what the probes did now');
+
+  // And the refusals.
+  assert.throws(() => pythonRuntimeManifest({ verifyOnly: true, distributions, importProbes }), /requires the manifest the build wrote/u);
+  assert.throws(() => pythonRuntimeManifest({ verifyOnly: false, distributions, importProbes }), /records the image/u);
+  assert.throws(() => pythonRuntimeManifest({ verifyOnly: true, recorded, importProbes }), /distributions and import probes/u);
+  assert.throws(() => pythonRuntimeManifest({ verifyOnly: true, recorded, distributions }), /distributions and import probes/u);
+  assert.throws(() => pythonRuntimeManifest(), /distributions and import probes/u);
+});
+
+test('the listing the build command runs reports two versions of one distribution', async (t) => {
+  // Run, not read. This script is what produces the `distributions` array both
+  // the build and `--verify only` hand to `verifyPythonRuntime`, and it used to
+  // collapse duplicates into a dictionary keyed by name - so
+  // DISTRIBUTION_DUPLICATED could never fire from the only command that builds a
+  // manifest, and F15's fix closed the hole on the run path only.
+  const python = await pythonInterpreter();
+  if (python === null) {
+    t.skip('no python3 interpreter on PATH');
+    return;
+  }
+
+  const site = await scratchDirectory(t, 'shadowgraph-v11-listing-');
+  for (const version of ['0.27.2', '0.28.1']) {
+    await mkdir(path.join(site, `httpx-${version}.dist-info`), { recursive: true });
+    await writeFile(
+      path.join(site, `httpx-${version}.dist-info`, 'METADATA'),
+      `Metadata-Version: 2.1\nName: httpx\nVersion: ${version}\n`,
+      'utf8'
+    );
+  }
+
+  const { stdout } = await execFileAsync(python, ['-c', LIST_DISTRIBUTIONS_SCRIPT, site]);
+  assert.deepEqual(JSON.parse(stdout), [
+    { name: 'httpx', version: '0.27.2' },
+    { name: 'httpx', version: '0.28.1' }
+  ]);
 });

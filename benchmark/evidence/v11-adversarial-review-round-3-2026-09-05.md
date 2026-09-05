@@ -117,14 +117,20 @@ So F11's own named case still passed, depending on directory order.
 resolves to is pip's business, not the lock's, and neither answer is a pinned
 runtime. The site read also covers `*.egg-info/PKG-INFO`, because
 `importlib.metadata` does and a `.dist-info`-only reader enumerated less than
-the arms themselves see, and it now reads past a byte-order mark and CRLF
-endings rather than returning nothing.
+the arms themselves see.
+
+(This paragraph also said the reader now handles a byte-order mark and CRLF
+"rather than returning nothing". For CRLF that was never the failure: header
+values are stripped when they are extracted. What the added `trimEnd()`
+actually does is stop the header scan at the blank line, so a description
+beginning `Version:` is not read as one - and the test that named both guards
+reached neither, which the fourth review found.)
 
 ## The rest
 
 | Finding | Answer |
 | --- | --- |
-| `RawSocketFenceTests` exercised 4 of the 9 new `_socket` guards; deleting the other 5 left 139/139 green | every one is exercised, in both directions; the reviewer's deletion now fails 3 |
+| `RawSocketFenceTests` exercised 4 of the 9 new `_socket` guards; deleting the other 5 left 139/139 green | every one is exercised, and the reviewer's deletion now fails 2 tests and errors a third. (Three were still exercised only in the *refusing* direction, which the fourth review found; both directions now.) |
 | `runnerResources.persistUnit` was asserted by key name only; a no-op passed | it is called, and what it wrote is asserted |
 | Both new refusals in `executeV11AcceptanceRun` were untested, and a test comment claimed one of them fires | both are tested, against the same READY candidate |
 | `assert.deepEqual(recorder.invocations(), [])` compared two absent things — the recorder was built and never bound | the test now binds *both* executables and contrasts them, which is the property |
