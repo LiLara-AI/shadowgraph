@@ -3,7 +3,7 @@
 - **Date:** 2026-09-05
 - **Worktree:** `benchmark/v1.1-nonscored-acceptance`
 - **Baseline commit:** `1ba20a86c392e1fedcf82b41830fd5a60a4cebd5`
-- **Commit recorded here:** `ae8570003e8cedcf093f12c75daf3b6eb2ce6e0f`
+- **Commits recorded here:** `ae8570003e8cedcf093f12c75daf3b6eb2ce6e0f`, `6e7fb54`
 - **Product version:** `0.40.0`
 - **Official run status:** **NOT STARTED**
 
@@ -28,8 +28,8 @@ enumerate because they sit below the level it examined.
 | CB3 | Graphiti required services unprovisioned | Open | **Cleared** | Verified service evidence, this record |
 | CB4 | Cognee required service unprovisioned | Open | **Cleared** | Verified service evidence, this record |
 | LB1 | `required-service` blockers emitted unconditionally | Open | **Cleared** | Commit `ae85700` |
-| LB2 | Official runtime hosts unimplemented | Open | **Open** | Nothing; scope enlarged, see below |
-| LB3 | Implementation lock requires a clean committed tree | Open | **Cleared** | Tree is clean at `ae85700` |
+| LB2 | Official runtime hosts unimplemented | Open | **Partly open** | Scope enlarged and enumerated below; LB2d and LB2e cleared by commit `6e7fb54` |
+| LB3 | Implementation lock requires a clean committed tree | Open | **Cleared** | Tree is clean at `6e7fb54` |
 
 `node benchmark/cli.mjs v11-preflight` with no evidence presented still reports
 three blockers. With the evidence recorded below presented, it reports exactly
@@ -143,17 +143,61 @@ from source, not inferred.
 | LB2a | `v11RuntimeDependencies()` throws `RUNTIME_UNAVAILABLE` | `benchmark/cli.mjs` |
 | LB2b | Three of four Python adapters refuse at their client factory pending "Task 8": Mem0, Graphiti and Cognee each raise `RuntimeUnavailable` from `_default_client_factory` | `benchmark/adapters/mem0_adapter.py`, `graphiti_adapter.py`, `cognee_adapter.py` |
 | LB2c | Basic Memory has a real client factory, but its storage measurement is declared not available pending an exact native byte-attribution method | `benchmark/adapters/basic_memory_adapter.py` |
-| LB2d | Nothing installs the pinned wheel set into the pinned Python image. The executor spawns an interpreter with `PYTHONPATH` set empty, and the image is bare `python:3.12.11-slim`, so every Python arm would fail at import | `benchmark/lib/python-adapter-executor.mjs` |
-| LB2e | `benchmark/lib/python-container-runtime.mjs` is imported only by its own unit test. The executor does not route through `buildContainerInvocation`, so adapters would run on the host interpreter rather than inside the pinned image | grep across `benchmark/` and `test/` |
+| LB2d | **Cleared by `6e7fb54`.** Nothing installed the pinned wheel set into the pinned Python image. The executor spawned an interpreter with `PYTHONPATH` set empty against a bare `python:3.12.11-slim`, so every Python arm would fail at import | `benchmark/lib/python-adapter-executor.mjs` |
+| LB2e | **Cleared by `6e7fb54`.** `benchmark/lib/python-container-runtime.mjs` was imported only by its own unit test. The executor did not route through `buildContainerInvocation`, so adapters would have run on the host interpreter rather than inside the pinned image | grep across `benchmark/` and `test/` |
 | LB2f | Graphiti's adapter requires an audited exact group driver (`driver_for_group`) that pinned `graphiti-core` 0.29.3 does not expose | `benchmark/adapters/graphiti_adapter.py` |
 | LB2g | No host is bound for the `control` or `node-mcp` runtime kinds, though `node-adapter-host.mjs` supplies the pieces one would be built from | `benchmark/lib/v11-run.mjs`, `benchmark/lib/node-adapter-host.mjs` |
 
-LB2d is the one piece this record can report as *feasible rather than merely
-required*: the committed wheel lock resolves and installs cleanly under
-`--require-hashes` into the pinned image, so a reproducible Python runtime for
-all four arms is buildable from the bytes already committed. Nothing about where
-that runtime should be mounted, or how it reaches the pinned image's read-only
-filesystem, has been decided or implemented.
+## The Python Runtime, Built and Executed
+
+LB2d and LB2e were closed the same day, in commit `6e7fb54`. What follows was
+observed, not designed on paper.
+
+`benchmark/cli.mjs v11-python-runtime` renders the committed wheel lock into a
+`--require-hashes` requirement set and installs it inside the pinned image. The
+result is verified symmetrically against the lock - a missing distribution and
+an undeclared extra are both findings - and the recorded import probes must
+pass, because a present distribution does not imply a working import.
+
+Observed on 2026-09-05:
+
+- 227 distributions installed, matching the lock exactly. No missing
+  distribution, no version drift, nothing extra.
+- All four Python arms' import probes passed: `mem0ai` 2.0.19,
+  `graphiti-core` 0.29.3, `basic-memory` 0.23.2, `cognee` 1.5.3. The Graphiti
+  probe is the one that matters most here - its wheel installs a package it does
+  not import, which is why the lock also pins `httpx` 0.28.1.
+- All four adapters then executed **inside the pinned image**, importing from
+  the read-only runtime mount, and returned well-formed protocol envelopes.
+
+The runtime is installed beside the image rather than baked into a derived one.
+A derived image would carry a local id and no registry digest, so it could not
+satisfy the digest-pinned reference the container runtime requires, and it would
+replace the interpreter the competitor lock names.
+
+### A defect only a real invocation could find
+
+`buildContainerInvocation` omitted `--interactive`. Docker gives a container no
+stdin without it, so the host script read EOF and every real invocation failed.
+Because the module had never been called by anything but its own unit test, this
+had never surfaced - and when it did, it surfaced as an adapter fault rather
+than as the launch defect it was. Fixed, with the reason recorded in a
+regression test.
+
+### What those envelopes actually said
+
+The four responses were `FAILED`, correctly and for their own reasons. This is
+LB2b, LB2c and LB2f, which the runtime work does not touch:
+
+| Arm | Recorded failure |
+| --- | --- |
+| `mem0-oss` | `ENDPOINT_UNAVAILABLE` - "Pinned Mem0 runtime is not available" |
+| `graphiti` | `CONTRACT_FAILURE` - "Graphiti adapter contract failed closed" |
+| `cognee` | `CONTRACT_FAILURE` - "Cognee adapter contract failed closed" |
+| `basic-memory` | `CONTRACT_FAILURE` - "Basic Memory adapter contract failed closed" |
+
+Nothing in that table is a measurement, and none of it says anything about how
+any product behaves. It says the transport works and the adapters refuse.
 
 ## Proven vs. Not Measured
 
@@ -168,10 +212,13 @@ filesystem, has been decided or implemented.
 - `v11-preflight` and `v11-run` answer readiness identically when evidence is
   presented, which is asserted by running both commands with the flag.
 - The pinned 227-package wheel set installs under `--require-hashes` into the
-  pinned Python image.
+  pinned Python image, contains exactly what the lock names, and all four arms
+  import from it.
+- All four Python adapters execute inside the pinned image against that runtime
+  and return well-formed protocol envelopes.
 - Frozen methodology files are byte-unchanged: `preregistration.json`,
   amendments 001-003, `acceptance/definition.json`, `acceptance/scenarios.json`.
-- 2193 Node tests and 86 Python adapter tests pass, 0 failed, 0 skipped, 0 todo.
+- 2219 Node tests and 86 Python adapter tests pass, 0 failed, 0 skipped, 0 todo.
 
 ### Not Measured
 
