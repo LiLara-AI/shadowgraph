@@ -98,7 +98,8 @@ the two tables ever disagree: `socket.connect`, `socket.connect_ex`,
 refuses. The docstring now says it is an enumeration and says which one.
 
 Mutating the fence back to its four original entry points fails three tests and
-errors a fourth.
+errors a fourth. And because widening a fence can break the thing it protects,
+it was then run against the real libraries in the pinned image - see below.
 
 ## F6 — The run wrote a provider ledger and nothing read it
 
@@ -134,6 +135,53 @@ sources, and the environment lock's ten fields are frozen. **Fixed** by
 verifying the site's manifest against the wheel lock and the pinned image at
 bind time and refusing with `RUNTIME_UNAVAILABLE`. Refusing is what makes those
 hashes mean the configuration that was measured.
+
+## The fence, checked live against the real libraries
+
+Widening a fence that sits in the execution path of four arms is exactly the
+change that breaks a measurement silently, so it was checked in both directions
+inside the pinned image, on `--network host`, against the pinned 227-package
+runtime and the live pinned services -
+`benchmark/probes/loopback_fence_live_demonstration.py`.
+
+| Path | Verdict |
+| --- | --- |
+| `httpx` -> pinned Ollama on 127.0.0.1 | OK - 200, 3 models |
+| OpenAI SDK -> pinned Ollama | OK - 3 models |
+| `litellm.embedding` -> pinned Ollama | OK - 768 dimensions |
+| Bolt -> pinned Neo4j on 127.0.0.1:7687 | OK - connected |
+| `getaddrinfo`, `gethostbyname`, `gethostbyname_ex`, `getnameinfo`, `gethostbyaddr` for loopback | OK - all five resolve |
+| connected loopback datagram (`send` and one-argument `sendto`) | OK - 9 bytes each |
+| `AF_UNIX` | OK - reaches the kernel, `FileNotFoundError` |
+| `connect` -> 192.0.2.1:80 | **Refused** |
+| `sendto` -> 192.0.2.1:9 | **Refused** |
+| `getaddrinfo("huggingface.co")` | **Refused** |
+| `gethostbyname("huggingface.co")` | **Refused** |
+
+15 of 15 as required, exit 0. Nothing a metered arm legitimately does was lost,
+and both of the holes the review found are closed.
+
+The run also caught one on its own, which is worth recording because it was not
+arranged: importing LiteLLM under the fence produced
+
+> `LiteLLM: Failed to fetch remote model cost map from`
+> `https://raw.githubusercontent.com/BerriAI/litellm/... : Adapter network access`
+> `is limited to loopback. Falling back to local backup.`
+
+That is an unmetered outbound fetch, from a library three of the four Python arms
+load, refused in the act. `LITELLM_LOCAL_MODEL_COST_MAP=True` is one of the gates
+and closes the same path at the place LiteLLM documents; this probe applies only
+the fence, so the two are independent and either one alone would have stopped it.
+
+## The runtime verification, checked against the real site
+
+The bind-time refusal added for F7 was run against the actual built runtime at
+`/home/khouly/shadowgraph-v11-runtime/site`: `verifyPythonRuntime` returns
+`valid: true` with zero findings against `python-wheels.lock.json` and the pinned
+image, and the manifest is where the run path looks for it
+(`dirname(site)/runtime-manifest.json`). A new refusal that would have blocked a
+legitimate run is a worse defect than the one it fixes, so this is the half that
+had to be shown rather than argued.
 
 ## The guards that could not fire
 
