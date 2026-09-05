@@ -113,7 +113,7 @@ the CLI.
 | LB2d | Pinned Python runtime | Cleared |
 | LB2e | Container execution wiring | Cleared |
 | LB2f | Graphiti exact group driver | Open, owner decision recorded |
-| LB2g | No control or node-mcp runtime host | Open |
+| LB2g | No control or node-mcp runtime host | Cleared, commit `2a62d0e` |
 | LB3 | Implementation lock needs a clean tree | Cleared |
 
 `v11-preflight` is READY. The run path is not.
