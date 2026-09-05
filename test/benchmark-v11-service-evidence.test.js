@@ -307,3 +307,32 @@ test('evidence exactly at the freshness window has already expired', () => {
   assert.deepEqual([...result.verifiedServices], []);
   assert.ok(result.findings.some((finding) => finding.code === 'SERVICE_EVIDENCE_STALE'));
 });
+
+test('a record where nothing serves the locked weights verifies nothing at all', () => {
+  // Found by mutation: deleting the whole-record model-endpoint rule left every
+  // existing test green, because each one also tripped a per-service finding.
+  // This is the case only the record-level rule catches - every service is
+  // individually healthy, and none of them is the common endpoint. Verifying
+  // here would clear Cognee's required service on evidence that no model
+  // endpoint exists.
+  const document = evidence();
+  for (const service of document.services) service.servedModels = [];
+
+  const result = verify({ evidence: document });
+  assert.deepEqual([...result.verifiedServices], [], 'a provisioned database is not a model endpoint');
+  assert.ok(result.findings.some((finding) => finding.code === 'SERVICE_MODEL_ENDPOINT_ABSENT'));
+});
+
+test('a service that serves the weights but is otherwise broken cannot be the endpoint', () => {
+  // The record-level rule counts only VERIFIED services. An endpoint that
+  // serves every locked model and fails its health check establishes nothing,
+  // and must not stand in as the common endpoint for the others.
+  const document = mutateService('ollama', (service) => {
+    service.checks[0].outcome = 'FAIL';
+  });
+
+  const result = verify({ evidence: document });
+  assert.ok(!result.verifiedServices.has('ollama'));
+  assert.deepEqual([...result.verifiedServices], [], 'neo4j must not verify on a record with no working endpoint');
+  assert.ok(result.findings.some((finding) => finding.code === 'SERVICE_MODEL_ENDPOINT_ABSENT'));
+});
