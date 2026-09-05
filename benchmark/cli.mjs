@@ -31,6 +31,7 @@ import {
   verifyPythonRuntime
 } from './lib/v11-python-runtime.mjs';
 import { providerModelsFromLock } from './lib/v11-provider-models.mjs';
+import { parseProviderLedger, reconcileProviderEvidence } from './lib/v11-provider-reconciler.mjs';
 import { createV11Registry } from './lib/v11-registry.mjs';
 import {
   V11RunError,
@@ -1051,9 +1052,14 @@ const ARM_PROBES = Object.freeze({
     script: 'mem0_execution_demonstration.py',
     requiresModelEndpoint: true,
     environment: (work) => ({
-      SHADOWGRAPH_STATE_ROOT: `${work}/state`
+      SHADOWGRAPH_STATE_ROOT: `${work}/state`,
+      SHADOWGRAPH_PROVIDER_LEDGER: `${work}/provider-ledger.ndjson`
     }),
-    directories: ['state']
+    directories: ['state'],
+    // The probe's proxy writes the same ledger the harness's meter writes, so
+    // the agreement between what the arm claims and what crossed the wire can be
+    // judged by the reconciler that will judge the real run.
+    ledger: 'provider-ledger.ndjson'
   }),
   cognee: Object.freeze({
     script: 'cognee_dataset_identity_demonstration.py',
@@ -1179,6 +1185,66 @@ async function v11ArmProbeCommand(options) {
       `the demonstration wrote no record; the probe did not run to completion: ${error?.message ?? error}`
     );
   }
+  // Reconciliation is the point of the ledger, and it is done here rather than
+  // in the probe on purpose: a demonstration that judged its own evidence would
+  // be exercising its own comparison, and the comparison that matters is the
+  // one the run will use. `reconcileProviderEvidence` had no caller outside its
+  // own test until now - it could emit RETRY_OBSERVED and nothing would ever
+  // ask it to.
+  let reconciliation = null;
+  if (typeof probe.ledger === 'string') {
+    const ledgerPath = join(workRoot, probe.ledger);
+    let ledgerText;
+    try {
+      ledgerText = await readFile(ledgerPath, 'utf8');
+    } catch (error) {
+      throw new Error(
+        `the demonstration declared a provider ledger it did not write: ${error?.message ?? error}`
+      );
+    }
+    const { events, malformed } = parseProviderLedger(ledgerText);
+    reconciliation = reconcileProviderEvidence({
+      events,
+      malformed,
+      expectations: evidence.expectations ?? [],
+      expectedModels: {
+        internal_memory_llm: pinned.internal_memory_llm.modelId,
+        embedding: pinned.embedding.modelId
+      }
+    });
+
+    // A reconciliation that agrees is worth exactly as much as the chance it
+    // had to disagree. So the same ledger is reconciled again with one event
+    // duplicated - which is what a single transparent retry would have looked
+    // like - and the run refuses unless that produces RETRY_OBSERVED. Without
+    // this, a reconciler that had quietly stopped comparing would report
+    // RECONCILED on every run and read as a clean result.
+    const control = events.length === 0
+      ? null
+      : reconcileProviderEvidence({
+        events: [...events, { ...events[0], requestNumber: events.length }],
+        malformed,
+        expectations: evidence.expectations ?? [],
+        expectedModels: {
+          internal_memory_llm: pinned.internal_memory_llm.modelId,
+          embedding: pinned.embedding.modelId
+        }
+      });
+    const controlDetects = control !== null
+      && control.findings.some((finding) => finding.code === 'RETRY_OBSERVED');
+
+    evidence = {
+      ...evidence,
+      reconciliation,
+      retryControl: control === null
+        ? { detected: false, reason: 'the ledger recorded no traffic to duplicate' }
+        : { detected: controlDetects, findings: control.findings }
+    };
+    if (reconciliation.status !== 'RECONCILED' || !controlDetects) {
+      evidence = { ...evidence, outcome: 'FAIL' };
+    }
+  }
+
   await writeJson(outputPath, evidence);
   process.stdout.write(`${JSON.stringify({
     schema: 'shadowgraph.v11.arm-execution-probe',
@@ -1188,7 +1254,11 @@ async function v11ArmProbeCommand(options) {
     observedAt: evidence.observedAt ?? null,
     outcome: evidence.outcome ?? 'FAIL',
     outputPath,
-    steps: (evidence.steps ?? []).map((entry) => ({ step: entry.step, outcome: entry.outcome }))
+    steps: (evidence.steps ?? []).map((entry) => ({ step: entry.step, outcome: entry.outcome })),
+    reconciliation: reconciliation === null
+      ? null
+      : { status: reconciliation.status, totals: reconciliation.totals, findings: reconciliation.findings },
+    retryControl: evidence.retryControl ?? null
   }, null, 2)}\n`);
   if (demonstrationFailed || evidence.outcome !== 'PASS') process.exitCode = 1;
   return evidence;

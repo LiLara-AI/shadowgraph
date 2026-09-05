@@ -46,6 +46,7 @@ import os
 import socket
 import sys
 import threading
+import time
 import traceback
 import urllib.request
 from datetime import datetime, timezone
@@ -101,33 +102,60 @@ def required_environment(name: str) -> str:
 
 # --------------------------------------------------------------------- meter
 
+LEDGER_CLASSES = {"llm": "internal_memory_llm", "embed": "embedding"}
+
+
+def _json_field(raw: bytes, field: str):
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except Exception:  # noqa: BLE001 - a body that is not JSON simply has no field
+        return None
+    return value.get(field) if isinstance(value, dict) else None
+
+
 class _Meter(http.server.BaseHTTPRequestHandler):
     """The provider meter, reduced to what this demonstration needs of it.
 
-    A loopback proxy that forwards to the pinned model service and counts every
-    request per route. It is not the harness's meter and does not pretend to be;
-    it is a second, independent observer, which is the only thing that makes the
-    adapter's own count worth reporting.
+    A loopback proxy that forwards to the pinned model service, counts every
+    request, and writes the same newline-delimited ledger the harness's meter
+    writes - one `shadowgraph.provider-meter.event` per request, carrying the
+    full correlation, both model ids and the outcome.
+
+    It is not the harness's meter and does not pretend to be. What matters is
+    that the ledger it produces is the shape the real reconciler consumes, so
+    the agreement between the adapter's count and the observed traffic is judged
+    by the code that will judge the real run rather than by this probe's own
+    comparison.
+
+    The correlation travels in the route. Each operation is handed a fresh path
+    per request class, which is how the real meter mints a capability: the path
+    *is* the correlation, so traffic cannot be attributed by proximity or by
+    best fit.
     """
 
     upstream = ""
     counts: dict = {}
+    events: list = []
+    ledger_path = ""
     lock = threading.Lock()
 
     def log_message(self, *_args) -> None:  # noqa: D102 - silence the default access log
         return
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's spelling
-        route, _, tail = self.path.lstrip("/").partition("/")
-        with _Meter.lock:
-            _Meter.counts[route] = _Meter.counts.get(route, 0) + 1
+        segments = self.path.lstrip("/").split("/")
+        route = segments[0] if segments else ""
+        attempt = segments[1] if len(segments) > 1 else ""
+        tail = "/".join(segments[2:])
         body = self.rfile.read(int(self.headers.get("content-length") or 0))
+        started = time.monotonic()
         request = urllib.request.Request(
             f"{_Meter.upstream}/{tail}",
             data=body,
             headers={"content-type": "application/json"},
             method="POST",
         )
+        failure = None
         try:
             with urllib.request.urlopen(request, timeout=180) as answer:
                 payload = answer.read()
@@ -135,6 +163,36 @@ class _Meter(http.server.BaseHTTPRequestHandler):
         except Exception as error:  # noqa: BLE001 - reported to the caller as a body
             payload = json.dumps({"error": {"message": str(error)}}).encode("utf-8")
             status = 502
+            failure = type(error).__name__
+        latency = int((time.monotonic() - started) * 1000)
+
+        with _Meter.lock:
+            _Meter.counts[route] = _Meter.counts.get(route, 0) + 1
+            event = {
+                "schema": "shadowgraph.provider-meter.event",
+                "version": 1,
+                "event": "provider_request",
+                "requestNumber": len(_Meter.events),
+                "runId": RUN_ID,
+                "attemptId": attempt,
+                "armId": ARM_ID,
+                "scenarioId": SCENARIO_ID,
+                "repetition": 0,
+                "phase": PHASE,
+                "requestClass": LEDGER_CLASSES.get(route, route),
+                "requestedModel": _json_field(body, "model"),
+                "providerModel": _json_field(payload, "model"),
+                "latencyMs": latency,
+                "outcome": "SUCCEEDED" if status == 200 and failure is None else "FAILED",
+                "failure": failure,
+                "httpStatus": status,
+                "usage": _json_field(payload, "usage"),
+            }
+            _Meter.events.append(event)
+            with open(_Meter.ledger_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(event) + "\n")
+                handle.flush()
+
         self.send_response(status)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(payload)))
@@ -142,9 +200,13 @@ class _Meter(http.server.BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
 
-def start_meter(upstream: str) -> tuple[http.server.ThreadingHTTPServer, int]:
+def start_meter(upstream: str, ledger_path: str) -> tuple[http.server.ThreadingHTTPServer, int]:
     _Meter.upstream = upstream.rstrip("/")
     _Meter.counts = {}
+    _Meter.events = []
+    _Meter.ledger_path = ledger_path
+    with open(ledger_path, "w", encoding="utf-8"):
+        pass
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Meter)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, server.server_address[1]
@@ -153,6 +215,32 @@ def start_meter(upstream: str) -> tuple[http.server.ThreadingHTTPServer, int]:
 def metered_counts() -> dict:
     with _Meter.lock:
         return dict(_Meter.counts)
+
+
+def expectations_from(envelope: dict) -> list:
+    """What the run declares this unit's traffic should have been.
+
+    Read from the envelope the adapter produced, per request class, so the
+    reconciler is comparing the arm's own claim against what the meter saw
+    rather than comparing the meter against itself.
+    """
+    counts = {
+        "internal_memory_llm": envelope["operations"]["internalMemoryModelCalls"],
+        "embedding": envelope["operations"]["embeddingCalls"],
+    }
+    return [
+        {
+            "runId": envelope["runId"],
+            "attemptId": envelope["attemptId"],
+            "armId": envelope["armId"],
+            "scenarioId": envelope["scenarioId"],
+            "repetition": envelope["repetition"],
+            "phase": envelope["phase"],
+            "requestClass": request_class,
+            "expectedCalls": expected,
+        }
+        for request_class, expected in counts.items()
+    ]
 
 
 # ------------------------------------------------------------------ requests
@@ -214,6 +302,19 @@ def request_for(operation: str) -> dict:
 
 # ------------------------------------------------------------------ execution
 
+def routes_for(operation: str, port: int) -> dict:
+    """One fresh capability per request class, carrying this unit's correlation.
+
+    The real executor mints a distinct endpoint per (request, request class) and
+    refuses to reuse one. Putting the attempt in the path is what lets the
+    ledger attribute a request exactly rather than by arrival order.
+    """
+    return {
+        "internal_memory_llm": f"http://127.0.0.1:{port}/llm/attempt-{operation}",
+        "embedding": f"http://127.0.0.1:{port}/embed/attempt-{operation}",
+    }
+
+
 def run_operation(operation: str, routes: dict, models: dict, state_root: str) -> dict:
     """Run one operation in its own process, the way the executor does.
 
@@ -267,11 +368,8 @@ def demonstrate() -> dict:
     embedding_model = required_environment("SHADOWGRAPH_EMBEDDING_MODEL")
     embedding_dimension = int(required_environment("SHADOWGRAPH_EMBEDDING_DIMENSION"))
 
-    server, port = start_meter(upstream)
-    routes = {
-        "internal_memory_llm": f"http://127.0.0.1:{port}/llm",
-        "embedding": f"http://127.0.0.1:{port}/embed",
-    }
+    ledger_path = required_environment("SHADOWGRAPH_PROVIDER_LEDGER")
+    server, port = start_meter(upstream, ledger_path)
     models = {
         "internal_memory_llm": {"modelId": llm_model, "embeddingDimension": None},
         "embedding": {"modelId": embedding_model, "embeddingDimension": embedding_dimension},
@@ -284,11 +382,14 @@ def demonstrate() -> dict:
         "observedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "models": models,
         "operations": {},
+        "providerLedger": ledger_path,
+        "expectations": [],
     }
 
     try:
         before = metered_counts()
-        reset = run_operation("reset", routes, models, state_root)
+        reset = run_operation("reset", routes_for("reset", port), models, state_root)
+        report["expectations"].extend(expectations_from(reset))
         report["operations"]["reset"] = reset
         step(
             "reset-succeeds-against-the-real-store",
@@ -298,7 +399,8 @@ def demonstrate() -> dict:
         )
 
         before = metered_counts()
-        persist = run_operation("persist", routes, models, state_root)
+        persist = run_operation("persist", routes_for("persist", port), models, state_root)
+        report["expectations"].extend(expectations_from(persist))
         after = metered_counts()
         embedded = after.get("embed", 0) - before.get("embed", 0)
         chatted = after.get("llm", 0) - before.get("llm", 0)
@@ -339,7 +441,8 @@ def demonstrate() -> dict:
             f"{chatted} chat request(s) observed, and the adapter requires zero",
         )
 
-        verify = run_operation("verify", routes, models, state_root)
+        verify = run_operation("verify", routes_for("verify", port), models, state_root)
+        report["expectations"].extend(expectations_from(verify))
         report["operations"]["verify"] = verify
         evidence = verify["result"]["persistenceEvidence"]
         isolation = verify["result"]["isolationEvidence"]
@@ -361,7 +464,8 @@ def demonstrate() -> dict:
         )
 
         before = metered_counts()
-        retrieve = run_operation("retrieve", routes, models, state_root)
+        retrieve = run_operation("retrieve", routes_for("retrieve", port), models, state_root)
+        report["expectations"].extend(expectations_from(retrieve))
         after = metered_counts()
         report["operations"]["retrieve"] = retrieve
         report["meteredOnRetrieve"] = {

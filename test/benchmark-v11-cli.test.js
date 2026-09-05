@@ -274,3 +274,47 @@ test('a demonstration of a different product version clears nothing', async (t) 
     finding.code === 'PRECONDITION_PACKAGE_MISMATCH'
   )));
 });
+
+
+test('the arm probe refuses an arm it has no demonstration for', async () => {
+  // An arm without an entry is refused by name rather than silently skipped,
+  // because "the probe reported nothing" and "the probe was never run" look the
+  // same in a record.
+  for (const args of [
+    ['v11-arm-probe'],
+    ['v11-arm-probe', '--arm', 'graphiti'],
+    ['v11-arm-probe', '--arm', 'shadowgraph-full']
+  ]) {
+    const { code, stderr } = await runCli(args);
+    assert.notEqual(code, 0, args.join(' '));
+    assert.match(stderr, /v11-arm-probe requires --arm/u);
+  }
+});
+
+test('an arm probe that needs a model endpoint says so rather than inventing one', async () => {
+  const missing = await runCli([
+    'v11-arm-probe', '--arm', 'mem0-oss', '--runtime', '/nonexistent', '--work', '/nonexistent'
+  ]);
+  assert.notEqual(missing.code, 0);
+  assert.match(missing.stderr, /--arm mem0-oss requires --model-endpoint/u);
+
+  // And one that has an endpoint still needs somewhere to run.
+  const noRoots = await runCli([
+    'v11-arm-probe', '--arm', 'mem0-oss', '--model-endpoint', 'http://127.0.0.1:11434/v1'
+  ]);
+  assert.notEqual(noRoots.code, 0);
+  assert.match(noRoots.stderr, /requires --runtime .* and --work/u);
+});
+
+test('the fence probe needs a runtime and a place to work', async () => {
+  const { code, stderr } = await runCli(['v11-fence-probe']);
+  assert.notEqual(code, 0);
+  assert.match(stderr, /v11-fence-probe requires --runtime .* and --work/u);
+});
+
+test('every probe command appears in the usage line', async () => {
+  const usage = await runCli([]);
+  for (const command of ['v11-fence-probe', 'v11-arm-probe', 'v11-precondition-probe']) {
+    assert.ok(usage.stderr.includes(command), command);
+  }
+});

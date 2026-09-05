@@ -15,9 +15,9 @@ All figures below were produced on the current branch with a clean working tree.
 
 | Gate | Command | Result |
 | --- | --- | --- |
-| Full repository | `npm test` | **2279 / 2279 pass**, 0 fail, 22 suites |
-| Benchmark focused | `npm run benchmark:test` | **1043 / 1043 pass**, 0 fail |
-| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **883 / 883 pass**, 0 fail |
+| Full repository | `npm test` | **2283 / 2283 pass**, 0 fail, 22 suites |
+| Benchmark focused | `npm run benchmark:test` | **1047 / 1047 pass**, 0 fail |
+| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **887 / 887 pass**, 0 fail |
 | Python adapters | `npm run benchmark:test:python` | **116 / 116 pass**, 0 fail |
 | Node syntax | `npm run check`, `npm run benchmark:check` | pass |
 | Python syntax | `npm run benchmark:check:python` | pass |
