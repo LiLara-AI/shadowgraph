@@ -213,6 +213,9 @@ export function createV11Registry(options) {
       armId,
       kind,
       lockType: lockEntry.type,
+      // The distribution the lock pins for this arm, so evidence about the arm
+      // can be checked against the lock without re-reading it.
+      packageName: lockEntry.package ?? null,
       version: lockEntry.version ?? null,
       mode: lockEntry.mode ?? null,
       packages: spec === null ? Object.freeze({}) : spec.packages,

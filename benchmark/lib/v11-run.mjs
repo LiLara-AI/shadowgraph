@@ -15,6 +15,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { aggregateRun } from './aggregate.mjs';
+import { verifyPreconditionEvidence } from './v11-precondition-evidence.mjs';
 import { buildV11Prompt } from './v11-prompts.mjs';
 import { verifyServiceEvidence } from './v11-service-evidence.mjs';
 import { validateRawRun } from './validate.mjs';
@@ -135,7 +136,11 @@ export async function computeV11Readiness(input) {
     definition,
     scenarios,
     benchmarkRoot,
+    // An operator's unverified declaration that a precondition holds. Retained
+    // for the tests that drive applicability directly; the CLI never populates
+    // it, because a declaration is not a demonstration.
     satisfiedPreconditions = [],
+    preconditionEvidencePath = null,
     serviceEvidencePath = null,
     // Deliberately not called `now`: elsewhere in this module `now` is the
     // clock function a run is given, and freshness here is an instant, not a
@@ -145,8 +150,30 @@ export async function computeV11Readiness(input) {
     readFileImpl = readFile
   } = input;
 
+  // A precondition is met when a demonstration establishes it, not when someone
+  // says so. The declared side of that comparison comes from the registry and
+  // the lock, never from the record being checked.
+  const preconditionEvidenceGate = preconditionEvidencePath === null
+    ? { state: 'absent' }
+    : await readGateJson(preconditionEvidencePath, readFileImpl);
+  const preconditionEvidence = verifyPreconditionEvidence({
+    evidence: preconditionEvidenceGate.state === 'present' ? preconditionEvidenceGate.value : null,
+    declaredPreconditions: Object.fromEntries(registry.descriptors.map((descriptor) => [
+      descriptor.armId,
+      descriptor.isolation?.userNamespacePrecondition ?? null
+    ])),
+    pinnedPackages: Object.fromEntries(registry.descriptors.map((descriptor) => [
+      descriptor.armId,
+      { name: descriptor.packageName ?? null, version: descriptor.version ?? null }
+    ])),
+    now: verificationInstant
+  });
+
   const declared = Object.fromEntries(definition.arms.map((arm) => [arm.id, arm.applicability]));
-  const applicability = registry.verifyApplicability(declared, satisfiedPreconditions);
+  const applicability = registry.verifyApplicability(declared, [
+    ...satisfiedPreconditions,
+    ...preconditionEvidence.satisfiedPreconditions
+  ]);
   const derivedCounts = registry.expectedCounts({
     scenarios: scenarios.length,
     repetitions: definition.commonExecution.repetitions,
@@ -220,6 +247,11 @@ export async function computeV11Readiness(input) {
     applicability,
     declaredCounts,
     derivedCounts,
+    preconditionEvidence: {
+      satisfiedPreconditions: [...preconditionEvidence.satisfiedPreconditions].sort(),
+      findings: preconditionEvidence.findings,
+      note: preconditionEvidence.note
+    },
     serviceEvidence: {
       verifiedServices: [...serviceEvidence.verifiedServices].sort(),
       findings: serviceEvidence.findings,
@@ -280,6 +312,7 @@ export async function executeV11AcceptanceRun(input) {
     scenarios,
     benchmarkRoot,
     satisfiedPreconditions = [],
+    preconditionEvidencePath = null,
     serviceEvidencePath = null,
     verificationInstant = undefined,
     runId,
@@ -331,6 +364,7 @@ export async function executeV11AcceptanceRun(input) {
     scenarios,
     benchmarkRoot,
     satisfiedPreconditions,
+    preconditionEvidencePath,
     serviceEvidencePath,
     verificationInstant,
     readFileImpl

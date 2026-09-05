@@ -53,7 +53,7 @@ const PHASES = ['A', 'B', 'C', 'D_TRUE', 'D_FALSE_0', 'D_FALSE_1', 'D_FALSE_2', 
 function parseArgs(argv) {
   if (argv.length === 0) {
     throw new Error(
-      'Usage: benchmark/cli.mjs <preflight|v11-preflight|v11-service-probe|v11-python-runtime|v11-run|run|validate|aggregate> [options]'
+      'Usage: benchmark/cli.mjs <preflight|v11-preflight|v11-service-probe|v11-precondition-probe|v11-python-runtime|v11-run|run|validate|aggregate> [options]'
     );
   }
   const command = argv[0];
@@ -483,10 +483,29 @@ async function loadV11Candidate() {
   return { competitorLock, containerImage, registry, ...loaded };
 }
 
-function parsePreconditions(options) {
-  return typeof options.preconditions === 'string' && options.preconditions.length > 0
-    ? options.preconditions.split(',').map((entry) => entry.trim()).filter(Boolean)
-    : [];
+/**
+ * Refuse the flag that used to assert a precondition.
+ *
+ * `--preconditions` let an operator declare that a declared isolation
+ * precondition held, and the v1.1 blocker matrix said plainly what that was
+ * worth: an input, not proof. Dropping it silently would leave existing scripts
+ * quietly weaker than they were, so it is refused by name and points at the
+ * command that produces a demonstration instead.
+ */
+function refuseAssertedPreconditions(options) {
+  if (options.preconditions !== undefined) {
+    throw new Error(
+      '--preconditions asserted a precondition rather than demonstrating one. '
+      + 'Run v11-precondition-probe and present its record with --precondition-evidence <path>.'
+    );
+  }
+}
+
+/** Where a precondition demonstration is read from, if the operator names one. */
+function parsePreconditionEvidencePath(options) {
+  return typeof options['precondition-evidence'] === 'string'
+    ? optionPath(options['precondition-evidence'])
+    : null;
 }
 
 /**
@@ -516,7 +535,8 @@ function parseServiceEvidencePath(options) {
 async function v11RunCommand(options) {
   const candidate = await loadV11Candidate();
   const benchmarkRoot = join(root, 'benchmark');
-  const satisfiedPreconditions = parsePreconditions(options);
+  refuseAssertedPreconditions(options);
+  const preconditionEvidencePath = parsePreconditionEvidencePath(options);
 
   // Readiness is decided before anything else is touched, including the
   // runtime binding. A blocked candidate must produce a refusal that names
@@ -525,7 +545,7 @@ async function v11RunCommand(options) {
   const readiness = await computeV11Readiness({
     ...candidate,
     benchmarkRoot,
-    satisfiedPreconditions,
+    preconditionEvidencePath,
     serviceEvidencePath
   });
   if (readiness.readiness !== 'READY') {
@@ -547,7 +567,7 @@ async function v11RunCommand(options) {
   const outcome = await executeV11AcceptanceRun({
     ...candidate,
     benchmarkRoot,
-    satisfiedPreconditions,
+    preconditionEvidencePath,
     serviceEvidencePath,
     runId,
     attemptId,
@@ -597,11 +617,13 @@ function v11RuntimeDependencies() {
  * a statement about the candidate, not about any arm's behaviour.
  */
 async function v11Preflight(options) {
+  refuseAssertedPreconditions(options);
   const { registry, definition, scenarios, containerImage } = await loadV11Candidate();
   const {
     applicability,
     declaredCounts,
     derivedCounts,
+    preconditionEvidence,
     serviceEvidence,
     readiness,
     blockers
@@ -610,7 +632,7 @@ async function v11Preflight(options) {
     definition,
     scenarios,
     benchmarkRoot: join(root, 'benchmark'),
-    satisfiedPreconditions: parsePreconditions(options),
+    preconditionEvidencePath: parsePreconditionEvidencePath(options),
     serviceEvidencePath: parseServiceEvidencePath(options)
   });
 
@@ -630,6 +652,7 @@ async function v11Preflight(options) {
     applicability,
     declaredCounts,
     derivedCounts,
+    preconditionEvidence,
     serviceEvidence,
     readiness,
     blockers
@@ -769,6 +792,117 @@ async function v11PythonRuntimeCommand(options) {
   return manifest;
 }
 
+/**
+ * Run the Cognee ACL demonstration inside the pinned image and record it.
+ *
+ * The harness performs the demonstration rather than accepting a description of
+ * one. The backend pairing is passed explicitly because the pairing *is* the
+ * precondition: `ENABLE_BACKEND_ACCESS_CONTROL` plus stores that can physically
+ * carry per-dataset isolation. Nothing here decides whether the result clears a
+ * blocker - `v11-preflight --precondition-evidence` does that, and it refuses a
+ * record whose demonstration failed.
+ */
+async function v11PreconditionProbeCommand(options) {
+  const runtimeRoot = optionPath(options.runtime);
+  const workRoot = optionPath(options.work);
+  if (runtimeRoot === null || workRoot === null) {
+    throw new Error('v11-precondition-probe requires --runtime <runtime-site> and --work <writable-root>');
+  }
+  if (typeof process.getuid !== 'function' || typeof process.getgid !== 'function') {
+    throw new Error('v11-precondition-probe requires a POSIX host so the demonstration state is owned by the invoking user');
+  }
+  const llmEndpoint = options['llm-endpoint'];
+  const embeddingEndpoint = options['embedding-endpoint'];
+  if (typeof llmEndpoint !== 'string' || typeof embeddingEndpoint !== 'string') {
+    throw new Error('v11-precondition-probe requires --llm-endpoint and --embedding-endpoint');
+  }
+
+  const benchmarkRoot = join(root, 'benchmark');
+  const [competitorLock, modelWeights] = await Promise.all([
+    readFile(competitorLockPath, 'utf8').then(JSON.parse),
+    readFile(join(benchmarkRoot, 'model-weights.lock.json'), 'utf8').then(JSON.parse)
+  ]);
+  const modelFor = (kind) => {
+    const model = modelWeights.models.find((entry) => entry.kind === kind);
+    if (model === undefined) throw new Error(`the model weight lock pins no ${kind} model`);
+    return model.modelId;
+  };
+
+  const outputPath = optionPath(options.out, join(benchmarkRoot, 'results', 'precondition-evidence.json'));
+  const probeDirectory = join(benchmarkRoot, 'probes');
+  const containerProbes = '/opt/shadowgraph/probes';
+  const containerWork = '/run/shadowgraph/demonstration';
+
+  await mkdir(join(workRoot, 'system', 'databases'), { recursive: true });
+  await mkdir(join(workRoot, 'data'), { recursive: true });
+  await mkdir(join(workRoot, 'home'), { recursive: true });
+
+  const environment = {
+    PYTHONPATH: CONTAINER_PATHS.runtime,
+    PYTHONDONTWRITEBYTECODE: '1',
+    HOME: `${containerWork}/home`,
+    // The precondition itself.
+    ENABLE_BACKEND_ACCESS_CONTROL: 'true',
+    // The pairing that can carry it. Both are file-backed, so the
+    // demonstration needs no service beyond the common endpoint.
+    VECTOR_DB_PROVIDER: 'lancedb',
+    VECTOR_DATASET_DATABASE_HANDLER: 'lancedb',
+    GRAPH_DATABASE_PROVIDER: 'ladybug',
+    GRAPH_DATASET_DATABASE_HANDLER: 'ladybug',
+    DATA_ROOT_DIRECTORY: `${containerWork}/data`,
+    SYSTEM_ROOT_DIRECTORY: `${containerWork}/system`,
+    TELEMETRY_DISABLED: '1',
+    COGNEE_TRACING_ENABLED: 'false',
+    OTEL_SDK_DISABLED: 'true',
+    SHADOWGRAPH_LLM_ENDPOINT: llmEndpoint,
+    SHADOWGRAPH_EMBEDDING_ENDPOINT: embeddingEndpoint,
+    // Cognee routes its completion path through litellm, which requires the
+    // provider prefix to resolve a model it has not seen before. The embedding
+    // path uses the OpenAI-compatible engine directly and takes the bare id.
+    SHADOWGRAPH_LLM_MODEL: `openai/${modelFor('decision_llm')}`,
+    SHADOWGRAPH_EMBEDDING_MODEL: modelFor('embedding'),
+    SHADOWGRAPH_DEMONSTRATION_OUTPUT: `${containerWork}/precondition-evidence.json`
+  };
+
+  const args = [
+    'run', '--rm', '--init',
+    '--network', 'host',
+    '--user', `${process.getuid()}:${process.getgid()}`,
+    '--mount', `type=bind,source=${runtimeRoot},target=${CONTAINER_PATHS.runtime},readonly`,
+    '--mount', `type=bind,source=${probeDirectory},target=${containerProbes},readonly`,
+    '--mount', `type=bind,source=${workRoot},target=${containerWork}`
+  ];
+  for (const name of Object.keys(environment).sort()) {
+    args.push('--env', `${name}=${environment[name]}`);
+  }
+  args.push(competitorLock.pythonImage, 'python', `${containerProbes}/cognee_acl_demonstration.py`);
+
+  let demonstrationFailed = false;
+  try {
+    await execFileAsync('docker', args, { maxBuffer: 64 * 1024 * 1024 });
+  } catch (error) {
+    // A demonstration that fails is a recorded outcome, not a crash. The probe
+    // still writes its record, and the record is what the gate reads.
+    demonstrationFailed = true;
+    if (typeof error?.stderr === 'string' && error.stderr.length > 0) process.stderr.write(error.stderr);
+  }
+
+  const evidence = JSON.parse(await readFile(join(workRoot, 'precondition-evidence.json'), 'utf8'));
+  await writeJson(outputPath, evidence);
+  process.stdout.write(`${JSON.stringify({
+    schema: 'shadowgraph.v11.precondition-probe',
+    version: 1,
+    armId: evidence.armId ?? null,
+    precondition: evidence.precondition ?? null,
+    observedAt: evidence.observedAt ?? null,
+    outcome: evidence.outcome ?? 'FAIL',
+    outputPath,
+    steps: (evidence.steps ?? []).map((entry) => ({ step: entry.step, outcome: entry.outcome }))
+  }, null, 2)}\n`);
+  if (demonstrationFailed || evidence.outcome !== 'PASS') process.exitCode = 1;
+  return evidence;
+}
+
 /** Ask the local container runtime one question and return its trimmed answer. */
 async function dockerField(args) {
   const { stdout } = await execFileAsync('docker', args);
@@ -876,6 +1010,7 @@ if (command === 'preflight') await preflight(options);
 else if (command === 'v11-preflight') await v11Preflight(options);
 else if (command === 'v11-service-probe') await v11ServiceProbeCommand(options);
 else if (command === 'v11-python-runtime') await v11PythonRuntimeCommand(options);
+else if (command === 'v11-precondition-probe') await v11PreconditionProbeCommand(options);
 else if (command === 'v11-run') await v11RunCommand(options);
 else if (command === 'run') {
   const { raw, preregistration } = await createRun(options);

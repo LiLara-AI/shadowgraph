@@ -1,8 +1,16 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+
+import {
+  PRECONDITION_EVIDENCE_SCHEMA,
+  REQUIRED_DEMONSTRATION_STEPS
+} from '../benchmark/lib/v11-precondition-evidence.mjs';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const execFileAsync = promisify(execFile);
 const repositoryRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -18,6 +26,33 @@ async function runCli(args) {
   } catch (error) {
     return { code: error.code ?? 1, stdout: error.stdout ?? '', stderr: error.stderr ?? '' };
   }
+}
+
+
+/**
+ * A demonstration record shaped exactly as the probe writes one.
+ *
+ * Every field here is checked against something committed - the precondition
+ * string the registry declares, the cognee version the competitor lock pins -
+ * so this fixture cannot drift away from what the harness actually requires
+ * without the verifier rejecting it.
+ */
+async function presentPreconditionEvidence(t, overrides = {}) {
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-precondition-');
+  const evidencePath = path.join(directory, 'precondition-evidence.json');
+  await writeFile(evidencePath, JSON.stringify({
+    schema: PRECONDITION_EVIDENCE_SCHEMA,
+    version: 1,
+    armId: 'cognee',
+    precondition: 'pinned backend access-control configuration',
+    observedAt: new Date().toISOString(),
+    package: { name: 'cognee', version: '1.5.3' },
+    outcome: 'PASS',
+    backendAccessControlEnabled: true,
+    steps: REQUIRED_DEMONSTRATION_STEPS.cognee.map((step) => ({ step, outcome: 'PASS' })),
+    ...overrides
+  }), 'utf8');
+  return evidencePath;
 }
 
 test('v11-preflight reports the candidate without contacting a service or scoring it', async () => {
@@ -110,12 +145,15 @@ test('services that are not provisioned are named as blockers, not assumed prese
   assert.deepEqual(services.map((blocker) => blocker.armId).sort(), ['cognee', 'graphiti']);
 });
 
-test('a satisfied precondition clears only its own blocker', async () => {
-  const { stdout } = await runCli([
-    'v11-preflight',
-    '--preconditions=pinned backend access-control configuration'
-  ]);
+test('a demonstrated precondition clears only its own blocker', async (t) => {
+  const evidencePath = await presentPreconditionEvidence(t);
+  const { stdout } = await runCli(['v11-preflight', '--precondition-evidence', evidencePath]);
   const report = JSON.parse(stdout);
+
+  assert.deepEqual(
+    report.preconditionEvidence.satisfiedPreconditions,
+    ['pinned backend access-control configuration']
+  );
 
   assert.equal(
     report.blockers.some((blocker) => blocker.code === 'DECLARED_ISOLATION_PRECONDITION_UNMET'),
@@ -152,13 +190,11 @@ test('authenticated immutable prerequisites clear their own gates', async () => 
   assert.equal(report.readiness, 'NOT READY');
 });
 
-test('clearing every applicability precondition still leaves required services blocked', async () => {
+test('clearing every applicability precondition still leaves required services blocked', async (t) => {
   // Cognee's ACL precondition and the immutable prerequisites are satisfied, but
   // Graphiti's declared native user isolation is still unavailable.
-  const { stdout } = await runCli([
-    'v11-preflight',
-    '--preconditions=pinned backend access-control configuration'
-  ]);
+  const evidencePath = await presentPreconditionEvidence(t);
+  const { stdout } = await runCli(['v11-preflight', '--precondition-evidence', evidencePath]);
   const report = JSON.parse(stdout);
   assert.equal(report.readiness, 'NOT READY');
   assert.equal(report.blockers.some((blocker) => blocker.kind === 'immutable-prerequisite'), false);
@@ -184,4 +220,57 @@ test('v11-preflight reports exactly the three post-Amendment-003 blockers', asyn
       'required-service:graphiti:Neo4j-compatible graph database plus common LLM and embedding endpoint'
     ].sort()
   );
+});
+
+test('the flag that only asserted a precondition is refused by name', async () => {
+  // Removing it silently would leave every script that passes it quietly
+  // weaker than it was, with no signal that the guarantee changed.
+  const { code, stderr } = await runCli([
+    'v11-preflight',
+    '--preconditions=pinned backend access-control configuration'
+  ]);
+  assert.notEqual(code, 0);
+  assert.match(stderr, /asserted a precondition rather than demonstrating one/u);
+  assert.match(stderr, /v11-precondition-probe/u);
+});
+
+test('a demonstration that failed clears nothing, however complete its shape', async (t) => {
+  const evidencePath = await presentPreconditionEvidence(t, { outcome: 'FAIL' });
+  const { stdout } = await runCli(['v11-preflight', '--precondition-evidence', evidencePath]);
+  const report = JSON.parse(stdout);
+
+  assert.deepEqual(report.preconditionEvidence.satisfiedPreconditions, []);
+  assert.ok(report.blockers.some((blocker) => (
+    blocker.code === 'DECLARED_ISOLATION_PRECONDITION_UNMET' && blocker.armId === 'cognee'
+  )));
+});
+
+test('a demonstration missing its refusal step clears nothing', async (t) => {
+  // The step that carries the whole claim. A record without it describes a
+  // product that was configured, not a boundary that was enforced.
+  const evidencePath = await presentPreconditionEvidence(t, {
+    steps: REQUIRED_DEMONSTRATION_STEPS.cognee
+      .filter((step) => step !== 'cross-user-read-refused')
+      .map((step) => ({ step, outcome: 'PASS' }))
+  });
+  const { stdout } = await runCli(['v11-preflight', '--precondition-evidence', evidencePath]);
+  const report = JSON.parse(stdout);
+
+  assert.deepEqual(report.preconditionEvidence.satisfiedPreconditions, []);
+  assert.ok(report.preconditionEvidence.findings.some((finding) => (
+    finding.code === 'DEMONSTRATION_STEP_MISSING' && finding.demonstrationStep === 'cross-user-read-refused'
+  )));
+});
+
+test('a demonstration of a different product version clears nothing', async (t) => {
+  const evidencePath = await presentPreconditionEvidence(t, {
+    package: { name: 'cognee', version: '1.5.2' }
+  });
+  const { stdout } = await runCli(['v11-preflight', '--precondition-evidence', evidencePath]);
+  const report = JSON.parse(stdout);
+
+  assert.deepEqual(report.preconditionEvidence.satisfiedPreconditions, []);
+  assert.ok(report.preconditionEvidence.findings.some((finding) => (
+    finding.code === 'PRECONDITION_PACKAGE_MISMATCH'
+  )));
 });
