@@ -28,6 +28,8 @@ import {
 } from 'node:os';
 import { promisify } from 'node:util';
 
+import { DIGEST_PINNED_IMAGE } from './python-container-runtime.mjs';
+
 const execFileAsync = promisify(execFile);
 
 /** Long enough for a cold `docker run`, short enough that a hang is not a hang. */
@@ -91,7 +93,12 @@ export async function observeEnvironment(options = {}) {
     runCommand = execFileAsync
   } = options;
 
-  if (typeof pythonImage !== 'string' || !pythonImage.includes('@sha256:')) {
+  // The same pattern the launch path applies, rather than a substring test
+  // for '@sha256:'. A truncated digest, or a reference that is only the
+  // separator, passed the substring test and was handed straight to
+  // `docker run` - and the interpreter version this module records would
+  // then describe an image the lock does not actually pin.
+  if (typeof pythonImage !== 'string' || !DIGEST_PINNED_IMAGE.test(pythonImage)) {
     throw new EnvironmentObservationError(
       'observing the environment requires the digest-pinned Python image'
     );

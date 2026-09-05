@@ -38,7 +38,11 @@ import {
   verifyPythonRuntime
 } from './lib/v11-python-runtime.mjs';
 import { providerModelsFromLock } from './lib/v11-provider-models.mjs';
-import { parseProviderLedger, reconcileProviderEvidence } from './lib/v11-provider-reconciler.mjs';
+import {
+  parseProviderLedger,
+  reconcileProviderEvidence,
+  runProviderReconciliation
+} from './lib/v11-provider-reconciler.mjs';
 import { buildEnvironmentLock } from './lib/v11-locks.mjs';
 import { observeEnvironment } from './lib/v11-environment.mjs';
 import { createV11NodeHosts } from './lib/v11-node-hosts.mjs';
@@ -46,6 +50,7 @@ import { createMeteredOuterTransport } from './lib/v11-outer-transport.mjs';
 import { buildV11Prompt } from './lib/v11-prompts.mjs';
 import { createV11PythonHosts } from './lib/v11-python-hosts.mjs';
 import { createV11Registry } from './lib/v11-registry.mjs';
+import { createV11RunResources } from './lib/v11-run-resources.mjs';
 import { UNIT_TIMEOUT_MS } from './lib/v11-runner.mjs';
 import {
   V11RunError,
@@ -601,6 +606,7 @@ async function v11RunCommand(options) {
   });
 
   let outcome;
+  let failure = null;
   try {
     outcome = await executeV11AcceptanceRun({
       ...candidate,
@@ -613,29 +619,94 @@ async function v11RunCommand(options) {
       amendment002Path: join(benchmarkRoot, 'preregistration-amendment-002.json'),
       amendment003Path: join(benchmarkRoot, 'preregistration-amendment-003.json'),
       ...runtime.dependencies,
-      // The runner closes these after the plan loop and before the terminal
-      // progress event. Left to the `finally` below, the provider ledger would
-      // still be open at the moment the run declares itself complete.
-      closeResources: runtime.close
+      // The meter, and only the meter. The runner calls this after the plan loop
+      // and before the terminal progress event; left to the `finally` below, the
+      // provider ledger would still be open at the moment the run declares
+      // itself complete, and closing the progress ledger here would take the
+      // terminal event with it.
+      closeResources: runtime.closeMeasurement
     });
-  } finally {
-    await runtime.close();
+  } catch (error) {
+    failure = error;
   }
+
+  // A teardown failure must not overwrite the reason the run stopped. The
+  // runner already combines its own primary and cleanup errors; `close()`
+  // memoizes its rejection, so the error thrown here can be one this failure
+  // already carries.
+  try {
+    await runtime.close();
+  } catch (error) {
+    if (failure === null) failure = error;
+    else if (!carries(failure, error)) {
+      failure = new AggregateError(
+        [failure, error],
+        `Run failure (${failure.message}) and resource cleanup failure (${error.message})`
+      );
+    }
+  }
+  if (failure !== null) throw failure;
+
+  // The ledger the meter wrote, read back and compared against what the run
+  // says it did. This is the only moment it can happen: the meter is closed,
+  // so the ledger is complete, and the record exists to be compared against.
+  //
+  // Until this call the run opened a ledger, filled it, and never looked -
+  // `RETRY_OBSERVED`, `MODEL_MISMATCH` and `UNEXPECTED_CALL` were codes an
+  // acceptance run could not produce, while the arm probe's comment claimed
+  // it was rehearsing 'the comparison the run will use'.
+  const reconciliation = await reconcileRunProviderEvidence({
+    ledgerPath: join(ledgerDirectory, `${attemptId}.provider-requests.ndjson`),
+    raw: outcome.raw,
+    attemptId,
+    pinnedModels: runtime.pinnedModels
+  });
 
   const rawPath = join(outputDirectory, `${attemptId}.raw.json`);
   const aggregatePath = join(outputDirectory, `${attemptId}.aggregate.json`);
+  const reconciliationPath = join(outputDirectory, `${attemptId}.provider-reconciliation.json`);
   await writeJson(rawPath, outcome.raw);
   await writeJson(aggregatePath, outcome.aggregate);
+  await writeJson(reconciliationPath, reconciliation);
   process.stdout.write(`${JSON.stringify({
     schema: 'shadowgraph.v11.run',
     version: 1,
     status: outcome.raw.status,
     mode: outcome.raw.mode,
     valid: outcome.validation.valid,
-    artifactsWritten: [rawPath, aggregatePath]
+    providerEvidence: reconciliation.status,
+    artifactsWritten: [rawPath, aggregatePath, reconciliationPath]
   }, null, 2)}`);
   if (!outcome.validation.valid) process.exitCode = 1;
+  // A run whose own provider traffic does not match its record is not a clean
+  // result reported alongside a caveat. It is a discrepancy, and it exits so.
+  if (reconciliation.status !== 'RECONCILED') process.exitCode = 1;
   return outcome;
+}
+
+
+/**
+ * Compare this attempt's provider ledger with the traffic the run recorded.
+ *
+ * A missing ledger is a discrepancy, not an absence: the meter opens the file
+ * when the run binds, so a run that produced a record and no ledger has lost
+ * its evidence, and reporting that as `RECONCILED` would be the strongest
+ * possible overstatement this reconciliation can make.
+ */
+async function reconcileRunProviderEvidence({ ledgerPath, raw, attemptId, pinnedModels }) {
+  let ledgerText = null;
+  try {
+    ledgerText = await readFile(ledgerPath, 'utf8');
+  } catch {
+    // Left null on purpose. What an unreadable ledger *means* is decided in
+    // `runProviderReconciliation`, where it can be tested, rather than here.
+  }
+  return runProviderReconciliation({ ledgerText, ledgerPath, raw, attemptId, pinnedModels });
+}
+/** Whether a thrown error already reports `candidate`, directly or as a cause. */
+function carries(error, candidate) {
+  if (error === candidate) return true;
+  return error instanceof AggregateError && error.errors.some((each) => carries(each, candidate));
 }
 
 /**
@@ -658,11 +729,12 @@ async function v11RunCommand(options) {
  * close over its endpoint minting. And everything comes before the runner, which
  * constructs nothing.
  *
- * Teardown is returned rather than performed. The runner closes resources after
- * the plan loop and *before* the terminal progress event, which is the only
- * moment at which the provider ledger is complete and the run has not yet
- * declared itself finished. The caller also closes in a `finally`, so this is
- * memoized: closing twice must be closing once.
+ * Teardown is returned rather than performed, and it is returned twice.
+ * `closeMeasurement` is what the runner calls after the plan loop and *before*
+ * the terminal progress event - the only moment at which the provider ledger is
+ * complete and the run has not yet declared itself finished. `close` is the
+ * caller's `finally` and shuts the run's own ledgers as well. Both are memoized:
+ * closing twice must be closing once.
  */
 async function v11RuntimeDependencies(options, context) {
   const {
@@ -713,6 +785,43 @@ async function v11RuntimeDependencies(options, context) {
     throw new V11RunError(
       'RUNTIME_UNAVAILABLE',
       'the node and Python arms need separate state roots: the Python executor takes ownership of its own'
+    );
+  }
+
+  // The site directory the four Python arms import, checked against the lock
+  // that was supposed to have built it.
+  //
+  // `verifyPythonRuntime` existed with exactly one caller - the build command -
+  // so the run path mounted whatever `--python-runtime` named. A site built
+  // from a stale wheel lock, or one where a transitive dependency was upgraded
+  // in place, satisfies every arm's own `require_versions` (which checks only
+  // that arm's top-level pinned distribution) and produces an artifact whose
+  // implementation and environment lock hashes are identical to a run on the
+  // locked 227-package set. Neither lock can cover this directory - the
+  // implementation lock covers tracked repository sources and the environment
+  // lock's fields are frozen - so refusing here is what makes those hashes mean
+  // the configuration that was actually measured.
+  const wheelsLockText = await readFile(join(benchmarkRoot, 'python-wheels.lock.json'), 'utf8');
+  const runtimeManifestPath = join(dirname(path.resolve(pythonRuntimeSite)), 'runtime-manifest.json');
+  let runtimeManifest;
+  try {
+    runtimeManifest = JSON.parse(await readFile(runtimeManifestPath, 'utf8'));
+  } catch (error) {
+    throw new V11RunError(
+      'RUNTIME_UNAVAILABLE',
+      `--python-runtime must name a site directory built by v11-python-runtime; ${runtimeManifestPath} could not be read: ${error?.message ?? error}`
+    );
+  }
+  const runtimeVerification = verifyPythonRuntime({
+    manifest: runtimeManifest,
+    wheelsLock: JSON.parse(wheelsLockText),
+    wheelsLockSha256: createHash('sha256').update(wheelsLockText, 'utf8').digest('hex'),
+    image: competitorLock.pythonImage
+  });
+  if (!runtimeVerification.valid) {
+    throw new V11RunError(
+      'RUNTIME_UNAVAILABLE',
+      `the pinned Python runtime does not match the wheel lock: ${JSON.stringify(runtimeVerification.findings)}`
     );
   }
 
@@ -822,28 +931,10 @@ async function v11RuntimeDependencies(options, context) {
       requestDecision: requestOuterDecision
     });
 
-    let closed = null;
-    const close = () => {
-      if (closed === null) {
-        closed = (async () => {
-          const failures = [];
-          // The meter first: closing it drains in-flight handlers and the ledger
-          // append chain, and a request still being recorded after the ledgers
-          // shut would be traffic the run cannot account for.
-          for (const dispose of [() => meter.close(), () => progress.close(), () => unitEvidence.close()]) {
-            try {
-              await dispose();
-            } catch (error) {
-              failures.push(error);
-            }
-          }
-          if (failures.length > 0) {
-            throw new AggregateError(failures, 'a v1.1 run resource failed to close');
-          }
-        })();
-      }
-      return closed;
-    };
+    // Two closes, not one: the runner's hook may only reach the meter, because
+    // the terminal progress event it has not written yet goes into a ledger the
+    // same call would otherwise shut. See v11-run-resources.mjs.
+    const { closeMeasurement, close } = createV11RunResources({ meter, progress, unitEvidence });
 
     return {
       dependencies: {
@@ -857,7 +948,12 @@ async function v11RuntimeDependencies(options, context) {
         implementationLockHash: implementationLock.lockSha256,
         environmentLockHash: environmentLock.digest
       },
-      close
+      closeMeasurement,
+      close,
+      // Returned so the reconciliation below compares the ledger against the
+      // models this run was actually bound to, rather than against a second
+      // reading of the lock that could drift from it.
+      pinnedModels
     };
   } catch (error) {
     await disposeOnFailure();
@@ -1351,12 +1447,13 @@ const ARM_PROBES = Object.freeze({
 /**
  * Demonstrate that one arm executes a real benchmark unit.
  *
- * `v11-run` cannot answer this yet: the run path has no provider meter and no
- * bound Python hosts, so an attempted run refuses at RUNTIME_UNAVAILABLE and
- * measures nothing. This asks the narrower question the blocker record actually
- * poses - can the arm's pinned library be driven through the adapter contract,
- * metered, with retries off - and answers it against the real service rather
- * than against a fake.
+ * The run path can answer this too now - it binds a meter and all seven arms -
+ * so this is the narrower instrument rather than the only one, and the sentence
+ * that used to stand here (that `v11-run` had no meter and no bound hosts) is
+ * no longer true. What it still answers better than a run does is the question
+ * the blocker record actually poses - can this arm's pinned library be driven
+ * through the adapter contract, metered, with retries off - against the real
+ * service rather than a fake, without a plan, a ledger, a lock or an artifact.
  *
  * The probe runs its own loopback proxy and counts what crosses it, so the
  * count in the envelope is checked against one the adapter did not produce.
@@ -1453,9 +1550,13 @@ async function v11ArmProbeCommand(options) {
   // Reconciliation is the point of the ledger, and it is done here rather than
   // in the probe on purpose: a demonstration that judged its own evidence would
   // be exercising its own comparison, and the comparison that matters is the
-  // one the run will use. `reconcileProviderEvidence` had no caller outside its
-  // own test until now - it could emit RETRY_OBSERVED and nothing would ever
-  // ask it to.
+  // one the run uses.
+  //
+  // It is the same comparison now. When this was written the run path did not
+  // reconcile at all - the meter wrote a ledger on every run and nothing read it
+  // back - so this was the only caller and the sentence above was aspirational.
+  // `v11RunCommand` reconciles its own attempt's ledger and exits non-zero on a
+  // discrepancy; this probe remains the narrower rehearsal.
   let reconciliation = null;
   if (typeof probe.ledger === 'string') {
     const ledgerPath = join(workRoot, probe.ledger);

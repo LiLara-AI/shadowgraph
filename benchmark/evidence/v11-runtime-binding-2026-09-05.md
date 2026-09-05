@@ -9,7 +9,9 @@
 LB2a is cleared. `v11RuntimeDependencies()` threw `RUNTIME_UNAVAILABLE` for the
 whole life of the candidate; it now returns the nine dependencies the runner
 requires, and **all seven arms bind to the runtime the competitor lock names for
-them and execute a real operation**.
+them and reach it. Six of the seven execute a real operation**; the seventh,
+Graphiti, reaches its runtime and refuses there, which is LB2f's recorded owner
+decision.
 
 That is a narrower claim than it sounds, and the next section is the reason it
 has to be.
@@ -155,16 +157,24 @@ project directory that namespace owns.
 
 - **No run was executed. No artifact exists.** The candidate has still produced
   no benchmark result, and this record does not change that.
-- **Five arms executing one reset is not five arms measured.** Nothing here
+- **Six arms executing one reset is not six arms measured.** Nothing here
   exercises retrieve, persist or verify for the container arms beyond what
   `v11-arm-probe --arm mem0-oss` already showed for one of them.
 - **F2 means a run today would fail every unit at the outer model.** The harness
   being runnable and the run being meaningful are different questions, and only
   the first is answered.
-- **Graphiti and Cognee remain blocked**, for two different reasons - LB2f's
-  recorded owner decision, and F3 respectively.
-- **The `close()` path is unit-tested, not run-tested.** No real run has yet
-  exercised teardown between the plan loop and the terminal event.
+- **Graphiti remains blocked**, on LB2f's recorded owner decision. Cognee does
+  not: F3 is fixed above and its client factory followed, and the table records
+  it SUCCEEDED. An earlier version of this bullet still listed Cognee as blocked
+  on F3 three sections after declaring F3 fixed.
+- **The `close()` path was wrong, and this record said only that it was
+  untested.** It closed the progress ledger the runner still had to write the
+  terminal event to, so a run that executed every unit and validated its own
+  raw record would have died on its last line and written no artifact. An
+  adversarial review of this range found it; `v11-run-resources.mjs` splits the
+  measurement close from the run's own ledgers, and the composition is now
+  tested against the real ledgers rather than a double that ignored `close`.
+  Still no real run has exercised it.
 
 ## Reproduce
 

@@ -4,7 +4,9 @@ import test from 'node:test';
 import {
   RECONCILIATION_CODES,
   parseProviderLedger,
-  reconcileProviderEvidence
+  providerExpectationsFromRun,
+  reconcileProviderEvidence,
+  runProviderReconciliation
 } from '../benchmark/lib/v11-provider-reconciler.mjs';
 
 const RUN = 'run-2026-08-31';
@@ -256,4 +258,267 @@ test('malformed input is refused rather than silently reconciled', () => {
     }),
     /expectedCalls/u
   );
+});
+
+// The run record is the claim; the ledger is the observation. Turning the first
+// into expectations is what lets a real acceptance run be reconciled at all -
+// before this existed the meter wrote a ledger on every run and nothing read it
+// back, so three of this module's discrepancy codes were unreachable in
+// production.
+
+function unit(overrides = {}) {
+  return {
+    unitId: 'mem0-oss:ACC_ONE:0:B',
+    runId: RUN,
+    attemptId: ATTEMPT,
+    armId: 'mem0-oss',
+    scenarioId: 'ACC_ONE',
+    repetition: 0,
+    phase: 'B',
+    status: 'MEASURED',
+    operations: {
+      memoryReadOperations: 1,
+      memoryWriteOperations: 1,
+      mcpToolCalls: 0,
+      outerDecisionModelCalls: 1,
+      internalMemoryModelCalls: 2,
+      embeddingCalls: 3,
+      persistenceVerificationOperations: 0
+    },
+    ...overrides
+  };
+}
+
+test('a run record becomes one expectation per unit and request class', () => {
+  const expectations = providerExpectationsFromRun({ units: [unit()] }, ATTEMPT);
+
+  assert.deepEqual(expectations.map((each) => [each.requestClass, each.expectedCalls]), [
+    ['outer_decision_llm', 1],
+    ['internal_memory_llm', 2],
+    ['embedding', 3]
+  ]);
+  assert.deepEqual(expectations[0], {
+    runId: RUN,
+    attemptId: ATTEMPT,
+    armId: 'mem0-oss',
+    scenarioId: 'ACC_ONE',
+    repetition: 0,
+    phase: 'B',
+    requestClass: 'outer_decision_llm',
+    expectedCalls: 1
+  });
+});
+
+test('a unit that meters nothing still produces expectations of zero', () => {
+  // An arm that issues no provider call has to be *checked* to have issued
+  // none. An omitted expectation would leave a stray event matching nothing the
+  // run declared, and the reconciler would have nothing to call it.
+  const quiet = unit({
+    armId: 'basic-memory',
+    operations: {
+      memoryReadOperations: 1,
+      memoryWriteOperations: 0,
+      mcpToolCalls: 0,
+      outerDecisionModelCalls: 0,
+      internalMemoryModelCalls: 0,
+      embeddingCalls: 0,
+      persistenceVerificationOperations: 0
+    }
+  });
+  const expectations = providerExpectationsFromRun({ units: [quiet] }, ATTEMPT);
+  assert.equal(expectations.length, 3);
+  assert.deepEqual(expectations.map((each) => each.expectedCalls), [0, 0, 0]);
+
+  const stray = reconcileProviderEvidence({
+    events: [event({ armId: 'basic-memory', requestClass: 'embedding' })],
+    expectations
+  });
+  assert.equal(stray.status, 'DISCREPANT');
+  assert.ok(stray.findings.some((finding) => finding.code === 'UNEXPECTED_CALL'));
+});
+
+test('only this attempt is expected, because the ledger is opened per attempt', () => {
+  // A resumed run carries the earlier attempt's units in its record, and that
+  // attempt's provider traffic is in an earlier ledger. Expecting it here would
+  // report every one of those calls missing from a ledger that never held them.
+  const record = { units: [unit(), unit({ attemptId: 'attempt-2', unitId: 'mem0-oss:ACC_ONE:1:B' })] };
+  const expectations = providerExpectationsFromRun(record, 'attempt-2');
+
+  assert.equal(expectations.length, 3);
+  assert.ok(expectations.every((each) => each.attemptId === 'attempt-2'));
+});
+
+test('a run record that cannot state its own provider traffic is refused', () => {
+  for (const [record, pattern] of [
+    [null, /raw run record/u],
+    [{}, /raw run record/u],
+    [{ units: [null] }, /must be an object/u],
+    [{ units: [unit({ operations: undefined })] }, /no operation metrics/u],
+    [{ units: [unit({ operations: { ...unit().operations, embeddingCalls: -1 } })] }, /embeddingCalls/u],
+    [{ units: [unit({ operations: { ...unit().operations, outerDecisionModelCalls: null } })] }, /outerDecisionModelCalls/u]
+  ]) {
+    assert.throws(() => providerExpectationsFromRun(record, ATTEMPT), pattern);
+  }
+  assert.throws(() => providerExpectationsFromRun({ units: [] }, ''), /attempt/u);
+});
+
+test('a retry the run did not declare is reported against a run record', () => {
+  // The whole reason the ledger counts requests rather than calls: a
+  // transparent SDK retry is a second request for one call, and the run record
+  // would say one.
+  const expectations = providerExpectationsFromRun({ units: [unit()] }, ATTEMPT);
+  const events = [
+    event({ requestNumber: 0, requestClass: 'outer_decision_llm' }),
+    event({ requestNumber: 1, requestClass: 'internal_memory_llm' }),
+    event({ requestNumber: 2, requestClass: 'internal_memory_llm' }),
+    event({ requestNumber: 3, requestClass: 'internal_memory_llm' }),
+    event({ requestNumber: 4, requestClass: 'embedding' }),
+    event({ requestNumber: 5, requestClass: 'embedding' }),
+    event({ requestNumber: 6, requestClass: 'embedding' })
+  ];
+
+  const report = reconcileProviderEvidence({ events, expectations });
+  assert.equal(report.status, 'DISCREPANT');
+  assert.ok(report.findings.some((finding) => finding.code === 'RETRY_OBSERVED'));
+
+  // And the same ledger without the extra internal call reconciles, so the
+  // finding above is the retry rather than the shape of the expectations.
+  const clean = reconcileProviderEvidence({
+    // Renumbered, because a hole in the numbering is its own finding: the
+    // meter numbers requests consecutively and a gap means evidence is missing.
+    events: events
+      .filter((each) => each.requestNumber !== 3)
+      .map((each, index) => ({ ...each, requestNumber: index })),
+    expectations
+  });
+  assert.equal(clean.status, 'RECONCILED');
+  assert.equal(clean.totals.expectedCalls, 6);
+  assert.equal(clean.totals.matchedCalls, 6);
+});
+
+// The decision a finished run makes about its own provider evidence. It is a
+// pure function on purpose: the interesting case is the ledger that is not
+// there, and leaving that in the CLI's catch block would put it where no test
+// could reach it.
+
+const PINNED = {
+  internal_memory_llm: { modelId: 'pinned-decision-model', embeddingDimension: null },
+  embedding: { modelId: 'pinned-embedding-model', embeddingDimension: 768 }
+};
+
+function ledgerLines(events) {
+  return `${events.map((each) => JSON.stringify(each)).join(String.fromCharCode(10))}${String.fromCharCode(10)}`;
+}
+
+test('a run whose ledger matches its record reconciles', () => {
+  const record = { units: [unit()] };
+  const report = runProviderReconciliation({
+    ledgerText: ledgerLines([
+      event({ requestNumber: 0, requestClass: 'outer_decision_llm' }),
+      event({ requestNumber: 1, requestClass: 'internal_memory_llm' }),
+      event({ requestNumber: 2, requestClass: 'internal_memory_llm' }),
+      event({ requestNumber: 3, requestClass: 'embedding', requestedModel: 'pinned-embedding-model', providerModel: 'pinned-embedding-model' }),
+      event({ requestNumber: 4, requestClass: 'embedding', requestedModel: 'pinned-embedding-model', providerModel: 'pinned-embedding-model' }),
+      event({ requestNumber: 5, requestClass: 'embedding', requestedModel: 'pinned-embedding-model', providerModel: 'pinned-embedding-model' })
+    ]),
+    ledgerPath: '/ledgers/attempt-1.provider-requests.ndjson',
+    raw: record,
+    attemptId: ATTEMPT,
+    pinnedModels: PINNED
+  });
+
+  assert.equal(report.schema, 'shadowgraph.v11.provider-reconciliation');
+  assert.equal(report.status, 'RECONCILED');
+  assert.deepEqual(report.findings, []);
+  assert.equal(report.totals.expectedCalls, 6);
+  assert.equal(report.totals.matchedCalls, 6);
+});
+
+test('a ledger that could not be read is UNAVAILABLE, never RECONCILED', () => {
+  // The meter opens this file when the run binds, so a run that produced a
+  // record and no ledger has lost its evidence. Reporting that as reconciled is
+  // the strongest overstatement this comparison could make.
+  const report = runProviderReconciliation({
+    ledgerText: null,
+    ledgerPath: '/ledgers/attempt-1.provider-requests.ndjson',
+    raw: { units: [unit()] },
+    attemptId: ATTEMPT,
+    pinnedModels: PINNED
+  });
+
+  assert.equal(report.status, 'UNAVAILABLE');
+  assert.equal(report.totals, null);
+  assert.deepEqual(report.findings.map((each) => each.code), ['LEDGER_UNREADABLE']);
+});
+
+test('an empty ledger is reconciled only when the run claimed nothing', () => {
+  const quiet = unit({
+    armId: 'basic-memory',
+    operations: {
+      memoryReadOperations: 1,
+      memoryWriteOperations: 0,
+      mcpToolCalls: 0,
+      outerDecisionModelCalls: 0,
+      internalMemoryModelCalls: 0,
+      embeddingCalls: 0,
+      persistenceVerificationOperations: 0
+    }
+  });
+  const common = {
+    ledgerText: '',
+    ledgerPath: '/ledgers/attempt-1.provider-requests.ndjson',
+    attemptId: ATTEMPT,
+    pinnedModels: PINNED
+  };
+
+  assert.equal(runProviderReconciliation({ ...common, raw: { units: [quiet] } }).status, 'RECONCILED');
+  // And a run that claimed six calls against an empty ledger does not.
+  const missing = runProviderReconciliation({ ...common, raw: { units: [unit()] } });
+  assert.equal(missing.status, 'DISCREPANT');
+  assert.equal(missing.totals.observedEvents, 0);
+});
+
+test('the model the run was bound to is the model the ledger is held to', () => {
+  // Not a second reading of the lock: the run passes the models it actually
+  // bound, so a ledger recording anything else is a mismatch rather than a
+  // disagreement between two readers.
+  const report = runProviderReconciliation({
+    ledgerText: ledgerLines([
+      event({ requestNumber: 0, requestClass: 'outer_decision_llm', requestedModel: 'some-other-model', providerModel: 'some-other-model' })
+    ]),
+    ledgerPath: '/ledgers/attempt-1.provider-requests.ndjson',
+    raw: {
+      units: [unit({
+        operations: {
+          memoryReadOperations: 0,
+          memoryWriteOperations: 0,
+          mcpToolCalls: 0,
+          outerDecisionModelCalls: 1,
+          internalMemoryModelCalls: 0,
+          embeddingCalls: 0,
+          persistenceVerificationOperations: 0
+        }
+      })]
+    },
+    attemptId: ATTEMPT,
+    pinnedModels: PINNED
+  });
+
+  assert.equal(report.status, 'DISCREPANT');
+  assert.ok(report.findings.some((finding) => finding.code === 'MODEL_MISMATCH'));
+});
+
+test('a reconciliation that cannot name its ledger or its models is refused', () => {
+  const base = {
+    ledgerText: '',
+    ledgerPath: '/ledgers/attempt-1.provider-requests.ndjson',
+    raw: { units: [] },
+    attemptId: ATTEMPT,
+    pinnedModels: PINNED
+  };
+  assert.throws(() => runProviderReconciliation({ ...base, ledgerPath: '' }), /name the ledger/u);
+  assert.throws(() => runProviderReconciliation({ ...base, pinnedModels: {} }), /pinned models/u);
+  assert.throws(() => runProviderReconciliation({ ...base, pinnedModels: { internal_memory_llm: {} } }), /pinned models/u);
+  assert.throws(() => runProviderReconciliation({ ...base, ledgerText: 42 }), /ledger text or nothing/u);
+  assert.throws(() => runProviderReconciliation(), /name the ledger/u);
 });

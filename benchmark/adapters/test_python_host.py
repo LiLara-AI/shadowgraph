@@ -11,6 +11,15 @@ from unittest.mock import patch
 
 import python_host
 
+# Every gate, not a fixed handful. Sampling a subset let six gates be
+# declared in GATES and never written to the environment an adapter runs in,
+# with the only test of them comparing the dictionary to itself.
+_SAMPLED_ENVIRONMENT = tuple(python_host.GATES) + (
+    "OPENAI_API_KEY",
+    "OTEL_EXPORTER_OTLP_HEADERS",
+)
+_FENCED_ENTRY_POINTS = python_host.FENCED_ENTRY_POINTS
+
 from test_support import models_for, python_config, python_models, request_for
 
 
@@ -24,15 +33,7 @@ class _FakeAdapterModule:
 
         cls.calls += 1
         cls.observed_environment = {
-            name: os.environ.get(name)
-            for name in (
-                "MEM0_TELEMETRY",
-                "GRAPHITI_TELEMETRY_ENABLED",
-                "TELEMETRY_DISABLED",
-                "BASIC_MEMORY_MODE",
-                "OPENAI_API_KEY",
-                "OTEL_EXPORTER_OTLP_HEADERS",
-            )
+            name: os.environ.get(name) for name in _SAMPLED_ENVIRONMENT
         }
         return build_envelope(
             request,
@@ -153,13 +154,13 @@ class PythonHostTests(unittest.TestCase):
             )
         self.assertEqual(code, 0)
         self.assertEqual(_FakeAdapterModule.calls, 1)
+        # Read out of the environment the adapter was actually given, so a gate
+        # that is declared and not applied fails here. The sibling test pins the
+        # values themselves; this one is about whether they arrive.
         self.assertEqual(
             _FakeAdapterModule.observed_environment,
             {
-                "MEM0_TELEMETRY": "false",
-                "GRAPHITI_TELEMETRY_ENABLED": "false",
-                "TELEMETRY_DISABLED": "1",
-                "BASIC_MEMORY_MODE": "local",
+                **python_host.GATES,
                 "OPENAI_API_KEY": None,
                 "OTEL_EXPORTER_OTLP_HEADERS": None,
             },
@@ -348,25 +349,59 @@ class NetworkFenceTests(unittest.TestCase):
         self.assertNotIsInstance(caught.exception, python_host.NetworkFenceError)
 
     def test_the_fence_is_lifted_even_when_the_adapter_raises(self) -> None:
-        before = (
-            socket.socket.connect,
-            socket.socket.connect_ex,
-            socket.create_connection,
-            socket.getaddrinfo,
-        )
+        # Every entry point, read off the fence's own table rather than a list
+        # kept here: one added there and forgotten here would be a guard nothing
+        # checks is installed or removed.
+        before = {name: python_host._entry_point(name) for name in _FENCED_ENTRY_POINTS}
         with self.assertRaises(RuntimeError):
             with python_host._loopback_only_network():
-                self.assertIsNot(socket.getaddrinfo, before[3])
+                for name in _FENCED_ENTRY_POINTS:
+                    self.assertIsNot(python_host._entry_point(name), before[name], name)
                 raise RuntimeError("adapter failed")
         self.assertEqual(
-            (
-                socket.socket.connect,
-                socket.socket.connect_ex,
-                socket.create_connection,
-                socket.getaddrinfo,
-            ),
+            {name: python_host._entry_point(name) for name in _FENCED_ENTRY_POINTS},
             before,
         )
+
+    def test_a_datagram_needs_no_connection_and_is_fenced_anyway(self) -> None:
+        # The hole this closes was real and demonstrated: with only the
+        # connection-oriented entry points guarded, `sendto` put bytes on the
+        # wire to any address while the fence reported itself installed.
+        payload = b"shadowgraph-fence"
+        peer = ("192.0.2.1", 9)
+        with python_host._loopback_only_network():
+            handle = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.addCleanup(handle.close)
+            with self.assertRaises(python_host.NetworkFenceError):
+                handle.sendto(payload, peer)
+            with self.assertRaises(python_host.NetworkFenceError):
+                handle.sendto(payload, 0, peer)
+            if hasattr(handle, "sendmsg"):  # pragma: no branch - POSIX
+                with self.assertRaises(python_host.NetworkFenceError):
+                    handle.sendmsg([payload], [], 0, peer)
+            # And loopback still works, or the fence would have cost the
+            # benchmark the meter it exists to protect.
+            self.assertEqual(handle.sendto(payload, ("127.0.0.1", 9)), len(payload))
+
+    def test_every_resolver_is_fenced_not_only_getaddrinfo(self) -> None:
+        # gethostbyname does not route through getaddrinfo. Fencing that one
+        # alone left the lookup - and the hostname - on the wire.
+        with python_host._loopback_only_network():
+            for resolve in (
+                socket.getaddrinfo,
+                socket.gethostbyname,
+                socket.gethostbyname_ex,
+            ):
+                with self.subTest(resolve=resolve.__name__):
+                    with self.assertRaises(python_host.NetworkFenceError):
+                        resolve("huggingface.co")
+            with self.assertRaises(python_host.NetworkFenceError):
+                socket.gethostbyaddr("93.184.216.34")
+            with self.assertRaises(python_host.NetworkFenceError):
+                socket.getnameinfo(("93.184.216.34", 80), 0)
+            # Loopback resolves, by name and by address.
+            self.assertEqual(socket.gethostbyname("localhost"), "127.0.0.1")
+            self.assertTrue(socket.getnameinfo(("127.0.0.1", 80), 0))
 
     def test_the_gates_close_every_unpinned_model_path_that_has_an_environment_switch(self) -> None:
         self.assertEqual(python_host.GATES["BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED"], "false")

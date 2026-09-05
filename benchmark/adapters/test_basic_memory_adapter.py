@@ -286,26 +286,42 @@ class BasicMemoryAdapterTests(unittest.TestCase):
         # directory per project, named by a digest of the project id, so the
         # bytes under it belong to this namespace and to no other. The arms with
         # shared stores still declare NOT_AVAILABLE, and should.
+        #
+        # The bytes have to be put there by this test. The fake client keeps its
+        # notes in a dictionary, so the project directory is empty and the
+        # earlier version of this test compared the adapter's walk to a
+        # re-implementation of the same walk over nothing: 0 == 0, green while
+        # `total += stat_result.st_size` was mutated to `total += 0`. The
+        # expected number below is a literal, and the file outside the owned
+        # directory is what makes 'and nothing else' a claim rather than a name.
+        project_path = basic_memory_adapter._project_path(
+            self.state_root, self.request("persist")["namespace"]["projectId"]
+        )
+        nested = os.path.join(project_path, "notes")
+        os.makedirs(nested, exist_ok=True)
+        owned = {
+            os.path.join(project_path, "entity.md"): b"a" * 41,
+            os.path.join(nested, "relation.md"): b"b" * 137,
+        }
+        for path, payload in owned.items():
+            with open(path, "wb") as handle:
+                handle.write(payload)
+
+        # The shared SQLite index sits beside the project directories rather than
+        # under one, and belongs to no single namespace. Ten thousand bytes of it
+        # must not appear in this arm's number.
+        outside = os.path.join(
+            self.state_root, "basic-memory-projects", "memory.db"
+        )
+        with open(outside, "wb") as handle:
+            handle.write(b"c" * 10_000)
+
         response = self.execute("persist")
         storage = response["storage"]
         self.assertEqual(storage["status"], "MEASURED")
         self.assertIsNone(storage["reason"])
         self.assertEqual(storage["blockedClaims"], [])
-        self.assertIsInstance(storage["bytes"], int)
-        self.assertGreaterEqual(storage["bytes"], 0)
-
-        # The number is the directory, checked against the filesystem rather
-        # than against the adapter's own walk.
-        project_path = basic_memory_adapter._project_path(
-            self.state_root, self.request("persist")["namespace"]["projectId"]
-        )
-        expected = sum(
-            os.lstat(os.path.join(directory, name)).st_size
-            for directory, _subdirectories, names in os.walk(project_path)
-            for name in names
-            if stat.S_ISREG(os.lstat(os.path.join(directory, name)).st_mode)
-        )
-        self.assertEqual(storage["bytes"], expected)
+        self.assertEqual(storage["bytes"], 41 + 137)
 
         # And the scope says what it leaves out, because a number that quietly
         # folded in the shared SQLite index would be a different measurement

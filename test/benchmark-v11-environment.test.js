@@ -104,6 +104,9 @@ test('an image that is not digest-pinned is refused before anything is observed'
   // whatever the tag pointed at on the day of the run. The refusal has to land
   // before any command runs, or a half-observed machine has already been paid
   // for by the time the argument is checked.
+  // Half of these carry the literal '@sha256:'. They are the half that
+  // matters: while this module tested for that substring rather than for a
+  // digest, every one of them was accepted and run.
   for (const pythonImage of [
     undefined,
     null,
@@ -112,6 +115,13 @@ test('an image that is not digest-pinned is refused before anything is observed'
     'python@sha256',
     'python@sha256abcdef',
     `python:3.12.11-slim@sha512:${'a'.repeat(64)}`,
+    '@sha256:',
+    'python:3.12.11-slim@sha256:',
+    `python:3.12.11-slim@sha256:${'a'.repeat(63)}`,
+    `python:3.12.11-slim@sha256:${'a'.repeat(65)}`,
+    `python:3.12.11-slim@sha256:${'Z'.repeat(64)}`,
+    `not an image at all @sha256:${'a'.repeat(64)}`,
+    `python:3.12.11-slim@sha256:${'a'.repeat(64)} --privileged`,
     42,
     {}
   ]) {

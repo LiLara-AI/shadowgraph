@@ -15,10 +15,10 @@ All figures below were produced on the current branch with a clean working tree.
 
 | Gate | Command | Result |
 | --- | --- | --- |
-| Full repository | `npm test` | **2317 / 2317 pass**, 0 fail, 22 suites |
-| Benchmark focused | `npm run benchmark:test` | **1081 / 1081 pass**, 0 fail |
-| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **919 / 919 pass**, 0 fail |
-| Python adapters | `npm run benchmark:test:python` | **134 / 134 pass**, 0 fail |
+| Full repository | `npm test` | **2336 / 2336 pass**, 0 fail, 22 suites |
+| Benchmark focused | `npm run benchmark:test` | **1100 / 1100 pass**, 0 fail |
+| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **938 / 938 pass**, 0 fail |
+| Python adapters | `npm run benchmark:test:python` | **136 / 136 pass**, 0 fail |
 | Node syntax | `npm run check`, `npm run benchmark:check` | pass |
 | Python syntax | `npm run benchmark:check:python` | pass |
 | Package privacy | `npm run check:package` | pass |
@@ -122,8 +122,8 @@ treat file content at HEAD, not the diffs, as the object of review.
 | 3 | One centralized outer decision path; adapters memory-only | **Closed** |
 | 4 | Provider-evidence reconciliation | **Closed** |
 | 5 | Mutation state fails closed | **Closed** (mechanism); wiring waits on 6 |
-| 6 | Real pinned runtime factories for all seven arms | **Partial** — contracts and offline adapters exist; official metered runtime hosts remain unimplemented |
-| 7 | Non-scored acceptance, 308 units | **Closed** offline; an official run is blocked by the four current preflight findings |
+| 6 | Real pinned runtime factories for all seven arms | **Partial** — the metered runtime hosts are bound and six of seven arms execute; Graphiti's factory is LB2f, an open owner decision |
+| 7 | Non-scored acceptance, 308 units | **Closed** offline; an official run is blocked by the three current preflight findings and by F2 |
 | 8 | Locks, ledger validation, readiness, evidence index, review bundle | **Partial** — prerequisite locks are committed; the implementation lock and run-bound bundle remain pending |
 | 9 | Focused, Node, Python, package, MCP, integration, smoke, privacy checks | **Closed** |
 
@@ -859,7 +859,9 @@ are excluded is a methodology decision.
 ## Blockers
 
 **Readiness and runnability are two different questions, and the answers now
-differ.** `v11-preflight` can reach READY. `v11-run` still cannot start.
+differ.** `v11-preflight` can reach READY, and `v11-run` now has a runtime to
+start - what it does not have is a decision model that can satisfy the frozen
+response schema.
 
 `node benchmark/cli.mjs v11-preflight` with no evidence presented exits non-zero
 with three blockers: the Cognee ACL precondition and the two required-service
@@ -874,9 +876,16 @@ expire six hours after they were observed. Neither can be replaced by an
 assertion: `--preconditions`, which used to stand in for the second, is now
 refused by name.
 
-An attempted run then refuses at `RUNTIME_UNAVAILABLE` and writes no artifact.
-That is the honest state: the candidate is ready to be run, and there is still
-no runtime that could run it.
+A run started without the runtime flags refuses at `RUNTIME_UNAVAILABLE` and
+writes no artifact; one started without evidence refuses on readiness, naming
+its blockers. Given both, the run path binds: the meter, the ledgers, the
+environment observation, the implementation lock and all seven arms.
+
+That is the honest state, and it is not that nothing could run. It is **F2**:
+the pinned `qwen2.5:0.5b` returned a decision the frozen schema rejects on 4 of
+4 Phase A attempts, and Phase A is the first thing every unit does, so every
+measured unit would fail at the outer model. The harness being runnable and the
+run being meaningful are different questions, and only the first is answered.
 
 | ID | Blocker | State |
 | --- | --- | --- |
@@ -896,13 +905,20 @@ no runtime that could run it.
 | F1 | The container runtime refused the tag the competitor lock pins, so every Python arm would have been recorded as a contract failure of the product | Cleared |
 | F2 | The pinned decision model returns a decision the frozen schema rejects, 0 of 4 attempts | **Open**, owner decision |
 | F3 | Cognee refuses the user namespace the definition declares it supports, on a precondition CB2 has since demonstrated | Cleared |
+| F4 | The run's teardown closed the progress ledger before the runner wrote its terminal event, so every bound run would have executed all 308 units and then written no artifact | Cleared |
+| F5 | The loopback network fence guarded four connection-oriented entry points and described itself as closing egress by construction; a datagram and `gethostbyname` both left the process | Cleared |
+| F6 | The run wrote a provider ledger nothing reconciled, so `RETRY_OBSERVED`, `MODEL_MISMATCH` and `UNEXPECTED_CALL` were codes a run could not emit | Cleared |
+| F7 | The Python site directory the arms import was never checked against the wheel lock, so two runs on different library sets produced identical lock hashes | Cleared |
 
 The evidence and the required next decisions are in
 `benchmark/evidence/v11-blocker-matrix-2026-09-03.md` (CB1-CB4, LB1-LB3, as of
 that date) and, superseding its blocker states,
 `benchmark/evidence/v11-service-readiness-2026-09-05.md`,
-`benchmark/evidence/v11-adapter-runtime-blockers-2026-09-05.md` and
-`benchmark/evidence/v11-cb2-acl-demonstration-2026-09-05.md`.
+`benchmark/evidence/v11-adapter-runtime-blockers-2026-09-05.md`,
+`benchmark/evidence/v11-cb2-acl-demonstration-2026-09-05.md`,
+`benchmark/evidence/v11-runtime-binding-2026-09-05.md` (LB2a, F1-F3) and
+`benchmark/evidence/v11-adversarial-review-2026-09-05.md` (F4-F7, and the
+guards, tests and documents the same review found wrong).
 
 ### Historical blocker record (resolved or superseded)
 
@@ -976,11 +992,19 @@ If Graphiti alone moves to `NOT_APPLICABLE`, the counts become
 **308 / 20 EXCLUDED / 288 MEASURED / 28 RESET / 260 outer calls**, the delta
 being exactly Graphiti's four `ISOLATION_USER` units.
 
-**No amendment has been adopted and no count has been changed.** The acceptance
-definition still carries the Amendment 002 counts
-(308 / 16 / 292 / 28 / 264), and `v11-preflight` reports the disagreement as a
-blocker. Correcting a declared applicability entry requires an amendment reviewed
-under the methodology, which is not a decision this engineering work may take.
+**That is what happened.** Owner-approved Amendment 003 (commit `1ba20a8`) moved
+Graphiti alone to `NOT_APPLICABLE`, and the acceptance definition now declares
+**308 / 20 EXCLUDED / 288 MEASURED / 28 RESET / 260 outer calls** - the counts
+above. `v11-preflight` reports declared and derived counts as equal and emits no
+applicability blocker for Graphiti; the one applicability finding it still emits
+is Cognee's `DECLARED_ISOLATION_PRECONDITION_UNMET`, which CB2 clears with a
+verified precondition record.
+
+The paragraph this replaces said no amendment had been adopted, four hundred
+lines after the same document recorded adopting one. Correcting a declared
+applicability entry still requires an amendment reviewed under the methodology,
+and that is still not a decision this engineering work may take - it was taken
+by the owner, and Cognee's entry remains where the definition puts it.
 
 ## What independent review must confirm
 

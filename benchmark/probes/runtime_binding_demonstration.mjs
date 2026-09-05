@@ -5,9 +5,16 @@
 // a preflight could reach READY and there was still nowhere to send an arm. It
 // is implemented now, and this demonstrates the half of it that unit tests
 // cannot - that the seven descriptors the registry produces resolve to seven
-// working executors, that the four container arms actually launch the pinned
-// image, and that a metered arm's provider call arrives at the meter with the
-// correlation the harness will attribute it by.
+// working executors and that the four container arms actually launch the
+// pinned image.
+//
+// It does not demonstrate anything about a metered provider call, and an
+// earlier version of this header said it did. A reset makes no provider call
+// by contract - each metered adapter calls `require_zero()` for it - so the
+// only claim this probe can make about the meter is the negative one, and it
+// now checks that claim instead of asserting it: an empty ledger is a
+// condition of exit 0, because a reset that reached the model would mean an
+// arm calling out for an operation the contract says makes no call.
 //
 // It is deliberately NOT a run. It starts no progress ledger, computes no
 // implementation lock, writes no artifact, and executes one `reset` per arm
@@ -30,7 +37,7 @@ import { createAdapterRequest } from '../lib/adapter-protocol.mjs';
 import { startProviderMeter } from '../lib/provider-meter.mjs';
 import { loadV11AcceptanceDefinition } from '../lib/v11-definition.mjs';
 import { createV11NodeHosts } from '../lib/v11-node-hosts.mjs';
-import { createV11PythonHosts } from '../lib/v11-python-hosts.mjs';
+import { HOST_SYNTHESIZED_FAILURE, createV11PythonHosts } from '../lib/v11-python-hosts.mjs';
 import { parseProviderLedger } from '../lib/v11-provider-reconciler.mjs';
 import { createV11Registry } from '../lib/v11-registry.mjs';
 import { createV11AdapterExecutor } from '../lib/v11-run.mjs';
@@ -112,6 +119,12 @@ try {
         elapsedMs: Date.now() - started,
         status: envelope.status,
         failureCause: envelope.failure?.cause ?? null,
+        // Whether the *product* answered. A container that never launched
+        // also produces a FAILED envelope carrying an adapter cause, so
+        // 'did not throw' is not evidence that anything ran: with the
+        // pre-F1 image pattern all four container arms failed this way and
+        // a count of non-throwing arms would still have read 7 of 7.
+        reachedItsRuntime: envelope.failure?.message !== HOST_SYNTHESIZED_FAILURE,
         storageStatus: envelope.storage.status,
         operations: envelope.operations
       };
@@ -121,6 +134,7 @@ try {
         kind: registry.descriptorFor(armId).kind,
         elapsedMs: Date.now() - started,
         status: 'THREW',
+        reachedItsRuntime: false,
         error: `${error.name}: ${error.message}`
       };
     }
@@ -139,8 +153,15 @@ report.providerLedger = {
     .map(([armId, count]) => ({ armId, count }))
 };
 report.bound = report.arms.length;
-report.reachedTheirRuntime = report.arms.filter((arm) => arm.status !== 'THREW').length;
+report.reachedTheirRuntime = report.arms.filter((arm) => arm.reachedItsRuntime).length;
+report.executed = report.arms.filter((arm) => arm.status === 'SUCCEEDED').length;
+// A reset makes no provider call. An event here would mean an arm reached the
+// model for an operation the contract says it must not - which is a finding,
+// not a footnote, so it decides the exit status alongside the arm counts.
+report.providerLedgerIsEmpty = events.length === 0 && malformed.length === 0;
 
 console.log(JSON.stringify(report, null, 2));
 await rm(workspace, { recursive: true, force: true });
-process.exit(report.reachedTheirRuntime === report.bound ? 0 : 1);
+process.exit(
+  report.reachedTheirRuntime === report.bound && report.providerLedgerIsEmpty ? 0 : 1
+);

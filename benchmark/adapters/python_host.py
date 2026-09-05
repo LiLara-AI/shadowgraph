@@ -74,6 +74,37 @@ GATES = {
 }
 LOOPBACK_FAMILIES = (socket.AF_INET, socket.AF_INET6)
 
+# Every entry point in `socket` by which an address or a name can leave this
+# process. Named once, because the saved originals, the guards that replace
+# them and the restore all read from this list: an entry point added to one
+# of the three and forgotten in the others is the shape of the hole this
+# fence has already had. A `socket.` prefix means the method on the socket
+# type; everything else is a module-level function.
+FENCED_ENTRY_POINTS = (
+    "socket.connect",
+    "socket.connect_ex",
+    "socket.sendto",
+    "socket.sendmsg",
+    "create_connection",
+    "getaddrinfo",
+    "gethostbyname",
+    "gethostbyname_ex",
+    "gethostbyaddr",
+    "getnameinfo",
+)
+
+
+def _fence_owner(name):
+    owner, _, attribute = name.rpartition(".")
+    return (socket.socket if owner == "socket" else socket), attribute
+
+
+def _entry_point(name):
+    """The callable a fenced name currently resolves to."""
+    owner, attribute = _fence_owner(name)
+    return getattr(owner, attribute)
+
+
 
 class NetworkFenceError(OSError):
     """An adapter attempted to reach an address outside loopback."""
@@ -97,28 +128,41 @@ def _loopback_host(host) -> bool:
 
 @contextlib.contextmanager
 def _loopback_only_network():
-    """Refuse every outbound connection that is not to loopback.
+    """Refuse every outbound datagram, connection and lookup that is not loopback.
 
     The environment gates above close the paths that are known today. This
-    closes the rest, including the ones a library adds tomorrow, and it does so
-    by construction rather than by enumeration: an adapter that cannot open a
-    non-loopback socket cannot make an unmetered call, whatever it intended.
+    closes the ones a library adds tomorrow, by taking the `socket` module's
+    egress and resolution surface rather than by naming the libraries: an
+    adapter that cannot address a non-loopback peer cannot make an unmetered
+    call, whatever it intended.
 
-    Loopback is the whole of what a measured unit legitimately needs. The
-    container shares the host network namespace precisely so that the provider
-    meter, the pinned model endpoint and the pinned graph database are reachable
-    on 127.0.0.1 - so this fence costs the benchmark nothing and costs an
-    unpinned fetch everything.
+    It is an enumeration, and calling it anything else was the defect. The
+    first version of this fence guarded `connect`, `connect_ex`,
+    `create_connection` and `getaddrinfo` and described itself as closing
+    egress 'by construction'. It did not: a datagram needs no connection, so
+    `sock.sendto(payload, ("192.0.2.1", 9))` left the process untouched, and
+    `socket.gethostbyname` resolves without going through `getaddrinfo` at all
+    - both demonstrated against this module. What follows is every entry point
+    in `socket` by which an address or a name can leave this process, and the
+    honest description of the fence is that list. `send` and `sendall` are
+    absent deliberately: reaching them requires a `connect` this fence refuses.
 
-    Name resolution is fenced too. Refusing the connection but allowing the
-    lookup would still put the hostname on the wire, and a resolver query is an
-    observation of what this process is doing that the benchmark did not
-    sanction.
+    The container's own network namespace is the part that *is* by
+    construction, and it is the stronger guarantee - but it is available only
+    to an arm that meters nothing (`--network none`). A metered arm shares the
+    host namespace precisely so the provider meter, the pinned model endpoint
+    and the pinned graph database are reachable on 127.0.0.1, and for that arm
+    this fence is the barrier.
+
+    Loopback is the whole of what a measured unit legitimately needs, so the
+    fence costs the benchmark nothing and costs an unpinned fetch everything.
+
+    Name resolution is fenced for its own reason. Refusing the connection but
+    allowing the lookup would still put the hostname on the wire, and a
+    resolver query is an observation of what this process is doing that the
+    benchmark did not sanction.
     """
-    original_connect = socket.socket.connect
-    original_connect_ex = socket.socket.connect_ex
-    original_create_connection = socket.create_connection
-    original_getaddrinfo = socket.getaddrinfo
+    originals = {name: _entry_point(name) for name in FENCED_ENTRY_POINTS}
 
     def permitted(family, address) -> bool:
         if family not in LOOPBACK_FAMILIES:
@@ -128,37 +172,85 @@ def _loopback_only_network():
             return False
         return _loopback_host(address[0])
 
+    def refuse_address():
+        raise NetworkFenceError("Adapter network access is limited to loopback")
+
+    def refuse_name():
+        raise NetworkFenceError("Adapter name resolution is limited to loopback")
+
     def guarded_connect(self, address):
         if not permitted(self.family, address):
-            raise NetworkFenceError("Adapter network access is limited to loopback")
-        return original_connect(self, address)
+            refuse_address()
+        return originals["socket.connect"](self, address)
 
     def guarded_connect_ex(self, address):
         if not permitted(self.family, address):
-            raise NetworkFenceError("Adapter network access is limited to loopback")
-        return original_connect_ex(self, address)
+            refuse_address()
+        return originals["socket.connect_ex"](self, address)
+
+    def guarded_sendto(self, *args):
+        # sendto(data, address) and sendto(data, flags, address): the peer is
+        # always the last argument, and a datagram needs no connection - which
+        # is how the first version of this fence let one out.
+        if len(args) >= 2 and not permitted(self.family, args[-1]):
+            refuse_address()
+        return originals["socket.sendto"](self, *args)
+
+    def guarded_sendmsg(self, *args):
+        # sendmsg(buffers[, ancdata[, flags[, address]]]): the address is the
+        # fourth argument, and present only when the socket is unconnected.
+        if len(args) >= 4 and args[3] is not None and not permitted(self.family, args[3]):
+            refuse_address()
+        return originals["socket.sendmsg"](self, *args)
 
     def guarded_create_connection(address, *args, **kwargs):
         if not (isinstance(address, tuple) and address and _loopback_host(address[0])):
-            raise NetworkFenceError("Adapter network access is limited to loopback")
-        return original_create_connection(address, *args, **kwargs)
+            refuse_address()
+        return originals["create_connection"](address, *args, **kwargs)
 
-    def guarded_getaddrinfo(host, *args, **kwargs):
-        if not _loopback_host(host):
-            raise NetworkFenceError("Adapter name resolution is limited to loopback")
-        return original_getaddrinfo(host, *args, **kwargs)
+    def name_guard(key):
+        # gethostbyname and its siblings do not route through getaddrinfo, so
+        # fencing that one alone still left a resolver query on the wire.
+        def guarded(host, *args, **kwargs):
+            if not _loopback_host(host):
+                refuse_name()
+            return originals[key](host, *args, **kwargs)
 
-    socket.socket.connect = guarded_connect
-    socket.socket.connect_ex = guarded_connect_ex
-    socket.create_connection = guarded_create_connection
-    socket.getaddrinfo = guarded_getaddrinfo
+        return guarded
+
+    def guarded_getnameinfo(sockaddr, *args, **kwargs):
+        if not (isinstance(sockaddr, tuple) and sockaddr and _loopback_host(sockaddr[0])):
+            refuse_name()
+        return originals["getnameinfo"](sockaddr, *args, **kwargs)
+
+    fenced = {
+        "socket.connect": guarded_connect,
+        "socket.connect_ex": guarded_connect_ex,
+        "socket.sendto": guarded_sendto,
+        "socket.sendmsg": guarded_sendmsg,
+        "create_connection": guarded_create_connection,
+        "getaddrinfo": name_guard("getaddrinfo"),
+        "gethostbyname": name_guard("gethostbyname"),
+        "gethostbyname_ex": name_guard("gethostbyname_ex"),
+        "gethostbyaddr": name_guard("gethostbyaddr"),
+        "getnameinfo": guarded_getnameinfo,
+    }
+    # Every saved original is replaced and every replacement is restored: the
+    # two tables share one key set, so an entry point added to one and
+    # forgotten in the other is a failure here rather than a hole at runtime.
+    if set(fenced) != set(originals):
+        raise RuntimeError("the loopback fence must guard exactly the entry points it saved")
+
+    def install(table):
+        for key, value in table.items():
+            owner, attribute = _fence_owner(key)
+            setattr(owner, attribute, value)
+
+    install(fenced)
     try:
         yield
     finally:
-        socket.socket.connect = original_connect
-        socket.socket.connect_ex = original_connect_ex
-        socket.create_connection = original_create_connection
-        socket.getaddrinfo = original_getaddrinfo
+        install(originals)
 
 
 class _BoundedSink(io.TextIOBase):

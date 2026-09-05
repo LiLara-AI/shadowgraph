@@ -80,17 +80,43 @@ adapter is imported: `BASIC_MEMORY_SEMANTIC_SEARCH_ENABLED=false`,
 `HF_HUB_OFFLINE=1`, `HF_DATASETS_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`. These
 close the four paths named above at the place each library documents.
 
-**A loopback-only network fence**, in the same host, wrapping
-`socket.socket.connect`, `connect_ex`, `socket.create_connection` and
-`socket.getaddrinfo` for the duration of the adapter call. Gates close the paths
-that are known; the fence closes the rest, including the one a library adds in
-its next release, and it does so by construction rather than by enumeration: an
-adapter that cannot open a non-loopback socket cannot make an unmetered call,
-whatever it intended.
+**A loopback-only network fence**, in the same host, for the duration of the
+adapter call. Gates close the paths that are known; the fence closes the ones a
+library adds in its next release, by taking the `socket` module's egress and
+resolution surface rather than by naming libraries.
 
-Name resolution is fenced too. Refusing the connection but allowing the lookup
-would still put the hostname on a resolver's wire, which is an observation of
-what the process is doing that the benchmark did not sanction.
+**Corrected.** This paragraph originally claimed the fence closed egress "by
+construction rather than by enumeration", and listed four entry points:
+`socket.socket.connect`, `connect_ex`, `socket.create_connection` and
+`socket.getaddrinfo`. It was an enumeration, and an incomplete one. An
+adversarial review demonstrated two holes against the production module inside
+the pinned image:
+
+- **A datagram needs no connection.** `sock.sendto(payload, ("192.0.2.1", 9))`
+  returned the byte count with the fence installed and active, and `sendmsg`
+  the same. `dnspython` is in the pinned 227-package runtime and resolves this
+  way, so this was not hypothetical.
+- **`socket.gethostbyname` does not route through `getaddrinfo`.** It resolved
+  a public hostname and returned its address while `getaddrinfo` in the same
+  block raised `NetworkFenceError`.
+
+The fence now guards ten entry points, named once in `FENCED_ENTRY_POINTS` and
+read from that one list by the save, the guard table and the restore:
+`socket.connect`, `socket.connect_ex`, `socket.sendto`, `socket.sendmsg`,
+`create_connection`, `getaddrinfo`, `gethostbyname`, `gethostbyname_ex`,
+`gethostbyaddr` and `getnameinfo`. `send` and `sendall` are deliberately
+absent: reaching them requires a `connect` the fence refuses.
+
+The honest description is that list, and the part that *is* by construction is
+the container's own network namespace - which is the stronger guarantee, and is
+available only to an arm that meters nothing (`--network none`). A metered arm
+shares the host namespace so the meter and the pinned endpoints are reachable
+on 127.0.0.1, and for that arm this fence is the barrier.
+
+Name resolution is fenced for its own reason. Refusing the connection but
+allowing the lookup would still put the hostname on a resolver's wire, which is
+an observation of what the process is doing that the benchmark did not
+sanction.
 
 The fence costs the benchmark nothing. Loopback is the whole of what a measured
 unit needs - the container shares the host network namespace precisely so the

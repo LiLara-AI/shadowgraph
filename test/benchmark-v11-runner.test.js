@@ -11,6 +11,7 @@ import {
   STANDARD_DECISION_RESPONSE_SCHEMA
 } from '../benchmark/lib/outer-model.mjs';
 import { createProgressLedger, createUnitEvidenceLedger } from '../benchmark/lib/progress.mjs';
+import { createV11RunResources } from '../benchmark/lib/v11-run-resources.mjs';
 import { validateRawRun } from '../benchmark/lib/validate.mjs';
 import {
   recordContentSha256,
@@ -241,9 +242,17 @@ function fakeClock() {
 function progressRecorder(onAppend = null, onWatchdog = null) {
   const events = [];
   let activeCorrelation = null;
+  let accepting = true;
   return {
     events,
+    async close() {
+      accepting = false;
+    },
     async append(event) {
+      // The real ledger rejects here (progress.mjs), and a double that did not
+      // let this file assert the exact teardown ordering that made every bound
+      // run die on its last line.
+      if (!accepting) throw new Error('Progress ledger is closed');
       events.push(structuredClone(event));
       if (event.event === 'unit_started') {
         activeCorrelation = {
@@ -1486,4 +1495,66 @@ test('one acceptance artifact flows through the integrated runner, validator, an
   });
   assert.equal(aggregate.mode, 'ACCEPTANCE');
   assertNoAcceptanceClaims(aggregate);
+});
+
+test('the run path composition completes: the real ledgers, closed the way the CLI closes them', async (t) => {
+  // The regression this exists for shipped green. `closeResources` was the CLI's
+  // whole teardown, so the runner closed the progress ledger and then tried to
+  // append `run_finished` to it - every bound run executing every unit,
+  // validating its own raw record, and dying on its last line with no artifact.
+  // Nothing caught it, because the only ordering test used a double that
+  // accepted appends after close.
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-runner-close-');
+  const ledgerPath = path.join(directory, 'progress.ndjson');
+  const unitPath = path.join(directory, 'units.ndjson');
+  const progress = await createProgressLedger({
+    path: ledgerPath,
+    runId: 'run-v11-1',
+    attemptId: 'attempt-v11-1'
+  });
+  const unitEvidence = await createUnitEvidenceLedger({
+    path: unitPath,
+    runId: 'run-v11-1',
+    attemptId: 'attempt-v11-1',
+    sensitiveValues: []
+  });
+  const meterClosedAt = [];
+  const resources = createV11RunResources({
+    meter: {
+      close: async () => {
+        meterClosedAt.push(
+          (await readFile(ledgerPath, 'utf8')).trimEnd().split('\n').map((line) => JSON.parse(line)).at(-1).event
+        );
+      }
+    },
+    progress,
+    unitEvidence
+  });
+
+  const raw = await runV11Benchmark(baseOptions({
+    progress,
+    persistUnit: (unit) => unitEvidence.append(unit),
+    closeResources: resources.closeMeasurement
+  }));
+  await resources.close();
+
+  const records = (await readFile(ledgerPath, 'utf8'))
+    .trimEnd()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+
+  assert.equal(raw.status, 'COMPLETE');
+  assert.equal(records.at(-1).event, 'run_finished', 'a bound run must end durably');
+  // And the meter closed before that terminal event was written, which is the
+  // whole reason the runner has this hook: the provider ledger is complete at
+  // the moment the run declares itself finished.
+  assert.deepEqual(meterClosedAt, ['checkpoint'], 'the meter must close before any terminal event exists');
+  await assert.rejects(progress.append({
+    event: 'run_finished',
+    armId: null,
+    scenarioId: null,
+    repetition: null,
+    phase: null,
+    evidence: {}
+  }), /Progress ledger is closed/u);
 });

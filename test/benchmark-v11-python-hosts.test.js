@@ -178,15 +178,19 @@ async function hosts(t, overrides = {}) {
  *
  * This is the only way to see what the module decided about the container from
  * outside it: the launch options are passed to `createPythonAdapterExecutor` and
- * never exposed again, so the argv the executor builds from them is the sole
- * observable. Nothing is pulled, started, or connected to - the script writes a
- * file, drains the protocol request off stdin with a shell builtin so the write
- * cannot race into an EPIPE, and exits non-zero.
+ * never exposed again, so the argv the executor builds and the wrapper it writes
+ * to stdin are the sole observables. The stdin capture is the load-bearing half:
+ * the argv says which image and which network, and only the wrapper says which
+ * *models* the arm was told to use - and replacing the pinned ids with a
+ * library's own defaults passed this entire suite until it was kept. Nothing is
+ * pulled, started, or connected to - the script writes both files and exits
+ * non-zero.
  */
 async function recordingContainerExecutable(t) {
   const directory = await scratchDirectory(t, 'shadowgraph-v11-python-hosts-docker-');
   const executable = path.join(directory, 'recording-container-executable');
   const record = path.join(directory, 'invocations.txt');
+  const requests = path.join(directory, 'requests.ndjson');
   await writeFile(executable, [
     '#!/bin/sh',
     'for argument in "$@"',
@@ -194,7 +198,7 @@ async function recordingContainerExecutable(t) {
     `  printf '%s\\n' "$argument" >> '${record}'`,
     'done',
     `printf '%s\\n' '--end-of-invocation--' >> '${record}'`,
-    'while IFS= read -r discarded; do :; done',
+    `cat >> '${requests}'`,
     'exit 3',
     ''
   ].join('\n'), { encoding: 'utf8', mode: 0o755 });
@@ -219,6 +223,19 @@ async function recordingContainerExecutable(t) {
         current.push(line);
       }
       return invocations;
+    },
+    /** The protocol wrappers the executor wrote to the container's stdin. */
+    requests() {
+      let text;
+      try {
+        text = readFileSync(requests, 'utf8');
+      } catch {
+        return [];
+      }
+      return text
+        .split(String.fromCharCode(10))
+        .filter((line) => line.length > 0)
+        .map((line) => JSON.parse(line));
     }
   };
 }
@@ -605,4 +622,66 @@ test('the arms the pinned specs name are exactly the arms the registry marks pyt
       );
     }
   }
+});
+
+// The lock's own fields, spelled out rather than read back through the module
+// under test. `providerModelsFromLock` is what the host calls; asserting against
+// its output would assert only that the host agrees with itself.
+const LOCKED_DECISION_MODEL = MODEL_WEIGHTS.models.find((model) => model.kind === 'decision_llm');
+const LOCKED_EMBEDDING_MODEL = MODEL_WEIGHTS.models.find((model) => model.kind === 'embedding');
+
+processGroupTest('the models the lock pins are the models that reach the arm', async (t) => {
+  // The defect this catches shipped green. Every test in the range checked the
+  // *shape* of what the host hands the executor, and the executor validates
+  // shape too - so hard-coding mem0's own defaults (gpt-5-mini,
+  // text-embedding-3-small at 1536) in place of the narrowing passed 1081 JS
+  // tests and 134 Python tests. The wrapper on stdin is the only place the
+  // values are observable, and it is also exactly what the container reads.
+  const recorder = await recordingContainerExecutable(t);
+  const bound = await hosts(t, { dockerExecutable: recorder.executable });
+  const execute = bound[PYTHON_RUNTIME_KIND](descriptorFor('mem0-oss', {
+    containerImage: LAUNCHABLE_IMAGE
+  }));
+
+  const response = await execute(requestFor('reset', 'mem0-oss'));
+  assert.equal(response.status, 'FAILED');
+
+  const [wrapper] = recorder.requests();
+  assert.notEqual(wrapper, undefined, 'the executor must write its request to the container');
+  assert.deepEqual(wrapper.providerModels, {
+    internal_memory_llm: {
+      modelId: LOCKED_DECISION_MODEL.modelId,
+      embeddingDimension: null
+    },
+    embedding: {
+      modelId: LOCKED_EMBEDDING_MODEL.modelId,
+      embeddingDimension: LOCKED_EMBEDDING_MODEL.embeddingDimension
+    }
+  });
+  // Not a hypothetical: mem0 sizes its vector collection from this number, and
+  // builds a 1536-wide one for 768-wide vectors when it is not told.
+  assert.equal(wrapper.providerModels.embedding.embeddingDimension, 768);
+});
+
+processGroupTest('an arm that meters nothing is handed no model and no network', async (t) => {
+  // The two halves of one decision. The arm the definition records as issuing no
+  // provider call must be handed a null for every class *and* a container with
+  // no network - and the module derives the second from the first, so a test
+  // that checked only one of them would not see them come apart.
+  const recorder = await recordingContainerExecutable(t);
+  const bound = await hosts(t, { dockerExecutable: recorder.executable });
+  const execute = bound[PYTHON_RUNTIME_KIND](descriptorFor('basic-memory', {
+    containerImage: LAUNCHABLE_IMAGE
+  }));
+
+  await execute(requestFor('reset', 'basic-memory'));
+
+  const [wrapper] = recorder.requests();
+  assert.deepEqual(wrapper.providerModels, { internal_memory_llm: null, embedding: null });
+  const [invocation] = recorder.invocations();
+  assert.ok(invocation.includes('--network'), 'the launch must state a network mode');
+  assert.equal(
+    invocation[invocation.indexOf('--network') + 1],
+    NETWORK_MODES.none.dockerValue
+  );
 });

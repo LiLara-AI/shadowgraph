@@ -14,11 +14,18 @@ benchmark unit end to end** - reset, persist, verify, retrieve - against the
 real pinned service, with the real pinned library, through the real adapter
 contract, metered.
 
-Read the scope carefully, because it is narrow. This is not a run. `v11-run`
-still refuses at `RUNTIME_UNAVAILABLE`, because the run path has no provider
-meter and no bound Python hosts. No artifact exists, nothing was scored, and
-three arms have still never executed anything. What is now true is that the
-blocker that said Mem0 *cannot* execute is false.
+Read the scope carefully, because it is narrow. This is not a run. No artifact
+exists and nothing was scored. What is now true is that the blocker that said
+Mem0 *cannot* execute is false.
+
+**Superseded, in this record's own terms.** When this was written the run path
+had no provider meter and no bound Python hosts, and this paragraph said so.
+Two later commits in the same range bound both - see
+`v11-runtime-binding-2026-09-05.md` - so `v11-run` no longer refuses at
+`RUNTIME_UNAVAILABLE` for that reason, and Cognee has since executed too. The
+sentences are corrected rather than deleted because a record that quietly
+reads as current when it is not is the failure mode this candidate keeps
+finding in itself.
 
 ## What the blocker was
 

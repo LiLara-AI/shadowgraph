@@ -98,11 +98,17 @@ the assigned id, and searching with no dataset - are all caught.
 
 ## What this does not claim
 
-- **The Cognee arm still cannot execute a unit.** Its client factory is still
-  `RuntimeUnavailable`; this fixes the identity it would have used, not the
-  runtime it would have used it in. That remains LB2b for Cognee.
-- **The user-namespace refusal is untouched.** The adapter still refuses a
-  `userId`, and CB2's ACL demonstration is a separate matter from this one.
+- **Both of the bullets that used to stand here are now false, and that is
+  the correction.** When this was written Cognee's client factory raised
+  `RuntimeUnavailable` and the adapter refused any `userId`, so this record
+  said it was fixing the identity an arm would have used rather than the
+  runtime it would have used it in. A later commit in the same range
+  implemented the factory and inverted the refusal - a namespace *without* a
+  user is what is refused now - and Cognee executes. See
+  `v11-runtime-binding-2026-09-05.md` (F3) and the LB2b row in
+  `CANDIDATE-STATUS.md`.
+- **Nothing here says a unit was measured.** Cognee has executed one `reset`;
+  retrieve, persist and verify have not been exercised against it.
 - **No run was executed and no artifact exists.**
 - **`cognify` was not exercised.** The probe adds and lists; it does not build a
   graph, so nothing here says the ingestion pipeline completes.

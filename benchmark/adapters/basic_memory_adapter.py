@@ -28,9 +28,14 @@ from python_runtime import (
 ADAPTER_ID = "basic-memory"
 PINNED_PACKAGES = {"basic-memory": "0.23.2"}
 DIRECTORY = "shadowgraph-benchmark"
-STORAGE = not_available_storage(
+# The storage a unit has when it failed before a byte scope existed. It is
+# not "this arm cannot attribute bytes" - this arm can, and every success
+# path measures - but "this particular invocation never got far enough to
+# look". Saying the former on a failure would have the run record assert a
+# blocker the same module closed.
+UNMEASURED_STORAGE = not_available_storage(
     "Basic Memory exact local project scope",
-    "Task 8 must lock an exact native byte-attribution method for the owned project leaf",
+    "this operation failed before its owned project directory could be measured",
 )
 
 
@@ -501,7 +506,7 @@ async def execute(
             "ENDPOINT_UNAVAILABLE",
             "Pinned Basic Memory runtime is not available",
             operations,
-            STORAGE,
+            UNMEASURED_STORAGE,
             persistence=persistence,
             isolation=isolation,
         )
@@ -511,7 +516,7 @@ async def execute(
             "CONTRACT_FAILURE",
             "Basic Memory adapter contract failed closed",
             operations,
-            STORAGE,
+            UNMEASURED_STORAGE,
             persistence=persistence,
             isolation=isolation,
         )
@@ -522,7 +527,7 @@ async def execute(
             cause,
             message,
             operations,
-            STORAGE,
+            UNMEASURED_STORAGE,
             persistence=persistence,
             isolation=isolation,
         )

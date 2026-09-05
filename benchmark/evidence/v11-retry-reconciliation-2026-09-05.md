@@ -102,10 +102,15 @@ this makes that state fail instead.
 
 ## What this does not claim
 
-- **The reconciler is not wired into `v11-run`.** It is wired into the arm
-  probe. The run path has no provider meter and no bound Python hosts, which is
-  LB2a and is not done; until it is, there is no run ledger to reconcile.
-- **Only one arm produced a ledger.** Graphiti and Cognee have never executed.
+- **The reconciler was not wired into `v11-run` when this was written.** It is
+  now: `v11RunCommand` reads this attempt's ledger after the meter closes,
+  turns the run record into expectations with `providerExpectationsFromRun`,
+  and writes `<attempt>.provider-reconciliation.json`. A run whose provider
+  traffic does not match its own record exits non-zero. LB2a, which this bullet
+  said was not done, is cleared.
+- **No real run has produced a ledger to reconcile.** The comparison is wired
+  and unit-tested; nothing here says it has judged real traffic. Cognee has
+  since executed a reset; Graphiti has not executed anything.
 - **This is not the harness's meter.** The probe's proxy writes the meter's
   ledger *shape*; it is not `provider-meter.mjs`, and nothing here exercises
   that module.

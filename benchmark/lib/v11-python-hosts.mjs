@@ -32,10 +32,26 @@ import {
   PYTHON_ADAPTER_SPECS,
   createPythonAdapterExecutor
 } from './python-adapter-executor.mjs';
-import { providerModelsFromLock } from './v11-provider-models.mjs';
+import {
+  PROVIDER_MODEL_CLASSES,
+  providerModelsFor,
+  providerModelsFromLock
+} from './v11-provider-models.mjs';
 
 /** The runtime kind this module binds. */
 export const PYTHON_RUNTIME_KIND = 'python-container';
+
+/**
+ * The message on an envelope this module synthesised rather than received.
+ *
+ * It is the only thing that distinguishes a failure the *product* reported
+ * from one the harness produced on its behalf - a container that could not
+ * launch, a deadline, an interrupted process - because both arrive as a
+ * FAILED envelope carrying an adapter cause. Exported so a caller checking
+ * that an arm reached its runtime can tell the two apart against this
+ * constant rather than against a copy of the string.
+ */
+export const HOST_SYNTHESIZED_FAILURE = 'Pinned Python adapter operation failed';
 
 export class PythonHostError extends Error {
   constructor(message) {
@@ -114,9 +130,8 @@ export function createV11PythonHosts(options = {}) {
   // a missing or malformed model-weight lock binds cleanly, lets the one arm
   // that meters nothing through, and fails three times in the middle of a run
   // as an error type the caller was not guarding for.
-  let pinnedModels;
   try {
-    pinnedModels = providerModelsFromLock(modelWeights);
+    providerModelsFromLock(modelWeights);
   } catch (error) {
     throw new PythonHostError(`the pinned model weights are unusable: ${error.message}`);
   }
@@ -139,10 +154,12 @@ export function createV11PythonHosts(options = {}) {
         `arm ${armId} must be bound to a digest-pinned container image, not ${JSON.stringify(descriptor.containerImage ?? null)}`
       );
     }
-    // The registry and the executor each carry this arm's metered request
-    // classes. A disagreement is a registry defect, and resolving it here by
-    // preferring one side would hide it - and would decide, silently, whether
-    // this arm gets a network.
+    // One table states an arm's metered request classes - PYTHON_ADAPTER_SPECS -
+    // and the registry builds its descriptor by reading that same table. So this
+    // is not two independent readings meeting, and it must not be described as
+    // one: it refuses a descriptor that did not come from the registry. That is
+    // still worth refusing, because the classes decide whether this arm is given
+    // a network, and a hand-built descriptor would decide that silently.
     const declared = [...(descriptor.requestClasses ?? [])];
     const expected = [...spec.requestClasses];
     if (declared.length !== expected.length || declared.some((value, index) => value !== expected[index])) {
@@ -151,18 +168,27 @@ export function createV11PythonHosts(options = {}) {
       );
     }
 
-    const metered = expected.length > 0;
+    // The models and the network come from one narrowing rather than two
+    // readings of the spec. `providerModelsFor` owns the rule - a class is
+    // present and null unless the arm meters it - and the network then follows
+    // the models: this arm is given one if and only if it was handed something
+    // to reach over it. Deriving the two separately is what would let the arm
+    // the definition records as issuing no provider call be given a network.
+    let providerModels;
+    try {
+      providerModels = providerModelsFor(modelWeights, expected);
+    } catch (error) {
+      throw new PythonHostError(`arm ${armId} cannot be handed pinned models: ${error.message}`);
+    }
+    const metered = PROVIDER_MODEL_CLASSES.some(
+      (requestClass) => providerModels[requestClass] !== null
+    );
     const executor = createPythonAdapterExecutor({
       adapterId: armId,
       armId,
       stateRoot: resolvedStateRoot,
       providerEndpointFor,
-      providerModels: Object.fromEntries(
-        Object.keys(pinnedModels).map((requestClass) => [
-          requestClass,
-          expected.includes(requestClass) ? pinnedModels[requestClass] : null
-        ])
-      ),
+      providerModels,
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
       container: {
         image: descriptor.containerImage,
@@ -190,7 +216,7 @@ export function createV11PythonHosts(options = {}) {
           result: { nativeContext: [], persistenceEvidence: null, isolationEvidence: null },
           failure: {
             cause: error.adapterCause,
-            message: 'Pinned Python adapter operation failed'
+            message: HOST_SYNTHESIZED_FAILURE
           },
           operations: emptyOperations(),
           storage: unmeasuredStorage()

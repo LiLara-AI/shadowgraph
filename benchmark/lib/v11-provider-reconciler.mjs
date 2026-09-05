@@ -281,3 +281,125 @@ export function reconcileProviderEvidence(input) {
     findings: Object.freeze(findings)
   });
 }
+
+// The operation metric that states, for one unit, how many calls of a given
+// request class the run says it made. Every class the meter can mint is here:
+// a class the run could produce and this table omitted would be traffic no
+// expectation covers, which the reconciler would then report as unexpected
+// rather than as unmeasured.
+const OPERATION_FIELD_BY_REQUEST_CLASS = Object.freeze({
+  outer_decision_llm: 'outerDecisionModelCalls',
+  internal_memory_llm: 'internalMemoryModelCalls',
+  embedding: 'embeddingCalls'
+});
+
+/**
+ * The provider traffic a finished run says it produced, as expectations.
+ *
+ * The run record is the claim and the ledger is the observation, and until
+ * this existed the two were never brought together: the meter wrote a ledger
+ * for every acceptance run and nothing read it back, so `RETRY_OBSERVED`,
+ * `MODEL_MISMATCH` and `UNEXPECTED_CALL` were codes no run could emit.
+ *
+ * One expectation per (unit, request class), including the classes a unit
+ * reports as zero - an arm that meters nothing still has to be *checked* to
+ * have metered nothing, and an expectation of zero is what turns a stray event
+ * into `UNEXPECTED_CALL` instead of into silence.
+ *
+ * Only this attempt's units, because the ledger is opened per attempt: a
+ * resumed run carries units from earlier attempts whose provider traffic is in
+ * an earlier ledger, and expecting them here would report every one of them
+ * missing.
+ */
+export function providerExpectationsFromRun(raw, attemptId) {
+  if (!isPlainObject(raw) || !Array.isArray(raw.units)) {
+    throw new Error('provider expectations require a raw run record with units');
+  }
+  if (!isNonEmptyString(attemptId)) {
+    throw new Error('provider expectations require the attempt whose ledger is being read');
+  }
+  const expectations = [];
+  for (const unit of raw.units) {
+    if (!isPlainObject(unit)) throw new Error('every unit must be an object');
+    if (unit.attemptId !== attemptId) continue;
+    if (!isPlainObject(unit.operations)) {
+      throw new Error(`unit ${String(unit.unitId)} records no operation metrics`);
+    }
+    for (const requestClass of Object.keys(OPERATION_FIELD_BY_REQUEST_CLASS)) {
+      const field = OPERATION_FIELD_BY_REQUEST_CLASS[requestClass];
+      const expectedCalls = unit.operations[field];
+      if (!Number.isSafeInteger(expectedCalls) || expectedCalls < 0) {
+        throw new Error(`unit ${String(unit.unitId)} records no ${field}`);
+      }
+      expectations.push({
+        runId: unit.runId,
+        attemptId: unit.attemptId,
+        armId: unit.armId,
+        scenarioId: unit.scenarioId,
+        repetition: unit.repetition,
+        phase: unit.phase,
+        requestClass,
+        expectedCalls
+      });
+    }
+  }
+  return expectations;
+}
+
+/**
+ * The reconciliation a finished run writes beside its record.
+ *
+ * Pure: the caller reads the ledger and passes its text, or `null` when it
+ * could not be read. That is deliberate - the interesting decision here is what
+ * an *absent* ledger means, and a function that did its own I/O would leave
+ * that decision in a `catch` block nothing could test. A missing ledger is a
+ * discrepancy rather than an absence: the meter opens the file when the run
+ * binds, so a run that produced a record and no ledger has lost its evidence,
+ * and reporting that as `RECONCILED` would be the strongest overstatement this
+ * comparison is capable of.
+ */
+export function runProviderReconciliation(input) {
+  const { ledgerText = null, ledgerPath, raw, attemptId, pinnedModels } = input ?? {};
+  if (!isNonEmptyString(ledgerPath)) {
+    throw new Error('a run reconciliation must name the ledger it read');
+  }
+  if (!isPlainObject(pinnedModels)
+    || !isPlainObject(pinnedModels.internal_memory_llm)
+    || !isPlainObject(pinnedModels.embedding)) {
+    throw new Error('a run reconciliation requires the pinned models the run was bound to');
+  }
+  const envelope = (status, totals, findings) => Object.freeze({
+    schema: 'shadowgraph.v11.provider-reconciliation',
+    version: 1,
+    attemptId,
+    ledgerPath,
+    status,
+    totals,
+    findings: Object.freeze(findings)
+  });
+
+  if (ledgerText === null) {
+    return envelope('UNAVAILABLE', null, [{
+      code: 'LEDGER_UNREADABLE',
+      detail: 'the provider ledger this run wrote could not be read'
+    }]);
+  }
+  if (typeof ledgerText !== 'string') {
+    throw new Error('a run reconciliation reads ledger text or nothing at all');
+  }
+
+  const { events, malformed } = parseProviderLedger(ledgerText);
+  const report = reconcileProviderEvidence({
+    events,
+    malformed,
+    expectations: providerExpectationsFromRun(raw, attemptId),
+    expectedModels: {
+      // The outer decision and an arm's own internal calls are the same pinned
+      // chat model: the lock states it once and both routes use it.
+      outer_decision_llm: pinnedModels.internal_memory_llm.modelId,
+      internal_memory_llm: pinnedModels.internal_memory_llm.modelId,
+      embedding: pinnedModels.embedding.modelId
+    }
+  });
+  return envelope(report.status, report.totals, report.findings);
+}
