@@ -42,8 +42,13 @@ function responseMentionsTarget(scenario, decisionId, response) {
  */
 export function isolationInspectionFrom(evidence) {
   if (evidence === null || evidence === undefined || typeof evidence !== 'object') return null;
-  const matchingRecordIds = Number(evidence.matchingRecordIdCount) || 0;
-  const matchingContent = Number(evidence.matchingContentCount) || 0;
+  const matchingRecordIds = evidence.matchingRecordIdCount;
+  const matchingContent = evidence.matchingContentCount;
+  // An evidence object without both counters did not report what the rule asks
+  // about, so it is not an inspection for this purpose. Coercing the missing
+  // counters to 0 would have let `verified: true` alone stand as a confirmation
+  // - the counts win only if they are there to win.
+  if (!Number.isFinite(matchingRecordIds) || !Number.isFinite(matchingContent)) return null;
   const leaked = matchingRecordIds > 0 || matchingContent > 0;
   return { verified: evidence.verified === true && !leaked, leaked };
 }
@@ -92,7 +97,11 @@ function isolationScore(scenario, decisionId, probe, persistenceMeasured) {
 
   if (!persistenceMeasured) return 1;
   if (inspection === null) return null;
-  return inspection.verified === true ? 1 : 0;
+  // Three outcomes, not two. A leak is 0 and a confirmation is 1, but an
+  // inspection that ran and confirmed nothing is neither: scoring it 0 would
+  // charge the arm for a defect in the inspection, and scoring it 1 is the
+  // fail-open this function exists to close.
+  return inspection.verified === true ? 1 : null;
 }
 
 /**

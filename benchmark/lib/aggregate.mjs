@@ -181,6 +181,20 @@ function summarizeArm(armId, raw, preregistration, groups) {
   };
 }
 
+/**
+ * An undefined false-alert rate must never satisfy a threshold.
+ *
+ * `null <= 0.05` is `true` in JavaScript, and `null <= null` is `true` as well,
+ * because both sides coerce to 0. Every gate below that compares a rate would
+ * therefore read "no false alerts" from an arm whose rate is undefined - the
+ * same fail-open the scorer was just fixed for, one layer up. Before that fix a
+ * null rate was almost unreachable; it is now the correct answer whenever a
+ * probe failed, so these comparisons have to say so explicitly.
+ */
+export function ratePassesAtMost(rate, limit) {
+  return Number.isFinite(rate) && Number.isFinite(limit) && rate <= limit;
+}
+
 function pairwiseWin(candidate, competitor) {
   return candidate.metrics.efficacyComposite >= competitor.metrics.efficacyComposite + 0.05
     && candidate.quality.mean >= competitor.quality.mean - 0.5
@@ -188,7 +202,7 @@ function pairwiseWin(candidate, competitor) {
     && candidate.metrics.userIsolation === 1
     && competitor.metrics.projectIsolation === 1
     && competitor.metrics.userIsolation === 1
-    && candidate.metrics.falseAlertRate <= competitor.metrics.falseAlertRate
+    && ratePassesAtMost(candidate.metrics.falseAlertRate, competitor.metrics.falseAlertRate)
     && candidate.metrics.failedAttemptAvoidance >= competitor.metrics.failedAttemptAvoidance;
 }
 
@@ -201,7 +215,7 @@ function bestCandidate(armResults, preregistration) {
       && metrics.rejectedAlternativeRecall >= 0.90
       && metrics.rejectionReasonRecall >= 0.90
       && metrics.changedFactDetection >= 0.90
-      && metrics.falseAlertRate <= 0.05
+      && ratePassesAtMost(metrics.falseAlertRate, 0.05)
       && metrics.failedAttemptAvoidance >= 0.90
       && metrics.projectIsolation === 1
       && metrics.userIsolation === 1

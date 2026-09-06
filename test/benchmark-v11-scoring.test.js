@@ -25,7 +25,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 
-import { v11Coverage } from '../benchmark/lib/aggregate.mjs';
+import { ratePassesAtMost, v11Coverage } from '../benchmark/lib/aggregate.mjs';
 import { isolationInspectionFrom, scoreScenario } from '../benchmark/lib/scoring.mjs';
 
 const SCENARIO = Object.freeze({
@@ -128,6 +128,23 @@ test('falseAlertRate divides by the frozen denominator of three', () => {
     ]
   });
   assert.equal(metrics.falseAlertRate, 1 / 3);
+});
+
+test('a fourth probe cannot dilute the frozen denominator', () => {
+  // With exactly three probes, dividing by the array length and dividing by the
+  // frozen 3 agree, so the test above passes against the defect it names. The
+  // denominator is only pinned by a set whose length is not 3.
+  const metrics = score({
+    D_FALSE: [
+      { changedFactDetected: true },
+      { changedFactDetected: false },
+      { changedFactDetected: false },
+      { changedFactDetected: false }
+    ]
+  });
+  assert.equal(metrics.falseAlertRate, 1 / 3);
+  assert.notEqual(metrics.falseAlertRate, 1 / 4);
+  assert.equal(metrics.falseAlertProbesValid, 3);
 });
 
 test('failed D_FALSE probes stay visible as counts, not just as a null rate', () => {
@@ -250,6 +267,31 @@ test('absent isolation evidence reads as no inspection, not as a clean one', () 
   assert.equal(isolationInspectionFrom(undefined), null);
 });
 
+test('evidence without both match counters is not an inspection', () => {
+  // `Number(undefined) || 0` would turn each missing counter into a clean zero,
+  // letting `verified: true` alone stand as the confirmation the frozen rule
+  // asks the counters for.
+  assert.equal(isolationInspectionFrom({ verified: true }), null);
+  assert.equal(isolationInspectionFrom({}), null);
+  assert.equal(isolationInspectionFrom({ verified: true, matchingRecordIdCount: 0 }), null);
+  assert.equal(isolationInspectionFrom({ verified: true, matchingContentCount: 0 }), null);
+  assert.equal(
+    isolationInspectionFrom({ verified: true, matchingRecordIdCount: '0', matchingContentCount: 0 }),
+    null
+  );
+});
+
+test('an inspection that ran and confirmed nothing is N/A, not a leak and not a pass', () => {
+  // Counters present and zero, but the adapter did not confirm. Charging the
+  // arm a 0 would bill it for a defect in the inspection; a 1 is the fail-open.
+  const inspection = isolationInspectionFrom({
+    verified: false, matchingRecordIdCount: 0, matchingContentCount: 0
+  });
+  assert.deepEqual(inspection, { verified: false, leaked: false });
+  assert.equal(score({ ISOLATION_PROJECT: { response: { choiceId: 'unrelated' }, inspection } })
+    .projectIsolation, null);
+});
+
 test('inspection with zero matches on both counters is clean', () => {
   assert.deepEqual(
     isolationInspectionFrom({ verified: true, matchingRecordIdCount: 0, matchingContentCount: 0 }),
@@ -303,6 +345,33 @@ test('an inspection that reports a leak scores 0 even when it also claims verifi
 // run whose units mostly failed. Every case below mixes statuses on purpose:
 // the defect this guards against is a tally that silently counts one of them.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// The threshold gates that read a false-alert rate. Making the rate N/A closed
+// one fail-open and opened another a layer up, because `null <= 0.05` is true
+// in JavaScript: an arm with an undefined rate would pass the marketing gate
+// and win a pairwise comparison on the strength of a number it does not have.
+// ---------------------------------------------------------------------------
+
+test('an undefined false-alert rate never satisfies a threshold', () => {
+  assert.equal(null <= 0.05, true, 'the coercion this guard exists for');
+  assert.equal(ratePassesAtMost(null, 0.05), false);
+  assert.equal(ratePassesAtMost(undefined, 0.05), false);
+  assert.equal(ratePassesAtMost(Number.NaN, 0.05), false);
+});
+
+test('an undefined competitor rate cannot be beaten', () => {
+  // Otherwise an arm beats a competitor whose rate was never measured.
+  assert.equal(ratePassesAtMost(0, null), false);
+  assert.equal(ratePassesAtMost(null, null), false);
+});
+
+test('real rates still compare the way they did', () => {
+  assert.equal(ratePassesAtMost(0, 0.05), true);
+  assert.equal(ratePassesAtMost(0.05, 0.05), true);
+  assert.equal(ratePassesAtMost(1 / 3, 0.05), false);
+  assert.equal(ratePassesAtMost(0, 1 / 3), true);
+});
 
 function unit(armId, phase, status, cause = null) {
   return { armId, phase, status, failure: cause === null ? null : { cause } };
