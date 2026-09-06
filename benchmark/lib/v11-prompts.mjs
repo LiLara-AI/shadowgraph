@@ -102,6 +102,52 @@ function validateNativeValue(value, label, state, depth) {
   state.seen.delete(value);
 }
 
+/**
+ * Answer fields that are stripped from a decision record before it is shown to
+ * the decision model. F32.
+ *
+ * The harness writes each decision response into the memory record verbatim, and
+ * the adapters hand record content back as native context. Every field the model
+ * is about to be asked for was therefore already in front of it, pre-filled with
+ * the value it gave last time - and because the frozen schema types these three
+ * as nullable, that value is usually `null`. Under `canonicalJson` key order the
+ * rendered context begins `{"content":{"changedFactDetected":null,...`, so the
+ * first thing a 7B model reads about the question it is being asked is a null
+ * answer to it. In run v11-acceptance-002 it copied that answer 64 times out of
+ * 64, in every arm that retrieved anything, while the control - which retrieves
+ * nothing and so saw no answer sheet - never did.
+ *
+ * `changedFactDetected` and `changedFactId` answer the D-phase probe, which asks
+ * about a state *after* the decision was recorded, so a record of that decision
+ * has no business asserting them at all. `decisionId` is dropped on a different
+ * ground: the record already carries its identity as `record.id`, which is left
+ * intact, so the only thing `content.decisionId` contributes is the model's
+ * previous echo - a null that teaches the next phase to answer null.
+ *
+ * What this does NOT do: it does not change the stored record, the adapter
+ * protocol, the response schema, or either prompt-binding hash, all of which are
+ * frozen or shared with the products. The arm still stores and returns what it
+ * stored and returned; the harness just stops handing the model its own answer
+ * sheet while asking the question again. It also does not close F31 - the model
+ * is still never told what `decisionId` is supposed to mean.
+ */
+const REDACTED_PRIOR_ANSWER_FIELDS = Object.freeze([
+  'changedFactDetected',
+  'changedFactId',
+  'decisionId'
+]);
+
+function withoutPriorAnswers(record) {
+  const content = record.content;
+  if (!isPlainObject(content)) return record;
+  if (!REDACTED_PRIOR_ANSWER_FIELDS.some((field) => Object.hasOwn(content, field))) return record;
+  const redacted = {};
+  for (const [field, value] of Object.entries(content)) {
+    if (!REDACTED_PRIOR_ANSWER_FIELDS.includes(field)) redacted[field] = value;
+  }
+  return { ...record, content: redacted };
+}
+
 function serializeNativeContext(nativeContext) {
   if (!Array.isArray(nativeContext)) boundaryReject('SHAPE');
   if (nativeContext.length > MAX_NATIVE_RECORDS) {
@@ -114,7 +160,9 @@ function serializeNativeContext(nativeContext) {
     }
     validateNativeValue(record, `adapter-native context[${index}]`, state, 0);
   }
-  const serialized = canonicalJson(nativeContext);
+  // Validation runs on what the adapter actually returned; only what reaches the
+  // model is redacted. A record that fails the boundary still fails it.
+  const serialized = canonicalJson(nativeContext.map(withoutPriorAnswers));
   if (Buffer.byteLength(serialized, 'utf8') > MAX_NATIVE_BYTES) {
     boundaryReject('LIMIT');
   }
