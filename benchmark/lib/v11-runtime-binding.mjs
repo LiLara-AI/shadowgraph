@@ -50,7 +50,7 @@ import { providerModelsFromLock } from './v11-provider-models.mjs';
 import { createV11PythonHosts } from './v11-python-hosts.mjs';
 import { readPythonSiteDistributions, verifyPythonRuntime } from './v11-python-runtime.mjs';
 import { createV11RunResources } from './v11-run-resources.mjs';
-import { UNIT_TIMEOUT_MS } from './v11-runner.mjs';
+import { ADAPTER_OPERATION_TIMEOUT_MS, UNIT_TIMEOUT_MS } from './v11-runner.mjs';
 
 /**
  * The ledger this attempt's meter writes and this attempt's run reads.
@@ -311,7 +311,13 @@ export async function bindV11Runtime(input, injections = {}) {
           stateRoot: pythonStateRoot,
           runtimeRoot: pythonRuntimeSite,
           providerEndpointFor,
-          modelWeights
+          modelWeights,
+          // Stated here rather than left to the executor's own default. That
+          // default is 30s, sized for a 0.5b model, and omitting this argument
+          // is exactly what F25 was: an operation ceiling three and a half
+          // times smaller than the work the pinned model now does, on a line no
+          // test entered.
+          timeoutMs: ADAPTER_OPERATION_TIMEOUT_MS
         })
       }
     });

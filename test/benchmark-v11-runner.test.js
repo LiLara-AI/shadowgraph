@@ -18,6 +18,7 @@ import {
   unitIdFor as contractUnitIdFor
 } from '../benchmark/lib/v11-contract.mjs';
 import {
+  UNIT_TIMEOUT_MS,
   V11_PHASES,
   runV11Benchmark,
   unitIdFor
@@ -1185,7 +1186,11 @@ test('watchdog aborts and races a non-cooperative unit once with exact correlati
   assert.deepEqual(raw.units.find((unit) => unit.phase === 'RESET').failure, {
     cause: 'TIMEOUT',
     operation: 'runner',
-    message: 'Measured unit exceeded the 120000ms monotonic deadline'
+    // From the constant, not a literal: the property is that the failure names
+    // the deadline it hit, so a reviewer reading an artifact can tell a harness
+    // ceiling from a product failure. The number itself is sized against the
+    // pinned model and has moved once already.
+    message: `Measured unit exceeded the ${UNIT_TIMEOUT_MS}ms monotonic deadline`
   });
   await new Promise((resolve) => setTimeout(resolve, 40));
   const reset = raw.units.find((unit) => unit.phase === 'RESET');

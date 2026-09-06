@@ -23,7 +23,7 @@ import test from 'node:test';
 
 import { createProgressLedger } from '../benchmark/lib/progress.mjs';
 import { buildV11Prompt } from '../benchmark/lib/v11-prompts.mjs';
-import { UNIT_TIMEOUT_MS } from '../benchmark/lib/v11-runner.mjs';
+import { ADAPTER_OPERATION_TIMEOUT_MS, UNIT_TIMEOUT_MS } from '../benchmark/lib/v11-runner.mjs';
 import { bindV11Runtime, providerLedgerPath } from '../benchmark/lib/v11-runtime-binding.mjs';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
@@ -468,6 +468,20 @@ test('every argument of the composition, because the composition is all this doe
     'the arms mount the site that was verified');
   assert.deepEqual(seen.pythonHosts[0].modelWeights, MODEL_WEIGHTS);
   assert.equal(typeof seen.pythonHosts[0].providerEndpointFor, 'function');
+
+  // The per-operation deadline, stated rather than defaulted. This argument was
+  // absent, and `python-adapter-executor.mjs` fell back to its own 30s default -
+  // sized when the pinned model was 0.5b, and three and a half times smaller than
+  // the 105.9s Cognee's persist measures at 7B. The run would have recorded a
+  // harness ceiling as the product failing. Nothing caught it, because an omitted
+  // argument looks like every other line of a composition until something asserts
+  // it is there.
+  assert.equal(seen.pythonHosts[0].timeoutMs, ADAPTER_OPERATION_TIMEOUT_MS);
+
+  // And it has to stay under the unit deadline, so a genuinely stuck unit is
+  // reported by the unit watchdog rather than by whichever operation was running.
+  assert.ok(ADAPTER_OPERATION_TIMEOUT_MS < UNIT_TIMEOUT_MS,
+    'the operation ceiling must sit below the unit ceiling');
 
   // The executor routes by the registry it was given, to both families.
   assert.equal(seen.adapterExecutor.length, 1);

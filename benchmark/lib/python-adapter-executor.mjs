@@ -953,9 +953,13 @@ export function createPythonAdapterExecutor(options) {
       'Python adapter execution requires process-group isolation'
     );
   }
+  // The ceiling is one second under the runner's unit deadline, so that when a
+  // unit does stall it is the unit watchdog that reports it rather than this
+  // one. The two numbers move together; see UNIT_TIMEOUT_MS in v11-runner.mjs
+  // for what sized them.
   const timeoutMs = boundedInteger(options.timeoutMs, DEFAULT_TIMEOUT_MS, {
     minimum: 50,
-    maximum: 119_000,
+    maximum: 599_000,
     label: 'Python adapter timeout'
   });
   const maxRequestBytes = boundedInteger(options.maxRequestBytes, DEFAULT_MAX_REQUEST_BYTES, {

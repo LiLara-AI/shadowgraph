@@ -988,8 +988,21 @@ Neither ceiling is frozen methodology: the preregistration freezes
 `requestTimeoutMs: 120000` for one *outer* request, untouched here, and sets no
 per-operation or per-unit limit. They are harness parameters that were never sized
 for the configuration under measurement. Raising them still changes what the
-harness records as a stall, so it is an owner decision and is recorded as F25
-rather than taken quietly.
+harness records as a stall, so it was put to the owner rather than taken quietly.
+
+**Cleared on 2026-09-06.** `UNIT_TIMEOUT_MS` is 600s and a new
+`ADAPTER_OPERATION_TIMEOUT_MS` of 300s is passed explicitly by `bindV11Runtime`
+to `createV11PythonHosts`, with the executor's clamp raised to 599s so the unit
+watchdog is still the one that fires last. Both are deliberately well clear of
+the measurement rather than fitted just above it: one observation is not a
+distribution, a ceiling that is too tight manufactures failures, and one that is
+too loose only costs time on a unit that is genuinely stuck.
+
+The wiring is now asserted, which is the part that matters — F25 was an omitted
+argument on a line no test entered, the same shape as F4, F6, F11 and F17 before
+it. Four mutations were run against the fix and all four fail a test: omitting
+`timeoutMs` again, setting it back to 30s, raising the operation ceiling above
+the unit ceiling, and reverting the unit ceiling to its 0.5b value.
 
 | ID | Blocker | State |
 | --- | --- | --- |
@@ -1030,7 +1043,7 @@ rather than taken quietly.
 | F22 | The container listing crashed on a `.dist-info` carrying no `Version`: the sort compared `None` with a string, so a site holding the duplicate the script exists to report produced no listing at all | Cleared, and the drop rule now matches `readPythonSiteDistributions` |
 | F23 | `matchedCalls` is clamped against `expectedCalls`, and every test asserting both asserted them equal, so a retry could have been counted as a matched call while the same report named it a retry | Cleared, both directions of the clamp are asserted |
 | F24 | Two documents described a tree that no longer exists: requirement 6's refusal table gave Cognee the columns of an arm with no native user scope, and `benchmark/evidence/README.md` still said amendment 003 was proposed and not adopted | Cleared |
-| F25 | The harness gives a Python adapter operation 30s (`DEFAULT_TIMEOUT_MS`, never raised by the run path) inside a 120s unit deadline, both sized when the pinned model was `qwen2.5:0.5b`. Measured at `qwen2.5:7b`: Cognee's persist is 105.9s and its retrieve 38.7s, so a decision unit is ~175s. Cognee's units would have failed on our deadline and been recorded as Cognee failing | **Open**, owner decision, measured in `benchmark/evidence/v11-prerun-review-2026-09-06.md` |
+| F25 | The harness gives a Python adapter operation 30s (`DEFAULT_TIMEOUT_MS`, never raised by the run path) inside a 120s unit deadline, both sized when the pinned model was `qwen2.5:0.5b`. Measured at `qwen2.5:7b`: Cognee's persist is 105.9s and its retrieve 38.7s, so a decision unit is ~175s. Cognee's units would have failed on our deadline and been recorded as Cognee failing | Cleared by owner decision on 2026-09-06: operation ceiling 300s stated by the run path, unit ceiling 600s, both sized against the measurement and mutation-tested |
 
 The evidence and the required next decisions are in
 `benchmark/evidence/v11-blocker-matrix-2026-09-03.md` (CB1-CB4, LB1-LB3, as of

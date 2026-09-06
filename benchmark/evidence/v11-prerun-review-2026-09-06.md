@@ -77,6 +77,30 @@ harness parameters, and a harness parameter that was never sized for the
 configuration under measurement is a defect in the harness, not a property of
 the products.
 
+### Resolved the same day, by owner decision
+
+`UNIT_TIMEOUT_MS` is 600s. A new `ADAPTER_OPERATION_TIMEOUT_MS` of 300s is
+passed explicitly by `bindV11Runtime` to `createV11PythonHosts`, and the
+executor's clamp is raised from 119s to 599s so the unit watchdog remains the
+one that fires last. Both values sit well clear of the measurement rather than
+just above it, for the reason given under *What this record does not claim*.
+
+The wiring is asserted now, which is the half that matters. F25 was an omitted
+argument on a line no test entered — the same shape as F4, F6, F11 and F17. Four
+mutations were run against the fix, and each fails a test:
+
+| Mutation | Suite |
+| --- | --- |
+| `timeoutMs` omitted from `createV11PythonHosts`, exactly as F25 | fail 1 |
+| `timeoutMs: 30_000`, the old effective value restored | fail 1 |
+| operation ceiling raised above the unit ceiling | fail 1 |
+| unit ceiling reverted to 120_000 | fail 1 |
+
+The runner test that asserted the timeout message now derives the number from
+`UNIT_TIMEOUT_MS` instead of repeating `120000`, because the property is that a
+failure names the deadline it hit — which is how a reader tells a harness ceiling
+from a product failure — and not that the deadline has any particular value.
+
 ## The other findings that survived
 
 | Finding | Severity | State |
@@ -125,9 +149,10 @@ and `--ledger-dir` default to the gitignored `benchmark/results`.
 ## What this record does not claim
 
 - **No run was executed. No artifact exists.**
-- **The deadlines were not changed.** Raising them alters what the harness
-  records as a stall, so it is the owner's decision, and this record is the
-  measurement for it rather than the decision.
+- **The deadlines were changed only after the owner decided.** Raising them
+  alters what the harness records as a stall. The measurement above is what the
+  decision was made on; the values are in `v11-runner.mjs` and are not derived
+  from any frozen source.
 - **105.9 seconds is one observation of one record on one machine**, not a
   distribution. It is 3.5× the ceiling, which is the only precision the decision
   needs; a value chosen to sit just above it would be fitted to a single sample.

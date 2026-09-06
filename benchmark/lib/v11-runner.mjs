@@ -39,7 +39,26 @@ const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
 // the same deadline. Restating it there would make the ledger's `stalled`
 // verdict and this hard deadline agree by coincidence rather than by
 // construction.
-export const UNIT_TIMEOUT_MS = 120_000;
+//
+// Sized against the configuration being measured, not chosen. It was 120s when
+// the pinned decision model was `qwen2.5:0.5b`. At `qwen2.5:7b` on a CPU-only
+// endpoint a decision unit is retrieve + outer decision + persist, and the
+// slowest arm was measured at 38.7 + ~29.6 + 105.9 = ~175s - so the old ceiling
+// would have failed Cognee's every decision unit and the artifact would have
+// read as the product failing rather than as this number being too small. The
+// value is deliberately well clear of the measurement rather than fitted just
+// above it: one observation is not a distribution, and a ceiling that is too
+// tight manufactures failures while one that is too loose only costs time on a
+// unit that is genuinely stuck. See
+// benchmark/evidence/v11-prerun-review-2026-09-06.md (F25).
+export const UNIT_TIMEOUT_MS = 600_000;
+
+// What one adapter operation inside that unit may take. Strictly below the unit
+// deadline, because a unit runs several operations and the unit's own watchdog
+// has to be the one that fires last. The run path passes this explicitly:
+// leaving it to `python-adapter-executor.mjs`'s own default is what produced
+// F25, since that default is 30s and no test entered the line that omitted it.
+export const ADAPTER_OPERATION_TIMEOUT_MS = 300_000;
 const RESUME_PROGRESS_EVENTS = new Set([
   'run_started',
   'unit_started',
