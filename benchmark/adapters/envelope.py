@@ -247,8 +247,10 @@ def _namespace_correlation(request: dict) -> dict:
     }
 
 
-def _validate_decision(content: Any, schema: dict | None = None) -> None:
-    schema = DECISION_SCHEMA if schema is None else schema
+def _validate_decision(content: Any, schema: dict) -> None:
+    # No default. The response and the record are different contracts (F37), and
+    # a caller that forgot to say which one it meant would silently get the
+    # fifteen-field response schema - which on a record is the hole this closed.
     _exact_keys(content, tuple(schema), "decision response")
     for field, kind in schema.items():
         value = content[field]

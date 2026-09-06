@@ -21,11 +21,16 @@ import { fileURLToPath } from 'node:url';
 
 import { buildV11Prompt, V11_OUTER_SYSTEM_PROMPT } from '../benchmark/lib/v11-prompts.mjs';
 import {
+  DECISION_RECORD_CONTENT_SCHEMA,
   STANDARD_DECISION_RESPONSE_SCHEMA,
   validateDecisionRecordContent
 } from '../benchmark/lib/outer-model.mjs';
 import { loadV11AcceptanceDefinition } from '../benchmark/lib/v11-definition.mjs';
-import { standardizedDecisionRecord } from '../benchmark/lib/v11-contract.mjs';
+import {
+  DECISION_PROBE_ANSWER_FIELDS,
+  standardizedDecisionRecord
+} from '../benchmark/lib/v11-contract.mjs';
+import { readFile } from 'node:fs/promises';
 
 const REPOSITORY_ROOT = fileURLToPath(new URL('..', import.meta.url));
 
@@ -284,4 +289,55 @@ test('the fix changes neither prompt-binding hash nor the stored record', async 
   for (const field of ['changedFactDetected', 'changedFactId', 'decisionId']) {
     assert.ok(!Object.hasOwn(record.content, field), `${field} must never be stored`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// One list, five copies. The three field names are written out independently in
+// `v11-contract.mjs` (canonical), `v11-prompts.mjs`, `outer-model.mjs`,
+// `envelope.py`, and in this file. They cannot be collapsed into one import
+// everywhere - `v11-prompts.mjs` already imports `v11-definition.mjs`, and
+// `outer-model.mjs` is imported *by* `v11-contract.mjs`, so either direction
+// closes a cycle - and Python cannot import from JavaScript at all.
+//
+// So the agreement is asserted instead. Drift here would be silent and would
+// reopen exactly the Cognee-shape hole F37 closed: one copy still redacting
+// while another had stopped withholding.
+// ---------------------------------------------------------------------------
+
+test('every copy of the probe-answer field list agrees with the canonical one', async () => {
+  const canonical = [...DECISION_PROBE_ANSWER_FIELDS].sort();
+  assert.deepEqual(canonical, ['changedFactDetected', 'changedFactId', 'decisionId']);
+
+  // This file's own copy.
+  assert.deepEqual([...ANSWER_KEYS].sort(), canonical);
+
+  // The record-content schema is the response schema minus exactly these.
+  assert.deepEqual(
+    Object.keys(STANDARD_DECISION_RESPONSE_SCHEMA)
+      .filter((field) => !Object.hasOwn(DECISION_RECORD_CONTENT_SCHEMA, field))
+      .sort(),
+    canonical
+  );
+
+  // The render-time redaction list in v11-prompts.mjs.
+  const prompts = await readFile(new URL('../benchmark/lib/v11-prompts.mjs', import.meta.url), 'utf8');
+  const redacted = prompts
+    .slice(prompts.indexOf('REDACTED_PRIOR_ANSWER_FIELDS = Object.freeze(['))
+    .slice(0, prompts.slice(prompts.indexOf('REDACTED_PRIOR_ANSWER_FIELDS = Object.freeze([')).indexOf(']'));
+  for (const field of canonical) {
+    assert.ok(redacted.includes(`'${field}'`), `v11-prompts.mjs no longer redacts ${field}`);
+  }
+  assert.equal((redacted.match(/'/gu) ?? []).length / 2, canonical.length,
+    'v11-prompts.mjs redacts a different number of fields than the canonical list');
+
+  // And the Python side, which cannot import any of the above.
+  const envelope = await readFile(new URL('../benchmark/adapters/envelope.py', import.meta.url), 'utf8');
+  const python = envelope
+    .slice(envelope.indexOf('DECISION_PROBE_ANSWER_FIELDS = ('))
+    .slice(0, envelope.slice(envelope.indexOf('DECISION_PROBE_ANSWER_FIELDS = (')).indexOf(')'));
+  for (const field of canonical) {
+    assert.ok(python.includes(`"${field}"`), `envelope.py no longer withholds ${field}`);
+  }
+  assert.equal((python.match(/"/gu) ?? []).length / 2, canonical.length,
+    'envelope.py withholds a different number of fields than the canonical list');
 });
