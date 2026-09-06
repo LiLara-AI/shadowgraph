@@ -12,10 +12,7 @@ import {
   validateAdapterRequest,
   validateAdapterResponse
 } from '../benchmark/lib/adapter-protocol.mjs';
-import {
-  namespaceRefFor,
-  recordContentSha256
-} from '../benchmark/lib/v11-contract.mjs';
+import { decisionRecordContent, namespaceRefFor, recordContentSha256 } from '../benchmark/lib/v11-contract.mjs';
 
 const RESPONSE_SCHEMA = {
   decisionId: 'string|null',
@@ -52,6 +49,11 @@ const VALID_DECISION = {
   memoryProjectId: 'project-a',
   memoryUserId: 'user-a'
 };
+
+// A decision record carries the response minus the three probe-answer fields
+// (F37). VALID_DECISION stays the response fixture; this is what a record
+// built from it actually stores, so this file keeps exercising both contracts.
+const VALID_RECORD_CONTENT = decisionRecordContent(VALID_DECISION);
 
 const OUTER_CONFIG = {
   endpoint: 'http://127.0.0.1:11434/v1',
@@ -99,7 +101,7 @@ function expectedDecisionRecord() {
   return {
     id: 'decision-generated-1',
     type: 'decision',
-    contentSha256: recordContentSha256(VALID_DECISION)
+    contentSha256: recordContentSha256(VALID_RECORD_CONTENT)
   };
 }
 
@@ -432,7 +434,7 @@ test('adapter request protocol accepts only the four operation-specific memory p
       operation: 'persist',
       correlation: ADAPTER_CORRELATION,
       namespace: NAMESPACE,
-      payload: { record: { id: 'decision-generated-1', type: 'decision', content: VALID_DECISION } }
+      payload: { record: { id: 'decision-generated-1', type: 'decision', content: VALID_RECORD_CONTENT } }
     }),
     createAdapterRequest({
       operation: 'verify',
@@ -473,7 +475,7 @@ test('adapter request protocol rejects outer-model authority, credentials, fixtu
     operation: 'persist',
     correlation: ADAPTER_CORRELATION,
     namespace: NAMESPACE,
-    payload: { record: { id: 'decision-generated-1', type: 'decision', content: VALID_DECISION } }
+    payload: { record: { id: 'decision-generated-1', type: 'decision', content: VALID_RECORD_CONTENT } }
   });
   const forbiddenContent = [
     { commonModel: { endpoint: 'http://127.0.0.1', apiKey: 'secret' } },
@@ -502,7 +504,7 @@ test('adapter request protocol rejects outer-model authority, credentials, fixtu
     assert.throws(
       () => validateAdapterRequest({
         ...base,
-        payload: { record: { ...base.payload.record, content: { ...VALID_DECISION, ...content } } }
+        payload: { record: { ...base.payload.record, content: { ...VALID_RECORD_CONTENT, ...content } } }
       }),
       /forbidden|decision response/i
     );
@@ -523,13 +525,13 @@ test('adapter payloads use exact harness-owned retrieval and record schemas', ()
     operation: 'persist',
     correlation: ADAPTER_CORRELATION,
     namespace: NAMESPACE,
-    payload: { record: { id: 'decision-generated-1', type: 'decision', content: VALID_DECISION } }
+    payload: { record: { id: 'decision-generated-1', type: 'decision', content: VALID_RECORD_CONTENT } }
   });
 
   for (const content of [
-    { ...VALID_DECISION, payloadData: JSON.stringify(phaseAScenario()) },
-    Object.fromEntries(Object.entries(VALID_DECISION).filter(([key]) => key !== 'recommendation')),
-    { ...VALID_DECISION, changedFactDetected: 'false' }
+    { ...VALID_RECORD_CONTENT, payloadData: JSON.stringify(phaseAScenario()) },
+    Object.fromEntries(Object.entries(VALID_RECORD_CONTENT).filter(([key]) => key !== 'recommendation')),
+    { ...VALID_RECORD_CONTENT, changedFactDetected: 'false' }
   ]) {
     assert.throws(
       () => validateAdapterRequest({

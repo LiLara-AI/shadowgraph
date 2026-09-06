@@ -493,7 +493,12 @@ class BasicMemoryRetrieveReadBackTests(BasicMemoryAdapterTests):
         records = response["result"]["nativeContext"]
         self.assertEqual(len(records), 1, "the persisted record must be returned")
         self.assertEqual(records[0]["type"], "decision")
-        self.assertIn("decisionId", records[0]["content"])
+        # `choiceId`, not `decisionId`: a stored decision record carries the
+        # response minus the three probe-answer fields (F37). What this test
+        # is proving is that the content round-trips, and choiceId does that.
+        self.assertIn("choiceId", records[0]["content"])
+        for absent in ("decisionId", "changedFactDetected", "changedFactId"):
+            self.assertNotIn(absent, records[0]["content"])
 
         # One search plus one read per hit, and the read is what supplies the
         # frontmatter the hit lacks.

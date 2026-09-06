@@ -40,7 +40,6 @@ const RECORD = Object.freeze({
   id: 'decision:node-hosts:scenario-one:0:A',
   type: 'decision',
   content: Object.freeze({
-    decisionId: 'model-decision-a',
     choiceId: 'choice-a',
     recalledAlternativeIds: ['alternative-a'],
     recalledRejectionReasonIds: ['reason-a'],
@@ -48,8 +47,6 @@ const RECORD = Object.freeze({
     evidenceIdsCited: ['evidence-a'],
     riskIdsRecognized: ['risk-a'],
     reviewTriggerIds: ['trigger-a'],
-    changedFactDetected: false,
-    changedFactId: null,
     recommendation: 'Use the reversible migration.',
     failedAttemptIdsAvoided: [],
     failedAttemptReasonIdsCited: [],

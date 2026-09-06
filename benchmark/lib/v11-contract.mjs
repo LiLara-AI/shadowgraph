@@ -222,12 +222,52 @@ export function decisionRecordId(correlation) {
   return `decision:${digest}`;
 }
 
+/**
+ * Response fields that answer a probe, and so are never written to a record. F37.
+ *
+ * A decision record says what was decided. `changedFactDetected` and
+ * `changedFactId` answer the D-phase probe, which asks about a state *after* the
+ * decision was taken, so a record of that decision cannot honestly assert them.
+ * `decisionId` is the record's own identity, already carried as `record.id`;
+ * inside `content` it was only the model's echo of it.
+ *
+ * Storing them is how run v11-acceptance-002 came to measure transcription
+ * rather than detection: the adapters hand record content back as native
+ * context, so every arm that retrieved anything was shown a filled-in copy of
+ * the answer sheet before being asked the question, and copied it 64 times out
+ * of 64 while the control - which retrieves nothing - never did.
+ *
+ * F32 first fixed this where the prompt is rendered, which covered the flat
+ * `{id, type, content}` shape four of the seven arms return and nothing else.
+ * Cognee's retrieve returns `{search_result, dataset_id, dataset_name}` with the
+ * record encoded as JSON *inside a string*, and no redaction that matches object
+ * keys can reach inside a string - so a provisioned cognee arm would have been
+ * handed the answer sheet while the other arms were clean. A field that is never
+ * written cannot leak through any shape or encoding, which is why the fix lives
+ * here now. The render-time redaction stays as a second line, against an adapter
+ * that invents these fields rather than echoing them.
+ */
+export const DECISION_PROBE_ANSWER_FIELDS = Object.freeze([
+  'changedFactDetected',
+  'changedFactId',
+  'decisionId'
+]);
+
+/** What a stored decision record carries: the response, minus the probe answers. */
+export function decisionRecordContent(decisionResponse) {
+  const content = {};
+  for (const [field, value] of Object.entries(decisionResponse)) {
+    if (!DECISION_PROBE_ANSWER_FIELDS.includes(field)) content[field] = structuredClone(value);
+  }
+  return content;
+}
+
 export function standardizedDecisionRecord(correlation, decisionResponse) {
   validateDecisionResponse(decisionResponse);
   return {
     id: decisionRecordId(correlation),
     type: 'decision',
-    content: structuredClone(decisionResponse)
+    content: decisionRecordContent(decisionResponse)
   };
 }
 

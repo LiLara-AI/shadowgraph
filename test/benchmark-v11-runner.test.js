@@ -1304,7 +1304,7 @@ test('isolation phases retrieve, model, persist, and verify in the actual probed
   );
 });
 
-test('persisted decision ids are deterministic per unit and keep the model decisionId in content', async () => {
+test('persisted decision ids are deterministic per unit and never store the model decisionId', async () => {
   const persisted = [];
   await runV11Benchmark(baseOptions({
     arms: [noMemoryArm()],
@@ -1330,8 +1330,11 @@ test('persisted decision ids are deterministic per unit and keep the model decis
 
   assert.equal(persisted.length, V11_PHASES.length - 2);
   assert.equal(new Set(persisted.map((record) => record.id)).size, persisted.length);
-  assert.ok(persisted.every((record) => record.content.decisionId === 'shared-model-decision'));
-  assert.ok(persisted.every((record) => record.id !== record.content.decisionId));
+  // Storage ids are the harness's, minted per unit. The model's own decisionId
+  // is not stored at all (F37), so there is no second id to confuse with the
+  // first - which is what this test was guarding against.
+  assert.ok(persisted.every((record) => !Object.hasOwn(record.content, 'decisionId')));
+  assert.ok(persisted.every((record) => record.id.startsWith('decision:')));
 });
 
 test('no-memory project isolation proves only empty alternate retrieval and records no persistence claims', async () => {

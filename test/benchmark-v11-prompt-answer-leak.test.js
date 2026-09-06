@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url';
 import { buildV11Prompt, V11_OUTER_SYSTEM_PROMPT } from '../benchmark/lib/v11-prompts.mjs';
 import {
   STANDARD_DECISION_RESPONSE_SCHEMA,
-  validateDecisionResponse
+  validateDecisionRecordContent
 } from '../benchmark/lib/outer-model.mjs';
 import { loadV11AcceptanceDefinition } from '../benchmark/lib/v11-definition.mjs';
 import { standardizedDecisionRecord } from '../benchmark/lib/v11-contract.mjs';
@@ -193,12 +193,18 @@ test('an answer field inside an array of results does not reach the prompt', asy
   assert.deepEqual(leakedKeys(prompt), []);
 });
 
-test('a record serialised into a string is the documented residual, F37', async () => {
-  // Redaction matches object keys, so it cannot reach inside a string. Cognee's
-  // retrieve returns `{search_result, dataset_id, dataset_name}` with the record
-  // encoded as JSON inside `search_result`, so this shape still carries the
-  // answer fields. This test asserts the limitation rather than hiding it: F37
-  // records the remedy, which is to stop writing these fields to a record at all.
+test('a record serialised into a string carries no answer fields either, F37 closed', async () => {
+  // This test used to assert the opposite, and said so: "if this ever comes back
+  // empty, F37 has been closed and this test should assert that instead."
+  //
+  // Key-based redaction cannot reach inside a string, and Cognee's retrieve
+  // returns `{search_result, dataset_id, dataset_name}` with the record encoded
+  // as JSON inside `search_result` - so redaction alone left one of the seven
+  // required arms exposed. The fields are no longer written to a record at all
+  // (`DECISION_PROBE_ANSWER_FIELDS` in `v11-contract.mjs`), so no shape and no
+  // encoding can carry them. This builds the string from a real
+  // `standardizedDecisionRecord`, which is what an adapter would actually have
+  // to encode.
   const SCENARIO = await acceptanceScenario();
   const record = recordFor(SCENARIO, 'A');
   const prompt = promptFor(SCENARIO, 'D_TRUE', [{
@@ -206,11 +212,27 @@ test('a record serialised into a string is the documented residual, F37', async 
     dataset_id: 'd1',
     dataset_name: 'benchmark'
   }]);
-  assert.deepEqual(
-    leakedKeys(prompt).sort(),
-    ['changedFactDetected', 'changedFactId', 'decisionId'],
-    'if this ever comes back empty, F37 has been closed and this test should assert that instead'
-  );
+  // Only the keys: D_TRUE's own public phase input legitimately names the
+  // changed fact, so its id appearing in the prompt is the question, not a leak.
+  assert.deepEqual(leakedKeys(prompt), []);
+});
+
+test('an adapter that invents the answer fields is still redacted, at any depth', async () => {
+  // The render-time redaction remains the second line of defence: storage cannot
+  // produce these fields any more, but an adapter can still fabricate them.
+  const SCENARIO = await acceptanceScenario();
+  const fabricated = {
+    changedFactDetected: null, changedFactId: SCENARIO.changedFact.id, decisionId: null
+  };
+  for (const shape of [
+    { id: 'r1', type: 'decision', content: fabricated },
+    { id: 'r1', type: 'decision', content: { inner: fabricated } },
+    { id: 'r1', type: 'decision', data: fabricated },
+    { id: 'r1', type: 'decision', results: [{ content: fabricated }] }
+  ]) {
+    const prompt = promptFor(SCENARIO, 'D_TRUE', [shape]);
+    assert.deepEqual(leakedKeys(prompt), [], `leaked from ${JSON.stringify(shape).slice(0, 60)}`);
+  }
 });
 
 test('the byte cap is measured on what the adapter returned, not on the redacted text', async () => {
@@ -219,7 +241,7 @@ test('the byte cap is measured on what the adapter returned, not on the redacted
   const SCENARIO = await acceptanceScenario();
   const oversized = Array.from({ length: 9 }, (_, index) => {
     const record = recordFor(SCENARIO, 'A');
-    return { ...record, id: `decision:oversized-${index}`, content: { ...record.content, changedFactId: 'x'.repeat(8000) } };
+    return { ...record, id: `decision:oversized-${index}`, content: { ...record.content, recommendation: 'x'.repeat(8000) } };
   });
   assert.throws(
     () => buildV11Prompt({ phase: 'D_TRUE', scenario: SCENARIO, nativeContext: oversized }),
@@ -247,14 +269,19 @@ test('the fix changes neither prompt-binding hash nor the stored record', async 
   assert.equal(request.system, V11_OUTER_SYSTEM_PROMPT);
   assert.deepEqual(request.responseSchema, STANDARD_DECISION_RESPONSE_SCHEMA);
 
-  // The record itself still holds all fifteen frozen fields and still satisfies
-  // the adapter protocol's decision-response validator, which requires exactly
-  // those keys on both the JS and the Python side.
+  // The record holds the response minus the three probe-answer fields, and the
+  // adapter protocol's record-content validator - which is a separate contract,
+  // not a loosened one - accepts exactly that and rejects the response shape.
   const record = recordFor(SCENARIO, 'A');
   assert.deepEqual(
     Object.keys(record.content).sort(),
-    Object.keys(STANDARD_DECISION_RESPONSE_SCHEMA).sort()
+    Object.keys(STANDARD_DECISION_RESPONSE_SCHEMA)
+      .filter((field) => !['changedFactDetected', 'changedFactId', 'decisionId'].includes(field))
+      .sort()
   );
-  assert.doesNotThrow(() => validateDecisionResponse(record.content));
-  assert.equal(record.content.changedFactDetected, null);
+  assert.doesNotThrow(() => validateDecisionRecordContent(record.content));
+  assert.throws(() => validateDecisionRecordContent({ ...record.content, changedFactDetected: null }));
+  for (const field of ['changedFactDetected', 'changedFactId', 'decisionId']) {
+    assert.ok(!Object.hasOwn(record.content, field), `${field} must never be stored`);
+  }
 });

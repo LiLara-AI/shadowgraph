@@ -246,7 +246,9 @@ function decisionRecordReference(arm, phase) {
       phase
     }),
     type: 'decision',
-    contentSha256: v11Contract.recordContentSha256(decision(phase))
+    contentSha256: v11Contract.recordContentSha256(
+      v11Contract.decisionRecordContent(decision(phase))
+    )
   };
 }
 
@@ -671,12 +673,15 @@ test('decision storage identifiers are deterministic, unit-unique, and independe
   assert.notEqual(idA, sharedModelDecisionId);
   assert.deepEqual(
     v11Contract.standardizedDecisionRecord(phaseA, responseA),
-    { id: idA, type: 'decision', content: responseA }
+    { id: idA, type: 'decision', content: v11Contract.decisionRecordContent(responseA) }
   );
-  assert.equal(
-    v11Contract.standardizedDecisionRecord(phaseB, responseB).content.decisionId,
-    sharedModelDecisionId,
-    'the model decisionId remains standardized content, never the storage key'
+  // The model's own decisionId is not stored at all (F37). It was the null in
+  // retrieved context that taught the next phase to answer null, and the record
+  // already carries its identity as `record.id` - which is the point this test
+  // exists to make, and which `idA !== sharedModelDecisionId` above still makes.
+  assert.ok(
+    !Object.hasOwn(v11Contract.standardizedDecisionRecord(phaseB, responseB).content, 'decisionId'),
+    'the model decisionId must never reach standardized record content'
   );
 });
 
@@ -840,7 +845,9 @@ test('schema v2 validation accepts repeated model decision ids only with distinc
   const phaseA = raw.units.find((item) => item.phase === 'A');
   const phaseB = raw.units.find((item) => item.phase === 'B');
   phaseB.decisionResponse.decisionId = phaseA.decisionResponse.decisionId;
-  const phaseBHash = v11Contract.recordContentSha256(phaseB.decisionResponse);
+  const phaseBHash = v11Contract.recordContentSha256(
+    v11Contract.decisionRecordContent(phaseB.decisionResponse)
+  );
   phaseB.adapterEvidence.verify.persistenceEvidence.expectedRecord.contentSha256 = phaseBHash;
   phaseB.adapterEvidence.verify.persistenceEvidence.observedContentSha256 = phaseBHash;
 

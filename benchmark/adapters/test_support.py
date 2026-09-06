@@ -5,8 +5,10 @@ from __future__ import annotations
 import copy
 
 
+# A stored decision record carries the response minus the three probe-answer
+# fields - changedFactDetected, changedFactId and decisionId. See
+# DECISION_PROBE_ANSWER_FIELDS in benchmark/lib/v11-contract.mjs (F37).
 DECISION_CONTENT = {
-    "decisionId": "decision-a",
     "choiceId": "choice-a",
     "recalledAlternativeIds": ["alternative-a"],
     "recalledRejectionReasonIds": ["reason-a"],
@@ -14,8 +16,6 @@ DECISION_CONTENT = {
     "evidenceIdsCited": ["evidence-a"],
     "riskIdsRecognized": ["risk-a"],
     "reviewTriggerIds": ["trigger-a"],
-    "changedFactDetected": False,
-    "changedFactId": None,
     "recommendation": "Use the reversible option.",
     "failedAttemptIdsAvoided": [],
     "failedAttemptReasonIdsCited": [],
@@ -23,7 +23,7 @@ DECISION_CONTENT = {
     "memoryUserId": "user-1",
 }
 
-DECISION_SHA256 = "ddec3f40f4bea882331edbe4136277f5776fc695b31e84e04647a29b357f7665"
+DECISION_SHA256 = "6b541d0d216a2f49ece61b89adbd6e0712dc6500a21d3e3f26e49b2cac4fc4ec"
 MEM0_NAMESPACE_REF = "3de23f4d9b785c784a30a772fc5a7587ca3b274957d8aaf46f47d360366f311d"
 
 

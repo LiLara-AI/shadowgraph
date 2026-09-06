@@ -89,7 +89,6 @@ function toolPayload(response) {
 
 function decisionContent(overrides = {}) {
   return {
-    decisionId: 'model-decision-a',
     choiceId: 'choice-a',
     recalledAlternativeIds: ['alternative-a'],
     recalledRejectionReasonIds: ['reason-a'],
@@ -97,8 +96,6 @@ function decisionContent(overrides = {}) {
     evidenceIdsCited: ['evidence-a'],
     riskIdsRecognized: ['risk-a'],
     reviewTriggerIds: ['trigger-a'],
-    changedFactDetected: false,
-    changedFactId: null,
     recommendation: 'Use the reversible migration.',
     failedAttemptIdsAvoided: [],
     failedAttemptReasonIdsCited: [],
@@ -421,7 +418,6 @@ for (const backend of ['json', 'sqlite']) {
       id: 'harness-decision-phase-a',
       type: 'decision',
       content: decisionContent({
-        decisionId: 'outer-decision-phase-a',
         recalledAlternativeIds: ['remembered-alternative-a', 'remembered-alternative-b']
       })
     };
@@ -481,7 +477,7 @@ for (const backend of ['json', 'sqlite']) {
     const isolationRecord = {
       id: 'harness-decision-isolation-project',
       type: 'decision',
-      content: decisionContent({ decisionId: 'outer-decision-isolation' })
+      content: decisionContent({ choiceId: 'outer-decision-isolation' })
     };
     const persistIsolation = requestFor('persist', {
       phase: 'ISOLATION_PROJECT',

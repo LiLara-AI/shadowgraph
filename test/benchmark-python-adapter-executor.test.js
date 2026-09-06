@@ -24,7 +24,6 @@ const MODEL_WEIGHTS = JSON.parse(readFileSync(
 
 function decisionContent() {
   return {
-    decisionId: 'decision-python-1',
     choiceId: 'choice-python-1',
     recalledAlternativeIds: [],
     recalledRejectionReasonIds: [],
@@ -32,8 +31,6 @@ function decisionContent() {
     evidenceIdsCited: [],
     riskIdsRecognized: [],
     reviewTriggerIds: [],
-    changedFactDetected: false,
-    changedFactId: null,
     recommendation: 'Use the bounded option.',
     failedAttemptIdsAvoided: [],
     failedAttemptReasonIdsCited: [],

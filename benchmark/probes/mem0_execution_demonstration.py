@@ -68,7 +68,6 @@ ALTERNATE = {"projectId": "project-1", "userId": "user-2"}
 RECORD_ID = f"decision:{len(ARM_ID)}:{ARM_ID}:10:{SCENARIO_ID}:1:0:{len(PHASE)}:{PHASE}"
 
 DECISION_CONTENT = {
-    "decisionId": "decision-a",
     "choiceId": "choice-a",
     "recalledAlternativeIds": ["alternative-a"],
     "recalledRejectionReasonIds": ["reason-a"],
@@ -76,8 +75,6 @@ DECISION_CONTENT = {
     "evidenceIdsCited": ["evidence-a"],
     "riskIdsRecognized": ["risk-a"],
     "reviewTriggerIds": ["trigger-a"],
-    "changedFactDetected": False,
-    "changedFactId": None,
     "recommendation": "Use the reversible option.",
     "failedAttemptIdsAvoided": [],
     "failedAttemptReasonIdsCited": [],
