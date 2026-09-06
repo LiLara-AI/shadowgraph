@@ -18,7 +18,7 @@ here.
 |---|---|
 | Repository | `C:/benchmark-engineering/worktrees/shadowgraph-v11-acceptance` (WSL: `/mnt/c/benchmark-engineering/worktrees/shadowgraph-v11-acceptance`) |
 | Branch | `benchmark/v1.1-nonscored-acceptance` |
-| **Pinned code commit** | **`aa5a35fd7918737b9647287c976309f843506b32`** |
+| **Pinned code commit** | **`51ea02927fb2dfad4afbdaa18f9928136319fe14`** |
 | HEAD | the tip of `benchmark/v1.1-nonscored-acceptance`. It is at or ahead of the pinned commit, and **every commit after it is documentation only** |
 | Working tree | clean — `git status --porcelain=v1 --untracked-files=all` prints nothing |
 | Diff digest | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` (the SHA-256 of the empty string, i.e. no diff) |
@@ -29,7 +29,7 @@ check below proves nothing executable moved after it.
 ### Verify the checkout before anything else
 
 ```bash
-cd /mnt/c/benchmark-engineering/worktrees/shadowgraph-v11-acceptance && git status --porcelain=v1 --untracked-files=all | wc -l && git diff HEAD | sha256sum && git merge-base --is-ancestor aa5a35fd7918737b9647287c976309f843506b32 HEAD && echo PINNED-COMMIT-IS-ANCESTOR && git diff --stat aa5a35fd7918737b9647287c976309f843506b32..HEAD -- benchmark/lib benchmark/adapters benchmark/acceptance benchmark/preregistration.json benchmark/preregistration-amendment-001.json benchmark/preregistration-amendment-002.json benchmark/preregistration-amendment-003.json benchmark/preregistration-amendment-004.json src scripts test package.json
+cd /mnt/c/benchmark-engineering/worktrees/shadowgraph-v11-acceptance && git status --porcelain=v1 --untracked-files=all | wc -l && git diff HEAD | sha256sum && git merge-base --is-ancestor 51ea02927fb2dfad4afbdaa18f9928136319fe14 HEAD && echo PINNED-COMMIT-IS-ANCESTOR && git diff --stat 51ea02927fb2dfad4afbdaa18f9928136319fe14..HEAD -- benchmark/lib benchmark/adapters benchmark/acceptance benchmark/preregistration.json benchmark/preregistration-amendment-001.json benchmark/preregistration-amendment-002.json benchmark/preregistration-amendment-003.json benchmark/preregistration-amendment-004.json src scripts test package.json
 ```
 
 Expect, in order: `0`; then `e3b0c442…b855`; then `PINNED-COMMIT-IS-ANCESTOR`;
@@ -92,20 +92,20 @@ own artifact records both, so which contract it ran under is always recoverable.
 
 ## 4. Verification evidence at this commit
 
-Produced on `aa5a35f` with a clean tree. **Run the two suites separately or via
+Produced on `51ea029` with a clean tree. **Run the two suites separately or via
 `npm run benchmark:test`, which now runs both.**
 
 | Gate | Command | Result |
 |---|---|---|
-| Full repository | `npm test` | **2423 tests — 2308 pass, 0 fail, 115 skipped, 0 todo** |
-| Benchmark, both halves | `npm run benchmark:test` | **JS 1187 (1183 pass, 4 skipped, 0 fail) · Python 139 pass** — both reported |
+| Full repository | `npm test` | **2424 tests — 2309 pass, 0 fail, 115 skipped, 0 todo** |
+| Benchmark, both halves | `npm run benchmark:test` | **JS 1188 (1184 pass, 4 skipped, 0 fail) · Python 139 pass** — both reported |
 | Node syntax | `npm run benchmark:check`, `npm run check` | PASS |
 | Python syntax | `npm run benchmark:check:python` | PASS |
 | Package privacy | `npm run check:package` | PASS |
 | Package smoke | `npm run smoke:package` | PASS |
 | MCP | `npm run check:mcp` | PASS |
 | Integrations | `npm run check:integrations` | PASS |
-| Mutation testing, cumulative | — | **44 mutants, 44 killed**, 1 recorded equivalent |
+| Mutation testing, cumulative | — | **48 mutants, 48 killed**, 1 recorded equivalent |
 
 **All 115 skips have one cause**, and it is legitimate: Node `v20.20.2` has no
 `node:sqlite`, which needs 22.5+. The guard is
@@ -193,7 +193,7 @@ cd /mnt/c/benchmark-engineering/worktrees/shadowgraph-v11-acceptance && node ben
 
 `benchmark/probe-records/` is gitignored and `service-endpoints.json` is **not
 present** — it must be recreated. `validateEndpoints`
-(`benchmark/lib/v11-service-probe.mjs:286-310`) requires `schema`, `version: 1`,
+(`benchmark/lib/v11-service-probe.mjs:287-310`) requires `schema`, `version: 1`,
 and a non-empty `services[]` where each entry has `name`, `container`, `baseUrl`
 and a `kind` of `neo4j` or `openai-compatible`. Optionally
 `authEnvironmentVariable` names an environment variable whose value is sent as
