@@ -100,17 +100,31 @@ exactly, which is what says the reader is right):
 `qwen2.5:7b` reports architecture `qwen2`, 7.6B parameters, `Q4_K_M`, context
 length 32768.
 
-**The lock is not changed here.** Which model the acceptance run pins decides
-what the run measures, and this record is evidence for that decision rather than
-the decision itself. Three things would still have to follow it, and none has
-been done:
+**The lock was not changed by this record.** Which model the acceptance run
+pins decides what the run measures, so this record is evidence for that
+decision rather than the decision itself. Three things had to follow it:
 
 1. `model-weights.lock.json` edited to the chosen model and its digest, which
    changes the implementation lock hash — expected, and recorded by the run.
-2. A fresh `v11-service-probe`, because the current service record names
-   `qwen2.5:0.5b` as a served model and the gate checks the lock against it.
+2. A fresh `v11-service-probe`, because the service record named `qwen2.5:0.5b`
+   as a served model and the gate checks the lock against it.
 3. A re-run of this probe against the committed lock, so the record says the
    pinned model passed rather than a candidate did.
+
+**All three were done on 2026-09-06, in and after commit `97f9010`.** The lock
+pins `qwen2.5:7b`; the service probe reports ollama serving `qwen2.5:7b` and
+`nomic-embed-text:v1.5` with 3 of 3 checks passing; the Phase A probe against
+the committed lock accepts 6 of 6. `v11-preflight` reports READY with zero
+blockers against those records.
+
+**And the run still has not started, for a reason this record did not
+anticipate.** Sizing the swap against total wall-clock missed a per-operation
+deadline: `python-adapter-executor.mjs` gives every Python adapter operation
+`DEFAULT_TIMEOUT_MS = 30_000`, and `bindV11Runtime` never raises it, while one
+`qwen2.5:7b` completion on this CPU measures about that on its own. Cognee's
+persist is contractually required to make one
+(`require_traffic("internal_memory_llm", "embedding")`). See
+`benchmark/evidence/v11-prerun-review-2026-09-06.md`.
 
 ## What this does not claim
 

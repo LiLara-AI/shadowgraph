@@ -123,7 +123,7 @@ treat file content at HEAD, not the diffs, as the object of review.
 | 4 | Provider-evidence reconciliation | **Closed**, with one stated limit: a FAILED unit's call *count* is not compared, because the harness wrote it rather than the adapter |
 | 5 | Mutation state fails closed | **Closed** (mechanism); wiring waits on 6 |
 | 6 | Real pinned runtime factories for all seven arms | **Partial** — the metered runtime hosts are bound and six of seven arms execute; Graphiti's factory is LB2f, an open owner decision |
-| 7 | Non-scored acceptance, 308 units | **Closed** offline; an official run is blocked by the three current preflight findings and by F2 |
+| 7 | Non-scored acceptance, 308 units | **Closed** offline. Preflight reports READY with zero blockers as of 2026-09-06 and F2 is cleared; an official run is held by the per-operation deadline described under Blockers |
 | 8 | Locks, ledger validation, readiness, evidence index, review bundle | **Partial** — every builder exists, and the run path takes the implementation and environment locks before it opens a file; the service and model locks and the review bundle are run-bound and cannot exist until a run does |
 | 9 | Focused, Node, Python, package, MCP, integration, smoke, privacy checks | **Closed** |
 
@@ -244,10 +244,12 @@ malformed envelopes, outer failure with no fabricated fallback, watchdog stall,
 interruption, resume, and one arm failing without taking the others down.
 
 This closes the **offline** half of requirement 7 only. It is a mock harness
-run. It is not evidence that any arm was measured. What prevents a real
-acceptance run today is the three preflight findings and F2 - not B1: the model
-lock carries full `sha256:` weights digests for both pinned models, and B1 is
-filed under the historical record below.
+run. It is not evidence that any arm was measured. What prevented a real
+acceptance run was never B1 — the model lock carries full `sha256:` weights
+digests for both pinned models, and B1 is filed under the historical record
+below. It was the three preflight findings, all cleared on 2026-09-06, and F2,
+cleared the same day. What holds the run now is F25: the per-operation deadline
+the harness gives a Python adapter, which was sized for a model 15x smaller.
 
 Building it found a real defect: the runner handed whatever `buildOuterRequest`
 returned straight to the model with no audit. The injection point that makes the
@@ -911,9 +913,12 @@ writes no artifact; one started without evidence refuses on readiness, naming
 its blockers. Given both, the run path binds: the meter, the ledgers, the
 environment observation, the implementation lock and all seven arms.
 
-**F2 was the last thing in the way, and the owner cleared it on 2026-09-06 by
-pinning a decision model that can answer.** What follows is the measurement that
-informed that decision and what the decision changed.
+**F2 was cleared on 2026-09-06 by pinning a decision model that can answer, and
+clearing it exposed F25.** Every gate is green — preflight READY with zero
+blockers, Phase A 6 of 6 against the committed lock — and the run is still not
+started, because the harness's per-operation deadline was sized for the model the
+swap replaced. What follows is the measurement behind the F2 decision, what that
+decision changed, and then F25.
 
 F2 was re-measured through the shipped `buildV11Prompt` and
 `requestOuterDecision`, over both scenarios at all three frozen seeds, with the
@@ -965,6 +970,27 @@ the real lock and compare it with a literal — which is what stops a lock chang
 from passing unnoticed — were re-verified: quietly renaming the locked model, or
 changing the embedding width, still fails two tests each.
 
+**A third consequence was missed, and a pre-run review caught it: F25.** Sizing
+the swap against total wall-clock left the *per-operation* ceilings untouched.
+`python-adapter-executor.mjs` gives every Python adapter operation
+`DEFAULT_TIMEOUT_MS = 30_000`, `bindV11Runtime` never raises it, and
+`UNIT_TIMEOUT_MS = 120_000` caps the unit above it; neither is reachable from the
+CLI. Measured at 7B, Cognee's persist takes **105.9s** (`add` 12.9 + `cognify`
+93.0) and its retrieve **38.7s**, so a decision unit is about **175s**. Both
+ceilings are too low.
+
+The consequence is not slowness. A timeout is recorded as a unit failure, so the
+artifact would have read as *Cognee failed* when what happened is that our ceiling
+was smaller than the model we had just pinned — the overstatement this benchmark
+treats as a defect. The run was not started.
+
+Neither ceiling is frozen methodology: the preregistration freezes
+`requestTimeoutMs: 120000` for one *outer* request, untouched here, and sets no
+per-operation or per-unit limit. They are harness parameters that were never sized
+for the configuration under measurement. Raising them still changes what the
+harness records as a stall, so it is an owner decision and is recorded as F25
+rather than taken quietly.
+
 | ID | Blocker | State |
 | --- | --- | --- |
 | CB1 | Graphiti declared isolation the product lacks | Cleared, Amendment 003 |
@@ -1004,6 +1030,7 @@ changing the embedding width, still fails two tests each.
 | F22 | The container listing crashed on a `.dist-info` carrying no `Version`: the sort compared `None` with a string, so a site holding the duplicate the script exists to report produced no listing at all | Cleared, and the drop rule now matches `readPythonSiteDistributions` |
 | F23 | `matchedCalls` is clamped against `expectedCalls`, and every test asserting both asserted them equal, so a retry could have been counted as a matched call while the same report named it a retry | Cleared, both directions of the clamp are asserted |
 | F24 | Two documents described a tree that no longer exists: requirement 6's refusal table gave Cognee the columns of an arm with no native user scope, and `benchmark/evidence/README.md` still said amendment 003 was proposed and not adopted | Cleared |
+| F25 | The harness gives a Python adapter operation 30s (`DEFAULT_TIMEOUT_MS`, never raised by the run path) inside a 120s unit deadline, both sized when the pinned model was `qwen2.5:0.5b`. Measured at `qwen2.5:7b`: Cognee's persist is 105.9s and its retrieve 38.7s, so a decision unit is ~175s. Cognee's units would have failed on our deadline and been recorded as Cognee failing | **Open**, owner decision, measured in `benchmark/evidence/v11-prerun-review-2026-09-06.md` |
 
 The evidence and the required next decisions are in
 `benchmark/evidence/v11-blocker-matrix-2026-09-03.md` (CB1-CB4, LB1-LB3, as of
@@ -1018,7 +1045,11 @@ that date) and, superseding its blocker states,
 `benchmark/evidence/v11-adversarial-review-round-4-2026-09-05.md` (F17-F19 - the
 fourth round, which found that reachable is not the same as asserted) and
 `benchmark/evidence/v11-adversarial-review-round-5-2026-09-06.md` (F20-F24 - the
-fifth, which found a fabricated finding in the fourth round's own record).
+fifth, which found a fabricated finding in the fourth round's own record),
+`benchmark/evidence/v11-readiness-and-f2-2026-09-06.md` (READY observed, and F2
+measured against three decision models) and
+`benchmark/evidence/v11-prerun-review-2026-09-06.md` (F25 - the review run before
+the run, and the reason the run was not started).
 
 ### Historical blocker record (resolved or superseded)
 

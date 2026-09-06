@@ -4,9 +4,14 @@
  *
  * F2 was recorded from four Phase A attempts, all rejected, with
  * `failedAttemptIdsAvoided` arriving as `null` where the schema says
- * `string[]`. It is the reason a READY harness is not yet a meaningful run:
+ * `string[]`. It was the reason a READY harness was not yet a meaningful run:
  * Phase A is the first thing every unit does, so a Phase A that cannot pass
  * fails all 288 measured units at the outer model.
+ *
+ * F2 was cleared on 2026-09-06 by pinning `qwen2.5:7b`, which this probe
+ * accepts 6 of 6. It is kept because the preregistration allows the decision
+ * LLM identity to be filled in only from a successful capability probe, so
+ * this is the check any future change of that identity has to pass first.
  *
  * This probe measures rather than argues. It uses the shipped
  * `buildV11Prompt` and `requestOuterDecision` - not a re-implementation - with
