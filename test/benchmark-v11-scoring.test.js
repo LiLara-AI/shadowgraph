@@ -25,6 +25,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
 
+import { v11Coverage } from '../benchmark/lib/aggregate.mjs';
 import { isolationInspectionFrom, scoreScenario } from '../benchmark/lib/scoring.mjs';
 
 const SCENARIO = Object.freeze({
@@ -295,4 +296,79 @@ test('an inspection that reports a leak scores 0 even when it also claims verifi
     }
   });
   assert.equal(metrics.projectIsolation, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Coverage in the aggregate. A run whose units mostly failed has to read as a
+// run whose units mostly failed. Every case below mixes statuses on purpose:
+// the defect this guards against is a tally that silently counts one of them.
+// ---------------------------------------------------------------------------
+
+function unit(armId, phase, status, cause = null) {
+  return { armId, phase, status, failure: cause === null ? null : { cause } };
+}
+
+const MIXED_RUN = {
+  units: [
+    unit('alpha', 'A', 'MEASURED'),
+    unit('alpha', 'B', 'MEASURED'),
+    unit('alpha', 'ISOLATION_USER', 'EXCLUDED'),
+    unit('beta', 'A', 'FAILED', 'ENDPOINT_UNAVAILABLE'),
+    unit('beta', 'B', 'FAILED', 'TIMEOUT'),
+    unit('beta', 'ISOLATION_USER', 'FAILED', 'ENDPOINT_UNAVAILABLE'),
+    unit('gamma', 'A', 'NOT_MEASURED')
+  ]
+};
+
+test('coverage counts every unit status, not only the ones that succeeded', () => {
+  const coverage = v11Coverage(MIXED_RUN);
+  assert.deepEqual(coverage.units, {
+    planned: 7, MEASURED: 2, FAILED: 3, NOT_MEASURED: 1, EXCLUDED: 1
+  });
+});
+
+test('coverage separates an arm that failed everything from one that failed nothing', () => {
+  const byArm = Object.fromEntries(
+    v11Coverage(MIXED_RUN).byArm.map((entry) => [entry.armId, entry])
+  );
+  // The arm status alone would call both of these PARTIAL_FAILED or worse, and
+  // a reader could not tell which arm to look at first.
+  assert.equal(byArm.alpha.FAILED, 0);
+  assert.equal(byArm.beta.FAILED, 3);
+  assert.equal(byArm.beta.MEASURED, 0);
+  assert.equal(byArm.gamma.NOT_MEASURED, 1);
+});
+
+test('coverage reports each phase separately, so a phase that always failed is visible', () => {
+  const byPhase = Object.fromEntries(
+    v11Coverage(MIXED_RUN).byPhase.map((entry) => [entry.phase, entry])
+  );
+  assert.equal(byPhase.A.planned, 3);
+  assert.equal(byPhase.A.MEASURED, 1);
+  assert.equal(byPhase.A.FAILED, 1);
+  assert.equal(byPhase.A.NOT_MEASURED, 1);
+  assert.equal(byPhase.ISOLATION_USER.EXCLUDED, 1);
+  assert.equal(byPhase.ISOLATION_USER.FAILED, 1);
+});
+
+test('coverage tallies failure causes so a run can be read without the raw ledger', () => {
+  assert.deepEqual(v11Coverage(MIXED_RUN).failureCauses, {
+    ENDPOINT_UNAVAILABLE: 2,
+    TIMEOUT: 1
+  });
+});
+
+test('coverage totals reconcile with the unit count in every breakdown', () => {
+  const coverage = v11Coverage(MIXED_RUN);
+  const statuses = ['MEASURED', 'FAILED', 'NOT_MEASURED', 'EXCLUDED'];
+  const total = (tally) => statuses.reduce((sum, status) => sum + tally[status], 0);
+  assert.equal(total(coverage.units), MIXED_RUN.units.length);
+  assert.equal(
+    coverage.byArm.reduce((sum, entry) => sum + total(entry), 0),
+    MIXED_RUN.units.length
+  );
+  assert.equal(
+    coverage.byPhase.reduce((sum, entry) => sum + total(entry), 0),
+    MIXED_RUN.units.length
+  );
 });

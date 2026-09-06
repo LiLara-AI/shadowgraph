@@ -1500,6 +1500,50 @@ test('one acceptance artifact flows through the integrated runner, validator, an
   });
   assert.equal(aggregate.mode, 'ACCEPTANCE');
   assertNoAcceptanceClaims(aggregate);
+
+  // Coverage has to survive into the aggregate, per arm and per phase. Before
+  // this existed the file carried seven arm statuses and a single unit count, so
+  // a run with eighty-four failed units read exactly like one with none, and
+  // PARTIAL_FAILED covered both an arm that failed four and an arm that failed
+  // forty. The assertions are reconciliation rather than literals on purpose:
+  // what has to hold is that every number here is the units, counted.
+  const statuses = ['MEASURED', 'FAILED', 'NOT_MEASURED', 'EXCLUDED'];
+  const total = (tally) => statuses.reduce((sum, status) => sum + tally[status], 0);
+
+  assert.equal(aggregate.coverage.units.planned, raw.units.length);
+  assert.equal(total(aggregate.coverage.units), raw.units.length);
+
+  assert.deepEqual(
+    aggregate.coverage.byArm.map((entry) => entry.armId).sort(),
+    [...new Set(raw.units.map((unit) => unit.armId))].sort()
+  );
+  assert.equal(
+    aggregate.coverage.byArm.reduce((sum, entry) => sum + total(entry), 0),
+    raw.units.length
+  );
+  for (const entry of aggregate.coverage.byArm) {
+    assert.equal(total(entry), entry.planned);
+    assert.equal(
+      entry.planned,
+      raw.units.filter((unit) => unit.armId === entry.armId).length
+    );
+  }
+
+  assert.equal(
+    aggregate.coverage.byPhase.reduce((sum, entry) => sum + total(entry), 0),
+    raw.units.length
+  );
+  for (const entry of aggregate.coverage.byPhase) {
+    assert.equal(total(entry), entry.planned);
+  }
+
+  // A failure that reached a terminal record carries a cause, and the causes
+  // have to be countable without reopening the raw ledger.
+  const recordedCauses = raw.units.filter((unit) => unit.failure?.cause).length;
+  assert.equal(
+    Object.values(aggregate.coverage.failureCauses).reduce((sum, n) => sum + n, 0),
+    recordedCauses
+  );
 });
 
 test('the run path composition completes: the real ledgers, closed the way the CLI closes them', async (t) => {

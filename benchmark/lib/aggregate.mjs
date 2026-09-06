@@ -398,6 +398,59 @@ function summarizeV11Arm(arm, raw, preregistration) {
   };
 }
 
+const V11_UNIT_STATUS_KEYS = Object.freeze(['MEASURED', 'FAILED', 'NOT_MEASURED', 'EXCLUDED']);
+
+function v11UnitStatusTally(units) {
+  const tally = Object.fromEntries(V11_UNIT_STATUS_KEYS.map((status) => [status, 0]));
+  for (const unit of units) {
+    if (Object.hasOwn(tally, unit.status)) tally[unit.status] += 1;
+  }
+  return { planned: units.length, ...tally };
+}
+
+/**
+ * Per-arm and per-phase coverage, so no aggregate number stands without the
+ * units behind it.
+ *
+ * The aggregate used to carry seven arm statuses and a single `units: 308`. A
+ * run in which 84 units failed and 48 more answered nothing therefore read the
+ * same as one in which every unit succeeded, and `PARTIAL_FAILED` compressed an
+ * arm that failed four units and an arm that failed forty into one token. None
+ * of that was hidden - it was all in the raw ledger - but a reader had to
+ * already suspect something to go looking, which is the wrong way round.
+ *
+ * `status: "COMPLETE"` stays as it is. It correctly means every planned unit
+ * reached a terminal record, and the defect was never that word: it was that
+ * the word was the only outcome-shaped thing in the file.
+ */
+export function v11Coverage(raw) {
+  const byArm = new Map();
+  const byPhase = new Map();
+  for (const unit of raw.units) {
+    if (!byArm.has(unit.armId)) byArm.set(unit.armId, []);
+    byArm.get(unit.armId).push(unit);
+    if (!byPhase.has(unit.phase)) byPhase.set(unit.phase, []);
+    byPhase.get(unit.phase).push(unit);
+  }
+  const failureCauses = {};
+  for (const unit of raw.units) {
+    const cause = unit.failure?.cause;
+    if (typeof cause === 'string') failureCauses[cause] = (failureCauses[cause] ?? 0) + 1;
+  }
+  return {
+    units: v11UnitStatusTally(raw.units),
+    failureCauses,
+    byArm: [...byArm.entries()].map(([armId, units]) => ({
+      armId,
+      ...v11UnitStatusTally(units)
+    })),
+    byPhase: [...byPhase.entries()].map(([phase, units]) => ({
+      phase,
+      ...v11UnitStatusTally(units)
+    }))
+  };
+}
+
 export function aggregateV11Run(raw, preregistration, options = {}) {
   const trustedSourceHashes = requireV11AggregationOptions(options);
   requireTrustedV11SourceHashes(raw, trustedSourceHashes);
@@ -410,6 +463,7 @@ export function aggregateV11Run(raw, preregistration, options = {}) {
     excludedArms: raw.arms.filter((arm) => arm.status === 'EXCLUDED').length,
     units: raw.units.length
   };
+  const coverage = v11Coverage(raw);
   const base = {
     schemaVersion: 2,
     benchmarkVersion: '1.1',
@@ -418,6 +472,7 @@ export function aggregateV11Run(raw, preregistration, options = {}) {
     status: raw.status,
     zeroResult: structuredClone(raw.zeroResult),
     counts,
+    coverage,
     armStatuses: raw.arms.map((arm) => ({
       armId: arm.armId,
       status: arm.status,
