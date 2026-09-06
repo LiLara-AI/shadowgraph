@@ -1,4 +1,4 @@
-import { scoreScenario } from './scoring.mjs';
+import { isolationInspectionFrom, scoreScenario } from './scoring.mjs';
 import { validateV11RawRun } from './validate.mjs';
 
 const REQUIRED_PHASES = [
@@ -264,9 +264,21 @@ function aggregateLegacyRun(raw, preregistration) {
   };
 }
 
-function v11IsolationLeak(unit) {
-  const evidence = unit?.adapterEvidence?.verify?.isolationEvidence;
-  return Array.isArray(evidence?.leakedRecordIds) && evidence.leakedRecordIds.length > 0;
+/**
+ * Read the persisted-state inspection an isolation unit actually recorded.
+ *
+ * This used to look for `leakedRecordIds`, a field no adapter in this repository
+ * writes, so it answered "no leak" for every unit ever run - including units
+ * where no inspection happened at all. The adapters do report the inspection,
+ * under `verified` plus two match counts, and that is what the frozen rule's
+ * "persisted-state inspection confirms no target record copied" refers to.
+ *
+ * Returning null for an absent inspection is the point: the scorer has to be
+ * able to tell "inspected and clean" from "never inspected", because only the
+ * first earns a passing isolation score.
+ */
+function v11IsolationInspection(unit) {
+  return isolationInspectionFrom(unit?.adapterEvidence?.verify?.isolationEvidence);
 }
 
 function v11LifecycleFrom(units) {
@@ -280,11 +292,11 @@ function v11LifecycleFrom(units) {
     E: byPhase.get('E')?.decisionResponse,
     ISOLATION_PROJECT: {
       response: byPhase.get('ISOLATION_PROJECT')?.decisionResponse,
-      persistedLeak: v11IsolationLeak(byPhase.get('ISOLATION_PROJECT'))
+      inspection: v11IsolationInspection(byPhase.get('ISOLATION_PROJECT'))
     },
     ISOLATION_USER: {
       response: byPhase.get('ISOLATION_USER')?.decisionResponse,
-      persistedLeak: v11IsolationLeak(byPhase.get('ISOLATION_USER'))
+      inspection: v11IsolationInspection(byPhase.get('ISOLATION_USER'))
     }
   };
 }
