@@ -3,11 +3,22 @@
 ShadowGraph the product remains at **0.40.0** and `"private": true`. "v1.1" names
 the benchmark methodology and candidate only. It is not a product release.
 
-**This candidate has produced no benchmark result.** No scored run was executed,
-no acceptance run was executed, no arm was ranked, and no comparative claim is
-made anywhere in this repository. The historical run
+**This candidate has produced no scored benchmark result, and no comparative
+claim is made anywhere in this repository.** No scored run was executed, no arm
+was ranked, and no arm is rank-eligible. The historical run
 `20260830T180000Z-comparative` remains permanently `INCOMPLETE / NOT MEASURED`;
 it was not rerun and its partial state was not reused.
+
+One **non-scored acceptance** run was executed on 2026-09-06,
+`v11-acceptance-002`, under the authorisation in
+`preregistration-amendment-002.json`'s `candidateAcceptance` block
+(`scored: false`, `rankings: false`). It is **VALID FOR DIAGNOSTICS ONLY** — the
+findings are in `benchmark/evidence/v11-run-002-findings-2026-09-06.md` — and it
+supports no comparison between arms. Its six artifacts are preserved read-only
+outside this repository at `~/shadowgraph-v11-run-evidence/run-002-preserved/`
+with a verified `SHA256SUMS.txt`. No benchmark artifact is tracked here or
+present in the working tree, which `test/benchmark-v11-definition.test.js`
+enforces against both the git index and the disk.
 
 ## Verification evidence
 
