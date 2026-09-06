@@ -966,3 +966,72 @@ test('failed-attempt content gets an exact canonical content hash', async () => 
   assert.equal(recordContentSha256(first), recordContentSha256(reordered));
   assert.notEqual(recordContentSha256(first), recordContentSha256({ ...first, reason: 'Different reason.' }));
 });
+
+test('a decision record id does not name the arm that wrote it', async () => {
+  // F26. The id used to be spelled out - `decision:19:shadowgraph-compact:20:...`
+  // - so an arm that retrieved its own record put its own name into the outer
+  // prompt through `nativeContext`, and `auditOuterRequest` refuses any prompt
+  // containing the arm id. Every arm with memory failed every decision phase
+  // after A, and only the no-memory control passed, because it retrieves nothing.
+  //
+  // Three rules the benchmark holds at once - ids deterministic per (arm,
+  // scenario, repetition, phase), retrieved records reach the prompt, the prompt
+  // must not name the arm - and this is the one that had to give.
+  const { decisionRecordId, standardizedDecisionRecord } =
+    await import('../benchmark/lib/v11-contract.mjs');
+  const { V11_ACCEPTANCE_ARM_IDS } = await import('../benchmark/lib/v11-definition.mjs');
+
+  const decision = {
+    decisionId: 'd-1',
+    choiceId: 'c-1',
+    recalledAlternativeIds: [],
+    recalledRejectionReasonIds: [],
+    constraintIdsAddressed: [],
+    evidenceIdsCited: [],
+    riskIdsRecognized: [],
+    reviewTriggerIds: [],
+    changedFactDetected: false,
+    changedFactId: null,
+    recommendation: 'hold the rollout',
+    failedAttemptIdsAvoided: [],
+    failedAttemptReasonIdsCited: [],
+    memoryProjectId: 'project-1',
+    memoryUserId: null
+  };
+
+  const ids = new Set();
+  for (const armId of V11_ACCEPTANCE_ARM_IDS) {
+    const correlation = { armId, scenarioId: 'ACC_INCIDENT_HANDOFF', repetition: 0, phase: 'A' };
+    const id = decisionRecordId(correlation);
+
+    // The property, stated the way the audit states it: a plain lowercase
+    // substring, because that is the test the outer request has to survive.
+    assert.equal(id.toLowerCase().includes(armId.toLowerCase()), false,
+      `${id} must not contain ${armId}`);
+    assert.match(id, /^decision:[a-f0-9]{64}$/u);
+
+    // Still deterministic, and still one id per correlation - which is all any
+    // caller ever needed from it.
+    assert.equal(decisionRecordId({ ...correlation }), id, 'the same correlation gives the same id');
+    assert.equal(ids.has(id), false, 'two arms must not share a record id');
+    ids.add(id);
+
+    // And the record the runner actually stores carries that id.
+    assert.equal(standardizedDecisionRecord(correlation, decision).id, id);
+  }
+  assert.equal(ids.size, V11_ACCEPTANCE_ARM_IDS.length);
+
+  // Every component still moves the id, so nothing was collapsed away.
+  const base = { armId: 'cognee', scenarioId: 'ACC_INCIDENT_HANDOFF', repetition: 0, phase: 'A' };
+  const seen = new Set([decisionRecordId(base)]);
+  for (const variant of [
+    { ...base, armId: 'mem0-oss' },
+    { ...base, scenarioId: 'ACC_SENSOR_REVIEW' },
+    { ...base, repetition: 1 },
+    { ...base, phase: 'B' }
+  ]) {
+    const id = decisionRecordId(variant);
+    assert.equal(seen.has(id), false, `${JSON.stringify(variant)} must give its own id`);
+    seen.add(id);
+  }
+});

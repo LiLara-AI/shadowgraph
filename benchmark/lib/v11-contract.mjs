@@ -180,6 +180,24 @@ export function recordContentSha256(content) {
   return domainSeparatedSha256('shadowgraph:v1.1:record-content:v1', content);
 }
 
+/**
+ * The storage id of one decision record.
+ *
+ * Hashed, not spelled out, and the reason is F26. This used to return
+ * `decision:19:shadowgraph-compact:20:ACC_INCIDENT_HANDOFF:1:0:1:A` - the arm
+ * id in plain text, by construction. An arm stores that record, retrieves it on
+ * the next phase, and the id travels into `nativeContext` and from there into
+ * the outer prompt. `auditOuterRequest` then refuses any prompt containing the
+ * arm's id, so every arm that used its own memory failed every decision phase
+ * after A, while the no-memory control passed. Three rules the benchmark holds
+ * at once - ids are deterministic per (arm, scenario, repetition, phase),
+ * retrieved records reach the prompt, and the prompt must not name the arm -
+ * and the readable id was the one that had to give.
+ *
+ * The digest keeps determinism and uniqueness, which is all any caller needed:
+ * both sides compute it from the same correlation with this function, and
+ * nothing reads it for meaning. `unitIdFor` above already did exactly this.
+ */
 export function decisionRecordId(correlation) {
   if (!isPlainObject(correlation)) throw new Error('decision record correlation must be an object');
   assertExactKeys(
@@ -195,13 +213,13 @@ export function decisionRecordId(correlation) {
   if (!Number.isSafeInteger(correlation.repetition) || correlation.repetition < 0) {
     throw new Error('decision record correlation.repetition must be a non-negative safe integer');
   }
-  const components = [
-    correlation.armId,
-    correlation.scenarioId,
-    String(correlation.repetition),
-    correlation.phase
-  ];
-  return `decision:${components.map((value) => `${value.length}:${value}`).join(':')}`;
+  const digest = domainSeparatedSha256('shadowgraph:v1.1:decision-record-id:v1', {
+    armId: correlation.armId,
+    scenarioId: correlation.scenarioId,
+    repetition: correlation.repetition,
+    phase: correlation.phase
+  });
+  return `decision:${digest}`;
 }
 
 export function standardizedDecisionRecord(correlation, decisionResponse) {

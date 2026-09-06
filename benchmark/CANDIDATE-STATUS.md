@@ -123,7 +123,7 @@ treat file content at HEAD, not the diffs, as the object of review.
 | 4 | Provider-evidence reconciliation | **Closed**, with one stated limit: a FAILED unit's call *count* is not compared, because the harness wrote it rather than the adapter |
 | 5 | Mutation state fails closed | **Closed** (mechanism); wiring waits on 6 |
 | 6 | Real pinned runtime factories for all seven arms | **Partial** — the metered runtime hosts are bound and six of seven arms execute; Graphiti's factory is LB2f, an open owner decision |
-| 7 | Non-scored acceptance, 308 units | **Closed** offline. Preflight reports READY with zero blockers as of 2026-09-06 and F2 is cleared; an official run is held by the per-operation deadline described under Blockers |
+| 7 | Non-scored acceptance, 308 units | **Closed** offline. Preflight reports READY with zero blockers as of 2026-09-06; F2, F25 and F26 are cleared. The first run was executed and aborted at 67 of 308 units, which is what found F26; no artifact exists |
 | 8 | Locks, ledger validation, readiness, evidence index, review bundle | **Partial** — every builder exists, and the run path takes the implementation and environment locks before it opens a file; the service and model locks and the review bundle are run-bound and cannot exist until a run does |
 | 9 | Focused, Node, Python, package, MCP, integration, smoke, privacy checks | **Closed** |
 
@@ -1004,6 +1004,31 @@ it. Four mutations were run against the fix and all four fail a test: omitting
 `timeoutMs` again, setting it back to 30s, raising the operation ceiling above
 the unit ceiling, and reverting the unit ceiling to its 0.5b value.
 
+### The first run, and F26
+
+With F25 cleared the acceptance run was started, and was aborted 67 units in.
+**No timeouts** — the deadline fix held — but 28 units had failed identically
+across four unrelated arms, on every decision phase except A, in a tenth of a
+second each, with `outerDecisionModelCalls: 0`. The arm retrieved its record;
+the outer model was never called.
+
+Three rules this benchmark holds at once, and they cannot all hold: a decision
+record id is deterministic per (arm, scenario, repetition, phase) and used to
+spell the arm out; retrieved records become `nativeContext` and reach the
+prompt, which is the point of the benchmark; and `auditOuterRequest` refuses any
+prompt containing the arm id. So an arm that used its own memory named itself in
+the prompt, and only `no-memory` — which retrieves nothing — could pass a
+decision phase.
+
+**No v1.1 run had ever measured a memory arm past phase A.** Five review rounds,
+twenty-five findings and 2363 tests had not found it, because it needs a real arm
+to store a real record and retrieve it. `decisionRecordId` now hashes its
+correlation, as `unitIdFor` beside it already did; 21 of 21 arm/phase
+combinations pass the audit, and three mutations are caught. Recorded in
+`benchmark/evidence/v11-first-run-and-f26-2026-09-06.md`, together with an
+operator error worth keeping: the first attempt to stop that run reported
+"stopped" and stopped nothing.
+
 | ID | Blocker | State |
 | --- | --- | --- |
 | CB1 | Graphiti declared isolation the product lacks | Cleared, Amendment 003 |
@@ -1044,6 +1069,7 @@ the unit ceiling, and reverting the unit ceiling to its 0.5b value.
 | F23 | `matchedCalls` is clamped against `expectedCalls`, and every test asserting both asserted them equal, so a retry could have been counted as a matched call while the same report named it a retry | Cleared, both directions of the clamp are asserted |
 | F24 | Two documents described a tree that no longer exists: requirement 6's refusal table gave Cognee the columns of an arm with no native user scope, and `benchmark/evidence/README.md` still said amendment 003 was proposed and not adopted | Cleared |
 | F25 | The harness gives a Python adapter operation 30s (`DEFAULT_TIMEOUT_MS`, never raised by the run path) inside a 120s unit deadline, both sized when the pinned model was `qwen2.5:0.5b`. Measured at `qwen2.5:7b`: Cognee's persist is 105.9s and its retrieve 38.7s, so a decision unit is ~175s. Cognee's units would have failed on our deadline and been recorded as Cognee failing | Cleared by owner decision on 2026-09-06: operation ceiling 300s stated by the run path, unit ceiling 600s, both sized against the measurement and mutation-tested |
+| F26 | The decision record id spelled out the arm that wrote it (`decision:19:shadowgraph-compact:20:...`), an arm retrieves its own records into `nativeContext`, and `auditOuterRequest` refuses any prompt containing the arm id as a plain substring. So every arm with memory failed every decision phase after A while the no-memory control passed - found by the first run, at 28 identical failures in 67 units | Cleared: `decisionRecordId` hashes its correlation as `unitIdFor` already did. 21 of 21 arm/phase combinations now pass the audit, three mutations caught |
 
 The evidence and the required next decisions are in
 `benchmark/evidence/v11-blocker-matrix-2026-09-03.md` (CB1-CB4, LB1-LB3, as of
@@ -1062,7 +1088,9 @@ fifth, which found a fabricated finding in the fourth round's own record),
 `benchmark/evidence/v11-readiness-and-f2-2026-09-06.md` (READY observed, and F2
 measured against three decision models) and
 `benchmark/evidence/v11-prerun-review-2026-09-06.md` (F25 - the review run before
-the run, and the reason the run was not started).
+the run, and the reason the run was not started) and
+`benchmark/evidence/v11-first-run-and-f26-2026-09-06.md` (F26 - what the first
+run found in 67 units, and the operator error in reporting its stop).
 
 ### Historical blocker record (resolved or superseded)
 
