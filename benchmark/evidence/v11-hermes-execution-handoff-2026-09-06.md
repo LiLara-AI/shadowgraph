@@ -18,18 +18,24 @@ here.
 |---|---|
 | Repository | `C:/benchmark-engineering/worktrees/shadowgraph-v11-acceptance` (WSL: `/mnt/c/benchmark-engineering/worktrees/shadowgraph-v11-acceptance`) |
 | Branch | `benchmark/v1.1-nonscored-acceptance` |
-| **Commit** | **`aa5a35fd7918737b9647287c976309f843506b32`** |
+| **Pinned code commit** | **`aa5a35fd7918737b9647287c976309f843506b32`** |
+| HEAD | the tip of `benchmark/v1.1-nonscored-acceptance`. It is at or ahead of the pinned commit, and **every commit after it is documentation only** |
 | Working tree | clean — `git status --porcelain=v1 --untracked-files=all` prints nothing |
 | Diff digest | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` (the SHA-256 of the empty string, i.e. no diff) |
+
+A document cannot contain its own commit hash, so the *code* is pinned and the
+check below proves nothing executable moved after it.
 
 ### Verify the checkout before anything else
 
 ```bash
-cd /mnt/c/benchmark-engineering/worktrees/shadowgraph-v11-acceptance && git rev-parse HEAD && git status --porcelain=v1 --untracked-files=all | wc -l && git diff HEAD | sha256sum
+cd /mnt/c/benchmark-engineering/worktrees/shadowgraph-v11-acceptance && git status --porcelain=v1 --untracked-files=all | wc -l && git diff HEAD | sha256sum && git merge-base --is-ancestor aa5a35fd7918737b9647287c976309f843506b32 HEAD && echo PINNED-COMMIT-IS-ANCESTOR && git diff --stat aa5a35fd7918737b9647287c976309f843506b32..HEAD -- benchmark/lib benchmark/adapters benchmark/acceptance benchmark/preregistration.json benchmark/preregistration-amendment-001.json benchmark/preregistration-amendment-002.json benchmark/preregistration-amendment-003.json benchmark/preregistration-amendment-004.json src scripts test package.json
 ```
 
-Expect `aa5a35fd7918737b9647287c976309f843506b32`, then `0`, then
-`e3b0c442…b855`. **Any other result: stop.**
+Expect, in order: `0`; then `e3b0c442…b855`; then `PINNED-COMMIT-IS-ANCESTOR`;
+then **no output at all** from the final `git diff --stat` — meaning no code,
+test, script, package, lock or methodology file changed after the pinned commit.
+**Any other result: stop.**
 
 ---
 
