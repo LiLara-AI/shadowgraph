@@ -304,6 +304,17 @@ test('the fix changes neither prompt-binding hash nor the stored record', async 
 // while another had stopped withholding.
 // ---------------------------------------------------------------------------
 
+/** Drop line comments so a commented-out entry cannot satisfy a text check. */
+function stripComments(source, marker) {
+  return source
+    .split('\n')
+    .map((line) => {
+      const at = line.indexOf(marker);
+      return at === -1 ? line : line.slice(0, at);
+    })
+    .join('\n');
+}
+
 test('every copy of the probe-answer field list agrees with the canonical one', async () => {
   const canonical = [...DECISION_PROBE_ANSWER_FIELDS].sort();
   assert.deepEqual(canonical, ['changedFactDetected', 'changedFactId', 'decisionId']);
@@ -320,7 +331,14 @@ test('every copy of the probe-answer field list agrees with the canonical one', 
   );
 
   // The render-time redaction list in v11-prompts.mjs.
-  const prompts = await readFile(new URL('../benchmark/lib/v11-prompts.mjs', import.meta.url), 'utf8');
+  // Comments are stripped first. Without that these slices are plain string
+  // matching, and `// 'decisionId'` would satisfy them while the field had in
+  // fact stopped being redacted - a guard that passes on the drift it exists to
+  // catch. The behavioural tests below would still fail, but this one should not
+  // claim a check it is not making.
+  const prompts = stripComments(
+    await readFile(new URL('../benchmark/lib/v11-prompts.mjs', import.meta.url), 'utf8'), '//'
+  );
   const redacted = prompts
     .slice(prompts.indexOf('REDACTED_PRIOR_ANSWER_FIELDS = Object.freeze(['))
     .slice(0, prompts.slice(prompts.indexOf('REDACTED_PRIOR_ANSWER_FIELDS = Object.freeze([')).indexOf(']'));
@@ -331,7 +349,9 @@ test('every copy of the probe-answer field list agrees with the canonical one', 
     'v11-prompts.mjs redacts a different number of fields than the canonical list');
 
   // And the Python side, which cannot import any of the above.
-  const envelope = await readFile(new URL('../benchmark/adapters/envelope.py', import.meta.url), 'utf8');
+  const envelope = stripComments(
+    await readFile(new URL('../benchmark/adapters/envelope.py', import.meta.url), 'utf8'), '#'
+  );
   const python = envelope
     .slice(envelope.indexOf('DECISION_PROBE_ANSWER_FIELDS = ('))
     .slice(0, envelope.slice(envelope.indexOf('DECISION_PROBE_ANSWER_FIELDS = (')).indexOf(')'));
