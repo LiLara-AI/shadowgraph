@@ -18,7 +18,7 @@ here.
 |---|---|
 | Repository | `C:/benchmark-engineering/worktrees/shadowgraph-v11-acceptance` (WSL: `/mnt/c/benchmark-engineering/worktrees/shadowgraph-v11-acceptance`) |
 | Branch | `benchmark/v1.1-nonscored-acceptance` |
-| **Pinned code commit** | **`51ea02927fb2dfad4afbdaa18f9928136319fe14`** |
+| **Pinned code commit** | **`50745b611f760b6b7fabc12a6396fcd2719cd1f1`** |
 | HEAD | the tip of `benchmark/v1.1-nonscored-acceptance`. It is at or ahead of the pinned commit, and **every commit after it is documentation only** |
 | Working tree | clean — `git status --porcelain=v1 --untracked-files=all` prints nothing |
 | Diff digest | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` (the SHA-256 of the empty string, i.e. no diff) |
@@ -29,7 +29,7 @@ check below proves nothing executable moved after it.
 ### Verify the checkout before anything else
 
 ```bash
-cd /mnt/c/benchmark-engineering/worktrees/shadowgraph-v11-acceptance && git status --porcelain=v1 --untracked-files=all | wc -l && git diff HEAD | sha256sum && git merge-base --is-ancestor 51ea02927fb2dfad4afbdaa18f9928136319fe14 HEAD && echo PINNED-COMMIT-IS-ANCESTOR && git diff --stat 51ea02927fb2dfad4afbdaa18f9928136319fe14..HEAD -- benchmark/lib benchmark/adapters benchmark/acceptance benchmark/preregistration.json benchmark/preregistration-amendment-001.json benchmark/preregistration-amendment-002.json benchmark/preregistration-amendment-003.json benchmark/preregistration-amendment-004.json src scripts test package.json
+cd /mnt/c/benchmark-engineering/worktrees/shadowgraph-v11-acceptance && git status --porcelain=v1 --untracked-files=all | wc -l && git diff HEAD | sha256sum && git merge-base --is-ancestor 50745b611f760b6b7fabc12a6396fcd2719cd1f1 HEAD && echo PINNED-COMMIT-IS-ANCESTOR && git diff --stat 50745b611f760b6b7fabc12a6396fcd2719cd1f1..HEAD -- benchmark/lib benchmark/adapters benchmark/acceptance benchmark/preregistration.json benchmark/preregistration-amendment-001.json benchmark/preregistration-amendment-002.json benchmark/preregistration-amendment-003.json benchmark/preregistration-amendment-004.json src scripts test package.json
 ```
 
 Expect, in order: `0`; then `e3b0c442…b855`; then `PINNED-COMMIT-IS-ANCESTOR`;
@@ -92,7 +92,7 @@ own artifact records both, so which contract it ran under is always recoverable.
 
 ## 4. Verification evidence at this commit
 
-Produced on `51ea029` with a clean tree. **Run the two suites separately or via
+Produced on `50745b6` with a clean tree. **Run the two suites separately or via
 `npm run benchmark:test`, which now runs both.**
 
 | Gate | Command | Result |
@@ -105,7 +105,7 @@ Produced on `51ea029` with a clean tree. **Run the two suites separately or via
 | Package smoke | `npm run smoke:package` | PASS |
 | MCP | `npm run check:mcp` | PASS |
 | Integrations | `npm run check:integrations` | PASS |
-| Mutation testing, cumulative | — | **48 mutants, 48 killed**, 1 recorded equivalent |
+| Mutation testing, cumulative | — | **50 mutants, 50 killed**, 1 recorded equivalent |
 
 **All 115 skips have one cause**, and it is legitimate: Node `v20.20.2` has no
 `node:sqlite`, which needs 22.5+. The guard is
