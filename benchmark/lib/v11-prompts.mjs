@@ -137,15 +137,31 @@ const REDACTED_PRIOR_ANSWER_FIELDS = Object.freeze([
   'decisionId'
 ]);
 
-function withoutPriorAnswers(record) {
-  const content = record.content;
-  if (!isPlainObject(content)) return record;
-  if (!REDACTED_PRIOR_ANSWER_FIELDS.some((field) => Object.hasOwn(content, field))) return record;
+/**
+ * Drop the probe-answer keys wherever they appear in a record, at any depth.
+ *
+ * The first version of this matched the path `record.content.<key>`, which is
+ * the shape `logical_record` produces and the shape four of the seven arms use.
+ * It missed every other shape. Cognee's retrieve returns
+ * `{search_result, dataset_id, dataset_name}` with the record encoded inside a
+ * string and no top-level `content` at all, so a provisioned cognee arm would
+ * have been handed the full answer sheet while the other arms were redacted -
+ * F32 back for exactly one arm, silently, and comparability gone with it.
+ *
+ * Matching on the key rather than the path closes the nested-object cases. It
+ * cannot reach a record serialised into a string, which is why the real fix is
+ * that these fields are no longer written to a record at all
+ * (`DECISION_PROBE_ANSWER_FIELDS` in `v11-contract.mjs`). This stays as the
+ * second line: an adapter that invents them still cannot show them to the model.
+ */
+function withoutPriorAnswers(value) {
+  if (Array.isArray(value)) return value.map(withoutPriorAnswers);
+  if (!isPlainObject(value)) return value;
   const redacted = {};
-  for (const [field, value] of Object.entries(content)) {
-    if (!REDACTED_PRIOR_ANSWER_FIELDS.includes(field)) redacted[field] = value;
+  for (const [field, item] of Object.entries(value)) {
+    if (!REDACTED_PRIOR_ANSWER_FIELDS.includes(field)) redacted[field] = withoutPriorAnswers(item);
   }
-  return { ...record, content: redacted };
+  return redacted;
 }
 
 function serializeNativeContext(nativeContext) {
@@ -161,12 +177,14 @@ function serializeNativeContext(nativeContext) {
     validateNativeValue(record, `adapter-native context[${index}]`, state, 0);
   }
   // Validation runs on what the adapter actually returned; only what reaches the
-  // model is redacted. A record that fails the boundary still fails it.
-  const serialized = canonicalJson(nativeContext.map(withoutPriorAnswers));
-  if (Buffer.byteLength(serialized, 'utf8') > MAX_NATIVE_BYTES) {
+  // model is redacted. A record that fails the boundary still fails it - and the
+  // byte cap is measured on the unredacted form for the same reason. Measuring
+  // it after redaction would have quietly admitted payloads that used to be
+  // rejected, since the redacted text is necessarily the shorter of the two.
+  if (Buffer.byteLength(canonicalJson(nativeContext), 'utf8') > MAX_NATIVE_BYTES) {
     boundaryReject('LIMIT');
   }
-  return serialized;
+  return canonicalJson(nativeContext.map(withoutPriorAnswers));
 }
 
 function primaryInput(scenario) {

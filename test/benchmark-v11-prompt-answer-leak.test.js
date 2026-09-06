@@ -152,6 +152,81 @@ test('a record with no content object is passed through rather than rejected', a
   assert.ok(prompt.includes('native shape'));
 });
 
+// ---------------------------------------------------------------------------
+// Adapter-native shapes. The first version of this redaction matched the path
+// `record.content.<key>`, which is what `logical_record` produces and what four
+// of the seven arms return. Every other shape went straight through. These pin
+// the key-based behaviour that replaced it.
+// ---------------------------------------------------------------------------
+
+const ANSWER_KEYS = ['changedFactDetected', 'changedFactId', 'decisionId'];
+
+function leakedKeys(prompt) {
+  // Escaped too: a record serialised into a string renders as \"key\".
+  return ANSWER_KEYS.filter((key) => prompt.includes(`"${key}"`) || prompt.includes(`\\"${key}\\"`));
+}
+
+test('an answer field nested below content does not reach the prompt', async () => {
+  const SCENARIO = await acceptanceScenario();
+  const record = recordFor(SCENARIO, 'A');
+  const prompt = promptFor(SCENARIO, 'D_TRUE', [
+    { id: 'r1', type: 'decision', content: { inner: record.content } }
+  ]);
+  assert.deepEqual(leakedKeys(prompt), []);
+});
+
+test('an answer field in a sibling key of content does not reach the prompt', async () => {
+  const SCENARIO = await acceptanceScenario();
+  const record = recordFor(SCENARIO, 'A');
+  const prompt = promptFor(SCENARIO, 'D_TRUE', [
+    { id: 'r1', type: 'decision', data: record.content }
+  ]);
+  assert.deepEqual(leakedKeys(prompt), []);
+});
+
+test('an answer field inside an array of results does not reach the prompt', async () => {
+  const SCENARIO = await acceptanceScenario();
+  const record = recordFor(SCENARIO, 'A');
+  const prompt = promptFor(SCENARIO, 'D_TRUE', [
+    { id: 'r1', type: 'decision', results: [{ content: record.content }] }
+  ]);
+  assert.deepEqual(leakedKeys(prompt), []);
+});
+
+test('a record serialised into a string is the documented residual, F37', async () => {
+  // Redaction matches object keys, so it cannot reach inside a string. Cognee's
+  // retrieve returns `{search_result, dataset_id, dataset_name}` with the record
+  // encoded as JSON inside `search_result`, so this shape still carries the
+  // answer fields. This test asserts the limitation rather than hiding it: F37
+  // records the remedy, which is to stop writing these fields to a record at all.
+  const SCENARIO = await acceptanceScenario();
+  const record = recordFor(SCENARIO, 'A');
+  const prompt = promptFor(SCENARIO, 'D_TRUE', [{
+    search_result: `shadowgraph-benchmark-record:v2:${JSON.stringify({ content: record.content })}`,
+    dataset_id: 'd1',
+    dataset_name: 'benchmark'
+  }]);
+  assert.deepEqual(
+    leakedKeys(prompt).sort(),
+    ['changedFactDetected', 'changedFactId', 'decisionId'],
+    'if this ever comes back empty, F37 has been closed and this test should assert that instead'
+  );
+});
+
+test('the byte cap is measured on what the adapter returned, not on the redacted text', async () => {
+  // Redacted text is necessarily shorter, so capping after redaction would
+  // quietly admit payloads the boundary used to reject.
+  const SCENARIO = await acceptanceScenario();
+  const oversized = Array.from({ length: 9 }, (_, index) => {
+    const record = recordFor(SCENARIO, 'A');
+    return { ...record, id: `decision:oversized-${index}`, content: { ...record.content, changedFactId: 'x'.repeat(8000) } };
+  });
+  assert.throws(
+    () => buildV11Prompt({ phase: 'D_TRUE', scenario: SCENARIO, nativeContext: oversized }),
+    (error) => error.code === 'LIMIT'
+  );
+});
+
 test('Phase A is unaffected, because it retrieves nothing', async () => {
   const SCENARIO = await acceptanceScenario();
   const request = buildV11Prompt({ phase: 'A', scenario: SCENARIO, nativeContext: [] });
