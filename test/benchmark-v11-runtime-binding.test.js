@@ -50,7 +50,7 @@ const MODEL_WEIGHTS = {
   models: [
     {
       kind: 'decision_llm',
-      modelId: 'qwen2.5:0.5b',
+      modelId: 'qwen2.5:7b',
       digestKind: 'model_weights',
       weightsDigest: `sha256:${'a'.repeat(64)}`,
       embeddingDimension: null
@@ -482,7 +482,7 @@ test('every argument of the composition, because the composition is all this doe
   // model - the same one the internal memory route uses.
   assert.equal(seen.outerTransport.length, 1);
   const outer = seen.outerTransport[0];
-  assert.equal(outer.model, 'qwen2.5:0.5b');
+  assert.equal(outer.model, 'qwen2.5:7b');
   assert.deepEqual(outer.seeds, [11, 22]);
   assert.equal(outer.temperature, PREREGISTRATION.commonExecution.temperature);
   assert.equal(outer.maxOutputTokens, PREREGISTRATION.commonExecution.maxOutputTokens);

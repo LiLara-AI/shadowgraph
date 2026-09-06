@@ -48,7 +48,7 @@ function modelWeights() {
   return {
     schemaVersion: 1,
     models: [
-      { kind: 'decision_llm', modelId: 'qwen2.5:0.5b', digestKind: 'model_weights', weightsDigest: LLM_WEIGHTS },
+      { kind: 'decision_llm', modelId: 'qwen2.5:7b', digestKind: 'model_weights', weightsDigest: LLM_WEIGHTS },
       { kind: 'embedding', modelId: 'nomic-embed-text:v1.5', digestKind: 'model_weights', weightsDigest: EMBEDDING_WEIGHTS }
     ]
   };
@@ -92,7 +92,7 @@ function estate(failures = {}) {
       return jsonResponse(200, { results: [{ columns: ['ok'], data: [{ row: [1] }] }], errors: [] });
     }
     if (url === 'http://127.0.0.1:11434/v1/chat/completions') {
-      return jsonResponse(200, { model: 'qwen2.5:0.5b', choices: [{ message: { role: 'assistant', content: 'OK' } }] });
+      return jsonResponse(200, { model: 'qwen2.5:7b', choices: [{ message: { role: 'assistant', content: 'OK' } }] });
     }
     if (url === 'http://127.0.0.1:11434/v1/embeddings') {
       return jsonResponse(200, { model: 'nomic-embed-text:v1.5', data: [{ embedding: new Array(768).fill(0.1) }] });
@@ -117,7 +117,7 @@ function probeInput(overrides = {}) {
       inspectImage: async (reference) => (reference === 'neo4j:5.20'
         ? { id: NEO4J_TAG_ID, layers: [...NEO4J_LAYERS] }
         : { id: OLLAMA_TAG_ID, layers: [...OLLAMA_LAYERS] }),
-      readModelWeightsDigest: async (_container, modelId) => (modelId === 'qwen2.5:0.5b'
+      readModelWeightsDigest: async (_container, modelId) => (modelId === 'qwen2.5:7b'
         ? LLM_WEIGHTS
         : EMBEDDING_WEIGHTS),
       readAuthorization: (service) => (service.authEnvironmentVariable === undefined
@@ -170,13 +170,13 @@ test('weight digests are read from the serving container, not copied from the lo
     input: {
       readModelWeightsDigest: async (container, modelId) => {
         observed.push({ container, modelId });
-        return modelId === 'qwen2.5:0.5b' ? LLM_WEIGHTS : EMBEDDING_WEIGHTS;
+        return modelId === 'qwen2.5:7b' ? LLM_WEIGHTS : EMBEDDING_WEIGHTS;
       }
     }
   });
   await probeServices(input);
   assert.deepEqual(observed, [
-    { container: 'shadowgraph-v11-ollama', modelId: 'qwen2.5:0.5b' },
+    { container: 'shadowgraph-v11-ollama', modelId: 'qwen2.5:7b' },
     { container: 'shadowgraph-v11-ollama', modelId: 'nomic-embed-text:v1.5' }
   ]);
 });

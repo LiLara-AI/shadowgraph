@@ -5,7 +5,7 @@
 // did: the host wrapper carried routes alone, so every library fell back to its
 // own default. Mem0's is `gpt-5-mini` for chat and `text-embedding-3-small` at
 // 1536 dimensions for embeddings. Pointed at the pinned Ollama, which serves
-// `qwen2.5:0.5b` and `nomic-embed-text:v1.5` at 768, the first asks for a model
+// `qwen2.5:7b` and `nomic-embed-text:v1.5` at 768, the first asks for a model
 // that is not there and the second sizes a vector collection to a width the
 // embeddings do not have.
 //

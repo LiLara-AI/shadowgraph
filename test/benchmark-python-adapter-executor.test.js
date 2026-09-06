@@ -981,14 +981,14 @@ processGroupTest('two invocations for one unit get two different container names
 // nothing said what to ask for, so each library used its own default: mem0
 // 2.0.19 asks for gpt-5-mini and text-embedding-3-small, and sizes its vector
 // collection to the latter's 1536 dimensions. Against the pinned Ollama - which
-// serves qwen2.5:0.5b and a 768-wide nomic-embed-text - the first is a model
+// serves qwen2.5:7b and a 768-wide nomic-embed-text - the first is a model
 // that is not there and the second is a collection the wrong width for the
 // vectors written into it. Neither is visible in a route.
 
 processGroupTest('the wrapper carries the locked model and dimension for every metered class', async (t) => {
   const { hostPath } = await makeHost(t, successHostSource({
     assertions: String.raw`assert wrapper["providerModels"] == {
-    "internal_memory_llm": {"modelId": "qwen2.5:0.5b", "embeddingDimension": None},
+    "internal_memory_llm": {"modelId": "qwen2.5:7b", "embeddingDimension": None},
     "embedding": {"modelId": "nomic-embed-text:v1.5", "embeddingDimension": 768},
 }`
   }));
@@ -1000,7 +1000,7 @@ processGroupTest('the wrapper carries the locked model and dimension for every m
 
   // And the literals above are the lock's, not this test's.
   const locked = pinnedModelsFor('mem0-oss');
-  assert.equal(locked.internal_memory_llm.modelId, 'qwen2.5:0.5b');
+  assert.equal(locked.internal_memory_llm.modelId, 'qwen2.5:7b');
   assert.equal(locked.embedding.modelId, 'nomic-embed-text:v1.5');
   assert.equal(locked.embedding.embeddingDimension, 768);
 });
@@ -1026,15 +1026,15 @@ test('a metered arm without its pinned models cannot be constructed', () => {
     'qwen2.5:0.5b',
     {},
     // A model for one class and not the other.
-    { internal_memory_llm: { modelId: 'qwen2.5:0.5b', embeddingDimension: null }, embedding: null },
+    { internal_memory_llm: { modelId: 'qwen2.5:7b', embeddingDimension: null }, embedding: null },
     // The embedding width missing, which is the half that fails silently.
     {
-      internal_memory_llm: { modelId: 'qwen2.5:0.5b', embeddingDimension: null },
+      internal_memory_llm: { modelId: 'qwen2.5:7b', embeddingDimension: null },
       embedding: { modelId: 'nomic-embed-text:v1.5', embeddingDimension: null }
     },
     // A width on the chat model, which would mean the two were transposed.
     {
-      internal_memory_llm: { modelId: 'qwen2.5:0.5b', embeddingDimension: 768 },
+      internal_memory_llm: { modelId: 'qwen2.5:7b', embeddingDimension: 768 },
       embedding: { modelId: 'nomic-embed-text:v1.5', embeddingDimension: 768 }
     },
     // Ids that are not ids.

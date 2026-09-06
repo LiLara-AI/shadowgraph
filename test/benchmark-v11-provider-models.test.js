@@ -4,7 +4,7 @@
 // the meter counts what arrives. It says nothing about what was asked for, and
 // every one of these libraries has an opinion when nobody tells it - mem0 2.0.19
 // reaches for gpt-5-mini and text-embedding-3-small at 1536 dimensions. Pointed
-// at the pinned Ollama that serves qwen2.5:0.5b and a 768-wide embedder, the
+// at the pinned Ollama that serves qwen2.5:7b and a 768-wide embedder, the
 // first names a model that is not installed and the second sizes a vector
 // collection to a width the vectors do not have.
 //
@@ -35,7 +35,7 @@ function lock(models) {
 
 function pinned() {
   return [
-    { kind: 'decision_llm', modelId: 'qwen2.5:0.5b', embeddingDimension: null },
+    { kind: 'decision_llm', modelId: 'qwen2.5:7b', embeddingDimension: null },
     { kind: 'embedding', modelId: 'nomic-embed-text:v1.5', embeddingDimension: 768 }
   ];
 }
@@ -54,7 +54,7 @@ test('the real lock resolves to the models the pinned services serve', async () 
   const modelWeights = JSON.parse(await readFile(LOCK_PATH, 'utf8'));
   const resolved = providerModelsFromLock(modelWeights);
   assert.deepEqual(resolved, {
-    internal_memory_llm: { modelId: 'qwen2.5:0.5b', embeddingDimension: null },
+    internal_memory_llm: { modelId: 'qwen2.5:7b', embeddingDimension: null },
     embedding: { modelId: 'nomic-embed-text:v1.5', embeddingDimension: 768 }
   });
 });

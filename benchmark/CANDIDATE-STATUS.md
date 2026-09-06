@@ -911,36 +911,59 @@ writes no artifact; one started without evidence refuses on readiness, naming
 its blockers. Given both, the run path binds: the meter, the ledgers, the
 environment observation, the implementation lock and all seven arms.
 
-That is the honest state, and it is not that nothing could run. It is **F2**:
-the pinned `qwen2.5:0.5b` returns a decision the frozen schema rejects, and Phase
-A is the first thing every unit does, so every measured unit would fail at the
-outer model. The harness being runnable and the run being meaningful are
-different questions, and only the first is answered.
+**F2 was the last thing in the way, and the owner cleared it on 2026-09-06 by
+pinning a decision model that can answer.** What follows is the measurement that
+informed that decision and what the decision changed.
 
-F2 was re-measured on 2026-09-06 through the shipped `buildV11Prompt` and
+F2 was re-measured through the shipped `buildV11Prompt` and
 `requestOuterDecision`, over both scenarios at all three frozen seeds, with the
 definition loaded through its hash gate
 (`benchmark/probes/v11_phase_a_decision_probe.mjs`):
 
 | Decision model | Phase A accepted | Rejected by |
 | --- | --- | --- |
-| `qwen2.5:0.5b`, the pinned one | **0 / 6** | `failedAttemptIdsAvoided`: wrong shape on one scenario, absent on the other |
+| `qwen2.5:0.5b`, pinned until now | **0 / 6** | `failedAttemptIdsAvoided`: wrong shape on one scenario, absent on the other |
 | `qwen2.5:3b` | **0 / 6** | `failedAttemptIdsAvoided` must be an array of strings |
-| `qwen2.5:7b` | **6 / 6** | — |
+| **`qwen2.5:7b`, pinned now** | **6 / 6** | — |
 
-So F2 is a model-capacity limit, not a prompt or schema defect: the same prompt
-and the same schema are satisfied on every attempt at 7B. And the remedy looks
-to be inside the frozen methodology rather than an amendment to it — the
-preregistration froze the decision LLM identity as `null` and permits a later run
-to fill it "only from a successful capability probe", and
-`model-weights.lock.json` is not one of the four hash-gated frozen sources.
+So F2 was a model-capacity limit, not a prompt or schema defect: the same prompt
+and the same schema are satisfied on every attempt at 7B. Phase A is the first
+thing every unit does, so at 0.5b every one of the 288 measured units would have
+failed at the outer model — a runnable harness producing a meaningless run.
 
-**The lock is not changed, and that remains the owner's decision.** What changed
-is that it is now a decision with a measured answer rather than an open question.
-Choosing a model requires editing `model-weights.lock.json` with its weight
-digest, re-running `v11-service-probe` (the current record names `qwen2.5:0.5b`
-as served), and re-running the Phase A probe against the committed lock so the
-record describes the pinned model rather than a candidate.
+**Why this is not an amendment.** The preregistration froze the decision LLM
+identity as `null` with `statusAtFreeze: NOT_AVAILABLE`, and permits a later run
+to fill it "only from a successful capability probe". The four hash-gated frozen
+sources are `preregistration.json` and amendments 001, 002 and 003;
+`model-weights.lock.json` is none of them, and neither `definition.json` nor any
+amendment names a model id. Verified rather than assumed. The probe above is the
+capability probe the clause requires.
+
+**What the swap changes, stated plainly.** One chat model is pinned for both the
+outer decision *and* every arm's internal memory LLM — deliberately, because an
+arm allowed its own would be measured against different reasoning and the
+comparison would stop being between memory systems. So this raises the internal
+extraction of Mem0, Graphiti and Cognee to 7B as well, identically for all of
+them. It also makes the run slow: measured at ~29.6s and ~607 tokens per outer
+decision on this machine, the 260 outer decision calls alone are ~128 minutes,
+and the arms' internal calls are on top of that.
+
+**And it stays on the CPU.** The pinned Ollama reports `inference compute id=cpu,
+total_vram="0 B"`. Passing the host GPU was tried in a throwaway container from
+the same pinned image and does not work: WSL2 exposes `/dev/dxg` and never
+`/dev/dri`, every Vulkan driver in the image (Intel's included) needs a
+`/dev/dri` node, and the one driver that works over `/dev/dxg` is not in the
+image. Adding it would mean modifying the image and breaking the digest that the
+lock and `v11-service-probe` verify — buying speed with the thing that makes the
+result checkable. The service containers were not touched.
+
+Two consequences of the swap were carried through here: `model-weights.lock.json`
+records `qwen2.5:7b` with the weight-layer digest read from the serving container
+and the exact parameter count from its own metadata, and the 27 places in code,
+fixtures and comments that named the old id were updated. The two tests that read
+the real lock and compare it with a literal — which is what stops a lock change
+from passing unnoticed — were re-verified: quietly renaming the locked model, or
+changing the embedding width, still fails two tests each.
 
 | ID | Blocker | State |
 | --- | --- | --- |
@@ -958,7 +981,7 @@ record describes the pinned model rather than a candidate.
 | LB2g | Control and MCP runtime hosts unbound | Cleared |
 | LB3 | Implementation lock requires a clean tree | Cleared |
 | F1 | The container runtime refused the tag the competitor lock pins, so every Python arm would have been recorded as a contract failure of the product | Cleared |
-| F2 | The pinned decision model returns a decision the frozen schema rejects: 0 of 6 Phase A attempts over both scenarios at all three frozen seeds, every one on `failedAttemptIdsAvoided`. `qwen2.5:3b` also 0 of 6; `qwen2.5:7b` 6 of 6 | **Open**, owner decision, with the candidate measurement in `benchmark/evidence/v11-readiness-and-f2-2026-09-06.md` |
+| F2 | The pinned decision model returned a decision the frozen schema rejects: 0 of 6 Phase A attempts over both scenarios at all three frozen seeds, every one on `failedAttemptIdsAvoided`. `qwen2.5:3b` also 0 of 6; `qwen2.5:7b` 6 of 6 | Cleared by owner decision on 2026-09-06: `qwen2.5:7b` pinned, inside the preregistration's capability-probe clause rather than by amendment |
 | F3 | Cognee refuses the user namespace the definition declares it supports, on a precondition CB2 has since demonstrated | Cleared |
 | F4 | The run's teardown closed the progress ledger before the runner wrote its terminal event, so every bound run would have executed all 308 units and then written no artifact | Cleared |
 | F5 | The loopback network fence guarded four connection-oriented entry points and described itself as closing egress by construction; a datagram and `gethostbyname` both left the process | Cleared |

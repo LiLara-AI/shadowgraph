@@ -95,7 +95,7 @@ def python_config(*, llm: str | None = "http://127.0.0.1:43100/llm-a", embedding
 
 def python_models(
     *,
-    llm: str | None = "qwen2.5:0.5b",
+    llm: str | None = "qwen2.5:7b",
     embedding: str | None = "nomic-embed-text:v1.5",
     dimension: int | None = 768,
 ) -> dict:
@@ -126,7 +126,7 @@ def models_for(config: dict) -> dict:
     deliberately mismatched pair something a test has to ask for.
     """
     return python_models(
-        llm=None if config["internal_memory_llm"] is None else "qwen2.5:0.5b",
+        llm=None if config["internal_memory_llm"] is None else "qwen2.5:7b",
         embedding=None if config["embedding"] is None else "nomic-embed-text:v1.5",
     )
 

@@ -367,7 +367,7 @@ class CogneeAdapterTests(unittest.TestCase):
         # provider prefix to resolve a model it has not seen; the embedding path
         # uses the OpenAI-compatible engine directly and takes the bare id. The
         # ACL demonstration established both against the live service.
-        self.assertEqual(config["llm_config"]["model"], "openai/qwen2.5:0.5b")
+        self.assertEqual(config["llm_config"]["model"], "openai/qwen2.5:7b")
         self.assertEqual(config["embedding_config"]["model"], "nomic-embed-text:v1.5")
         self.assertEqual(config["embedding_config"]["dimensions"], 768)
         self.assertEqual(config["llm_config"]["max_retries"], 0)

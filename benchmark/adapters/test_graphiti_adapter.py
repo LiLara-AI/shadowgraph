@@ -176,7 +176,7 @@ class GraphitiAdapterTests(unittest.TestCase):
         config = self.configs[0]
         self.assertEqual(config["llm_endpoint"], "http://127.0.0.1:43100/llm-a")
         self.assertEqual(config["embedding_endpoint"], "http://127.0.0.1:43100/embed-a")
-        self.assertEqual(config["llm_model"], "qwen2.5:0.5b")
+        self.assertEqual(config["llm_model"], "qwen2.5:7b")
         self.assertEqual(config["embedding_model"], "nomic-embed-text:v1.5")
         self.assertEqual(config["embedding_dimension"], 768)
 

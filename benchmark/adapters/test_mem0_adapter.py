@@ -218,7 +218,7 @@ class Mem0AdapterTests(unittest.TestCase):
         # Unset, mem0 2.0.19 asks for gpt-5-mini and text-embedding-3-small and
         # sizes its vector collection to the latter's 1536 dimensions. The
         # pinned Ollama serves neither, and returns 768-wide vectors.
-        self.assertEqual(config["llm"]["config"]["model"], "qwen2.5:0.5b")
+        self.assertEqual(config["llm"]["config"]["model"], "qwen2.5:7b")
         self.assertEqual(config["embedder"]["config"]["model"], "nomic-embed-text:v1.5")
         self.assertEqual(config["embedder"]["config"]["embedding_dims"], 768)
         self.assertNotIn("max_retries", config["llm"]["config"])

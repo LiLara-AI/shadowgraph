@@ -40,7 +40,7 @@ function modelWeights() {
   return {
     schemaVersion: 1,
     models: [
-      { kind: 'decision_llm', modelId: 'qwen2.5:0.5b', digestKind: 'model_weights', weightsDigest: LLM_WEIGHTS },
+      { kind: 'decision_llm', modelId: 'qwen2.5:7b', digestKind: 'model_weights', weightsDigest: LLM_WEIGHTS },
       { kind: 'embedding', modelId: 'nomic-embed-text:v1.5', digestKind: 'model_weights', weightsDigest: EMBEDDING_WEIGHTS }
     ]
   };
@@ -81,7 +81,7 @@ function evidence(overrides = {}) {
         resolvedDigest: OLLAMA_DIGEST,
         containerId: '9bf2e614d12d',
         servedModels: [
-          { modelId: 'qwen2.5:0.5b', weightsDigest: LLM_WEIGHTS },
+          { modelId: 'qwen2.5:7b', weightsDigest: LLM_WEIGHTS },
           { modelId: 'nomic-embed-text:v1.5', weightsDigest: EMBEDDING_WEIGHTS }
         ],
         checks: [
@@ -245,7 +245,7 @@ test('a model-serving claim is only required of the service that claims to serve
 test('the locked weights must be served by one endpoint, not spread across several', () => {
   const document = evidence();
   document.services[0].servedModels = [{ modelId: 'nomic-embed-text:v1.5', weightsDigest: EMBEDDING_WEIGHTS }];
-  document.services[1].servedModels = [{ modelId: 'qwen2.5:0.5b', weightsDigest: LLM_WEIGHTS }];
+  document.services[1].servedModels = [{ modelId: 'qwen2.5:7b', weightsDigest: LLM_WEIGHTS }];
   const result = verify({ evidence: document });
   assert.ok(!result.verifiedServices.has('ollama'), 'a partial model set must not verify the common endpoint');
   assert.ok(result.findings.some((finding) => finding.code === 'SERVICE_MODEL_ABSENT'));

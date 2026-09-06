@@ -104,8 +104,8 @@ class PythonHostTests(unittest.TestCase):
             python_models(dimension=None),
             python_models(llm="qwen 2.5"),
             {"internal_memory_llm": None, "embedding": None},
-            {"internal_memory_llm": "qwen2.5:0.5b", "embedding": "nomic-embed-text:v1.5"},
-            {"internal_memory_llm": {"modelId": "qwen2.5:0.5b"}, "embedding": None},
+            {"internal_memory_llm": "qwen2.5:7b", "embedding": "nomic-embed-text:v1.5"},
+            {"internal_memory_llm": {"modelId": "qwen2.5:7b"}, "embedding": None},
         ):
             record = self.wrapper(models=models)
             with patch.object(python_host.importlib, "import_module") as importer:
