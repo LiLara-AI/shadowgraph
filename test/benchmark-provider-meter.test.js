@@ -584,6 +584,72 @@ test('request-class routes and methods cannot be mislabeled and every bound reje
   }
 });
 
+test('a client that spells the resource with its own /v1 is metered, not refused', async (t) => {
+  // F27. The bound capability is a whole URL and the upstream's version segment
+  // is already inside it, so clients disagree about whether to append
+  // `/embeddings` or `/v1/embeddings`. Mem0's OpenAI client appends the first;
+  // Cognee's `openai_compatible` embedding engine appends the second, always -
+  // handing it a URL already ending in `/embeddings` produced
+  // `/embeddings/v1/embeddings`, so no endpoint shape fixes it.
+  //
+  // Every one of Cognee's embedding requests was refused in zero milliseconds,
+  // its persist failed, and all twenty of its later units failed behind that.
+  // The arm was reported as failing over a path segment.
+  let upstreamCount = 0;
+  const upstreamPaths = [];
+  const upstream = await listen(t, async (request, response) => {
+    upstreamCount += 1;
+    upstreamPaths.push(new URL(request.url, 'http://127.0.0.1').pathname);
+    await readBody(request);
+    response.end('{}');
+  });
+  const { meter, ledgerPath } = await meterFor(t, upstream.origin);
+  const embeddingEndpoint = meter.bindEndpoint({ ...BASE_CORRELATION, requestClass: 'embedding' });
+  const outerEndpoint = meter.bindEndpoint(BASE_CORRELATION);
+
+  const post = (url, model) => fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model })
+  });
+
+  // Both spellings of the bound resource reach upstream.
+  const bare = await post(`${embeddingEndpoint}/embeddings`, 'embedding-model');
+  const versioned = await post(`${embeddingEndpoint}/v1/embeddings`, 'embedding-model');
+  const chat = await post(`${outerEndpoint}/v1/chat/completions`, 'outer-model');
+  assert.equal(bare.status, 200);
+  assert.equal(versioned.status, 200, 'a leading /v1 names the same resource');
+  assert.equal(chat.status, 200);
+  assert.equal(upstreamCount, 3);
+
+  // And what the check is actually for is untouched: a capability bound for one
+  // class still cannot be used for another, in either spelling.
+  const crossed = await post(`${embeddingEndpoint}/v1/chat/completions`, 'embedding-model');
+  const crossedBack = await post(`${outerEndpoint}/v1/embeddings`, 'outer-model');
+  const doubled = await post(`${embeddingEndpoint}/v1/v1/embeddings`, 'embedding-model');
+  const nested = await post(`${embeddingEndpoint}/embeddings/v1/embeddings`, 'embedding-model');
+  // Only at the front, and only once. Stripping a `/v1` from the middle would
+  // accept a path the upstream never serves - the comment above says "leading",
+  // and nothing pinned it until this line.
+  const middle = await post(`${outerEndpoint}/chat/v1/completions`, 'outer-model');
+  assert.equal(crossed.status, 400);
+  assert.equal(crossedBack.status, 400);
+  assert.equal(doubled.status, 400, 'only one /v1 is normalised, and only at the front');
+  assert.equal(nested.status, 400);
+  assert.equal(middle.status, 400, 'a /v1 in the middle is not a spelling of the resource');
+  assert.equal(upstreamCount, 3, 'no crossed or misspelled request reached upstream');
+
+  // The proxy still forwards the upstream's own path, not the client's spelling.
+  assert.deepEqual(upstreamPaths, ['/embeddings', '/embeddings', '/chat/completions'],
+    'the client spelling is normalised before it is forwarded, or an upstream whose base already ends in /v1 gets /v1/v1/embeddings');
+
+  const events = await ledgerEvents(ledgerPath);
+  assert.equal(events.length, 8, 'three metered, five refused');
+  assert.deepEqual(events.map((event) => event.outcome), [
+    'SUCCEEDED', 'SUCCEEDED', 'SUCCEEDED', 'FAILED', 'FAILED', 'FAILED', 'FAILED', 'FAILED'
+  ]);
+});
+
 test('early bound rejections close incomplete bodies and cannot block meter shutdown', async (t) => {
   let upstreamCount = 0;
   const upstream = await listen(t, async (request, response) => {

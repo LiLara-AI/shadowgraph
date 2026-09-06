@@ -51,6 +51,32 @@ const RESOURCE_BY_REQUEST_CLASS = Object.freeze({
   internal_memory_llm: '/chat/completions',
   embedding: '/embeddings'
 });
+
+/**
+ * The resource a client asked for, with one leading `/v1` removed.
+ *
+ * A bound capability is a whole URL, and the upstream's version segment is
+ * already inside it - `/provider-meter/v1/<id>` proxies to an upstream base
+ * that itself ends in `/v1`. Clients disagree about whether that means they
+ * should append `/embeddings` or `/v1/embeddings`, and both name the same
+ * resource. Mem0's OpenAI client appends the first; Cognee's
+ * `openai_compatible` embedding engine appends the second, unconditionally -
+ * handing it a URL that already ends in `/embeddings` only produced
+ * `/embeddings/v1/embeddings`, so this cannot be fixed by shaping the endpoint.
+ *
+ * F27: every one of Cognee's embedding requests was refused with
+ * CLIENT_CONTRACT_FAILURE in zero milliseconds, its persist failed, and every
+ * later phase failed behind it - an arm reported as failing for a disagreement
+ * about a path segment.
+ *
+ * What the comparison is actually for is unchanged: a capability bound for
+ * embeddings must not be usable for a chat completion. Stripping one `/v1`
+ * from either side of that comparison cannot turn one resource into the other,
+ * and nothing else is normalised - the match stays exact.
+ */
+function boundResourcePath(resourcePath) {
+  return resourcePath.startsWith('/v1/') ? resourcePath.slice(3) : resourcePath;
+}
 const USAGE_COUNT_FIELDS = new Set([
   'prompt_tokens',
   'completion_tokens',
@@ -653,7 +679,8 @@ export async function startProviderMeter(config) {
       await rejectBoundRequest(405);
       return;
     }
-    if (resourcePath !== RESOURCE_BY_REQUEST_CLASS[correlation.requestClass]) {
+    const boundResource = boundResourcePath(resourcePath);
+    if (boundResource !== RESOURCE_BY_REQUEST_CLASS[correlation.requestClass]) {
       await rejectBoundRequest(400);
       return;
     }
@@ -670,7 +697,10 @@ export async function startProviderMeter(config) {
       if (inboundTimeoutMs < 1) throw codedError('PROVIDER_REQUEST_TIMEOUT');
       body = await readBoundedBody(request, MAX_REQUEST_BYTES, inboundTimeoutMs);
       requestedModel = parseRequestedModel(body);
-      target = resourceTarget(upstream, resourcePath, incoming.search);
+      // The normalised resource, not the client's spelling. The upstream base
+      // already carries its own version segment, so forwarding a client's
+      // `/v1/embeddings` verbatim would ask it for `/v1/v1/embeddings`.
+      target = resourceTarget(upstream, boundResource, incoming.search);
     } catch (error) {
       if (error?.code === 'PROVIDER_REQUEST_TIMEOUT') {
         await rejectTimedOutRequest();

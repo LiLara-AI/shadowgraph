@@ -128,6 +128,68 @@ phases collide.
 Notable in itself: **2363 tests passed before the guard was added.** Nothing
 pinned the id format, and nothing asserted the property the audit depends on.
 
+## F27 — a path segment, and an arm reported as failing for it
+
+The run was restarted with F26 fixed, and reached 155 of 308 units with five
+arms measuring normally. Cognee did not: **20 of its 22 units failed**, and the
+monitor called it a timeout. It was not a timeout.
+
+The provider meter's ledger says what it was:
+
+```
+#69  embedding  A  http=None  latency=0.0s
+     failure={"code":"CLIENT_CONTRACT_FAILURE","message":"Metered provider request violated the bound contract"}
+```
+
+Eight of those, all Cognee, all `embedding`, all refused in **zero
+milliseconds** — before any upstream call. Mem0's twenty-one embedding requests
+went through. The `TIMEOUT` the unit reported is what the adapter said *after*
+its embeddings kept being refused.
+
+A bound capability is a whole URL, `/provider-meter/v1/<48 hex>`, and the meter
+requires the rest of the path to equal the resource for the bound class. The
+upstream base already ends in `/v1`. Clients disagree about what to append.
+Measured, by standing up a server shaped like the meter's route and logging
+what Cognee asked for:
+
+```
+POST  suffix=/chat/completions      model=qwen2.5:7b              MATCHES
+POST  suffix=/v1/embeddings         model=nomic-embed-text:v1.5   REFUSED - meter wants /embeddings
+```
+
+Cognee's litellm completion path appends `/chat/completions`; its
+`openai_compatible` embedding engine appends `/v1/embeddings`. Both name the
+same resources the meter binds; one spelling was accepted and the other was
+not, and **an arm was reported as failing over that**.
+
+**The adapter cannot fix it.** The obvious candidate — hand Cognee an endpoint
+that already names the resource — was tried and refuted in the same probe:
+Cognee appends `/v1/embeddings` unconditionally, producing
+`/embeddings/v1/embeddings`. No endpoint shape works.
+
+**Fixed in the meter, in the one place that owns the comparison.** One leading
+`/v1` is removed before the resource is compared *and* before it is forwarded.
+The class separation the check exists for is untouched: a capability bound for
+embeddings still cannot be used for a chat completion, in either spelling.
+
+The second half of that sentence is the part the first attempt got wrong. The
+meter forwards the client's resource path to the upstream base, so normalising
+only the *check* would have accepted `/v1/embeddings` and then asked ollama for
+`/v1/v1/embeddings`. The test asserts the forwarded path, and that is what
+caught it before it shipped.
+
+Four mutations, four failures: the normaliser reverted to identity (F27
+verbatim); checked normalised but forwarded raw (the half-fix); `/v1` stripped
+anywhere rather than only at the front; the class check dropped entirely. The
+third of those initially **survived** — the comment said "leading" and nothing
+pinned it — so the test now sends `/chat/v1/completions` and requires a refusal.
+
+### What F27 means for the run that found it
+
+Cognee's results in `v11-acceptance-002` are **not measurements of Cognee**.
+They are our meter refusing its requests. Nothing from that arm may be read as
+a property of the product.
+
 ## An operator error in this session, recorded because it was reported wrongly
 
 The first attempt to stop the run reported "stopped" and stopped nothing. The
