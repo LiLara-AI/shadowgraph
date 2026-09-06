@@ -1038,7 +1038,7 @@ operator error worth keeping: the first attempt to stop that run reported
 | LB1 | Required-service blockers emitted unconditionally | Cleared |
 | LB2a | `v11RuntimeDependencies()` unimplemented | Cleared, all seven arms bound and reached |
 | LB2b | Mem0, Graphiti and Cognee client factories refuse | Cleared for Mem0 and Cognee, both executing; **Open** for Graphiti, which is LB2f |
-| LB2c | Basic Memory storage attribution deferred | Cleared, exact bytes of the owned project directory |
+| LB2c | Basic Memory storage attribution deferred | **Clearance withdrawn, reclosed as not-attributable (F29)**. It rested on the premise that the arm's records are the files in its project directory. Basic Memory 0.23.2 persists record bodies to a SQLite index shared by every project and defers the markdown write, so the directory stays empty and the walk reported MEASURED 0 bytes. The arm now declares NOT_AVAILABLE, as mem0 and cognee do |
 | LB2d | Pinned Python runtime never installed into the pinned image | Cleared |
 | LB2e | Adapters never routed through the pinned container | Cleared |
 | LB2f | Graphiti exact group driver unavailable | **Open**, owner decision recorded |

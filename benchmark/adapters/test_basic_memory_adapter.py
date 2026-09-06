@@ -281,77 +281,61 @@ class BasicMemoryAdapterTests(unittest.TestCase):
         self.assertEqual(response["failure"]["cause"], "CONTRACT_FAILURE")
         self.assertEqual(self.clients, [])
 
-    def test_storage_bytes_are_the_owned_project_directory_and_nothing_else(self) -> None:
-        # This arm is the one that can answer exactly. Basic Memory keeps a
-        # directory per project, named by a digest of the project id, so the
-        # bytes under it belong to this namespace and to no other. The arms with
-        # shared stores still declare NOT_AVAILABLE, and should.
+    def test_storage_is_not_available_because_record_bodies_are_not_in_the_directory(self) -> None:
+        # This arm used to report exact bytes by walking the project directory,
+        # on the premise that the arm's records are the files in it. Basic Memory
+        # 0.23.2 does not work that way: a note's body goes into
+        # `note_content.markdown_content` in the shared SQLite index, and the
+        # markdown file write is queued for `drain_pending_materializations()`,
+        # which nothing in this adapter's call path reaches. So a namespace holds
+        # its records while its directory stays empty, and a walk of that
+        # directory reports MEASURED 0 bytes - the most favourable number
+        # available, under the status that means the number is exact.
         #
-        # The bytes have to be put there by this test. The fake client keeps its
-        # notes in a dictionary, so the project directory is empty and the
-        # earlier version of this test compared the adapter's walk to a
-        # re-implementation of the same walk over nothing: 0 == 0, green while
-        # `total += stat_result.st_size` was mutated to `total += 0`. The
-        # expected number below is a literal, and the file outside the owned
-        # directory is what makes 'and nothing else' a claim rather than a name.
-        project_path = basic_memory_adapter._project_path(
-            self.state_root, self.request("persist")["namespace"]["projectId"]
-        )
-        nested = os.path.join(project_path, "notes")
-        os.makedirs(nested, exist_ok=True)
-        owned = {
-            os.path.join(project_path, "entity.md"): b"a" * 41,
-            os.path.join(nested, "relation.md"): b"b" * 137,
-        }
-        for path, payload in owned.items():
-            with open(path, "wb") as handle:
-                handle.write(payload)
-
-        # The shared SQLite index sits beside the project directories rather than
-        # under one, and belongs to no single namespace. Ten thousand bytes of it
-        # must not appear in this arm's number.
-        outside = os.path.join(
-            self.state_root, "basic-memory-projects", "memory.db"
-        )
-        with open(outside, "wb") as handle:
-            handle.write(b"c" * 10_000)
-
+        # The test that stood here wrote two files into the directory itself and
+        # asserted their sizes came back. It even said why it had to: "the fake
+        # client keeps its notes in a dictionary, so the project directory is
+        # empty". That empty directory was the product's actual behaviour, and
+        # supplying the missing files by hand turned the defect into the fixture.
         response = self.execute("persist")
         storage = response["storage"]
-        self.assertEqual(storage["status"], "MEASURED")
-        self.assertIsNone(storage["reason"])
-        self.assertEqual(storage["blockedClaims"], [])
-        self.assertEqual(storage["bytes"], 41 + 137)
+        self.assertEqual(storage["status"], "NOT_AVAILABLE")
+        self.assertIsNone(storage["bytes"])
+        self.assertIsNone(storage["method"])
+        self.assertEqual(storage["blockedClaims"], ["storage bytes"])
+        self.assertIn("shared by every project", storage["reason"])
 
-        # And the scope says what it leaves out, because a number that quietly
-        # folded in the shared SQLite index would be a different measurement
-        # wearing this one's name.
-        self.assertIn("SQLite index", storage["scope"])
-        self.assertIn("excluded", storage["scope"])
-        self.assertIn("project directory", storage["method"])
-
-    def test_an_absent_project_directory_is_refused_rather_than_reported_as_zero(self) -> None:
-        # os.walk over a path that is not there yields nothing, so the naive
-        # implementation reports 0 bytes measured - a claim about a store nobody
-        # looked at, which is the exact shape of fail-open this candidate keeps
-        # finding in itself.
-        missing = os.path.join(self.state_root, "no-such-project-directory")
-        self.assertFalse(os.path.exists(missing))
-        with self.assertRaises(ContractError):
-            basic_memory_adapter._measured_storage(missing)
-
-    def test_a_symlink_into_another_namespace_is_counted_nowhere(self) -> None:
-        if not hasattr(os, "symlink"):
-            self.skipTest("requires symlink support")
+    def test_a_namespace_holding_records_never_reports_measured_zero_bytes(self) -> None:
+        # The regression, stated as the run recorded it. A record is persisted
+        # and read back, so the namespace demonstrably holds it; the project
+        # directory holds no regular file, exactly as run v11-acceptance-002
+        # found. Any storage status of MEASURED here is a byte claim about
+        # records the walk cannot see, and 0 is the number it would report.
+        self.execute("persist")
         project_path = basic_memory_adapter._project_path(
             self.state_root, self.request("persist")["namespace"]["projectId"]
         )
-        elsewhere = Path(self.state_root) / "not-this-namespace.md"
-        elsewhere.write_bytes(b"x" * 4096)
-        before = basic_memory_adapter._measured_storage(project_path)["bytes"]
-        os.symlink(elsewhere, os.path.join(project_path, "borrowed.md"))
-        after = basic_memory_adapter._measured_storage(project_path)["bytes"]
-        self.assertEqual(after, before)
+        materialized = [
+            os.path.join(directory, name)
+            for directory, _subdirectories, names in os.walk(project_path)
+            for name in names
+        ]
+        self.assertEqual(materialized, [])
+
+        for operation in ("persist", "retrieve"):
+            storage = self.execute(operation)["storage"]
+            self.assertNotEqual(storage["status"], "MEASURED")
+            self.assertIsNone(storage["bytes"])
+
+    def test_a_failed_unit_says_it_stopped_early_rather_than_that_the_scope_is_missing(self) -> None:
+        # Both storages are NOT_AVAILABLE, and they still say different things.
+        # One is a fact about the product, the other about one invocation, and a
+        # run record reading back a failed unit should be able to tell which.
+        self.assertNotEqual(
+            basic_memory_adapter.STORAGE["reason"],
+            basic_memory_adapter.UNMEASURED_STORAGE["reason"],
+        )
+        self.assertIn("failed before", basic_memory_adapter.UNMEASURED_STORAGE["reason"])
 
     @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink support")
     def test_project_path_rejects_an_interior_symlink_without_outside_writes(self) -> None:

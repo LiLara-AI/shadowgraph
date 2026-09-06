@@ -6,7 +6,7 @@ import hashlib
 import os
 import stat
 
-from envelope import ContractError, build_envelope, empty_operations, measured_storage, not_available_storage, record_content_sha256, validate_request
+from envelope import ContractError, build_envelope, empty_operations, not_available_storage, record_content_sha256, validate_request
 from python_runtime import (
     ProviderCalls,
     RuntimeUnavailable,
@@ -28,14 +28,14 @@ from python_runtime import (
 ADAPTER_ID = "basic-memory"
 PINNED_PACKAGES = {"basic-memory": "0.23.2"}
 DIRECTORY = "shadowgraph-benchmark"
-# The storage a unit has when it failed before a byte scope existed. It is
-# not "this arm cannot attribute bytes" - this arm can, and every success
-# path measures - but "this particular invocation never got far enough to
-# look". Saying the former on a failure would have the run record assert a
-# blocker the same module closed.
+# The storage a unit has when it failed before reaching its namespace at all.
+# Both this and STORAGE below are NOT_AVAILABLE, but they are not the same
+# statement, and collapsing them would lose the difference between "this product
+# offers no attributable byte scope" and "this invocation stopped early". A run
+# record should be able to tell those apart when reading back a failed unit.
 UNMEASURED_STORAGE = not_available_storage(
     "Basic Memory exact local project scope",
-    "this operation failed before its owned project directory could be measured",
+    "this operation failed before its owned project namespace was resolved",
 )
 
 
@@ -66,46 +66,34 @@ RESET_ANCHOR_PROJECT = "shadowgraph-benchmark-reset-anchor"
 LOCAL_SEARCH_TYPE = "text"
 
 
-STORAGE_SCOPE = (
-    "Basic Memory owned project directory; the shared SQLite index and the "
-    "reset anchor project are excluded because neither is attributable to one "
-    "benchmark namespace"
+# This adapter used to report exact bytes by walking the project directory that
+# a namespace owns, on the premise that "the arm's records are the files in it".
+# That premise does not hold for the pinned product. Basic Memory 0.23.2 writes a
+# note's body into `note_content.markdown_content` in the shared
+# `config/basic-memory/memory.db`, and defers the markdown file write to a queue
+# drained by `drain_pending_materializations()`, whose callers are lifespans this
+# adapter does not enter. So the records exist and the directory stays empty: the
+# residue of run v11-acceptance-002 holds nine `note_content` rows per state
+# root, every one `file_write_status='pending'`, 14,765-15,156 characters of
+# markdown between them, and zero regular files in the project directories.
+#
+# The old code therefore reported MEASURED 0 bytes for namespaces that were
+# holding records - not an approximation of the truth but its opposite, and the
+# most favourable possible number, published under a status that means the
+# number is exact. Its fail-closed guard could not catch this either, because
+# `_project_path` creates the directory before anything asks whether it exists.
+#
+# The bytes are real and they are attributable in principle; what is missing is a
+# way to attribute them to one namespace from outside the product, since the
+# SQLite index is shared across every project. That is the same situation mem0
+# and cognee are in, and this now says so in the same words instead of reporting
+# a number it cannot stand behind.
+STORAGE = not_available_storage(
+    "Basic Memory exact local project scope",
+    "record bodies persist to a SQLite index shared by every project and "
+    "markdown materialization is deferred, so no exact attributable native "
+    "storage byte scope is available",
 )
-STORAGE_METHOD = (
-    "recursive sum of regular file sizes under the project directory this "
-    "namespace owns, following no symlink"
-)
-
-
-def _measured_storage(project_path: str) -> dict:
-    """Exact bytes under the directory this namespace owns.
-
-    Basic Memory keeps one directory per project, named by a digest of the
-    project id, and the arm's records are the files in it. That makes an exact
-    attributable byte scope available for this arm in a way it is not for the
-    others, whose stores are shared across namespaces - which is why they
-    declare NOT_AVAILABLE and this one no longer has to.
-
-    The scope names what is left out as well as what is counted. Basic Memory's
-    SQLite index lives outside this directory and is shared by every project, so
-    no part of it belongs to one namespace; a number that quietly folded it in
-    would be a different measurement wearing this one's name. Symlinks are
-    followed nowhere and counted nowhere, so nothing outside the owned directory
-    can be attributed to it.
-    """
-    if not os.path.isdir(project_path):
-        raise ContractError("Basic Memory project directory is absent, so there is no byte scope")
-    total = 0
-    for directory, _subdirectories, names in os.walk(project_path, followlinks=False):
-        for name in names:
-            path = os.path.join(directory, name)
-            try:
-                stat_result = os.lstat(path)
-            except OSError as error:
-                raise ContractError("Basic Memory storage scope could not be measured") from error
-            if stat.S_ISREG(stat_result.st_mode):
-                total += stat_result.st_size
-    return measured_storage(total, STORAGE_SCOPE, STORAGE_METHOD)
 
 
 def _project_path(state_root: str, project: str) -> str:
@@ -426,7 +414,7 @@ async def execute(
                 request,
                 native_context=native_context,
                 operations=operations,
-                storage=_measured_storage(project_path),
+                storage=STORAGE,
             )
         elif operation == "persist":
             record = request["payload"]["record"]
@@ -485,7 +473,7 @@ async def execute(
                     "OPERATION_FAILED",
                     "Exact Basic Memory persistence or isolation verification failed",
                     operations,
-                    _measured_storage(project_path),
+                    STORAGE,
                     persistence=persistence,
                     isolation=isolation,
                 )
@@ -494,11 +482,11 @@ async def execute(
                 persistence_evidence=persistence,
                 isolation_evidence=isolation,
                 operations=operations,
-                storage=_measured_storage(project_path),
+                storage=STORAGE,
             )
         # Reset and persist both leave the owned directory in place.
         return build_envelope(
-            request, operations=operations, storage=_measured_storage(project_path)
+            request, operations=operations, storage=STORAGE
         )
     except RuntimeUnavailable:
         return failed_response(
