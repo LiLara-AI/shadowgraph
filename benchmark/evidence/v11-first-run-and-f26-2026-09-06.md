@@ -190,6 +190,45 @@ Cognee's results in `v11-acceptance-002` are **not measurements of Cognee**.
 They are our meter refusing its requests. Nothing from that arm may be read as
 a property of the product.
 
+## F28 — the isolation namespace is never registered, so the question cannot be asked
+
+**Open, not fixed.** Basic Memory fails `ISOLATION_PROJECT` deterministically:
+three of three repetitions, `OPERATION_FAILED` on `retrieve`, ~4.5s, after one
+memory read. Every other phase of that arm is `MEASURED` (27 of 33 units), and
+four other arms pass the same phase. So it is specific to this arm and this
+phase.
+
+The mechanism, established rather than guessed:
+
+1. `basic_memory_adapter.py` calls `create_memory_project` **only in the RESET
+   branch**, and only for the arm's own namespace plus the reset anchor.
+2. `ISOLATION_PROJECT` retrieves with `project=<isolationProjectId>` —   `lantern-training` for one scenario, `mariner-lab` for the other — which
+   RESET never creates.
+3. Basic Memory raises rather than returning nothing for a project it does not
+   know, and the adapter classifies that as `OPERATION_FAILED`.
+
+**A first hypothesis was wrong and is recorded as such.** `_measured_storage`
+raises `ContractError` when the project directory is absent, which looked like
+the cause. It is not: `_project_path` calls `_ensure_real_direct_directory`,
+which *creates* the directory. Computing the adapter's own digest over every
+directory on disk shows all three present in every state root — the arm
+project, the isolation project, and the anchor. The directory exists; the
+*registration* does not.
+
+### Why this is a harness question, not a Basic Memory result
+
+The isolation claim is *the record is not visible under the other namespace*.
+Demonstrating it requires querying that namespace and finding nothing. Four
+arms can be asked; this one cannot, because the harness asks about a namespace
+it never registered with the product.
+
+Creating an empty project and finding nothing in it does not manufacture
+isolation — it is the demonstration. But it is a change to what the arm is
+asked to do, so it is recorded for the owner rather than taken here. The
+alternative reading, that a product refusing to answer is itself the answer, is
+a different claim from the one this phase makes, and the artifact currently
+records neither: it records `OPERATION_FAILED`.
+
 ## An operator error in this session, recorded because it was reported wrongly
 
 The first attempt to stop the run reported "stopped" and stopped nothing. The
