@@ -738,6 +738,20 @@ test('operational current-status header describes the committed candidate gate',
   assert.doesNotMatch(currentStatus, /NOT READY for provider budget/u);
 });
 
+test('operational current-status header distinguishes READY prerequisites from an unrun acceptance', async () => {
+  const operational = await readFile(
+    path.join(REPOSITORY_ROOT, 'benchmark', 'evidence', 'v11-operational-budget-repair.md'),
+    'utf8'
+  );
+  const [currentStatus] = operational.split('\n## Disposition', 1);
+  assert.match(currentStatus, /Neo4j `AUTH_OK`/u);
+  assert.match(currentStatus, /fresh Cognee ACL precondition.*PASS/u);
+  assert.match(currentStatus, /structured preflight.*`READY`.*zero blockers/u);
+  assert.match(currentStatus, /no `v11-acceptance-004` provider traffic, campaign ledger, raw run, aggregate, ranking, or publication exists/u);
+  assert.doesNotMatch(currentStatus, /must be supplied out of band before the Neo4j service probe can proceed/u);
+  assert.doesNotMatch(currentStatus, /No image pull, service start\/recreation, model substitution, scored work, or publication is an authorized workaround/u);
+});
+
 test('this candidate has produced no benchmark result', async () => {
   // The headline claim of CANDIDATE-STATUS.md, and constraint 3 of the goal:
   // no scored run, no acceptance run, no artifact. It had no enforcement in the
