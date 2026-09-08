@@ -721,6 +721,23 @@ test('CANDIDATE-STATUS labels historical verification as non-current evidence', 
   assert.doesNotMatch(status, /All figures below were produced on the current branch with a clean working tree\./u);
 });
 
+test('operational current-status header describes the committed candidate gate', async () => {
+  const operational = await readFile(
+    path.join(REPOSITORY_ROOT, 'benchmark', 'evidence', 'v11-operational-budget-repair.md'),
+    'utf8'
+  );
+  const [currentStatus] = operational.split('\n## Disposition', 1);
+  assert.match(
+    currentStatus,
+    /Current prospective status — Amendment 006 \(committed exact candidate; not a live result\)/u
+  );
+  assert.match(currentStatus, /official implementation lock/u);
+  assert.match(currentStatus, /unused, exact-lock-bound `v11-acceptance-004` budget and campaign policy/u);
+  assert.match(currentStatus, /SHADOWGRAPH_NEO4J_AUTH/u);
+  assert.doesNotMatch(currentStatus, /apply only after an authorized committed exact tree/u);
+  assert.doesNotMatch(currentStatus, /NOT READY for provider budget/u);
+});
+
 test('this candidate has produced no benchmark result', async () => {
   // The headline claim of CANDIDATE-STATUS.md, and constraint 3 of the goal:
   // no scored run, no acceptance run, no artifact. It had no enforcement in the
