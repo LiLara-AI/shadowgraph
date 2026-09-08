@@ -60,6 +60,7 @@ const requiredFixtureFiles = [
   'scripts/mcp-wire-size.mjs',
   'scripts/check-package.mjs',
   'scripts/check-benchmark-python-syntax.mjs',
+  'scripts/check-benchmark-syntax.mjs',
   'scripts/bench-journal.mjs',
   'scripts/smoke-package.mjs',
   'scripts/validate-bench-journal.mjs',
@@ -143,7 +144,8 @@ test('check-package requires native methodology modules, probes, and portable sy
     'benchmark/lib/v11-native-attempt-evidence-loader.mjs',
     'benchmark/probes/cognee_retry_taxonomy_demonstration.py',
     'benchmark/probes/cognee_embedding_retry_taxonomy_demonstration.py',
-    'scripts/check-benchmark-python-syntax.mjs'
+    'scripts/check-benchmark-python-syntax.mjs',
+    'scripts/check-benchmark-syntax.mjs'
   ];
   for (const relativePath of required) {
     const target = join(root, ...relativePath.split('/'));

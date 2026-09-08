@@ -18,9 +18,14 @@ const NATIVE_MODULES = Object.freeze([
 
 test('benchmark syntax gate names every native-attempt module and each syntax defect is rejected', async (t) => {
   const packageJson = JSON.parse(await readFile(path.join(REPOSITORY_ROOT, 'package.json'), 'utf8'));
-  const command = packageJson.scripts['benchmark:check'];
+  const benchmarkCheck = packageJson.scripts['benchmark:check'];
+  assert.doesNotMatch(benchmarkCheck, /npm run/u);
+  assert.match(packageJson.scripts.check, /node scripts\/check-benchmark-syntax\.mjs/u);
+  assert.doesNotMatch(packageJson.scripts.check, /npm run benchmark:check/u);
+  const gateSource = await readFile(path.join(REPOSITORY_ROOT, 'scripts', 'check-benchmark-syntax.mjs'), 'utf8');
   for (const modulePath of NATIVE_MODULES) {
-    assert.match(command, new RegExp(`node --check ${modulePath.replace(/[.]/gu, '\\.')}`, 'u'));
+    assert.match(benchmarkCheck, new RegExp(`node --check ${modulePath.replace(/[.]/gu, '\\.')}`, 'u'));
+    assert.match(gateSource, new RegExp(`['\"]${modulePath.replace(/[.]/gu, '\\.')}`, 'u'));
   }
 
   const directory = await scratchDirectory(t, 'shadowgraph-v11-native-syntax-');

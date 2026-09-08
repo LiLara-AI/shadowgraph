@@ -104,6 +104,7 @@ const requiredFiles = [
   'scripts/mcp-wire-size.mjs',
   'scripts/check-package.mjs',
   'scripts/check-benchmark-python-syntax.mjs',
+  'scripts/check-benchmark-syntax.mjs',
   'scripts/bench-journal.mjs',
   'scripts/smoke-package.mjs',
   'scripts/validate-bench-journal.mjs',
