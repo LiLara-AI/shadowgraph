@@ -748,8 +748,25 @@ test('operational current-status header distinguishes READY prerequisites from a
   assert.match(currentStatus, /fresh Cognee ACL precondition.*PASS/u);
   assert.match(currentStatus, /structured preflight.*`READY`.*zero blockers/u);
   assert.match(currentStatus, /no `v11-acceptance-004` provider traffic, campaign ledger, raw run, aggregate, ranking, or publication exists/u);
+  assert.match(currentStatus, /do not infer any arm success or turn known arm failures into passes/u);
   assert.doesNotMatch(currentStatus, /must be supplied out of band before the Neo4j service probe can proceed/u);
   assert.doesNotMatch(currentStatus, /No image pull, service start\/recreation, model substitution, scored work, or publication is an authorized workaround/u);
+});
+
+test('operational current-status header refuses a serialized Neo4j auth assignment', async () => {
+  const operational = await readFile(
+    path.join(REPOSITORY_ROOT, 'benchmark', 'evidence', 'v11-operational-budget-repair.md'),
+    'utf8'
+  );
+  const [currentStatus] = operational.split('\n## Disposition', 1);
+  const serializedAuth = /SHADOWGRAPH_NEO4J_AUTH`?\s*(?:=|:)\s*\S+/u;
+  assert.match(currentStatus, /without recording its value/u);
+  assert.doesNotMatch(currentStatus, serializedAuth);
+  const forgedLeak = currentStatus.replace(
+    'without recording its value',
+    'SHADOWGRAPH_NEO4J_AUTH=[REDACTED]'
+  );
+  assert.match(forgedLeak, serializedAuth);
 });
 
 test('this candidate has produced no benchmark result', async () => {
