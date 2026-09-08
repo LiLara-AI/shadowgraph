@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import process from 'node:process';
 
-const program = "import ast,pathlib; [ast.parse(p.read_text(encoding='utf-8'), filename=str(p)) for p in pathlib.Path('benchmark/adapters').glob('*.py')]";
+const program = "import ast,pathlib; [ast.parse(p.read_text(encoding='utf-8'), filename=str(p)) for directory in ('benchmark/adapters','benchmark/probes') for p in pathlib.Path(directory).glob('*.py')]";
 const missingInterpreter = /(?:Python was not found|not recognized as an internal or external command|No Python at|command not found)/iu;
 
 const candidates = process.platform === 'win32'

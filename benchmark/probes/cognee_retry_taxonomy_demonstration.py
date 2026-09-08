@@ -80,7 +80,7 @@ async def demonstrate() -> dict:
             "internal_memory_llm": f"http://127.0.0.1:{port}/v1",
             "embedding": "http://127.0.0.1:1/embed",
         }
-        runtime = cognee_adapter._runtime_config(routes, models, "/tmp/cognee-retry-taxonomy")
+        runtime = cognee_adapter._runtime_config(routes, models, "cognee-retry-taxonomy-state")
         setup_module = importlib.import_module("cognee.modules.engine.operations.setup")
 
         async def no_database_setup():
@@ -119,16 +119,12 @@ async def demonstrate() -> dict:
             pass
 
         request_models = [request["body"].get("model") for request in requests]
-        fallback = {
-            "fallback_model": effective.fallback_model,
-            "fallback_api_key": effective.fallback_api_key,
-            "fallback_endpoint": effective.fallback_endpoint,
-        }
         assert importlib.metadata.version("cognee") == "1.5.3"
         assert effective.structured_output_framework == "litellm_native"
         assert client.model == EXPECTED_MODEL
         assert client.llm_args.get("num_retries") == 0
-        assert fallback == {"fallback_model": "", "fallback_api_key": "", "fallback_endpoint": ""}
+        assert effective.fallback_model == ""
+        assert effective.fallback_endpoint == ""
         assert litellm.supports_response_schema(EXPECTED_MODEL) is False
         assert len(requests) == 3
         assert request_models == [EXPECTED_WIRE_MODEL] * 3

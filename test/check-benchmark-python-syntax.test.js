@@ -11,6 +11,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const launcher = path.join(root, 'scripts', 'check-benchmark-python-syntax.mjs');
 
 test('benchmark Python syntax gate uses the portable Node launcher and parses adapters', async () => {
+  const launcherSource = await readFile(launcher, 'utf8');
+  assert.match(launcherSource, /benchmark\/probes/u);
   const packageJson = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
   assert.match(
     packageJson.scripts['benchmark:test:js'],

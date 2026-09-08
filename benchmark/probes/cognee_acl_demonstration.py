@@ -98,7 +98,7 @@ async def demonstrate() -> dict:
     # configuration before it will ingest anything, so the demonstration runs
     # against the same endpoint the benchmark declares rather than against a
     # stand-in.
-    api_key = secrets.token_urlsafe(16)
+    api_key = ""
     cognee.config.set_llm_provider("openai")
     cognee.config.set_llm_endpoint(required_environment("SHADOWGRAPH_LLM_ENDPOINT"))
     cognee.config.set_llm_model(required_environment("SHADOWGRAPH_LLM_MODEL"))

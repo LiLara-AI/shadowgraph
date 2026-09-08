@@ -77,7 +77,7 @@ async def demonstrate() -> dict:
                 "internal_memory_llm": {"modelId": "qwen2.5:7b"},
                 "embedding": {"modelId": EXPECTED_EMBEDDING_MODEL, "embeddingDimension": 768},
             },
-            "/tmp/cognee-embedding-taxonomy",
+            "cognee-embedding-taxonomy-state",
         )
         selected = runtime["embedding_config"]
         with patch.object(

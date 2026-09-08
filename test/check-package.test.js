@@ -29,6 +29,11 @@ const requiredFixtureFiles = [
   'benchmark/lib/preregistration.mjs',
   'benchmark/lib/scoring.mjs',
   'benchmark/lib/validate.mjs',
+  'benchmark/lib/v11-native-attempts.mjs',
+  'benchmark/lib/v11-native-attempt-evidence.mjs',
+  'benchmark/lib/v11-native-attempt-evidence-loader.mjs',
+  'benchmark/probes/cognee_retry_taxonomy_demonstration.py',
+  'benchmark/probes/cognee_embedding_retry_taxonomy_demonstration.py',
   'benchmark/preregistration.json',
   'benchmark/preregistration.sha256',
   'benchmark/preregistration-amendment-001.json',
@@ -54,6 +59,7 @@ const requiredFixtureFiles = [
   'scripts/check-mcp.mjs',
   'scripts/mcp-wire-size.mjs',
   'scripts/check-package.mjs',
+  'scripts/check-benchmark-python-syntax.mjs',
   'scripts/bench-journal.mjs',
   'scripts/smoke-package.mjs',
   'scripts/validate-bench-journal.mjs',
@@ -126,6 +132,27 @@ test('check-package requires every effective v1.1 methodology source', async (t)
     await rm(join(root, ...relativePath.split('/')), { force: true });
     await assert.rejects(runChecker(root), new RegExp(`required package file is missing: ${relativePath.replace(/[.]/gu, '\\.')}`, 'u'));
     await writeFile(join(root, ...relativePath.split('/')), 'restored fixture source\n', 'utf8');
+  }
+});
+
+test('check-package requires native methodology modules, probes, and portable syntax launcher', async (t) => {
+  const root = await packageFixture(t, '# Harmless package audit\n');
+  const required = [
+    'benchmark/lib/v11-native-attempts.mjs',
+    'benchmark/lib/v11-native-attempt-evidence.mjs',
+    'benchmark/lib/v11-native-attempt-evidence-loader.mjs',
+    'benchmark/probes/cognee_retry_taxonomy_demonstration.py',
+    'benchmark/probes/cognee_embedding_retry_taxonomy_demonstration.py',
+    'scripts/check-benchmark-python-syntax.mjs'
+  ];
+  for (const relativePath of required) {
+    const target = join(root, ...relativePath.split('/'));
+    await rm(target, { force: true });
+    await assert.rejects(
+      runChecker(root),
+      new RegExp(`required package file is missing: ${relativePath.replace(/[.]/gu, '\\.')}`, 'u')
+    );
+    await writeFile(target, 'restored fixture source\n', 'utf8');
   }
 });
 
