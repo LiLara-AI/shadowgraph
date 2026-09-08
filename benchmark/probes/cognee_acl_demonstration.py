@@ -228,6 +228,8 @@ def main() -> int:
             "armId": ARM_ID,
             "precondition": PRECONDITION,
             "observedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "package": {"name": "cognee", "version": cognee.get_cognee_version()},
+            "backendAccessControlEnabled": bool(backend_access_control_enabled()),
             "fatal": True,
         }
     report["steps"] = STEPS

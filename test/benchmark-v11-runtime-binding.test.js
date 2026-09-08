@@ -72,6 +72,19 @@ const SERVICE_EVIDENCE = {
 const IMPLEMENTATION_LOCK_HASH = '1'.repeat(64);
 const ENVIRONMENT_LOCK_HASH = '2'.repeat(64);
 const REQUEST_OUTER_DECISION = async () => ({ decision: null });
+const NATIVE_ATTEMPT_POLICY = Object.freeze({
+  schema: 'shadowgraph.v11.native-attempt-policy',
+  version: 1,
+  maxAttemptsPerRootRequestClass: 24,
+  arms: [{
+    armId: 'fixture-arm',
+    recovery: {
+      outer_decision_llm: [],
+      internal_memory_llm: [],
+      embedding: []
+    }
+  }]
+});
 
 
 /**
@@ -200,6 +213,7 @@ async function harness(t, overrides = {}) {
     benchmarkRoot: path.join(directory, 'benchmark'),
     competitorLock: { pythonImage: IMAGE },
     definition: { commonExecution: { randomSeeds: [11, 22] } },
+    nativeAttemptPolicy: NATIVE_ATTEMPT_POLICY,
     registry: { descriptorFor: () => ({}) },
     runId: 'run-binding-1',
     attemptId: 'attempt-binding-1',
@@ -368,7 +382,13 @@ test('the acceptance binding passes its exact authorized budget to the meter', a
     return original(config);
   };
   const bound = await bindV11Runtime(h.input, h.injections);
-  try { assert.deepEqual(options, { budget: h.input.providerBudget }); }
+  try {
+    assert.deepEqual(options, {
+      budget: h.input.providerBudget,
+      requireRootOperation: true,
+      maxAttemptsPerRootRequestClass: 24
+    });
+  }
   finally { await bound.close(); }
 });
 

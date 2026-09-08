@@ -193,7 +193,8 @@ function providerCorrelation(request, requestClass) {
     scenarioId: request.scenarioId,
     repetition: request.repetition,
     phase: request.phase,
-    requestClass
+    requestClass,
+    rootOperation: request.operation
   };
 }
 

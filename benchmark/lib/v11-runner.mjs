@@ -6,6 +6,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { createAdapterRequest, validateAdapterResponse } from './adapter-protocol.mjs';
 import { OUTER_HTTP_ERROR_CODE, validateDecisionResponse } from './outer-model.mjs';
 import { validateV11RawRun } from './validate.mjs';
+import { validateNativeAttemptPolicy } from './v11-native-attempts.mjs';
 import {
   OPERATION_FIELDS,
   V11_PHASES,
@@ -37,6 +38,8 @@ const AMENDMENT_003_SHA256 = '726de2018584aca399fc27d2bba15585d8b6fb9454bc240835
 const AMENDMENT_004_SHA256 = 'b0c3a2553608efb78147a8c1f1ef9af51a7d0eebaa0037ce4ad7b64616b1c5f9';
 const AMENDMENT_005_SHA256 = 'c435fa9d772c151c83214ef3a4180e0646236cd2cbb079be082b8341c4e6e223';
 const AMENDMENT_005_SIDECAR = `${AMENDMENT_005_SHA256}  benchmark/preregistration-amendment-005.json\n`;
+const AMENDMENT_006_SHA256 = '3bc9308a19e44ecc06d15dc0144239aa907b49cf897a11f9fab7cfe116966760';
+const AMENDMENT_006_SIDECAR = `${AMENDMENT_006_SHA256}  benchmark/preregistration-amendment-006.json\n`;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
 // Exported because a production caller has to build the progress ledger with
 // the same deadline. Restating it there would make the ledger's `stalled`
@@ -432,7 +435,55 @@ async function loadAmendments(options) {
     || enforcement?.nativeAttemptEligibilityRuleIsArmNeutral !== true) {
     throw new Error('Amendment 005 does not match the authorized arm-neutral native-attempt policy');
   }
-  return { amendment002: amendment, amendment003, amendment004, amendment005, effectiveMatrix };
+  const amendment006 = await loadExactAmendment(
+    6,
+    'amendment006Sha256',
+    AMENDMENT_006_SHA256,
+    options.amendment006Path
+  );
+  await loadExactAmendmentSidecar(6, AMENDMENT_006_SIDECAR, options.amendment006SidecarPath);
+  const traceContract = amendment006?.nativeAttemptTraceContract;
+  if (amendment006?.amendmentId !== 'amendment-006'
+    || amendment006?.status !== 'AUTHORIZED_FOR_NON_SCORED_V1_1_ACCEPTANCE'
+    || amendment006?.supersedes?.amendment005Sha256 !== options.amendment005Sha256
+    || amendment006?.invariants?.scored !== false
+    || amendment006?.invariants?.comparativeClaimsEnabled !== false
+    || amendment006?.invariants?.providerBudgetsRelaxed !== false
+    || amendment006?.prospectiveEffect?.rescoreExistingRuns !== false
+    || amendment006?.prospectiveEffect?.rewriteHistoricalArtifacts !== false
+    || amendment006?.prospectiveEffect?.resumeHistoricalRuns !== false
+    || traceContract?.maxAttemptsPerRootRequestClass !== 24
+    || traceContract?.meterOwnedEvidence?.rootOperationRequiredBeforeDispatch !== true
+    || traceContract?.meterOwnedEvidence?.rootOperationReexecutionProhibited !== true
+    || traceContract?.preconditionEvidence?.allArmsMustHavePolicyEntries !== true
+    || traceContract?.preconditionEvidence?.nonemptyRecoveryPolicyRequiresFreshPinnedLoopbackFaultInjection !== true
+    || traceContract?.accounting?.admissionBeforeDispatch !== true
+    || traceContract?.accounting?.nativeSuccessDoesNotCreateANewHarnessAttempt !== true) {
+    throw new Error('Amendment 006 does not match the authorized arm-neutral native-attempt trace contract');
+  }
+  let nativeAttemptPolicy;
+  try {
+    nativeAttemptPolicy = validateNativeAttemptPolicy(traceContract.armNeutralRecoveryPolicy);
+    for (const arm of options.arms) {
+      if (!nativeAttemptPolicy.policies.has(arm.id)) {
+        throw new Error(`policy has no entry for selected arm ${arm.id}`);
+      }
+    }
+    if (nativeAttemptPolicy.maxAttemptsPerRootRequestClass !== traceContract.maxAttemptsPerRootRequestClass) {
+      throw new Error('policy cap differs from trace cap');
+    }
+  } catch {
+    throw new Error('Amendment 006 native-attempt policy is invalid');
+  }
+  return {
+    amendment002: amendment,
+    amendment003,
+    amendment004,
+    amendment005,
+    amendment006,
+    nativeAttemptPolicy,
+    effectiveMatrix
+  };
 }
 
 function validateArm(arm, seen) {
@@ -474,6 +525,18 @@ function validationDefinition(options) {
       randomSeeds: [...options.seeds]
     },
     scenarios: structuredClone(options.scenarios)
+  };
+}
+
+function validationSourceHashes(options) {
+  return {
+    preregistrationSha256: options.preregistrationSha256,
+    amendment001Sha256: options.amendment001Sha256,
+    amendment002Sha256: options.amendment002Sha256,
+    amendment003Sha256: options.amendment003Sha256,
+    amendment004Sha256: options.amendment004Sha256,
+    amendment005Sha256: options.amendment005Sha256,
+    amendment006Sha256: options.amendment006Sha256
   };
 }
 
@@ -760,7 +823,8 @@ async function validateResume(options, plannedIds) {
     'amendment002Sha256',
     'amendment003Sha256',
     'amendment004Sha256',
-    'amendment005Sha256'
+    'amendment005Sha256',
+    'amendment006Sha256'
   ]) {
     if (previousRaw[field] !== options[field]) {
       throw new Error(`Changed ${field} requires a new runId`);
@@ -772,7 +836,12 @@ async function validateResume(options, plannedIds) {
   if (previousRaw.status !== 'INTERRUPTED') {
     throw new Error('Diagnostic resume requires an INTERRUPTED previous raw run');
   }
-  validateV11RawRun(previousRaw, validationDefinition(options), options.preregistrationSha256);
+  validateV11RawRun(
+    previousRaw,
+    validationDefinition(options),
+    options.preregistrationSha256,
+    validationSourceHashes(options)
+  );
   if (previousRaw.attemptIds.length !== resume.attemptLedgers.length
     || previousRaw.attemptIds.some((attemptId, index) => (
       attemptId !== resume.attemptLedgers[index]?.attemptId
@@ -853,6 +922,7 @@ function validateOptions(options) {
     'amendment003Sha256',
     'amendment004Sha256',
     'amendment005Sha256',
+    'amendment006Sha256',
     'implementationLockHash',
     'environmentLockHash'
   ]) requireHash(options[field], field);
@@ -870,6 +940,12 @@ function validateOptions(options) {
   }
   if (!isNonEmptyString(options.amendment005SidecarPath)) {
     throw new Error('amendment005SidecarPath must identify the exact Amendment 005 hash sidecar');
+  }
+  if (!isNonEmptyString(options.amendment006Path)) {
+    throw new Error('amendment006Path must identify the exact Amendment 006 source file');
+  }
+  if (!isNonEmptyString(options.amendment006SidecarPath)) {
+    throw new Error('amendment006SidecarPath must identify the exact Amendment 006 hash sidecar');
   }
   if (!isPlainObject(options.progress)
     || typeof options.progress.append !== 'function'
@@ -1659,6 +1735,7 @@ async function executeV11Benchmark(options, closeResources) {
     amendment003Sha256: options.amendment003Sha256,
     amendment004Sha256: options.amendment004Sha256,
     amendment005Sha256: options.amendment005Sha256,
+    amendment006Sha256: options.amendment006Sha256,
     implementationLockHash: options.implementationLockHash,
     environmentLockHash: options.environmentLockHash,
     startedAt,
@@ -1673,7 +1750,12 @@ async function executeV11Benchmark(options, closeResources) {
     arms,
     units
   };
-  validateV11RawRun(result, validationDefinition(options), options.preregistrationSha256);
+  validateV11RawRun(
+    result,
+    validationDefinition(options),
+    options.preregistrationSha256,
+    validationSourceHashes(options)
+  );
 
   if (interrupted) {
     await appendProgress(options, 'run_interrupted', null, { cause: 'OPERATOR_INTERRUPTION' });

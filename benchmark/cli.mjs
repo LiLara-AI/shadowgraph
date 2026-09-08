@@ -438,7 +438,10 @@ async function validateCommand(options) {
     verifyPreregistration(preregistrationPath, preregistrationHashPath),
     readFile(input, 'utf8').then(JSON.parse)
   ]);
-  const result = validateRawRun(raw, document, sha256);
+  const expectedSourceHashes = raw?.schemaVersion === 2
+    ? (await loadV11Candidate()).sourceHashes
+    : undefined;
+  const result = validateRawRun(raw, document, sha256, expectedSourceHashes);
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
@@ -450,8 +453,20 @@ async function aggregateCommand(options) {
     verifyPreregistration(preregistrationPath, preregistrationHashPath),
     readFile(input, 'utf8').then(JSON.parse)
   ]);
-  validateRawRun(raw, document, sha256);
-  const aggregate = aggregateRun(raw, document);
+  const candidate = raw?.schemaVersion === 2 ? await loadV11Candidate() : null;
+  const expectedSourceHashes = candidate?.sourceHashes;
+  const validationDefinition = candidate === null
+    ? document
+    : { ...candidate.definition, scenarios: candidate.scenarios };
+  validateRawRun(
+    raw,
+    validationDefinition,
+    expectedSourceHashes?.preregistrationSha256 ?? sha256,
+    expectedSourceHashes
+  );
+  const aggregate = raw?.schemaVersion === 2
+    ? aggregateRun(raw, validationDefinition, { trustedSourceHashes: expectedSourceHashes })
+    : aggregateRun(raw, validationDefinition);
   await writeJson(output, aggregate);
   if (aggregate.allowedMarketingText) process.stdout.write(`${aggregate.allowedMarketingText}\n`);
 }
@@ -495,6 +510,13 @@ function refuseAssertedPreconditions(options) {
 function parsePreconditionEvidencePath(options) {
   return typeof options['precondition-evidence'] === 'string'
     ? optionPath(options['precondition-evidence'])
+    : null;
+}
+
+/** Where fresh arm-neutral native-attempt proof is read from, if named. */
+function parseNativeAttemptEvidencePath(options) {
+  return typeof options['native-attempt-evidence'] === 'string'
+    ? optionPath(options['native-attempt-evidence'])
     : null;
 }
 
@@ -547,6 +569,7 @@ async function v11RunCommand(options) {
   const benchmarkRoot = join(root, 'benchmark');
   refuseAssertedPreconditions(options);
   const preconditionEvidencePath = parsePreconditionEvidencePath(options);
+  const nativeAttemptEvidencePath = parseNativeAttemptEvidencePath(options);
 
   // Readiness is decided before anything else is touched, including the
   // runtime binding. A blocked candidate must produce a refusal that names
@@ -561,6 +584,7 @@ async function v11RunCommand(options) {
     ...candidate,
     benchmarkRoot,
     preconditionEvidencePath,
+    nativeAttemptEvidencePath,
     serviceEvidencePath
   });
   if (readiness.readiness !== 'READY') {
@@ -597,6 +621,7 @@ async function v11RunCommand(options) {
       ...candidate,
       benchmarkRoot,
       preconditionEvidencePath,
+      nativeAttemptEvidencePath,
       serviceEvidencePath,
       runId,
       attemptId,
@@ -606,6 +631,8 @@ async function v11RunCommand(options) {
       amendment004Path: join(benchmarkRoot, 'preregistration-amendment-004.json'),
       amendment005Path: join(benchmarkRoot, 'preregistration-amendment-005.json'),
       amendment005SidecarPath: join(benchmarkRoot, 'preregistration-amendment-005.sha256'),
+      amendment006Path: join(benchmarkRoot, 'preregistration-amendment-006.json'),
+      amendment006SidecarPath: join(benchmarkRoot, 'preregistration-amendment-006.sha256'),
       ...runtime.dependencies,
       // Judged inside the run rather than after it, so a caller cannot omit it.
       // Reached only once `closeResources` has closed the meter, which is what
@@ -615,6 +642,7 @@ async function v11RunCommand(options) {
         raw,
         attemptId,
         pinnedModels: runtime.pinnedModels,
+        nativeAttemptPolicy: candidate.nativeAttemptPolicy,
         providerBudget: runtime.dependencies.providerBudget
       })
     });
@@ -676,7 +704,9 @@ async function v11RunCommand(options) {
  * its evidence, and reporting that as `RECONCILED` would be the strongest
  * possible overstatement this reconciliation can make.
  */
-async function reconcileRunProviderEvidence({ ledgerPath, raw, attemptId, pinnedModels, providerBudget }) {
+async function reconcileRunProviderEvidence({
+  ledgerPath, raw, attemptId, pinnedModels, nativeAttemptPolicy, providerBudget
+}) {
   let ledgerText = null;
   try {
     ledgerText = await readFile(ledgerPath, 'utf8');
@@ -688,7 +718,7 @@ async function reconcileRunProviderEvidence({ ledgerPath, raw, attemptId, pinned
   try { attemptLedgerText = await readFile(`${ledgerPath}.attempts.ndjson`, 'utf8'); }
   catch { /* Missing attempt evidence remains an explicit failed reconciliation. */ }
   return runProviderReconciliation({ ledgerText, ledgerPath, raw, attemptId, pinnedModels,
-    providerBudget, attemptLedgerText });
+    nativeAttemptPolicy, providerBudget, attemptLedgerText });
 }
 
 /**
@@ -709,6 +739,7 @@ async function v11RuntimeDependencies(options, context) {
     benchmarkRoot: context.benchmarkRoot,
     competitorLock: context.competitorLock,
     definition: context.definition,
+    nativeAttemptPolicy: context.nativeAttemptPolicy,
     registry: context.registry,
     runId: context.runId,
     attemptId: context.attemptId,
@@ -732,12 +763,20 @@ async function v11RuntimeDependencies(options, context) {
 async function v11Preflight(options) {
   await readCampaignConfiguration(options);
   refuseAssertedPreconditions(options);
-  const { registry, definition, scenarios, containerImage } = await loadV11Candidate();
+  const {
+    registry,
+    definition,
+    scenarios,
+    containerImage,
+    nativeAttemptPolicy,
+    sourceHashes
+  } = await loadV11Candidate();
   const {
     applicability,
     declaredCounts,
     derivedCounts,
     preconditionEvidence,
+    nativeAttemptEvidence,
     serviceEvidence,
     readiness,
     blockers,
@@ -749,8 +788,11 @@ async function v11Preflight(options) {
     registry,
     definition,
     scenarios,
+    nativeAttemptPolicy,
+    sourceHashes,
     benchmarkRoot: join(root, 'benchmark'),
     preconditionEvidencePath: parsePreconditionEvidencePath(options),
+    nativeAttemptEvidencePath: parseNativeAttemptEvidencePath(options),
     serviceEvidencePath: parseServiceEvidencePath(options)
   });
 
@@ -771,6 +813,7 @@ async function v11Preflight(options) {
     declaredCounts,
     derivedCounts,
     preconditionEvidence,
+    nativeAttemptEvidence,
     serviceEvidence,
     providerBudget,
     readiness,

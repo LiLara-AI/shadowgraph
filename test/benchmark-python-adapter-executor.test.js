@@ -266,6 +266,7 @@ assert os.path.realpath(os.environ["TEMP"]).startswith(os.path.dirname(os.path.r
   for (const call of calls) {
     assert.equal(call.correlation.armId, 'mem0-oss');
     assert.equal(call.correlation.requestClass, call.requestClass);
+    assert.equal(call.correlation.rootOperation, 'retrieve');
     assert.equal(Object.hasOwn(call.correlation, 'operation'), false);
   }
   assert.doesNotMatch(JSON.stringify(first), /provider-meter|43100/u);

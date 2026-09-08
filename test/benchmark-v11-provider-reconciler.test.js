@@ -439,6 +439,85 @@ function ledgerLines(events) {
   return `${events.map((each) => JSON.stringify(each)).join(String.fromCharCode(10))}${String.fromCharCode(10)}`;
 }
 
+test('reconciliation carries a meter-owned C trace when the generic policy authorizes it', () => {
+  const operations = {
+    memoryReadOperations: 0,
+    memoryWriteOperations: 0,
+    mcpToolCalls: 0,
+    outerDecisionModelCalls: 0,
+    internalMemoryModelCalls: 2,
+    embeddingCalls: 0,
+    persistenceVerificationOperations: 0
+  };
+  const policy = {
+    schema: 'shadowgraph.v11.native-attempt-policy',
+    version: 1,
+    maxAttemptsPerRootRequestClass: 24,
+    arms: [{
+      armId: 'mem0-oss',
+      recovery: { outer_decision_llm: [], internal_memory_llm: ['C'], embedding: [] }
+    }]
+  };
+  const report = runProviderReconciliation({
+    ledgerText: ledgerLines([
+      event({ requestNumber: 1, rootOperation: 'persist', responseFormat: 'json_object' }),
+      event({ requestNumber: 2, rootOperation: 'persist', responseFormat: 'json_object' })
+    ]),
+    ledgerPath: '/ledgers/attempt-1.provider-requests.ndjson',
+    raw: { units: [unit({ operations })] },
+    attemptId: ATTEMPT,
+    pinnedModels: PINNED,
+    nativeAttemptPolicy: policy
+  });
+  assert.equal(report.status, 'RECONCILED');
+  assert.deepEqual(report.nativeAttemptTrace.trace.map((entry) => entry.category), ['INITIAL', 'C']);
+  assert.deepEqual(report.nativeAttemptTrace.findings, []);
+});
+
+test('an authorized transport B pair is metered and reconciles only after the retry succeeds', () => {
+  const operations = {
+    memoryReadOperations: 0,
+    memoryWriteOperations: 0,
+    mcpToolCalls: 0,
+    outerDecisionModelCalls: 0,
+    internalMemoryModelCalls: 0,
+    embeddingCalls: 2,
+    persistenceVerificationOperations: 0
+  };
+  const policy = {
+    schema: 'shadowgraph.v11.native-attempt-policy',
+    version: 1,
+    maxAttemptsPerRootRequestClass: 24,
+    arms: [{
+      armId: 'mem0-oss',
+      recovery: { outer_decision_llm: [], internal_memory_llm: [], embedding: ['B'] }
+    }]
+  };
+  const success = event({
+    requestNumber: 2,
+    requestClass: 'embedding',
+    rootOperation: 'persist',
+    responseFormat: null,
+    requestedModel: 'pinned-embedding-model',
+    providerModel: 'pinned-embedding-model'
+  });
+  const report = runProviderReconciliation({
+    ledgerText: ledgerLines([
+      { ...success, requestNumber: 1, outcome: 'FAILED', failure: { code: 'UPSTREAM_HTTP' }, httpStatus: 500,
+        usage: { inputTokens: 0, outputTokens: 0 } },
+      success
+    ]),
+    ledgerPath: '/ledgers/attempt-1.provider-requests.ndjson',
+    raw: { units: [unit({ operations })] },
+    attemptId: ATTEMPT,
+    pinnedModels: PINNED,
+    nativeAttemptPolicy: policy
+  });
+  assert.equal(report.status, 'RECONCILED');
+  assert.deepEqual(report.nativeAttemptTrace.trace.map((entry) => entry.category), ['INITIAL', 'B']);
+  assert.deepEqual(report.findings, []);
+});
+
 test('a run whose ledger matches its record reconciles', () => {
   const record = { units: [unit()] };
   const report = runProviderReconciliation({

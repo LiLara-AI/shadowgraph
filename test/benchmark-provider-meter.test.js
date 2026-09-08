@@ -21,7 +21,9 @@ const EVENT_FIELDS = [
   'repetition',
   'phase',
   'requestClass',
+  'rootOperation',
   'requestedModel',
+  'responseFormat',
   'providerModel',
   'latencyMs',
   'outcome',
@@ -280,8 +282,8 @@ async function sendIncompleteRequest(url, { method = 'POST', contentLength }) {
  * stuck. For the meters configured well under a second, the floor is what
  * applies.
  */
-async function startTrackedMeter(t, config) {
-  const meter = await startProviderMeter(config);
+async function startTrackedMeter(t, config, options = {}) {
+  const meter = await startProviderMeter(config, options);
   const budgetMs = Math.max(5_000, (config.upstreamTimeoutMs ?? 0) * 2 + 3_000);
   t.after(() => boundedCleanup(
     () => meter.close(),
@@ -291,7 +293,7 @@ async function startTrackedMeter(t, config) {
   return meter;
 }
 
-async function meterFor(t, upstreamBaseUrl, overrides = {}) {
+async function meterFor(t, upstreamBaseUrl, overrides = {}, meterOptions = {}) {
   const directory = await temporaryDirectory(t);
   const ledgerPath = path.join(directory, 'provider-requests.ndjson');
   const meter = await startTrackedMeter(t, {
@@ -301,7 +303,7 @@ async function meterFor(t, upstreamBaseUrl, overrides = {}) {
     ledgerPath,
     upstreamTimeoutMs: 2_000,
     ...overrides
-  });
+  }, meterOptions);
   return { meter, ledgerPath };
 }
 
@@ -312,6 +314,8 @@ function assertExactEvent(event, expected = {}) {
   assert.equal(event.event, 'provider_request');
   assert.ok(Number.isSafeInteger(event.requestNumber) && event.requestNumber > 0);
   assert.ok(Number.isFinite(event.latencyMs) && event.latencyMs >= 0);
+  assert.equal(event.rootOperation, expected.rootOperation ?? null);
+  assert.equal(event.responseFormat, expected.responseFormat ?? null);
   for (const [key, value] of Object.entries(expected)) assert.deepEqual(event[key], value, key);
 }
 
@@ -368,8 +372,86 @@ test('configuration is loopback-only, ledgers are collision-safe, and bindings r
   );
   assert.throws(
     () => fresh.bindEndpoint({ ...BASE_CORRELATION, extra: 'not-allowed' }),
-    /Unknown provider meter correlation field/i
+    /Unknown provider meter binding field/i
   );
+});
+
+test('provider meter records the capability-bound root operation for every provider request', async (t) => {
+  const upstream = await listen(t, async (request, response) => {
+    await readBody(request);
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(providerPayload()));
+  });
+  const { meter, ledgerPath } = await meterFor(t, upstream.origin, {}, { requireRootOperation: true });
+  assert.throws(() => meter.bindEndpoint(BASE_CORRELATION), /Missing required provider meter binding field: rootOperation/);
+  const endpoint = meter.bindEndpoint({ ...BASE_CORRELATION, rootOperation: 'persist' });
+
+  const response = await fetch(`${endpoint}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'requested-outer-model', messages: [] })
+  });
+  assert.equal(response.status, 200);
+  await meter.close();
+
+  const [event] = await ledgerEvents(ledgerPath);
+  assert.equal(event.rootOperation, 'persist');
+});
+
+test('meter atomically caps native attempts per root request class before upstream dispatch', async (t) => {
+  let upstreamCalls = 0;
+  const upstream = await listen(t, async (request, response) => {
+    upstreamCalls += 1;
+    await readBody(request);
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(providerPayload()));
+  });
+  const { meter, ledgerPath } = await meterFor(t, upstream.origin, {}, {
+    requireRootOperation: true,
+    maxAttemptsPerRootRequestClass: 1
+  });
+  const endpoint = meter.bindEndpoint({ ...BASE_CORRELATION, rootOperation: 'persist' });
+  const request = () => fetch(`${endpoint}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'requested-outer-model', messages: [] })
+  });
+
+  assert.equal((await request()).status, 200);
+  assert.equal((await request()).status, 403);
+  await meter.close();
+
+  const events = await ledgerEvents(ledgerPath);
+  assert.equal(upstreamCalls, 1);
+  assert.equal(events.length, 2);
+  assert.equal(events[1].failure.code, 'NATIVE_ATTEMPT_CAP_EXHAUSTED');
+});
+
+test('provider meter records only the structured-output mode, never its schema body', async (t) => {
+  const upstream = await listen(t, async (request, response) => {
+    await readBody(request);
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(providerPayload()));
+  });
+  const { meter, ledgerPath } = await meterFor(t, upstream.origin);
+  const endpoint = meter.bindEndpoint(BASE_CORRELATION);
+  const schemaSentinel = 'do-not-retain-this-schema';
+
+  const response = await fetch(`${endpoint}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'requested-outer-model',
+      messages: [],
+      response_format: { type: 'json_object', json_schema: { name: schemaSentinel } }
+    })
+  });
+  assert.equal(response.status, 200);
+  await meter.close();
+
+  const [event] = await ledgerEvents(ledgerPath);
+  assert.equal(event.responseFormat, 'json_object');
+  assert.ok(!(await readFile(ledgerPath, 'utf8')).includes(schemaSentinel));
 });
 
 test('Task 3 outer requests traverse one opaque bound endpoint and preserve exact usage', async (t) => {
@@ -416,6 +498,7 @@ test('Task 3 outer requests traverse one opaque bound endpoint and preserve exac
     requestNumber: 1,
     ...BASE_CORRELATION,
     requestedModel: 'requested-outer-model',
+    responseFormat: 'json_object',
     providerModel: 'reported-provider-model',
     outcome: 'SUCCEEDED',
     failure: null,

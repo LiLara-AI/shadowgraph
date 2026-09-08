@@ -30,7 +30,7 @@ const REQUIRED_MEASUREMENT_FIELDS = [
 const V11_RAW_FIELDS = [
   'schemaVersion', 'benchmarkVersion', 'mode', 'runId', 'attemptId', 'attemptIds',
   'status', 'preregistrationSha256', 'amendment001Sha256', 'amendment002Sha256',
-  'amendment003Sha256', 'amendment004Sha256', 'amendment005Sha256',
+  'amendment003Sha256', 'amendment004Sha256', 'amendment005Sha256', 'amendment006Sha256',
   'implementationLockHash', 'environmentLockHash', 'startedAt', 'finishedAt',
   'zeroResult', 'outerPromptBinding', 'arms', 'units'
 ];
@@ -705,7 +705,30 @@ function validateOuterPromptBinding(binding) {
   }
 }
 
-export function validateV11RawRun(raw, preregistration, expectedSha256) {
+function validateV11SourceHashes(raw, expectedSourceHashes) {
+  const fields = [
+    'preregistrationSha256',
+    'amendment001Sha256',
+    'amendment002Sha256',
+    'amendment003Sha256',
+    'amendment004Sha256',
+    'amendment005Sha256',
+    'amendment006Sha256'
+  ];
+  if (!isPlainObject(expectedSourceHashes)
+    || Object.keys(expectedSourceHashes).length !== fields.length
+    || fields.some((field) => !Object.hasOwn(expectedSourceHashes, field))) {
+    throw new Error('v1.1 raw run requires exactly seven trusted source hashes');
+  }
+  for (const field of fields) {
+    assertHash(expectedSourceHashes[field], `trusted v1.1 source hash.${field}`);
+    if (raw[field] !== expectedSourceHashes[field]) {
+      throw new Error(`v1.1 raw run.${field} does not match the trusted source hash`);
+    }
+  }
+}
+
+export function validateV11RawRun(raw, preregistration, expectedSha256, expectedSourceHashes) {
   assertExactFields(raw, V11_RAW_FIELDS, 'v1.1 raw run');
   if (raw.schemaVersion !== 2 || raw.benchmarkVersion !== '1.1') {
     throw new Error('v1.1 raw run requires schemaVersion 2 and benchmarkVersion 1.1');
@@ -737,9 +760,10 @@ export function validateV11RawRun(raw, preregistration, expectedSha256) {
   }
   for (const field of [
     'preregistrationSha256', 'amendment001Sha256', 'amendment002Sha256',
-    'amendment003Sha256', 'amendment004Sha256', 'amendment005Sha256',
+    'amendment003Sha256', 'amendment004Sha256', 'amendment005Sha256', 'amendment006Sha256',
     'implementationLockHash', 'environmentLockHash'
   ]) assertHash(raw[field], `v1.1 raw run.${field}`);
+  validateV11SourceHashes(raw, expectedSourceHashes);
   if (raw.preregistrationSha256 !== expectedSha256) {
     throw new Error('Raw run preregistration hash does not match the frozen preregistration');
   }
@@ -808,8 +832,8 @@ export function validateV11RawRun(raw, preregistration, expectedSha256) {
   };
 }
 
-export function validateRawRun(raw, preregistration, expectedSha256) {
+export function validateRawRun(raw, preregistration, expectedSha256, expectedSourceHashes) {
   return raw?.schemaVersion === 2
-    ? validateV11RawRun(raw, preregistration, expectedSha256)
+    ? validateV11RawRun(raw, preregistration, expectedSha256, expectedSourceHashes)
     : validateLegacyRawRun(raw, preregistration, expectedSha256);
 }

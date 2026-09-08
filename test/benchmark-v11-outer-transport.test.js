@@ -251,7 +251,7 @@ test('every call binds its own endpoint, and the config carries the one bound fo
   assert.deepEqual(meter.bound.map(({ attemptId }) => attemptId), ['attempt-1', 'attempt-2']);
 });
 
-test('exactly the seven correlation fields are bound, even when the caller carries more', async () => {
+test('the seven correlation fields plus harness-owned outer root are bound, even when the caller carries more', async () => {
   // The runner's correlation grows over time. Anything extra that reached
   // bindEndpoint would be minted into a route the real meter then refuses, and
   // anything missing would bind a route attributed to the wrong unit - so the
@@ -267,7 +267,7 @@ test('exactly the seven correlation fields are bound, even when the caller carri
 
   await requestOuter({ correlation, request: outerRequest() });
 
-  assert.deepEqual(Object.keys(meter.bound[0]).sort(), [...CORRELATION_FIELDS]);
+  assert.deepEqual(Object.keys(meter.bound[0]).sort(), [...CORRELATION_FIELDS, 'rootOperation'].sort());
   assert.deepEqual(meter.bound[0], {
     runId: 'run-outer-transport',
     attemptId: 'attempt-1',
@@ -275,7 +275,8 @@ test('exactly the seven correlation fields are bound, even when the caller carri
     scenarioId: 'S01_DATABASE',
     repetition: 1,
     phase: 'A',
-    requestClass: 'outer_decision_llm'
+    requestClass: 'outer_decision_llm',
+    rootOperation: 'outer-decision'
   });
   // Copied, not handed over: a binding that shared the caller's object would
   // change underneath the meter when the runner reused the correlation.

@@ -16,7 +16,11 @@ import path from 'node:path';
 
 import { aggregateRun } from './aggregate.mjs';
 import { verifyPreconditionEvidence } from './v11-precondition-evidence.mjs';
+import { verifyNativeAttemptEvidence } from './v11-native-attempt-evidence.mjs';
+import { loadNativeAttemptProbeReports } from './v11-native-attempt-evidence-loader.mjs';
+import { validateNativeAttemptPolicy } from './v11-native-attempts.mjs';
 import { buildV11Prompt } from './v11-prompts.mjs';
+import { providerModelsFromLock } from './v11-provider-models.mjs';
 import { verifyServiceEvidence } from './v11-service-evidence.mjs';
 import { validateRawRun } from './validate.mjs';
 import { runV11Benchmark } from './v11-runner.mjs';
@@ -136,12 +140,15 @@ export async function computeV11Readiness(input) {
     registry,
     definition,
     scenarios,
+    nativeAttemptPolicy = null,
+    sourceHashes = null,
     benchmarkRoot,
     // An operator's unverified declaration that a precondition holds. Retained
     // for the tests that drive applicability directly; the CLI never populates
     // it, because a declaration is not a demonstration.
     satisfiedPreconditions = [],
     preconditionEvidencePath = null,
+    nativeAttemptEvidencePath = null,
     serviceEvidencePath = null,
     // Deliberately not called `now`: elsewhere in this module `now` is the
     // clock function a run is given, and freshness here is an instant, not a
@@ -238,6 +245,65 @@ export async function computeV11Readiness(input) {
     now: verificationInstant
   });
 
+  let nativeAttemptEvidence = null;
+  let normalizedNativeAttemptPolicy = null;
+  if (nativeAttemptPolicy !== null) {
+    const nativeEvidenceGate = nativeAttemptEvidencePath === null
+      ? { state: 'absent' }
+      : await readGateJson(nativeAttemptEvidencePath, readFileImpl);
+    try {
+      normalizedNativeAttemptPolicy = validateNativeAttemptPolicy(nativeAttemptPolicy);
+      const nativeProbeReports = nativeEvidenceGate.state === 'present'
+        ? await loadNativeAttemptProbeReports({
+          evidencePath: nativeAttemptEvidencePath,
+          evidence: nativeEvidenceGate.value
+        })
+        : new Map();
+      const pinnedModels = providerModelsFromLock(gateValues.get('model-weights.lock.json'));
+      nativeAttemptEvidence = verifyNativeAttemptEvidence({
+        evidence: nativeEvidenceGate.state === 'present' ? nativeEvidenceGate.value : null,
+        policy: nativeAttemptPolicy,
+        amendment006Sha256: sourceHashes?.amendment006Sha256,
+        pinnedPackages: Object.fromEntries(registry.descriptors.map((descriptor) => [
+          descriptor.armId,
+          { name: descriptor.packageName ?? null, version: descriptor.version ?? null }
+        ])),
+        pinnedModels,
+        probeReports: nativeProbeReports,
+        now: verificationInstant
+      });
+    } catch {
+      nativeAttemptEvidence = Object.freeze({
+        satisfiedRecoveries: new Set(),
+        findings: Object.freeze([{ code: 'NATIVE_ATTEMPT_EVIDENCE_CONTEXT_INVALID' }]),
+        note: 'the native-attempt policy or committed runtime pins could not be verified'
+      });
+    }
+    for (const [armId, recovery] of normalizedNativeAttemptPolicy?.policies ?? []) {
+      for (const [requestClass, categories] of Object.entries(recovery)) {
+        for (const category of categories) {
+          const key = `${armId}\u001f${requestClass}\u001f${category}`;
+          if (nativeAttemptEvidence.satisfiedRecoveries.has(key)) continue;
+          blockers.push({
+            kind: 'native-attempt-evidence',
+            code: 'NATIVE_ATTEMPT_EVIDENCE_REQUIRED',
+            armId,
+            requestClass,
+            category,
+            note: nativeAttemptEvidence.note
+          });
+        }
+      }
+    }
+    if (normalizedNativeAttemptPolicy === null) {
+      blockers.push({
+        kind: 'native-attempt-evidence',
+        code: 'NATIVE_ATTEMPT_POLICY_INVALID',
+        note: nativeAttemptEvidence.note
+      });
+    }
+  }
+
   for (const descriptor of registry.descriptors) {
     if (descriptor.requiredService === null) continue;
     const unverified = descriptor.requiredServiceNames
@@ -263,6 +329,15 @@ export async function computeV11Readiness(input) {
       findings: preconditionEvidence.findings,
       note: preconditionEvidence.note
     },
+    nativeAttemptEvidence: nativeAttemptEvidence === null ? {
+      satisfiedRecoveries: [],
+      findings: [],
+      note: 'no native recovery policy was supplied to this direct readiness call'
+    } : {
+      satisfiedRecoveries: [...nativeAttemptEvidence.satisfiedRecoveries].sort(),
+      findings: nativeAttemptEvidence.findings,
+      note: nativeAttemptEvidence.note
+    },
     serviceEvidence: {
       verifiedServices: [...serviceEvidence.verifiedServices].sort(),
       findings: serviceEvidence.findings,
@@ -286,6 +361,23 @@ export function createV11AdapterExecutor(input) {
   if (!isPlainRecord(hosts)) {
     throw new V11RunError('CONTRACT_FAILURE', 'adapter hosts must be an object');
   }
+  const measuredRoots = new Set();
+  const measuredRootKey = (request) => {
+    if (!isPlainRecord(request)) return null;
+    const fields = ['runId', 'attemptId', 'armId', 'scenarioId', 'phase', 'operation'];
+    if (fields.some((field) => (
+      typeof request[field] !== 'string' || request[field].trim().length === 0
+    ))
+      || !Number.isSafeInteger(request.repetition) || request.repetition < 0) {
+      return null;
+    }
+    return [...fields.slice(0, 4), 'repetition', ...fields.slice(4)]
+      .map((field) => {
+        const value = String(request[field]);
+        return `${value.length}:${value}`;
+      })
+      .join('|');
+  };
   const byArm = new Map();
   for (const descriptor of registry.descriptors) {
     const host = hosts[descriptor.kind];
@@ -299,6 +391,13 @@ export function createV11AdapterExecutor(input) {
   }
 
   return async function executeAdapter(request, options) {
+    const root = measuredRootKey(request);
+    if (root !== null) {
+      if (measuredRoots.has(root)) {
+        throw new V11RunError('HARNESS_OPERATION_REEXECUTION', 'A measured adapter root operation may be invoked only once');
+      }
+      measuredRoots.add(root);
+    }
     const execute = byArm.get(request.armId);
     if (execute === undefined) {
       throw new V11RunError('RUNTIME_UNAVAILABLE', `no runtime is bound to arm ${request.armId}`);
@@ -321,9 +420,11 @@ export async function executeV11AcceptanceRun(input) {
     registry,
     definition,
     scenarios,
+    nativeAttemptPolicy = null,
     benchmarkRoot,
     satisfiedPreconditions = [],
     preconditionEvidencePath = null,
+    nativeAttemptEvidencePath = null,
     serviceEvidencePath = null,
     verificationInstant = undefined,
     runId,
@@ -343,6 +444,8 @@ export async function executeV11AcceptanceRun(input) {
     amendment004Path,
     amendment005Path,
     amendment005SidecarPath,
+    amendment006Path,
+    amendment006SidecarPath,
     resume = null,
     signal = undefined,
     // A production run owns a provider meter and two ledgers. The runner already
@@ -399,9 +502,12 @@ export async function executeV11AcceptanceRun(input) {
     registry,
     definition,
     scenarios,
+    nativeAttemptPolicy,
+    sourceHashes,
     benchmarkRoot,
     satisfiedPreconditions,
     preconditionEvidencePath,
+    nativeAttemptEvidencePath,
     serviceEvidencePath,
     verificationInstant,
     readFileImpl
@@ -438,6 +544,7 @@ export async function executeV11AcceptanceRun(input) {
     amendment003Sha256: sourceHashes.amendment003Sha256,
     amendment004Sha256: sourceHashes.amendment004Sha256,
     amendment005Sha256: sourceHashes.amendment005Sha256,
+    amendment006Sha256: sourceHashes.amendment006Sha256,
     implementationLockHash,
     environmentLockHash,
     amendment002Path,
@@ -445,6 +552,8 @@ export async function executeV11AcceptanceRun(input) {
     amendment004Path,
     amendment005Path,
     amendment005SidecarPath,
+    amendment006Path,
+    amendment006SidecarPath,
     progress,
     persistUnit,
     now,
@@ -473,7 +582,12 @@ export async function executeV11AcceptanceRun(input) {
     },
     scenarios: structuredClone(scenarios)
   };
-  const validation = validateRawRun(raw, resolvedDefinition, sourceHashes.preregistrationSha256);
+  const validation = validateRawRun(
+    raw,
+    resolvedDefinition,
+    sourceHashes.preregistrationSha256,
+    sourceHashes
+  );
   const aggregate = aggregateRun(raw, resolvedDefinition, { trustedSourceHashes: sourceHashes });
 
   // After `closeResources`, so the ledger is complete, and after the record,

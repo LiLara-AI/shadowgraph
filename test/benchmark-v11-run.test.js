@@ -38,6 +38,8 @@ const AMENDMENT_003_PATH = path.join(BENCHMARK_ROOT, 'preregistration-amendment-
 const AMENDMENT_004_PATH = path.join(BENCHMARK_ROOT, 'preregistration-amendment-004.json');
 const AMENDMENT_005_PATH = path.join(BENCHMARK_ROOT, 'preregistration-amendment-005.json');
 const AMENDMENT_005_SIDECAR_PATH = path.join(BENCHMARK_ROOT, 'preregistration-amendment-005.sha256');
+const AMENDMENT_006_PATH = path.join(BENCHMARK_ROOT, 'preregistration-amendment-006.json');
+const AMENDMENT_006_SIDECAR_PATH = path.join(BENCHMARK_ROOT, 'preregistration-amendment-006.sha256');
 
 async function realCandidate() {
   const competitorLock = JSON.parse(
@@ -59,7 +61,7 @@ async function runCli(args) {
     const { stdout } = await execFileAsync(process.execPath, [CLI, ...args]);
     return { code: 0, stdout };
   } catch (error) {
-    return { code: error.code ?? 1, stdout: error.stdout ?? '' };
+    return { code: error.code ?? 1, stdout: error.stdout ?? '', stderr: error.stderr ?? error.message ?? '' };
   }
 }
 
@@ -107,6 +109,25 @@ test('readiness names every unmet immutable prerequisite, not only applicability
     assert.ok(found, `${gate.requirement} is not reported`);
     assert.match(found.note, /cannot establish authenticity/u);
   }
+});
+
+test('every non-empty native recovery policy entry requires fresh external evidence', async () => {
+  const candidate = await realCandidate();
+  const report = await computeV11Readiness({
+    ...candidate,
+    benchmarkRoot: BENCHMARK_ROOT,
+    verificationInstant: Date.parse('2026-09-08T10:00:00.000Z')
+  });
+  assert.deepEqual(
+    report.blockers
+      .filter((blocker) => blocker.kind === 'native-attempt-evidence')
+      .map(({ armId, requestClass, category }) => ({ armId, requestClass, category }))
+      .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+    [
+      { armId: 'cognee', requestClass: 'embedding', category: 'B' },
+      { armId: 'cognee', requestClass: 'internal_memory_llm', category: 'C' }
+    ]
+  );
 });
 
 test('a prerequisite file that exists but is empty is not treated as satisfied', async (t) => {
@@ -289,6 +310,35 @@ test('adapter routing follows the lock, and an unconfigured runtime is refused',
   );
 });
 
+test('adapter routing refuses a second invocation of the same measured root operation', async () => {
+  const { registry } = await realCandidate();
+  let calls = 0;
+  const host = () => () => async () => {
+    calls += 1;
+    return { status: 'SUCCEEDED' };
+  };
+  const executeAdapter = createV11AdapterExecutor({
+    registry,
+    hosts: { control: host(), 'node-mcp': host(), 'python-container': host() }
+  });
+  const request = {
+    runId: 'run-no-rerun',
+    attemptId: 'attempt-no-rerun',
+    armId: 'cognee',
+    scenarioId: 'ACC_TRACE_1',
+    repetition: 0,
+    phase: 'A',
+    operation: 'persist'
+  };
+
+  await executeAdapter(request, {});
+  await assert.rejects(
+    executeAdapter(request, {}),
+    (error) => error instanceof V11RunError && error.code === 'HARNESS_OPERATION_REEXECUTION'
+  );
+  assert.equal(calls, 1);
+});
+
 test('the module refuses to run a candidate its own readiness check blocks', async () => {
   const candidate = await realCandidate();
   await assert.rejects(
@@ -303,6 +353,8 @@ test('the module refuses to run a candidate its own readiness check blocks', asy
       amendment004Path: AMENDMENT_004_PATH,
       amendment005Path: AMENDMENT_005_PATH,
       amendment005SidecarPath: AMENDMENT_005_SIDECAR_PATH,
+    amendment006Path: AMENDMENT_006_PATH,
+    amendment006SidecarPath: AMENDMENT_006_SIDECAR_PATH,
       implementationLockHash: '4'.repeat(64),
       environmentLockHash: '5'.repeat(64),
       executeAdapter: async () => {
@@ -347,6 +399,8 @@ test('a real run may use only the frozen prompt builder', async () => {
     amendment004Path: AMENDMENT_004_PATH,
     amendment005Path: AMENDMENT_005_PATH,
     amendment005SidecarPath: AMENDMENT_005_SIDECAR_PATH,
+    amendment006Path: AMENDMENT_006_PATH,
+    amendment006SidecarPath: AMENDMENT_006_SIDECAR_PATH,
     implementationLockHash: '4'.repeat(64),
     environmentLockHash: '5'.repeat(64),
     executeAdapter: async () => {
@@ -464,6 +518,8 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
     amendment004Path: AMENDMENT_004_PATH,
     amendment005Path: AMENDMENT_005_PATH,
     amendment005SidecarPath: AMENDMENT_005_SIDECAR_PATH,
+    amendment006Path: AMENDMENT_006_PATH,
+    amendment006SidecarPath: AMENDMENT_006_SIDECAR_PATH,
     implementationLockHash: '4'.repeat(64),
     environmentLockHash: '5'.repeat(64),
     progress,
@@ -560,6 +616,15 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
   assert.equal(outcome.raw.mode, 'ACCEPTANCE');
   assert.equal(outcome.validation.valid, true, 'the validator must accept the run it just produced');
   assert.equal(outcome.aggregate.mode, 'ACCEPTANCE');
+
+  const rawPath = path.join(outputDirectory, 'cli-v11-raw.json');
+  const aggregatePath = path.join(outputDirectory, 'cli-v11-aggregate.json');
+  await writeFile(rawPath, `${JSON.stringify(outcome.raw)}\n`, 'utf8');
+  const cliAggregate = await runCli(['aggregate', '--input', rawPath, '--output', aggregatePath]);
+  assert.equal(cliAggregate.code, 0, `${cliAggregate.stderr}\n${cliAggregate.stdout}`);
+  const cliAggregateArtifact = JSON.parse(await readFile(aggregatePath, 'utf8'));
+  assert.equal(cliAggregateArtifact.schemaVersion, 2);
+  assert.equal(cliAggregateArtifact.mode, 'ACCEPTANCE');
 
   // Counting units is not the same as measuring them. Without this, the test
   // passed with every unit FAILED - found by mutating the prompt-input
@@ -928,6 +993,11 @@ test('preflight and run answer readiness identically when evidence is presented'
   assert.deepEqual(preflightReport.serviceEvidence.verifiedServices, ['neo4j', 'ollama']);
   assert.deepEqual(preflightReport.blockers.filter((blocker) => blocker.kind === 'required-service'), []);
   assert.equal(preflightReport.readiness, 'NOT READY');
-  assert.deepEqual(preflightReport.blockers.map((blocker) => blocker.code), ['PROVIDER_BUDGET_REQUIRED', 'DECLARED_ISOLATION_PRECONDITION_UNMET']);
+  assert.deepEqual(preflightReport.blockers.map((blocker) => blocker.code), [
+    'PROVIDER_BUDGET_REQUIRED',
+    'DECLARED_ISOLATION_PRECONDITION_UNMET',
+    'NATIVE_ATTEMPT_EVIDENCE_REQUIRED',
+    'NATIVE_ATTEMPT_EVIDENCE_REQUIRED'
+  ]);
   assert.deepEqual(await readdir(outputDirectory), [], 'a still-blocked run writes nothing');
 });

@@ -117,6 +117,7 @@ export function createMeteredOuterTransport(options = {}) {
     // through, so nothing the runner adds later is silently minted into a route.
     const bound = {};
     for (const field of CORRELATION_FIELDS) bound[field] = correlation[field];
+    bound.rootOperation = 'outer-decision';
     const endpoint = meter.bindEndpoint(bound);
 
     return await requestDecision({

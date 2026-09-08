@@ -112,6 +112,17 @@ test('a record that is not this schema establishes nothing', () => {
   }
 });
 
+test('a fatal probe record remains a declared failed demonstration before its first required step', () => {
+  const result = verify({ evidence: evidence({
+    outcome: 'FAIL',
+    fatal: true,
+    steps: []
+  }) });
+  assert.deepEqual([...result.satisfiedPreconditions], []);
+  assert.ok(result.findings.some((finding) => finding.code === 'DEMONSTRATION_FAILED'));
+  assert.equal(result.findings.some((finding) => finding.code === 'PRECONDITION_EVIDENCE_MALFORMED'), false);
+});
+
 test('a demonstration whose overall outcome is not PASS establishes nothing', () => {
   const result = verify({ evidence: evidence({ outcome: 'FAIL' }) });
   assert.deepEqual([...result.satisfiedPreconditions], []);

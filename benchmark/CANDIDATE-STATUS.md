@@ -20,9 +20,9 @@ with a verified `SHA256SUMS.txt`. No benchmark artifact is tracked here or
 present in the working tree, which `test/benchmark-v11-definition.test.js`
 enforces against both the git index and the disk.
 
-## Verification evidence
+## Historical verification evidence — not current candidate evidence
 
-All figures below were produced on the current branch with a clean working tree.
+The figures below were produced on an earlier branch snapshot and clean working tree. They are retained as historical verification context only; they do **not** establish the current recovery candidate, fresh service readiness, implementation-lock identity, or acceptance eligibility. The current operational state and exact-byte gate evidence are maintained in `benchmark/evidence/v11-operational-budget-repair.md`.
 
 | Gate | Command | Result |
 | --- | --- | --- |
@@ -124,7 +124,9 @@ tracked tree. Reviewing this branch by diff alone will therefore understate what
 was pre-existing and overstate what this session authored. Reviewers should
 treat file content at HEAD, not the diffs, as the object of review.
 
-## Requirement status
+## Historical requirement status — superseded for the current candidate
+
+The table records prior branch-era investigations and must not be read as a current READY verdict. In particular, any historical `READY`, cleared service, or completed-run wording is superseded by the current exact-byte disposition in `benchmark/evidence/v11-operational-budget-repair.md`.
 
 | # | Requirement | Status |
 | --- | --- | --- |

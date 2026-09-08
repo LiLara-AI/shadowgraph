@@ -79,7 +79,7 @@ def _runtime_config(routes: dict, models: dict, state_root: str) -> dict:
         # separately, so a library request is never silently called a rerun.
         "automatic_retries": 0,
         "harness_operation_retries": 0,
-        "native_attempt_policy": "amendment-005-metered-and-bounded",
+        "native_attempt_policy": "amendment-006-arm-neutral-meter-trace",
         "native_acl_gate": "task8_required_for_user_scope",
     }
 

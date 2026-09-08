@@ -14,6 +14,7 @@
 // This module performs no I/O and holds no state.
 
 import { reconcileProviderAttempts } from './v11-budget.mjs';
+import { traceNativeAttempts } from './v11-native-attempts.mjs';
 
 const LEDGER_SCHEMA = 'shadowgraph.provider-meter.event';
 const LEDGER_VERSION = 1;
@@ -44,7 +45,8 @@ export const RECONCILIATION_CODES = Object.freeze([
   'MODEL_MISMATCH',
   'FAILED_OUTCOME',
   'INCOMPLETE_USAGE',
-  'UNVERIFIED_OPERATION_COUNT'
+  'UNVERIFIED_OPERATION_COUNT',
+  'NATIVE_ATTEMPT_TRACE_DISCREPANT'
 ]);
 
 function isPlainObject(value) {
@@ -152,8 +154,11 @@ function validateExpectation(expectation, index) {
  * or response bodies - only correlations, counts and model identifiers - so it
  * is safe to retain as evidence.
  */
-export function reconcileProviderEvidence(input) {
+function reconcileProviderEvidenceInternal(input, toleratedTransportFailureRequestNumbers = new Set()) {
   if (!isPlainObject(input)) throw new Error('reconciliation input must be an object');
+  if (!(toleratedTransportFailureRequestNumbers instanceof Set)) {
+    throw new Error('tolerated transport failures must be an internal set');
+  }
   const {
     events,
     malformed = [],
@@ -258,7 +263,8 @@ export function reconcileProviderEvidence(input) {
     }
 
     for (const event of matched) {
-      if (event.outcome !== 'SUCCEEDED') {
+      const toleratedTransportFailure = toleratedTransportFailureRequestNumbers.has(event.requestNumber);
+      if (event.outcome !== 'SUCCEEDED' && !toleratedTransportFailure) {
         findings.push({
           code: 'FAILED_OUTCOME',
           correlation,
@@ -334,6 +340,11 @@ export function reconcileProviderEvidence(input) {
     }),
     findings: Object.freeze(findings)
   });
+}
+
+/** Public reconciliation is strict: only the live trace path can permit B precursors. */
+export function reconcileProviderEvidence(input) {
+  return reconcileProviderEvidenceInternal(input);
 }
 
 // The operation metric that states, for one unit, how many calls of a given
@@ -440,7 +451,7 @@ export function providerExpectationsFromRun(raw, attemptId) {
  * comparison is capable of.
  */
 export function runProviderReconciliation(input) {
-  const { ledgerText = null, ledgerPath, raw, attemptId, pinnedModels } = input ?? {};
+  const { ledgerText = null, ledgerPath, raw, attemptId, pinnedModels, nativeAttemptPolicy } = input ?? {};
   if (!isNonEmptyString(ledgerPath)) {
     throw new Error('a run reconciliation must name the ledger it read');
   }
@@ -454,14 +465,15 @@ export function runProviderReconciliation(input) {
     || !named(pinnedModels.embedding)) {
     throw new Error('a run reconciliation requires the pinned model ids the run was bound to');
   }
-  const envelope = (status, totals, findings) => Object.freeze({
+  const envelope = (status, totals, findings, nativeAttemptTrace = null) => Object.freeze({
     schema: 'shadowgraph.v11.provider-reconciliation',
     version: 1,
     attemptId,
     ledgerPath,
     status,
     totals,
-    findings: Object.freeze(findings)
+    findings: Object.freeze(findings),
+    nativeAttemptTrace
   });
 
   if (ledgerText === null) {
@@ -476,26 +488,69 @@ export function runProviderReconciliation(input) {
 
   const { events, malformed } = parseProviderLedger(ledgerText);
   const { expectations, unverifiedCounts } = providerExpectationsFromRun(raw, attemptId);
-  const report = reconcileProviderEvidence({
+  const expectedModels = {
+    // The outer decision and an arm's own internal calls are the same pinned
+    // chat model: the lock states it once and both routes use it.
+    outer_decision_llm: pinnedModels.internal_memory_llm.modelId,
+    internal_memory_llm: pinnedModels.internal_memory_llm.modelId,
+    embedding: pinnedModels.embedding.modelId
+  };
+  let report = reconcileProviderEvidenceInternal({
     events,
     malformed,
     expectations,
     unverifiedCounts,
-    expectedModels: {
-      // The outer decision and an arm's own internal calls are the same pinned
-      // chat model: the lock states it once and both routes use it.
-      outer_decision_llm: pinnedModels.internal_memory_llm.modelId,
-      internal_memory_llm: pinnedModels.internal_memory_llm.modelId,
-      embedding: pinnedModels.embedding.modelId
-    }
+    expectedModels
   });
+  let nativeAttemptTrace = null;
+  if (nativeAttemptPolicy !== undefined) {
+    try {
+      nativeAttemptTrace = traceNativeAttempts({
+        events,
+        expectedModels,
+        policy: nativeAttemptPolicy
+      });
+    } catch {
+      nativeAttemptTrace = Object.freeze({
+        status: 'DISCREPANT',
+        trace: Object.freeze([]),
+        findings: Object.freeze([{ code: 'NATIVE_ATTEMPT_TRACE_INVALID' }])
+      });
+    }
+    if (nativeAttemptTrace.status === 'RECONCILED') {
+      const resolvedTransportFailures = new Set(
+        nativeAttemptTrace.trace
+          .filter((entry) => entry.category === 'B' && entry.priorRequestNumber !== null)
+          .map((entry) => entry.priorRequestNumber)
+      );
+      if (resolvedTransportFailures.size > 0) {
+        report = reconcileProviderEvidenceInternal({
+          events,
+          malformed,
+          expectations,
+          unverifiedCounts,
+          expectedModels
+        }, resolvedTransportFailures);
+      }
+    }
+  }
+  let findings = [...report.findings];
+  let status = report.status;
+  if (nativeAttemptTrace?.status !== null && nativeAttemptTrace?.status !== undefined
+    && nativeAttemptTrace.status !== 'RECONCILED') {
+    status = 'DISCREPANT';
+    findings.push({
+      code: 'NATIVE_ATTEMPT_TRACE_DISCREPANT',
+      traceFindings: nativeAttemptTrace.findings.length
+    });
+  }
   if (input.providerBudget !== undefined) {
     const budgetEvidence = reconcileProviderAttempts({
       text: input.attemptLedgerText, events, expectedBudget: input.providerBudget
     });
     return Object.freeze({ ...envelope(
-      budgetEvidence.status === 'RECONCILED' ? report.status : 'DISCREPANT', report.totals, report.findings
+      budgetEvidence.status === 'RECONCILED' ? status : 'DISCREPANT', report.totals, findings, nativeAttemptTrace
     ), budgetEvidence });
   }
-  return envelope(report.status, report.totals, report.findings);
+  return envelope(status, report.totals, findings, nativeAttemptTrace);
 }

@@ -51,6 +51,7 @@ import { buildV11Prompt } from './v11-prompts.mjs';
 import { providerModelsFromLock } from './v11-provider-models.mjs';
 import { createV11PythonHosts } from './v11-python-hosts.mjs';
 import { readPythonSiteDistributions, verifyPythonRuntime } from './v11-python-runtime.mjs';
+import { validateNativeAttemptPolicy } from './v11-native-attempts.mjs';
 import { createV11RunResources } from './v11-run-resources.mjs';
 import { ADAPTER_OPERATION_TIMEOUT_MS, UNIT_TIMEOUT_MS } from './v11-runner.mjs';
 
@@ -127,6 +128,7 @@ export async function bindV11Runtime(input, injections = {}) {
     benchmarkRoot,
     competitorLock,
     definition,
+    nativeAttemptPolicy,
     registry,
     runId,
     attemptId,
@@ -138,6 +140,16 @@ export async function bindV11Runtime(input, injections = {}) {
     pythonRuntimeSite,
     platform = process.platform
   } = input;
+
+  let normalizedNativeAttemptPolicy;
+  try {
+    normalizedNativeAttemptPolicy = validateNativeAttemptPolicy(nativeAttemptPolicy);
+  } catch {
+    throw new V11RunError(
+      'RUNTIME_UNAVAILABLE',
+      'the frozen arm-neutral native-attempt policy is missing or invalid'
+    );
+  }
 
   // The Python executor refuses win32 outright, and its container launch reads
   // POSIX uid/gid. Saying so here names the real constraint instead of
@@ -295,7 +307,11 @@ export async function bindV11Runtime(input, injections = {}) {
       upstreamAuthorization: null,
       ledgerPath: providerLedgerPath(ledgerDirectory, attemptId),
       upstreamTimeoutMs: execution.requestTimeoutMs
-    }, { budget: providerBudget, ...(campaign === null ? {} : {
+    }, {
+      budget: providerBudget,
+      requireRootOperation: true,
+      maxAttemptsPerRootRequestClass: normalizedNativeAttemptPolicy.maxAttemptsPerRootRequestClass,
+      ...(campaign === null ? {} : {
       campaignReserve: (requestClass) => campaign.reserve(requestClass)
     }) });
     closers.push(() => meter.close());

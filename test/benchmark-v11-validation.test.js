@@ -11,7 +11,8 @@ const TRUSTED_SOURCE_HASHES = Object.freeze({
   amendment002Sha256: '3'.repeat(64),
   amendment003Sha256: '4'.repeat(64),
   amendment004Sha256: '5'.repeat(64),
-  amendment005Sha256: '6'.repeat(64)
+  amendment005Sha256: '6'.repeat(64),
+  amendment006Sha256: '7'.repeat(64)
 });
 const PREREGISTRATION_SHA = TRUSTED_SOURCE_HASHES.preregistrationSha256;
 const RUN_ID = 'run-validation-1';
@@ -460,6 +461,7 @@ function rawRun({ mode = 'ACCEPTANCE', armDefinitions, mutateUnit = null, zeroRe
     amendment003Sha256: TRUSTED_SOURCE_HASHES.amendment003Sha256,
     amendment004Sha256: TRUSTED_SOURCE_HASHES.amendment004Sha256,
     amendment005Sha256: TRUSTED_SOURCE_HASHES.amendment005Sha256,
+    amendment006Sha256: TRUSTED_SOURCE_HASHES.amendment006Sha256,
     implementationLockHash: '4'.repeat(64),
     environmentLockHash: '5'.repeat(64),
     startedAt: '2026-08-31T00:00:00.000Z',
@@ -475,6 +477,17 @@ function rawRun({ mode = 'ACCEPTANCE', armDefinitions, mutateUnit = null, zeroRe
     units
   };
 }
+
+test('schema v2 validation rejects a tampered Amendment 005 hash before aggregation', () => {
+  const arms = [{ id: 'arm-v11-source', name: 'V11 source arm', applicability: applicability() }];
+  const raw = rawRun({ armDefinitions: arms });
+  raw.amendment005Sha256 = 'f'.repeat(64);
+
+  assert.throws(
+    () => validateRawRun(raw, preregistration(arms), PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
+    /amendment005Sha256.*trusted|trusted.*amendment005Sha256/iu
+  );
+});
 
 test('schema v2 aggregation requires trusted source hashes and rejects raw source-hash tampering', () => {
   const arms = [{ id: 'arm-hash-bound', name: 'Hash-bound arm', applicability: applicability() }];
@@ -492,7 +505,8 @@ test('schema v2 aggregation requires trusted source hashes and rejects raw sourc
     'amendment002Sha256',
     'amendment003Sha256',
     'amendment004Sha256',
-    'amendment005Sha256'
+    'amendment005Sha256',
+    'amendment006Sha256'
   ]) {
     const tampered = structuredClone(raw);
     tampered[field] = '9'.repeat(64);
@@ -538,7 +552,7 @@ test('schema v2 validation retains partial evidence and verifies mechanical arm 
 
   const failed = raw.units.find((item) => item.armId === 'arm-partial' && item.phase === 'B');
   const before = structuredClone(failed);
-  const result = validateRawRun(raw, preregistration(arms), PREREGISTRATION_SHA);
+  const result = validateRawRun(raw, preregistration(arms), PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES);
 
   assert.equal(result.valid, true);
   assert.equal(result.schemaVersion, 2);
@@ -575,7 +589,7 @@ test('schema v2 validation rejects an arm status that disagrees with its unit ev
   raw.arms[0].status = 'MEASURED';
 
   assert.throws(
-    () => validateRawRun(raw, preregistration(arms), PREREGISTRATION_SHA),
+    () => validateRawRun(raw, preregistration(arms), PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
     /status MEASURED.*mechanically derived PARTIAL_FAILED/i
   );
   assert.throws(
@@ -607,7 +621,7 @@ test('schema v2 validation binds raw applicability to the harness-owned definiti
   userIsolation.storage = storage();
 
   assert.throws(
-    () => validateRawRun(raw, definition, PREREGISTRATION_SHA),
+    () => validateRawRun(raw, definition, PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
     /applicability.*harness-owned|harness-owned.*applicability/iu
   );
 });
@@ -624,7 +638,7 @@ test('schema v2 validation requires exact persisted adapter evidence shapes', ()
   isolationUnit.adapterEvidence.verify.isolationEvidence = { verified: true };
 
   assert.throws(
-    () => validateRawRun(raw, definition, PREREGISTRATION_SHA),
+    () => validateRawRun(raw, definition, PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
     /isolationEvidence.*(?:missing|required|field|namespace|leaked)/iu
   );
 
@@ -637,7 +651,7 @@ test('schema v2 validation requires exact persisted adapter evidence shapes', ()
     matchedRecordIds: []
   };
   assert.throws(
-    () => validateRawRun(persistenceRaw, definition, PREREGISTRATION_SHA),
+    () => validateRawRun(persistenceRaw, definition, PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
     /persistenceEvidence.*(?:missing|required|field|namespace|matched)/iu
   );
 
@@ -647,7 +661,7 @@ test('schema v2 validation requires exact persisted adapter evidence shapes', ()
   phaseA.operations.memoryReadOperations = 0;
   assert.equal(phaseA.adapterEvidence.retrieve, null);
   assert.throws(
-    () => validateRawRun(missingEvidenceRaw, definition, PREREGISTRATION_SHA),
+    () => validateRawRun(missingEvidenceRaw, definition, PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
     /MEASURED.*(?:retrieve|adapter evidence)/iu
   );
 });
@@ -697,14 +711,14 @@ test('schema v2 validator shares the bounded domain-separated unit id format and
   assert.ok(raw.units.every((item) => /^unit:[a-f0-9]{64}$/u.test(item.unitId)));
   assert.ok(raw.units.every((item) => item.unitId.length <= 256));
   assert.equal(new Set(raw.units.map((item) => item.unitId)).size, raw.units.length);
-  assert.doesNotThrow(() => validateRawRun(raw, preregistration([arm]), PREREGISTRATION_SHA));
+  assert.doesNotThrow(() => validateRawRun(raw, preregistration([arm]), PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES));
 
   const legacy = structuredClone(raw);
   const legacyUnit = legacy.units[0];
   const components = [legacyUnit.armId, legacyUnit.scenarioId, String(legacyUnit.repetition), legacyUnit.phase];
   legacyUnit.unitId = `unit:${components.map((value) => `${value.length}:${value}`).join(':')}`;
   assert.throws(
-    () => validateRawRun(legacy, preregistration([arm]), PREREGISTRATION_SHA),
+    () => validateRawRun(legacy, preregistration([arm]), PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
     /correlation does not match unitId/iu
   );
 });
@@ -720,7 +734,7 @@ test('schema v2 validation rejects model-id reuse as a persisted storage-id coll
   phaseB.adapterEvidence.verify.persistenceEvidence.matchedRecordIds = [phaseAStorageId];
 
   assert.throws(
-    () => validateRawRun(raw, preregistration([arm]), PREREGISTRATION_SHA),
+    () => validateRawRun(raw, preregistration([arm]), PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
     /persisted record|storage.*id|expected.*record|unit-unique/iu
   );
 });
@@ -732,7 +746,7 @@ test('schema v2 validation rejects any-record persistence matches', () => {
   phaseA.adapterEvidence.verify.persistenceEvidence.matchedRecordIds.push('unrelated-record');
 
   assert.throws(
-    () => validateRawRun(raw, preregistration([arm]), PREREGISTRATION_SHA),
+    () => validateRawRun(raw, preregistration([arm]), PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
     /exact persisted record|matchedRecordIds|only matched record|any-record/iu
   );
 });
@@ -741,7 +755,7 @@ test('schema v2 validation binds isolation retrieval to alternate namespaces and
   const arm = { id: 'arm-isolation-binding', name: 'Isolation binding arm', applicability: applicability() };
   const document = preregistration([arm]);
   const raw = rawRun({ armDefinitions: [arm] });
-  assert.doesNotThrow(() => validateRawRun(raw, document, PREREGISTRATION_SHA));
+  assert.doesNotThrow(() => validateRawRun(raw, document, PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES));
 
   const projectIsolation = raw.units.find((item) => item.phase === 'ISOLATION_PROJECT');
   assert.equal(
@@ -782,7 +796,7 @@ test('schema v2 validation binds isolation retrieval to alternate namespaces and
     const invalid = structuredClone(raw);
     mutate(invalid.units.find((item) => item.phase === 'ISOLATION_PROJECT'));
     assert.throws(
-      () => validateRawRun(invalid, document, PREREGISTRATION_SHA),
+      () => validateRawRun(invalid, document, PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
       /(?:retrieve|persist|verify|adapter evidence).*(?:namespace|context)|missing.*namespace/iu,
       label
     );
@@ -805,7 +819,7 @@ test('schema v2 validation rejects a matching Phase-A id in the alternate namesp
   );
 
   assert.throws(
-    () => validateRawRun(raw, preregistration([arm]), PREREGISTRATION_SHA),
+    () => validateRawRun(raw, preregistration([arm]), PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
     /isolationEvidence.*zero matching|alternate namespace.*without matching/iu
   );
 });
@@ -818,7 +832,7 @@ test('schema v2 validation rejects matching Phase-A content under a different id
   isolation.adapterEvidence.verify.isolationEvidence.matchingRecordIdCount = 0;
   isolation.adapterEvidence.verify.isolationEvidence.matchingContentCount = 1;
   assert.throws(
-    () => validateRawRun(raw, preregistration([arm]), PREREGISTRATION_SHA),
+    () => validateRawRun(raw, preregistration([arm]), PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
     /isolationEvidence.*zero matching|alternate namespace.*without matching/iu
   );
 });
@@ -829,7 +843,7 @@ test('schema v2 validation binds isolation counts to the exact Phase-A target', 
   const isolation = raw.units.find((item) => item.phase === 'ISOLATION_PROJECT');
   isolation.adapterEvidence.verify.isolationEvidence.expectedAbsentRecord.id = 'different-phase-a-record';
   assert.throws(
-    () => validateRawRun(raw, preregistration([arm]), PREREGISTRATION_SHA),
+    () => validateRawRun(raw, preregistration([arm]), PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
     /exact alternate namespace|expectedAbsentRecord|Phase-A/iu
   );
 });
@@ -840,7 +854,7 @@ test('schema v2 validation rejects a same-id persistence match with the wrong co
   const phaseA = raw.units.find((item) => item.phase === 'A');
   phaseA.adapterEvidence.verify.persistenceEvidence.observedContentSha256 = 'f'.repeat(64);
   assert.throws(
-    () => validateRawRun(raw, preregistration([arm]), PREREGISTRATION_SHA),
+    () => validateRawRun(raw, preregistration([arm]), PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
     /exact expected record content hash|exact persisted record/iu
   );
 });
@@ -861,7 +875,7 @@ test('schema v2 validation accepts repeated model decision ids only with distinc
     phaseA.adapterEvidence.verify.persistenceEvidence.expectedRecord.id,
     phaseB.adapterEvidence.verify.persistenceEvidence.expectedRecord.id
   );
-  assert.doesNotThrow(() => validateRawRun(raw, preregistration([arm]), PREREGISTRATION_SHA));
+  assert.doesNotThrow(() => validateRawRun(raw, preregistration([arm]), PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES));
 });
 
 test('schema v2 validation forbids invented evidence for persistence N/A and excluded user isolation', () => {
@@ -872,7 +886,7 @@ test('schema v2 validation forbids invented evidence for persistence N/A and exc
   };
   const document = preregistration([arm]);
   const raw = rawRun({ armDefinitions: [arm] });
-  assert.doesNotThrow(() => validateRawRun(raw, document, PREREGISTRATION_SHA));
+  assert.doesNotThrow(() => validateRawRun(raw, document, PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES));
 
   const invalidPersistence = structuredClone(raw);
   const phaseA = invalidPersistence.units.find((item) => item.phase === 'A');
@@ -882,7 +896,7 @@ test('schema v2 validation forbids invented evidence for persistence N/A and exc
     decisionRecordReference(arm, 'A')
   );
   assert.throws(
-    () => validateRawRun(invalidPersistence, document, PREREGISTRATION_SHA),
+    () => validateRawRun(invalidPersistence, document, PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
     /NOT_APPLICABLE.*(?:evidence|claims)|persistence.*NOT_APPLICABLE/iu
   );
 
@@ -890,7 +904,7 @@ test('schema v2 validation forbids invented evidence for persistence N/A and exc
   const projectIsolation = invalidIsolation.units.find((item) => item.phase === 'ISOLATION_PROJECT');
   projectIsolation.adapterEvidence.verify.isolationEvidence = isolationEvidence(arm, 'ISOLATION_PROJECT');
   assert.throws(
-    () => validateRawRun(invalidIsolation, document, PREREGISTRATION_SHA),
+    () => validateRawRun(invalidIsolation, document, PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
     /NOT_APPLICABLE.*(?:evidence|claims)|persistence.*NOT_APPLICABLE/iu
   );
 
@@ -902,7 +916,7 @@ test('schema v2 validation forbids invented evidence for persistence N/A and exc
     namespace: alternateNamespace(arm, 'ISOLATION_USER')
   });
   assert.throws(
-    () => validateRawRun(invalidExcluded, document, PREREGISTRATION_SHA),
+    () => validateRawRun(invalidExcluded, document, PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
     /EXCLUDED.*claims/iu
   );
 });
@@ -915,7 +929,7 @@ test('schema v2 validation enforces terminal measured/failed units and claim-fre
   };
   const excludedRaw = rawRun({ armDefinitions: [excludedArm] });
   const excludedDocument = preregistration([excludedArm]);
-  validateRawRun(excludedRaw, excludedDocument, PREREGISTRATION_SHA);
+  validateRawRun(excludedRaw, excludedDocument, PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES);
   const excludedIndex = excludedRaw.units.findIndex((item) => item.phase === 'ISOLATION_USER');
   const excludedMutations = [
     ['latencyMs', (item) => { item.latencyMs = 1; }],
@@ -933,7 +947,7 @@ test('schema v2 validation enforces terminal measured/failed units and claim-fre
     const invalid = structuredClone(excludedRaw);
     mutate(invalid.units[excludedIndex]);
     assert.throws(
-      () => validateRawRun(invalid, excludedDocument, PREREGISTRATION_SHA),
+      () => validateRawRun(invalid, excludedDocument, PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
       /EXCLUDED.*(?:claims|latency|applicability)/iu,
       `EXCLUDED ${field} must be rejected`
     );
@@ -953,7 +967,7 @@ test('schema v2 validation enforces terminal measured/failed units and claim-fre
     mutateUnit: ({ arm, phase }) => notMeasuredUnit({ arm, phase })
   });
   const unavailableDocument = preregistration([unavailableArm]);
-  validateRawRun(unavailableRaw, unavailableDocument, PREREGISTRATION_SHA);
+  validateRawRun(unavailableRaw, unavailableDocument, PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES);
   const unavailableMutations = [
     ['latencyMs', (item) => { item.latencyMs = 1; }],
     ['providerUsage', (item) => { item.providerUsage = { total_tokens: 1 }; }],
@@ -969,7 +983,7 @@ test('schema v2 validation enforces terminal measured/failed units and claim-fre
     const invalid = structuredClone(unavailableRaw);
     mutate(invalid.units[1]);
     assert.throws(
-      () => validateRawRun(invalid, unavailableDocument, PREREGISTRATION_SHA),
+      () => validateRawRun(invalid, unavailableDocument, PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
       /NOT_MEASURED.*claims|operations.*recorded adapter evidence/iu,
       `NOT_MEASURED ${field} must be rejected`
     );
@@ -988,7 +1002,7 @@ test('schema v2 validation enforces terminal measured/failed units and claim-fre
     const invalid = structuredClone(failedRaw);
     invalid.units.find((item) => item.phase === 'A')[field] = null;
     assert.throws(
-      () => validateRawRun(invalid, failedDocument, PREREGISTRATION_SHA),
+      () => validateRawRun(invalid, failedDocument, PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
       /FAILED.*terminal/iu,
       `FAILED ${field} must be terminal`
     );
@@ -1006,7 +1020,7 @@ test('schema v2 validation accepts only exact non-negative provider usage counts
     total_tokens: 12,
     input_tokens_details: { cached_tokens: 1 }
   };
-  validateRawRun(raw, document, PREREGISTRATION_SHA);
+  validateRawRun(raw, document, PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES);
 
   const invalidUsage = [
     { total_tokens: -1 },
@@ -1019,7 +1033,7 @@ test('schema v2 validation accepts only exact non-negative provider usage counts
     const invalid = structuredClone(raw);
     invalid.units[targetIndex].providerUsage = providerUsage;
     assert.throws(
-      () => validateRawRun(invalid, document, PREREGISTRATION_SHA),
+      () => validateRawRun(invalid, document, PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
       /providerUsage.*(?:invalid|unknown|non-negative|safe integer)/iu
     );
   }
@@ -1038,7 +1052,7 @@ test('schema v2 aggregation excludes partial arms while harness-owned N/A stays 
       : null
   });
   const document = preregistration(arms);
-  validateRawRun(raw, document, PREREGISTRATION_SHA);
+  validateRawRun(raw, document, PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES);
 
   const aggregate = aggregateRun(raw, document, aggregationOptions());
 
@@ -1071,7 +1085,7 @@ test('schema v2 aggregation excludes partial arms while harness-owned N/A stays 
   // the code refuses would imply a capability the candidate does not have.
   const scoredRaw = { ...structuredClone(raw), mode: 'SCORED' };
   assert.throws(
-    () => validateRawRun(scoredRaw, document, PREREGISTRATION_SHA),
+    () => validateRawRun(scoredRaw, document, PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
     /may not produce or accept a scored run/iu
   );
   assert.throws(
@@ -1097,7 +1111,7 @@ test('schema v2 zero-result validation and aggregation preserve the actual recor
   const document = preregistration(arms);
   document.marketingThresholds.noResultText = 'No result: required benchmark endpoints are unavailable.';
 
-  assert.doesNotThrow(() => validateRawRun(raw, document, PREREGISTRATION_SHA));
+  assert.doesNotThrow(() => validateRawRun(raw, document, PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES));
   const aggregate = aggregateRun(raw, document, aggregationOptions());
   assert.deepEqual(aggregate.zeroResult, zeroResult);
   // allowedMarketingText is a scored-mode field, and its absence here is the
@@ -1119,14 +1133,14 @@ test('schema v2 zero-result validation and aggregation preserve the actual recor
   const substituted = structuredClone(raw);
   substituted.zeroResult.causes = ['ENDPOINT_UNAVAILABLE'];
   assert.throws(
-    () => validateRawRun(substituted, document, PREREGISTRATION_SHA),
+    () => validateRawRun(substituted, document, PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
     /zeroResult.*actual recorded cause/i
   );
 
   const embellished = structuredClone(raw);
   embellished.zeroResult.causes = ['TIMEOUT', 'ENDPOINT_UNAVAILABLE'];
   assert.throws(
-    () => validateRawRun(embellished, document, PREREGISTRATION_SHA),
+    () => validateRawRun(embellished, document, PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
     /zeroResult.*actual recorded cause/i
   );
 });
@@ -1135,7 +1149,7 @@ test('schema v2 acceptance aggregation emits no evaluation, ranking, or marketin
   const arms = [{ id: 'arm-acceptance', name: 'Acceptance arm', applicability: applicability() }];
   const raw = rawRun({ mode: 'ACCEPTANCE', armDefinitions: arms });
   const document = preregistration(arms);
-  validateRawRun(raw, document, PREREGISTRATION_SHA);
+  validateRawRun(raw, document, PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES);
 
   const aggregate = aggregateRun(raw, document, aggregationOptions());
   const forbidden = /(?:score|rank|winner|best|marketing|quality|efficacy)/iu;
@@ -1161,7 +1175,7 @@ test('schema v2 acceptance aggregation emits no evaluation, ranking, or marketin
   });
   contaminated.units[1].adapterEvidence.retrieve.persistenceEvidence = { quality: null };
   assert.throws(
-    () => validateRawRun(contaminated, document, PREREGISTRATION_SHA),
+    () => validateRawRun(contaminated, document, PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
     /acceptance output.*forbidden field quality/iu
   );
   assert.throws(

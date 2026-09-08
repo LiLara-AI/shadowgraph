@@ -129,7 +129,6 @@ export function verifyPreconditionEvidence(input) {
     || evidence.version !== PRECONDITION_EVIDENCE_VERSION
     || !isNonEmptyString(evidence.armId)
     || !Array.isArray(evidence.steps)
-    || evidence.steps.length === 0
     || !isPlainRecord(evidence.package)) {
     return empty([{
       code: 'PRECONDITION_EVIDENCE_MALFORMED',

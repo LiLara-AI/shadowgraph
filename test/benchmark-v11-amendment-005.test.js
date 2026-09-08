@@ -18,6 +18,14 @@ test('the effective candidate identity binds every authorized amendment through 
   assert.deepEqual(loaded.definition.sourceHashes, loaded.sourceHashes);
 });
 
+test('the benchmark JavaScript gate includes Amendment 005 regression coverage', async () => {
+  const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.match(
+    packageJson.scripts['benchmark:test:js'],
+    /test\/benchmark-v11-amendment-005\.test\.js/u
+  );
+});
+
 test('Amendment 005 bytes and sidecar are governed by the implementation lock', async () => {
   const amendmentUrl = new URL('../benchmark/preregistration-amendment-005.json', import.meta.url);
   const sidecarUrl = new URL('../benchmark/preregistration-amendment-005.sha256', import.meta.url);

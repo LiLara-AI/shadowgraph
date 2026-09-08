@@ -378,7 +378,7 @@ class CogneeAdapterTests(unittest.TestCase):
         self.assertNotIn("max_retries", config["embedding_config"])
         self.assertEqual(config["automatic_retries"], 0)
         self.assertEqual(config["harness_operation_retries"], 0)
-        self.assertEqual(config["native_attempt_policy"], "amendment-005-metered-and-bounded")
+        self.assertEqual(config["native_attempt_policy"], "amendment-006-arm-neutral-meter-trace")
         self.assertNotIn("ollama", str(config).lower())
         search_call = self.clients[0].calls[2]
         self.assertIs(search_call[2], FakeSearchType.GRAPH_COMPLETION)
@@ -608,7 +608,7 @@ class CogneeRuntimeConfigTests(unittest.TestCase):
         )
         self.assertEqual(config["automatic_retries"], 0)
         self.assertEqual(config["harness_operation_retries"], 0)
-        self.assertEqual(config["native_attempt_policy"], "amendment-005-metered-and-bounded")
+        self.assertEqual(config["native_attempt_policy"], "amendment-006-arm-neutral-meter-trace")
 
     def test_factory_applies_native_transport_and_no_fallback_config_before_setup(self) -> None:
         calls = []

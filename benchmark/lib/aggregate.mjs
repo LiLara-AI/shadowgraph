@@ -21,7 +21,8 @@ const V11_SOURCE_HASH_FIELDS = [
   'amendment002Sha256',
   'amendment003Sha256',
   'amendment004Sha256',
-  'amendment005Sha256'
+  'amendment005Sha256',
+  'amendment006Sha256'
 ];
 
 function isPlainObject(value) {
@@ -38,7 +39,7 @@ function requireTrustedV11SourceHashes(raw, trustedSourceHashes) {
     throw new Error(
       'Trusted v1.1 source hashes must contain exactly preregistrationSha256, '
       + 'amendment001Sha256, amendment002Sha256, amendment003Sha256, '
-      + 'amendment004Sha256, and amendment005Sha256'
+      + 'amendment004Sha256, amendment005Sha256, and amendment006Sha256'
     );
   }
   for (const field of V11_SOURCE_HASH_FIELDS) {
@@ -474,7 +475,12 @@ export function v11Coverage(raw) {
 export function aggregateV11Run(raw, preregistration, options = {}) {
   const trustedSourceHashes = requireV11AggregationOptions(options);
   requireTrustedV11SourceHashes(raw, trustedSourceHashes);
-  validateV11RawRun(raw, preregistration, trustedSourceHashes.preregistrationSha256);
+  validateV11RawRun(
+    raw,
+    preregistration,
+    trustedSourceHashes.preregistrationSha256,
+    trustedSourceHashes
+  );
   const counts = {
     measuredArms: raw.arms.filter((arm) => arm.status === 'MEASURED').length,
     partialFailedArms: raw.arms.filter((arm) => arm.status === 'PARTIAL_FAILED').length,

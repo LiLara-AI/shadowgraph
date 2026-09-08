@@ -26,6 +26,7 @@ const CORRELATION_FIELDS = [
   'phase',
   'requestClass'
 ];
+const ROOT_OPERATIONS = new Set(['reset', 'retrieve', 'persist', 'verify', 'outer-decision']);
 
 const CORRELATION_HEADERS = Object.freeze({
   runId: 'x-shadowgraph-run-id',
@@ -194,6 +195,33 @@ function validateCorrelation(correlation) {
   return Object.freeze({ ...correlation });
 }
 
+function validateBinding(value, requireRootOperation) {
+  if (!isPlainObject(value)) throw new Error('provider meter binding must be an object');
+  const hasRootOperation = Object.hasOwn(value, 'rootOperation');
+  const expectedFields = [
+    ...CORRELATION_FIELDS,
+    ...(hasRootOperation || requireRootOperation ? ['rootOperation'] : [])
+  ];
+  assertExactKeys(value, expectedFields, 'provider meter binding');
+  const { rootOperation = null, ...correlation } = value;
+  if (rootOperation !== null && (!isNonEmptyString(rootOperation) || !ROOT_OPERATIONS.has(rootOperation))) {
+    throw new Error('provider meter rootOperation is invalid');
+  }
+  if (requireRootOperation && rootOperation === null) {
+    throw new Error('provider meter rootOperation is required');
+  }
+  return Object.freeze({ ...validateCorrelation(correlation), rootOperation });
+}
+
+function rootRequestClassKey(correlation) {
+  return [...CORRELATION_FIELDS, 'rootOperation']
+    .map((field) => {
+      const value = String(correlation[field]);
+      return `${value.length}:${value}`;
+    })
+    .join('|');
+}
+
 function correlationHeadersMatch(request, correlation) {
   const entries = CORRELATION_FIELDS.map((field) => [
     field,
@@ -292,7 +320,7 @@ function readBoundedBody(stream, limit, timeoutMs) {
   });
 }
 
-function parseRequestedModel(body) {
+function parseRequestMetadata(body) {
   if (body.length === 0) throw new Error('INVALID_CLIENT_JSON');
   let payload;
   try {
@@ -303,7 +331,15 @@ function parseRequestedModel(body) {
   if (!isPlainObject(payload)) throw new Error('INVALID_CLIENT_JSON');
   if (!Object.hasOwn(payload, 'model') || payload.model === null) throw new Error('INVALID_CLIENT_MODEL');
   validateModelIdentifier(payload.model, 'INVALID_CLIENT_MODEL');
-  return payload.model;
+  const format = payload.response_format;
+  const responseFormat = format === undefined || format === null
+    ? null
+    : isPlainObject(format) && format.type === 'json_schema'
+      ? 'json_schema'
+      : isPlainObject(format) && format.type === 'json_object'
+        ? 'json_object'
+        : 'other';
+  return { requestedModel: payload.model, responseFormat };
 }
 
 function validateModelIdentifier(value, code) {
@@ -521,10 +557,28 @@ function safeResponseHeaders(headers) {
  * Each endpoint returned by bindEndpoint is an opaque capability bound to one
  * exact benchmark correlation and contains no upstream URL or authorization.
  */
-export async function startProviderMeter(config, { budget = null, campaignReserve = null } = {}) {
+export async function startProviderMeter(config, {
+  budget = null,
+  campaignReserve = null,
+  requireRootOperation = false,
+  maxAttemptsPerRootRequestClass = null
+} = {}) {
   // Legacy stand-alone meter users have no operational authorization contract.
   // The v1.1 acceptance binding always supplies a validated budget; never default it there.
   const authorization = budget === null ? null : validateProviderBudget(budget);
+  if (typeof requireRootOperation !== 'boolean') {
+    throw new Error('requireRootOperation must be boolean');
+  }
+  if (maxAttemptsPerRootRequestClass !== null && (
+    !Number.isSafeInteger(maxAttemptsPerRootRequestClass)
+    || maxAttemptsPerRootRequestClass < 1
+    || maxAttemptsPerRootRequestClass > 32
+  )) {
+    throw new Error('maxAttemptsPerRootRequestClass must be null or an integer from one through 32');
+  }
+  if (maxAttemptsPerRootRequestClass !== null && !requireRootOperation) {
+    throw new Error('maxAttemptsPerRootRequestClass requires root operation evidence');
+  }
   const { listener, upstream } = validateConfig(config);
   let ledger;
   let attempts;
@@ -545,6 +599,7 @@ export async function startProviderMeter(config, { budget = null, campaignReserv
   let advertisedOrigin;
   const inFlight = new Set();
   const consumed = Object.fromEntries(REQUEST_CLASSES.map((name) => [name, 0]));
+  const nativeAttemptCounts = new Map();
   let nextAttemptNumber = 1;
   let auditTail = Promise.resolve();
   let evidenceFailure = null;
@@ -572,7 +627,8 @@ export async function startProviderMeter(config, { budget = null, campaignReserv
     outcome,
     failure,
     httpStatus,
-    usage
+    usage,
+    responseFormat = null
   }) {
     const operation = ledgerTail.then(async () => {
       const event = {
@@ -587,7 +643,9 @@ export async function startProviderMeter(config, { budget = null, campaignReserv
         repetition: correlation.repetition,
         phase: correlation.phase,
         requestClass: correlation.requestClass,
+        rootOperation: correlation.rootOperation,
         requestedModel,
+        responseFormat,
         providerModel,
         latencyMs,
         outcome,
@@ -652,13 +710,23 @@ export async function startProviderMeter(config, { budget = null, campaignReserv
     const attemptNumber = nextAttemptNumber++;
     // Reserve synchronously before any await, including journal I/O. Failures
     // and malformed admitted requests consume slots; none are refunded.
-    let admitted = authorization === null || (!budgetStopped && !evidenceFailure
-      && consumed[correlation.requestClass] < authorization.limits[correlation.requestClass]);
+    const rootAttemptKey = rootRequestClassKey(correlation);
+    const attemptsSoFar = nativeAttemptCounts.get(rootAttemptKey) ?? 0;
+    const nativeCapDenied = maxAttemptsPerRootRequestClass !== null
+      && attemptsSoFar >= maxAttemptsPerRootRequestClass;
+    // Count before any await and never refund. A campaign/budget rejection is
+    // still a native attempt at this root/class; only a cap denial occurs before
+    // the new attempt can enter the bounded native sequence.
+    if (!nativeCapDenied && maxAttemptsPerRootRequestClass !== null) {
+      nativeAttemptCounts.set(rootAttemptKey, attemptsSoFar + 1);
+    }
+    let admitted = !nativeCapDenied && (authorization === null || (!budgetStopped && !evidenceFailure
+      && consumed[correlation.requestClass] < authorization.limits[correlation.requestClass]));
     if (admitted) consumed[correlation.requestClass] += 1;
     if (admitted && campaignReserve !== null) {
       admitted = await campaignReserve(correlation.requestClass);
     }
-    if (!admitted) budgetStopped = true;
+    if (!admitted && !nativeCapDenied) budgetStopped = true;
     await audit({ event: 'admission', attemptNumber, correlation, admitted,
       authorizationRef: authorization?.authorizationRef ?? null });
     const appendEvent = async (event) => {
@@ -670,7 +738,9 @@ export async function startProviderMeter(config, { budget = null, campaignReserv
     if (!admitted) {
       await appendEvent({ correlation, requestedModel: null, providerModel: null,
         latencyMs: elapsedSince(started), outcome: 'FAILED',
-        failure: { code: 'PROVIDER_BUDGET_EXHAUSTED', message: 'Operational safety ceiling reached; dispatch denied' },
+        failure: nativeCapDenied
+          ? { code: 'NATIVE_ATTEMPT_CAP_EXHAUSTED', message: 'Native root request-class ceiling reached; dispatch denied' }
+          : { code: 'PROVIDER_BUDGET_EXHAUSTED', message: 'Operational safety ceiling reached; dispatch denied' },
         httpStatus: null, usage: null });
       boundedResponse(response, 403, Buffer.from('{"error":"provider_budget_exhausted"}'), {
         'content-type': 'application/json', connection: 'close'
@@ -745,12 +815,13 @@ export async function startProviderMeter(config, { budget = null, campaignReserv
 
     let body;
     let requestedModel;
+    let responseFormat = null;
     let target;
     try {
       const inboundTimeoutMs = remainingDeadlineMs();
       if (inboundTimeoutMs < 1) throw codedError('PROVIDER_REQUEST_TIMEOUT');
       body = await readBoundedBody(request, MAX_REQUEST_BYTES, inboundTimeoutMs);
-      requestedModel = parseRequestedModel(body);
+      ({ requestedModel, responseFormat } = parseRequestMetadata(body));
       // The normalised resource, not the client's spelling. The upstream base
       // already carries its own version segment, so forwarding a client's
       // `/v1/embeddings` verbatim would ask it for `/v1/v1/embeddings`.
@@ -810,6 +881,7 @@ export async function startProviderMeter(config, { budget = null, campaignReserv
       await appendEvent({
         correlation,
         requestedModel,
+        responseFormat,
         providerModel: null,
         latencyMs: elapsedSince(started),
         outcome: 'FAILED',
@@ -833,6 +905,7 @@ export async function startProviderMeter(config, { budget = null, campaignReserv
       await appendEvent({
         correlation,
         requestedModel,
+        responseFormat,
         providerModel: null,
         latencyMs: elapsedSince(started),
         outcome: 'FAILED',
@@ -847,6 +920,7 @@ export async function startProviderMeter(config, { budget = null, campaignReserv
       await appendEvent({
         correlation,
         requestedModel,
+        responseFormat,
         providerModel: null,
         latencyMs: elapsedSince(started),
         outcome: 'FAILED',
@@ -865,6 +939,7 @@ export async function startProviderMeter(config, { budget = null, campaignReserv
       await appendEvent({
         correlation,
         requestedModel,
+        responseFormat,
         providerModel: null,
         latencyMs: elapsedSince(started),
         outcome: 'FAILED',
@@ -891,6 +966,7 @@ export async function startProviderMeter(config, { budget = null, campaignReserv
       await appendEvent({
         correlation,
         requestedModel,
+        responseFormat,
         providerModel: null,
         latencyMs: elapsedSince(started),
         outcome: 'FAILED',
@@ -909,6 +985,7 @@ export async function startProviderMeter(config, { budget = null, campaignReserv
       await appendEvent({
         correlation,
         requestedModel,
+        responseFormat,
         providerModel: null,
         latencyMs: elapsedSince(started),
         outcome: 'FAILED',
@@ -926,6 +1003,7 @@ export async function startProviderMeter(config, { budget = null, campaignReserv
     await appendEvent({
       correlation,
       requestedModel,
+      responseFormat,
       providerModel: measured.providerModel,
       latencyMs: elapsedSince(started),
       outcome: 'SUCCEEDED',
@@ -982,7 +1060,7 @@ export async function startProviderMeter(config, { budget = null, campaignReserv
 
   function bindEndpoint(input) {
     if (state !== 'OPEN') throw new Error('Provider meter is closed');
-    const correlation = validateCorrelation(input);
+    const correlation = validateBinding(input, requireRootOperation);
     if (authorization !== null) validateProviderBudget(authorization, correlation);
     let routeId;
     do routeId = randomBytes(24).toString('hex'); while (bindings.has(routeId));

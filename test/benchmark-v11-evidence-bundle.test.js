@@ -25,7 +25,8 @@ const SOURCE_HASHES = Object.freeze({
   amendment002Sha256: '08e12eca3f93bd67cfeaf90a2064f91beb240e78a8fd63ed8645da78c0d88f1b',
   amendment003Sha256: '726de2018584aca399fc27d2bba15585d8b6fb9454bc24083578daed22f0be0a',
   amendment004Sha256: 'b0c3a2553608efb78147a8c1f1ef9af51a7d0eebaa0037ce4ad7b64616b1c5f9',
-  amendment005Sha256: 'c435fa9d772c151c83214ef3a4180e0646236cd2cbb079be082b8341c4e6e223'
+  amendment005Sha256: 'c435fa9d772c151c83214ef3a4180e0646236cd2cbb079be082b8341c4e6e223',
+  amendment006Sha256: '3bc9308a19e44ecc06d15dc0144239aa907b49cf897a11f9fab7cfe116966760'
 });
 
 function entry(overrides = {}) {
@@ -106,7 +107,7 @@ test('the bundle is byte-identical across builds from the same inputs', () => {
 test('the bundle refuses an extra or missing methodology identity instead of dropping it', () => {
   assert.throws(
     () => bundleOf(sampleEntries(), {
-      sourceHashes: { ...SOURCE_HASHES, amendment006Sha256: 'd'.repeat(64) }
+      sourceHashes: { ...SOURCE_HASHES, amendment007Sha256: 'd'.repeat(64) }
     }),
     (error) => error instanceof EvidenceBundleError && error.code === 'CONTRACT_FAILURE'
   );

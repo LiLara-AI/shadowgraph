@@ -27,18 +27,28 @@ import cognee_adapter
 EXPECTED_MODEL = "openai/qwen2.5:7b"
 EXPECTED_WIRE_MODEL = "qwen2.5:7b"
 EXPECTED_EMBEDDING_MODEL = "nomic-embed-text:v1.5"
+AMENDMENT_006_SHA256 = "3bc9308a19e44ecc06d15dc0144239aa907b49cf897a11f9fab7cfe116966760"
 
 
 async def _http_handler(reader, writer, requests):
     try:
         header_bytes = await reader.readuntil(b"\r\n\r\n")
         headers = header_bytes.decode("iso-8859-1").split("\r\n")
+        header_map = {
+            line.split(":", 1)[0].strip().lower(): line.split(":", 1)[1].strip()
+            for line in headers[1:]
+            if ":" in line
+        }
         content_length = next(
             int(line.split(":", 1)[1].strip())
             for line in headers[1:]
             if line.lower().startswith("content-length:")
         )
-        requests.append(json.loads((await reader.readexactly(content_length)).decode("utf-8")))
+        requests.append({
+            "path": headers[0].split(" ")[1],
+            "retryOrdinal": int(header_map.get("x-stainless-retry-count", "0")),
+            "body": json.loads((await reader.readexactly(content_length)).decode("utf-8")),
+        })
         body = json.dumps({"choices": [{"message": {"content": "{}"}}]}).encode("utf-8")
         writer.write(
             b"HTTP/1.1 200 OK\r\n"
@@ -108,56 +118,52 @@ async def demonstrate() -> dict:
         except (asyncio.CancelledError, Exception):
             pass
 
-        request_models = [request.get("model") for request in requests]
+        request_models = [request["body"].get("model") for request in requests]
         fallback = {
             "fallback_model": effective.fallback_model,
             "fallback_api_key": effective.fallback_api_key,
             "fallback_endpoint": effective.fallback_endpoint,
         }
-        report = {
-            "schema": "shadowgraph.v11.cognee-retry-taxonomy-evidence",
-            "version": 1,
-            "observedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            "armId": "cognee",
-            "package": {"name": "cognee", "version": importlib.metadata.version("cognee")},
-            "network": "docker-network-none plus loopback-only socket fence",
-            "selectedConfiguration": {
-                "structuredOutputFramework": effective.structured_output_framework,
-                "providerPrefixedModel": client.model,
-                "lockedWireModelId": EXPECTED_WIRE_MODEL,
-                "litellmNumRetries": client.llm_args.get("num_retries"),
-                "fallback": fallback,
-            },
-            "fault": {
-                "kind": "valid-http-200-with-malformed-required-json",
-                "rootStructuredOutputInvocations": 1,
-                "schemaResponseSupported": litellm.supports_response_schema(EXPECTED_MODEL),
-                "wireRequests": len(requests),
-                "wireModels": request_models,
-                "meteredProviderCalls": dict(provider_calls.counts),
-                "outerRetryScheduledAfterValidationExhaustion": outer_retry_scheduled,
-                "outerProviderRequestSuppressedByProbe": True,
-            },
-            "taxonomy": {
-                "A_harness_measured_operation_reexecution": False,
-                "B_transport_retry_observed": False,
-                "C_native_structured_output_validation_or_repair": True,
-                "D_structured_output_mode_fallback_observed": False,
-                "E_model_or_provider_fallback_observed": False,
-            },
-        }
-        assert report["package"]["version"] == "1.5.3"
-        assert report["selectedConfiguration"]["structuredOutputFramework"] == "litellm_native"
-        assert report["selectedConfiguration"]["providerPrefixedModel"] == EXPECTED_MODEL
-        assert report["selectedConfiguration"]["lockedWireModelId"] == EXPECTED_WIRE_MODEL
-        assert report["selectedConfiguration"]["litellmNumRetries"] == 0
+        assert importlib.metadata.version("cognee") == "1.5.3"
+        assert effective.structured_output_framework == "litellm_native"
+        assert client.model == EXPECTED_MODEL
+        assert client.llm_args.get("num_retries") == 0
         assert fallback == {"fallback_model": "", "fallback_api_key": "", "fallback_endpoint": ""}
-        assert report["fault"]["schemaResponseSupported"] is False
+        assert litellm.supports_response_schema(EXPECTED_MODEL) is False
         assert len(requests) == 3
         assert request_models == [EXPECTED_WIRE_MODEL] * 3
+        assert all(request["path"] == "/v1/chat/completions" for request in requests)
         assert provider_calls.counts == {"internal_memory_llm": 3, "embedding": 0}
         assert outer_retry_scheduled is True
-        return report
+        return {
+            "schema": "shadowgraph.v11.native-attempt-loopback-report",
+            "version": 1,
+            "observedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "amendment006Sha256": AMENDMENT_006_SHA256,
+            "armId": "cognee",
+            "requestClass": "internal_memory_llm",
+            "category": "C",
+            "package": {"name": "cognee", "version": "1.5.3"},
+            "modelId": EXPECTED_WIRE_MODEL,
+            "network": "loopback-only",
+            "rootOperationInvocations": 1,
+            "wireAttempts": [
+                {
+                    "ordinal": index + 1,
+                    "path": request["path"],
+                    "outcome": "SUCCEEDED",
+                    "modelId": EXPECTED_WIRE_MODEL,
+                    "retryOrdinal": request["retryOrdinal"],
+                    "responseFormat": "json_object",
+                }
+                for index, request in enumerate(requests)
+            ],
+            "taxonomy": {"A": False, "B": False, "C": True, "D": False, "E": False},
+            "allAttemptsMetered": True,
+            "providerUsageAccounting": "metered-complete-or-fail-closed",
+            "modelEndpointPinned": True,
+            "harnessOperationReruns": 0,
+        }
     finally:
         server.close()
         await server.wait_closed()

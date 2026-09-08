@@ -21,6 +21,7 @@ import {
 // v11-contract; none of them imports this module, so there is no cycle. Check
 // that again before adding an import to any of them.
 import { isExcludedFromUserIsolation } from './v11-registry.mjs';
+import { validateNativeAttemptPolicy } from './v11-native-attempts.mjs';
 
 const FIXTURE_SET = 'candidate-acceptance-non-scored-2026-08';
 const HASH = /^[a-f0-9]{64}$/u;
@@ -135,7 +136,8 @@ export const V11_ACCEPTANCE_SOURCE_HASHES = Object.freeze({
   amendment002Sha256: '08e12eca3f93bd67cfeaf90a2064f91beb240e78a8fd63ed8645da78c0d88f1b',
   amendment003Sha256: '726de2018584aca399fc27d2bba15585d8b6fb9454bc24083578daed22f0be0a',
   amendment004Sha256: 'b0c3a2553608efb78147a8c1f1ef9af51a7d0eebaa0037ce4ad7b64616b1c5f9',
-  amendment005Sha256: 'c435fa9d772c151c83214ef3a4180e0646236cd2cbb079be082b8341c4e6e223'
+  amendment005Sha256: 'c435fa9d772c151c83214ef3a4180e0646236cd2cbb079be082b8341c4e6e223',
+  amendment006Sha256: '3bc9308a19e44ecc06d15dc0144239aa907b49cf897a11f9fab7cfe116966760'
 });
 
 export const V11_ACCEPTANCE_ARM_IDS = Object.freeze([
@@ -652,6 +654,7 @@ function validateFrozenSources(
   amendment003,
   amendment004,
   amendment005,
+  amendment006,
   definition
 ) {
   if (!Array.isArray(preregistration.arms)
@@ -749,6 +752,41 @@ function validateFrozenSources(
     ])) {
     boundaryReject('SHAPE');
   }
+  const traceContract = amendment006?.nativeAttemptTraceContract;
+  if (amendment006?.amendmentId !== 'amendment-006'
+    || amendment006?.status !== 'AUTHORIZED_FOR_NON_SCORED_V1_1_ACCEPTANCE'
+    || amendment006?.supersedes?.amendment005Sha256 !== definition.sourceHashes.amendment005Sha256
+    || amendment006?.invariants?.scored !== false
+    || amendment006?.invariants?.comparativeClaimsEnabled !== false
+    || amendment006?.invariants?.providerModelsChanged !== false
+    || amendment006?.invariants?.providerEndpointsChanged !== false
+    || amendment006?.invariants?.providerBudgetsRelaxed !== false
+    || amendment006?.prospectiveEffect?.rescoreExistingRuns !== false
+    || amendment006?.prospectiveEffect?.rewriteHistoricalArtifacts !== false
+    || amendment006?.prospectiveEffect?.resumeHistoricalRuns !== false
+    || traceContract?.appliesTo !== 'every arm, every root operation, every provider request class, and every future non-scored v1.1 run identically'
+    || traceContract?.maxAttemptsPerRootRequestClass !== 24
+    || traceContract?.meterOwnedEvidence?.rootOperationRequiredBeforeDispatch !== true
+    || traceContract?.meterOwnedEvidence?.rootOperationReexecutionProhibited !== true
+    || traceContract?.meterOwnedEvidence?.samePinnedRequestedAndProviderModelRequired !== true
+    || traceContract?.meterOwnedEvidence?.providerEndpointFallbackProhibited !== true
+    || traceContract?.preconditionEvidence?.allArmsMustHavePolicyEntries !== true
+    || traceContract?.preconditionEvidence?.nonemptyRecoveryPolicyRequiresFreshPinnedLoopbackFaultInjection !== true
+    || traceContract?.preconditionEvidence?.missingOrMalformedEvidenceBlocksDispatch !== true
+    || traceContract?.accounting?.admissionBeforeDispatch !== true
+    || traceContract?.accounting?.failedAndInflightCallsConsumeTheirClassCeiling !== true
+    || traceContract?.accounting?.allAttemptsCountTowardLatencyTokensCostAndProviderBudget !== true
+    || traceContract?.accounting?.nativeSuccessDoesNotCreateANewHarnessAttempt !== true) {
+    boundaryReject('SHAPE');
+  }
+  try {
+    const policy = validateNativeAttemptPolicy(traceContract.armNeutralRecoveryPolicy, [...V11_ACCEPTANCE_ARM_IDS]);
+    if (policy.maxAttemptsPerRootRequestClass !== traceContract.maxAttemptsPerRootRequestClass) {
+      boundaryReject('SHAPE');
+    }
+  } catch {
+    boundaryReject('SHAPE');
+  }
 }
 
 function validateMechanicalCounts(definition, scenarioCount) {
@@ -814,7 +852,8 @@ export async function loadV11AcceptanceDefinition(options) {
     ['amendment002Sha256', 'preregistration-amendment-002.json', 'frozen Amendment 002'],
     ['amendment003Sha256', 'preregistration-amendment-003.json', 'authorized Amendment 003'],
     ['amendment004Sha256', 'preregistration-amendment-004.json', 'authorized Amendment 004'],
-    ['amendment005Sha256', 'preregistration-amendment-005.json', 'authorized Amendment 005']
+    ['amendment005Sha256', 'preregistration-amendment-005.json', 'authorized Amendment 005'],
+    ['amendment006Sha256', 'preregistration-amendment-006.json', 'authorized Amendment 006']
   ];
   const parsedSources = [];
   for (const [hashField, filename, label] of sourceFiles) {
@@ -831,11 +870,18 @@ export async function loadV11AcceptanceDefinition(options) {
     benchmarkRoot,
     'authorized Amendment 005 hash sidecar'
   );
+  const amendment006Sidecar = await readSafeFile(
+    path.join(benchmarkRoot, 'preregistration-amendment-006.sha256'),
+    benchmarkRoot,
+    'authorized Amendment 006 hash sidecar'
+  );
   const expectedAmendment005Sidecar = `${V11_ACCEPTANCE_SOURCE_HASHES.amendment005Sha256}  benchmark/preregistration-amendment-005.json\n`;
-  if (amendment005Sidecar.toString('utf8') !== expectedAmendment005Sidecar) {
+  const expectedAmendment006Sidecar = `${V11_ACCEPTANCE_SOURCE_HASHES.amendment006Sha256}  benchmark/preregistration-amendment-006.json\n`;
+  if (amendment005Sidecar.toString('utf8') !== expectedAmendment005Sidecar
+    || amendment006Sidecar.toString('utf8') !== expectedAmendment006Sidecar) {
     boundaryReject('SHAPE');
   }
-  const [preregistration, amendment001, amendment002, amendment003, amendment004, amendment005] = parsedSources;
+  const [preregistration, amendment001, amendment002, amendment003, amendment004, amendment005, amendment006] = parsedSources;
   validateFrozenSources(
     preregistration,
     amendment001,
@@ -843,6 +889,7 @@ export async function loadV11AcceptanceDefinition(options) {
     amendment003,
     amendment004,
     amendment005,
+    amendment006,
     definition
   );
 
@@ -862,6 +909,7 @@ export async function loadV11AcceptanceDefinition(options) {
     definition: structuredClone(definition),
     scenarios: structuredClone(scenarioDocument.scenarios),
     sourceHashes: structuredClone(V11_ACCEPTANCE_SOURCE_HASHES),
+    nativeAttemptPolicy: structuredClone(amendment006.nativeAttemptTraceContract.armNeutralRecoveryPolicy),
     expectedCounts: structuredClone(V11_ACCEPTANCE_EXPECTED_COUNTS)
   });
 }

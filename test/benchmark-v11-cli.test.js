@@ -213,10 +213,15 @@ test('v11-preflight retains the three methodology blockers and requires operatio
       if (blocker.kind === 'applicability') {
         return `${blocker.kind}:${blocker.code}:${blocker.armId}`;
       }
+      if (blocker.kind === 'native-attempt-evidence') {
+        return `${blocker.kind}:${blocker.code}:${blocker.armId}:${blocker.requestClass}:${blocker.category}`;
+      }
       return `${blocker.kind}:${blocker.armId}:${blocker.service}`;
     }).sort(),
     [
       'applicability:DECLARED_ISOLATION_PRECONDITION_UNMET:cognee',
+      'native-attempt-evidence:NATIVE_ATTEMPT_EVIDENCE_REQUIRED:cognee:embedding:B',
+      'native-attempt-evidence:NATIVE_ATTEMPT_EVIDENCE_REQUIRED:cognee:internal_memory_llm:C',
       'operational-budget:PROVIDER_BUDGET_REQUIRED',
       'required-service:cognee:common LLM and embedding endpoint',
       'required-service:graphiti:Neo4j-compatible graph database plus common LLM and embedding endpoint'
