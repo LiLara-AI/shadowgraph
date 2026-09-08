@@ -201,7 +201,7 @@ test('clearing every applicability precondition still leaves required services b
   assert.equal(report.blockers.some((blocker) => blocker.code === 'DECLARED_ISOLATION_UNAVAILABLE'), false);
 });
 
-test('v11-preflight reports exactly the three post-Amendment-003 blockers', async () => {
+test('v11-preflight retains the three methodology blockers and requires operational authorization', async () => {
   const { code, stdout } = await runCli(['v11-preflight']);
   const report = JSON.parse(stdout);
 
@@ -209,6 +209,7 @@ test('v11-preflight reports exactly the three post-Amendment-003 blockers', asyn
   assert.equal(report.readiness, 'NOT READY');
   assert.deepEqual(
     report.blockers.map((blocker) => {
+      if (blocker.kind === 'operational-budget') return `${blocker.kind}:${blocker.code}`;
       if (blocker.kind === 'applicability') {
         return `${blocker.kind}:${blocker.code}:${blocker.armId}`;
       }
@@ -216,6 +217,7 @@ test('v11-preflight reports exactly the three post-Amendment-003 blockers', asyn
     }).sort(),
     [
       'applicability:DECLARED_ISOLATION_PRECONDITION_UNMET:cognee',
+      'operational-budget:PROVIDER_BUDGET_REQUIRED',
       'required-service:cognee:common LLM and embedding endpoint',
       'required-service:graphiti:Neo4j-compatible graph database plus common LLM and embedding endpoint'
     ].sort()

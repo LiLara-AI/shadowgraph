@@ -438,6 +438,11 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
   const applicability = new Map(definition.arms.map((arm) => [arm.id, arm.applicability]));
   const reconciled = [];
   const readyInput = {
+    // Explicit offline authorization, not a production limit or an extra readiness bypass.
+    providerBudget: { schema: 'shadowgraph.v11.provider-budget', version: 1,
+      authorizationRef: 'offline-test-only', runId: 'run-v11-connected', attemptId: 'attempt-v11-connected',
+      implementationLockHash: '4'.repeat(64), maxRetries: 0,
+      limits: { outer_decision_llm: 260, internal_memory_llm: 0, embedding: 0 } },
     registry,
     definition,
     scenarios,
@@ -470,6 +475,16 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
       return { status: 'RECONCILED', findings: [] };
     }
   };
+
+  // All non-budget prerequisites are satisfied in this fixture. Budget absence
+  // alone must stop dispatch, not merely accompany unrelated readiness failures.
+  let dispatched = 0;
+  await assert.rejects(executeV11AcceptanceRun({ ...readyInput, providerBudget: null,
+    executeAdapter: async () => { dispatched += 1; throw new Error('not reached'); },
+    requestOuter: async () => { dispatched += 1; throw new Error('not reached'); }
+  }), (e) => e.code === 'NOT_READY'
+    && e.readiness.blockers.length === 1 && e.readiness.blockers[0].code === 'PROVIDER_BUDGET_REQUIRED');
+  assert.equal(dispatched, 0);
 
   // The two refusals this input has to pass through, checked against the same
   // READY candidate rather than against a fixture of their own - they fire
@@ -901,6 +916,6 @@ test('preflight and run answer readiness identically when evidence is presented'
   assert.deepEqual(preflightReport.serviceEvidence.verifiedServices, ['neo4j', 'ollama']);
   assert.deepEqual(preflightReport.blockers.filter((blocker) => blocker.kind === 'required-service'), []);
   assert.equal(preflightReport.readiness, 'NOT READY');
-  assert.deepEqual(preflightReport.blockers.map((blocker) => blocker.code), ['DECLARED_ISOLATION_PRECONDITION_UNMET']);
+  assert.deepEqual(preflightReport.blockers.map((blocker) => blocker.code), ['PROVIDER_BUDGET_REQUIRED', 'DECLARED_ISOLATION_PRECONDITION_UNMET']);
   assert.deepEqual(await readdir(outputDirectory), [], 'a still-blocked run writes nothing');
 });

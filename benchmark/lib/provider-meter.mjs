@@ -7,6 +7,7 @@ import { isIP } from 'node:net';
 import { performance } from 'node:perf_hooks';
 
 import { REQUEST_CLASSES } from './v11-contract.mjs';
+import { validateProviderBudget } from './v11-budget.mjs';
 
 const CONFIG_FIELDS = [
   'listenerUrl',
@@ -520,12 +521,18 @@ function safeResponseHeaders(headers) {
  * Each endpoint returned by bindEndpoint is an opaque capability bound to one
  * exact benchmark correlation and contains no upstream URL or authorization.
  */
-export async function startProviderMeter(config) {
+export async function startProviderMeter(config, { budget = null, campaignReserve = null } = {}) {
+  // Legacy stand-alone meter users have no operational authorization contract.
+  // The v1.1 acceptance binding always supplies a validated budget; never default it there.
+  const authorization = budget === null ? null : validateProviderBudget(budget);
   const { listener, upstream } = validateConfig(config);
   let ledger;
+  let attempts;
   try {
     ledger = await open(config.ledgerPath, 'ax', 0o600);
+    if (authorization !== null) attempts = await open(`${config.ledgerPath}.attempts.ndjson`, 'ax', 0o600);
   } catch (error) {
+    await ledger?.close();
     if (error?.code === 'EEXIST') throw new Error('Provider meter ledger already exists');
     throw error;
   }
@@ -537,8 +544,27 @@ export async function startProviderMeter(config) {
   let closePromise = null;
   let advertisedOrigin;
   const inFlight = new Set();
+  const consumed = Object.fromEntries(REQUEST_CLASSES.map((name) => [name, 0]));
+  let nextAttemptNumber = 1;
+  let auditTail = Promise.resolve();
+  let evidenceFailure = null;
+  let budgetStopped = false;
 
-  function appendEvent({
+  function audit(record) {
+    if (!attempts) return Promise.resolve();
+    const operation = auditTail.then(async () => {
+      if (evidenceFailure) throw evidenceFailure;
+      await attempts.write(`${JSON.stringify({
+        schema: 'shadowgraph.provider-meter.attempt', version: 1,
+        recordedAt: new Date().toISOString(), ...record
+      })}\n`);
+      await attempts.sync();
+    });
+    auditTail = operation.catch((error) => { evidenceFailure = error; });
+    return operation;
+  }
+
+  function appendCompletion({
     correlation,
     requestedModel,
     providerModel,
@@ -574,7 +600,7 @@ export async function startProviderMeter(config) {
       await ledger.sync();
       return event;
     });
-    ledgerTail = operation.catch(() => {});
+    ledgerTail = operation.catch((error) => { evidenceFailure = error; });
     return operation;
   }
 
@@ -623,6 +649,34 @@ export async function startProviderMeter(config) {
     }
 
     const started = performance.now();
+    const attemptNumber = nextAttemptNumber++;
+    // Reserve synchronously before any await, including journal I/O. Failures
+    // and malformed admitted requests consume slots; none are refunded.
+    let admitted = authorization === null || (!budgetStopped && !evidenceFailure
+      && consumed[correlation.requestClass] < authorization.limits[correlation.requestClass]);
+    if (admitted) consumed[correlation.requestClass] += 1;
+    if (admitted && campaignReserve !== null) {
+      admitted = await campaignReserve(correlation.requestClass);
+    }
+    if (!admitted) budgetStopped = true;
+    await audit({ event: 'admission', attemptNumber, correlation, admitted,
+      authorizationRef: authorization?.authorizationRef ?? null });
+    const appendEvent = async (event) => {
+      const completion = await appendCompletion(event);
+      await audit({ event: 'completion', attemptNumber, requestNumber: completion.requestNumber,
+        outcome: completion.outcome });
+      return completion;
+    };
+    if (!admitted) {
+      await appendEvent({ correlation, requestedModel: null, providerModel: null,
+        latencyMs: elapsedSince(started), outcome: 'FAILED',
+        failure: { code: 'PROVIDER_BUDGET_EXHAUSTED', message: 'Operational safety ceiling reached; dispatch denied' },
+        httpStatus: null, usage: null });
+      boundedResponse(response, 403, Buffer.from('{"error":"provider_budget_exhausted"}'), {
+        'content-type': 'application/json', connection: 'close'
+      });
+      return;
+    }
     const deadlineAt = started + config.upstreamTimeoutMs;
     const rejectBoundRequest = async (status) => {
       await appendEvent({
@@ -734,6 +788,12 @@ export async function startProviderMeter(config) {
     request.socket.once('close', abortForClient);
     if (request.aborted || response.destroyed) downstream.abort();
     try {
+      // Write-ahead intent is not proof of upstream receipt. An interrupted
+      // intent without completion remains UNKNOWN, not a successful request.
+      await audit({ event: 'dispatch_intent', attemptNumber });
+      // A concurrent completion may fail while the audit write/sync awaits.
+      // Recheck the sticky failure at the last synchronous dispatch boundary.
+      if (evidenceFailure) throw evidenceFailure;
       const upstreamTimeoutMs = remainingDeadlineMs();
       if (upstreamTimeoutMs < 1) throw codedError('UPSTREAM_TIMEOUT');
       upstreamResponse = await requestUpstream({
@@ -892,6 +952,7 @@ export async function startProviderMeter(config) {
   });
 
   try {
+    if (authorization !== null) await audit({ event: 'authorization', budget: authorization });
     await new Promise((resolve, reject) => {
       const onError = (error) => {
         server.off('listening', onListening);
@@ -908,6 +969,7 @@ export async function startProviderMeter(config) {
     });
   } catch (error) {
     await ledger.close();
+    await attempts?.close();
     throw error;
   }
 
@@ -921,6 +983,7 @@ export async function startProviderMeter(config) {
   function bindEndpoint(input) {
     if (state !== 'OPEN') throw new Error('Provider meter is closed');
     const correlation = validateCorrelation(input);
+    if (authorization !== null) validateProviderBudget(authorization, correlation);
     let routeId;
     do routeId = randomBytes(24).toString('hex'); while (bindings.has(routeId));
     bindings.set(routeId, correlation);
@@ -936,9 +999,12 @@ export async function startProviderMeter(config) {
       });
       await Promise.allSettled([...inFlight]);
       await ledgerTail;
+      await auditTail;
       await ledger.close();
+      await attempts?.close();
       bindings.clear();
       state = 'CLOSED';
+      if (evidenceFailure) throw evidenceFailure;
     })();
     return closePromise;
   }

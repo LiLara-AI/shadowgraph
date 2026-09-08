@@ -13,6 +13,8 @@
 //
 // This module performs no I/O and holds no state.
 
+import { reconcileProviderAttempts } from './v11-budget.mjs';
+
 const LEDGER_SCHEMA = 'shadowgraph.provider-meter.event';
 const LEDGER_VERSION = 1;
 const LEDGER_EVENT = 'provider_request';
@@ -483,5 +485,13 @@ export function runProviderReconciliation(input) {
       embedding: pinnedModels.embedding.modelId
     }
   });
+  if (input.providerBudget !== undefined) {
+    const budgetEvidence = reconcileProviderAttempts({
+      text: input.attemptLedgerText, events, expectedBudget: input.providerBudget
+    });
+    return Object.freeze({ ...envelope(
+      budgetEvidence.status === 'RECONCILED' ? report.status : 'DISCREPANT', report.totals, report.findings
+    ), budgetEvidence });
+  }
   return envelope(report.status, report.totals, report.findings);
 }

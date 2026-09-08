@@ -40,6 +40,8 @@ import { createImplementationLock, discoverImplementationLockFiles } from './imp
 import { requestOuterDecision } from './outer-model.mjs';
 import { createProgressLedger, createUnitEvidenceLedger } from './progress.mjs';
 import { startProviderMeter } from './provider-meter.mjs';
+import { validateProviderBudget } from './v11-budget.mjs';
+import { openCampaignBudget } from './v11-campaign-budget.mjs';
 import { createV11AdapterExecutor, V11RunError } from './v11-run.mjs';
 import { observeEnvironment } from './v11-environment.mjs';
 import { buildEnvironmentLock } from './v11-locks.mjs';
@@ -83,6 +85,7 @@ export function assertLoopbackUpstream(value) {
 
 const REAL = Object.freeze({
   startProviderMeter,
+  openCampaignBudget,
   createProgressLedger,
   createUnitEvidenceLedger,
   createImplementationLock,
@@ -115,6 +118,9 @@ const REAL = Object.freeze({
  * @param {object} [injections] constructors, so a test can drive this
  */
 export async function bindV11Runtime(input, injections = {}) {
+  const providerBudget = validateProviderBudget(input.providerBudget, {
+    runId: input.runId, attemptId: input.attemptId
+  });
   const build = { ...REAL, ...injections };
   const {
     repositoryRoot,
@@ -254,6 +260,7 @@ export async function bindV11Runtime(input, injections = {}) {
   });
 
   // 2. The machine, observed rather than asserted.
+  validateProviderBudget(providerBudget, { implementationLockHash: implementationLock.lockSha256 ?? null });
   const environmentLock = build.buildEnvironmentLock({
     observations: await build.observeEnvironment({ pythonImage: competitorLock.pythonImage })
   });
@@ -276,13 +283,21 @@ export async function bindV11Runtime(input, injections = {}) {
   };
 
   try {
+    let campaign = null;
+    if (input.campaign !== undefined) {
+      campaign = await build.openCampaignBudget(input.campaign.root, input.campaign.policy, { implementationLockHash: implementationLock.lockSha256 });
+      closers.push(() => campaign.close());
+      await campaign.beginSession(attemptId);
+    }
     const meter = await build.startProviderMeter({
       listenerUrl: 'http://127.0.0.1:0',
       upstreamBaseUrl: providerUpstream,
       upstreamAuthorization: null,
       ledgerPath: providerLedgerPath(ledgerDirectory, attemptId),
       upstreamTimeoutMs: execution.requestTimeoutMs
-    });
+    }, { budget: providerBudget, ...(campaign === null ? {} : {
+      campaignReserve: (requestClass) => campaign.reserve(requestClass)
+    }) });
     closers.push(() => meter.close());
 
     const progress = await build.createProgressLedger({
@@ -335,10 +350,23 @@ export async function bindV11Runtime(input, injections = {}) {
     // Two closes, not one: the runner's hook may only reach the meter, because
     // the terminal progress event it has not written yet goes into a ledger the
     // same call would otherwise shut. See v11-run-resources.mjs.
-    const { close, runnerResources } = createV11RunResources({ meter, progress, unitEvidence });
+    const resources = createV11RunResources({ meter, progress, unitEvidence });
+    const { runnerResources } = resources;
+    let closePromise = null;
+    const close = () => {
+      if (closePromise === null) closePromise = (async () => {
+        const failures = [];
+        try { await resources.close(); } catch (error) { failures.push(error); }
+        try { await campaign?.close(); } catch (error) { failures.push(error); }
+        if (failures.length === 1) throw failures[0];
+        if (failures.length > 1) throw new AggregateError(failures, 'Run and campaign cleanup failed');
+      })();
+      return closePromise;
+    };
 
     return {
       dependencies: {
+        providerBudget,
         executeAdapter,
         buildOuterRequest: buildV11Prompt,
         requestOuter,

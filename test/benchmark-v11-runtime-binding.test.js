@@ -191,6 +191,11 @@ async function harness(t, overrides = {}) {
   const meterConfig = [];
 
   const input = {
+    providerBudget: {
+      schema: 'shadowgraph.v11.provider-budget', version: 1, authorizationRef: 'offline-test-only',
+      runId: 'run-binding-1', attemptId: 'attempt-binding-1', implementationLockHash: IMPLEMENTATION_LOCK_HASH,
+      maxRetries: 0, limits: { outer_decision_llm: 1, internal_memory_llm: 1, embedding: 1 }
+    },
     repositoryRoot: directory,
     benchmarkRoot: path.join(directory, 'benchmark'),
     competitorLock: { pythonImage: IMAGE },
@@ -352,6 +357,69 @@ test('the meter writes the ledger this attempt will read back', async (t) => {
   assert.equal(meterConfig[0].upstreamBaseUrl, input.providerUpstream);
   assert.equal(meterConfig[0].upstreamAuthorization, null);
   await bound.close();
+});
+
+test('the acceptance binding passes its exact authorized budget to the meter', async (t) => {
+  const h = await harness(t);
+  let options;
+  const original = h.injections.startProviderMeter;
+  h.injections.startProviderMeter = async (config, actual) => {
+    options = actual;
+    return original(config);
+  };
+  const bound = await bindV11Runtime(h.input, h.injections);
+  try { assert.deepEqual(options, { budget: h.input.providerBudget }); }
+  finally { await bound.close(); }
+});
+
+test('an otherwise configured runtime cannot begin discovery with an unresolved budget', async (t) => {
+  const h = await harness(t);
+  for (const providerBudget of [undefined, {}, { ...h.input.providerBudget, maxRetries: 1 }]) {
+    await assert.rejects(bindV11Runtime({ ...h.input, providerBudget }, h.injections), /budget/iu);
+  }
+  assert.deepEqual(h.trace, []);
+});
+
+test('the acceptance binding reserves against its persistent campaign before dispatch', async (t) => {
+  const h = await harness(t);
+  const calls = [];
+  h.input.campaign = { root: path.join(h.directory, 'campaign'), policy: {
+    campaignId: 'offline-only', implementationLockHash: IMPLEMENTATION_LOCK_HASH,
+    maxRequests: 2, maxSessions: 3, maxRecoveryAttempts: 0,
+    deadline: '2099-01-01T00:00:00.000Z',
+    limits: { outer_decision_llm: 1, internal_memory_llm: 1, embedding: 1 }
+  } };
+  h.injections.openCampaignBudget = async (root, policy) => {
+    calls.push(['open', root, policy]);
+    return { beginSession: async (id) => calls.push(['session', id]),
+      reserve: async (requestClass) => { calls.push(['reserve', requestClass]); return false; },
+      close: async () => calls.push(['close']) };
+  };
+  const original = h.injections.startProviderMeter;
+  let meterOptions;
+  h.injections.startProviderMeter = async (config, options) => {
+    meterOptions = options;
+    return original(config);
+  };
+  const bound = await bindV11Runtime(h.input, h.injections);
+  try {
+    assert.equal(typeof meterOptions.campaignReserve, 'function');
+    assert.equal(await meterOptions.campaignReserve('embedding'), false);
+    assert.deepEqual(calls.slice(0, 3), [
+      ['open', h.input.campaign.root, h.input.campaign.policy],
+      ['session', h.input.attemptId], ['reserve', 'embedding']
+    ]);
+  } finally { await bound.close(); }
+  assert.deepEqual(calls.at(-1), ['close']);
+});
+
+test('a budget for different implementation bytes refuses before environment or file creation', async (t) => {
+  const h = await harness(t);
+  h.input.providerBudget.implementationLockHash = 'f'.repeat(64);
+  await assert.rejects(bindV11Runtime(h.input, h.injections), (e) => e.code === 'PROVIDER_BUDGET_MISMATCH');
+  assert.equal(h.trace.includes('observe-environment'), false);
+  assert.deepEqual(h.seen.created, []);
+  assert.deepEqual(h.meterConfig, []);
 });
 
 test('everything already built is closed when a later step fails', async (t) => {

@@ -20,7 +20,8 @@ import { parseProviderLedger, reconcileProviderEvidence, runProviderReconciliati
 import { createV11Registry } from './lib/v11-registry.mjs';
 import { combineRunFailure } from './lib/v11-run-resources.mjs';
 import { bindV11Runtime, providerLedgerPath } from './lib/v11-runtime-binding.mjs';
-import { computeV11Readiness, executeV11AcceptanceRun } from './lib/v11-run.mjs';
+import { computeV11Readiness, executeV11AcceptanceRun, readGateJson } from './lib/v11-run.mjs';
+import { validateCampaignPolicy } from './lib/v11-campaign-budget.mjs';
 import { ollamaManifestPath, ollamaWeightsDigest, probeServices } from './lib/v11-service-probe.mjs';
 import { validateRawRun } from './lib/validate.mjs';
 
@@ -511,6 +512,25 @@ function parseServiceEvidencePath(options) {
     : null;
 }
 
+async function readCampaignConfiguration(options) {
+  const policyPath = options['campaign-policy'];
+  const campaignRoot = options['campaign-root'];
+  if (policyPath === undefined && campaignRoot === undefined) return undefined;
+  if (typeof policyPath !== 'string' || typeof campaignRoot !== 'string') {
+    throw new Error('--campaign-policy and --campaign-root must be supplied together');
+  }
+  const gate = await readGateJson(optionPath(policyPath));
+  if (gate.state !== 'present') throw new Error('campaign-policy is unreadable or malformed');
+  return { root: optionPath(campaignRoot), policy: validateCampaignPolicy(gate.value) };
+}
+
+async function readProviderBudget(options) {
+  if (options['provider-budget'] === undefined) return null;
+  const gate = await readGateJson(optionPath(options['provider-budget']));
+  // Keep malformed/unreadable distinct from absent, without echoing file contents.
+  return gate.state === 'present' ? gate.value : {};
+}
+
 /**
  * Execute the non-scored acceptance plan.
  *
@@ -522,6 +542,7 @@ function parseServiceEvidencePath(options) {
  * that later reads as evidence.
  */
 async function v11RunCommand(options) {
+  const campaign = await readCampaignConfiguration(options);
   const candidate = await loadV11Candidate();
   const benchmarkRoot = join(root, 'benchmark');
   refuseAssertedPreconditions(options);
@@ -531,7 +552,12 @@ async function v11RunCommand(options) {
   // runtime binding. A blocked candidate must produce a refusal that names
   // its blockers, not a failure to reach hosts that were never the point.
   const serviceEvidencePath = parseServiceEvidencePath(options);
+  const runId = safeRunId(options['run-id']);
+  const attemptId = safeRunId(options['attempt-id'] ?? `${runId}-attempt-1`);
   const readiness = await computeV11Readiness({
+    providerBudget: await readProviderBudget(options),
+    runId: options['run-id'] ?? null,
+    attemptId: options['attempt-id'] ?? null,
     ...candidate,
     benchmarkRoot,
     preconditionEvidencePath,
@@ -551,11 +577,11 @@ async function v11RunCommand(options) {
   }
 
   const outputDirectory = optionPath(options.out, join(benchmarkRoot, 'results'));
-  const runId = safeRunId(options['run-id']);
-  const attemptId = safeRunId(options['attempt-id'] ?? `${runId}-attempt-1`);
   const ledgerDirectory = optionPath(options['ledger-dir'], outputDirectory);
 
   const runtime = await v11RuntimeDependencies(options, {
+    providerBudget: readiness.providerBudget,
+    campaign,
     ...candidate,
     benchmarkRoot,
     runId,
@@ -585,7 +611,8 @@ async function v11RunCommand(options) {
         ledgerPath: providerLedgerPath(ledgerDirectory, attemptId),
         raw,
         attemptId,
-        pinnedModels: runtime.pinnedModels
+        pinnedModels: runtime.pinnedModels,
+        providerBudget: runtime.dependencies.providerBudget
       })
     });
   } catch (error) {
@@ -646,7 +673,7 @@ async function v11RunCommand(options) {
  * its evidence, and reporting that as `RECONCILED` would be the strongest
  * possible overstatement this reconciliation can make.
  */
-async function reconcileRunProviderEvidence({ ledgerPath, raw, attemptId, pinnedModels }) {
+async function reconcileRunProviderEvidence({ ledgerPath, raw, attemptId, pinnedModels, providerBudget }) {
   let ledgerText = null;
   try {
     ledgerText = await readFile(ledgerPath, 'utf8');
@@ -654,7 +681,11 @@ async function reconcileRunProviderEvidence({ ledgerPath, raw, attemptId, pinned
     // Left null on purpose. What an unreadable ledger *means* is decided in
     // `runProviderReconciliation`, where it can be tested, rather than here.
   }
-  return runProviderReconciliation({ ledgerText, ledgerPath, raw, attemptId, pinnedModels });
+  let attemptLedgerText = null;
+  try { attemptLedgerText = await readFile(`${ledgerPath}.attempts.ndjson`, 'utf8'); }
+  catch { /* Missing attempt evidence remains an explicit failed reconciliation. */ }
+  return runProviderReconciliation({ ledgerText, ledgerPath, raw, attemptId, pinnedModels,
+    providerBudget, attemptLedgerText });
 }
 
 /**
@@ -669,6 +700,8 @@ async function reconcileRunProviderEvidence({ ledgerPath, raw, attemptId, pinned
  */
 async function v11RuntimeDependencies(options, context) {
   return await bindV11Runtime({
+    providerBudget: context.providerBudget,
+    campaign: context.campaign,
     repositoryRoot: root,
     benchmarkRoot: context.benchmarkRoot,
     competitorLock: context.competitorLock,
@@ -694,6 +727,7 @@ async function v11RuntimeDependencies(options, context) {
  * a statement about the candidate, not about any arm's behaviour.
  */
 async function v11Preflight(options) {
+  await readCampaignConfiguration(options);
   refuseAssertedPreconditions(options);
   const { registry, definition, scenarios, containerImage } = await loadV11Candidate();
   const {
@@ -703,8 +737,12 @@ async function v11Preflight(options) {
     preconditionEvidence,
     serviceEvidence,
     readiness,
-    blockers
+    blockers,
+    providerBudget
   } = await computeV11Readiness({
+    providerBudget: await readProviderBudget(options),
+    runId: options['run-id'] ?? null,
+    attemptId: options['attempt-id'] ?? null,
     registry,
     definition,
     scenarios,
@@ -731,6 +769,7 @@ async function v11Preflight(options) {
     derivedCounts,
     preconditionEvidence,
     serviceEvidence,
+    providerBudget,
     readiness,
     blockers
   };

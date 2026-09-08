@@ -20,6 +20,7 @@ import { buildV11Prompt } from './v11-prompts.mjs';
 import { verifyServiceEvidence } from './v11-service-evidence.mjs';
 import { validateRawRun } from './validate.mjs';
 import { runV11Benchmark } from './v11-runner.mjs';
+import { validateProviderBudget } from './v11-budget.mjs';
 
 export class V11RunError extends Error {
   constructor(code, message) {
@@ -186,6 +187,15 @@ export async function computeV11Readiness(input) {
     .map((key) => ({ count: key, declared: declaredCounts[key], derived: derivedCounts[key] }));
 
   const blockers = [];
+  let providerBudget = null;
+  try {
+    providerBudget = validateProviderBudget(input.providerBudget, {
+      runId: input.runId, attemptId: input.attemptId,
+      implementationLockHash: input.implementationLockHash
+    });
+  } catch (error) {
+    blockers.push({ kind: 'operational-budget', code: error.code, detail: error.message });
+  }
   for (const finding of applicability.findings) {
     blockers.push({ kind: 'applicability', ...finding });
   }
@@ -245,6 +255,7 @@ export async function computeV11Readiness(input) {
 
   return {
     applicability,
+    providerBudget,
     declaredCounts,
     derivedCounts,
     preconditionEvidence: {
@@ -378,6 +389,10 @@ export async function executeV11AcceptanceRun(input) {
   }
 
   const readinessReport = await computeV11Readiness({
+    providerBudget: input.providerBudget,
+    runId,
+    attemptId,
+    implementationLockHash,
     registry,
     definition,
     scenarios,
