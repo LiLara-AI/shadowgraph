@@ -89,7 +89,7 @@ async def demonstrate() -> dict:
                 model=selected["model"],
                 dimensions=selected["dimensions"],
                 endpoint=selected["endpoint"],
-                api_key="not-a-secret",
+                api_key="",
             )
 
         async def abort_outer_sleep(_delay: float) -> None:
