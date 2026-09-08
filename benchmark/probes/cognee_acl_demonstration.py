@@ -46,6 +46,10 @@ PRECONDITION = "pinned backend access-control configuration"
 # One name, two users. The point of the demonstration is that this single name
 # does not name a single dataset.
 DATASET_NAME = "shadowgraph-acl-probe"
+# The local benchmark endpoint authenticates nothing, but pinned Cognee rejects
+# an empty OpenAI-provider key before it can test the endpoint. This designated
+# placeholder fills that syntactic slot; it is not a credential.
+UNUSED_API_KEY = "not-a-secret"
 
 STEPS: list[dict] = []
 
@@ -98,7 +102,7 @@ async def demonstrate() -> dict:
     # configuration before it will ingest anything, so the demonstration runs
     # against the same endpoint the benchmark declares rather than against a
     # stand-in.
-    api_key = ""
+    api_key = UNUSED_API_KEY
     cognee.config.set_llm_provider("openai")
     cognee.config.set_llm_endpoint(required_environment("SHADOWGRAPH_LLM_ENDPOINT"))
     cognee.config.set_llm_model(required_environment("SHADOWGRAPH_LLM_MODEL"))
