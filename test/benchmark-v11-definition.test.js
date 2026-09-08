@@ -34,7 +34,11 @@ const FROZEN_RELATIVE_FILES = [
   'benchmark/preregistration-amendment-001.json',
   'benchmark/preregistration-amendment-002.json',
   'benchmark/preregistration-amendment-003.json',
-  'benchmark/preregistration-amendment-003.sha256'
+  'benchmark/preregistration-amendment-003.sha256',
+  'benchmark/preregistration-amendment-004.json',
+  'benchmark/preregistration-amendment-004.sha256',
+  'benchmark/preregistration-amendment-005.json',
+  'benchmark/preregistration-amendment-005.sha256'
 ];
 
 function sha256(bytes) {
@@ -281,14 +285,16 @@ const BENIGN_BOUNDARY_CORPUS = Object.freeze([
   'modelingAssumption'
 ]);
 
-test('acceptance definition binds Amendment 003, exact topology, and mechanical counts', async () => {
+test('acceptance definition binds Amendments 003 through 005, exact topology, and mechanical counts', async () => {
   const loaded = await loadV11AcceptanceDefinition({ repositoryRoot: REPOSITORY_ROOT });
 
   assert.deepEqual(V11_ACCEPTANCE_SOURCE_HASHES, {
     preregistrationSha256: '738ee8b4813fab77da2e4e24582b12e756686650e4c39fad41c5337f831f5dac',
     amendment001Sha256: '2b209df6ca46a179e332acd4ed0b16a35a089f5c14575dd86353db0dc7249c4a',
     amendment002Sha256: '08e12eca3f93bd67cfeaf90a2064f91beb240e78a8fd63ed8645da78c0d88f1b',
-    amendment003Sha256: '726de2018584aca399fc27d2bba15585d8b6fb9454bc24083578daed22f0be0a'
+    amendment003Sha256: '726de2018584aca399fc27d2bba15585d8b6fb9454bc24083578daed22f0be0a',
+    amendment004Sha256: 'b0c3a2553608efb78147a8c1f1ef9af51a7d0eebaa0037ce4ad7b64616b1c5f9',
+    amendment005Sha256: 'c435fa9d772c151c83214ef3a4180e0646236cd2cbb079be082b8341c4e6e223'
   });
   assert.deepEqual(V11_ACCEPTANCE_ARM_IDS, [
     'no-memory',
@@ -331,11 +337,23 @@ test('acceptance definition binds Amendment 003, exact topology, and mechanical 
   assert.ok(loaded.scenarios.every(({ id }) => /^ACC_[A-Z0-9_]+$/u.test(id)));
   assert.equal(
     sha256(await readFile(path.join(REPOSITORY_ROOT, 'benchmark/acceptance/definition.json'))),
-    '79bda68c52c0f60983bf224ea17400b95dc1aa78eeacea5042d4b13596ac99ca'
+    'ce425b1b7728411710d4570e2e10c06ee4be55219a939c73c0810d4e8c0261e3'
   );
   assert.equal(
     sha256(await readFile(path.join(REPOSITORY_ROOT, 'benchmark/acceptance/scenarios.json'))),
     '728dc6e3f12db8334d31d29641caee01d4b1c645c5b51bcb27caa3fff5b4b14a'
+  );
+});
+
+test('loader rejects a mutated Amendment 005 sidecar even when its JSON source is unchanged', async (t) => {
+  const root = await cloneDefinitionFixture(t);
+  const sidecarPath = path.join(root, 'benchmark', 'preregistration-amendment-005.sha256');
+  const original = await readFile(sidecarPath);
+  await writeFile(sidecarPath, Buffer.concat([original, Buffer.from('# changed\n')]));
+
+  await assert.rejects(
+    loadV11AcceptanceDefinition({ repositoryRoot: root }),
+    /SHAPE/iu
   );
 });
 

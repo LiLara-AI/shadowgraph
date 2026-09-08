@@ -19,7 +19,9 @@ const V11_SOURCE_HASH_FIELDS = [
   'preregistrationSha256',
   'amendment001Sha256',
   'amendment002Sha256',
-  'amendment003Sha256'
+  'amendment003Sha256',
+  'amendment004Sha256',
+  'amendment005Sha256'
 ];
 
 function isPlainObject(value) {
@@ -33,7 +35,11 @@ function requireTrustedV11SourceHashes(raw, trustedSourceHashes) {
   const fields = Object.keys(trustedSourceHashes);
   if (fields.length !== V11_SOURCE_HASH_FIELDS.length
     || fields.some((field) => !V11_SOURCE_HASH_FIELDS.includes(field))) {
-    throw new Error('Trusted v1.1 source hashes must contain exactly preregistrationSha256, amendment001Sha256, amendment002Sha256, and amendment003Sha256');
+    throw new Error(
+      'Trusted v1.1 source hashes must contain exactly preregistrationSha256, '
+      + 'amendment001Sha256, amendment002Sha256, amendment003Sha256, '
+      + 'amendment004Sha256, and amendment005Sha256'
+    );
   }
   for (const field of V11_SOURCE_HASH_FIELDS) {
     if (!SHA256.test(trustedSourceHashes[field])) {

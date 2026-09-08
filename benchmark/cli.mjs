@@ -603,6 +603,9 @@ async function v11RunCommand(options) {
       sourceHashes: candidate.sourceHashes,
       amendment002Path: join(benchmarkRoot, 'preregistration-amendment-002.json'),
       amendment003Path: join(benchmarkRoot, 'preregistration-amendment-003.json'),
+      amendment004Path: join(benchmarkRoot, 'preregistration-amendment-004.json'),
+      amendment005Path: join(benchmarkRoot, 'preregistration-amendment-005.json'),
+      amendment005SidecarPath: join(benchmarkRoot, 'preregistration-amendment-005.sha256'),
       ...runtime.dependencies,
       // Judged inside the run rather than after it, so a caller cannot omit it.
       // Reached only once `closeResources` has closed the meter, which is what

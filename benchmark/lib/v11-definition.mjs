@@ -133,7 +133,9 @@ export const V11_ACCEPTANCE_SOURCE_HASHES = Object.freeze({
   preregistrationSha256: '738ee8b4813fab77da2e4e24582b12e756686650e4c39fad41c5337f831f5dac',
   amendment001Sha256: '2b209df6ca46a179e332acd4ed0b16a35a089f5c14575dd86353db0dc7249c4a',
   amendment002Sha256: '08e12eca3f93bd67cfeaf90a2064f91beb240e78a8fd63ed8645da78c0d88f1b',
-  amendment003Sha256: '726de2018584aca399fc27d2bba15585d8b6fb9454bc24083578daed22f0be0a'
+  amendment003Sha256: '726de2018584aca399fc27d2bba15585d8b6fb9454bc24083578daed22f0be0a',
+  amendment004Sha256: 'b0c3a2553608efb78147a8c1f1ef9af51a7d0eebaa0037ce4ad7b64616b1c5f9',
+  amendment005Sha256: 'c435fa9d772c151c83214ef3a4180e0646236cd2cbb079be082b8341c4e6e223'
 });
 
 export const V11_ACCEPTANCE_ARM_IDS = Object.freeze([
@@ -643,7 +645,15 @@ function validateScenarioDocument(document, preregistration) {
   }
 }
 
-function validateFrozenSources(preregistration, amendment001, amendment002, amendment003, definition) {
+function validateFrozenSources(
+  preregistration,
+  amendment001,
+  amendment002,
+  amendment003,
+  amendment004,
+  amendment005,
+  definition
+) {
   if (!Array.isArray(preregistration.arms)
     || !isDeepStrictEqual(preregistration.arms.map(({ id }) => id), [...V11_ACCEPTANCE_ARM_IDS])) {
     boundaryReject('SHAPE');
@@ -689,6 +699,54 @@ function validateFrozenSources(preregistration, amendment001, amendment002, amen
     || correction.evidence?.observedNativeProjectNamespace !== 'group_id'
     || correction.evidence?.observedNativeUserNamespace !== null
     || correction.evidence?.userIdEncodedIntoGroupId !== false) {
+    boundaryReject('SHAPE');
+  }
+  if (amendment004?.amendmentId !== 'amendment-004'
+    || amendment004?.status !== 'AUTHORIZED_FOR_NON_SCORED_V1_1_ACCEPTANCE'
+    || amendment004?.supersedes?.amendment003Sha256 !== definition.sourceHashes.amendment003Sha256
+    || amendment004?.invariants?.scored !== false
+    || amendment004?.invariants?.comparativeClaimsEnabled !== false
+    || amendment004?.retrospectiveEffect?.rescoreExistingRuns !== false) {
+    boundaryReject('SHAPE');
+  }
+  const taxonomy = amendment005?.retryTaxonomy;
+  const enforcement = taxonomy?.enforcement;
+  if (amendment005?.amendmentId !== 'amendment-005'
+    || amendment005?.status !== 'AUTHORIZED_FOR_NON_SCORED_V1_1_ACCEPTANCE'
+    || amendment005?.supersedes?.amendment004Sha256 !== definition.sourceHashes.amendment004Sha256
+    || amendment005?.invariants?.scored !== false
+    || amendment005?.invariants?.comparativeClaimsEnabled !== false
+    || amendment005?.invariants?.providerModelsChanged !== false
+    || amendment005?.invariants?.providerEndpointsChanged !== false
+    || amendment005?.invariants?.providerBudgetsRelaxed !== false
+    || amendment005?.prospectiveEffect?.rescoreExistingRuns !== false
+    || amendment005?.prospectiveEffect?.rewriteHistoricalArtifacts !== false
+    || amendment005?.prospectiveEffect?.resumeHistoricalRuns !== false
+    || taxonomy?.categories?.A?.allowed !== false
+    || taxonomy?.categories?.B?.publiclyConfigurablePolicy !== 'zero'
+    || taxonomy?.categories?.B?.unconfigurableNativeAttemptPolicy !== 'metered-and-bounded'
+    || taxonomy?.categories?.C?.allowed !== 'metered-and-bounded'
+    || taxonomy?.categories?.D?.allowed !== 'metered-and-disclosed-same-model-endpoint-only'
+    || taxonomy?.categories?.E?.allowed !== false
+    || enforcement?.harnessOperationRetries !== 0
+    || enforcement?.outerDecisionRetries !== 0
+    || enforcement?.publicTransportRetryControlsMustBeZero !== true
+    || enforcement?.allProviderAttemptsMeteredBeforeDispatch !== true
+    || enforcement?.allProviderAttemptsRecordedInOperationCounters !== true
+    || enforcement?.allProviderAttemptsCountTowardLatencyTokensCostAndClassBudget !== true
+    || enforcement?.samePinnedModelAndEndpointRequired !== true
+    || enforcement?.fallbackModelOrProviderProhibited !== true
+    || enforcement?.nativeSchemaModeFallbackMustBeDeclaredAndFaultInjected !== true
+    || enforcement?.rootOperationFailureDoesNotTriggerHarnessRerun !== true
+    || enforcement?.unaccountedProviderLedgerTrafficRemainsAReconciliationFailure !== true
+    || enforcement?.nativeAttemptEligibilityRuleIsArmNeutral !== true
+    || !isDeepStrictEqual(enforcement?.nativeAttemptsBoundedBy, [
+      'atomic per-class campaign ceilings',
+      'request timeout',
+      'adapter operation timeout',
+      'unit timeout',
+      'campaign deadline'
+    ])) {
     boundaryReject('SHAPE');
   }
 }
@@ -754,7 +812,9 @@ export async function loadV11AcceptanceDefinition(options) {
     ['preregistrationSha256', 'preregistration.json', 'frozen preregistration'],
     ['amendment001Sha256', 'preregistration-amendment-001.json', 'frozen Amendment 001'],
     ['amendment002Sha256', 'preregistration-amendment-002.json', 'frozen Amendment 002'],
-    ['amendment003Sha256', 'preregistration-amendment-003.json', 'authorized Amendment 003']
+    ['amendment003Sha256', 'preregistration-amendment-003.json', 'authorized Amendment 003'],
+    ['amendment004Sha256', 'preregistration-amendment-004.json', 'authorized Amendment 004'],
+    ['amendment005Sha256', 'preregistration-amendment-005.json', 'authorized Amendment 005']
   ];
   const parsedSources = [];
   for (const [hashField, filename, label] of sourceFiles) {
@@ -766,8 +826,25 @@ export async function loadV11AcceptanceDefinition(options) {
     }
     parsedSources.push(parseJson(bytes, label));
   }
-  const [preregistration, amendment001, amendment002, amendment003] = parsedSources;
-  validateFrozenSources(preregistration, amendment001, amendment002, amendment003, definition);
+  const amendment005Sidecar = await readSafeFile(
+    path.join(benchmarkRoot, 'preregistration-amendment-005.sha256'),
+    benchmarkRoot,
+    'authorized Amendment 005 hash sidecar'
+  );
+  const expectedAmendment005Sidecar = `${V11_ACCEPTANCE_SOURCE_HASHES.amendment005Sha256}  benchmark/preregistration-amendment-005.json\n`;
+  if (amendment005Sidecar.toString('utf8') !== expectedAmendment005Sidecar) {
+    boundaryReject('SHAPE');
+  }
+  const [preregistration, amendment001, amendment002, amendment003, amendment004, amendment005] = parsedSources;
+  validateFrozenSources(
+    preregistration,
+    amendment001,
+    amendment002,
+    amendment003,
+    amendment004,
+    amendment005,
+    definition
+  );
 
   const scenariosPath = path.resolve(acceptanceRoot, definition.scenarios.path);
   if (!inside(acceptanceRoot, scenariosPath) || path.dirname(scenariosPath) !== acceptanceRoot) {

@@ -35,6 +35,8 @@ const SINGLETON_FILE_ROLES = Object.freeze([
   'amendment_003_sidecar',
   'amendment_004',
   'amendment_004_sidecar',
+  'amendment_005',
+  'amendment_005_sidecar',
   'runner',
   'validator',
   'aggregator',
@@ -60,7 +62,8 @@ const SIDECAR_TARGETS = Object.freeze({
   amendment_001_sidecar: 'amendment_001',
   amendment_002_sidecar: 'amendment_002',
   amendment_003_sidecar: 'amendment_003',
-  amendment_004_sidecar: 'amendment_004'
+  amendment_004_sidecar: 'amendment_004',
+  amendment_005_sidecar: 'amendment_005'
 });
 
 const SERVICE_MANIFEST_PATH = 'benchmark/service-images.json';
@@ -93,6 +96,8 @@ const COVERAGE_SELECTORS = Object.freeze([
   { role: 'amendment_003_sidecar', kind: 'path', value: 'benchmark/preregistration-amendment-003.sha256' },
   { role: 'amendment_004', kind: 'path', value: 'benchmark/preregistration-amendment-004.json' },
   { role: 'amendment_004_sidecar', kind: 'path', value: 'benchmark/preregistration-amendment-004.sha256' },
+  { role: 'amendment_005', kind: 'path', value: 'benchmark/preregistration-amendment-005.json' },
+  { role: 'amendment_005_sidecar', kind: 'path', value: 'benchmark/preregistration-amendment-005.sha256' },
   { role: 'runner', kind: 'path', value: 'benchmark/lib/v11-runner.mjs' },
   { role: 'validator', kind: 'path', value: 'benchmark/lib/validate.mjs' },
   { role: 'aggregator', kind: 'path', value: 'benchmark/lib/aggregate.mjs' },

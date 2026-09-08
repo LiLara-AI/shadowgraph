@@ -32,6 +32,8 @@ const FILE_SPECS = Object.freeze([
   { role: 'amendment_003_sidecar', path: 'benchmark/preregistration-amendment-003.sha256' },
   { role: 'amendment_004', path: 'benchmark/preregistration-amendment-004.json' },
   { role: 'amendment_004_sidecar', path: 'benchmark/preregistration-amendment-004.sha256' },
+  { role: 'amendment_005', path: 'benchmark/preregistration-amendment-005.json' },
+  { role: 'amendment_005_sidecar', path: 'benchmark/preregistration-amendment-005.sha256' },
   { role: 'runner', path: 'benchmark/lib/v11-runner.mjs' },
   { role: 'validator', path: 'benchmark/lib/validate.mjs' },
   { role: 'aggregator', path: 'benchmark/lib/aggregate.mjs' },
@@ -102,13 +104,35 @@ async function temporaryDirectory(t, prefix = 'shadowgraph-lock-') {
   return directory;
 }
 
+const GIT_REPOSITORY_SELECTORS = Object.freeze([
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_COMMON_DIR',
+  'GIT_INDEX_FILE',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_CEILING_DIRECTORIES'
+]);
+
+function environmentWithoutGitSelectors(base = process.env) {
+  const environment = { ...base };
+  for (const key of GIT_REPOSITORY_SELECTORS) delete environment[key];
+  return environment;
+}
+
+async function independentGit(repository, args) {
+  return execFile('git', ['-C', repository, ...args], {
+    env: environmentWithoutGitSelectors()
+  });
+}
+
 async function git(repository, args, { date = FIXTURE_DATE } = {}) {
   return execFile('git', ['-C', repository, ...args], {
-    env: {
+    env: environmentWithoutGitSelectors({
       ...process.env,
       GIT_AUTHOR_DATE: date,
       GIT_COMMITTER_DATE: date
-    }
+    })
   });
 }
 
@@ -157,7 +181,7 @@ async function createFixture(t) {
   const base = await temporaryDirectory(t);
   const repository = path.join(base, 'repo');
   await mkdir(repository, { recursive: true });
-  await execFile('git', ['-C', repository, 'init', '--quiet']);
+  await independentGit(repository, ['init', '--quiet']);
 
   const primaryFiles = new Map([
     ['.gitattributes', '* -text\n'],
@@ -168,6 +192,7 @@ async function createFixture(t) {
     ['benchmark/preregistration-amendment-002.json', '{"fixture":"amendment-002"}\n'],
     ['benchmark/preregistration-amendment-003.json', '{"fixture":"amendment-003"}\n'],
     ['benchmark/preregistration-amendment-004.json', '{"fixture":"amendment-004"}\n'],
+    ['benchmark/preregistration-amendment-005.json', '{"fixture":"amendment-005"}\n'],
     ['benchmark/lib/v11-runner.mjs', 'export const fixtureRunner = true;\n'],
     ['benchmark/lib/validate.mjs', 'export const fixtureValidator = true;\n'],
     ['benchmark/lib/aggregate.mjs', 'export const fixtureAggregator = true;\n'],
@@ -223,7 +248,12 @@ async function createFixture(t) {
     [
       'benchmark/preregistration-amendment-004.sha256',
       'benchmark/preregistration-amendment-004.json',
-      'benchmark/preregistration-amendment-004.json'
+      'preregistration-amendment-004.json'
+    ],
+    [
+      'benchmark/preregistration-amendment-005.sha256',
+      'benchmark/preregistration-amendment-005.json',
+      'preregistration-amendment-005.json'
     ]
   ];
   for (const [sidecarPath, targetPath, recordedPath] of sidecars) {
@@ -234,6 +264,48 @@ async function createFixture(t) {
   await commitAll(repository, 'fixture baseline');
   return { base, repository, input: fixtureInput(repository) };
 }
+
+test('fixture Git commands cannot inherit a caller repository selector', async (t) => {
+  const sentinelBase = await temporaryDirectory(t, 'shadowgraph-lock-git-selector-');
+  const sentinel = path.join(sentinelBase, 'sentinel');
+  await mkdir(sentinel, { recursive: true });
+  await independentGit(sentinel, ['init', '--quiet']);
+  await writeRepositoryFile(sentinel, 'sentinel.txt', 'unchanged\n');
+  await independentGit(sentinel, ['add', '--all']);
+  await independentGit(sentinel, [
+    '-c', 'user.name=Sentinel Fixture',
+    '-c', 'user.email=sentinel@example.invalid',
+    'commit', '--quiet', '--no-gpg-sign', '-m', 'sentinel baseline'
+  ]);
+  const sentinelHead = String((await independentGit(sentinel, ['rev-parse', 'HEAD'])).stdout).trim();
+
+  const before = Object.fromEntries(GIT_REPOSITORY_SELECTORS.map((key) => [key, process.env[key]]));
+  try {
+    process.env.GIT_DIR = path.join(sentinel, '.git');
+    process.env.GIT_WORK_TREE = sentinel;
+    for (const key of GIT_REPOSITORY_SELECTORS) {
+      if (key !== 'GIT_DIR' && key !== 'GIT_WORK_TREE') delete process.env[key];
+    }
+    let fixture = null;
+    let fixtureError = null;
+    try {
+      fixture = await createFixture(t);
+    } catch (error) {
+      fixtureError = error;
+    }
+    assert.equal(fixtureError, null, 'fixture must create and commit its own repository');
+    const fixtureHead = String((await independentGit(fixture.repository, ['rev-parse', 'HEAD'])).stdout).trim();
+    assert.match(fixtureHead, /^[a-f0-9]{40}$/u);
+  } finally {
+    for (const key of GIT_REPOSITORY_SELECTORS) {
+      if (before[key] === undefined) delete process.env[key];
+      else process.env[key] = before[key];
+    }
+  }
+
+  const sentinelAfter = String((await independentGit(sentinel, ['rev-parse', 'HEAD'])).stdout).trim();
+  assert.equal(sentinelAfter, sentinelHead, 'fixture Git must not move caller-selected repository HEAD');
+});
 
 function replaceModel(input, kind, replacement) {
   return {
@@ -248,7 +320,9 @@ test('lock is deterministic, comprehensive, path-portable, and verifies in a byt
 
   const cloneBase = await temporaryDirectory(t, 'shadowgraph-lock-clone-');
   const clone = path.join(cloneBase, 'repo-copy');
-  await execFile('git', ['clone', '--quiet', '--no-local', fixture.repository, clone]);
+  await execFile('git', ['clone', '--quiet', '--no-local', fixture.repository, clone], {
+    env: environmentWithoutGitSelectors()
+  });
   const cloneInput = fixtureInput(clone);
   cloneInput.files.reverse();
   cloneInput.models.reverse();

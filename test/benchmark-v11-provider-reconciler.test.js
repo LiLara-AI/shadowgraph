@@ -571,17 +571,37 @@ test('a reconciliation that cannot name its ledger or its models is refused', ()
   assert.throws(() => runProviderReconciliation(), /name the ledger/u);
 });
 
-test('a failed unit is held to everything except its counts', () => {
-  // A container that fails mid-operation gets a host-synthesised envelope whose
-  // counts are all zero, and an abort discards counts the adapter had already
-  // reported - while the calls are in the ledger either way. Holding those
-  // correlations to zero reported a metering violation on a run that had none.
-  //
-  // The first attempt removed the events instead, and was wrong three ways: it
-  // left a hole in the request numbering so LEDGER_GAP fired on the very run it
-  // meant to save; it skipped every per-event check; and it therefore let an arm
-  // reach an unpinned model and crash while the run reported RECONCILED. So the
-  // count is what is unverifiable, and only the count.
+test('provider traffic from a failed root operation is an unreconciled count failure', () => {
+  const failed = unit({
+    unitId: 'mem0-oss:ACC_ONE:1:B',
+    repetition: 1,
+    status: 'FAILED'
+  });
+  const report = runProviderReconciliation({
+    ledgerText: ledgerLines([
+      event({
+        requestNumber: 0,
+        repetition: 1,
+        requestClass: 'internal_memory_llm'
+      })
+    ]),
+    ledgerPath: '/ledgers/attempt-1.provider-requests.ndjson',
+    raw: { units: [failed] },
+    attemptId: ATTEMPT,
+    pinnedModels: PINNED
+  });
+
+  assert.equal(report.status, 'DISCREPANT');
+  assert.ok(report.findings.some((finding) => finding.code === 'UNVERIFIED_OPERATION_COUNT'));
+  assert.ok(!report.findings.some((finding) => finding.code === 'RETRY_OBSERVED'));
+  assert.equal(report.totals.unverifiedCountEvents, 1);
+});
+
+test('a failed unit preserves its traffic but fails reconciliation when its counts are unverified', () => {
+  // A container that fails mid-operation can yield a host-synthesised envelope
+  // whose operation metrics are zero, or lose counts after the meter has
+  // already admitted calls. Keep every event (otherwise numbering/model/outcome
+  // evidence is lost), but the unverified count itself must fail closed.
   const failed = unit({ unitId: 'mem0-oss:ACC_ONE:1:B', repetition: 1, status: 'FAILED' });
   const record = { units: [unit(), failed] };
   const { expectations, unverifiedCounts } = providerExpectationsFromRun(record, ATTEMPT);
@@ -611,14 +631,18 @@ test('a failed unit is held to everything except its counts', () => {
     pinnedModels: PINNED
   });
 
-  assert.equal(report.status, 'RECONCILED');
-  assert.deepEqual(report.findings, [], 'no LEDGER_GAP: the events were never removed');
+  assert.equal(report.status, 'DISCREPANT');
+  const countFindings = report.findings.filter((finding) => finding.code === 'UNVERIFIED_OPERATION_COUNT');
+  assert.equal(countFindings.length, 3);
+  assert.ok(!report.findings.some((finding) => finding.code === 'LEDGER_GAP'));
+  assert.ok(!report.findings.some((finding) => finding.code === 'RETRY_OBSERVED'));
+  assert.ok(!report.findings.some((finding) => finding.code === 'UNEXPECTED_CALL'));
   assert.equal(report.totals.observedEvents, 8);
   assert.equal(report.totals.unverifiedCountEvents, 2);
   assert.equal(report.totals.unverifiedCountUnits, 1);
-  // The measured unit claimed 1 + 2 + 3; the failed unit's three expectations
-  // are not counted, because they are not being compared. Leaving them in the
-  // totals would report six expected calls the run was never held to.
+  // The measured unit claimed 1 + 2 + 3. Failed-unit counts remain outside
+  // matched/expected totals because the raw record cannot substantiate them,
+  // but the UNVERIFIED_OPERATION_COUNT finding prevents a reconciled verdict.
   assert.equal(report.totals.expectedCalls, 6);
   assert.equal(report.totals.matchedCalls, 6);
 });

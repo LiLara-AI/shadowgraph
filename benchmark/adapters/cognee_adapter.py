@@ -46,14 +46,22 @@ def _runtime_config(routes: dict, models: dict, state_root: str) -> dict:
         # are derived here from the one pinned id, so the prefix stays a fact
         # about this library rather than something the protocol has to carry.
         "model": "openai/" + models["internal_memory_llm"]["modelId"],
-        "max_retries": 0,
+        # Pinned Cognee forwards llm_args to LiteLLM. `max_retries` at this
+        # adapter layer was never consumed by the selected configuration path;
+        # `num_retries` is the public LiteLLM transport control that is.
+        "structured_output_framework": "litellm_native",
+        "llm_args": {"num_retries": 0},
+        # Pinned Cognee only enters fallback-model handling when these values
+        # are all present. State every empty value rather than inheriting one.
+        "fallback_model": "",
+        "fallback_api_key": "",
+        "fallback_endpoint": "",
     }
     embedding = {
         "provider": "openai",
         "endpoint": routes["embedding"],
         "model": models["embedding"]["modelId"],
         "dimensions": models["embedding"]["embeddingDimension"],
-        "max_retries": 0,
     }
     return {
         "package": {"name": "cognee", "version": "1.5.3"},
@@ -67,8 +75,11 @@ def _runtime_config(routes: dict, models: dict, state_root: str) -> dict:
         "data_root": os.path.join(state_root, "data"),
         "llm_config": llm,
         "embedding_config": embedding,
+        # This means retry A only. Amendment 005 governs visible native attempts
+        # separately, so a library request is never silently called a rerun.
         "automatic_retries": 0,
-        "retry_proof": "task8_runtime_meter_required",
+        "harness_operation_retries": 0,
+        "native_attempt_policy": "amendment-005-metered-and-bounded",
         "native_acl_gate": "task8_required_for_user_scope",
     }
 
@@ -266,6 +277,15 @@ async def _default_client_factory(config, provider_call):
         cognee.config.set_llm_endpoint(llm["endpoint"])
         cognee.config.set_llm_model(llm["model"])
         cognee.config.set_llm_api_key(UNUSED_API_KEY)
+        fallback_config = {
+            name: llm[name]
+            for name in ("fallback_model", "fallback_api_key", "fallback_endpoint")
+        }
+        cognee.config.set_llm_config({
+            "structured_output_framework": llm["structured_output_framework"],
+            "llm_args": llm["llm_args"],
+            **fallback_config,
+        })
         cognee.config.set_embedding_provider("openai_compatible")
         cognee.config.set_embedding_endpoint(embedding["endpoint"])
         cognee.config.set_embedding_model(embedding["model"])

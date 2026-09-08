@@ -34,6 +34,9 @@ const HASH = /^[a-f0-9]{64}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
 const AMENDMENT_002_SHA256 = '08e12eca3f93bd67cfeaf90a2064f91beb240e78a8fd63ed8645da78c0d88f1b';
 const AMENDMENT_003_SHA256 = '726de2018584aca399fc27d2bba15585d8b6fb9454bc24083578daed22f0be0a';
+const AMENDMENT_004_SHA256 = 'b0c3a2553608efb78147a8c1f1ef9af51a7d0eebaa0037ce4ad7b64616b1c5f9';
+const AMENDMENT_005_SHA256 = 'c435fa9d772c151c83214ef3a4180e0646236cd2cbb079be082b8341c4e6e223';
+const AMENDMENT_005_SIDECAR = `${AMENDMENT_005_SHA256}  benchmark/preregistration-amendment-005.json\n`;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
 // Exported because a production caller has to build the progress ledger with
 // the same deadline. Restating it there would make the ledger's `stalled`
@@ -356,7 +359,80 @@ async function loadAmendments(options) {
       }
     }
   }
-  return { amendment002: amendment, amendment003, effectiveMatrix };
+
+  async function loadExactAmendment(number, hashField, expectedHash, sourcePath) {
+    if (options[hashField] !== expectedHash) {
+      throw new Error(`Amendment ${number} hash is not the exact locked v1.1 source digest`);
+    }
+    let amendmentSource;
+    try {
+      amendmentSource = await readFile(sourcePath);
+    } catch {
+      throw new Error(`Unable to read Amendment ${number} source`);
+    }
+    if (createHash('sha256').update(amendmentSource).digest('hex') !== expectedHash) {
+      throw new Error(`Amendment ${number} source bytes do not match amendment${number}Sha256`);
+    }
+    try {
+      return JSON.parse(amendmentSource.toString('utf8'));
+    } catch {
+      throw new Error(`Amendment ${number} source is not valid JSON`);
+    }
+  }
+
+  async function loadExactAmendmentSidecar(number, expectedBytes, sourcePath) {
+    let sidecar;
+    try {
+      sidecar = await readFile(sourcePath, 'utf8');
+    } catch {
+      throw new Error(`Unable to read Amendment ${String(number).padStart(3, '0')} sidecar`);
+    }
+    if (sidecar !== expectedBytes) {
+      throw new Error(`Amendment ${String(number).padStart(3, '0')} sidecar does not authenticate the exact locked source bytes`);
+    }
+  }
+
+  const amendment004 = await loadExactAmendment(
+    4,
+    'amendment004Sha256',
+    AMENDMENT_004_SHA256,
+    options.amendment004Path
+  );
+  if (amendment004?.amendmentId !== 'amendment-004'
+    || amendment004?.status !== 'AUTHORIZED_FOR_NON_SCORED_V1_1_ACCEPTANCE'
+    || amendment004?.supersedes?.amendment003Sha256 !== options.amendment003Sha256
+    || amendment004?.invariants?.scored !== false
+    || amendment004?.retrospectiveEffect?.rescoreExistingRuns !== false) {
+    throw new Error('Amendment 004 does not match the authorized prospective prompt correction');
+  }
+
+  const amendment005 = await loadExactAmendment(
+    5,
+    'amendment005Sha256',
+    AMENDMENT_005_SHA256,
+    options.amendment005Path
+  );
+  await loadExactAmendmentSidecar(5, AMENDMENT_005_SIDECAR, options.amendment005SidecarPath);
+  const taxonomy = amendment005?.retryTaxonomy;
+  const enforcement = taxonomy?.enforcement;
+  if (amendment005?.amendmentId !== 'amendment-005'
+    || amendment005?.status !== 'AUTHORIZED_FOR_NON_SCORED_V1_1_ACCEPTANCE'
+    || amendment005?.supersedes?.amendment004Sha256 !== options.amendment004Sha256
+    || amendment005?.invariants?.scored !== false
+    || amendment005?.invariants?.comparativeClaimsEnabled !== false
+    || amendment005?.invariants?.providerBudgetsRelaxed !== false
+    || amendment005?.prospectiveEffect?.rescoreExistingRuns !== false
+    || taxonomy?.categories?.A?.allowed !== false
+    || taxonomy?.categories?.E?.allowed !== false
+    || enforcement?.harnessOperationRetries !== 0
+    || enforcement?.outerDecisionRetries !== 0
+    || enforcement?.allProviderAttemptsMeteredBeforeDispatch !== true
+    || enforcement?.fallbackModelOrProviderProhibited !== true
+    || enforcement?.rootOperationFailureDoesNotTriggerHarnessRerun !== true
+    || enforcement?.nativeAttemptEligibilityRuleIsArmNeutral !== true) {
+    throw new Error('Amendment 005 does not match the authorized arm-neutral native-attempt policy');
+  }
+  return { amendment002: amendment, amendment003, amendment004, amendment005, effectiveMatrix };
 }
 
 function validateArm(arm, seen) {
@@ -682,7 +758,9 @@ async function validateResume(options, plannedIds) {
     'preregistrationSha256',
     'amendment001Sha256',
     'amendment002Sha256',
-    'amendment003Sha256'
+    'amendment003Sha256',
+    'amendment004Sha256',
+    'amendment005Sha256'
   ]) {
     if (previousRaw[field] !== options[field]) {
       throw new Error(`Changed ${field} requires a new runId`);
@@ -773,6 +851,8 @@ function validateOptions(options) {
     'amendment001Sha256',
     'amendment002Sha256',
     'amendment003Sha256',
+    'amendment004Sha256',
+    'amendment005Sha256',
     'implementationLockHash',
     'environmentLockHash'
   ]) requireHash(options[field], field);
@@ -781,6 +861,15 @@ function validateOptions(options) {
   }
   if (!isNonEmptyString(options.amendment003Path)) {
     throw new Error('amendment003Path must identify the exact Amendment 003 source file');
+  }
+  if (!isNonEmptyString(options.amendment004Path)) {
+    throw new Error('amendment004Path must identify the exact Amendment 004 source file');
+  }
+  if (!isNonEmptyString(options.amendment005Path)) {
+    throw new Error('amendment005Path must identify the exact Amendment 005 source file');
+  }
+  if (!isNonEmptyString(options.amendment005SidecarPath)) {
+    throw new Error('amendment005SidecarPath must identify the exact Amendment 005 hash sidecar');
   }
   if (!isPlainObject(options.progress)
     || typeof options.progress.append !== 'function'
@@ -1568,6 +1657,8 @@ async function executeV11Benchmark(options, closeResources) {
     amendment001Sha256: options.amendment001Sha256,
     amendment002Sha256: options.amendment002Sha256,
     amendment003Sha256: options.amendment003Sha256,
+    amendment004Sha256: options.amendment004Sha256,
+    amendment005Sha256: options.amendment005Sha256,
     implementationLockHash: options.implementationLockHash,
     environmentLockHash: options.environmentLockHash,
     startedAt,

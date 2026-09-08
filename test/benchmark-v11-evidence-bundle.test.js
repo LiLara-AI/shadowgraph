@@ -23,7 +23,9 @@ const SOURCE_HASHES = Object.freeze({
   preregistrationSha256: '738ee8b4813fab77da2e4e24582b12e756686650e4c39fad41c5337f831f5dac',
   amendment001Sha256: '2b209df6ca46a179e332acd4ed0b16a35a089f5c14575dd86353db0dc7249c4a',
   amendment002Sha256: '08e12eca3f93bd67cfeaf90a2064f91beb240e78a8fd63ed8645da78c0d88f1b',
-  amendment003Sha256: '726de2018584aca399fc27d2bba15585d8b6fb9454bc24083578daed22f0be0a'
+  amendment003Sha256: '726de2018584aca399fc27d2bba15585d8b6fb9454bc24083578daed22f0be0a',
+  amendment004Sha256: 'b0c3a2553608efb78147a8c1f1ef9af51a7d0eebaa0037ce4ad7b64616b1c5f9',
+  amendment005Sha256: 'c435fa9d772c151c83214ef3a4180e0646236cd2cbb079be082b8341c4e6e223'
 });
 
 function entry(overrides = {}) {
@@ -90,6 +92,7 @@ test('the bundle is byte-identical across builds from the same inputs', () => {
   assert.equal(first.bytes, second.bytes);
   assert.equal(first.digest, second.digest);
   assert.equal(bundleDigest(first.bundle), first.digest);
+  assert.deepEqual(first.bundle.sourceHashes, SOURCE_HASHES);
 
   // A reviewer rebuilds the bundle and compares bytes, so the serialization has
   // to be stable down to key order - not merely equal as a parsed object.
@@ -98,6 +101,20 @@ test('the bundle is byte-identical across builds from the same inputs', () => {
   assert.equal(first.bytes.endsWith('\n'), true, 'bundle bytes must end with a newline');
   assert.equal(first.bytes.includes('\n', 0), true);
   assert.equal(first.bytes.trimEnd().includes('\n'), false, 'bundle bytes must be one line');
+});
+
+test('the bundle refuses an extra or missing methodology identity instead of dropping it', () => {
+  assert.throws(
+    () => bundleOf(sampleEntries(), {
+      sourceHashes: { ...SOURCE_HASHES, amendment006Sha256: 'd'.repeat(64) }
+    }),
+    (error) => error instanceof EvidenceBundleError && error.code === 'CONTRACT_FAILURE'
+  );
+  const { amendment005Sha256: _missing, ...missing } = SOURCE_HASHES;
+  assert.throws(
+    () => bundleOf(sampleEntries(), { sourceHashes: missing }),
+    (error) => error instanceof EvidenceBundleError && error.code === 'CONTRACT_FAILURE'
+  );
 });
 
 test('any change to any indexed artifact changes the bundle digest', () => {

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import os
+import sys
 import tempfile
 import types
 import unittest
@@ -370,10 +371,14 @@ class CogneeAdapterTests(unittest.TestCase):
         self.assertEqual(config["llm_config"]["model"], "openai/qwen2.5:7b")
         self.assertEqual(config["embedding_config"]["model"], "nomic-embed-text:v1.5")
         self.assertEqual(config["embedding_config"]["dimensions"], 768)
-        self.assertEqual(config["llm_config"]["max_retries"], 0)
-        self.assertEqual(config["embedding_config"]["max_retries"], 0)
+        # Only the LiteLLM public transport setting reaches the selected LLM
+        # client. A generic max_retries declaration would be false evidence.
+        self.assertEqual(config["llm_config"]["llm_args"], {"num_retries": 0})
+        self.assertNotIn("max_retries", config["llm_config"])
+        self.assertNotIn("max_retries", config["embedding_config"])
         self.assertEqual(config["automatic_retries"], 0)
-        self.assertEqual(config["retry_proof"], "task8_runtime_meter_required")
+        self.assertEqual(config["harness_operation_retries"], 0)
+        self.assertEqual(config["native_attempt_policy"], "amendment-005-metered-and-bounded")
         self.assertNotIn("ollama", str(config).lower())
         search_call = self.clients[0].calls[2]
         self.assertIs(search_call[2], FakeSearchType.GRAPH_COMPLETION)
@@ -591,6 +596,123 @@ class CogneeRuntimeConfigTests(unittest.TestCase):
         config = self.config()
         self.assertEqual(config["system_root"], os.path.join(self.state_root, "system"))
         self.assertEqual(config["data_root"], os.path.join(self.state_root, "data"))
+
+    def test_the_selected_native_framework_declares_public_transport_zero_and_no_fallback(self) -> None:
+        config = self.config()
+        llm = config["llm_config"]
+        self.assertEqual(llm["structured_output_framework"], "litellm_native")
+        self.assertEqual(llm["llm_args"], {"num_retries": 0})
+        self.assertEqual(
+            {name: llm[name] for name in ("fallback_model", "fallback_api_key", "fallback_endpoint")},
+            {"fallback_model": "", "fallback_api_key": "", "fallback_endpoint": ""},
+        )
+        self.assertEqual(config["automatic_retries"], 0)
+        self.assertEqual(config["harness_operation_retries"], 0)
+        self.assertEqual(config["native_attempt_policy"], "amendment-005-metered-and-bounded")
+
+    def test_factory_applies_native_transport_and_no_fallback_config_before_setup(self) -> None:
+        calls = []
+
+        def setter(name):
+            def apply(value=None):
+                calls.append((name, copy.deepcopy(value)))
+            return apply
+
+        config_api = types.SimpleNamespace()
+        for method in (
+            "system_root_directory",
+            "data_root_directory",
+            "set_vector_db_provider",
+            "set_graph_database_provider",
+            "set_llm_provider",
+            "set_llm_endpoint",
+            "set_llm_model",
+            "set_llm_api_key",
+            "set_llm_config",
+            "set_embedding_provider",
+            "set_embedding_endpoint",
+            "set_embedding_model",
+            "set_embedding_dimensions",
+            "set_embedding_api_key",
+        ):
+            setattr(config_api, method, setter(method))
+        cognee = types.ModuleType("cognee")
+        cognee.__path__ = []
+        cognee.config = config_api
+        cognee.SearchType = FakeSearchType
+        cognee.datasets = object()
+
+        async def cognee_setup():
+            calls.append(("setup", None))
+
+        async def create_user(_email, _password):
+            return FakeUser("created")
+
+        async def get_user_by_email(_email):
+            return None
+
+        class FakeHttpxClient:
+            def send(self, _request, *args, **kwargs):
+                return None
+
+        class FakeAsyncHttpxClient:
+            async def send(self, _request, *args, **kwargs):
+                return None
+
+        httpx = types.ModuleType("httpx")
+        httpx.Client = FakeHttpxClient
+        httpx.AsyncClient = FakeAsyncHttpxClient
+        context = types.ModuleType("cognee.context_global_variables")
+        context.backend_access_control_enabled = lambda: True
+        open_data_file_module = types.ModuleType("cognee.infrastructure.files.utils.open_data_file")
+        open_data_file_module.open_data_file = lambda *_args, **_kwargs: None
+        setup_module = types.ModuleType("cognee.modules.engine.operations.setup")
+        setup_module.setup = cognee_setup
+        users_module = types.ModuleType("cognee.modules.users.methods")
+        users_module.create_user = create_user
+        users_module.get_user_by_email = get_user_by_email
+        data_item_module = types.ModuleType("cognee.tasks.ingestion.data_item")
+        data_item_module.DataItem = FakeDataItem
+
+        modules = {
+            "httpx": httpx,
+            "cognee": cognee,
+            "cognee.context_global_variables": context,
+            "cognee.infrastructure": types.ModuleType("cognee.infrastructure"),
+            "cognee.infrastructure.files": types.ModuleType("cognee.infrastructure.files"),
+            "cognee.infrastructure.files.utils": types.ModuleType("cognee.infrastructure.files.utils"),
+            "cognee.infrastructure.files.utils.open_data_file": open_data_file_module,
+            "cognee.modules": types.ModuleType("cognee.modules"),
+            "cognee.modules.engine": types.ModuleType("cognee.modules.engine"),
+            "cognee.modules.engine.operations": types.ModuleType("cognee.modules.engine.operations"),
+            "cognee.modules.engine.operations.setup": setup_module,
+            "cognee.modules.users": types.ModuleType("cognee.modules.users"),
+            "cognee.modules.users.methods": users_module,
+            "cognee.tasks": types.ModuleType("cognee.tasks"),
+            "cognee.tasks.ingestion": types.ModuleType("cognee.tasks.ingestion"),
+            "cognee.tasks.ingestion.data_item": data_item_module,
+        }
+        with patch.dict(sys.modules, modules), patch.dict(os.environ, {}, clear=True):
+            client = asyncio.run(
+                await_native(cognee_adapter._default_client_factory(self.config(), lambda _class: None))
+            )
+
+        self.assertIsInstance(client, cognee_adapter._CogneeClient)
+        applied = dict(calls)
+        self.assertEqual(
+            applied["set_llm_config"],
+            {
+                "structured_output_framework": "litellm_native",
+                "llm_args": {"num_retries": 0},
+                "fallback_model": "",
+                "fallback_api_key": "",
+                "fallback_endpoint": "",
+            },
+        )
+        self.assertLess(
+            [name for name, _value in calls].index("set_llm_config"),
+            [name for name, _value in calls].index("setup"),
+        )
 
     def test_a_configuration_the_factory_cannot_use_is_reported_as_an_unavailable_runtime(self) -> None:
         # The caller is deciding whether the arm can execute. A KeyError escaping

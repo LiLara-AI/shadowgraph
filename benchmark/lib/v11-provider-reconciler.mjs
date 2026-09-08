@@ -43,7 +43,8 @@ export const RECONCILIATION_CODES = Object.freeze([
   'RETRY_OBSERVED',
   'MODEL_MISMATCH',
   'FAILED_OUTCOME',
-  'INCOMPLETE_USAGE'
+  'INCOMPLETE_USAGE',
+  'UNVERIFIED_OPERATION_COUNT'
 ]);
 
 function isPlainObject(value) {
@@ -224,10 +225,20 @@ export function reconcileProviderEvidence(input) {
     const countsAreVerifiable = !unverified.has(correlationPrefix(expectation));
 
     if (!countsAreVerifiable) {
-      // No count comparison, and no UNEXPECTED_CALL either: the events are
-      // matched to this correlation, so they are accounted for. Every per-event
-      // check below still runs on them.
+      // A failed root operation can lose its adapter operation metrics after the
+      // meter has already admitted and recorded a provider request. Preserve
+      // the traffic for all per-event checks, but never call that evidence
+      // reconciled: Amendment 005 requires every admitted provider attempt to
+      // be attributable to a root-operation count.
       unverifiedObserved += matched.length;
+      if (matched.length > 0 || expectation.expectedCalls > 0) {
+        findings.push({
+          code: 'UNVERIFIED_OPERATION_COUNT',
+          correlation,
+          expected: expectation.expectedCalls,
+          observed: matched.length
+        });
+      }
     } else if (matched.length < expectation.expectedCalls) {
       findings.push({
         code: 'MISSING_CALL',
@@ -356,22 +367,15 @@ const OPERATION_FIELD_BY_REQUEST_CLASS = Object.freeze({
  * missing.
  *
  * Every unit of the attempt gets expectations, including the ones that failed.
- * What a FAILED unit does not get is a *count* the reconciler will hold it to,
- * and it is returned in `unverifiedCounts` for that: a host-synthesised failure
- * envelope zeroes the operation metrics, and an abort observed between the
- * adapter returning and the counts being added discards them, while the calls
- * the container had already made are in the ledger either way. Holding those
- * correlations to zero would report `UNEXPECTED_CALL` and `RETRY_OBSERVED` on
- * every run containing one adapter failure.
+ * A FAILED unit can lose host operation metrics after the meter has already
+ * admitted traffic. Its counts are labelled `unverifiedCounts` so the
+ * reconciler preserves the event rather than inventing a retry or dropping it;
+ * any observed traffic or nonzero declared count then produces
+ * `UNVERIFIED_OPERATION_COUNT` and blocks reconciliation. A host-synthesised
+ * zero envelope is therefore never a route to a reconciled native call.
  *
- * Only the count. Everything else about that traffic is still checked - the
- * model it named, the outcome it reported, the usage it returned, its place in
- * the ledger's numbering - because none of those read a count. An earlier
- * version of this dropped the events instead and let an arm reach an unpinned
- * model and crash while the run reported `RECONCILED`.
- *
- * And only FAILED. `EXCLUDED` and `NOT_MEASURED` units are not units the
- * harness failed to observe: `validateRawRun` *forbids* them from recording any
+ * Per-event model/outcome/usage/ledger-number checks still run on every failed
+ * unit. `EXCLUDED` and `NOT_MEASURED` units are different: `validateRawRun` *forbids* them from recording any
  * operation at all, so their zero is structural and the record does know the
  * answer. Excusing them excused the 20 excluded units every acceptance plan
  * schedules - a fifteenth of the run, on correlations an arm can still reach a

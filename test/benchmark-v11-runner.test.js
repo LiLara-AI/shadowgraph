@@ -40,6 +40,8 @@ const HASHES = Object.freeze({
   amendment001Sha256: '2b209df6ca46a179e332acd4ed0b16a35a089f5c14575dd86353db0dc7249c4a',
   amendment002Sha256: '08e12eca3f93bd67cfeaf90a2064f91beb240e78a8fd63ed8645da78c0d88f1b',
   amendment003Sha256: '726de2018584aca399fc27d2bba15585d8b6fb9454bc24083578daed22f0be0a',
+  amendment004Sha256: 'b0c3a2553608efb78147a8c1f1ef9af51a7d0eebaa0037ce4ad7b64616b1c5f9',
+  amendment005Sha256: 'c435fa9d772c151c83214ef3a4180e0646236cd2cbb079be082b8341c4e6e223',
   implementationLockHash: '4'.repeat(64),
   environmentLockHash: '5'.repeat(64)
 });
@@ -48,6 +50,15 @@ const AMENDMENT_002_PATH = fileURLToPath(
 );
 const AMENDMENT_003_PATH = fileURLToPath(
   new URL('../benchmark/preregistration-amendment-003.json', import.meta.url)
+);
+const AMENDMENT_004_PATH = fileURLToPath(
+  new URL('../benchmark/preregistration-amendment-004.json', import.meta.url)
+);
+const AMENDMENT_005_PATH = fileURLToPath(
+  new URL('../benchmark/preregistration-amendment-005.json', import.meta.url)
+);
+const AMENDMENT_005_SIDECAR_PATH = fileURLToPath(
+  new URL('../benchmark/preregistration-amendment-005.sha256', import.meta.url)
 );
 
 function sha256(value) {
@@ -293,6 +304,9 @@ function baseOptions(overrides = {}) {
     ...HASHES,
     amendment002Path: AMENDMENT_002_PATH,
     amendment003Path: AMENDMENT_003_PATH,
+    amendment004Path: AMENDMENT_004_PATH,
+    amendment005Path: AMENDMENT_005_PATH,
+    amendment005SidecarPath: AMENDMENT_005_SIDECAR_PATH,
     progress,
     persistUnit: async () => {},
     now: clock.now,
@@ -1149,6 +1163,53 @@ test('runner binds Amendment 003 bytes and its effective Graphiti correction bef
   }
 });
 
+test('runner binds Amendment 005 bytes before it can call an adapter', async (t) => {
+  const source = await readFile(AMENDMENT_005_PATH);
+  assert.equal(sha256(source), HASHES.amendment005Sha256);
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-amendment-005-');
+  const changedPath = path.join(directory, 'amendment-005.changed.json');
+  await writeFile(changedPath, Buffer.concat([source, Buffer.from('\n')]));
+
+  let adapterCalls = 0;
+  const progress = progressRecorder();
+  await assert.rejects(
+    runV11Benchmark(baseOptions({
+      amendment005Path: changedPath,
+      progress,
+      executeAdapter: async (request) => {
+        adapterCalls += 1;
+        return adapterEnvelope(request);
+      }
+    })),
+    /Amendment 5 source bytes|Amendment 005/iu
+  );
+  assert.equal(progress.events.length, 0);
+  assert.equal(adapterCalls, 0);
+});
+
+test('runner binds Amendment 005 sidecar bytes before it can call an adapter', async (t) => {
+  const source = await readFile(AMENDMENT_005_SIDECAR_PATH);
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-amendment-005-sidecar-');
+  const changedPath = path.join(directory, 'amendment-005.changed.sha256');
+  await writeFile(changedPath, Buffer.concat([source, Buffer.from('# changed\n')]));
+
+  let adapterCalls = 0;
+  const progress = progressRecorder();
+  await assert.rejects(
+    runV11Benchmark(baseOptions({
+      amendment005SidecarPath: changedPath,
+      progress,
+      executeAdapter: async (request) => {
+        adapterCalls += 1;
+        return adapterEnvelope(request);
+      }
+    })),
+    /Amendment 005 sidecar/iu
+  );
+  assert.equal(progress.events.length, 0);
+  assert.equal(adapterCalls, 0);
+});
+
 test('watchdog aborts and races a non-cooperative unit once with exact correlation', async () => {
   let watchdogCalls = 0;
   let resetCalls = 0;
@@ -1199,12 +1260,32 @@ test('watchdog aborts and races a non-cooperative unit once with exact correlati
   assert.equal(reset.operations.memoryWriteOperations, 0);
 });
 
-test('120000ms monotonic unit bound fires even when recent heartbeats report no stall', async () => {
+test('unit watchdog permits elapsed time below the frozen 600000ms bound', async () => {
+  let monotonicCalls = 0;
+  let resetCalls = 0;
+  const raw = await runV11Benchmark(baseOptions({
+    heartbeatIntervalMs: 1,
+    monotonicNow: () => (monotonicCalls++ === 0 ? 0 : 120_001),
+    executeAdapter: async (request) => {
+      if (request.phase === 'RESET') {
+        resetCalls += 1;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      return adapterEnvelope(request);
+    }
+  }));
+
+  assert.equal(UNIT_TIMEOUT_MS, 600_000);
+  assert.equal(resetCalls, 1);
+  assert.equal(raw.units.find((unit) => unit.phase === 'RESET').failure, null);
+});
+
+test('the frozen monotonic unit bound fires even when recent heartbeats report no stall', async () => {
   let monotonic = 0;
   let resetCalls = 0;
   const raw = await runV11Benchmark(baseOptions({
     heartbeatIntervalMs: 1,
-    monotonicNow: () => (monotonic += 120_001),
+    monotonicNow: () => (monotonic += UNIT_TIMEOUT_MS + 1),
     executeAdapter: async (request) => {
       if (request.phase === 'RESET') {
         resetCalls += 1;
@@ -1498,7 +1579,9 @@ test('one acceptance artifact flows through the integrated runner, validator, an
       preregistrationSha256: HASHES.preregistrationSha256,
       amendment001Sha256: HASHES.amendment001Sha256,
       amendment002Sha256: HASHES.amendment002Sha256,
-      amendment003Sha256: HASHES.amendment003Sha256
+      amendment003Sha256: HASHES.amendment003Sha256,
+      amendment004Sha256: HASHES.amendment004Sha256,
+      amendment005Sha256: HASHES.amendment005Sha256
     }
   });
   assert.equal(aggregate.mode, 'ACCEPTANCE');
