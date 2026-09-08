@@ -75,7 +75,7 @@ def _runtime_config(routes: dict, models: dict, state_root: str) -> dict:
         "data_root": os.path.join(state_root, "data"),
         "llm_config": llm,
         "embedding_config": embedding,
-        # This means retry A only. Amendment 005 governs visible native attempts
+        # This means retry A only. Amendment 006 governs visible native attempts
         # separately, so a library request is never silently called a rerun.
         "automatic_retries": 0,
         "harness_operation_retries": 0,

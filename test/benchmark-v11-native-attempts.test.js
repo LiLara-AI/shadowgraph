@@ -44,6 +44,50 @@ function policy() {
   };
 }
 
+test('a failed event with a non-null wrong provider model remains a fallback discrepancy', () => {
+  const result = traceNativeAttempts({
+    events: [
+      event(1, {
+        requestClass: 'embedding',
+        responseFormat: null,
+        requestedModel: MODELS.embedding,
+        providerModel: 'unapproved-embedding-model',
+        outcome: 'FAILED'
+      }),
+      event(2, {
+        requestClass: 'embedding',
+        responseFormat: null,
+        requestedModel: MODELS.embedding,
+        providerModel: MODELS.embedding
+      })
+    ],
+    expectedModels: MODELS,
+    policy: policy()
+  });
+
+  assert.equal(result.status, 'DISCREPANT');
+  assert.ok(result.findings.some((finding) => finding.code === 'MODEL_OR_PROVIDER_FALLBACK'));
+  assert.equal(result.trace[0].category, 'E');
+});
+
+test('a successful event without the pinned provider model remains a fallback discrepancy', () => {
+  const result = traceNativeAttempts({
+    events: [event(1, {
+      requestClass: 'embedding',
+      responseFormat: null,
+      requestedModel: MODELS.embedding,
+      providerModel: null,
+      outcome: 'SUCCEEDED'
+    })],
+    expectedModels: MODELS,
+    policy: policy()
+  });
+
+  assert.equal(result.status, 'DISCREPANT');
+  assert.ok(result.findings.some((finding) => finding.code === 'MODEL_OR_PROVIDER_FALLBACK'));
+  assert.equal(result.trace[0].category, 'E');
+});
+
 test('a B entry names the failed wire attempt it resolves', () => {
   const result = traceNativeAttempts({
     events: [

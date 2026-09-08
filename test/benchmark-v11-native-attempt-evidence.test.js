@@ -189,6 +189,52 @@ test('matching-hash report with malformed schema cannot clear native evidence', 
   ]);
 });
 
+test('matching-hash report with an undeclared nested package field cannot clear native evidence', () => {
+  const record = evidence();
+  const report = JSON.parse(PROBE_REPORTS['internal-c.report.json']);
+  report.package.audit = 'opaque';
+  const altered = `${JSON.stringify(report)}\n`;
+  record.entries[0].probeSha256 = sha256(altered);
+  const result = verifyNativeAttemptEvidence(verifierInput(record, {
+    ...PROBE_REPORTS,
+    'internal-c.report.json': altered
+  }));
+
+  assert.deepEqual(result.findings.map((finding) => finding.code), [
+    'NATIVE_PROBE_REPORT_MALFORMED'
+  ]);
+});
+
+test('native evidence entry with an undeclared nested package field fails closed', () => {
+  const record = evidence();
+  record.entries[0].package.audit = 'opaque';
+  const result = verifyNativeAttemptEvidence(verifierInput(record));
+
+  assert.deepEqual(result.findings.map((finding) => finding.code), [
+    'NATIVE_ATTEMPT_EVIDENCE_ENTRY_MALFORMED'
+  ]);
+});
+
+test('matching-hash malformed UTF-8 report bytes cannot clear native evidence', () => {
+  const record = evidence();
+  const report = JSON.parse(PROBE_REPORTS['internal-c.report.json']);
+  report.package.name = '__INVALID_UTF8__';
+  const bytes = Buffer.from(`${JSON.stringify(report)}\n`, 'utf8');
+  const marker = Buffer.from('__INVALID_UTF8__', 'utf8');
+  const offset = bytes.indexOf(marker);
+  assert.notEqual(offset, -1);
+  bytes[offset] = 0x80;
+  record.entries[0].probeSha256 = sha256(bytes);
+  const result = verifyNativeAttemptEvidence(verifierInput(record, {
+    ...PROBE_REPORTS,
+    'internal-c.report.json': bytes
+  }));
+
+  assert.deepEqual(result.findings.map((finding) => finding.code), [
+    'NATIVE_PROBE_REPORT_MALFORMED'
+  ]);
+});
+
 test('native evidence accepts canonical UTC microsecond instants from the pinned Python probe', () => {
   const record = evidence();
   record.observedAt = '2026-09-08T09:59:00.123456Z';

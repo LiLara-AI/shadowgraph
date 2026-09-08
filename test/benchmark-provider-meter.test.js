@@ -7,6 +7,7 @@ import test from 'node:test';
 
 import { requestOuterDecision, STANDARD_DECISION_RESPONSE_SCHEMA } from '../benchmark/lib/outer-model.mjs';
 import { startProviderMeter } from '../benchmark/lib/provider-meter.mjs';
+import { runProviderReconciliation } from '../benchmark/lib/v11-provider-reconciler.mjs';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const EVENT_FIELDS = [
@@ -425,6 +426,95 @@ test('meter atomically caps native attempts per root request class before upstre
   assert.equal(upstreamCalls, 1);
   assert.equal(events.length, 2);
   assert.equal(events[1].failure.code, 'NATIVE_ATTEMPT_CAP_EXHAUSTED');
+});
+
+test('provider-meter 500-to-200 B trace preserves missing usage as accounting failure, not fallback', async (t) => {
+  let upstreamRequests = 0;
+  const upstream = await listen(t, async (request, response) => {
+    upstreamRequests += 1;
+    await readBody(request);
+    if (upstreamRequests === 1) {
+      response.writeHead(500, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ error: 'transient loopback failure' }));
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(providerPayload({ model: 'pinned-embedding-model' })));
+  });
+  const correlation = {
+    ...BASE_CORRELATION,
+    armId: 'mem0-oss',
+    scenarioId: 'ACC_ONE',
+    phase: 'B',
+    requestClass: 'embedding'
+  };
+  const { meter, ledgerPath } = await meterFor(t, upstream.origin, {}, {
+    requireRootOperation: true,
+    maxAttemptsPerRootRequestClass: 24
+  });
+  const endpoint = meter.bindEndpoint({ ...correlation, rootOperation: 'persist' });
+  const request = () => fetch(`${endpoint}/embeddings`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'pinned-embedding-model', input: ['loopback'] })
+  });
+
+  assert.equal((await request()).status, 500);
+  assert.equal((await request()).status, 200);
+  await meter.close();
+
+  const events = await ledgerEvents(ledgerPath);
+  assert.equal(events.length, 2);
+  assert.equal(events[0].outcome, 'FAILED');
+  assert.equal(events[0].providerModel, null);
+  assert.equal(events[0].httpStatus, 500);
+  assert.equal(events[1].outcome, 'SUCCEEDED');
+  assert.equal(events[1].providerModel, 'pinned-embedding-model');
+
+  const report = runProviderReconciliation({
+    ledgerText: await readFile(ledgerPath, 'utf8'),
+    ledgerPath,
+    raw: {
+      units: [{
+        unitId: 'unit-meter-b',
+        status: 'SUCCEEDED',
+        runId: correlation.runId,
+        attemptId: correlation.attemptId,
+        armId: correlation.armId,
+        scenarioId: correlation.scenarioId,
+        repetition: correlation.repetition,
+        phase: correlation.phase,
+        operations: {
+          memoryReadOperations: 0,
+          memoryWriteOperations: 0,
+          mcpToolCalls: 0,
+          outerDecisionModelCalls: 0,
+          internalMemoryModelCalls: 0,
+          embeddingCalls: 2,
+          persistenceVerificationOperations: 0
+        }
+      }]
+    },
+    attemptId: correlation.attemptId,
+    pinnedModels: {
+      internal_memory_llm: { modelId: 'pinned-decision-model' },
+      embedding: { modelId: 'pinned-embedding-model' }
+    },
+    nativeAttemptPolicy: {
+      schema: 'shadowgraph.v11.native-attempt-policy',
+      version: 1,
+      maxAttemptsPerRootRequestClass: 24,
+      arms: [{
+        armId: correlation.armId,
+        recovery: { outer_decision_llm: [], internal_memory_llm: [], embedding: ['B'] }
+      }]
+    }
+  });
+
+  assert.equal(report.status, 'DISCREPANT');
+  assert.deepEqual(report.nativeAttemptTrace.trace.map((entry) => entry.category), ['INITIAL', 'B']);
+  assert.deepEqual(report.nativeAttemptTrace.findings, []);
+  assert.deepEqual(report.findings.map((finding) => finding.code), ['INCOMPLETE_USAGE']);
 });
 
 test('provider meter records only the structured-output mode, never its schema body', async (t) => {

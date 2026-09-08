@@ -152,7 +152,14 @@ export function traceNativeAttempts({ events, expectedModels, policy, armIds = n
       else category = 'C';
     }
     const expectedModel = expectedModels[event.requestClass];
-    if (event.requestedModel !== expectedModel || event.providerModel !== expectedModel) {
+    // A transport failure has no provider response model to attest. `null` is
+    // the meter's explicit unavailable-evidence value, not evidence of E
+    // fallback. Successful events still require the pinned provider model, and
+    // any non-null failed model must agree with it.
+    const providerModelMatches = event.outcome === 'FAILED'
+      ? event.providerModel === null || event.providerModel === expectedModel
+      : event.providerModel === expectedModel;
+    if (event.requestedModel !== expectedModel || !providerModelMatches) {
       findings.push({ code: 'MODEL_OR_PROVIDER_FALLBACK', requestNumber: event.requestNumber });
       category = 'E';
     }

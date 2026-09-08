@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 
+import { TextDecoder } from 'node:util';
+
 import { validateNativeAttemptPolicy } from './v11-native-attempts.mjs';
 
 export const NATIVE_ATTEMPT_EVIDENCE_SCHEMA = 'shadowgraph.v11.native-attempt-evidence';
@@ -15,12 +17,14 @@ const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u;
 const SAFE_PROBE_REPORT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const NATIVE_ATTEMPT_REPORT_SCHEMA = 'shadowgraph.v11.native-attempt-loopback-report';
 const NATIVE_ATTEMPT_REPORT_VERSION = 1;
+const UTF8_FATAL = new TextDecoder('utf-8', { fatal: true });
 const REPORT_FIELDS = Object.freeze([
   'schema', 'version', 'observedAt', 'amendment006Sha256',
   'armId', 'requestClass', 'category', 'package', 'modelId', 'network',
   'rootOperationInvocations', 'wireAttempts', 'taxonomy', 'allAttemptsMetered',
   'providerUsageAccounting', 'modelEndpointPinned', 'harnessOperationReruns'
 ]);
+const PACKAGE_FIELDS = Object.freeze(['name', 'version']);
 const WIRE_ATTEMPT_FIELDS = Object.freeze([
   'ordinal', 'path', 'outcome', 'modelId', 'retryOrdinal', 'responseFormat'
 ]);
@@ -84,7 +88,7 @@ function expectedWirePath(requestClass) {
 
 function parseProbeReport(bytes) {
   try {
-    const report = JSON.parse(Buffer.from(bytes).toString('utf8'));
+    const report = JSON.parse(UTF8_FATAL.decode(Buffer.from(bytes)));
     return isPlainRecord(report) ? report : null;
   } catch {
     return null;
@@ -93,6 +97,7 @@ function parseProbeReport(bytes) {
 
 function validateProbeReport(report, entry, input) {
   if (!exactKeys(report, REPORT_FIELDS)
+    || !exactKeys(report.package, PACKAGE_FIELDS)
     || report.schema !== NATIVE_ATTEMPT_REPORT_SCHEMA
     || report.version !== NATIVE_ATTEMPT_REPORT_VERSION) {
     return 'NATIVE_PROBE_REPORT_MALFORMED';
@@ -152,7 +157,9 @@ function validateEntry(entry, expected, input, policy) {
     'network', 'wireRequests', 'allAttemptsMetered', 'providerUsageAccounting',
     'modelEndpointPinned', 'harnessOperationReruns', 'taxonomy', 'probeReport', 'probeSha256'
   ];
-  if (!exactKeys(entry, fields)) return 'NATIVE_ATTEMPT_EVIDENCE_ENTRY_MALFORMED';
+  if (!exactKeys(entry, fields) || !exactKeys(entry.package, PACKAGE_FIELDS)) {
+    return 'NATIVE_ATTEMPT_EVIDENCE_ENTRY_MALFORMED';
+  }
   if (entry.armId !== expected.armId || entry.requestClass !== expected.requestClass || entry.category !== expected.category) {
     return 'NATIVE_ATTEMPT_EVIDENCE_ENTRY_MISMATCH';
   }
