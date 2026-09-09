@@ -13,8 +13,20 @@ const PINNED = {
   embedding: { modelId: 'nomic-embed-text:v1.5' }
 };
 
+const CAMPAIGN_POLICY = Object.freeze({
+  campaignId: 'offline-only',
+  deadline: '2099-01-01T00:00:00.000Z',
+  limits: { outer_decision_llm: 5, internal_memory_llm: 5, embedding: 5 },
+  maxRequests: 5,
+  maxSessions: 5,
+  maxRecoveryAttempts: 0,
+  implementationLockHash: 'e'.repeat(64)
+});
+
 function raw() {
-  return { units: [{
+  return {
+    implementationLockHash: CAMPAIGN_POLICY.implementationLockHash,
+    units: [{
     unitId: 'cognee:ACC_PLAN_1:0:A',
     runId: RUN,
     attemptId: ATTEMPT,
@@ -99,13 +111,17 @@ function planLedger({ omitChildRule = false, omitClose = false, omitRootPlanSlot
     .map((row) => JSON.stringify(row)).join('\n') + '\n';
 }
 
-function campaignLedger({ reservationId = 'offline-only:1', plannedDispatchId = DISPATCH } = {}) {
+function campaignLedger({
+  reservationId = 'offline-only:1',
+  plannedDispatchId = DISPATCH,
+  policy = CAMPAIGN_POLICY
+} = {}) {
   const correlation = {
     runId: RUN, attemptId: ATTEMPT, armId: 'cognee', scenarioId: 'ACC_PLAN_1',
     repetition: 0, phase: 'A', requestClass: 'embedding', rootOperation: 'persist'
   };
   return [
-    { event: 'policy', policy: { campaignId: 'offline-only' } },
+    { event: 'policy', policy },
     {
       event: 'session', id: 'attempt-plan-reconcile-1', recovery: false,
       kind: 'acceptance', runId: RUN, attemptId: ATTEMPT
@@ -182,6 +198,125 @@ test('a matching campaign reservation receipt reconciles a planned event', () =>
   assert.deepEqual(report.findings, []);
 });
 
+test('a campaign receipt ledger with an incomplete policy is invalid evidence', () => {
+  const report = runProviderReconciliation({
+    ledgerText: `${JSON.stringify(event('persist', { campaignReservationId: 'offline-only:1' }))}\n`,
+    ledgerPath: 'planned.provider-requests.ndjson',
+    planLedgerText: planLedger(),
+    campaignLedgerText: campaignLedger({ policy: { campaignId: 'offline-only' } }),
+    requireDispatchPlans: true,
+    requireCampaignReservations: true,
+    raw: raw(),
+    attemptId: ATTEMPT,
+    pinnedModels: PINNED
+  });
+  assert.equal(report.status, 'DISCREPANT');
+  assert.ok(report.findings.some((finding) => finding.code === 'CAMPAIGN_LEDGER_INVALID'));
+});
+
+test('a noncontiguous campaign receipt sequence is invalid evidence', () => {
+  const report = runProviderReconciliation({
+    ledgerText: `${JSON.stringify(event('persist', { campaignReservationId: 'offline-only:2' }))}\n`,
+    ledgerPath: 'planned.provider-requests.ndjson',
+    planLedgerText: planLedger(),
+    campaignLedgerText: campaignLedger({ reservationId: 'offline-only:2' }),
+    requireDispatchPlans: true,
+    requireCampaignReservations: true,
+    raw: raw(),
+    attemptId: ATTEMPT,
+    pinnedModels: PINNED
+  });
+  assert.equal(report.status, 'DISCREPANT');
+  assert.ok(report.findings.some((finding) => finding.code === 'CAMPAIGN_LEDGER_INVALID'));
+});
+
+test('campaign receipts exceeding the policy maximum are invalid evidence', () => {
+  const policy = { ...CAMPAIGN_POLICY, maxRequests: 1, limits: { ...CAMPAIGN_POLICY.limits, embedding: 1 } };
+  const rows = campaignLedger({ policy }).trimEnd().split('\n');
+  const receipt = JSON.parse(rows.at(-1));
+  rows.push(JSON.stringify({ ...receipt, reservationId: 'offline-only:2' }));
+  const report = runProviderReconciliation({
+    ledgerText: `${JSON.stringify(event('persist', { campaignReservationId: 'offline-only:1' }))}\n`,
+    ledgerPath: 'planned.provider-requests.ndjson', planLedgerText: planLedger(),
+    campaignLedgerText: `${rows.join('\n')}\n`, requireDispatchPlans: true,
+    requireCampaignReservations: true, raw: raw(), attemptId: ATTEMPT, pinnedModels: PINNED
+  });
+  assert.equal(report.status, 'DISCREPANT');
+  assert.ok(report.findings.some((finding) => finding.code === 'CAMPAIGN_LEDGER_INVALID'));
+});
+
+test('campaign sessions exceeding the policy maximum are invalid evidence', () => {
+  const policy = { ...CAMPAIGN_POLICY, maxSessions: 1 };
+  const rows = campaignLedger({ policy }).trimEnd().split('\n');
+  rows.splice(2, 0, JSON.stringify({
+    event: 'session', id: 'probe-session-2', recovery: false, kind: 'probe', runId: RUN, attemptId: ATTEMPT
+  }));
+  const report = runProviderReconciliation({
+    ledgerText: `${JSON.stringify(event('persist', { campaignReservationId: 'offline-only:1' }))}\n`,
+    ledgerPath: 'planned.provider-requests.ndjson', planLedgerText: planLedger(),
+    campaignLedgerText: `${rows.join('\n')}\n`, requireDispatchPlans: true,
+    requireCampaignReservations: true, raw: raw(), attemptId: ATTEMPT, pinnedModels: PINNED
+  });
+  assert.equal(report.status, 'DISCREPANT');
+  assert.ok(report.findings.some((finding) => finding.code === 'CAMPAIGN_LEDGER_INVALID'));
+});
+
+test('campaign recovery sessions exceeding the policy maximum are invalid evidence', () => {
+  const policy = { ...CAMPAIGN_POLICY, maxSessions: 5, maxRecoveryAttempts: 0 };
+  const rows = campaignLedger({ policy }).trimEnd().split('\n');
+  rows.splice(2, 0, JSON.stringify({
+    event: 'session', id: 'recovery-session-2', recovery: true, kind: 'probe', runId: RUN, attemptId: ATTEMPT
+  }));
+  const report = runProviderReconciliation({
+    ledgerText: `${JSON.stringify(event('persist', { campaignReservationId: 'offline-only:1' }))}\n`,
+    ledgerPath: 'planned.provider-requests.ndjson', planLedgerText: planLedger(),
+    campaignLedgerText: `${rows.join('\n')}\n`, requireDispatchPlans: true,
+    requireCampaignReservations: true, raw: raw(), attemptId: ATTEMPT, pinnedModels: PINNED
+  });
+  assert.equal(report.status, 'DISCREPANT');
+  assert.ok(report.findings.some((finding) => finding.code === 'CAMPAIGN_LEDGER_INVALID'));
+});
+
+test('a campaign ledger cannot reconcile without raw implementation-lock identity', () => {
+  const observedRaw = raw();
+  delete observedRaw.implementationLockHash;
+  const report = runProviderReconciliation({
+    ledgerText: `${JSON.stringify(event('persist', { campaignReservationId: 'offline-only:1' }))}\n`,
+    ledgerPath: 'planned.provider-requests.ndjson', planLedgerText: planLedger(),
+    campaignLedgerText: campaignLedger(), requireDispatchPlans: true,
+    requireCampaignReservations: true, raw: observedRaw, attemptId: ATTEMPT, pinnedModels: PINNED
+  });
+  assert.equal(report.status, 'DISCREPANT');
+  assert.ok(report.findings.some((finding) => finding.code === 'CAMPAIGN_LEDGER_INVALID'));
+});
+
+test('a campaign ledger for another implementation lock is invalid evidence', () => {
+  const observedRaw = raw();
+  observedRaw.implementationLockHash = 'f'.repeat(64);
+  const report = runProviderReconciliation({
+    ledgerText: `${JSON.stringify(event('persist', { campaignReservationId: 'offline-only:1' }))}\n`,
+    ledgerPath: 'planned.provider-requests.ndjson', planLedgerText: planLedger(),
+    campaignLedgerText: campaignLedger(), requireDispatchPlans: true,
+    requireCampaignReservations: true, raw: observedRaw, attemptId: ATTEMPT, pinnedModels: PINNED
+  });
+  assert.equal(report.status, 'DISCREPANT');
+  assert.ok(report.findings.some((finding) => finding.code === 'CAMPAIGN_LEDGER_INVALID'));
+});
+
+test('a campaign receipt with an out-of-policy request class is invalid evidence', () => {
+  const rows = campaignLedger().trimEnd().split('\n');
+  const receipt = JSON.parse(rows.at(-1));
+  rows[rows.length - 1] = JSON.stringify({ ...receipt, requestClass: 'unknown_provider_class' });
+  const report = runProviderReconciliation({
+    ledgerText: `${JSON.stringify(event('persist', { campaignReservationId: 'offline-only:1' }))}\n`,
+    ledgerPath: 'planned.provider-requests.ndjson', planLedgerText: planLedger(),
+    campaignLedgerText: `${rows.join('\n')}\n`, requireDispatchPlans: true,
+    requireCampaignReservations: true, raw: raw(), attemptId: ATTEMPT, pinnedModels: PINNED
+  });
+  assert.equal(report.status, 'DISCREPANT');
+  assert.ok(report.findings.some((finding) => finding.code === 'CAMPAIGN_LEDGER_INVALID'));
+});
+
 test('a malformed campaign dispatch identity invalidates the campaign ledger', () => {
   const report = runProviderReconciliation({
     ledgerText: `${JSON.stringify(event('persist', { campaignReservationId: 'offline-only:1' }))}\n`,
@@ -199,7 +334,7 @@ test('a malformed campaign dispatch identity invalidates the campaign ledger', (
   assert.ok(report.findings.some((finding) => finding.code === 'CAMPAIGN_LEDGER_INVALID'));
 });
 
-test('a consumed static plan reconciles its one authorized provider event', () => {
+test('a consumed static plan permits exactly one provider event', () => {
   const correlation = {
     runId: RUN, attemptId: ATTEMPT, armId: 'shadowgraph-full', scenarioId: 'ACC_STATIC_1',
     repetition: 0, phase: 'A', requestClass: 'internal_memory_llm', rootOperation: 'outer-decision'
@@ -248,6 +383,23 @@ test('a consumed static plan reconciles its one authorized provider event', () =
 
   assert.equal(report.status, 'RECONCILED');
   assert.deepEqual(report.findings, []);
+
+  const replay = runProviderReconciliation({
+    ledgerText: `${JSON.stringify(staticEvent)}\n${JSON.stringify({ ...staticEvent, requestNumber: 2 })}\n`,
+    ledgerPath: 'static.provider-requests.ndjson',
+    planLedgerText: planText,
+    requireDispatchPlans: true,
+    raw: { units: [{
+      unitId: 'shadowgraph-full:ACC_STATIC_1:0:A', ...correlation, status: 'MEASURED',
+      operations: { memoryReadOperations: 0, memoryWriteOperations: 0, mcpToolCalls: 0,
+        outerDecisionModelCalls: 0, internalMemoryModelCalls: 2, embeddingCalls: 0,
+        persistenceVerificationOperations: 0 }
+    }] },
+    attemptId: ATTEMPT,
+    pinnedModels: PINNED
+  });
+  assert.equal(replay.status, 'DISCREPANT');
+  assert.ok(replay.findings.some((finding) => finding.code === 'STATIC_DISPATCH_REPLAY'));
 });
 
 test('an interrupted dynamic plan without closure is invalid evidence', () => {

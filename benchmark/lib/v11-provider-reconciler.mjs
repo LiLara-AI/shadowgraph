@@ -15,6 +15,7 @@
 
 import { reconcileProviderAttempts } from './v11-budget.mjs';
 import { traceNativeAttempts } from './v11-native-attempts.mjs';
+import { validateCampaignPolicy } from './v11-campaign-budget.mjs';
 
 const LEDGER_SCHEMA = 'shadowgraph.provider-meter.event';
 const LEDGER_VERSIONS = new Set([1, 2]);
@@ -22,6 +23,7 @@ const LEDGER_EVENT = 'provider_request';
 const PLAN_SCHEMA = 'shadowgraph.provider-meter.plan';
 const PLAN_VERSION = 1;
 const OPAQUE_DISPATCH_ID = /^[a-f0-9]{48}$/u;
+const SHA256 = /^[a-f0-9]{64}$/u;
 
 const CORRELATION_FIELDS = Object.freeze([
   'runId',
@@ -62,6 +64,7 @@ export const RECONCILIATION_CODES = Object.freeze([
   'DISPATCH_PLAN_MISSING',
   'DISPATCH_PLAN_UNKNOWN_ALIAS',
   'DISPATCH_PLAN_MISMATCH',
+  'STATIC_DISPATCH_REPLAY',
   'CAMPAIGN_LEDGER_UNREADABLE',
   'CAMPAIGN_LEDGER_INVALID',
   'CAMPAIGN_RESERVATION_MISSING',
@@ -590,6 +593,7 @@ function parseDispatchPlanLedger(text) {
 function reconcileDispatchPlans(events, text) {
   const parsed = parseDispatchPlanLedger(text);
   const findings = [...parsed.findings];
+  const consumedStaticAliases = new Set();
   for (const event of events) {
     if (event.version !== 2) {
       findings.push('DISPATCH_PLAN_MISSING');
@@ -599,6 +603,10 @@ function reconcileDispatchPlans(events, text) {
     if (!plan) {
       findings.push('DISPATCH_PLAN_UNKNOWN_ALIAS');
       continue;
+    }
+    if (plan.disposition === 'root-initial') {
+      if (consumedStaticAliases.has(plan.alias)) findings.push('STATIC_DISPATCH_REPLAY');
+      else consumedStaticAliases.add(plan.alias);
     }
     if (event.plannedDispatchId !== plan.plannedDispatchId
       || event.rootInvocationId !== plan.rootInvocationId
@@ -611,7 +619,7 @@ function reconcileDispatchPlans(events, text) {
   return { status: findings.length ? 'DISCREPANT' : 'RECONCILED', findings: [...new Set(findings)] };
 }
 
-function parseCampaignReservationLedger(text) {
+function parseCampaignReservationLedger(text, expectedImplementationLockHash = null) {
   if (typeof text !== 'string' || !text.endsWith('\n')) {
     return { findings: ['CAMPAIGN_LEDGER_UNREADABLE'], reservations: new Map() };
   }
@@ -621,14 +629,22 @@ function parseCampaignReservationLedger(text) {
   } catch {
     return { findings: ['CAMPAIGN_LEDGER_INVALID'], reservations: new Map() };
   }
-  const campaignId = rows[0]?.event === 'policy' && isPlainObject(rows[0].policy)
-    ? rows[0].policy.campaignId
-    : null;
-  if (!isNonEmptyString(campaignId) || !/^[A-Za-z0-9-]+$/.test(campaignId)) {
+  let policy;
+  try {
+    if (rows[0]?.event !== 'policy') throw new Error('missing policy');
+    policy = validateCampaignPolicy(rows[0].policy);
+  } catch {
+    return { findings: ['CAMPAIGN_LEDGER_INVALID'], reservations: new Map() };
+  }
+  const { campaignId } = policy;
+  if (expectedImplementationLockHash !== null && policy.implementationLockHash !== expectedImplementationLockHash) {
     return { findings: ['CAMPAIGN_LEDGER_INVALID'], reservations: new Map() };
   }
   const sessions = new Map();
   const reservations = new Map();
+  const counts = Object.fromEntries(Object.keys(policy.limits).map((key) => [key, 0]));
+  let total = 0;
+  let recoveries = 0;
   const findings = [];
   for (const row of rows.slice(1)) {
     if (!isPlainObject(row)) { findings.push('CAMPAIGN_LEDGER_INVALID'); continue; }
@@ -642,6 +658,7 @@ function parseCampaignReservationLedger(text) {
         findings.push('CAMPAIGN_LEDGER_INVALID');
       } else {
         sessions.set(row.id, row);
+        if (row.recovery) recoveries += 1;
       }
       continue;
     }
@@ -650,9 +667,11 @@ function parseCampaignReservationLedger(text) {
     const session = sessions.get(row.session);
     if (Object.keys(row).sort().join() !== fields.slice().sort().join()
       || !CAMPAIGN_RESERVATION_ID.test(row.reservationId)
+      || row.reservationId !== `${campaignId}:${total + 1}`
       || !row.reservationId.startsWith(`${campaignId}:`)
       || reservations.has(row.reservationId)
       || !session
+      || !Object.hasOwn(policy.limits, row.requestClass)
       || row.runId !== session.runId || row.attemptId !== session.attemptId
       || !CAMPAIGN_JOIN_FIELDS.every((field) => (
         field === 'repetition'
@@ -668,12 +687,19 @@ function parseCampaignReservationLedger(text) {
       continue;
     }
     reservations.set(row.reservationId, row);
+    counts[row.requestClass] += 1;
+    total += 1;
+  }
+  if (total > policy.maxRequests || sessions.size > policy.maxSessions
+    || recoveries > policy.maxRecoveryAttempts
+    || Object.keys(counts).some((requestClass) => counts[requestClass] > policy.limits[requestClass])) {
+    findings.push('CAMPAIGN_LEDGER_INVALID');
   }
   return { findings: [...new Set(findings)], reservations };
 }
 
-function reconcileCampaignReservations(events, text) {
-  const parsed = parseCampaignReservationLedger(text);
+function reconcileCampaignReservations(events, text, expectedImplementationLockHash = null) {
+  const parsed = parseCampaignReservationLedger(text, expectedImplementationLockHash);
   const findings = [...parsed.findings];
   const used = new Set();
   for (const event of events) {
@@ -764,8 +790,11 @@ export function runProviderReconciliation(input) {
   const dispatchPlanEvidence = requireDispatchPlans
     ? reconcileDispatchPlans(events, planLedgerText)
     : null;
+  const rawImplementationLockHash = raw?.implementationLockHash;
   const campaignReservationEvidence = requireCampaignReservations
-    ? reconcileCampaignReservations(events, campaignLedgerText)
+    ? (typeof rawImplementationLockHash === 'string' && SHA256.test(rawImplementationLockHash)
+      ? reconcileCampaignReservations(events, campaignLedgerText, rawImplementationLockHash)
+      : { status: 'DISCREPANT', findings: ['CAMPAIGN_LEDGER_INVALID'] })
     : null;
   const { expectations, unverifiedCounts } = providerExpectationsFromRun(raw, attemptId);
   const expectedModels = {

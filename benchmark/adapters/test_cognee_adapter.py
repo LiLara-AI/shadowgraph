@@ -876,6 +876,68 @@ class CogneeMeteredRequestTests(unittest.TestCase):
             httpx.Client().send(_StubRequest(endpoint + "/embeddings"))
         self.assertEqual(len(httpx.sent), 1)
 
+    def test_scope_allows_same_request_object_to_send_twice(self) -> None:
+        endpoint = "http://127.0.0.1:43100/embed-retry"
+        alias = "a" * 48
+        httpx = _StubHttpx()
+        counted = []
+        cognee_adapter._count_metered_requests(httpx, {"embedding": endpoint}, counted.append, require_dispatch_identity=True)
+
+        async def declare(_request_class, _endpoint):
+            return {"alias": alias, "plannedDispatchId": "b" * 48}
+
+        async def close(_request_class, _identity):
+            return None
+
+        async def exercise():
+            async with cognee_adapter._metered_dispatch_scope(
+                {"embedding": endpoint}, ("embedding",), declare=declare, close=close
+            ):
+                request = _StubRequest(endpoint + "/embeddings")
+                httpx.Client().send(request)
+                httpx.Client().send(request)
+                self.assertEqual(request.headers["x-shadowgraph-dispatch-alias"], alias)
+
+        asyncio.run(exercise())
+        self.assertEqual(counted, ["embedding", "embedding"])
+        self.assertEqual(len(httpx.sent), 2)
+
+    def test_equal_but_distinct_request_cannot_claim_meter_alias_provenance(self) -> None:
+        endpoint = "http://127.0.0.1:43100/embed-equal-forgery"
+        alias = "a" * 48
+
+        class EqualRequest(_StubRequest):
+            def __eq__(self, _other):
+                return True
+
+            def __hash__(self):
+                return 1
+
+        httpx = _StubHttpx()
+        counted = []
+        cognee_adapter._count_metered_requests(httpx, {"embedding": endpoint}, counted.append, require_dispatch_identity=True)
+
+        async def declare(_request_class, _endpoint):
+            return {"alias": alias, "plannedDispatchId": "b" * 48}
+
+        async def close(_request_class, _identity):
+            return None
+
+        async def exercise():
+            async with cognee_adapter._metered_dispatch_scope(
+                {"embedding": endpoint}, ("embedding",), declare=declare, close=close
+            ):
+                first = EqualRequest(endpoint + "/embeddings")
+                httpx.Client().send(first)
+                with self.assertRaises(cognee_adapter.ContractError):
+                    httpx.Client().send(EqualRequest(
+                        endpoint + "/embeddings", {"x-shadowgraph-dispatch-alias": alias}
+                    ))
+
+        asyncio.run(exercise())
+        self.assertEqual(counted, ["embedding"])
+        self.assertEqual(len(httpx.sent), 1)
+
     def test_caller_supplied_dispatch_alias_is_rejected_before_wire_send(self) -> None:
         endpoint = "http://127.0.0.1:43100/embed-spoof"
         httpx = _StubHttpx()

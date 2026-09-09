@@ -165,3 +165,16 @@ test('distinct planned dispatches cannot reset the aggregate root class cap', ()
   assert.deepEqual(result.trace.map((entry) => entry.category), ['INITIAL', 'INITIAL', 'INITIAL']);
   assert.deepEqual(result.findings, [{ code: 'ROOT_CLASS_ATTEMPT_CAP_EXCEEDED', requestNumber: 3 }]);
 });
+
+test('changing root invocation identity cannot reset the aggregate root class cap', () => {
+  const bounded = policy();
+  bounded.maxAttemptsPerRootRequestClass = 24;
+  const events = Array.from({ length: 25 }, (_, index) => event(index + 1, {
+    rootInvocationId: `root-persist-${index + 1}`,
+    plannedDispatchId: (index + 1).toString(16).padStart(48, '0')
+  }));
+  const result = traceNativeAttempts({ requireDispatchPlans: true, events, expectedModels: MODELS, policy: bounded });
+
+  assert.equal(result.status, 'DISCREPANT');
+  assert.deepEqual(result.findings, [{ code: 'ROOT_CLASS_ATTEMPT_CAP_EXCEEDED', requestNumber: 25 }]);
+});

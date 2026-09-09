@@ -11,6 +11,7 @@ import os
 import secrets
 import math
 import re
+import weakref
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from http.client import HTTPConnection
@@ -136,11 +137,14 @@ def _valid_dispatch_identity(value) -> bool:
     )
 
 
-def _request_has_dispatch_alias(request) -> bool:
+def _request_dispatch_alias(request):
     headers = getattr(request, "headers", None)
-    return headers is not None and any(
-        str(name).lower() == DISPATCH_ALIAS_HEADER for name in headers
-    )
+    if headers is None:
+        return None
+    for name, value in headers.items():
+        if str(name).lower() == DISPATCH_ALIAS_HEADER:
+            return str(value)
+    return None
 
 
 @asynccontextmanager
@@ -325,6 +329,32 @@ def _count_metered_requests(httpx_module, routes: dict, provider_call, *, requir
     metered = {endpoint: request_class for request_class, endpoint in routes.items() if endpoint}
     original_send = httpx_module.Client.send
     original_async_send = httpx_module.AsyncClient.send
+    meter_injected_aliases = {}
+
+    def meter_injected_alias_for(request):
+        request_id = id(request)
+        record = meter_injected_aliases.get(request_id)
+        if record is None:
+            return None
+        reference, alias = record
+        if reference() is request:
+            return alias
+        meter_injected_aliases.pop(request_id, None)
+        return None
+
+    def remember_meter_injected_alias(request, alias):
+        request_id = id(request)
+
+        def cleanup(reference):
+            record = meter_injected_aliases.get(request_id)
+            if record is not None and record[0] is reference:
+                meter_injected_aliases.pop(request_id, None)
+
+        try:
+            reference = weakref.ref(request, cleanup)
+        except TypeError as error:
+            raise RuntimeUnavailable("Cognee provider request cannot retain dispatch provenance") from error
+        meter_injected_aliases[request_id] = (reference, alias)
 
     def request_class_for(url) -> str | None:
         text = str(url)
@@ -336,8 +366,6 @@ def _count_metered_requests(httpx_module, routes: dict, provider_call, *, requir
     def authorize(request, request_class) -> None:
         if not require_dispatch_identity or request_class is None:
             return
-        if _request_has_dispatch_alias(request):
-            raise ContractError("Cognee provider request supplied a dispatch alias")
         identities = _ACTIVE_DISPATCH_IDENTITIES.get() or {}
         identity = identities.get(request_class)
         if not _valid_dispatch_identity(identity):
@@ -345,7 +373,18 @@ def _count_metered_requests(httpx_module, routes: dict, provider_call, *, requir
         headers = getattr(request, "headers", None)
         if headers is None:
             raise RuntimeUnavailable("Cognee provider request cannot carry a dispatch plan")
+        existing_alias = _request_dispatch_alias(request)
+        if existing_alias is not None:
+            if (existing_alias == identity["alias"]
+                    and meter_injected_alias_for(request) == identity["alias"]):
+                return
+            raise ContractError("Cognee provider request supplied a dispatch alias")
         headers[DISPATCH_ALIAS_HEADER] = identity["alias"]
+        try:
+            remember_meter_injected_alias(request, identity["alias"])
+        except RuntimeUnavailable:
+            del headers[DISPATCH_ALIAS_HEADER]
+            raise
 
     def send(self, request, *args, **kwargs):
         request_class = request_class_for(request.url)

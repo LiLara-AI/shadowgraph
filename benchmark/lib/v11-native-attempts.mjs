@@ -41,7 +41,7 @@ function rootKey(event, requireDispatchPlans = false) {
   return values.map((value) => `${value.length}:${value}`).join('|');
 }
 
-function rootClassKey(event, requireDispatchPlans = false) {
+function rootClassKey(event) {
   const values = [
     event.runId,
     event.attemptId,
@@ -52,7 +52,6 @@ function rootClassKey(event, requireDispatchPlans = false) {
     event.rootOperation,
     event.requestClass
   ];
-  if (requireDispatchPlans) values.push(event.rootInvocationId);
   return values.map((value) => `${value.length}:${value}`).join('|');
 }
 
@@ -177,7 +176,7 @@ export function traceNativeAttempts({
       continue;
     }
     const key = rootKey(event, requireDispatchPlans);
-    const capKey = rootClassKey(event, requireDispatchPlans);
+    const capKey = rootClassKey(event);
     const prior = groups.get(key) ?? [];
     const sequence = prior.length + 1;
     const rootClassSequence = (rootClassCounts.get(capKey) ?? 0) + 1;
