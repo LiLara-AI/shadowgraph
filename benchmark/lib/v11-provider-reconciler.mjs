@@ -318,7 +318,7 @@ function reconcileProviderEvidenceInternal(input, toleratedTransportFailureReque
           httpStatus: event.httpStatus ?? null
         });
       }
-      if (!isPlainObject(event.usage) && !toleratedTransportFailure) {
+      if (!isPlainObject(event.usage)) {
         findings.push({
           code: 'INCOMPLETE_USAGE',
           correlation,
