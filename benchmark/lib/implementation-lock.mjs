@@ -39,6 +39,8 @@ const SINGLETON_FILE_ROLES = Object.freeze([
   'amendment_005_sidecar',
   'amendment_006',
   'amendment_006_sidecar',
+  'amendment_008',
+  'amendment_008_sidecar',
   'runner',
   'validator',
   'aggregator',
@@ -66,7 +68,8 @@ const SIDECAR_TARGETS = Object.freeze({
   amendment_003_sidecar: 'amendment_003',
   amendment_004_sidecar: 'amendment_004',
   amendment_005_sidecar: 'amendment_005',
-  amendment_006_sidecar: 'amendment_006'
+  amendment_006_sidecar: 'amendment_006',
+  amendment_008_sidecar: 'amendment_008'
 });
 
 const SERVICE_MANIFEST_PATH = 'benchmark/service-images.json';
