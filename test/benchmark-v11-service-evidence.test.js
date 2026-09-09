@@ -70,6 +70,30 @@ const NEO4J_DIGEST = NEO4J_ATTESTATION.digest;
 const OLLAMA_DIGEST = OLLAMA_ATTESTATION.digest;
 const LLM_WEIGHTS = `sha256:${'c'.repeat(64)}`;
 const EMBEDDING_WEIGHTS = `sha256:${'e'.repeat(64)}`;
+const NEO4J_LOCAL_IMAGE_ID = `sha256:${'1'.repeat(64)}`;
+const OLLAMA_LOCAL_IMAGE_ID = `sha256:${'2'.repeat(64)}`;
+
+function immutableReference(image, digest) {
+  const lastSlash = image.lastIndexOf('/');
+  const lastColon = image.lastIndexOf(':');
+  return `${lastColon > lastSlash ? image.slice(0, lastColon) : image}@${digest}`;
+}
+
+function imageIdentity({ name, image, digest, registryIndexDigest, containerId, containerImageId }) {
+  return {
+    schema: 'shadowgraph.v11.service-image-identity',
+    version: 1,
+    serviceName: name,
+    image,
+    platformManifestDigest: digest,
+    registryIndexDigest,
+    platform: 'linux/amd64',
+    immutableReference: immutableReference(image, digest),
+    containerReference: `shadowgraph-v11-${name}`,
+    containerId,
+    containerImageId
+  };
+}
 
 function serviceManifest() {
   return {
@@ -109,7 +133,7 @@ function modelWeights() {
 function evidence(overrides = {}) {
   return {
     schema: SERVICE_EVIDENCE_SCHEMA,
-    version: 1,
+    version: 2,
     observedAt: OBSERVED_AT,
     services: [
       {
@@ -117,8 +141,23 @@ function evidence(overrides = {}) {
         image: 'neo4j:5.20',
         resolvedDigest: NEO4J_DIGEST,
         containerId: 'f77e3ef92797',
+        imageIdentity: imageIdentity({
+          name: 'neo4j',
+          image: 'neo4j:5.20',
+          digest: NEO4J_DIGEST,
+          registryIndexDigest: NEO4J_ATTESTATION.registryAttestation.indexDigest,
+          containerId: 'f77e3ef92797',
+          containerImageId: NEO4J_LOCAL_IMAGE_ID
+        }),
         servedModels: [],
         checks: [
+          {
+            kind: 'image-identity',
+            endpoint: 'shadowgraph-v11-neo4j',
+            observedAt: OBSERVED_AT,
+            outcome: 'PASS',
+            detail: 'container identity matches the committed immutable image'
+          },
           {
             kind: 'http-status',
             endpoint: 'http://127.0.0.1:7474/',
@@ -140,11 +179,26 @@ function evidence(overrides = {}) {
         image: 'ollama/ollama:0.33.2',
         resolvedDigest: OLLAMA_DIGEST,
         containerId: '9bf2e614d12d',
+        imageIdentity: imageIdentity({
+          name: 'ollama',
+          image: 'ollama/ollama:0.33.2',
+          digest: OLLAMA_DIGEST,
+          registryIndexDigest: OLLAMA_ATTESTATION.registryAttestation.indexDigest,
+          containerId: '9bf2e614d12d',
+          containerImageId: OLLAMA_LOCAL_IMAGE_ID
+        }),
         servedModels: [
           { modelId: 'qwen2.5:7b', weightsDigest: LLM_WEIGHTS },
           { modelId: 'nomic-embed-text:v1.5', weightsDigest: EMBEDDING_WEIGHTS }
         ],
         checks: [
+          {
+            kind: 'image-identity',
+            endpoint: 'shadowgraph-v11-ollama',
+            observedAt: OBSERVED_AT,
+            outcome: 'PASS',
+            detail: 'container identity matches the committed immutable image'
+          },
           {
             kind: 'openai-chat-completions',
             endpoint: 'http://127.0.0.1:11434/v1/chat/completions',
@@ -275,6 +329,31 @@ test('a syntactically valid non-platform digest cannot verify a committed platfo
   assert.ok(result.findings.some((finding) => (
     finding.code === 'SERVICE_PLATFORM_MANIFEST_DIGEST_MISMATCH' && finding.service === 'neo4j'
   )));
+});
+
+test('immutable OCI platform identity is mandatory, attested, platform-specific, and bound to its service', () => {
+  const cases = [
+    ['absent', (service) => { delete service.imageIdentity; }, 'SERVICE_IMAGE_IDENTITY_REQUIRED'],
+    ['malformed', (service) => { service.imageIdentity = { schema: 'wrong' }; }, 'SERVICE_IMAGE_IDENTITY_MALFORMED'],
+    ['wrong platform', (service) => { service.imageIdentity.platform = 'linux/arm64'; }, 'SERVICE_IMAGE_IDENTITY_PLATFORM_MISMATCH'],
+    ['wrong immutable manifest', (service) => {
+      service.imageIdentity.platformManifestDigest = `sha256:${'7'.repeat(64)}`;
+    }, 'SERVICE_IMAGE_IDENTITY_MISMATCH'],
+    ['wrong registry attestation', (service) => {
+      service.imageIdentity.registryIndexDigest = `sha256:${'8'.repeat(64)}`;
+    }, 'SERVICE_IMAGE_IDENTITY_MISMATCH'],
+    ['wrong container binding', (service) => { service.imageIdentity.containerId = 'other-container'; }, 'SERVICE_IMAGE_IDENTITY_CONTAINER_MISMATCH'],
+    ['missing identity check', (service) => {
+      service.checks = service.checks.filter((check) => check.kind !== 'image-identity');
+    }, 'SERVICE_IMAGE_IDENTITY_REQUIRED']
+  ];
+
+  for (const [label, mutate, code] of cases) {
+    const document = mutateService('ollama', mutate);
+    const result = verify({ evidence: document });
+    assert.equal(result.verifiedServices.has('ollama'), false, `${label} identity must withhold readiness`);
+    assert.ok(result.findings.some((finding) => finding.code === code && finding.service === 'ollama'), label);
+  }
 });
 
 test('a service with no checks at all is not verified', () => {

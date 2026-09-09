@@ -227,6 +227,38 @@ test('the record names the committed image, not whatever the container was start
   );
 });
 
+test('the probe persists a complete service-bound OCI platform identity, not an untyped local image ID', async () => {
+  const { input } = probeInput();
+  const evidence = await probeServices(input);
+
+  for (const service of evidence.services) {
+    const expected = service.name === 'neo4j'
+      ? {
+          digest: NEO4J_PLATFORM_MANIFEST_DIGEST,
+          index: NEO4J_ATTESTATION.registryAttestation.indexDigest,
+          imageId: NEO4J_IMAGE_ID
+        }
+      : {
+          digest: OLLAMA_PLATFORM_MANIFEST_DIGEST,
+          index: OLLAMA_ATTESTATION.registryAttestation.indexDigest,
+          imageId: OLLAMA_IMAGE_ID
+        };
+    assert.deepEqual(service.imageIdentity, {
+      schema: 'shadowgraph.v11.service-image-identity',
+      version: 1,
+      serviceName: service.name,
+      image: service.image,
+      platformManifestDigest: expected.digest,
+      registryIndexDigest: expected.index,
+      platform: 'linux/amd64',
+      immutableReference: `${service.image.slice(0, service.image.lastIndexOf(':'))}@${expected.digest}`,
+      containerReference: `shadowgraph-v11-${service.name}`,
+      containerId: service.containerId,
+      containerImageId: expected.imageId
+    });
+  }
+});
+
 test('the probe inspects the canonical repository platform-manifest reference', async () => {
   const inspected = [];
   const { input } = probeInput({
@@ -376,6 +408,26 @@ test('a same-layer tag/index identity cannot impersonate the committed platform 
   assert.match(identity.detail, /platform manifest digest/u);
 });
 
+test('the persisted identity records the observed platform and a wrong platform cannot verify', async () => {
+  const { input } = probeInput({
+    input: {
+      inspectImage: async (reference) => (reference.startsWith('neo4j@')
+        ? { id: NEO4J_IMAGE_ID, layers: [...NEO4J_LAYERS], platform: 'linux/arm64' }
+        : { id: OLLAMA_IMAGE_ID, layers: [...OLLAMA_LAYERS], platform: 'linux/amd64' })
+    }
+  });
+  const evidence = await probeServices(input);
+  const neo4j = evidence.services.find((service) => service.name === 'neo4j');
+
+  assert.equal(neo4j.imageIdentity.platform, 'linux/arm64');
+  assert.equal(neo4j.checks.find((check) => check.kind === 'image-identity').outcome, 'FAIL');
+  const verified = gate(evidence);
+  assert.equal(verified.verifiedServices.has('neo4j'), false);
+  assert.ok(verified.findings.some((finding) => (
+    finding.code === 'SERVICE_IMAGE_IDENTITY_PLATFORM_MISMATCH' && finding.service === 'neo4j'
+  )));
+});
+
 test('a container whose layers are not the committed image layers fails identity', async () => {
   const { input } = probeInput({
     input: {
@@ -423,6 +475,36 @@ test('the record carries no credential, and the credential does reach the reques
 
   const cypher = requests.find((entry) => entry.url.endsWith('/tx/commit'));
   assert.ok(cypher.headers.authorization, 'the probe must actually authenticate');
+});
+
+test('endpoint userinfo and malformed authority are rejected before probing or persistence', async () => {
+  const unsafe = [
+    'http://probe-user:synthetic-token@127.0.0.1:7474',
+    'http://probe%3Auser@127.0.0.1:7474',
+    'http://probe%ZZ@127.0.0.1:7474'
+  ];
+  for (const baseUrl of unsafe) {
+    const { input, requests } = probeInput();
+    const document = endpoints();
+    document.services[0].baseUrl = baseUrl;
+    await assert.rejects(
+      () => probeServices({ ...input, endpoints: document }),
+      (error) => {
+        assert.ok(error instanceof ServiceProbeError);
+        assert.match(error.message, /safe absolute http or https URL without userinfo/u);
+        assert.equal(error.message.includes('synthetic-token'), false);
+        assert.equal(error.message.includes('probe%3Auser'), false);
+        return true;
+      },
+      baseUrl
+    );
+    assert.deepEqual(requests, [], 'unsafe endpoint input must not reach a transport');
+  }
+
+  const { input } = probeInput();
+  const safeEvidence = await probeServices(input);
+  assert.equal(JSON.stringify(safeEvidence).includes('@127.0.0.1'), false);
+  assert.ok(gate(safeEvidence).verifiedServices.has('neo4j'));
 });
 
 test('endpoints must declare this schema and a known kind', async () => {

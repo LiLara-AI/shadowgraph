@@ -22,7 +22,11 @@ import { loadNativeAttemptProbeReports } from './v11-native-attempt-evidence-loa
 import { validateNativeAttemptPolicy } from './v11-native-attempts.mjs';
 import { buildV11Prompt } from './v11-prompts.mjs';
 import { providerModelsFromLock } from './v11-provider-models.mjs';
-import { verifyServiceEvidence } from './v11-service-evidence.mjs';
+import {
+  captureVerifiedServiceEvidence,
+  resolveVerifiedServiceEvidence,
+  verifyServiceEvidence
+} from './v11-service-evidence.mjs';
 import { validateRawRun } from './validate.mjs';
 import { runV11Benchmark } from './v11-runner.mjs';
 import { validateProviderBudget } from './v11-budget.mjs';
@@ -101,7 +105,7 @@ export async function readGateJson(filePath, readFileImpl = readFile) {
     return { state: 'unreadable' };
   }
   try {
-    return { state: 'present', value: JSON.parse(text) };
+    return { state: 'present', value: JSON.parse(text), text };
   } catch {
     return { state: 'malformed' };
   }
@@ -138,6 +142,10 @@ export async function computeV11Readiness(input) {
     preconditionEvidencePath = null,
     nativeAttemptEvidencePath = null,
     serviceEvidencePath = null,
+    // A module-minted snapshot may be carried from the readiness decision into
+    // runtime binding. It is deliberately preferred over a path: reopening a
+    // mutable path would turn a passed preflight into a different evidence claim.
+    verifiedServiceEvidence = null,
     // Deliberately not called `now`: elsewhere in this module `now` is the
     // clock function a run is given, and freshness here is an instant, not a
     // clock. One name for two types is how a run would end up handing a
@@ -219,20 +227,54 @@ export async function computeV11Readiness(input) {
     }
   }
 
-  // A required service is cleared only by a probe record that agrees with those
-  // committed files. Absent evidence verifies nothing, which is the state the
-  // repository is in by default and the reason this cannot quietly become a
-  // pass: `serviceEvidencePath` is null unless an operator names a file, and a
-  // named file still has to survive verifyServiceEvidence.
-  const serviceEvidenceGate = serviceEvidencePath === null
-    ? { state: 'absent' }
-    : await readGateJson(serviceEvidencePath, readFileImpl);
-  const serviceEvidence = verifyServiceEvidence({
-    evidence: serviceEvidenceGate.state === 'present' ? serviceEvidenceGate.value : null,
-    serviceManifest: gateValues.get('service-images.json'),
-    modelWeights: gateValues.get('model-weights.lock.json'),
-    now: verificationInstant
-  });
+  // A required service is cleared only by exact probe bytes that agree with the
+  // committed baselines. When a prior readiness decision supplies its trusted
+  // snapshot, never reopen the mutable operator-selected path.
+  let capturedServiceEvidence = verifiedServiceEvidence;
+  let serviceEvidence;
+  if (capturedServiceEvidence !== null) {
+    serviceEvidence = resolveVerifiedServiceEvidence({
+      snapshot: capturedServiceEvidence,
+      serviceManifest: gateValues.get('service-images.json'),
+      modelWeights: gateValues.get('model-weights.lock.json'),
+      now: verificationInstant
+    });
+  } else {
+    const serviceEvidenceGate = serviceEvidencePath === null
+      ? { state: 'absent' }
+      : await readGateJson(serviceEvidencePath, readFileImpl);
+    if (serviceEvidenceGate.state === 'present') {
+      try {
+        capturedServiceEvidence = captureVerifiedServiceEvidence({
+          evidenceText: serviceEvidenceGate.text,
+          serviceManifest: gateValues.get('service-images.json'),
+          modelWeights: gateValues.get('model-weights.lock.json'),
+          now: verificationInstant
+        });
+        serviceEvidence = resolveVerifiedServiceEvidence({
+          snapshot: capturedServiceEvidence,
+          serviceManifest: gateValues.get('service-images.json'),
+          modelWeights: gateValues.get('model-weights.lock.json'),
+          now: verificationInstant
+        });
+      } catch {
+        capturedServiceEvidence = null;
+        serviceEvidence = verifyServiceEvidence({
+          evidence: serviceEvidenceGate.value,
+          serviceManifest: gateValues.get('service-images.json'),
+          modelWeights: gateValues.get('model-weights.lock.json'),
+          now: verificationInstant
+        });
+      }
+    } else {
+      serviceEvidence = verifyServiceEvidence({
+        evidence: null,
+        serviceManifest: gateValues.get('service-images.json'),
+        modelWeights: gateValues.get('model-weights.lock.json'),
+        now: verificationInstant
+      });
+    }
+  }
 
   let nativeAttemptEvidence = null;
   let normalizedNativeAttemptPolicy = null;
@@ -329,10 +371,14 @@ export async function computeV11Readiness(input) {
       note: nativeAttemptEvidence.note
     },
     serviceEvidence: {
+      evidenceSha256: serviceEvidence.evidenceSha256 ?? null,
       verifiedServices: [...serviceEvidence.verifiedServices].sort(),
       findings: serviceEvidence.findings,
       note: serviceEvidence.note
     },
+    // Not rendered by the CLI preflight report. The run path consumes this
+    // module-minted snapshot instead of reopening --service-evidence.
+    verifiedServiceEvidence: serviceEvidence.evidenceSha256 === null ? null : capturedServiceEvidence,
     readiness: blockers.length === 0 ? 'READY' : 'NOT READY',
     blockers
   };
@@ -416,6 +462,7 @@ export async function executeV11AcceptanceRun(input) {
     preconditionEvidencePath = null,
     nativeAttemptEvidencePath = null,
     serviceEvidencePath = null,
+    verifiedServiceEvidence = null,
     verificationInstant = undefined,
     runId,
     attemptId,
@@ -502,6 +549,7 @@ export async function executeV11AcceptanceRun(input) {
     preconditionEvidencePath,
     nativeAttemptEvidencePath,
     serviceEvidencePath,
+    verifiedServiceEvidence,
     verificationInstant,
     readFileImpl
   });

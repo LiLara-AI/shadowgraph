@@ -58,11 +58,15 @@ function check(kind, endpoint, observedAt, outcome, detail) {
 }
 
 /** Record an outcome without letting a transport failure end the probe. */
+function redactUnsafeUrlUserinfo(value) {
+  return String(value).replace(/\b(https?:\/\/)([^/\s@]+)@/giu, '$1[redacted]@');
+}
+
 async function attempt(operation) {
   try {
     return { ok: true, value: await operation() };
   } catch (error) {
-    return { ok: false, detail: error?.message ?? String(error) };
+    return { ok: false, detail: redactUnsafeUrlUserinfo(error?.message ?? String(error)) };
   }
 }
 
@@ -99,6 +103,31 @@ function repositoryOfTaggedImage(image) {
   return lastColon > lastSlash ? image.slice(0, lastColon) : image;
 }
 
+function immutableReferenceFor(manifestService) {
+  return `${repositoryOfTaggedImage(manifestService.image)}@${manifestService.digest}`;
+}
+
+function imageIdentityObservation(service, manifestService, container, resolvedImage) {
+  if (!isPlainRecord(container)
+    || !isNonEmptyString(container.id)
+    || !isNonEmptyString(container.image)
+    || !isPlainRecord(resolvedImage)
+    || !isNonEmptyString(resolvedImage.platform)) return null;
+  return {
+    schema: 'shadowgraph.v11.service-image-identity',
+    version: 1,
+    serviceName: service.name,
+    image: manifestService.image,
+    platformManifestDigest: manifestService.digest,
+    registryIndexDigest: manifestService.registryIndexDigest,
+    platform: resolvedImage.platform,
+    immutableReference: immutableReferenceFor(manifestService),
+    containerReference: service.container,
+    containerId: container.id,
+    containerImageId: container.image
+  };
+}
+
 /**
  * Confirm the named container is running the image the committed manifest pins.
  *
@@ -113,15 +142,17 @@ async function imageIdentityCheck(service, manifestService, observedAt, deps) {
     return {
       resolvedDigest: null,
       containerId: null,
+      imageIdentity: null,
       check: check('image-identity', service.container, observedAt, 'FAIL', container.detail)
     };
   }
-  const immutableReference = `${repositoryOfTaggedImage(manifestService.image)}@${manifestService.digest}`;
+  const immutableReference = immutableReferenceFor(manifestService);
   const image = await attempt(() => deps.inspectImage(immutableReference));
   if (!image.ok) {
     return {
-      resolvedDigest: container.value.image ?? null,
+      resolvedDigest: null,
       containerId: container.value.id ?? null,
+      imageIdentity: null,
       check: check('image-identity', service.container, observedAt, 'FAIL', image.detail)
     };
   }
@@ -137,11 +168,12 @@ async function imageIdentityCheck(service, manifestService, observedAt, deps) {
   } else if (!layersMatch) {
     detail = `container image ${container.value.image} does not have the layers ${immutableReference} resolves to (${image.value.id})`;
   } else {
-    detail = `container local image ID matches the ${container.value.layers.length} layers resolved from OCI platform manifest ${manifestService.digest}`;
+    detail = `container local image ID matches the ${image.value.layers.length} layers resolved from OCI platform manifest ${manifestService.digest}`;
   }
   return {
     resolvedDigest: matches ? manifestService.digest : null,
     containerId: container.value.id ?? null,
+    imageIdentity: imageIdentityObservation(service, manifestService, container.value, image.value),
     check: check('image-identity', service.container, observedAt, matches ? 'PASS' : 'FAIL', detail)
   };
 }
@@ -298,6 +330,27 @@ export function ollamaManifestPath(modelId, root = OLLAMA_HOME) {
   return path.posix.join(root, 'models', 'manifests', 'registry.ollama.ai', 'library', name, tag);
 }
 
+function validateSafeBaseUrl(value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new ServiceProbeError(
+      'CONTRACT_FAILURE',
+      'each endpoint baseUrl must be a safe absolute http or https URL without userinfo'
+    );
+  }
+  if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
+    || parsed.hostname.length === 0
+    || parsed.username.length > 0
+    || parsed.password.length > 0) {
+    throw new ServiceProbeError(
+      'CONTRACT_FAILURE',
+      'each endpoint baseUrl must be a safe absolute http or https URL without userinfo'
+    );
+  }
+}
+
 function validateEndpoints(endpoints) {
   if (!isPlainRecord(endpoints)
     || endpoints.schema !== SERVICE_ENDPOINTS_SCHEMA
@@ -320,6 +373,7 @@ function validateEndpoints(endpoints) {
         'each endpoint needs a name, container, baseUrl and a kind of neo4j or openai-compatible'
       );
     }
+    validateSafeBaseUrl(service.baseUrl);
   }
 }
 
@@ -385,6 +439,7 @@ export async function probeServices(input) {
       image: manifestEntry.image,
       resolvedDigest: identity.resolvedDigest,
       containerId: identity.containerId,
+      imageIdentity: identity.imageIdentity,
       servedModels: probed.servedModels,
       checks: [identity.check, ...probed.checks]
     });

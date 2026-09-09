@@ -52,6 +52,7 @@ import { providerModelsFromLock } from './v11-provider-models.mjs';
 import { createV11PythonHosts } from './v11-python-hosts.mjs';
 import { readPythonSiteDistributions, verifyPythonRuntime } from './v11-python-runtime.mjs';
 import { validateNativeAttemptPolicy } from './v11-native-attempts.mjs';
+import { resolveVerifiedServiceEvidence } from './v11-service-evidence.mjs';
 import { createV11RunResources } from './v11-run-resources.mjs';
 import { ADAPTER_OPERATION_TIMEOUT_MS, UNIT_TIMEOUT_MS } from './v11-runner.mjs';
 
@@ -132,7 +133,7 @@ export async function bindV11Runtime(input, injections = {}) {
     registry,
     runId,
     attemptId,
-    serviceEvidencePath,
+    verifiedServiceEvidence,
     ledgerDirectory,
     providerUpstream,
     stateRoot,
@@ -247,28 +248,42 @@ export async function bindV11Runtime(input, injections = {}) {
   );
   const execution = preregistration.commonExecution;
 
-  // The digests the lock records are the ones the service probe verified, not
-  // ones resolved again here. Two independent resolutions could disagree, and
-  // the run would be locked to the one nobody checked.
-  if (serviceEvidencePath === null || serviceEvidencePath === undefined) {
+  // Runtime binding consumes the exact service-evidence snapshot preflight
+  // verified. It never reopens --service-evidence: replacing that raw path after
+  // readiness cannot change the immutable service identities or its byte hash.
+  if (verifiedServiceEvidence === null || verifiedServiceEvidence === undefined) {
     throw new V11RunError(
       'RUNTIME_UNAVAILABLE',
-      'the implementation lock records the service digests the probe verified, so --service-evidence is required to start a run'
+      'the implementation lock requires a verified service-evidence snapshot from readiness'
     );
   }
-  const serviceEvidence = JSON.parse(await build.readFile(serviceEvidencePath, 'utf8'));
-  const serviceImages = (serviceEvidence.services ?? []).map((service) => ({
-    name: service.name,
-    image: service.image,
-    digest: service.resolvedDigest
-  }));
+  let serviceManifest;
+  try {
+    serviceManifest = JSON.parse(await build.readFile(join(benchmarkRoot, 'service-images.json'), 'utf8'));
+  } catch {
+    throw new V11RunError('RUNTIME_UNAVAILABLE', 'the committed service manifest could not be read for verified service evidence');
+  }
+  const verifiedServices = resolveVerifiedServiceEvidence({
+    snapshot: verifiedServiceEvidence,
+    serviceManifest,
+    modelWeights,
+    now: Date.now()
+  });
+  if (verifiedServices.evidenceSha256 === null || verifiedServices.serviceImages.length === 0) {
+    throw new V11RunError(
+      'RUNTIME_UNAVAILABLE',
+      `verified service evidence is unavailable: ${verifiedServices.findings.map((finding) => finding.code).join(',')}`
+    );
+  }
+  const { serviceImages, evidenceSha256: serviceEvidenceSha256 } = verifiedServices;
 
   // 1. The lock, before anything creates a file.
   const implementationLock = await build.createImplementationLock({
     repoRoot: repositoryRoot,
     files: await build.discoverImplementationLockFiles(repositoryRoot),
     models: modelWeights.models,
-    serviceImages
+    serviceImages,
+    serviceEvidenceSha256
   });
 
   // 2. The machine, observed rather than asserted.
@@ -417,7 +432,8 @@ export async function bindV11Runtime(input, injections = {}) {
       runtime: Object.freeze({
         manifestPath: runtimeManifestPath,
         sitePath: pythonRuntimeSite,
-        distributions: siteDistributions.length
+        distributions: siteDistributions.length,
+        serviceEvidenceSha256
       })
     };
   } catch (error) {

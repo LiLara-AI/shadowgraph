@@ -8,7 +8,7 @@ import { isPlaceholder } from './placeholder.mjs';
 
 const execFile = promisify(execFileCallback);
 
-const INPUT_FIELDS = ['repoRoot', 'files', 'models', 'serviceImages'];
+const INPUT_FIELDS = ['repoRoot', 'files', 'models', 'serviceImages', 'serviceEvidenceSha256'];
 const VERIFY_FIELDS = [...INPUT_FIELDS, 'lock'];
 const FILE_SPEC_FIELDS = ['role', 'path'];
 const MODEL_FIELDS = [
@@ -522,6 +522,14 @@ function normalizeDigest(value, label) {
   return value.toLowerCase();
 }
 
+function normalizeEvidenceSha256(value) {
+  assertNonEmptyString(value, 'serviceEvidenceSha256');
+  if (!/^[a-f0-9]{64}$/u.test(value)) {
+    throw new Error('serviceEvidenceSha256 must be a lowercase SHA-256 hex digest');
+  }
+  return value;
+}
+
 function parseRegistryHost(value, label) {
   const normalized = value.toLowerCase();
   if (DOCKER_HUB_REGISTRY_ALIASES.has(normalized)) return DOCKER_HUB_REGISTRY;
@@ -943,6 +951,7 @@ export async function createImplementationLock(input) {
   const { entries: files, contentBySingletonRole } = await hashManifestFiles(before, specs);
   const requiredServices = parseServiceManifest(contentBySingletonRole.get('service_manifest'));
   const serviceImages = validateServiceImages(input.serviceImages, modelDigests, requiredServices);
+  const serviceEvidenceSha256 = normalizeEvidenceSha256(input.serviceEvidenceSha256);
   const after = await inspectRepository(input.repoRoot);
   if (after.headCommit !== before.headCommit) {
     throw new Error('Repository HEAD changed while creating the implementation lock');
@@ -953,7 +962,7 @@ export async function createImplementationLock(input) {
 
   const core = {
     schema: 'shadowgraph.implementation-lock',
-    version: 2,
+    version: 3,
     repository: { headCommit: before.headCommit },
     coverage: {
       serviceManifest: SERVICE_MANIFEST_PATH,
@@ -965,7 +974,8 @@ export async function createImplementationLock(input) {
     },
     files,
     models,
-    serviceImages
+    serviceImages,
+    serviceEvidenceSha256
   };
   const lock = {
     ...core,
@@ -985,7 +995,8 @@ export async function verifyImplementationLock(input) {
     repoRoot: input.repoRoot,
     files: input.files,
     models: input.models,
-    serviceImages: input.serviceImages
+    serviceImages: input.serviceImages,
+    serviceEvidenceSha256: input.serviceEvidenceSha256
   });
   if (canonicalStringify(input.lock) !== canonicalStringify(expected)) {
     throw new Error('Implementation lock does not match current bytes and evidence');

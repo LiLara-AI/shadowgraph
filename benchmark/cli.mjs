@@ -612,7 +612,7 @@ async function v11RunCommand(options) {
     benchmarkRoot,
     runId,
     attemptId,
-    serviceEvidencePath,
+    verifiedServiceEvidence: readiness.verifiedServiceEvidence,
     ledgerDirectory
   });
 
@@ -626,6 +626,7 @@ async function v11RunCommand(options) {
       preconditionEvidencePath,
       nativeAttemptEvidencePath,
       serviceEvidencePath,
+      verifiedServiceEvidence: readiness.verifiedServiceEvidence,
       runId,
       attemptId,
       sourceHashes: candidate.sourceHashes,
@@ -747,7 +748,7 @@ async function v11RuntimeDependencies(options, context) {
     registry: context.registry,
     runId: context.runId,
     attemptId: context.attemptId,
-    serviceEvidencePath: context.serviceEvidencePath,
+    verifiedServiceEvidence: context.verifiedServiceEvidence,
     ledgerDirectory: context.ledgerDirectory,
     providerUpstream: options['provider-upstream'],
     stateRoot: optionPath(options['state-root']),

@@ -30,10 +30,16 @@
 // that is answering now. A single failed or stale check withholds verification
 // from its own service and from no other.
 
+import { createHash } from 'node:crypto';
+
 import { parseServiceManifestDocument } from './implementation-lock.mjs';
 
 export const SERVICE_EVIDENCE_SCHEMA = 'shadowgraph.v11.service-evidence';
-export const SERVICE_EVIDENCE_VERSION = 1;
+export const SERVICE_EVIDENCE_VERSION = 2;
+export const SERVICE_IMAGE_IDENTITY_SCHEMA = 'shadowgraph.v11.service-image-identity';
+export const SERVICE_IMAGE_IDENTITY_VERSION = 1;
+export const VERIFIED_SERVICE_EVIDENCE_SCHEMA = 'shadowgraph.v11.verified-service-evidence';
+export const VERIFIED_SERVICE_EVIDENCE_VERSION = 1;
 
 /**
  * How long a probe stays good for.
@@ -54,11 +60,10 @@ export const SERVICE_EVIDENCE_NOTE =
  * record naming a check this module does not understand would otherwise verify
  * a service on the strength of something nobody defined.
  *
- * `image-identity` records whether the probed container is running the image
- * the committed manifest pins. It is recorded rather than required here - the
- * implementation lock is the authority on which bytes a run may claim, and
- * duplicating that judgement in the readiness gate would put two answers to one
- * question in the repository.
+ * `image-identity` is mandatory. It binds the probe's named container and
+ * local image observation to the exact platform-manifest and registry-index
+ * identities the committed schema-v3 manifest attests. A matching tag, a
+ * container name, or a copied digest alone never establishes service readiness.
  */
 export const SERVICE_CHECK_KINDS = Object.freeze([
   'image-identity',
@@ -70,6 +75,38 @@ export const SERVICE_CHECK_KINDS = Object.freeze([
 ]);
 
 const SHA256_REFERENCE = /^sha256:[a-f0-9]{64}$/u;
+const SERVICE_IMAGE_IDENTITY_FIELDS = Object.freeze([
+  'schema', 'version', 'serviceName', 'image', 'platformManifestDigest',
+  'registryIndexDigest', 'platform', 'immutableReference', 'containerReference',
+  'containerId', 'containerImageId'
+]);
+const VERIFIED_SERVICE_EVIDENCE_FIELDS = Object.freeze([
+  'schema', 'version', 'evidenceSha256', 'serviceImages', 'verifiedServices'
+]);
+const capturedServiceEvidence = new WeakMap();
+
+function hasExactKeys(value, fields) {
+  if (!isPlainRecord(value)) return false;
+  const actual = Object.keys(value).sort();
+  return actual.length === fields.length
+    && actual.every((key, index) => key === [...fields].sort()[index]);
+}
+
+function sha256Text(value) {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+function immutableReference(image, digest) {
+  const lastSlash = image.lastIndexOf('/');
+  const lastColon = image.lastIndexOf(':');
+  return `${lastColon > lastSlash ? image.slice(0, lastColon) : image}@${digest}`;
+}
+
+function deepFreeze(value) {
+  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value)) deepFreeze(child);
+  return Object.freeze(value);
+}
 
 function isPlainRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -111,6 +148,70 @@ function lockedWeights(modelWeights) {
     weights.set(model.modelId, model.weightsDigest);
   }
   return weights;
+}
+
+function requiredImageIdentityFindings(service, declaredService, checks, push) {
+  const identity = service.imageIdentity;
+  if (identity === undefined || identity === null) {
+    push('SERVICE_IMAGE_IDENTITY_REQUIRED', {
+      detail: 'a required immutable image identity observation is absent'
+    });
+    return;
+  }
+  if (!hasExactKeys(identity, SERVICE_IMAGE_IDENTITY_FIELDS)
+    || identity.schema !== SERVICE_IMAGE_IDENTITY_SCHEMA
+    || identity.version !== SERVICE_IMAGE_IDENTITY_VERSION
+    || !isNonEmptyString(identity.serviceName)
+    || !isNonEmptyString(identity.image)
+    || !isNonEmptyString(identity.platformManifestDigest)
+    || !isNonEmptyString(identity.registryIndexDigest)
+    || !isNonEmptyString(identity.platform)
+    || !isNonEmptyString(identity.immutableReference)
+    || !isNonEmptyString(identity.containerReference)
+    || !isNonEmptyString(identity.containerId)
+    || !isNonEmptyString(identity.containerImageId)
+    || !SHA256_REFERENCE.test(identity.platformManifestDigest)
+    || !SHA256_REFERENCE.test(identity.registryIndexDigest)
+    || !SHA256_REFERENCE.test(identity.containerImageId)) {
+    push('SERVICE_IMAGE_IDENTITY_MALFORMED', {
+      detail: 'image identity must be a complete schema-v3 platform-manifest observation'
+    });
+    return;
+  }
+  if (identity.serviceName.toLowerCase() !== service.name.toLowerCase()
+    || identity.containerId !== service.containerId) {
+    push('SERVICE_IMAGE_IDENTITY_CONTAINER_MISMATCH', {
+      detail: 'image identity is not bound to this exact service entry and Docker container'
+    });
+  }
+  if (identity.platform !== declaredService.platform) {
+    push('SERVICE_IMAGE_IDENTITY_PLATFORM_MISMATCH', {
+      declared: declaredService.platform,
+      recorded: identity.platform
+    });
+  }
+  if (identity.image !== declaredService.image
+    || identity.platformManifestDigest !== declaredService.digest
+    || identity.registryIndexDigest !== declaredService.registryIndexDigest
+    || identity.immutableReference !== immutableReference(declaredService.image, declaredService.digest)) {
+    push('SERVICE_IMAGE_IDENTITY_MISMATCH', {
+      detail: 'image identity does not match the committed schema-v3 OCI attestation'
+    });
+  }
+  const imageChecks = Array.isArray(checks)
+    ? checks.filter((check) => isPlainRecord(check) && check.kind === 'image-identity')
+    : [];
+  if (imageChecks.length !== 1) {
+    push('SERVICE_IMAGE_IDENTITY_REQUIRED', {
+      detail: 'exactly one passing image-identity check is required for each service'
+    });
+  } else if (imageChecks[0].endpoint !== identity.containerReference) {
+    push('SERVICE_IMAGE_IDENTITY_CONTAINER_MISMATCH', {
+      detail: 'the image-identity check is not bound to the recorded container reference'
+    });
+  } else if (imageChecks[0].outcome !== 'PASS') {
+    push('SERVICE_IMAGE_IDENTITY_CHECK_FAILED', { outcome: imageChecks[0].outcome ?? null });
+  }
 }
 
 /**
@@ -156,6 +257,7 @@ function serviceFindings(service, { images, weights, now }) {
   }
 
   const checks = Array.isArray(service.checks) ? service.checks : null;
+  requiredImageIdentityFindings(service, declaredService, checks, push);
   if (checks === null || checks.length === 0) {
     push('SERVICE_UNCHECKED', { detail: 'a service with no recorded check establishes nothing' });
   } else {
@@ -374,5 +476,128 @@ export function verifyServiceEvidence(input) {
     verifiedServices,
     findings: Object.freeze(findings),
     note: SERVICE_EVIDENCE_NOTE
+  });
+}
+
+function snapshotFailure(code, detail) {
+  return Object.freeze({
+    verifiedServices: new Set(),
+    findings: Object.freeze([{ code, detail }]),
+    note: SERVICE_EVIDENCE_NOTE,
+    serviceImages: Object.freeze([]),
+    evidenceSha256: null
+  });
+}
+
+function serviceImagesForVerifiedServices(images, verifiedServices) {
+  const selected = [];
+  for (const name of [...verifiedServices].sort()) {
+    const declared = images.get(name);
+    if (declared === undefined) return null;
+    selected.push(Object.freeze({
+      name: declared.name,
+      image: declared.image,
+      digest: declared.digest
+    }));
+  }
+  return Object.freeze(selected.sort((left, right) => left.name.localeCompare(right.name)));
+}
+
+function sameServiceImages(left, right) {
+  return Array.isArray(left) && Array.isArray(right)
+    && left.length === right.length
+    && left.every((entry, index) => (
+      isPlainRecord(entry)
+      && entry.name === right[index]?.name
+      && entry.image === right[index]?.image
+      && entry.digest === right[index]?.digest
+    ));
+}
+
+/**
+ * Capture exactly the UTF-8 bytes a readiness decision verified. The snapshot
+ * deliberately has module-private provenance: only this module can mint one,
+ * so a raw file object cannot be substituted into runtime binding after a
+ * preflight check.
+ */
+export function captureVerifiedServiceEvidence(input) {
+  const { evidenceText, serviceManifest, modelWeights, now } = input ?? {};
+  if (typeof evidenceText !== 'string') {
+    throw new Error('service evidence bytes must be UTF-8 text');
+  }
+  let evidence;
+  try {
+    evidence = JSON.parse(evidenceText);
+  } catch {
+    throw new Error('service evidence bytes are not valid JSON');
+  }
+  const images = declaredImages(serviceManifest);
+  if (images === null) throw new Error('committed service manifest is unusable');
+  const verification = verifyServiceEvidence({ evidence, serviceManifest, modelWeights, now });
+  const serviceImages = serviceImagesForVerifiedServices(images, verification.verifiedServices);
+  if (serviceImages === null) throw new Error('verified service is absent from the committed manifest');
+  const snapshot = Object.freeze({
+    schema: VERIFIED_SERVICE_EVIDENCE_SCHEMA,
+    version: VERIFIED_SERVICE_EVIDENCE_VERSION,
+    evidenceSha256: sha256Text(evidenceText),
+    serviceImages,
+    verifiedServices: Object.freeze([...verification.verifiedServices].sort())
+  });
+  capturedServiceEvidence.set(snapshot, Object.freeze({
+    evidence: deepFreeze(evidence),
+    evidenceText,
+    serviceImages
+  }));
+  return snapshot;
+}
+
+/**
+ * Recheck a module-minted snapshot against the committed baselines without
+ * reopening the operator-selected path. Freshness is still measured at the
+ * current caller-supplied instant, but the evidence bytes cannot drift.
+ */
+export function resolveVerifiedServiceEvidence(input) {
+  const { snapshot, serviceManifest, modelWeights, now } = input ?? {};
+  if (!hasExactKeys(snapshot, VERIFIED_SERVICE_EVIDENCE_FIELDS)
+    || snapshot.schema !== VERIFIED_SERVICE_EVIDENCE_SCHEMA
+    || snapshot.version !== VERIFIED_SERVICE_EVIDENCE_VERSION
+    || typeof snapshot.evidenceSha256 !== 'string'
+    || !/^[a-f0-9]{64}$/u.test(snapshot.evidenceSha256)
+    || !Array.isArray(snapshot.verifiedServices)) {
+    return snapshotFailure(
+      'SERVICE_EVIDENCE_SNAPSHOT_UNTRUSTED',
+      'runtime binding requires an in-process immutable snapshot produced by service validation'
+    );
+  }
+  const captured = capturedServiceEvidence.get(snapshot);
+  if (captured === undefined || sha256Text(captured.evidenceText) !== snapshot.evidenceSha256) {
+    return snapshotFailure(
+      'SERVICE_EVIDENCE_SNAPSHOT_TAMPERED',
+      'the verified service-evidence bytes no longer match their captured hash'
+    );
+  }
+  const images = declaredImages(serviceManifest);
+  if (images === null) {
+    return snapshotFailure('SERVICE_MANIFEST_UNUSABLE', 'the committed service manifest is absent or invalid');
+  }
+  const verification = verifyServiceEvidence({
+    evidence: captured.evidence,
+    serviceManifest,
+    modelWeights,
+    now
+  });
+  const serviceImages = serviceImagesForVerifiedServices(images, verification.verifiedServices);
+  if (serviceImages === null
+    || !sameServiceImages(serviceImages, snapshot.serviceImages)
+    || JSON.stringify([...verification.verifiedServices].sort()) !== JSON.stringify(snapshot.verifiedServices)) {
+    return snapshotFailure(
+      'SERVICE_EVIDENCE_SNAPSHOT_MISMATCH',
+      'the captured service evidence no longer verifies to the identity presented to runtime binding'
+    );
+  }
+  return Object.freeze({
+    ...verification,
+    serviceImages,
+    evidenceSha256: snapshot.evidenceSha256
   });
 }

@@ -949,17 +949,30 @@ async function committedGateDirectory(t, prefix) {
 const EVIDENCE_OBSERVED_AT = '2026-09-05T02:55:00.000Z';
 const EVIDENCE_NOW = Date.parse('2026-09-05T03:00:00.000Z');
 
+function serviceContainerReference(name) {
+  return `fixture-service-${name}`;
+}
+
 function evidenceChecks(name) {
+  const checks = [{
+    kind: 'image-identity',
+    endpoint: serviceContainerReference(name),
+    observedAt: EVIDENCE_OBSERVED_AT,
+    outcome: 'PASS',
+    detail: 'fixture immutable image identity established'
+  }];
   if (name === 'neo4j') {
-    return [
+    checks.push(
       { kind: 'http-status', endpoint: 'http://127.0.0.1:7474/', observedAt: EVIDENCE_OBSERVED_AT, outcome: 'PASS', detail: 'HTTP 200' },
       { kind: 'cypher-statement', endpoint: 'http://127.0.0.1:7474/db/neo4j/tx/commit', observedAt: EVIDENCE_OBSERVED_AT, outcome: 'PASS', detail: 'RETURN 1 AS ok' }
-    ];
+    );
+    return checks;
   }
-  return [
+  checks.push(
     { kind: 'openai-chat-completions', endpoint: 'http://127.0.0.1:11434/v1/chat/completions', observedAt: EVIDENCE_OBSERVED_AT, outcome: 'PASS', detail: 'HTTP 200' },
     { kind: 'openai-embeddings', endpoint: 'http://127.0.0.1:11434/v1/embeddings', observedAt: EVIDENCE_OBSERVED_AT, outcome: 'PASS', detail: 'HTTP 200' }
-  ];
+  );
+  return checks;
 }
 
 async function committedServiceEvidence(overrides = {}) {
@@ -971,16 +984,32 @@ async function committedServiceEvidence(overrides = {}) {
   }));
   return {
     schema: 'shadowgraph.v11.service-evidence',
-    version: 1,
+    version: 2,
     observedAt: EVIDENCE_OBSERVED_AT,
-    services: manifest.services.map((service, index) => ({
-      name: service.name,
-      image: service.image,
-      resolvedDigest: service.digest,
-      containerId: 'container-' + service.name,
-      servedModels: service.name === 'neo4j' ? [] : servedModels,
-      checks: evidenceChecks(service.name)
-    })),
+    services: manifest.services.map((service, index) => {
+      const containerId = `container-${service.name}`;
+      return {
+        name: service.name,
+        image: service.image,
+        resolvedDigest: service.digest,
+        containerId,
+        imageIdentity: {
+          schema: 'shadowgraph.v11.service-image-identity',
+          version: 1,
+          serviceName: service.name,
+          image: service.image,
+          platformManifestDigest: service.digest,
+          registryIndexDigest: service.registryAttestation.indexDigest,
+          platform: service.platform,
+          immutableReference: `${service.image.slice(0, service.image.lastIndexOf(':'))}@${service.digest}`,
+          containerReference: serviceContainerReference(service.name),
+          containerId,
+          containerImageId: `sha256:${String(index + 1).repeat(64)}`
+        },
+        servedModels: service.name === 'neo4j' ? [] : servedModels,
+        checks: evidenceChecks(service.name)
+      };
+    }),
     ...overrides
   };
 }
@@ -1026,6 +1055,43 @@ test('a fresh probe record that agrees with the committed locks clears both requ
   assert.deepEqual(serviceBlockers(report), [], 'a verified service is no longer a blocker');
   assert.deepEqual([...report.serviceEvidence.verifiedServices].sort(), ['neo4j', 'ollama']);
   assert.match(report.serviceEvidence.note, /cannot establish/iu);
+});
+
+test('readiness carries immutable verified evidence bytes instead of reopening a replaced path', async (t) => {
+  const directory = await committedGateDirectory(t, 'shadowgraph-v11-evidence-snapshot-');
+  const serviceEvidencePath = path.join(directory, 'service-evidence.json');
+  await writeFile(serviceEvidencePath, JSON.stringify(await committedServiceEvidence()), 'utf8');
+  const candidate = await realCandidate();
+  const first = await computeV11Readiness({
+    ...candidate,
+    benchmarkRoot: directory,
+    serviceEvidencePath,
+    verificationInstant: EVIDENCE_NOW
+  });
+  assert.ok(first.verifiedServiceEvidence, 'a valid readiness decision must retain a trusted snapshot');
+  assert.match(first.serviceEvidence.evidenceSha256, /^[a-f0-9]{64}$/u);
+  assert.deepEqual(serviceBlockers(first), []);
+
+  await writeFile(serviceEvidencePath, '{ replaced after validation', 'utf8');
+  let rawPathReads = 0;
+  const replay = await computeV11Readiness({
+    ...candidate,
+    benchmarkRoot: directory,
+    serviceEvidencePath,
+    verifiedServiceEvidence: first.verifiedServiceEvidence,
+    verificationInstant: EVIDENCE_NOW,
+    readFileImpl: async (file, ...rest) => {
+      if (path.resolve(file) === path.resolve(serviceEvidencePath)) {
+        rawPathReads += 1;
+        throw new Error('the replaced raw evidence path must not be reopened');
+      }
+      return await readFile(file, ...rest);
+    }
+  });
+  assert.equal(rawPathReads, 0);
+  assert.equal(replay.serviceEvidence.evidenceSha256, first.serviceEvidence.evidenceSha256);
+  assert.deepEqual(replay.serviceEvidence.verifiedServices, first.serviceEvidence.verifiedServices);
+  assert.deepEqual(serviceBlockers(replay), []);
 });
 
 test('case-varied service evidence clears canonical required services', async (t) => {

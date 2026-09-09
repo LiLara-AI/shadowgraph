@@ -18,12 +18,14 @@
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 
 import { createProgressLedger } from '../benchmark/lib/progress.mjs';
 import { buildV11Prompt } from '../benchmark/lib/v11-prompts.mjs';
 import { ADAPTER_OPERATION_TIMEOUT_MS, UNIT_TIMEOUT_MS } from '../benchmark/lib/v11-runner.mjs';
+import { captureVerifiedServiceEvidence } from '../benchmark/lib/v11-service-evidence.mjs';
 import { bindV11Runtime, providerLedgerPath } from '../benchmark/lib/v11-runtime-binding.mjs';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
@@ -64,9 +66,68 @@ const MODEL_WEIGHTS = {
     }
   ]
 };
+const SERVICE_MANIFEST = JSON.parse(readFileSync(
+  new URL('../benchmark/service-images.json', import.meta.url),
+  'utf8'
+));
+const SERVICE_EVIDENCE_OBSERVED_AT = new Date().toISOString();
 const SERVICE_EVIDENCE = {
-  services: [{ name: 'ollama', image: 'ollama/ollama:0.12.3', resolvedDigest: `sha256:${'d'.repeat(64)}` }]
+  schema: 'shadowgraph.v11.service-evidence',
+  version: 2,
+  observedAt: SERVICE_EVIDENCE_OBSERVED_AT,
+  services: SERVICE_MANIFEST.services.map((service, index) => {
+    const containerId = `fixture-container-${service.name}`;
+    const containerReference = `fixture-service-${service.name}`;
+    const common = {
+      name: service.name,
+      image: service.image,
+      resolvedDigest: service.digest,
+      containerId,
+      imageIdentity: {
+        schema: 'shadowgraph.v11.service-image-identity',
+        version: 1,
+        serviceName: service.name,
+        image: service.image,
+        platformManifestDigest: service.digest,
+        registryIndexDigest: service.registryAttestation.indexDigest,
+        platform: service.platform,
+        immutableReference: `${service.image.slice(0, service.image.lastIndexOf(':'))}@${service.digest}`,
+        containerReference,
+        containerId,
+        containerImageId: `sha256:${String(index + 1).repeat(64)}`
+      },
+      checks: [{
+        kind: 'image-identity', endpoint: containerReference,
+        observedAt: SERVICE_EVIDENCE_OBSERVED_AT, outcome: 'PASS', detail: 'fixture identity'
+      }]
+    };
+    if (service.name === 'neo4j') {
+      return {
+        ...common,
+        servedModels: [],
+        checks: [...common.checks,
+          { kind: 'http-status', endpoint: 'http://127.0.0.1:7474/', observedAt: SERVICE_EVIDENCE_OBSERVED_AT, outcome: 'PASS', detail: 'HTTP 200' },
+          { kind: 'cypher-statement', endpoint: 'http://127.0.0.1:7474/db/neo4j/tx/commit', observedAt: SERVICE_EVIDENCE_OBSERVED_AT, outcome: 'PASS', detail: 'RETURN 1' }
+        ]
+      };
+    }
+    return {
+      ...common,
+      servedModels: MODEL_WEIGHTS.models.map(({ modelId, weightsDigest }) => ({ modelId, weightsDigest })),
+      checks: [...common.checks,
+        { kind: 'openai-chat-completions', endpoint: 'http://127.0.0.1:11434/v1/chat/completions', observedAt: SERVICE_EVIDENCE_OBSERVED_AT, outcome: 'PASS', detail: 'HTTP 200' },
+        { kind: 'openai-embeddings', endpoint: 'http://127.0.0.1:11434/v1/embeddings', observedAt: SERVICE_EVIDENCE_OBSERVED_AT, outcome: 'PASS', detail: 'HTTP 200' }
+      ]
+    };
+  })
 };
+const SERVICE_EVIDENCE_TEXT = JSON.stringify(SERVICE_EVIDENCE);
+const VERIFIED_SERVICE_EVIDENCE = captureVerifiedServiceEvidence({
+  evidenceText: SERVICE_EVIDENCE_TEXT,
+  serviceManifest: SERVICE_MANIFEST,
+  modelWeights: MODEL_WEIGHTS,
+  now: Date.now()
+});
 // Distinct, so a swap is visible: the run record carries both, and they say
 // different things about what was measured.
 const IMPLEMENTATION_LOCK_HASH = '1'.repeat(64);
@@ -139,8 +200,8 @@ async function harness(t, overrides = {}) {
       if (file.endsWith('python-wheels.lock.json')) return JSON.stringify(WHEELS_LOCK);
       if (file.endsWith('runtime-manifest.json')) return JSON.stringify(MANIFEST);
       if (file.endsWith('model-weights.lock.json')) return JSON.stringify(MODEL_WEIGHTS);
+      if (file.endsWith('service-images.json')) return JSON.stringify(SERVICE_MANIFEST);
       if (file.endsWith('preregistration.json')) return JSON.stringify(PREREGISTRATION);
-      if (file.endsWith('service-evidence.json')) return JSON.stringify(SERVICE_EVIDENCE);
       throw Object.assign(new Error(`unexpected read: ${file}`), { code: 'ENOENT' });
     },
     mkdir: async (target) => {
@@ -222,7 +283,7 @@ async function harness(t, overrides = {}) {
     registry: { descriptorFor: () => ({}) },
     runId: 'run-binding-1',
     attemptId: 'attempt-binding-1',
-    serviceEvidencePath: path.join(directory, 'service-evidence.json'),
+    verifiedServiceEvidence: VERIFIED_SERVICE_EVIDENCE,
     ledgerDirectory: directory,
     providerUpstream: 'http://127.0.0.1:11434/v1',
     stateRoot: path.join(directory, 'node-state'),
@@ -482,7 +543,7 @@ test('the refusals that keep a run off a machine it cannot measure on', async (t
     [{ stateRoot: null }, /--state-root/u],
     [{ pythonStateRoot: undefined }, /--state-root/u],
     [{ pythonRuntimeSite: null }, /--state-root/u],
-    [{ serviceEvidencePath: null }, /--service-evidence/u]
+    [{ verifiedServiceEvidence: null }, /verified service-evidence snapshot/u]
   ]) {
     await assert.rejects(
       bindV11Runtime({ ...input, ...override }, injections),
@@ -504,6 +565,40 @@ test('the refusals that keep a run off a machine it cannot measure on', async (t
   for (const upstream of ['http://127.0.0.1:11434/v1', 'http://127.9.9.9:1/v1', 'http://[::1]:11434/v1']) {
     const fresh = await harness(t);
     const bound = await bindV11Runtime({ ...fresh.input, providerUpstream: upstream }, fresh.injections);
+    await bound.close();
+  }
+});
+
+test('the acceptance binding refuses a raw or schema-less service-evidence substitute', async (t) => {
+  const { input, injections } = await harness(t);
+  input.verifiedServiceEvidence = {
+    services: [{ name: 'ollama', image: 'ollama/ollama:0.12.3', resolvedDigest: `sha256:${'d'.repeat(64)}` }]
+  };
+
+  await assert.rejects(
+    bindV11Runtime(input, injections),
+    /verified service evidence|service-evidence snapshot/u
+  );
+});
+
+test('a replacement raw path cannot alter the snapshot-derived implementation identity', async (t) => {
+  const { input, injections, seen, trace } = await harness(t);
+  const rawPath = path.join(input.ledgerDirectory, 'replaced-service-evidence.json');
+  input.serviceEvidencePath = rawPath;
+  const originalReadFile = injections.readFile;
+  injections.readFile = async (file, ...rest) => {
+    if (file === rawPath) {
+      return JSON.stringify({ schema: 'replaced', services: [] });
+    }
+    return await originalReadFile(file, ...rest);
+  };
+
+  const bound = await bindV11Runtime(input, injections);
+  try {
+    assert.equal(trace.some((entry) => entry === 'read:replaced-service-evidence.json'), false);
+    assert.equal(seen.implementationLock[0].serviceEvidenceSha256, VERIFIED_SERVICE_EVIDENCE.evidenceSha256);
+    assert.deepEqual(seen.implementationLock[0].serviceImages, VERIFIED_SERVICE_EVIDENCE.serviceImages);
+  } finally {
     await bound.close();
   }
 });
@@ -545,18 +640,14 @@ test('every argument of the composition, because the composition is all this doe
   // binding is asserted; this one decides what the meter is reachable *from*.
   assert.equal(meterConfig[0].listenerUrl, 'http://127.0.0.1:0');
 
-  // The implementation lock: this repository, the files discovered in it, the
-  // models the weight lock pins, and the digests the service probe verified -
-  // not the tags it started from.
+  // The implementation lock receives exactly the immutable service identities
+  // and the evidence-byte hash captured by readiness, never a reopened path.
   assert.deepEqual(seen.implementationLock, [{
     repoRoot: input.repositoryRoot,
     files: [`${input.repositoryRoot}/benchmark/cli.mjs`],
     models: MODEL_WEIGHTS.models,
-    serviceImages: [{
-      name: 'ollama',
-      image: 'ollama/ollama:0.12.3',
-      digest: SERVICE_EVIDENCE.services[0].resolvedDigest
-    }]
+    serviceImages: VERIFIED_SERVICE_EVIDENCE.serviceImages,
+    serviceEvidenceSha256: VERIFIED_SERVICE_EVIDENCE.evidenceSha256
   }]);
 
   // The environment lock is built from what was observed, not asserted.
@@ -647,7 +738,8 @@ test('every argument of the composition, because the composition is all this doe
   assert.deepEqual({ ...bound.runtime }, {
     manifestPath: path.join(path.dirname(path.resolve(input.pythonRuntimeSite)), 'runtime-manifest.json'),
     sitePath: input.pythonRuntimeSite,
-    distributions: MANIFEST.distributions.length
+    distributions: MANIFEST.distributions.length,
+    serviceEvidenceSha256: VERIFIED_SERVICE_EVIDENCE.evidenceSha256
   });
 
   await bound.close();

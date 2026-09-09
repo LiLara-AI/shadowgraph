@@ -243,7 +243,8 @@ function fixtureInput(repository) {
     repoRoot: repository,
     files: FILE_SPECS.map((entry) => ({ ...entry })),
     models: MODELS.map((entry) => ({ ...entry })),
-    serviceImages: SERVICE_IMAGES.map((entry) => ({ ...entry }))
+    serviceImages: SERVICE_IMAGES.map((entry) => ({ ...entry })),
+    serviceEvidenceSha256: 'c'.repeat(64)
   };
 }
 
@@ -417,7 +418,8 @@ test('lock is deterministic, comprehensive, path-portable, and verifies in a byt
   const clonedLock = await createImplementationLock(cloneInput);
   assert.deepEqual(clonedLock, lock, 'input order and clone path must not change the lock');
   assert.equal(lock.schema, 'shadowgraph.implementation-lock');
-  assert.equal(lock.version, 2);
+  assert.equal(lock.version, 3);
+  assert.equal(lock.serviceEvidenceSha256, fixture.input.serviceEvidenceSha256);
   assert.match(lock.repository.headCommit, /^[a-f0-9]{40,64}$/u);
   assert.match(lock.lockSha256, /^[a-f0-9]{64}$/u);
   assert.deepEqual(new Set(lock.files.map((entry) => entry.role)), new Set(FILE_SPECS.map((entry) => entry.role)));
@@ -682,6 +684,18 @@ test('verification fails closed for changed bytes, changed evidence, and lock ta
     verifyImplementationLock({ ...changedModels, lock: currentLock }),
     /does not match/i
   );
+
+  const changedEvidenceHash = { ...fixture.input, serviceEvidenceSha256: 'd'.repeat(64) };
+  const evidenceBoundLock = await createImplementationLock(changedEvidenceHash);
+  assert.notEqual(evidenceBoundLock.lockSha256, currentLock.lockSha256,
+    'a distinct verified service-evidence byte hash must produce a distinct official lock');
+  await assert.rejects(
+    verifyImplementationLock({ ...changedEvidenceHash, lock: currentLock }),
+    /does not match/i
+  );
+  const missingEvidenceHash = { ...fixture.input };
+  delete missingEvidenceHash.serviceEvidenceSha256;
+  await assert.rejects(createImplementationLock(missingEvidenceHash), /serviceEvidenceSha256|input/i);
 
   const tampered = structuredClone(currentLock);
   tampered.files[0].sha256 = 'f'.repeat(64);
