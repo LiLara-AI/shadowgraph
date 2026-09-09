@@ -76,6 +76,16 @@ test('v11-preflight reports the candidate without contacting a service or scorin
   assert.notEqual(code, 0);
 });
 
+test('v11-preflight reports missing campaign configuration as a run blocker', async () => {
+  const { code, stdout } = await runCli(['v11-preflight']);
+  const report = JSON.parse(stdout);
+
+  assert.notEqual(code, 0);
+  assert.ok(report.blockers.some((blocker) => (
+    blocker.kind === 'campaign' && blocker.code === 'CAMPAIGN_CONFIGURATION_REQUIRED'
+  )));
+});
+
 test('every frozen arm is bound to a runtime and its observed isolation', async () => {
   const { stdout } = await runCli(['v11-preflight']);
   const report = JSON.parse(stdout);
@@ -220,6 +230,7 @@ test('v11-preflight retains the three methodology blockers and requires operatio
     }).sort(),
     [
       'applicability:DECLARED_ISOLATION_PRECONDITION_UNMET:cognee',
+      'campaign:undefined:undefined',
       'native-attempt-evidence:NATIVE_ATTEMPT_EVIDENCE_REQUIRED:cognee:embedding:B',
       'native-attempt-evidence:NATIVE_ATTEMPT_EVIDENCE_REQUIRED:cognee:internal_memory_llm:C',
       'operational-budget:PROVIDER_BUDGET_REQUIRED',

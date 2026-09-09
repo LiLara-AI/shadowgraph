@@ -33,7 +33,8 @@ const REQUIRED_SOURCE_HASH_FIELDS = Object.freeze([
   'amendment003Sha256',
   'amendment004Sha256',
   'amendment005Sha256',
-  'amendment006Sha256'
+  'amendment006Sha256',
+  'amendment008Sha256'
 ]);
 
 /** What an indexed artifact is evidence of. Anything else is refused. */
@@ -211,7 +212,8 @@ export function buildReviewBundle(input) {
       amendment003Sha256: sourceHashes.amendment003Sha256,
       amendment004Sha256: sourceHashes.amendment004Sha256,
       amendment005Sha256: sourceHashes.amendment005Sha256,
-      amendment006Sha256: sourceHashes.amendment006Sha256
+      amendment006Sha256: sourceHashes.amendment006Sha256,
+      amendment008Sha256: sourceHashes.amendment008Sha256
     },
     evidenceIndexDigest: evidenceIndexDigest(validated),
     index: validated

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import os
 import sys
 import tempfile
+import threading
 import types
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from enum import Enum
 from pathlib import Path
 from unittest.mock import patch
@@ -544,8 +547,9 @@ class _StubHttpxClient:
 
 
 class _StubRequest:
-    def __init__(self, url):
+    def __init__(self, url, headers=None):
         self.url = url
+        self.headers = dict(headers or {})
 
 
 class _StubHttpx:
@@ -659,6 +663,14 @@ class CogneeRuntimeConfigTests(unittest.TestCase):
             async def send(self, _request, *args, **kwargs):
                 return None
 
+        class FakeNativeLiteLLMAdapter:
+            async def acreate_structured_output(self):
+                return None
+
+        class FakeEmbeddingEngine:
+            async def embed_text(self):
+                return None
+
         httpx = types.ModuleType("httpx")
         httpx.Client = FakeHttpxClient
         httpx.AsyncClient = FakeAsyncHttpxClient
@@ -673,6 +685,14 @@ class CogneeRuntimeConfigTests(unittest.TestCase):
         users_module.get_user_by_email = get_user_by_email
         data_item_module = types.ModuleType("cognee.tasks.ingestion.data_item")
         data_item_module.DataItem = FakeDataItem
+        native_adapter_module = types.ModuleType(
+            "cognee.infrastructure.llm.structured_output_framework.litellm_native.native_adapter"
+        )
+        native_adapter_module.NativeLiteLLMAdapter = FakeNativeLiteLLMAdapter
+        embedding_engine_module = types.ModuleType(
+            "cognee.infrastructure.databases.vector.embeddings.OpenAICompatibleEmbeddingEngine"
+        )
+        embedding_engine_module.OpenAICompatibleEmbeddingEngine = FakeEmbeddingEngine
 
         modules = {
             "httpx": httpx,
@@ -691,13 +711,44 @@ class CogneeRuntimeConfigTests(unittest.TestCase):
             "cognee.tasks": types.ModuleType("cognee.tasks"),
             "cognee.tasks.ingestion": types.ModuleType("cognee.tasks.ingestion"),
             "cognee.tasks.ingestion.data_item": data_item_module,
+            "cognee.infrastructure.llm": types.ModuleType("cognee.infrastructure.llm"),
+            "cognee.infrastructure.llm.structured_output_framework": types.ModuleType(
+                "cognee.infrastructure.llm.structured_output_framework"
+            ),
+            "cognee.infrastructure.llm.structured_output_framework.litellm_native": types.ModuleType(
+                "cognee.infrastructure.llm.structured_output_framework.litellm_native"
+            ),
+            "cognee.infrastructure.llm.structured_output_framework.litellm_native.native_adapter": native_adapter_module,
+            "cognee.infrastructure.databases": types.ModuleType("cognee.infrastructure.databases"),
+            "cognee.infrastructure.databases.vector": types.ModuleType("cognee.infrastructure.databases.vector"),
+            "cognee.infrastructure.databases.vector.embeddings": types.ModuleType(
+                "cognee.infrastructure.databases.vector.embeddings"
+            ),
+            "cognee.infrastructure.databases.vector.embeddings.OpenAICompatibleEmbeddingEngine": embedding_engine_module,
         }
-        with patch.dict(sys.modules, modules), patch.dict(os.environ, {}, clear=True):
+        aliases = iter(["a" * 48, "b" * 48])
+
+        async def meter_declare(_endpoint):
+            return {"alias": next(aliases), "plannedDispatchId": "c" * 48}
+
+        async def meter_close(_endpoint, _identity):
+            return None
+
+        with (
+            patch.dict(sys.modules, modules),
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(cognee_adapter, "_meter_declare", meter_declare),
+            patch.object(cognee_adapter, "_meter_close", meter_close),
+        ):
             client = asyncio.run(
                 await_native(cognee_adapter._default_client_factory(self.config(), lambda _class: None))
             )
 
         self.assertIsInstance(client, cognee_adapter._CogneeClient)
+        self.assertTrue(
+            FakeNativeLiteLLMAdapter.acreate_structured_output.__shadowgraph_dispatch_wrapped__
+        )
+        self.assertTrue(FakeEmbeddingEngine.embed_text.__shadowgraph_dispatch_wrapped__)
         applied = dict(calls)
         self.assertEqual(
             applied["set_llm_config"],
@@ -782,6 +833,219 @@ class CogneeMeteredRequestTests(unittest.TestCase):
         for _index in range(3):
             client.send(_StubRequest("http://127.0.0.1:43100/llm-a/chat/completions"))
         self.assertEqual(self.counted, ["internal_memory_llm"] * 3)
+
+    def test_meter_authorized_scope_declares_before_wire_send_and_resets_after_close(self) -> None:
+        endpoint = "http://127.0.0.1:43100/embed-scoped"
+        alias = "a" * 48
+        httpx = _StubHttpx()
+        counted = []
+        actions = []
+        cognee_adapter._count_metered_requests(
+            httpx,
+            {"embedding": endpoint},
+            counted.append,
+            require_dispatch_identity=True,
+        )
+
+        async def declare(request_class, declared_endpoint):
+            actions.append(("declare", request_class, declared_endpoint))
+            return {"alias": alias, "plannedDispatchId": "b" * 48}
+
+        async def close(request_class, identity):
+            actions.append(("close", request_class, identity["alias"]))
+
+        async def exercise():
+            async with cognee_adapter._metered_dispatch_scope(
+                {"embedding": endpoint},
+                ("embedding",),
+                declare=declare,
+                close=close,
+            ):
+                request = _StubRequest(endpoint + "/embeddings")
+                httpx.Client().send(request)
+                self.assertEqual(request.headers["x-shadowgraph-dispatch-alias"], alias)
+
+        asyncio.run(exercise())
+        self.assertEqual(counted, ["embedding"])
+        self.assertEqual(httpx.sent, [("sync", endpoint + "/embeddings")])
+        self.assertEqual(
+            actions,
+            [("declare", "embedding", endpoint), ("close", "embedding", alias)],
+        )
+        with self.assertRaises(RuntimeUnavailable):
+            httpx.Client().send(_StubRequest(endpoint + "/embeddings"))
+        self.assertEqual(len(httpx.sent), 1)
+
+    def test_caller_supplied_dispatch_alias_is_rejected_before_wire_send(self) -> None:
+        endpoint = "http://127.0.0.1:43100/embed-spoof"
+        httpx = _StubHttpx()
+        counted = []
+        cognee_adapter._count_metered_requests(
+            httpx,
+            {"embedding": endpoint},
+            counted.append,
+            require_dispatch_identity=True,
+        )
+
+        async def declare(_request_class, _endpoint):
+            return {"alias": "a" * 48, "plannedDispatchId": "b" * 48}
+
+        async def close(_request_class, _identity):
+            return None
+
+        async def exercise():
+            async with cognee_adapter._metered_dispatch_scope(
+                {"embedding": endpoint},
+                ("embedding",),
+                declare=declare,
+                close=close,
+            ):
+                with self.assertRaises(cognee_adapter.ContractError):
+                    httpx.Client().send(_StubRequest(
+                        endpoint + "/embeddings",
+                        {"X-Shadowgraph-Dispatch-Alias": "c" * 48},
+                    ))
+
+        asyncio.run(exercise())
+        self.assertEqual(counted, [])
+        self.assertEqual(httpx.sent, [])
+
+    def test_wrapped_native_children_receive_distinct_scoped_aliases(self) -> None:
+        endpoint = "http://127.0.0.1:43100/embed-children"
+        aliases = iter(["a" * 48, "b" * 48, "c" * 48])
+        dispatch_ids = iter(["d" * 48, "e" * 48, "f" * 48])
+        declared = []
+        closed = []
+        seen = []
+        httpx = _StubHttpx()
+        cognee_adapter._count_metered_requests(
+            httpx,
+            {"embedding": endpoint},
+            lambda _request_class: None,
+            require_dispatch_identity=True,
+        )
+
+        async def declare(request_class, declared_endpoint):
+            identity = {
+                "alias": next(aliases),
+                "plannedDispatchId": next(dispatch_ids),
+            }
+            declared.append((request_class, declared_endpoint, identity["alias"]))
+            return identity
+
+        async def close(request_class, identity):
+            closed.append((request_class, identity["alias"]))
+
+        class FakeEmbeddingRoot:
+            async def embed_text(self, label):
+                request = _StubRequest(endpoint + "/embeddings")
+                httpx.Client().send(request)
+                seen.append((label, request.headers["x-shadowgraph-dispatch-alias"]))
+                if label == "parent":
+                    await asyncio.gather(self.embed_text("left"), self.embed_text("right"))
+
+        cognee_adapter._wrap_native_dispatch_root(
+            FakeEmbeddingRoot,
+            "embed_text",
+            {"embedding": endpoint},
+            ("embedding",),
+            declare=declare,
+            close=close,
+        )
+        asyncio.run(FakeEmbeddingRoot().embed_text("parent"))
+
+        self.assertEqual(seen[0], ("parent", "a" * 48))
+        self.assertEqual({alias for _label, alias in seen[1:]}, {"b" * 48, "c" * 48})
+        self.assertEqual([item[2] for item in declared], ["a" * 48, "b" * 48, "c" * 48])
+        self.assertEqual({alias for _request_class, alias in closed}, {"a" * 48, "b" * 48, "c" * 48})
+
+    def test_pinned_native_roots_are_the_only_roots_wrapped_for_dispatch_identity(self) -> None:
+        endpoint = "http://127.0.0.1:43100/meter-route"
+
+        class FakeNativeLiteLLMAdapter:
+            async def acreate_structured_output(self):
+                return None
+
+        class FakeEmbeddingEngine:
+            async def embed_text(self):
+                return None
+
+        async def declare(_request_class, _endpoint):
+            return {"alias": "a" * 48, "plannedDispatchId": "b" * 48}
+
+        async def close(_request_class, _identity):
+            return None
+
+        cognee_adapter._install_cognee_dispatch_roots(
+            {"internal_memory_llm": endpoint, "embedding": endpoint + "/embedding"},
+            native_litellm_adapter=FakeNativeLiteLLMAdapter,
+            embedding_engine=FakeEmbeddingEngine,
+            declare=declare,
+            close=close,
+        )
+
+        self.assertTrue(
+            FakeNativeLiteLLMAdapter.acreate_structured_output.__shadowgraph_dispatch_wrapped__
+        )
+        self.assertTrue(FakeEmbeddingEngine.embed_text.__shadowgraph_dispatch_wrapped__)
+        self.assertFalse(hasattr(FakeNativeLiteLLMAdapter, "add"))
+        self.assertFalse(hasattr(FakeEmbeddingEngine, "cognify"))
+
+
+class CogneeMeteredLoopbackBridgeTests(unittest.TestCase):
+    def test_meter_plan_bridge_declares_and_closes_over_literal_loopback(self) -> None:
+        calls = []
+        alias = "a" * 48
+        dispatch_id = "b" * 48
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, _format, *_args):
+                return None
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length)
+                calls.append((self.path, dict(self.headers), body))
+                if self.path == "/meter/route/__shadowgraph/declare":
+                    response = json.dumps({
+                        "alias": alias,
+                        "plannedDispatchId": dispatch_id,
+                    }).encode("utf-8")
+                    self.send_response(201)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(response)))
+                    self.end_headers()
+                    self.wfile.write(response)
+                    return
+                if self.path == "/meter/route/__shadowgraph/close":
+                    self.send_response(204)
+                    self.end_headers()
+                    return
+                self.send_response(404)
+                self.end_headers()
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(lambda: server.shutdown())
+        endpoint = f"http://127.0.0.1:{server.server_address[1]}/meter/route"
+
+        identity = asyncio.run(cognee_adapter._meter_declare(endpoint))
+        asyncio.run(cognee_adapter._meter_close(endpoint, identity))
+
+        self.assertEqual(identity, {"alias": alias, "plannedDispatchId": dispatch_id})
+        self.assertEqual([item[0] for item in calls], [
+            "/meter/route/__shadowgraph/declare",
+            "/meter/route/__shadowgraph/close",
+        ])
+        self.assertEqual([item[2] for item in calls], [b"", b""])
+        self.assertEqual(
+            {name.lower(): value for name, value in calls[1][1].items()}[
+                "x-shadowgraph-dispatch-alias"
+            ],
+            alias,
+        )
 
 
 class CogneeClientSeamTests(unittest.TestCase):

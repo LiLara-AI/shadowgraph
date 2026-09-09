@@ -40,6 +40,8 @@ const AMENDMENT_005_PATH = path.join(BENCHMARK_ROOT, 'preregistration-amendment-
 const AMENDMENT_005_SIDECAR_PATH = path.join(BENCHMARK_ROOT, 'preregistration-amendment-005.sha256');
 const AMENDMENT_006_PATH = path.join(BENCHMARK_ROOT, 'preregistration-amendment-006.json');
 const AMENDMENT_006_SIDECAR_PATH = path.join(BENCHMARK_ROOT, 'preregistration-amendment-006.sha256');
+const AMENDMENT_008_PATH = path.join(BENCHMARK_ROOT, 'preregistration-amendment-008.json');
+const AMENDMENT_008_SIDECAR_PATH = path.join(BENCHMARK_ROOT, 'preregistration-amendment-008.sha256');
 
 async function realCandidate() {
   const competitorLock = JSON.parse(
@@ -355,6 +357,8 @@ test('the module refuses to run a candidate its own readiness check blocks', asy
       amendment005SidecarPath: AMENDMENT_005_SIDECAR_PATH,
     amendment006Path: AMENDMENT_006_PATH,
     amendment006SidecarPath: AMENDMENT_006_SIDECAR_PATH,
+    amendment008Path: AMENDMENT_008_PATH,
+    amendment008SidecarPath: AMENDMENT_008_SIDECAR_PATH,
       implementationLockHash: '4'.repeat(64),
       environmentLockHash: '5'.repeat(64),
       executeAdapter: async () => {
@@ -401,6 +405,8 @@ test('a real run may use only the frozen prompt builder', async () => {
     amendment005SidecarPath: AMENDMENT_005_SIDECAR_PATH,
     amendment006Path: AMENDMENT_006_PATH,
     amendment006SidecarPath: AMENDMENT_006_SIDECAR_PATH,
+    amendment008Path: AMENDMENT_008_PATH,
+    amendment008SidecarPath: AMENDMENT_008_SIDECAR_PATH,
     implementationLockHash: '4'.repeat(64),
     environmentLockHash: '5'.repeat(64),
     executeAdapter: async () => {
@@ -512,6 +518,7 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
     benchmarkRoot: gateDirectory,
     runId: 'run-v11-connected',
     attemptId: 'attempt-v11-connected',
+    campaign: { root: 'fixture-campaign-root', policy: {} },
     sourceHashes,
     amendment002Path: AMENDMENT_002_PATH,
     amendment003Path: AMENDMENT_003_PATH,
@@ -520,6 +527,8 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
     amendment005SidecarPath: AMENDMENT_005_SIDECAR_PATH,
     amendment006Path: AMENDMENT_006_PATH,
     amendment006SidecarPath: AMENDMENT_006_SIDECAR_PATH,
+    amendment008Path: AMENDMENT_008_PATH,
+    amendment008SidecarPath: AMENDMENT_008_SIDECAR_PATH,
     implementationLockHash: '4'.repeat(64),
     environmentLockHash: '5'.repeat(64),
     progress,
@@ -994,6 +1003,7 @@ test('preflight and run answer readiness identically when evidence is presented'
   assert.deepEqual(preflightReport.blockers.filter((blocker) => blocker.kind === 'required-service'), []);
   assert.equal(preflightReport.readiness, 'NOT READY');
   assert.deepEqual(preflightReport.blockers.map((blocker) => blocker.code), [
+    'CAMPAIGN_CONFIGURATION_REQUIRED',
     'PROVIDER_BUDGET_REQUIRED',
     'DECLARED_ISOLATION_PRECONDITION_UNMET',
     'NATIVE_ATTEMPT_EVIDENCE_REQUIRED',

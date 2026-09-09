@@ -40,6 +40,8 @@ const AMENDMENT_005_SHA256 = 'c435fa9d772c151c83214ef3a4180e0646236cd2cbb079be08
 const AMENDMENT_005_SIDECAR = `${AMENDMENT_005_SHA256}  benchmark/preregistration-amendment-005.json\n`;
 const AMENDMENT_006_SHA256 = '3bc9308a19e44ecc06d15dc0144239aa907b49cf897a11f9fab7cfe116966760';
 const AMENDMENT_006_SIDECAR = `${AMENDMENT_006_SHA256}  benchmark/preregistration-amendment-006.json\n`;
+const AMENDMENT_008_SHA256 = '184ba096d3b3d762f96e37c9a594925dd22e9628b9649a89d4a0a0c8fdff5ff9';
+const AMENDMENT_008_SIDECAR = `${AMENDMENT_008_SHA256}  benchmark/preregistration-amendment-008.json\n`;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
 // Exported because a production caller has to build the progress ledger with
 // the same deadline. Restating it there would make the ledger's `stalled`
@@ -461,6 +463,29 @@ async function loadAmendments(options) {
     || traceContract?.accounting?.nativeSuccessDoesNotCreateANewHarnessAttempt !== true) {
     throw new Error('Amendment 006 does not match the authorized arm-neutral native-attempt trace contract');
   }
+  const amendment008 = await loadExactAmendment(
+    8,
+    'amendment008Sha256',
+    AMENDMENT_008_SHA256,
+    options.amendment008Path
+  );
+  await loadExactAmendmentSidecar(8, AMENDMENT_008_SIDECAR, options.amendment008SidecarPath);
+  const attribution = amendment008?.prospectiveAttributionAndCampaignContract;
+  if (amendment008?.amendmentId !== 'amendment-008'
+    || amendment008?.status !== 'AUTHORIZED_PROSPECTIVE_REMEDIATION_PENDING_PINNED_LOOPBACK'
+    || amendment008?.supersedes?.amendment006Sha256 !== options.amendment006Sha256
+    || amendment008?.invariants?.scored !== false
+    || amendment008?.invariants?.comparativeClaimsEnabled !== false
+    || amendment008?.invariants?.providerBudgetsRelaxed !== false
+    || amendment008?.prospectiveEffect?.rescoreExistingRuns !== false
+    || amendment008?.prospectiveEffect?.rewriteHistoricalArtifacts !== false
+    || amendment008?.prospectiveEffect?.resumeHistoricalRuns !== false
+    || attribution?.planAuthority !== 'meter-issued durable pre-dispatch root and dispatch plans'
+    || attribution?.campaignNoResetRule !== 'new run IDs and session IDs do not reset consumed campaign totals or per-class limits'
+    || amendment008?.acceptanceGates?.freshPinnedCogneeLoopbackFaultInjectionRequired !== true
+    || amendment008?.acceptanceGates?.cumulativeCampaignPolicyRequired !== true) {
+    throw new Error('Amendment 008 does not match the authorized prospective attribution and campaign contract');
+  }
   let nativeAttemptPolicy;
   try {
     nativeAttemptPolicy = validateNativeAttemptPolicy(traceContract.armNeutralRecoveryPolicy);
@@ -481,6 +506,7 @@ async function loadAmendments(options) {
     amendment004,
     amendment005,
     amendment006,
+    amendment008,
     nativeAttemptPolicy,
     effectiveMatrix
   };
@@ -536,7 +562,8 @@ function validationSourceHashes(options) {
     amendment003Sha256: options.amendment003Sha256,
     amendment004Sha256: options.amendment004Sha256,
     amendment005Sha256: options.amendment005Sha256,
-    amendment006Sha256: options.amendment006Sha256
+    amendment006Sha256: options.amendment006Sha256,
+    amendment008Sha256: options.amendment008Sha256
   };
 }
 
@@ -824,7 +851,8 @@ async function validateResume(options, plannedIds) {
     'amendment003Sha256',
     'amendment004Sha256',
     'amendment005Sha256',
-    'amendment006Sha256'
+    'amendment006Sha256',
+    'amendment008Sha256'
   ]) {
     if (previousRaw[field] !== options[field]) {
       throw new Error(`Changed ${field} requires a new runId`);
@@ -923,6 +951,7 @@ function validateOptions(options) {
     'amendment004Sha256',
     'amendment005Sha256',
     'amendment006Sha256',
+    'amendment008Sha256',
     'implementationLockHash',
     'environmentLockHash'
   ]) requireHash(options[field], field);
@@ -946,6 +975,12 @@ function validateOptions(options) {
   }
   if (!isNonEmptyString(options.amendment006SidecarPath)) {
     throw new Error('amendment006SidecarPath must identify the exact Amendment 006 hash sidecar');
+  }
+  if (!isNonEmptyString(options.amendment008Path)) {
+    throw new Error('amendment008Path must identify the exact Amendment 008 source file');
+  }
+  if (!isNonEmptyString(options.amendment008SidecarPath)) {
+    throw new Error('amendment008SidecarPath must identify the exact Amendment 008 hash sidecar');
   }
   if (!isPlainObject(options.progress)
     || typeof options.progress.append !== 'function'
@@ -1736,6 +1771,7 @@ async function executeV11Benchmark(options, closeResources) {
     amendment004Sha256: options.amendment004Sha256,
     amendment005Sha256: options.amendment005Sha256,
     amendment006Sha256: options.amendment006Sha256,
+    amendment008Sha256: options.amendment008Sha256,
     implementationLockHash: options.implementationLockHash,
     environmentLockHash: options.environmentLockHash,
     startedAt,

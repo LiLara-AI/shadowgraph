@@ -49,22 +49,26 @@ export const PYTHON_ADAPTER_SPECS = Object.freeze({
   'mem0-oss': Object.freeze({
     armId: 'mem0-oss',
     packages: Object.freeze({ mem0ai: '2.0.19' }),
-    requestClasses: Object.freeze(['internal_memory_llm', 'embedding'])
+    requestClasses: Object.freeze(['internal_memory_llm', 'embedding']),
+    dispatchIdentityMode: 'static'
   }),
   graphiti: Object.freeze({
     armId: 'graphiti',
     packages: Object.freeze({ 'graphiti-core': '0.29.3', httpx: '0.28.1' }),
-    requestClasses: Object.freeze(['internal_memory_llm', 'embedding'])
+    requestClasses: Object.freeze(['internal_memory_llm', 'embedding']),
+    dispatchIdentityMode: 'static'
   }),
   'basic-memory': Object.freeze({
     armId: 'basic-memory',
     packages: Object.freeze({ 'basic-memory': '0.23.2' }),
-    requestClasses: Object.freeze([])
+    requestClasses: Object.freeze([]),
+    dispatchIdentityMode: 'static'
   }),
   cognee: Object.freeze({
     armId: 'cognee',
     packages: Object.freeze({ cognee: '1.5.3' }),
-    requestClasses: Object.freeze(['internal_memory_llm', 'embedding'])
+    requestClasses: Object.freeze(['internal_memory_llm', 'embedding']),
+    dispatchIdentityMode: 'dynamic'
   })
 });
 
@@ -183,6 +187,14 @@ function validateProviderEndpoint(value) {
     throw new PythonAdapterExecutorError('CONTRACT_FAILURE', 'The metered provider endpoint is invalid');
   }
   return endpoint.toString().replace(/\/$/u, '');
+}
+
+function validateProviderRouteAllocation(value) {
+  if (typeof value === 'string') return validateProviderEndpoint(value);
+  if (!isPlainRecord(value) || Object.keys(value).length !== 1 || !Object.hasOwn(value, 'endpoint')) {
+    throw new PythonAdapterExecutorError('CONTRACT_FAILURE', 'A fresh metered provider endpoint is required');
+  }
+  return validateProviderEndpoint(value.endpoint);
 }
 
 function providerCorrelation(request, requestClass) {
@@ -1001,13 +1013,19 @@ export function createPythonAdapterExecutor(options) {
   }
   const usedEndpoints = new Set();
 
-  async function routesFor(request, deadlineAt, signal) {
+  async function routesFor(request, deadlineAt, signal, rootInvocationId) {
     const routes = { internal_memory_llm: null, embedding: null };
     const allocated = [];
     for (const requestClass of spec.requestClasses) {
       const correlation = providerCorrelation(request, requestClass);
-      const endpoint = validateProviderEndpoint(await waitBounded(
-        Promise.resolve().then(() => options.providerEndpointFor(requestClass, correlation)),
+      const plan = Object.freeze({
+        rootInvocationId,
+        rootOperation: correlation.rootOperation,
+        planSlot: `adapter-${requestClass}`,
+        identityMode: spec.dispatchIdentityMode
+      });
+      const endpoint = validateProviderRouteAllocation(await waitBounded(
+        Promise.resolve().then(() => options.providerEndpointFor(requestClass, correlation, plan)),
         deadlineAt,
         signal,
         new PythonAdapterExecutorError(
@@ -1044,7 +1062,8 @@ export function createPythonAdapterExecutor(options) {
         'Python adapter operation was interrupted'
       );
     }
-    const routes = await routesFor(request, deadlineAt, signal);
+    const rootInvocationId = randomUUID();
+    const routes = await routesFor(request, deadlineAt, signal, rootInvocationId);
     const wrapper = {
       schemaVersion: 2,
       adapterId: options.adapterId,

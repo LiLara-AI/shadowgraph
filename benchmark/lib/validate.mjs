@@ -31,6 +31,7 @@ const V11_RAW_FIELDS = [
   'schemaVersion', 'benchmarkVersion', 'mode', 'runId', 'attemptId', 'attemptIds',
   'status', 'preregistrationSha256', 'amendment001Sha256', 'amendment002Sha256',
   'amendment003Sha256', 'amendment004Sha256', 'amendment005Sha256', 'amendment006Sha256',
+  'amendment008Sha256',
   'implementationLockHash', 'environmentLockHash', 'startedAt', 'finishedAt',
   'zeroResult', 'outerPromptBinding', 'arms', 'units'
 ];
@@ -713,12 +714,13 @@ function validateV11SourceHashes(raw, expectedSourceHashes) {
     'amendment003Sha256',
     'amendment004Sha256',
     'amendment005Sha256',
-    'amendment006Sha256'
+    'amendment006Sha256',
+    'amendment008Sha256'
   ];
   if (!isPlainObject(expectedSourceHashes)
     || Object.keys(expectedSourceHashes).length !== fields.length
     || fields.some((field) => !Object.hasOwn(expectedSourceHashes, field))) {
-    throw new Error('v1.1 raw run requires exactly seven trusted source hashes');
+    throw new Error('v1.1 raw run requires exactly eight trusted source hashes');
   }
   for (const field of fields) {
     assertHash(expectedSourceHashes[field], `trusted v1.1 source hash.${field}`);
@@ -761,6 +763,7 @@ export function validateV11RawRun(raw, preregistration, expectedSha256, expected
   for (const field of [
     'preregistrationSha256', 'amendment001Sha256', 'amendment002Sha256',
     'amendment003Sha256', 'amendment004Sha256', 'amendment005Sha256', 'amendment006Sha256',
+    'amendment008Sha256',
     'implementationLockHash', 'environmentLockHash'
   ]) assertHash(raw[field], `v1.1 raw run.${field}`);
   validateV11SourceHashes(raw, expectedSourceHashes);

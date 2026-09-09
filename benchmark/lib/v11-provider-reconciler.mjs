@@ -17,8 +17,11 @@ import { reconcileProviderAttempts } from './v11-budget.mjs';
 import { traceNativeAttempts } from './v11-native-attempts.mjs';
 
 const LEDGER_SCHEMA = 'shadowgraph.provider-meter.event';
-const LEDGER_VERSION = 1;
+const LEDGER_VERSIONS = new Set([1, 2]);
 const LEDGER_EVENT = 'provider_request';
+const PLAN_SCHEMA = 'shadowgraph.provider-meter.plan';
+const PLAN_VERSION = 1;
+const OPAQUE_DISPATCH_ID = /^[a-f0-9]{48}$/u;
 
 const CORRELATION_FIELDS = Object.freeze([
   'runId',
@@ -28,6 +31,14 @@ const CORRELATION_FIELDS = Object.freeze([
   'repetition',
   'phase',
   'requestClass'
+]);
+const ROOT_OPERATIONS = new Set(['reset', 'retrieve', 'persist', 'verify', 'outer-decision']);
+const CAMPAIGN_RESERVATION_ID = /^[A-Za-z0-9-]+:[1-9]\d*$/;
+const SAFE_LINEAGE_ID = /^[A-Za-z0-9._:-]+$/;
+const PLAN_DISPOSITIONS = new Set(['root-initial', 'data-dependent-child', 'recovery']);
+const CAMPAIGN_JOIN_FIELDS = Object.freeze([
+  ...CORRELATION_FIELDS,
+  'rootOperation', 'rootInvocationId', 'plannedDispatchId', 'planSlot', 'disposition'
 ]);
 
 /** Every discrepancy this reconciler can report. */
@@ -46,6 +57,17 @@ export const RECONCILIATION_CODES = Object.freeze([
   'FAILED_OUTCOME',
   'INCOMPLETE_USAGE',
   'UNVERIFIED_OPERATION_COUNT',
+  'DISPATCH_PLAN_LEDGER_UNREADABLE',
+  'DISPATCH_PLAN_INVALID',
+  'DISPATCH_PLAN_MISSING',
+  'DISPATCH_PLAN_UNKNOWN_ALIAS',
+  'DISPATCH_PLAN_MISMATCH',
+  'CAMPAIGN_LEDGER_UNREADABLE',
+  'CAMPAIGN_LEDGER_INVALID',
+  'CAMPAIGN_RESERVATION_MISSING',
+  'CAMPAIGN_RESERVATION_UNKNOWN',
+  'CAMPAIGN_RESERVATION_MISMATCH',
+  'CAMPAIGN_RESERVATION_REUSED',
   'NATIVE_ATTEMPT_TRACE_DISCREPANT'
 ]);
 
@@ -60,8 +82,11 @@ function isNonEmptyString(value) {
 }
 
 /** Stable key over the full correlation. Lengths are prefixed so no component can impersonate another. */
-function correlationKey(value) {
-  return CORRELATION_FIELDS
+function correlationKey(value, requireRootOperation = false) {
+  const fields = requireRootOperation
+    ? [...CORRELATION_FIELDS, 'rootOperation']
+    : CORRELATION_FIELDS;
+  return fields
     .map((field) => {
       const component = String(value[field]);
       return `${component.length}:${component}`;
@@ -69,9 +94,10 @@ function correlationKey(value) {
     .join('|');
 }
 
-function readableCorrelation(value) {
+function readableCorrelation(value, requireRootOperation = false) {
   const correlation = {};
   for (const field of CORRELATION_FIELDS) correlation[field] = value[field];
+  if (requireRootOperation) correlation.rootOperation = value.rootOperation;
   return correlation;
 }
 
@@ -99,7 +125,7 @@ export function parseProviderLedger(text) {
     }
     if (!isPlainObject(parsed)
       || parsed.schema !== LEDGER_SCHEMA
-      || parsed.version !== LEDGER_VERSION
+      || !LEDGER_VERSIONS.has(parsed.version)
       || parsed.event !== LEDGER_EVENT) {
       malformed.push({ lineNumber, reason: 'not a provider-meter request event' });
       continue;
@@ -117,16 +143,24 @@ export function parseProviderLedger(text) {
       malformed.push({ lineNumber, reason: 'correlation is incomplete' });
       continue;
     }
+    if (parsed.version === 2 && (!isNonEmptyString(parsed.rootInvocationId)
+      || !OPAQUE_DISPATCH_ID.test(parsed.plannedDispatchId)
+      || !OPAQUE_DISPATCH_ID.test(parsed.dispatchAlias)
+      || !isNonEmptyString(parsed.planSlot)
+      || !isNonEmptyString(parsed.disposition))) {
+      malformed.push({ lineNumber, reason: 'dispatch plan identity is incomplete' });
+      continue;
+    }
     events.push({ ...parsed, lineNumber });
   }
   return { events, malformed };
 }
 
-function expectationKey(expectation) {
-  return correlationKey(expectation);
+function expectationKey(expectation, requireRootOperation = false) {
+  return correlationKey(expectation, requireRootOperation);
 }
 
-function validateExpectation(expectation, index) {
+function validateExpectation(expectation, index, requireRootOperation = false) {
   if (!isPlainObject(expectation)) {
     throw new Error(`expectation[${index}] must be an object`);
   }
@@ -143,6 +177,10 @@ function validateExpectation(expectation, index) {
   }
   if (!Number.isSafeInteger(expectation.expectedCalls) || expectation.expectedCalls < 0) {
     throw new Error(`expectation[${index}].expectedCalls must be a non-negative safe integer`);
+  }
+  if (requireRootOperation && (!isNonEmptyString(expectation.rootOperation)
+    || !ROOT_OPERATIONS.has(expectation.rootOperation))) {
+    throw new Error(`expectation[${index}].rootOperation must be a known root operation`);
   }
 }
 
@@ -174,11 +212,15 @@ function reconcileProviderEvidenceInternal(input, toleratedTransportFailureReque
     // it skipped MODEL_MISMATCH, FAILED_OUTCOME and INCOMPLETE_USAGE, none of
     // which read a count; and it therefore let an arm reach an unpinned model
     // and crash, and reported RECONCILED.
-    unverifiedCounts = []
+    unverifiedCounts = [],
+    requireRootOperation = false
   } = input;
   if (!Array.isArray(events)) throw new Error('events must be an array');
   if (!Array.isArray(expectations)) throw new Error('expectations must be an array');
-  expectations.forEach(validateExpectation);
+  if (typeof requireRootOperation !== 'boolean') {
+    throw new Error('requireRootOperation must be boolean');
+  }
+  expectations.forEach((expectation, index) => validateExpectation(expectation, index, requireRootOperation));
   if (!Array.isArray(unverifiedCounts)) throw new Error('unverifiedCounts must be an array');
   const unverified = new Set(unverifiedCounts.map((correlation) => {
     if (!isPlainObject(correlation)) throw new Error('every unverified count must name a correlation');
@@ -215,7 +257,7 @@ function reconcileProviderEvidenceInternal(input, toleratedTransportFailureReque
 
   const observed = new Map();
   for (const event of events) {
-    const key = correlationKey(event);
+    const key = correlationKey(event, requireRootOperation);
     if (!observed.has(key)) observed.set(key, []);
     observed.get(key).push(event);
   }
@@ -223,10 +265,10 @@ function reconcileProviderEvidenceInternal(input, toleratedTransportFailureReque
   const expectedKeys = new Set();
   let unverifiedObserved = 0;
   for (const expectation of expectations) {
-    const key = expectationKey(expectation);
+    const key = expectationKey(expectation, requireRootOperation);
     expectedKeys.add(key);
     const matched = observed.get(key) ?? [];
-    const correlation = readableCorrelation(expectation);
+    const correlation = readableCorrelation(expectation, requireRootOperation);
     const countsAreVerifiable = !unverified.has(correlationPrefix(expectation));
 
     if (!countsAreVerifiable) {
@@ -305,7 +347,7 @@ function reconcileProviderEvidenceInternal(input, toleratedTransportFailureReque
     if (expectedKeys.has(key)) continue;
     findings.push({
       code: 'UNEXPECTED_CALL',
-      correlation: readableCorrelation(matched[0]),
+      correlation: readableCorrelation(matched[0], requireRootOperation),
       expected: 0,
       observed: matched.length
     });
@@ -316,7 +358,7 @@ function reconcileProviderEvidenceInternal(input, toleratedTransportFailureReque
   ), 0);
   const matchedCalls = expectations.reduce((total, entry) => {
     if (unverified.has(correlationPrefix(entry))) return total;
-    const matched = observed.get(expectationKey(entry)) ?? [];
+    const matched = observed.get(expectationKey(entry, requireRootOperation)) ?? [];
     return total + Math.min(matched.length, entry.expectedCalls);
   }, 0);
 
@@ -438,6 +480,224 @@ export function providerExpectationsFromRun(raw, attemptId) {
   return { expectations, unverifiedCounts };
 }
 
+function planCorrelationKey(correlation) {
+  return [
+    correlation.runId,
+    correlation.attemptId,
+    correlation.armId,
+    correlation.scenarioId,
+    String(correlation.repetition),
+    correlation.phase,
+    correlation.requestClass,
+    correlation.rootOperation
+  ].map((value) => `${value.length}:${value}`).join('|');
+}
+
+function validPlanCorrelation(correlation) {
+  return isPlainObject(correlation)
+    && CORRELATION_FIELDS.every((field) => (
+      field === 'repetition'
+        ? Number.isSafeInteger(correlation.repetition) && correlation.repetition >= 0
+        : isNonEmptyString(correlation[field])
+    ))
+    && isNonEmptyString(correlation.rootOperation)
+    && ROOT_OPERATIONS.has(correlation.rootOperation);
+}
+
+function samePlanCorrelation(left, right) {
+  return validPlanCorrelation(left) && validPlanCorrelation(right)
+    && [...CORRELATION_FIELDS, 'rootOperation'].every((field) => left[field] === right[field]);
+}
+
+function parseDispatchPlanLedger(text) {
+  if (typeof text !== 'string' || !text.endsWith('\n')) {
+    return { findings: ['DISPATCH_PLAN_LEDGER_UNREADABLE'], plans: new Map() };
+  }
+  const roots = new Map();
+  const plans = new Map();
+  const dispatchIds = new Set();
+  const findings = [];
+  for (const line of text.trimEnd().split('\n')) {
+    let row;
+    try { row = JSON.parse(line); } catch { findings.push('DISPATCH_PLAN_INVALID'); continue; }
+    if (!isPlainObject(row) || row.schema !== PLAN_SCHEMA || row.version !== PLAN_VERSION
+      || !isNonEmptyString(row.recordedAt) || !Number.isFinite(Date.parse(row.recordedAt))) {
+      findings.push('DISPATCH_PLAN_INVALID');
+      continue;
+    }
+    if (row.event === 'root_plan') {
+      const expectedChildRule = row.identityMode === 'dynamic'
+        ? 'data-dependent-before-send'
+        : null;
+      if (!isNonEmptyString(row.rootInvocationId) || !isNonEmptyString(row.planSlot)
+        || !['dynamic', 'static'].includes(row.identityMode)
+        || row.childRule !== expectedChildRule
+        || !validPlanCorrelation(row.correlation)) {
+        findings.push('DISPATCH_PLAN_INVALID');
+        continue;
+      }
+      const key = `${row.rootInvocationId}|${planCorrelationKey(row.correlation)}|${row.planSlot}`;
+      if (roots.has(key)) findings.push('DISPATCH_PLAN_INVALID');
+      else roots.set(key, row);
+      continue;
+    }
+    if (row.event === 'dispatch_plan') {
+      if (!OPAQUE_DISPATCH_ID.test(row.plannedDispatchId) || !OPAQUE_DISPATCH_ID.test(row.alias)
+        || !isNonEmptyString(row.rootInvocationId) || !isNonEmptyString(row.parentRootInvocationId)
+        || !isNonEmptyString(row.rootPlanSlot) || !isNonEmptyString(row.planSlot)
+        || !['root-initial', 'data-dependent-child', 'recovery'].includes(row.disposition)
+        || !(row.recoveryOf === null || OPAQUE_DISPATCH_ID.test(row.recoveryOf))
+        || !validPlanCorrelation(row.correlation)) {
+        findings.push('DISPATCH_PLAN_INVALID');
+        continue;
+      }
+      const rootKey = `${row.rootInvocationId}|${planCorrelationKey(row.correlation)}|${row.rootPlanSlot}`;
+      const root = roots.get(rootKey);
+      if (!root || row.parentRootInvocationId !== root.rootInvocationId
+        || row.childRule !== root.childRule
+        || plans.has(row.alias) || dispatchIds.has(row.plannedDispatchId)) {
+        findings.push('DISPATCH_PLAN_INVALID');
+        continue;
+      }
+      const plan = { ...row, closed: false };
+      plans.set(row.alias, plan);
+      dispatchIds.add(row.plannedDispatchId);
+      continue;
+    }
+    if (row.event === 'dispatch_closed' || row.event === 'dispatch_consumed') {
+      const plan = plans.get(row.alias);
+      const consumedStatic = row.event === 'dispatch_consumed';
+      if (!plan || plan.closed || row.plannedDispatchId !== plan.plannedDispatchId
+        || row.rootInvocationId !== plan.rootInvocationId || row.planSlot !== plan.planSlot
+        || (consumedStatic && plan.disposition !== 'root-initial')
+        || (!consumedStatic && plan.disposition === 'root-initial')) {
+        findings.push('DISPATCH_PLAN_INVALID');
+      } else {
+        plan.closed = true;
+      }
+      continue;
+    }
+    if (row.event !== 'dispatch_denied') findings.push('DISPATCH_PLAN_INVALID');
+  }
+  for (const plan of plans.values()) {
+    if (plan.disposition === 'data-dependent-child' && !plan.closed) {
+      findings.push('DISPATCH_PLAN_INVALID');
+    }
+  }
+  return { findings: [...new Set(findings)], plans };
+}
+
+function reconcileDispatchPlans(events, text) {
+  const parsed = parseDispatchPlanLedger(text);
+  const findings = [...parsed.findings];
+  for (const event of events) {
+    if (event.version !== 2) {
+      findings.push('DISPATCH_PLAN_MISSING');
+      continue;
+    }
+    const plan = parsed.plans.get(event.dispatchAlias);
+    if (!plan) {
+      findings.push('DISPATCH_PLAN_UNKNOWN_ALIAS');
+      continue;
+    }
+    if (event.plannedDispatchId !== plan.plannedDispatchId
+      || event.rootInvocationId !== plan.rootInvocationId
+      || event.planSlot !== plan.planSlot
+      || event.disposition !== plan.disposition
+      || !samePlanCorrelation(event, plan.correlation)) {
+      findings.push('DISPATCH_PLAN_MISMATCH');
+    }
+  }
+  return { status: findings.length ? 'DISCREPANT' : 'RECONCILED', findings: [...new Set(findings)] };
+}
+
+function parseCampaignReservationLedger(text) {
+  if (typeof text !== 'string' || !text.endsWith('\n')) {
+    return { findings: ['CAMPAIGN_LEDGER_UNREADABLE'], reservations: new Map() };
+  }
+  const rows = [];
+  try {
+    for (const line of text.trimEnd().split('\n')) rows.push(JSON.parse(line));
+  } catch {
+    return { findings: ['CAMPAIGN_LEDGER_INVALID'], reservations: new Map() };
+  }
+  const campaignId = rows[0]?.event === 'policy' && isPlainObject(rows[0].policy)
+    ? rows[0].policy.campaignId
+    : null;
+  if (!isNonEmptyString(campaignId) || !/^[A-Za-z0-9-]+$/.test(campaignId)) {
+    return { findings: ['CAMPAIGN_LEDGER_INVALID'], reservations: new Map() };
+  }
+  const sessions = new Map();
+  const reservations = new Map();
+  const findings = [];
+  for (const row of rows.slice(1)) {
+    if (!isPlainObject(row)) { findings.push('CAMPAIGN_LEDGER_INVALID'); continue; }
+    if (row.event === 'session') {
+      const fields = ['event', 'id', 'recovery', 'kind', 'runId', 'attemptId'];
+      if (Object.keys(row).sort().join() !== fields.sort().join()
+        || !isNonEmptyString(row.id) || sessions.has(row.id)
+        || typeof row.recovery !== 'boolean'
+        || !['probe', 'acceptance'].includes(row.kind)
+        || !isNonEmptyString(row.runId) || !isNonEmptyString(row.attemptId)) {
+        findings.push('CAMPAIGN_LEDGER_INVALID');
+      } else {
+        sessions.set(row.id, row);
+      }
+      continue;
+    }
+    if (row.event !== 'reservation') { findings.push('CAMPAIGN_LEDGER_INVALID'); continue; }
+    const fields = ['event', 'reservationId', 'session', ...CAMPAIGN_JOIN_FIELDS];
+    const session = sessions.get(row.session);
+    if (Object.keys(row).sort().join() !== fields.slice().sort().join()
+      || !CAMPAIGN_RESERVATION_ID.test(row.reservationId)
+      || !row.reservationId.startsWith(`${campaignId}:`)
+      || reservations.has(row.reservationId)
+      || !session
+      || row.runId !== session.runId || row.attemptId !== session.attemptId
+      || !CAMPAIGN_JOIN_FIELDS.every((field) => (
+        field === 'repetition'
+          ? Number.isSafeInteger(row.repetition) && row.repetition >= 0
+          : isNonEmptyString(row[field])
+      ))
+      || !SAFE_LINEAGE_ID.test(row.rootInvocationId)
+      || !OPAQUE_DISPATCH_ID.test(row.plannedDispatchId)
+      || !SAFE_LINEAGE_ID.test(row.planSlot)
+      || !PLAN_DISPOSITIONS.has(row.disposition)
+      || !ROOT_OPERATIONS.has(row.rootOperation)) {
+      findings.push('CAMPAIGN_LEDGER_INVALID');
+      continue;
+    }
+    reservations.set(row.reservationId, row);
+  }
+  return { findings: [...new Set(findings)], reservations };
+}
+
+function reconcileCampaignReservations(events, text) {
+  const parsed = parseCampaignReservationLedger(text);
+  const findings = [...parsed.findings];
+  const used = new Set();
+  for (const event of events) {
+    if (event.version !== 2 || !CAMPAIGN_RESERVATION_ID.test(event.campaignReservationId)) {
+      findings.push('CAMPAIGN_RESERVATION_MISSING');
+      continue;
+    }
+    const reservation = parsed.reservations.get(event.campaignReservationId);
+    if (!reservation) {
+      findings.push('CAMPAIGN_RESERVATION_UNKNOWN');
+      continue;
+    }
+    if (used.has(event.campaignReservationId)) {
+      findings.push('CAMPAIGN_RESERVATION_REUSED');
+      continue;
+    }
+    used.add(event.campaignReservationId);
+    if (!CAMPAIGN_JOIN_FIELDS.every((field) => event[field] === reservation[field])) {
+      findings.push('CAMPAIGN_RESERVATION_MISMATCH');
+    }
+  }
+  return { status: findings.length ? 'DISCREPANT' : 'RECONCILED', findings: [...new Set(findings)] };
+}
+
 /**
  * The reconciliation a finished run writes beside its record.
  *
@@ -451,7 +711,21 @@ export function providerExpectationsFromRun(raw, attemptId) {
  * comparison is capable of.
  */
 export function runProviderReconciliation(input) {
-  const { ledgerText = null, ledgerPath, raw, attemptId, pinnedModels, nativeAttemptPolicy } = input ?? {};
+  const {
+    ledgerText = null,
+    ledgerPath,
+    raw,
+    attemptId,
+    pinnedModels,
+    nativeAttemptPolicy,
+    planLedgerText = null,
+    campaignLedgerText = null,
+    requireDispatchPlans = false,
+    requireCampaignReservations = false
+  } = input ?? {};
+  if (typeof requireDispatchPlans !== 'boolean' || typeof requireCampaignReservations !== 'boolean') {
+    throw new Error('dispatch plan and campaign reservation requirements must be boolean');
+  }
   if (!isNonEmptyString(ledgerPath)) {
     throw new Error('a run reconciliation must name the ledger it read');
   }
@@ -487,6 +761,12 @@ export function runProviderReconciliation(input) {
   }
 
   const { events, malformed } = parseProviderLedger(ledgerText);
+  const dispatchPlanEvidence = requireDispatchPlans
+    ? reconcileDispatchPlans(events, planLedgerText)
+    : null;
+  const campaignReservationEvidence = requireCampaignReservations
+    ? reconcileCampaignReservations(events, campaignLedgerText)
+    : null;
   const { expectations, unverifiedCounts } = providerExpectationsFromRun(raw, attemptId);
   const expectedModels = {
     // The outer decision and an arm's own internal calls are the same pinned
@@ -508,7 +788,8 @@ export function runProviderReconciliation(input) {
       nativeAttemptTrace = traceNativeAttempts({
         events,
         expectedModels,
-        policy: nativeAttemptPolicy
+        policy: nativeAttemptPolicy,
+        requireDispatchPlans
       });
     } catch {
       nativeAttemptTrace = Object.freeze({
@@ -536,6 +817,14 @@ export function runProviderReconciliation(input) {
   }
   let findings = [...report.findings];
   let status = report.status;
+  if (dispatchPlanEvidence !== null && dispatchPlanEvidence.status !== 'RECONCILED') {
+    status = 'DISCREPANT';
+    findings.push(...dispatchPlanEvidence.findings.map((code) => ({ code })));
+  }
+  if (campaignReservationEvidence !== null && campaignReservationEvidence.status !== 'RECONCILED') {
+    status = 'DISCREPANT';
+    findings.push(...campaignReservationEvidence.findings.map((code) => ({ code })));
+  }
   if (nativeAttemptTrace?.status !== null && nativeAttemptTrace?.status !== undefined
     && nativeAttemptTrace.status !== 'RECONCILED') {
     status = 'DISCREPANT';

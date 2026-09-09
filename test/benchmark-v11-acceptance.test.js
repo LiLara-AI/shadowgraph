@@ -52,6 +52,12 @@ const AMENDMENT_006_PATH = fileURLToPath(
 const AMENDMENT_006_SIDECAR_PATH = fileURLToPath(
   new URL('../benchmark/preregistration-amendment-006.sha256', import.meta.url)
 );
+const AMENDMENT_008_PATH = fileURLToPath(
+  new URL('../benchmark/preregistration-amendment-008.json', import.meta.url)
+);
+const AMENDMENT_008_SIDECAR_PATH = fileURLToPath(
+  new URL('../benchmark/preregistration-amendment-008.sha256', import.meta.url)
+);
 
 // The frozen source digests, stated so a change to the frozen bytes fails this
 // suite instead of silently re-baselining it.
@@ -63,6 +69,7 @@ const HASHES = Object.freeze({
   amendment004Sha256: 'b0c3a2553608efb78147a8c1f1ef9af51a7d0eebaa0037ce4ad7b64616b1c5f9',
   amendment005Sha256: 'c435fa9d772c151c83214ef3a4180e0646236cd2cbb079be082b8341c4e6e223',
   amendment006Sha256: '3bc9308a19e44ecc06d15dc0144239aa907b49cf897a11f9fab7cfe116966760',
+  amendment008Sha256: '184ba096d3b3d762f96e37c9a594925dd22e9628b9649a89d4a0a0c8fdff5ff9',
   implementationLockHash: '4'.repeat(64),
   environmentLockHash: '5'.repeat(64)
 });
@@ -291,6 +298,8 @@ async function acceptanceRun(overrides = {}) {
     amendment005SidecarPath: AMENDMENT_005_SIDECAR_PATH,
     amendment006Path: AMENDMENT_006_PATH,
     amendment006SidecarPath: AMENDMENT_006_SIDECAR_PATH,
+    amendment008Path: AMENDMENT_008_PATH,
+    amendment008SidecarPath: AMENDMENT_008_SIDECAR_PATH,
     progress,
     persistUnit: async () => {},
     now: clock.now,
@@ -672,6 +681,7 @@ test('the frozen source digests are carried through the run unchanged', () => {
   assert.equal(raw.amendment004Sha256, loaded.sourceHashes.amendment004Sha256);
   assert.equal(raw.amendment005Sha256, loaded.sourceHashes.amendment005Sha256);
   assert.equal(raw.amendment006Sha256, loaded.sourceHashes.amendment006Sha256);
+  assert.equal(raw.amendment008Sha256, loaded.sourceHashes.amendment008Sha256);
   assert.equal(raw.preregistrationSha256, HASHES.preregistrationSha256);
   assert.equal(raw.amendment001Sha256, HASHES.amendment001Sha256);
   assert.equal(raw.amendment002Sha256, HASHES.amendment002Sha256);
@@ -679,6 +689,7 @@ test('the frozen source digests are carried through the run unchanged', () => {
   assert.equal(raw.amendment004Sha256, HASHES.amendment004Sha256);
   assert.equal(raw.amendment005Sha256, HASHES.amendment005Sha256);
   assert.equal(raw.amendment006Sha256, HASHES.amendment006Sha256);
+  assert.equal(raw.amendment008Sha256, HASHES.amendment008Sha256);
 });
 
 test('every unit is checkpointed, and no unit reports an unapproved status', () => {

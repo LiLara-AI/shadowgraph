@@ -17,6 +17,7 @@ import { loadV11AcceptanceDefinition } from './lib/v11-definition.mjs';
 import { LIST_DISTRIBUTIONS_SCRIPT, PYTHON_IMPORT_MODULES, pythonRuntimeManifest, renderRequirements, verifyPythonRuntime } from './lib/v11-python-runtime.mjs';
 import { providerModelsFromLock } from './lib/v11-provider-models.mjs';
 import { parseProviderLedger, reconcileProviderEvidence, runProviderReconciliation } from './lib/v11-provider-reconciler.mjs';
+import { reconcileProviderEvidenceFiles } from './lib/v11-provider-evidence-loader.mjs';
 import { createV11Registry } from './lib/v11-registry.mjs';
 import { combineRunFailure } from './lib/v11-run-resources.mjs';
 import { bindV11Runtime, providerLedgerPath } from './lib/v11-runtime-binding.mjs';
@@ -579,6 +580,7 @@ async function v11RunCommand(options) {
   const attemptId = safeRunId(options['attempt-id'] ?? `${runId}-attempt-1`);
   const readiness = await computeV11Readiness({
     providerBudget: await readProviderBudget(options),
+    campaign: campaign ?? null,
     runId: options['run-id'] ?? null,
     attemptId: options['attempt-id'] ?? null,
     ...candidate,
@@ -619,6 +621,7 @@ async function v11RunCommand(options) {
   try {
     outcome = await executeV11AcceptanceRun({
       ...candidate,
+      campaign: campaign ?? null,
       benchmarkRoot,
       preconditionEvidencePath,
       nativeAttemptEvidencePath,
@@ -633,12 +636,15 @@ async function v11RunCommand(options) {
       amendment005SidecarPath: join(benchmarkRoot, 'preregistration-amendment-005.sha256'),
       amendment006Path: join(benchmarkRoot, 'preregistration-amendment-006.json'),
       amendment006SidecarPath: join(benchmarkRoot, 'preregistration-amendment-006.sha256'),
+      amendment008Path: join(benchmarkRoot, 'preregistration-amendment-008.json'),
+      amendment008SidecarPath: join(benchmarkRoot, 'preregistration-amendment-008.sha256'),
       ...runtime.dependencies,
       // Judged inside the run rather than after it, so a caller cannot omit it.
       // Reached only once `closeResources` has closed the meter, which is what
       // makes the ledger complete at the moment it is read.
       reconcileProviderEvidence: (raw) => reconcileRunProviderEvidence({
         ledgerPath: providerLedgerPath(ledgerDirectory, attemptId),
+        campaignLedgerPath: campaign === undefined ? null : join(campaign.root, 'campaign.ndjson'),
         raw,
         attemptId,
         pinnedModels: runtime.pinnedModels,
@@ -705,20 +711,18 @@ async function v11RunCommand(options) {
  * possible overstatement this reconciliation can make.
  */
 async function reconcileRunProviderEvidence({
-  ledgerPath, raw, attemptId, pinnedModels, nativeAttemptPolicy, providerBudget
+  ledgerPath, campaignLedgerPath, raw, attemptId, pinnedModels, nativeAttemptPolicy, providerBudget
 }) {
-  let ledgerText = null;
-  try {
-    ledgerText = await readFile(ledgerPath, 'utf8');
-  } catch {
-    // Left null on purpose. What an unreadable ledger *means* is decided in
-    // `runProviderReconciliation`, where it can be tested, rather than here.
-  }
-  let attemptLedgerText = null;
-  try { attemptLedgerText = await readFile(`${ledgerPath}.attempts.ndjson`, 'utf8'); }
-  catch { /* Missing attempt evidence remains an explicit failed reconciliation. */ }
-  return runProviderReconciliation({ ledgerText, ledgerPath, raw, attemptId, pinnedModels,
-    nativeAttemptPolicy, providerBudget, attemptLedgerText });
+  return await reconcileProviderEvidenceFiles({
+    readFile,
+    ledgerPath,
+    raw,
+    attemptId,
+    pinnedModels,
+    nativeAttemptPolicy,
+    providerBudget,
+    campaignLedgerPath
+  });
 }
 
 /**
@@ -761,7 +765,7 @@ async function v11RuntimeDependencies(options, context) {
  * a statement about the candidate, not about any arm's behaviour.
  */
 async function v11Preflight(options) {
-  await readCampaignConfiguration(options);
+  const campaign = await readCampaignConfiguration(options);
   refuseAssertedPreconditions(options);
   const {
     registry,
@@ -783,6 +787,7 @@ async function v11Preflight(options) {
     providerBudget
   } = await computeV11Readiness({
     providerBudget: await readProviderBudget(options),
+    campaign: campaign ?? null,
     runId: options['run-id'] ?? null,
     attemptId: options['attempt-id'] ?? null,
     registry,

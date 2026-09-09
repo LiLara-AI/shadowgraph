@@ -162,22 +162,26 @@ test('public adapter specs bind four exact ids, arms, versions, and provider req
     'mem0-oss': {
       armId: 'mem0-oss',
       packages: { mem0ai: '2.0.19' },
-      requestClasses: ['internal_memory_llm', 'embedding']
+      requestClasses: ['internal_memory_llm', 'embedding'],
+      dispatchIdentityMode: 'static'
     },
     'basic-memory': {
       armId: 'basic-memory',
       packages: { 'basic-memory': '0.23.2' },
-      requestClasses: []
+      requestClasses: [],
+      dispatchIdentityMode: 'static'
     },
     graphiti: {
       armId: 'graphiti',
       packages: { 'graphiti-core': '0.29.3', httpx: '0.28.1' },
-      requestClasses: ['internal_memory_llm', 'embedding']
+      requestClasses: ['internal_memory_llm', 'embedding'],
+      dispatchIdentityMode: 'static'
     },
     cognee: {
       armId: 'cognee',
       packages: { cognee: '1.5.3' },
-      requestClasses: ['internal_memory_llm', 'embedding']
+      requestClasses: ['internal_memory_llm', 'embedding'],
+      dispatchIdentityMode: 'dynamic'
     }
   });
 });
@@ -270,6 +274,42 @@ assert os.path.realpath(os.environ["TEMP"]).startswith(os.path.dirname(os.path.r
     assert.equal(Object.hasOwn(call.correlation, 'operation'), false);
   }
   assert.doesNotMatch(JSON.stringify(first), /provider-meter|43100/u);
+});
+
+processGroupTest('Cognee planned routes share one root invocation and use dynamic dispatch mode', async (t) => {
+  const calls = [];
+  const { hostPath } = await makeHost(t, successHostSource({
+    adapterId: 'cognee',
+    assertions: String.raw`assert wrapper["providerRoutes"]["internal_memory_llm"].startswith("http://127.")
+assert wrapper["providerRoutes"]["embedding"].startswith("http://127.")`
+  }));
+  const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
+    adapterId: 'cognee',
+    armId: 'cognee',
+    providerEndpointFor: async (requestClass, correlation, plan) => {
+      calls.push({ requestClass, correlation: structuredClone(correlation), plan: structuredClone(plan) });
+      return {
+        endpoint: `http://127.0.0.1:43100/provider-meter/v1/${String(calls.length).padStart(48, 'a')}`
+      };
+    }
+  }));
+  await executor.execute(requestFor('persist', { armId: 'cognee' }));
+
+  assert.deepEqual(calls.map(({ requestClass }) => requestClass), [
+    'internal_memory_llm',
+    'embedding'
+  ]);
+  assert.equal(new Set(calls.map(({ plan }) => plan.rootInvocationId)).size, 1);
+  assert.match(calls[0].plan.rootInvocationId, /^[0-9a-f]{8}-[0-9a-f-]{27}$/u);
+  assert.deepEqual(calls.map(({ plan }) => plan.identityMode), ['dynamic', 'dynamic']);
+  assert.deepEqual(calls.map(({ plan }) => plan.planSlot), [
+    'adapter-internal_memory_llm',
+    'adapter-embedding'
+  ]);
+  for (const call of calls) {
+    assert.equal(call.correlation.rootOperation, 'persist');
+    assert.equal(call.plan.rootOperation, 'persist');
+  }
 });
 
 processGroupTest('basic-memory launches with both provider routes null and never invokes route callback', async (t) => {

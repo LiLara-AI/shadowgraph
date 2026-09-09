@@ -1,0 +1,84 @@
+{
+  "amendmentVersion": "1.1.0",
+  "amendmentId": "amendment-008",
+  "status": "AUTHORIZED_PROSPECTIVE_REMEDIATION_PENDING_PINNED_LOOPBACK",
+  "proposedAt": "2026-09-09T08:33:06Z",
+  "authorizedAt": "2026-09-09T08:33:06Z",
+  "supersedes": {
+    "amendment006File": "benchmark/preregistration-amendment-006.json",
+    "amendment006Sha256": "3bc9308a19e44ecc06d15dc0144239aa907b49cf897a11f9fab7cfe116966760"
+  },
+  "reason": {
+    "validComparativeResultObserved": false,
+    "historicalRunChanged": false,
+    "finding": "PROSPECTIVE_ATTRIBUTION_LINEAGE_AND_CUMULATIVE_CAMPAIGN_JOIN",
+    "correction": "Amendment 006 records bounded native attempt categories but does not prospectively authorize semantic work before provider dispatch, distinguish planned dynamic children from recovery or replay, or join cumulative campaign reservations to provider evidence. This amendment adds only benchmark-owned meter plans, opaque local capabilities, arm-neutral aggregate caps, and durable campaign receipts. It does not infer or repair missing historical lineage."
+  },
+  "invariants": {
+    "scored": false,
+    "scenariosChanged": false,
+    "seedsChanged": false,
+    "repetitionsChanged": false,
+    "armSetChanged": false,
+    "frozenSourcesChanged": false,
+    "comparativeClaimsEnabled": false,
+    "scoringRulesChanged": false,
+    "responseSchemaChanged": false,
+    "applicabilityMatrixChanged": false,
+    "providerModelsChanged": false,
+    "providerEndpointsChanged": false,
+    "providerBudgetsRelaxed": false,
+    "timeoutsChanged": false
+  },
+  "prospectiveAttributionAndCampaignContract": {
+    "appliesTo": "every arm, every root operation, every provider request class, every probe session, and every future non-scored v1.1 acceptance run",
+    "planAuthority": "meter-issued durable pre-dispatch root and dispatch plans",
+    "forbiddenAuthoritySubstitutes": [
+      "request-body-or-HMAC-identity",
+      "ContextVar-only-identity",
+      "caller-supplied-header-identity"
+    ],
+    "rootPlanFields": [
+      "correlation",
+      "rootOperation",
+      "rootInvocationId",
+      "planSlot",
+      "identityMode",
+      "childRule"
+    ],
+    "dispatchPlanFields": [
+      "plannedDispatchId",
+      "opaqueAlias",
+      "parentRootInvocationId",
+      "rootPlanSlot",
+      "planSlot",
+      "disposition",
+      "recoveryOf"
+    ],
+    "dynamicChildRule": "declare each data-dependent child before its native root enters provider send",
+    "staticPlanRule": "one declared provider send; later reuse is denied before upstream dispatch",
+    "recoveryRule": "B, C, and D are evaluated only within one verified plannedDispatchId under the frozen arm-neutral policy",
+    "unknownOrMismatchedIdentityRule": "missing, malformed, unknown, cross-root, closed, or reused identity is denied before upstream dispatch",
+    "aggregateCapRule": "rootInvocationId plus requestClass caps are independent of plan slots and aliases",
+    "campaignRule": "one durable campaign ledger spans probe and acceptance sessions; every admitted provider send carries one durable reservation receipt",
+    "campaignNoResetRule": "new run IDs and session IDs do not reset consumed campaign totals or per-class limits",
+    "privacyRule": "plans, campaign receipts, provider ledgers, and reconciliation retain no prompts, request bodies, schema bodies, credentials, or aliases upstream of the local meter",
+    "pinnedCogneeLoopbackGate": "required before any fresh non-scored acceptance; pending infrastructure is not proof"
+  },
+  "prospectiveEffect": {
+    "appliesToRunsStartedAfter": "2026-09-09T08:33:06Z",
+    "rescoreExistingRuns": false,
+    "rewriteHistoricalArtifacts": false,
+    "resumeHistoricalRuns": false,
+    "note": "The sealed v11-acceptance-004-attempt-1 investigation remains INSUFFICIENT EVIDENCE — RUN INVALID. No historical provider event, plan, root invocation, campaign receipt, or causal lineage is reconstructed by this amendment."
+  },
+  "acceptanceGates": {
+    "offlineVerticalSliceRequired": true,
+    "freshIndependentExactByteReviewRequired": true,
+    "freshPinnedCogneeLoopbackFaultInjectionRequired": true,
+    "officialImplementationLockAndBindingsRequired": true,
+    "cumulativeCampaignPolicyRequired": true,
+    "freshUnusedNonScoredRunRequired": true,
+    "rerunForFavorableOutcomeProhibited": true
+  }
+}

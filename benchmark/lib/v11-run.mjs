@@ -142,6 +142,7 @@ export async function computeV11Readiness(input) {
     scenarios,
     nativeAttemptPolicy = null,
     sourceHashes = null,
+    campaign = null,
     benchmarkRoot,
     // An operator's unverified declaration that a precondition holds. Retained
     // for the tests that drive applicability directly; the CLI never populates
@@ -194,6 +195,7 @@ export async function computeV11Readiness(input) {
     .map((key) => ({ count: key, declared: declaredCounts[key], derived: derivedCounts[key] }));
 
   const blockers = [];
+  if (campaign === null) blockers.push({ kind: 'campaign', code: 'CAMPAIGN_CONFIGURATION_REQUIRED' });
   let providerBudget = null;
   try {
     providerBudget = validateProviderBudget(input.providerBudget, {
@@ -264,6 +266,7 @@ export async function computeV11Readiness(input) {
         evidence: nativeEvidenceGate.state === 'present' ? nativeEvidenceGate.value : null,
         policy: nativeAttemptPolicy,
         amendment006Sha256: sourceHashes?.amendment006Sha256,
+        amendment008Sha256: sourceHashes?.amendment008Sha256,
         pinnedPackages: Object.fromEntries(registry.descriptors.map((descriptor) => [
           descriptor.armId,
           { name: descriptor.packageName ?? null, version: descriptor.version ?? null }
@@ -446,6 +449,8 @@ export async function executeV11AcceptanceRun(input) {
     amendment005SidecarPath,
     amendment006Path,
     amendment006SidecarPath,
+    amendment008Path,
+    amendment008SidecarPath,
     resume = null,
     signal = undefined,
     // A production run owns a provider meter and two ledgers. The runner already
@@ -504,6 +509,7 @@ export async function executeV11AcceptanceRun(input) {
     scenarios,
     nativeAttemptPolicy,
     sourceHashes,
+    campaign: input.campaign ?? null,
     benchmarkRoot,
     satisfiedPreconditions,
     preconditionEvidencePath,
@@ -545,6 +551,7 @@ export async function executeV11AcceptanceRun(input) {
     amendment004Sha256: sourceHashes.amendment004Sha256,
     amendment005Sha256: sourceHashes.amendment005Sha256,
     amendment006Sha256: sourceHashes.amendment006Sha256,
+    amendment008Sha256: sourceHashes.amendment008Sha256,
     implementationLockHash,
     environmentLockHash,
     amendment002Path,
@@ -554,6 +561,8 @@ export async function executeV11AcceptanceRun(input) {
     amendment005SidecarPath,
     amendment006Path,
     amendment006SidecarPath,
+    amendment008Path,
+    amendment008SidecarPath,
     progress,
     persistUnit,
     now,

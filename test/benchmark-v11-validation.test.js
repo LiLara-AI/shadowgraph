@@ -12,7 +12,8 @@ const TRUSTED_SOURCE_HASHES = Object.freeze({
   amendment003Sha256: '4'.repeat(64),
   amendment004Sha256: '5'.repeat(64),
   amendment005Sha256: '6'.repeat(64),
-  amendment006Sha256: '7'.repeat(64)
+  amendment006Sha256: '7'.repeat(64),
+  amendment008Sha256: '8'.repeat(64)
 });
 const PREREGISTRATION_SHA = TRUSTED_SOURCE_HASHES.preregistrationSha256;
 const RUN_ID = 'run-validation-1';
@@ -462,6 +463,7 @@ function rawRun({ mode = 'ACCEPTANCE', armDefinitions, mutateUnit = null, zeroRe
     amendment004Sha256: TRUSTED_SOURCE_HASHES.amendment004Sha256,
     amendment005Sha256: TRUSTED_SOURCE_HASHES.amendment005Sha256,
     amendment006Sha256: TRUSTED_SOURCE_HASHES.amendment006Sha256,
+    amendment008Sha256: TRUSTED_SOURCE_HASHES.amendment008Sha256,
     implementationLockHash: '4'.repeat(64),
     environmentLockHash: '5'.repeat(64),
     startedAt: '2026-08-31T00:00:00.000Z',
@@ -506,7 +508,8 @@ test('schema v2 aggregation requires trusted source hashes and rejects raw sourc
     'amendment003Sha256',
     'amendment004Sha256',
     'amendment005Sha256',
-    'amendment006Sha256'
+    'amendment006Sha256',
+    'amendment008Sha256'
   ]) {
     const tampered = structuredClone(raw);
     tampered[field] = '9'.repeat(64);

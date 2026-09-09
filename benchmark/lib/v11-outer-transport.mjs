@@ -27,6 +27,8 @@
 // runner hands one over, and the outer model must never see which project or
 // user the arm is storing under.
 
+import { randomUUID } from 'node:crypto';
+
 const CORRELATION_FIELDS = Object.freeze([
   'runId',
   'attemptId',
@@ -76,7 +78,7 @@ export function createMeteredOuterTransport(options = {}) {
     fetchImpl = globalThis.fetch
   } = options;
 
-  if (meter === null || typeof meter !== 'object' || typeof meter.bindEndpoint !== 'function') {
+  if (meter === null || typeof meter !== 'object' || typeof meter.bindPlannedEndpoint !== 'function') {
     throw new OuterTransportError('a metered outer transport requires a provider meter');
   }
   if (!isNonEmptyString(model)) {
@@ -118,7 +120,16 @@ export function createMeteredOuterTransport(options = {}) {
     const bound = {};
     for (const field of CORRELATION_FIELDS) bound[field] = correlation[field];
     bound.rootOperation = 'outer-decision';
-    const endpoint = meter.bindEndpoint(bound);
+    const route = await meter.bindPlannedEndpoint({
+      ...bound,
+      rootInvocationId: randomUUID(),
+      planSlot: 'outer-decision',
+      identityMode: 'static'
+    });
+    if (route === null || typeof route !== 'object' || !isNonEmptyString(route.endpoint)) {
+      throw new OuterTransportError('the provider meter returned an invalid planned endpoint');
+    }
+    const endpoint = route.endpoint;
 
     return await requestDecision({
       fetchImpl: (url, init) => fetchImpl(url, {

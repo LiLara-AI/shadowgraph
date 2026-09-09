@@ -71,6 +71,30 @@ test('exact agreement reconciles', () => {
   });
 });
 
+test('root-operation mismatch cannot credit an equal-count provider event', () => {
+  const report = reconcileProviderEvidence({
+    requireRootOperation: true,
+    events: [event({ requestClass: 'embedding', rootOperation: 'verify' })],
+    expectations: [expectation({ requestClass: 'embedding', rootOperation: 'persist' })]
+  });
+
+  assert.equal(report.status, 'DISCREPANT');
+  assert.deepEqual(codes(report).sort(), ['MISSING_CALL', 'UNEXPECTED_CALL']);
+  assert.equal(report.totals.matchedCalls, 0);
+});
+
+test('strict root-operation reconciliation accepts the matching operation', () => {
+  const report = reconcileProviderEvidence({
+    requireRootOperation: true,
+    events: [event({ requestClass: 'embedding', rootOperation: 'persist' })],
+    expectations: [expectation({ requestClass: 'embedding', rootOperation: 'persist' })]
+  });
+
+  assert.equal(report.status, 'RECONCILED');
+  assert.deepEqual(report.findings, []);
+  assert.equal(report.totals.matchedCalls, 1);
+});
+
 test('every correlation component must match exactly, with no approximate attribution', () => {
   // Each of these differs from the expectation in exactly one component. None
   // may be credited against it: the call is missing and the observed traffic is

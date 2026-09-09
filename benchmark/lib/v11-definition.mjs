@@ -137,7 +137,8 @@ export const V11_ACCEPTANCE_SOURCE_HASHES = Object.freeze({
   amendment003Sha256: '726de2018584aca399fc27d2bba15585d8b6fb9454bc24083578daed22f0be0a',
   amendment004Sha256: 'b0c3a2553608efb78147a8c1f1ef9af51a7d0eebaa0037ce4ad7b64616b1c5f9',
   amendment005Sha256: 'c435fa9d772c151c83214ef3a4180e0646236cd2cbb079be082b8341c4e6e223',
-  amendment006Sha256: '3bc9308a19e44ecc06d15dc0144239aa907b49cf897a11f9fab7cfe116966760'
+  amendment006Sha256: '3bc9308a19e44ecc06d15dc0144239aa907b49cf897a11f9fab7cfe116966760',
+  amendment008Sha256: '184ba096d3b3d762f96e37c9a594925dd22e9628b9649a89d4a0a0c8fdff5ff9'
 });
 
 export const V11_ACCEPTANCE_ARM_IDS = Object.freeze([
@@ -655,6 +656,7 @@ function validateFrozenSources(
   amendment004,
   amendment005,
   amendment006,
+  amendment008,
   definition
 ) {
   if (!Array.isArray(preregistration.arms)
@@ -787,6 +789,31 @@ function validateFrozenSources(
   } catch {
     boundaryReject('SHAPE');
   }
+  const attribution = amendment008?.prospectiveAttributionAndCampaignContract;
+  if (amendment008?.amendmentId !== 'amendment-008'
+    || amendment008?.status !== 'AUTHORIZED_PROSPECTIVE_REMEDIATION_PENDING_PINNED_LOOPBACK'
+    || amendment008?.supersedes?.amendment006Sha256 !== definition.sourceHashes.amendment006Sha256
+    || amendment008?.invariants?.scored !== false
+    || amendment008?.invariants?.comparativeClaimsEnabled !== false
+    || amendment008?.invariants?.providerModelsChanged !== false
+    || amendment008?.invariants?.providerEndpointsChanged !== false
+    || amendment008?.invariants?.providerBudgetsRelaxed !== false
+    || amendment008?.prospectiveEffect?.rescoreExistingRuns !== false
+    || amendment008?.prospectiveEffect?.rewriteHistoricalArtifacts !== false
+    || amendment008?.prospectiveEffect?.resumeHistoricalRuns !== false
+    || attribution?.planAuthority !== 'meter-issued durable pre-dispatch root and dispatch plans'
+    || !isDeepStrictEqual(attribution?.forbiddenAuthoritySubstitutes, [
+      'request-body-or-HMAC-identity', 'ContextVar-only-identity', 'caller-supplied-header-identity'
+    ])
+    || attribution?.dynamicChildRule !== 'declare each data-dependent child before its native root enters provider send'
+    || attribution?.staticPlanRule !== 'one declared provider send; later reuse is denied before upstream dispatch'
+    || attribution?.aggregateCapRule !== 'rootInvocationId plus requestClass caps are independent of plan slots and aliases'
+    || attribution?.campaignNoResetRule !== 'new run IDs and session IDs do not reset consumed campaign totals or per-class limits'
+    || attribution?.pinnedCogneeLoopbackGate !== 'required before any fresh non-scored acceptance; pending infrastructure is not proof'
+    || amendment008?.acceptanceGates?.freshPinnedCogneeLoopbackFaultInjectionRequired !== true
+    || amendment008?.acceptanceGates?.cumulativeCampaignPolicyRequired !== true) {
+    boundaryReject('SHAPE');
+  }
 }
 
 function validateMechanicalCounts(definition, scenarioCount) {
@@ -853,7 +880,8 @@ export async function loadV11AcceptanceDefinition(options) {
     ['amendment003Sha256', 'preregistration-amendment-003.json', 'authorized Amendment 003'],
     ['amendment004Sha256', 'preregistration-amendment-004.json', 'authorized Amendment 004'],
     ['amendment005Sha256', 'preregistration-amendment-005.json', 'authorized Amendment 005'],
-    ['amendment006Sha256', 'preregistration-amendment-006.json', 'authorized Amendment 006']
+    ['amendment006Sha256', 'preregistration-amendment-006.json', 'authorized Amendment 006'],
+    ['amendment008Sha256', 'preregistration-amendment-008.json', 'prospective Amendment 008']
   ];
   const parsedSources = [];
   for (const [hashField, filename, label] of sourceFiles) {
@@ -875,13 +903,20 @@ export async function loadV11AcceptanceDefinition(options) {
     benchmarkRoot,
     'authorized Amendment 006 hash sidecar'
   );
+  const amendment008Sidecar = await readSafeFile(
+    path.join(benchmarkRoot, 'preregistration-amendment-008.sha256'),
+    benchmarkRoot,
+    'prospective Amendment 008 hash sidecar'
+  );
   const expectedAmendment005Sidecar = `${V11_ACCEPTANCE_SOURCE_HASHES.amendment005Sha256}  benchmark/preregistration-amendment-005.json\n`;
   const expectedAmendment006Sidecar = `${V11_ACCEPTANCE_SOURCE_HASHES.amendment006Sha256}  benchmark/preregistration-amendment-006.json\n`;
+  const expectedAmendment008Sidecar = `${V11_ACCEPTANCE_SOURCE_HASHES.amendment008Sha256}  benchmark/preregistration-amendment-008.json\n`;
   if (amendment005Sidecar.toString('utf8') !== expectedAmendment005Sidecar
-    || amendment006Sidecar.toString('utf8') !== expectedAmendment006Sidecar) {
+    || amendment006Sidecar.toString('utf8') !== expectedAmendment006Sidecar
+    || amendment008Sidecar.toString('utf8') !== expectedAmendment008Sidecar) {
     boundaryReject('SHAPE');
   }
-  const [preregistration, amendment001, amendment002, amendment003, amendment004, amendment005, amendment006] = parsedSources;
+  const [preregistration, amendment001, amendment002, amendment003, amendment004, amendment005, amendment006, amendment008] = parsedSources;
   validateFrozenSources(
     preregistration,
     amendment001,
@@ -890,6 +925,7 @@ export async function loadV11AcceptanceDefinition(options) {
     amendment004,
     amendment005,
     amendment006,
+    amendment008,
     definition
   );
 

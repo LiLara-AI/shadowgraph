@@ -6,6 +6,17 @@ import { verifyNativeAttemptEvidence } from '../benchmark/lib/v11-native-attempt
 
 const NOW = Date.parse('2026-09-08T10:00:00.000Z');
 const AMENDMENT_006 = 'a'.repeat(64);
+const AMENDMENT_008 = 'b'.repeat(64);
+const IDENTITY_PROOF = Object.freeze({
+  meterIssuedOpaqueAlias: true,
+  durablePlanBeforeDispatch: true,
+  rootInvocationAndDispatchIds: true,
+  bodyIndependentIdentity: true,
+  contextCarrierOnly: true,
+  planClosureBeforeReconciliation: true,
+  aggregateCapIndependentOfAliases: true,
+  campaignReservationJoinedBeforeDispatch: true
+});
 function structuredReport({ requestClass, category, modelId, taxonomy, wireAttempts }) {
   return JSON.stringify({
     schema: 'shadowgraph.v11.native-attempt-loopback-report',
@@ -116,6 +127,20 @@ function evidence() {
       }
     ]
   };
+}
+
+function amendment008Evidence() {
+  const reports = Object.fromEntries(Object.entries(PROBE_REPORTS).map(([name, text]) => {
+    const report = JSON.parse(text);
+    report.amendment008Sha256 = AMENDMENT_008;
+    report.identityProtocol = { ...IDENTITY_PROOF };
+    return [name, `${JSON.stringify(report)}\n`];
+  }));
+  const record = evidence();
+  record.amendment008Sha256 = AMENDMENT_008;
+  record.identityProtocol = { ...IDENTITY_PROOF };
+  for (const entry of record.entries) entry.probeSha256 = sha256(reports[entry.probeReport]);
+  return { record, reports };
 }
 
 function verifierInput(record, probeReports = PROBE_REPORTS) {
@@ -239,6 +264,27 @@ test('native evidence accepts canonical UTC microsecond instants from the pinned
   const record = evidence();
   record.observedAt = '2026-09-08T09:59:00.123456Z';
   const result = verifyNativeAttemptEvidence(verifierInput(record));
+  assert.deepEqual(result.findings, []);
+});
+
+test('Amendment 008 rejects Amendment-006-only native attempt evidence as insufficient', () => {
+  const result = verifyNativeAttemptEvidence({
+    ...verifierInput(evidence()),
+    amendment008Sha256: 'b'.repeat(64)
+  });
+
+  assert.deepEqual(result.findings.map((finding) => finding.code), [
+    'NATIVE_ATTEMPT_EVIDENCE_METHODOLOGY_REQUIRED'
+  ]);
+});
+
+test('Amendment 008 accepts only identity-aware fresh loopback evidence', () => {
+  const { record, reports } = amendment008Evidence();
+  const result = verifyNativeAttemptEvidence({
+    ...verifierInput(record, reports),
+    amendment008Sha256: AMENDMENT_008
+  });
+
   assert.deepEqual(result.findings, []);
 });
 

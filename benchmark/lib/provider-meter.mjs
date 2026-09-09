@@ -40,6 +40,8 @@ const CORRELATION_HEADERS = Object.freeze({
 
 const ROUTE_PREFIX = '/provider-meter/v1/';
 const OPAQUE_ROUTE_ID = /^[a-f0-9]{48}$/u;
+const OPAQUE_DISPATCH_ID = /^[a-f0-9]{48}$/u;
+const CAMPAIGN_RESERVATION_ID = /^[A-Za-z0-9-]+:[1-9]\d*$/u;
 const HEADER_SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
 const MODEL_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:/@+~-]{0,255}$/u;
 const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
@@ -48,6 +50,8 @@ const FAILURE_BODY = Buffer.from('{"error":"provider_meter_upstream_failure"}');
 
 const SAFE_REQUEST_HEADERS = ['accept', 'content-type'];
 const SAFE_RESPONSE_HEADERS = ['cache-control', 'content-encoding', 'content-type', 'retry-after'];
+const DISPATCH_ALIAS_HEADER = 'x-shadowgraph-dispatch-alias';
+const DISPATCH_IDENTITY_MODES = new Set(['dynamic', 'static']);
 const RESOURCE_BY_REQUEST_CLASS = Object.freeze({
   outer_decision_llm: '/chat/completions',
   internal_memory_llm: '/chat/completions',
@@ -211,6 +215,33 @@ function validateBinding(value, requireRootOperation) {
     throw new Error('provider meter rootOperation is required');
   }
   return Object.freeze({ ...validateCorrelation(correlation), rootOperation });
+}
+
+function validatePlannedBinding(value) {
+  if (!isPlainObject(value)) throw new Error('planned provider meter binding must be an object');
+  assertExactKeys(value, [
+    ...CORRELATION_FIELDS,
+    'rootOperation',
+    'rootInvocationId',
+    'planSlot',
+    'identityMode'
+  ], 'planned provider meter binding');
+  const { rootInvocationId, planSlot, identityMode, ...rootBinding } = value;
+  if (!isNonEmptyString(rootInvocationId) || !HEADER_SAFE_ID.test(rootInvocationId)) {
+    throw new Error('planned provider meter rootInvocationId must be a header-safe identifier');
+  }
+  if (!isNonEmptyString(planSlot) || !HEADER_SAFE_ID.test(planSlot)) {
+    throw new Error('planned provider meter planSlot must be a header-safe identifier');
+  }
+  if (!DISPATCH_IDENTITY_MODES.has(identityMode)) {
+    throw new Error('planned provider meter identityMode is invalid');
+  }
+  return Object.freeze({
+    ...validateBinding(rootBinding, true),
+    rootInvocationId,
+    planSlot,
+    identityMode
+  });
 }
 
 function rootRequestClassKey(correlation) {
@@ -561,6 +592,7 @@ export async function startProviderMeter(config, {
   budget = null,
   campaignReserve = null,
   requireRootOperation = false,
+  requireDispatchPlans = false,
   maxAttemptsPerRootRequestClass = null
 } = {}) {
   // Legacy stand-alone meter users have no operational authorization contract.
@@ -568,6 +600,12 @@ export async function startProviderMeter(config, {
   const authorization = budget === null ? null : validateProviderBudget(budget);
   if (typeof requireRootOperation !== 'boolean') {
     throw new Error('requireRootOperation must be boolean');
+  }
+  if (typeof requireDispatchPlans !== 'boolean') {
+    throw new Error('requireDispatchPlans must be boolean');
+  }
+  if (requireDispatchPlans && !requireRootOperation) {
+    throw new Error('requireDispatchPlans requires root operation evidence');
   }
   if (maxAttemptsPerRootRequestClass !== null && (
     !Number.isSafeInteger(maxAttemptsPerRootRequestClass)
@@ -582,16 +620,23 @@ export async function startProviderMeter(config, {
   const { listener, upstream } = validateConfig(config);
   let ledger;
   let attempts;
+  let plans;
   try {
     ledger = await open(config.ledgerPath, 'ax', 0o600);
     if (authorization !== null) attempts = await open(`${config.ledgerPath}.attempts.ndjson`, 'ax', 0o600);
+    if (requireDispatchPlans) plans = await open(`${config.ledgerPath}.plans.ndjson`, 'ax', 0o600);
   } catch (error) {
     await ledger?.close();
+    await plans?.close();
+    await attempts?.close();
     if (error?.code === 'EEXIST') throw new Error('Provider meter ledger already exists');
     throw error;
   }
 
   const bindings = new Map();
+  const dispatchPlans = new Map();
+  const rootPlanKeys = new Set();
+  const dynamicChildOrdinals = new Map();
   let state = 'STARTING';
   let nextRequestNumber = 1;
   let ledgerTail = Promise.resolve();
@@ -602,6 +647,7 @@ export async function startProviderMeter(config, {
   const nativeAttemptCounts = new Map();
   let nextAttemptNumber = 1;
   let auditTail = Promise.resolve();
+  let planTail = Promise.resolve();
   let evidenceFailure = null;
   let budgetStopped = false;
 
@@ -619,6 +665,138 @@ export async function startProviderMeter(config, {
     return operation;
   }
 
+  function opaqueDispatchId() {
+    return randomBytes(24).toString('hex');
+  }
+
+  function rootPlanKey(binding) {
+    return [
+      binding.runId,
+      binding.attemptId,
+      binding.armId,
+      binding.scenarioId,
+      String(binding.repetition),
+      binding.phase,
+      binding.requestClass,
+      binding.rootOperation,
+      binding.rootInvocationId,
+      binding.planSlot
+    ].map((value) => `${value.length}:${value}`).join('|');
+  }
+
+  function appendPlan(record) {
+    const operation = planTail.then(async () => {
+      if (!plans || evidenceFailure) throw evidenceFailure ?? new Error('Provider meter plan ledger is unavailable');
+      await plans.write(`${JSON.stringify({
+        schema: 'shadowgraph.provider-meter.plan',
+        version: 1,
+        recordedAt: new Date().toISOString(),
+        ...record
+      })}\n`);
+      await plans.sync();
+    });
+    planTail = operation.catch((error) => { evidenceFailure = error; });
+    return operation;
+  }
+
+  async function createDispatchPlan(binding, routeId, {
+    disposition = 'data-dependent-child',
+    planSlot = null
+  } = {}) {
+    const childKey = rootPlanKey(binding);
+    const ordinal = (dynamicChildOrdinals.get(childKey) ?? 0) + 1;
+    dynamicChildOrdinals.set(childKey, ordinal);
+    const plannedDispatchId = opaqueDispatchId();
+    const alias = opaqueDispatchId();
+    const plan = Object.freeze({
+      plannedDispatchId,
+      alias,
+      rootInvocationId: binding.rootInvocationId,
+      parentRootInvocationId: binding.rootInvocationId,
+      rootPlanSlot: binding.planSlot,
+      childRule: binding.identityMode === 'dynamic' ? 'data-dependent-before-send' : null,
+      planSlot: planSlot ?? `${binding.planSlot}:child:${ordinal}`,
+      disposition,
+      recoveryOf: null,
+      correlation: Object.freeze({
+        runId: binding.runId,
+        attemptId: binding.attemptId,
+        armId: binding.armId,
+        scenarioId: binding.scenarioId,
+        repetition: binding.repetition,
+        phase: binding.phase,
+        requestClass: binding.requestClass,
+        rootOperation: binding.rootOperation
+      }),
+      routeId,
+      state: 'active'
+    });
+    await appendPlan({
+      event: 'dispatch_plan',
+      plannedDispatchId: plan.plannedDispatchId,
+      alias: plan.alias,
+      rootInvocationId: plan.rootInvocationId,
+      parentRootInvocationId: plan.parentRootInvocationId,
+      rootPlanSlot: plan.rootPlanSlot,
+      childRule: plan.childRule,
+      planSlot: plan.planSlot,
+      disposition: plan.disposition,
+      recoveryOf: plan.recoveryOf,
+      correlation: plan.correlation
+    });
+    dispatchPlans.set(plan.alias, plan);
+    return plan;
+  }
+
+  async function closeDispatchPlan(plan) {
+    if (plan.state !== 'active') return false;
+    await appendPlan({
+      event: 'dispatch_closed',
+      plannedDispatchId: plan.plannedDispatchId,
+      alias: plan.alias,
+      rootInvocationId: plan.rootInvocationId,
+      planSlot: plan.planSlot
+    });
+    dispatchPlans.set(plan.alias, Object.freeze({ ...plan, state: 'closed' }));
+    return true;
+  }
+
+  function reserveStaticDispatchPlan(plan) {
+    if (plan.disposition !== 'root-initial' || plan.state !== 'active') return false;
+    dispatchPlans.set(plan.alias, Object.freeze({ ...plan, state: 'consuming' }));
+    return true;
+  }
+
+  async function consumeStaticDispatchPlan(plan) {
+    await appendPlan({
+      event: 'dispatch_consumed',
+      plannedDispatchId: plan.plannedDispatchId,
+      alias: plan.alias,
+      rootInvocationId: plan.rootInvocationId,
+      planSlot: plan.planSlot
+    });
+    dispatchPlans.set(plan.alias, Object.freeze({ ...plan, state: 'consumed' }));
+  }
+
+  async function recordPlanDenial(binding, code) {
+    await appendPlan({
+      event: 'dispatch_denied',
+      code,
+      rootInvocationId: binding.rootInvocationId,
+      planSlot: binding.planSlot,
+      correlation: {
+        runId: binding.runId,
+        attemptId: binding.attemptId,
+        armId: binding.armId,
+        scenarioId: binding.scenarioId,
+        repetition: binding.repetition,
+        phase: binding.phase,
+        requestClass: binding.requestClass,
+        rootOperation: binding.rootOperation
+      }
+    });
+  }
+
   function appendCompletion({
     correlation,
     requestedModel,
@@ -628,12 +806,14 @@ export async function startProviderMeter(config, {
     failure,
     httpStatus,
     usage,
-    responseFormat = null
+    responseFormat = null,
+    dispatchPlan = null,
+    campaignReservationId = null
   }) {
     const operation = ledgerTail.then(async () => {
       const event = {
         schema: 'shadowgraph.provider-meter.event',
-        version: 1,
+        version: dispatchPlan === null ? 1 : 2,
         event: 'provider_request',
         requestNumber: nextRequestNumber,
         runId: correlation.runId,
@@ -651,7 +831,15 @@ export async function startProviderMeter(config, {
         outcome,
         failure,
         httpStatus,
-        usage
+        usage,
+        ...(dispatchPlan === null ? {} : {
+          rootInvocationId: dispatchPlan.rootInvocationId,
+          plannedDispatchId: dispatchPlan.plannedDispatchId,
+          planSlot: dispatchPlan.planSlot,
+          dispatchAlias: dispatchPlan.alias,
+          disposition: dispatchPlan.disposition,
+          ...(campaignReservationId === null ? {} : { campaignReservationId })
+        })
       };
       nextRequestNumber += 1;
       await ledger.write(`${JSON.stringify(event)}\n`);
@@ -660,6 +848,107 @@ export async function startProviderMeter(config, {
     });
     ledgerTail = operation.catch((error) => { evidenceFailure = error; });
     return operation;
+  }
+
+  function dispatchAliasFromRequest(request) {
+    const value = request.headers[DISPATCH_ALIAS_HEADER];
+    if (Array.isArray(value) || typeof value !== 'string' || !OPAQUE_DISPATCH_ID.test(value)) {
+      return null;
+    }
+    return value;
+  }
+
+  function dispatchPlanForRequest(request, binding, routeId) {
+    if (binding.identityMode === 'static') {
+      if (request.headers[DISPATCH_ALIAS_HEADER] !== undefined) return { code: 'STATIC_ALIAS_FORBIDDEN' };
+      const plan = dispatchPlans.get(binding.staticDispatchPlan.alias);
+      if (!plan || plan.routeId !== routeId || plan.state !== 'active') {
+        return { code: 'INVALID_OR_REUSED_DISPATCH_ALIAS' };
+      }
+      return { plan };
+    }
+    const alias = dispatchAliasFromRequest(request);
+    if (alias === null) return { code: 'MISSING_OR_MALFORMED_DISPATCH_ALIAS' };
+    const plan = dispatchPlans.get(alias);
+    if (!plan) return { code: 'UNKNOWN_DISPATCH_ALIAS' };
+    if (plan.routeId !== routeId || plan.rootInvocationId !== binding.rootInvocationId
+      || plan.state !== 'active') return { code: 'INVALID_OR_REUSED_DISPATCH_ALIAS' };
+    return { plan };
+  }
+
+  function campaignReservationInput(correlation, dispatchPlan) {
+    if (dispatchPlan === null) return correlation.requestClass;
+    return {
+      requestClass: correlation.requestClass,
+      runId: correlation.runId,
+      attemptId: correlation.attemptId,
+      armId: correlation.armId,
+      scenarioId: correlation.scenarioId,
+      repetition: correlation.repetition,
+      phase: correlation.phase,
+      rootOperation: correlation.rootOperation,
+      rootInvocationId: dispatchPlan.rootInvocationId,
+      plannedDispatchId: dispatchPlan.plannedDispatchId,
+      planSlot: dispatchPlan.planSlot,
+      disposition: dispatchPlan.disposition
+    };
+  }
+
+  async function denyPlannedRequest(response, binding, code) {
+    try {
+      await recordPlanDenial(binding, code);
+    } catch {
+      failureResponse(response);
+      return;
+    }
+    boundedResponse(response, 403, Buffer.from('{"error":"dispatch_plan_denied"}'), {
+      'content-type': 'application/json', connection: 'close'
+    });
+  }
+
+  async function handlePlanEndpoint(request, response, resourcePath, binding, routeId) {
+    if (resourcePath === '/__shadowgraph/declare') {
+      if (request.method !== 'POST' || binding.identityMode !== 'dynamic'
+        || request.headers[DISPATCH_ALIAS_HEADER] !== undefined) {
+        await denyPlannedRequest(response, binding, 'INVALID_DISPATCH_DECLARATION');
+        return true;
+      }
+      let plan;
+      try {
+        plan = await createDispatchPlan(binding, routeId);
+      } catch {
+        failureResponse(response);
+        return true;
+      }
+      const body = Buffer.from(JSON.stringify({
+        plannedDispatchId: plan.plannedDispatchId,
+        alias: plan.alias
+      }));
+      boundedResponse(response, 201, body, { 'content-type': 'application/json' });
+      return true;
+    }
+    if (resourcePath === '/__shadowgraph/close') {
+      if (request.method !== 'POST') {
+        await denyPlannedRequest(response, binding, 'INVALID_DISPATCH_CLOSE');
+        return true;
+      }
+      const alias = dispatchAliasFromRequest(request);
+      const plan = alias === null ? null : dispatchPlans.get(alias);
+      if (!plan || plan.routeId !== routeId || plan.rootInvocationId !== binding.rootInvocationId
+        || plan.state !== 'active') {
+        await denyPlannedRequest(response, binding, 'INVALID_OR_REUSED_DISPATCH_ALIAS');
+        return true;
+      }
+      try {
+        await closeDispatchPlan(plan);
+      } catch {
+        failureResponse(response);
+        return true;
+      }
+      boundedResponse(response, 204, Buffer.alloc(0));
+      return true;
+    }
+    return false;
   }
 
   async function handleIncoming(request, response) {
@@ -706,6 +995,31 @@ export async function startProviderMeter(config, {
       return;
     }
 
+    if (requireDispatchPlans && await handlePlanEndpoint(request, response, resourcePath, correlation, routeId)) {
+      return;
+    }
+    let dispatchPlan = null;
+    if (requireDispatchPlans) {
+      const identity = dispatchPlanForRequest(request, correlation, routeId);
+      if (identity.code) {
+        await denyPlannedRequest(response, correlation, identity.code);
+        return;
+      }
+      dispatchPlan = identity.plan;
+      if (dispatchPlan.disposition === 'root-initial') {
+        if (!reserveStaticDispatchPlan(dispatchPlan)) {
+          await denyPlannedRequest(response, correlation, 'INVALID_OR_REUSED_DISPATCH_ALIAS');
+          return;
+        }
+        try {
+          await consumeStaticDispatchPlan(dispatchPlan);
+        } catch {
+          failureResponse(response);
+          return;
+        }
+      }
+    }
+
     const started = performance.now();
     const attemptNumber = nextAttemptNumber++;
     // Reserve synchronously before any await, including journal I/O. Failures
@@ -722,15 +1036,33 @@ export async function startProviderMeter(config, {
     }
     let admitted = !nativeCapDenied && (authorization === null || (!budgetStopped && !evidenceFailure
       && consumed[correlation.requestClass] < authorization.limits[correlation.requestClass]));
+    let campaignReservationId = null;
     if (admitted) consumed[correlation.requestClass] += 1;
     if (admitted && campaignReserve !== null) {
-      admitted = await campaignReserve(correlation.requestClass);
+      try {
+        const reservation = await campaignReserve(campaignReservationInput(correlation, dispatchPlan));
+        if (reservation === false) {
+          admitted = false;
+        } else if (dispatchPlan !== null) {
+          if (reservation === null || typeof reservation !== 'object'
+            || Object.keys(reservation).length !== 1
+            || !CAMPAIGN_RESERVATION_ID.test(reservation.reservationId)) {
+            admitted = false;
+          } else {
+            campaignReservationId = reservation.reservationId;
+          }
+        } else if (reservation !== true) {
+          admitted = false;
+        }
+      } catch {
+        admitted = false;
+      }
     }
     if (!admitted && !nativeCapDenied) budgetStopped = true;
     await audit({ event: 'admission', attemptNumber, correlation, admitted,
-      authorizationRef: authorization?.authorizationRef ?? null });
+      authorizationRef: authorization?.authorizationRef ?? null, campaignReservationId });
     const appendEvent = async (event) => {
-      const completion = await appendCompletion(event);
+      const completion = await appendCompletion({ ...event, dispatchPlan, campaignReservationId });
       await audit({ event: 'completion', attemptNumber, requestNumber: completion.requestNumber,
         outcome: completion.outcome });
       return completion;
@@ -1068,6 +1400,52 @@ export async function startProviderMeter(config, {
     return `${advertisedOrigin}${ROUTE_PREFIX}${routeId}`;
   }
 
+  async function bindPlannedEndpoint(input) {
+    if (!requireDispatchPlans) {
+      throw new Error('Provider meter was not started with required dispatch plans');
+    }
+    if (state !== 'OPEN') throw new Error('Provider meter is closed');
+    const binding = validatePlannedBinding(input);
+    if (authorization !== null) validateProviderBudget(authorization, binding);
+    const key = rootPlanKey(binding);
+    if (rootPlanKeys.has(key)) throw new Error('Duplicate provider meter root plan');
+    let routeId;
+    do routeId = randomBytes(24).toString('hex'); while (bindings.has(routeId));
+    await appendPlan({
+      event: 'root_plan',
+      rootInvocationId: binding.rootInvocationId,
+      planSlot: binding.planSlot,
+      identityMode: binding.identityMode,
+      childRule: binding.identityMode === 'dynamic' ? 'data-dependent-before-send' : null,
+      correlation: {
+        runId: binding.runId,
+        attemptId: binding.attemptId,
+        armId: binding.armId,
+        scenarioId: binding.scenarioId,
+        repetition: binding.repetition,
+        phase: binding.phase,
+        requestClass: binding.requestClass,
+        rootOperation: binding.rootOperation
+      }
+    });
+    let bound = binding;
+    if (binding.identityMode === 'static') {
+      const staticDispatchPlan = await createDispatchPlan(binding, routeId, {
+        disposition: 'root-initial',
+        planSlot: binding.planSlot
+      });
+      bound = Object.freeze({ ...binding, staticDispatchPlan });
+    }
+    rootPlanKeys.add(key);
+    bindings.set(routeId, bound);
+    const endpoint = `${advertisedOrigin}${ROUTE_PREFIX}${routeId}`;
+    return Object.freeze({
+      endpoint,
+      declareEndpoint: `${endpoint}/__shadowgraph/declare`,
+      closeEndpoint: `${endpoint}/__shadowgraph/close`
+    });
+  }
+
   async function close() {
     if (closePromise !== null) return closePromise;
     state = 'CLOSING';
@@ -1078,14 +1456,17 @@ export async function startProviderMeter(config, {
       await Promise.allSettled([...inFlight]);
       await ledgerTail;
       await auditTail;
+      await planTail;
       await ledger.close();
       await attempts?.close();
+      await plans?.close();
       bindings.clear();
+      dispatchPlans.clear();
       state = 'CLOSED';
       if (evidenceFailure) throw evidenceFailure;
     })();
     return closePromise;
   }
 
-  return Object.freeze({ bindEndpoint, close });
+  return Object.freeze({ bindEndpoint, bindPlannedEndpoint, close });
 }

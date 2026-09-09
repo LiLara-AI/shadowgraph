@@ -31,6 +31,82 @@ test('campaign reservations survive fresh sessions and count in-flight calls wit
   await next.close();
 });
 
+test('campaign reservations durably join a prospective session to one dispatch plan', async (t) => {
+  const root = path.join(await scratchDirectory(t, 'campaign-lineage-'), 'campaign');
+  await createCampaignBudget(root, policy);
+  const campaign = await openCampaignBudget(root, policy);
+  await campaign.beginSession('probe-lineage-1', {
+    kind: 'probe',
+    runId: 'probe-run-1',
+    attemptId: 'probe-attempt-1'
+  });
+  const reservation = await campaign.reserve({
+    requestClass: 'embedding',
+    runId: 'probe-run-1',
+    attemptId: 'probe-attempt-1',
+    armId: 'cognee',
+    scenarioId: 'ACC_PLAN_1',
+    repetition: 0,
+    phase: 'A',
+    rootOperation: 'persist',
+    rootInvocationId: 'root-probe-1',
+    plannedDispatchId: 'a'.repeat(48),
+    planSlot: 'adapter-embedding:child:1',
+    disposition: 'data-dependent-child'
+  });
+  await campaign.close();
+
+  assert.match(reservation.reservationId, /^offline-only:[1-9]\d*$/u);
+  const rows = (await readFile(path.join(root, 'campaign.ndjson'), 'utf8'))
+    .trimEnd().split('\n').map((line) => JSON.parse(line));
+  assert.deepEqual(rows[1], {
+    event: 'session', id: 'probe-lineage-1', recovery: false,
+    kind: 'probe', runId: 'probe-run-1', attemptId: 'probe-attempt-1'
+  });
+  assert.deepEqual(rows[2], {
+    event: 'reservation', reservationId: reservation.reservationId,
+    session: 'probe-lineage-1', requestClass: 'embedding',
+    runId: 'probe-run-1', attemptId: 'probe-attempt-1', armId: 'cognee',
+    scenarioId: 'ACC_PLAN_1', repetition: 0, phase: 'A', rootOperation: 'persist',
+    rootInvocationId: 'root-probe-1', plannedDispatchId: 'a'.repeat(48),
+    planSlot: 'adapter-embedding:child:1', disposition: 'data-dependent-child'
+  });
+});
+
+test('campaign reopen rejects a receipt record without dispatch lineage', async (t) => {
+  const root = path.join(await scratchDirectory(t, 'campaign-tampered-lineage-'), 'campaign');
+  await createCampaignBudget(root, policy);
+  const ledgerPath = path.join(root, 'campaign.ndjson');
+  await writeFile(ledgerPath, [
+    { event: 'policy', policy },
+    {
+      event: 'session', id: 'probe-tampered-1', recovery: false,
+      kind: 'probe', runId: 'probe-run-1', attemptId: 'probe-attempt-1'
+    },
+    {
+      event: 'reservation', reservationId: 'offline-only:1', session: 'probe-tampered-1',
+      requestClass: 'embedding'
+    }
+  ].map((row) => JSON.stringify(row)).join('\n') + '\n');
+
+  await assert.rejects(openCampaignBudget(root, policy), /Invalid campaign journal/);
+});
+
+test('campaign reopen rejects a legacy reservation inside a prospective session', async (t) => {
+  const root = path.join(await scratchDirectory(t, 'campaign-mixed-lineage-'), 'campaign');
+  await createCampaignBudget(root, policy);
+  await writeFile(path.join(root, 'campaign.ndjson'), [
+    { event: 'policy', policy },
+    {
+      event: 'session', id: 'probe-mixed-1', recovery: false,
+      kind: 'probe', runId: 'probe-run-1', attemptId: 'probe-attempt-1'
+    },
+    { event: 'reservation', session: 'probe-mixed-1', requestClass: 'embedding' }
+  ].map((row) => JSON.stringify(row)).join('\n') + '\n');
+
+  await assert.rejects(openCampaignBudget(root, policy), /Invalid campaign journal/);
+});
+
 test('campaign identity cannot be recreated or limits raised on reopen', async (t) => {
   const root = path.join(await scratchDirectory(t, 'campaign-identity-'), 'campaign');
   await createCampaignBudget(root, policy);
@@ -100,6 +176,25 @@ test('CLI refuses incomplete campaign configuration before creating run resource
     assert.equal(result.code, 1);
     assert.match(result.stderr, /campaign-policy.*campaign-root|campaign-root.*campaign-policy/);
   }
+  const { readdir } = await import('node:fs/promises');
+  assert.deepEqual(await readdir(dir), []);
+});
+
+test('CLI reports a missing campaign policy and root as a v11 run blocker', async (t) => {
+  const dir = await scratchDirectory(t, 'campaign-cli-required-');
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const { fileURLToPath } = await import('node:url');
+  const cli = fileURLToPath(new URL('../benchmark/cli.mjs', import.meta.url));
+  let result;
+  try {
+    result = await promisify(execFile)(process.execPath, [cli, 'v11-run', '--out', path.join(dir, 'out')]);
+  } catch (error) { result = error; }
+  assert.equal(result.code, 1);
+  const report = JSON.parse(result.stdout);
+  assert.ok(report.readiness.blockers.some((blocker) => (
+    blocker.kind === 'campaign' && blocker.code === 'CAMPAIGN_CONFIGURATION_REQUIRED'
+  )));
   const { readdir } = await import('node:fs/promises');
   assert.deepEqual(await readdir(dir), []);
 });

@@ -43,6 +43,7 @@ const HASHES = Object.freeze({
   amendment004Sha256: 'b0c3a2553608efb78147a8c1f1ef9af51a7d0eebaa0037ce4ad7b64616b1c5f9',
   amendment005Sha256: 'c435fa9d772c151c83214ef3a4180e0646236cd2cbb079be082b8341c4e6e223',
   amendment006Sha256: '3bc9308a19e44ecc06d15dc0144239aa907b49cf897a11f9fab7cfe116966760',
+  amendment008Sha256: '184ba096d3b3d762f96e37c9a594925dd22e9628b9649a89d4a0a0c8fdff5ff9',
   implementationLockHash: '4'.repeat(64),
   environmentLockHash: '5'.repeat(64)
 });
@@ -66,6 +67,12 @@ const AMENDMENT_006_PATH = fileURLToPath(
 );
 const AMENDMENT_006_SIDECAR_PATH = fileURLToPath(
   new URL('../benchmark/preregistration-amendment-006.sha256', import.meta.url)
+);
+const AMENDMENT_008_PATH = fileURLToPath(
+  new URL('../benchmark/preregistration-amendment-008.json', import.meta.url)
+);
+const AMENDMENT_008_SIDECAR_PATH = fileURLToPath(
+  new URL('../benchmark/preregistration-amendment-008.sha256', import.meta.url)
 );
 
 function sha256(value) {
@@ -316,6 +323,8 @@ function baseOptions(overrides = {}) {
     amendment005SidecarPath: AMENDMENT_005_SIDECAR_PATH,
     amendment006Path: AMENDMENT_006_PATH,
     amendment006SidecarPath: AMENDMENT_006_SIDECAR_PATH,
+    amendment008Path: AMENDMENT_008_PATH,
+    amendment008SidecarPath: AMENDMENT_008_SIDECAR_PATH,
     progress,
     persistUnit: async () => {},
     now: clock.now,
@@ -502,6 +511,21 @@ test('integrated runner executes retrieve → outer → persist → verify and c
   assertNoAcceptanceClaims(raw);
 });
 
+test('runner requires Amendment 008 identity/campaign source binding before any unit runs', async () => {
+  let calls = 0;
+  await assert.rejects(
+    runV11Benchmark(baseOptions({
+      amendment008Sha256: undefined,
+      executeAdapter: async (request) => {
+        calls += 1;
+        return adapterEnvelope(request);
+      }
+    })),
+    /amendment008Sha256/u
+  );
+  assert.equal(calls, 0);
+});
+
 test('a failed unit remains raw evidence, later units continue, and arm status is derived mechanically', async () => {
   const progress = progressRecorder();
   const raw = await runV11Benchmark(baseOptions({
@@ -624,7 +648,8 @@ test('diagnostic resume never replaces a started unit that had no terminal evide
     amendment003Sha256: HASHES.amendment003Sha256,
     amendment004Sha256: HASHES.amendment004Sha256,
     amendment005Sha256: HASHES.amendment005Sha256,
-    amendment006Sha256: HASHES.amendment006Sha256
+    amendment006Sha256: HASHES.amendment006Sha256,
+    amendment008Sha256: HASHES.amendment008Sha256
   }).valid, true);
 });
 
@@ -1597,7 +1622,8 @@ test('one acceptance artifact flows through the integrated runner, validator, an
     amendment003Sha256: HASHES.amendment003Sha256,
     amendment004Sha256: HASHES.amendment004Sha256,
     amendment005Sha256: HASHES.amendment005Sha256,
-    amendment006Sha256: HASHES.amendment006Sha256
+    amendment006Sha256: HASHES.amendment006Sha256,
+    amendment008Sha256: HASHES.amendment008Sha256
   }).valid, true);
   const aggregate = aggregateRun(raw, definition, {
     trustedSourceHashes: {
@@ -1607,7 +1633,8 @@ test('one acceptance artifact flows through the integrated runner, validator, an
       amendment003Sha256: HASHES.amendment003Sha256,
       amendment004Sha256: HASHES.amendment004Sha256,
       amendment005Sha256: HASHES.amendment005Sha256,
-      amendment006Sha256: HASHES.amendment006Sha256
+      amendment006Sha256: HASHES.amendment006Sha256,
+      amendment008Sha256: HASHES.amendment008Sha256
     }
   });
   assert.equal(aggregate.mode, 'ACCEPTANCE');

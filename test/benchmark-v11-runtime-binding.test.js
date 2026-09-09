@@ -111,6 +111,10 @@ async function harness(t, overrides = {}) {
     bindEndpoint: (correlation) => {
       seen.endpoints.push(correlation);
       return `http://127.0.0.1:43100/v1/${correlation.requestClass}`;
+    },
+    bindPlannedEndpoint: async (input) => {
+      seen.plannedEndpoints.push(input);
+      return { endpoint: `http://127.0.0.1:43100/v1/planned-${input.requestClass}` };
     }
   };
 
@@ -118,6 +122,7 @@ async function harness(t, overrides = {}) {
     created: [],
     siteRead: [],
     endpoints: [],
+    plannedEndpoints: [],
     nodeHosts: [],
     pythonHosts: [],
     adapterExecutor: [],
@@ -386,6 +391,7 @@ test('the acceptance binding passes its exact authorized budget to the meter', a
     assert.deepEqual(options, {
       budget: h.input.providerBudget,
       requireRootOperation: true,
+      requireDispatchPlans: true,
       maxAttemptsPerRootRequestClass: 24
     });
   }
@@ -409,10 +415,17 @@ test('the acceptance binding reserves against its persistent campaign before dis
     deadline: '2099-01-01T00:00:00.000Z',
     limits: { outer_decision_llm: 1, internal_memory_llm: 1, embedding: 1 }
   } };
+  const dispatch = {
+    requestClass: 'embedding', runId: h.input.runId, attemptId: h.input.attemptId,
+    armId: 'cognee', scenarioId: 'ACC_PLAN_1', repetition: 0, phase: 'A',
+    rootOperation: 'persist', rootInvocationId: 'root-campaign-1',
+    plannedDispatchId: 'a'.repeat(48), planSlot: 'adapter-embedding:child:1',
+    disposition: 'data-dependent-child'
+  };
   h.injections.openCampaignBudget = async (root, policy) => {
     calls.push(['open', root, policy]);
-    return { beginSession: async (id) => calls.push(['session', id]),
-      reserve: async (requestClass) => { calls.push(['reserve', requestClass]); return false; },
+    return { beginSession: async (...args) => calls.push(['session', ...args]),
+      reserve: async (input) => { calls.push(['reserve', input]); return { reservationId: 'offline-only:1' }; },
       close: async () => calls.push(['close']) };
   };
   const original = h.injections.startProviderMeter;
@@ -424,10 +437,13 @@ test('the acceptance binding reserves against its persistent campaign before dis
   const bound = await bindV11Runtime(h.input, h.injections);
   try {
     assert.equal(typeof meterOptions.campaignReserve, 'function');
-    assert.equal(await meterOptions.campaignReserve('embedding'), false);
+    assert.deepEqual(await meterOptions.campaignReserve(dispatch), { reservationId: 'offline-only:1' });
     assert.deepEqual(calls.slice(0, 3), [
       ['open', h.input.campaign.root, h.input.campaign.policy],
-      ['session', h.input.attemptId], ['reserve', 'embedding']
+      ['session', h.input.attemptId, {
+        kind: 'acceptance', runId: h.input.runId, attemptId: h.input.attemptId
+      }],
+      ['reserve', dispatch]
     ]);
   } finally { await bound.close(); }
   assert.deepEqual(calls.at(-1), ['close']);
@@ -637,28 +653,35 @@ test('every argument of the composition, because the composition is all this doe
   await bound.close();
 });
 
-test('the endpoint the Python arms are given is minted per correlation by the meter', async (t) => {
+test('the endpoint the Python arms are given is a meter-owned planned capability', async (t) => {
   // `providerEndpointFor` is the only thing connecting a metered arm to the
-  // meter, and it is a closure the double could not otherwise see into.
+  // meter, and it must carry the pre-dispatch plan rather than a broad route.
   const { input, injections, seen } = await harness(t);
   const bound = await bindV11Runtime(input, injections);
 
   const correlation = {
     runId: input.runId,
     attemptId: input.attemptId,
-    armId: 'mem0-oss',
+    armId: 'cognee',
     scenarioId: 'ACC_ONE',
     repetition: 0,
     phase: 'B',
-    requestClass: 'embedding'
+    requestClass: 'embedding',
+    rootOperation: 'persist'
   };
-  const endpoint = seen.pythonHosts[0].providerEndpointFor('embedding', correlation);
-  assert.equal(endpoint, 'http://127.0.0.1:43100/v1/embedding');
-  // The whole correlation reaches the meter, not just the class it is keyed
-  // by: the capability is minted per (correlation, request class), and a
-  // correlation that arrived short would attribute the call to the wrong unit.
-  assert.deepEqual(seen.endpoints, [correlation]);
-  assert.notEqual(seen.endpoints[0], correlation, 'and it is copied, not aliased');
+  const plan = {
+    rootInvocationId: '0f0f0f0f-1111-4222-8333-444444444444',
+    rootOperation: 'persist',
+    planSlot: 'adapter-embedding',
+    identityMode: 'dynamic'
+  };
+  const route = await seen.pythonHosts[0].providerEndpointFor('embedding', correlation, plan);
+  assert.deepEqual(route, { endpoint: 'http://127.0.0.1:43100/v1/planned-embedding' });
+  // The whole plan and correlation reach the meter. No legacy broad binding may
+  // mint a route capable of silently accepting an unplanned child request.
+  assert.deepEqual(seen.endpoints, []);
+  assert.deepEqual(seen.plannedEndpoints, [{ ...correlation, ...plan }]);
+  assert.notEqual(seen.plannedEndpoints[0], correlation, 'the plan is copied into a new binding record');
 
   await bound.close();
 });

@@ -8,7 +8,7 @@ export const NATIVE_ATTEMPT_EVIDENCE_SCHEMA = 'shadowgraph.v11.native-attempt-ev
 export const NATIVE_ATTEMPT_EVIDENCE_VERSION = 1;
 export const NATIVE_ATTEMPT_EVIDENCE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 export const NATIVE_ATTEMPT_EVIDENCE_NOTE =
-  'fresh loopback fault evidence is checked against the frozen Amendment 006 policy, package pins, and model pins; live meter reconciliation remains required for every run';
+  'fresh loopback fault evidence is checked against the frozen Amendment 006 recovery policy and, when Amendment 008 is active, its identity-aware plan/alias/campaign contract; live meter reconciliation remains required for every run';
 
 const RECOVERY_CATEGORIES = Object.freeze(['B', 'C', 'D']);
 const TAXONOMY_KEYS = Object.freeze(['A', 'B', 'C', 'D', 'E']);
@@ -28,6 +28,16 @@ const PACKAGE_FIELDS = Object.freeze(['name', 'version']);
 const WIRE_ATTEMPT_FIELDS = Object.freeze([
   'ordinal', 'path', 'outcome', 'modelId', 'retryOrdinal', 'responseFormat'
 ]);
+const IDENTITY_PROOF_FIELDS = Object.freeze([
+  'meterIssuedOpaqueAlias',
+  'durablePlanBeforeDispatch',
+  'rootInvocationAndDispatchIds',
+  'bodyIndependentIdentity',
+  'contextCarrierOnly',
+  'planClosureBeforeReconciliation',
+  'aggregateCapIndependentOfAliases',
+  'campaignReservationJoinedBeforeDispatch'
+]);
 
 function isPlainRecord(value) {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -43,6 +53,11 @@ function exactKeys(value, fields) {
   return isPlainRecord(value)
     && Object.keys(value).length === fields.length
     && fields.every((field) => Object.hasOwn(value, field));
+}
+
+function exactIdentityProof(value) {
+  return exactKeys(value, IDENTITY_PROOF_FIELDS)
+    && IDENTITY_PROOF_FIELDS.every((field) => value[field] === true);
 }
 
 function recoveryKey(armId, requestClass, category) {
@@ -96,7 +111,10 @@ function parseProbeReport(bytes) {
 }
 
 function validateProbeReport(report, entry, input) {
-  if (!exactKeys(report, REPORT_FIELDS)
+  const reportFields = input.requiresAmendment008
+    ? [...REPORT_FIELDS, 'amendment008Sha256', 'identityProtocol']
+    : REPORT_FIELDS;
+  if (!exactKeys(report, reportFields)
     || !exactKeys(report.package, PACKAGE_FIELDS)
     || report.schema !== NATIVE_ATTEMPT_REPORT_SCHEMA
     || report.version !== NATIVE_ATTEMPT_REPORT_VERSION) {
@@ -108,6 +126,8 @@ function validateProbeReport(report, entry, input) {
     return 'NATIVE_PROBE_REPORT_IDENTITY_MISMATCH';
   }
   if (report.amendment006Sha256 !== input.amendment006Sha256
+    || (input.requiresAmendment008 && (report.amendment008Sha256 !== input.amendment008Sha256
+      || !exactIdentityProof(report.identityProtocol)))
     || report.armId !== entry.armId
     || report.requestClass !== entry.requestClass
     || report.category !== entry.category
@@ -214,7 +234,11 @@ function validateEntry(entry, expected, input, policy) {
  * the meter-owned trace proves what actually happens during that run.
  */
 export function verifyNativeAttemptEvidence(input) {
-  const { evidence, policy, amendment006Sha256, pinnedPackages, pinnedModels, probeReports = null, now } = input ?? {};
+  const {
+    evidence, policy, amendment006Sha256, amendment008Sha256 = null, pinnedPackages, pinnedModels,
+    probeReports = null, now
+  } = input ?? {};
+  const requiresAmendment008 = amendment008Sha256 !== null;
   let normalizedPolicy;
   try {
     normalizedPolicy = validateNativeAttemptPolicy(policy);
@@ -222,6 +246,7 @@ export function verifyNativeAttemptEvidence(input) {
     return empty([{ code: 'NATIVE_ATTEMPT_POLICY_INVALID' }]);
   }
   if (!isNonEmptyString(amendment006Sha256) || !SHA256.test(amendment006Sha256)
+    || (requiresAmendment008 && (!isNonEmptyString(amendment008Sha256) || !SHA256.test(amendment008Sha256)))
     || !isPlainRecord(pinnedPackages) || !isPlainRecord(pinnedModels) || !Number.isFinite(now)) {
     return empty([{ code: 'NATIVE_ATTEMPT_EVIDENCE_CONTEXT_INVALID' }]);
   }
@@ -231,7 +256,15 @@ export function verifyNativeAttemptEvidence(input) {
     findings: Object.freeze([]),
     note: NATIVE_ATTEMPT_EVIDENCE_NOTE
   });
-  if (!exactKeys(evidence, ['schema', 'version', 'observedAt', 'amendment006Sha256', 'entries'])
+  if (requiresAmendment008 && (!isPlainRecord(evidence)
+    || evidence.amendment008Sha256 !== amendment008Sha256
+    || !exactIdentityProof(evidence.identityProtocol))) {
+    return empty([{ code: 'NATIVE_ATTEMPT_EVIDENCE_METHODOLOGY_REQUIRED' }]);
+  }
+  const evidenceFields = requiresAmendment008
+    ? ['schema', 'version', 'observedAt', 'amendment006Sha256', 'amendment008Sha256', 'identityProtocol', 'entries']
+    : ['schema', 'version', 'observedAt', 'amendment006Sha256', 'entries'];
+  if (!exactKeys(evidence, evidenceFields)
     || evidence.schema !== NATIVE_ATTEMPT_EVIDENCE_SCHEMA
     || evidence.version !== NATIVE_ATTEMPT_EVIDENCE_VERSION
     || !Array.isArray(evidence.entries)) {
@@ -263,7 +296,8 @@ export function verifyNativeAttemptEvidence(input) {
     }
     seen.add(key);
     const code = validateEntry(entry, expected.get(key), {
-      pinnedPackages, pinnedModels, probeReports, evidenceObservedAt: observedAt, amendment006Sha256
+      pinnedPackages, pinnedModels, probeReports, evidenceObservedAt: observedAt,
+      amendment006Sha256, amendment008Sha256, requiresAmendment008
     }, normalizedPolicy);
     if (code !== null) findings.push({ code, ...expected.get(key) });
   }

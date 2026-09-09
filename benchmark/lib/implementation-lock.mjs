@@ -103,6 +103,8 @@ const COVERAGE_SELECTORS = Object.freeze([
   { role: 'amendment_005_sidecar', kind: 'path', value: 'benchmark/preregistration-amendment-005.sha256' },
   { role: 'amendment_006', kind: 'path', value: 'benchmark/preregistration-amendment-006.json' },
   { role: 'amendment_006_sidecar', kind: 'path', value: 'benchmark/preregistration-amendment-006.sha256' },
+  { role: 'amendment_008', kind: 'path', value: 'benchmark/preregistration-amendment-008.json' },
+  { role: 'amendment_008_sidecar', kind: 'path', value: 'benchmark/preregistration-amendment-008.sha256' },
   { role: 'runner', kind: 'path', value: 'benchmark/lib/v11-runner.mjs' },
   { role: 'validator', kind: 'path', value: 'benchmark/lib/validate.mjs' },
   { role: 'aggregator', kind: 'path', value: 'benchmark/lib/aggregate.mjs' },

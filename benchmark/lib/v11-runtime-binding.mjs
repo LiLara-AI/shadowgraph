@@ -299,7 +299,11 @@ export async function bindV11Runtime(input, injections = {}) {
     if (input.campaign !== undefined) {
       campaign = await build.openCampaignBudget(input.campaign.root, input.campaign.policy, { implementationLockHash: implementationLock.lockSha256 });
       closers.push(() => campaign.close());
-      await campaign.beginSession(attemptId);
+      await campaign.beginSession(attemptId, {
+        kind: 'acceptance',
+        runId,
+        attemptId
+      });
     }
     const meter = await build.startProviderMeter({
       listenerUrl: 'http://127.0.0.1:0',
@@ -310,9 +314,10 @@ export async function bindV11Runtime(input, injections = {}) {
     }, {
       budget: providerBudget,
       requireRootOperation: true,
+      requireDispatchPlans: true,
       maxAttemptsPerRootRequestClass: normalizedNativeAttemptPolicy.maxAttemptsPerRootRequestClass,
       ...(campaign === null ? {} : {
-      campaignReserve: (requestClass) => campaign.reserve(requestClass)
+      campaignReserve: (dispatch) => campaign.reserve(dispatch)
     }) });
     closers.push(() => meter.close());
 
@@ -332,7 +337,10 @@ export async function bindV11Runtime(input, injections = {}) {
     });
     closers.push(() => unitEvidence.close());
 
-    const providerEndpointFor = (_requestClass, correlation) => meter.bindEndpoint({ ...correlation });
+    const providerEndpointFor = (_requestClass, correlation, plan) => meter.bindPlannedEndpoint({
+      ...correlation,
+      ...plan
+    });
 
     const executeAdapter = build.createV11AdapterExecutor({
       registry,

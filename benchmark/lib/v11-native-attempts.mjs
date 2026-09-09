@@ -7,6 +7,7 @@ export const NATIVE_ROOT_OPERATIONS = Object.freeze([
 const RECOVERY_CATEGORIES = new Set(['B', 'C', 'D']);
 const RESPONSE_FORMATS = new Set([null, 'json_schema', 'json_object', 'other']);
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
+const OPAQUE_DISPATCH_ID = /^[a-f0-9]{48}$/u;
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -25,8 +26,8 @@ function assertExactKeys(value, expected, label) {
   }
 }
 
-function rootKey(event) {
-  return [
+function rootKey(event, requireDispatchPlans = false) {
+  const values = [
     event.runId,
     event.attemptId,
     event.armId,
@@ -35,10 +36,27 @@ function rootKey(event) {
     event.phase,
     event.rootOperation,
     event.requestClass
-  ].map((value) => `${value.length}:${value}`).join('|');
+  ];
+  if (requireDispatchPlans) values.push(event.rootInvocationId, event.plannedDispatchId);
+  return values.map((value) => `${value.length}:${value}`).join('|');
 }
 
-function validateEvent(event, index) {
+function rootClassKey(event, requireDispatchPlans = false) {
+  const values = [
+    event.runId,
+    event.attemptId,
+    event.armId,
+    event.scenarioId,
+    String(event.repetition),
+    event.phase,
+    event.rootOperation,
+    event.requestClass
+  ];
+  if (requireDispatchPlans) values.push(event.rootInvocationId);
+  return values.map((value) => `${value.length}:${value}`).join('|');
+}
+
+function validateEvent(event, index, requireDispatchPlans = false) {
   if (!isPlainObject(event)) throw new Error(`native attempt event ${index} must be an object`);
   for (const field of ['runId', 'attemptId', 'armId', 'scenarioId', 'phase', 'rootOperation', 'requestClass']) {
     if (!isNonEmptyString(event[field]) || !SAFE_ID.test(event[field])) {
@@ -54,6 +72,12 @@ function validateEvent(event, index) {
   }
   if (!['SUCCEEDED', 'FAILED'].includes(event.outcome) || !RESPONSE_FORMATS.has(event.responseFormat ?? null)) {
     throw new Error(`native attempt event ${index} has invalid observable outcome evidence`);
+  }
+  if (requireDispatchPlans && (!isNonEmptyString(event.rootInvocationId)
+    || !SAFE_ID.test(event.rootInvocationId)
+    || !isNonEmptyString(event.plannedDispatchId)
+    || !OPAQUE_DISPATCH_ID.test(event.plannedDispatchId))) {
+    throw new Error(`native attempt event ${index} has invalid dispatch-plan identity`);
   }
 }
 
@@ -115,9 +139,18 @@ export function validateNativeAttemptPolicy(policy, armIds = null) {
  * an independent probe has authorized C for the same arm/class. E is never
  * inferred away: both requested and provider model must equal the locked model.
  */
-export function traceNativeAttempts({ events, expectedModels, policy, armIds = null }) {
+export function traceNativeAttempts({
+  events,
+  expectedModels,
+  policy,
+  armIds = null,
+  requireDispatchPlans = false
+}) {
   if (!Array.isArray(events) || !isPlainObject(expectedModels)) {
     throw new Error('native attempt trace requires events and expected models');
+  }
+  if (typeof requireDispatchPlans !== 'boolean') {
+    throw new Error('native attempt trace requireDispatchPlans must be boolean');
   }
   const validatedPolicy = validateNativeAttemptPolicy(policy, armIds);
   for (const requestClass of REQUEST_CLASSES) {
@@ -128,10 +161,11 @@ export function traceNativeAttempts({ events, expectedModels, policy, armIds = n
   const findings = [];
   const trace = [];
   const groups = new Map();
+  const rootClassCounts = new Map();
   const seenRequestNumbers = new Set();
   const ordered = [...events].sort((left, right) => left.requestNumber - right.requestNumber);
   for (const [index, event] of ordered.entries()) {
-    validateEvent(event, index + 1);
+    validateEvent(event, index + 1, requireDispatchPlans);
     if (seenRequestNumbers.has(event.requestNumber)) {
       findings.push({ code: 'DUPLICATE_REQUEST_NUMBER', requestNumber: event.requestNumber });
       continue;
@@ -142,9 +176,12 @@ export function traceNativeAttempts({ events, expectedModels, policy, armIds = n
       findings.push({ code: 'UNPOLICIED_ARM_OR_CLASS', requestNumber: event.requestNumber });
       continue;
     }
-    const key = rootKey(event);
+    const key = rootKey(event, requireDispatchPlans);
+    const capKey = rootClassKey(event, requireDispatchPlans);
     const prior = groups.get(key) ?? [];
     const sequence = prior.length + 1;
+    const rootClassSequence = (rootClassCounts.get(capKey) ?? 0) + 1;
+    rootClassCounts.set(capKey, rootClassSequence);
     let category = 'INITIAL';
     if (sequence > 1) {
       if (prior.at(-1).outcome === 'FAILED') category = 'B';
@@ -163,7 +200,7 @@ export function traceNativeAttempts({ events, expectedModels, policy, armIds = n
       findings.push({ code: 'MODEL_OR_PROVIDER_FALLBACK', requestNumber: event.requestNumber });
       category = 'E';
     }
-    if (sequence > validatedPolicy.maxAttemptsPerRootRequestClass) {
+    if (rootClassSequence > validatedPolicy.maxAttemptsPerRootRequestClass) {
       findings.push({ code: 'ROOT_CLASS_ATTEMPT_CAP_EXCEEDED', requestNumber: event.requestNumber });
     }
     if (RECOVERY_CATEGORIES.has(category) && !recovery.includes(category)) {
@@ -183,7 +220,12 @@ export function traceNativeAttempts({ events, expectedModels, policy, armIds = n
       category,
       priorRequestNumber: prior.at(-1)?.requestNumber ?? null,
       outcome: event.outcome,
-      responseFormat: event.responseFormat ?? null
+      responseFormat: event.responseFormat ?? null,
+      ...(requireDispatchPlans ? {
+        rootInvocationId: event.rootInvocationId,
+        plannedDispatchId: event.plannedDispatchId,
+        rootClassSequence
+      } : {})
     });
     prior.push(entry);
     groups.set(key, prior);

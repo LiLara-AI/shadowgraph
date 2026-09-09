@@ -114,3 +114,54 @@ test('same-mode successful native follow-up is C only when the arm-neutral polic
   assert.deepEqual(result.trace.map((entry) => entry.category), ['INITIAL', 'C']);
   assert.deepEqual(result.findings, []);
 });
+
+test('distinct planned dispatches under one root are independent INITIAL work', () => {
+  const result = traceNativeAttempts({
+    requireDispatchPlans: true,
+    events: [
+      event(1, { rootInvocationId: 'root-persist-1', plannedDispatchId: 'a'.repeat(48) }),
+      event(2, { rootInvocationId: 'root-persist-1', plannedDispatchId: 'b'.repeat(48) })
+    ],
+    expectedModels: MODELS,
+    policy: policy()
+  });
+
+  assert.equal(result.status, 'RECONCILED');
+  assert.deepEqual(result.trace.map((entry) => entry.category), ['INITIAL', 'INITIAL']);
+  assert.deepEqual(result.findings, []);
+});
+
+test('same planned dispatch retains its B/C/D lineage', () => {
+  const result = traceNativeAttempts({
+    requireDispatchPlans: true,
+    events: [
+      event(1, { rootInvocationId: 'root-persist-1', plannedDispatchId: 'c'.repeat(48) }),
+      event(2, { rootInvocationId: 'root-persist-1', plannedDispatchId: 'c'.repeat(48) })
+    ],
+    expectedModels: MODELS,
+    policy: policy()
+  });
+
+  assert.equal(result.status, 'RECONCILED');
+  assert.deepEqual(result.trace.map((entry) => entry.category), ['INITIAL', 'C']);
+  assert.deepEqual(result.findings, []);
+});
+
+test('distinct planned dispatches cannot reset the aggregate root class cap', () => {
+  const bounded = policy();
+  bounded.maxAttemptsPerRootRequestClass = 2;
+  const result = traceNativeAttempts({
+    requireDispatchPlans: true,
+    events: [
+      event(1, { rootInvocationId: 'root-persist-1', plannedDispatchId: 'd'.repeat(48) }),
+      event(2, { rootInvocationId: 'root-persist-1', plannedDispatchId: 'e'.repeat(48) }),
+      event(3, { rootInvocationId: 'root-persist-1', plannedDispatchId: 'f'.repeat(48) })
+    ],
+    expectedModels: MODELS,
+    policy: bounded
+  });
+
+  assert.equal(result.status, 'DISCREPANT');
+  assert.deepEqual(result.trace.map((entry) => entry.category), ['INITIAL', 'INITIAL', 'INITIAL']);
+  assert.deepEqual(result.findings, [{ code: 'ROOT_CLASS_ATTEMPT_CAP_EXCEEDED', requestNumber: 3 }]);
+});

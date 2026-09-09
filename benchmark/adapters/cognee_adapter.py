@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
+import ipaddress
+import inspect
+import json
 import os
 import secrets
 import math
+import re
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
+from http.client import HTTPConnection
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from envelope import ContractError, build_envelope, empty_operations, not_available_storage, record_content_sha256, validate_request
@@ -114,8 +123,184 @@ UNUSED_API_KEY = "not-a-secret"
 BENCHMARK_USER_DOMAIN = "example.com"
 BENCHMARK_USER_PREFIX = "shadowgraph-benchmark"
 
+DISPATCH_ALIAS_HEADER = "x-shadowgraph-dispatch-alias"
+_DISPATCH_ALIAS = re.compile(r"^[a-f0-9]{48}$")
+_ACTIVE_DISPATCH_IDENTITIES = ContextVar("cognee_meter_dispatch_identities", default=None)
 
-def _count_metered_requests(httpx_module, routes: dict, provider_call) -> None:
+
+def _valid_dispatch_identity(value) -> bool:
+    return (
+        isinstance(value, dict)
+        and _DISPATCH_ALIAS.fullmatch(value.get("alias", "")) is not None
+        and _DISPATCH_ALIAS.fullmatch(value.get("plannedDispatchId", "")) is not None
+    )
+
+
+def _request_has_dispatch_alias(request) -> bool:
+    headers = getattr(request, "headers", None)
+    return headers is not None and any(
+        str(name).lower() == DISPATCH_ALIAS_HEADER for name in headers
+    )
+
+
+@asynccontextmanager
+async def _metered_dispatch_scope(routes: dict, request_classes, *, declare, close):
+    """Carry only already-authorized meter aliases across one native scope."""
+    if not isinstance(routes, dict) or not isinstance(request_classes, tuple):
+        raise RuntimeUnavailable("Cognee dispatch scope is invalid")
+    parent = _ACTIVE_DISPATCH_IDENTITIES.get() or {}
+    additions = {}
+    try:
+        for request_class in request_classes:
+            endpoint = routes.get(request_class)
+            if request_class in additions or not isinstance(endpoint, str) or not endpoint:
+                raise RuntimeUnavailable("Cognee dispatch scope is invalid")
+            identity = await declare(request_class, endpoint)
+            if not _valid_dispatch_identity(identity):
+                raise RuntimeUnavailable("Cognee dispatch declaration was invalid")
+            additions[request_class] = dict(identity)
+        context_restore_handle = _ACTIVE_DISPATCH_IDENTITIES.set({**parent, **additions})
+    except Exception:
+        for request_class, identity in reversed(tuple(additions.items())):
+            try:
+                await close(request_class, identity)
+            except Exception:
+                pass
+        raise
+    try:
+        yield
+    finally:
+        try:
+            for request_class, identity in reversed(tuple(additions.items())):
+                await close(request_class, identity)
+        finally:
+            _ACTIVE_DISPATCH_IDENTITIES.reset(context_restore_handle)
+
+
+def _wrap_native_dispatch_root(target, method_name: str, routes: dict, request_classes: tuple, *, declare, close) -> None:
+    """Wrap one decorated Cognee retry root without changing vendor implementation."""
+    if not isinstance(method_name, str) or not method_name:
+        raise RuntimeUnavailable("Cognee native dispatch root is invalid")
+    original = getattr(target, method_name, None)
+    if original is None or getattr(original, "__shadowgraph_dispatch_wrapped__", False):
+        raise RuntimeUnavailable("Cognee native dispatch root is unavailable")
+
+    async def scoped(*args, **kwargs):
+        async with _metered_dispatch_scope(
+            routes,
+            request_classes,
+            declare=declare,
+            close=close,
+        ):
+            result = original(*args, **kwargs)
+            if not inspect.isawaitable(result):
+                raise RuntimeUnavailable("Cognee native dispatch root is not asynchronous")
+            return await result
+
+    scoped.__shadowgraph_dispatch_wrapped__ = True
+    setattr(target, method_name, scoped)
+
+
+def _install_cognee_dispatch_roots(
+    routes: dict,
+    *,
+    native_litellm_adapter,
+    embedding_engine,
+    declare,
+    close,
+) -> None:
+    """Install scopes at Cognee 1.5.3's two known native retry roots."""
+    _wrap_native_dispatch_root(
+        native_litellm_adapter,
+        "acreate_structured_output",
+        routes,
+        ("internal_memory_llm",),
+        declare=declare,
+        close=close,
+    )
+    _wrap_native_dispatch_root(
+        embedding_engine,
+        "embed_text",
+        routes,
+        ("embedding",),
+        declare=declare,
+        close=close,
+    )
+
+
+def _meter_endpoint(endpoint: str):
+    if not isinstance(endpoint, str) or not endpoint:
+        raise RuntimeUnavailable("Cognee meter endpoint is invalid")
+    try:
+        parsed = urlsplit(endpoint)
+        host = parsed.hostname
+        if (
+            parsed.scheme != "http"
+            or not host
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or not parsed.path.strip("/")
+            or not ipaddress.ip_address(host).is_loopback
+        ):
+            raise ValueError("not a literal loopback route")
+    except (TypeError, ValueError) as error:
+        raise RuntimeUnavailable("Cognee meter endpoint is invalid") from error
+    return parsed
+
+
+def _meter_post(endpoint: str, suffix: str, *, alias=None, expected_status: int) -> bytes:
+    parsed = _meter_endpoint(endpoint)
+    if not isinstance(suffix, str) or not suffix.startswith("/"):
+        raise RuntimeUnavailable("Cognee meter request is invalid")
+    headers = {"Content-Length": "0"}
+    if alias is not None:
+        if _DISPATCH_ALIAS.fullmatch(alias) is None:
+            raise RuntimeUnavailable("Cognee meter close identity is invalid")
+        headers[DISPATCH_ALIAS_HEADER] = alias
+    connection = HTTPConnection(parsed.hostname, parsed.port or 80, timeout=5)
+    try:
+        connection.request("POST", parsed.path.rstrip("/") + suffix, body=b"", headers=headers)
+        response = connection.getresponse()
+        body = response.read(2049)
+        if response.status != expected_status or len(body) > 2048:
+            raise RuntimeUnavailable("Cognee meter request was refused")
+        return body
+    except (OSError, ValueError) as error:
+        raise RuntimeUnavailable("Cognee meter request could not be completed") from error
+    finally:
+        connection.close()
+
+
+def _meter_declare_sync(endpoint: str) -> dict:
+    body = _meter_post(endpoint, "/__shadowgraph/declare", expected_status=201)
+    try:
+        identity = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeUnavailable("Cognee meter declaration was invalid") from error
+    if set(identity) != {"alias", "plannedDispatchId"} or not _valid_dispatch_identity(identity):
+        raise RuntimeUnavailable("Cognee meter declaration was invalid")
+    return identity
+
+
+async def _meter_declare(endpoint: str) -> dict:
+    return await asyncio.to_thread(_meter_declare_sync, endpoint)
+
+
+async def _meter_close(endpoint: str, identity: dict) -> None:
+    if not _valid_dispatch_identity(identity):
+        raise RuntimeUnavailable("Cognee meter close identity is invalid")
+    await asyncio.to_thread(
+        _meter_post,
+        endpoint,
+        "/__shadowgraph/close",
+        alias=identity["alias"],
+        expected_status=204,
+    )
+
+
+def _count_metered_requests(httpx_module, routes: dict, provider_call, *, require_dispatch_identity=False) -> None:
     """Count every request this process sends to a metered route.
 
     Mem0 exposes its SDK clients, so its adapter rebinds them and counts on a
@@ -135,6 +320,8 @@ def _count_metered_requests(httpx_module, routes: dict, provider_call) -> None:
     entirely alone - and cannot happen anyway, since the host fences this
     process to loopback.
     """
+    if not isinstance(require_dispatch_identity, bool):
+        raise ContractError("Cognee dispatch identity requirement is invalid")
     metered = {endpoint: request_class for request_class, endpoint in routes.items() if endpoint}
     original_send = httpx_module.Client.send
     original_async_send = httpx_module.AsyncClient.send
@@ -146,15 +333,31 @@ def _count_metered_requests(httpx_module, routes: dict, provider_call) -> None:
                 return request_class
         return None
 
+    def authorize(request, request_class) -> None:
+        if not require_dispatch_identity or request_class is None:
+            return
+        if _request_has_dispatch_alias(request):
+            raise ContractError("Cognee provider request supplied a dispatch alias")
+        identities = _ACTIVE_DISPATCH_IDENTITIES.get() or {}
+        identity = identities.get(request_class)
+        if not _valid_dispatch_identity(identity):
+            raise RuntimeUnavailable("Cognee provider request has no active dispatch plan")
+        headers = getattr(request, "headers", None)
+        if headers is None:
+            raise RuntimeUnavailable("Cognee provider request cannot carry a dispatch plan")
+        headers[DISPATCH_ALIAS_HEADER] = identity["alias"]
+
     def send(self, request, *args, **kwargs):
         request_class = request_class_for(request.url)
         if request_class is not None:
+            authorize(request, request_class)
             provider_call(request_class)
         return original_send(self, request, *args, **kwargs)
 
     async def async_send(self, request, *args, **kwargs):
         request_class = request_class_for(request.url)
         if request_class is not None:
+            authorize(request, request_class)
             provider_call(request_class)
         return await original_async_send(self, request, *args, **kwargs)
 
@@ -256,6 +459,8 @@ async def _default_client_factory(config, provider_call):
         import cognee
         from cognee.context_global_variables import backend_access_control_enabled
         from cognee.infrastructure.files.utils.open_data_file import open_data_file
+        from cognee.infrastructure.llm.structured_output_framework.litellm_native.native_adapter import NativeLiteLLMAdapter
+        from cognee.infrastructure.databases.vector.embeddings.OpenAICompatibleEmbeddingEngine import OpenAICompatibleEmbeddingEngine
         from cognee.modules.engine.operations.setup import setup as cognee_setup
         from cognee.modules.users.methods import create_user, get_user_by_email
         from cognee.tasks.ingestion.data_item import DataItem
@@ -291,7 +496,37 @@ async def _default_client_factory(config, provider_call):
         cognee.config.set_embedding_model(embedding["model"])
         cognee.config.set_embedding_dimensions(embedding["dimensions"])
         cognee.config.set_embedding_api_key(UNUSED_API_KEY)
-        await cognee_setup()
+        routes = {
+            "internal_memory_llm": llm["endpoint"],
+            "embedding": embedding["endpoint"],
+        }
+
+        async def declare(_request_class, endpoint):
+            return await _meter_declare(endpoint)
+
+        async def close(request_class, identity):
+            return await _meter_close(routes[request_class], identity)
+
+        _count_metered_requests(
+            httpx,
+            routes,
+            provider_call,
+            require_dispatch_identity=True,
+        )
+        _install_cognee_dispatch_roots(
+            routes,
+            native_litellm_adapter=NativeLiteLLMAdapter,
+            embedding_engine=OpenAICompatibleEmbeddingEngine,
+            declare=declare,
+            close=close,
+        )
+        async with _metered_dispatch_scope(
+            routes,
+            ("internal_memory_llm", "embedding"),
+            declare=declare,
+            close=close,
+        ):
+            await cognee_setup()
     except Exception as error:
         raise RuntimeUnavailable(
             "Cognee could not be configured against the pinned stores and metered routes"
@@ -306,11 +541,6 @@ async def _default_client_factory(config, provider_call):
             "Cognee backend access control is not active under the pinned stores"
         )
 
-    _count_metered_requests(
-        httpx,
-        {"internal_memory_llm": llm["endpoint"], "embedding": embedding["endpoint"]},
-        provider_call,
-    )
     return _CogneeClient(cognee, DataItem, open_data_file, create_user, get_user_by_email)
 
 

@@ -129,15 +129,30 @@ function providerResponse() {
 // does, and keeps every object it was handed so the binding can be inspected.
 function meterDouble() {
   const bound = [];
+  const plannedBound = [];
+  const legacyBound = [];
   const endpoints = [];
+  const endpointFor = (suffix) => {
+    const endpoint = `http://127.0.0.1:7777/provider-meter/v1/route-${suffix}`;
+    endpoints.push(endpoint);
+    return endpoint;
+  };
   return {
     bound,
+    plannedBound,
+    legacyBound,
     endpoints,
     bindEndpoint(correlation) {
+      legacyBound.push(correlation);
       bound.push(correlation);
-      const endpoint = `http://127.0.0.1:7777/provider-meter/v1/route-${bound.length}`;
-      endpoints.push(endpoint);
-      return endpoint;
+      return endpointFor(bound.length);
+    },
+    bindPlannedEndpoint(plan) {
+      plannedBound.push(plan);
+      bound.push(Object.fromEntries(
+        [...CORRELATION_FIELDS, 'rootOperation'].map((field) => [field, plan[field]])
+      ));
+      return { endpoint: endpointFor(bound.length) };
     }
   };
 }
@@ -249,6 +264,26 @@ test('every call binds its own endpoint, and the config carries the one bound fo
   assert.equal(decisions[0].config.endpoint, meter.endpoints[0]);
   assert.equal(decisions[1].config.endpoint, meter.endpoints[1], 'the second call must not reuse the first route');
   assert.deepEqual(meter.bound.map(({ attemptId }) => attemptId), ['attempt-1', 'attempt-2']);
+});
+
+test('outer calls bind a fresh static dispatch plan rather than a legacy endpoint', async () => {
+  const { requestOuter, meter } = transport();
+  await requestOuter({ correlation: correlationFor(), request: outerRequest() });
+
+  assert.deepEqual(meter.legacyBound, []);
+  assert.equal(meter.plannedBound.length, 1);
+  const plan = meter.plannedBound[0];
+  assert.equal(plan.rootOperation, 'outer-decision');
+  assert.equal(plan.identityMode, 'static');
+  assert.equal(plan.planSlot, 'outer-decision');
+  assert.match(plan.rootInvocationId, /^[0-9a-f]{8}-[0-9a-f-]{27}$/u);
+  assert.deepEqual(Object.keys(plan).sort(), [
+    ...CORRELATION_FIELDS,
+    'identityMode',
+    'planSlot',
+    'rootInvocationId',
+    'rootOperation'
+  ].sort());
 });
 
 test('the seven correlation fields plus harness-owned outer root are bound, even when the caller carries more', async () => {
