@@ -30,6 +30,8 @@
 // that is answering now. A single failed or stale check withholds verification
 // from its own service and from no other.
 
+import { parseServiceManifestDocument } from './implementation-lock.mjs';
+
 export const SERVICE_EVIDENCE_SCHEMA = 'shadowgraph.v11.service-evidence';
 export const SERVICE_EVIDENCE_VERSION = 1;
 
@@ -84,27 +86,13 @@ function instantOf(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-/**
- * Read the committed service manifest into `name -> image`.
- *
- * Accepts the same two shapes `V11_PREREQUISITE_GATES` accepts, so a manifest
- * that satisfies the prerequisite gate is readable here rather than needing a
- * second, subtly different spelling.
- */
+/** Read the committed service manifest into `name -> immutable platform identity`. */
 function declaredImages(serviceManifest) {
-  if (!isPlainRecord(serviceManifest)) return null;
-  const services = Array.isArray(serviceManifest.services)
-    ? serviceManifest.services
-    : serviceManifest.serviceImages;
-  if (!Array.isArray(services) || services.length === 0) return null;
-  const images = new Map();
-  for (const service of services) {
-    if (!isPlainRecord(service) || !isNonEmptyString(service.name) || !isNonEmptyString(service.image)) {
-      return null;
-    }
-    images.set(service.name, service.image);
+  try {
+    return parseServiceManifestDocument(serviceManifest);
+  } catch {
+    return null;
   }
-  return images;
 }
 
 /** Read the committed weight lock into `modelId -> weightsDigest`. */
@@ -140,19 +128,25 @@ function serviceFindings(service, { images, weights, now }) {
   const name = service.name;
   const push = (code, extra = {}) => findings.push({ code, service: name, ...extra });
 
-  const declaredImage = images.get(name);
-  if (declaredImage === undefined) {
+  const declaredService = images.get(name.toLowerCase());
+  if (declaredService === undefined) {
     push('SERVICE_NOT_DECLARED', {
       detail: 'the committed service manifest does not declare a service by this name'
     });
     return findings;
   }
-  if (service.image !== declaredImage) {
-    push('SERVICE_IMAGE_MISMATCH', { declared: declaredImage, recorded: service.image ?? null });
+  if (service.image !== declaredService.image) {
+    push('SERVICE_IMAGE_MISMATCH', { declared: declaredService.image, recorded: service.image ?? null });
   }
   if (!isNonEmptyString(service.resolvedDigest) || !SHA256_REFERENCE.test(service.resolvedDigest)) {
     push('SERVICE_DIGEST_MALFORMED', {
       detail: 'a resolved image digest must be sha256: followed by 64 lowercase hex characters'
+    });
+  } else if (service.resolvedDigest !== declaredService.digest) {
+    push('SERVICE_PLATFORM_MANIFEST_DIGEST_MISMATCH', {
+      declared: declaredService.digest,
+      recorded: service.resolvedDigest,
+      detail: 'the observed container identity is not the committed OCI platform-manifest digest'
     });
   }
   if (!isNonEmptyString(service.containerId)) {
@@ -335,20 +329,22 @@ export function verifyServiceEvidence(input) {
   for (const service of evidence.services) {
     const name = isPlainRecord(service) ? service.name : null;
     if (!isNonEmptyString(name)) continue;
-    if (namesSeen.has(name)) duplicated.add(name);
-    namesSeen.add(name);
+    const canonicalName = name.toLowerCase();
+    if (namesSeen.has(canonicalName)) duplicated.add(canonicalName);
+    namesSeen.add(canonicalName);
   }
 
   const findings = [];
   const verifiedServices = new Set();
   let servesLockedModels = false;
   for (const service of evidence.services) {
-    if (isPlainRecord(service) && duplicated.has(service.name)) {
+    if (isPlainRecord(service) && isNonEmptyString(service.name)
+      && duplicated.has(service.name.toLowerCase())) {
       continue;
     }
     const serviceResult = serviceFindings(service, { images, weights, now });
     if (serviceResult.length === 0) {
-      verifiedServices.add(service.name);
+      verifiedServices.add(service.name.toLowerCase());
       if (Array.isArray(service.servedModels) && service.servedModels.length > 0) {
         servesLockedModels = true;
       }

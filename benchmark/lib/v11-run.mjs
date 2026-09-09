@@ -14,6 +14,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
+import { parseServiceManifestDocument } from './implementation-lock.mjs';
 import { aggregateRun } from './aggregate.mjs';
 import { verifyPreconditionEvidence } from './v11-precondition-evidence.mjs';
 import { verifyNativeAttemptEvidence } from './v11-native-attempt-evidence.mjs';
@@ -36,12 +37,6 @@ export class V11RunError extends Error {
 
 const FULL_SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const BARE_SHA256 = /^[a-f0-9]{64}$/u;
-
-// A lockable service reference: a repository plus an explicit tag, with no
-// digest suffix. Kept deliberately in step with `assertLockableImage` and
-// `MUTABLE_LATEST` in implementation-lock.mjs, which owns this file's contract.
-const LOCKABLE_IMAGE = /^[A-Za-z0-9][A-Za-z0-9._/-]*:[A-Za-z0-9][A-Za-z0-9._-]*$/u;
-const MUTABLE_LATEST = /(?:^|[/:@])latest(?:$|[/:@])/iu;
 
 function isPlainRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -72,24 +67,16 @@ export const V11_PREREQUISITE_GATES = Object.freeze([
   Object.freeze({
     requirement: 'service-manifest',
     file: 'service-images.json',
-    // The canonical `services` array is what implementation-lock.mjs parses at
-    // this path; `serviceImages` is accepted for the older shape. An image must
-    // be a lockable repository reference - a repository plus an explicit,
-    // non-`latest` tag. Requiring an inline `@sha256:` digest here would be
-    // wrong: assertLockableImage refuses a reference containing '@', so such a
-    // manifest could satisfy readiness and still never produce a lock. Digests
-    // are operator-supplied run evidence; the manifest is the committed
-    // statement of which services must carry one.
+    // The implementation-lock parser owns the exact service identity grammar.
+    // A readiness gate must never accept a tag-only/index/config-ID shape that
+    // the lock or service-evidence verifier would later reject.
     isSatisfied: (value) => {
-      const services = Array.isArray(value?.services) ? value.services : value?.serviceImages;
-      return Array.isArray(services) && services.length > 0
-        && services.every((service) => (
-          isPlainRecord(service)
-          && typeof service.name === 'string' && service.name.length > 0
-          && typeof service.image === 'string'
-          && LOCKABLE_IMAGE.test(service.image)
-          && !MUTABLE_LATEST.test(service.image)
-        ));
+      try {
+        parseServiceManifestDocument(value);
+        return true;
+      } catch {
+        return false;
+      }
     }
   }),
   Object.freeze({

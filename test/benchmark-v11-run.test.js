@@ -10,6 +10,7 @@
 
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
@@ -42,6 +43,56 @@ const AMENDMENT_006_PATH = path.join(BENCHMARK_ROOT, 'preregistration-amendment-
 const AMENDMENT_006_SIDECAR_PATH = path.join(BENCHMARK_ROOT, 'preregistration-amendment-006.sha256');
 const AMENDMENT_008_PATH = path.join(BENCHMARK_ROOT, 'preregistration-amendment-008.json');
 const AMENDMENT_008_SIDECAR_PATH = path.join(BENCHMARK_ROOT, 'preregistration-amendment-008.sha256');
+
+function sha256Digest(bytes) {
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+}
+
+function serviceImageEntry(name, image) {
+  const lastColon = image.lastIndexOf(':');
+  const repository = image.slice(0, lastColon);
+  const tag = image.slice(lastColon + 1);
+  const manifestBytes = Buffer.from(JSON.stringify({
+    schemaVersion: 2,
+    mediaType: 'application/vnd.oci.image.manifest.v1+json',
+    config: {
+      mediaType: 'application/vnd.oci.image.config.v1+json',
+      digest: `sha256:${'a'.repeat(64)}`,
+      size: 1
+    },
+    layers: [{
+      mediaType: 'application/vnd.oci.image.layer.v1.tar+gzip',
+      digest: `sha256:${'b'.repeat(64)}`,
+      size: 1
+    }]
+  }));
+  const digest = sha256Digest(manifestBytes);
+  const indexBytes = Buffer.from(JSON.stringify({
+    schemaVersion: 2,
+    mediaType: 'application/vnd.oci.image.index.v1+json',
+    manifests: [{
+      mediaType: 'application/vnd.oci.image.manifest.v1+json',
+      digest,
+      size: manifestBytes.length,
+      platform: { os: 'linux', architecture: 'amd64' }
+    }]
+  }));
+  return {
+    name,
+    image,
+    digest,
+    digestKind: 'oci-platform-manifest',
+    platform: 'linux/amd64',
+    registryAttestation: {
+      registry: 'registry-1.docker.io',
+      repository: repository.includes('/') ? repository : `library/${repository}`,
+      tag,
+      indexDigest: sha256Digest(indexBytes),
+      indexBase64: indexBytes.toString('base64'),
+      platformManifestBase64: manifestBytes.toString('base64')
+    }
+  };
+}
 
 async function realCandidate() {
   const competitorLock = JSON.parse(
@@ -149,8 +200,8 @@ test('a mutable service manifest reference does not satisfy the service gate', a
   const directory = await scratchDirectory(t, 'shadowgraph-v11-mutable-service-manifest-');
   await writeFile(path.join(directory, 'service-images.json'), JSON.stringify({
     schema: 'shadowgraph.service-images',
-    version: 1,
-    services: [{ name: 'ollama', image: 'ollama/ollama:latest' }]
+    version: 3,
+    services: [{ ...serviceImageEntry('ollama', 'ollama/ollama:0.33.2'), image: 'ollama/ollama:latest' }]
   }), 'utf8');
   await writeFile(path.join(directory, 'model-weights.lock.json'), JSON.stringify({
     models: [{ modelId: 'fixture', digestKind: 'model_weights', weightsDigest: 'sha256:' + 'b'.repeat(64) }]
@@ -177,8 +228,40 @@ test('a digest-suffixed service reference does not satisfy the service gate', as
   const directory = await scratchDirectory(t, 'shadowgraph-v11-digest-service-manifest-');
   await writeFile(path.join(directory, 'service-images.json'), JSON.stringify({
     schema: 'shadowgraph.service-images',
-    version: 1,
-    services: [{ name: 'ollama', image: 'ollama/ollama@sha256:' + 'a'.repeat(64) }]
+    version: 3,
+    services: [{
+      ...serviceImageEntry('ollama', 'ollama/ollama:0.33.2'),
+      image: 'ollama/ollama@sha256:' + 'a'.repeat(64)
+    }]
+  }), 'utf8');
+  await writeFile(path.join(directory, 'model-weights.lock.json'), JSON.stringify({
+    models: [{ modelId: 'fixture', digestKind: 'model_weights', weightsDigest: 'sha256:' + 'b'.repeat(64) }]
+  }), 'utf8');
+  await writeFile(path.join(directory, 'python-wheels.lock.json'), JSON.stringify({
+    wheels: [{ name: 'fixture', sha256: 'c'.repeat(64) }]
+  }), 'utf8');
+
+  const candidate = await realCandidate();
+  const report = await computeV11Readiness({
+    ...candidate,
+    benchmarkRoot: directory,
+    satisfiedPreconditions: ['pinned backend access-control configuration']
+  });
+
+  assert.ok(report.blockers.some((blocker) => (
+    blocker.kind === 'immutable-prerequisite' && blocker.requirement === 'service-manifest'
+  )));
+});
+
+test('an untagged service reference with a registry port does not satisfy the service gate', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-untagged-service-manifest-');
+  await writeFile(path.join(directory, 'service-images.json'), JSON.stringify({
+    schema: 'shadowgraph.service-images',
+    version: 3,
+    services: [{
+      ...serviceImageEntry('ollama', 'ollama/ollama:0.33.2'),
+      image: 'registry.example:5000/team/ollama'
+    }]
   }), 'utf8');
   await writeFile(path.join(directory, 'model-weights.lock.json'), JSON.stringify({
     models: [{ modelId: 'fixture', digestKind: 'model_weights', weightsDigest: 'sha256:' + 'b'.repeat(64) }]
@@ -203,8 +286,8 @@ test('the canonical tagged service manifest satisfies the service prerequisite g
   const directory = await scratchDirectory(t, 'shadowgraph-v11-service-manifest-');
   await writeFile(path.join(directory, 'service-images.json'), JSON.stringify({
     schema: 'shadowgraph.service-images',
-    version: 1,
-    services: [{ name: 'ollama', image: 'ollama/ollama:0.33.2' }]
+    version: 3,
+    services: [serviceImageEntry('ollama', 'ollama/ollama:0.33.2')]
   }), 'utf8');
   await writeFile(path.join(directory, 'model-weights.lock.json'), JSON.stringify({
     models: [{ modelId: 'fixture', digestKind: 'model_weights', weightsDigest: 'sha256:' + 'b'.repeat(64) }]
@@ -228,6 +311,35 @@ test('the canonical tagged service manifest satisfies the service prerequisite g
   );
 });
 
+test('a service manifest without a committed OCI platform-manifest identity blocks readiness', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-service-manifest-identity-');
+  await writeFile(path.join(directory, 'service-images.json'), JSON.stringify({
+    schema: 'shadowgraph.service-images',
+    version: 3,
+    services: [{
+      ...serviceImageEntry('ollama', 'ollama/ollama:0.33.2'),
+      digestKind: 'oci-image-index'
+    }]
+  }), 'utf8');
+  await writeFile(path.join(directory, 'model-weights.lock.json'), JSON.stringify({
+    models: [{ modelId: 'fixture', digestKind: 'model_weights', weightsDigest: 'sha256:' + 'b'.repeat(64) }]
+  }), 'utf8');
+  await writeFile(path.join(directory, 'python-wheels.lock.json'), JSON.stringify({
+    wheels: [{ name: 'fixture', sha256: 'c'.repeat(64) }]
+  }), 'utf8');
+
+  const candidate = await realCandidate();
+  const report = await computeV11Readiness({
+    ...candidate,
+    benchmarkRoot: directory,
+    satisfiedPreconditions: ['pinned backend access-control configuration']
+  });
+
+  assert.ok(report.blockers.some((blocker) => (
+    blocker.kind === 'immutable-prerequisite' && blocker.requirement === 'service-manifest'
+  )));
+});
+
 test('the committed service manifest uses references the implementation lock can pin', async () => {
   // benchmark/lib/implementation-lock.mjs is the authority for this file. Its
   // assertLockableImage refuses any reference containing '@' ("must be an image
@@ -237,11 +349,56 @@ test('the committed service manifest uses references the implementation lock can
   const manifest = JSON.parse(await readFile(path.join(BENCHMARK_ROOT, 'service-images.json'), 'utf8'));
 
   assert.equal(manifest.schema, 'shadowgraph.service-images');
-  assert.ok(Array.isArray(manifest.services) && manifest.services.length > 0);
+  assert.equal(manifest.version, 3);
+  assert.deepEqual(
+    manifest.services.map(({ name, image, digest, digestKind, platform, registryAttestation }) => ({
+      name,
+      image,
+      digest,
+      digestKind,
+      platform,
+      registry: registryAttestation.registry,
+      repository: registryAttestation.repository,
+      tag: registryAttestation.tag,
+      indexDigest: registryAttestation.indexDigest
+    })),
+    [
+      {
+        name: 'neo4j',
+        image: 'neo4j:5.20',
+        digest: 'sha256:99a767ef6f5573cd72d6d7f32c5266233af3c58efdc71577349a7c251d8ecb3b',
+        digestKind: 'oci-platform-manifest',
+        platform: 'linux/amd64',
+        registry: 'registry-1.docker.io',
+        repository: 'library/neo4j',
+        tag: '5.20',
+        indexDigest: 'sha256:52d3dec8d45585b21edeca8517d752b2512e52aa94f80fc36a5788c88c95f8e4'
+      },
+      {
+        name: 'ollama',
+        image: 'ollama/ollama:0.33.2',
+        digest: 'sha256:9e7d782e99880c70f9563c51633da875ca605518a8f8d95c2532bda70a027b7a',
+        digestKind: 'oci-platform-manifest',
+        platform: 'linux/amd64',
+        registry: 'registry-1.docker.io',
+        repository: 'ollama/ollama',
+        tag: '0.33.2',
+        indexDigest: 'sha256:020e4134285e2ef4d8fd801234176de3b4faadc992a3eb06c8e66a2f9d4c4ba2'
+      }
+    ]
+  );
   for (const service of manifest.services) {
     assert.equal(service.image.includes('@'), false, `${service.name} names an image ID, not a repository`);
     assert.equal(/(?:^|[/:@])latest(?:$|[/:@])/iu.test(service.image), false, `${service.name} is mutable`);
     assert.match(service.image, /^[^@\s]+:[^@\s:]+$/u, `${service.name} must carry an explicit tag`);
+    const attestation = service.registryAttestation;
+    assert.deepEqual(Object.keys(attestation).sort(), [
+      'indexBase64', 'indexDigest', 'platformManifestBase64', 'registry', 'repository', 'tag'
+    ]);
+    for (const field of ['indexBase64', 'platformManifestBase64']) {
+      const decoded = Buffer.from(attestation[field], 'base64');
+      assert.equal(decoded.toString('base64'), attestation[field], `${service.name} ${field} is canonical base64`);
+    }
   }
 });
 
@@ -461,9 +618,11 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
   );
   await writeFile(
     path.join(gateDirectory, 'service-images.json'),
-    // The legacy `serviceImages` key is still accepted, but the image must be a
-    // reference implementation-lock.mjs could pin: repository plus explicit tag.
-    JSON.stringify({ serviceImages: [{ name: 'fixture-service', image: 'fixture/service:1.0.0' }] }),
+    JSON.stringify({
+      schema: 'shadowgraph.service-images',
+      version: 3,
+      services: [serviceImageEntry('fixture-service', 'fixture/service:1.0.0')]
+    }),
     'utf8'
   );
   await writeFile(
@@ -817,7 +976,7 @@ async function committedServiceEvidence(overrides = {}) {
     services: manifest.services.map((service, index) => ({
       name: service.name,
       image: service.image,
-      resolvedDigest: 'sha256:' + String(index + 1).repeat(64).slice(0, 64),
+      resolvedDigest: service.digest,
       containerId: 'container-' + service.name,
       servedModels: service.name === 'neo4j' ? [] : servedModels,
       checks: evidenceChecks(service.name)
@@ -867,6 +1026,17 @@ test('a fresh probe record that agrees with the committed locks clears both requ
   assert.deepEqual(serviceBlockers(report), [], 'a verified service is no longer a blocker');
   assert.deepEqual([...report.serviceEvidence.verifiedServices].sort(), ['neo4j', 'ollama']);
   assert.match(report.serviceEvidence.note, /cannot establish/iu);
+});
+
+test('case-varied service evidence clears canonical required services', async (t) => {
+  const evidence = await committedServiceEvidence();
+  for (const service of evidence.services) {
+    service.name = service.name[0].toUpperCase() + service.name.slice(1);
+  }
+  const report = await readinessWithEvidence(t, 'shadowgraph-v11-evidence-case-', evidence);
+
+  assert.deepEqual(serviceBlockers(report), []);
+  assert.deepEqual([...report.serviceEvidence.verifiedServices].sort(), ['neo4j', 'ollama']);
 });
 
 test('evidence for the common endpoint alone clears Cognee and not Graphiti', async (t) => {

@@ -21,6 +21,7 @@
 
 import path from 'node:path';
 
+import { parseServiceManifestDocument } from './implementation-lock.mjs';
 import { SERVICE_EVIDENCE_SCHEMA, SERVICE_EVIDENCE_VERSION } from './v11-service-evidence.mjs';
 
 export const SERVICE_ENDPOINTS_SCHEMA = 'shadowgraph.v11.service-endpoints';
@@ -91,6 +92,13 @@ function sameImageContent(left, right) {
   return left.every((layer, index) => layer === right[index]);
 }
 
+/** Convert a validated repository:tag reference into canonical repository form. */
+function repositoryOfTaggedImage(image) {
+  const lastSlash = image.lastIndexOf('/');
+  const lastColon = image.lastIndexOf(':');
+  return lastColon > lastSlash ? image.slice(0, lastColon) : image;
+}
+
 /**
  * Confirm the named container is running the image the committed manifest pins.
  *
@@ -99,7 +107,7 @@ function sameImageContent(left, right) {
  * container an operator pointed at is the one the manifest names, so a run
  * against a container someone rebuilt is visible instead of silent.
  */
-async function imageIdentityCheck(service, manifestImage, observedAt, deps) {
+async function imageIdentityCheck(service, manifestService, observedAt, deps) {
   const container = await attempt(() => deps.inspectContainer(service.container));
   if (!container.ok) {
     return {
@@ -108,7 +116,8 @@ async function imageIdentityCheck(service, manifestImage, observedAt, deps) {
       check: check('image-identity', service.container, observedAt, 'FAIL', container.detail)
     };
   }
-  const image = await attempt(() => deps.inspectImage(manifestImage));
+  const immutableReference = `${repositoryOfTaggedImage(manifestService.image)}@${manifestService.digest}`;
+  const image = await attempt(() => deps.inspectImage(immutableReference));
   if (!image.ok) {
     return {
       resolvedDigest: container.value.image ?? null,
@@ -116,19 +125,24 @@ async function imageIdentityCheck(service, manifestImage, observedAt, deps) {
       check: check('image-identity', service.container, observedAt, 'FAIL', image.detail)
     };
   }
-  const matches = sameImageContent(container.value.layers, image.value.layers);
+  const localImageMatches = container.value.image === image.value.id;
+  const platformMatches = image.value.platform === manifestService.platform;
+  const layersMatch = sameImageContent(container.value.layers, image.value.layers);
+  const matches = localImageMatches && platformMatches && layersMatch;
+  let detail;
+  if (!localImageMatches) {
+    detail = `container local image ID ${container.value.image} does not match image ID ${image.value.id} resolved from committed OCI platform manifest digest ${manifestService.digest}`;
+  } else if (!platformMatches) {
+    detail = `immutable image ${immutableReference} reports platform ${image.value.platform ?? 'unknown'}, not ${manifestService.platform}`;
+  } else if (!layersMatch) {
+    detail = `container image ${container.value.image} does not have the layers ${immutableReference} resolves to (${image.value.id})`;
+  } else {
+    detail = `container local image ID matches the ${container.value.layers.length} layers resolved from OCI platform manifest ${manifestService.digest}`;
+  }
   return {
-    resolvedDigest: container.value.image ?? null,
+    resolvedDigest: matches ? manifestService.digest : null,
     containerId: container.value.id ?? null,
-    check: check(
-      'image-identity',
-      service.container,
-      observedAt,
-      matches ? 'PASS' : 'FAIL',
-      matches
-        ? `container runs the ${container.value.layers.length} layers ${manifestImage} resolves to`
-        : `container image ${container.value.image} does not have the layers ${manifestImage} resolves to (${image.value.id})`
-    )
+    check: check('image-identity', service.container, observedAt, matches ? 'PASS' : 'FAIL', detail)
   };
 }
 
@@ -331,9 +345,14 @@ export async function probeServices(input) {
   } = input ?? {};
 
   validateEndpoints(endpoints);
-  const declared = Array.isArray(serviceManifest?.services) ? serviceManifest.services : null;
-  if (declared === null || declared.length === 0) {
-    throw new ServiceProbeError('CONTRACT_FAILURE', 'the committed service manifest declares no service');
+  let declared;
+  try {
+    declared = parseServiceManifestDocument(serviceManifest);
+  } catch (error) {
+    throw new ServiceProbeError(
+      'CONTRACT_FAILURE',
+      `the committed service manifest is invalid: ${error?.message ?? String(error)}`
+    );
   }
   if (!Array.isArray(modelWeights?.models) || modelWeights.models.length === 0) {
     throw new ServiceProbeError('CONTRACT_FAILURE', 'the committed model weight lock pins no model');
@@ -349,14 +368,14 @@ export async function probeServices(input) {
   const services = [];
 
   for (const service of endpoints.services) {
-    const manifestEntry = declared.find((entry) => entry.name === service.name);
+    const manifestEntry = declared.get(service.name.toLowerCase());
     if (manifestEntry === undefined) {
       throw new ServiceProbeError(
         'CONTRACT_FAILURE',
         `service ${service.name} is not declared in the committed service manifest`
       );
     }
-    const identity = await imageIdentityCheck(service, manifestEntry.image, observedAt, deps);
+    const identity = await imageIdentityCheck(service, manifestEntry, observedAt, deps);
     const probed = service.kind === 'neo4j'
       ? await probeNeo4j(service, observedAt, deps)
       : await probeModelEndpoint(service, modelWeights, observedAt, deps);

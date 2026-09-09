@@ -1442,12 +1442,12 @@ async function dockerField(args) {
  * separated from the probe so that the probe's behaviour on an unreachable
  * service is testable without a container runtime.
  */
-const IMAGE_IDENTITY_FORMAT = '{{.Id}}\t{{json .RootFS.Layers}}';
+const IMAGE_IDENTITY_FORMAT = '{{.Id}}\t{{json .RootFS.Layers}}\t{{.Os}}\t{{.Architecture}}';
 
 async function inspectImageIdentity(reference) {
-  const [id, layers] = (await dockerField(['image', 'inspect', reference, '--format', IMAGE_IDENTITY_FORMAT]))
+  const [id, layers, os, architecture] = (await dockerField(['image', 'inspect', reference, '--format', IMAGE_IDENTITY_FORMAT]))
     .split('\t');
-  return { id, layers: JSON.parse(layers) };
+  return { id, layers: JSON.parse(layers), platform: `${os}/${architecture}` };
 }
 
 const containerRuntimeProbes = {

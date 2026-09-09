@@ -8,6 +8,7 @@
 // catches that.
 
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 
 import { verifyServiceEvidence } from '../benchmark/lib/v11-service-evidence.mjs';
@@ -27,6 +28,54 @@ const NEO4J_IMAGE_ID = `sha256:${'1'.repeat(64)}`;
 const OLLAMA_IMAGE_ID = `sha256:${'2'.repeat(64)}`;
 const NEO4J_TAG_ID = `sha256:${'3'.repeat(64)}`;
 const OLLAMA_TAG_ID = `sha256:${'4'.repeat(64)}`;
+
+function sha256Digest(bytes) {
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+}
+
+function rawRegistryAttestation(repository, tag) {
+  const manifestBytes = Buffer.from(JSON.stringify({
+    schemaVersion: 2,
+    mediaType: 'application/vnd.oci.image.manifest.v1+json',
+    config: {
+      mediaType: 'application/vnd.oci.image.config.v1+json',
+      digest: `sha256:${'c'.repeat(64)}`,
+      size: 1
+    },
+    layers: [{
+      mediaType: 'application/vnd.oci.image.layer.v1.tar+gzip',
+      digest: `sha256:${'d'.repeat(64)}`,
+      size: 1
+    }]
+  }));
+  const digest = sha256Digest(manifestBytes);
+  const indexBytes = Buffer.from(JSON.stringify({
+    schemaVersion: 2,
+    mediaType: 'application/vnd.oci.image.index.v1+json',
+    manifests: [{
+      mediaType: 'application/vnd.oci.image.manifest.v1+json',
+      digest,
+      size: manifestBytes.length,
+      platform: { os: 'linux', architecture: 'amd64' }
+    }]
+  }));
+  return Object.freeze({
+    digest,
+    registryAttestation: Object.freeze({
+      registry: 'registry-1.docker.io',
+      repository,
+      tag,
+      indexDigest: sha256Digest(indexBytes),
+      indexBase64: indexBytes.toString('base64'),
+      platformManifestBase64: manifestBytes.toString('base64')
+    })
+  });
+}
+
+const NEO4J_ATTESTATION = rawRegistryAttestation('library/neo4j', '5.20');
+const OLLAMA_ATTESTATION = rawRegistryAttestation('ollama/ollama', '0.33.2');
+const NEO4J_PLATFORM_MANIFEST_DIGEST = NEO4J_ATTESTATION.digest;
+const OLLAMA_PLATFORM_MANIFEST_DIGEST = OLLAMA_ATTESTATION.digest;
 const NEO4J_LAYERS = [`sha256:${'a'.repeat(64)}`, `sha256:${'b'.repeat(64)}`];
 const OLLAMA_LAYERS = [`sha256:${'7'.repeat(64)}`];
 const LLM_WEIGHTS = `sha256:${'c'.repeat(64)}`;
@@ -36,10 +85,24 @@ const NEO4J_SECRET = 'neo4j:correct-horse-battery-staple';
 function serviceManifest() {
   return {
     schema: 'shadowgraph.service-images',
-    version: 1,
+    version: 3,
     services: [
-      { name: 'neo4j', image: 'neo4j:5.20' },
-      { name: 'ollama', image: 'ollama/ollama:0.33.2' }
+      {
+        name: 'neo4j',
+        image: 'neo4j:5.20',
+        digest: NEO4J_PLATFORM_MANIFEST_DIGEST,
+        digestKind: 'oci-platform-manifest',
+        platform: 'linux/amd64',
+        registryAttestation: NEO4J_ATTESTATION.registryAttestation
+      },
+      {
+        name: 'ollama',
+        image: 'ollama/ollama:0.33.2',
+        digest: OLLAMA_PLATFORM_MANIFEST_DIGEST,
+        digestKind: 'oci-platform-manifest',
+        platform: 'linux/amd64',
+        registryAttestation: OLLAMA_ATTESTATION.registryAttestation
+      }
     ]
   };
 }
@@ -114,9 +177,9 @@ function probeInput(overrides = {}) {
       inspectContainer: async (name) => (name === 'shadowgraph-v11-neo4j'
         ? { id: 'container-neo4j', image: NEO4J_IMAGE_ID, layers: [...NEO4J_LAYERS] }
         : { id: 'container-ollama', image: OLLAMA_IMAGE_ID, layers: [...OLLAMA_LAYERS] }),
-      inspectImage: async (reference) => (reference === 'neo4j:5.20'
-        ? { id: NEO4J_TAG_ID, layers: [...NEO4J_LAYERS] }
-        : { id: OLLAMA_TAG_ID, layers: [...OLLAMA_LAYERS] }),
+      inspectImage: async (reference) => (reference.startsWith('neo4j@')
+        ? { id: NEO4J_IMAGE_ID, layers: [...NEO4J_LAYERS], platform: 'linux/amd64' }
+        : { id: OLLAMA_IMAGE_ID, layers: [...OLLAMA_LAYERS], platform: 'linux/amd64' }),
       readModelWeightsDigest: async (_container, modelId) => (modelId === 'qwen2.5:7b'
         ? LLM_WEIGHTS
         : EMBEDDING_WEIGHTS),
@@ -160,8 +223,67 @@ test('the record names the committed image, not whatever the container was start
   );
   assert.deepEqual(
     evidence.services.map((service) => service.resolvedDigest),
-    [NEO4J_IMAGE_ID, OLLAMA_IMAGE_ID]
+    [NEO4J_PLATFORM_MANIFEST_DIGEST, OLLAMA_PLATFORM_MANIFEST_DIGEST]
   );
+});
+
+test('the probe inspects the canonical repository platform-manifest reference', async () => {
+  const inspected = [];
+  const { input } = probeInput({
+    input: {
+      inspectImage: async (reference) => {
+        inspected.push(reference);
+        if (reference === `neo4j@${NEO4J_PLATFORM_MANIFEST_DIGEST}`) {
+          return { id: NEO4J_IMAGE_ID, layers: [...NEO4J_LAYERS], platform: 'linux/amd64' };
+        }
+        if (reference === `ollama/ollama@${OLLAMA_PLATFORM_MANIFEST_DIGEST}`) {
+          return { id: OLLAMA_IMAGE_ID, layers: [...OLLAMA_LAYERS], platform: 'linux/amd64' };
+        }
+        throw new Error(`unexpected immutable reference ${reference}`);
+      }
+    }
+  });
+  const evidence = await probeServices(input);
+
+  assert.ok(evidence.services.every((service) => service.checks[0].outcome === 'PASS'));
+  assert.deepEqual(inspected, [
+    `neo4j@${NEO4J_PLATFORM_MANIFEST_DIGEST}`,
+    `ollama/ollama@${OLLAMA_PLATFORM_MANIFEST_DIGEST}`
+  ]);
+});
+
+test('a local Docker image ID establishes a platform manifest only through the exact immutable reference', async () => {
+  const manifest = serviceManifest();
+  manifest.services[0].digest = NEO4J_PLATFORM_MANIFEST_DIGEST;
+  manifest.services[1].digest = OLLAMA_PLATFORM_MANIFEST_DIGEST;
+  const { input } = probeInput({
+    input: {
+      serviceManifest: manifest,
+      inspectImage: async (reference) => {
+        if (reference === `neo4j@${NEO4J_PLATFORM_MANIFEST_DIGEST}`) {
+          return { id: NEO4J_IMAGE_ID, layers: [...NEO4J_LAYERS], platform: 'linux/amd64' };
+        }
+        if (reference === `ollama/ollama@${OLLAMA_PLATFORM_MANIFEST_DIGEST}`) {
+          return { id: OLLAMA_IMAGE_ID, layers: [...OLLAMA_LAYERS], platform: 'linux/amd64' };
+        }
+        throw new Error(`unexpected immutable reference ${reference}`);
+      }
+    }
+  });
+  const evidence = await probeServices(input);
+  const verified = verifyServiceEvidence({
+    evidence,
+    serviceManifest: manifest,
+    modelWeights: modelWeights(),
+    now: NOW
+  });
+
+  assert.ok(evidence.services.every((service) => service.checks[0].outcome === 'PASS'));
+  assert.deepEqual(evidence.services.map((service) => service.resolvedDigest), [
+    NEO4J_PLATFORM_MANIFEST_DIGEST,
+    OLLAMA_PLATFORM_MANIFEST_DIGEST
+  ]);
+  assert.deepEqual(verified.findings, []);
 });
 
 test('weight digests are read from the serving container, not copied from the lock', async () => {
@@ -226,28 +348,48 @@ test('an endpoint that answers 200 with an error body is a failure, not a pass',
   assert.ok(!gate(evidence).verifiedServices.has('ollama'));
 });
 
-test('identity holds when only the image ids differ, because that is what pinning by digest does', async () => {
-  // Regression: comparing image ids reported a mismatch between a live,
-  // correctly digest-pinned container and the very tag it was pinned from,
-  // because the tag resolves to the multi-platform index and the digest pull
-  // resolves to the platform manifest inside it.
+test('identity binds a distinct platform manifest through its local image ID', async () => {
+  // Docker records a local image/config identity on the container. The exact
+  // immutable repository reference resolves to that local identity, while the
+  // committed platform-manifest digest remains the evidence identity.
   const { input } = probeInput();
   const evidence = await probeServices(input);
   for (const service of evidence.services) {
     const identity = service.checks.find((entry) => entry.kind === 'image-identity');
     assert.equal(identity.outcome, 'PASS', identity.detail);
   }
-  assert.notEqual(NEO4J_IMAGE_ID, NEO4J_TAG_ID, 'the fixture must not accidentally match by id');
+  assert.notEqual(NEO4J_IMAGE_ID, NEO4J_PLATFORM_MANIFEST_DIGEST);
+});
+
+test('a same-layer tag/index identity cannot impersonate the committed platform manifest', async () => {
+  const { input } = probeInput({
+    input: {
+      inspectContainer: async (name) => (name === 'shadowgraph-v11-neo4j'
+        ? { id: 'container-neo4j', image: NEO4J_TAG_ID, layers: [...NEO4J_LAYERS] }
+        : { id: 'container-ollama', image: OLLAMA_IMAGE_ID, layers: [...OLLAMA_LAYERS] })
+    }
+  });
+  const evidence = await probeServices(input);
+  const identity = evidence.services[0].checks.find((entry) => entry.kind === 'image-identity');
+
+  assert.equal(identity.outcome, 'FAIL');
+  assert.match(identity.detail, /platform manifest digest/u);
 });
 
 test('a container whose layers are not the committed image layers fails identity', async () => {
   const { input } = probeInput({
     input: {
-      inspectContainer: async () => ({
-        id: 'container-rebuilt',
-        image: `sha256:${'9'.repeat(64)}`,
-        layers: [`sha256:${'d'.repeat(64)}`]
-      })
+      inspectContainer: async (name) => (name === 'shadowgraph-v11-neo4j'
+        ? {
+            id: 'container-rebuilt-neo4j',
+            image: NEO4J_IMAGE_ID,
+            layers: [`sha256:${'d'.repeat(64)}`]
+          }
+        : {
+            id: 'container-rebuilt-ollama',
+            image: OLLAMA_IMAGE_ID,
+            layers: [`sha256:${'d'.repeat(64)}`]
+          })
     }
   });
   const evidence = await probeServices(input);

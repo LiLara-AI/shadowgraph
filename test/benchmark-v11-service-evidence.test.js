@@ -9,6 +9,7 @@
 // expects the clearance to disappear.
 
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 
 import {
@@ -20,18 +21,77 @@ import {
 const NOW = Date.parse('2026-09-05T03:00:00.000Z');
 const OBSERVED_AT = '2026-09-05T02:55:00.000Z';
 
-const NEO4J_DIGEST = `sha256:${'9'.repeat(64)}`;
-const OLLAMA_DIGEST = `sha256:${'8'.repeat(64)}`;
+function sha256Digest(bytes) {
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+}
+
+function rawRegistryAttestation(repository, tag) {
+  const manifestBytes = Buffer.from(JSON.stringify({
+    schemaVersion: 2,
+    mediaType: 'application/vnd.oci.image.manifest.v1+json',
+    config: {
+      mediaType: 'application/vnd.oci.image.config.v1+json',
+      digest: `sha256:${'a'.repeat(64)}`,
+      size: 1
+    },
+    layers: [{
+      mediaType: 'application/vnd.oci.image.layer.v1.tar+gzip',
+      digest: `sha256:${'b'.repeat(64)}`,
+      size: 1
+    }]
+  }));
+  const digest = sha256Digest(manifestBytes);
+  const indexBytes = Buffer.from(JSON.stringify({
+    schemaVersion: 2,
+    mediaType: 'application/vnd.oci.image.index.v1+json',
+    manifests: [{
+      mediaType: 'application/vnd.oci.image.manifest.v1+json',
+      digest,
+      size: manifestBytes.length,
+      platform: { os: 'linux', architecture: 'amd64' }
+    }]
+  }));
+  return Object.freeze({
+    digest,
+    registryAttestation: Object.freeze({
+      registry: 'registry-1.docker.io',
+      repository,
+      tag,
+      indexDigest: sha256Digest(indexBytes),
+      indexBase64: indexBytes.toString('base64'),
+      platformManifestBase64: manifestBytes.toString('base64')
+    })
+  });
+}
+
+const NEO4J_ATTESTATION = rawRegistryAttestation('library/neo4j', '5.20');
+const OLLAMA_ATTESTATION = rawRegistryAttestation('ollama/ollama', '0.33.2');
+const NEO4J_DIGEST = NEO4J_ATTESTATION.digest;
+const OLLAMA_DIGEST = OLLAMA_ATTESTATION.digest;
 const LLM_WEIGHTS = `sha256:${'c'.repeat(64)}`;
 const EMBEDDING_WEIGHTS = `sha256:${'e'.repeat(64)}`;
 
 function serviceManifest() {
   return {
     schema: 'shadowgraph.service-images',
-    version: 1,
+    version: 3,
     services: [
-      { name: 'neo4j', image: 'neo4j:5.20' },
-      { name: 'ollama', image: 'ollama/ollama:0.33.2' }
+      {
+        name: 'neo4j',
+        image: 'neo4j:5.20',
+        digest: NEO4J_DIGEST,
+        digestKind: 'oci-platform-manifest',
+        platform: 'linux/amd64',
+        registryAttestation: NEO4J_ATTESTATION.registryAttestation
+      },
+      {
+        name: 'ollama',
+        image: 'ollama/ollama:0.33.2',
+        digest: OLLAMA_DIGEST,
+        digestKind: 'oci-platform-manifest',
+        platform: 'linux/amd64',
+        registryAttestation: OLLAMA_ATTESTATION.registryAttestation
+      }
     ]
   };
 }
@@ -185,6 +245,17 @@ test('an image reference that differs from the committed manifest is not verifie
   assert.ok(result.findings.some((finding) => finding.code === 'SERVICE_IMAGE_MISMATCH' && finding.service === 'neo4j'));
 });
 
+test('case-normalized manifest names verify the same case-normalized evidence entry', () => {
+  const manifest = serviceManifest();
+  manifest.services[0].name = 'Neo4j';
+  const document = evidence();
+  document.services[0].name = 'Neo4j';
+  const result = verify({ evidence: document, serviceManifest: manifest });
+
+  assert.ok(result.verifiedServices.has('neo4j'));
+  assert.equal(result.findings.some((finding) => finding.code === 'SERVICE_NOT_DECLARED'), false);
+});
+
 test('a resolved digest that is not a sha256 reference is not verified', () => {
   for (const digest of ['', 'sha256:short', 'neo4j:5.20', `sha256:${'Z'.repeat(64)}`, `sha256:${'9'.repeat(63)}`]) {
     const document = mutateService('neo4j', (service) => { service.resolvedDigest = digest; });
@@ -192,6 +263,18 @@ test('a resolved digest that is not a sha256 reference is not verified', () => {
     assert.ok(!result.verifiedServices.has('neo4j'), `digest ${digest} must not verify`);
     assert.ok(result.findings.some((finding) => finding.code === 'SERVICE_DIGEST_MALFORMED'));
   }
+});
+
+test('a syntactically valid non-platform digest cannot verify a committed platform manifest', () => {
+  const document = mutateService('neo4j', (service) => {
+    service.resolvedDigest = `sha256:${'7'.repeat(64)}`;
+  });
+  const result = verify({ evidence: document });
+
+  assert.ok(!result.verifiedServices.has('neo4j'));
+  assert.ok(result.findings.some((finding) => (
+    finding.code === 'SERVICE_PLATFORM_MANIFEST_DIGEST_MISMATCH' && finding.service === 'neo4j'
+  )));
 });
 
 test('a service with no checks at all is not verified', () => {
@@ -300,6 +383,29 @@ test('two identical healthy entries for one service are still refused', () => {
   const result = verify({ evidence: document });
   assert.ok(!result.verifiedServices.has('neo4j'));
   assert.ok(result.findings.some((finding) => finding.code === 'SERVICE_DUPLICATE_ENTRY'));
+});
+
+test('case-only duplicate service entries are both withheld', () => {
+  const document = evidence();
+  const neo4j = document.services.find((service) => service.name === 'neo4j');
+  document.services.push({
+    ...structuredClone(neo4j),
+    name: 'Neo4j',
+    checks: [{
+      kind: 'http-status',
+      endpoint: 'http://127.0.0.1:7474/',
+      observedAt: OBSERVED_AT,
+      outcome: 'FAIL',
+      detail: 'connection refused'
+    }]
+  });
+
+  const result = verify({ evidence: document });
+  assert.ok(!result.verifiedServices.has('neo4j'));
+  assert.ok(!result.verifiedServices.has('Neo4j'));
+  assert.ok(result.findings.some((finding) => (
+    finding.code === 'SERVICE_DUPLICATE_ENTRY' && finding.service === 'neo4j'
+  )));
 });
 
 test('evidence exactly at the freshness window has already expired', () => {
