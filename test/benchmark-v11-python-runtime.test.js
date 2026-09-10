@@ -21,6 +21,8 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
+  PYTHON_RUNTIME_BYTECODE_ENVIRONMENT,
+  pythonRuntimePipInstallArguments,
   PYTHON_IMPORT_MODULES,
   PYTHON_RUNTIME_SCHEMA,
   LIST_DISTRIBUTIONS_SCRIPT,
@@ -143,6 +145,35 @@ test('requirements carry every hash the lock records for a package, on one line 
   // Continuation backslashes are how this was first written and how it first
   // broke: pip read the escaped newline as part of the version specifier.
   assert.ok(!rendered.includes('\\'), 'no line continuations');
+});
+
+test('runtime build commands fence bytecode before mounting the verified site', () => {
+  assert.deepEqual(PYTHON_RUNTIME_BYTECODE_ENVIRONMENT, ['PYTHONDONTWRITEBYTECODE=1']);
+  assert.deepEqual(
+    pythonRuntimePipInstallArguments({ target: '/runtime/site', requirements: '/runtime/requirements.txt' }),
+    [
+      'python', '-m', 'pip', 'install', '--require-hashes', '--no-compile',
+      '--no-cache-dir', '--no-warn-script-location', '--target', '/runtime/site',
+      '-r', '/runtime/requirements.txt'
+    ]
+  );
+});
+
+test('runtime build commands reject unsafe container paths', () => {
+  for (const input of [
+    { target: 'relative/site', requirements: '/runtime/requirements.txt' },
+    { target: '../site', requirements: '/runtime/requirements.txt' },
+    { target: '/runtime/../site', requirements: '/runtime/requirements.txt' },
+    { target: '/runtime//site', requirements: '/runtime/requirements.txt' },
+    { target: '/runtime\\site', requirements: '/runtime/requirements.txt' },
+    { target: '/runtime/\nsite', requirements: '/runtime/requirements.txt' },
+    { target: '/runtime/site', requirements: '/runtime/\nrequirements.txt' }
+  ]) {
+    assert.throws(
+      () => pythonRuntimePipInstallArguments(input),
+      /absolute control-free target and requirements paths/u
+    );
+  }
 });
 
 test('a hash that is not a sha256 is refused', () => {

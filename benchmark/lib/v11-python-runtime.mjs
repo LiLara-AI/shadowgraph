@@ -65,6 +65,27 @@ export class PythonRuntimeError extends Error {
   }
 }
 
+/** Every runtime-builder container must leave the mounted site bytecode-free. */
+export const PYTHON_RUNTIME_BYTECODE_ENVIRONMENT = Object.freeze(['PYTHONDONTWRITEBYTECODE=1']);
+
+/** A container command may name only a canonical absolute POSIX path. */
+function isSafeAbsoluteContainerPath(value) {
+  return typeof value === 'string'
+    && /^\/(?:[^\\/\u0000-\u001F\u007F]+\/)*[^\\/\u0000-\u001F\u007F]+$/u.test(value)
+    && !value.split('/').some((segment) => segment === '.' || segment === '..');
+}
+
+/** Render the only pip installation command allowed for a mountable runtime site. */
+export function pythonRuntimePipInstallArguments({ target, requirements } = {}) {
+  if (!isSafeAbsoluteContainerPath(target) || !isSafeAbsoluteContainerPath(requirements)) {
+    throw new PythonRuntimeError('runtime pip installation requires absolute control-free target and requirements paths');
+  }
+  return Object.freeze([
+    'python', '-m', 'pip', 'install', '--require-hashes', '--no-compile',
+    '--no-cache-dir', '--no-warn-script-location', '--target', target, '-r', requirements
+  ]);
+}
+
 function isPlainRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }

@@ -524,6 +524,36 @@ test('a budget for different implementation bytes refuses before environment or 
   assert.deepEqual(h.meterConfig, []);
 });
 
+test('an invalid campaign lineage refuses before runtime directories or campaign persistence', async (t) => {
+  const h = await harness(t);
+  h.input.campaign = {
+    root: path.join(h.directory, 'campaign'),
+    policy: {
+      campaignId: 'fixture-successor', implementationLockHash: IMPLEMENTATION_LOCK_HASH,
+      maxRequests: 2, maxSessions: 2, maxRecoveryAttempts: 0,
+      deadline: '2099-01-01T00:00:00.000Z',
+      limits: { outer_decision_llm: 0, internal_memory_llm: 0, embedding: 2 }
+    }
+  };
+  const campaignCalls = [];
+  h.injections.verifyCampaignPolicyLineage = async () => {
+    h.trace.push('continuity');
+    throw new Error('invalid-campaign-lineage');
+  };
+  h.injections.openCampaignBudget = async (...args) => {
+    campaignCalls.push(args);
+    throw new Error('campaign-open-must-not-run');
+  };
+  await assert.rejects(bindV11Runtime(h.input, h.injections), /invalid-campaign-lineage/u);
+  assert.ok(h.trace.includes('implementation-lock'));
+  for (const forbidden of ['observe-environment', 'meter', 'progress', 'unit-evidence']) {
+    assert.equal(h.trace.includes(forbidden), false, `${forbidden} must follow campaign lineage admission`);
+  }
+  assert.deepEqual(h.seen.created, []);
+  assert.deepEqual(campaignCalls, []);
+  assert.deepEqual(h.meterConfig, []);
+});
+
 test('a raw-unsafe upstream is refused before URL parsing, runtime directories, or campaign persistence', async (t) => {
   const unsafeUpstreams = [
     'http://@127.0.0.1:11434/v1',

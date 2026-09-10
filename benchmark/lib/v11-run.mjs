@@ -30,6 +30,7 @@ import {
 import { validateRawRun } from './validate.mjs';
 import { runV11Benchmark } from './v11-runner.mjs';
 import { validateProviderBudget } from './v11-budget.mjs';
+import { assertRestrictedCampaignExecutionPolicy, verifyCampaignPolicyLineage } from './v11-campaign-budget.mjs';
 
 export class V11RunError extends Error {
   constructor(code, message) {
@@ -151,7 +152,9 @@ export async function computeV11Readiness(input) {
     // clock. One name for two types is how a run would end up handing a
     // function to a comparison and getting a silent answer.
     verificationInstant = Date.now(),
-    readFileImpl = readFile
+    readFileImpl = readFile,
+    verifyCampaignLineage = verifyCampaignPolicyLineage,
+    assertRestrictedCampaignPolicy = assertRestrictedCampaignExecutionPolicy
   } = input;
 
   // A precondition is met when a demonstration establishes it, not when someone
@@ -190,7 +193,23 @@ export async function computeV11Readiness(input) {
     .map((key) => ({ count: key, declared: declaredCounts[key], derived: derivedCounts[key] }));
 
   const blockers = [];
-  if (campaign === null) blockers.push({ kind: 'campaign', code: 'CAMPAIGN_CONFIGURATION_REQUIRED' });
+  if (campaign === null) {
+    blockers.push({ kind: 'campaign', code: 'CAMPAIGN_CONFIGURATION_REQUIRED' });
+  } else {
+    try {
+      assertRestrictedCampaignPolicy(campaign.policy);
+      await verifyCampaignLineage(campaign.policy, {
+        currentLedgerPath: path.join(campaign.root, 'campaign.ndjson')
+      });
+    } catch (error) {
+      blockers.push({
+        kind: 'campaign',
+        code: /continuation is unsupported/u.test(String(error?.message))
+          ? 'CAMPAIGN_CONTINUATION_UNSUPPORTED'
+          : 'CAMPAIGN_CONTINUITY_INVALID'
+      });
+    }
+  }
   let providerBudget = null;
   try {
     providerBudget = validateProviderBudget(input.providerBudget, {
@@ -544,6 +563,8 @@ export async function executeV11AcceptanceRun(input) {
     nativeAttemptPolicy,
     sourceHashes,
     campaign: input.campaign ?? null,
+    verifyCampaignLineage: input.verifyCampaignLineage,
+    assertRestrictedCampaignPolicy: input.assertRestrictedCampaignPolicy,
     benchmarkRoot,
     satisfiedPreconditions,
     preconditionEvidencePath,

@@ -41,7 +41,7 @@ import { requestOuterDecision } from './outer-model.mjs';
 import { createProgressLedger, createUnitEvidenceLedger } from './progress.mjs';
 import { startProviderMeter } from './provider-meter.mjs';
 import { validateProviderBudget } from './v11-budget.mjs';
-import { openCampaignBudget } from './v11-campaign-budget.mjs';
+import { assertRestrictedCampaignExecutionPolicy, openCampaignBudget, verifyCampaignPolicyLineage } from './v11-campaign-budget.mjs';
 import { createV11AdapterExecutor, V11RunError } from './v11-run.mjs';
 import { observeEnvironment } from './v11-environment.mjs';
 import { buildEnvironmentLock } from './v11-locks.mjs';
@@ -120,6 +120,8 @@ export function assertLoopbackUpstream(value) {
 const REAL = Object.freeze({
   startProviderMeter,
   openCampaignBudget,
+  assertRestrictedCampaignExecutionPolicy,
+  verifyCampaignPolicyLineage,
   createProgressLedger,
   createUnitEvidenceLedger,
   createImplementationLock,
@@ -318,8 +320,14 @@ export async function bindV11Runtime(input, injections = {}) {
     serviceEvidenceSha256
   });
 
-  // 2. The machine, observed rather than asserted.
+  // 2. The campaign lineage, before environment observation or any directory.
   validateProviderBudget(providerBudget, { implementationLockHash: implementationLock.lockSha256 ?? null });
+  if (input.campaign !== undefined) {
+    build.assertRestrictedCampaignExecutionPolicy(input.campaign.policy);
+    await build.verifyCampaignPolicyLineage(input.campaign.policy, {
+      currentLedgerPath: join(input.campaign.root, 'campaign.ndjson')
+    });
+  }
   const environmentLock = build.buildEnvironmentLock({
     observations: await build.observeEnvironment({ pythonImage: competitorLock.pythonImage })
   });

@@ -678,6 +678,8 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
     runId: 'run-v11-connected',
     attemptId: 'attempt-v11-connected',
     campaign: { root: 'fixture-campaign-root', policy: {} },
+    verifyCampaignLineage: async () => Object.freeze({}),
+    assertRestrictedCampaignPolicy: () => Object.freeze({}),
     sourceHashes,
     amendment002Path: AMENDMENT_002_PATH,
     amendment003Path: AMENDMENT_003_PATH,
@@ -711,6 +713,25 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
       return { status: 'RECONCILED', findings: [] };
     }
   };
+
+  // A caller that supplies a campaign object directly must not bypass the
+  // receipt-bound continuation verification performed by the CLI path.
+  const lineageBlocked = await computeV11Readiness({
+    ...readyInput,
+    verifyCampaignLineage: async () => { throw new Error('invalid-campaign-lineage'); }
+  });
+  assert.ok(lineageBlocked.blockers.some((blocker) => (
+    blocker.kind === 'campaign' && blocker.code === 'CAMPAIGN_CONTINUITY_INVALID'
+  )));
+
+  const restrictedBlocked = await computeV11Readiness({
+    ...readyInput,
+    assertRestrictedCampaignPolicy: () => { throw new Error('Campaign continuation is unsupported in restricted execution mode'); },
+    verifyCampaignLineage: async () => { throw new Error('must-not-verify-continuation'); }
+  });
+  assert.ok(restrictedBlocked.blockers.some((blocker) => (
+    blocker.kind === 'campaign' && blocker.code === 'CAMPAIGN_CONTINUATION_UNSUPPORTED'
+  )));
 
   // All non-budget prerequisites are satisfied in this fixture. Budget absence
   // alone must stop dispatch, not merely accompany unrelated readiness failures.

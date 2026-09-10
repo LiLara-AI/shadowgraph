@@ -14,7 +14,15 @@ import { NO_COMMON_MODEL_REASON, probeCommonCapabilities, readCommonModelConfigu
 import { verifyPreregistration } from './lib/preregistration.mjs';
 import { CONTAINER_PATHS } from './lib/python-container-runtime.mjs';
 import { loadV11AcceptanceDefinition } from './lib/v11-definition.mjs';
-import { LIST_DISTRIBUTIONS_SCRIPT, PYTHON_IMPORT_MODULES, pythonRuntimeManifest, renderRequirements, verifyPythonRuntime } from './lib/v11-python-runtime.mjs';
+import {
+  LIST_DISTRIBUTIONS_SCRIPT,
+  PYTHON_IMPORT_MODULES,
+  PYTHON_RUNTIME_BYTECODE_ENVIRONMENT,
+  pythonRuntimeManifest,
+  pythonRuntimePipInstallArguments,
+  renderRequirements,
+  verifyPythonRuntime
+} from './lib/v11-python-runtime.mjs';
 import { providerModelsFromLock } from './lib/v11-provider-models.mjs';
 import { parseProviderLedger, reconcileProviderEvidence, runProviderReconciliation } from './lib/v11-provider-reconciler.mjs';
 import { reconcileProviderEvidenceFiles } from './lib/v11-provider-evidence-loader.mjs';
@@ -22,7 +30,7 @@ import { createV11Registry } from './lib/v11-registry.mjs';
 import { combineRunFailure } from './lib/v11-run-resources.mjs';
 import { bindV11Runtime, providerLedgerPath } from './lib/v11-runtime-binding.mjs';
 import { computeV11Readiness, executeV11AcceptanceRun, readGateJson } from './lib/v11-run.mjs';
-import { validateCampaignPolicy } from './lib/v11-campaign-budget.mjs';
+import { assertRestrictedCampaignExecutionPolicy, verifyCampaignPolicyLineage } from './lib/v11-campaign-budget.mjs';
 import { ollamaManifestPath, ollamaWeightsDigest, probeServices } from './lib/v11-service-probe.mjs';
 import { validateRawRun } from './lib/validate.mjs';
 
@@ -544,7 +552,10 @@ async function readCampaignConfiguration(options) {
   }
   const gate = await readGateJson(optionPath(policyPath));
   if (gate.state !== 'present') throw new Error('campaign-policy is unreadable or malformed');
-  return { root: optionPath(campaignRoot), policy: validateCampaignPolicy(gate.value) };
+  const root = optionPath(campaignRoot);
+  const policy = assertRestrictedCampaignExecutionPolicy(gate.value);
+  await verifyCampaignPolicyLineage(policy, { currentLedgerPath: join(root, 'campaign.ndjson') });
+  return { root, policy };
 }
 
 async function readProviderBudget(options) {
@@ -872,6 +883,7 @@ async function v11PythonRuntimeCommand(options) {
     '--mount', `type=bind,source=${runtimeRoot},target=/runtime`,
     '--env', 'HOME=/runtime',
     '--env', 'PIP_DISABLE_PIP_VERSION_CHECK=1',
+    ...PYTHON_RUNTIME_BYTECODE_ENVIRONMENT.flatMap((entry) => ['--env', entry]),
     ...extraArgs,
     image,
     ...command
@@ -882,12 +894,10 @@ async function v11PythonRuntimeCommand(options) {
     await writeFile(join(runtimeRoot, 'requirements.txt'), renderRequirements(wheelsLock), 'utf8');
     // Network is needed to fetch the pinned wheels and nothing else; every
     // artifact it may accept is fixed by --require-hashes.
-    await dockerRun(['--network', 'host'], [
-      'python', '-m', 'pip', 'install',
-      '--require-hashes', '--no-cache-dir', '--no-warn-script-location',
-      '--target', '/runtime/site',
-      '-r', '/runtime/requirements.txt'
-    ]);
+    await dockerRun(['--network', 'host'], pythonRuntimePipInstallArguments({
+      target: '/runtime/site',
+      requirements: '/runtime/requirements.txt'
+    }));
   }
 
   const { stdout: listed } = await dockerRun(['--network', 'none'], [
