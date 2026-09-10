@@ -480,8 +480,16 @@ test('the record carries no credential, and the credential does reach the reques
 test('endpoint userinfo and malformed authority are rejected before probing or persistence', async () => {
   const unsafe = [
     'http://probe-user:synthetic-token@127.0.0.1:7474',
-    'http://probe%3Auser@127.0.0.1:7474',
-    'http://probe%ZZ@127.0.0.1:7474'
+    'http://***@127.0.0.1:7474',
+    'http://***@127.0.0.1:7474',
+    'http://@127.0.0.1:7474',
+    'http://:@127.0.0.1:7474',
+    'http:/@127.0.0.1:7474',
+    'http:/:@127.0.0.1:7474',
+    String.raw`http:\@127.0.0.1:7474`,
+    String.raw`http:\:@127.0.0.1:7474`,
+    String.raw`http:/\@127.0.0.1:7474`,
+    String.raw`http:/\:@127.0.0.1:7474`
   ];
   for (const baseUrl of unsafe) {
     const { input, requests } = probeInput();

@@ -127,3 +127,113 @@ asyncio.run(main())
   assert.equal(events[0].plannedDispatchId, result.identity.plannedDispatchId);
   assert.equal(events[0].dispatchAlias, result.identity.alias);
 });
+
+test('Cognee adapter instrumentation invokes each native and transport original exactly once', async () => {
+  const adapterDirectory = path.resolve('benchmark/adapters');
+  const python = process.platform === 'win32' ? 'python' : 'python3';
+  const script = String.raw`
+import asyncio
+import json
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import cognee_adapter
+
+class NativeLiteLLMAdapter:
+    def __init__(self):
+        self.calls = 0
+    async def acreate_structured_output(self, value):
+        self.calls += 1
+        return value
+
+class OpenAICompatibleEmbeddingEngine:
+    def __init__(self):
+        self.calls = 0
+    async def embed_text(self, value):
+        self.calls += 1
+        return value
+
+class Request:
+    def __init__(self, url):
+        self.url = url
+        self.headers = {}
+
+class Client:
+    calls = 0
+    def send(self, request, *args, **kwargs):
+        type(self).calls += 1
+        return 'sync-original'
+
+class AsyncClient:
+    calls = 0
+    async def send(self, request, *args, **kwargs):
+        type(self).calls += 1
+        return 'async-original'
+
+class Httpx:
+    Client = Client
+    AsyncClient = AsyncClient
+
+async def main():
+    declared = []
+    closed = []
+    async def declare(request_class, endpoint):
+        declared.append((request_class, endpoint))
+        return {'alias': 'a' * 48, 'plannedDispatchId': 'b' * 48}
+    async def close(request_class, identity):
+        closed.append((request_class, identity['alias']))
+    native = NativeLiteLLMAdapter()
+    embedding = OpenAICompatibleEmbeddingEngine()
+    routes = {'internal_memory_llm': 'http://127.0.0.1:12345/provider-meter/v1/llm', 'embedding': 'http://127.0.0.1:12345/provider-meter/v1/route'}
+    cognee_adapter._install_cognee_dispatch_roots(
+        routes,
+        native_litellm_adapter=native,
+        embedding_engine=embedding,
+        declare=declare,
+        close=close,
+    )
+    native_result = await native.acreate_structured_output('native-original')
+    embedding_result = await embedding.embed_text('embedding-original')
+    observed = []
+    cognee_adapter._count_metered_requests(
+        Httpx,
+        {'embedding': 'http://127.0.0.1:12345/provider-meter/v1/route'},
+        observed.append,
+        require_dispatch_identity=False,
+    )
+    sync_result = Client().send(Request('http://127.0.0.1:12345/provider-meter/v1/route/embeddings'))
+    async_result = await AsyncClient().send(Request('http://127.0.0.1:12345/provider-meter/v1/route/embeddings'))
+    print(json.dumps({
+        'nativeResult': native_result,
+        'nativeCalls': native.calls,
+        'embeddingResult': embedding_result,
+        'embeddingCalls': embedding.calls,
+        'declared': len(declared),
+        'closed': len(closed),
+        'syncResult': sync_result,
+        'asyncResult': async_result,
+        'syncCalls': Client.calls,
+        'asyncCalls': AsyncClient.calls,
+        'metered': observed,
+    }, sort_keys=True))
+
+asyncio.run(main())
+`;
+  const { stdout, stderr } = await execFileAsync(python, ['-B', '-c', script, adapterDirectory], {
+    maxBuffer: 128 * 1024
+  });
+  assert.equal(stderr, '');
+  assert.deepEqual(JSON.parse(stdout), {
+    asyncCalls: 1,
+    asyncResult: 'async-original',
+    closed: 2,
+    declared: 2,
+    embeddingCalls: 1,
+    embeddingResult: 'embedding-original',
+    metered: ['embedding', 'embedding'],
+    nativeCalls: 1,
+    nativeResult: 'native-original',
+    syncCalls: 1,
+    syncResult: 'sync-original'
+  });
+});

@@ -164,6 +164,110 @@ test('a matching plan alias reconciles valid same-operation traffic', () => {
   assert.deepEqual(report.findings, []);
 });
 
+test('a bound dynamic replay denial joins its root slot and exact child plan', () => {
+  const rows = planLedger().trimEnd().split('\n');
+  rows.push(JSON.stringify({
+    schema: 'shadowgraph.provider-meter.plan', version: 1, recordedAt: '2099-01-01T00:00:03.000Z',
+    event: 'dispatch_denied', code: 'INVALID_OR_REUSED_DISPATCH_ALIAS',
+    rootInvocationId: ROOT, rootPlanSlot: 'root-embedding', planSlot: 'root-embedding:child:1',
+    plannedDispatchId: DISPATCH, alias: ALIAS, disposition: 'data-dependent-child',
+    correlation: {
+      runId: RUN, attemptId: ATTEMPT, armId: 'cognee', scenarioId: 'ACC_PLAN_1',
+      repetition: 0, phase: 'A', requestClass: 'embedding', rootOperation: 'persist'
+    }
+  }));
+  const report = runProviderReconciliation({
+    ledgerText: `${JSON.stringify(event('persist'))}\n`,
+    ledgerPath: 'planned.provider-requests.ndjson',
+    planLedgerText: `${rows.join('\n')}\n`,
+    requireDispatchPlans: true,
+    raw: raw(),
+    attemptId: ATTEMPT,
+    pinnedModels: PINNED
+  });
+
+  assert.equal(report.status, 'RECONCILED');
+  assert.deepEqual(report.findings, []);
+});
+
+test('a dynamic replay denial cannot forge its planned dispatch identity', () => {
+  const rows = planLedger().trimEnd().split('\n');
+  rows.push(JSON.stringify({
+    schema: 'shadowgraph.provider-meter.plan', version: 1, recordedAt: '2099-01-01T00:00:03.000Z',
+    event: 'dispatch_denied', code: 'INVALID_OR_REUSED_DISPATCH_ALIAS',
+    rootInvocationId: ROOT, rootPlanSlot: 'root-embedding', planSlot: 'root-embedding:child:1',
+    plannedDispatchId: 'c'.repeat(48), alias: ALIAS, disposition: 'data-dependent-child',
+    correlation: {
+      runId: RUN, attemptId: ATTEMPT, armId: 'cognee', scenarioId: 'ACC_PLAN_1',
+      repetition: 0, phase: 'A', requestClass: 'embedding', rootOperation: 'persist'
+    }
+  }));
+  const report = runProviderReconciliation({
+    ledgerText: `${JSON.stringify(event('persist'))}\n`,
+    ledgerPath: 'planned.provider-requests.ndjson',
+    planLedgerText: `${rows.join('\n')}\n`,
+    requireDispatchPlans: true,
+    raw: raw(),
+    attemptId: ATTEMPT,
+    pinnedModels: PINNED
+  });
+
+  assert.equal(report.status, 'DISCREPANT');
+  assert.ok(report.findings.some((finding) => finding.code === 'DISPATCH_PLAN_INVALID'));
+});
+
+test('a known dynamic replay cannot be represented as an unbound denial', () => {
+  const rows = planLedger().trimEnd().split('\n');
+  rows.push(JSON.stringify({
+    schema: 'shadowgraph.provider-meter.plan', version: 1, recordedAt: '2099-01-01T00:00:03.000Z',
+    event: 'dispatch_denied', code: 'INVALID_OR_REUSED_DISPATCH_ALIAS',
+    rootInvocationId: ROOT, planSlot: 'root-embedding',
+    plannedDispatchId: null, alias: null, disposition: null,
+    correlation: {
+      runId: RUN, attemptId: ATTEMPT, armId: 'cognee', scenarioId: 'ACC_PLAN_1',
+      repetition: 0, phase: 'A', requestClass: 'embedding', rootOperation: 'persist'
+    }
+  }));
+  const report = runProviderReconciliation({
+    ledgerText: `${JSON.stringify(event('persist'))}\n`,
+    ledgerPath: 'planned.provider-requests.ndjson',
+    planLedgerText: `${rows.join('\n')}\n`,
+    requireDispatchPlans: true,
+    raw: raw(),
+    attemptId: ATTEMPT,
+    pinnedModels: PINNED
+  });
+
+  assert.equal(report.status, 'DISCREPANT');
+  assert.ok(report.findings.some((finding) => finding.code === 'DISPATCH_PLAN_INVALID'));
+});
+
+test('an unknown dynamic alias remains explicitly unbound', () => {
+  const rows = planLedger().trimEnd().split('\n');
+  rows.push(JSON.stringify({
+    schema: 'shadowgraph.provider-meter.plan', version: 1, recordedAt: '2099-01-01T00:00:03.000Z',
+    event: 'dispatch_denied', code: 'UNKNOWN_DISPATCH_ALIAS',
+    rootInvocationId: ROOT, rootPlanSlot: 'root-embedding', planSlot: null,
+    plannedDispatchId: null, alias: null, disposition: null,
+    correlation: {
+      runId: RUN, attemptId: ATTEMPT, armId: 'cognee', scenarioId: 'ACC_PLAN_1',
+      repetition: 0, phase: 'A', requestClass: 'embedding', rootOperation: 'persist'
+    }
+  }));
+  const report = runProviderReconciliation({
+    ledgerText: `${JSON.stringify(event('persist'))}\n`,
+    ledgerPath: 'planned.provider-requests.ndjson',
+    planLedgerText: `${rows.join('\n')}\n`,
+    requireDispatchPlans: true,
+    raw: raw(),
+    attemptId: ATTEMPT,
+    pinnedModels: PINNED
+  });
+
+  assert.equal(report.status, 'RECONCILED');
+  assert.deepEqual(report.findings, []);
+});
+
 test('a missing campaign reservation receipt cannot reconcile a planned event', () => {
   const report = runProviderReconciliation({
     ledgerText: `${JSON.stringify(event('persist', { campaignReservationId: 'offline-only:2' }))}\n`,
@@ -334,6 +438,36 @@ test('a malformed campaign dispatch identity invalidates the campaign ledger', (
   assert.ok(report.findings.some((finding) => finding.code === 'CAMPAIGN_LEDGER_INVALID'));
 });
 
+test('a dynamic root cannot credit a root-initial consumed dispatch', () => {
+  const rows = planLedger().trimEnd().split('\n').map((line) => JSON.parse(line));
+  rows[1] = {
+    ...rows[1],
+    planSlot: 'root-embedding',
+    disposition: 'root-initial'
+  };
+  rows[2] = {
+    ...rows[2],
+    event: 'dispatch_consumed',
+    planSlot: 'root-embedding'
+  };
+  const report = runProviderReconciliation({
+    ledgerText: `${JSON.stringify({
+      ...event('persist'),
+      planSlot: 'root-embedding',
+      disposition: 'root-initial'
+    })}\n`,
+    ledgerPath: 'forged-dynamic-static.provider-requests.ndjson',
+    planLedgerText: `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`,
+    requireDispatchPlans: true,
+    raw: raw(),
+    attemptId: ATTEMPT,
+    pinnedModels: PINNED
+  });
+
+  assert.equal(report.status, 'DISCREPANT');
+  assert.ok(report.findings.some((finding) => finding.code === 'DISPATCH_PLAN_INVALID'));
+});
+
 test('a consumed static plan permits exactly one provider event', () => {
   const correlation = {
     runId: RUN, attemptId: ATTEMPT, armId: 'shadowgraph-full', scenarioId: 'ACC_STATIC_1',
@@ -383,6 +517,26 @@ test('a consumed static plan permits exactly one provider event', () => {
 
   assert.equal(report.status, 'RECONCILED');
   assert.deepEqual(report.findings, []);
+
+  const unconsumedPlanText = `${planText.trimEnd().split('\n').slice(0, -1).join('\n')}\n`;
+  const unconsumed = runProviderReconciliation({
+    ledgerText: `${JSON.stringify(staticEvent)}\n`,
+    ledgerPath: 'static.provider-requests.ndjson',
+    planLedgerText: unconsumedPlanText,
+    requireDispatchPlans: true,
+    raw: { units: [{
+      unitId: 'shadowgraph-full:ACC_STATIC_1:0:A', ...correlation, status: 'MEASURED',
+      operations: {
+        memoryReadOperations: 0, memoryWriteOperations: 0, mcpToolCalls: 0,
+        outerDecisionModelCalls: 0, internalMemoryModelCalls: 1, embeddingCalls: 0,
+        persistenceVerificationOperations: 0
+      }
+    }] },
+    attemptId: ATTEMPT,
+    pinnedModels: PINNED
+  });
+  assert.equal(unconsumed.status, 'DISCREPANT');
+  assert.ok(unconsumed.findings.some((finding) => finding.code === 'STATIC_DISPATCH_UNCONSUMED'));
 
   const replay = runProviderReconciliation({
     ledgerText: `${JSON.stringify(staticEvent)}\n${JSON.stringify({ ...staticEvent, requestNumber: 2 })}\n`,

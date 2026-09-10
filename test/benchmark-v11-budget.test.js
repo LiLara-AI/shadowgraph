@@ -197,6 +197,124 @@ test('write-ahead evidence distinguishes complete, incomplete, malformed and mis
   assert.equal(run(encode(completed), [event], fixtureBudget({ limits: { outer_decision_llm: 0, internal_memory_llm: 0, embedding: 0 } })).status, 'BLOCKED');
 });
 
+test('plan-bound write-ahead admissions must match the exact completion and campaign identity', () => {
+  const budget = fixtureBudget();
+  const correlation = {
+    runId: budget.runId,
+    attemptId: budget.attemptId,
+    armId: 'cognee',
+    scenarioId: 'planned-fixture',
+    repetition: 0,
+    phase: 'A',
+    requestClass: 'embedding',
+    rootOperation: 'persist',
+    rootInvocationId: 'planned-root',
+    plannedDispatchId: 'a'.repeat(48),
+    planSlot: 'planned-root:child:1',
+    dispatchAlias: 'b'.repeat(48),
+    disposition: 'data-dependent-child'
+  };
+  const event = {
+    ...correlation,
+    requestNumber: 1,
+    outcome: 'SUCCEEDED',
+    campaignReservationId: 'offline-test-only:1'
+  };
+  const wrap = (row) => ({
+    schema: 'shadowgraph.provider-meter.attempt',
+    version: 1,
+    recordedAt: '2026-09-10T00:00:00.000Z',
+    ...row
+  });
+  const encode = (rows) => rows.map((row) => JSON.stringify(wrap(row))).join('\n') + '\n';
+  const admission = {
+    event: 'admission',
+    attemptNumber: 1,
+    correlation,
+    admitted: true,
+    authorizationRef: budget.authorizationRef,
+    campaignReservationId: event.campaignReservationId
+  };
+  const complete = [
+    { event: 'authorization', budget },
+    admission,
+    { event: 'dispatch_intent', attemptNumber: 1 },
+    { event: 'completion', attemptNumber: 1, requestNumber: 1, outcome: 'SUCCEEDED' }
+  ];
+  assert.equal(budgetModule.reconcileProviderAttempts({ text: encode(complete), events: [event], expectedBudget: budget }).status, 'RECONCILED');
+  for (const [field, forged] of Object.entries({
+    plannedDispatchId: 'c'.repeat(48),
+    dispatchAlias: 'd'.repeat(48),
+    disposition: 'recovery',
+    campaignReservationId: 'offline-test-only:999'
+  })) {
+    const forgedAdmission = structuredClone(admission);
+    if (field === 'campaignReservationId') forgedAdmission[field] = forged;
+    else forgedAdmission.correlation[field] = forged;
+    const rows = [complete[0], forgedAdmission, complete[2], complete[3]];
+    assert.equal(
+      budgetModule.reconcileProviderAttempts({ text: encode(rows), events: [event], expectedBudget: budget }).status,
+      'BLOCKED',
+      field
+    );
+  }
+});
+
+test('native-cap denial completes an audit without masquerading as a provider-budget denial', () => {
+  const budget = fixtureBudget({ limits: { outer_decision_llm: 0, internal_memory_llm: 0, embedding: 1 } });
+  const correlation = {
+    runId: budget.runId,
+    attemptId: budget.attemptId,
+    armId: 'cognee',
+    scenarioId: 'native-cap',
+    repetition: 0,
+    phase: 'probe',
+    requestClass: 'embedding',
+    rootOperation: 'persist',
+    rootInvocationId: 'native-cap-root',
+    plannedDispatchId: 'a'.repeat(48),
+    planSlot: 'native-cap-root',
+    dispatchAlias: 'b'.repeat(48),
+    disposition: 'root-initial',
+    identityMode: 'static',
+    staticDispatchPlan: { opaque: true }
+  };
+  const event = {
+    runId: budget.runId,
+    attemptId: budget.attemptId,
+    armId: 'cognee',
+    scenarioId: 'native-cap',
+    repetition: 0,
+    phase: 'probe',
+    requestClass: 'embedding',
+    rootOperation: 'persist',
+    rootInvocationId: 'native-cap-root',
+    plannedDispatchId: 'a'.repeat(48),
+    planSlot: 'native-cap-root',
+    dispatchAlias: 'b'.repeat(48),
+    disposition: 'root-initial',
+    requestNumber: 1,
+    outcome: 'FAILED',
+    failure: { code: 'NATIVE_ATTEMPT_CAP_EXHAUSTED' }
+  };
+  const row = (value) => ({
+    schema: 'shadowgraph.provider-meter.attempt', version: 1,
+    recordedAt: '2026-09-09T00:00:00.000Z', ...value
+  });
+  const text = [
+    row({ event: 'authorization', budget }),
+    row({ event: 'admission', attemptNumber: 1, correlation, admitted: false,
+      authorizationRef: budget.authorizationRef, campaignReservationId: null }),
+    row({ event: 'completion', attemptNumber: 1, requestNumber: 1, outcome: 'FAILED' })
+  ].map(JSON.stringify).join('\n') + '\n';
+  const result = budgetModule.reconcileProviderAttempts({ text, events: [event], expectedBudget: budget });
+  assert.equal(result.status, 'RECONCILED');
+  assert.deepEqual(result.findings, []);
+  assert.deepEqual(result.counts.embedding, {
+    admitted: 0, denied: 1, dispatchIntents: 0, completed: 1, succeeded: 0, failed: 1, incomplete: 0
+  });
+});
+
 test('concurrent completion-write failure blocks dispatch after audit await', async (t) => {
   const directory = await scratchDirectory(t, 'v11-budget-audit-race-');
   const ledger = path.join(directory, 'completion.ndjson');

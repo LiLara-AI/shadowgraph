@@ -542,6 +542,148 @@ test('an authorized transport B pair is metered and reconciles only after the re
   assert.deepEqual(report.findings, []);
 });
 
+test('a meter-recorded native-cap denial is exempt from campaign reservation requirements', () => {
+  const implementationLockHash = 'a'.repeat(64);
+  const capEvent = {
+    schema: 'shadowgraph.provider-meter.event',
+    version: 2,
+    event: 'provider_request',
+    requestNumber: 1,
+    runId: RUN,
+    attemptId: ATTEMPT,
+    armId: 'mem0-oss',
+    scenarioId: 'native-cap',
+    repetition: 0,
+    phase: 'probe',
+    requestClass: 'embedding',
+    rootOperation: 'persist',
+    requestedModel: null,
+    providerModel: null,
+    responseFormat: null,
+    latencyMs: 1,
+    outcome: 'FAILED',
+    failure: { code: 'NATIVE_ATTEMPT_CAP_EXHAUSTED' },
+    httpStatus: null,
+    usage: null,
+    rootInvocationId: 'native-cap-root',
+    plannedDispatchId: 'a'.repeat(48),
+    planSlot: 'native-cap-root',
+    dispatchAlias: 'b'.repeat(48),
+    disposition: 'root-initial'
+  };
+  const policy = {
+    campaignId: 'native-cap-policy',
+    implementationLockHash,
+    maxRequests: 1,
+    maxSessions: 1,
+    maxRecoveryAttempts: 0,
+    deadline: '2027-01-01T00:00:00.000Z',
+    limits: { outer_decision_llm: 0, internal_memory_llm: 0, embedding: 1 }
+  };
+  const campaignLedgerText = `${JSON.stringify({ event: 'policy', policy })}\n${JSON.stringify({
+    event: 'session', id: 'native-cap-session', recovery: false, kind: 'probe', runId: RUN, attemptId: ATTEMPT
+  })}\n`;
+  const report = runProviderReconciliation({
+    ledgerText: ledgerLines([capEvent]),
+    ledgerPath: 'native-cap.provider.ndjson',
+    raw: { implementationLockHash, units: [unit({
+      scenarioId: 'native-cap',
+      phase: 'probe',
+      operations: {
+        memoryReadOperations: 0,
+        memoryWriteOperations: 0,
+        mcpToolCalls: 0,
+        outerDecisionModelCalls: 0,
+        internalMemoryModelCalls: 0,
+        embeddingCalls: 1,
+        persistenceVerificationOperations: 0
+      }
+    })] },
+    attemptId: ATTEMPT,
+    pinnedModels: PINNED,
+    campaignLedgerText,
+    requireCampaignReservations: true
+  });
+  assert.ok(!codes(report).includes('CAMPAIGN_RESERVATION_MISSING'));
+});
+
+test('an unconsumed current-attempt campaign reservation is a discrepancy', () => {
+  const implementationLockHash = 'a'.repeat(64);
+  const policy = {
+    campaignId: 'receipt-policy',
+    implementationLockHash,
+    maxRequests: 3,
+    maxSessions: 2,
+    maxRecoveryAttempts: 0,
+    deadline: '2027-01-01T00:00:00.000Z',
+    limits: { outer_decision_llm: 0, internal_memory_llm: 0, embedding: 3 }
+  };
+  const providerEvent = {
+    schema: 'shadowgraph.provider-meter.event',
+    version: 2,
+    event: 'provider_request',
+    requestNumber: 1,
+    runId: RUN,
+    attemptId: ATTEMPT,
+    armId: 'mem0-oss',
+    scenarioId: 'receipt-scenario',
+    repetition: 0,
+    phase: 'probe',
+    requestClass: 'embedding',
+    rootOperation: 'persist',
+    requestedModel: 'pinned-embedding-model',
+    providerModel: 'pinned-embedding-model',
+    responseFormat: null,
+    latencyMs: 1,
+    outcome: 'SUCCEEDED',
+    failure: null,
+    httpStatus: 200,
+    usage: { inputTokens: 0, outputTokens: 0 },
+    rootInvocationId: 'receipt-root-1',
+    plannedDispatchId: 'a'.repeat(48),
+    planSlot: 'receipt-slot-1',
+    dispatchAlias: 'b'.repeat(48),
+    disposition: 'root-initial',
+    campaignReservationId: 'receipt-policy:2'
+  };
+  const reservation = (reservationId, rootInvocationId, plannedDispatchId, planSlot, runId = RUN, attemptId = ATTEMPT) => ({
+    event: 'reservation', reservationId, session: attemptId === ATTEMPT ? 'receipt-session' : 'older-session',
+    requestClass: 'embedding', runId, attemptId,
+    armId: 'mem0-oss', scenarioId: 'receipt-scenario', repetition: 0, phase: 'probe',
+    rootOperation: 'persist', rootInvocationId, plannedDispatchId, planSlot, disposition: 'root-initial'
+  });
+  const campaignLedgerText = [
+    { event: 'policy', policy },
+    { event: 'session', id: 'older-session', recovery: false, kind: 'probe', runId: 'older-run', attemptId: 'older-attempt' },
+    reservation('receipt-policy:1', 'older-root-1', 'd'.repeat(48), 'older-slot-1', 'older-run', 'older-attempt'),
+    { event: 'session', id: 'receipt-session', recovery: false, kind: 'probe', runId: RUN, attemptId: ATTEMPT },
+    reservation('receipt-policy:2', 'receipt-root-1', 'a'.repeat(48), 'receipt-slot-1'),
+    reservation('receipt-policy:3', 'receipt-root-2', 'c'.repeat(48), 'receipt-slot-2')
+  ].map(JSON.stringify).join('\n') + '\n';
+  const report = runProviderReconciliation({
+    ledgerText: ledgerLines([providerEvent]),
+    ledgerPath: 'receipt.provider.ndjson',
+    raw: { implementationLockHash, units: [unit({
+      scenarioId: 'receipt-scenario', phase: 'probe',
+      operations: {
+        memoryReadOperations: 0,
+        memoryWriteOperations: 0,
+        mcpToolCalls: 0,
+        outerDecisionModelCalls: 0,
+        internalMemoryModelCalls: 0,
+        embeddingCalls: 1,
+        persistenceVerificationOperations: 0
+      }
+    })] },
+    attemptId: ATTEMPT,
+    pinnedModels: PINNED,
+    campaignLedgerText,
+    requireCampaignReservations: true
+  });
+  assert.equal(report.status, 'DISCREPANT');
+  assert.deepEqual(codes(report), ['CAMPAIGN_RESERVATION_ORPHANED']);
+});
+
 test('a run whose ledger matches its record reconciles', () => {
   const record = { units: [unit()] };
   const report = runProviderReconciliation({

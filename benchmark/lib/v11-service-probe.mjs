@@ -330,7 +330,20 @@ export function ollamaManifestPath(modelId, root = OLLAMA_HOME) {
   return path.posix.join(root, 'models', 'manifests', 'registry.ollama.ai', 'library', name, tag);
 }
 
+function rawAuthorityIsUnsafe(value) {
+  if (typeof value !== 'string' || value.includes('\\')) return true;
+  const match = /^(?:https?):\/\/([^/?#]*)/iu.exec(value);
+  if (match === null || match[1].length === 0) return true;
+  return match[1].includes('@');
+}
+
 function validateSafeBaseUrl(value) {
+  if (rawAuthorityIsUnsafe(value)) {
+    throw new ServiceProbeError(
+      'CONTRACT_FAILURE',
+      'each endpoint baseUrl must be a safe absolute http or https URL without userinfo'
+    );
+  }
   let parsed;
   try {
     parsed = new URL(value);

@@ -166,7 +166,7 @@ test('distinct planned dispatches cannot reset the aggregate root class cap', ()
   assert.deepEqual(result.findings, [{ code: 'ROOT_CLASS_ATTEMPT_CAP_EXCEEDED', requestNumber: 3 }]);
 });
 
-test('changing root invocation identity cannot reset the aggregate root class cap', () => {
+test('independent root invocation identities do not consume one another native cap', () => {
   const bounded = policy();
   bounded.maxAttemptsPerRootRequestClass = 24;
   const events = Array.from({ length: 25 }, (_, index) => event(index + 1, {
@@ -175,6 +175,123 @@ test('changing root invocation identity cannot reset the aggregate root class ca
   }));
   const result = traceNativeAttempts({ requireDispatchPlans: true, events, expectedModels: MODELS, policy: bounded });
 
+  assert.equal(result.status, 'RECONCILED');
+  assert.deepEqual(result.findings, []);
+  assert.deepEqual(result.trace.map((entry) => entry.rootClassSequence), Array(25).fill(1));
+});
+
+test('one root request class cap spans otherwise distinct correlations', () => {
+  const bounded = policy();
+  bounded.maxAttemptsPerRootRequestClass = 1;
+  const result = traceNativeAttempts({
+    requireDispatchPlans: true,
+    events: [
+      event(1, { requestClass: 'embedding', responseFormat: null,
+        requestedModel: MODELS.embedding, providerModel: MODELS.embedding,
+        scenarioId: 'CAP_SCOPE_A', rootInvocationId: 'shared-cap-root', plannedDispatchId: 'a'.repeat(48) }),
+      event(2, { requestClass: 'embedding', responseFormat: null,
+        requestedModel: MODELS.embedding, providerModel: MODELS.embedding,
+        scenarioId: 'CAP_SCOPE_B', rootInvocationId: 'shared-cap-root', plannedDispatchId: 'b'.repeat(48) })
+    ],
+    expectedModels: MODELS,
+    policy: bounded
+  });
+
   assert.equal(result.status, 'DISCREPANT');
-  assert.deepEqual(result.findings, [{ code: 'ROOT_CLASS_ATTEMPT_CAP_EXCEEDED', requestNumber: 25 }]);
+  assert.deepEqual(result.findings, [{ code: 'ROOT_CLASS_ATTEMPT_CAP_EXCEEDED', requestNumber: 2 }]);
+  assert.equal(result.trace[1].rootClassSequence, 2);
+});
+
+test('a meter-recorded same-root native-cap denial proves enforcement without fallback or cap-overrun findings', () => {
+  const bounded = policy();
+  bounded.maxAttemptsPerRootRequestClass = 24;
+  const events = Array.from({ length: 24 }, (_, index) => event(index + 1, {
+    requestClass: 'embedding',
+    responseFormat: null,
+    requestedModel: MODELS.embedding,
+    providerModel: MODELS.embedding,
+    rootInvocationId: 'native-cap-root',
+    plannedDispatchId: (index + 1).toString(16).padStart(48, '0')
+  }));
+  events.push(event(25, {
+    requestClass: 'embedding',
+    responseFormat: null,
+    requestedModel: null,
+    providerModel: null,
+    outcome: 'FAILED',
+    failure: { code: 'NATIVE_ATTEMPT_CAP_EXHAUSTED' },
+    rootInvocationId: 'native-cap-root',
+    plannedDispatchId: 'f'.repeat(48)
+  }));
+  const result = traceNativeAttempts({ requireDispatchPlans: true, events, expectedModels: MODELS, policy: bounded });
+  assert.equal(result.status, 'RECONCILED');
+  assert.deepEqual(result.findings, []);
+  assert.equal(result.trace.at(-1).rootClassSequence, 25);
+  assert.equal(result.trace.at(-1).category, 'NATIVE_CAP_DENIED');
+});
+
+test('a saturated same-plan native-cap denial is enforcement rather than C recovery', () => {
+  const bounded = policy();
+  bounded.maxAttemptsPerRootRequestClass = 1;
+  const plan = 'a'.repeat(48);
+  const result = traceNativeAttempts({
+    requireDispatchPlans: true,
+    events: [
+      event(1, { rootInvocationId: 'native-cap-root', plannedDispatchId: plan }),
+      event(2, {
+        rootInvocationId: 'native-cap-root', plannedDispatchId: plan,
+        requestedModel: null, providerModel: null, responseFormat: null,
+        outcome: 'FAILED', failure: { code: 'NATIVE_ATTEMPT_CAP_EXHAUSTED' }
+      })
+    ],
+    expectedModels: MODELS,
+    policy: bounded
+  });
+
+  assert.equal(result.status, 'RECONCILED');
+  assert.deepEqual(result.findings, []);
+  assert.equal(result.trace[1].rootClassSequence, 2);
+  assert.equal(result.trace[1].category, 'NATIVE_CAP_DENIED');
+});
+
+test('a native-cap denial before saturation is a discrepancy', () => {
+  const bounded = policy();
+  bounded.maxAttemptsPerRootRequestClass = 2;
+  const result = traceNativeAttempts({
+    requireDispatchPlans: true,
+    events: [event(1, {
+      requestClass: 'embedding', responseFormat: null,
+      requestedModel: null, providerModel: null,
+      outcome: 'FAILED', failure: { code: 'NATIVE_ATTEMPT_CAP_EXHAUSTED' },
+      rootInvocationId: 'native-cap-early', plannedDispatchId: 'b'.repeat(48)
+    })],
+    expectedModels: MODELS,
+    policy: bounded
+  });
+
+  assert.equal(result.status, 'DISCREPANT');
+  assert.deepEqual(result.findings, [
+    { code: 'NATIVE_CAP_DENIAL_NOT_AT_SATURATION', requestNumber: 1 },
+    { code: 'MODEL_OR_PROVIDER_FALLBACK', requestNumber: 1 }
+  ]);
+});
+
+test('a non-planned native-cap claim is never enforcement evidence', () => {
+  const bounded = policy();
+  bounded.maxAttemptsPerRootRequestClass = 1;
+  const result = traceNativeAttempts({
+    events: [
+      event(1, { requestClass: 'embedding', responseFormat: null,
+        requestedModel: MODELS.embedding, providerModel: MODELS.embedding }),
+      event(2, { requestClass: 'embedding', responseFormat: null,
+        requestedModel: null, providerModel: null, outcome: 'FAILED',
+        failure: { code: 'NATIVE_ATTEMPT_CAP_EXHAUSTED' } })
+    ],
+    expectedModels: MODELS,
+    policy: bounded
+  });
+
+  assert.equal(result.status, 'DISCREPANT');
+  assert.notEqual(result.trace[1].category, 'NATIVE_CAP_DENIED');
+  assert.ok(result.findings.some((finding) => finding.code === 'NATIVE_CAP_DENIAL_NOT_AT_SATURATION'));
 });

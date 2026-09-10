@@ -175,7 +175,12 @@ async function harness(t, overrides = {}) {
     },
     bindPlannedEndpoint: async (input) => {
       seen.plannedEndpoints.push(input);
-      return { endpoint: `http://127.0.0.1:43100/v1/planned-${input.requestClass}` };
+      const endpoint = `http://127.0.0.1:43100/v1/planned-${input.requestClass}`;
+      return {
+        endpoint,
+        declareEndpoint: `${endpoint}/__shadowgraph/declare`,
+        closeEndpoint: `${endpoint}/__shadowgraph/close`
+      };
     }
   };
 

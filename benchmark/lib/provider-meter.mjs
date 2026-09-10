@@ -114,6 +114,13 @@ function isNonEmptyString(value) {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
+function rawAuthorityIsUnsafe(value) {
+  if (typeof value !== 'string' || value.includes('\\')) return true;
+  const match = /^(?:https?):\/\/([^/?#]*)/iu.exec(value);
+  if (match === null || match[1].length === 0) return true;
+  return match[1].includes('@');
+}
+
 function assertExactKeys(value, expectedKeys, label) {
   if (!isPlainObject(value)) throw new Error(`${label} must be an object`);
   const expected = new Set(expectedKeys);
@@ -140,6 +147,9 @@ function isLoopbackHostname(hostname) {
 
 function parseEndpoint(value, label, { listener = false } = {}) {
   if (!isNonEmptyString(value)) throw new Error(`${label} must be a non-empty URL`);
+  if (rawAuthorityIsUnsafe(value)) {
+    throw new Error(`${label} must use a canonical HTTP or HTTPS URL without credentials`);
+  }
   let endpoint;
   try {
     endpoint = new URL(value);
@@ -245,10 +255,10 @@ function validatePlannedBinding(value) {
 }
 
 function rootRequestClassKey(correlation) {
-  return [...CORRELATION_FIELDS, 'rootOperation']
-    .map((field) => {
-      const value = String(correlation[field]);
-      return `${value.length}:${value}`;
+  return [correlation.rootInvocationId, correlation.requestClass]
+    .map((value) => {
+      const text = String(value);
+      return `${text.length}:${text}`;
     })
     .join('|');
 }
@@ -617,6 +627,9 @@ export async function startProviderMeter(config, {
   if (maxAttemptsPerRootRequestClass !== null && !requireRootOperation) {
     throw new Error('maxAttemptsPerRootRequestClass requires root operation evidence');
   }
+  if (maxAttemptsPerRootRequestClass !== null && !requireDispatchPlans) {
+    throw new Error('maxAttemptsPerRootRequestClass requires planned dispatch identity');
+  }
   const { listener, upstream } = validateConfig(config);
   let ledger;
   let attempts;
@@ -778,22 +791,43 @@ export async function startProviderMeter(config, {
     dispatchPlans.set(plan.alias, Object.freeze({ ...plan, state: 'consumed' }));
   }
 
-  async function recordPlanDenial(binding, code) {
+  async function recordPlanDenial(binding, code, dispatchPlan = null) {
+    const correlation = {
+      runId: binding.runId,
+      attemptId: binding.attemptId,
+      armId: binding.armId,
+      scenarioId: binding.scenarioId,
+      repetition: binding.repetition,
+      phase: binding.phase,
+      requestClass: binding.requestClass,
+      rootOperation: binding.rootOperation
+    };
+    if (dispatchPlan !== null && (
+      dispatchPlan.rootInvocationId !== binding.rootInvocationId
+      || (binding.identityMode === 'static'
+        ? dispatchPlan.planSlot !== binding.planSlot
+        : dispatchPlan.rootPlanSlot !== binding.planSlot)
+      || dispatchPlan.correlation?.runId !== correlation.runId
+      || dispatchPlan.correlation?.attemptId !== correlation.attemptId
+      || dispatchPlan.correlation?.armId !== correlation.armId
+      || dispatchPlan.correlation?.scenarioId !== correlation.scenarioId
+      || dispatchPlan.correlation?.repetition !== correlation.repetition
+      || dispatchPlan.correlation?.phase !== correlation.phase
+      || dispatchPlan.correlation?.requestClass !== correlation.requestClass
+      || dispatchPlan.correlation?.rootOperation !== correlation.rootOperation
+    )) {
+      throw new Error('dispatch denial plan identity does not match its binding');
+    }
     await appendPlan({
       event: 'dispatch_denied',
       code,
       rootInvocationId: binding.rootInvocationId,
-      planSlot: binding.planSlot,
-      correlation: {
-        runId: binding.runId,
-        attemptId: binding.attemptId,
-        armId: binding.armId,
-        scenarioId: binding.scenarioId,
-        repetition: binding.repetition,
-        phase: binding.phase,
-        requestClass: binding.requestClass,
-        rootOperation: binding.rootOperation
-      }
+      rootPlanSlot: binding.planSlot,
+      planSlot: dispatchPlan?.planSlot ?? null,
+      correlation,
+      plannedDispatchId: dispatchPlan?.plannedDispatchId ?? null,
+      alias: dispatchPlan?.alias ?? null,
+      disposition: dispatchPlan?.disposition ?? null
     });
   }
 
@@ -860,10 +894,12 @@ export async function startProviderMeter(config, {
 
   function dispatchPlanForRequest(request, binding, routeId) {
     if (binding.identityMode === 'static') {
-      if (request.headers[DISPATCH_ALIAS_HEADER] !== undefined) return { code: 'STATIC_ALIAS_FORBIDDEN' };
+      if (request.headers[DISPATCH_ALIAS_HEADER] !== undefined) {
+        return { code: 'STATIC_ALIAS_FORBIDDEN', denialPlan: binding.staticDispatchPlan };
+      }
       const plan = dispatchPlans.get(binding.staticDispatchPlan.alias);
       if (!plan || plan.routeId !== routeId || plan.state !== 'active') {
-        return { code: 'INVALID_OR_REUSED_DISPATCH_ALIAS' };
+        return { code: 'INVALID_OR_REUSED_DISPATCH_ALIAS', denialPlan: plan ?? binding.staticDispatchPlan };
       }
       return { plan };
     }
@@ -871,8 +907,10 @@ export async function startProviderMeter(config, {
     if (alias === null) return { code: 'MISSING_OR_MALFORMED_DISPATCH_ALIAS' };
     const plan = dispatchPlans.get(alias);
     if (!plan) return { code: 'UNKNOWN_DISPATCH_ALIAS' };
-    if (plan.routeId !== routeId || plan.rootInvocationId !== binding.rootInvocationId
-      || plan.state !== 'active') return { code: 'INVALID_OR_REUSED_DISPATCH_ALIAS' };
+    if (plan.routeId !== routeId || plan.rootInvocationId !== binding.rootInvocationId) {
+      return { code: 'INVALID_DISPATCH_ALIAS_BINDING' };
+    }
+    if (plan.state !== 'active') return { code: 'INVALID_OR_REUSED_DISPATCH_ALIAS', denialPlan: plan };
     return { plan };
   }
 
@@ -894,9 +932,9 @@ export async function startProviderMeter(config, {
     };
   }
 
-  async function denyPlannedRequest(response, binding, code) {
+  async function denyPlannedRequest(response, binding, code, dispatchPlan = null) {
     try {
-      await recordPlanDenial(binding, code);
+      await recordPlanDenial(binding, code, dispatchPlan);
     } catch {
       failureResponse(response);
       return;
@@ -910,7 +948,12 @@ export async function startProviderMeter(config, {
     if (resourcePath === '/__shadowgraph/declare') {
       if (request.method !== 'POST' || binding.identityMode !== 'dynamic'
         || request.headers[DISPATCH_ALIAS_HEADER] !== undefined) {
-        await denyPlannedRequest(response, binding, 'INVALID_DISPATCH_DECLARATION');
+        await denyPlannedRequest(
+          response,
+          binding,
+          'INVALID_DISPATCH_DECLARATION',
+          binding.identityMode === 'static' ? binding.staticDispatchPlan : null
+        );
         return true;
       }
       let plan;
@@ -928,15 +971,31 @@ export async function startProviderMeter(config, {
       return true;
     }
     if (resourcePath === '/__shadowgraph/close') {
-      if (request.method !== 'POST') {
-        await denyPlannedRequest(response, binding, 'INVALID_DISPATCH_CLOSE');
+      if (request.method !== 'POST' || binding.identityMode !== 'dynamic') {
+        await denyPlannedRequest(
+          response,
+          binding,
+          'INVALID_DISPATCH_CLOSE',
+          binding.identityMode === 'static' ? binding.staticDispatchPlan : null
+        );
         return true;
       }
       const alias = dispatchAliasFromRequest(request);
-      const plan = alias === null ? null : dispatchPlans.get(alias);
-      if (!plan || plan.routeId !== routeId || plan.rootInvocationId !== binding.rootInvocationId
-        || plan.state !== 'active') {
-        await denyPlannedRequest(response, binding, 'INVALID_OR_REUSED_DISPATCH_ALIAS');
+      if (alias === null) {
+        await denyPlannedRequest(response, binding, 'MISSING_OR_MALFORMED_DISPATCH_ALIAS');
+        return true;
+      }
+      const plan = dispatchPlans.get(alias);
+      if (!plan) {
+        await denyPlannedRequest(response, binding, 'UNKNOWN_DISPATCH_ALIAS');
+        return true;
+      }
+      if (plan.routeId !== routeId || plan.rootInvocationId !== binding.rootInvocationId) {
+        await denyPlannedRequest(response, binding, 'INVALID_DISPATCH_ALIAS_BINDING');
+        return true;
+      }
+      if (plan.state !== 'active') {
+        await denyPlannedRequest(response, binding, 'INVALID_OR_REUSED_DISPATCH_ALIAS', plan);
         return true;
       }
       try {
@@ -1002,13 +1061,13 @@ export async function startProviderMeter(config, {
     if (requireDispatchPlans) {
       const identity = dispatchPlanForRequest(request, correlation, routeId);
       if (identity.code) {
-        await denyPlannedRequest(response, correlation, identity.code);
+        await denyPlannedRequest(response, correlation, identity.code, identity.denialPlan ?? null);
         return;
       }
       dispatchPlan = identity.plan;
       if (dispatchPlan.disposition === 'root-initial') {
         if (!reserveStaticDispatchPlan(dispatchPlan)) {
-          await denyPlannedRequest(response, correlation, 'INVALID_OR_REUSED_DISPATCH_ALIAS');
+          await denyPlannedRequest(response, correlation, 'INVALID_OR_REUSED_DISPATCH_ALIAS', dispatchPlan);
           return;
         }
         try {
@@ -1022,9 +1081,17 @@ export async function startProviderMeter(config, {
 
     const started = performance.now();
     const attemptNumber = nextAttemptNumber++;
+    const attemptCorrelation = dispatchPlan === null ? correlation : {
+      ...correlation,
+      rootInvocationId: dispatchPlan.rootInvocationId,
+      plannedDispatchId: dispatchPlan.plannedDispatchId,
+      planSlot: dispatchPlan.planSlot,
+      dispatchAlias: dispatchPlan.alias,
+      disposition: dispatchPlan.disposition
+    };
     // Reserve synchronously before any await, including journal I/O. Failures
     // and malformed admitted requests consume slots; none are refunded.
-    const rootAttemptKey = rootRequestClassKey(correlation);
+    const rootAttemptKey = rootRequestClassKey(attemptCorrelation);
     const attemptsSoFar = nativeAttemptCounts.get(rootAttemptKey) ?? 0;
     const nativeCapDenied = maxAttemptsPerRootRequestClass !== null
       && attemptsSoFar >= maxAttemptsPerRootRequestClass;
@@ -1059,7 +1126,7 @@ export async function startProviderMeter(config, {
       }
     }
     if (!admitted && !nativeCapDenied) budgetStopped = true;
-    await audit({ event: 'admission', attemptNumber, correlation, admitted,
+    await audit({ event: 'admission', attemptNumber, correlation: attemptCorrelation, admitted,
       authorizationRef: authorization?.authorizationRef ?? null, campaignReservationId });
     const appendEvent = async (event) => {
       const completion = await appendCompletion({ ...event, dispatchPlan, campaignReservationId });

@@ -352,10 +352,16 @@ export async function bindV11Runtime(input, injections = {}) {
     });
     closers.push(() => unitEvidence.close());
 
-    const providerEndpointFor = (_requestClass, correlation, plan) => meter.bindPlannedEndpoint({
-      ...correlation,
-      ...plan
-    });
+    const providerEndpointFor = async (_requestClass, correlation, plan) => {
+      const route = await meter.bindPlannedEndpoint({
+        ...correlation,
+        ...plan
+      });
+      if (!route || typeof route.endpoint !== 'string') {
+        throw new Error('planned provider route did not establish an endpoint');
+      }
+      return Object.freeze({ endpoint: route.endpoint });
+    };
 
     const executeAdapter = build.createV11AdapterExecutor({
       registry,

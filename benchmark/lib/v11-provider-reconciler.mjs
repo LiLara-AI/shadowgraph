@@ -38,6 +38,12 @@ const ROOT_OPERATIONS = new Set(['reset', 'retrieve', 'persist', 'verify', 'oute
 const CAMPAIGN_RESERVATION_ID = /^[A-Za-z0-9-]+:[1-9]\d*$/;
 const SAFE_LINEAGE_ID = /^[A-Za-z0-9._:-]+$/;
 const PLAN_DISPOSITIONS = new Set(['root-initial', 'data-dependent-child', 'recovery']);
+const DYNAMIC_UNBOUND_DENIAL_CODES = new Set([
+  'MISSING_OR_MALFORMED_DISPATCH_ALIAS',
+  'UNKNOWN_DISPATCH_ALIAS',
+  'INVALID_DISPATCH_ALIAS_BINDING',
+  'INVALID_DISPATCH_DECLARATION'
+]);
 const CAMPAIGN_JOIN_FIELDS = Object.freeze([
   ...CORRELATION_FIELDS,
   'rootOperation', 'rootInvocationId', 'plannedDispatchId', 'planSlot', 'disposition'
@@ -65,12 +71,14 @@ export const RECONCILIATION_CODES = Object.freeze([
   'DISPATCH_PLAN_UNKNOWN_ALIAS',
   'DISPATCH_PLAN_MISMATCH',
   'STATIC_DISPATCH_REPLAY',
+  'STATIC_DISPATCH_UNCONSUMED',
   'CAMPAIGN_LEDGER_UNREADABLE',
   'CAMPAIGN_LEDGER_INVALID',
   'CAMPAIGN_RESERVATION_MISSING',
   'CAMPAIGN_RESERVATION_UNKNOWN',
   'CAMPAIGN_RESERVATION_MISMATCH',
   'CAMPAIGN_RESERVATION_REUSED',
+  'CAMPAIGN_RESERVATION_ORPHANED',
   'NATIVE_ATTEMPT_TRACE_DISCREPANT'
 ]);
 
@@ -85,6 +93,13 @@ function isNonEmptyString(value) {
 }
 
 /** Stable key over the full correlation. Lengths are prefixed so no component can impersonate another. */
+function isNativeCapDenial(event) {
+  return event?.version === 2
+    && event?.outcome === 'FAILED'
+    && event?.failure?.code === 'NATIVE_ATTEMPT_CAP_EXHAUSTED'
+    && event?.campaignReservationId === undefined;
+}
+
 function correlationKey(value, requireRootOperation = false) {
   const fields = requireRootOperation
     ? [...CORRELATION_FIELDS, 'rootOperation']
@@ -556,8 +571,13 @@ function parseDispatchPlanLedger(text) {
       }
       const rootKey = `${row.rootInvocationId}|${planCorrelationKey(row.correlation)}|${row.rootPlanSlot}`;
       const root = roots.get(rootKey);
+      const dispositionMatchesRoot = root !== undefined && (
+        root.identityMode === 'static'
+          ? row.disposition === 'root-initial'
+          : row.disposition === 'data-dependent-child' || row.disposition === 'recovery'
+      );
       if (!root || row.parentRootInvocationId !== root.rootInvocationId
-        || row.childRule !== root.childRule
+        || row.childRule !== root.childRule || !dispositionMatchesRoot
         || plans.has(row.alias) || dispatchIds.has(row.plannedDispatchId)) {
         findings.push('DISPATCH_PLAN_INVALID');
         continue;
@@ -580,7 +600,47 @@ function parseDispatchPlanLedger(text) {
       }
       continue;
     }
-    if (row.event !== 'dispatch_denied') findings.push('DISPATCH_PLAN_INVALID');
+    if (row.event === 'dispatch_denied') {
+      const correlationFields = [...CORRELATION_FIELDS, 'rootOperation'];
+      const denialFields = [
+        'schema', 'version', 'recordedAt', 'event', 'code', 'rootInvocationId', 'rootPlanSlot', 'planSlot',
+        'correlation', 'plannedDispatchId', 'alias', 'disposition'
+      ];
+      const exactCorrelation = isPlainObject(row.correlation)
+        && Object.keys(row.correlation).length === correlationFields.length
+        && correlationFields.every((field) => Object.hasOwn(row.correlation, field));
+      if (Object.keys(row).length !== denialFields.length
+        || !denialFields.every((field) => Object.hasOwn(row, field))
+        || !isNonEmptyString(row.code) || !isNonEmptyString(row.rootInvocationId)
+        || !isNonEmptyString(row.rootPlanSlot) || !exactCorrelation || !validPlanCorrelation(row.correlation)) {
+        findings.push('DISPATCH_PLAN_INVALID');
+        continue;
+      }
+      const rootKey = `${row.rootInvocationId}|${planCorrelationKey(row.correlation)}|${row.rootPlanSlot}`;
+      const root = roots.get(rootKey);
+      const allNull = row.planSlot === null
+        && row.plannedDispatchId === null && row.alias === null && row.disposition === null;
+      const allBound = isNonEmptyString(row.planSlot)
+        && OPAQUE_DISPATCH_ID.test(row.plannedDispatchId)
+        && OPAQUE_DISPATCH_ID.test(row.alias) && PLAN_DISPOSITIONS.has(row.disposition);
+      if (!root || (!allNull && !allBound)) {
+        findings.push('DISPATCH_PLAN_INVALID');
+        continue;
+      }
+      if (allBound) {
+        const plan = plans.get(row.alias);
+        if (!plan || row.plannedDispatchId !== plan.plannedDispatchId
+          || row.rootInvocationId !== plan.rootInvocationId || row.rootPlanSlot !== plan.rootPlanSlot
+          || row.planSlot !== plan.planSlot
+          || row.disposition !== plan.disposition || !samePlanCorrelation(row.correlation, plan.correlation)) {
+          findings.push('DISPATCH_PLAN_INVALID');
+        }
+      } else if (root.identityMode === 'static' || !DYNAMIC_UNBOUND_DENIAL_CODES.has(row.code)) {
+        findings.push('DISPATCH_PLAN_INVALID');
+      }
+      continue;
+    }
+    findings.push('DISPATCH_PLAN_INVALID');
   }
   for (const plan of plans.values()) {
     if (plan.disposition === 'data-dependent-child' && !plan.closed) {
@@ -605,7 +665,8 @@ function reconcileDispatchPlans(events, text) {
       continue;
     }
     if (plan.disposition === 'root-initial') {
-      if (consumedStaticAliases.has(plan.alias)) findings.push('STATIC_DISPATCH_REPLAY');
+      if (!plan.closed) findings.push('STATIC_DISPATCH_UNCONSUMED');
+      else if (consumedStaticAliases.has(plan.alias)) findings.push('STATIC_DISPATCH_REPLAY');
       else consumedStaticAliases.add(plan.alias);
     }
     if (event.plannedDispatchId !== plan.plannedDispatchId
@@ -698,11 +759,12 @@ function parseCampaignReservationLedger(text, expectedImplementationLockHash = n
   return { findings: [...new Set(findings)], reservations };
 }
 
-function reconcileCampaignReservations(events, text, expectedImplementationLockHash = null) {
+function reconcileCampaignReservations(events, text, expectedImplementationLockHash = null, expectedAttemptId = null) {
   const parsed = parseCampaignReservationLedger(text, expectedImplementationLockHash);
   const findings = [...parsed.findings];
   const used = new Set();
   for (const event of events) {
+    if (isNativeCapDenial(event)) continue;
     if (event.version !== 2 || !CAMPAIGN_RESERVATION_ID.test(event.campaignReservationId)) {
       findings.push('CAMPAIGN_RESERVATION_MISSING');
       continue;
@@ -719,6 +781,11 @@ function reconcileCampaignReservations(events, text, expectedImplementationLockH
     used.add(event.campaignReservationId);
     if (!CAMPAIGN_JOIN_FIELDS.every((field) => event[field] === reservation[field])) {
       findings.push('CAMPAIGN_RESERVATION_MISMATCH');
+    }
+  }
+  for (const [reservationId, reservation] of parsed.reservations) {
+    if (reservation.attemptId === expectedAttemptId && !used.has(reservationId)) {
+      findings.push('CAMPAIGN_RESERVATION_ORPHANED');
     }
   }
   return { status: findings.length ? 'DISCREPANT' : 'RECONCILED', findings: [...new Set(findings)] };
@@ -793,7 +860,7 @@ export function runProviderReconciliation(input) {
   const rawImplementationLockHash = raw?.implementationLockHash;
   const campaignReservationEvidence = requireCampaignReservations
     ? (typeof rawImplementationLockHash === 'string' && SHA256.test(rawImplementationLockHash)
-      ? reconcileCampaignReservations(events, campaignLedgerText, rawImplementationLockHash)
+      ? reconcileCampaignReservations(events, campaignLedgerText, rawImplementationLockHash, attemptId)
       : { status: 'DISCREPANT', findings: ['CAMPAIGN_LEDGER_INVALID'] })
     : null;
   const { expectations, unverifiedCounts } = providerExpectationsFromRun(raw, attemptId);

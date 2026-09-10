@@ -26,6 +26,14 @@ function assertExactKeys(value, expected, label) {
   }
 }
 
+function hasNativeCapDenialCode(event) {
+  return event.outcome === 'FAILED' && event.failure?.code === 'NATIVE_ATTEMPT_CAP_EXHAUSTED';
+}
+
+function isNativeCapDenialAtSaturation(event, rootClassSequence, maxAttempts) {
+  return hasNativeCapDenialCode(event) && rootClassSequence === maxAttempts + 1;
+}
+
 function rootKey(event, requireDispatchPlans = false) {
   const values = [
     event.runId,
@@ -41,17 +49,19 @@ function rootKey(event, requireDispatchPlans = false) {
   return values.map((value) => `${value.length}:${value}`).join('|');
 }
 
-function rootClassKey(event) {
-  const values = [
-    event.runId,
-    event.attemptId,
-    event.armId,
-    event.scenarioId,
-    String(event.repetition),
-    event.phase,
-    event.rootOperation,
-    event.requestClass
-  ];
+function rootClassKey(event, requireDispatchPlans = false) {
+  const values = requireDispatchPlans
+    ? [event.rootInvocationId, event.requestClass]
+    : [
+      event.runId,
+      event.attemptId,
+      event.armId,
+      event.scenarioId,
+      String(event.repetition),
+      event.phase,
+      event.rootOperation,
+      event.requestClass
+    ];
   return values.map((value) => `${value.length}:${value}`).join('|');
 }
 
@@ -176,30 +186,39 @@ export function traceNativeAttempts({
       continue;
     }
     const key = rootKey(event, requireDispatchPlans);
-    const capKey = rootClassKey(event);
+    const capKey = rootClassKey(event, requireDispatchPlans);
     const prior = groups.get(key) ?? [];
     const sequence = prior.length + 1;
     const rootClassSequence = (rootClassCounts.get(capKey) ?? 0) + 1;
     rootClassCounts.set(capKey, rootClassSequence);
-    let category = 'INITIAL';
-    if (sequence > 1) {
+    const capDenialClaim = hasNativeCapDenialCode(event);
+    const nativeCapDenied = requireDispatchPlans && isNativeCapDenialAtSaturation(
+      event,
+      rootClassSequence,
+      validatedPolicy.maxAttemptsPerRootRequestClass
+    );
+    let category = nativeCapDenied ? 'NATIVE_CAP_DENIED' : 'INITIAL';
+    if (!nativeCapDenied && sequence > 1) {
       if (prior.at(-1).outcome === 'FAILED') category = 'B';
       else if ((prior.at(-1).responseFormat ?? null) !== (event.responseFormat ?? null)) category = 'D';
       else category = 'C';
     }
+    if (capDenialClaim && !nativeCapDenied) {
+      findings.push({ code: 'NATIVE_CAP_DENIAL_NOT_AT_SATURATION', requestNumber: event.requestNumber });
+    }
     const expectedModel = expectedModels[event.requestClass];
     // A transport failure has no provider response model to attest. `null` is
     // the meter's explicit unavailable-evidence value, not evidence of E
-    // fallback. Successful events still require the pinned provider model, and
-    // any non-null failed model must agree with it.
-    const providerModelMatches = event.outcome === 'FAILED'
+    // fallback. A native-cap denial happens before an upstream request and so
+    // intentionally has neither a requested nor a provider model.
+    const providerModelMatches = nativeCapDenied || (event.outcome === 'FAILED'
       ? event.providerModel === null || event.providerModel === expectedModel
-      : event.providerModel === expectedModel;
-    if (event.requestedModel !== expectedModel || !providerModelMatches) {
+      : event.providerModel === expectedModel);
+    if (!nativeCapDenied && (event.requestedModel !== expectedModel || !providerModelMatches)) {
       findings.push({ code: 'MODEL_OR_PROVIDER_FALLBACK', requestNumber: event.requestNumber });
       category = 'E';
     }
-    if (rootClassSequence > validatedPolicy.maxAttemptsPerRootRequestClass) {
+    if (!nativeCapDenied && rootClassSequence > validatedPolicy.maxAttemptsPerRootRequestClass) {
       findings.push({ code: 'ROOT_CLASS_ATTEMPT_CAP_EXCEEDED', requestNumber: event.requestNumber });
     }
     if (RECOVERY_CATEGORIES.has(category) && !recovery.includes(category)) {

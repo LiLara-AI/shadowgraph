@@ -2,8 +2,33 @@
 // No numeric defaults: a budget must come from an explicit operator decision.
 import { REQUEST_CLASSES } from './v11-contract.mjs';
 
+const ATTEMPT_COMPLETION_JOIN_FIELDS = Object.freeze([
+  'runId', 'attemptId', 'armId', 'scenarioId', 'repetition', 'phase',
+  'requestClass', 'rootOperation', 'rootInvocationId', 'plannedDispatchId',
+  'planSlot', 'dispatchAlias', 'disposition'
+]);
+const PLAN_BOUND_ATTEMPT_FIELDS = Object.freeze([
+  'rootInvocationId', 'plannedDispatchId', 'planSlot', 'dispatchAlias', 'disposition'
+]);
+const PLAN_DISPOSITIONS = new Set(['root-initial', 'data-dependent-child', 'recovery']);
+const OPAQUE_DISPATCH_ID = /^[a-f0-9]{48}$/u;
+const NATIVE_CAP_DENIAL = 'NATIVE_ATTEMPT_CAP_EXHAUSTED';
+const PROVIDER_BUDGET_DENIAL = 'PROVIDER_BUDGET_EXHAUSTED';
+
 function refuse(code, message) {
   throw Object.assign(new Error(message), { code });
+}
+
+function planBoundAttemptIdentity(correlation) {
+  const present = PLAN_BOUND_ATTEMPT_FIELDS.map((field) => Object.hasOwn(correlation, field));
+  if (!present.some(Boolean)) return false;
+  if (!present.every(Boolean)
+    || typeof correlation.rootInvocationId !== 'string' || !correlation.rootInvocationId
+    || !OPAQUE_DISPATCH_ID.test(correlation.plannedDispatchId)
+    || typeof correlation.planSlot !== 'string' || !correlation.planSlot
+    || !OPAQUE_DISPATCH_ID.test(correlation.dispatchAlias)
+    || !PLAN_DISPOSITIONS.has(correlation.disposition)) return null;
+  return true;
 }
 
 export function validateProviderBudget(value, expected = {}) {
@@ -67,14 +92,20 @@ export function reconcileProviderAttempts({ text, events, expectedBudget = undef
       if (!Number.isSafeInteger(row.attemptNumber) || row.attemptNumber < 1) throw new Error('INVALID_ATTEMPT_NUMBER');
       if (row.event === 'admission') {
         const c = row.correlation;
+        const planBound = c && planBoundAttemptIdentity(c);
         if (row.attemptNumber !== attempts.size + 1 || typeof row.admitted !== 'boolean'
           || !c || !REQUEST_CLASSES.includes(c.requestClass)
           || ['runId', 'attemptId', 'armId', 'scenarioId', 'phase'].some((key) => typeof c[key] !== 'string' || !c[key])
-          || !Number.isSafeInteger(c.repetition) || c.repetition < 0) throw new Error('INVALID_ADMISSION');
+          || !Number.isSafeInteger(c.repetition) || c.repetition < 0
+          || planBound === null
+          || (planBound && (!Object.hasOwn(row, 'campaignReservationId')
+            || !(row.campaignReservationId === null || (typeof row.campaignReservationId === 'string' && row.campaignReservationId))))
+          || (!planBound && Object.hasOwn(row, 'campaignReservationId') && row.campaignReservationId !== null)) {
+          throw new Error('INVALID_ADMISSION');
+        }
         validateProviderBudget(budget, c);
-        attempts.set(row.attemptNumber, { ...row, dispatched: false, completed: false });
+        attempts.set(row.attemptNumber, { ...row, planBound, dispatched: false, completed: false });
         counts[c.requestClass][row.admitted ? 'admitted' : 'denied'] += 1;
-        if (!row.admitted) bad('BUDGET_DISPATCH_DENIED');
         continue;
       }
       const attempt = attempts.get(row.attemptNumber);
@@ -86,16 +117,20 @@ export function reconcileProviderAttempts({ text, events, expectedBudget = undef
         count.dispatchIntents += 1;
       } else if (row.event === 'completion') {
         const event = completions.get(row.requestNumber);
+        const nativeCapDenied = !attempt.admitted && event.failure?.code === NATIVE_CAP_DENIAL;
+        const providerBudgetDenied = !attempt.admitted && event.failure?.code === PROVIDER_BUDGET_DENIAL;
         if (attempt.completed || linked.has(row.requestNumber) || !event
-          || Object.keys(attempt.correlation).some((key) => attempt.correlation[key] !== event[key])
+          || ATTEMPT_COMPLETION_JOIN_FIELDS.some((key) => attempt.correlation[key] !== event[key])
+          || (attempt.planBound && attempt.campaignReservationId !== (event.campaignReservationId ?? null))
           || row.outcome !== event.outcome || !['SUCCEEDED', 'FAILED'].includes(event.outcome)
           || (event.outcome === 'SUCCEEDED' && !attempt.dispatched)
-          || (!attempt.admitted && event.failure?.code !== 'PROVIDER_BUDGET_EXHAUSTED')) throw new Error('INVALID_ATTEMPT_COMPLETION');
+          || (!attempt.admitted && !nativeCapDenied && !providerBudgetDenied)) throw new Error('INVALID_ATTEMPT_COMPLETION');
         attempt.completed = true;
         linked.add(row.requestNumber);
         count.completed += 1;
         count[event.outcome === 'SUCCEEDED' ? 'succeeded' : 'failed'] += 1;
-        if (event.outcome === 'FAILED') bad('FAILED_ATTEMPT');
+        if (event.outcome === 'FAILED' && !nativeCapDenied) bad('FAILED_ATTEMPT');
+        if (providerBudgetDenied) bad('BUDGET_DISPATCH_DENIED');
       } else throw new Error('UNKNOWN_ATTEMPT_EVENT');
     }
     for (const attempt of attempts.values()) {

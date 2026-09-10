@@ -356,6 +356,31 @@ test('configuration is loopback-only, ledgers are collision-safe, and bindings r
     /upstreamBaseUrl.*credentials/i
   );
 
+  const rawAuthorityBypasses = [
+    ['listenerUrl', 'http://@127.0.0.1:0'],
+    ['upstreamBaseUrl', `http://:@127.0.0.1:${new URL(upstream.origin).port}/v1`],
+    ['upstreamBaseUrl', String.raw`http:\\@127.0.0.1:${new URL(upstream.origin).port}/v1`],
+    ['upstreamBaseUrl', String.raw`http:/\\:@127.0.0.1:${new URL(upstream.origin).port}/v1`]
+  ];
+  for (const [index, [field, unsafeEndpoint]] of rawAuthorityBypasses.entries()) {
+    const ledgerPath = path.join(directory, `raw-authority-${index}.ndjson`);
+    let unexpectedMeter = null;
+    try {
+      await assert.rejects(
+        startProviderMeter({ ...baseConfig, [field]: unsafeEndpoint, ledgerPath })
+          .then((meter) => {
+            unexpectedMeter = meter;
+            return meter;
+          }),
+        /canonical.*URL.*credentials/i,
+        `${field} must reject ${unsafeEndpoint}`
+      );
+      await assert.rejects(readFile(ledgerPath, 'utf8'), { code: 'ENOENT' });
+    } finally {
+      await unexpectedMeter?.close();
+    }
+  }
+
   await writeFile(baseConfig.ledgerPath, 'preserve-me\n', { flag: 'wx' });
   await assert.rejects(startProviderMeter(baseConfig), /ledger already exists/i);
   assert.equal(await readFile(baseConfig.ledgerPath, 'utf8'), 'preserve-me\n');
@@ -399,7 +424,7 @@ test('provider meter records the capability-bound root operation for every provi
   assert.equal(event.rootOperation, 'persist');
 });
 
-test('meter atomically caps native attempts per root request class before upstream dispatch', async (t) => {
+test('native caps bind exact root invocation plus request class across plan slots and correlations', async (t) => {
   let upstreamCalls = 0;
   const upstream = await listen(t, async (request, response) => {
     upstreamCalls += 1;
@@ -407,25 +432,66 @@ test('meter atomically caps native attempts per root request class before upstre
     response.writeHead(200, { 'content-type': 'application/json' });
     response.end(JSON.stringify(providerPayload()));
   });
+  const directory = await temporaryDirectory(t);
+  const baseConfig = {
+    listenerUrl: 'http://127.0.0.1:0',
+    upstreamBaseUrl: upstream.origin,
+    upstreamAuthorization: `Bearer ${UPSTREAM_SECRET}`,
+    ledgerPath: path.join(directory, 'provider-requests.ndjson'),
+    upstreamTimeoutMs: 2_000
+  };
+  let unexpectedlyStarted = null;
+  try {
+    await assert.rejects(
+      startProviderMeter(baseConfig, {
+        requireRootOperation: true,
+        maxAttemptsPerRootRequestClass: 1
+      }).then((meter) => {
+        unexpectedlyStarted = meter;
+        throw new Error('native cap configuration unexpectedly started without planned root identity');
+      }),
+      /maxAttemptsPerRootRequestClass requires planned dispatch identity/i
+    );
+  } finally {
+    await unexpectedlyStarted?.close();
+  }
+
   const { meter, ledgerPath } = await meterFor(t, upstream.origin, {}, {
     requireRootOperation: true,
+    requireDispatchPlans: true,
     maxAttemptsPerRootRequestClass: 1
   });
-  const endpoint = meter.bindEndpoint({ ...BASE_CORRELATION, rootOperation: 'persist' });
-  const request = () => fetch(`${endpoint}/chat/completions`, {
+  const route = async (rootInvocationId, planSlot, scenarioId = BASE_CORRELATION.scenarioId) => meter.bindPlannedEndpoint({
+    ...BASE_CORRELATION,
+    scenarioId,
+    rootOperation: 'persist',
+    rootInvocationId,
+    planSlot,
+    identityMode: 'static'
+  });
+  const [firstRootFirst, sameRootDifferentScenario, independentRoot] = await Promise.all([
+    route('native-cap-root-a', 'first'),
+    route('native-cap-root-a', 'different-scenario', 'S02_DIFFERENT_CAP_SCOPE'),
+    route('native-cap-root-b', 'first')
+  ]);
+  const request = (endpoint) => fetch(`${endpoint}/chat/completions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ model: 'requested-outer-model', messages: [] })
   });
 
-  assert.equal((await request()).status, 200);
-  assert.equal((await request()).status, 403);
+  assert.equal((await request(firstRootFirst.endpoint)).status, 200);
+  assert.equal((await request(sameRootDifferentScenario.endpoint)).status, 403);
+  assert.equal((await request(independentRoot.endpoint)).status, 200);
   await meter.close();
 
   const events = await ledgerEvents(ledgerPath);
-  assert.equal(upstreamCalls, 1);
-  assert.equal(events.length, 2);
+  assert.equal(upstreamCalls, 2);
+  assert.equal(events.length, 3);
   assert.equal(events[1].failure.code, 'NATIVE_ATTEMPT_CAP_EXHAUSTED');
+  assert.equal(events[1].rootInvocationId, 'native-cap-root-a');
+  assert.equal(events[1].scenarioId, 'S02_DIFFERENT_CAP_SCOPE');
+  assert.equal(events[2].rootInvocationId, 'native-cap-root-b');
 });
 
 test('provider-meter 500-to-200 B trace preserves missing usage as accounting failure, not fallback', async (t) => {
@@ -449,8 +515,7 @@ test('provider-meter 500-to-200 B trace preserves missing usage as accounting fa
     requestClass: 'embedding'
   };
   const { meter, ledgerPath } = await meterFor(t, upstream.origin, {}, {
-    requireRootOperation: true,
-    maxAttemptsPerRootRequestClass: 24
+    requireRootOperation: true
   });
   const endpoint = meter.bindEndpoint({ ...correlation, rootOperation: 'persist' });
   const request = () => fetch(`${endpoint}/embeddings`, {
