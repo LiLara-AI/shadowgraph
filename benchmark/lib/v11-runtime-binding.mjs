@@ -67,13 +67,45 @@ export function providerLedgerPath(ledgerDirectory, attemptId) {
   return join(ledgerDirectory, `${attemptId}.provider-requests.ndjson`);
 }
 
+const CANONICAL_LOOPBACK_AUTHORITY = /^(?:127\.(?:0|[1-9]\d?|1\d{2}|2[0-4]\d|25[0-5])\.(?:0|[1-9]\d?|1\d{2}|2[0-4]\d|25[0-5])\.(?:0|[1-9]\d?|1\d{2}|2[0-4]\d|25[0-5])|\[::1\])(?::(?:0|[1-9]\d{0,4}))?$/u;
+const CANONICAL_LOOPBACK_URL = /^http:\/\/([^/?#]*)(?:\/[^?#]*)?$/u;
+const RAW_URI_UNSAFE = /[\s\u0000-\u001F\u007F\\]/u;
+const RAW_URI_STRIPPABLE = /[\s\u0000-\u001F\u007F\\]/gu;
+const RAW_URI_SCHEME = /^[A-Za-z][A-Za-z\d+.-]*:/u;
+
+function rawAuthorityIsUnsafe(value) {
+  if (typeof value !== 'string') return false;
+  // This stripped value is classification-only: accepted upstreams are always
+  // validated against the original bytes below. It identifies forms WHATWG
+  // would repair (for example `\0http://`, `http ://`, or `https://`) before
+  // they can reach URL construction, while ordinary malformed prose remains on
+  // the existing absolute-URL error path.
+  const schemeCandidate = value.replace(RAW_URI_STRIPPABLE, '');
+  if (!RAW_URI_SCHEME.test(schemeCandidate)) return false;
+  if (RAW_URI_UNSAFE.test(value)) return true;
+  const match = CANONICAL_LOOPBACK_URL.exec(value);
+  return match === null || !CANONICAL_LOOPBACK_AUTHORITY.test(match[1]);
+}
+
 /** Refuse a provider upstream that is not literally on loopback. */
 export function assertLoopbackUpstream(value) {
+  if (rawAuthorityIsUnsafe(value)) {
+    throw new V11RunError(
+      'RUNTIME_UNAVAILABLE',
+      '--provider-upstream must be a canonical literal loopback http URL without userinfo, whitespace, query, or fragment'
+    );
+  }
   let parsed;
   try {
     parsed = new URL(value);
   } catch {
     throw new V11RunError('RUNTIME_UNAVAILABLE', '--provider-upstream must be an absolute http URL');
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new V11RunError(
+      'RUNTIME_UNAVAILABLE',
+      '--provider-upstream must be a canonical literal loopback http URL without userinfo, whitespace, query, or fragment'
+    );
   }
   const host = parsed.hostname.replace(/^\[|\]$/gu, '');
   const loopback = host === '::1' || /^127(?:\.\d{1,3}){3}$/u.test(host);

@@ -26,7 +26,7 @@ import { createProgressLedger } from '../benchmark/lib/progress.mjs';
 import { buildV11Prompt } from '../benchmark/lib/v11-prompts.mjs';
 import { ADAPTER_OPERATION_TIMEOUT_MS, UNIT_TIMEOUT_MS } from '../benchmark/lib/v11-runner.mjs';
 import { captureVerifiedServiceEvidence } from '../benchmark/lib/v11-service-evidence.mjs';
-import { bindV11Runtime, providerLedgerPath } from '../benchmark/lib/v11-runtime-binding.mjs';
+import { assertLoopbackUpstream, bindV11Runtime, providerLedgerPath } from '../benchmark/lib/v11-runtime-binding.mjs';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const IMAGE = `python:3.12.11-slim@sha256:${'4'.repeat(64)}`;
@@ -522,6 +522,140 @@ test('a budget for different implementation bytes refuses before environment or 
   assert.equal(h.trace.includes('observe-environment'), false);
   assert.deepEqual(h.seen.created, []);
   assert.deepEqual(h.meterConfig, []);
+});
+
+test('a raw-unsafe upstream is refused before URL parsing, runtime directories, or campaign persistence', async (t) => {
+  const unsafeUpstreams = [
+    'http://@127.0.0.1:11434/v1',
+    'http://:@127.0.0.1:11434/v1',
+    String.raw`http:\\@127.0.0.1:11434/v1`,
+    String.raw`http:/\\:@127.0.0.1:11434/v1`,
+    'http:/127.0.0.1:11434/v1',
+    'HTTP://127.0.0.1:11434/v1',
+    'http://[0:0:0:0:0:0:0:1]:11434/v1',
+    'http://127.0.0.1.:11434/v1',
+    'http://2130706433:11434/v1',
+    'http://0x7f000001:11434/v1',
+    'http://127.1:11434/v1',
+    'http://127.000.000.001:11434/v1',
+    'http://127.0.0.1:11434/v 1',
+    'http://127.0.0.1:11434/v\t1',
+    'http://127.0.0.1:11434/v\n1',
+    ' http://127.0.0.1:11434/v1',
+    'http://127.0.0.1:11434/v1?unexpected=query',
+    'http://127.0.0.1:11434/v1#unexpected-fragment',
+    '\u0000http://127.0.0.1:11434/v1',
+    '\u0000http://2130706433:11434/v1',
+    '\u0000http://0x7f000001:11434/v1',
+    'http ://127.0.0.1:11434/v1',
+    'https://127.0.0.1:11434/v1',
+    'ftp://127.0.0.1:11434/v1'
+  ];
+  const NativeURL = globalThis.URL;
+  let parseCalls = 0;
+  globalThis.URL = class extends NativeURL {
+    constructor(...args) {
+      parseCalls += 1;
+      super(...args);
+    }
+  };
+  try {
+    for (const providerUpstream of unsafeUpstreams) {
+      parseCalls = 0;
+    const h = await harness(t);
+    const campaignCalls = [];
+    h.input.campaign = {
+      root: path.join(h.directory, 'campaign'),
+      policy: {
+        campaignId: 'offline-only', implementationLockHash: IMPLEMENTATION_LOCK_HASH,
+        maxRequests: 2, maxSessions: 3, maxRecoveryAttempts: 0,
+        deadline: '2099-01-01T00:00:00.000Z',
+        limits: { outer_decision_llm: 1, internal_memory_llm: 1, embedding: 1 }
+      }
+    };
+    h.injections.openCampaignBudget = async (...args) => {
+      campaignCalls.push(['open', ...args]);
+      return {
+        beginSession: async (...args) => campaignCalls.push(['session', ...args]),
+        reserve: async () => ({ reservationId: 'not-reached' }),
+        close: async () => campaignCalls.push(['close'])
+      };
+    };
+    h.injections.startProviderMeter = async (config) => {
+      h.trace.push('meter');
+      h.meterConfig.push(config);
+      throw new Error('meter fallback was reached');
+    };
+
+    const error = await bindV11Runtime(
+      { ...h.input, providerUpstream },
+      h.injections
+    ).then(
+      () => null,
+      (caught) => caught
+    );
+    assert.ok(error instanceof Error, providerUpstream);
+    assert.deepEqual(h.seen.created, [], `${providerUpstream} must create no runtime directory`);
+    assert.deepEqual(campaignCalls, [], `${providerUpstream} must not open or begin a campaign session`);
+    assert.deepEqual(h.meterConfig, [], `${providerUpstream} must not reach the meter fallback`);
+    assert.deepEqual(h.trace, [], `${providerUpstream} must stop before all runtime construction`);
+      assert.equal(parseCalls, 0, `${providerUpstream} must not reach WHATWG URL parsing`);
+      assert.match(error.message, /canonical literal loopback http URL without userinfo, whitespace, query, or fragment/u);
+    }
+  } finally {
+    globalThis.URL = NativeURL;
+  }
+});
+
+test('the raw upstream fence rejects query and fragment before URL parsing', () => {
+  const NativeURL = globalThis.URL;
+  let parseCalls = 0;
+  globalThis.URL = class extends NativeURL {
+    constructor(...args) {
+      parseCalls += 1;
+      super(...args);
+    }
+  };
+  try {
+    for (const upstream of [
+      'http://127.0.0.1:11434/v1?unexpected=query',
+      'http://127.0.0.1:11434/v1#unexpected-fragment'
+    ]) {
+      assert.throws(
+        () => assertLoopbackUpstream(upstream),
+        /canonical literal loopback http URL/u
+      );
+    }
+    assert.equal(parseCalls, 0, 'raw query and fragment syntax must not reach WHATWG normalization');
+  } finally {
+    globalThis.URL = NativeURL;
+  }
+});
+
+test('the raw upstream fence rejects embedded whitespace before URL parsing', () => {
+  const NativeURL = globalThis.URL;
+  let parseCalls = 0;
+  globalThis.URL = class extends NativeURL {
+    constructor(...args) {
+      parseCalls += 1;
+      super(...args);
+    }
+  };
+  try {
+    for (const upstream of [
+      'http://127.0.0.1:11434/v 1',
+      'http://127.0.0.1:11434/v\t1',
+      'http://127.0.0.1:11434/v\n1'
+    ]) {
+      assert.throws(
+        () => assertLoopbackUpstream(upstream),
+        /canonical literal loopback http URL/u
+      );
+    }
+    assert.equal(parseCalls, 0, 'embedded raw whitespace must not reach WHATWG normalization');
+  } finally {
+    globalThis.URL = NativeURL;
+  }
 });
 
 test('everything already built is closed when a later step fails', async (t) => {
