@@ -65,6 +65,7 @@ export function validateProviderBudget(value, expected = {}) {
  */
 export function reconcileProviderAttempts({ text, events, expectedBudget = undefined }) {
   const findings = [];
+  const failedAttempts = [];
   const counts = Object.fromEntries(REQUEST_CLASSES.map((name) => [name, {
     admitted: 0, denied: 0, dispatchIntents: 0, completed: 0, succeeded: 0, failed: 0, incomplete: 0
   }]));
@@ -129,7 +130,15 @@ export function reconcileProviderAttempts({ text, events, expectedBudget = undef
         linked.add(row.requestNumber);
         count.completed += 1;
         count[event.outcome === 'SUCCEEDED' ? 'succeeded' : 'failed'] += 1;
-        if (event.outcome === 'FAILED' && !nativeCapDenied) bad('FAILED_ATTEMPT');
+        if (event.outcome === 'FAILED' && !nativeCapDenied) {
+          bad('FAILED_ATTEMPT');
+          failedAttempts.push(Object.freeze({
+            attemptNumber: attempt.attemptNumber,
+            requestNumber: row.requestNumber,
+            failureCode: event.failure?.code ?? null,
+            correlation: Object.freeze({ ...attempt.correlation })
+          }));
+        }
         if (providerBudgetDenied) bad('BUDGET_DISPATCH_DENIED');
       } else throw new Error('UNKNOWN_ATTEMPT_EVENT');
     }
@@ -143,9 +152,11 @@ export function reconcileProviderAttempts({ text, events, expectedBudget = undef
     for (const name of REQUEST_CLASSES) if (counts[name].admitted > budget.limits[name]) bad('PROVIDER_BUDGET_BREACH');
   } catch (error) {
     // Do not echo arbitrary malformed JSON or credential-bearing input.
+    failedAttempts.length = 0;
     bad('ATTEMPT_EVIDENCE_INVALID');
   }
   return { status: findings.length ? 'BLOCKED' : 'RECONCILED', counts,
     findings: [...new Set(findings)],
+    failedAttempts: Object.freeze([...failedAttempts]),
     note: 'Dispatch intents are write-ahead evidence, not proof of upstream receipt; incomplete attempts remain unknown.' };
 }

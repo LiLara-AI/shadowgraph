@@ -648,6 +648,7 @@ export async function startProviderMeter(config, {
 
   const bindings = new Map();
   const dispatchPlans = new Map();
+  const completionWaiters = new Map();
   const rootPlanKeys = new Set();
   const dynamicChildOrdinals = new Map();
   let state = 'STARTING';
@@ -831,6 +832,20 @@ export async function startProviderMeter(config, {
     });
   }
 
+  function completionPromiseFor(plan) {
+    let resolveCompletion;
+    let rejectCompletion;
+    const completion = new Promise((resolve, reject) => {
+      resolveCompletion = resolve;
+      rejectCompletion = reject;
+    });
+    // Callers that need cancellation ordering await this promise. Suppress an
+    // unobserved rejection for other static routes; awaiting it still rejects.
+    completion.catch(() => {});
+    completionWaiters.set(plan.plannedDispatchId, { resolveCompletion, rejectCompletion });
+    return completion;
+  }
+
   function appendCompletion({
     correlation,
     requestedModel,
@@ -878,9 +893,25 @@ export async function startProviderMeter(config, {
       nextRequestNumber += 1;
       await ledger.write(`${JSON.stringify(event)}\n`);
       await ledger.sync();
+      if (dispatchPlan !== null) {
+        const waiter = completionWaiters.get(dispatchPlan.plannedDispatchId);
+        if (waiter !== undefined) {
+          completionWaiters.delete(dispatchPlan.plannedDispatchId);
+          waiter.resolveCompletion(Object.freeze({ ...event }));
+        }
+      }
       return event;
     });
-    ledgerTail = operation.catch((error) => { evidenceFailure = error; });
+    ledgerTail = operation.catch((error) => {
+      evidenceFailure = error;
+      if (dispatchPlan !== null) {
+        const waiter = completionWaiters.get(dispatchPlan.plannedDispatchId);
+        if (waiter !== undefined) {
+          completionWaiters.delete(dispatchPlan.plannedDispatchId);
+          waiter.rejectCompletion(error);
+        }
+      }
+    });
     return operation;
   }
 
@@ -1496,11 +1527,13 @@ export async function startProviderMeter(config, {
       }
     });
     let bound = binding;
+    let completion = null;
     if (binding.identityMode === 'static') {
       const staticDispatchPlan = await createDispatchPlan(binding, routeId, {
         disposition: 'root-initial',
         planSlot: binding.planSlot
       });
+      completion = completionPromiseFor(staticDispatchPlan);
       bound = Object.freeze({ ...binding, staticDispatchPlan });
     }
     rootPlanKeys.add(key);
@@ -1509,7 +1542,8 @@ export async function startProviderMeter(config, {
     return Object.freeze({
       endpoint,
       declareEndpoint: `${endpoint}/__shadowgraph/declare`,
-      closeEndpoint: `${endpoint}/__shadowgraph/close`
+      closeEndpoint: `${endpoint}/__shadowgraph/close`,
+      ...(completion === null ? {} : { completion })
     });
   }
 

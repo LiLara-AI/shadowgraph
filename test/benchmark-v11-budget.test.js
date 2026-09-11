@@ -197,7 +197,79 @@ test('write-ahead evidence distinguishes complete, incomplete, malformed and mis
   assert.equal(run(encode(completed), [event], fixtureBudget({ limits: { outer_decision_llm: 0, internal_memory_llm: 0, embedding: 0 } })).status, 'BLOCKED');
 });
 
-test('plan-bound write-ahead admissions must match the exact completion and campaign identity', () => {
+test('attempt accounting preserves distinct failed identities while rejecting replayed, missing, and unexpected completions', () => {
+  const budget = fixtureBudget();
+  const correlation = {
+    runId: budget.runId,
+    attemptId: budget.attemptId,
+    armId: 'cognee',
+    scenarioId: 'shared-failure-code',
+    repetition: 0,
+    phase: 'probe',
+    requestClass: 'embedding'
+  };
+  const row = (value) => ({
+    schema: 'shadowgraph.provider-meter.attempt',
+    version: 1,
+    recordedAt: '2026-09-11T00:00:00.000Z',
+    ...value
+  });
+  const encode = (rows) => rows.map((value) => JSON.stringify(row(value))).join('\n') + '\n';
+  const events = [1, 2].map((requestNumber) => ({
+    ...correlation,
+    requestNumber,
+    outcome: 'FAILED',
+    failure: { code: 'UPSTREAM_HTTP_STATUS' }
+  }));
+  const complete = [
+    { event: 'authorization', budget },
+    ...events.flatMap((event, index) => [
+      { event: 'admission', attemptNumber: index + 1, correlation, admitted: true },
+      { event: 'dispatch_intent', attemptNumber: index + 1 },
+      { event: 'completion', attemptNumber: index + 1, requestNumber: event.requestNumber, outcome: 'FAILED' }
+    ])
+  ];
+  const result = budgetModule.reconcileProviderAttempts({ text: encode(complete), events, expectedBudget: budget });
+  assert.equal(result.status, 'BLOCKED');
+  assert.deepEqual(result.findings, ['FAILED_ATTEMPT']);
+  assert.deepEqual(result.failedAttempts.map((attempt) => ({
+    attemptNumber: attempt.attemptNumber,
+    requestNumber: attempt.requestNumber,
+    failureCode: attempt.failureCode,
+    runId: attempt.correlation.runId,
+    attemptId: attempt.correlation.attemptId
+  })), [
+    { attemptNumber: 1, requestNumber: 1, failureCode: 'UPSTREAM_HTTP_STATUS', runId: budget.runId, attemptId: budget.attemptId },
+    { attemptNumber: 2, requestNumber: 2, failureCode: 'UPSTREAM_HTTP_STATUS', runId: budget.runId, attemptId: budget.attemptId }
+  ]);
+  const replayed = budgetModule.reconcileProviderAttempts({
+    text: encode([...complete, complete.at(-1)]),
+    events,
+    expectedBudget: budget
+  });
+  assert.equal(replayed.status, 'BLOCKED');
+  assert.ok(replayed.findings.includes('ATTEMPT_EVIDENCE_INVALID'));
+  assert.deepEqual(replayed.failedAttempts, []);
+  const missing = budgetModule.reconcileProviderAttempts({
+    text: encode(complete.slice(0, -1)),
+    events,
+    expectedBudget: budget
+  });
+  assert.equal(missing.status, 'BLOCKED');
+  assert.ok(missing.findings.includes('INCOMPLETE_ATTEMPT'));
+  assert.deepEqual(missing.failedAttempts.map((attempt) => attempt.attemptNumber), [1],
+    'the completed first fault remains identified, but the missing second attempt is never fabricated');
+  const unexpected = budgetModule.reconcileProviderAttempts({
+    text: encode(complete),
+    events: [{ ...events[0], requestNumber: 3 }],
+    expectedBudget: budget
+  });
+  assert.equal(unexpected.status, 'BLOCKED');
+  assert.ok(unexpected.findings.includes('ATTEMPT_EVIDENCE_INVALID'));
+  assert.deepEqual(unexpected.failedAttempts, []);
+});
+
+test('plan-bound write-ahead admissions must match the exact completion and campaign identity', async () => {
   const budget = fixtureBudget();
   const correlation = {
     runId: budget.runId,

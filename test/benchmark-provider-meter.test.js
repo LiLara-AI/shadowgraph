@@ -1325,6 +1325,131 @@ test('upstream timeout is an absolute deadline even when response bytes keep arr
   });
 });
 
+test('planned cancellation waits for the durable downstream-abort completion before upstream release', async (t) => {
+  let releaseUpstream;
+  let markStarted;
+  const started = new Promise((resolve) => { markStarted = resolve; });
+  const upstream = await listen(t, async (request, response) => {
+    await readBody(request);
+    markStarted();
+    await new Promise((resolve) => { releaseUpstream = resolve; });
+    if (!response.writableEnded) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify(providerPayload()));
+    }
+  });
+  const directory = await temporaryDirectory(t);
+  const ledgerPath = path.join(directory, 'planned-cancellation.ndjson');
+  const meter = await startProviderMeter({
+    listenerUrl: 'http://127.0.0.1:0',
+    upstreamBaseUrl: upstream.origin,
+    upstreamAuthorization: `Bearer ${UPSTREAM_SECRET}`,
+    ledgerPath,
+    upstreamTimeoutMs: 2_000
+  }, {
+    requireRootOperation: true,
+    requireDispatchPlans: true,
+    maxAttemptsPerRootRequestClass: 2
+  });
+  t.after(() => {
+    releaseUpstream?.();
+    return meter.close();
+  });
+  const route = await meter.bindPlannedEndpoint({
+    runId: 'run-planned-cancellation',
+    attemptId: 'attempt-planned-cancellation',
+    armId: 'cognee',
+    scenarioId: 'native-cancellation',
+    repetition: 0,
+    phase: 'probe',
+    requestClass: 'embedding',
+    rootOperation: 'persist',
+    rootInvocationId: 'planned-cancellation-root',
+    planSlot: 'planned-cancellation-root',
+    identityMode: 'static'
+  });
+  assert.ok(route.completion instanceof Promise, 'static planned route exposes a terminal completion promise');
+  const payload = JSON.stringify({ model: 'nomic-embed-text:v1.5', input: ['cancellation'] });
+  let clientRequest;
+  const clientSettled = new Promise((resolve) => {
+    clientRequest = httpRequest(`${route.endpoint}/embeddings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) }
+    }, (response) => {
+      response.resume();
+      response.once('end', resolve);
+    });
+    clientRequest.once('error', resolve);
+    clientRequest.end(payload);
+  });
+  await started;
+  clientRequest.destroy();
+  await clientSettled;
+  const completion = await within(route.completion, 1_000, 'planned cancellation did not reach a terminal meter completion');
+  assert.equal(completion.outcome, 'FAILED');
+  assert.equal(completion.failure?.code, 'DOWNSTREAM_ABORTED');
+  releaseUpstream();
+  const [event] = await ledgerEvents(ledgerPath);
+  assert.equal(event.outcome, 'FAILED');
+  assert.equal(event.failure?.code, 'DOWNSTREAM_ABORTED');
+});
+
+test('planned completion remains succeeded when client destruction occurs after response completion', async (t) => {
+  const upstream = await listen(t, async (request, response) => {
+    await readBody(request);
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(providerPayload()));
+  });
+  const directory = await temporaryDirectory(t);
+  const ledgerPath = path.join(directory, 'planned-completion-control.ndjson');
+  const meter = await startProviderMeter({
+    listenerUrl: 'http://127.0.0.1:0',
+    upstreamBaseUrl: upstream.origin,
+    upstreamAuthorization: `Bearer ${UPSTREAM_SECRET}`,
+    ledgerPath,
+    upstreamTimeoutMs: 2_000
+  }, {
+    requireRootOperation: true,
+    requireDispatchPlans: true,
+    maxAttemptsPerRootRequestClass: 2
+  });
+  t.after(() => meter.close());
+  const route = await meter.bindPlannedEndpoint({
+    runId: 'run-planned-completion',
+    attemptId: 'attempt-planned-completion',
+    armId: 'cognee',
+    scenarioId: 'native-completion-control',
+    repetition: 0,
+    phase: 'probe',
+    requestClass: 'embedding',
+    rootOperation: 'persist',
+    rootInvocationId: 'planned-completion-root',
+    planSlot: 'planned-completion-root',
+    identityMode: 'static'
+  });
+  assert.ok(route.completion instanceof Promise, 'static planned route exposes a terminal completion promise');
+  const payload = JSON.stringify({ model: 'nomic-embed-text:v1.5', input: ['completion'] });
+  let clientRequest;
+  await new Promise((resolve, reject) => {
+    clientRequest = httpRequest(`${route.endpoint}/embeddings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) }
+    }, (response) => {
+      response.resume();
+      response.once('end', resolve);
+    });
+    clientRequest.once('error', reject);
+    clientRequest.end(payload);
+  });
+  clientRequest.destroy();
+  const completion = await within(route.completion, 1_000, 'planned completion was not durable');
+  assert.equal(completion.outcome, 'SUCCEEDED');
+  assert.equal(completion.failure, null);
+  const [event] = await ledgerEvents(ledgerPath);
+  assert.equal(event.outcome, 'SUCCEEDED');
+  assert.equal(event.failure, null);
+});
+
 test('downstream aborts are recorded and close drains in-flight handlers before closing the ledger', async (t) => {
   let releaseUpstream;
   let markStarted;

@@ -376,3 +376,78 @@ test('campaign reservation is joined to the planned dispatch before upstream sen
   const events = (await readFile(ledgerPath, 'utf8')).trimEnd().split('\n').map((line) => JSON.parse(line));
   assert.equal(events[0].campaignReservationId, 'offline-only:1');
 });
+
+test('a native-cap pre-dispatch refusal is a provider event but not a reservation or upstream dispatch', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-native-cap-accounting-');
+  const ledgerPath = path.join(directory, 'provider.ndjson');
+  const budget = {
+    schema: 'shadowgraph.v11.provider-budget',
+    version: 1,
+    authorizationRef: 'offline-native-cap-accounting',
+    runId: CORRELATION.runId,
+    attemptId: CORRELATION.attemptId,
+    implementationLockHash: 'a'.repeat(64),
+    maxRetries: 0,
+    limits: { outer_decision_llm: 0, internal_memory_llm: 0, embedding: 1 }
+  };
+  const reservations = [];
+  let upstreamCalls = 0;
+  const upstream = await listen(t, async (request, response) => {
+    upstreamCalls += 1;
+    await readBody(request);
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(providerResponse());
+  });
+  const meter = await startProviderMeter({
+    listenerUrl: 'http://127.0.0.1:0',
+    upstreamBaseUrl: `${upstream}/v1`,
+    upstreamAuthorization: null,
+    ledgerPath,
+    upstreamTimeoutMs: 5_000
+  }, {
+    budget,
+    requireRootOperation: true,
+    requireDispatchPlans: true,
+    maxAttemptsPerRootRequestClass: 1,
+    campaignReserve: async (reservation) => {
+      reservations.push(reservation);
+      return { reservationId: `offline-native-cap:${reservations.length}` };
+    }
+  });
+  t.after(() => meter.close());
+  const binding = (planSlot) => ({
+    ...CORRELATION,
+    rootInvocationId: 'native-cap-accounting-root',
+    planSlot,
+    identityMode: 'static'
+  });
+  const first = await meter.bindPlannedEndpoint(binding('native-cap-accounting-1'));
+  const second = await meter.bindPlannedEndpoint(binding('native-cap-accounting-2'));
+  const send = async (route) => {
+    const response = await fetch(`${route.endpoint}/embeddings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'nomic-embed-text:v1.5', input: ['cap'] })
+    });
+    await response.arrayBuffer();
+    return response.status;
+  };
+  assert.equal(await send(first), 200);
+  assert.equal(await send(second), 403);
+  assert.equal(upstreamCalls, 1);
+  assert.equal(reservations.length, 1);
+  await meter.close();
+  const events = (await readFile(ledgerPath, 'utf8')).trimEnd().split('\n').map((line) => JSON.parse(line));
+  assert.equal(events.length, 2);
+  const admitted = events.find((event) => event.outcome === 'SUCCEEDED');
+  const refused = events.find((event) => event.failure?.code === 'NATIVE_ATTEMPT_CAP_EXHAUSTED');
+  assert.ok(admitted?.campaignReservationId);
+  assert.equal(refused?.outcome, 'FAILED');
+  assert.equal(Object.hasOwn(refused, 'campaignReservationId'), false);
+  const attempts = await readFile(`${ledgerPath}.attempts.ndjson`, 'utf8');
+  const reconciled = reconcileProviderAttempts({ text: attempts, events });
+  assert.equal(reconciled.status, 'RECONCILED');
+  assert.deepEqual(reconciled.counts.embedding, {
+    admitted: 1, denied: 1, dispatchIntents: 1, completed: 2, succeeded: 1, failed: 1, incomplete: 0
+  });
+});
