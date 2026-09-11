@@ -115,6 +115,36 @@ test('same-mode successful native follow-up is C only when the arm-neutral polic
   assert.deepEqual(result.findings, []);
 });
 
+test('scoped behavior retains validated child-plan identity while grouping retries by logical correlation', () => {
+  const result = traceNativeAttempts({
+    requireDispatchPlans: false,
+    retainDispatchIdentity: true,
+    events: [
+      event(1, { rootInvocationId: 'root-persist-1', plannedDispatchId: 'a'.repeat(48) }),
+      event(2, { rootInvocationId: 'root-persist-1', plannedDispatchId: 'b'.repeat(48) })
+    ],
+    expectedModels: MODELS,
+    policy: policy()
+  });
+
+  assert.equal(result.status, 'RECONCILED');
+  assert.deepEqual(result.trace.map((entry) => entry.category), ['INITIAL', 'C']);
+  assert.deepEqual(result.trace.map((entry) => ({
+    rootInvocationId: entry.rootInvocationId,
+    plannedDispatchId: entry.plannedDispatchId
+  })), [
+    { rootInvocationId: 'root-persist-1', plannedDispatchId: 'a'.repeat(48) },
+    { rootInvocationId: 'root-persist-1', plannedDispatchId: 'b'.repeat(48) }
+  ]);
+  assert.throws(() => traceNativeAttempts({
+    requireDispatchPlans: false,
+    retainDispatchIdentity: true,
+    events: [event(1, { rootInvocationId: 'root-persist-1', plannedDispatchId: 'not-a-plan-id' })],
+    expectedModels: MODELS,
+    policy: policy()
+  }), /dispatch-plan identity/u);
+});
+
 test('distinct planned dispatches under one root are independent INITIAL work', () => {
   const result = traceNativeAttempts({
     requireDispatchPlans: true,

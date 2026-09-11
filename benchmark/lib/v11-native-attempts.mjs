@@ -153,14 +153,16 @@ export function traceNativeAttempts({
   expectedModels,
   policy,
   armIds = null,
-  requireDispatchPlans = false
+  requireDispatchPlans = false,
+  retainDispatchIdentity = false
 }) {
   if (!Array.isArray(events) || !isPlainObject(expectedModels)) {
     throw new Error('native attempt trace requires events and expected models');
   }
-  if (typeof requireDispatchPlans !== 'boolean') {
-    throw new Error('native attempt trace requireDispatchPlans must be boolean');
+  if (typeof requireDispatchPlans !== 'boolean' || typeof retainDispatchIdentity !== 'boolean') {
+    throw new Error('native attempt trace dispatch identity options must be boolean');
   }
+  const includeDispatchIdentity = requireDispatchPlans || retainDispatchIdentity;
   const validatedPolicy = validateNativeAttemptPolicy(policy, armIds);
   for (const requestClass of REQUEST_CLASSES) {
     if (!isNonEmptyString(expectedModels[requestClass])) {
@@ -174,7 +176,7 @@ export function traceNativeAttempts({
   const seenRequestNumbers = new Set();
   const ordered = [...events].sort((left, right) => left.requestNumber - right.requestNumber);
   for (const [index, event] of ordered.entries()) {
-    validateEvent(event, index + 1, requireDispatchPlans);
+    validateEvent(event, index + 1, includeDispatchIdentity);
     if (seenRequestNumbers.has(event.requestNumber)) {
       findings.push({ code: 'DUPLICATE_REQUEST_NUMBER', requestNumber: event.requestNumber });
       continue;
@@ -239,10 +241,10 @@ export function traceNativeAttempts({
       priorRequestNumber: prior.at(-1)?.requestNumber ?? null,
       outcome: event.outcome,
       responseFormat: event.responseFormat ?? null,
-      ...(requireDispatchPlans ? {
+      ...(includeDispatchIdentity ? {
         rootInvocationId: event.rootInvocationId,
         plannedDispatchId: event.plannedDispatchId,
-        rootClassSequence
+        ...(requireDispatchPlans ? { rootClassSequence } : {})
       } : {})
     });
     prior.push(entry);

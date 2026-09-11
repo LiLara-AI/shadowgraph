@@ -814,10 +814,12 @@ export function runProviderReconciliation(input) {
     planLedgerText = null,
     campaignLedgerText = null,
     requireDispatchPlans = false,
+    retainDispatchIdentity = false,
     requireCampaignReservations = false
   } = input ?? {};
-  if (typeof requireDispatchPlans !== 'boolean' || typeof requireCampaignReservations !== 'boolean') {
-    throw new Error('dispatch plan and campaign reservation requirements must be boolean');
+  if (typeof requireDispatchPlans !== 'boolean' || typeof retainDispatchIdentity !== 'boolean'
+    || typeof requireCampaignReservations !== 'boolean') {
+    throw new Error('dispatch plan, dispatch identity, and campaign reservation requirements must be boolean');
   }
   if (!isNonEmptyString(ledgerPath)) {
     throw new Error('a run reconciliation must name the ledger it read');
@@ -885,7 +887,8 @@ export function runProviderReconciliation(input) {
         events,
         expectedModels,
         policy: nativeAttemptPolicy,
-        requireDispatchPlans
+        requireDispatchPlans,
+        retainDispatchIdentity
       });
     } catch {
       nativeAttemptTrace = Object.freeze({
