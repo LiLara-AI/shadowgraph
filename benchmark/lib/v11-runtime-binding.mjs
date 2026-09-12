@@ -138,6 +138,7 @@ const REAL = Object.freeze({
   readFile,
   mkdir,
   now: () => new Date().toISOString(),
+  now: () => new Date().toISOString(),
   monotonicNow: () => performance.now()
 });
 
@@ -324,10 +325,30 @@ export async function bindV11Runtime(input, injections = {}) {
   validateProviderBudget(providerBudget, { implementationLockHash: implementationLock.lockSha256 ?? null });
   if (input.campaign !== undefined) {
     build.assertRestrictedCampaignExecutionPolicy(input.campaign.policy);
+    if (input.campaign.policy.deadline && new Date(input.campaign.policy.deadline) <= new Date(build.now())) { throw new V11RunError('CAMPAIGN_EXPIRED', 'campaign expired'); }
     await build.verifyCampaignPolicyLineage(input.campaign.policy, {
       currentLedgerPath: join(input.campaign.root, 'campaign.ndjson')
     });
   }
+  let campaign = null;
+  const closers = [];
+  const disposeOnFailure = async () => {
+    for (const close of closers.reverse()) {
+      try { await close(); } catch {}
+    }
+  };
+
+  try {
+  if (input.campaign !== undefined) {
+    campaign = await build.openCampaignBudget(input.campaign.root, input.campaign.policy, { implementationLockHash: implementationLock.lockSha256 });
+    closers.push(() => campaign.close());
+    await campaign.beginSession(attemptId, {
+      kind: input.definition.scored ? 'scored' : 'acceptance',
+      runId,
+      attemptId
+    });
+  }
+
   const environmentLock = build.buildEnvironmentLock({
     observations: await build.observeEnvironment({ pythonImage: competitorLock.pythonImage })
   });
@@ -337,29 +358,7 @@ export async function bindV11Runtime(input, injections = {}) {
   await build.mkdir(stateRoot, { recursive: true });
   await build.mkdir(pythonStateRoot, { recursive: true });
 
-  const closers = [];
-  const disposeOnFailure = async () => {
-    for (const close of closers.reverse()) {
-      try {
-        await close();
-      } catch {
-        // A failed construction is already being reported; a teardown error on
-        // top of it would replace the reason with a symptom.
-      }
-    }
-  };
 
-  try {
-    let campaign = null;
-    if (input.campaign !== undefined) {
-      campaign = await build.openCampaignBudget(input.campaign.root, input.campaign.policy, { implementationLockHash: implementationLock.lockSha256 });
-      closers.push(() => campaign.close());
-      await campaign.beginSession(attemptId, {
-        kind: 'acceptance',
-        runId,
-        attemptId
-      });
-    }
     const meter = await build.startProviderMeter({
       listenerUrl: 'http://127.0.0.1:0',
       upstreamBaseUrl: providerUpstream,
