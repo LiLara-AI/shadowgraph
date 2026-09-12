@@ -1302,7 +1302,7 @@ async function invokeAdapter(
   let response;
   try {
     throwIfAborted(signal);
-    response = await options.executeAdapter(request, { signal });
+    response = await options.executeAdapter(request, { signal, operationSlot: evidenceKey });
     throwIfAborted(signal);
     validateAdapterResponse({ request, response });
     addOperations(unit.operations, response.operations);
