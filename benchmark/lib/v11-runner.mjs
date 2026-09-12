@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from 'node:util';
 
 import { createAdapterRequest, validateAdapterResponse } from './adapter-protocol.mjs';
 import { OUTER_HTTP_ERROR_CODE, validateDecisionResponse } from './outer-model.mjs';
+import { validateV11AcceptanceEligibility } from './v11-acceptance-eligibility.mjs';
 import { validateV11RawRun } from './validate.mjs';
 import { validateNativeAttemptPolicy } from './v11-native-attempts.mjs';
 import {
@@ -42,6 +43,8 @@ const AMENDMENT_006_SHA256 = '3bc9308a19e44ecc06d15dc0144239aa907b49cf897a11f9fa
 const AMENDMENT_006_SIDECAR = `${AMENDMENT_006_SHA256}  benchmark/preregistration-amendment-006.json\n`;
 const AMENDMENT_008_SHA256 = '184ba096d3b3d762f96e37c9a594925dd22e9628b9649a89d4a0a0c8fdff5ff9';
 const AMENDMENT_008_SIDECAR = `${AMENDMENT_008_SHA256}  benchmark/preregistration-amendment-008.json\n`;
+const AMENDMENT_009_SHA256 = '804d1f3bf0ae9f8f8e38f01676c66dc5e7c16b722f1ce438cc63a33b9a84c2e2';
+const AMENDMENT_009_SIDECAR = `${AMENDMENT_009_SHA256}  benchmark/preregistration-amendment-009.json\n`;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
 // Exported because a production caller has to build the progress ledger with
 // the same deadline. Restating it there would make the ledger's `stalled`
@@ -486,6 +489,16 @@ async function loadAmendments(options) {
     || amendment008?.acceptanceGates?.cumulativeCampaignPolicyRequired !== true) {
     throw new Error('Amendment 008 does not match the authorized prospective attribution and campaign contract');
   }
+  let amendment009 = null;
+  if (options.amendment009Path !== undefined) {
+    amendment009 = await loadExactAmendment(
+      9,
+      'amendment009Sha256',
+      AMENDMENT_009_SHA256,
+      options.amendment009Path
+    );
+    await loadExactAmendmentSidecar(9, AMENDMENT_009_SIDECAR, options.amendment009SidecarPath);
+  }
   let nativeAttemptPolicy;
   try {
     nativeAttemptPolicy = validateNativeAttemptPolicy(traceContract.armNeutralRecoveryPolicy);
@@ -507,6 +520,7 @@ async function loadAmendments(options) {
     amendment005,
     amendment006,
     amendment008,
+    amendment009,
     nativeAttemptPolicy,
     effectiveMatrix
   };
@@ -563,7 +577,8 @@ function validationSourceHashes(options) {
     amendment004Sha256: options.amendment004Sha256,
     amendment005Sha256: options.amendment005Sha256,
     amendment006Sha256: options.amendment006Sha256,
-    amendment008Sha256: options.amendment008Sha256
+    amendment008Sha256: options.amendment008Sha256,
+    ...(options.amendment009Sha256 !== undefined ? { amendment009Sha256: options.amendment009Sha256 } : {})
   };
 }
 
@@ -852,7 +867,8 @@ async function validateResume(options, plannedIds) {
     'amendment004Sha256',
     'amendment005Sha256',
     'amendment006Sha256',
-    'amendment008Sha256'
+    'amendment008Sha256',
+    ...(options.amendment009Sha256 !== undefined ? ['amendment009Sha256'] : [])
   ]) {
     if (previousRaw[field] !== options[field]) {
       throw new Error(`Changed ${field} requires a new runId`);
@@ -927,7 +943,13 @@ function validateOptions(options) {
   // place that can hold the line for a caller who reaches it without going
   // through executeV11AcceptanceRun.
   if (options.scored) {
-    throw new Error('This candidate may not execute a scored run');
+    if (!options.acceptanceEligibility) {
+      throw new Error('This candidate may not execute a scored run');
+    }
+    validateV11AcceptanceEligibility(options.acceptanceEligibility, {
+      implementationLockHash: options.implementationLockHash,
+      amendment009Sha256: options.amendment009Sha256
+    });
   }
   if (!Array.isArray(options.arms) || options.arms.length === 0) throw new Error('arms must be non-empty');
   if (!Array.isArray(options.scenarios) || options.scenarios.length === 0) throw new Error('scenarios must be non-empty');
@@ -981,6 +1003,15 @@ function validateOptions(options) {
   }
   if (!isNonEmptyString(options.amendment008SidecarPath)) {
     throw new Error('amendment008SidecarPath must identify the exact Amendment 008 hash sidecar');
+  }
+  if (options.amendment009Sha256 !== undefined) {
+    requireHash(options.amendment009Sha256, 'amendment009Sha256');
+    if (!isNonEmptyString(options.amendment009Path)) {
+      throw new Error('amendment009Path must identify the exact Amendment 009 source file');
+    }
+    if (!isNonEmptyString(options.amendment009SidecarPath)) {
+      throw new Error('amendment009SidecarPath must identify the exact Amendment 009 hash sidecar');
+    }
   }
   if (!isPlainObject(options.progress)
     || typeof options.progress.append !== 'function'
@@ -1556,6 +1587,9 @@ async function executeDecision(options, spec, unit, signal, completedUnits, oute
       'setupVerify'
     );
   }
+  if (probeNamespace !== null) {
+    await invokeAdapter(options, spec, 'reset', probeNamespace, {}, unit, signal);
+  }
   const retrieved = await invokeAdapter(options, spec, 'retrieve', retrievalNamespace, {
     query: { scenarioId: spec.scenario.id, task: spec.scenario.task }
   }, unit, signal);
@@ -1577,7 +1611,7 @@ async function executeDecision(options, spec, unit, signal, completedUnits, oute
       const available = {
         phase: spec.phase,
         scenario: structuredClone(spec.scenario),
-        nativeContext: structuredClone(retrieved.result.nativeContext)
+        nativeContext: structuredClone(retrieved.result.nativeContext).slice(0, 20)
       };
       return options.buildOuterRequest(Object.fromEntries(
         OUTER_REQUEST_INPUT_FIELDS.map((field) => [field, available[field]])
@@ -1603,6 +1637,25 @@ async function executeDecision(options, spec, unit, signal, completedUnits, oute
   unit.decisionResponse = structuredClone(outer.decision);
   unit.providerUsage = structuredClone(outer.usage);
   unit.providerModel = outer.providerModel;
+
+  if (outer.usage?.prompt_tokens > 8192) {
+    throw Object.assign(new Error('PROVIDER_USAGE_EXCEEDED'), {
+      unitFailure: publicFailure(
+        'CONTRACT_FAILURE',
+        'outer',
+        'Provider-reported input usage exceeds the frozen maximum'
+      )
+    });
+  }
+  if (spec.phase.startsWith('D_FALSE_') && typeof outer.decision?.changedFactDetected !== 'boolean') {
+    throw Object.assign(new Error('D_FALSE_PREDICTION_INVALID'), {
+      unitFailure: publicFailure(
+        'CONTRACT_FAILURE',
+        'outer',
+        'D_FALSE requires a boolean changed-fact prediction'
+      )
+    });
+  }
 
   const record = standardizedDecisionRecord({
     armId: spec.arm.id,
@@ -1772,6 +1825,8 @@ async function executeV11Benchmark(options, closeResources) {
     amendment005Sha256: options.amendment005Sha256,
     amendment006Sha256: options.amendment006Sha256,
     amendment008Sha256: options.amendment008Sha256,
+    ...(options.amendment009Sha256 !== undefined ? { amendment009Sha256: options.amendment009Sha256 } : {}),
+    ...(options.scored && options.acceptanceEligibility ? { acceptanceEligibilitySha256: createHash('sha256').update(canonicalJson(options.acceptanceEligibility)).digest('hex') } : {}),
     implementationLockHash: options.implementationLockHash,
     environmentLockHash: options.environmentLockHash,
     startedAt,
