@@ -2,6 +2,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { createConnection } from 'node:net';
 import { cpus, release as osRelease, totalmem, type as osType } from 'node:os';
 import path, { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -1571,7 +1572,43 @@ const containerRuntimeProbes = {
   inspectImage: inspectImageIdentity,
   readModelWeightsDigest: async (container, modelId) => ollamaWeightsDigest(
     await dockerField(['exec', container, 'cat', ollamaManifestPath(modelId)])
-  )
+  ),
+  connectTcp: async (boltUrl) => {
+    try {
+      const parsed = new URL(boltUrl);
+      const host = parsed.hostname || '127.0.0.1';
+      const port = Number(parsed.port) || 7687;
+      return await new Promise((resolve) => {
+        const socket = createConnection({ host, port });
+        const timer = setTimeout(() => {
+          socket.destroy();
+          resolve(false);
+        }, 5000);
+        socket.once('connect', () => {
+          clearTimeout(timer);
+          socket.destroy();
+          resolve(true);
+        });
+        socket.once('error', () => {
+          clearTimeout(timer);
+          resolve(false);
+        });
+      });
+    } catch {
+      return false;
+    }
+  },
+  readContainerEnvironmentValue: async (container, varName) => {
+    const output = await dockerField([
+      'container', 'inspect', container,
+      '--format', '{{range .Config.Env}}{{println .}}{{end}}'
+    ]);
+    const prefix = `${varName}=`;
+    for (const line of output.split(/\r?\n/u)) {
+      if (line.startsWith(prefix)) return line.slice(prefix.length);
+    }
+    return null;
+  }
 };
 
 /**
