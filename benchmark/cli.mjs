@@ -672,8 +672,11 @@ async function v11RunCommand(options) {
     benchmarkRoot,
     candidate.definition
   );
+  const providerBudget = await readProviderBudget(options);
+  const implementationLockHash = providerBudget?.implementationLockHash ?? campaign?.policy?.implementationLockHash ?? null;
   const readiness = await computeV11Readiness({
-    providerBudget: await readProviderBudget(options),
+    providerBudget,
+    implementationLockHash,
     campaign: campaign ?? null,
     runId: options['run-id'] ?? null,
     attemptId: options['attempt-id'] ?? null,
@@ -926,6 +929,9 @@ async function v11Preflight(options) {
     definition
   );
 
+  const providerBudget = await readProviderBudget(options);
+  const implementationLockHash = providerBudget?.implementationLockHash ?? campaign?.policy?.implementationLockHash ?? null;
+
   const {
     applicability,
     declaredCounts,
@@ -934,10 +940,10 @@ async function v11Preflight(options) {
     nativeAttemptEvidence,
     serviceEvidence,
     readiness,
-    blockers,
-    providerBudget
+    blockers
   } = await computeV11Readiness({
-    providerBudget: await readProviderBudget(options),
+    providerBudget,
+    implementationLockHash,
     campaign: campaign ?? null,
     runId: options['run-id'] ?? null,
     attemptId: options['attempt-id'] ?? null,
