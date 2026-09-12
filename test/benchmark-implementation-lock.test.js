@@ -38,6 +38,8 @@ const FILE_SPECS = Object.freeze([
   { role: 'amendment_006_sidecar', path: 'benchmark/preregistration-amendment-006.sha256' },
   { role: 'amendment_008', path: 'benchmark/preregistration-amendment-008.json' },
   { role: 'amendment_008_sidecar', path: 'benchmark/preregistration-amendment-008.sha256' },
+  { role: 'amendment_009', path: 'benchmark/preregistration-amendment-009.json' },
+  { role: 'amendment_009_sidecar', path: 'benchmark/preregistration-amendment-009.sha256' },
   { role: 'runner', path: 'benchmark/lib/v11-runner.mjs' },
   { role: 'validator', path: 'benchmark/lib/validate.mjs' },
   { role: 'aggregator', path: 'benchmark/lib/aggregate.mjs' },
@@ -270,6 +272,7 @@ async function createFixture(t) {
     ['benchmark/preregistration-amendment-005.json', '{"fixture":"amendment-005"}\n'],
     ['benchmark/preregistration-amendment-006.json', '{"fixture":"amendment-006"}\n'],
     ['benchmark/preregistration-amendment-008.json', '{"fixture":"amendment-008"}\n'],
+    ['benchmark/preregistration-amendment-009.json', '{"fixture":"amendment-009"}\n'],
     ['benchmark/lib/v11-runner.mjs', 'export const fixtureRunner = true;\n'],
     ['benchmark/lib/validate.mjs', 'export const fixtureValidator = true;\n'],
     ['benchmark/lib/aggregate.mjs', 'export const fixtureAggregator = true;\n'],
@@ -341,6 +344,11 @@ async function createFixture(t) {
       'benchmark/preregistration-amendment-008.sha256',
       'benchmark/preregistration-amendment-008.json',
       'preregistration-amendment-008.json'
+    ],
+    [
+      'benchmark/preregistration-amendment-009.sha256',
+      'benchmark/preregistration-amendment-009.json',
+      'benchmark/preregistration-amendment-009.json'
     ]
   ];
   for (const [sidecarPath, targetPath, recordedPath] of sidecars) {

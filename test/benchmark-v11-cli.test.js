@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -55,6 +55,23 @@ async function presentPreconditionEvidence(t, overrides = {}) {
   return evidencePath;
 }
 
+test('v11-preflight selects the exact scored profile only with --mode scored', async () => {
+  const scored = await runCli(['v11-preflight', '--mode', 'scored']);
+  const report = JSON.parse(scored.stdout);
+  assert.equal(report.scored, true);
+  assert.equal(report.declaredCounts.totalUnits, 2310);
+  assert.equal(report.declaredCounts.excludedUnits, 150);
+  assert.equal(report.declaredCounts.measuredUnits, 2160);
+  assert.equal(report.declaredCounts.outerDecisionCalls, 1950);
+  assert.equal(report.readiness, 'NOT READY');
+  assert.notEqual(scored.code, 0);
+
+  const unknown = await runCli(['v11-preflight', '--mode', 'not-a-mode']);
+  assert.notEqual(unknown.code, 0);
+  assert.equal(unknown.stdout, '');
+  assert.match(unknown.stderr, /mode must be acceptance or scored/iu);
+});
+
 test('v11-preflight reports the candidate without contacting a service or scoring it', async () => {
   const { code, stdout } = await runCli(['v11-preflight']);
   const report = JSON.parse(stdout);
@@ -74,6 +91,25 @@ test('v11-preflight reports the candidate without contacting a service or scorin
   // an operator proceed on a green shell result.
   assert.equal(report.readiness, 'NOT READY');
   assert.notEqual(code, 0);
+});
+
+test('v11-run selects the scored profile and refuses it without output when prerequisites are absent', async (t) => {
+  const output = path.join(await scratchDirectory(t, 'v11-scored-refusal-'), 'result');
+  const result = await runCli([
+    'v11-run', '--mode', 'scored',
+    '--run-id', 'v11-scored-refusal',
+    '--attempt-id', 'v11-scored-refusal-attempt-1',
+    '--out', output
+  ]);
+  const report = JSON.parse(result.stdout);
+
+  assert.notEqual(result.code, 0);
+  assert.equal(report.status, 'REFUSED');
+  assert.match(report.reason, /scored run/iu);
+  assert.equal(report.readiness.declaredCounts.totalUnits, 2310);
+  assert.equal(report.readiness.declaredCounts.outerDecisionCalls, 1950);
+  assert.deepEqual(report.artifactsWritten, []);
+  await assert.rejects(readFile(output), (error) => error.code === 'ENOENT');
 });
 
 test('v11-preflight reports missing campaign configuration as a run blocker', async () => {
@@ -232,10 +268,13 @@ test('v11-preflight retains the three methodology blockers and requires operatio
       'applicability:DECLARED_ISOLATION_PRECONDITION_UNMET:cognee',
       'campaign:undefined:undefined',
       'native-attempt-evidence:NATIVE_ATTEMPT_EVIDENCE_REQUIRED:cognee:embedding:B',
+      'native-attempt-evidence:NATIVE_ATTEMPT_EVIDENCE_REQUIRED:cognee:internal_memory_llm:B',
       'native-attempt-evidence:NATIVE_ATTEMPT_EVIDENCE_REQUIRED:cognee:internal_memory_llm:C',
+      'native-attempt-evidence:NATIVE_ATTEMPT_EVIDENCE_REQUIRED:graphiti:internal_memory_llm:B',
       'operational-budget:PROVIDER_BUDGET_REQUIRED',
       'required-service:cognee:common LLM and embedding endpoint',
-      'required-service:graphiti:Neo4j-compatible graph database plus common LLM and embedding endpoint'
+      'required-service:graphiti:Neo4j-compatible graph database plus common LLM and embedding endpoint',
+      'service-evidence:undefined:undefined'
     ].sort()
   );
 });

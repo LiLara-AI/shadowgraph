@@ -215,6 +215,21 @@ async function probeNeo4j(service, observedAt, deps) {
   checks.push(check('cypher-statement', endpoint, observedAt, cypher.ok ? 'PASS' : 'FAIL',
     cypher.ok ? cypher.value : cypher.detail));
 
+  const bolt = await attempt(async () => {
+    if (await deps.connectTcp(service.boltUrl) !== true) throw new Error('TCP connection was not established');
+    return 'TCP connection established';
+  });
+  checks.push(check('bolt-connect', service.boltUrl, observedAt, bolt.ok ? 'PASS' : 'FAIL',
+    bolt.ok ? bolt.value : bolt.detail));
+
+  const auth = await attempt(async () => {
+    const value = await deps.readContainerEnvironmentValue(service.container, 'NEO4J_AUTH');
+    if (value !== 'none') throw new Error('NEO4J_AUTH is not none');
+    return 'NEO4J_AUTH=none';
+  });
+  checks.push(check('authentication-posture', service.container, observedAt, auth.ok ? 'PASS' : 'FAIL',
+    auth.ok ? auth.value : auth.detail));
+
   return { checks, servedModels: [] };
 }
 
@@ -387,6 +402,13 @@ function validateEndpoints(endpoints) {
       );
     }
     validateSafeBaseUrl(service.baseUrl);
+    if (service.kind === 'neo4j'
+      && (service.boltUrl !== 'bolt://127.0.0.1:7687' || service.authentication !== 'none')) {
+      throw new ServiceProbeError(
+        'CONTRACT_FAILURE',
+        'the Neo4j endpoint must bind bolt://127.0.0.1:7687 with authentication none'
+      );
+    }
   }
 }
 
@@ -408,6 +430,8 @@ export async function probeServices(input) {
     inspectImage,
     readModelWeightsDigest,
     readAuthorization = () => null,
+    connectTcp,
+    readContainerEnvironmentValue,
     now
   } = input ?? {};
 
@@ -424,14 +448,27 @@ export async function probeServices(input) {
   if (!Array.isArray(modelWeights?.models) || modelWeights.models.length === 0) {
     throw new ServiceProbeError('CONTRACT_FAILURE', 'the committed model weight lock pins no model');
   }
-  for (const dependency of ['inspectContainer', 'inspectImage', 'readModelWeightsDigest']) {
+  for (const dependency of [
+    'inspectContainer', 'inspectImage', 'readModelWeightsDigest',
+    ...(endpoints.services.some(({ kind }) => kind === 'neo4j')
+      ? ['connectTcp', 'readContainerEnvironmentValue']
+      : [])
+  ]) {
     if (typeof input[dependency] !== 'function') {
       throw new ServiceProbeError('CONTRACT_FAILURE', `${dependency} must be supplied`);
     }
   }
 
   const observedAt = new Date(now).toISOString();
-  const deps = { fetchImpl, inspectContainer, inspectImage, readModelWeightsDigest, readAuthorization };
+  const deps = {
+    fetchImpl,
+    inspectContainer,
+    inspectImage,
+    readModelWeightsDigest,
+    readAuthorization,
+    connectTcp,
+    readContainerEnvironmentValue
+  };
   const services = [];
 
   for (const service of endpoints.services) {

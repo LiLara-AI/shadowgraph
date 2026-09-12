@@ -149,10 +149,15 @@ export function scoreScenario(scenario, lifecycle, { applicability = null } = {}
   const persistenceMeasured = applicability === null
     ? true
     : applicability?.persistence?.status !== 'NOT_APPLICABLE';
-  const targetDecisionId = lifecycle.A?.decisionId;
+  const targetDecisionId = Object.hasOwn(lifecycle.A ?? {}, 'persistedDecisionId')
+    ? lifecycle.A.persistedDecisionId
+    : lifecycle.A?.decisionId;
   const falseAlerts = falseAlertOutcome(falseProbes);
   const metrics = {
-    decisionRetrievalAccuracy: recall.choiceId === scenario.choice.id && typeof recall.decisionId === 'string' && recall.decisionId.length > 0 ? 1 : 0,
+    decisionRetrievalAccuracy: recall.choiceId === scenario.choice.id
+      && typeof targetDecisionId === 'string'
+      && targetDecisionId.length > 0
+      && recall.decisionId === targetDecisionId ? 1 : 0,
     rejectedAlternativeRecall: uniqueIntersectionCount(recall.recalledAlternativeIds, alternativeIds) / alternativeIds.length,
     rejectionReasonRecall: uniqueIntersectionCount(recall.recalledRejectionReasonIds, reasonIds) / reasonIds.length,
     changedFactDetection: changed.changedFactDetected === true && changed.changedFactId === scenario.changedFact.id ? 1 : 0,

@@ -642,7 +642,7 @@ test('an arm without native user isolation is never given a user namespace', () 
   }
 });
 
-test('the runner itself refuses a scored run, not merely the layer above it', async () => {
+test('the runner itself refuses an Amendment-009-unbound scored run, not merely the layer above it', async () => {
   // Independent review produced a valid 308-unit SCORED run with a hostile
   // prompt builder in a single direct call to runV11Benchmark. Both properties
   // requirement 7 asserts about "a run" - canonical builder, non-scored - lived
@@ -655,7 +655,7 @@ test('the runner itself refuses a scored run, not merely the layer above it', as
   // happening to pass true is held by nothing.
   await assert.rejects(
     acceptanceRun({ scored: true }),
-    /may not execute a scored run/iu
+    /final Amendment 009 profile/iu
   );
 });
 

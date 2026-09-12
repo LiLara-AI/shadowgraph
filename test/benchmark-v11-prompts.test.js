@@ -339,6 +339,35 @@ test('every outer phase uses one deterministic schema and phase-appropriate publ
   assert.doesNotMatch(userIsolation, new RegExp(scenario.isolationProjectId, 'u'));
 });
 
+test('changed-fact prompts define one neutral decision-relevance target without revealing class labels', async () => {
+  const scenario = await acceptanceScenario();
+  const context = nativeContext();
+  const prompts = [
+    buildV11Prompt({ phase: 'D_TRUE', scenario, nativeContext: context }).prompt,
+    buildV11Prompt({ phase: 'D_FALSE_0', scenario, nativeContext: context }).prompt
+  ];
+  for (const prompt of prompts) {
+    assert.match(prompt, /Phase D decision review/u);
+    assert.match(prompt, /observedFact/u);
+    assert.match(
+      prompt,
+      /changedFactDetected means the observed fact materially requires reconsidering the earlier decision/iu
+    );
+    assert.match(prompt, /return true.*return false.*return null/isu);
+    assert.doesNotMatch(prompt, /D_TRUE|D_FALSE|unrelated fact|fact relevant to its review trigger/iu);
+  }
+});
+
+test('failed-attempt prompts define record-based citation fields without revealing fixture truth', async () => {
+  const scenario = await acceptanceScenario();
+  const prompt = buildV11Prompt({ phase: 'E', scenario, nativeContext: nativeContext() }).prompt;
+  assert.match(prompt, /failedAttemptIdsAvoided must contain the failed_attempt record id/iu);
+  assert.match(prompt, /failedAttemptReasonIdsCited must contain that record content reasonId/iu);
+  assert.doesNotMatch(prompt, new RegExp(scenario.failedAttempt.id, 'u'));
+  assert.doesNotMatch(prompt, new RegExp(scenario.failedAttempt.reasonId, 'u'));
+  assert.doesNotMatch(prompt, new RegExp(scenario.failedAttempt.approachId, 'u'));
+});
+
 test('RESET has no outer prompt and callers cannot introduce arm-specific divergence', async () => {
   const scenario = await acceptanceScenario();
   expectBoundaryThrow(

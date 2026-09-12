@@ -34,16 +34,16 @@ function requireTrustedV11SourceHashes(raw, trustedSourceHashes) {
   if (!isPlainObject(trustedSourceHashes)) {
     throw new Error('Trusted v1.1 source hashes are required for aggregation');
   }
+  const required = [
+    ...V11_SOURCE_HASH_FIELDS,
+    ...(Object.hasOwn(raw ?? {}, 'amendment009Sha256') ? ['amendment009Sha256'] : [])
+  ];
   const fields = Object.keys(trustedSourceHashes);
-  if (fields.length !== V11_SOURCE_HASH_FIELDS.length
-    || fields.some((field) => !V11_SOURCE_HASH_FIELDS.includes(field))) {
-    throw new Error(
-      'Trusted v1.1 source hashes must contain exactly preregistrationSha256, '
-      + 'amendment001Sha256, amendment002Sha256, amendment003Sha256, '
-      + 'amendment004Sha256, amendment005Sha256, amendment006Sha256, and amendment008Sha256'
-    );
+  if (fields.length !== required.length
+    || fields.some((field) => !required.includes(field))) {
+    throw new Error(`Trusted v1.1 ${raw?.mode ?? 'unknown'} source hashes must contain exactly ${required.join(', ')}`);
   }
-  for (const field of V11_SOURCE_HASH_FIELDS) {
+  for (const field of required) {
     if (!SHA256.test(trustedSourceHashes[field])) {
       throw new Error(`Trusted v1.1 source hash ${field} must be a lowercase full SHA-256 digest`);
     }
@@ -53,18 +53,89 @@ function requireTrustedV11SourceHashes(raw, trustedSourceHashes) {
   }
 }
 
-function requireV11AggregationOptions(options) {
+function requireV11AggregationOptions(raw, options) {
   if (!isPlainObject(options)) {
     throw new Error('Trusted v1.1 source hashes are required for aggregation');
   }
-  const unknown = Object.keys(options).find((field) => field !== 'trustedSourceHashes');
+  const allowed = raw?.mode === 'SCORED'
+    ? ['trustedSourceHashes', 'providerReconciliation']
+    : ['trustedSourceHashes'];
+  const unknown = Object.keys(options).find((field) => !allowed.includes(field));
   if (unknown !== undefined) {
-    throw new Error(`Unknown v1.1 aggregation option ${unknown}; only trustedSourceHashes is allowed`);
+    throw new Error(`Unknown v1.1 aggregation option ${unknown}; only ${allowed.join(', ')} are allowed`);
   }
   if (!Object.hasOwn(options, 'trustedSourceHashes')) {
     throw new Error('Trusted v1.1 source hashes are required for aggregation');
   }
-  return options.trustedSourceHashes;
+  if (raw?.mode === 'SCORED' && !Object.hasOwn(options, 'providerReconciliation')) {
+    throw new Error('SCORED aggregation requires providerReconciliation');
+  }
+  return options;
+}
+
+export function validateV11ProviderReconciliationGate(raw, report) {
+  const topFields = [
+    'schema', 'version', 'runId', 'attemptId', 'ledgerPath', 'status', 'totals',
+    'events', 'evidenceHashes', 'findings', 'nativeAttemptTrace', 'budgetEvidence'
+  ];
+  const hashFields = [
+    'providerLedgerSha256', 'attemptLedgerSha256', 'planLedgerSha256', 'campaignLedgerSha256'
+  ];
+  const totalFields = [
+    'expectedCalls', 'observedEvents', 'matchedCalls', 'unexpectedEvents', 'missingCalls',
+    'malformedLines', 'retryEvents', 'modelMismatches', 'failedOutcomes', 'incompleteUsage',
+    'unverifiedCountUnits', 'unverifiedCountEvents'
+  ];
+  const exactKeys = (value, fields) => isPlainObject(value)
+    && Object.keys(value).length === fields.length
+    && fields.every((field) => Object.hasOwn(value, field));
+  const events = Array.isArray(report?.events) ? report.events : [];
+  const eventsValid = events.length > 0
+    && events.every((event, index) => isPlainObject(event)
+      && event.requestNumber === index + 1
+      && ['outer_decision_llm', 'internal_memory_llm', 'embedding'].includes(event.requestClass)
+      && ['SUCCEEDED', 'FAILED'].includes(event.outcome)
+      && event.correlation?.runId === raw.runId
+      && event.correlation?.attemptId === raw.attemptId);
+  const expectedCalls = raw.units.reduce((sum, unit) => {
+    const outer = unit.providerUsage === null ? 0 : 1;
+    const native = Object.values(unit.adapterEvidence ?? {}).reduce((inner, evidence) => (
+      inner + (evidence?.operations?.internalMemoryModelCalls ?? 0)
+        + (evidence?.operations?.embeddingCalls ?? 0)
+    ), 0);
+    return sum + outer + native;
+  }, 0);
+  if (!exactKeys(report, topFields)
+    || report.schema !== 'shadowgraph.v11.provider-reconciliation'
+    || report.version !== 1
+    || report.runId !== raw.runId
+    || report.attemptId !== raw.attemptId
+    || typeof report.ledgerPath !== 'string' || report.ledgerPath.length === 0
+    || report.status !== 'RECONCILED'
+    || !exactKeys(report.totals, totalFields)
+    || report.totals.expectedCalls !== expectedCalls
+    || report.totals.matchedCalls !== expectedCalls
+    || report.totals.observedEvents !== expectedCalls
+    || report.totals.observedEvents !== events.length
+    || report.totals.unexpectedEvents !== 0
+    || report.totals.missingCalls !== 0
+    || report.totals.malformedLines !== 0
+    || report.totals.modelMismatches !== 0
+    || report.totals.failedOutcomes !== 0
+    || report.totals.incompleteUsage !== 0
+    || report.totals.unverifiedCountUnits !== 0
+    || report.totals.unverifiedCountEvents !== 0
+    || !eventsValid
+    || !exactKeys(report.evidenceHashes, hashFields)
+    || !hashFields.every((field) => /^[a-f0-9]{64}$/u.test(report.evidenceHashes[field]))
+    || !Array.isArray(report.findings) || report.findings.length !== 0
+    || !isPlainObject(report.nativeAttemptTrace) || report.nativeAttemptTrace.status !== 'RECONCILED'
+    || !Array.isArray(report.nativeAttemptTrace.findings) || report.nativeAttemptTrace.findings.length !== 0
+    || !Array.isArray(report.nativeAttemptTrace.trace)
+    || !isPlainObject(report.budgetEvidence) || report.budgetEvidence.status !== 'RECONCILED') {
+    throw new Error('SCORED aggregation requires exact RECONCILED provider evidence for this run and attempt');
+  }
+  return report;
 }
 
 function mean(values) {
@@ -305,8 +376,14 @@ function v11IsolationInspection(unit) {
 
 function v11LifecycleFrom(units) {
   const byPhase = new Map(units.map((unit) => [unit.phase, unit]));
+  const phaseA = byPhase.get('A');
   return {
-    A: byPhase.get('A')?.decisionResponse,
+    A: phaseA?.decisionResponse === null || phaseA?.decisionResponse === undefined
+      ? phaseA?.decisionResponse
+      : {
+          ...phaseA.decisionResponse,
+          persistedDecisionId: phaseA.adapterEvidence?.verify?.persistenceEvidence?.expectedRecord?.id ?? null
+        },
     B: byPhase.get('B')?.decisionResponse,
     C: byPhase.get('C')?.decisionResponse,
     D_TRUE: byPhase.get('D_TRUE')?.decisionResponse,
@@ -474,7 +551,8 @@ export function v11Coverage(raw) {
 }
 
 export function aggregateV11Run(raw, preregistration, options = {}) {
-  const trustedSourceHashes = requireV11AggregationOptions(options);
+  const aggregationOptions = requireV11AggregationOptions(raw, options);
+  const trustedSourceHashes = aggregationOptions.trustedSourceHashes;
   requireTrustedV11SourceHashes(raw, trustedSourceHashes);
   validateV11RawRun(
     raw,
@@ -507,6 +585,7 @@ export function aggregateV11Run(raw, preregistration, options = {}) {
     }))
   };
   if (raw.mode === 'ACCEPTANCE') return base;
+  validateV11ProviderReconciliationGate(raw, aggregationOptions.providerReconciliation);
 
   const armResults = raw.arms
     .filter((arm) => arm.status === 'MEASURED')

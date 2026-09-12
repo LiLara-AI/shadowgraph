@@ -15,6 +15,9 @@ import test from 'node:test';
 import {
   SERVICE_EVIDENCE_MAX_AGE_MS,
   SERVICE_EVIDENCE_SCHEMA,
+  attestV11LiveServices,
+  captureVerifiedServiceEvidence,
+  validateV11LiveServiceAttestation,
   verifyServiceEvidence
 } from '../benchmark/lib/v11-service-evidence.mjs';
 
@@ -171,6 +174,20 @@ function evidence(overrides = {}) {
             observedAt: OBSERVED_AT,
             outcome: 'PASS',
             detail: 'RETURN 1 AS ok'
+          },
+          {
+            kind: 'bolt-connect',
+            endpoint: 'bolt://127.0.0.1:7687',
+            observedAt: OBSERVED_AT,
+            outcome: 'PASS',
+            detail: 'TCP connection established'
+          },
+          {
+            kind: 'authentication-posture',
+            endpoint: 'shadowgraph-v11-neo4j',
+            observedAt: OBSERVED_AT,
+            outcome: 'PASS',
+            detail: 'NEO4J_AUTH=none'
           }
         ]
       },
@@ -241,6 +258,57 @@ test('a complete, fresh record verifies every service it describes', () => {
   const result = verify();
   assert.deepEqual(result.findings, []);
   assert.deepEqual([...result.verifiedServices].sort(), ['neo4j', 'ollama']);
+});
+
+test('Neo4j verification requires Bolt reachability and the locked authentication posture', () => {
+  for (const kind of ['bolt-connect', 'authentication-posture']) {
+    const document = mutateService('neo4j', (service) => {
+      service.checks = service.checks.filter((entry) => entry.kind !== kind);
+    });
+    const result = verify({ evidence: document });
+    assert.equal(result.verifiedServices.has('neo4j'), false, kind);
+  }
+});
+
+test('final live attestation rechecks services and cannot be forged by cloning JSON', async () => {
+  const document = evidence();
+  const snapshot = captureVerifiedServiceEvidence({
+    evidenceText: JSON.stringify(document),
+    serviceManifest: serviceManifest(),
+    modelWeights: modelWeights(),
+    now: NOW
+  });
+  const services = new Map(document.services.map((service) => [service.imageIdentity.containerReference, service]));
+  const attestation = await attestV11LiveServices({
+    snapshot,
+    deps: {
+      inspectContainer: async (reference) => ({
+        id: services.get(reference).imageIdentity.containerId,
+        image: services.get(reference).imageIdentity.containerImageId
+      }),
+      connectTcp: async () => true,
+      readContainerEnvironmentValue: async () => 'none',
+      readModelWeightsDigest: async (reference, modelId) => services.get(reference).servedModels
+        .find((model) => model.modelId === modelId).weightsDigest
+    }
+  });
+  assert.equal(validateV11LiveServiceAttestation(attestation, snapshot.evidenceSha256), attestation);
+  assert.throws(
+    () => validateV11LiveServiceAttestation(structuredClone(attestation), snapshot.evidenceSha256),
+    /live service attestation/iu
+  );
+  await assert.rejects(
+    attestV11LiveServices({
+      snapshot,
+      deps: {
+        inspectContainer: async () => ({ id: 'changed', image: 'changed' }),
+        connectTcp: async () => true,
+        readContainerEnvironmentValue: async () => 'none',
+        readModelWeightsDigest: async () => null
+      }
+    }),
+    /container identity changed/iu
+  );
 });
 
 test('absent evidence verifies nothing and is not an error', () => {

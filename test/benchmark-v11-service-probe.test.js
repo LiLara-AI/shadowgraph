@@ -127,8 +127,9 @@ function endpoints() {
         kind: 'neo4j',
         container: 'shadowgraph-v11-neo4j',
         baseUrl: 'http://127.0.0.1:7474',
+        boltUrl: 'bolt://127.0.0.1:7687',
         database: 'neo4j',
-        authEnvironmentVariable: 'SHADOWGRAPH_TEST_NEO4J_AUTH'
+        authentication: 'none'
       },
       {
         name: 'ollama',
@@ -183,9 +184,9 @@ function probeInput(overrides = {}) {
       readModelWeightsDigest: async (_container, modelId) => (modelId === 'qwen2.5:7b'
         ? LLM_WEIGHTS
         : EMBEDDING_WEIGHTS),
-      readAuthorization: (service) => (service.authEnvironmentVariable === undefined
-        ? null
-        : `Basic ${Buffer.from(NEO4J_SECRET, 'utf8').toString('base64')}`),
+      readAuthorization: () => null,
+      connectTcp: async (endpoint) => endpoint === 'bolt://127.0.0.1:7687',
+      readContainerEnvironmentValue: async (_container, name) => name === 'NEO4J_AUTH' ? 'none' : null,
       now: NOW,
       ...overrides.input
     }
@@ -208,6 +209,9 @@ test('a healthy estate produces a record its own verifier accepts', async () => 
   assert.equal(evidence.observedAt, new Date(NOW).toISOString());
   assert.deepEqual(evidence.services.map((service) => service.name), ['neo4j', 'ollama']);
   assert.ok(evidence.services.every((service) => service.checks.every((entry) => entry.outcome === 'PASS')));
+  const neo4j = evidence.services.find(({ name }) => name === 'neo4j');
+  assert.equal(neo4j.checks.find(({ kind }) => kind === 'bolt-connect').outcome, 'PASS');
+  assert.equal(neo4j.checks.find(({ kind }) => kind === 'authentication-posture').detail, 'NEO4J_AUTH=none');
 
   const verified = gate(evidence);
   assert.deepEqual(verified.findings, []);
@@ -466,7 +470,7 @@ test('an image with no readable layers never establishes identity', async () => 
   }
 });
 
-test('the record carries no credential, and the credential does reach the request', async () => {
+test('auth-none Neo4j neither sends nor records an available credential', async () => {
   const { input, requests } = probeInput();
   const evidence = await probeServices(input);
   const serialized = JSON.stringify(evidence);
@@ -474,7 +478,7 @@ test('the record carries no credential, and the credential does reach the reques
   assert.ok(!serialized.includes(Buffer.from(NEO4J_SECRET, 'utf8').toString('base64')));
 
   const cypher = requests.find((entry) => entry.url.endsWith('/tx/commit'));
-  assert.ok(cypher.headers.authorization, 'the probe must actually authenticate');
+  assert.equal(cypher.headers.authorization, undefined, 'auth-none must not send a credential');
 });
 
 test('endpoint userinfo and malformed authority are rejected before probing or persistence', async () => {

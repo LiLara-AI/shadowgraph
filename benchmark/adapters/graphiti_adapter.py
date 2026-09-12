@@ -30,6 +30,7 @@ STORAGE = not_available_storage(
     "No exact attributable Neo4j database byte scope is available",
 )
 REFERENCE_TIME = datetime(1970, 1, 1, tzinfo=timezone.utc)
+UNUSED_API_KEY = "not-a-secret"
 
 
 def _runtime_config(routes: dict, models: dict) -> dict:
@@ -40,6 +41,9 @@ def _runtime_config(routes: dict, models: dict) -> dict:
         "embedding_endpoint": routes["embedding"],
         "embedding_model": models["embedding"]["modelId"],
         "embedding_dimension": models["embedding"]["embeddingDimension"],
+        "graph_database_uri": "bolt://127.0.0.1:7687",
+        "graph_database_name": "neo4j",
+        "graph_database_auth": "none",
         "max_retries": 0,
         "automatic_retries": 0,
         "retry_proof": "task8_runtime_meter_required",
@@ -48,10 +52,135 @@ def _runtime_config(routes: dict, models: dict) -> dict:
     }
 
 
-def _default_client_factory(_config, _provider_call):
-    raise RuntimeUnavailable(
-        "Graphiti real runtime requires the Task 8 Neo4j image and model lock"
+class _NativeGroupNodeType:
+    def __init__(self, clear_data):
+        self._clear_data = clear_data
+
+    async def delete_by_group_id(self, driver, group_id):
+        await self._clear_data(driver, [group_id])
+
+
+class _NativeGroupEpisodeType:
+    def __init__(self, episodic_node):
+        self._episodic_node = episodic_node
+
+    async def get_by_group_ids(self, driver, group_ids, **kwargs):
+        return await self._episodic_node.get_by_group_ids(driver, group_ids, **kwargs)
+
+
+class _NativeGraphitiClient:
+    def __init__(self, native, runtime):
+        self._native = native
+        self.driver = native.driver
+        self.EpisodeType = runtime["EpisodeType"]
+        self.node_type = _NativeGroupNodeType(runtime["clear_data"])
+        self.episodic_node_type = _NativeGroupEpisodeType(runtime["EpisodicNode"])
+
+    def driver_for_group(self, group_id):
+        del group_id
+        return self.driver
+
+    async def search(self, *args, **kwargs):
+        return await self._native.search(*args, **kwargs)
+
+    async def add_episode(self, *args, **kwargs):
+        return await self._native.add_episode(*args, **kwargs)
+
+
+def _load_native_runtime():
+    import httpx
+    from openai import AsyncOpenAI
+    from graphiti_core import Graphiti
+    from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
+    from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
+    from graphiti_core.graphiti import EpisodeType
+    from graphiti_core.llm_client.config import LLMConfig
+    from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
+    from graphiti_core.nodes import EpisodicNode
+    from graphiti_core.utils.maintenance.graph_data_operations import clear_data
+
+    return {
+        "Graphiti": Graphiti,
+        "EpisodeType": EpisodeType,
+        "EpisodicNode": EpisodicNode,
+        "LLMConfig": LLMConfig,
+        "OpenAIGenericClient": OpenAIGenericClient,
+        "OpenAIEmbedderConfig": OpenAIEmbedderConfig,
+        "OpenAIEmbedder": OpenAIEmbedder,
+        "OpenAIRerankerClient": OpenAIRerankerClient,
+        "clear_data": clear_data,
+        "httpx": httpx,
+        "AsyncOpenAI": AsyncOpenAI,
+    }
+
+
+def _metered_openai(runtime, endpoint, provider_call, request_class):
+    httpx = runtime["httpx"]
+
+    class _MeteredAsyncTransport(httpx.AsyncHTTPTransport):
+        async def handle_async_request(self, request):
+            provider_call(request_class)
+            return await super().handle_async_request(request)
+
+    http_client = httpx.AsyncClient(
+        transport=_MeteredAsyncTransport(retries=0),
+        timeout=httpx.Timeout(120),
     )
+    return runtime["AsyncOpenAI"](
+        api_key=UNUSED_API_KEY,
+        base_url=endpoint,
+        max_retries=0,
+        http_client=http_client,
+    )
+
+
+def _default_client_factory(config, provider_call, *, runtime=None):
+    if config.get("graph_database_auth") != "none" or config.get("graph_database_name") != "neo4j":
+        raise RuntimeUnavailable("Graphiti requires the pinned local Neo4j configuration")
+    runtime = _load_native_runtime() if runtime is None else runtime
+    llm_config = runtime["LLMConfig"](
+        api_key=UNUSED_API_KEY,
+        model=config["llm_model"],
+        base_url=config["llm_endpoint"],
+        temperature=0,
+    )
+    llm_openai = _metered_openai(
+        runtime,
+        config["llm_endpoint"],
+        provider_call,
+        "internal_memory_llm",
+    )
+    embedding_openai = _metered_openai(
+        runtime,
+        config["embedding_endpoint"],
+        provider_call,
+        "embedding",
+    )
+    llm_client = runtime["OpenAIGenericClient"](
+        llm_config,
+        cache=False,
+        client=llm_openai,
+    )
+    embedder = runtime["OpenAIEmbedder"](
+        runtime["OpenAIEmbedderConfig"](
+            api_key=UNUSED_API_KEY,
+            embedding_model=config["embedding_model"],
+            embedding_dim=config["embedding_dimension"],
+            base_url=config["embedding_endpoint"],
+        ),
+        client=embedding_openai,
+    )
+    reranker = runtime["OpenAIRerankerClient"](llm_config, client=llm_openai)
+    native = runtime["Graphiti"](
+        uri=config["graph_database_uri"],
+        user=None,
+        password=None,
+        llm_client=llm_client,
+        embedder=embedder,
+        cross_encoder=reranker,
+        store_raw_episode_content=config["store_raw_episode_content"],
+    )
+    return _NativeGraphitiClient(native, runtime)
 
 
 def _episode_record(item) -> dict:
@@ -239,7 +368,7 @@ async def execute(
                 storage=STORAGE,
             )
         if operation == "persist":
-            provider_calls.require_traffic("internal_memory_llm", "embedding")
+            provider_calls.require_traffic("internal_memory_llm")
         else:
             provider_calls.require_zero()
         provider_calls.apply(operations)

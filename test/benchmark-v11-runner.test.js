@@ -13,6 +13,8 @@ import {
 import { createProgressLedger, createUnitEvidenceLedger } from '../benchmark/lib/progress.mjs';
 import { createV11RunResources } from '../benchmark/lib/v11-run-resources.mjs';
 import { validateRawRun } from '../benchmark/lib/validate.mjs';
+import { loadV11ScoredDefinition } from '../benchmark/lib/v11-definition.mjs';
+import { buildV11Prompt } from '../benchmark/lib/v11-prompts.mjs';
 import {
   recordContentSha256,
   unitIdFor as contractUnitIdFor
@@ -74,6 +76,13 @@ const AMENDMENT_008_PATH = fileURLToPath(
 const AMENDMENT_008_SIDECAR_PATH = fileURLToPath(
   new URL('../benchmark/preregistration-amendment-008.sha256', import.meta.url)
 );
+const AMENDMENT_009_PATH = fileURLToPath(
+  new URL('../benchmark/preregistration-amendment-009.json', import.meta.url)
+);
+const AMENDMENT_009_SIDECAR_PATH = fileURLToPath(
+  new URL('../benchmark/preregistration-amendment-009.sha256', import.meta.url)
+);
+const REPOSITORY_ROOT = fileURLToPath(new URL('..', import.meta.url));
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
@@ -460,12 +469,14 @@ function assertNoAcceptanceClaims(value) {
 
 test('integrated runner executes retrieve → outer → persist → verify and checkpoints every terminal unit', async () => {
   const trace = [];
+  const operationSlots = [];
   let phaseAPersisted = false;
   const progress = progressRecorder();
   const options = baseOptions({
     progress,
-    executeAdapter: async (request) => {
+    executeAdapter: async (request, { operationSlot }) => {
       trace.push(`${request.phase}:${request.operation}`);
+      operationSlots.push(`${request.phase}:${request.operation}:${operationSlot}`);
       if (request.phase === 'A' && request.operation === 'persist') phaseAPersisted = true;
       return adapterEnvelope(request);
     },
@@ -495,6 +506,28 @@ test('integrated runner executes retrieve → outer → persist → verify and c
     trace.filter((entry) => entry.startsWith('E:')),
     ['E:persist', 'E:verify', 'E:retrieve', 'E:outer', 'E:persist', 'E:verify']
   );
+  assert.deepEqual(
+    operationSlots.filter((entry) => entry.startsWith('E:')),
+    [
+      'E:persist:setupPersist',
+      'E:verify:setupVerify',
+      'E:retrieve:retrieve',
+      'E:persist:persist',
+      'E:verify:verify'
+    ]
+  );
+  for (const phase of ['ISOLATION_PROJECT', 'ISOLATION_USER']) {
+    assert.deepEqual(
+      trace.filter((entry) => entry.startsWith(`${phase}:`)),
+      [
+        `${phase}:reset`,
+        `${phase}:retrieve`,
+        `${phase}:outer`,
+        `${phase}:persist`,
+        `${phase}:verify`
+      ]
+    );
+  }
   assert.equal(raw.units.find((unit) => unit.phase === 'A').status, 'MEASURED');
   assert.equal(raw.arms[0].status, 'MEASURED');
 
@@ -509,6 +542,46 @@ test('integrated runner executes retrieve → outer → persist → verify and c
     if (nextStarted !== -1) assert.ok(nextStarted >= 1, 'checkpoint must precede the next unit');
   }
   assertNoAcceptanceClaims(raw);
+});
+
+test('runner refuses an untrusted scored-eligibility receipt before effects', async () => {
+  const candidate = await loadV11ScoredDefinition({ repositoryRoot: REPOSITORY_ROOT });
+  const progress = progressRecorder();
+  let effects = 0;
+  await assert.rejects(
+    runV11Benchmark(baseOptions({
+      scored: true,
+      finalProfile: true,
+      acceptanceEligibility: {
+        schema: 'shadowgraph.v11.acceptance-eligibility',
+        version: 1,
+        status: 'ELIGIBLE_FOR_SCORED',
+        runId: 'accepted-run',
+        attemptId: 'accepted-attempt',
+        implementationLockHash: '4'.repeat(64),
+        amendment009Sha256: candidate.sourceHashes.amendment009Sha256,
+        rawSha256: 'a'.repeat(64),
+        providerReconciliationSha256: 'b'.repeat(64),
+        counts: { totalUnits: 308, applicableUnits: 288, excludedUnits: 20, failedUnits: 0 },
+        issuedAt: '2026-09-08T10:00:00.000Z'
+      },
+      arms: candidate.definition.arms,
+      scenarios: candidate.scenarios,
+      repetitions: candidate.definition.commonExecution.repetitions,
+      seeds: candidate.definition.commonExecution.randomSeeds,
+      ...candidate.sourceHashes,
+      amendment009Path: AMENDMENT_009_PATH,
+      amendment009SidecarPath: AMENDMENT_009_SIDECAR_PATH,
+      progress,
+      buildOuterRequest: buildV11Prompt,
+      executeAdapter: async () => { effects += 1; },
+      requestOuter: async () => { effects += 1; },
+      persistUnit: async () => { effects += 1; }
+    })),
+    /issued or artifact-verified/iu
+  );
+  assert.equal(progress.events.length, 0);
+  assert.equal(effects, 0);
 });
 
 test('runner requires Amendment 008 identity/campaign source binding before any unit runs', async () => {
@@ -898,6 +971,104 @@ test('outer correlation mismatch fails closed after retrieve and before persist 
       message: 'Isolation verification requires a valid measured Phase A unit'
     });
   }
+});
+
+test('retrieved native context is capped at the frozen limit before the common prompt', async () => {
+  const observed = [];
+  const raw = await runV11Benchmark(baseOptions({
+    executeAdapter: async (request) => {
+      const envelope = adapterEnvelope(request);
+      if (request.phase === 'B' && request.operation === 'retrieve') {
+        envelope.result.nativeContext = Array.from({ length: 21 }, (_unused, index) => ({
+          type: 'decision',
+          id: `decision-${index}`,
+          content: { recommendation: `item-${index}` }
+        }));
+      }
+      return envelope;
+    },
+    buildOuterRequest: ({ phase, nativeContext }) => {
+      if (phase === 'B') observed.push(nativeContext.length);
+      return {
+        system: 'Common system instruction.',
+        prompt: `Common prompt for ${phase}.`,
+        responseSchema: { ...STANDARD_DECISION_RESPONSE_SCHEMA }
+      };
+    }
+  }));
+
+  assert.equal(raw.units.find(({ phase }) => phase === 'B').status, 'MEASURED');
+  assert.deepEqual(observed, [20, 20]);
+});
+
+test('provider-reported input usage above 8192 fails before persistence without losing evidence', async () => {
+  const trace = [];
+  const raw = await runV11Benchmark(baseOptions({
+    executeAdapter: async (request) => {
+      trace.push(`${request.phase}:${request.operation}`);
+      return adapterEnvelope(request);
+    },
+    requestOuter: async ({ correlation }) => ({
+      decision: decision(correlation.phase),
+      usage: {
+        prompt_tokens: correlation.phase === 'B' ? 8193 : 3,
+        completion_tokens: 2,
+        total_tokens: correlation.phase === 'B' ? 8195 : 5
+      },
+      providerModel: 'provider-model',
+      requestCount: 1,
+      correlation: { ...correlation }
+    })
+  }));
+  const unit = raw.units.find(({ phase }) => phase === 'B');
+
+  assert.equal(unit.status, 'FAILED');
+  assert.deepEqual(unit.failure, {
+    cause: 'CONTRACT_FAILURE',
+    operation: 'outer',
+    message: 'Provider-reported input usage exceeds the frozen maximum'
+  });
+  assert.equal(unit.providerUsage.prompt_tokens, 8193);
+  assert.notEqual(unit.decisionResponse, null);
+  assert.equal(trace.includes('B:persist'), false);
+  assert.equal(trace.includes('B:verify'), false);
+});
+
+test('a null D_FALSE prediction is retained but fails before persistence', async () => {
+  const trace = [];
+  const raw = await runV11Benchmark(baseOptions({
+    executeAdapter: async (request) => {
+      trace.push(`${request.phase}:${request.operation}`);
+      return adapterEnvelope(request);
+    },
+    requestOuter: async ({ correlation }) => ({
+      decision: {
+        ...decision(correlation.phase),
+        ...(correlation.phase === 'D_FALSE_0' ? { changedFactDetected: null } : {})
+      },
+      usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+      providerModel: 'provider-model',
+      requestCount: 1,
+      correlation: { ...correlation }
+    })
+  }));
+
+  const probe = raw.units.find((unit) => unit.phase === 'D_FALSE_0');
+  assert.equal(probe.status, 'FAILED');
+  assert.deepEqual(probe.failure, {
+    cause: 'CONTRACT_FAILURE',
+    operation: 'outer',
+    message: 'D_FALSE requires a boolean changed-fact prediction'
+  });
+  assert.equal(probe.decisionResponse.changedFactDetected, null);
+  assert.deepEqual(probe.providerUsage, { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 });
+  assert.equal(probe.operations.outerDecisionModelCalls, 1);
+  assert.deepEqual(
+    trace.filter((entry) => entry.startsWith('D_FALSE_0:')),
+    ['D_FALSE_0:retrieve']
+  );
+  assert.equal(probe.adapterEvidence.persist, null);
+  assert.equal(probe.adapterEvidence.verify, null);
 });
 
 test('trusted outer HTTP statuses map to public causes without retry or response-detail leakage', async () => {
@@ -1367,7 +1538,7 @@ test('nested endpoint errors retain ENDPOINT_UNAVAILABLE instead of becoming con
   assert.equal(raw.units.find((unit) => unit.phase === 'B').status, 'MEASURED');
 });
 
-test('isolation phases retrieve, model, persist, and verify in the actual probed namespace', async () => {
+test('isolation phases reset and retrieve the probed namespace before primary persistence and verification', async () => {
   const adapterRequests = [];
   const outerRequests = [];
   await runV11Benchmark(baseOptions({
@@ -1400,13 +1571,14 @@ test('isolation phases retrieve, model, persist, and verify in the actual probed
   };
   for (const [phase, namespace] of Object.entries(expected)) {
     const phaseRequests = adapterRequests.filter((request) => request.phase === phase);
-    assert.deepEqual(phaseRequests.map((request) => request.operation), ['retrieve', 'persist', 'verify']);
+    assert.deepEqual(phaseRequests.map((request) => request.operation), ['reset', 'retrieve', 'persist', 'verify']);
     assert.deepEqual(phaseRequests[0].namespace, namespace);
-    assert.deepEqual(phaseRequests[1].namespace, {
+    assert.deepEqual(phaseRequests[1].namespace, namespace);
+    assert.deepEqual(phaseRequests[2].namespace, {
       projectId: 'project-primary',
       userId: 'user-primary'
     });
-    assert.deepEqual(phaseRequests[2].namespace, {
+    assert.deepEqual(phaseRequests[3].namespace, {
       projectId: 'project-primary',
       userId: 'user-primary'
     });
@@ -1415,7 +1587,7 @@ test('isolation phases retrieve, model, persist, and verify in the actual probed
     assert.equal(phaseRequests.at(-1).payload.expectedAbsentRecord.type, 'decision');
     assert.match(phaseRequests.at(-1).payload.expectedAbsentRecord.contentSha256, /^[a-f0-9]{64}$/u);
     assert.match(phaseRequests[0].namespaceRef, /^[a-f0-9]{64}$/u);
-    assert.notEqual(phaseRequests[0].namespaceRef, phaseRequests[1].namespaceRef);
+    assert.notEqual(phaseRequests[0].namespaceRef, phaseRequests[2].namespaceRef);
     assert.deepEqual(outerRequests.find((request) => request.correlation.phase === phase).namespace, namespace);
   }
   const failedAttemptVerify = adapterRequests.find((request) => request.phase === 'E'

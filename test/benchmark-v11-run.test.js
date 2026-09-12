@@ -17,8 +17,11 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
+import { canonicalJson } from '../benchmark/lib/v11-contract.mjs';
 import { createProgressLedger, createUnitEvidenceLedger } from '../benchmark/lib/progress.mjs';
-import { loadV11AcceptanceDefinition } from '../benchmark/lib/v11-definition.mjs';
+import { loadV11AcceptanceDefinition, loadV11FinalAcceptanceDefinition, loadV11ScoredDefinition } from '../benchmark/lib/v11-definition.mjs';
+import { buildV11FinalReport } from '../benchmark/lib/v11-final-report.mjs';
+import { attestV11LiveServices, captureVerifiedServiceEvidence } from '../benchmark/lib/v11-service-evidence.mjs';
 import { buildV11Prompt } from '../benchmark/lib/v11-prompts.mjs';
 import { createV11Registry } from '../benchmark/lib/v11-registry.mjs';
 import {
@@ -26,7 +29,9 @@ import {
   V11_PREREQUISITE_GATES,
   computeV11Readiness,
   createV11AdapterExecutor,
-  executeV11AcceptanceRun
+  executeV11AcceptanceRun,
+  executeV11FinalAcceptanceRun,
+  executeV11ScoredRun
 } from '../benchmark/lib/v11-run.mjs';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
@@ -43,6 +48,8 @@ const AMENDMENT_006_PATH = path.join(BENCHMARK_ROOT, 'preregistration-amendment-
 const AMENDMENT_006_SIDECAR_PATH = path.join(BENCHMARK_ROOT, 'preregistration-amendment-006.sha256');
 const AMENDMENT_008_PATH = path.join(BENCHMARK_ROOT, 'preregistration-amendment-008.json');
 const AMENDMENT_008_SIDECAR_PATH = path.join(BENCHMARK_ROOT, 'preregistration-amendment-008.sha256');
+const AMENDMENT_009_PATH = path.join(BENCHMARK_ROOT, 'preregistration-amendment-009.json');
+const AMENDMENT_009_SIDECAR_PATH = path.join(BENCHMARK_ROOT, 'preregistration-amendment-009.sha256');
 
 function sha256Digest(bytes) {
   return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
@@ -92,6 +99,123 @@ function serviceImageEntry(name, image) {
       platformManifestBase64: manifestBytes.toString('base64')
     }
   };
+}
+
+function cleanProviderReconciliation(raw) {
+  const events = raw.units.filter((unit) => unit.providerUsage !== null).map((unit, index) => ({
+    requestNumber: index + 1,
+    requestClass: 'outer_decision_llm',
+    outcome: 'SUCCEEDED',
+    providerModel: unit.providerModel,
+    usage: unit.providerUsage,
+    latencyMs: 1,
+    correlation: {
+      runId: raw.runId,
+      attemptId: raw.attemptId,
+      armId: unit.armId,
+      scenarioId: unit.scenarioId,
+      repetition: unit.repetition,
+      phase: unit.phase
+    }
+  }));
+  return {
+    schema: 'shadowgraph.v11.provider-reconciliation',
+    version: 1,
+    runId: raw.runId,
+    attemptId: raw.attemptId,
+    ledgerPath: 'offline-provider-ledger.ndjson',
+    status: 'RECONCILED',
+    totals: {
+      expectedCalls: events.length,
+      observedEvents: events.length,
+      matchedCalls: events.length,
+      malformedLines: 0,
+      unexpectedEvents: 0,
+      missingCalls: 0,
+      retryEvents: 0,
+      modelMismatches: 0,
+      failedOutcomes: 0,
+      incompleteUsage: 0,
+      unverifiedCountUnits: 0,
+      unverifiedCountEvents: 0
+    },
+    events,
+    evidenceHashes: {
+      providerLedgerSha256: '1'.repeat(64),
+      attemptLedgerSha256: '2'.repeat(64),
+      planLedgerSha256: '3'.repeat(64),
+      campaignLedgerSha256: '4'.repeat(64)
+    },
+    findings: [],
+    nativeAttemptTrace: { status: 'RECONCILED', findings: [], trace: [] },
+    budgetEvidence: { status: 'RECONCILED', findings: [] }
+  };
+}
+
+async function createNativeAttemptEvidenceFixture(directory, candidate) {
+  const observedAt = '2026-09-08T09:59:00.000Z';
+  const identityProtocol = {
+    meterIssuedOpaqueAlias: true,
+    durablePlanBeforeDispatch: true,
+    rootInvocationAndDispatchIds: true,
+    bodyIndependentIdentity: true,
+    contextCarrierOnly: true,
+    planClosureBeforeReconciliation: true,
+    aggregateCapIndependentOfAliases: true,
+    campaignReservationJoinedBeforeDispatch: true
+  };
+  const recoverySpecs = [
+    { armId: 'graphiti', requestClass: 'internal_memory_llm', category: 'B', packageName: 'graphiti-core', packageVersion: '0.29.3', modelId: 'qwen2.5:7b' },
+    { armId: 'cognee', requestClass: 'internal_memory_llm', category: 'B', packageName: 'cognee', packageVersion: '1.5.3', modelId: 'qwen2.5:7b' },
+    { armId: 'cognee', requestClass: 'internal_memory_llm', category: 'C', packageName: 'cognee', packageVersion: '1.5.3', modelId: 'qwen2.5:7b' },
+    { armId: 'cognee', requestClass: 'embedding', category: 'B', packageName: 'cognee', packageVersion: '1.5.3', modelId: 'nomic-embed-text:v1.5' }
+  ];
+  const entries = [];
+  for (const spec of recoverySpecs) {
+    const chat = spec.requestClass === 'internal_memory_llm';
+    const taxonomy = Object.fromEntries(['A', 'B', 'C', 'D', 'E'].map((name) => [name, name === spec.category]));
+    const wireAttempts = spec.category === 'C'
+      ? [1, 2, 3].map((ordinal) => ({
+          ordinal, path: '/v1/chat/completions', outcome: 'SUCCEEDED', modelId: spec.modelId,
+          retryOrdinal: 0, responseFormat: 'json_object'
+        }))
+      : [
+          { ordinal: 1, path: chat ? '/v1/chat/completions' : '/v1/embeddings', outcome: 'FAILED', modelId: spec.modelId, retryOrdinal: 0, responseFormat: chat ? 'json_object' : null },
+          { ordinal: 2, path: chat ? '/v1/chat/completions' : '/v1/embeddings', outcome: 'SUCCEEDED', modelId: spec.modelId, retryOrdinal: 1, responseFormat: chat ? 'json_object' : null }
+        ];
+    const reportName = `${spec.armId}-${spec.requestClass}-${spec.category}.report.json`;
+    const reportText = `${JSON.stringify({
+      schema: 'shadowgraph.v11.native-attempt-loopback-report', version: 1, observedAt,
+      amendment006Sha256: candidate.sourceHashes.amendment006Sha256,
+      amendment008Sha256: candidate.sourceHashes.amendment008Sha256,
+      identityProtocol,
+      armId: spec.armId, requestClass: spec.requestClass, category: spec.category,
+      package: { name: spec.packageName, version: spec.packageVersion },
+      modelId: spec.modelId, network: 'loopback-only', rootOperationInvocations: 1,
+      wireAttempts, taxonomy, allAttemptsMetered: true,
+      providerUsageAccounting: 'metered-complete-or-fail-closed',
+      modelEndpointPinned: true, harnessOperationReruns: 0
+    })}\n`;
+    await writeFile(path.join(directory, reportName), reportText, 'utf8');
+    entries.push({
+      armId: spec.armId, requestClass: spec.requestClass, category: spec.category,
+      package: { name: spec.packageName, version: spec.packageVersion }, modelId: spec.modelId,
+      outcome: 'PASS', network: 'loopback-only', wireRequests: wireAttempts.length,
+      allAttemptsMetered: true, providerUsageAccounting: 'metered-complete-or-fail-closed',
+      modelEndpointPinned: true, harnessOperationReruns: 0, taxonomy,
+      probeReport: reportName,
+      probeSha256: createHash('sha256').update(reportText).digest('hex')
+    });
+  }
+  const evidencePath = path.join(directory, 'native-attempt-evidence.json');
+  await writeFile(evidencePath, `${JSON.stringify({
+    schema: 'shadowgraph.v11.native-attempt-evidence', version: 1, observedAt,
+    amendment006Sha256: candidate.sourceHashes.amendment006Sha256,
+    amendment008Sha256: candidate.sourceHashes.amendment008Sha256,
+    identityProtocol,
+    entries
+  })}\n`, 'utf8');
+  return evidencePath;
 }
 
 async function realCandidate() {
@@ -365,14 +489,14 @@ test('the committed service manifest uses references the implementation lock can
     [
       {
         name: 'neo4j',
-        image: 'neo4j:5.20',
-        digest: 'sha256:99a767ef6f5573cd72d6d7f32c5266233af3c58efdc71577349a7c251d8ecb3b',
+        image: 'neo4j:5.26.0',
+        digest: 'sha256:d5e6396795ab2b813d5c6ac820ba36f129c412ea4ad982ffccab7b8f69e9e6a5',
         digestKind: 'oci-platform-manifest',
         platform: 'linux/amd64',
         registry: 'registry-1.docker.io',
         repository: 'library/neo4j',
-        tag: '5.20',
-        indexDigest: 'sha256:52d3dec8d45585b21edeca8517d752b2512e52aa94f80fc36a5788c88c95f8e4'
+        tag: '5.26.0',
+        indexDigest: 'sha256:5a015e53de1895e7eee1574ae0325cf8c4b89587222778108c594bdd45a474b5'
       },
       {
         name: 'ollama',
@@ -498,6 +622,190 @@ test('adapter routing refuses a second invocation of the same measured root oper
   assert.equal(calls, 1);
 });
 
+test('adapter routing permits the two declared Phase-E persist slots but rejects an exact slot replay', async () => {
+  const { registry } = await realCandidate();
+  let calls = 0;
+  const hostOptions = [];
+  const host = () => () => async (_request, options) => {
+    calls += 1;
+    hostOptions.push(options);
+    return { status: 'SUCCEEDED' };
+  };
+  const executeAdapter = createV11AdapterExecutor({
+    registry,
+    hosts: { control: host(), 'node-mcp': host(), 'python-container': host() }
+  });
+  const request = {
+    runId: 'run-phase-e-slots',
+    attemptId: 'attempt-phase-e-slots',
+    armId: 'shadowgraph-full',
+    scenarioId: 'ACC_TRACE_1',
+    repetition: 0,
+    phase: 'E',
+    operation: 'persist'
+  };
+
+  await executeAdapter(request, { operationSlot: 'setupPersist' });
+  await executeAdapter(request, { operationSlot: 'persist' });
+  await assert.rejects(
+    executeAdapter(request, { operationSlot: 'persist' }),
+    (error) => error instanceof V11RunError && error.code === 'HARNESS_OPERATION_REEXECUTION'
+  );
+  assert.equal(calls, 2);
+  assert.deepEqual(hostOptions, [{}, {}], 'harness-only slot identity must not reach product hosts');
+});
+
+test('adapter routing rejects omitted, unknown, and cross-operation slots before host execution', async () => {
+  const { registry } = await realCandidate();
+  let calls = 0;
+  const host = () => () => async () => {
+    calls += 1;
+    return { status: 'SUCCEEDED' };
+  };
+  const executeAdapter = createV11AdapterExecutor({
+    registry,
+    hosts: { control: host(), 'node-mcp': host(), 'python-container': host() }
+  });
+  const request = {
+    runId: 'run-invalid-slots',
+    attemptId: 'attempt-invalid-slots',
+    armId: 'shadowgraph-full',
+    scenarioId: 'ACC_TRACE_1',
+    repetition: 0,
+    phase: 'E',
+    operation: 'verify'
+  };
+  for (const options of [{}, { operationSlot: 'unknown' }, { operationSlot: 'setupPersist' }]) {
+    await assert.rejects(
+      executeAdapter(request, options),
+      (error) => error instanceof V11RunError && error.code === 'HARNESS_OPERATION_SLOT_INVALID'
+    );
+  }
+  await assert.rejects(
+    executeAdapter({ ...request, phase: 'A' }, { operationSlot: 'setupVerify' }),
+    (error) => error instanceof V11RunError && error.code === 'HARNESS_OPERATION_SLOT_INVALID'
+  );
+  assert.equal(calls, 0);
+});
+
+test('readiness rejects a final campaign outside the one frozen program lineage', async () => {
+  const historical = await realCandidate();
+  const final = await loadV11FinalAcceptanceDefinition({ repositoryRoot: REPOSITORY_ROOT });
+  const report = await computeV11Readiness({
+    ...historical,
+    ...final,
+    benchmarkRoot: BENCHMARK_ROOT,
+    implementationLockHash: '4'.repeat(64),
+    campaign: {
+      root: 'C:/benchmark-evidence/second-program-root',
+      policy: {
+        campaignId: 'second-final-program',
+        deadline: '2026-09-25T23:37:31.000Z',
+        implementationLockHash: '4'.repeat(64),
+        maxRequests: 16269,
+        maxSessions: 16,
+        maxRecoveryAttempts: 0,
+        limits: { outer_decision_llm: 2730, internal_memory_llm: 2738, embedding: 10801 },
+        sessionLimits: { probe: 12, acceptance: 3, scored: 1 },
+        campaignRegistryPath: path.join(REPOSITORY_ROOT, '..', 'second-program.claim.json'),
+        continuityRegistryPath: path.join(REPOSITORY_ROOT, '..', 'second-program.continuity.ndjson')
+      }
+    },
+    verificationInstant: Date.parse('2026-09-12T00:00:00.000Z')
+  });
+  assert.ok(report.blockers.some(({ code }) => code === 'PROGRAM_BUDGET_MISMATCH'));
+});
+
+test('readiness rejects a final campaign whose absolute deadline exceeds fourteen days', async () => {
+  const historical = await realCandidate();
+  const final = await loadV11FinalAcceptanceDefinition({ repositoryRoot: REPOSITORY_ROOT });
+  const implementationLockHash = '4'.repeat(64);
+  const report = await computeV11Readiness({
+    ...historical,
+    ...final,
+    benchmarkRoot: BENCHMARK_ROOT,
+    implementationLockHash,
+    campaign: {
+      root: 'missing-final-campaign-root',
+      policy: {
+        campaignId: 'shadowgraph-v11-final-program',
+        deadline: '2026-09-26T23:37:31.000Z',
+        implementationLockHash,
+        maxRequests: 16269,
+        maxSessions: 16,
+        maxRecoveryAttempts: 0,
+        limits: { outer_decision_llm: 2730, internal_memory_llm: 2738, embedding: 10801 },
+        sessionLimits: { probe: 12, acceptance: 3, scored: 1 },
+        campaignRegistryPath: path.join(REPOSITORY_ROOT, '..', 'deadline-too-long-claim.json'),
+        continuityRegistryPath: path.join(REPOSITORY_ROOT, '..', 'deadline-too-long-continuity.ndjson')
+      }
+    },
+    verifyCampaignPolicyLineage: async () => {},
+    verificationInstant: Date.parse('2026-09-12T00:00:00.000Z')
+  });
+  assert.ok(report.blockers.some(({ code }) => code === 'PROGRAM_BUDGET_MISMATCH'), JSON.stringify(report.blockers));
+});
+
+test('readiness rejects a final campaign beyond Amendment 009 cumulative ceilings', async () => {
+  const historical = await realCandidate();
+  const final = await loadV11FinalAcceptanceDefinition({ repositoryRoot: REPOSITORY_ROOT });
+  const report = await computeV11Readiness({
+    registry: historical.registry,
+    ...final,
+    benchmarkRoot: BENCHMARK_ROOT,
+    implementationLockHash: '4'.repeat(64),
+    campaign: {
+      root: path.join(REPOSITORY_ROOT, '..', 'oversized-final-campaign'),
+      policy: {
+        campaignId: 'shadowgraph-v11-final-program',
+        deadline: '2026-09-20T00:00:00.000Z',
+        implementationLockHash: '4'.repeat(64),
+        maxRequests: 999999,
+        maxSessions: 999,
+        maxRecoveryAttempts: 0,
+        limits: { outer_decision_llm: 999999, internal_memory_llm: 999999, embedding: 999999 },
+        sessionLimits: { probe: 997, acceptance: 1, scored: 1 },
+        campaignRegistryPath: path.join(REPOSITORY_ROOT, '..', 'oversized-final-campaign.claim.json'),
+        continuityRegistryPath: path.join(REPOSITORY_ROOT, '..', 'oversized-final-campaign.continuity.ndjson')
+      }
+    },
+    assertCampaignPolicy: (value) => value,
+    verifyCampaignLineage: async () => {},
+    verificationInstant: Date.parse('2026-09-12T00:00:00.000Z')
+  });
+  assert.ok(
+    report.blockers.some(({ code }) => code === 'PROGRAM_BUDGET_MISMATCH'),
+    JSON.stringify(report.blockers)
+  );
+});
+
+test('readiness reports an expired campaign before runtime binding', async () => {
+  const candidate = await realCandidate();
+  const report = await computeV11Readiness({
+    ...candidate,
+    benchmarkRoot: BENCHMARK_ROOT,
+    verificationInstant: Date.parse('2026-09-12T00:00:00.000Z'),
+    campaign: {
+      root: 'fixture-expired-campaign',
+      policy: {
+        campaignId: 'fixture-expired-campaign',
+        implementationLockHash: '4'.repeat(64),
+        maxRequests: 1,
+        maxSessions: 1,
+        maxRecoveryAttempts: 0,
+        deadline: '2020-01-01T00:00:00.000Z',
+        limits: { outer_decision_llm: 1, internal_memory_llm: 0, embedding: 0 }
+      }
+    },
+    assertRestrictedCampaignPolicy: () => Object.freeze({}),
+    verifyCampaignLineage: async () => Object.freeze({})
+  });
+
+  assert.ok(report.blockers.some((blocker) => (
+    blocker.kind === 'campaign' && blocker.code === 'CAMPAIGN_EXPIRED'
+  )));
+});
+
 test('the module refuses to run a candidate its own readiness check blocks', async () => {
   const candidate = await realCandidate();
   await assert.rejects(
@@ -534,6 +842,75 @@ test('the module refuses to run a candidate its own readiness check blocks', asy
     }),
     (error) => error instanceof V11RunError && error.code === 'NOT_READY'
   );
+});
+
+test('scored execution requires the exact scored profile before readiness or effects', async () => {
+  const acceptance = await realCandidate();
+  const scored = {
+    registry: acceptance.registry,
+    ...await loadV11ScoredDefinition({ repositoryRoot: REPOSITORY_ROOT })
+  };
+  const acceptanceEligibility = {
+    schema: 'shadowgraph.v11.acceptance-eligibility',
+    version: 1,
+    status: 'ELIGIBLE_FOR_SCORED',
+    runId: 'accepted-run',
+    attemptId: 'accepted-attempt-1',
+    implementationLockHash: '4'.repeat(64),
+    amendment009Sha256: scored.sourceHashes.amendment009Sha256,
+    rawSha256: 'a'.repeat(64),
+    providerReconciliationSha256: 'b'.repeat(64),
+    counts: { totalUnits: 308, applicableUnits: 288, excludedUnits: 20, failedUnits: 0 },
+    issuedAt: '2026-09-08T09:59:00.000Z'
+  };
+  let effects = 0;
+  const common = {
+    benchmarkRoot: BENCHMARK_ROOT,
+    runId: 'run-scored-profile-gate',
+    attemptId: 'attempt-scored-profile-gate',
+    implementationLockHash: '4'.repeat(64),
+    environmentLockHash: '5'.repeat(64),
+    amendment002Path: AMENDMENT_002_PATH,
+    amendment003Path: AMENDMENT_003_PATH,
+    amendment004Path: AMENDMENT_004_PATH,
+    amendment005Path: AMENDMENT_005_PATH,
+    amendment005SidecarPath: AMENDMENT_005_SIDECAR_PATH,
+    amendment006Path: AMENDMENT_006_PATH,
+    amendment006SidecarPath: AMENDMENT_006_SIDECAR_PATH,
+    amendment008Path: AMENDMENT_008_PATH,
+    amendment008SidecarPath: AMENDMENT_008_SIDECAR_PATH,
+    amendment009Path: AMENDMENT_009_PATH,
+    amendment009SidecarPath: AMENDMENT_009_SIDECAR_PATH,
+    buildOuterRequest: buildV11Prompt,
+    executeAdapter: async () => { effects += 1; },
+    requestOuter: async () => { effects += 1; },
+    persistUnit: async () => { effects += 1; },
+    reconcileProviderEvidence: async () => { effects += 1; }
+  };
+
+  await assert.rejects(
+    executeV11ScoredRun({ ...common, ...acceptance }),
+    (error) => error instanceof V11RunError && error.code === 'PROFILE_MODE_MISMATCH'
+  );
+  assert.equal(effects, 0);
+
+  await assert.rejects(
+    executeV11ScoredRun({ ...common, ...scored }),
+    (error) => error instanceof V11RunError && error.code === 'ACCEPTANCE_GATE_REQUIRED'
+  );
+  assert.equal(effects, 0);
+
+  await assert.rejects(
+    executeV11ScoredRun({ ...common, ...scored, acceptanceEligibility, nativeAttemptPolicy: null }),
+    (error) => error instanceof V11RunError && error.code === 'ACCEPTANCE_GATE_REQUIRED'
+  );
+  assert.equal(effects, 0);
+
+  await assert.rejects(
+    executeV11ScoredRun({ ...common, ...scored, acceptanceEligibility }),
+    (error) => error instanceof V11RunError && error.code === 'ACCEPTANCE_GATE_REQUIRED'
+  );
+  assert.equal(effects, 0);
 });
 
 test('a real run may use only the frozen prompt builder', async () => {
@@ -604,26 +981,18 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
   // Stub registry: a READY verdict is unreachable from the real one today, and
   // that is the candidate's true state. What is proven here is the connection -
   // runner to validator to aggregator - not that the real candidate is ready.
-  const loaded = await loadV11AcceptanceDefinition({ repositoryRoot: REPOSITORY_ROOT });
-  const { definition, scenarios, sourceHashes } = loaded;
+  const loaded = await loadV11FinalAcceptanceDefinition({ repositoryRoot: REPOSITORY_ROOT });
+  const { definition, scenarios, sourceHashes, nativeAttemptPolicy } = loaded;
 
   const gateDirectory = await scratchDirectory(t, 'shadowgraph-v11-ready-');
   const outputDirectory = await scratchDirectory(t, 'shadowgraph-v11-out-');
   await writeFile(
     path.join(gateDirectory, 'model-weights.lock.json'),
-    JSON.stringify({
-      models: [{ modelId: 'fixture-model', digestKind: 'model_weights', weightsDigest: `sha256:${'a'.repeat(64)}` }]
-    }),
-    'utf8'
+    await readFile(path.join(BENCHMARK_ROOT, 'model-weights.lock.json'))
   );
   await writeFile(
     path.join(gateDirectory, 'service-images.json'),
-    JSON.stringify({
-      schema: 'shadowgraph.service-images',
-      version: 3,
-      services: [serviceImageEntry('fixture-service', 'fixture/service:1.0.0')]
-    }),
-    'utf8'
+    await readFile(path.join(BENCHMARK_ROOT, 'service-images.json'))
   );
   await writeFile(
     path.join(gateDirectory, 'python-wheels.lock.json'),
@@ -636,11 +1005,42 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
     descriptors: definition.arms.map((arm) => ({
       armId: arm.id,
       kind: arm.id === 'no-memory' ? 'control' : 'node-mcp',
-      requiredService: null
+      requiredService: null,
+      ...({
+        graphiti: { packageName: 'graphiti-core', version: '0.29.3' },
+        cognee: { packageName: 'cognee', version: '1.5.3' }
+      }[arm.id] ?? {})
     })),
     verifyApplicability: () => ({ status: 'CONSISTENT', findings: [] }),
     expectedCounts: () => ({ ...declaredCounts })
   };
+  const nativeAttemptEvidencePath = await createNativeAttemptEvidenceFixture(gateDirectory, loaded);
+  const serviceDocument = structuredClone(await committedServiceEvidence());
+  const serviceObservedAt = '2026-09-08T09:59:00.000Z';
+  serviceDocument.observedAt = serviceObservedAt;
+  for (const service of serviceDocument.services) {
+    for (const check of service.checks) check.observedAt = serviceObservedAt;
+  }
+  const verifiedServiceEvidence = captureVerifiedServiceEvidence({
+    evidenceText: JSON.stringify(serviceDocument),
+    serviceManifest: JSON.parse(await readFile(path.join(gateDirectory, 'service-images.json'), 'utf8')),
+    modelWeights: JSON.parse(await readFile(path.join(gateDirectory, 'model-weights.lock.json'), 'utf8')),
+    now: Date.parse('2026-09-08T10:00:00.000Z')
+  });
+  const liveServiceAttestation = await attestV11LiveServices({
+    snapshot: verifiedServiceEvidence,
+    deps: {
+      inspectContainer: async (reference) => {
+        const service = serviceDocument.services.find(({ imageIdentity }) => imageIdentity.containerReference === reference);
+        return { id: service.imageIdentity.containerId, image: service.imageIdentity.containerImageId };
+      },
+      connectTcp: async () => true,
+      readContainerEnvironmentValue: async () => 'none',
+      readModelWeightsDigest: async (reference, modelId) => serviceDocument.services
+        .find(({ imageIdentity }) => imageIdentity.containerReference === reference)
+        .servedModels.find((model) => model.modelId === modelId).weightsDigest
+    }
+  });
 
   const progressPath = path.join(outputDirectory, 'attempt.progress.ndjson');
   const unitEvidencePath = path.join(outputDirectory, 'attempt.units.ndjson');
@@ -674,10 +1074,29 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
     registry,
     definition,
     scenarios,
+    nativeAttemptPolicy,
+    nativeAttemptEvidencePath,
+    verifiedServiceEvidence,
+    liveServiceAttestation,
+    verificationInstant: Date.parse('2026-09-08T10:00:00.000Z'),
     benchmarkRoot: gateDirectory,
     runId: 'run-v11-connected',
     attemptId: 'attempt-v11-connected',
-    campaign: { root: 'fixture-campaign-root', policy: {} },
+    campaign: {
+      root: 'fixture-campaign-root',
+      policy: {
+        campaignId: 'shadowgraph-v11-final-program',
+        deadline: '2026-09-25T23:37:31.000Z',
+        implementationLockHash: '4'.repeat(64),
+        maxRequests: 16269,
+        maxSessions: 16,
+        maxRecoveryAttempts: 0,
+        limits: { outer_decision_llm: 2730, internal_memory_llm: 2738, embedding: 10801 },
+        sessionLimits: { probe: 12, acceptance: 3, scored: 1 },
+        campaignRegistryPath: path.join(outputDirectory, 'fixture-final-program.claim.json'),
+        continuityRegistryPath: path.join(outputDirectory, 'fixture-final-program.continuity.ndjson')
+      }
+    },
     verifyCampaignLineage: async () => Object.freeze({}),
     assertRestrictedCampaignPolicy: () => Object.freeze({}),
     sourceHashes,
@@ -690,6 +1109,8 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
     amendment006SidecarPath: AMENDMENT_006_SIDECAR_PATH,
     amendment008Path: AMENDMENT_008_PATH,
     amendment008SidecarPath: AMENDMENT_008_SIDECAR_PATH,
+    amendment009Path: AMENDMENT_009_PATH,
+    amendment009SidecarPath: AMENDMENT_009_SIDECAR_PATH,
     implementationLockHash: '4'.repeat(64),
     environmentLockHash: '5'.repeat(64),
     progress,
@@ -710,7 +1131,7 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
     // reconciler's discrepancy codes became unreachable in production.
     reconcileProviderEvidence: (raw) => {
       reconciled.push(raw);
-      return { status: 'RECONCILED', findings: [] };
+      return cleanProviderReconciliation(raw);
     }
   };
 
@@ -736,7 +1157,7 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
   // All non-budget prerequisites are satisfied in this fixture. Budget absence
   // alone must stop dispatch, not merely accompany unrelated readiness failures.
   let dispatched = 0;
-  await assert.rejects(executeV11AcceptanceRun({ ...readyInput, providerBudget: null,
+  await assert.rejects(executeV11FinalAcceptanceRun({ ...readyInput, providerBudget: null,
     executeAdapter: async () => { dispatched += 1; throw new Error('not reached'); },
     requestOuter: async () => { dispatched += 1; throw new Error('not reached'); }
   }), (e) => e.code === 'NOT_READY'
@@ -752,11 +1173,11 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
   // reconciliation a property of a run rather than of a caller, so the
   // requirement is what has to be tested.
   await assert.rejects(
-    executeV11AcceptanceRun({ ...readyInput, reconcileProviderEvidence: undefined }),
+    executeV11FinalAcceptanceRun({ ...readyInput, reconcileProviderEvidence: undefined }),
     /must reconcile its own provider evidence/u
   );
   await assert.rejects(
-    executeV11AcceptanceRun({ ...readyInput, reconcileProviderEvidence: 'yes please' }),
+    executeV11FinalAcceptanceRun({ ...readyInput, reconcileProviderEvidence: 'yes please' }),
     /must reconcile its own provider evidence/u
   );
   // An answer that is not a verdict is not a reconciliation: an artifact would
@@ -780,7 +1201,7 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
       sensitiveValues: []
     });
     await assert.rejects(
-      executeV11AcceptanceRun({
+      executeV11FinalAcceptanceRun({
         ...readyInput,
         progress: spareProgress,
         persistUnit: (unit) => spareUnits.append(unit),
@@ -793,7 +1214,7 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
     await spareUnits.close();
   }
 
-  const outcome = await executeV11AcceptanceRun(readyInput);
+  const outcome = await executeV11FinalAcceptanceRun(readyInput);
 
   assert.equal(outcome.readiness.readiness, 'READY');
   // The reconciliation ran, saw this run's own record, and its verdict is
@@ -801,6 +1222,9 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
   assert.equal(reconciled.length, 1);
   assert.equal(reconciled[0], outcome.raw);
   assert.equal(outcome.providerEvidence.status, 'RECONCILED');
+  assert.equal(outcome.acceptanceEligibility.status, 'ELIGIBLE_FOR_SCORED');
+  assert.equal(outcome.acceptanceEligibility.implementationLockHash, '4'.repeat(64));
+  assert.equal(outcome.acceptanceEligibility.amendment009Sha256, sourceHashes.amendment009Sha256);
   assert.equal(outcome.raw.units.length, 308);
   assert.equal(outcome.raw.mode, 'ACCEPTANCE');
   assert.equal(outcome.validation.valid, true, 'the validator must accept the run it just produced');
@@ -837,6 +1261,324 @@ test('a ready candidate runs the plan and reaches the validator and the aggregat
   for (const forbidden of ['winner', 'ranking', 'outperform', 'leaderboard']) {
     assert.equal(serialized.includes(forbidden), false, forbidden);
   }
+
+  const acceptedRawPath = path.join(outputDirectory, 'accepted.raw.json');
+  const acceptedProviderPath = path.join(outputDirectory, 'accepted.provider-reconciliation.json');
+  const acceptedEligibilityPath = path.join(outputDirectory, 'accepted.acceptance-eligibility.json');
+  await Promise.all([
+    writeFile(acceptedRawPath, `${JSON.stringify(outcome.raw)}\n`, 'utf8'),
+    writeFile(acceptedProviderPath, `${JSON.stringify(outcome.providerEvidence)}\n`, 'utf8'),
+    writeFile(acceptedEligibilityPath, `${JSON.stringify(outcome.acceptanceEligibility)}\n`, 'utf8')
+  ]);
+  const acceptedPreflight = await runCli([
+    'v11-preflight', '--mode', 'scored',
+    '--acceptance-evidence', acceptedEligibilityPath,
+    '--accepted-raw', acceptedRawPath,
+    '--accepted-reconciliation', acceptedProviderPath
+  ]);
+  assert.ok([0, 1].includes(acceptedPreflight.code), acceptedPreflight.stderr);
+  assert.notEqual(acceptedPreflight.stdout, '', acceptedPreflight.stderr);
+  const acceptedPreflightReport = JSON.parse(acceptedPreflight.stdout);
+  assert.deepEqual(acceptedPreflightReport.acceptanceEligibility, {
+    status: 'ELIGIBLE_FOR_SCORED',
+    runId: outcome.raw.runId,
+    attemptId: outcome.raw.attemptId
+  });
+  const tamperedEligibilityPath = path.join(outputDirectory, 'tampered.acceptance-eligibility.json');
+  await writeFile(tamperedEligibilityPath, `${JSON.stringify({
+    ...outcome.acceptanceEligibility,
+    rawSha256: 'f'.repeat(64)
+  })}\n`, 'utf8');
+  const tamperedPreflight = await runCli([
+    'v11-preflight', '--mode', 'scored',
+    '--acceptance-evidence', tamperedEligibilityPath,
+    '--accepted-raw', acceptedRawPath,
+    '--accepted-reconciliation', acceptedProviderPath
+  ]);
+  assert.equal(tamperedPreflight.code, 1);
+  assert.match(tamperedPreflight.stderr, /does not match the supplied raw/iu);
+
+  const scoredCandidate = await loadV11ScoredDefinition({ repositoryRoot: REPOSITORY_ROOT });
+  const scoredGateDirectory = await scratchDirectory(t, 'shadowgraph-v11-scored-ready-');
+  for (const file of ['model-weights.lock.json', 'service-images.json', 'python-wheels.lock.json']) {
+    await writeFile(
+      path.join(scoredGateDirectory, file),
+      await readFile(path.join(BENCHMARK_ROOT, file))
+    );
+  }
+  const nativeObservedAt = '2026-09-08T09:59:00.000Z';
+  const identityProtocol = {
+    meterIssuedOpaqueAlias: true,
+    durablePlanBeforeDispatch: true,
+    rootInvocationAndDispatchIds: true,
+    bodyIndependentIdentity: true,
+    contextCarrierOnly: true,
+    planClosureBeforeReconciliation: true,
+    aggregateCapIndependentOfAliases: true,
+    campaignReservationJoinedBeforeDispatch: true
+  };
+  const recoverySpecs = [
+    { armId: 'graphiti', requestClass: 'internal_memory_llm', category: 'B', packageName: 'graphiti-core', packageVersion: '0.29.3', modelId: 'qwen2.5:7b' },
+    { armId: 'cognee', requestClass: 'internal_memory_llm', category: 'B', packageName: 'cognee', packageVersion: '1.5.3', modelId: 'qwen2.5:7b' },
+    { armId: 'cognee', requestClass: 'internal_memory_llm', category: 'C', packageName: 'cognee', packageVersion: '1.5.3', modelId: 'qwen2.5:7b' },
+    { armId: 'cognee', requestClass: 'embedding', category: 'B', packageName: 'cognee', packageVersion: '1.5.3', modelId: 'nomic-embed-text:v1.5' }
+  ];
+  const nativeEntries = [];
+  for (const spec of recoverySpecs) {
+    const chat = spec.requestClass === 'internal_memory_llm';
+    const taxonomy = Object.fromEntries(['A', 'B', 'C', 'D', 'E'].map((name) => [name, name === spec.category]));
+    const wireAttempts = spec.category === 'C'
+      ? [1, 2, 3].map((ordinal) => ({
+          ordinal,
+          path: '/v1/chat/completions',
+          outcome: 'SUCCEEDED',
+          modelId: spec.modelId,
+          retryOrdinal: 0,
+          responseFormat: 'json_object'
+        }))
+      : [
+          { ordinal: 1, path: chat ? '/v1/chat/completions' : '/v1/embeddings', outcome: 'FAILED', modelId: spec.modelId, retryOrdinal: 0, responseFormat: chat ? 'json_object' : null },
+          { ordinal: 2, path: chat ? '/v1/chat/completions' : '/v1/embeddings', outcome: 'SUCCEEDED', modelId: spec.modelId, retryOrdinal: 1, responseFormat: chat ? 'json_object' : null }
+        ];
+    const reportName = `${spec.armId}-${spec.requestClass}-${spec.category}.report.json`;
+    const reportText = `${JSON.stringify({
+      schema: 'shadowgraph.v11.native-attempt-loopback-report',
+      version: 1,
+      observedAt: nativeObservedAt,
+      amendment006Sha256: scoredCandidate.sourceHashes.amendment006Sha256,
+      amendment008Sha256: scoredCandidate.sourceHashes.amendment008Sha256,
+      identityProtocol,
+      armId: spec.armId,
+      requestClass: spec.requestClass,
+      category: spec.category,
+      package: { name: spec.packageName, version: spec.packageVersion },
+      modelId: spec.modelId,
+      network: 'loopback-only',
+      rootOperationInvocations: 1,
+      wireAttempts,
+      taxonomy,
+      allAttemptsMetered: true,
+      providerUsageAccounting: 'metered-complete-or-fail-closed',
+      modelEndpointPinned: true,
+      harnessOperationReruns: 0
+    })}\n`;
+    await writeFile(path.join(scoredGateDirectory, reportName), reportText, 'utf8');
+    nativeEntries.push({
+      armId: spec.armId,
+      requestClass: spec.requestClass,
+      category: spec.category,
+      package: { name: spec.packageName, version: spec.packageVersion },
+      modelId: spec.modelId,
+      outcome: 'PASS',
+      network: 'loopback-only',
+      wireRequests: wireAttempts.length,
+      allAttemptsMetered: true,
+      providerUsageAccounting: 'metered-complete-or-fail-closed',
+      modelEndpointPinned: true,
+      harnessOperationReruns: 0,
+      taxonomy,
+      probeReport: reportName,
+      probeSha256: createHash('sha256').update(reportText).digest('hex')
+    });
+  }
+  const scoredNativeAttemptEvidencePath = path.join(scoredGateDirectory, 'native-attempt-evidence.json');
+  await writeFile(scoredNativeAttemptEvidencePath, `${JSON.stringify({
+    schema: 'shadowgraph.v11.native-attempt-evidence',
+    version: 1,
+    observedAt: nativeObservedAt,
+    amendment006Sha256: scoredCandidate.sourceHashes.amendment006Sha256,
+    amendment008Sha256: scoredCandidate.sourceHashes.amendment008Sha256,
+    identityProtocol,
+    entries: nativeEntries
+  })}\n`, 'utf8');
+  const scoredProgressPath = path.join(outputDirectory, 'scored.progress.ndjson');
+  const scoredUnitEvidencePath = path.join(outputDirectory, 'scored.units.ndjson');
+  const scoredProgress = await createProgressLedger({
+    path: scoredProgressPath,
+    runId: 'run-v11-scored-connected',
+    attemptId: 'attempt-v11-scored-connected',
+    monotonicNow: () => (monotonic += 5)
+  });
+  const scoredUnitEvidence = await createUnitEvidenceLedger({
+    path: scoredUnitEvidencePath,
+    runId: 'run-v11-scored-connected',
+    attemptId: 'attempt-v11-scored-connected',
+    sensitiveValues: []
+  });
+  t.after(async () => {
+    await scoredProgress.close().catch(() => {});
+    await scoredUnitEvidence.close().catch(() => {});
+  });
+  const scoredApplicability = new Map(
+    scoredCandidate.definition.arms.map((arm) => [arm.id, arm.applicability])
+  );
+  const scoredRegistry = {
+    descriptors: scoredCandidate.definition.arms.map((arm) => {
+      const runtime = {
+        graphiti: { packageName: 'graphiti-core', version: '0.29.3' },
+        cognee: { packageName: 'cognee', version: '1.5.3' }
+      }[arm.id] ?? {};
+      return {
+        armId: arm.id,
+        kind: arm.id === 'no-memory' ? 'control' : 'node-mcp',
+        requiredService: null,
+        ...runtime
+      };
+    }),
+    verifyApplicability: () => ({ status: 'CONSISTENT', findings: [] }),
+    expectedCounts: () => ({ ...scoredCandidate.definition.expectedCounts })
+  };
+  const scoredReconciled = [];
+  const scoredDefinition = { ...scoredCandidate.definition };
+  Object.defineProperty(scoredDefinition, 'marketingThresholds', {
+    enumerable: true,
+    get() {
+      assert.equal(scoredReconciled.length, 1, 'scored aggregation must follow reconciliation');
+      return scoredCandidate.definition.marketingThresholds;
+    }
+  });
+  let scoredOutcome;
+  try {
+    scoredOutcome = await executeV11ScoredRun({
+    ...readyInput,
+    ...scoredCandidate,
+    definition: scoredDefinition,
+    registry: scoredRegistry,
+    acceptanceEligibility: outcome.acceptanceEligibility,
+    benchmarkRoot: scoredGateDirectory,
+    nativeAttemptEvidencePath,
+    verificationInstant: Date.parse('2026-09-08T10:00:00.000Z'),
+    runId: 'run-v11-scored-connected',
+    attemptId: 'attempt-v11-scored-connected',
+    providerBudget: {
+      schema: 'shadowgraph.v11.provider-budget',
+      version: 1,
+      authorizationRef: 'offline-scored-test-only',
+      runId: 'run-v11-scored-connected',
+      attemptId: 'attempt-v11-scored-connected',
+      implementationLockHash: '4'.repeat(64),
+      maxRetries: 0,
+      limits: { outer_decision_llm: 1950, internal_memory_llm: 0, embedding: 0 }
+    },
+    amendment009Path: AMENDMENT_009_PATH,
+    amendment009SidecarPath: AMENDMENT_009_SIDECAR_PATH,
+    progress: scoredProgress,
+    persistUnit: (unit) => scoredUnitEvidence.append(unit),
+    executeAdapter: async (request) => stubEnvelope(request, scoredApplicability),
+    reconcileProviderEvidence: (raw) => {
+      scoredReconciled.push(raw);
+      return cleanProviderReconciliation(raw);
+    }
+  });
+  } catch (error) {
+    assert.fail(JSON.stringify(error?.readiness?.blockers ?? { code: error?.code, message: error?.message }));
+  }
+
+  assert.equal(scoredOutcome.readiness.readiness, 'READY');
+  assert.equal(scoredOutcome.raw.mode, 'SCORED');
+  assert.equal(
+    scoredOutcome.raw.acceptanceEligibilitySha256,
+    createHash('sha256').update(canonicalJson(outcome.acceptanceEligibility)).digest('hex')
+  );
+  assert.equal(scoredOutcome.raw.units.length, 2310);
+  assert.equal(scoredOutcome.raw.units.filter(({ status }) => status === 'MEASURED').length, 2160);
+  assert.equal(scoredOutcome.raw.units.filter(({ status }) => status === 'EXCLUDED').length, 150);
+  assert.equal(scoredOutcome.validation.valid, true);
+  assert.equal(scoredOutcome.providerEvidence.status, 'RECONCILED');
+  assert.equal(scoredReconciled.length, 1);
+  assert.equal(scoredReconciled[0], scoredOutcome.raw);
+  assert.equal(scoredOutcome.aggregate.mode, 'SCORED');
+  assert.equal(scoredOutcome.aggregate.armResults.length, 7);
+  assert.equal(scoredOutcome.aggregate.bestClaimAllowed, false);
+  const reportProviderEvidence = {
+    ...scoredOutcome.providerEvidence,
+    events: scoredOutcome.raw.units
+      .filter(({ providerUsage }) => providerUsage !== null)
+      .map((unit, index) => ({
+        requestNumber: index + 1,
+        requestClass: 'outer_decision_llm',
+        outcome: 'SUCCEEDED',
+        providerModel: unit.providerModel,
+        latencyMs: 1,
+        usage: structuredClone(unit.providerUsage),
+        correlation: {
+          runId: unit.runId,
+          attemptId: unit.attemptId,
+          armId: unit.armId,
+          scenarioId: unit.scenarioId,
+          repetition: unit.repetition,
+          phase: unit.phase
+        }
+      }))
+  };
+  const finalReport = buildV11FinalReport({
+    raw: scoredOutcome.raw,
+    aggregate: scoredOutcome.aggregate,
+    providerReconciliation: reportProviderEvidence,
+    scenarios: scoredCandidate.scenarios,
+    amendment: JSON.parse(await readFile(AMENDMENT_009_PATH, 'utf8'))
+  });
+  assert.equal(finalReport.validity.length, 7);
+  assert.ok(finalReport.metrics.every(({ numerator, denominator, validSampleCount }) => (
+    Number.isFinite(numerator) && denominator > 0 && validSampleCount > 0
+  )));
+  assert.ok(finalReport.pairwise.some(({ candidate, comparator }) => (
+    candidate === 'shadowgraph-full' && comparator === 'no-memory'
+  )));
+  assert.equal(finalReport.pairwise.length, 192);
+  assert.ok(finalReport.pairwise.every(({ comparabilityStatus, confidenceInterval }) => (
+    comparabilityStatus === 'VALIDLY_COMPARABLE'
+      ? Array.isArray(confidenceInterval) && confidenceInterval.length === 2
+      : confidenceInterval === null
+  )));
+  assert.equal(
+    finalReport.fullCompactEquivalence.functionallyEquivalent,
+    true,
+    JSON.stringify({
+      equivalence: finalReport.fullCompactEquivalence,
+      nonTies: finalReport.pairwise.filter((row) => row.candidate === 'shadowgraph-full'
+        && row.comparator === 'shadowgraph-compact' && row.tieClassification !== 'TIE')
+    })
+  );
+  assert.equal(finalReport.economics.length, 7);
+  assert.equal(finalReport.failures.length, 0);
+  assert.equal(finalReport.methodology.bootstrap.replicates, 10000);
+  const scoredRawPath = path.join(outputDirectory, 'cli-v11-scored-raw.json');
+  const scoredAggregatePath = path.join(outputDirectory, 'cli-v11-scored-aggregate.json');
+  const scoredProviderPath = path.join(outputDirectory, 'cli-v11-scored-provider-reconciliation.json');
+  const refusedAggregatePath = path.join(outputDirectory, 'cli-v11-scored-refused-aggregate.json');
+  await writeFile(scoredRawPath, `${JSON.stringify(scoredOutcome.raw)}\n`, 'utf8');
+  await writeFile(scoredProviderPath, `${JSON.stringify(reportProviderEvidence)}\n`, 'utf8');
+  const cliScoredValidation = await runCli(['validate', '--input', scoredRawPath]);
+  assert.equal(cliScoredValidation.code, 0, `${cliScoredValidation.stderr}\n${cliScoredValidation.stdout}`);
+  assert.equal(JSON.parse(cliScoredValidation.stdout).valid, true);
+  const refusedAggregate = await runCli([
+    'aggregate', '--input', scoredRawPath, '--output', refusedAggregatePath
+  ]);
+  assert.equal(refusedAggregate.code, 1);
+  await assert.rejects(readFile(refusedAggregatePath), { code: 'ENOENT' });
+  const selfAssertedAggregate = await runCli([
+    'aggregate', '--input', scoredRawPath, '--output', scoredAggregatePath,
+    '--provider-reconciliation', scoredProviderPath
+  ]);
+  assert.equal(selfAssertedAggregate.code, 1);
+  await assert.rejects(readFile(scoredAggregatePath), { code: 'ENOENT' });
+  const finalReportDirectory = path.join(outputDirectory, 'final-report');
+  const selfAssertedReport = await runCli([
+    'v11-final-report',
+    '--raw', scoredRawPath,
+    '--aggregate', path.join(outputDirectory, 'missing-scored-aggregate.json'),
+    '--provider-reconciliation', scoredProviderPath,
+    '--out', finalReportDirectory
+  ]);
+  assert.equal(selfAssertedReport.code, 1);
+  await assert.rejects(readdir(finalReportDirectory), { code: 'ENOENT' });
+  const acceptedRawBeforeOverwriteProbe = await readFile(acceptedRawPath, 'utf8');
+  const overwriteProbe = await runCli(['aggregate', '--input', acceptedRawPath, '--output', acceptedRawPath]);
+  assert.equal(overwriteProbe.code, 1);
+  assert.equal(await readFile(acceptedRawPath, 'utf8'), acceptedRawBeforeOverwriteProbe);
+  const scoredProgressLines = (await readFile(scoredProgressPath, 'utf8')).trim().split('\n');
+  assert.equal(scoredProgressLines.filter((line) => JSON.parse(line).event === 'checkpoint').length, 2310);
 });
 
 function stubDecision(phase, namespace) {
@@ -985,7 +1727,9 @@ function evidenceChecks(name) {
   if (name === 'neo4j') {
     checks.push(
       { kind: 'http-status', endpoint: 'http://127.0.0.1:7474/', observedAt: EVIDENCE_OBSERVED_AT, outcome: 'PASS', detail: 'HTTP 200' },
-      { kind: 'cypher-statement', endpoint: 'http://127.0.0.1:7474/db/neo4j/tx/commit', observedAt: EVIDENCE_OBSERVED_AT, outcome: 'PASS', detail: 'RETURN 1 AS ok' }
+      { kind: 'cypher-statement', endpoint: 'http://127.0.0.1:7474/db/neo4j/tx/commit', observedAt: EVIDENCE_OBSERVED_AT, outcome: 'PASS', detail: 'RETURN 1 AS ok' },
+      { kind: 'bolt-connect', endpoint: 'bolt://127.0.0.1:7687', observedAt: EVIDENCE_OBSERVED_AT, outcome: 'PASS', detail: 'TCP CONNECT' },
+      { kind: 'authentication-posture', endpoint: serviceContainerReference(name), observedAt: EVIDENCE_OBSERVED_AT, outcome: 'PASS', detail: 'NEO4J_AUTH=none' }
     );
     return checks;
   }
@@ -1263,6 +2007,9 @@ test('preflight and run answer readiness identically when evidence is presented'
     'CAMPAIGN_CONFIGURATION_REQUIRED',
     'PROVIDER_BUDGET_REQUIRED',
     'DECLARED_ISOLATION_PRECONDITION_UNMET',
+    'SERVICE_LIVE_ATTESTATION_REQUIRED',
+    'NATIVE_ATTEMPT_EVIDENCE_REQUIRED',
+    'NATIVE_ATTEMPT_EVIDENCE_REQUIRED',
     'NATIVE_ATTEMPT_EVIDENCE_REQUIRED',
     'NATIVE_ATTEMPT_EVIDENCE_REQUIRED'
   ]);

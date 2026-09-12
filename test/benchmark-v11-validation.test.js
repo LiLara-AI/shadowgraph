@@ -295,6 +295,15 @@ function unit({ arm, phase, status = 'MEASURED', failure = null }) {
     evidence.reset = recordedAdapterEvidence({ arm, phase, namespace: primaryNamespace(arm) });
   } else if (!isExcluded) {
     const failureOperation = isFailed ? failure.operation : null;
+    const isolationNamespace = alternateNamespace(arm, phase);
+    if (isolationNamespace !== null) {
+      evidence.reset = recordedAdapterEvidence({
+        arm,
+        phase,
+        namespace: isolationNamespace
+      });
+      addOperationCounts(operationTotals, evidence.reset.operations);
+    }
     const retrieveStatus = failureOperation === 'retrieve' ? 'FAILED' : 'SUCCEEDED';
     evidence.retrieve = recordedAdapterEvidence({
       arm,
@@ -881,6 +890,31 @@ test('schema v2 validation accepts repeated model decision ids only with distinc
   assert.doesNotThrow(() => validateRawRun(raw, preregistration([arm]), PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES));
 });
 
+test('schema v2 validation rejects a MEASURED D_FALSE unit with a null prediction', () => {
+  const arm = { id: 'arm-null-d-false', name: 'Null D_FALSE arm', applicability: applicability() };
+  const raw = rawRun({ armDefinitions: [arm] });
+  const probe = raw.units.find((item) => item.phase === 'D_FALSE_0');
+  probe.decisionResponse.changedFactDetected = null;
+
+  assert.throws(
+    () => validateRawRun(raw, preregistration([arm]), PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
+    /D_FALSE.*boolean/iu
+  );
+});
+
+test('schema v2 validation rejects MEASURED provider input usage above 8192', () => {
+  const arm = { id: 'arm-input-limit', name: 'Input limit arm', applicability: applicability() };
+  const raw = rawRun({ armDefinitions: [arm] });
+  const unit = raw.units.find((item) => item.phase === 'B');
+  unit.providerUsage.prompt_tokens = 8193;
+  unit.providerUsage.total_tokens = 8195;
+
+  assert.throws(
+    () => validateRawRun(raw, preregistration([arm]), PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
+    /input usage exceeds the frozen maximum/iu
+  );
+});
+
 test('schema v2 validation forbids invented evidence for persistence N/A and excluded user isolation', () => {
   const arm = {
     id: 'no-memory',
@@ -1079,21 +1113,18 @@ test('schema v2 aggregation excludes partial arms while harness-owned N/A stays 
     );
   }
 
-  // The reader refuses SCORED, symmetric to the producer refusing to emit it.
-  // aggregateV11Run validates first, so one refusal covers both entry points -
-  // which also means the scored aggregation path (rankEligibleArms,
-  // bestClaimAllowed, allowedMarketingText) is unreachable and therefore
-  // untested while the candidate is in this state. That is a real coverage
-  // loss, recorded here rather than papered over: tests passing against a path
-  // the code refuses would imply a capability the candidate does not have.
+  // Merely relabelling an acceptance artifact as SCORED cannot authorize it.
+  // The reader rejects the missing raw authority field, while aggregation first
+  // rejects the missing ninth trusted source hash. The fully Amendment-009-bound
+  // scored path is exercised by the 2310-unit run composition test.
   const scoredRaw = { ...structuredClone(raw), mode: 'SCORED' };
   assert.throws(
     () => validateRawRun(scoredRaw, document, PREREGISTRATION_SHA, TRUSTED_SOURCE_HASHES),
-    /may not produce or accept a scored run/iu
+    /missing required field amendment009Sha256/iu
   );
   assert.throws(
     () => aggregateRun(scoredRaw, document, aggregationOptions()),
-    /may not produce or accept a scored run/iu
+    /SCORED aggregation requires providerReconciliation/iu
   );
 });
 

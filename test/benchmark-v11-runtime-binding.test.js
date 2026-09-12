@@ -283,7 +283,7 @@ async function harness(t, overrides = {}) {
     repositoryRoot: directory,
     benchmarkRoot: path.join(directory, 'benchmark'),
     competitorLock: { pythonImage: IMAGE },
-    definition: { commonExecution: { randomSeeds: [11, 22] } },
+    definition: { scored: false, commonExecution: { randomSeeds: [11, 22] } },
     nativeAttemptPolicy: NATIVE_ATTEMPT_POLICY,
     registry: { descriptorFor: () => ({}) },
     runId: 'run-binding-1',
@@ -515,6 +515,50 @@ test('the acceptance binding reserves against its persistent campaign before dis
   assert.deepEqual(calls.at(-1), ['close']);
 });
 
+test('the scored binding records a scored campaign session before dispatch', async (t) => {
+  const h = await harness(t);
+  h.input.definition = { ...h.input.definition, scored: true, finalProfile: true };
+  h.input.campaign = { root: path.join(h.directory, 'scored-campaign'), policy: {
+    campaignId: 'shadowgraph-v11-final-program', implementationLockHash: IMPLEMENTATION_LOCK_HASH,
+    maxRequests: 1, maxSessions: 1, maxRecoveryAttempts: 0,
+    deadline: '2026-09-25T23:37:31.000Z',
+    limits: { outer_decision_llm: 1, internal_memory_llm: 0, embedding: 0 },
+    sessionLimits: { probe: 0, acceptance: 0, scored: 1 },
+    campaignRegistryPath: path.join(h.directory, 'scored-campaign-claim.json'),
+    continuityRegistryPath: path.join(h.directory, 'scored-campaign-continuity.ndjson')
+  } };
+  const calls = [];
+  const order = [];
+  h.injections.openCampaignBudget = async (root, policy) => {
+    order.push('campaign-open');
+    calls.push(['open', root, policy]);
+    return {
+      beginSession: async (...args) => { order.push('session'); calls.push(['session', ...args]); },
+      reserve: async () => ({ reservationId: 'offline-scored-only:1' }),
+      close: async () => calls.push(['close'])
+    };
+  };
+  for (const name of ['observeEnvironment', 'mkdir', 'startProviderMeter']) {
+    const original = h.injections[name];
+    h.injections[name] = async (...args) => {
+      order.push(name);
+      return await original(...args);
+    };
+  }
+
+  const bound = await bindV11Runtime(h.input, h.injections);
+  await bound.close();
+
+  assert.deepEqual(calls[1], [
+    'session',
+    h.input.attemptId,
+    { kind: 'scored', runId: h.input.runId, attemptId: h.input.attemptId }
+  ]);
+  assert.ok(order.indexOf('session') < order.indexOf('observeEnvironment'));
+  assert.ok(order.indexOf('session') < order.indexOf('mkdir'));
+  assert.ok(order.indexOf('session') < order.indexOf('startProviderMeter'));
+});
+
 test('a budget for different implementation bytes refuses before environment or file creation', async (t) => {
   const h = await harness(t);
   h.input.providerBudget.implementationLockHash = 'f'.repeat(64);
@@ -522,6 +566,31 @@ test('a budget for different implementation bytes refuses before environment or 
   assert.equal(h.trace.includes('observe-environment'), false);
   assert.deepEqual(h.seen.created, []);
   assert.deepEqual(h.meterConfig, []);
+});
+
+test('an expired campaign refuses before environment, directories, campaign state, or meter effects', async (t) => {
+  const h = await harness(t);
+  h.input.campaign = { root: path.join(h.directory, 'expired-campaign'), policy: {
+    campaignId: 'expired-offline-only', implementationLockHash: IMPLEMENTATION_LOCK_HASH,
+    maxRequests: 1, maxSessions: 1, maxRecoveryAttempts: 0,
+    deadline: '2020-01-01T00:00:00.000Z',
+    limits: { outer_decision_llm: 1, internal_memory_llm: 0, embedding: 0 }
+  } };
+  const campaignCalls = [];
+  h.injections.now = () => '2026-09-12T00:00:00.000Z';
+  h.injections.openCampaignBudget = async (...args) => {
+    campaignCalls.push(['open', ...args]);
+    throw new Error('expired campaign reached open');
+  };
+
+  await assert.rejects(
+    bindV11Runtime(h.input, h.injections),
+    (error) => error?.code === 'CAMPAIGN_EXPIRED'
+  );
+  assert.equal(h.trace.includes('observe-environment'), false);
+  assert.deepEqual(h.seen.created, []);
+  assert.deepEqual(h.meterConfig, []);
+  assert.deepEqual(campaignCalls, []);
 });
 
 test('an invalid campaign lineage refuses before runtime directories or campaign persistence', async (t) => {

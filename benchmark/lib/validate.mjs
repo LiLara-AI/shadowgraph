@@ -35,6 +35,16 @@ const V11_RAW_FIELDS = [
   'implementationLockHash', 'environmentLockHash', 'startedAt', 'finishedAt',
   'zeroResult', 'outerPromptBinding', 'arms', 'units'
 ];
+const V11_FINAL_RAW_FIELDS = [
+  ...V11_RAW_FIELDS.slice(0, 15),
+  'amendment009Sha256',
+  ...V11_RAW_FIELDS.slice(15)
+];
+const V11_SCORED_RAW_FIELDS = [
+  ...V11_FINAL_RAW_FIELDS.slice(0, 16),
+  'acceptanceEligibilitySha256',
+  ...V11_FINAL_RAW_FIELDS.slice(16)
+];
 const V11_ARM_FIELDS = ['armId', 'name', 'status', 'applicability'];
 const V11_UNIT_FIELDS = [
   'schemaVersion', 'unitId', 'runId', 'attemptId', 'armId', 'scenarioId',
@@ -225,7 +235,7 @@ function expectedAlternateNamespace(unit, scenario) {
 }
 
 function expectedEvidenceNamespace(unit, scenario, evidenceKey) {
-  if (evidenceKey === 'retrieve') {
+  if (evidenceKey === 'retrieve' || evidenceKey === 'reset') {
     return expectedAlternateNamespace(unit, scenario) ?? primaryNamespace(unit, scenario);
   }
   return primaryNamespace(unit, scenario);
@@ -248,7 +258,7 @@ function validateRecordedEvidenceBindings(unit, scenario, context) {
     if (evidence === null) continue;
     const expectedNamespace = expectedEvidenceNamespace(unit, scenario, evidenceKey);
     if (evidence.namespaceRef !== namespaceEvidenceRef(unit, expectedNamespace)) {
-      const kind = evidenceKey === 'retrieve' && alternate !== null ? 'alternate' : 'primary';
+      const kind = ['retrieve', 'reset'].includes(evidenceKey) && alternate !== null ? 'alternate' : 'primary';
       throw new Error(`${context}.adapterEvidence.${evidenceKey} must use the exact ${kind} namespace reference`);
     }
     if (evidenceKey !== 'retrieve' && evidence.nativeContextCount !== 0) {
@@ -282,8 +292,16 @@ function validateMeasuredAdapterEvidence(unit, scenario, raw, context) {
     return;
   }
 
-  if (unit.adapterEvidence.reset !== null) {
-    throw new Error(`${context} decision unit contains unexpected reset evidence`);
+  const alternate = expectedAlternateNamespace(unit, scenario);
+  if (alternate === null) {
+    if (unit.adapterEvidence.reset !== null) {
+      throw new Error(`${context} non-isolation decision unit contains unexpected reset evidence`);
+    }
+  } else {
+    const reset = requiredAdapterEvidence(unit, 'reset', 'SUCCEEDED', context);
+    if (reset.persistenceEvidence !== null || reset.isolationEvidence !== null) {
+      throw new Error(`${context} isolation reset must not contain verification claims`);
+    }
   }
   const retrieve = requiredAdapterEvidence(unit, 'retrieve', 'SUCCEEDED', context);
   if (retrieve.persistenceEvidence !== null || retrieve.isolationEvidence !== null) {
@@ -619,6 +637,14 @@ function validateV11Unit(unit, raw, preregistration, armsById, seenUnitIds) {
     if (unit.phase !== 'RESET' && unit.decisionResponse === null) {
       throw new Error(`${context} MEASURED decision unit requires a decision response`);
     }
+    if (unit.phase.startsWith('D_FALSE_')
+      && typeof unit.decisionResponse?.changedFactDetected !== 'boolean') {
+      throw new Error(`${context} MEASURED D_FALSE unit requires a boolean changedFactDetected prediction`);
+    }
+    const reportedInputTokens = unit.providerUsage?.prompt_tokens ?? unit.providerUsage?.inputTokens;
+    if (Number.isFinite(reportedInputTokens) && reportedInputTokens > 8192) {
+      throw new Error(`${context} MEASURED provider input usage exceeds the frozen maximum`);
+    }
     validateIsolationPhaseABinding(unit, raw, context);
     validateMeasuredAdapterEvidence(unit, scenario, raw, context);
   }
@@ -715,12 +741,13 @@ function validateV11SourceHashes(raw, expectedSourceHashes) {
     'amendment004Sha256',
     'amendment005Sha256',
     'amendment006Sha256',
-    'amendment008Sha256'
+    'amendment008Sha256',
+    ...(Object.hasOwn(raw, 'amendment009Sha256') ? ['amendment009Sha256'] : [])
   ];
   if (!isPlainObject(expectedSourceHashes)
     || Object.keys(expectedSourceHashes).length !== fields.length
     || fields.some((field) => !Object.hasOwn(expectedSourceHashes, field))) {
-    throw new Error('v1.1 raw run requires exactly eight trusted source hashes');
+    throw new Error(`v1.1 ${raw.mode} raw run requires exactly ${fields.length} trusted source hashes`);
   }
   for (const field of fields) {
     assertHash(expectedSourceHashes[field], `trusted v1.1 source hash.${field}`);
@@ -731,22 +758,15 @@ function validateV11SourceHashes(raw, expectedSourceHashes) {
 }
 
 export function validateV11RawRun(raw, preregistration, expectedSha256, expectedSourceHashes) {
-  assertExactFields(raw, V11_RAW_FIELDS, 'v1.1 raw run');
+  const finalProfile = Object.hasOwn(raw ?? {}, 'amendment009Sha256');
+  const rawFields = raw?.mode === 'SCORED'
+    ? V11_SCORED_RAW_FIELDS
+    : finalProfile ? V11_FINAL_RAW_FIELDS : V11_RAW_FIELDS;
+  assertExactFields(raw, rawFields, 'v1.1 raw run');
   if (raw.schemaVersion !== 2 || raw.benchmarkVersion !== '1.1') {
     throw new Error('v1.1 raw run requires schemaVersion 2 and benchmarkVersion 1.1');
   }
   if (!['SCORED', 'ACCEPTANCE'].includes(raw.mode)) throw new Error(`Invalid v1.1 run mode ${raw.mode}`);
-  // The producer refuses to emit a scored run; the reader must refuse to
-  // accept one, or the invariant holds on only one side. A hand-authored
-  // artifact declaring SCORED used to validate as valid:true and aggregate into
-  // rank-eligibility and marketing fields - and `benchmark/cli.mjs validate`
-  // reads from disk, so a reviewer pointed at one would have been told it was
-  // valid for a mode this candidate may not produce. The mode stays in the
-  // schema because the schema outlives this candidate's state; what changes is
-  // that no artifact carrying it is accepted while that state holds.
-  if (raw.mode === 'SCORED') {
-    throw new Error('This candidate may not produce or accept a scored run');
-  }
   if (raw.mode === 'ACCEPTANCE') assertAcceptanceFieldsAbsent(raw);
   if (!['COMPLETE', 'INTERRUPTED'].includes(raw.status)) throw new Error(`Invalid v1.1 run status ${raw.status}`);
   validateOuterPromptBinding(raw.outerPromptBinding);
@@ -763,7 +783,8 @@ export function validateV11RawRun(raw, preregistration, expectedSha256, expected
   for (const field of [
     'preregistrationSha256', 'amendment001Sha256', 'amendment002Sha256',
     'amendment003Sha256', 'amendment004Sha256', 'amendment005Sha256', 'amendment006Sha256',
-    'amendment008Sha256',
+    'amendment008Sha256', ...(finalProfile ? ['amendment009Sha256'] : []),
+    ...(raw.mode === 'SCORED' ? ['acceptanceEligibilitySha256'] : []),
     'implementationLockHash', 'environmentLockHash'
   ]) assertHash(raw[field], `v1.1 raw run.${field}`);
   validateV11SourceHashes(raw, expectedSourceHashes);

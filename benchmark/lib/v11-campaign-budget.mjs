@@ -6,7 +6,7 @@ import { mkdir, open, readFile, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { canonicalJson, REQUEST_CLASSES } from './v11-contract.mjs';
 
-const SESSION_KINDS = new Set(['probe', 'acceptance']);
+const SESSION_KINDS = new Set(['probe', 'acceptance', 'scored']);
 const ROOT_OPERATIONS = new Set(['reset', 'retrieve', 'persist', 'verify', 'outer-decision']);
 const PLAN_DISPOSITIONS = new Set(['root-initial', 'data-dependent-child', 'recovery']);
 const SAFE_ID = /^[A-Za-z0-9._:-]+$/;
@@ -17,8 +17,14 @@ const CAMPAIGN_RESERVATION_ID = /^[A-Za-z0-9-]+:[1-9]\d*$/u;
 const CORE_POLICY_FIELDS = Object.freeze([
   'campaignId', 'deadline', 'limits', 'maxRequests', 'maxSessions', 'maxRecoveryAttempts', 'implementationLockHash'
 ]);
+const FINAL_POLICY_FIELDS = Object.freeze([
+  ...CORE_POLICY_FIELDS, 'sessionLimits', 'campaignRegistryPath', 'continuityRegistryPath'
+]);
 const SUCCESSOR_POLICY_FIELDS = Object.freeze([
   ...CORE_POLICY_FIELDS, 'campaignLineageId', 'continuation'
+]);
+const FINAL_SUCCESSOR_POLICY_FIELDS = Object.freeze([
+  ...SUCCESSOR_POLICY_FIELDS, 'sessionLimits'
 ]);
 const CONTINUATION_FIELDS = Object.freeze([
   'predecessorLedgerPath', 'predecessorLedgerSha256',
@@ -98,6 +104,48 @@ function sha256Text(value) {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
+function campaignGenesisClaim(policy, root) {
+  return {
+    event: 'campaign-genesis-claim',
+    campaignId: policy.campaignId,
+    policySha256: sha256Text(canonicalJson(policy)),
+    campaignRoot: path.resolve(root),
+    continuityRegistryPath: policy.continuityRegistryPath
+  };
+}
+
+async function claimCampaignGenesis(policy, root) {
+  if (!Object.hasOwn(policy, 'campaignRegistryPath')) return;
+  const expected = campaignGenesisClaim(policy, root);
+  let file;
+  try {
+    file = await open(policy.campaignRegistryPath, 'wx', 0o600);
+  } catch (error) {
+    if (error?.code !== 'EEXIST') throw error;
+    let existing;
+    try { existing = JSON.parse(await readFile(policy.campaignRegistryPath, 'utf8')); }
+    catch { throw new Error('Campaign genesis claim is unreadable'); }
+    if (canonicalJson(existing) !== canonicalJson(expected)) {
+      throw new Error('Campaign id is already claimed by another physical root');
+    }
+    return;
+  }
+  try {
+    await file.writeFile(`${JSON.stringify(expected)}\n`);
+    await file.sync();
+  } finally { await file.close(); }
+}
+
+async function verifyCampaignGenesis(policy, root) {
+  if (!Object.hasOwn(policy, 'campaignRegistryPath')) return;
+  let existing;
+  try { existing = JSON.parse(await readFile(policy.campaignRegistryPath, 'utf8')); }
+  catch { throw new Error('Campaign genesis claim is unreadable'); }
+  if (canonicalJson(existing) !== canonicalJson(campaignGenesisClaim(policy, root))) {
+    throw new Error('Campaign genesis claim is absent or mismatched');
+  }
+}
+
 /** The stable receipt namespace; legacy genesis policies use campaignId. */
 function campaignLineageId(policy) {
   return policy.campaignLineageId ?? policy.campaignId;
@@ -107,7 +155,10 @@ export function validateCampaignPolicy(policy) {
   const fields = isPlainRecord(policy) ? Object.keys(policy).sort().join() : '';
   const legacy = fields === [...CORE_POLICY_FIELDS].sort().join();
   const successor = fields === [...SUCCESSOR_POLICY_FIELDS].sort().join();
-  const invalidSuccessor = successor && (
+  const finalGenesis = fields === [...FINAL_POLICY_FIELDS].sort().join();
+  const finalSuccessor = fields === [...FINAL_SUCCESSOR_POLICY_FIELDS].sort().join();
+  const finalPolicy = finalGenesis || finalSuccessor;
+  const invalidSuccessor = (successor || finalSuccessor) && (
     !CAMPAIGN_ID.test(policy.campaignLineageId)
     || !exactKeys(policy.continuation, CONTINUATION_FIELDS)
     || !safeAbsolutePath(policy.continuation.predecessorLedgerPath)
@@ -118,7 +169,7 @@ export function validateCampaignPolicy(policy) {
     || !SHA256.test(policy.continuation.continuityRegistryGenesisSha256)
     || !SAFE_ID.test(policy.continuation.registryClaimId)
   );
-  if ((!legacy && !successor)
+  if ((!legacy && !successor && !finalPolicy)
     || typeof policy?.implementationLockHash !== 'string' || !SHA256.test(policy.implementationLockHash)
     || typeof policy.campaignId !== 'string' || !CAMPAIGN_ID.test(policy.campaignId)
     || !Number.isSafeInteger(policy.maxRequests) || policy.maxRequests < 1
@@ -128,6 +179,16 @@ export function validateCampaignPolicy(policy) {
     || new Date(policy.deadline).toISOString() !== policy.deadline
     || !isPlainRecord(policy.limits) || Object.keys(policy.limits).sort().join() !== [...REQUEST_CLASSES].sort().join()
     || REQUEST_CLASSES.some((key) => !Number.isSafeInteger(policy.limits[key]) || policy.limits[key] < 0)
+    || (finalPolicy && (
+      !exactKeys(policy.sessionLimits, [...SESSION_KINDS])
+      || [...SESSION_KINDS].some((kind) => !Number.isSafeInteger(policy.sessionLimits[kind]) || policy.sessionLimits[kind] < 0)
+      || [...SESSION_KINDS].reduce((sum, kind) => sum + policy.sessionLimits[kind], 0) !== policy.maxSessions
+    ))
+    || (finalGenesis && (
+      !safeAbsolutePath(policy.campaignRegistryPath)
+      || !safeAbsolutePath(policy.continuityRegistryPath)
+      || policy.campaignRegistryPath === policy.continuityRegistryPath
+    ))
     || invalidSuccessor) {
     throw new Error('Invalid campaign policy');
   }
@@ -136,7 +197,7 @@ export function validateCampaignPolicy(policy) {
 
 export function assertRestrictedCampaignExecutionPolicy(policy) {
   const validated = validateCampaignPolicy(policy);
-  if (Object.hasOwn(validated, 'continuation')) {
+  if (Object.hasOwn(validated, 'continuation') && !Object.hasOwn(validated, 'sessionLimits')) {
     throw new Error('Campaign continuation is unsupported in restricted execution mode');
   }
   return validated;
@@ -176,6 +237,16 @@ function assertCampaignStateWithinPolicy(state, policy) {
     || REQUEST_CLASSES.some((key) => state.counts[key] > policy.limits[key])) {
     throw new Error('Campaign evidence exceeds policy');
   }
+  if (Object.hasOwn(policy, 'sessionLimits')) {
+    const counts = Object.fromEntries([...SESSION_KINDS].map((kind) => [kind, 0]));
+    for (const metadata of state.sessions.values()) {
+      if (metadata === null) throw new Error('Final campaign session metadata is missing');
+      counts[metadata.kind] += 1;
+    }
+    if ([...SESSION_KINDS].some((kind) => counts[kind] > policy.sessionLimits[kind])) {
+      throw new Error('Campaign evidence exceeds session-kind ceiling');
+    }
+  }
 }
 
 function assertContinuationDoesNotRelax(successor, predecessor) {
@@ -185,6 +256,15 @@ function assertContinuationDoesNotRelax(successor, predecessor) {
     || Date.parse(successor.deadline) > Date.parse(predecessor.deadline)
     || REQUEST_CLASSES.some((key) => successor.limits[key] > predecessor.limits[key])) {
     throw new Error('Campaign continuation relaxes predecessor ceilings');
+  }
+  if (Object.hasOwn(successor, 'sessionLimits') !== Object.hasOwn(predecessor, 'sessionLimits')
+    || (Object.hasOwn(successor, 'sessionLimits')
+      && [...SESSION_KINDS].some((kind) => successor.sessionLimits[kind] > predecessor.sessionLimits[kind]))) {
+    throw new Error('Campaign continuation relaxes predecessor session-kind ceilings');
+  }
+  if (Object.hasOwn(successor, 'sessionLimits')
+    && successor.continuation.continuityRegistryPath !== predecessor.continuityRegistryPath) {
+    throw new Error('Campaign continuation does not use the predecessor-anchored registry');
   }
 }
 
@@ -200,10 +280,15 @@ function campaignRows(text) {
 }
 
 function inheritedSnapshot(state) {
+  const sessionCounts = Object.fromEntries([...SESSION_KINDS].map((kind) => [kind, 0]));
+  for (const metadata of state.sessions.values()) {
+    if (metadata !== null) sessionCounts[metadata.kind] += 1;
+  }
   return {
     total: state.total,
     recoveries: state.recoveries,
     sessions: state.sessions.size,
+    sessionCounts,
     counts: { ...state.counts }
   };
 }
@@ -330,12 +415,13 @@ function replayCampaignLedger({ text, policy, inherited }) {
         const expectedFields = metadata === null
           ? ['event', 'id', 'recovery']
           : ['event', 'id', 'recovery', 'kind', 'runId', 'attemptId'];
-        if (!isNonEmptyString(row.id) || !SAFE_ID.test(row.id) || state.sessions.has(row.id)
+        if ((Object.hasOwn(policy, 'sessionLimits') && metadata === null)
+          || !isNonEmptyString(row.id) || !SAFE_ID.test(row.id) || state.sessions.has(row.id)
           || typeof row.recovery !== 'boolean'
           || Object.keys(row).sort().join() !== expectedFields.sort().join()) {
           throw new Error('invalid session');
         }
-        state.sessions.set(row.id, metadata);
+        state.sessions.set(row.id, metadata === null ? null : Object.freeze({ ...metadata, campaignId: policy.campaignId }));
         if (row.recovery) state.recoveries += 1;
         continue;
       }
@@ -527,6 +613,7 @@ export async function createCampaignBudget(root, input) {
     ? await inheritedCampaignState(policy, { seenLedgerPaths: new Set([path.resolve(ledgerPath)]) })
     : null;
   if (inherited !== null) await claimCampaignContinuation(policy, root);
+  else await claimCampaignGenesis(policy, root);
   await mkdir(root, { recursive: false, mode: 0o700 }); // parent must already exist
   let file;
   try { file = await open(ledgerPath, 'wx', 0o600); }
@@ -553,6 +640,7 @@ export async function openCampaignBudget(root, input, expected = {}) {
     seenLedgerPaths: new Set([path.resolve(ledgerPath)])
   });
   if (Object.hasOwn(policy, 'continuation')) await verifyCampaignContinuationClaim(policy, root);
+  else await verifyCampaignGenesis(policy, root);
   if (expected.implementationLockHash !== undefined && expected.implementationLockHash !== policy.implementationLockHash) {
     throw new Error('Campaign policy was issued for a different official implementation lock');
   }
@@ -595,10 +683,23 @@ export async function openCampaignBudget(root, input, expected = {}) {
           const metadata = sessionMetadata({ kind, runId, attemptId });
           if (Date.now() >= Date.parse(policy.deadline)) throw new Error('Campaign expired');
           if (typeof id !== 'string' || !/^[A-Za-z0-9._:-]+$/.test(id) || sessions.has(id) || sessions.size >= policy.maxSessions) throw new Error('Campaign session refused');
+          if (Object.hasOwn(policy, 'sessionLimits')) {
+            if (metadata === null) throw new Error('Campaign session context refused');
+            if (metadata.kind === 'acceptance'
+              && [...sessions.values()].some((value) => value?.kind === 'acceptance'
+                && value.campaignId === policy.campaignId)) {
+              throw new Error('Campaign acceptance session already consumed for this candidate');
+            }
+            const usedForKind = [...sessions.values()].filter((value) => value?.kind === metadata.kind).length;
+            if (usedForKind >= policy.sessionLimits[metadata.kind]) {
+              throw new Error('Campaign session kind reached its ceiling');
+            }
+          }
           if (typeof recovery !== 'boolean' || (recovery && recoveries >= policy.maxRecoveryAttempts)) throw new Error('Campaign recovery refused');
           await append({ event: 'session', id, recovery, ...(metadata ?? {}) });
           if (recovery) recoveries += 1;
-          sessions.set(id, metadata); currentSession = Object.freeze({ id, metadata });
+          const storedMetadata = metadata === null ? null : Object.freeze({ ...metadata, campaignId: policy.campaignId });
+          sessions.set(id, storedMetadata); currentSession = Object.freeze({ id, metadata: storedMetadata });
         });
       },
       reserve(input) {

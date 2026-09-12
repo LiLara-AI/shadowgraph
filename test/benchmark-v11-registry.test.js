@@ -9,6 +9,7 @@ import {
   V11_ARM_IDS,
   createV11Registry
 } from '../benchmark/lib/v11-registry.mjs';
+import { parseServiceManifestDocument } from '../benchmark/lib/implementation-lock.mjs';
 
 const IMAGE = 'python@sha256:47ae396f09c1303b8653019811a8498470603d7ffefc29cb07c88f1f8cb3d19f';
 const PHASES = [
@@ -255,6 +256,21 @@ test('every named required service is declared by the committed service manifest
       assert.ok(declared.has(name), `${descriptor.armId} requires undeclared service ${name}`);
     }
   }
+});
+
+test('Graphiti is bound to the minimum supported Neo4j 5.26 service with an offline-verifiable OCI identity', async () => {
+  const manifest = JSON.parse(await readFile(
+    fileURLToPath(new URL('../benchmark/service-images.json', import.meta.url)),
+    'utf8'
+  ));
+  assert.doesNotThrow(() => parseServiceManifestDocument(manifest));
+  const neo4j = manifest.services.find((service) => service.name === 'neo4j');
+  assert.equal(neo4j.image, 'neo4j:5.26.0');
+  assert.equal(
+    neo4j.digest,
+    'sha256:d5e6396795ab2b813d5c6ac820ba36f129c412ea4ad982ffccab7b8f69e9e6a5'
+  );
+  assert.equal(neo4j.registryAttestation.tag, '5.26.0');
 });
 
 test('a lock that adds a service requirement without naming its services is refused', async () => {

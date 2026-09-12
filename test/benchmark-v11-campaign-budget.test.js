@@ -82,6 +82,178 @@ test('campaign reservations survive fresh sessions and count in-flight calls wit
   await next.close();
 });
 
+test('a scored campaign session is durable and remains bounded by the same session ceiling', async (t) => {
+  const root = path.join(await scratchDirectory(t, 'campaign-scored-'), 'campaign');
+  const scoredPolicy = {
+    ...policy,
+    campaignId: 'scored-offline-only',
+    maxRequests: 1,
+    maxSessions: 1,
+    limits: { outer_decision_llm: 1, internal_memory_llm: 0, embedding: 0 }
+  };
+  await createCampaignBudget(root, scoredPolicy);
+  const campaign = await openCampaignBudget(root, scoredPolicy);
+  await campaign.beginSession('scored-session-1', {
+    kind: 'scored',
+    runId: 'scored-run-1',
+    attemptId: 'scored-attempt-1'
+  });
+  const reservation = await campaign.reserve({
+    requestClass: 'outer_decision_llm',
+    runId: 'scored-run-1',
+    attemptId: 'scored-attempt-1',
+    armId: 'shadowgraph-full',
+    scenarioId: 'S01_DATABASE',
+    repetition: 0,
+    phase: 'A',
+    rootOperation: 'outer-decision',
+    rootInvocationId: 'scored-root-1',
+    plannedDispatchId: 'a'.repeat(48),
+    planSlot: 'outer:initial',
+    disposition: 'root-initial'
+  });
+  assert.match(reservation.reservationId, /^scored-offline-only:[1-9]\d*$/u);
+  await campaign.close();
+
+  const reopened = await openCampaignBudget(root, scoredPolicy);
+  await assert.rejects(
+    reopened.beginSession('scored-session-2', {
+      kind: 'scored',
+      runId: 'scored-run-2',
+      attemptId: 'scored-attempt-2'
+    }),
+    /session/iu
+  );
+  await reopened.close();
+  const rows = (await readFile(path.join(root, 'campaign.ndjson'), 'utf8'))
+    .trimEnd().split('\n').map((line) => JSON.parse(line));
+  assert.equal(rows.filter(({ event }) => event === 'session').length, 1);
+  assert.deepEqual(rows.find(({ event }) => event === 'session'), {
+    event: 'session',
+    id: 'scored-session-1',
+    recovery: false,
+    kind: 'scored',
+    runId: 'scored-run-1',
+    attemptId: 'scored-attempt-1'
+  });
+});
+
+test('final campaign policies enforce per-kind session ceilings below the total ceiling', async (t) => {
+  const directory = await scratchDirectory(t, 'campaign-kind-limits-');
+  const root = path.join(directory, 'campaign');
+  const finalPolicy = {
+    ...policy,
+    campaignId: 'final-kind-limits',
+    maxSessions: 4,
+    maxRequests: 3,
+    limits: { outer_decision_llm: 1, internal_memory_llm: 1, embedding: 1 },
+    sessionLimits: { probe: 1, acceptance: 2, scored: 1 },
+    campaignRegistryPath: path.join(directory, 'final-kind-limits.claim.json'),
+    continuityRegistryPath: path.join(directory, 'final-kind-limits.continuity.ndjson')
+  };
+  await createCampaignBudget(root, finalPolicy);
+  const campaign = await openCampaignBudget(root, finalPolicy);
+  await campaign.beginSession('probe-1', { kind: 'probe', runId: 'probe-1', attemptId: 'probe-1-a1' });
+  await campaign.beginSession('acceptance-1', { kind: 'acceptance', runId: 'acceptance-1', attemptId: 'acceptance-1-a1' });
+  await assert.rejects(
+    campaign.beginSession('acceptance-2', { kind: 'acceptance', runId: 'acceptance-2', attemptId: 'acceptance-2-a1' }),
+    /acceptance session.*already consumed/iu
+  );
+  await campaign.beginSession('scored-1', { kind: 'scored', runId: 'scored-1', attemptId: 'scored-1-a1' });
+  await assert.rejects(
+    campaign.beginSession('scored-2', { kind: 'scored', runId: 'scored-2', attemptId: 'scored-2-a1' }),
+    /session kind.*ceiling/iu
+  );
+  await campaign.close();
+});
+
+test('a final campaign id cannot be recreated under a second physical root', async (t) => {
+  const directory = await scratchDirectory(t, 'campaign-genesis-claim-');
+  const finalPolicy = {
+    ...policy,
+    campaignId: 'one-global-campaign',
+    sessionLimits: { probe: 0, acceptance: 1, scored: 1 },
+    campaignRegistryPath: path.join(directory, 'one-global-campaign.claim.json'),
+    continuityRegistryPath: path.join(directory, 'one-global-campaign.continuity.ndjson')
+  };
+  const first = path.join(directory, 'first');
+  const second = path.join(directory, 'second');
+  await createCampaignBudget(first, finalPolicy);
+  await assert.rejects(createCampaignBudget(second, finalPolicy), /campaign id.*already claimed/iu);
+  await assert.rejects(import('node:fs/promises').then(({ lstat }) => lstat(second)), { code: 'ENOENT' });
+  const claim = JSON.parse(await readFile(finalPolicy.campaignRegistryPath, 'utf8'));
+  assert.equal(claim.campaignId, finalPolicy.campaignId);
+  assert.equal(claim.campaignRoot, first);
+});
+
+test('a final campaign successor inherits consumption and continues the global receipt sequence', async (t) => {
+  const directory = await scratchDirectory(t, 'campaign-final-successor-');
+  const predecessorRoot = path.join(directory, 'predecessor');
+  const continuityRegistryPath = path.join(directory, 'continuity.ndjson');
+  const predecessor = {
+    ...policy,
+    campaignId: 'final-lineage',
+    maxRequests: 2,
+    maxSessions: 4,
+    maxRecoveryAttempts: 0,
+    limits: { outer_decision_llm: 1, internal_memory_llm: 0, embedding: 1 },
+    sessionLimits: { probe: 2, acceptance: 1, scored: 1 },
+    campaignRegistryPath: path.join(directory, 'final-lineage.claim.json'),
+    continuityRegistryPath
+  };
+  await createCampaignBudget(predecessorRoot, predecessor);
+  const original = await openCampaignBudget(predecessorRoot, predecessor);
+  await original.beginSession('probe-1', { kind: 'probe', runId: 'probe-1', attemptId: 'probe-1-a1' });
+  const firstReceipt = await original.reserve({
+    requestClass: 'embedding', runId: 'probe-1', attemptId: 'probe-1-a1', armId: 'graphiti',
+    scenarioId: 'final-lineage-probe', repetition: 0, phase: 'probe', rootOperation: 'persist',
+    rootInvocationId: 'final-lineage-root-1', plannedDispatchId: 'a'.repeat(48),
+    planSlot: 'probe:initial', disposition: 'root-initial'
+  });
+  await original.close();
+
+  const predecessorLedgerPath = path.join(predecessorRoot, 'campaign.ndjson');
+  const predecessorLedgerText = await readFile(predecessorLedgerPath, 'utf8');
+  const terminal = predecessorLedgerText.trimEnd().split('\n').map(JSON.parse).at(-1);
+  const digest = (value) => import('node:crypto')
+    .then(({ createHash }) => createHash('sha256').update(value, 'utf8').digest('hex'));
+  const predecessorLedgerSha256 = await digest(predecessorLedgerText);
+  const predecessorReceiptSha256 = await digest(canonicalJson(terminal));
+  const genesis = {
+    event: 'genesis', campaignLineageId: predecessor.campaignId, predecessorLedgerSha256,
+    predecessorReceiptId: firstReceipt.reservationId, predecessorReceiptSha256
+  };
+  await writeFile(continuityRegistryPath, `${JSON.stringify(genesis)}\n`);
+  const { campaignRegistryPath: _claim, continuityRegistryPath: _continuity, ...shared } = predecessor;
+  const successor = {
+    ...shared,
+    campaignId: 'final-lineage-successor',
+    implementationLockHash: 'b'.repeat(64),
+    campaignLineageId: predecessor.campaignId,
+    continuation: {
+      predecessorLedgerPath,
+      predecessorLedgerSha256,
+      predecessorReceiptId: firstReceipt.reservationId,
+      predecessorReceiptSha256,
+      continuityRegistryPath,
+      continuityRegistryGenesisSha256: await digest(canonicalJson(genesis)),
+      registryClaimId: 'final-successor-claim'
+    }
+  };
+  const successorRoot = path.join(directory, 'successor');
+  await createCampaignBudget(successorRoot, successor);
+  const next = await openCampaignBudget(successorRoot, successor, { implementationLockHash: successor.implementationLockHash });
+  await next.beginSession('acceptance-1', { kind: 'acceptance', runId: 'acceptance-1', attemptId: 'acceptance-1-a1' });
+  const secondReceipt = await next.reserve({
+    requestClass: 'outer_decision_llm', runId: 'acceptance-1', attemptId: 'acceptance-1-a1', armId: 'no-memory',
+    scenarioId: 'final-lineage-acceptance', repetition: 0, phase: 'A', rootOperation: 'outer-decision',
+    rootInvocationId: 'final-lineage-root-2', plannedDispatchId: 'b'.repeat(48),
+    planSlot: 'outer:initial', disposition: 'root-initial'
+  });
+  assert.equal(secondReceipt.reservationId, `${predecessor.campaignId}:2`);
+  await next.close();
+});
+
 test('campaign reservations durably join a prospective session to one dispatch plan', async (t) => {
   const root = path.join(await scratchDirectory(t, 'campaign-lineage-'), 'campaign');
   await createCampaignBudget(root, policy);

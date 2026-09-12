@@ -141,6 +141,11 @@ export const V11_ACCEPTANCE_SOURCE_HASHES = Object.freeze({
   amendment008Sha256: '184ba096d3b3d762f96e37c9a594925dd22e9628b9649a89d4a0a0c8fdff5ff9'
 });
 
+export const V11_SCORED_SOURCE_HASHES = Object.freeze({
+  ...V11_ACCEPTANCE_SOURCE_HASHES,
+  amendment009Sha256: '804d1f3bf0ae9f8f8e38f01676c66dc5e7c16b722f1ce438cc63a33b9a84c2e2'
+});
+
 export const V11_ACCEPTANCE_ARM_IDS = Object.freeze([
   'no-memory',
   'shadowgraph-full',
@@ -160,6 +165,29 @@ export const V11_ACCEPTANCE_EXPECTED_COUNTS = Object.freeze({
   resetUnits: 28,
   outerDecisionCalls: 260
 });
+
+export const V11_SCORED_EXPECTED_COUNTS = Object.freeze({
+  totalUnits: 2310,
+  excludedUnits: 150,
+  measuredUnits: 2160,
+  resetUnits: 210,
+  outerDecisionCalls: 1950
+});
+
+const V11_SCORED_SCENARIO_IDS = Object.freeze([
+  'S01_DATABASE',
+  'S02_DEPLOYMENT',
+  'S03_CACHING',
+  'S04_API_ERRORS',
+  'S05_MIGRATION',
+  'S06_AUTH',
+  'S07_TESTING',
+  'S08_PERFORMANCE',
+  'S09_CHANGED_CONSTRAINT',
+  'S10_RELEASE_BACKUP'
+]);
+
+const V11_SCORED_SEEDS = Object.freeze([1729, 2718, 31415]);
 
 const EXPECTED_APPLICABILITY = Object.freeze({
   'no-memory': Object.freeze({
@@ -947,5 +975,136 @@ export async function loadV11AcceptanceDefinition(options) {
     sourceHashes: structuredClone(V11_ACCEPTANCE_SOURCE_HASHES),
     nativeAttemptPolicy: structuredClone(amendment006.nativeAttemptTraceContract.armNeutralRecoveryPolicy),
     expectedCounts: structuredClone(V11_ACCEPTANCE_EXPECTED_COUNTS)
+  });
+}
+
+export async function loadV11ScoredDefinition(options) {
+  const acceptance = await loadV11AcceptanceDefinition(options);
+  const repositoryRoot = await realpath(path.resolve(options.repositoryRoot));
+  const benchmarkRoot = path.join(repositoryRoot, 'benchmark');
+  const [amendmentBytes, sidecarBytes, preregistrationBytes] = await Promise.all([
+    readSafeFile(
+      path.join(benchmarkRoot, 'preregistration-amendment-009.json'),
+      benchmarkRoot,
+      'authorized Amendment 009'
+    ),
+    readSafeFile(
+      path.join(benchmarkRoot, 'preregistration-amendment-009.sha256'),
+      benchmarkRoot,
+      'authorized Amendment 009 hash sidecar'
+    ),
+    readSafeFile(
+      path.join(benchmarkRoot, 'preregistration.json'),
+      benchmarkRoot,
+      'frozen preregistration'
+    )
+  ]);
+  if (sha256(amendmentBytes) !== V11_SCORED_SOURCE_HASHES.amendment009Sha256
+    || sidecarBytes.toString('utf8') !== `${V11_SCORED_SOURCE_HASHES.amendment009Sha256}  benchmark/preregistration-amendment-009.json\n`
+    || sha256(preregistrationBytes) !== V11_SCORED_SOURCE_HASHES.preregistrationSha256) {
+    boundaryReject('SHAPE');
+  }
+
+  const amendment = parseJson(amendmentBytes, 'authorized Amendment 009');
+  const preregistration = parseJson(preregistrationBytes, 'frozen preregistration');
+  const profile = amendment?.executionProfiles?.scored;
+  if (amendment?.schemaVersion !== 1
+    || amendment?.amendmentId !== 'amendment-009'
+    || amendment?.status !== 'AUTHORIZED_FOR_NON_SCORED_ACCEPTANCE_AND_FINAL_SCORED_V1_1'
+    || amendment?.supersedes?.amendment008Sha256 !== V11_ACCEPTANCE_SOURCE_HASHES.amendment008Sha256
+    || amendment?.supersedes?.preregistrationSha256 !== V11_ACCEPTANCE_SOURCE_HASHES.preregistrationSha256
+    || amendment?.reason?.validComparativeResultObserved !== false
+    || amendment?.retrospectiveEffect?.rewriteHistoricalArtifacts !== false
+    || amendment?.retrospectiveEffect?.rescoreExistingRuns !== false
+    || amendment?.retrospectiveEffect?.resumeHistoricalRuns !== false
+    || profile?.scored !== true
+    || profile?.scenarioSource !== 'benchmark/preregistration.json#scenarios'
+    || !isDeepStrictEqual(profile?.scenarioIds, [...V11_SCORED_SCENARIO_IDS])
+    || !isDeepStrictEqual(profile?.armIds, [...V11_ACCEPTANCE_ARM_IDS])
+    || !isDeepStrictEqual(profile?.phases, [...V11_ACCEPTANCE_PHASES])
+    || profile?.repetitions !== 3
+    || !isDeepStrictEqual(profile?.seeds, [...V11_SCORED_SEEDS])
+    || profile?.requiresCleanAcceptanceOnExactCandidate !== true
+    || profile?.scoredSessions !== 1
+    || profile?.replacementRunAllowed !== false
+    || amendment?.prospectiveCorrections?.changedFact?.nullDfalseStatus !== 'FAILED'
+    || amendment?.prospectiveCorrections?.changedFact?.nullCountsAsNegative !== false
+    || amendment?.prospectiveCorrections?.isolation?.alternateNamespaceResetBeforeRetrieve !== true
+    || amendment?.prospectiveCorrections?.graphiti?.minimumNeo4jVersion !== '5.26.0'
+    || amendment?.cumulativeProgramBudget?.ceilings?.totalRequests !== 16269
+    || amendment?.cumulativeProgramBudget?.refunds !== false
+    || amendment?.cumulativeProgramBudget?.transfers !== false) {
+    boundaryReject('SHAPE');
+  }
+  if (!Array.isArray(preregistration.scenarios)
+    || preregistration.scenarios.length !== V11_SCORED_SCENARIO_IDS.length
+    || !isDeepStrictEqual(
+      preregistration.scenarios.map(({ id }) => id),
+      [...V11_SCORED_SCENARIO_IDS]
+    )) {
+    boundaryReject('SHAPE');
+  }
+  preregistration.scenarios.forEach(validateV11PublicScenario);
+  assertUnique(
+    preregistration.scenarios.flatMap(declaredScenarioIds),
+    'scored scenario declared ids'
+  );
+
+  const policySource = amendment.nativeAttemptPolicy;
+  const nativeAttemptPolicy = {
+    schema: policySource?.schema,
+    version: policySource?.version,
+    maxAttemptsPerRootRequestClass: policySource?.maxAttemptsPerRootRequestClass,
+    arms: structuredClone(policySource?.arms)
+  };
+  validateNativeAttemptPolicy(nativeAttemptPolicy, [...V11_ACCEPTANCE_ARM_IDS]);
+
+  const definition = {
+    schemaVersion: 1,
+    benchmarkVersion: '1.1',
+    fixtureSet: 'final-scored-2026-08',
+    scored: true,
+    finalProfile: true,
+    sourceHashes: structuredClone(V11_SCORED_SOURCE_HASHES),
+    scenarios: {
+      path: 'benchmark/preregistration.json#scenarios',
+      sha256: V11_SCORED_SOURCE_HASHES.preregistrationSha256
+    },
+    arms: structuredClone(acceptance.definition.arms),
+    phases: [...V11_ACCEPTANCE_PHASES],
+    commonExecution: { repetitions: 3, randomSeeds: [...V11_SCORED_SEEDS] },
+    expectedCounts: structuredClone(V11_SCORED_EXPECTED_COUNTS),
+    nativeAttemptPolicySha256: 'c2b31ab1454c10249c74325178b6e4f11753c36e42f363926513edc7b99353e4',
+    marketingThresholds: structuredClone(preregistration.marketingThresholds)
+  };
+
+  return deepFreeze({
+    definition,
+    scenarios: structuredClone(preregistration.scenarios),
+    sourceHashes: structuredClone(V11_SCORED_SOURCE_HASHES),
+    nativeAttemptPolicy,
+    expectedCounts: structuredClone(V11_SCORED_EXPECTED_COUNTS),
+    preregistration: structuredClone(preregistration)
+  });
+}
+
+export async function loadV11FinalAcceptanceDefinition(options) {
+  const [historical, scored] = await Promise.all([
+    loadV11AcceptanceDefinition(options),
+    loadV11ScoredDefinition(options)
+  ]);
+  const definition = {
+    ...structuredClone(historical.definition),
+    finalProfile: true,
+    sourceHashes: structuredClone(V11_SCORED_SOURCE_HASHES),
+    nativeAttemptPolicySha256: scored.definition.nativeAttemptPolicySha256
+  };
+  return deepFreeze({
+    definition,
+    scenarios: structuredClone(historical.scenarios),
+    sourceHashes: structuredClone(V11_SCORED_SOURCE_HASHES),
+    nativeAttemptPolicy: structuredClone(scored.nativeAttemptPolicy),
+    expectedCounts: structuredClone(V11_ACCEPTANCE_EXPECTED_COUNTS),
+    preregistration: structuredClone(scored.preregistration)
   });
 }

@@ -69,6 +69,8 @@ export const SERVICE_CHECK_KINDS = Object.freeze([
   'image-identity',
   'http-status',
   'cypher-statement',
+  'bolt-connect',
+  'authentication-posture',
   'openai-chat-completions',
   'openai-embeddings',
   'model-weights'
@@ -84,6 +86,7 @@ const VERIFIED_SERVICE_EVIDENCE_FIELDS = Object.freeze([
   'schema', 'version', 'evidenceSha256', 'serviceImages', 'verifiedServices'
 ]);
 const capturedServiceEvidence = new WeakMap();
+const liveServiceAttestations = new WeakSet();
 
 function hasExactKeys(value, fields) {
   if (!isPlainRecord(value)) return false;
@@ -272,6 +275,25 @@ function serviceFindings(service, { images, weights, now }) {
     // to answer on both surfaces the arms use.
     const kinds = new Set(checks.filter(isPlainRecord).map((check) => check.kind));
     const servesModels = Array.isArray(service.servedModels) && service.servedModels.length > 0;
+    if (name.toLowerCase() === 'neo4j') {
+      const bolt = checks.filter((item) => item?.kind === 'bolt-connect');
+      const auth = checks.filter((item) => item?.kind === 'authentication-posture');
+      if (bolt.length !== 1
+        || bolt[0]?.endpoint !== 'bolt://127.0.0.1:7687'
+        || bolt[0]?.outcome !== 'PASS') {
+        push('SERVICE_BOLT_CHECK_REQUIRED', {
+          detail: 'Graphiti requires exactly one passing check of bolt://127.0.0.1:7687'
+        });
+      }
+      if (auth.length !== 1
+        || auth[0]?.endpoint !== service.containerId && auth[0]?.endpoint !== service.imageIdentity?.containerReference
+        || auth[0]?.outcome !== 'PASS'
+        || auth[0]?.detail !== 'NEO4J_AUTH=none') {
+        push('SERVICE_AUTHENTICATION_POSTURE_REQUIRED', {
+          detail: 'Graphiti requires an exact NEO4J_AUTH=none container observation'
+        });
+      }
+    }
     if (servesModels) {
       for (const required of ['openai-chat-completions', 'openai-embeddings']) {
         if (!kinds.has(required)) {
@@ -600,4 +622,55 @@ export function resolveVerifiedServiceEvidence(input) {
     serviceImages,
     evidenceSha256: snapshot.evidenceSha256
   });
+}
+
+export async function attestV11LiveServices(input) {
+  const { snapshot, deps } = input ?? {};
+  const captured = capturedServiceEvidence.get(snapshot);
+  if (captured === undefined || !deps
+    || typeof deps.inspectContainer !== 'function'
+    || typeof deps.connectTcp !== 'function'
+    || typeof deps.readContainerEnvironmentValue !== 'function'
+    || typeof deps.readModelWeightsDigest !== 'function') {
+    throw new Error('live service attestation requires a captured snapshot and real probe dependencies');
+  }
+  for (const service of captured.evidence.services) {
+    const reference = service.imageIdentity?.containerReference;
+    const live = await deps.inspectContainer(reference);
+    if (live?.id !== service.imageIdentity?.containerId
+      || live?.image !== service.imageIdentity?.containerImageId) {
+      throw new Error(`live ${service.name} container identity changed`);
+    }
+    if (service.name.toLowerCase() === 'neo4j') {
+      if (await deps.connectTcp('bolt://127.0.0.1:7687') !== true
+        || await deps.readContainerEnvironmentValue(reference, 'NEO4J_AUTH') !== 'none') {
+        throw new Error('live Neo4j Bolt/auth posture is not auth-none');
+      }
+    }
+    if (service.name.toLowerCase() === 'ollama') {
+      for (const model of service.servedModels) {
+        if (await deps.readModelWeightsDigest(reference, model.modelId) !== model.weightsDigest) {
+          throw new Error(`live model weights changed for ${model.modelId}`);
+        }
+      }
+    }
+  }
+  const attestation = Object.freeze({
+    schema: 'shadowgraph.v11.live-service-attestation',
+    version: 1,
+    evidenceSha256: snapshot.evidenceSha256,
+    serviceNames: Object.freeze(captured.evidence.services.map(({ name }) => name).sort())
+  });
+  liveServiceAttestations.add(attestation);
+  return attestation;
+}
+
+export function validateV11LiveServiceAttestation(attestation, expectedEvidenceSha256) {
+  if (!liveServiceAttestations.has(attestation)
+    || attestation?.schema !== 'shadowgraph.v11.live-service-attestation'
+    || attestation.version !== 1
+    || attestation.evidenceSha256 !== expectedEvidenceSha256) {
+    throw new Error('fresh final execution requires live service attestation for the exact locked evidence');
+  }
+  return attestation;
 }

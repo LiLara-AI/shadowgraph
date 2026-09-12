@@ -13,6 +13,8 @@
 //
 // This module performs no I/O and holds no state.
 
+import { createHash } from 'node:crypto';
+
 import { reconcileProviderAttempts } from './v11-budget.mjs';
 import { traceNativeAttempts } from './v11-native-attempts.mjs';
 import { validateCampaignPolicy } from './v11-campaign-budget.mjs';
@@ -391,6 +393,12 @@ function reconcileProviderEvidenceInternal(input, toleratedTransportFailureReque
       observedEvents: events.length,
       matchedCalls,
       malformedLines: malformed.length,
+      unexpectedEvents: findings.filter(({ code }) => code === 'UNEXPECTED_CALL').length,
+      missingCalls: findings.filter(({ code }) => code === 'MISSING_CALL').length,
+      retryEvents: findings.filter(({ code }) => code === 'RETRY_OBSERVED').length,
+      modelMismatches: findings.filter(({ code }) => code === 'MODEL_MISMATCH').length,
+      failedOutcomes: findings.filter(({ code }) => code === 'FAILED_OUTCOME').length,
+      incompleteUsage: findings.filter(({ code }) => code === 'INCOMPLETE_USAGE').length,
       // Traffic this run could not hold its own record's counts to. Named and
       // counted rather than removed - every other check still applied to it.
       // The set is keyed by unit, since a correlation's request class is not part
@@ -680,7 +688,12 @@ function reconcileDispatchPlans(events, text) {
   return { status: findings.length ? 'DISCREPANT' : 'RECONCILED', findings: [...new Set(findings)] };
 }
 
-function parseCampaignReservationLedger(text, expectedImplementationLockHash = null) {
+function parseCampaignReservationLedger(
+  text,
+  expectedImplementationLockHash = null,
+  expectedAttemptId = null,
+  expectedSessionKind = null
+) {
   if (typeof text !== 'string' || !text.endsWith('\n')) {
     return { findings: ['CAMPAIGN_LEDGER_UNREADABLE'], reservations: new Map() };
   }
@@ -698,6 +711,7 @@ function parseCampaignReservationLedger(text, expectedImplementationLockHash = n
     return { findings: ['CAMPAIGN_LEDGER_INVALID'], reservations: new Map() };
   }
   const { campaignId } = policy;
+  const campaignLineageId = policy.campaignLineageId ?? campaignId;
   if (expectedImplementationLockHash !== null && policy.implementationLockHash !== expectedImplementationLockHash) {
     return { findings: ['CAMPAIGN_LEDGER_INVALID'], reservations: new Map() };
   }
@@ -706,19 +720,69 @@ function parseCampaignReservationLedger(text, expectedImplementationLockHash = n
   const counts = Object.fromEntries(Object.keys(policy.limits).map((key) => [key, 0]));
   let total = 0;
   let recoveries = 0;
+  const sessionCounts = { probe: 0, acceptance: 0, scored: 0 };
+  let inheritedSessions = 0;
+  let currentAttemptSessions = 0;
   const findings = [];
-  for (const row of rows.slice(1)) {
+  let firstCurrentRow = 1;
+  if (Object.hasOwn(policy, 'continuation')) {
+    const row = rows[1];
+    const fields = [
+      'event', 'campaignLineageId', 'predecessorLedgerSha256', 'predecessorReceiptId',
+      'predecessorReceiptSha256', 'continuityRegistryGenesisSha256', 'registryClaimId', 'inherited'
+    ];
+    const inheritedFields = ['total', 'recoveries', 'sessions', 'sessionCounts', 'counts'];
+    const validInherited = isPlainObject(row?.inherited)
+      && Object.keys(row.inherited).sort().join() === inheritedFields.sort().join()
+      && isPlainObject(row.inherited.counts)
+      && Object.keys(row.inherited.counts).sort().join() === Object.keys(policy.limits).sort().join()
+      && isPlainObject(row.inherited.sessionCounts)
+      && Object.keys(row.inherited.sessionCounts).sort().join() === ['acceptance', 'probe', 'scored'].join()
+      && ['total', 'recoveries', 'sessions'].every((field) => Number.isSafeInteger(row.inherited[field]) && row.inherited[field] >= 0)
+      && Object.values(row.inherited.counts).every((value) => Number.isSafeInteger(value) && value >= 0)
+      && Object.values(row.inherited.sessionCounts).every((value) => Number.isSafeInteger(value) && value >= 0);
+    if (!isPlainObject(row)
+      || Object.keys(row).sort().join() !== fields.sort().join()
+      || row.event !== 'continuation'
+      || row.campaignLineageId !== campaignLineageId
+      || row.predecessorLedgerSha256 !== policy.continuation.predecessorLedgerSha256
+      || row.predecessorReceiptId !== policy.continuation.predecessorReceiptId
+      || row.predecessorReceiptSha256 !== policy.continuation.predecessorReceiptSha256
+      || row.continuityRegistryGenesisSha256 !== policy.continuation.continuityRegistryGenesisSha256
+      || row.registryClaimId !== policy.continuation.registryClaimId
+      || !validInherited) {
+      findings.push('CAMPAIGN_LEDGER_INVALID');
+    } else {
+      total = row.inherited.total;
+      recoveries = row.inherited.recoveries;
+      inheritedSessions = row.inherited.sessions;
+      for (const key of Object.keys(counts)) counts[key] = row.inherited.counts[key];
+      for (const kind of Object.keys(sessionCounts)) sessionCounts[kind] = row.inherited.sessionCounts[kind];
+    }
+    firstCurrentRow = 2;
+  } else if (rows[1]?.event === 'continuation') {
+    findings.push('CAMPAIGN_LEDGER_INVALID');
+    firstCurrentRow = 2;
+  }
+  for (const row of rows.slice(firstCurrentRow)) {
     if (!isPlainObject(row)) { findings.push('CAMPAIGN_LEDGER_INVALID'); continue; }
     if (row.event === 'session') {
       const fields = ['event', 'id', 'recovery', 'kind', 'runId', 'attemptId'];
       if (Object.keys(row).sort().join() !== fields.sort().join()
         || !isNonEmptyString(row.id) || sessions.has(row.id)
         || typeof row.recovery !== 'boolean'
-        || !['probe', 'acceptance'].includes(row.kind)
+        || !['probe', 'acceptance', 'scored'].includes(row.kind)
         || !isNonEmptyString(row.runId) || !isNonEmptyString(row.attemptId)) {
         findings.push('CAMPAIGN_LEDGER_INVALID');
       } else {
         sessions.set(row.id, row);
+        sessionCounts[row.kind] += 1;
+        if (expectedAttemptId !== null && row.attemptId === expectedAttemptId) {
+          currentAttemptSessions += 1;
+          if (expectedSessionKind !== null && row.kind !== expectedSessionKind) {
+            findings.push('CAMPAIGN_LEDGER_INVALID');
+          }
+        }
         if (row.recovery) recoveries += 1;
       }
       continue;
@@ -728,8 +792,8 @@ function parseCampaignReservationLedger(text, expectedImplementationLockHash = n
     const session = sessions.get(row.session);
     if (Object.keys(row).sort().join() !== fields.slice().sort().join()
       || !CAMPAIGN_RESERVATION_ID.test(row.reservationId)
-      || row.reservationId !== `${campaignId}:${total + 1}`
-      || !row.reservationId.startsWith(`${campaignId}:`)
+      || row.reservationId !== `${campaignLineageId}:${total + 1}`
+      || !row.reservationId.startsWith(`${campaignLineageId}:`)
       || reservations.has(row.reservationId)
       || !session
       || !Object.hasOwn(policy.limits, row.requestClass)
@@ -751,16 +815,29 @@ function parseCampaignReservationLedger(text, expectedImplementationLockHash = n
     counts[row.requestClass] += 1;
     total += 1;
   }
-  if (total > policy.maxRequests || sessions.size > policy.maxSessions
+  if (total > policy.maxRequests || inheritedSessions + sessions.size > policy.maxSessions
     || recoveries > policy.maxRecoveryAttempts
-    || Object.keys(counts).some((requestClass) => counts[requestClass] > policy.limits[requestClass])) {
+    || Object.keys(counts).some((requestClass) => counts[requestClass] > policy.limits[requestClass])
+    || (policy.sessionLimits && Object.keys(sessionCounts).some((kind) => sessionCounts[kind] > policy.sessionLimits[kind]))
+    || (expectedAttemptId !== null && currentAttemptSessions !== 1)) {
     findings.push('CAMPAIGN_LEDGER_INVALID');
   }
   return { findings: [...new Set(findings)], reservations };
 }
 
-function reconcileCampaignReservations(events, text, expectedImplementationLockHash = null, expectedAttemptId = null) {
-  const parsed = parseCampaignReservationLedger(text, expectedImplementationLockHash);
+function reconcileCampaignReservations(
+  events,
+  text,
+  expectedImplementationLockHash = null,
+  expectedAttemptId = null,
+  expectedSessionKind = null
+) {
+  const parsed = parseCampaignReservationLedger(
+    text,
+    expectedImplementationLockHash,
+    expectedAttemptId,
+    expectedSessionKind
+  );
   const findings = [...parsed.findings];
   const used = new Set();
   for (const event of events) {
@@ -834,13 +911,32 @@ export function runProviderReconciliation(input) {
     || !named(pinnedModels.embedding)) {
     throw new Error('a run reconciliation requires the pinned model ids the run was bound to');
   }
-  const envelope = (status, totals, findings, nativeAttemptTrace = null) => Object.freeze({
+  const runId = isNonEmptyString(raw?.runId)
+    ? raw.runId
+    : (isNonEmptyString(raw?.units?.[0]?.runId) ? raw.units[0].runId : null);
+  if (runId !== null && raw?.units?.some((entry) => entry.runId !== runId)) {
+    throw new Error('a run reconciliation requires one exact run id');
+  }
+  const evidenceHashes = Object.freeze({
+    providerLedgerSha256: typeof ledgerText === 'string'
+      ? createHash('sha256').update(ledgerText).digest('hex') : null,
+    attemptLedgerSha256: typeof input.attemptLedgerText === 'string'
+      ? createHash('sha256').update(input.attemptLedgerText).digest('hex') : null,
+    planLedgerSha256: typeof planLedgerText === 'string'
+      ? createHash('sha256').update(planLedgerText).digest('hex') : null,
+    campaignLedgerSha256: typeof campaignLedgerText === 'string'
+      ? createHash('sha256').update(campaignLedgerText).digest('hex') : null
+  });
+  const envelope = (status, totals, findings, nativeAttemptTrace = null, retainedEvents = null) => Object.freeze({
     schema: 'shadowgraph.v11.provider-reconciliation',
     version: 1,
+    runId,
     attemptId,
     ledgerPath,
     status,
     totals,
+    events: retainedEvents === null ? null : Object.freeze(structuredClone(retainedEvents)),
+    evidenceHashes,
     findings: Object.freeze(findings),
     nativeAttemptTrace
   });
@@ -862,7 +958,13 @@ export function runProviderReconciliation(input) {
   const rawImplementationLockHash = raw?.implementationLockHash;
   const campaignReservationEvidence = requireCampaignReservations
     ? (typeof rawImplementationLockHash === 'string' && SHA256.test(rawImplementationLockHash)
-      ? reconcileCampaignReservations(events, campaignLedgerText, rawImplementationLockHash, attemptId)
+      ? reconcileCampaignReservations(
+        events,
+        campaignLedgerText,
+        rawImplementationLockHash,
+        attemptId,
+        raw?.mode === 'SCORED' ? 'scored' : raw?.mode === 'ACCEPTANCE' ? 'acceptance' : null
+      )
       : { status: 'DISCREPANT', findings: ['CAMPAIGN_LEDGER_INVALID'] })
     : null;
   const { expectations, unverifiedCounts } = providerExpectationsFromRun(raw, attemptId);
@@ -937,8 +1039,8 @@ export function runProviderReconciliation(input) {
       text: input.attemptLedgerText, events, expectedBudget: input.providerBudget
     });
     return Object.freeze({ ...envelope(
-      budgetEvidence.status === 'RECONCILED' ? status : 'DISCREPANT', report.totals, findings, nativeAttemptTrace
+      budgetEvidence.status === 'RECONCILED' ? status : 'DISCREPANT', report.totals, findings, nativeAttemptTrace, events
     ), budgetEvidence });
   }
-  return envelope(status, report.totals, findings, nativeAttemptTrace);
+  return envelope(status, report.totals, findings, nativeAttemptTrace, events);
 }

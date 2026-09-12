@@ -494,6 +494,7 @@ test('reconciliation carries a meter-owned C trace when the generic policy autho
     nativeAttemptPolicy: policy
   });
   assert.equal(report.status, 'RECONCILED');
+  assert.equal(report.runId, RUN);
   assert.deepEqual(report.nativeAttemptTrace.trace.map((entry) => entry.category), ['INITIAL', 'C']);
   assert.deepEqual(report.nativeAttemptTrace.findings, []);
 });
@@ -580,31 +581,34 @@ test('a meter-recorded native-cap denial is exempt from campaign reservation req
     deadline: '2027-01-01T00:00:00.000Z',
     limits: { outer_decision_llm: 0, internal_memory_llm: 0, embedding: 1 }
   };
-  const campaignLedgerText = `${JSON.stringify({ event: 'policy', policy })}\n${JSON.stringify({
-    event: 'session', id: 'native-cap-session', recovery: false, kind: 'probe', runId: RUN, attemptId: ATTEMPT
-  })}\n`;
-  const report = runProviderReconciliation({
-    ledgerText: ledgerLines([capEvent]),
-    ledgerPath: 'native-cap.provider.ndjson',
-    raw: { implementationLockHash, units: [unit({
-      scenarioId: 'native-cap',
-      phase: 'probe',
-      operations: {
-        memoryReadOperations: 0,
-        memoryWriteOperations: 0,
-        mcpToolCalls: 0,
-        outerDecisionModelCalls: 0,
-        internalMemoryModelCalls: 0,
-        embeddingCalls: 1,
-        persistenceVerificationOperations: 0
-      }
-    })] },
-    attemptId: ATTEMPT,
-    pinnedModels: PINNED,
-    campaignLedgerText,
-    requireCampaignReservations: true
-  });
-  assert.ok(!codes(report).includes('CAMPAIGN_RESERVATION_MISSING'));
+  for (const kind of ['probe', 'scored']) {
+    const campaignLedgerText = `${JSON.stringify({ event: 'policy', policy })}\n${JSON.stringify({
+      event: 'session', id: `native-cap-${kind}-session`, recovery: false, kind, runId: RUN, attemptId: ATTEMPT
+    })}\n`;
+    const report = runProviderReconciliation({
+      ledgerText: ledgerLines([capEvent]),
+      ledgerPath: 'native-cap.provider.ndjson',
+      raw: { mode: 'SCORED', runId: RUN, implementationLockHash, units: [unit({
+        scenarioId: 'native-cap',
+        phase: 'probe',
+        operations: {
+          memoryReadOperations: 0,
+          memoryWriteOperations: 0,
+          mcpToolCalls: 0,
+          outerDecisionModelCalls: 0,
+          internalMemoryModelCalls: 0,
+          embeddingCalls: 1,
+          persistenceVerificationOperations: 0
+        }
+      })] },
+      attemptId: ATTEMPT,
+      pinnedModels: PINNED,
+      campaignLedgerText,
+      requireCampaignReservations: true
+    });
+    assert.ok(!codes(report).includes('CAMPAIGN_RESERVATION_MISSING'), kind);
+    assert.equal(codes(report).includes('CAMPAIGN_LEDGER_INVALID'), kind !== 'scored', kind);
+  }
 });
 
 test('an unconsumed current-attempt campaign reservation is a discrepancy', () => {

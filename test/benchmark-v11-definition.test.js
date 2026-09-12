@@ -12,7 +12,11 @@ import {
   V11_ACCEPTANCE_EXPECTED_COUNTS,
   V11_ACCEPTANCE_PHASES,
   V11_ACCEPTANCE_SOURCE_HASHES,
+  V11_SCORED_EXPECTED_COUNTS,
+  V11_SCORED_SOURCE_HASHES,
   loadV11AcceptanceDefinition,
+  loadV11FinalAcceptanceDefinition,
+  loadV11ScoredDefinition,
   validateV11AcceptanceScenario,
   validateV11PublicScenario
 } from '../benchmark/lib/v11-definition.mjs';
@@ -44,6 +48,49 @@ const FROZEN_RELATIVE_FILES = [
   'benchmark/preregistration-amendment-008.json',
   'benchmark/preregistration-amendment-008.sha256'
 ];
+
+test('scored definition reuses all ten frozen scenarios while acceptance remains unchanged', async () => {
+  const [acceptance, finalAcceptance, scored, preregistration] = await Promise.all([
+    loadV11AcceptanceDefinition({ repositoryRoot: REPOSITORY_ROOT }),
+    loadV11FinalAcceptanceDefinition({ repositoryRoot: REPOSITORY_ROOT }),
+    loadV11ScoredDefinition({ repositoryRoot: REPOSITORY_ROOT }),
+    readJson(path.join(REPOSITORY_ROOT, 'benchmark', 'preregistration.json'))
+  ]);
+
+  assert.equal(acceptance.definition.scored, false);
+  assert.equal(Object.hasOwn(acceptance.definition, 'finalProfile'), false);
+  assert.equal(Object.keys(acceptance.sourceHashes).length, 8);
+  assert.deepEqual(acceptance.expectedCounts, V11_ACCEPTANCE_EXPECTED_COUNTS);
+  assert.equal(finalAcceptance.definition.scored, false);
+  assert.equal(finalAcceptance.definition.finalProfile, true);
+  assert.deepEqual(finalAcceptance.scenarios, acceptance.scenarios);
+  assert.deepEqual(finalAcceptance.sourceHashes, V11_SCORED_SOURCE_HASHES);
+  assert.deepEqual(finalAcceptance.nativeAttemptPolicy, scored.nativeAttemptPolicy);
+
+  assert.equal(scored.definition.scored, true);
+  assert.equal(scored.definition.finalProfile, true);
+  assert.equal(Object.keys(scored.sourceHashes).length, 9);
+  assert.deepEqual(scored.sourceHashes, V11_SCORED_SOURCE_HASHES);
+  assert.equal(scored.sourceHashes.amendment009Sha256, '804d1f3bf0ae9f8f8e38f01676c66dc5e7c16b722f1ce438cc63a33b9a84c2e2');
+  assert.deepEqual(scored.scenarios, preregistration.scenarios);
+  assert.deepEqual(
+    scored.scenarios.map(({ id }) => id),
+    [
+      'S01_DATABASE', 'S02_DEPLOYMENT', 'S03_CACHING', 'S04_API_ERRORS',
+      'S05_MIGRATION', 'S06_AUTH', 'S07_TESTING', 'S08_PERFORMANCE',
+      'S09_CHANGED_CONSTRAINT', 'S10_RELEASE_BACKUP'
+    ]
+  );
+  assert.deepEqual(scored.definition.arms, acceptance.definition.arms);
+  assert.deepEqual(scored.definition.phases, V11_ACCEPTANCE_PHASES);
+  assert.deepEqual(scored.definition.commonExecution, {
+    repetitions: 3,
+    randomSeeds: [1729, 2718, 31415]
+  });
+  assert.deepEqual(scored.expectedCounts, V11_SCORED_EXPECTED_COUNTS);
+  assert.deepEqual(scored.definition.expectedCounts, V11_SCORED_EXPECTED_COUNTS);
+  assert.deepEqual(scored.preregistration.marketingThresholds, preregistration.marketingThresholds);
+});
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');

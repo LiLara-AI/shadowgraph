@@ -256,6 +256,26 @@ test('decisionRetrievalAccuracy still scores 0 for a missing decisionId, per "ot
   assert.equal(metrics.decisionRetrievalAccuracy, 0);
 });
 
+test('decisionRetrievalAccuracy requires the exact persisted Phase-A record id', () => {
+  const persistedDecisionId = 'decision:persisted-exact';
+  const wrong = score({
+    A: { decisionId: null, persistedDecisionId, reviewTriggerIds: ['trigger-1'] },
+    B: { choiceId: 'choice-1', decisionId: 'decision:wrong-but-nonempty' }
+  });
+  const exact = score({
+    A: { decisionId: null, persistedDecisionId, reviewTriggerIds: ['trigger-1'] },
+    B: { choiceId: 'choice-1', decisionId: persistedDecisionId }
+  });
+  const noPersistedRecord = score({
+    A: { decisionId: 'decision:not-persisted', persistedDecisionId: null, reviewTriggerIds: ['trigger-1'] },
+    B: { choiceId: 'choice-1', decisionId: 'decision:not-persisted' }
+  });
+
+  assert.equal(wrong.decisionRetrievalAccuracy, 0);
+  assert.equal(exact.decisionRetrievalAccuracy, 1);
+  assert.equal(noPersistedRecord.decisionRetrievalAccuracy, 0);
+});
+
 // ---------------------------------------------------------------------------
 // Reading the adapters' isolation evidence. This is the half of the frozen rule
 // that a model cannot talk its way out of, so what counts as a confirmation has

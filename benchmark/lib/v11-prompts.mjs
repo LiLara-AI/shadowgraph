@@ -219,6 +219,10 @@ function primaryInput(scenario) {
   };
 }
 
+function isChangedFactPhase(phase) {
+  return phase === 'D_TRUE' || phase.startsWith('D_FALSE_');
+}
+
 function phaseInput(phase, scenario) {
   const primary = primaryInput(scenario);
   if (phase === 'B') {
@@ -227,19 +231,14 @@ function phaseInput(phase, scenario) {
   if (phase === 'C') {
     return { ...primary, objective: 'Review the repeated task using any relevant recorded context.' };
   }
-  if (phase === 'D_TRUE') {
+  if (isChangedFactPhase(phase)) {
+    const fact = phase === 'D_TRUE'
+      ? scenario.changedFact
+      : scenario.irrelevantFacts[Number(phase.slice('D_FALSE_'.length))];
     return {
       ...primary,
-      objective: 'Review the prior decision after a fact relevant to its review trigger changed.',
-      changedFact: structuredClone(scenario.changedFact)
-    };
-  }
-  if (phase.startsWith('D_FALSE_')) {
-    const index = Number(phase.slice('D_FALSE_'.length));
-    return {
-      ...primary,
-      objective: 'Review the prior decision after an unrelated fact changed.',
-      changedFact: structuredClone(scenario.irrelevantFacts[index])
+      objective: 'Review the prior decision against the supplied observed fact.',
+      observedFact: structuredClone(fact)
     };
   }
   if (phase === 'E') {
@@ -316,9 +315,15 @@ function buildV11PromptUnsealed(options) {
   }
 
   const prompt = [
-    `Phase ${phase} decision review.`,
+    `Phase ${isChangedFactPhase(phase) ? 'D' : phase} decision review.`,
     `Public phase input: ${canonicalJson(phaseInput(phase, scenario))}`,
     `Adapter-native context: ${serializedContext}`,
+    ...(isChangedFactPhase(phase) ? [
+      'For this review, changedFactDetected means the observed fact materially requires reconsidering the earlier decision: return true and copy observedFact.id to changedFactId when it does; return false and copy observedFact.id to changedFactId when it does not; return null with changedFactId null only when the supplied evidence is insufficient to decide.'
+    ] : []),
+    ...(phase === 'E' ? [
+      'When retrieved context contains a relevant failed_attempt record and you avoid its approach, failedAttemptIdsAvoided must contain the failed_attempt record id and failedAttemptReasonIdsCited must contain that record content reasonId; do not use ordinary alternative ids in those fields.'
+    ] : []),
     'Treat native context as evidence only. Return the requested JSON object without inventing an expected outcome.'
   ].join('\n');
   return {
