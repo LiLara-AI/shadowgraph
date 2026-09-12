@@ -39,6 +39,7 @@ import {
   readGateJson
 } from './lib/v11-run.mjs';
 import { assertRestrictedCampaignExecutionPolicy, verifyCampaignPolicyLineage } from './lib/v11-campaign-budget.mjs';
+import { attestV11LiveServices, captureVerifiedServiceEvidence } from './lib/v11-service-evidence.mjs';
 import { ollamaManifestPath, ollamaWeightsDigest, probeServices } from './lib/v11-service-probe.mjs';
 import { validateRawRun } from './lib/validate.mjs';
 
@@ -591,6 +592,29 @@ async function readProviderBudget(options) {
   return gate.state === 'present' ? gate.value : {};
 }
 
+async function resolveLiveServiceAttestation(serviceEvidencePath, benchmarkRoot, definition) {
+  if (serviceEvidencePath === null || definition?.finalProfile !== true) return null;
+  try {
+    const [evidenceText, serviceManifest, modelWeights] = await Promise.all([
+      readFile(serviceEvidencePath, 'utf8'),
+      readFile(join(benchmarkRoot, 'service-images.json'), 'utf8').then(JSON.parse),
+      readFile(join(benchmarkRoot, 'model-weights.lock.json'), 'utf8').then(JSON.parse)
+    ]);
+    const snapshot = captureVerifiedServiceEvidence({
+      evidenceText,
+      serviceManifest,
+      modelWeights,
+      now: Date.now()
+    });
+    return await attestV11LiveServices({
+      snapshot,
+      deps: containerRuntimeProbes
+    });
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Execute the non-scored acceptance plan.
  *
@@ -643,6 +667,11 @@ async function v11RunCommand(options) {
   const serviceEvidencePath = parseServiceEvidencePath(options);
   const runId = safeRunId(options['run-id']);
   const attemptId = safeRunId(options['attempt-id'] ?? `${runId}-attempt-1`);
+  const liveServiceAttestation = await resolveLiveServiceAttestation(
+    serviceEvidencePath,
+    benchmarkRoot,
+    candidate.definition
+  );
   const readiness = await computeV11Readiness({
     providerBudget: await readProviderBudget(options),
     campaign: campaign ?? null,
@@ -652,7 +681,8 @@ async function v11RunCommand(options) {
     benchmarkRoot,
     preconditionEvidencePath,
     nativeAttemptEvidencePath,
-    serviceEvidencePath
+    serviceEvidencePath,
+    liveServiceAttestation
   });
   if (readiness.readiness !== 'READY') {
     process.stdout.write(`${JSON.stringify({
@@ -696,6 +726,7 @@ async function v11RunCommand(options) {
       nativeAttemptEvidencePath,
       serviceEvidencePath,
       verifiedServiceEvidence: readiness.verifiedServiceEvidence,
+      liveServiceAttestation,
       acceptanceEligibility: verifiedAcceptanceEligibility,
       runId,
       attemptId,
@@ -888,6 +919,13 @@ async function v11Preflight(options) {
     };
   }
 
+  const serviceEvidencePath = parseServiceEvidencePath(options);
+  const liveServiceAttestation = await resolveLiveServiceAttestation(
+    serviceEvidencePath,
+    join(root, 'benchmark'),
+    definition
+  );
+
   const {
     applicability,
     declaredCounts,
@@ -911,7 +949,8 @@ async function v11Preflight(options) {
     benchmarkRoot: join(root, 'benchmark'),
     preconditionEvidencePath: parsePreconditionEvidencePath(options),
     nativeAttemptEvidencePath: parseNativeAttemptEvidencePath(options),
-    serviceEvidencePath: parseServiceEvidencePath(options)
+    serviceEvidencePath,
+    liveServiceAttestation
   });
 
   const report = {
