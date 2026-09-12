@@ -25,11 +25,17 @@ import { providerModelsFromLock } from './v11-provider-models.mjs';
 import {
   captureVerifiedServiceEvidence,
   resolveVerifiedServiceEvidence,
+  validateV11LiveServiceAttestation,
   verifyServiceEvidence
 } from './v11-service-evidence.mjs';
+import {
+  issueV11AcceptanceEligibility,
+  validateV11AcceptanceEligibility
+} from './v11-acceptance-eligibility.mjs';
 import { validateRawRun } from './validate.mjs';
 import { runV11Benchmark } from './v11-runner.mjs';
 import { validateProviderBudget } from './v11-budget.mjs';
+import { validateV11FinalProgramPolicy } from './v11-program-budget.mjs';
 import { assertRestrictedCampaignExecutionPolicy, verifyCampaignPolicyLineage } from './v11-campaign-budget.mjs';
 
 export class V11RunError extends Error {
@@ -147,6 +153,8 @@ export async function computeV11Readiness(input) {
     // runtime binding. It is deliberately preferred over a path: reopening a
     // mutable path would turn a passed preflight into a different evidence claim.
     verifiedServiceEvidence = null,
+    liveServiceAttestation = null,
+    implementationLockHash = null,
     // Deliberately not called `now`: elsewhere in this module `now` is the
     // clock function a run is given, and freshness here is an instant, not a
     // clock. One name for two types is how a run would end up handing a
@@ -196,9 +204,32 @@ export async function computeV11Readiness(input) {
   if (campaign === null) {
     blockers.push({ kind: 'campaign', code: 'CAMPAIGN_CONFIGURATION_REQUIRED' });
   } else {
+    const checkInstant = typeof verificationInstant === 'number'
+      ? verificationInstant
+      : Date.parse(verificationInstant);
+    if (campaign.policy?.deadline && Date.parse(campaign.policy.deadline) <= checkInstant) {
+      blockers.push({
+        kind: 'campaign',
+        code: 'CAMPAIGN_EXPIRED',
+        note: 'campaign deadline has expired'
+      });
+    }
+    if (definition?.finalProfile === true) {
+      try {
+        validateV11FinalProgramPolicy(campaign.policy, implementationLockHash);
+      } catch (error) {
+        blockers.push({
+          kind: 'campaign',
+          code: error.code ?? 'PROGRAM_BUDGET_MISMATCH',
+          note: error.message
+        });
+      }
+    }
+    const assertPolicy = input.assertCampaignPolicy ?? assertRestrictedCampaignPolicy;
+    const verifyLineage = input.verifyCampaignPolicyLineage ?? verifyCampaignLineage;
     try {
-      assertRestrictedCampaignPolicy(campaign.policy);
-      await verifyCampaignLineage(campaign.policy, {
+      assertPolicy(campaign.policy);
+      await verifyLineage(campaign.policy, {
         currentLedgerPath: path.join(campaign.root, 'campaign.ndjson')
       });
     } catch (error) {
@@ -291,6 +322,25 @@ export async function computeV11Readiness(input) {
         serviceManifest: gateValues.get('service-images.json'),
         modelWeights: gateValues.get('model-weights.lock.json'),
         now: verificationInstant
+      });
+    }
+  }
+
+  if (definition?.finalProfile === true) {
+    let attestationValid = false;
+    if (liveServiceAttestation !== null && serviceEvidence?.evidenceSha256) {
+      try {
+        validateV11LiveServiceAttestation(liveServiceAttestation, serviceEvidence.evidenceSha256);
+        attestationValid = true;
+      } catch {
+        attestationValid = false;
+      }
+    }
+    if (!attestationValid) {
+      blockers.push({
+        kind: 'service-evidence',
+        code: 'SERVICE_LIVE_ATTESTATION_REQUIRED',
+        note: 'live service attestation is required for final execution'
       });
     }
   }
@@ -411,13 +461,20 @@ export async function computeV11Readiness(input) {
  * host that happens to be available - running an arm on a runtime the lock does
  * not describe would report a measurement of software nobody pinned.
  */
+const PHASE_E_OPERATION_SLOTS = Object.freeze({
+  persist: Object.freeze(['setupPersist', 'persist']),
+  verify: Object.freeze(['setupVerify', 'verify']),
+  retrieve: Object.freeze(['retrieve']),
+  reset: Object.freeze(['reset'])
+});
+
 export function createV11AdapterExecutor(input) {
   const { registry, hosts } = input;
   if (!isPlainRecord(hosts)) {
     throw new V11RunError('CONTRACT_FAILURE', 'adapter hosts must be an object');
   }
   const measuredRoots = new Set();
-  const measuredRootKey = (request) => {
+  const measuredRootKey = (request, slot) => {
     if (!isPlainRecord(request)) return null;
     const fields = ['runId', 'attemptId', 'armId', 'scenarioId', 'phase', 'operation'];
     if (fields.some((field) => (
@@ -426,9 +483,10 @@ export function createV11AdapterExecutor(input) {
       || !Number.isSafeInteger(request.repetition) || request.repetition < 0) {
       return null;
     }
-    return [...fields.slice(0, 4), 'repetition', ...fields.slice(4)]
-      .map((field) => {
-        const value = String(request[field]);
+    const parts = [...fields.slice(0, 4), 'repetition', fields[4], fields[5], String(slot)];
+    return parts
+      .map((part) => {
+        const value = part === 'repetition' ? String(request.repetition) : (part === String(slot) ? String(slot) : String(request[part]));
         return `${value.length}:${value}`;
       })
       .join('|');
@@ -446,7 +504,19 @@ export function createV11AdapterExecutor(input) {
   }
 
   return async function executeAdapter(request, options) {
-    const root = measuredRootKey(request);
+    if (request?.phase === 'E') {
+      const validSlots = PHASE_E_OPERATION_SLOTS[request.operation];
+      const slot = options?.operationSlot;
+      if (!validSlots || typeof slot !== 'string' || !validSlots.includes(slot)) {
+        throw new V11RunError('HARNESS_OPERATION_SLOT_INVALID', `Phase E ${request.operation} requires a valid operationSlot`);
+      }
+    } else {
+      if (options?.operationSlot !== undefined && options.operationSlot !== request?.operation) {
+        throw new V11RunError('HARNESS_OPERATION_SLOT_INVALID', `Operation slot ${options.operationSlot} is invalid for phase ${request?.phase}`);
+      }
+    }
+    const slot = options?.operationSlot ?? request?.operation;
+    const root = measuredRootKey(request, slot);
     if (root !== null) {
       if (measuredRoots.has(root)) {
         throw new V11RunError('HARNESS_OPERATION_REEXECUTION', 'A measured adapter root operation may be invoked only once');
@@ -457,7 +527,8 @@ export function createV11AdapterExecutor(input) {
     if (execute === undefined) {
       throw new V11RunError('RUNTIME_UNAVAILABLE', `no runtime is bound to arm ${request.armId}`);
     }
-    return await execute(request, options);
+    const { operationSlot, ...forwardOptions } = options ?? {};
+    return await execute(request, forwardOptions);
   };
 }
 
@@ -482,6 +553,7 @@ export async function executeV11AcceptanceRun(input) {
     nativeAttemptEvidencePath = null,
     serviceEvidencePath = null,
     verifiedServiceEvidence = null,
+    liveServiceAttestation = null,
     verificationInstant = undefined,
     runId,
     attemptId,
@@ -504,6 +576,8 @@ export async function executeV11AcceptanceRun(input) {
     amendment006SidecarPath,
     amendment008Path,
     amendment008SidecarPath,
+    amendment009Path = undefined,
+    amendment009SidecarPath = undefined,
     resume = null,
     signal = undefined,
     // A production run owns a provider meter and two ledgers. The runner already
@@ -571,6 +645,7 @@ export async function executeV11AcceptanceRun(input) {
     nativeAttemptEvidencePath,
     serviceEvidencePath,
     verifiedServiceEvidence,
+    liveServiceAttestation,
     verificationInstant,
     readFileImpl
   });
@@ -608,6 +683,7 @@ export async function executeV11AcceptanceRun(input) {
     amendment005Sha256: sourceHashes.amendment005Sha256,
     amendment006Sha256: sourceHashes.amendment006Sha256,
     amendment008Sha256: sourceHashes.amendment008Sha256,
+    ...(sourceHashes.amendment009Sha256 !== undefined ? { amendment009Sha256: sourceHashes.amendment009Sha256 } : {}),
     implementationLockHash,
     environmentLockHash,
     amendment002Path,
@@ -619,6 +695,8 @@ export async function executeV11AcceptanceRun(input) {
     amendment006SidecarPath,
     amendment008Path,
     amendment008SidecarPath,
+    amendment009Path,
+    amendment009SidecarPath,
     progress,
     persistUnit,
     now,
@@ -631,6 +709,13 @@ export async function executeV11AcceptanceRun(input) {
     ...(closeResources === undefined ? {} : { closeResources }),
     ...(heartbeatIntervalMs === undefined ? {} : { heartbeatIntervalMs })
   });
+
+  // Reconcile provider evidence before aggregation so aggregateRun observes it.
+  const providerEvidence = await reconcileProviderEvidence(raw);
+  if (providerEvidence === null || typeof providerEvidence !== 'object'
+    || typeof providerEvidence.status !== 'string') {
+    throw new Error('provider evidence reconciliation must report a status');
+  }
 
   // The validator and the aggregator take the resolved plan, not the acceptance
   // file: on disk `definition.scenarios` is a path and a digest, and the run
@@ -645,7 +730,8 @@ export async function executeV11AcceptanceRun(input) {
       repetitions: definition.commonExecution.repetitions,
       randomSeeds: [...definition.commonExecution.randomSeeds]
     },
-    scenarios: structuredClone(scenarios)
+    scenarios: structuredClone(scenarios),
+    marketingThresholds: definition.marketingThresholds
   };
   const validation = validateRawRun(
     raw,
@@ -655,13 +741,204 @@ export async function executeV11AcceptanceRun(input) {
   );
   const aggregate = aggregateRun(raw, resolvedDefinition, { trustedSourceHashes: sourceHashes });
 
-  // After `closeResources`, so the ledger is complete, and after the record,
-  // so there is something to compare it against.
+  return { readiness: readinessReport, raw, validation, aggregate, providerEvidence };
+}
+
+export async function executeV11FinalAcceptanceRun(input) {
+  const outcome = await executeV11AcceptanceRun(input);
+  const acceptanceEligibility = issueV11AcceptanceEligibility({
+    raw: outcome.raw,
+    providerReconciliation: outcome.providerEvidence,
+    definition: {
+      ...input.definition,
+      scenarios: input.scenarios ?? input.definition.scenarios
+    },
+    sourceHashes: input.sourceHashes
+  });
+  return {
+    ...outcome,
+    acceptanceEligibility
+  };
+}
+
+export async function executeV11ScoredRun(input) {
+  if (input.definition?.scored !== true) {
+    throw new V11RunError('PROFILE_MODE_MISMATCH', 'scored execution requires the scored profile definition');
+  }
+  if (!input.acceptanceEligibility || !input.nativeAttemptPolicy) {
+    throw new V11RunError('ACCEPTANCE_GATE_REQUIRED', 'acceptance eligibility and native attempt policy are required');
+  }
+  try {
+    validateV11AcceptanceEligibility(input.acceptanceEligibility, {
+      implementationLockHash: input.implementationLockHash,
+      amendment009Sha256: input.sourceHashes?.amendment009Sha256
+    });
+  } catch (err) {
+    throw new V11RunError('ACCEPTANCE_GATE_REQUIRED', err.message);
+  }
+
+  const {
+    registry,
+    definition,
+    scenarios,
+    nativeAttemptPolicy = null,
+    benchmarkRoot,
+    satisfiedPreconditions = [],
+    preconditionEvidencePath = null,
+    nativeAttemptEvidencePath = null,
+    serviceEvidencePath = null,
+    verifiedServiceEvidence = null,
+    liveServiceAttestation = null,
+    verificationInstant = undefined,
+    runId,
+    attemptId,
+    executeAdapter,
+    buildOuterRequest,
+    requestOuter,
+    progress,
+    persistUnit,
+    now,
+    monotonicNow,
+    sourceHashes,
+    implementationLockHash,
+    environmentLockHash,
+    amendment002Path,
+    amendment003Path,
+    amendment004Path,
+    amendment005Path,
+    amendment005SidecarPath,
+    amendment006Path,
+    amendment006SidecarPath,
+    amendment008Path,
+    amendment008SidecarPath,
+    amendment009Path = undefined,
+    amendment009SidecarPath = undefined,
+    resume = null,
+    signal = undefined,
+    closeResources = undefined,
+    heartbeatIntervalMs = undefined,
+    reconcileProviderEvidence,
+    readFileImpl = readFile
+  } = input;
+
+  if (buildOuterRequest !== buildV11Prompt) {
+    throw new V11RunError(
+      'NON_CANONICAL_PROMPT_BUILDER',
+      'a scored run may only use the frozen v1.1 prompt builder'
+    );
+  }
+
+  const readinessReport = await computeV11Readiness({
+    providerBudget: input.providerBudget,
+    runId,
+    attemptId,
+    implementationLockHash,
+    registry,
+    definition,
+    scenarios,
+    nativeAttemptPolicy,
+    sourceHashes,
+    campaign: input.campaign ?? null,
+    verifyCampaignLineage: input.verifyCampaignLineage,
+    assertRestrictedCampaignPolicy: input.assertRestrictedCampaignPolicy,
+    benchmarkRoot,
+    satisfiedPreconditions,
+    preconditionEvidencePath,
+    nativeAttemptEvidencePath,
+    serviceEvidencePath,
+    verifiedServiceEvidence,
+    liveServiceAttestation,
+    verificationInstant,
+    readFileImpl
+  });
+  if (readinessReport.readiness !== 'READY') {
+    throw Object.assign(
+      new V11RunError('NOT_READY', 'The v1.1 candidate is not ready to execute a scored run'),
+      { readiness: readinessReport }
+    );
+  }
+
+  if (typeof reconcileProviderEvidence !== 'function') {
+    throw new Error('a v1.1 scored run must reconcile its own provider evidence');
+  }
+
+  const raw = await runV11Benchmark({
+    runId,
+    attemptId,
+    scored: true,
+    acceptanceEligibility: input.acceptanceEligibility,
+    arms: definition.arms.map(({ id, name, applicability }) => ({
+      id,
+      name,
+      applicability: structuredClone(applicability)
+    })),
+    scenarios: structuredClone(scenarios),
+    repetitions: definition.commonExecution.repetitions,
+    seeds: [...definition.commonExecution.randomSeeds],
+    preregistrationSha256: sourceHashes.preregistrationSha256,
+    amendment001Sha256: sourceHashes.amendment001Sha256,
+    amendment002Sha256: sourceHashes.amendment002Sha256,
+    amendment003Sha256: sourceHashes.amendment003Sha256,
+    amendment004Sha256: sourceHashes.amendment004Sha256,
+    amendment005Sha256: sourceHashes.amendment005Sha256,
+    amendment006Sha256: sourceHashes.amendment006Sha256,
+    amendment008Sha256: sourceHashes.amendment008Sha256,
+    ...(sourceHashes.amendment009Sha256 !== undefined ? { amendment009Sha256: sourceHashes.amendment009Sha256 } : {}),
+    implementationLockHash,
+    environmentLockHash,
+    amendment002Path,
+    amendment003Path,
+    amendment004Path,
+    amendment005Path,
+    amendment005SidecarPath,
+    amendment006Path,
+    amendment006SidecarPath,
+    amendment008Path,
+    amendment008SidecarPath,
+    amendment009Path,
+    amendment009SidecarPath,
+    progress,
+    persistUnit,
+    now,
+    monotonicNow,
+    executeAdapter,
+    buildOuterRequest,
+    requestOuter,
+    ...(resume === null ? {} : { resume }),
+    ...(signal === undefined ? {} : { signal }),
+    ...(closeResources === undefined ? {} : { closeResources }),
+    ...(heartbeatIntervalMs === undefined ? {} : { heartbeatIntervalMs })
+  });
+
   const providerEvidence = await reconcileProviderEvidence(raw);
   if (providerEvidence === null || typeof providerEvidence !== 'object'
     || typeof providerEvidence.status !== 'string') {
     throw new Error('provider evidence reconciliation must report a status');
   }
+
+  const resolvedDefinition = {
+    arms: definition.arms.map(({ id, name, applicability }) => ({
+      id,
+      name,
+      applicability: structuredClone(applicability)
+    })),
+    commonExecution: {
+      repetitions: definition.commonExecution.repetitions,
+      randomSeeds: [...definition.commonExecution.randomSeeds]
+    },
+    scenarios: structuredClone(scenarios),
+    marketingThresholds: definition.marketingThresholds
+  };
+  const validation = validateRawRun(
+    raw,
+    resolvedDefinition,
+    sourceHashes.preregistrationSha256,
+    sourceHashes
+  );
+  const aggregate = aggregateRun(raw, resolvedDefinition, {
+    trustedSourceHashes: sourceHashes,
+    providerReconciliation: providerEvidence
+  });
 
   return { readiness: readinessReport, raw, validation, aggregate, providerEvidence };
 }

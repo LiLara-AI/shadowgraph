@@ -13,7 +13,8 @@ import { adapterCommandForRecord, loadAdapterConfiguration, redactConfiguredSecr
 import { NO_COMMON_MODEL_REASON, probeCommonCapabilities, readCommonModelConfiguration } from './lib/capabilities.mjs';
 import { verifyPreregistration } from './lib/preregistration.mjs';
 import { CONTAINER_PATHS } from './lib/python-container-runtime.mjs';
-import { loadV11AcceptanceDefinition } from './lib/v11-definition.mjs';
+import { loadV11FinalAcceptanceDefinition, loadV11ScoredDefinition } from './lib/v11-definition.mjs';
+import { verifyV11AcceptanceEligibilityArtifacts } from './lib/v11-acceptance-eligibility.mjs';
 import {
   LIST_DISTRIBUTIONS_SCRIPT,
   PYTHON_IMPORT_MODULES,
@@ -29,7 +30,13 @@ import { reconcileProviderEvidenceFiles } from './lib/v11-provider-evidence-load
 import { createV11Registry } from './lib/v11-registry.mjs';
 import { combineRunFailure } from './lib/v11-run-resources.mjs';
 import { bindV11Runtime, providerLedgerPath } from './lib/v11-runtime-binding.mjs';
-import { computeV11Readiness, executeV11AcceptanceRun, readGateJson } from './lib/v11-run.mjs';
+import {
+  computeV11Readiness,
+  executeV11AcceptanceRun,
+  executeV11FinalAcceptanceRun,
+  executeV11ScoredRun,
+  readGateJson
+} from './lib/v11-run.mjs';
 import { assertRestrictedCampaignExecutionPolicy, verifyCampaignPolicyLineage } from './lib/v11-campaign-budget.mjs';
 import { ollamaManifestPath, ollamaWeightsDigest, probeServices } from './lib/v11-service-probe.mjs';
 import { validateRawRun } from './lib/validate.mjs';
@@ -447,10 +454,19 @@ async function validateCommand(options) {
     verifyPreregistration(preregistrationPath, preregistrationHashPath),
     readFile(input, 'utf8').then(JSON.parse)
   ]);
-  const expectedSourceHashes = raw?.schemaVersion === 2
-    ? (await loadV11Candidate()).sourceHashes
-    : undefined;
-  const result = validateRawRun(raw, document, sha256, expectedSourceHashes);
+  const candidate = raw?.schemaVersion === 2
+    ? await loadV11Candidate({ mode: raw?.mode === 'SCORED' ? 'scored' : 'acceptance' })
+    : null;
+  const expectedSourceHashes = candidate?.sourceHashes;
+  const validationDefinition = candidate === null
+    ? document
+    : { ...candidate.definition, scenarios: candidate.scenarios };
+  const result = validateRawRun(
+    raw,
+    validationDefinition,
+    expectedSourceHashes?.preregistrationSha256 ?? sha256,
+    expectedSourceHashes
+  );
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
@@ -458,6 +474,9 @@ async function aggregateCommand(options) {
   const input = optionPath(options.input);
   if (!input) throw new Error('aggregate requires --input <raw-run.json>');
   const output = optionPath(options.output, join(dirname(input), 'aggregate.json'));
+  if (resolve(input) === resolve(output)) {
+    throw new Error('aggregate output path must not overwrite input raw run file');
+  }
   const [{ document, sha256 }, raw] = await Promise.all([
     verifyPreregistration(preregistrationPath, preregistrationHashPath),
     readFile(input, 'utf8').then(JSON.parse)
@@ -488,13 +507,19 @@ async function aggregateCommand(options) {
  * prerequisite is an unsatisfied prerequisite: letting a SyntaxError escape
  * would abort the command and emit no readiness report at all.
  */
-/** Load the frozen candidate: competitor lock, registry, acceptance definition. */
-async function loadV11Candidate() {
+/** Load the frozen candidate: competitor lock, registry, acceptance or scored definition. */
+async function loadV11Candidate(options = {}) {
+  const mode = options.mode ?? 'acceptance';
+  if (mode !== 'acceptance' && mode !== 'scored') {
+    throw new Error('mode must be acceptance or scored');
+  }
   const competitorLock = JSON.parse(await readFile(competitorLockPath, 'utf8'));
   const containerImage = competitorLock.pythonImage;
   const registry = createV11Registry({ competitorLock, containerImage });
-  const loaded = await loadV11AcceptanceDefinition({ repositoryRoot: root });
-  return { competitorLock, containerImage, registry, ...loaded };
+  const loaded = mode === 'scored'
+    ? await loadV11ScoredDefinition({ repositoryRoot: root })
+    : await loadV11FinalAcceptanceDefinition({ repositoryRoot: root });
+  return { competitorLock, containerImage, registry, ...loaded, mode };
 }
 
 /**
@@ -576,12 +601,40 @@ async function readProviderBudget(options) {
  * that later reads as evidence.
  */
 async function v11RunCommand(options) {
+  const mode = options.mode ?? 'acceptance';
+  if (mode !== 'acceptance' && mode !== 'scored') {
+    throw new Error('mode must be acceptance or scored');
+  }
   const campaign = await readCampaignConfiguration(options);
-  const candidate = await loadV11Candidate();
+  const candidate = await loadV11Candidate(options);
   const benchmarkRoot = join(root, 'benchmark');
   refuseAssertedPreconditions(options);
   const preconditionEvidencePath = parsePreconditionEvidencePath(options);
   const nativeAttemptEvidencePath = parseNativeAttemptEvidencePath(options);
+
+  let verifiedAcceptanceEligibility = null;
+  if (options['acceptance-evidence'] || options['accepted-raw'] || options['accepted-reconciliation']) {
+    if (!options['acceptance-evidence'] || !options['accepted-raw'] || !options['accepted-reconciliation']) {
+      throw new Error('--acceptance-evidence, --accepted-raw, and --accepted-reconciliation must all be provided together');
+    }
+    const [evidenceJson, rawJson, reconciliationJson, acceptanceCandidate] = await Promise.all([
+      readFile(optionPath(options['acceptance-evidence']), 'utf8').then(JSON.parse),
+      readFile(optionPath(options['accepted-raw']), 'utf8').then(JSON.parse),
+      readFile(optionPath(options['accepted-reconciliation']), 'utf8').then(JSON.parse),
+      loadV11FinalAcceptanceDefinition({ repositoryRoot: root })
+    ]);
+    const verified = verifyV11AcceptanceEligibilityArtifacts({
+      evidence: evidenceJson,
+      raw: rawJson,
+      providerReconciliation: reconciliationJson,
+      definition: {
+        ...acceptanceCandidate.definition,
+        scenarios: acceptanceCandidate.scenarios
+      },
+      sourceHashes: acceptanceCandidate.sourceHashes
+    });
+    verifiedAcceptanceEligibility = verified.evidence;
+  }
 
   // Readiness is decided before anything else is touched, including the
   // runtime binding. A blocked candidate must produce a refusal that names
@@ -605,7 +658,9 @@ async function v11RunCommand(options) {
       schema: 'shadowgraph.v11.run',
       version: 1,
       status: 'REFUSED',
-      reason: 'the candidate is not ready to execute an acceptance run',
+      reason: mode === 'scored'
+        ? 'the candidate is not ready to execute a scored run'
+        : 'the candidate is not ready to execute an acceptance run',
       artifactsWritten: [],
       readiness
     }, null, 2)}`);
@@ -627,10 +682,12 @@ async function v11RunCommand(options) {
     ledgerDirectory
   });
 
+  const runFn = mode === 'scored' ? executeV11ScoredRun : executeV11FinalAcceptanceRun;
+
   let outcome;
   let failure = null;
   try {
-    outcome = await executeV11AcceptanceRun({
+    outcome = await runFn({
       ...candidate,
       campaign: campaign ?? null,
       benchmarkRoot,
@@ -638,6 +695,7 @@ async function v11RunCommand(options) {
       nativeAttemptEvidencePath,
       serviceEvidencePath,
       verifiedServiceEvidence: readiness.verifiedServiceEvidence,
+      acceptanceEligibility: verifiedAcceptanceEligibility,
       runId,
       attemptId,
       sourceHashes: candidate.sourceHashes,
@@ -650,6 +708,8 @@ async function v11RunCommand(options) {
       amendment006SidecarPath: join(benchmarkRoot, 'preregistration-amendment-006.sha256'),
       amendment008Path: join(benchmarkRoot, 'preregistration-amendment-008.json'),
       amendment008SidecarPath: join(benchmarkRoot, 'preregistration-amendment-008.sha256'),
+      amendment009Path: join(benchmarkRoot, 'preregistration-amendment-009.json'),
+      amendment009SidecarPath: join(benchmarkRoot, 'preregistration-amendment-009.sha256'),
       ...runtime.dependencies,
       // Judged inside the run rather than after it, so a caller cannot omit it.
       // Reached only once `closeResources` has closed the meter, which is what
@@ -684,9 +744,15 @@ async function v11RunCommand(options) {
   const rawPath = join(outputDirectory, `${attemptId}.raw.json`);
   const aggregatePath = join(outputDirectory, `${attemptId}.aggregate.json`);
   const reconciliationPath = join(outputDirectory, `${attemptId}.provider-reconciliation.json`);
+  const artifactsWritten = [rawPath, aggregatePath, reconciliationPath];
   await writeJson(rawPath, outcome.raw);
   await writeJson(aggregatePath, outcome.aggregate);
   await writeJson(reconciliationPath, reconciliation);
+  if (outcome.acceptanceEligibility) {
+    const eligibilityPath = join(outputDirectory, `${attemptId}.acceptance-eligibility.json`);
+    await writeJson(eligibilityPath, outcome.acceptanceEligibility);
+    artifactsWritten.push(eligibilityPath);
+  }
   process.stdout.write(`${JSON.stringify({
     schema: 'shadowgraph.v11.run',
     version: 1,
@@ -701,7 +767,7 @@ async function v11RunCommand(options) {
     // Which site the arms imported, and how much of it was checked. Neither
     // lock can carry this, so the run says it.
     pythonRuntime: runtime.runtime,
-    artifactsWritten: [rawPath, aggregatePath, reconciliationPath]
+    artifactsWritten
   }, null, 2)}`);
   // A run whose own provider traffic does not match its record is not a clean
   // result reported alongside a caveat. It is a discrepancy, and it exits so.
@@ -777,8 +843,13 @@ async function v11RuntimeDependencies(options, context) {
  * a statement about the candidate, not about any arm's behaviour.
  */
 async function v11Preflight(options) {
+  const mode = options.mode ?? 'acceptance';
+  if (mode !== 'acceptance' && mode !== 'scored') {
+    throw new Error('mode must be acceptance or scored');
+  }
   const campaign = await readCampaignConfiguration(options);
   refuseAssertedPreconditions(options);
+  const candidate = await loadV11Candidate(options);
   const {
     registry,
     definition,
@@ -786,7 +857,36 @@ async function v11Preflight(options) {
     containerImage,
     nativeAttemptPolicy,
     sourceHashes
-  } = await loadV11Candidate();
+  } = candidate;
+
+  let verifiedAcceptanceEligibility = null;
+  if (options['acceptance-evidence'] || options['accepted-raw'] || options['accepted-reconciliation']) {
+    if (!options['acceptance-evidence'] || !options['accepted-raw'] || !options['accepted-reconciliation']) {
+      throw new Error('--acceptance-evidence, --accepted-raw, and --accepted-reconciliation must all be provided together');
+    }
+    const [evidenceJson, rawJson, reconciliationJson, acceptanceCandidate] = await Promise.all([
+      readFile(optionPath(options['acceptance-evidence']), 'utf8').then(JSON.parse),
+      readFile(optionPath(options['accepted-raw']), 'utf8').then(JSON.parse),
+      readFile(optionPath(options['accepted-reconciliation']), 'utf8').then(JSON.parse),
+      loadV11FinalAcceptanceDefinition({ repositoryRoot: root })
+    ]);
+    const verified = verifyV11AcceptanceEligibilityArtifacts({
+      evidence: evidenceJson,
+      raw: rawJson,
+      providerReconciliation: reconciliationJson,
+      definition: {
+        ...acceptanceCandidate.definition,
+        scenarios: acceptanceCandidate.scenarios
+      },
+      sourceHashes: acceptanceCandidate.sourceHashes
+    });
+    verifiedAcceptanceEligibility = {
+      status: verified.evidence.status,
+      runId: verified.evidence.runId,
+      attemptId: verified.evidence.attemptId
+    };
+  }
+
   const {
     applicability,
     declaredCounts,
@@ -816,7 +916,7 @@ async function v11Preflight(options) {
   const report = {
     schema: 'shadowgraph.v11.preflight',
     version: 1,
-    scored: false,
+    scored: mode === 'scored',
     containerImage,
     arms: registry.descriptors.map((descriptor) => ({
       armId: descriptor.armId,
@@ -833,6 +933,7 @@ async function v11Preflight(options) {
     nativeAttemptEvidence,
     serviceEvidence,
     providerBudget,
+    ...(verifiedAcceptanceEligibility ? { acceptanceEligibility: verifiedAcceptanceEligibility } : {}),
     readiness,
     blockers
   };

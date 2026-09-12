@@ -66,6 +66,12 @@ test('exact agreement reconciles', () => {
     observedEvents: 1,
     matchedCalls: 1,
     malformedLines: 0,
+    unexpectedEvents: 0,
+    missingCalls: 0,
+    retryEvents: 0,
+    modelMismatches: 0,
+    failedOutcomes: 0,
+    incompleteUsage: 0,
     unverifiedCountUnits: 0,
     unverifiedCountEvents: 0
   });

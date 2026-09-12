@@ -944,7 +944,7 @@ function validateOptions(options) {
   // through executeV11AcceptanceRun.
   if (options.scored) {
     if (!options.acceptanceEligibility) {
-      throw new Error('This candidate may not execute a scored run');
+      throw new Error('This candidate may not execute a scored run without the final Amendment 009 profile and acceptance eligibility');
     }
     validateV11AcceptanceEligibility(options.acceptanceEligibility, {
       implementationLockHash: options.implementationLockHash,
