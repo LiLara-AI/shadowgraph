@@ -41,6 +41,8 @@ const SINGLETON_FILE_ROLES = Object.freeze([
   'amendment_006_sidecar',
   'amendment_008',
   'amendment_008_sidecar',
+  'amendment_009',
+  'amendment_009_sidecar',
   'runner',
   'validator',
   'aggregator',
