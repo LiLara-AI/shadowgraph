@@ -56,7 +56,7 @@ export const PYTHON_ADAPTER_SPECS = Object.freeze({
     armId: 'graphiti',
     packages: Object.freeze({ 'graphiti-core': '0.29.3', httpx: '0.28.1' }),
     requestClasses: Object.freeze(['internal_memory_llm', 'embedding']),
-    dispatchIdentityMode: 'static'
+    dispatchIdentityMode: 'dynamic'
   }),
   'basic-memory': Object.freeze({
     armId: 'basic-memory',

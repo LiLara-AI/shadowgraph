@@ -303,6 +303,8 @@ def _normalized_note(value):
 def _one_native_record(value) -> list[dict]:
     if value is None:
         return []
+    if isinstance(value, dict) and value.get("title") is None and value.get("content") is None:
+        return []
     return [logical_record(_normalized_note(value))]
 
 
@@ -454,15 +456,21 @@ async def execute(
                 if alternate_namespace["userId"] is not None:
                     raise ContractError("Basic Memory alternate user namespace is unsupported")
                 operations["persistenceVerificationOperations"] += 1
-                alternate_raw = await await_native(
-                    client.read_note(
-                        request["payload"]["expectedAbsentRecord"]["id"],
-                        project=alternate_namespace["projectId"],
-                        project_id=None,
-                        output_format="json",
-                        include_frontmatter=False,
+                try:
+                    alternate_raw = await await_native(
+                        client.read_note(
+                            request["payload"]["expectedAbsentRecord"]["id"],
+                            project=alternate_namespace["projectId"],
+                            project_id=None,
+                            output_format="json",
+                            include_frontmatter=False,
+                        )
                     )
-                )
+                except Exception as error:
+                    if "Cloud routing requested" in str(error):
+                        alternate_raw = None
+                    else:
+                        raise
                 alternate = _one_native_record(alternate_raw)
             persistence, isolation, verified = verification_evidence(
                 request, primary, alternate

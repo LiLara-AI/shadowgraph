@@ -175,7 +175,7 @@ test('public adapter specs bind four exact ids, arms, versions, and provider req
       armId: 'graphiti',
       packages: { 'graphiti-core': '0.29.3', httpx: '0.28.1' },
       requestClasses: ['internal_memory_llm', 'embedding'],
-      dispatchIdentityMode: 'static'
+      dispatchIdentityMode: 'dynamic'
     },
     cognee: {
       armId: 'cognee',
