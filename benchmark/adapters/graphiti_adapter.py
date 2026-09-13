@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 from datetime import datetime, timezone
+import http.client
+import json
+import re
+import urllib.parse
 
 from envelope import ContractError, build_envelope, empty_operations, not_available_storage, record_content_sha256, validate_request
 from python_runtime import (
@@ -31,6 +36,68 @@ STORAGE = not_available_storage(
 )
 REFERENCE_TIME = datetime(1970, 1, 1, tzinfo=timezone.utc)
 UNUSED_API_KEY = "not-a-secret"
+
+DISPATCH_ALIAS_HEADER = "x-shadowgraph-dispatch-alias"
+_DISPATCH_ALIAS = re.compile(r"^[a-f0-9]{48}$")
+
+
+def _valid_dispatch_identity(value) -> bool:
+    return (
+        isinstance(value, dict)
+        and _DISPATCH_ALIAS.fullmatch(value.get("alias", "")) is not None
+        and _DISPATCH_ALIAS.fullmatch(value.get("plannedDispatchId", "")) is not None
+    )
+
+
+def _meter_post(endpoint: str, suffix: str, *, alias: str | None = None, expected_status: int) -> bytes:
+    parsed = urllib.parse.urlsplit(endpoint)
+    if parsed.scheme != "http" or not parsed.hostname or parsed.port is None:
+        raise RuntimeUnavailable("Graphiti meter endpoint URI is invalid")
+    connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=5)
+    try:
+        headers = {"Content-Length": "0"}
+        if alias is not None:
+            if _DISPATCH_ALIAS.fullmatch(alias) is None:
+                raise RuntimeUnavailable("Graphiti meter close identity is invalid")
+            headers[DISPATCH_ALIAS_HEADER] = alias
+        path = parsed.path.rstrip("/") + suffix
+        connection.request("POST", path, body=b"", headers=headers)
+        response = connection.getresponse()
+        body = response.read(2049)
+        if response.status != expected_status or len(body) > 2048:
+            raise RuntimeUnavailable("Graphiti meter request was refused")
+        return body
+    except (OSError, ValueError) as error:
+        raise RuntimeUnavailable("Graphiti meter request could not be completed") from error
+    finally:
+        connection.close()
+
+
+def _meter_declare_sync(endpoint: str) -> dict:
+    body = _meter_post(endpoint, "/__shadowgraph/declare", expected_status=201)
+    try:
+        identity = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeUnavailable("Graphiti meter declaration was invalid") from error
+    if set(identity) != {"alias", "plannedDispatchId"} or not _valid_dispatch_identity(identity):
+        raise RuntimeUnavailable("Graphiti meter declaration was invalid")
+    return identity
+
+
+async def _meter_declare(endpoint: str) -> dict:
+    return await asyncio.to_thread(_meter_declare_sync, endpoint)
+
+
+async def _meter_close(endpoint: str, identity: dict) -> None:
+    if not _valid_dispatch_identity(identity):
+        raise RuntimeUnavailable("Graphiti meter close identity is invalid")
+    await asyncio.to_thread(
+        _meter_post,
+        endpoint,
+        "/__shadowgraph/close",
+        alias=identity["alias"],
+        expected_status=204,
+    )
 
 
 def _runtime_config(routes: dict, models: dict) -> dict:
@@ -119,8 +186,15 @@ def _metered_openai(runtime, endpoint, provider_call, request_class):
 
     class _MeteredAsyncTransport(httpx.AsyncHTTPTransport):
         async def handle_async_request(self, request):
+            identity = await _meter_declare(endpoint)
+            headers = getattr(request, "headers", None)
+            if headers is not None:
+                headers[DISPATCH_ALIAS_HEADER] = identity["alias"]
             provider_call(request_class)
-            return await super().handle_async_request(request)
+            try:
+                return await super().handle_async_request(request)
+            finally:
+                await _meter_close(endpoint, identity)
 
     http_client = httpx.AsyncClient(
         transport=_MeteredAsyncTransport(retries=0),

@@ -353,7 +353,8 @@ test('changed-fact prompts define one neutral decision-relevance target without 
       prompt,
       /changedFactDetected means the observed fact materially requires reconsidering the earlier decision/iu
     );
-    assert.match(prompt, /return true.*return false.*return null/isu);
+    assert.match(prompt, /return true.*return false/isu);
+    assert.match(prompt, /changedFactDetected must be boolean true or false, never null/isu);
     assert.doesNotMatch(prompt, /D_TRUE|D_FALSE|unrelated fact|fact relevant to its review trigger/iu);
   }
 });

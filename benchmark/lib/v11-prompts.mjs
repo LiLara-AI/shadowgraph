@@ -319,7 +319,7 @@ function buildV11PromptUnsealed(options) {
     `Public phase input: ${canonicalJson(phaseInput(phase, scenario))}`,
     `Adapter-native context: ${serializedContext}`,
     ...(isChangedFactPhase(phase) ? [
-      'For this review, changedFactDetected means the observed fact materially requires reconsidering the earlier decision: return true and copy observedFact.id to changedFactId when it does; return false and copy observedFact.id to changedFactId when it does not (when native context contains no prior decision or when the observed fact has no bearing on the earlier decision, it does not require reconsideration, so return false); return null with changedFactId null only when the supplied evidence is insufficient to decide.'
+      'For this review, changedFactDetected means the observed fact materially requires reconsidering the earlier decision: return true and copy observedFact.id to changedFactId when it does; return false and copy observedFact.id to changedFactId when it does not (when native context contains no prior decision or when the observed fact has no bearing on the earlier decision, it does not require reconsideration, so return false). changedFactDetected must be boolean true or false, never null.'
     ] : []),
     ...(phase === 'E' ? [
       'When retrieved context contains a relevant failed_attempt record and you avoid its approach, failedAttemptIdsAvoided must contain the failed_attempt record id and failedAttemptReasonIdsCited must contain that record content reasonId; do not use ordinary alternative ids in those fields.'

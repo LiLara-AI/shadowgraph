@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import unittest
 from enum import Enum
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import threading
+import unittest
+from unittest.mock import patch
 
 import graphiti_adapter
 
@@ -325,16 +329,26 @@ class GraphitiAdapterTests(unittest.TestCase):
         self.assertIs(client.driver_for_group("project-1"), client.driver)
         self.assertIs(client.EpisodeType, FakeEpisodeSource)
 
-        asyncio.run(
-            constructed["openai"][0].options["http_client"].options["transport"].handle_async_request(
-                object()
+        async def fake_declare(endpoint):
+            return {"alias": "a" * 48, "plannedDispatchId": "b" * 48}
+
+        async def fake_close(endpoint, identity):
+            return None
+
+        with (
+            patch.object(graphiti_adapter, "_meter_declare", fake_declare),
+            patch.object(graphiti_adapter, "_meter_close", fake_close),
+        ):
+            asyncio.run(
+                constructed["openai"][0].options["http_client"].options["transport"].handle_async_request(
+                    object()
+                )
             )
-        )
-        asyncio.run(
-            constructed["openai"][1].options["http_client"].options["transport"].handle_async_request(
-                object()
+            asyncio.run(
+                constructed["openai"][1].options["http_client"].options["transport"].handle_async_request(
+                    object()
+                )
             )
-        )
         self.assertEqual(constructed["transport_sends"], 2)
         self.assertEqual(provider_classes, ["internal_memory_llm", "embedding"])
 
@@ -519,6 +533,136 @@ class GraphitiAdapterTests(unittest.TestCase):
         self.assertEqual(response["status"], "FAILED")
         self.assertEqual(response["failure"]["cause"], "ENDPOINT_UNAVAILABLE")
         self.assertEqual(self.clients, [])
+
+
+class GraphitiMeteredTests(unittest.TestCase):
+    def test_meter_declares_and_closes_over_loopback(self) -> None:
+        calls = []
+        alias = "c" * 48
+        dispatch_id = "d" * 48
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, _format, *_args):
+                return None
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length)
+                calls.append((self.path, dict(self.headers), body))
+                if self.path == "/meter/route/__shadowgraph/declare":
+                    response = json.dumps({
+                        "alias": alias,
+                        "plannedDispatchId": dispatch_id,
+                    }).encode("utf-8")
+                    self.send_response(201)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(response)))
+                    self.end_headers()
+                    self.wfile.write(response)
+                    return
+                if self.path == "/meter/route/__shadowgraph/close":
+                    self.send_response(204)
+                    self.end_headers()
+                    return
+                self.send_response(404)
+                self.end_headers()
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(lambda: server.shutdown())
+        endpoint = f"http://127.0.0.1:{server.server_address[1]}/meter/route"
+
+        identity = asyncio.run(graphiti_adapter._meter_declare(endpoint))
+        asyncio.run(graphiti_adapter._meter_close(endpoint, identity))
+
+        self.assertEqual(identity, {"alias": alias, "plannedDispatchId": dispatch_id})
+        self.assertEqual([item[0] for item in calls], [
+            "/meter/route/__shadowgraph/declare",
+            "/meter/route/__shadowgraph/close",
+        ])
+
+    def test_metered_transport_declares_injects_alias_and_closes(self) -> None:
+        calls = []
+        alias = "e" * 48
+        dispatch_id = "f" * 48
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, _format, *_args):
+                return None
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length)
+                calls.append((self.path, dict(self.headers), body))
+                if self.path == "/v1/__shadowgraph/declare":
+                    response = json.dumps({
+                        "alias": alias,
+                        "plannedDispatchId": dispatch_id,
+                    }).encode("utf-8")
+                    self.send_response(201)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(response)))
+                    self.end_headers()
+                    self.wfile.write(response)
+                    return
+                if self.path == "/v1/__shadowgraph/close":
+                    self.send_response(204)
+                    self.end_headers()
+                    return
+                self.send_response(404)
+                self.end_headers()
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(lambda: server.shutdown())
+        endpoint = f"http://127.0.0.1:{server.server_address[1]}/v1"
+
+        provider_calls = []
+
+        class FakeBaseTransport:
+            def __init__(self, **_kwargs):
+                pass
+
+            async def handle_async_request(self, request):
+                calls.append(("upstream", dict(request.headers), b""))
+                return "ok"
+
+        runtime = {
+            "httpx": type("Httpx", (), {
+                "AsyncHTTPTransport": FakeBaseTransport,
+                "AsyncClient": lambda **kwargs: kwargs,
+                "Timeout": lambda s: s,
+            }),
+            "AsyncOpenAI": lambda **kwargs: kwargs,
+        }
+
+        openai_client = graphiti_adapter._metered_openai(
+            runtime,
+            endpoint,
+            provider_calls.append,
+            "internal_memory_llm",
+        )
+        transport = openai_client["http_client"]["transport"]
+
+        class DummyRequest:
+            def __init__(self):
+                self.headers = {}
+
+        dummy_req = DummyRequest()
+        result = asyncio.run(transport.handle_async_request(dummy_req))
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(provider_calls, ["internal_memory_llm"])
+        self.assertEqual(dummy_req.headers.get("x-shadowgraph-dispatch-alias"), alias)
+        self.assertEqual([item[0] for item in calls], [
+            "/v1/__shadowgraph/declare",
+            "upstream",
+            "/v1/__shadowgraph/close",
+        ])
 
 
 if __name__ == "__main__":

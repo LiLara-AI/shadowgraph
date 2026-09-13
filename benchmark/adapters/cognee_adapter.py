@@ -181,7 +181,16 @@ async def _metered_dispatch_scope(routes: dict, request_classes, *, declare, clo
             _ACTIVE_DISPATCH_IDENTITIES.reset(context_restore_handle)
 
 
-def _wrap_native_dispatch_root(target, method_name: str, routes: dict, request_classes: tuple, *, declare, close) -> None:
+def _wrap_native_dispatch_root(
+    target,
+    method_name: str,
+    routes: dict,
+    request_classes: tuple,
+    *,
+    declare,
+    close,
+    serialize: bool = False,
+) -> None:
     """Wrap one decorated Cognee retry root without changing vendor implementation."""
     if not isinstance(method_name, str) or not method_name:
         raise RuntimeUnavailable("Cognee native dispatch root is invalid")
@@ -189,17 +198,35 @@ def _wrap_native_dispatch_root(target, method_name: str, routes: dict, request_c
     if original is None or getattr(original, "__shadowgraph_dispatch_wrapped__", False):
         raise RuntimeUnavailable("Cognee native dispatch root is unavailable")
 
+    semaphore = None
+
     async def scoped(*args, **kwargs):
-        async with _metered_dispatch_scope(
-            routes,
-            request_classes,
-            declare=declare,
-            close=close,
-        ):
-            result = original(*args, **kwargs)
-            if not inspect.isawaitable(result):
-                raise RuntimeUnavailable("Cognee native dispatch root is not asynchronous")
-            return await result
+        nonlocal semaphore
+        if serialize:
+            if semaphore is None:
+                semaphore = asyncio.Semaphore(1)
+            async with semaphore:
+                async with _metered_dispatch_scope(
+                    routes,
+                    request_classes,
+                    declare=declare,
+                    close=close,
+                ):
+                    result = original(*args, **kwargs)
+                    if not inspect.isawaitable(result):
+                        raise RuntimeUnavailable("Cognee native dispatch root is not asynchronous")
+                    return await result
+        else:
+            async with _metered_dispatch_scope(
+                routes,
+                request_classes,
+                declare=declare,
+                close=close,
+            ):
+                result = original(*args, **kwargs)
+                if not inspect.isawaitable(result):
+                    raise RuntimeUnavailable("Cognee native dispatch root is not asynchronous")
+                return await result
 
     scoped.__shadowgraph_dispatch_wrapped__ = True
     setattr(target, method_name, scoped)
@@ -221,6 +248,7 @@ def _install_cognee_dispatch_roots(
         ("internal_memory_llm",),
         declare=declare,
         close=close,
+        serialize=True,
     )
     _wrap_native_dispatch_root(
         embedding_engine,
@@ -229,6 +257,7 @@ def _install_cognee_dispatch_roots(
         ("embedding",),
         declare=declare,
         close=close,
+        serialize=False,
     )
 
 
