@@ -234,6 +234,7 @@ def _default_client_factory(config, provider_call, *, runtime=None):
         llm_config,
         cache=False,
         client=llm_openai,
+        structured_output_mode="json_object",
     )
     embedder = runtime["OpenAIEmbedder"](
         runtime["OpenAIEmbedderConfig"](
