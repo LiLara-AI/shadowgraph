@@ -10,8 +10,9 @@
 
 import { assertHardPurgeGapLedgers, assertJournalBaselinePlacement, assertJournalEntrySequence, assertUniqueJournalSequences, rebuildProjection, journalGaps, duplicateSequences, journalBaselinePlacementIssues, journalEntryPostconditionIssue, journalEntrySequenceIssue, journalFactLifecycleIssues, schema5PurgeArtifactIssue, JOURNAL_ENTRY_TYPES, JOURNAL_TYPE_ENTITY_KIND, REPLAYABLE_ENTRY_TYPES } from './journal.js';
 import { createConfidence, applyContribution, setOutcomeContribution, computeConfidence, summarizeBasis, CONFIDENCE_POLICY } from './confidence.js';
-import { hybridSearch } from './hybrid-search.js';
+import { hybridSearch, foldText } from './hybrid-search.js';
 import { effectiveFactExpirationBoundary, factValidityPolicyIssue, isValidIsoInstant } from './fact-validity.js';
+import { evaluateRule, isSupportedOperator, isSupportedUnit, ruleOperandIssue } from './condition-eval.js';
 import { createHash } from 'node:crypto';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
@@ -58,6 +59,12 @@ export const DECISION_TRANSITIONS = Object.freeze({
 const CURRENT_DECISION_STATUSES = Object.freeze(['proposed', 'planned', 'in_progress', 'executed', 'validated', 'reconsidered']);
 
 export const OUTCOME_STATUSES = Object.freeze(['successful', 'mixed', 'failed', 'unknown']);
+// Deliberately NOT called an outcome. `outcome` here is a decision-only,
+// single-slot concept that weights confidence and writes an `outcome.recorded`
+// journal entry; none of that applies to an attempt, and reusing the word would
+// import those semantics by implication. This only classifies what an attempt's
+// free-text `result` already says.
+export const ATTEMPT_RESULT_CLASSES = Object.freeze(['failed', 'succeeded', 'inconclusive']);
 export const MEMORY_TYPES = Object.freeze(['preference', 'profile', 'goal', 'instruction', 'procedure', 'episode', 'note']);
 const MEMORY_STATUSES = Object.freeze(['active', 'superseded', 'invalidated']);
 
@@ -97,6 +104,33 @@ function assertFiniteJsonNumbers(value, seen = new WeakSet()) {
 function clone(value) {
   assertFiniteJsonNumbers(value);
   return JSON.parse(JSON.stringify(value));
+}
+
+// Detach one value on its way into a response. clone() is the established JSON
+// boundary, but it cannot be applied to a whole condition detail: a detail may
+// legitimately carry `observed: undefined` ("no fact recorded for this key"),
+// and a JSON round-trip would drop that field rather than report it. Primitives
+// need no copy, so only objects and arrays pay for one.
+function detachValue(value) {
+  return value === null || typeof value !== 'object' ? value : clone(value);
+}
+
+// Detach every own field of a caller-visible detail object.
+//
+// Naming the fields that "can" hold an object is not safe: write-time validation
+// rejects an object `operator` or `unit`, but import is deliberately lenient and
+// preserves stored records verbatim, so a rule written by another build can
+// carry an object anywhere. This walks the object's own keys instead of a
+// hand-kept list.
+//
+// It is a field-by-field walk rather than one clone() of the whole detail
+// because a detail may legitimately carry `observed: undefined` ("no fact
+// recorded for this key"); a JSON round-trip would drop that key rather than
+// report it, and callers read key presence. detachValue() leaves `undefined`
+// alone, so the key survives.
+function detachDetail(detail) {
+  for (const key of Object.keys(detail)) detail[key] = detachValue(detail[key]);
+  return detail;
 }
 
 // Legacy facts may have no id. Runtime-random ids make the same persisted legacy
@@ -810,7 +844,7 @@ export function createShadowGraph(options = {}) {
       // G8: confidence carries an auditable basis, not a bare number.
       confidence: createConfidence(confidence, evidence.length), status: 'proposed',
       assumptions: strings(input.assumptions, 'assumptions'), evidence,
-      alternatives: alternatives.map((item) => ({ id: item.id ?? id('alternative'), label: item.label, reasonRejected: item.reasonRejected ?? item.reason ?? '', reopenWhen: normalizeRules(item.reopenWhen ?? []), status: 'rejected' })),
+      alternatives: alternatives.map((item) => ({ id: item.id ?? id('alternative'), label: item.label, reasonRejected: item.reasonRejected ?? item.reason ?? '', reopenWhen: normalizeRules(item.reopenWhen ?? [], { strict: true }), status: 'rejected' })),
       failedAttempts: [...(input.failedAttempts ?? [])], outcome: input.outcome ?? null,
       reviewAfter: input.reviewAfter ?? null, createdAt: input.createdAt ?? now(), updatedAt: now()
     };
@@ -831,8 +865,11 @@ export function createShadowGraph(options = {}) {
   function addAttempt(input) {
     const existing = idempotent(input, 'attempt'); if (existing) return existing;
     if (!input || typeof input !== 'object' || typeof input.solution !== 'string' || !input.solution.trim() || typeof input.result !== 'string' || !input.result.trim()) throw new Error('An attempt requires non-empty solution and result strings');
+    if (input.resultClass !== undefined && !ATTEMPT_RESULT_CLASSES.includes(input.resultClass)) {
+      throw new Error('Attempt resultClass must be failed, succeeded, or inconclusive');
+    }
     validateTemporalFields(input, ['createdAt']);
-    const attempt = { id: input.id ?? id('attempt'), kind: 'attempt', schemaVersion: SCHEMA_VERSION, project: normalizeProject(input.project), ...provenanceFields(input), solution: input.solution, result: input.result, environment: input.environment ?? '', reason: input.reason ?? '', reusableWhen: normalizeRules(input.reusableWhen ?? []), relatedTo: input.relatedTo ?? [], createdAt: input.createdAt ?? now() };
+    const attempt = { id: input.id ?? id('attempt'), kind: 'attempt', schemaVersion: SCHEMA_VERSION, project: normalizeProject(input.project), ...provenanceFields(input), solution: input.solution, result: input.result, environment: input.environment ?? '', ...(input.resultClass === undefined ? {} : { resultClass: input.resultClass }), reason: input.reason ?? '', reusableWhen: normalizeRules(input.reusableWhen ?? [], { strict: true }), relatedTo: input.relatedTo ?? [], createdAt: input.createdAt ?? now() };
     clone(attempt);
     assertUnusedEntityId(attempt.id);
     assertJournalCapacity(1);
@@ -1401,15 +1438,13 @@ export function createShadowGraph(options = {}) {
     return clone(record);
   }
 
-  function ruleMatches(rule, value) {
-    if (typeof rule === 'string') return value === true || value === rule;
-    if (!rule || typeof rule !== 'object') return false;
-    if (rule.operator === 'equals') return value === rule.value;
-    if (rule.operator === 'not_equals') return value !== rule.value;
-    if (rule.operator === 'contains') return Array.isArray(value) ? value.includes(rule.value) : String(value).includes(String(rule.value));
-    if (rule.operator === 'greater_than') return Number(value) > Number(rule.value);
-    if (rule.operator === 'less_than') return Number(value) < Number(rule.value);
-    return false;
+  // Delegates to the shared three-valued evaluator. The old body returned a bare
+  // boolean, so an unknown operator, a non-numeric value and an unreadable unit
+  // all read as `false` -- the same answer as "checked, and this decision is
+  // fine". `unknown` is now a distinct verdict that review() reports instead of
+  // discarding. See src/condition-eval.js.
+  function ruleVerdict(rule, value) {
+    return evaluateRule(rule, value);
   }
 
   // G1: reconsideration must work from persisted state, not only from facts the
@@ -1420,6 +1455,15 @@ export function createShadowGraph(options = {}) {
     const candidates = new Map();
     for (const fact of facts.values()) {
       if ((fact.project ?? 'default') !== project) continue;
+      // Expiry is a property of the fact, not of whether housekeeping has run
+      // yet. maintain() is what flips `status` to expired and stamps validTo,
+      // and it may not have run since the boundary passed -- so read-time
+      // evaluation asks the canonical policy directly. Without this, context()
+      // reported an attempt reusable and the same call after maintain() did not,
+      // from identical evidence. The boundary instant itself is already past:
+      // `expiresAt` is when the fact stops holding, matching maintain().
+      const boundary = effectiveFactExpirationBoundary(fact);
+      if (boundary && compareInstants(boundary, asOf) <= 0) continue;
       const temporal = fact.temporal;
       if (temporal) {
         if (temporal.validFrom && compareInstants(temporal.validFrom, asOf) > 0) continue;
@@ -1429,20 +1473,96 @@ export function createShadowGraph(options = {}) {
       candidates.get(fact.key).push(fact);
     }
     const values = {};
+    const sources = {};
+    const conflicts = {};
     for (const [key, matches] of candidates) {
-      const winner = [...matches].sort((left, right) => {
+      const ordered = [...matches].sort((left, right) => {
         const byValidFrom = compareInstants(right.temporal?.validFrom ?? right.observedAt, left.temporal?.validFrom ?? left.observedAt);
         return byValidFrom !== 0 ? byValidFrom : String(right.id).localeCompare(String(left.id));
-      })[0];
+      });
+      const winner = ordered[0];
       values[key] = winner.value;
+      // Provenance of the fact the verdict was actually computed from. Only
+      // fields the fact really carries are emitted -- nothing is synthesised.
+      sources[key] = factReference(winner);
+      // The winner is deterministic and storage behaviour is unchanged, but when
+      // several equally applicable facts disagree the winner must not pass
+      // itself off as settled evidence. Record the disagreement so a verdict
+      // built on it can be reported as contested.
+      const disagreeing = ordered.filter((fact) => !Object.is(fact.value, winner.value));
+      if (disagreeing.length) conflicts[key] = ordered.map((fact) => factReference(fact));
     }
-    return values;
+    return { values, sources, conflicts };
   }
 
-  function review(context = {}) {
+  // A fact reference carries only what the fact actually recorded. Absent fields
+  // are omitted rather than defaulted, so a reader can never mistake a filled-in
+  // blank for an observation.
+  function factReference(fact) {
+    const reference = { factId: fact.id, value: fact.value };
+    const observedAt = fact.observedAt ?? fact.temporal?.recordedAt;
+    if (observedAt != null) reference.observedAt = observedAt;
+    if (fact.temporal?.validFrom != null) reference.validFrom = fact.temporal.validFrom;
+    if (fact.sourceClass != null) reference.sourceClass = fact.sourceClass;
+    if (fact.verificationStatus != null) reference.verificationStatus = fact.verificationStatus;
+    return reference;
+  }
+
+  // One evaluated condition, explained. Used for both breaches and unresolved
+  // conditions so a caller reads the same shape either way.
+  //
+  // Every field is detached on the way out by detachDetail(). `expected`,
+  // `operator`, `key` and `unit` come from the stored rule and
+  // `observed`/`evidence`/`conflictingEvidence` from the stored fact, so without
+  // this a caller holding a returned detail could reach straight into a rule or
+  // a fact and edit it -- with no journal entry, and with a rebuild silently
+  // putting the old value back.
+  function conditionDetail(record, alternative, rule, evaluation, stored, callerSupplied) {
+    const detail = {
+      decisionId: record.id,
+      alternativeId: alternative.id,
+      alternativeLabel: alternative.label,
+      key: rule.key ?? null,
+      operator: evaluation.operator,
+      expected: evaluation.expected,
+      observed: evaluation.actual,
+      verdict: evaluation.verdict,
+      reason: evaluation.reason
+    };
+    if (rule.unit != null) detail.unit = rule.unit;
+    if (callerSupplied) detail.evidence = { source: 'caller_supplied' };
+    else if (stored.sources[rule.key]) detail.evidence = { source: 'stored_fact', ...stored.sources[rule.key] };
+    if (!callerSupplied && stored.conflicts[rule.key]) detail.conflictingEvidence = stored.conflicts[rule.key];
+    return detachDetail(detail);
+  }
+
+  // Find a pre-coverage signal on this decision whose recorded breaches
+  // reconstruct to exactly `coverage`. Returns null when none does, which is the
+  // answer whenever history is missing, partial, ambiguous, or a different set.
+  //
+  // The signal is returned, not moved or modified: it keeps its stored key, id,
+  // status and acknowledgedAt, so the historical record stays intact and a later
+  // reconstruction reaches the same conclusion. Candidates are ordered by id so
+  // the choice does not depend on import order.
+  function legacySignalCovering(decisionId, coverage) {
+    const candidates = [...reviewSignals.values()]
+      .filter((signal) => signal.decisionId === decisionId && signal.coverage === undefined)
+      .sort((left, right) => String(left.id).localeCompare(String(right.id)));
+    return candidates.find((signal) => sameCoverage(reconstructedCoverage(signal), coverage)) ?? null;
+  }
+
+  // Evaluates every current decision and returns both the decisions that are due
+  // for review AND the conditions that could not be settled.
+  //
+  // The second half matters as much as the first: a decision with only unknown
+  // or contested conditions produces no `due` entry and therefore no review
+  // signal, so before this existed that uncertainty was indistinguishable from
+  // a clean pass. `diagnostics` carries it out instead. A diagnostic is NOT a
+  // review signal -- it claims neither a breach nor a confirmed-safe decision.
+  function evaluateReview(context = {}) {
     const prepared = validateReviewInput(context);
     const project = prepared.project;
-    const changed = new Set(prepared.changedFacts); const due = [];
+    const changed = new Set(prepared.changedFacts); const due = []; const diagnostics = [];
     const reviewAt = prepared.asOf ?? now();
     for (const record of records.values()) {
       if (record.kind !== 'decision') continue;
@@ -1450,25 +1570,207 @@ export function createShadowGraph(options = {}) {
       if (project !== undefined && record.project !== project) continue;
       const matches = [];
       const reconsider = new Set();
+      const violatedConditions = [];
+      const unresolved = [];
+      // What this decision's review signal would actually cover. `matches` is a
+      // human-readable reason list and collapses duplicates -- two thresholds on
+      // one fact key both read as that key -- so it cannot serve as identity.
+      const coverage = new Set();
       // Precedence: caller-supplied `facts` override stored facts of the same key,
       // preserving the pre-existing call-argument contract. String rules keep
       // matching `changedFacts` only: that list is an ephemeral "these just
       // changed" signal, whereas facts are durable state, so feeding state into it
       // would make every decision due forever.
-      const knownFacts = { ...storedFactValues(record.project ?? 'default', reviewAt), ...prepared.facts };
+      const stored = storedFactValues(record.project ?? 'default', reviewAt);
+      const knownFacts = { ...stored.values, ...prepared.facts };
       for (const alternative of record.alternatives) for (const rule of alternative.reopenWhen) {
-        if (typeof rule === 'string' && changed.has(rule)) { matches.push(rule); reconsider.add(alternative.label); }
-        else if (rule && Object.prototype.hasOwnProperty.call(knownFacts, rule.key) && ruleMatches(rule, knownFacts[rule.key])) { matches.push(rule.key); reconsider.add(alternative.label); }
+        if (typeof rule === 'string') {
+          if (changed.has(rule)) {
+            matches.push(rule); reconsider.add(alternative.label);
+            coverage.add(conditionCoverageId(rule, null));
+          }
+          continue;
+        }
+        if (!rule || typeof rule !== 'object') continue;
+        const callerSupplied = Object.prototype.hasOwnProperty.call(prepared.facts, rule.key);
+        if (!Object.prototype.hasOwnProperty.call(knownFacts, rule.key)) {
+          // No evidence for this key at all. Not a breach, and not a pass.
+          unresolved.push(conditionDetail(record, alternative, rule,
+            { operator: rule.operator ?? 'equals', expected: rule.value, actual: undefined, verdict: 'unknown', reason: 'No fact recorded for this key' },
+            stored, callerSupplied));
+          continue;
+        }
+        const evaluation = ruleVerdict(rule, knownFacts[rule.key]);
+        const detail = conditionDetail(record, alternative, rule, evaluation, stored, callerSupplied);
+        if (evaluation.verdict === 'true') {
+          matches.push(rule.key); reconsider.add(alternative.label);
+          coverage.add(conditionCoverageId(alternative, rule));
+          violatedConditions.push(detail);
+          // A breach still fires when the evidence behind it is contested --
+          // suppressing it would hide the very thing worth looking at -- but the
+          // contest travels with it.
+          if (detail.conflictingEvidence) unresolved.push(detail);
+        } else if (evaluation.verdict === 'unknown') {
+          unresolved.push(detail);
+        } else if (detail.conflictingEvidence) {
+          // A "no review needed" resting on facts that disagree is exactly the
+          // silent pass this reports.
+          unresolved.push(detail);
+        }
       }
-      if (record.reviewAfter && compareInstants(record.reviewAfter, reviewAt) <= 0) matches.push('review date reached');
-      if (record.outcome?.status === 'failed') matches.push('decision outcome failed');
-      if (matches.length) due.push({ decisionId: record.id, title: record.title, reason: [...new Set(matches)].join(', '), alternativesToReconsider: reconsider.size ? [...reconsider] : record.alternatives.map((item) => item.label) });
+      if (record.reviewAfter && compareInstants(record.reviewAfter, reviewAt) <= 0) {
+        matches.push('review date reached');
+        coverage.add(conditionCoverageId('review date reached', null));
+      }
+      if (record.outcome?.status === 'failed') {
+        matches.push('decision outcome failed');
+        coverage.add(conditionCoverageId('decision outcome failed', null));
+      }
+      if (matches.length) {
+        // detachDetail() covers the wrapper too: `title` and the alternative
+        // labels are stored record fields, and a lenient import can have made
+        // either of them an object. `violatedConditions` holds details that are
+        // already detached, so it is left alone rather than cloned twice.
+        const entry = detachDetail({
+          decisionId: record.id, title: record.title,
+          reason: [...new Set(matches)].join(', '),
+          alternativesToReconsider: reconsider.size ? [...reconsider] : record.alternatives.map((item) => item.label),
+          coverage: [...coverage].sort()
+        });
+        entry.violatedConditions = violatedConditions;
+        due.push(entry);
+      }
+      if (unresolved.length) {
+        const entry = detachDetail({ decisionId: record.id, title: record.title });
+        entry.conditions = unresolved;
+        diagnostics.push(entry);
+      }
     }
     for (const item of due) {
-      const key = reviewSignalKey(item.decisionId, item.reason);
-      if (!reviewSignals.has(key)) reviewSignals.set(key, { id: id('review'), kind: 'review', ...clone(item), status: 'open', createdAt: now() });
+      // Signal identity is (decisionId, reason, coverage). An acknowledgement
+      // survives re-evaluation of the SAME breach set, and a breach set that
+      // grows -- a second, stricter alternative on the same fact key starting to
+      // fire -- gets its own open signal rather than inheriting the old one.
+      //
+      // Backward compatibility, explicitly: a signal persisted before coverage
+      // existed carries no `coverage` field, so its scope is not stated. It is
+      // left exactly as stored -- never rewritten, never re-keyed, never
+      // deleted -- and is matched to a current breach set only when its own
+      // recorded `violatedConditions` reconstruct to precisely that set. See
+      // reconstructedCoverage().
+      //
+      // An earlier version stamped the CURRENT coverage onto such a signal so
+      // the new lookup would find it. That silently widened the acknowledgement:
+      // an ack of `lag >= 500` alone came to cover `lag >= 1000` as well the
+      // moment the stricter alternative started breaching. An acknowledgement
+      // may only cover what it can be shown to have covered; where history is
+      // missing, partial or ambiguous the current breach set is OPEN and visible.
+      const key = reviewSignalKey(item.decisionId, item.reason, item.coverage);
+      let signal = reviewSignals.get(key);
+      if (!signal) signal = legacySignalCovering(item.decisionId, item.coverage);
+      if (!signal) {
+        signal = { id: id('review'), kind: 'review', ...clone(item), status: 'open', createdAt: now() };
+        reviewSignals.set(key, signal);
+      }
+      // The identifier travels with the entry. A compact client lists reviews
+      // through context() and has no other advertised route to the signal, so
+      // without this it could reach the acknowledge tool but never name what to
+      // acknowledge. `status` comes along because `due` is recomputed from
+      // current evidence on every call and does not drop an acknowledged item,
+      // so a caller needs to see which ones are already handled.
+      item.reviewSignalId = signal.id;
+      item.reviewSignalStatus = signal.status;
+      // Coverage is signal identity, and it is persisted on the signal where a
+      // caller can read it through shadowgraph_review_signals. On a due entry it
+      // would be redundant with violatedConditions and pure wire weight, so it
+      // does not travel there.
+      delete item.coverage;
     }
-    return due;
+    return { due, diagnostics };
+  }
+
+  // Public shape is unchanged: a bare array of due decisions.
+  function review(context = {}) { return evaluateReview(context).due; }
+
+  // A declared classification wins; the legacy text heuristic is the fallback for
+  // records written before `resultClass` existed, so no stored attempt changes
+  // meaning. The two are distinguishable by whether `resultClass` is present:
+  // an inferred classification is a guess about prose and is never presented as
+  // a verified failure.
+  function attemptFailed(attempt) {
+    if (attempt.resultClass !== undefined) return attempt.resultClass === 'failed';
+    return /fail|regression|error/i.test(attempt.result);
+  }
+
+  // Evaluates `attempts[].reusableWhen`, the field that has been normalised and
+  // persisted since schema 4 with nothing ever reading it.
+  //
+  // Combination is ALL, not any: "this may be worth trying again" is a positive
+  // claim about every precondition, unlike reopenWhen where any single breach is
+  // reason enough to look again. An unresolved or contested condition blocks the
+  // claim outright -- uncertainty must never read as permission to retry.
+  //
+  // A satisfied condition means the attempt MAY be reconsidered. It does not
+  // erase the recorded failure, and it does not authorise a retry.
+  function evaluateAttemptReuse(project, reviewAt, suppliedFacts) {
+    const stored = storedFactValues(project, reviewAt);
+    const knownFacts = { ...stored.values, ...suppliedFacts };
+    const reusable = []; const diagnostics = [];
+    for (const record of records.values()) {
+      if (record.kind !== 'attempt' || record.project !== project) continue;
+      // Every stored condition counts, including the legacy free-text form.
+      // Filtering those out made an ALL decision over a SUBSET: an attempt with
+      // one unprovable prose condition and one satisfied structured condition
+      // read as fully reusable, which is the opposite of what the text says.
+      // The text is never interpreted and never rewritten -- this evaluator has
+      // no way to settle it, so it says so.
+      const rules = record.reusableWhen ?? [];
+      if (!rules.length) continue;
+      const satisfied = []; const unresolved = [];
+      for (const rule of rules) {
+        if (!rule || typeof rule !== 'object' || Array.isArray(rule)) {
+          unresolved.push(attemptConditionDetail(record, { key: null }, {
+            operator: null, expected: rule, actual: undefined, verdict: 'unknown',
+            reason: 'Legacy free-text condition this evaluator cannot verify'
+          }, stored, false));
+          continue;
+        }
+        const callerSupplied = Object.prototype.hasOwnProperty.call(suppliedFacts, rule.key);
+        const evaluation = Object.prototype.hasOwnProperty.call(knownFacts, rule.key)
+          ? ruleVerdict(rule, knownFacts[rule.key])
+          : { operator: rule.operator ?? 'equals', expected: rule.value, actual: undefined, verdict: 'unknown', reason: 'No fact recorded for this key' };
+        const detail = attemptConditionDetail(record, rule, evaluation, stored, callerSupplied);
+        if (evaluation.verdict === 'true') satisfied.push(detail);
+        if (evaluation.verdict !== 'false' || detail.conflictingEvidence) {
+          if (evaluation.verdict !== 'true' || detail.conflictingEvidence) unresolved.push(detail);
+        }
+      }
+      if (satisfied.length === rules.length && !unresolved.length) {
+        const entry = detachDetail({ attemptId: record.id, solution: record.solution, resultClass: record.resultClass ?? null });
+        entry.satisfiedConditions = satisfied;
+        reusable.push(entry);
+      }
+      if (unresolved.length) diagnostics.push({ attemptId: record.id, conditions: unresolved });
+    }
+    return { reusable, diagnostics };
+  }
+
+  // Detached on the way out for the same reason conditionDetail() is.
+  function attemptConditionDetail(attempt, rule, evaluation, stored, callerSupplied) {
+    const detail = {
+      attemptId: attempt.id,
+      key: rule.key ?? null,
+      operator: evaluation.operator,
+      expected: evaluation.expected,
+      observed: evaluation.actual,
+      verdict: evaluation.verdict,
+      reason: evaluation.reason
+    };
+    if (rule.unit != null) detail.unit = rule.unit;
+    if (callerSupplied) detail.evidence = { source: 'caller_supplied' };
+    else if (stored.sources[rule.key]) detail.evidence = { source: 'stored_fact', ...stored.sources[rule.key] };
+    if (!callerSupplied && stored.conflicts[rule.key]) detail.conflictingEvidence = stored.conflicts[rule.key];
+    return detachDetail(detail);
   }
 
   function maintain(input = {}) {
@@ -1516,8 +1818,8 @@ export function createShadowGraph(options = {}) {
       };
       appendJournal({ type: 'fact.expired', entityKind: 'fact', entityId: fact.id, project: fact.project, payload: clone(fact) });
     }
-    const due = review(reviewInput);
-    return { at, staleDecisionIds, agedDecisionIds: [...staleDecisionIds], reviewSignals: [...reviewSignals.values()].map(clone), due };
+    const { due, diagnostics } = evaluateReview(reviewInput);
+    return { at, staleDecisionIds, agedDecisionIds: [...staleDecisionIds], reviewSignals: [...reviewSignals.values()].map(clone), due, diagnostics };
   }
 
   function getReviewSignals(input = {}) { const project = input.project === undefined ? undefined : normalizeProject(input.project); return [...reviewSignals.values()].filter((item) => (project === undefined || records.get(item.decisionId)?.project === project) && (!input.status || item.status === input.status)).map(clone); }
@@ -1763,6 +2065,17 @@ export function createShadowGraph(options = {}) {
       activeScopes.set(scope, (activeScopes.get(scope) ?? 0) + 1);
     }
     for (const [scope, count] of activeScopes) if (count > 1) push('error', 'duplicate_active_fact_scope', { scope, count });
+    // A legacy id collision left these references pointing at an id that now
+    // belongs to a different entity. The link still resolves, which is what makes
+    // it dangerous, so it is declared rather than left to look healthy.
+    for (const relation of relations.values()) {
+      const endpoints = relation.migration?.ambiguousLegacyEndpoints;
+      if (Array.isArray(endpoints) && endpoints.length) push('error', 'ambiguous_legacy_relation_endpoint', { relationId: relation.id, endpoints });
+    }
+    for (const record of records.values()) {
+      const fields = record.migration?.ambiguousLegacyReferences;
+      if (Array.isArray(fields) && fields.length) push('error', 'ambiguous_legacy_reference', { recordId: record.id, fields });
+    }
     const activeMemoryScopes = new Map();
     for (const record of records.values()) {
       if (record.kind !== 'memory' || record.status !== 'active') continue;
@@ -1803,7 +2116,13 @@ export function createShadowGraph(options = {}) {
     if (options.project !== undefined) normalizeProject(options.project);
     const memoryProject = normalizeProject(options.project);
     const memoryScope = normalizeMemoryScope(options.scope);
-    const terms = String(query).toLowerCase().split(/\s+/).filter(Boolean);
+    // Folded on both sides, or the match is one-directional: an unaccented query
+    // would find an accented record but not the reverse.
+    const terms = foldForMatch(query).split(/\s+/).filter(Boolean);
+    // The same query with only case folded away, positionally aligned with
+    // `terms`. Matching uses the folded form; ranking uses this to prefer a
+    // record that holds the word the caller actually typed.
+    const rawTerms = String(query).toLocaleLowerCase().split(/\s+/).filter(Boolean);
     const hits = [];
     for (const record of records.values()) {
       if (!matchesFilters(record, options)) continue;
@@ -1816,7 +2135,7 @@ export function createShadowGraph(options = {}) {
       const matched = [...new Set(perTerm.flat())];
       hits.push({
         record: clone(record),
-        score: terms.length ? score(record, terms) : 0,
+        score: terms.length ? score(record, terms, rawTerms) : 0,
         matched,
         reason: terms.length ? `Matched ${matched.join(', ')}` : 'Matched filters only',
         matchedBy: terms.length ? 'content' : 'filter',
@@ -1852,14 +2171,30 @@ export function createShadowGraph(options = {}) {
   function recall(query = '', options = {}) {
     validateTemporalFields(options, ['asOf', 'currentAt']);
     const recallOptions = { ...options, project: normalizeProject(options.project), scope: normalizeMemoryScope(options.scope), currentAt: options.currentAt ?? (options.asOf ? null : now()) };
-    const result = hybridSearch(exportData(), query, recallOptions);
+    // Ranking only READS the graph, but this used to hand it `exportData()`,
+    // which deep-clones every record, fact, relation, review signal, idempotency
+    // entry, event and the entire journal -- on every call. Ranking reads three
+    // of those. Measured with scripts/context-size.mjs on a 70-record corpus,
+    // about 89% of recall() was that copy (2.05 ms) rather than the ranking it
+    // paid for (0.26 ms), and the journal grows without bound.
+    //
+    // So rank over live entities and clone only the page actually returned. No
+    // caller receives a reference into live state, which is the property the
+    // wholesale clone was really providing.
+    const rankingView = { records: [...records.values()], facts: [...facts.values()], relations: [...relations.values()] };
+    const result = hybridSearch(rankingView, query, recallOptions);
     const envelope = paginate(
       result.items,
       recallOptions,
       { project: recallOptions.project, scope: recallOptions.scope, query: String(query), asOf: options.asOf ?? null },
       { signals: result.signals, ranking: result.ranking }
     );
-    return { ...envelope, signals: result.signals, ranking: result.ranking };
+    return {
+      ...envelope,
+      items: envelope.items.map((item) => ({ ...item, record: clone(item.record) })),
+      signals: result.signals,
+      ranking: result.ranking
+    };
   }
 
   // context() returns several collections. Each one declares its own total and
@@ -1873,10 +2208,17 @@ export function createShadowGraph(options = {}) {
     };
     const activeDecisions = collect([...records.values()].filter((x) => x.kind === 'decision' && x.project === project && CURRENT_DECISION_STATUSES.includes(x.status)).map(clone));
     const staleAssumptions = collect([...facts.values()].filter((x) => x.project === project && x.status !== 'active').map(clone));
-    const failedAttemptsToAvoid = collect([...records.values()].filter((x) => x.kind === 'attempt' && x.project === project && /fail|regression|error/i.test(x.result)).map(clone));
-    const openReviews = collect(review({ project, changedFacts: input.changedFacts ?? [], facts: input.facts ?? {} }));
+    const failedAttemptsToAvoid = collect([...records.values()].filter((x) => x.kind === 'attempt' && x.project === project && attemptFailed(x)).map(clone));
+    const evaluated = evaluateReview({ project, changedFacts: input.changedFacts ?? [], facts: input.facts ?? {} });
+    const openReviews = collect(evaluated.due);
+    // Conditions that could not be settled travel as their own collection, so
+    // they are bounded and declared by the same completeness contract as every
+    // other collection here rather than riding along unbounded.
+    const reuse = evaluateAttemptReuse(project, now(), input.facts ?? {});
+    const reusableAttempts = collect(reuse.reusable);
+    const conditionDiagnostics = collect([...evaluated.diagnostics, ...reuse.diagnostics]);
     const suggestedQuestions = collect([...records.values()].filter((x) => x.kind === 'decision' && x.project === project && (x.confidence?.current ?? 0) < 0.5).map((x) => `What evidence could change the decision: ${x.title}?`));
-    const groups = { activeDecisions, staleAssumptions, failedAttemptsToAvoid, openReviews, suggestedQuestions };
+    const groups = { activeDecisions, staleAssumptions, failedAttemptsToAvoid, openReviews, suggestedQuestions, conditionDiagnostics, reusableAttempts };
     return {
       project,
       activeDecisions: activeDecisions.items,
@@ -1884,6 +2226,8 @@ export function createShadowGraph(options = {}) {
       failedAttemptsToAvoid: failedAttemptsToAvoid.items,
       openReviews: openReviews.items,
       suggestedQuestions: suggestedQuestions.items,
+      conditionDiagnostics: conditionDiagnostics.items,
+      reusableAttempts: reusableAttempts.items,
       completeness: {
         scope: { project },
         complete: Object.values(groups).every((group) => !group.hasMore),
@@ -2091,6 +2435,29 @@ export function createShadowGraph(options = {}) {
         entry.entityId = remapped;
         if (entry.payload?.id !== undefined) entry.payload.id = remapped;
       }
+
+      // A legacy collision renames the LATER entity, so the old id survives on the
+      // earlier one. Any reference still holding that id therefore resolves to a
+      // different entity than it may have meant -- and it resolves silently,
+      // because the endpoint still exists. Schemas 1-3 ids were collection-local
+      // and carry no kind, so which entity was intended is genuinely unknowable.
+      // Rebinding would be inventing a link, so the ambiguity is marked here and
+      // reported by validate(), the same way a duplicate active fact scope is
+      // declared rather than resolved by rule.
+      const ambiguousLegacyIds = new Set([...legacyIdRemaps.keys()].map((key) => key.slice(key.indexOf(':') + 1)));
+      if (ambiguousLegacyIds.size) {
+        for (const relation of importedRelations) {
+          const endpoints = ['from', 'to'].filter((side) => ambiguousLegacyIds.has(relation[side]));
+          if (endpoints.length) relation.migration = { ...(relation.migration ?? {}), ambiguousLegacyEndpoints: endpoints };
+        }
+        for (const record of importedRecords) {
+          const fields = ['supersedes', 'supersededBy', 'relatedTo', 'failedAttempts'].filter((field) => {
+            const value = record[field];
+            return Array.isArray(value) ? value.some((item) => ambiguousLegacyIds.has(item)) : ambiguousLegacyIds.has(value);
+          });
+          if (fields.length) record.migration = { ...(record.migration ?? {}), ambiguousLegacyReferences: fields };
+        }
+      }
     }
     {
       const importedAlternatives = importedRecords.flatMap((record) => record.alternatives ?? []);
@@ -2154,15 +2521,15 @@ export function createShadowGraph(options = {}) {
       const finalFacts = new Map(facts);
       for (const record of importedRecords) finalRecords.set(record.id, record);
       for (const fact of importedFacts) finalFacts.set(fact.id, fact);
-      const reviewOwners = new Map([...reviewSignals.values()].map((signal) => [signal.id, reviewSignalKey(signal.decisionId, signal.reason)]));
+      const reviewOwners = new Map([...reviewSignals.values()].map((signal) => [signal.id, reviewSignalKey(signal.decisionId, signal.reason, signal.coverage)]));
       const incomingReviewIds = new Set();
-      const existingReviewIdentities = new Map([...reviewSignals.values()].map((signal) => [reviewSignalKey(signal.decisionId, signal.reason), signal.id]));
+      const existingReviewIdentities = new Map([...reviewSignals.values()].map((signal) => [reviewSignalKey(signal.decisionId, signal.reason, signal.coverage), signal.id]));
       const incomingReviewIdentities = new Set();
       for (const signal of importedSignals) {
         if (!signal || typeof signal.id !== 'string' || !signal.id || typeof signal.decisionId !== 'string' || !signal.decisionId || typeof signal.reason !== 'string' || !signal.reason) throw new Error('Review signal is malformed');
         if (incomingReviewIds.has(signal.id)) throw new Error(`Duplicate review signal id ${signal.id}`);
         incomingReviewIds.add(signal.id);
-        const ownerKey = reviewSignalKey(signal.decisionId, signal.reason);
+        const ownerKey = reviewSignalKey(signal.decisionId, signal.reason, signal.coverage);
         if (incomingReviewIdentities.has(ownerKey) || (existingReviewIdentities.has(ownerKey) && existingReviewIdentities.get(ownerKey) !== signal.id)) throw new Error(`Duplicate review signal identity ${ownerKey}`);
         incomingReviewIdentities.add(ownerKey);
         if (reviewOwners.has(signal.id) && reviewOwners.get(signal.id) !== ownerKey) throw new Error(`Duplicate review signal id ${signal.id}`);
@@ -2424,7 +2791,7 @@ export function createShadowGraph(options = {}) {
       currentFacts.set(scope, winner);
     }
     for (const relation of importedRelations) relations.set(relation.id, relation);
-    for (const signal of importedSignals) reviewSignals.set(reviewSignalKey(signal.decisionId, signal.reason), signal);
+    for (const signal of importedSignals) reviewSignals.set(reviewSignalKey(signal.decisionId, signal.reason, signal.coverage), signal);
     for (const item of pendingIdempotencyUpdates) idempotency.set(item.key, item.value);
     for (const importedEvent of importedEvents) events.push(importedEvent);
 
@@ -2584,7 +2951,43 @@ export function createShadowGraph(options = {}) {
   };
 }
 
-function normalizeRules(rules) { return rules.map((rule) => typeof rule === 'string' ? rule : { key: rule.key, operator: rule.operator ?? 'equals', value: rule.value }); }
+// `strict` is for caller writes, where a typo should fail loudly instead of
+// becoming a condition that can never fire. Stored records go through the
+// lenient path: an operator this build does not recognise is PRESERVED verbatim
+// and reported by validate(), never rewritten onto a meaning we guessed. That is
+// the same envelope-vs-entity asymmetry used for schema versions -- a future or
+// unknown entity is kept and flagged, because losing it is worse.
+function normalizeRules(rules, { strict = false } = {}) {
+  return rules.map((rule) => {
+    if (typeof rule === 'string') return rule;
+    if (!rule || typeof rule !== 'object' || Array.isArray(rule)) {
+      if (strict) throw new Error('A reopen/reuse rule must be a string or an object');
+      return rule;
+    }
+    const operator = rule.operator ?? 'equals';
+    if (strict) {
+      if (typeof rule.key !== 'string' || !rule.key.trim()) throw new Error('A structured rule requires a non-empty key');
+      if (!isSupportedOperator(operator)) throw new Error(`Unsupported rule operator ${String(operator)}`);
+      if (rule.unit != null && !isSupportedUnit(rule.unit)) throw new Error(`Unsupported rule unit ${String(rule.unit)}`);
+      // Already rejected, but only as a side effect of clone() refusing an
+      // `undefined` field, which reported "Values must be plain JSON data" and
+      // named neither the rule nor the missing operand.
+      if (!Object.hasOwn(rule, 'value') || rule.value === undefined) throw new Error(`A structured rule requires a value for operator ${operator}`);
+    }
+    // Only write `value` when the rule actually carries one. Writing
+    // `value: undefined` for a rule with no operand made every later clone() of
+    // the record throw, so one such rule arriving through the lenient import
+    // path poisoned exportData() and context() for the whole graph. The rule is
+    // preserved as stored -- it is never given an operand it did not have.
+    const normalized = Object.hasOwn(rule, 'value') && rule.value !== undefined
+      ? { key: rule.key, operator, value: rule.value }
+      : { key: rule.key, operator };
+    // The unit was previously dropped here, so a caller could declare one and
+    // have it silently discarded before any comparison saw it.
+    if (rule.unit != null) normalized.unit = rule.unit;
+    return normalized;
+  });
+}
 
 function normalizeProject(value) {
   if (value === undefined || value === null) return 'default';
@@ -2604,8 +3007,91 @@ function normalizeMemoryScope(scope = {}) {
   return value;
 }
 
-function reviewSignalKey(decisionId, reason) {
-  return JSON.stringify([decisionId, reason]);
+// Signal identity. `coverage` names the exact set of breached conditions the
+// signal stands for, so a decision whose second, stricter alternative starts
+// breaching raises its own signal instead of inheriting the acknowledgement of
+// the first.
+//
+// `reason` is deliberately NOT part of the identity. It is a human-readable
+// cause list built in stored-rule order, so exporting a decision and re-importing
+// it with its alternatives in a different order turned `lag, load` into
+// `load, lag` and reopened an acknowledged review covering exactly the same
+// breaches. Coverage is a sorted set that already distinguishes everything
+// `reason` distinguishes and more, so dropping `reason` costs no discrimination
+// and removes the ordering sensitivity. `reason` itself is left exactly as
+// built -- canonicalising it would misreport the order the rules are stored in.
+//
+// Omitting `coverage` reproduces the pre-coverage key byte for byte, which is
+// what a signal persisted before coverage existed is still stored under. The two
+// forms cannot collide: the second element is a string there and an array here.
+function reviewSignalKey(decisionId, reason, coverage) {
+  return coverage === undefined
+    ? JSON.stringify([decisionId, reason])
+    : JSON.stringify([decisionId, [...coverage].sort()]);
+}
+
+// A stable name for one breached condition. The alternative's id is assigned at
+// write and persists through export, import and rebuild, and the rule is named
+// by content rather than by position so reordering `reopenWhen` does not reopen
+// a settled review. Matches with no structured rule behind them (a changed-fact
+// token, a review date, a failed outcome) carry their own text.
+// Reconstruct the coverage a pre-coverage signal actually recorded, or null when
+// it cannot be established from what the signal stores.
+//
+// A signal's `violatedConditions` are a clone of the breaches that raised it, and
+// each one names the alternative that carried the rule plus the rule's `key`,
+// `operator`, `expected` value and `unit`. That is exactly the input
+// conditionCoverageId() needs, so a signal carrying them can be placed precisely.
+//
+// Two properties make this safe to trust:
+//
+//   - it can only ever UNDER-state history. `violatedConditions` records rule
+//     breaches and nothing else, so a historical match with no rule behind it (a
+//     changedFacts token, `review date reached`, `decision outcome failed`) is
+//     absent from the reconstruction. The derived set is therefore always a
+//     subset of what was really acknowledged, never a superset.
+//   - a rule that has since been edited or removed reconstructs to an id that is
+//     simply not in today's coverage, so the sets do not match and the caller
+//     falls through to a new open signal.
+//
+// Anything missing, malformed, or empty returns null -- unknown history is not
+// evidence of an acknowledgement.
+function reconstructedCoverage(signal) {
+  const conditions = signal?.violatedConditions;
+  if (!Array.isArray(conditions) || conditions.length === 0) return null;
+  const derived = [];
+  for (const condition of conditions) {
+    if (!condition || typeof condition !== 'object' || Array.isArray(condition)) return null;
+    if (typeof condition.alternativeId !== 'string' || !condition.alternativeId) return null;
+    if (typeof condition.key !== 'string' || !condition.key) return null;
+    // Fail closed on anything that does not pin down the historical rule's
+    // semantics. An unsupported or non-string operator, an unreadable unit, or a
+    // missing operand all mean the old breach cannot be identified -- and an
+    // absent operand is especially dangerous here, because JSON.stringify drops
+    // an `undefined` field, so the identity would silently shrink to a shorter
+    // shape and could collide with a rule that genuinely states no operand.
+    if (!isSupportedOperator(condition.operator)) return null;
+    if (condition.unit != null && !isSupportedUnit(condition.unit)) return null;
+    const rule = Object.hasOwn(condition, 'expected') && condition.expected !== undefined
+      ? { key: condition.key, operator: condition.operator, value: condition.expected }
+      : { key: condition.key, operator: condition.operator };
+    if (condition.unit != null) rule.unit = condition.unit;
+    if (ruleOperandIssue(rule)) return null;
+    derived.push(conditionCoverageId({ id: condition.alternativeId }, rule));
+  }
+  return [...new Set(derived)].sort();
+}
+
+function sameCoverage(left, right) {
+  return Array.isArray(left) && Array.isArray(right)
+    && left.length === right.length
+    && left.every((item, index) => item === right[index]);
+}
+
+function conditionCoverageId(alternative, rule) {
+  return rule === null
+    ? JSON.stringify(['match', alternative])
+    : JSON.stringify(['rule', alternative.id, canonical(rule)]);
 }
 
 function sameMemoryScopeValues(left, right) {
@@ -3029,9 +3515,28 @@ function migrateFact(fact) {
 
 // G7: the declared content surface. Anything not listed here is metadata, not
 // content, and must not satisfy a free-text query.
+// The same fold the recall() tokenizer uses, deliberately shared rather than
+// reimplemented: two search paths with two different ideas of what counts as the
+// same character is how they drift apart.
+//
+// Substring matching is preserved exactly. This only widens what counts as the
+// same character, so `cach` still matches `cache` and the declared-content-field
+// rule is untouched. It can only add matches, never remove one.
+export const foldForMatch = foldText;
+
+// Same declared content fields, but compared on the stored text with only case
+// folded away -- no diacritic or orthographic folding. Used for ranking, never
+// for deciding whether a record matches, so it cannot narrow a result set.
+function matchFieldsExact(record, needle) {
+  return matchFieldsWith(record, needle, (value) => String(value ?? '').toLocaleLowerCase().includes(needle));
+}
+
 function matchFields(record, needle) {
+  return matchFieldsWith(record, needle, (value) => foldForMatch(value).includes(needle));
+}
+
+function matchFieldsWith(record, needle, has) {
   const fields = [];
-  const has = (value) => String(value ?? '').toLowerCase().includes(needle);
   if (has(record.title)) fields.push('title');
   if (has(record.goal)) fields.push('goal');
   if (has(record.chosen)) fields.push('chosen');
@@ -3046,10 +3551,27 @@ function matchFields(record, needle) {
 }
 
 const FIELD_WEIGHT = { title: 5, chosen: 3, goal: 3 };
-function score(record, terms) {
+// Folding decides WHETHER a record matches; this decides what ranks first among
+// those that do.
+//
+// Folding is what makes an Arabic record findable at all, but it also collapses
+// real minimal pairs -- على with علي, آمن with امن -- and once collapsed, a
+// record holding the word the caller actually typed scored exactly the same as
+// one holding only its near-twin. The distinction was not just widened, it was
+// erased from the ordering.
+//
+// So a match on the caller's ORIGINAL, unfolded text outranks a match that only
+// survived folding. Case is still ignored, because case was never the
+// distinction in question. This changes order only: it admits no new record and
+// excludes none, stored text is untouched, and identifiers -- which are matched
+// literally and therefore always exact -- can only be reinforced by it.
+const EXACT_TERM_BONUS = 4;
+function score(record, terms, rawTerms) {
   let total = 0;
-  for (const term of terms) {
+  for (const [index, term] of terms.entries()) {
     for (const field of matchFields(record, term)) total += FIELD_WEIGHT[field] ?? 2;
+    const raw = rawTerms?.[index];
+    if (raw && matchFieldsExact(record, raw).length) total += EXACT_TERM_BONUS;
     total += 1;
   }
   return total;

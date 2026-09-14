@@ -90,7 +90,7 @@ test('CLI mcp launches the compact stdio server used by client configurations', 
   t.after(() => child.kill());
   const response = readOneResponse(child);
   child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' })}\n`);
-  assert.equal((await response).result.tools.length, 12);
+  assert.equal((await response).result.tools.length, 13);
 });
 
 test('dashboard is served locally, explains token handling, and does not bypass API auth', async (t) => {

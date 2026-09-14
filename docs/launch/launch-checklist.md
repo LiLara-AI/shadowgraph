@@ -69,7 +69,7 @@ decision or action.
 - [x] `npm install --global github:LiLara-AI/shadowgraph` verified from a clean environment.
 - [x] Clone-from-source path verified.
 - [x] `setup` → `doctor` → decision → restart → recall → changed fact → review verified end to end.
-- [x] `shadowgraph mcp` starts and advertises 12 tools in compact mode.
+- [x] `shadowgraph mcp` starts and advertises 13 tools in compact mode.
 - [x] Fresh clone of public `main` followed using only the published README.
 - [ ] Optional: one other person follows the README cold on a machine you do not control.
 

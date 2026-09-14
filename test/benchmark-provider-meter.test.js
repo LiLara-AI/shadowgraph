@@ -5,6 +5,11 @@ import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 
+// Assembled at runtime so this synthetic redaction fixture is not a literal
+// machine path in tracked source. See CONTRIBUTING.md, public repository hygiene.
+const WINDOWS_PROFILE_PREFIX = ['C:', 'Users', 'private'].join('/');
+const WINDOWS_PROFILE_MODEL = `${WINDOWS_PROFILE_PREFIX}/account/model`;
+
 import { requestOuterDecision, STANDARD_DECISION_RESPONSE_SCHEMA } from '../benchmark/lib/outer-model.mjs';
 import { startProviderMeter } from '../benchmark/lib/provider-meter.mjs';
 import { scratchDirectory } from '../tools/scratch-directory.js';
@@ -656,7 +661,7 @@ test('correlation-valid malformed requests remain visible as sanitized failed at
   const windowsPathModel = await fetch(`${endpoint}/chat/completions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ model: 'C:/Users/private/account/model', messages: [] })
+    body: JSON.stringify({ model: WINDOWS_PROFILE_MODEL, messages: [] })
   });
   const emptyBody = await fetch(`${endpoint}/chat/completions`, {
     method: 'POST',
@@ -702,7 +707,7 @@ test('correlation-valid malformed requests remain visible as sanitized failed at
   const evidence = await readFile(ledgerPath, 'utf8');
   assert.ok(!evidence.includes('not-json'));
   assert.ok(!evidence.includes('private.invalid'));
-  assert.ok(!evidence.includes('C:/Users/private'));
+  assert.ok(!evidence.includes(WINDOWS_PROFILE_PREFIX));
   assert.ok(!evidence.includes(new URL(upstream.origin).host));
 });
 
@@ -826,7 +831,7 @@ test('malformed provider JSON and malformed usage fail closed with sanitized 502
 test('model identifiers and provider usage are bounded to public numeric evidence', async (t) => {
   const responses = [
     { model: '/private/account/model', usage: { total_tokens: 2 }, data: [] },
-    { model: 'C:/Users/private/account/model', usage: { total_tokens: 2 }, data: [] },
+    { model: WINDOWS_PROFILE_MODEL, usage: { total_tokens: 2 }, data: [] },
     { model: 'provider-model', usage: { privatePrompt: 'private prompt contents' }, data: [] },
     { model: 'provider-model', usage: { total_tokens: '2' }, data: [] },
     { model: 'provider-model', usage: { total_tokens: -1 }, data: [] },
@@ -868,7 +873,7 @@ test('model identifiers and provider usage are bounded to public numeric evidenc
   assert.deepEqual(events[5].usage, responses[5].usage);
   const evidence = await readFile(ledgerPath, 'utf8');
   assert.ok(!evidence.includes('/private/account/model'));
-  assert.ok(!evidence.includes('C:/Users/private'));
+  assert.ok(!evidence.includes(WINDOWS_PROFILE_PREFIX));
   assert.ok(!evidence.includes('private prompt contents'));
   assert.ok(!evidence.includes('privatePrompt'));
 });

@@ -38,7 +38,40 @@ Explicitly non-matchable: `id`, `kind`, `schemaVersion`, `project`, `status`, `c
 
 Terms are split on whitespace and lowercased. **Every term must match at least one content field** (AND across terms, OR across fields). A record matching only some terms is excluded. `matched` is the deduplicated union of fields across all terms.
 
-Matching is **case-insensitive substring**, not tokenised: `cach` matches `cache`. This is deliberate for a local-first store with no index — it favours recall and needs no stemmer, dictionary, or dependency. The cost, stated plainly: no stemming (`caches` will not match `caching`), no ranking beyond field weights, and no Unicode normalisation beyond JavaScript's own `toLowerCase()`, so accented and unaccented forms are distinct.
+Matching is **case-insensitive substring**, not tokenised: `cach` matches `cache`. This is deliberate for a local-first store with no index — it favours recall and needs no stemmer, dictionary, or dependency. The cost, stated plainly: no stemming (`caches` will not match `caching`) and no ranking beyond field weights.
+
+**Unicode folding (changed 2026-09-13).** Query and content are both folded by `foldText()` from `src/hybrid-search.js` — the *same* function `recall()`'s tokenizer uses, shared so the two paths cannot drift apart. It applies NFKC, then NFD, then drops `\p{Mn}`, then folds Arabic `أ/إ/آ/ٱ`→`ا`, `ى`→`ي`, `ة`→`ه`, removes tatweel, then lowercases.
+
+This corrects a silent failure rather than adding a feature. Arabic harakat are `\p{Mn}`, so the recall tokenizer's `[\p{L}\p{N}]+` treated them as **separators**: `مُحَمَّد` tokenised to `["م","ح","م","د"]`, four single letters that could never match the same word typed without diacritics. Those records were unreachable. On the substring path, `résumé` and `resume` were simply different strings.
+
+Folding only ever **widens** what counts as the same character, so it can add a match but not remove one. `cach` still matches `cache`; declared content fields, `matched`, `matchedBy` and ordering are untouched. Measured effect and the rejected alternatives are recorded in `docs/retrieval-decision-2026-09-13.md`; regressions in `test/retrieval-folding.test.js`.
+
+**The precision cost, stated rather than buried.** Widening matching necessarily admits false positives, and two of the Arabic folds collapse genuinely different words:
+
+| Fold | Collapses | Which are |
+| --- | --- | --- |
+| `ى` → `ي` | `على` / `علي` | "on, about" and the name Ali |
+| `آ` → `ا` | `آمن` / `امن` | "safe, believed" and "security" |
+
+The hamza-seat folds (`أ/إ/آ/ٱ` → `ا`) are otherwise near-free — that is casual typing, not a different word. The trade is taken because the alternative is worse: without it a record is unreachable whenever writer and searcher chose different spellings of the same word, which is common. A false positive is visible and rankable; an unreachable record is neither. Both collisions are asserted in `test/retrieval-folding.test.js` so they stay known.
+
+### Exact original text outranks a fold-only match (changed 2026-09-14)
+
+Folding decides **whether** a record matches. It decided nothing about order, so once two words collided, the record holding the word the caller actually typed scored identically to the one holding only its near-twin — the distinction was not merely widened, it was erased from the ranking.
+
+`score()` now adds a fixed bonus when a term also matches on the **stored text with only case folded away** — no diacritic or orthographic folding. So for the query `علي` the record containing `علي` ranks above one containing only `على`, and symmetrically for `على`.
+
+| Property | Guarantee |
+| --- | --- |
+| Recall | Unchanged. Both records still return; only their order differs. |
+| Stored text | Never rewritten. The comparison reads it; nothing writes it. |
+| Identifiers | Matched literally, so an exact identifier can only be reinforced, never displaced by a folded variant. |
+| Scope | Applied after the scope filter, so it cannot surface a record the filter excluded. |
+| Case | Still ignored — case was never the distinction in question. |
+
+**This applies to `search()` and `retrieve()` only.** `recall()`'s weighted-RRF fusion is deliberately unchanged and keeps the behaviour documented for it: adding an exact-match signal there requires a second token stream and a re-weighting of the fusion, which is a retrieval-subsystem change rather than a ranking fix. The two paths therefore differ on this point, by decision. Regressions: `test/retrieval-folding.test.js`.
+
+It does **not** reach meaning: paraphrase and cross-language queries still fail, and `scripts/retrieval-eval.mjs` keeps scoring those categories so the limitation stays visible.
 
 An empty query returns all filter-passing records with `matchedBy: 'filter'` — never an error and never silently zero results.
 

@@ -10,5 +10,5 @@ test('compact MCP advertises the workflow surface including remember and recall'
   let buffer = '';
   const response = new Promise((resolve) => child.stdout.on('data', (chunk) => { buffer += chunk; const line = buffer.split('\n')[0]; if (line) resolve(JSON.parse(line)); }));
   child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) + '\n');
-  const result = await response; child.kill(); assert.equal(result.result.tools.length, 12); assert.ok(result.result.tools.some((tool) => tool.name === 'shadowgraph_context')); assert.ok(result.result.tools.some((tool) => tool.name === 'shadowgraph_remember')); assert.ok(result.result.tools.some((tool) => tool.name === 'shadowgraph_recall'));
+  const result = await response; child.kill(); assert.equal(result.result.tools.length, 13); assert.ok(result.result.tools.some((tool) => tool.name === 'shadowgraph_context')); assert.ok(result.result.tools.some((tool) => tool.name === 'shadowgraph_remember')); assert.ok(result.result.tools.some((tool) => tool.name === 'shadowgraph_recall'));
 });

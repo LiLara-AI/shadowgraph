@@ -471,7 +471,7 @@ test('a later initialize renegotiates, in both directions', async (t) => {
 });
 
 test('a session that never initializes keeps the pre-2025 wire shape, in full and compact mode', async (t) => {
-  for (const [mode, expectedCount] of [['0', 27], ['1', 12]]) {
+  for (const [mode, expectedCount] of [['0', 27], ['1', 13]]) {
     const rpc = await startMcp(t, { SHADOWGRAPH_MCP_COMPACT: mode });
     const listed = await rpc.listTools({});
     assert.equal(listed.tools.length, expectedCount, `compact=${mode}`);

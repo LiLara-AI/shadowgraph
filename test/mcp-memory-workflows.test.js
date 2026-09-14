@@ -66,7 +66,7 @@ test('MCP exposes simple remember/recall workflows and uses an explicit local em
   const names = listed.result.tools.map((tool) => tool.name);
   assert.equal(names.includes('shadowgraph_remember'), true);
   assert.equal(names.includes('shadowgraph_recall'), true);
-  assert.equal(names.length, 12);
+  assert.equal(names.length, 13);
   assert.equal(Object.hasOwn(listed.result.tools.find((tool) => tool.name === 'shadowgraph_recall'), 'annotations'), false);
 
   const remembered = await rpc.call({

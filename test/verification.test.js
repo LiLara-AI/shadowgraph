@@ -277,7 +277,7 @@ test('U-1: MCP exposes verification only when a separate verifier is preconfigur
   });
   t.after(() => configuredCompact.child.kill());
   const compactList = await configuredCompact.call({ jsonrpc: '2.0', id: 20, method: 'tools/list' });
-  assert.equal(compactList.result.tools.length, 12);
+  assert.equal(compactList.result.tools.length, 13);
   assert.equal(compactList.result.tools.some((tool) => tool.name === 'shadowgraph_verify_fact'), false);
 
   const recorded = await configured.call({

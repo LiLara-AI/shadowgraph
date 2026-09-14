@@ -189,7 +189,7 @@ try {
   const [compactList] = await rpc(installedCli, { SHADOWGRAPH_FILE: compactFile, SHADOWGRAPH_MCP_COMPACT: '1' }, [
     { jsonrpc: '2.0', id: 2, method: 'tools/list' }
   ]);
-  assert.equal(compactList.result.tools.length, 12);
+  assert.equal(compactList.result.tools.length, 13);
   const [mcpRemember] = await rpc(installedCli, { SHADOWGRAPH_FILE: compactFile, SHADOWGRAPH_MCP_COMPACT: '1' }, [
     { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'shadowgraph_remember', arguments: {
       project: 'mcp-demo', memoryType: 'note', key: 'package', text: 'Loaded from installed tarball'

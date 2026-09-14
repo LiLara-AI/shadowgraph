@@ -66,7 +66,11 @@ const COMPACT_EXPECTED = [
   'shadowgraph_record_outcome',
   'shadowgraph_maintain',
   'shadowgraph_retrieve',
-  'shadowgraph_validate'
+  'shadowgraph_validate',
+  // Promoted into compact on 2026-09-14. A compact client could see reviews
+  // through shadowgraph_context but had no advertised route to acknowledge one,
+  // so signals accumulated with no way to clear them.
+  'shadowgraph_ack_review'
 ];
 // The exact set src/mcp.js used to spell out inline as a name list. A tool that
 // writes but is missing here would silently stop being saved.
@@ -270,7 +274,7 @@ test('the catalog advertises exactly the documented full, compact, and verifier 
 
   const compact = selectTools(fullCatalog, { compact: true });
   assert.deepEqual(compact.map((entry) => entry.name), COMPACT_EXPECTED);
-  assert.equal(compact.length, 12);
+  assert.equal(compact.length, 13);
   assert.deepEqual([...COMPACT_TOOL_NAMES], COMPACT_EXPECTED);
 
   // The optional verification tool is a full-mode capability only.
@@ -337,10 +341,17 @@ test('recall and remember declare an open world only when an embedding endpoint 
 // left out. There is deliberately no minimum length and no required wording,
 // because padding a clause to clear a floor makes a description worse.
 const DESCRIPTION_CAP = 350;
+// `compact` was raised from 4300 to 4450 on 2026-09-14, once and deliberately,
+// because compact gained a 13th tool: shadowgraph_ack_review was promoted so a
+// compact client could close the review loop it could already see. Measured, not
+// estimated: the compact total went 3,997 -> 4,338 characters, the whole
+// difference being that tool's own 341-character description, which is itself
+// under the 350 per-description cap. `full` and `verifier` are unchanged,
+// because the tool was already advertised there.
 const DESCRIPTION_TOTALS = {
   full: 9100,
   verifier: 9400,
-  compact: 4300
+  compact: 4450
 };
 // A tool whose result a caller could destroy something with has to say so in
 // its own words. The check is on meaning, not on a keyword: each of these must
@@ -407,11 +418,32 @@ test('the advertised description text stays within its aggregate budget', () => 
 // context. Output schemas are excluded from the pressure on purpose: they are
 // truthful promises about results, and shrinking one to clear a budget would
 // trade a real guarantee for a smaller number.
+// The `structured` budgets were raised once, deliberately, when review conditions
+// began reporting the evidence behind a verdict and reusableWhen started being
+// evaluated. Measured with `node scripts/mcp-wire-size.mjs`:
+//
+//   full structured     156,333 -> 172,527  (+16,194, +10.4%)
+//   compact structured   90,842 -> 107,036  (+16,194, +17.8%)
+//   full bare            42,166 ->  42,465  (+299)
+//   full annotated       45,000 ->  45,299  (+299)
+//
+// The structured cost is `evaluatedConditionSchema` inlined at five sites --
+// violatedConditions, conditionDiagnostics and reusableAttempts on
+// `shadowgraph_context`, plus violatedConditions and diagnostics on
+// `shadowgraph_maintain` -- because this catalog forbids $ref, so a shared shape
+// cannot be shared on the wire. The +299 on the lower tiers is the new
+// `resultClass` input property and a reworded `result` description.
+//
+// Only a client that negotiates the structured tier pays the large part, and
+// what it buys is a review signal that names the operator, the expected and
+// observed values and the fact the verdict came from, instead of a
+// comma-separated list of keys. Budgets keep roughly 2% headroom so the guard
+// still catches unplanned growth.
 const WIRE_BUDGETS = {
-  'withoutVerifier.full': { bare: 44_500, annotated: 47_500, structured: 165_500 },
-  'withoutVerifier.compact': { bare: 30_000, annotated: 31_500, structured: 96_000 },
-  'withVerifier.full': { bare: 45_500, annotated: 48_500, structured: 170_000 },
-  'withVerifier.compact': { bare: 30_000, annotated: 31_500, structured: 96_000 }
+  'withoutVerifier.full': { bare: 44_500, annotated: 47_500, structured: 176_000 },
+  'withoutVerifier.compact': { bare: 30_000, annotated: 31_500, structured: 110_000 },
+  'withVerifier.full': { bare: 45_500, annotated: 48_500, structured: 181_000 },
+  'withVerifier.compact': { bare: 30_000, annotated: 31_500, structured: 110_000 }
 };
 
 test('the advertised tool list stays within its wire-size budget, at every tier', () => {

@@ -55,7 +55,9 @@ When no limit is supplied, the default applies and `completeness.limitSource` re
 
 ## 4. `context()` is shaped differently, and why
 
-`context()` returns five named collections rather than one list, so a single `page` cannot describe it. Its collections stay **at their original keys** (`activeDecisions`, `staleAssumptions`, `failedAttemptsToAvoid`, `openReviews`, `suggestedQuestions`) as plain arrays — preserving backward compatibility for existing callers — and it adds:
+`context()` returns several named collections rather than one list, so a single `page` cannot describe it. Its collections stay **at their original keys** (`activeDecisions`, `staleAssumptions`, `failedAttemptsToAvoid`, `openReviews`, `suggestedQuestions`) as plain arrays — preserving backward compatibility for existing callers — and it adds:
+
+Two further collections arrived on 2026-09-13, both additive and both bound by this same contract: `conditionDiagnostics` (conditions that could not be settled, or that rest on facts which disagree) and `reusableAttempts` (attempts whose `reusableWhen` conditions all hold). Each declares its own counts under `collections`, and each participates in the top-level `complete`, so neither can truncate silently. See `docs/contracts/review-conditions-contract.md`.
 
 ```jsonc
 "completeness": {

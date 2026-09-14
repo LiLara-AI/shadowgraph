@@ -198,9 +198,9 @@ test('MCP modern notifications are accepted without any response', async (t) => 
   assert.equal(listed.result.tools.length, 27);
 });
 
-test('MCP modern compact mode advertises exactly 12 tools', async (t) => {
+test('MCP modern compact mode advertises exactly 13 tools', async (t) => {
   const rpc = await startMcp(t, { SHADOWGRAPH_MCP_COMPACT: '1' });
   const listed = await rpc.call({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: modernParams() });
-  assert.equal(listed.result.tools.length, 12);
+  assert.equal(listed.result.tools.length, 13);
   assertModernComplete(listed.result);
 });

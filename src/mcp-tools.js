@@ -195,9 +195,10 @@ const decisionRecordSchema = entityRecordSchema('A stored decision, including it
 const attemptRecordSchema = entityRecordSchema('A stored attempt and its result.', {
   solution: stringOrNull('What was tried.'),
   result: stringOrNull('What happened.'),
+  resultClass: stringOrNull('Declared classification: failed, succeeded, or inconclusive. Absent means only the legacy wording heuristic classified this attempt.'),
   reason: stringOrNull('Why it turned out that way.'),
   environment: stringOrNull('Where it was tried.'),
-  reusableWhen: { type: 'array', description: 'Conditions under which the attempt is worth repeating.' },
+  reusableWhen: { type: 'array', description: 'Conditions under which the attempt is worth repeating. All must hold, and none may be unresolved.' },
   relatedTo: { type: 'array', description: 'Identifiers of related entities.' }
 });
 const factRecordSchema = entityRecordSchema('A stored fact with its provenance claim and validity window.', {
@@ -250,6 +251,46 @@ const newRelationSchema = {
     temporal: { type: 'object', description: 'Bi-temporal window: validFrom, validTo, recordedAt, invalidatedAt.' }
   }
 };
+// Output schemas are walked for portability and may not carry $ref, so the
+// recursive `jsonValueProperty` cannot be reused here. This is the flat
+// equivalent already used for observed fact values elsewhere in this catalog.
+const storedValueSchema = {
+  anyOf: [{ type: 'string' }, { type: 'number' }, { type: 'boolean' }, { type: 'null' }, { type: 'array' }, { type: 'object' }],
+  description: 'A stored value, any lossless JSON value.'
+};
+const factReferenceSchema = {
+  type: 'object',
+  description: 'A fact a verdict came from. Unrecorded fields are omitted, never filled in.',
+  required: ['factId', 'value'],
+  properties: {
+    factId: { type: 'string', description: 'The observed fact.' },
+    value: storedValueSchema,
+    observedAt: { type: 'string', description: 'When observed, if recorded.' },
+    validFrom: { type: 'string', description: 'Validity start, if recorded.' },
+    sourceClass: { type: 'string', description: 'Provenance class, if recorded.' },
+    verificationStatus: { type: 'string', description: 'Verification status, if recorded.' }
+  }
+};
+const evaluatedConditionSchema = {
+  type: 'object',
+  description: 'One evaluated reopen condition. Verdict "unknown" means it could not be evaluated from available evidence, which is not a pass.',
+  required: ['key', 'operator', 'verdict', 'reason'],
+  properties: {
+    decisionId: { type: 'string', description: 'Decision the condition belongs to, for a reopenWhen rule.' },
+    attemptId: { type: 'string', description: 'Attempt the condition belongs to, for a reusableWhen rule.' },
+    alternativeId: { type: 'string', description: 'Alternative carrying it.' },
+    alternativeLabel: { type: 'string', description: 'Label of that alternative.' },
+    key: stringOrNull('Fact key read.'),
+    operator: stringOrNull('Operator the rule declared.'),
+    expected: storedValueSchema,
+    observed: storedValueSchema,
+    unit: { type: 'string', description: 'Unit the rule declared, if any.' },
+    verdict: { type: 'string', enum: ['true', 'false', 'unknown'], description: 'Evaluation result.' },
+    reason: { type: 'string', description: 'Why this verdict.' },
+    evidence: { type: 'object', description: 'Provenance of the value used.' },
+    conflictingEvidence: { type: 'array', items: factReferenceSchema, description: 'Equally applicable facts that disagree. The verdict rests on the deterministic winner.' }
+  }
+};
 const reviewDueSchema = {
   type: 'object',
   description: 'One decision whose rejected alternatives are due for reconsideration.',
@@ -258,7 +299,32 @@ const reviewDueSchema = {
     decisionId: { type: 'string', description: 'The decision to reconsider.' },
     title: stringOrNull('Decision title, when the stored decision has one.'),
     reason: { type: 'string', description: 'Comma-separated causes: the fact keys whose reopenWhen rules matched, "review date reached", or "decision outcome failed".' },
-    alternativesToReconsider: stringList('Labels of the alternatives to look at again; all of them when the trigger was not alternative-specific.')
+    alternativesToReconsider: stringList('Labels of the alternatives to look at again; all of them when the trigger was not alternative-specific.'),
+    violatedConditions: { type: 'array', items: evaluatedConditionSchema, description: 'The conditions that actually fired, each naming its operator, expected and observed value, and the fact it was computed from.' },
+    reviewSignalId: { type: 'string', description: 'Pass this to shadowgraph_ack_review to acknowledge this review.' },
+    reviewSignalStatus: { type: 'string', enum: ['open', 'acknowledged'], description: 'Whether this review was already acknowledged. Entries are recomputed from current evidence on every call and an acknowledged one still appears, so check this before acting.' }
+  }
+};
+const conditionDiagnosticSchema = {
+  type: 'object',
+  description: 'Unresolved or contested conditions on one decision or attempt. Not a review signal: neither a breach nor a confirmed-safe decision.',
+  required: ['conditions'],
+  properties: {
+    decisionId: { type: 'string', description: 'The decision involved, for reopenWhen conditions.' },
+    attemptId: { type: 'string', description: 'The attempt involved, for reusableWhen conditions.' },
+    title: stringOrNull('Decision title, when stored.'),
+    conditions: { type: 'array', items: evaluatedConditionSchema, description: 'The unresolved or contested conditions.' }
+  }
+};
+const reusableAttemptSchema = {
+  type: 'object',
+  description: 'An attempt whose reusableWhen conditions ALL hold now, with none unresolved. It may be worth reconsidering: the recorded failure still stands and this is not authorisation to retry.',
+  required: ['attemptId', 'satisfiedConditions'],
+  properties: {
+    attemptId: { type: 'string', description: 'The attempt.' },
+    solution: { type: 'string', description: 'What was tried.' },
+    resultClass: stringOrNull('Declared result class, or null when only the legacy text heuristic classified it.'),
+    satisfiedConditions: { type: 'array', items: evaluatedConditionSchema, description: 'Every condition that had to hold, and the evidence for each.' }
   }
 };
 const reviewSignalSchema = {
@@ -270,8 +336,9 @@ const reviewSignalSchema = {
     kind: { type: 'string', const: 'review', description: 'Always "review".' },
     decisionId: { type: 'string', description: 'The decision this signal is about.' },
     title: stringOrNull('Decision title, when the stored decision has one.'),
-    reason: { type: 'string', description: 'Why the signal was raised. Together with decisionId this is the dedupe identity, so the same cause never raises a second signal.' },
+    reason: { type: 'string', description: 'Why it was raised. Identity is this plus decisionId and coverage.' },
     alternativesToReconsider: stringList('Alternative labels to look at again.'),
+    coverage: stringList('Exact conditions covered, and part of this identity.'),
     status: { type: 'string', enum: ['open', 'acknowledged'], description: 'open until acknowledged.' },
     createdAt: { type: 'string', description: 'ISO 8601 time the signal was raised.' },
     acknowledgedAt: stringOrNull('ISO 8601 time of the most recent acknowledgement.')
@@ -535,7 +602,7 @@ function compose({ does, route, effects, returns }) {
 // ---------------------------------------------------------------------------
 // The catalog
 // ---------------------------------------------------------------------------
-// `compact` marks the 12 everyday workflow tools advertised when
+// `compact` marks the 13 everyday workflow tools advertised when
 // SHADOWGRAPH_MCP_COMPACT=1. `persists` marks the tools whose successful call is
 // followed by a durable save in src/mcp.js; shadowgraph_restore is deliberately
 // false because the storage backend commits the replacement itself.
@@ -600,7 +667,8 @@ const CATALOG = [
       properties: {
         id: { type: 'string', minLength: 1, description: 'Optional caller-chosen attempt identifier. Omit to generate one; a duplicate entity identifier is rejected.' },
         solution: { type: 'string', description: 'What was tried. Required, non-empty, and searchable content.' },
-        result: { type: 'string', description: 'What happened. Required, non-empty, and searchable content. Wording such as failed, error, or regression is what makes the attempt surface in shadowgraph_context as one to avoid.' },
+        result: { type: 'string', description: 'What happened. Required, non-empty, and searchable content. With no resultClass, wording such as failed, error, or regression is what makes the attempt surface in shadowgraph_context as one to avoid.' },
+        resultClass: { type: 'string', enum: ['failed', 'succeeded', 'inconclusive'], description: 'Classify the result instead of leaving it to the wording heuristic. Set it when the result text does not say failed, error, or regression, or when it does but the attempt did not fail.' },
         project: projectProperty,
         reason: { type: 'string', description: 'Why it turned out that way. Searchable content.' },
         environment: { type: 'string', description: 'Where it was tried, such as a runtime, OS, or version. Searchable content, so a later attempt can be matched to the same environment.' },
@@ -684,9 +752,11 @@ const CATALOG = [
         failedAttemptsToAvoid: { type: 'array', items: attemptRecordSchema, description: 'Attempts whose result mentions failure, regression, or error.' },
         openReviews: { type: 'array', items: reviewDueSchema, description: 'Decisions currently due for reconsideration.' },
         suggestedQuestions: stringList('Questions for the low-confidence decisions in this project.'),
+        conditionDiagnostics: { type: 'array', items: conditionDiagnosticSchema, description: 'Conditions that could not be settled, or that rest on facts which disagree. Neither a breach nor a confirmed-safe decision.' },
+        reusableAttempts: { type: 'array', items: reusableAttemptSchema, description: 'Attempts whose reusableWhen conditions all hold now. Worth reconsidering, not authorised to retry.' },
         completeness: {
           type: 'object',
-          description: 'Per-collection completeness. context returns five named collections, so one page object cannot describe it.',
+          description: 'Per-collection completeness. context returns several named collections, so one page object cannot describe it.',
           required: ['scope', 'complete', 'limitSource', 'losslessItems', 'collections'],
           properties: {
             scope: { type: 'object', description: 'The project this result covers.' },
@@ -702,7 +772,9 @@ const CATALOG = [
                 staleAssumptions: collectionCompletenessSchema('Counts for staleAssumptions.'),
                 failedAttemptsToAvoid: collectionCompletenessSchema('Counts for failedAttemptsToAvoid.'),
                 openReviews: collectionCompletenessSchema('Counts for openReviews.'),
-                suggestedQuestions: collectionCompletenessSchema('Counts for suggestedQuestions.')
+                suggestedQuestions: collectionCompletenessSchema('Counts for suggestedQuestions.'),
+                conditionDiagnostics: collectionCompletenessSchema('Counts for conditionDiagnostics.'),
+                reusableAttempts: collectionCompletenessSchema('Counts for reusableAttempts.')
               }
             }
           }
@@ -1093,7 +1165,8 @@ const CATALOG = [
         staleDecisionIds: stringList('Decisions moved to stale because they passed reviewAfter.'),
         agedDecisionIds: stringList('Compatibility alias of staleDecisionIds for older callers.'),
         reviewSignals: { type: 'array', items: reviewSignalSchema, description: 'Every persisted review signal after the run, open and acknowledged alike.' },
-        due: { type: 'array', items: reviewDueSchema, description: 'Decisions due for reconsideration after the run.' }
+        due: { type: 'array', items: reviewDueSchema, description: 'Decisions due for reconsideration after the run.' },
+        diagnostics: { type: 'array', items: conditionDiagnosticSchema, description: 'Conditions that could not be settled, or that rest on facts which disagree.' }
       }
     }
   },
@@ -1272,7 +1345,7 @@ const CATALOG = [
   },
   {
     name: 'shadowgraph_ack_review',
-    compact: false,
+    compact: true,
     persists: true,
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     describe: {
@@ -1284,7 +1357,7 @@ const CATALOG = [
       type: 'object',
       required: ['id'],
       properties: {
-        id: { type: 'string', description: 'Review signal id, as returned in the id field by shadowgraph_review_signals or in reviewSignals by shadowgraph_maintain. This is the signal id, not the decisionId it refers to.' }
+        id: { type: 'string', description: 'Review signal id, as returned in reviewSignalId by shadowgraph_context, in the id field by shadowgraph_review_signals, or in reviewSignals by shadowgraph_maintain. This is the signal id, not the decisionId it refers to.' }
       }
     },
     outputSchema: acknowledgedSignalSchema

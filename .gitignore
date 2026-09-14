@@ -8,3 +8,19 @@ __pycache__/
 *.py[cod]
 .DS_Store
 .env
+
+# Local assistant / editor tool state. None of these hold public product
+# configuration -- the tracked client templates live in `integrations/` -- and
+# they accumulate session, cache and backup data that must never be published.
+# `.npmignore` already excluded them from the tarball; this keeps them out of
+# the repository as well.
+.claude/
+.codex/
+.cursor/
+.hermes/
+.serena/
+
+# Local-only handoff and debug notes. Internal operational material with machine
+# details belongs here, outside version control; only sanitized, product-relevant
+# handoff information is tracked under docs/.
+.local-handoff/

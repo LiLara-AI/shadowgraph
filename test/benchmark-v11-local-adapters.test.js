@@ -237,7 +237,7 @@ test('node adapter host negotiates legacy MCP and enforces exact full and compac
     compact: true
   }, async ({ tools }) => tools.map(({ name }) => name));
   assert.equal(full.length, 27);
-  assert.equal(compact.length, 12);
+  assert.equal(compact.length, 13);
   assert.equal(full.includes('shadowgraph_verify_fact'), false);
   assert.equal(compact.includes('shadowgraph_verify_fact'), false);
 });

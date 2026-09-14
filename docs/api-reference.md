@@ -147,7 +147,7 @@ MCP exposes `shadowgraph_verify_fact` only in full mode when `SHADOWGRAPH_VERIFI
 
 | Surface | Entry point | Notes |
 | --- | --- | --- |
-| MCP | `shadowgraph mcp` (from a clone: `npm run mcp`) | Dual-era: `initialize` negotiates `2024-11-05`, `2025-03-26`, `2025-06-18`, or `2025-11-25`, and modern `2026-07-28` is served per request; see [MCP compatibility](mcp-compatibility.md). `SHADOWGRAPH_MCP_COMPACT=1` advertises 12 tools instead of 27. |
+| MCP | `shadowgraph mcp` (from a clone: `npm run mcp`) | Dual-era: `initialize` negotiates `2024-11-05`, `2025-03-26`, `2025-06-18`, or `2025-11-25`, and modern `2026-07-28` is served per request; see [MCP compatibility](mcp-compatibility.md). `SHADOWGRAPH_MCP_COMPACT=1` advertises 13 tools instead of 27. |
 | HTTP | `shadowgraph serve` (from a clone: `npm start`) | Binds `127.0.0.1`; optional Bearer auth via `SHADOWGRAPH_API_TOKEN`. |
 | CLI | `shadowgraph <command>` (from a clone: `node src/cli.js <command>`) | Each invocation is a separate process that reopens the store. |
 

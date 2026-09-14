@@ -8,8 +8,58 @@ const SIGNALS = Object.freeze(['lexical', 'semantic', 'graph', 'temporal']);
 const DEFAULT_WEIGHTS = Object.freeze({ lexical: 1, semantic: 1, graph: 0.8, temporal: 0.4 });
 const RRF_K = 60;
 
+// Arabic orthographic folds. These are separate letters, not combining marks, so
+// no Unicode normalisation form unifies them.
+//
+// This is a recall/precision trade, not a free win, and it is the standard trade
+// Arabic IR makes. The hamza-seat folds are near-free: أ/إ/آ/ٱ for ا is casual
+// typing, not a different word. The other two DO collide real words:
+//
+//   ى -> ي   collapses على ("on", "about") with علي (the name Ali)
+//   آ -> ا   collapses آمن ("safe", "believed") with امن ("security")
+//
+// It is taken because the alternative is worse: without it, a record is
+// unreachable whenever the writer and the searcher picked different spellings of
+// the same word, which is common. A false positive is visible and rankable; an
+// unreachable record is neither. The cost is documented in
+// docs/contracts/search-contract.md and locked by test/retrieval-folding.test.js
+// so it stays a known trade rather than a surprise.
+const ARABIC_ALEF = /[آأإٱ]/g;  // آ أ إ ٱ -> ا
+const ARABIC_ALEF_MAQSURA = /ى/g;              // ى -> ي
+const ARABIC_TA_MARBUTA = /ة/g;                // ة -> ه
+const ARABIC_TATWEEL = /ـ/g;                   // kashida, purely decorative
+
+/**
+ * One text fold, shared by both search paths so they cannot drift apart.
+ *
+ * The tokenizer previously matched `[\p{L}\p{N}]+` over NFKC text. `\p{Mn}` is
+ * neither a letter nor a number, so Arabic harakat were treated as token
+ * SEPARATORS: "مُحَمَّد" tokenised to ["م","ح","م","د"] -- four single letters that
+ * can never match the same word written without diacritics, which is how Arabic
+ * is normally typed. Every such record was unreachable by BM25.
+ *
+ * NFD splits a character into base plus combining marks; dropping the marks
+ * removes harakat and Latin accents together, so "résumé" and "resume" fold to
+ * one form as well. NFKC alone does neither -- it normalises compatibility
+ * forms, not diacritics.
+ *
+ * This only ever widens what counts as the same character. It cannot remove a
+ * match that used to work, and it leaves substring semantics untouched.
+ */
+export function foldText(value) {
+  return String(value ?? '')
+    .normalize('NFKC')
+    .normalize('NFD')
+    .replace(/\p{Mn}/gu, '')
+    .replace(ARABIC_TATWEEL, '')
+    .replace(ARABIC_ALEF, 'ا')
+    .replace(ARABIC_ALEF_MAQSURA, 'ي')
+    .replace(ARABIC_TA_MARBUTA, 'ه')
+    .toLocaleLowerCase();
+}
+
 function tokenize(value) {
-  return String(value ?? '').normalize('NFKC').toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+  return foldText(value).match(/[\p{L}\p{N}]+/gu) ?? [];
 }
 
 function primitives(value, output = []) {

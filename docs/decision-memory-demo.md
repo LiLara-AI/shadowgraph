@@ -178,7 +178,7 @@ contribution to the decision's confidence history rather than overwriting a numb
 
 ## 2. MCP
 
-The same story through the stdio MCP server in compact mode, which advertises 12 workflow tools.
+The same story through the stdio MCP server in compact mode, which advertises 13 workflow tools.
 
 ```bash
 SHADOWGRAPH_MCP_COMPACT=1 shadowgraph mcp

@@ -64,7 +64,13 @@ export const COMPACT_TOOL_NAMES = Object.freeze([
   'shadowgraph_record_outcome',
   'shadowgraph_maintain',
   'shadowgraph_retrieve',
-  'shadowgraph_validate'
+  'shadowgraph_validate',
+  // Mirrors the product catalog in src/mcp-tools.js, which promoted
+  // shadowgraph_ack_review into compact on 2026-09-14. This list is compared for
+  // exact equality against tools/list, so it has to track the product surface or
+  // every compact adapter session fails the contract check. Surface inventory
+  // only -- no scenario, scoring, or execution behaviour is affected.
+  'shadowgraph_ack_review'
 ]);
 
 const ENVIRONMENT_ALLOWLIST = Object.freeze([

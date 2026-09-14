@@ -2,7 +2,171 @@
 
 ## Unreleased
 
+### Fixed
+
+- **A rule that states no operand is `unknown`, for every operator.** Only the ordered, range and
+  set operators noticed a missing `value`. `equals` and `contains` compared against `undefined` and
+  returned a confident `false`; `not_equals` returned **`true`**, because `500 !== undefined`, so a
+  stored rule that said nothing read as a genuine breach and could raise a review signal. One
+  shared predicate, `ruleOperandIssue()`, now decides this for all ten operators and for review
+  coverage reconstruction, so the two cannot drift apart. An *absent* operand is not `value: null`
+  — null is a legitimate comparison target that JSON preserves — and presence is tested rather than
+  truthiness, so `0`, `false` and `''` remain real operands that decide. The stored rule is
+  reported as it is, never given an operand it did not have.
+- **An absent operand is no longer written as `undefined`.** `normalizeRules` emitted
+  `{key, operator, value: undefined}` for a rule carrying no operand. Stored state is plain JSON
+  and `undefined` is not, so every later `clone()` of that record threw: one such rule arriving
+  through the lenient import path took `exportData()` and `context()` down for the whole graph.
+  The field is now omitted. A caller write was already refused by that same throw but reported
+  `Values must be plain JSON data`; strict mode now says
+  `A structured rule requires a value for operator <operator>`. **Affects existing stored data:** a
+  graph holding such a rule becomes readable again, and that rule now reports `unknown` instead of
+  a verdict.
+- **Legacy acknowledgement reconstruction fails closed on incomplete history.** Coverage rebuilt
+  from a pre-`coverage` signal's `violatedConditions` accepted an entry whose `expected` operand
+  was missing. `JSON.stringify` drops an `undefined` field, so the reconstructed identity silently
+  shrank to a shorter shape that could match a current rule stating no operand, and the old
+  acknowledgement was reused for a breach it never covered. Reconstruction now refuses any entry
+  with an absent or malformed operand, an absent / non-string / unsupported `operator`, or an
+  unrecognised `unit`, and the current breach set gets its own `open` signal. A historical
+  `expected` of `0`, `false`, `''` or `null` still reconstructs. The legacy signal is preserved
+  unchanged either way.
+- **Returned condition details no longer alias stored state.** Every field of a caller-visible
+  detail on `violatedConditions`, `conditionDiagnostics`,
+  `reusableAttempts[].satisfiedConditions` and `maintain().due` / `.diagnostics` was a reference
+  into the stored rule or the stored fact whenever the value was an object or an array. Mutating a
+  returned value therefore rewrote canonical state with **no journal entry**, so live state and the
+  journal diverged silently and a rebuild put the old value back. They are copies now — the copy
+  walks the detail's own keys rather than a list of fields expected to hold objects, because
+  write-time validation rejects an object `operator` or `unit` but **import is lenient** and
+  preserves stored records verbatim, so a rule written by another build can carry an object
+  anywhere. A key whose value is `undefined` is preserved, since `observed: undefined` is how "no
+  fact recorded for this key" is reported. No response field was added, removed or renamed.
+- **Legacy free-text `reusableWhen` conditions are no longer discarded.** String conditions were
+  filtered out before the ALL decision, making it an ALL over a subset:
+  `reusableWhen: ["approval required", {key: "ready", value: true}]` with `ready = true` reported
+  the attempt reusable even though nothing had settled the approval. Free text is now counted and
+  evaluates to `unknown` — this evaluator is deterministic and cannot prove prose — which keeps the
+  attempt out of `reusableAttempts` and surfaces the unresolved text verbatim in
+  `conditionDiagnostics`. The stored condition is never interpreted, migrated or rewritten.
+  **Affects existing stored data:** an attempt previously reported reusable may no longer be.
+- **A newly applicable breach no longer inherits an old acknowledgement.** Review signal identity
+  was `(decisionId, reason)`, and `reason` is a cause list built from fact keys, so two rules on
+  one key collapsed to one reason. With alternatives carrying `lag >= 500` and `lag >= 1000`, an
+  acknowledgement made at `lag = 600` silently covered the second alternative when `lag = 1200`
+  breached it too. Identity is now `(decisionId, coverage)`, where the additive `coverage` field
+  lists stable per-condition ids (the carrying alternative's persisted `id` plus the rule by
+  canonical content, so reordering `reopenWhen` does not reopen a settled review). `reason` is
+  **not** part of the identity: besides being too coarse, it is built in stored-rule order, so
+  re-importing a decision with its alternatives reversed turned `lag, load` into `load, lag` and
+  reopened an acknowledged review covering exactly the same breaches. Coverage already
+  distinguishes everything `reason` does and more, so `reason` was dropped from the identity rather
+  than canonicalised — sorting the cause list would misreport the order rules are stored in.
+  `reason` is still reported, exactly as built. An unchanged breach set stays acknowledged, a
+  broadened one raises a separate `open` signal, and narrowing back returns to the acknowledged
+  signal. **Backward compatible, without widening:** a signal stored before `coverage` existed is
+  left exactly as stored — never re-keyed, stamped or deleted — and is matched to a current breach
+  set only when its own recorded `violatedConditions` reconstruct to precisely that set;
+  reconstruction can only under-state history, never over-state it, so an old acknowledgement can
+  be honoured but never widened. Where history is missing, partial, ambiguous or different, the
+  current breach set is `open` and visible. No schema version bump: both stores persist the signal
+  payload whole. **Affects existing stored data:** a decision with two rules on one fact key can
+  now raise a second, open signal where it previously reused the first, and a pre-`coverage` signal
+  with no recorded conditions no longer suppresses anything.
+- **Expired evidence no longer satisfies conditions until `maintain()` runs.** Read-time evaluation
+  consulted only the marks `maintain()` writes (`status`, `temporal.validTo`), so a fact whose
+  expiration boundary had already passed still counted, and the same evidence gave `context()` one
+  `reusableAttempts` entry before a maintenance run and none after. Evaluation now reads the
+  canonical `effectiveFactExpirationBoundary()` — the same policy `maintain()` uses, not a second
+  copy of the rules — and the boundary instant itself is already expired. A condition whose
+  applicable evidence has all expired is `unknown` and reported, never a pass; `maintain()`
+  afterwards changes persisted housekeeping only, never the answer. **Affects existing stored
+  data:** an already-expired fact stops satisfying conditions before the next `maintain()`.
+
 ### Changed
+
+- **Compact mode advertises 13 tools instead of 12.** `shadowgraph_ack_review` was promoted into
+  compact. A compact client could already see reviews through `shadowgraph_context` but had no
+  advertised route to acknowledge one, so signals accumulated with no way to clear them. The only
+  path to a signal id was `shadowgraph_maintain`, which also stales decisions and expires facts —
+  a maintenance write, not a listing route. No new tool was added; an existing one became reachable.
+- `review()` / `maintain().due` / `context().openReviews` entries gained **`reviewSignalId`** and
+  **`reviewSignalStatus`** (`open` | `acknowledged`), both additive. The id is what
+  `shadowgraph_ack_review` takes. The status is included because entries are recomputed from current
+  evidence on every call and an acknowledged one still appears, so a caller must check before
+  acting. Existing fields are unchanged.
+- **Behaviour change in ranking.** For `search()` and `retrieve()`, a match on the caller's original
+  unfolded text now outranks a match that only survived Unicode folding. Folding decided whether a
+  record matched but nothing about order, so a record holding the word the caller typed scored
+  identically to one holding only its near-twin — `على` against `علي`, `آمن` against `امن`. Order
+  only: no record is admitted or excluded, recall is unchanged, stored text is untouched, scope
+  isolation is unaffected, and an exact identifier can only be reinforced. Case is still ignored.
+  `recall()`'s RRF fusion is deliberately **not** changed and keeps its documented behaviour, so the
+  two paths differ here; see `docs/contracts/search-contract.md`.
+- **Arabic and accented text are now findable.** The `recall()` tokenizer matched `[\p{L}\p{N}]+`,
+  and Arabic harakat are `\p{Mn}`, so diacritics acted as token *separators*: `مُحَمَّد` tokenised to
+  four single letters and could never match `محمد`. Records written with tashkeel were unreachable
+  by BM25, and on the substring path `résumé` and `resume` were different strings. One shared
+  `foldText()` in `src/hybrid-search.js`, used by both search paths, now folds diacritics and the
+  Arabic `أ/إ/آ/ٱ`, `ى`, `ة` and tatweel variants. Folding only widens what counts as the same
+  character: it can add a match but not remove one, and `cach` still matches `cache`. Measured on 15
+  cases: `search` 7→11, `retrieve` 7→11, `recall` 10→13, with Arabic orthography 0/3 → 3/3 on all
+  three. Paraphrase and cross-language are unchanged — folding does not reach meaning. See
+  `docs/retrieval-decision-2026-09-13.md`.
+  **Precision cost, disclosed:** widening matching admits false positives, and two folds collapse
+  genuinely different words — `ى`→`ي` merges `على` ("on/about") with `علي` (the name Ali), and
+  `آ`→`ا` merges `آمن` ("safe/believed") with `امن` ("security"). Taken deliberately, because an
+  unreachable record is worse than a rankable false positive; both are asserted in
+  `test/retrieval-folding.test.js` so they stay known.
+- `recall()` no longer deep-clones the entire graph on every call. It ranked over `exportData()`,
+  which copies every record, fact, relation, review signal, idempotency entry, event and the whole
+  journal; ranking reads three of those. It now ranks over live entities and clones only the page
+  returned, so a caller still never holds a reference into live state. Measured on a 70-record
+  corpus: 2.31 ms → 0.70 ms.
+- New measurement scripts, kept separate on purpose: `scripts/context-size.mjs` (retrieved-context
+  bytes, phase timings and factual coverage) and `scripts/retrieval-eval.mjs` (a 15-case retrieval
+  evaluation with dev/held-out splits, scored per category). Tool-definition bytes stay in
+  `scripts/mcp-wire-size.mjs` and are never inferred from context bytes. No token measurement is
+  taken anywhere, so no token claim is made.
+- Reconsideration conditions are evaluated with three verdicts instead of a boolean. `true` means
+  review is due, `false` means the condition is genuinely unmet, and `unknown` means it could not
+  be evaluated from the evidence available. `unknown` opens no review signal but is always
+  reported, so uncertainty is no longer indistinguishable from safety. See
+  `docs/contracts/review-conditions-contract.md`.
+- **Behaviour change on existing stored data.** Rules using `gte`, `lte`, `between`, `in` or
+  `not_in` were silently inert — the evaluator recognised five operators and returned `false` for
+  everything else — and they now evaluate. A stored condition that never fired may now fire. Stored
+  operators this build still does not recognise are preserved verbatim and evaluate to `unknown`;
+  they are never rewritten.
+- **Behaviour change.** An ordered comparison against a value that is not a finite number, such as
+  `"250ms" > 200`, was `false` because `Number("250ms")` is `NaN`. It is now `unknown`, or decidable
+  when the rule declares `unit: 'ms'`. `null`, empty strings and non-numeric values against ordered
+  operators are likewise `unknown` rather than `false`.
+- A caller-supplied `unit` on a rule is preserved instead of being dropped by `normalizeRules`, and
+  participates in comparison through an explicit conversion whitelist. A bare number is read in the
+  rule's declared unit; an unannotated rule is never assumed to mean milliseconds.
+- `addDecision()` and `addAttempt()` now reject an unsupported operator, an unsupported unit, or an
+  empty rule key, so a typo fails at the write instead of becoming a condition that can never fire.
+  Legacy free-text conditions are still accepted, and import/migration stays lenient.
+- `context()` gained a `conditionDiagnostics` collection and `maintain()` a `diagnostics` key, both
+  additive, carrying conditions that are unresolved or resting on facts that disagree. The
+  diagnostics collection is bounded and declared by the existing completeness contract.
+  `review()` still returns a bare array of due decisions, unchanged.
+- `openReviews[]` entries gained `violatedConditions`, naming the operator, expected value, observed
+  value, unit and the fact the verdict was computed from. Existing fields are unchanged. Fields a
+  fact does not record are omitted rather than synthesised.
+- `attempts[].reusableWhen` is evaluated for the first time. The field has been normalised and
+  persisted since schema 4 with nothing reading it; it now surfaces as `context().reusableAttempts`.
+  Its rules combine with **ALL**, not `any` — the opposite of `reopenWhen` — and any unresolved or
+  contested condition blocks the result, because uncertainty must not read as permission to retry.
+  A reported attempt may be reconsidered; it is not authorised to retry, and it still appears in
+  `failedAttemptsToAvoid` with its recorded failure untouched.
+- `addAttempt()` accepts an optional `resultClass` of `failed`, `succeeded` or `inconclusive`.
+  Deliberately not called an outcome: `outcome` is a decision-only, single-slot concept that weights
+  confidence and writes an `outcome.recorded` journal entry, none of which applies to an attempt.
+  A declared class decides which attempts reach `failedAttemptsToAvoid`; with none, the legacy
+  `/fail|regression|error/i` wording test still classifies, so no stored attempt changes meaning.
+  An inferred classification is never written back as though declared.
 
 - MCP tool metadata now has one source, `src/mcp-tools.js`, which also supplies the advertised tool
   list, the unknown-tool guard, and the set of tools that persist after a successful call. Tool

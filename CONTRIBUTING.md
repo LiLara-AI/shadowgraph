@@ -60,6 +60,45 @@ npm run check:package
 npm run smoke:package
 ```
 
+`npm run check` includes `check:public-hygiene`, which audits the tracked tree. Run it alone with
+`npm run check:public-hygiene`.
+
+## Public repository hygiene
+
+This repository is public. Everything tracked here is readable by anyone, including files that are
+never packaged — `npm run check:package` audits the published tarball, so it cannot see them.
+
+- Public commits must not include local usernames, absolute machine paths, backup locations,
+  session transcripts, scratch artifacts or secrets.
+- Internal operational handoffs and debug notes containing machine information stay **outside** the
+  repository, or in an ignored local directory such as `.local-handoff/`. Only sanitized,
+  product-relevant handoff information is tracked under `docs/`.
+- Tracked documentation uses sanitized placeholders: `<repo-root>`, `<user-home>`,
+  `<local-backup-path>`.
+- Tracked files anywhere in the repository — tests, docs, scripts, notes — are named after the
+  behaviour or subject they cover, not the agent, person or tool involved in producing them:
+  `rule-operand-regressions.test.js`, not a tool name; no `docs/<tool>-notes.md` or
+  `<tool>-review.md`. The same applies to scratch-directory prefixes and prose. A tool name alone
+  is fine where it names real product surface (`integrations/claude-code.mcp.json`), and a process
+  word alone is fine (`review-conditions.test.js`); it is the two together in one filename that
+  marks a development artefact, and that is what the guard reports.
+- Do not add automated-assistant attribution or trailers to public release history unless the
+  repository owner explicitly requests it. No `Co-Authored-By` for an assistant, no `Generated-By`,
+  and no session metadata in public commit messages.
+- A public merge or release requires **both** gates: tree hygiene and history hygiene.
+- Legitimate technical references and research citations are not prohibited. Documenting a client
+  ShadowGraph genuinely supports, naming an environment variable such as `ANTHROPIC_API_KEY`
+  without a value, or citing published research is expected and must not be stripped. This policy
+  removes development-process attribution, not product or research references.
+
+Tree hygiene runs in `npm run check`. History hygiene is separate because it depends on a base ref
+and on branch topology, so it runs at merge/release time:
+
+```bash
+node scripts/check-public-hygiene.mjs --history-base origin/main \
+  --identity "LiLara-AI <253868849+LiLara-AI@users.noreply.github.com>"
+```
+
 ## Pull requests
 
 - Keep the core vendor-neutral.

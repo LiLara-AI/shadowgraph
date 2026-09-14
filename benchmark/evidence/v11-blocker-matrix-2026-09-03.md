@@ -2,7 +2,7 @@
 
 - **Date:** 2026-09-03
 - **Operator:** Hermes Agent
-- **Worktree:** `/mnt/c/benchmark-engineering/worktrees/shadowgraph-v1.1`
+- **Worktree:** `<repo-root>` (dedicated benchmark worktree)
 - **Branch:** `benchmark/v1.1-methodology-repair-glama-sync`
 - **Baseline commit:** `c918aba54627ee095538f3df9a846c07d9334317`
 - **Product version:** `0.40.0`

@@ -42,7 +42,7 @@ Modern complete results include `resultType: 'complete'` and server identity met
 
 ### Tool inventory
 
-The **12 compact tools** are the everyday agent workflow. They are also present in full mode:
+The **13 compact tools** are the everyday agent workflow. They are also present in full mode:
 
 | Tool | Purpose |
 | --- | --- |
@@ -82,7 +82,7 @@ The **12 compact tools** are the everyday agent workflow. They are also present 
 A 28th tool, `shadowgraph_verify_fact`, appears in full mode **only** when
 `SHADOWGRAPH_VERIFIER_CONFIG` names a local trust configuration. The caller supplies just `factId`
 and an evidence path inside the configured root — never verifier identity, key, signature, method,
-or target status. Compact mode stays at exactly 12 regardless.
+or target status. Compact mode stays at exactly 13 regardless.
 
 Compact mode is a tool-advertisement choice, not lossy storage: the full relational graph,
 memories, facts, alternatives, and outcomes are stored identically in both modes. Every tool listed
@@ -227,7 +227,7 @@ Six of these are worth stating plainly, because a reader would otherwise guess w
 
 ### Output schemas, and two deliberate omissions
 
-25 of the 27 full-mode tools (26 of 28 with a verifier configured, 11 of 12 in compact mode) declare
+25 of the 27 full-mode tools (26 of 28 with a verifier configured, 12 of 13 in compact mode) declare
 an `outputSchema` and return `structuredContent` that conforms to it. Two do not:
 
 | Tool | Why no output schema |
@@ -285,7 +285,7 @@ Detail that used to sit in a description, kept here because it is worth having s
 - `shadowgraph_search`, `shadowgraph_retrieve`, `shadowgraph_recall`, and `shadowgraph_journal` all
   return `{ items, page: { offset, limit, total, hasMore }, completeness }`, and `completeness` always
   declares what was omitted. The searchable content fields are listed in each tool's `query` property.
-- `shadowgraph_context` returns five named collections, each with its own `returned`, `total`,
+- `shadowgraph_context` returns several named collections, each with its own `returned`, `total`,
   `hasMore`, and `omitted` under `completeness.collections`, so truncation is attributable.
 - `shadowgraph_record_fact` rejects `verificationStatus` of `verified` or `expired`: verification is
   not self-assertable and expiry belongs to `shadowgraph_maintain`. Writes for one key must arrive in
@@ -316,7 +316,7 @@ Detail that used to sit in a description, kept here because it is worth having s
 Glama inspects this server in **full mode**, advertising all 27 tools. Compact mode is not used for
 inspection: the published `glama.json` schema accepts only `maintainers`, so there is no supported
 way to declare the compact environment variable or to disclose in the generated configuration that
-the listing was produced from a reduced surface. Advertising 12 tools while the server offers 27
+the listing was produced from a reduced surface. Advertising 13 tools while the server offers 27
 would understate what the server does, so the tool-count penalty is accepted instead.
 
 Glama's generated container does not talk to this server directly. It runs `mcp-proxy@6.4.3` in front
@@ -383,7 +383,7 @@ tooling install, the scripts fall back to the same exact versions through `npx`.
 - Inspector exits non-zero;
 - Inspector writes any strict schema finding to stderr;
 - Full mode is not exactly 27 tools without a verifier;
-- Compact mode is not exactly 12 tools;
+- Compact mode is not exactly 13 tools;
 - any advertised tool is missing one of the four boolean annotations;
 - any tool other than the two documented omissions is missing an object-rooted `outputSchema`.
 
