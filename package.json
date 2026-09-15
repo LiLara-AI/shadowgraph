@@ -81,7 +81,7 @@
     "setup": "node src/cli.js setup",
     "doctor": "node src/cli.js doctor",
     "mcp": "node src/mcp.js",
-    "check": "node --check src/shadowgraph.js && node --check src/hybrid-search.js && node --check src/embedding.js && node --check src/markdown-workspace.js && node --check src/storage.js && node --check src/sqlite-storage.js && node --check src/restore-validation.js && node --check src/server.js && node --check src/cli.js && node --check src/mcp.js && node --check src/mcp-tools.js && node --check src/verification.js && node --check src/backup.js && node --check src/revision-store.js && node --check src/journal.js && node --check src/confidence.js && node --check scripts/bench-journal.mjs && node --check scripts/validate-bench-journal.mjs && node --check scripts/check-package.mjs && node --check scripts/check-public-hygiene.mjs && node --check scripts/check-mcp.mjs && node --check scripts/check-glama-proxy.mjs && node --check scripts/check-integrations.mjs && node --check scripts/smoke-package.mjs && node --check scripts/mcp-wire-size.mjs && node --check scripts/context-size.mjs && node --check scripts/retrieval-eval.mjs && npm run benchmark:check && npm run check:public-hygiene",
+    "check": "node --check src/shadowgraph.js && node --check src/hybrid-search.js && node --check src/embedding.js && node --check src/markdown-workspace.js && node --check src/storage.js && node --check src/sqlite-storage.js && node --check src/restore-validation.js && node --check src/server.js && node --check src/cli.js && node --check src/mcp.js && node --check src/mcp-tools.js && node --check src/verification.js && node --check src/backup.js && node --check src/revision-store.js && node --check src/journal.js && node --check src/confidence.js && node --check scripts/bench-journal.mjs && node --check scripts/validate-bench-journal.mjs && node --check scripts/check-package.mjs && node --check scripts/check-public-hygiene.mjs && node --check scripts/check-mcp.mjs && node --check scripts/check-glama-proxy.mjs && node --check scripts/check-integrations.mjs && node --check scripts/smoke-package.mjs && node --check scripts/mcp-wire-size.mjs && node --check scripts/context-size.mjs && node --check scripts/retrieval-eval.mjs && node --check scripts/local-workspace.mjs && npm run benchmark:check && npm run check:public-hygiene",
     "bench": "node scripts/bench-journal.mjs",
     "size:mcp": "node scripts/mcp-wire-size.mjs",
     "benchmark:preflight": "node benchmark/cli.mjs preflight",
@@ -98,6 +98,8 @@
     "check:glama": "node scripts/check-glama-proxy.mjs",
     "check:integrations": "node scripts/check-integrations.mjs",
     "check:public-hygiene": "node scripts/check-public-hygiene.mjs",
+    "local:workspace:init": "node scripts/local-workspace.mjs init",
+    "local:workspace:status": "node scripts/local-workspace.mjs status",
     "smoke:package": "node scripts/smoke-package.mjs"
   }
 }

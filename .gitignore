@@ -20,7 +20,12 @@ __pycache__/
 .hermes/
 .serena/
 
-# Local-only handoff and debug notes. Internal operational material with machine
-# details belongs here, outside version control; only sanitized, product-relevant
-# handoff information is tracked under docs/.
+# Local-only handoff and debug notes. Only sanitized, product-relevant handoff
+# information is tracked under docs/.
+#
+# These in-repository ignore rules are a FALLBACK against an accidental `git
+# add`, not the preferred place to keep raw internal material: anything here is
+# one forced add or one edited rule away from publication. Raw handoffs, session
+# state, backups, logs and machine notes belong outside the repository entirely,
+# in the local workspace (`npm run local:workspace:init`). See CONTRIBUTING.md.
 .local-handoff/

@@ -157,6 +157,20 @@ function fail(message) {
   console.error(`check-public-hygiene: ${message}`);
 }
 
+// What to do about a finding, in neutral wording. This gate REPORTS: it never
+// deletes, moves, sanitizes or backs up anything, and it never rewrites
+// history, so what happens to the raw material stays the developer's decision.
+// Raw development data is worth keeping; it simply does not belong in a public
+// repository. Only the path, line and category are ever echoed -- printing the
+// matched value would copy the thing being reported into another log.
+export const REMEDIATION = [
+  'Raw and internal development data is meant to be preserved, not deleted. Keep the full-fidelity',
+  'copy outside the repository and track only a sanitized public version:',
+  '  npm run local:workspace:init     create the external local workspace',
+  '  npm run local:workspace:status   show where it resolves (read-only)',
+  'See CONTRIBUTING.md, "Public repository hygiene". This check only reports; it changes nothing.'
+].join('\n');
+
 async function git(args, cwd) {
   const { stdout } = await execFileAsync('git', args, { cwd, maxBuffer: 64 * 1024 * 1024 });
   return stdout;
@@ -269,7 +283,7 @@ export async function checkTree(root = defaultRoot) {
     ));
     fail(`tracked tree hygiene violations:\n${violations
       .map(({ path, line, category }) => `- ${path}${line ? `:${line}` : ''} [${category}]`)
-      .join('\n')}`);
+      .join('\n')}\n\n${REMEDIATION}`);
     return violations;
   }
   console.log(`public hygiene: tracked tree clean (${paths.length} tracked files, ${allowedCategories.size} path(s) allowlisted by category)`);

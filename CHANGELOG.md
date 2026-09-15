@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+### Added
+
+- **A local workspace for raw development material, outside the repository.** Repository hygiene
+  used to offer only one place for internal handoffs, session state, backups, debugging logs and
+  private benchmark material: an ignored directory *inside* the repository, one forced add away
+  from publication. `npm run local:workspace:init` creates an external workspace instead, and
+  `npm run local:workspace:status` reports where it resolves without touching anything. It resolves
+  from `SHADOWGRAPH_LOCAL_WORKSPACE` or defaults to the repository's sibling `shadowgraph-local`;
+  the repository root and every path inside it are refused by canonical, symlink-resolved comparison
+  rather than a string prefix test. `init` checks every directory it would create and the README for
+  a symlink, a Windows junction or a hardlink before it creates anything, so a workspace it refuses
+  is a workspace it did not modify; it creates only what is missing, never overwrites an existing
+  README, and creates no Git metadata. `status` only reads, and importing the module does nothing at
+  all.
+
+  Placing material in the workspace is **manual** in this release: no repository command copies,
+  moves, deletes or rewrites raw data, and nothing indexes it. An automated preservation command was
+  intentionally not shipped — copying into an external directory safely on every supported platform,
+  while the filesystem underneath may be concurrently substituted, needs machinery out of proportion
+  to a convenience `cp` already provides. The ignored directories named in `.gitignore` remain a
+  fallback against an accidental `git add`, not the place raw material belongs. No runtime behaviour
+  changes and no dependency is added.
+- **The public hygiene check says what to do with a finding.** It reported the violation and left
+  the developer to guess, which invites deleting the offending material. The diagnostic now states
+  that raw data is meant to be preserved outside the repository and only a sanitized copy tracked,
+  and names the workspace commands. The gate itself is unchanged in what it touches: it reports,
+  and never deletes, moves, sanitizes, backs up or rewrites anything.
+
 ### Fixed
 
 - **A rule that states no operand is `unknown`, for every operator.** Only the ordered, range and
