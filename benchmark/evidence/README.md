@@ -158,7 +158,13 @@ for both `graphiti` and `cognee`, while both adapters reject any non-null
 `userId`:
 
 - `benchmark/adapters/graphiti_adapter.py` — *"Graphiti has no native user namespace"*
-- `benchmark/adapters/cognee_adapter.py` — *"Cognee user ACL is not locked for benchmark execution"*
+- `benchmark/adapters/cognee_adapter.py` — *"Cognee user ACL is not locked for
+  benchmark execution"*, **as it read when this probe was run.** The adapter no
+  longer refuses a user namespace: CB2 demonstrated Cognee 1.5.3 enforcing its
+  native per-user ACL under the pinned backend configuration, and the adapter
+  resolves `namespace.userId` through `client.user_for(...)` today. The
+  contradiction this section settles is the one that stood then, not a standing
+  description of the tree.
 
 That contradiction had to be settled by observation before any count could be
 called truthful, because the applicability matrix determines how many
@@ -247,8 +253,18 @@ native user namespace (`no-memory`, `shadowgraph-full`, `shadowgraph-compact`,
 The delta is exactly Graphiti's four `ISOLATION_USER` units
 (2 scenarios x 2 repetitions).
 
-**Status: proposed, not adopted.** Changing a declared applicability entry
-requires an amendment reviewed under the methodology. `preregistration.json` and
-both existing amendments remain byte-identical and are not edited. Until an
-amendment 003 is reviewed and accepted, the acceptance definition continues to
-carry the A002 counts, and no acceptance execution may claim either set.
+**Status when this record was written: proposed, not adopted.** Changing a
+declared applicability entry requires an amendment reviewed under the
+methodology. `preregistration.json` and both existing amendments remain
+byte-identical and are not edited.
+
+**Since adopted, on 2026-09-04.**
+`benchmark/preregistration-amendment-003.json` carries `status:
+AUTHORIZED_FOR_NON_SCORED_V1_1_ACCEPTANCE` and a `supersedes` block naming the
+preregistration and both prior amendments by SHA-256;
+`benchmark/preregistration-amendment-003.sha256` pins the amendment itself; and
+`benchmark/acceptance/definition.json` now carries **20 / 288 / 260** — the
+right-hand column above. The paragraph before this one is left as it stood so
+the sequence stays legible, but the sentence it used to end with — that the
+definition continues to carry the A002 counts — is no longer true, and is
+removed rather than left to be read as current.

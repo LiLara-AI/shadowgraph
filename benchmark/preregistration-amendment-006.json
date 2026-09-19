@@ -1,0 +1,109 @@
+{
+  "amendmentVersion": "1.1.0",
+  "amendmentId": "amendment-006",
+  "status": "AUTHORIZED_FOR_NON_SCORED_V1_1_ACCEPTANCE",
+  "proposedAt": "2026-09-08T09:43:21Z",
+  "authorizedAt": "2026-09-08T09:43:21Z",
+  "supersedes": {
+    "preregistrationFile": "benchmark/preregistration.json",
+    "preregistrationSha256": "738ee8b4813fab77da2e4e24582b12e756686650e4c39fad41c5337f831f5dac",
+    "amendment001File": "benchmark/preregistration-amendment-001.json",
+    "amendment001Sha256": "2b209df6ca46a179e332acd4ed0b16a35a089f5c14575dd86353db0dc7249c4a",
+    "amendment002File": "benchmark/preregistration-amendment-002.json",
+    "amendment002Sha256": "08e12eca3f93bd67cfeaf90a2064f91beb240e78a8fd63ed8645da78c0d88f1b",
+    "amendment003File": "benchmark/preregistration-amendment-003.json",
+    "amendment003Sha256": "726de2018584aca399fc27d2bba15585d8b6fb9454bc24083578daed22f0be0a",
+    "amendment004File": "benchmark/preregistration-amendment-004.json",
+    "amendment004Sha256": "b0c3a2553608efb78147a8c1f1ef9af51a7d0eebaa0037ce4ad7b64616b1c5f9",
+    "amendment005File": "benchmark/preregistration-amendment-005.json",
+    "amendment005Sha256": "c435fa9d772c151c83214ef3a4180e0646236cd2cbb079be082b8341c4e6e223"
+  },
+  "reason": {
+    "validComparativeResultObserved": false,
+    "partialStateReuse": false,
+    "finding": "NATIVE_ATTEMPT_TRACE_CONTRACT",
+    "correction": "Amendment 005 distinguished harness re-execution from provider transport, native validation/repair, schema-mode fallback, and model/provider fallback, but it did not make the distinction a pre-dispatch, meter-owned gate. Pinned Cognee 1.5.3 loopback fault injection established three same-model JSON-object completions for one malformed structured-output root operation (C), and its selected OpenAI-compatible embedding engine established three HTTP attempts before its outer tenacity retry after a local transient fault (B). This amendment supplies a prospective trace and finite dispatch contract for every arm, instead of a product-specific exception."
+  },
+  "invariants": {
+    "scored": false,
+    "scenariosChanged": false,
+    "seedsChanged": false,
+    "repetitionsChanged": false,
+    "armSetChanged": false,
+    "frozenSourcesChanged": false,
+    "comparativeClaimsEnabled": false,
+    "scoringRulesChanged": false,
+    "responseSchemaChanged": false,
+    "applicabilityMatrixChanged": false,
+    "providerModelsChanged": false,
+    "providerEndpointsChanged": false,
+    "providerBudgetsRelaxed": false,
+    "timeoutsChanged": false
+  },
+  "nativeAttemptTraceContract": {
+    "appliesTo": "every arm, every root operation, every provider request class, and every future non-scored v1.1 run identically",
+    "meterOwnedEvidence": {
+      "rootOperationRequiredBeforeDispatch": true,
+      "rootOperations": ["reset", "retrieve", "persist", "verify", "outer-decision"],
+      "safeTraceFields": ["correlation", "rootOperation", "requestNumber", "requestClass", "outcome", "responseFormat", "requestedModel", "providerModel", "latencyMs", "usage"],
+      "schemaBodiesOrPromptsRetained": false,
+      "rootOperationReexecutionProhibited": true,
+      "samePinnedRequestedAndProviderModelRequired": true,
+      "providerEndpointFallbackProhibited": true
+    },
+    "taxonomyResolution": {
+      "A": "A repeated adapter/harness root tuple is refused before the second host invocation.",
+      "B": "A second meter event at one root/class after a FAILED predecessor is transport retry evidence and is allowed only by the same arm/class policy plus fresh fault-injection evidence.",
+      "C": "A same-mode meter event after a SUCCEEDED predecessor is native validation/self-correction evidence and is allowed only by the same arm/class policy plus fresh fault-injection evidence.",
+      "D": "A meter event whose structured-output mode differs from its SUCCEEDED predecessor is schema-mode fallback evidence and is allowed only by the same arm/class policy plus fresh fault-injection evidence.",
+      "E": "A requested or reported provider model that differs from the locked model is a prohibited model/provider fallback and makes the trace discrepant."
+    },
+    "maxAttemptsPerRootRequestClass": 24,
+    "capDerivation": "The selected Cognee embedding path has an observed three-attempt AsyncOpenAI transport cycle. Its pinned tenacity schedule has minimum waits of 2, 4, 8, 16, 32, 64, and 128 seconds under a 128-second stop-after-delay boundary, permitting at most eight outer invocations and therefore at most 24 provider attempts before the meter's independent request, adapter, unit, campaign, and class-budget ceilings also apply. The same fixed cap applies to every arm and request class; it is a stop-loss ceiling, not an expected count or transferable pool.",
+    "armNeutralRecoveryPolicy": {
+      "schema": "shadowgraph.v11.native-attempt-policy",
+      "version": 1,
+      "maxAttemptsPerRootRequestClass": 24,
+      "arms": [
+        {"armId": "no-memory", "recovery": {"outer_decision_llm": [], "internal_memory_llm": [], "embedding": []}},
+        {"armId": "shadowgraph-full", "recovery": {"outer_decision_llm": [], "internal_memory_llm": [], "embedding": []}},
+        {"armId": "shadowgraph-compact", "recovery": {"outer_decision_llm": [], "internal_memory_llm": [], "embedding": []}},
+        {"armId": "mem0-oss", "recovery": {"outer_decision_llm": [], "internal_memory_llm": [], "embedding": []}},
+        {"armId": "graphiti", "recovery": {"outer_decision_llm": [], "internal_memory_llm": [], "embedding": []}},
+        {"armId": "basic-memory", "recovery": {"outer_decision_llm": [], "internal_memory_llm": [], "embedding": []}},
+        {"armId": "cognee", "recovery": {"outer_decision_llm": [], "internal_memory_llm": ["C"], "embedding": ["B"]}}
+      ]
+    },
+    "preconditionEvidence": {
+      "allArmsMustHavePolicyEntries": true,
+      "nonemptyRecoveryPolicyRequiresFreshPinnedLoopbackFaultInjection": true,
+      "faultInjectionMayNotContactAnExternalProvider": true,
+      "missingOrMalformedEvidenceBlocksDispatch": true,
+      "unrecognizedNativeSequenceMakesTheRunDiscrepant": true
+    },
+    "accounting": {
+      "admissionBeforeDispatch": true,
+      "failedAndInflightCallsConsumeTheirClassCeiling": true,
+      "allAttemptsCountTowardLatencyTokensCostAndProviderBudget": true,
+      "providerLedgerAndAdapterCountersMustReconcile": true,
+      "nativeSuccessDoesNotCreateANewHarnessAttempt": true
+    }
+  },
+  "prospectiveEffect": {
+    "appliesToRunsStartedAfter": "2026-09-08T09:43:21Z",
+    "rescoreExistingRuns": false,
+    "rewriteHistoricalArtifacts": false,
+    "resumeHistoricalRuns": false,
+    "note": "Runs 002 and 003 retain the bytes, classifications, statuses, and findings they actually recorded. They are not rerun, rescored, or submitted as evidence for this prospective trace contract."
+  },
+  "countDerivation": {
+    "rule": "Unchanged. The amendment changes neither the arm matrix nor the scenario, seed, repetition, phase, reset, or outer-decision derivation.",
+    "expected": {
+      "totalUnits": 308,
+      "excludedUnits": 20,
+      "measuredUnits": 288,
+      "resetUnits": 28,
+      "outerDecisionCalls": 260
+    }
+  }
+}

@@ -12,7 +12,11 @@ import {
   V11_ACCEPTANCE_EXPECTED_COUNTS,
   V11_ACCEPTANCE_PHASES,
   V11_ACCEPTANCE_SOURCE_HASHES,
+  V11_SCORED_EXPECTED_COUNTS,
+  V11_SCORED_SOURCE_HASHES,
   loadV11AcceptanceDefinition,
+  loadV11FinalAcceptanceDefinition,
+  loadV11ScoredDefinition,
   validateV11AcceptanceScenario,
   validateV11PublicScenario
 } from '../benchmark/lib/v11-definition.mjs';
@@ -32,8 +36,61 @@ const ACCEPTANCE_RELATIVE_FILES = [
 const FROZEN_RELATIVE_FILES = [
   'benchmark/preregistration.json',
   'benchmark/preregistration-amendment-001.json',
-  'benchmark/preregistration-amendment-002.json'
+  'benchmark/preregistration-amendment-002.json',
+  'benchmark/preregistration-amendment-003.json',
+  'benchmark/preregistration-amendment-003.sha256',
+  'benchmark/preregistration-amendment-004.json',
+  'benchmark/preregistration-amendment-004.sha256',
+  'benchmark/preregistration-amendment-005.json',
+  'benchmark/preregistration-amendment-005.sha256',
+  'benchmark/preregistration-amendment-006.json',
+  'benchmark/preregistration-amendment-006.sha256',
+  'benchmark/preregistration-amendment-008.json',
+  'benchmark/preregistration-amendment-008.sha256'
 ];
+
+test('scored definition reuses all ten frozen scenarios while acceptance remains unchanged', async () => {
+  const [acceptance, finalAcceptance, scored, preregistration] = await Promise.all([
+    loadV11AcceptanceDefinition({ repositoryRoot: REPOSITORY_ROOT }),
+    loadV11FinalAcceptanceDefinition({ repositoryRoot: REPOSITORY_ROOT }),
+    loadV11ScoredDefinition({ repositoryRoot: REPOSITORY_ROOT }),
+    readJson(path.join(REPOSITORY_ROOT, 'benchmark', 'preregistration.json'))
+  ]);
+
+  assert.equal(acceptance.definition.scored, false);
+  assert.equal(Object.hasOwn(acceptance.definition, 'finalProfile'), false);
+  assert.equal(Object.keys(acceptance.sourceHashes).length, 8);
+  assert.deepEqual(acceptance.expectedCounts, V11_ACCEPTANCE_EXPECTED_COUNTS);
+  assert.equal(finalAcceptance.definition.scored, false);
+  assert.equal(finalAcceptance.definition.finalProfile, true);
+  assert.deepEqual(finalAcceptance.scenarios, acceptance.scenarios);
+  assert.deepEqual(finalAcceptance.sourceHashes, V11_SCORED_SOURCE_HASHES);
+  assert.deepEqual(finalAcceptance.nativeAttemptPolicy, scored.nativeAttemptPolicy);
+
+  assert.equal(scored.definition.scored, true);
+  assert.equal(scored.definition.finalProfile, true);
+  assert.equal(Object.keys(scored.sourceHashes).length, 9);
+  assert.deepEqual(scored.sourceHashes, V11_SCORED_SOURCE_HASHES);
+  assert.equal(scored.sourceHashes.amendment009Sha256, '804d1f3bf0ae9f8f8e38f01676c66dc5e7c16b722f1ce438cc63a33b9a84c2e2');
+  assert.deepEqual(scored.scenarios, preregistration.scenarios);
+  assert.deepEqual(
+    scored.scenarios.map(({ id }) => id),
+    [
+      'S01_DATABASE', 'S02_DEPLOYMENT', 'S03_CACHING', 'S04_API_ERRORS',
+      'S05_MIGRATION', 'S06_AUTH', 'S07_TESTING', 'S08_PERFORMANCE',
+      'S09_CHANGED_CONSTRAINT', 'S10_RELEASE_BACKUP'
+    ]
+  );
+  assert.deepEqual(scored.definition.arms, acceptance.definition.arms);
+  assert.deepEqual(scored.definition.phases, V11_ACCEPTANCE_PHASES);
+  assert.deepEqual(scored.definition.commonExecution, {
+    repetitions: 3,
+    randomSeeds: [1729, 2718, 31415]
+  });
+  assert.deepEqual(scored.expectedCounts, V11_SCORED_EXPECTED_COUNTS);
+  assert.deepEqual(scored.definition.expectedCounts, V11_SCORED_EXPECTED_COUNTS);
+  assert.deepEqual(scored.preregistration.marketingThresholds, preregistration.marketingThresholds);
+});
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
@@ -279,13 +336,18 @@ const BENIGN_BOUNDARY_CORPUS = Object.freeze([
   'modelingAssumption'
 ]);
 
-test('acceptance definition is frozen to A002 sources, exact topology, and mechanical counts', async () => {
+test('acceptance definition binds Amendments 003 through 008, exact topology, and mechanical counts', async () => {
   const loaded = await loadV11AcceptanceDefinition({ repositoryRoot: REPOSITORY_ROOT });
 
   assert.deepEqual(V11_ACCEPTANCE_SOURCE_HASHES, {
     preregistrationSha256: '738ee8b4813fab77da2e4e24582b12e756686650e4c39fad41c5337f831f5dac',
     amendment001Sha256: '2b209df6ca46a179e332acd4ed0b16a35a089f5c14575dd86353db0dc7249c4a',
-    amendment002Sha256: '08e12eca3f93bd67cfeaf90a2064f91beb240e78a8fd63ed8645da78c0d88f1b'
+    amendment002Sha256: '08e12eca3f93bd67cfeaf90a2064f91beb240e78a8fd63ed8645da78c0d88f1b',
+    amendment003Sha256: '726de2018584aca399fc27d2bba15585d8b6fb9454bc24083578daed22f0be0a',
+    amendment004Sha256: 'b0c3a2553608efb78147a8c1f1ef9af51a7d0eebaa0037ce4ad7b64616b1c5f9',
+    amendment005Sha256: 'c435fa9d772c151c83214ef3a4180e0646236cd2cbb079be082b8341c4e6e223',
+    amendment006Sha256: '3bc9308a19e44ecc06d15dc0144239aa907b49cf897a11f9fab7cfe116966760',
+    amendment008Sha256: '184ba096d3b3d762f96e37c9a594925dd22e9628b9649a89d4a0a0c8fdff5ff9'
   });
   assert.deepEqual(V11_ACCEPTANCE_ARM_IDS, [
     'no-memory',
@@ -311,10 +373,10 @@ test('acceptance definition is frozen to A002 sources, exact topology, and mecha
   ]);
   assert.deepEqual(V11_ACCEPTANCE_EXPECTED_COUNTS, {
     totalUnits: 308,
-    excludedUnits: 16,
-    measuredUnits: 292,
+    excludedUnits: 20,
+    measuredUnits: 288,
     resetUnits: 28,
-    outerDecisionCalls: 264
+    outerDecisionCalls: 260
   });
   assert.equal(loaded.definition.scored, false);
   assert.equal(loaded.definition.commonExecution.repetitions, 2);
@@ -328,11 +390,23 @@ test('acceptance definition is frozen to A002 sources, exact topology, and mecha
   assert.ok(loaded.scenarios.every(({ id }) => /^ACC_[A-Z0-9_]+$/u.test(id)));
   assert.equal(
     sha256(await readFile(path.join(REPOSITORY_ROOT, 'benchmark/acceptance/definition.json'))),
-    'b48666efec93e4b7c6c6bebee66634546ccd991c66158d426d1547620720a596'
+    'f41a62337bc330adcf13b8691e9634eb934d474a969645d95e0cb6c500a0b30f'
   );
   assert.equal(
     sha256(await readFile(path.join(REPOSITORY_ROOT, 'benchmark/acceptance/scenarios.json'))),
     '728dc6e3f12db8334d31d29641caee01d4b1c645c5b51bcb27caa3fff5b4b14a'
+  );
+});
+
+test('loader rejects a mutated Amendment 005 sidecar even when its JSON source is unchanged', async (t) => {
+  const root = await cloneDefinitionFixture(t);
+  const sidecarPath = path.join(root, 'benchmark', 'preregistration-amendment-005.sha256');
+  const original = await readFile(sidecarPath);
+  await writeFile(sidecarPath, Buffer.concat([original, Buffer.from('# changed\n')]));
+
+  await assert.rejects(
+    loadV11AcceptanceDefinition({ repositoryRoot: root }),
+    /SHAPE/iu
   );
 });
 
@@ -688,6 +762,61 @@ test('all public and loader boundary errors are static and non-disclosing', asyn
       [sentinel]
     );
   });
+});
+
+test('CANDIDATE-STATUS labels historical verification as non-current evidence', async () => {
+  const status = await readFile(path.join(REPOSITORY_ROOT, 'benchmark', 'CANDIDATE-STATUS.md'), 'utf8');
+  assert.match(status, /Historical verification evidence — not current candidate evidence/u);
+  assert.match(status, /v11-operational-budget-repair\.md/u);
+  assert.doesNotMatch(status, /All figures below were produced on the current branch with a clean working tree\./u);
+});
+
+test('operational current-status header describes the committed candidate gate', async () => {
+  const operational = await readFile(
+    path.join(REPOSITORY_ROOT, 'benchmark', 'evidence', 'v11-operational-budget-repair.md'),
+    'utf8'
+  );
+  const [currentStatus] = operational.split('\n## Disposition', 1);
+  assert.match(
+    currentStatus,
+    /Current prospective status — Amendment 006 \(committed exact candidate; not a live result\)/u
+  );
+  assert.match(currentStatus, /official implementation lock/u);
+  assert.match(currentStatus, /unused, exact-lock-bound `v11-acceptance-004` budget and campaign policy/u);
+  assert.match(currentStatus, /SHADOWGRAPH_NEO4J_AUTH/u);
+  assert.doesNotMatch(currentStatus, /apply only after an authorized committed exact tree/u);
+  assert.doesNotMatch(currentStatus, /NOT READY for provider budget/u);
+});
+
+test('operational current-status header distinguishes READY prerequisites from an unrun acceptance', async () => {
+  const operational = await readFile(
+    path.join(REPOSITORY_ROOT, 'benchmark', 'evidence', 'v11-operational-budget-repair.md'),
+    'utf8'
+  );
+  const [currentStatus] = operational.split('\n## Disposition', 1);
+  assert.match(currentStatus, /Neo4j `AUTH_OK`/u);
+  assert.match(currentStatus, /fresh Cognee ACL precondition.*PASS/u);
+  assert.match(currentStatus, /structured preflight.*`READY`.*zero blockers/u);
+  assert.match(currentStatus, /no `v11-acceptance-004` provider traffic, campaign ledger, raw run, aggregate, ranking, or publication exists/u);
+  assert.match(currentStatus, /do not infer any arm success or turn known arm failures into passes/u);
+  assert.doesNotMatch(currentStatus, /must be supplied out of band before the Neo4j service probe can proceed/u);
+  assert.doesNotMatch(currentStatus, /No image pull, service start\/recreation, model substitution, scored work, or publication is an authorized workaround/u);
+});
+
+test('operational current-status header refuses a serialized Neo4j auth assignment', async () => {
+  const operational = await readFile(
+    path.join(REPOSITORY_ROOT, 'benchmark', 'evidence', 'v11-operational-budget-repair.md'),
+    'utf8'
+  );
+  const [currentStatus] = operational.split('\n## Disposition', 1);
+  const serializedAuth = /SHADOWGRAPH_NEO4J_AUTH`?\s*(?:=|:)\s*\S+/u;
+  assert.match(currentStatus, /without recording its value/u);
+  assert.doesNotMatch(currentStatus, serializedAuth);
+  const forgedLeak = currentStatus.replace(
+    'without recording its value',
+    'SHADOWGRAPH_NEO4J_AUTH=[REDACTED]'
+  );
+  assert.match(forgedLeak, serializedAuth);
 });
 
 test('this candidate has produced no benchmark result', async () => {

@@ -180,6 +180,24 @@ export function recordContentSha256(content) {
   return domainSeparatedSha256('shadowgraph:v1.1:record-content:v1', content);
 }
 
+/**
+ * The storage id of one decision record.
+ *
+ * Hashed, not spelled out, and the reason is F26. This used to return
+ * `decision:19:shadowgraph-compact:20:ACC_INCIDENT_HANDOFF:1:0:1:A` - the arm
+ * id in plain text, by construction. An arm stores that record, retrieves it on
+ * the next phase, and the id travels into `nativeContext` and from there into
+ * the outer prompt. `auditOuterRequest` then refuses any prompt containing the
+ * arm's id, so every arm that used its own memory failed every decision phase
+ * after A, while the no-memory control passed. Three rules the benchmark holds
+ * at once - ids are deterministic per (arm, scenario, repetition, phase),
+ * retrieved records reach the prompt, and the prompt must not name the arm -
+ * and the readable id was the one that had to give.
+ *
+ * The digest keeps determinism and uniqueness, which is all any caller needed:
+ * both sides compute it from the same correlation with this function, and
+ * nothing reads it for meaning. `unitIdFor` above already did exactly this.
+ */
 export function decisionRecordId(correlation) {
   if (!isPlainObject(correlation)) throw new Error('decision record correlation must be an object');
   assertExactKeys(
@@ -195,13 +213,53 @@ export function decisionRecordId(correlation) {
   if (!Number.isSafeInteger(correlation.repetition) || correlation.repetition < 0) {
     throw new Error('decision record correlation.repetition must be a non-negative safe integer');
   }
-  const components = [
-    correlation.armId,
-    correlation.scenarioId,
-    String(correlation.repetition),
-    correlation.phase
-  ];
-  return `decision:${components.map((value) => `${value.length}:${value}`).join(':')}`;
+  const digest = domainSeparatedSha256('shadowgraph:v1.1:decision-record-id:v1', {
+    armId: correlation.armId,
+    scenarioId: correlation.scenarioId,
+    repetition: correlation.repetition,
+    phase: correlation.phase
+  });
+  return `decision:${digest}`;
+}
+
+/**
+ * Response fields that answer a probe, and so are never written to a record. F37.
+ *
+ * A decision record says what was decided. `changedFactDetected` and
+ * `changedFactId` answer the D-phase probe, which asks about a state *after* the
+ * decision was taken, so a record of that decision cannot honestly assert them.
+ * `decisionId` is the record's own identity, already carried as `record.id`;
+ * inside `content` it was only the model's echo of it.
+ *
+ * Storing them is how run v11-acceptance-002 came to measure transcription
+ * rather than detection: the adapters hand record content back as native
+ * context, so every arm that retrieved anything was shown a filled-in copy of
+ * the answer sheet before being asked the question, and copied it 64 times out
+ * of 64 while the control - which retrieves nothing - never did.
+ *
+ * F32 first fixed this where the prompt is rendered, which covered the flat
+ * `{id, type, content}` shape four of the seven arms return and nothing else.
+ * Cognee's retrieve returns `{search_result, dataset_id, dataset_name}` with the
+ * record encoded as JSON *inside a string*, and no redaction that matches object
+ * keys can reach inside a string - so a provisioned cognee arm would have been
+ * handed the answer sheet while the other arms were clean. A field that is never
+ * written cannot leak through any shape or encoding, which is why the fix lives
+ * here now. The render-time redaction stays as a second line, against an adapter
+ * that invents these fields rather than echoing them.
+ */
+export const DECISION_PROBE_ANSWER_FIELDS = Object.freeze([
+  'changedFactDetected',
+  'changedFactId',
+  'decisionId'
+]);
+
+/** What a stored decision record carries: the response, minus the probe answers. */
+export function decisionRecordContent(decisionResponse) {
+  const content = {};
+  for (const [field, value] of Object.entries(decisionResponse)) {
+    if (!DECISION_PROBE_ANSWER_FIELDS.includes(field)) content[field] = structuredClone(value);
+  }
+  return content;
 }
 
 export function standardizedDecisionRecord(correlation, decisionResponse) {
@@ -209,7 +267,7 @@ export function standardizedDecisionRecord(correlation, decisionResponse) {
   return {
     id: decisionRecordId(correlation),
     type: 'decision',
-    content: structuredClone(decisionResponse)
+    content: decisionRecordContent(decisionResponse)
   };
 }
 

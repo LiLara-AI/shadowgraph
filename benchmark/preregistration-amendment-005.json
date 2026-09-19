@@ -1,0 +1,115 @@
+{
+  "amendmentVersion": "1.1.0",
+  "amendmentId": "amendment-005",
+  "status": "AUTHORIZED_FOR_NON_SCORED_V1_1_ACCEPTANCE",
+  "proposedAt": "2026-09-08T05:09:08Z",
+  "authorizedAt": "2026-09-08T05:09:08Z",
+  "supersedes": {
+    "preregistrationFile": "benchmark/preregistration.json",
+    "preregistrationSha256": "738ee8b4813fab77da2e4e24582b12e756686650e4c39fad41c5337f831f5dac",
+    "amendment001File": "benchmark/preregistration-amendment-001.json",
+    "amendment001Sha256": "2b209df6ca46a179e332acd4ed0b16a35a089f5c14575dd86353db0dc7249c4a",
+    "amendment002File": "benchmark/preregistration-amendment-002.json",
+    "amendment002Sha256": "08e12eca3f93bd67cfeaf90a2064f91beb240e78a8fd63ed8645da78c0d88f1b",
+    "amendment003File": "benchmark/preregistration-amendment-003.json",
+    "amendment003Sha256": "726de2018584aca399fc27d2bba15585d8b6fb9454bc24083578daed22f0be0a",
+    "amendment004File": "benchmark/preregistration-amendment-004.json",
+    "amendment004Sha256": "b0c3a2553608efb78147a8c1f1ef9af51a7d0eebaa0037ce4ad7b64616b1c5f9"
+  },
+  "reason": {
+    "validComparativeResultObserved": false,
+    "partialStateReuse": false,
+    "finding": "F34",
+    "correction": "The earlier zero-retry wording did not distinguish a harness re-executing a measured operation from a provider attempt made inside a single product-native structured-output or embedding operation. Pinned Cognee 1.5.3 fault injection showed three provider completions after malformed JSON while the adapter itself had invoked one native structured-output operation. Treating all five possible mechanisms as the same retry would either hide real provider usage or reject measured product behavior without a fair, arm-neutral rule. This amendment defines the boundary prospectively."
+  },
+  "invariants": {
+    "scored": false,
+    "scenariosChanged": false,
+    "seedsChanged": false,
+    "repetitionsChanged": false,
+    "armSetChanged": false,
+    "frozenSourcesChanged": false,
+    "comparativeClaimsEnabled": false,
+    "scoringRulesChanged": false,
+    "responseSchemaChanged": false,
+    "applicabilityMatrixChanged": false,
+    "providerModelsChanged": false,
+    "providerEndpointsChanged": false,
+    "providerBudgetsRelaxed": false,
+    "timeoutsChanged": false
+  },
+  "retryTaxonomy": {
+    "appliesTo": "every arm, every root operation, every provider request class, and every future non-scored v1.1 run identically",
+    "categories": {
+      "A": {
+        "name": "harness-measured-operation-reexecution",
+        "meaning": "The adapter or harness invokes persist, retrieve, reset, or verify again after that root operation has failed or completed.",
+        "allowed": false
+      },
+      "B": {
+        "name": "provider-transport-retry",
+        "meaning": "A provider client or transport resends a request because of a transport, timeout, or provider error.",
+        "publiclyConfigurablePolicy": "zero",
+        "unconfigurableNativeAttemptPolicy": "metered-and-bounded"
+      },
+      "C": {
+        "name": "native-structured-output-validation-or-repair",
+        "meaning": "Inside one root operation, a product-native structured-output implementation makes another provider request to validate or repair malformed output.",
+        "allowed": "metered-and-bounded"
+      },
+      "D": {
+        "name": "structured-output-mode-fallback",
+        "meaning": "Inside one root operation, a product-native implementation changes structured-output mode while keeping the same pinned provider, endpoint, and model.",
+        "allowed": "metered-and-disclosed-same-model-endpoint-only"
+      },
+      "E": {
+        "name": "model-or-provider-fallback",
+        "meaning": "A product-native implementation substitutes a different model, endpoint, provider, or credential route.",
+        "allowed": false
+      }
+    },
+    "enforcement": {
+      "harnessOperationRetries": 0,
+      "outerDecisionRetries": 0,
+      "publicTransportRetryControlsMustBeZero": true,
+      "allProviderAttemptsMeteredBeforeDispatch": true,
+      "allProviderAttemptsRecordedInOperationCounters": true,
+      "allProviderAttemptsCountTowardLatencyTokensCostAndClassBudget": true,
+      "samePinnedModelAndEndpointRequired": true,
+      "fallbackModelOrProviderProhibited": true,
+      "nativeSchemaModeFallbackMustBeDeclaredAndFaultInjected": true,
+      "nativeAttemptsBoundedBy": [
+        "atomic per-class campaign ceilings",
+        "request timeout",
+        "adapter operation timeout",
+        "unit timeout",
+        "campaign deadline"
+      ],
+      "rootOperationFailureDoesNotTriggerHarnessRerun": true,
+      "unaccountedProviderLedgerTrafficRemainsAReconciliationFailure": true,
+      "nativeAttemptEligibilityRuleIsArmNeutral": true
+    },
+    "evidenceRule": {
+      "rootOperationTrace": "The progress/unit correlation names one root operation; provider attempt and completion ledgers are reconciled against its adapter operation counters.",
+      "faultInjection": "An arm that relies on C or D must demonstrate the selected pinned runtime and configuration with a loopback-only adversarial probe before a live run. The probe cannot contact an external provider.",
+      "failureTreatment": "An operation that exhausts its native behavior, reaches a provider cap, times out, or produces ledger disagreement is FAILED. Native success is never relabelled as a new harness attempt."
+    }
+  },
+  "prospectiveEffect": {
+    "appliesToRunsStartedAfter": "2026-09-08T05:09:08Z",
+    "rescoreExistingRuns": false,
+    "rewriteHistoricalArtifacts": false,
+    "resumeHistoricalRuns": false,
+    "note": "Runs 002 and 003 retain the bytes, retry semantics, statuses, and findings they actually recorded. They are not resubmitted, rescored, or used to satisfy this amendment's pre-run evidence requirement."
+  },
+  "countDerivation": {
+    "rule": "Unchanged. The amendment changes neither the arm matrix nor the scenario, seed, repetition, phase, reset, or outer-decision derivation.",
+    "expected": {
+      "totalUnits": 308,
+      "excludedUnits": 20,
+      "measuredUnits": 288,
+      "resetUnits": 28,
+      "outerDecisionCalls": 260
+    }
+  }
+}

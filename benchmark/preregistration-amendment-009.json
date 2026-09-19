@@ -1,0 +1,264 @@
+{
+  "schemaVersion": 1,
+  "amendmentId": "amendment-009",
+  "status": "AUTHORIZED_FOR_NON_SCORED_ACCEPTANCE_AND_FINAL_SCORED_V1_1",
+  "authorizedAt": "2026-09-11T23:37:31Z",
+  "supersedes": {
+    "amendment008File": "benchmark/preregistration-amendment-008.json",
+    "amendment008Sha256": "184ba096d3b3d762f96e37c9a594925dd22e9628b9649a89d4a0a0c8fdff5ff9",
+    "preregistrationFile": "benchmark/preregistration.json",
+    "preregistrationSha256": "738ee8b4813fab77da2e4e24582b12e756686650e4c39fad41c5337f831f5dac"
+  },
+  "reason": {
+    "validComparativeResultObserved": false,
+    "acceptance005Rescored": false,
+    "acceptance005StatusPreserved": "ACCEPTANCE_COMPLETE_PROVIDER_RECONCILIATION_DISCREPANT",
+    "corrections": [
+      "Phase E used two legitimate persist and verify roots but the production executor keyed only by operation.",
+      "D_FALSE exposed the hidden class label and allowed a null prediction to remain MEASURED despite the frozen failed-unit rule.",
+      "Isolation retrieval did not initialize and clear the alternate native namespace.",
+      "Graphiti had a stub production factory and a Neo4j service below graphiti-core 0.29.3's declared minimum.",
+      "Cognee and Graphiti have pinned native retry layers that require prospective, fault-injected B evidence rather than silent suppression."
+    ]
+  },
+  "invariants": {
+    "historicalRunsRewritten": false,
+    "historicalRunsRescored": false,
+    "historicalCampaignConsumptionReset": false,
+    "armSetChanged": false,
+    "baseScenarioContentChanged": false,
+    "baseSeedsChanged": false,
+    "baseRepetitionsChanged": false,
+    "qualityRubricChanged": false,
+    "winTieThresholdsChanged": false,
+    "providerModelsChanged": false,
+    "providerEndpointsChanged": false,
+    "temperatureChanged": false,
+    "harnessRetries": 0,
+    "outerDecisionRetries": 0,
+    "fallbackModelOrProviderAllowed": false,
+    "missingUsageMeansZero": false,
+    "failedOrUnansweredUnitsRewarded": false,
+    "integrationFailureCountsAsCompetitorLoss": false,
+    "favorableResultRerunAllowed": false
+  },
+  "prospectiveCorrections": {
+    "phaseE": {
+      "operationSlots": {
+        "persist": ["setupPersist", "persist"],
+        "verify": ["setupVerify", "verify"],
+        "retrieve": ["retrieve"]
+      },
+      "exactSlotReplayDeniedBeforeHost": true,
+      "fieldSemantics": "failedAttemptIdsAvoided contains failed_attempt record.id only when its approach is avoided; failedAttemptReasonIdsCited contains failed_attempt record.content.reasonId only when that reason informed the response"
+    },
+    "changedFact": {
+      "modelVisiblePhaseLabel": "D",
+      "modelVisibleFactKey": "observedFact",
+      "target": "whether the observed fact materially requires reconsidering the earlier decision",
+      "sameInstructionForPositiveAndNegativeFacts": true,
+      "hiddenGroundTruthLabels": true,
+      "nullDfalseStatus": "FAILED",
+      "nullCountsAsNegative": false,
+      "coercionAllowed": false
+    },
+    "decisionRecall": {
+      "scoringRuleChanged": true,
+      "priorRule": "correct choiceId plus any non-empty decisionId",
+      "requiredDecisionId": "EXACT_PHASE_A_PERSISTED_RECORD_ID",
+      "reason": "The final program explicitly requires correct decisionId recall; a wrong non-empty identifier is not recall.",
+      "historicalRunsRescored": false
+    },
+    "isolation": {
+      "alternateNamespaceResetBeforeRetrieve": true,
+      "resetIncludedInLifecycleLatencyAndOperationCounts": true,
+      "primaryRecordPersistedOnlyAfterAlternateRetrieval": true,
+      "responseAndPersistedStateAbsenceBothRequired": true
+    },
+    "graphiti": {
+      "package": "graphiti-core",
+      "version": "0.29.3",
+      "minimumNeo4jVersion": "5.26.0",
+      "nativeProjectScope": "group_id property in one neo4j database",
+      "nativeUserScope": null,
+      "openAiSdkRetries": 0,
+      "providerWireCallsMetered": true,
+      "embeddingMayBeZeroAfterValidExtraction": true,
+      "boltReachableRequired": true,
+      "authenticationDisabledRequired": true,
+      "liveServiceAttestationRequired": true,
+      "serviceAuthPosture": "local loopback, authentication disabled, no credential in request or evidence"
+    },
+    "timeouts": {
+      "providerRequestTimeoutMs": 120000,
+      "adapterOperationTimeoutMs": 300000,
+      "unitTimeoutMs": 600000,
+      "heartbeatIntervalMs": 30000
+    },
+    "timeoutRationale": "The 120-second provider request deadline is unchanged. The adapter and unit bounds are outer stop-losses that include bounded native work and cleanup; they do not extend a provider request or turn a timeout into success."
+  },
+  "executionProfiles": {
+    "acceptance": {
+      "scored": false,
+      "amendment009Bound": true,
+      "sourceHashCount": 9,
+      "scenarioSource": "benchmark/acceptance/scenarios.json",
+      "scenarioCount": 2,
+      "repetitions": 2,
+      "seeds": [1729, 2718],
+      "armIds": ["no-memory", "shadowgraph-full", "shadowgraph-compact", "mem0-oss", "graphiti", "basic-memory", "cognee"],
+      "phases": ["RESET", "A", "B", "C", "D_TRUE", "D_FALSE_0", "D_FALSE_1", "D_FALSE_2", "E", "ISOLATION_PROJECT", "ISOLATION_USER"],
+      "expectedCounts": {
+        "totalUnits": 308,
+        "excludedUnits": 20,
+        "applicableUnits": 288,
+        "resetUnits": 28,
+        "outerDecisionCalls": 260
+      },
+      "claimsEnabled": false
+    },
+    "scored": {
+      "scored": true,
+      "scenarioSource": "benchmark/preregistration.json#scenarios",
+      "scenarioIds": ["S01_DATABASE", "S02_DEPLOYMENT", "S03_CACHING", "S04_API_ERRORS", "S05_MIGRATION", "S06_AUTH", "S07_TESTING", "S08_PERFORMANCE", "S09_CHANGED_CONSTRAINT", "S10_RELEASE_BACKUP"],
+      "scenarioContentSha256": "4956e9cfef4535181e25150fd16946a5f789b74ee4d37ee75d0878d2cd347926",
+      "armIds": ["no-memory", "shadowgraph-full", "shadowgraph-compact", "mem0-oss", "graphiti", "basic-memory", "cognee"],
+      "phases": ["RESET", "A", "B", "C", "D_TRUE", "D_FALSE_0", "D_FALSE_1", "D_FALSE_2", "E", "ISOLATION_PROJECT", "ISOLATION_USER"],
+      "repetitions": 3,
+      "seeds": [1729, 2718, 31415],
+      "armRotation": "rotate the seven-arm list left by seed modulo seven within each scenario and repetition",
+      "expectedCounts": {
+        "totalUnits": 2310,
+        "excludedUnits": 150,
+        "applicableUnits": 2160,
+        "resetUnits": 210,
+        "outerDecisionCalls": 1950
+      },
+      "requiresCleanAcceptanceOnExactCandidate": true,
+      "scoredSessions": 1,
+      "replacementRunAllowed": false,
+      "rawBindsAcceptanceEligibilitySha256": true
+    }
+  },
+  "scoredAcceptanceGate": {
+    "required": true,
+    "amendment009Bound": true,
+    "exactImplementationLockRequired": true,
+    "rawValidationStatus": "VALID",
+    "providerReconciliationStatus": "RECONCILED",
+    "applicableFailedUnits": 0,
+    "replacementAcceptanceAllowed": false,
+    "moduleTrustedCapabilityRequired": true,
+    "artifactRevalidationRequired": true
+  },
+  "nativeAttemptPolicy": {
+    "schema": "shadowgraph.v11.native-attempt-policy",
+    "version": 1,
+    "maxAttemptsPerRootRequestClass": 24,
+    "freshPinnedLoopbackEvidenceRequired": true,
+    "missingOrMalformedEvidenceBlocksDispatch": true,
+    "allWireAttemptsConsumeBudget": true,
+    "arms": [
+      {"armId": "no-memory", "recovery": {"outer_decision_llm": [], "internal_memory_llm": [], "embedding": []}},
+      {"armId": "shadowgraph-full", "recovery": {"outer_decision_llm": [], "internal_memory_llm": [], "embedding": []}},
+      {"armId": "shadowgraph-compact", "recovery": {"outer_decision_llm": [], "internal_memory_llm": [], "embedding": []}},
+      {"armId": "mem0-oss", "recovery": {"outer_decision_llm": [], "internal_memory_llm": [], "embedding": []}},
+      {"armId": "graphiti", "recovery": {"outer_decision_llm": [], "internal_memory_llm": ["B"], "embedding": []}},
+      {"armId": "basic-memory", "recovery": {"outer_decision_llm": [], "internal_memory_llm": [], "embedding": []}},
+      {"armId": "cognee", "recovery": {"outer_decision_llm": [], "internal_memory_llm": ["B", "C"], "embedding": ["B"]}}
+    ]
+  },
+  "eligibilityAndComparability": {
+    "unitEligibility": "Only MEASURED units with phase-valid strict response data and required persistence/isolation evidence enter a metric denominator.",
+    "dFalseEligibility": "All three D_FALSE probes must contain Boolean predictions; null, missing, or malformed makes that unit FAILED and leaves the scenario/repetition false-alert rate undefined.",
+    "armEligibility": "All applicable RESET and decision units must be MEASURED, every provider attempt must be exactly plan/campaign/attempt/event reconciled, and every required metric must be finite for the claim being made.",
+    "nonApplicableUserIsolation": "A preregistered NOT_APPLICABLE user-isolation unit is EXCLUDED, does not become zero, and blocks user-isolation, overall-pairwise, and best claims but not unrelated per-metric comparisons.",
+    "failedArm": "A failed or incomplete arm remains visible as NOT_VALIDLY_COMPARABLE and receives no score, zero, rank, loss, denominator contribution, peer-median contribution, or imputed usage.",
+    "pairwiseCohort": "A pairwise result requires both arms valid for that metric on the identical 30 scenario/repetition observations; otherwise it is NOT_VALIDLY_COMPARABLE.",
+    "bestClaim": "The original all-seven-arm best gate remains unchanged and is false if any arm or required metric is unavailable.",
+    "providerGate": "Scoring requires exact provider, attempt, plan, native-trace, campaign, model, and budget accounting before aggregation. Arm-scoped exclusions may not hide any structural, identity, policy, budget, or contamination discrepancy.",
+    "sharedProviderContamination": "A timed-out arm may be quarantined only with exact cancellation/drain or isolated provider-capacity evidence; otherwise later affected arms are not comparable.",
+    "causality": "Report associations supported by the design; do not claim that memory caused an observed difference beyond the matched benchmark conditions."
+  },
+  "reporting": {
+    "providerEvidence": {
+      "sanitizedEventsIncluded": true,
+      "providerAttemptPlanCampaignLedgerHashesRequired": true,
+      "standaloneConsumersRecomputeReconciliation": true
+    },
+    "requiredMetricFields": ["numerator", "denominator", "validSampleCount", "excludedCount", "failedCount", "pointEstimate"],
+    "pairwiseFields": ["candidate", "comparator", "metric", "candidateEstimate", "comparatorEstimate", "absoluteDifference", "percentageDifference", "tieClassification", "confidenceInterval", "validPairedSampleCount"],
+    "percentageRule": "For nonzero comparator values, 100 * (candidate - comparator) / abs(comparator); null when the comparator is zero. Directionality is labeled per metric.",
+    "fullCompactRule": "Report functional metric deltas and economics separately; equivalence is claimed only within the frozen tie thresholds on every valid functional metric.",
+    "unsupportedClaimsRequired": true
+  },
+  "uncertainty": {
+    "confidenceLevel": 0.95,
+    "method": "scenario-cluster percentile bootstrap",
+    "clusters": "ten scenario ids; retain all three repetitions within each resampled scenario",
+    "replicates": 10000,
+    "rng": "mulberry32",
+    "seed": 20260912,
+    "intervalQuantiles": [0.025, 0.975],
+    "quantileEstimator": "R7_LINEAR_INTERPOLATION",
+    "resampleTraversalOrder": "REPLICATE_THEN_SCENARIO_DRAW_THEN_REPETITION",
+    "insufficientRule": "no interval unless both arms have all ten paired scenario clusters for the metric",
+    "tieRule": "frozen point-estimate thresholds; intervals are descriptive and do not change tie classification"
+  },
+  "economics": {
+    "outerUsageSource": "validated unit providerUsage",
+    "internalUsageSource": "exact unit/root/plan/request/attempt/provider-event joins",
+    "totalLifecycleTokens": "sum all complete outer, internal-memory, and embedding usage for the arm/scenario/repetition lifecycle; unavailable if any required usage is missing",
+    "latency": "sum measured unit wall latency for lifecycle totals; provider-attempt latency remains a separate table",
+    "toolCalls": "sum recorded native memory and MCP operation counters with setup operations identified separately",
+    "storage": "only exact attributable product namespace bytes; otherwise unavailable",
+    "cost": "provider charge is 0 USD with source local-free only after exact local endpoint identity is verified; hardware amortization and energy cost remain NOT_MEASURED",
+    "missingUsage": "unavailable, never zero"
+  },
+  "cumulativeProgramBudget": {
+    "authorizationScope": "fresh post-Acceptance-005 benchmark-owner program",
+    "programLineageId": "shadowgraph-v11-final-program",
+    "continuityRegistryAnchoredByGenesis": true,
+    "ceilings": {
+      "sessions": 16,
+      "outer_decision_llm": 2730,
+      "internal_memory_llm": 2738,
+      "embedding": 10801,
+      "totalRequests": 16269
+    },
+    "diagnosticSessions": 4,
+    "acceptanceSessions": 3,
+    "scoredSessions": 1,
+    "administrativePrerequisiteSessions": 8,
+    "sessionLimits": {
+      "probe": 12,
+      "acceptance": 3,
+      "scored": 1
+    },
+    "absoluteDeadline": "2026-09-25T23:37:31.000Z",
+    "refunds": false,
+    "transfers": false,
+    "newIdentityResetsConsumption": false,
+    "deadlineDaysFromFirstSession": 14,
+    "perRootRequestClassMaximum": 24,
+    "allocationNote": "The scored class ceilings are the 7.5x exact matrix scaling of the non-scored acceptance ceilings. Diagnostic and up to three acceptance candidates share the remaining fixed ceiling; a source change consumes a new acceptance identity but does not refund prior traffic."
+  },
+  "executionOrder": [
+    "offline RED-GREEN fixes and full gates",
+    "independent exact-byte review",
+    "clean local commit and fresh implementation lock",
+    "fresh bounded loopback native-attempt proofs",
+    "fresh service and precondition evidence",
+    "one clean non-scored acceptance on the exact candidate",
+    "one final scored session on the unchanged candidate",
+    "reconciliation before aggregation",
+    "deterministic report and sanitized evidence bundle"
+  ],
+  "retrospectiveEffect": {
+    "rewriteHistoricalArtifacts": false,
+    "rescoreExistingRuns": false,
+    "resumeHistoricalRuns": false,
+    "reuseHistoricalState": false,
+    "note": "R2, R3, Acceptance-005, their evidence, verdicts, findings, and consumed allocations remain immutable. Amendment 009 applies only to fresh identities started after these bytes are committed and locked."
+  }
+}

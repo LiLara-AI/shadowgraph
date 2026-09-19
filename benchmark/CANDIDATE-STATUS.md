@@ -3,22 +3,33 @@
 ShadowGraph the product remains at **0.40.0** and `"private": true`. "v1.1" names
 the benchmark methodology and candidate only. It is not a product release.
 
-**This candidate has produced no benchmark result.** No scored run was executed,
-no acceptance run was executed, no arm was ranked, and no comparative claim is
-made anywhere in this repository. The historical run
+**This candidate has produced no scored benchmark result, and no comparative
+claim is made anywhere in this repository.** No scored run was executed, no arm
+was ranked, and no arm is rank-eligible. The historical run
 `20260830T180000Z-comparative` remains permanently `INCOMPLETE / NOT MEASURED`;
 it was not rerun and its partial state was not reused.
 
-## Verification evidence
+One **non-scored acceptance** run was executed on 2026-09-06,
+`v11-acceptance-002`, under the authorisation in
+`preregistration-amendment-002.json`'s `candidateAcceptance` block
+(`scored: false`, `rankings: false`). It is **VALID FOR DIAGNOSTICS ONLY** — the
+findings are in `benchmark/evidence/v11-run-002-findings-2026-09-06.md` — and it
+supports no comparison between arms. Its six artifacts are preserved read-only
+outside this repository at `~/shadowgraph-v11-run-evidence/run-002-preserved/`
+with a verified `SHA256SUMS.txt`. No benchmark artifact is tracked here or
+present in the working tree, which `test/benchmark-v11-definition.test.js`
+enforces against both the git index and the disk.
 
-All figures below were produced on the current branch with a clean working tree.
+## Historical verification evidence — not current candidate evidence
+
+The figures below were produced on an earlier branch snapshot and clean working tree. They are retained as historical verification context only; they do **not** establish the current recovery candidate, fresh service readiness, implementation-lock identity, or acceptance eligibility. The current operational state and exact-byte gate evidence are maintained in `benchmark/evidence/v11-operational-budget-repair.md`.
 
 | Gate | Command | Result |
 | --- | --- | --- |
-| Full repository | `npm test` | **2145 / 2145 pass**, 0 fail, 22 suites |
-| Benchmark focused | `npm run benchmark:test` | **911 / 911 pass**, 0 fail |
-| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **767 / 767 pass**, 0 fail |
-| Python adapters | `npm run benchmark:test:python` | **86 tests, OK** |
+| Full repository | `npm test` | **2361 / 2361 pass**, 0 fail, 22 suites |
+| Benchmark focused | `npm run benchmark:test` | **1125 / 1125 pass**, 0 fail |
+| v1.1 suites only | `node --test test/benchmark-v11-*.test.js` | **963 / 963 pass**, 0 fail |
+| Python adapters | `npm run benchmark:test:python` | **139 / 139 pass**, 0 fail |
 | Node syntax | `npm run check`, `npm run benchmark:check` | pass |
 | Python syntax | `npm run benchmark:check:python` | pass |
 | Package privacy | `npm run check:package` | pass |
@@ -61,9 +72,14 @@ Unchanged throughout, verified by `sha256sum` and an empty `git diff`:
 738ee8b4813fab77da2e4e24582b12e756686650e4c39fad41c5337f831f5dac  preregistration.json
 2b209df6ca46a179e332acd4ed0b16a35a089f5c14575dd86353db0dc7249c4a  preregistration-amendment-001.json
 08e12eca3f93bd67cfeaf90a2064f91beb240e78a8fd63ed8645da78c0d88f1b  preregistration-amendment-002.json
+726de2018584aca399fc27d2bba15585d8b6fb9454bc24083578daed22f0be0a  preregistration-amendment-003.json
 ```
 
-All three `.sha256` sidecars are unmodified.
+Amendment 003 is the owner-approved correction that cleared CB1. Its bytes are
+not merely listed here: `v11-runner.mjs` rehashes the file at run time and
+throws on a mismatch, and five test files assert the digest.
+
+All four `.sha256` sidecars are unmodified.
 `preregistration-amendment-001.sha256` records a bare filename while the other
 two record `benchmark/`-prefixed paths. This is a pre-existing inconsistency in
 frozen bytes and is **deliberately preserved, not normalised**.
@@ -71,23 +87,28 @@ frozen bytes and is **deliberately preserved, not normalised**.
 ### Acceptance fixtures — weaker provenance, stated plainly
 
 ```
-b48666efec93e4b7c6c6bebee66634546ccd991c66158d426d1547620720a596  acceptance/definition.json
+79bda68c52c0f60983bf224ea17400b95dc1aa78eeacea5042d4b13596ac99ca  acceptance/definition.json
 728dc6e3f12db8334d31d29641caee01d4b1c645c5b51bcb27caa3fff5b4b14a  acceptance/scenarios.json
 ```
 
 These two digests do **not** carry the same guarantee as the three above, and
-should not be read as if they did. The files did not exist at `d493cd3` and have
-no prior tracked version on any ref, so git cannot prove they were unmodified:
-they arrived as untracked work from the interrupted session and were committed
-as found. The claim that their bytes were never edited is supported by
-filesystem mtimes predating this session's first commit, which is corroboration,
-not proof.
+should not be read as if they did. The files did not exist at `d493cd3`, so git
+cannot prove their original bytes were unmodified: they arrived as untracked
+work from the interrupted session and were committed as found.
+
+`scenarios.json` has not been edited since. `definition.json` **has**: commit
+`1ba20a8` adopted owner-approved Amendment 003, changing Graphiti's declared
+`userIsolation` and the derived counts, and the digest above is the post-
+amendment one. The earlier value `b48666ef…` recorded here until 2026-09-05 was
+the pre-amendment file; it was left standing when the amendment landed, so an
+independent reviewer recomputing it would have found a mismatch and had no way
+to tell an authorised amendment from tampering. The canonical digest is enforced
+in `v11-definition.mjs` and asserted in `test/benchmark-v11-definition.test.js`,
+both of which were updated with the amendment.
 
 What *is* provable from the repository: `definition.json` already recorded the
 correct `scenarios.sha256` internally, so the two files were self-consistent
-before anything was touched, and two digests asserted in
-`test/benchmark-v11-definition.test.js` matched neither file. The **test
-literals** were corrected; the JSON bytes were not.
+before anything was touched.
 
 ### How to read the commit series
 
@@ -103,18 +124,20 @@ tracked tree. Reviewing this branch by diff alone will therefore understate what
 was pre-existing and overstate what this session authored. Reviewers should
 treat file content at HEAD, not the diffs, as the object of review.
 
-## Requirement status
+## Historical requirement status — superseded for the current candidate
+
+The table records prior branch-era investigations and must not be read as a current READY verdict. In particular, any historical `READY`, cleared service, or completed-run wording is superseded by the current exact-byte disposition in `benchmark/evidence/v11-operational-budget-repair.md`.
 
 | # | Requirement | Status |
 | --- | --- | --- |
 | 1 | Serialized-input safety and error non-disclosure | **Closed**, scoped — see below |
 | 2 | Registry, runner, CLI, validator, aggregator/scorer, truthful applicability | **Closed** offline; live execution waits on 6 |
 | 3 | One centralized outer decision path; adapters memory-only | **Closed** |
-| 4 | Provider-evidence reconciliation | **Closed** |
+| 4 | Provider-evidence reconciliation | **Closed**, with one stated limit: a FAILED unit's call *count* is not compared, because the harness wrote it rather than the adapter |
 | 5 | Mutation state fails closed | **Closed** (mechanism); wiring waits on 6 |
-| 6 | Real pinned runtime factories for all seven arms | **Partial** — contracts and offline adapters exist; official metered runtime hosts remain unimplemented |
-| 7 | Non-scored acceptance, 308 units | **Closed** offline; an official run is blocked by the four current preflight findings |
-| 8 | Locks, ledger validation, readiness, evidence index, review bundle | **Partial** — prerequisite locks are committed; the implementation lock and run-bound bundle remain pending |
+| 6 | Real pinned runtime factories for all seven arms | **Partial** — the metered runtime hosts are bound and six of seven arms execute; Graphiti's factory is LB2f, an open owner decision |
+| 7 | Non-scored acceptance, 308 units | **Closed** offline. Preflight reports READY with zero blockers as of 2026-09-06; F2, F25 and F26 are cleared. The first run was executed and aborted at 67 of 308 units, which is what found F26; no artifact exists |
+| 8 | Locks, ledger validation, readiness, evidence index, review bundle | **Partial** — every builder exists, and the run path takes the implementation and environment locks before it opens a file; the service and model locks and the review bundle are run-bound and cannot exist until a run does |
 | 9 | Focused, Node, Python, package, MCP, integration, smoke, privacy checks | **Closed** |
 
 ### Closed
@@ -214,15 +237,18 @@ supplying checkpoint and watchdog state and the unit-evidence ledger supplying
 `persistUnit` — is exercised end to end over all 308 units in
 `test/benchmark-v11-run.test.js`, with `validateRawRun` returning `valid: true`
 for the run it just produced and 308 checkpoints on disk. That test uses a
-**stub registry**, because a READY verdict is not reachable from the real one
-today (graphiti declares user isolation the product does not have, and three
-immutable prerequisites are absent). What it proves is that the pieces are
+**stub registry**, because a READY verdict needs evidence records this test does
+not produce - the verified service record and the precondition demonstration,
+both of which expire six hours after they were observed. It is not because the
+matrix is inconsistent: Amendment 003 moved Graphiti's declared user isolation
+to `NOT_APPLICABLE`, and the immutable prerequisites are committed. What it
+proves is that the pieces are
 connected, not that the candidate is ready; the readiness tests beside it cover
 the refusal against the real candidate.
 
 **7 — Offline acceptance.** `test/benchmark-v11-acceptance.test.js` drives all
 308 units through the real runner with the real prompt builder, adapters and
-outer model injected: 16 EXCLUDED, 292 MEASURED, 28 RESET, 264 outer calls, each
+outer model injected: 20 EXCLUDED, 288 MEASURED, 28 RESET, 260 outer calls, each
 count derived from the declared matrix and then cross-checked against the
 definition, the loader and the literal. Eleven fault injections assert
 fail-closed behaviour: prompt divergence, arm self-identification, memory
@@ -231,8 +257,12 @@ malformed envelopes, outer failure with no fabricated fallback, watchdog stall,
 interruption, resume, and one arm failing without taking the others down.
 
 This closes the **offline** half of requirement 7 only. It is a mock harness
-run. It is not evidence that any arm was measured, and B1 alone still prevents a
-real acceptance run.
+run. It is not evidence that any arm was measured. What prevented a real
+acceptance run was never B1 — the model lock carries full `sha256:` weights
+digests for both pinned models, and B1 is filed under the historical record
+below. It was the three preflight findings, all cleared on 2026-09-06, and F2,
+cleared the same day. What holds the run now is F25: the per-operation deadline
+the harness gives a Python adapter, which was sized for a model 15x smaller.
 
 Building it found a real defect: the runner handed whatever `buildOuterRequest`
 returned straight to the model with no audit. The injection point that makes the
@@ -601,24 +631,37 @@ natively honour:
 | --- | --- | --- | --- |
 | Mem0 OSS | `user_id` | `CONTRACT_FAILURE` | `ENDPOINT_UNAVAILABLE` |
 | Graphiti | none (`group_id` only) | `ENDPOINT_UNAVAILABLE` | `CONTRACT_FAILURE` |
-| Cognee | ACL, not locked | `ENDPOINT_UNAVAILABLE` | `CONTRACT_FAILURE` |
+| Cognee | native ACL, demonstrated under CB2 | `CONTRACT_FAILURE` | `ENDPOINT_UNAVAILABLE` |
 
 Read across, that is "genuine native namespaces only, never manufacture
 isolation" holding per arm, and holding whether or not the runtime exists. Mem0
-will not silently widen a user scope it was asked for into a project-wide one;
-Graphiti will not fold a user id into its group scope; Cognee will not run
-against unpinned access control. The `ENDPOINT_UNAVAILABLE` cause in the
-supported column is itself load-bearing: it tells a reviewer the arm is blocked
-on provisioning rather than on its own contract.
+and Cognee both have a native user scope, so for both of them the user-scoped
+namespace is the one that reaches the runtime and the project-only namespace is
+the contract refusal — neither will silently widen a user scope into a
+project-wide one. Graphiti has no user scope at all, so its columns are the
+other way round: it will not fold a user id into its group scope.
+
+(The Cognee row was inverted here until the fifth review. `cognee` is listed in
+`test_unprovisioned_runtimes.py` with `has_native_user_namespace=True`, which
+makes `user-1` its *native* shape and `None` its foreign one — so
+`ENDPOINT_UNAVAILABLE` belongs in the user-scoped column, as it does for Mem0.
+The row read as though the adapter still refused a user namespace, which it
+stopped doing when CB2 demonstrated the ACL.)
+
+Whichever column it lands in per arm, the `ENDPOINT_UNAVAILABLE` cause is
+load-bearing: it tells a reviewer that arm is blocked on provisioning rather
+than on its own contract.
 
 In every combination the envelope is `FAILED` with a public cause, carries no
 persistence or isolation evidence, counts zero operations of every kind, and
 reports a static public message that is not the internal reason.
 
-Note the consequence for Graphiti: the frozen matrix declares its user isolation
-`SUPPORTED`, so the runner would send it a user-scoped namespace, and the
-adapter would refuse every unit. That is the same contradiction `v11-preflight`
-reports as a blocker, observed from the adapter side.
+Note what this used to mean for Graphiti, and no longer does: the frozen matrix
+declared its user isolation `SUPPORTED`, so the runner would have sent it a
+user-scoped namespace and the adapter would have refused every unit - the
+contradiction `v11-preflight` reported as a blocker, seen from the adapter side.
+Amendment 003 resolved it by declaring `NOT_APPLICABLE`, which is what the
+product exposes, and preflight reports no Graphiti applicability blocker now.
 
 ### Partial
 
@@ -634,9 +677,11 @@ their content gates pass:
 
 The implementation lock, evidence index, and review bundle are still ungenerated.
 They must bind a clean committed execution tree and real operator-supplied
-service digests; there is no official run to bundle. The authoritative current
-split between four preflight blockers and three later implementation blockers is
-recorded in `benchmark/evidence/v11-blocker-matrix-2026-09-03.md`.
+service digests; there is no official run to bundle. The blocker matrix in this
+document is the authoritative split.
+`benchmark/evidence/v11-blocker-matrix-2026-09-03.md` records the state on that
+date - four preflight blockers and three implementation blockers - and its
+blocker states are superseded by the records the matrix names.
 
 #### Historical lock-builder review (superseded by the current status above)
 
@@ -848,22 +893,229 @@ are excluded is a methodology decision.
 
 ## Blockers
 
-`node benchmark/cli.mjs v11-preflight` currently exits non-zero with exactly
-four blockers:
+**Readiness and runnability are two different questions, and the answers now
+differ.** `v11-preflight` can reach READY, and `v11-run` now has a runtime to
+start - what it does not have is a decision model that can satisfy the frozen
+response schema.
 
-1. **CB1 — Graphiti isolation contradiction.** Graphiti 0.29.3 has no native
-   user namespace although frozen Amendment 002 declares it `SUPPORTED`.
-2. **CB2 — Cognee ACL precondition.** Native ACL capability exists, but the
-   pinned backend access-control configuration and enforcement evidence do not.
-3. **CB3 — Graphiti services.** A verified Neo4j-compatible database and common
-   LLM/embedding endpoint are not provisioned and bound to the run.
-4. **CB4 — Cognee services.** The verified common LLM/embedding endpoint is not
-   provisioned and bound to the run.
+`node benchmark/cli.mjs v11-preflight` with no evidence presented exits non-zero
+with three blockers: the Cognee ACL precondition and the two required-service
+blockers. Owner-approved Amendment 003 cleared CB1 by correcting Graphiti's
+declared applicability against what the product actually exposes.
 
-After those are cleared, the harness still needs a verified service-health input
-and real metered runtime hosts before an official run can start. The complete
-evidence and required actions are in
-`benchmark/evidence/v11-blocker-matrix-2026-09-03.md` under CB1-CB4 and LB1-LB3.
+Presented with a verified service record and a verified precondition
+demonstration, the same command reports **READY with zero blockers**. Both
+records are produced by the harness itself — `v11-service-probe` and
+`v11-precondition-probe` — and both are checked against committed bytes and
+expire six hours after they were observed. Neither can be replaced by an
+assertion: `--preconditions`, which used to stand in for the second, is now
+refused by name.
+
+**Observed on 2026-09-06, not inferred.** Against the live stack: neo4j 3 of 3
+checks PASS, ollama 3 of 3 with both pinned models' weight digests matching the
+lock, the Cognee ACL demonstration 10 of 10 steps PASS, and preflight
+`"readiness": "READY", "blockers": []` with declared and derived counts agreeing
+at 20 / 288 / 260. Recorded in
+`benchmark/evidence/v11-readiness-and-f2-2026-09-06.md`, which also records the
+one failure on the way there — an operator mistake, refused precisely: the
+container's `NEO4J_AUTH` is Neo4j's `user/password`, and HTTP Basic needs
+`user:password`, so the raw form returns `400 Invalid authentication header`.
+
+A run started without the runtime flags refuses at `RUNTIME_UNAVAILABLE` and
+writes no artifact; one started without evidence refuses on readiness, naming
+its blockers. Given both, the run path binds: the meter, the ledgers, the
+environment observation, the implementation lock and all seven arms.
+
+**F2 was cleared on 2026-09-06 by pinning a decision model that can answer, and
+clearing it exposed F25.** Every gate is green — preflight READY with zero
+blockers, Phase A 6 of 6 against the committed lock — and the run is still not
+started, because the harness's per-operation deadline was sized for the model the
+swap replaced. What follows is the measurement behind the F2 decision, what that
+decision changed, and then F25.
+
+F2 was re-measured through the shipped `buildV11Prompt` and
+`requestOuterDecision`, over both scenarios at all three frozen seeds, with the
+definition loaded through its hash gate
+(`benchmark/probes/v11_phase_a_decision_probe.mjs`):
+
+| Decision model | Phase A accepted | Rejected by |
+| --- | --- | --- |
+| `qwen2.5:0.5b`, pinned until now | **0 / 6** | `failedAttemptIdsAvoided`: wrong shape on one scenario, absent on the other |
+| `qwen2.5:3b` | **0 / 6** | `failedAttemptIdsAvoided` must be an array of strings |
+| **`qwen2.5:7b`, pinned now** | **6 / 6** | — |
+
+So F2 was a model-capacity limit, not a prompt or schema defect: the same prompt
+and the same schema are satisfied on every attempt at 7B. Phase A is the first
+thing every unit does, so at 0.5b every one of the 288 measured units would have
+failed at the outer model — a runnable harness producing a meaningless run.
+
+**Why this is not an amendment.** The preregistration froze the decision LLM
+identity as `null` with `statusAtFreeze: NOT_AVAILABLE`, and permits a later run
+to fill it "only from a successful capability probe". The four hash-gated frozen
+sources are `preregistration.json` and amendments 001, 002 and 003;
+`model-weights.lock.json` is none of them, and neither `definition.json` nor any
+amendment names a model id. Verified rather than assumed. The probe above is the
+capability probe the clause requires.
+
+**What the swap changes, stated plainly.** One chat model is pinned for both the
+outer decision *and* every arm's internal memory LLM — deliberately, because an
+arm allowed its own would be measured against different reasoning and the
+comparison would stop being between memory systems. So this raises the internal
+extraction of Mem0, Graphiti and Cognee to 7B as well, identically for all of
+them. It also makes the run slow: measured at ~29.6s and ~607 tokens per outer
+decision on this machine, the 260 outer decision calls alone are ~128 minutes,
+and the arms' internal calls are on top of that.
+
+**And it stays on the CPU.** The pinned Ollama reports `inference compute id=cpu,
+total_vram="0 B"`. Passing the host GPU was tried in a throwaway container from
+the same pinned image and does not work: WSL2 exposes `/dev/dxg` and never
+`/dev/dri`, every Vulkan driver in the image (Intel's included) needs a
+`/dev/dri` node, and the one driver that works over `/dev/dxg` is not in the
+image. Adding it would mean modifying the image and breaking the digest that the
+lock and `v11-service-probe` verify — buying speed with the thing that makes the
+result checkable. The service containers were not touched.
+
+Two consequences of the swap were carried through here: `model-weights.lock.json`
+records `qwen2.5:7b` with the weight-layer digest read from the serving container
+and the exact parameter count from its own metadata, and the 27 places in code,
+fixtures and comments that named the old id were updated. The two tests that read
+the real lock and compare it with a literal — which is what stops a lock change
+from passing unnoticed — were re-verified: quietly renaming the locked model, or
+changing the embedding width, still fails two tests each.
+
+**A third consequence was missed, and a pre-run review caught it: F25.** Sizing
+the swap against total wall-clock left the *per-operation* ceilings untouched.
+`python-adapter-executor.mjs` gives every Python adapter operation
+`DEFAULT_TIMEOUT_MS = 30_000`, `bindV11Runtime` never raises it, and
+`UNIT_TIMEOUT_MS = 120_000` caps the unit above it; neither is reachable from the
+CLI. Measured at 7B, Cognee's persist takes **105.9s** (`add` 12.9 + `cognify`
+93.0) and its retrieve **38.7s**, so a decision unit is about **175s**. Both
+ceilings are too low.
+
+The consequence is not slowness. A timeout is recorded as a unit failure, so the
+artifact would have read as *Cognee failed* when what happened is that our ceiling
+was smaller than the model we had just pinned — the overstatement this benchmark
+treats as a defect. The run was not started.
+
+Neither ceiling is frozen methodology: the preregistration freezes
+`requestTimeoutMs: 120000` for one *outer* request, untouched here, and sets no
+per-operation or per-unit limit. They are harness parameters that were never sized
+for the configuration under measurement. Raising them still changes what the
+harness records as a stall, so it was put to the owner rather than taken quietly.
+
+**Cleared on 2026-09-06.** `UNIT_TIMEOUT_MS` is 600s and a new
+`ADAPTER_OPERATION_TIMEOUT_MS` of 300s is passed explicitly by `bindV11Runtime`
+to `createV11PythonHosts`, with the executor's clamp raised to 599s so the unit
+watchdog is still the one that fires last. Both are deliberately well clear of
+the measurement rather than fitted just above it: one observation is not a
+distribution, a ceiling that is too tight manufactures failures, and one that is
+too loose only costs time on a unit that is genuinely stuck.
+
+The wiring is now asserted, which is the part that matters — F25 was an omitted
+argument on a line no test entered, the same shape as F4, F6, F11 and F17 before
+it. Four mutations were run against the fix and all four fail a test: omitting
+`timeoutMs` again, setting it back to 30s, raising the operation ceiling above
+the unit ceiling, and reverting the unit ceiling to its 0.5b value.
+
+### The first run, and F26
+
+With F25 cleared the acceptance run was started, and was aborted 67 units in.
+**No timeouts** — the deadline fix held — but 28 units had failed identically
+across four unrelated arms, on every decision phase except A, in a tenth of a
+second each, with `outerDecisionModelCalls: 0`. The arm retrieved its record;
+the outer model was never called.
+
+Three rules this benchmark holds at once, and they cannot all hold: a decision
+record id is deterministic per (arm, scenario, repetition, phase) and used to
+spell the arm out; retrieved records become `nativeContext` and reach the
+prompt, which is the point of the benchmark; and `auditOuterRequest` refuses any
+prompt containing the arm id. So an arm that used its own memory named itself in
+the prompt, and only `no-memory` — which retrieves nothing — could pass a
+decision phase.
+
+**No v1.1 run had ever measured a memory arm past phase A.** Five review rounds,
+twenty-five findings and 2363 tests had not found it, because it needs a real arm
+to store a real record and retrieve it. `decisionRecordId` now hashes its
+correlation, as `unitIdFor` beside it already did; 21 of 21 arm/phase
+combinations pass the audit, and three mutations are caught. Recorded in
+`benchmark/evidence/v11-first-run-and-f26-2026-09-06.md`, together with an
+operator error worth keeping: the first attempt to stop that run reported
+"stopped" and stopped nothing.
+
+| ID | Blocker | State |
+| --- | --- | --- |
+| CB1 | Graphiti declared isolation the product lacks | Cleared, Amendment 003 |
+| CB2 | Cognee pinned backend access-control configuration | Cleared, behavioural demonstration |
+| CB3 | Graphiti required services | Cleared, verified service record |
+| CB4 | Cognee required service | Cleared, verified service record |
+| LB1 | Required-service blockers emitted unconditionally | Cleared |
+| LB2a | `v11RuntimeDependencies()` unimplemented | Cleared, all seven arms bound and reached |
+| LB2b | Mem0, Graphiti and Cognee client factories refuse | Cleared for Mem0 and Cognee, both executing; **Open** for Graphiti, which is LB2f |
+| LB2c | Basic Memory storage attribution deferred | **Clearance withdrawn, reclosed as not-attributable (F29)**. It rested on the premise that the arm's records are the files in its project directory. Basic Memory 0.23.2 persists record bodies to a SQLite index shared by every project and defers the markdown write, so the directory stays empty and the walk reported MEASURED 0 bytes. The arm now declares NOT_AVAILABLE, as mem0 and cognee do |
+| LB2d | Pinned Python runtime never installed into the pinned image | Cleared |
+| LB2e | Adapters never routed through the pinned container | Cleared |
+| LB2f | Graphiti exact group driver unavailable | **Open**, owner decision recorded |
+| LB2g | Control and MCP runtime hosts unbound | Cleared |
+| LB3 | Implementation lock requires a clean tree | Cleared |
+| F1 | The container runtime refused the tag the competitor lock pins, so every Python arm would have been recorded as a contract failure of the product | Cleared |
+| F2 | The pinned decision model returned a decision the frozen schema rejects: 0 of 6 Phase A attempts over both scenarios at all three frozen seeds, every one on `failedAttemptIdsAvoided`. `qwen2.5:3b` also 0 of 6; `qwen2.5:7b` 6 of 6 | Cleared by owner decision on 2026-09-06: `qwen2.5:7b` pinned, inside the preregistration's capability-probe clause rather than by amendment |
+| F3 | Cognee refuses the user namespace the definition declares it supports, on a precondition CB2 has since demonstrated | Cleared |
+| F4 | The run's teardown closed the progress ledger before the runner wrote its terminal event, so every bound run would have executed all 308 units and then written no artifact | Cleared |
+| F5 | The loopback network fence guarded four connection-oriented entry points and described itself as closing egress by construction; a datagram and `gethostbyname` both left the process | Cleared |
+| F6 | The run wrote a provider ledger nothing reconciled, so `RETRY_OBSERVED`, `MODEL_MISMATCH` and `UNEXPECTED_CALL` were codes a run could not emit | Cleared |
+| F7 | The Python site directory the arms import was never checked against the wheel lock, so two runs on different library sets produced identical lock hashes | Cleared |
+| F8 | The F4 fix was made in a module and *chosen* in the CLI, on a line no test executes: putting the full teardown back at the call site reproduced the whole defect with 2336 tests green | Cleared, the pairing is made where it is tested |
+| F9 | The widened fence guarded only the `socket` module, so the same datagram left through `_socket`, the C accelerator it wraps | Cleared |
+| F10 | The new provider reconciliation expected zero calls from units the harness did not measure, so one adapter failure or one interruption would have reported a metering violation against the run's own record | Cleared |
+| F11 | The bind-time Python runtime check verified a manifest and never read the site it gates, and `v11-python-runtime --verify only` rewrote the manifest before verifying it | Cleared |
+| F12 | The clock the run path handed the runner returned a number where the runner requires an ISO string, so no unit could have executed | Cleared |
+| F13 | F10's fix removed a failed unit's events instead of its counts, which broke ledger continuity, skipped every per-event check, and excused the 20 excluded units of every plan | Cleared |
+| F14 | `v11-python-runtime --verify only` ran four fresh import probes, printed a failing one, and verified the ones recorded at build time | Cleared |
+| F15 | A real in-place `pip --upgrade` leaves two `.dist-info` directories, and the site read collapsed them last-wins, so F11's own named case still verified valid | Cleared |
+| F16 | No test entered the run path at all: a `throw` at the top of `v11RuntimeDependencies` left 2344 tests green, which is why F4, F6 and F11 could each be reverted at their own call site | Cleared, the composition moved to `v11-runtime-binding.mjs` |
+| F17 | Moving the composition made it reachable and not asserted: six single-token mis-wirings of `bindV11Runtime` - the arms mounting the wrong site, the two state roots swapped, a self-comparing wheel-lock hash, the wrong outer model, the two lock hashes swapped - all passed the suite | Cleared, every argument is pinned |
+| F18 | `DISTRIBUTION_DUPLICATED` could not fire from the only command that builds a manifest: the container listing collapsed duplicates by name before verification, so F15's fix closed the hole on the run path alone | Cleared |
+| F19 | `v11-python-runtime --verify only` measured four fresh import probes, printed a failing one, and verified the ones recorded at build time | **Corrected by F20.** As published this restated F14 against the commit that fixed it. What was true at `f465fff` is that the rule was correct and unreachable; extracting it into `pythonRuntimeManifest` cleared that |
+| F20 | A fabricated finding in my own evidence: the round-4 record's F19, and the commit message carrying it, described a fail-open that `f465fff:benchmark/cli.mjs:881` had already closed. Three skeptics passed it because none compared the claim with the tree | Cleared, the record says what was actually true and why the claim was wrong |
+| F21 | The binding test's fixture made the manifest's image and the competitor lock's image the same value, and three doubles discarded their arguments, so `verifyPythonRuntime` could be made self-comparing, the site the arms mount went unasserted, and the one wire between a metered arm and the meter was pinned by a URL suffix | Cleared, with four mutations caught |
+| F22 | The container listing crashed on a `.dist-info` carrying no `Version`: the sort compared `None` with a string, so a site holding the duplicate the script exists to report produced no listing at all | Cleared, and the drop rule now matches `readPythonSiteDistributions` |
+| F23 | `matchedCalls` is clamped against `expectedCalls`, and every test asserting both asserted them equal, so a retry could have been counted as a matched call while the same report named it a retry | Cleared, both directions of the clamp are asserted |
+| F24 | Two documents described a tree that no longer exists: requirement 6's refusal table gave Cognee the columns of an arm with no native user scope, and `benchmark/evidence/README.md` still said amendment 003 was proposed and not adopted | Cleared |
+| F25 | The harness gives a Python adapter operation 30s (`DEFAULT_TIMEOUT_MS`, never raised by the run path) inside a 120s unit deadline, both sized when the pinned model was `qwen2.5:0.5b`. Measured at `qwen2.5:7b`: Cognee's persist is 105.9s and its retrieve 38.7s, so a decision unit is ~175s. Cognee's units would have failed on our deadline and been recorded as Cognee failing | Cleared by owner decision on 2026-09-06: operation ceiling 300s stated by the run path, unit ceiling 600s, both sized against the measurement and mutation-tested |
+| F26 | The decision record id spelled out the arm that wrote it (`decision:19:shadowgraph-compact:20:...`), an arm retrieves its own records into `nativeContext`, and `auditOuterRequest` refuses any prompt containing the arm id as a plain substring. So every arm with memory failed every decision phase after A while the no-memory control passed - found by the first run, at 28 identical failures in 67 units | Cleared: `decisionRecordId` hashes its correlation as `unitIdFor` already did. 21 of 21 arm/phase combinations now pass the audit, three mutations caught |
+| F27 | Cognee's embedding engine appends `/v1/embeddings` to a bound capability while the meter required `/embeddings`, so all eight of its embedding requests were refused in zero milliseconds as CLIENT_CONTRACT_FAILURE, its persist failed, and 20 of its 22 units failed behind that - an arm reported as failing over a path segment. Found by the second run | Cleared: the meter removes one leading `/v1` before comparing *and* before forwarding. Class separation unchanged; four mutations caught, one of which needed a new case |
+| F28 | Basic Memory fails `ISOLATION_PROJECT` 3 of 3 with `OPERATION_FAILED` on retrieve. `create_memory_project` runs only in the RESET branch and only for the arm's own namespace, so the isolation namespace is never registered with the product and the query cannot be answered. The directory exists - `_project_path` creates it - so the storage guard is not the cause | **Open**, owner decision: registering an empty isolation project would make the demonstration possible without manufacturing isolation, but it changes what the arm is asked to do |
+| F29 | The Basic Memory arm reported MEASURED storage bytes by walking the project directory a namespace owns, on the stated premise that "the arm's records are the files in it". Basic Memory 0.23.2 writes note bodies to `note_content.markdown_content` in a SQLite index shared by every project and defers the markdown write to a queue this adapter never drains, so the directory stays empty and the arm published MEASURED **0 bytes for namespaces holding records** - the most favourable number available, under the status that means it is exact. Run 002's residue: nine `note_content` rows per state root, all `file_write_status='pending'`, 14,765-15,156 chars of markdown, zero regular files | Cleared: the arm declares NOT_AVAILABLE, as mem0 and cognee do. LB2c's clearance withdrawn. Three tests replaced; restoring the MEASURED claim fails six tests across three classes |
+| F30 | The scorer awarded passing scores to absent answers, three ways. `falseAlertRate` divided by the probes it found and counted a null as a negative, against `preregistration.json:280` ("Null, malformed, or missing is a failed unit, not a negative prediction"), so an arm answering none of the three probes posted the best rate in the run. `projectIsolation`/`userIsolation` returned **1 - the best score on a hard security gate** - for a probe that returned nothing, against a rule reading "1 only when ... **and** persisted-state inspection confirms". And that persisted-state half was never consulted at all: it read `leakedRecordIds` and `persistedLeak`, neither of which any adapter in this repository writes | Cleared: the rate is N/A rather than 0 when any probe failed, with probe counts beside it; a 1 now requires both halves; the real evidence (`verified` plus two match counts) is read, and a match count overrules an adapter's own `verified`. Frozen v1.0 isolation scores unchanged; `falseAlertRate` does change for v1.0, deliberately, because `preregistration.json:280` is v1.0's own rule and the old code violated it there too - no published v1.0 result moves. 34 tests, 23 mutants killed |
+| F31 | Nothing in the frozen prompt contract said what `decisionId` should contain. The schema requested the field and typed it `string|null`, and the record id was in native context as `record.id`, so a model returning `null` complied with everything it was told and `decisionRetrievalAccuracy` scored 0 for every arm however well it recalled. Observed: `null` x152, `'D001'` x28 (every one at `nativeContextCount == 0`), a real `decision:<hex>` x4 | **Cleared by Amendment 004**, authorized 2026-09-06. One sentence in the common outer system instruction names the field's referent - no expected value, no fixture id, no arm-specific wording, identical for every arm and phase, all asserted by `test/benchmark-v11-amendment-004.test.js`. Prospective only: no scoring rule and no response schema moved, and run 002 is not rescored. `systemSha256` moves to `99a04ebaca9e0a5cfbbaa818bde326670fad736ef72aff9dfcdadac83469c03a`, so runs before and after are not comparable on this metric |
+| F32 | The harness penalised exactly the arms that retrieve. `standardizedDecisionRecord` stores each decision response verbatim as the record's content, adapters return record content verbatim as native context, and `canonicalJson` key order put `"changedFactDetected":null` first - so the model read a null answer to the question it was being asked. 64 of 64 nulls occurred in arms with retrieved context; 0 of 12 in the control. The confound's direction differs by metric, and an earlier flat claim that it favoured the control was wrong | **Cleared, and superseded by F37's root-cause fix.** `serializeNativeContext` drops `changedFactDetected`, `changedFactId` and the prior `decisionId` echo before rendering, matching the key at any depth, leaving `record.id`, the stored record, the adapter protocol and both prompt-binding hashes untouched - both hashes recomputed after the fix still match run 002's recorded values. 14 tests, 13 mutants killed. **A record serialised into a string is not covered: see F37** |
+| F33 | The provider reconciliation verdict never reaches the aggregator, which is given only the raw run. Run 002 reconciled DISCREPANT with 64 findings and the word appears nowhere in `aggregate.json` | **Open** - needs an aggregator signature change. Per-arm and per-phase unit coverage is now in `aggregate.coverage`; the reconciliation verdict is not |
+| F34 | `benchmark/acceptance/definition.json` and `benchmark/preregistration.json` both carry `commonExecution.repetitions` - the identical key path - with 2 and 3 respectively, and nothing in either file says these are two protocols: the scored benchmark and the non-scored candidate acceptance. All three amendments meanwhile assert `repetitionsChanged: false` | **Open**, documentation. The 2-repetition design is correctly authorised by amendment-002's `candidateAcceptance` block at line 389; that file has no `commonExecution` key at all, and an earlier draft of this row wrongly attributed the clash to it |
+| F36 | The frozen rule that a null `D_FALSE` probe is a failed unit is honoured in the scorer and nowhere in unit classification. `aggregate.coverage` over the preserved run still reports MEASURED 204 / FAILED 84, while the corrected 156 / 132 exists only as prose in the findings report | **Open, by decision.** Changing the runner's status assignment would restate execution outcomes and move the `complete` gate that decides whether an arm is scored at all; the frozen sentence sits in the scoring rules, so the scorer is where it was honoured. The defect that remains is that the corrected count is not derivable from any artifact |
+| F37 | Key-based redaction cannot reach inside a string, and Cognee's retrieve returns `{search_result, dataset_id, dataset_name}` with the record encoded as JSON inside `search_result` - so a provisioned cognee arm would have been shown the pre-filled answer fields while the other six were redacted, reintroducing F32 for one of the seven required arms and destroying comparability with it | **Cleared at the root.** `standardizedDecisionRecord` projects the response to the twelve fields a record actually holds; `changedFactDetected`, `changedFactId` and `decisionId` are never written, so no shape or encoding can carry them. Separate record-content contracts on both sides (`validateDecisionRecordContent`, `DECISION_RECORD_SCHEMA`) reject content that still carries them. The frozen response schema is untouched. Node and Python agree on the new fixture digest `6b541d0d...4fc4ec`, recomputed not hand-edited. 8 mutants across both languages, all killed |
+| F38 | `npm run benchmark:test` was `node --test <files> && npm run benchmark:test:python`, so a red JS half meant the 139 Python tests never ran and never appeared - verified by counting zero `Ran N tests` lines | **Cleared.** `scripts/run-benchmark-suites.mjs` runs both halves, prints both summaries and exits non-zero if either fails; proved with a deliberate JS failure (exit 1, Python still ran, summary reported both). Neither suite weakened. The JS file list moved to `benchmark:test:js` and stays one source of truth |
+| F35 | The v1.0 lifecycle computes `persistedLeak` with `=== true`, so an absent inspection becomes "no leak" - the same fail-open F30 fixed on the v1.1 path | **Open, deliberately not fixed.** Closing it would restate frozen v1.0 results as a side effect of a v1.1 repair, so it is recorded and left for a v1.0 decision |
+
+The evidence and the required next decisions are in
+`benchmark/evidence/v11-blocker-matrix-2026-09-03.md` (CB1-CB4, LB1-LB3, as of
+that date) and, superseding its blocker states,
+`benchmark/evidence/v11-service-readiness-2026-09-05.md`,
+`benchmark/evidence/v11-adapter-runtime-blockers-2026-09-05.md`,
+`benchmark/evidence/v11-cb2-acl-demonstration-2026-09-05.md`,
+`benchmark/evidence/v11-runtime-binding-2026-09-05.md` (LB2a, F1-F3),
+`benchmark/evidence/v11-adversarial-review-2026-09-05.md` (F4-F7),
+`benchmark/evidence/v11-adversarial-review-round-2-2026-09-05.md` (F8-F11) and
+`benchmark/evidence/v11-adversarial-review-round-3-2026-09-05.md` (F12-F16) and
+`benchmark/evidence/v11-adversarial-review-round-4-2026-09-05.md` (F17-F19 - the
+fourth round, which found that reachable is not the same as asserted) and
+`benchmark/evidence/v11-adversarial-review-round-5-2026-09-06.md` (F20-F24 - the
+fifth, which found a fabricated finding in the fourth round's own record),
+`benchmark/evidence/v11-readiness-and-f2-2026-09-06.md` (READY observed, and F2
+measured against three decision models) and
+`benchmark/evidence/v11-prerun-review-2026-09-06.md` (F25 - the review run before
+the run, and the reason the run was not started) and
+`benchmark/evidence/v11-first-run-and-f26-2026-09-06.md` (F26 - what the first
+run found in 67 units, and the operator error in reporting its stop).
 
 ### Historical blocker record (resolved or superseded)
 
@@ -937,11 +1189,19 @@ If Graphiti alone moves to `NOT_APPLICABLE`, the counts become
 **308 / 20 EXCLUDED / 288 MEASURED / 28 RESET / 260 outer calls**, the delta
 being exactly Graphiti's four `ISOLATION_USER` units.
 
-**No amendment has been adopted and no count has been changed.** The acceptance
-definition still carries the Amendment 002 counts
-(308 / 16 / 292 / 28 / 264), and `v11-preflight` reports the disagreement as a
-blocker. Correcting a declared applicability entry requires an amendment reviewed
-under the methodology, which is not a decision this engineering work may take.
+**That is what happened.** Owner-approved Amendment 003 (commit `1ba20a8`) moved
+Graphiti alone to `NOT_APPLICABLE`, and the acceptance definition now declares
+**308 / 20 EXCLUDED / 288 MEASURED / 28 RESET / 260 outer calls** - the counts
+above. `v11-preflight` reports declared and derived counts as equal and emits no
+applicability blocker for Graphiti; the one applicability finding it still emits
+is Cognee's `DECLARED_ISOLATION_PRECONDITION_UNMET`, which CB2 clears with a
+verified precondition record.
+
+The paragraph this replaces said no amendment had been adopted, 890 lines
+after the same document recorded adopting one. Correcting a declared
+applicability entry still requires an amendment reviewed under the methodology,
+and that is still not a decision this engineering work may take - it was taken
+by the owner, and Cognee's entry remains where the definition puts it.
 
 ## What independent review must confirm
 

@@ -1,4 +1,4 @@
-import { scoreScenario } from './scoring.mjs';
+import { isolationInspectionFrom, scoreScenario } from './scoring.mjs';
 import { validateV11RawRun } from './validate.mjs';
 
 const REQUIRED_PHASES = [
@@ -18,7 +18,12 @@ const SHA256 = /^[a-f0-9]{64}$/u;
 const V11_SOURCE_HASH_FIELDS = [
   'preregistrationSha256',
   'amendment001Sha256',
-  'amendment002Sha256'
+  'amendment002Sha256',
+  'amendment003Sha256',
+  'amendment004Sha256',
+  'amendment005Sha256',
+  'amendment006Sha256',
+  'amendment008Sha256'
 ];
 
 function isPlainObject(value) {
@@ -29,12 +34,16 @@ function requireTrustedV11SourceHashes(raw, trustedSourceHashes) {
   if (!isPlainObject(trustedSourceHashes)) {
     throw new Error('Trusted v1.1 source hashes are required for aggregation');
   }
+  const required = [
+    ...V11_SOURCE_HASH_FIELDS,
+    ...(Object.hasOwn(raw ?? {}, 'amendment009Sha256') ? ['amendment009Sha256'] : [])
+  ];
   const fields = Object.keys(trustedSourceHashes);
-  if (fields.length !== V11_SOURCE_HASH_FIELDS.length
-    || fields.some((field) => !V11_SOURCE_HASH_FIELDS.includes(field))) {
-    throw new Error('Trusted v1.1 source hashes must contain exactly preregistrationSha256, amendment001Sha256, and amendment002Sha256');
+  if (fields.length !== required.length
+    || fields.some((field) => !required.includes(field))) {
+    throw new Error(`Trusted v1.1 ${raw?.mode ?? 'unknown'} source hashes must contain exactly ${required.join(', ')}`);
   }
-  for (const field of V11_SOURCE_HASH_FIELDS) {
+  for (const field of required) {
     if (!SHA256.test(trustedSourceHashes[field])) {
       throw new Error(`Trusted v1.1 source hash ${field} must be a lowercase full SHA-256 digest`);
     }
@@ -44,18 +53,89 @@ function requireTrustedV11SourceHashes(raw, trustedSourceHashes) {
   }
 }
 
-function requireV11AggregationOptions(options) {
+function requireV11AggregationOptions(raw, options) {
   if (!isPlainObject(options)) {
     throw new Error('Trusted v1.1 source hashes are required for aggregation');
   }
-  const unknown = Object.keys(options).find((field) => field !== 'trustedSourceHashes');
+  const allowed = raw?.mode === 'SCORED'
+    ? ['trustedSourceHashes', 'providerReconciliation']
+    : ['trustedSourceHashes'];
+  const unknown = Object.keys(options).find((field) => !allowed.includes(field));
   if (unknown !== undefined) {
-    throw new Error(`Unknown v1.1 aggregation option ${unknown}; only trustedSourceHashes is allowed`);
+    throw new Error(`Unknown v1.1 aggregation option ${unknown}; only ${allowed.join(', ')} are allowed`);
   }
   if (!Object.hasOwn(options, 'trustedSourceHashes')) {
     throw new Error('Trusted v1.1 source hashes are required for aggregation');
   }
-  return options.trustedSourceHashes;
+  if (raw?.mode === 'SCORED' && !Object.hasOwn(options, 'providerReconciliation')) {
+    throw new Error('SCORED aggregation requires providerReconciliation');
+  }
+  return options;
+}
+
+export function validateV11ProviderReconciliationGate(raw, report) {
+  const topFields = [
+    'schema', 'version', 'runId', 'attemptId', 'ledgerPath', 'status', 'totals',
+    'events', 'evidenceHashes', 'findings', 'nativeAttemptTrace', 'budgetEvidence'
+  ];
+  const hashFields = [
+    'providerLedgerSha256', 'attemptLedgerSha256', 'planLedgerSha256', 'campaignLedgerSha256'
+  ];
+  const totalFields = [
+    'expectedCalls', 'observedEvents', 'matchedCalls', 'unexpectedEvents', 'missingCalls',
+    'malformedLines', 'retryEvents', 'modelMismatches', 'failedOutcomes', 'incompleteUsage',
+    'unverifiedCountUnits', 'unverifiedCountEvents'
+  ];
+  const exactKeys = (value, fields) => isPlainObject(value)
+    && Object.keys(value).length === fields.length
+    && fields.every((field) => Object.hasOwn(value, field));
+  const events = Array.isArray(report?.events) ? report.events : [];
+  const eventsValid = events.length > 0
+    && events.every((event, index) => isPlainObject(event)
+      && event.requestNumber === index + 1
+      && ['outer_decision_llm', 'internal_memory_llm', 'embedding'].includes(event.requestClass)
+      && ['SUCCEEDED', 'FAILED'].includes(event.outcome)
+      && event.correlation?.runId === raw.runId
+      && event.correlation?.attemptId === raw.attemptId);
+  const expectedCalls = raw.units.reduce((sum, unit) => {
+    const outer = unit.providerUsage === null ? 0 : 1;
+    const native = Object.values(unit.adapterEvidence ?? {}).reduce((inner, evidence) => (
+      inner + (evidence?.operations?.internalMemoryModelCalls ?? 0)
+        + (evidence?.operations?.embeddingCalls ?? 0)
+    ), 0);
+    return sum + outer + native;
+  }, 0);
+  if (!exactKeys(report, topFields)
+    || report.schema !== 'shadowgraph.v11.provider-reconciliation'
+    || report.version !== 1
+    || report.runId !== raw.runId
+    || report.attemptId !== raw.attemptId
+    || typeof report.ledgerPath !== 'string' || report.ledgerPath.length === 0
+    || report.status !== 'RECONCILED'
+    || !exactKeys(report.totals, totalFields)
+    || report.totals.expectedCalls !== expectedCalls
+    || report.totals.matchedCalls !== expectedCalls
+    || report.totals.observedEvents !== expectedCalls
+    || report.totals.observedEvents !== events.length
+    || report.totals.unexpectedEvents !== 0
+    || report.totals.missingCalls !== 0
+    || report.totals.malformedLines !== 0
+    || report.totals.modelMismatches !== 0
+    || report.totals.failedOutcomes !== 0
+    || report.totals.incompleteUsage !== 0
+    || report.totals.unverifiedCountUnits !== 0
+    || report.totals.unverifiedCountEvents !== 0
+    || !eventsValid
+    || !exactKeys(report.evidenceHashes, hashFields)
+    || !hashFields.every((field) => /^[a-f0-9]{64}$/u.test(report.evidenceHashes[field]))
+    || !Array.isArray(report.findings) || report.findings.length !== 0
+    || !isPlainObject(report.nativeAttemptTrace) || report.nativeAttemptTrace.status !== 'RECONCILED'
+    || !Array.isArray(report.nativeAttemptTrace.findings) || report.nativeAttemptTrace.findings.length !== 0
+    || !Array.isArray(report.nativeAttemptTrace.trace)
+    || !isPlainObject(report.budgetEvidence) || report.budgetEvidence.status !== 'RECONCILED') {
+    throw new Error('SCORED aggregation requires exact RECONCILED provider evidence for this run and attempt');
+  }
+  return report;
 }
 
 function mean(values) {
@@ -180,6 +260,20 @@ function summarizeArm(armId, raw, preregistration, groups) {
   };
 }
 
+/**
+ * An undefined false-alert rate must never satisfy a threshold.
+ *
+ * `null <= 0.05` is `true` in JavaScript, and `null <= null` is `true` as well,
+ * because both sides coerce to 0. Every gate below that compares a rate would
+ * therefore read "no false alerts" from an arm whose rate is undefined - the
+ * same fail-open the scorer was just fixed for, one layer up. Before that fix a
+ * null rate was almost unreachable; it is now the correct answer whenever a
+ * probe failed, so these comparisons have to say so explicitly.
+ */
+export function ratePassesAtMost(rate, limit) {
+  return Number.isFinite(rate) && Number.isFinite(limit) && rate <= limit;
+}
+
 function pairwiseWin(candidate, competitor) {
   return candidate.metrics.efficacyComposite >= competitor.metrics.efficacyComposite + 0.05
     && candidate.quality.mean >= competitor.quality.mean - 0.5
@@ -187,7 +281,7 @@ function pairwiseWin(candidate, competitor) {
     && candidate.metrics.userIsolation === 1
     && competitor.metrics.projectIsolation === 1
     && competitor.metrics.userIsolation === 1
-    && candidate.metrics.falseAlertRate <= competitor.metrics.falseAlertRate
+    && ratePassesAtMost(candidate.metrics.falseAlertRate, competitor.metrics.falseAlertRate)
     && candidate.metrics.failedAttemptAvoidance >= competitor.metrics.failedAttemptAvoidance;
 }
 
@@ -200,7 +294,7 @@ function bestCandidate(armResults, preregistration) {
       && metrics.rejectedAlternativeRecall >= 0.90
       && metrics.rejectionReasonRecall >= 0.90
       && metrics.changedFactDetection >= 0.90
-      && metrics.falseAlertRate <= 0.05
+      && ratePassesAtMost(metrics.falseAlertRate, 0.05)
       && metrics.failedAttemptAvoidance >= 0.90
       && metrics.projectIsolation === 1
       && metrics.userIsolation === 1
@@ -263,15 +357,33 @@ function aggregateLegacyRun(raw, preregistration) {
   };
 }
 
-function v11IsolationLeak(unit) {
-  const evidence = unit?.adapterEvidence?.verify?.isolationEvidence;
-  return Array.isArray(evidence?.leakedRecordIds) && evidence.leakedRecordIds.length > 0;
+/**
+ * Read the persisted-state inspection an isolation unit actually recorded.
+ *
+ * This used to look for `leakedRecordIds`, a field no adapter in this repository
+ * writes, so it answered "no leak" for every unit ever run - including units
+ * where no inspection happened at all. The adapters do report the inspection,
+ * under `verified` plus two match counts, and that is what the frozen rule's
+ * "persisted-state inspection confirms no target record copied" refers to.
+ *
+ * Returning null for an absent inspection is the point: the scorer has to be
+ * able to tell "inspected and clean" from "never inspected", because only the
+ * first earns a passing isolation score.
+ */
+function v11IsolationInspection(unit) {
+  return isolationInspectionFrom(unit?.adapterEvidence?.verify?.isolationEvidence);
 }
 
 function v11LifecycleFrom(units) {
   const byPhase = new Map(units.map((unit) => [unit.phase, unit]));
+  const phaseA = byPhase.get('A');
   return {
-    A: byPhase.get('A')?.decisionResponse,
+    A: phaseA?.decisionResponse === null || phaseA?.decisionResponse === undefined
+      ? phaseA?.decisionResponse
+      : {
+          ...phaseA.decisionResponse,
+          persistedDecisionId: phaseA.adapterEvidence?.verify?.persistenceEvidence?.expectedRecord?.id ?? null
+        },
     B: byPhase.get('B')?.decisionResponse,
     C: byPhase.get('C')?.decisionResponse,
     D_TRUE: byPhase.get('D_TRUE')?.decisionResponse,
@@ -279,11 +391,11 @@ function v11LifecycleFrom(units) {
     E: byPhase.get('E')?.decisionResponse,
     ISOLATION_PROJECT: {
       response: byPhase.get('ISOLATION_PROJECT')?.decisionResponse,
-      persistedLeak: v11IsolationLeak(byPhase.get('ISOLATION_PROJECT'))
+      inspection: v11IsolationInspection(byPhase.get('ISOLATION_PROJECT'))
     },
     ISOLATION_USER: {
       response: byPhase.get('ISOLATION_USER')?.decisionResponse,
-      persistedLeak: v11IsolationLeak(byPhase.get('ISOLATION_USER'))
+      inspection: v11IsolationInspection(byPhase.get('ISOLATION_USER'))
     }
   };
 }
@@ -385,10 +497,69 @@ function summarizeV11Arm(arm, raw, preregistration) {
   };
 }
 
+const V11_UNIT_STATUS_KEYS = Object.freeze(['MEASURED', 'FAILED', 'NOT_MEASURED', 'EXCLUDED']);
+
+function v11UnitStatusTally(units) {
+  const tally = Object.fromEntries(V11_UNIT_STATUS_KEYS.map((status) => [status, 0]));
+  for (const unit of units) {
+    if (Object.hasOwn(tally, unit.status)) tally[unit.status] += 1;
+  }
+  return { planned: units.length, ...tally };
+}
+
+/**
+ * Per-arm and per-phase coverage, so no aggregate number stands without the
+ * units behind it.
+ *
+ * The aggregate used to carry seven arm statuses and a single `units: 308`. A
+ * run in which 84 units failed and 48 more answered nothing therefore read the
+ * same as one in which every unit succeeded, and `PARTIAL_FAILED` compressed an
+ * arm that failed four units and an arm that failed forty into one token. None
+ * of that was hidden - it was all in the raw ledger - but a reader had to
+ * already suspect something to go looking, which is the wrong way round.
+ *
+ * `status: "COMPLETE"` stays as it is. It correctly means every planned unit
+ * reached a terminal record, and the defect was never that word: it was that
+ * the word was the only outcome-shaped thing in the file.
+ */
+export function v11Coverage(raw) {
+  const byArm = new Map();
+  const byPhase = new Map();
+  for (const unit of raw.units) {
+    if (!byArm.has(unit.armId)) byArm.set(unit.armId, []);
+    byArm.get(unit.armId).push(unit);
+    if (!byPhase.has(unit.phase)) byPhase.set(unit.phase, []);
+    byPhase.get(unit.phase).push(unit);
+  }
+  const failureCauses = {};
+  for (const unit of raw.units) {
+    const cause = unit.failure?.cause;
+    if (typeof cause === 'string') failureCauses[cause] = (failureCauses[cause] ?? 0) + 1;
+  }
+  return {
+    units: v11UnitStatusTally(raw.units),
+    failureCauses,
+    byArm: [...byArm.entries()].map(([armId, units]) => ({
+      armId,
+      ...v11UnitStatusTally(units)
+    })),
+    byPhase: [...byPhase.entries()].map(([phase, units]) => ({
+      phase,
+      ...v11UnitStatusTally(units)
+    }))
+  };
+}
+
 export function aggregateV11Run(raw, preregistration, options = {}) {
-  const trustedSourceHashes = requireV11AggregationOptions(options);
+  const aggregationOptions = requireV11AggregationOptions(raw, options);
+  const trustedSourceHashes = aggregationOptions.trustedSourceHashes;
   requireTrustedV11SourceHashes(raw, trustedSourceHashes);
-  validateV11RawRun(raw, preregistration, trustedSourceHashes.preregistrationSha256);
+  validateV11RawRun(
+    raw,
+    preregistration,
+    trustedSourceHashes.preregistrationSha256,
+    trustedSourceHashes
+  );
   const counts = {
     measuredArms: raw.arms.filter((arm) => arm.status === 'MEASURED').length,
     partialFailedArms: raw.arms.filter((arm) => arm.status === 'PARTIAL_FAILED').length,
@@ -397,6 +568,7 @@ export function aggregateV11Run(raw, preregistration, options = {}) {
     excludedArms: raw.arms.filter((arm) => arm.status === 'EXCLUDED').length,
     units: raw.units.length
   };
+  const coverage = v11Coverage(raw);
   const base = {
     schemaVersion: 2,
     benchmarkVersion: '1.1',
@@ -405,6 +577,7 @@ export function aggregateV11Run(raw, preregistration, options = {}) {
     status: raw.status,
     zeroResult: structuredClone(raw.zeroResult),
     counts,
+    coverage,
     armStatuses: raw.arms.map((arm) => ({
       armId: arm.armId,
       status: arm.status,
@@ -412,6 +585,7 @@ export function aggregateV11Run(raw, preregistration, options = {}) {
     }))
   };
   if (raw.mode === 'ACCEPTANCE') return base;
+  validateV11ProviderReconciliationGate(raw, aggregationOptions.providerReconciliation);
 
   const armResults = raw.arms
     .filter((arm) => arm.status === 'MEASURED')

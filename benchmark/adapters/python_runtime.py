@@ -8,6 +8,8 @@ import importlib.metadata
 import inspect
 import ipaddress
 import json
+import os
+import re
 import uuid
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -16,8 +18,8 @@ from envelope import ContractError, build_envelope, canonical_json, record_conte
 
 
 ENCODING_PREFIX = "shadowgraph-benchmark-record:v2:"
+PINNED_MODEL_ID = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}\Z")
 BENCHMARK_UUID_NAMESPACE = uuid.UUID("2533a762-6523-53c2-bbd9-6f533c197a44")
-COGNEE_DATASET_UUID_NAMESPACE = uuid.UUID("f266d968-ec78-5e9b-b767-b78eb418b156")
 ENDPOINT_ERRNOS = {
     errno.ECONNREFUSED,
     errno.ECONNRESET,
@@ -75,6 +77,56 @@ def _is_literal_loopback_endpoint(value: Any) -> bool:
         and bool(parsed.netloc)
         and parsed.path not in ("", "/")
     )
+
+
+def _is_pinned_model(value: Any, *, embedding: bool) -> bool:
+    if not isinstance(value, dict) or set(value) != {"modelId", "embeddingDimension"}:
+        return False
+    if not isinstance(value["modelId"], str) or not PINNED_MODEL_ID.match(value["modelId"]):
+        return False
+    dimension = value["embeddingDimension"]
+    if embedding:
+        return isinstance(dimension, int) and not isinstance(dimension, bool) and dimension > 0
+    return dimension is None
+
+
+def persistent_state_root(product: str) -> str:
+    """The owned directory an arm's native storage lives in, across processes.
+
+    The executor prepares one leaf per unit and names it in the environment. An
+    arm that persisted anywhere else would be measured on state the harness did
+    not create and cannot clean, so an absent, relative or symlinked root is a
+    refusal rather than a fallback.
+    """
+    configured = os.environ.get("SHADOWGRAPH_PYTHON_ADAPTER_STATE_ROOT")
+    if not isinstance(configured, str) or not configured or not os.path.isabs(configured):
+        raise ContractError(f"{product} requires an owned persistent state root")
+    normalized = os.path.abspath(configured)
+    if os.path.realpath(normalized) != normalized:
+        raise ContractError(f"{product} persistent state root is unsafe")
+    return normalized
+
+
+def require_models(models: Any, *, required: bool) -> None:
+    """Hold an adapter to the models the weight lock pins.
+
+    Routes say where an internal call goes; models say what it asks for. Every
+    one of these libraries has a default for the second, and every default names
+    a model the pinned endpoint does not serve - so an adapter that is handed
+    routes and no models does not fail, it measures something else. The shapes
+    mirror `require_routes` deliberately: the arms that take routes take models,
+    and the arm that takes neither takes neither.
+    """
+    if not isinstance(models, dict) or set(models) != {"internal_memory_llm", "embedding"}:
+        raise ContractError("Python adapter pinned model config is invalid")
+    if not required:
+        if (models["internal_memory_llm"], models["embedding"]) != (None, None):
+            raise ContractError("This Python adapter does not accept pinned models")
+        return
+    if not _is_pinned_model(models["internal_memory_llm"], embedding=False) or not _is_pinned_model(
+        models["embedding"], embedding=True
+    ):
+        raise ContractError("Python adapter requires a pinned model for each metered route")
 
 
 def require_routes(config: Any, *, required: bool) -> None:
@@ -143,12 +195,6 @@ def deterministic_native_uuid(adapter_id: str, logical_record_id: str) -> str:
     if not isinstance(adapter_id, str) or not adapter_id or not isinstance(logical_record_id, str) or not logical_record_id:
         raise ContractError("Native UUID inputs must be non-empty strings")
     return str(uuid.uuid5(BENCHMARK_UUID_NAMESPACE, f"{adapter_id}:{logical_record_id}"))
-
-
-def deterministic_dataset_uuid(adapter_id: str, project_id: str) -> uuid.UUID:
-    if not isinstance(adapter_id, str) or not adapter_id or not isinstance(project_id, str) or not project_id:
-        raise ContractError("Dataset UUID inputs must be non-empty strings")
-    return uuid.uuid5(COGNEE_DATASET_UUID_NAMESPACE, f"{adapter_id}:{project_id}")
 
 
 def decode_content(value: Any) -> dict:

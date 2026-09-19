@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -13,7 +14,7 @@ import basic_memory_adapter
 import python_runtime
 from envelope import ContractError
 
-from test_support import DECISION_SHA256, python_config, request_for
+from test_support import DECISION_SHA256, models_for, python_config, python_models, request_for
 
 
 BASIC_REF = "df8bfcf3fb8f56f2e8144f81e6db609ffa86190e3534f99393e85d687016ac6e"
@@ -161,10 +162,29 @@ class BasicMemoryAdapterTests(unittest.TestCase):
             basic_memory_adapter.execute(
                 self.request(operation, **overrides),
                 python_config(llm=None, embedding=None),
+                models_for(python_config(llm=None, embedding=None)),
                 client_factory=self.factory,
                 version_getter=lambda name: "0.23.2" if name == "basic-memory" else None,
             )
         )
+
+    def test_an_arm_that_meters_nothing_refuses_a_pinned_model(self) -> None:
+        # The mirror of the metered case. A model here would mean this arm had
+        # been handed a provider capability it is defined not to have.
+        for models in (python_models(), python_models(embedding=None), {}, None):
+            with self.subTest(models=models):
+                response = asyncio.run(
+                    basic_memory_adapter.execute(
+                        self.request("retrieve"),
+                        python_config(llm=None, embedding=None),
+                        models,
+                        client_factory=self.factory,
+                        version_getter=lambda _name: "0.23.2",
+                    )
+                )
+                self.assertEqual(response["status"], "FAILED")
+                self.assertEqual(response["failure"]["cause"], "CONTRACT_FAILURE")
+        self.assertEqual(self.clients, [])
 
     def test_reset_is_idempotent_and_uses_only_an_owned_persistent_project_path(self) -> None:
         first = self.execute("reset")
@@ -252,6 +272,7 @@ class BasicMemoryAdapterTests(unittest.TestCase):
             basic_memory_adapter.execute(
                 bad,
                 python_config(llm=None, embedding=None),
+                models_for(python_config(llm=None, embedding=None)),
                 client_factory=self.factory,
                 version_getter=lambda _name: "0.23.2",
             )
@@ -260,13 +281,61 @@ class BasicMemoryAdapterTests(unittest.TestCase):
         self.assertEqual(response["failure"]["cause"], "CONTRACT_FAILURE")
         self.assertEqual(self.clients, [])
 
-    def test_storage_is_not_available_pending_a_task8_attribution_method(self) -> None:
+    def test_storage_is_not_available_because_record_bodies_are_not_in_the_directory(self) -> None:
+        # This arm used to report exact bytes by walking the project directory,
+        # on the premise that the arm's records are the files in it. Basic Memory
+        # 0.23.2 does not work that way: a note's body goes into
+        # `note_content.markdown_content` in the shared SQLite index, and the
+        # markdown file write is queued for `drain_pending_materializations()`,
+        # which nothing in this adapter's call path reaches. So a namespace holds
+        # its records while its directory stays empty, and a walk of that
+        # directory reports MEASURED 0 bytes - the most favourable number
+        # available, under the status that means the number is exact.
+        #
+        # The test that stood here wrote two files into the directory itself and
+        # asserted their sizes came back. It even said why it had to: "the fake
+        # client keeps its notes in a dictionary, so the project directory is
+        # empty". That empty directory was the product's actual behaviour, and
+        # supplying the missing files by hand turned the defect into the fixture.
         response = self.execute("persist")
-        self.assertEqual(response["storage"]["status"], "NOT_AVAILABLE")
-        self.assertIsNone(response["storage"]["bytes"])
-        self.assertIsNone(response["storage"]["method"])
-        self.assertNotIn("supplied", response["storage"]["reason"].lower())
-        self.assertIn("Task 8", response["storage"]["reason"])
+        storage = response["storage"]
+        self.assertEqual(storage["status"], "NOT_AVAILABLE")
+        self.assertIsNone(storage["bytes"])
+        self.assertIsNone(storage["method"])
+        self.assertEqual(storage["blockedClaims"], ["storage bytes"])
+        self.assertIn("shared by every project", storage["reason"])
+
+    def test_a_namespace_holding_records_never_reports_measured_zero_bytes(self) -> None:
+        # The regression, stated as the run recorded it. A record is persisted
+        # and read back, so the namespace demonstrably holds it; the project
+        # directory holds no regular file, exactly as run v11-acceptance-002
+        # found. Any storage status of MEASURED here is a byte claim about
+        # records the walk cannot see, and 0 is the number it would report.
+        self.execute("persist")
+        project_path = basic_memory_adapter._project_path(
+            self.state_root, self.request("persist")["namespace"]["projectId"]
+        )
+        materialized = [
+            os.path.join(directory, name)
+            for directory, _subdirectories, names in os.walk(project_path)
+            for name in names
+        ]
+        self.assertEqual(materialized, [])
+
+        for operation in ("persist", "retrieve"):
+            storage = self.execute(operation)["storage"]
+            self.assertNotEqual(storage["status"], "MEASURED")
+            self.assertIsNone(storage["bytes"])
+
+    def test_a_failed_unit_says_it_stopped_early_rather_than_that_the_scope_is_missing(self) -> None:
+        # Both storages are NOT_AVAILABLE, and they still say different things.
+        # One is a fact about the product, the other about one invocation, and a
+        # run record reading back a failed unit should be able to tell which.
+        self.assertNotEqual(
+            basic_memory_adapter.STORAGE["reason"],
+            basic_memory_adapter.UNMEASURED_STORAGE["reason"],
+        )
+        self.assertIn("failed before", basic_memory_adapter.UNMEASURED_STORAGE["reason"])
 
     @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink support")
     def test_project_path_rejects_an_interior_symlink_without_outside_writes(self) -> None:
@@ -424,7 +493,12 @@ class BasicMemoryRetrieveReadBackTests(BasicMemoryAdapterTests):
         records = response["result"]["nativeContext"]
         self.assertEqual(len(records), 1, "the persisted record must be returned")
         self.assertEqual(records[0]["type"], "decision")
-        self.assertIn("decisionId", records[0]["content"])
+        # `choiceId`, not `decisionId`: a stored decision record carries the
+        # response minus the three probe-answer fields (F37). What this test
+        # is proving is that the content round-trips, and choiceId does that.
+        self.assertIn("choiceId", records[0]["content"])
+        for absent in ("decisionId", "changedFactDetected", "changedFactId"):
+            self.assertNotIn(absent, records[0]["content"])
 
         # One search plus one read per hit, and the read is what supplies the
         # frontmatter the hit lacks.

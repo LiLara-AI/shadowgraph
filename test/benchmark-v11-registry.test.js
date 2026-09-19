@@ -9,6 +9,7 @@ import {
   V11_ARM_IDS,
   createV11Registry
 } from '../benchmark/lib/v11-registry.mjs';
+import { parseServiceManifestDocument } from '../benchmark/lib/implementation-lock.mjs';
 
 const IMAGE = 'python@sha256:47ae396f09c1303b8653019811a8498470603d7ffefc29cb07c88f1f8cb3d19f';
 const PHASES = [
@@ -220,4 +221,74 @@ test('count derivation refuses malformed shapes', async () => {
   assert.throws(() => built.expectedCounts({
     scenarios: 2, repetitions: 2, phases: PHASES, declared: null
   }), RegistryError);
+});
+
+test('every arm that requires a service names which committed services it requires', async () => {
+  const built = await registry();
+  for (const descriptor of built.descriptors) {
+    assert.equal(
+      descriptor.requiredService !== null,
+      descriptor.requiredServiceNames.length > 0,
+      `${descriptor.armId} states a service requirement in prose or by name but not both`
+    );
+  }
+  assert.deepEqual(
+    built.descriptorFor('graphiti').requiredServiceNames,
+    ['neo4j', 'ollama'],
+    'the prose requirement bundles a database and the common endpoint; both must be named'
+  );
+  assert.deepEqual(built.descriptorFor('cognee').requiredServiceNames, ['ollama']);
+  assert.deepEqual(built.descriptorFor('mem0-oss').requiredServiceNames, []);
+});
+
+test('every named required service is declared by the committed service manifest', async () => {
+  // The names exist so readiness can ask about a specific pinned service. A
+  // name the manifest never declares could never be verified, so it would be a
+  // permanent blocker that reads like a provisioning problem.
+  const manifest = JSON.parse(await readFile(
+    fileURLToPath(new URL('../benchmark/service-images.json', import.meta.url)),
+    'utf8'
+  ));
+  const declared = new Set(manifest.services.map((service) => service.name));
+  const built = await registry();
+  for (const descriptor of built.descriptors) {
+    for (const name of descriptor.requiredServiceNames) {
+      assert.ok(declared.has(name), `${descriptor.armId} requires undeclared service ${name}`);
+    }
+  }
+});
+
+test('Graphiti is bound to the minimum supported Neo4j 5.26 service with an offline-verifiable OCI identity', async () => {
+  const manifest = JSON.parse(await readFile(
+    fileURLToPath(new URL('../benchmark/service-images.json', import.meta.url)),
+    'utf8'
+  ));
+  assert.doesNotThrow(() => parseServiceManifestDocument(manifest));
+  const neo4j = manifest.services.find((service) => service.name === 'neo4j');
+  assert.equal(neo4j.image, 'neo4j:5.26.0');
+  assert.equal(
+    neo4j.digest,
+    'sha256:d5e6396795ab2b813d5c6ac820ba36f129c412ea4ad982ffccab7b8f69e9e6a5'
+  );
+  assert.equal(neo4j.registryAttestation.tag, '5.26.0');
+});
+
+test('a lock that adds a service requirement without naming its services is refused', async () => {
+  const competitorLock = await realLock();
+  competitorLock.arms['basic-memory'].requiredService = 'a service nobody named';
+  assert.throws(
+    () => createV11Registry({ competitorLock, containerImage: IMAGE }),
+    RegistryError,
+    'prose and named requirements must be added together'
+  );
+});
+
+test('a lock that drops a service requirement the registry still names is refused', async () => {
+  const competitorLock = await realLock();
+  delete competitorLock.arms.cognee.requiredService;
+  assert.throws(
+    () => createV11Registry({ competitorLock, containerImage: IMAGE }),
+    RegistryError,
+    'prose and named requirements must be removed together'
+  );
 });

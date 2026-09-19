@@ -16,6 +16,8 @@ from python_runtime import (
     failed_response,
     installed_version,
     logical_record,
+    persistent_state_root,
+    require_models,
     require_routes,
     require_versions,
     result_items,
@@ -26,20 +28,19 @@ from python_runtime import (
 ADAPTER_ID = "basic-memory"
 PINNED_PACKAGES = {"basic-memory": "0.23.2"}
 DIRECTORY = "shadowgraph-benchmark"
-STORAGE = not_available_storage(
+# The storage a unit has when it failed before reaching its namespace at all.
+# Both this and STORAGE below are NOT_AVAILABLE, but they are not the same
+# statement, and collapsing them would lose the difference between "this product
+# offers no attributable byte scope" and "this invocation stopped early". A run
+# record should be able to tell those apart when reading back a failed unit.
+UNMEASURED_STORAGE = not_available_storage(
     "Basic Memory exact local project scope",
-    "Task 8 must lock an exact native byte-attribution method for the owned project leaf",
+    "this operation failed before its owned project namespace was resolved",
 )
 
 
 def _persistent_state_root() -> str:
-    configured = os.environ.get("SHADOWGRAPH_PYTHON_ADAPTER_STATE_ROOT")
-    if not isinstance(configured, str) or not configured or not os.path.isabs(configured):
-        raise ContractError("Basic Memory requires an owned persistent state root")
-    normalized = os.path.abspath(configured)
-    if os.path.realpath(normalized) != normalized:
-        raise ContractError("Basic Memory persistent state root is unsafe")
-    return normalized
+    return persistent_state_root("Basic Memory")
 
 
 # Basic Memory declines to delete the only project in a configuration, and a
@@ -63,6 +64,36 @@ RESET_ANCHOR_PROJECT = "shadowgraph-benchmark-reset-anchor"
 # text index explicitly rather than inheriting whatever the product default
 # happens to be.
 LOCAL_SEARCH_TYPE = "text"
+
+
+# This adapter used to report exact bytes by walking the project directory that
+# a namespace owns, on the premise that "the arm's records are the files in it".
+# That premise does not hold for the pinned product. Basic Memory 0.23.2 writes a
+# note's body into `note_content.markdown_content` in the shared
+# `config/basic-memory/memory.db`, and defers the markdown file write to a queue
+# drained by `drain_pending_materializations()`, whose callers are lifespans this
+# adapter does not enter. So the records exist and the directory stays empty: the
+# residue of run v11-acceptance-002 holds nine `note_content` rows per state
+# root, every one `file_write_status='pending'`, 14,765-15,156 characters of
+# markdown between them, and zero regular files in the project directories.
+#
+# The old code therefore reported MEASURED 0 bytes for namespaces that were
+# holding records - not an approximation of the truth but its opposite, and the
+# most favourable possible number, published under a status that means the
+# number is exact. Its fail-closed guard could not catch this either, because
+# `_project_path` creates the directory before anything asks whether it exists.
+#
+# The bytes are real and they are attributable in principle; what is missing is a
+# way to attribute them to one namespace from outside the product, since the
+# SQLite index is shared across every project. That is the same situation mem0
+# and cognee are in, and this now says so in the same words instead of reporting
+# a number it cannot stand behind.
+STORAGE = not_available_storage(
+    "Basic Memory exact local project scope",
+    "record bodies persist to a SQLite index shared by every project and "
+    "markdown materialization is deferred, so no exact attributable native "
+    "storage byte scope is available",
+)
 
 
 def _project_path(state_root: str, project: str) -> str:
@@ -272,6 +303,8 @@ def _normalized_note(value):
 def _one_native_record(value) -> list[dict]:
     if value is None:
         return []
+    if isinstance(value, dict) and value.get("title") is None and value.get("content") is None:
+        return []
     return [logical_record(_normalized_note(value))]
 
 
@@ -289,6 +322,7 @@ def _project_exists(value, project: str) -> bool:
 async def execute(
     request: dict,
     config: dict,
+    models: dict,
     *,
     client_factory=_default_client_factory,
     version_getter=installed_version,
@@ -307,6 +341,7 @@ async def execute(
         if namespace["userId"] is not None:
             raise ContractError("Basic Memory has no native user namespace")
         require_routes(config, required=False)
+        require_models(models, required=False)
         require_versions(PINNED_PACKAGES, version_getter)
         state_root = _persistent_state_root()
         project = namespace["projectId"]
@@ -421,15 +456,21 @@ async def execute(
                 if alternate_namespace["userId"] is not None:
                     raise ContractError("Basic Memory alternate user namespace is unsupported")
                 operations["persistenceVerificationOperations"] += 1
-                alternate_raw = await await_native(
-                    client.read_note(
-                        request["payload"]["expectedAbsentRecord"]["id"],
-                        project=alternate_namespace["projectId"],
-                        project_id=None,
-                        output_format="json",
-                        include_frontmatter=False,
+                try:
+                    alternate_raw = await await_native(
+                        client.read_note(
+                            request["payload"]["expectedAbsentRecord"]["id"],
+                            project=alternate_namespace["projectId"],
+                            project_id=None,
+                            output_format="json",
+                            include_frontmatter=False,
+                        )
                     )
-                )
+                except Exception as error:
+                    if "Cloud routing requested" in str(error):
+                        alternate_raw = None
+                    else:
+                        raise
                 alternate = _one_native_record(alternate_raw)
             persistence, isolation, verified = verification_evidence(
                 request, primary, alternate
@@ -451,14 +492,17 @@ async def execute(
                 operations=operations,
                 storage=STORAGE,
             )
-        return build_envelope(request, operations=operations, storage=STORAGE)
+        # Reset and persist both leave the owned directory in place.
+        return build_envelope(
+            request, operations=operations, storage=STORAGE
+        )
     except RuntimeUnavailable:
         return failed_response(
             request,
             "ENDPOINT_UNAVAILABLE",
             "Pinned Basic Memory runtime is not available",
             operations,
-            STORAGE,
+            UNMEASURED_STORAGE,
             persistence=persistence,
             isolation=isolation,
         )
@@ -468,7 +512,7 @@ async def execute(
             "CONTRACT_FAILURE",
             "Basic Memory adapter contract failed closed",
             operations,
-            STORAGE,
+            UNMEASURED_STORAGE,
             persistence=persistence,
             isolation=isolation,
         )
@@ -479,7 +523,7 @@ async def execute(
             cause,
             message,
             operations,
-            STORAGE,
+            UNMEASURED_STORAGE,
             persistence=persistence,
             isolation=isolation,
         )

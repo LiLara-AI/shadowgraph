@@ -11,12 +11,16 @@ import {
   STANDARD_DECISION_RESPONSE_SCHEMA
 } from '../benchmark/lib/outer-model.mjs';
 import { createProgressLedger, createUnitEvidenceLedger } from '../benchmark/lib/progress.mjs';
+import { createV11RunResources } from '../benchmark/lib/v11-run-resources.mjs';
 import { validateRawRun } from '../benchmark/lib/validate.mjs';
+import { loadV11ScoredDefinition } from '../benchmark/lib/v11-definition.mjs';
+import { buildV11Prompt } from '../benchmark/lib/v11-prompts.mjs';
 import {
   recordContentSha256,
   unitIdFor as contractUnitIdFor
 } from '../benchmark/lib/v11-contract.mjs';
 import {
+  UNIT_TIMEOUT_MS,
   V11_PHASES,
   runV11Benchmark,
   unitIdFor
@@ -37,12 +41,48 @@ const HASHES = Object.freeze({
   preregistrationSha256: '738ee8b4813fab77da2e4e24582b12e756686650e4c39fad41c5337f831f5dac',
   amendment001Sha256: '2b209df6ca46a179e332acd4ed0b16a35a089f5c14575dd86353db0dc7249c4a',
   amendment002Sha256: '08e12eca3f93bd67cfeaf90a2064f91beb240e78a8fd63ed8645da78c0d88f1b',
+  amendment003Sha256: '726de2018584aca399fc27d2bba15585d8b6fb9454bc24083578daed22f0be0a',
+  amendment004Sha256: 'b0c3a2553608efb78147a8c1f1ef9af51a7d0eebaa0037ce4ad7b64616b1c5f9',
+  amendment005Sha256: 'c435fa9d772c151c83214ef3a4180e0646236cd2cbb079be082b8341c4e6e223',
+  amendment006Sha256: '3bc9308a19e44ecc06d15dc0144239aa907b49cf897a11f9fab7cfe116966760',
+  amendment008Sha256: '184ba096d3b3d762f96e37c9a594925dd22e9628b9649a89d4a0a0c8fdff5ff9',
   implementationLockHash: '4'.repeat(64),
   environmentLockHash: '5'.repeat(64)
 });
 const AMENDMENT_002_PATH = fileURLToPath(
   new URL('../benchmark/preregistration-amendment-002.json', import.meta.url)
 );
+const AMENDMENT_003_PATH = fileURLToPath(
+  new URL('../benchmark/preregistration-amendment-003.json', import.meta.url)
+);
+const AMENDMENT_004_PATH = fileURLToPath(
+  new URL('../benchmark/preregistration-amendment-004.json', import.meta.url)
+);
+const AMENDMENT_005_PATH = fileURLToPath(
+  new URL('../benchmark/preregistration-amendment-005.json', import.meta.url)
+);
+const AMENDMENT_005_SIDECAR_PATH = fileURLToPath(
+  new URL('../benchmark/preregistration-amendment-005.sha256', import.meta.url)
+);
+const AMENDMENT_006_PATH = fileURLToPath(
+  new URL('../benchmark/preregistration-amendment-006.json', import.meta.url)
+);
+const AMENDMENT_006_SIDECAR_PATH = fileURLToPath(
+  new URL('../benchmark/preregistration-amendment-006.sha256', import.meta.url)
+);
+const AMENDMENT_008_PATH = fileURLToPath(
+  new URL('../benchmark/preregistration-amendment-008.json', import.meta.url)
+);
+const AMENDMENT_008_SIDECAR_PATH = fileURLToPath(
+  new URL('../benchmark/preregistration-amendment-008.sha256', import.meta.url)
+);
+const AMENDMENT_009_PATH = fileURLToPath(
+  new URL('../benchmark/preregistration-amendment-009.json', import.meta.url)
+);
+const AMENDMENT_009_SIDECAR_PATH = fileURLToPath(
+  new URL('../benchmark/preregistration-amendment-009.sha256', import.meta.url)
+);
+const REPOSITORY_ROOT = fileURLToPath(new URL('..', import.meta.url));
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
@@ -237,9 +277,17 @@ function fakeClock() {
 function progressRecorder(onAppend = null, onWatchdog = null) {
   const events = [];
   let activeCorrelation = null;
+  let accepting = true;
   return {
     events,
+    async close() {
+      accepting = false;
+    },
     async append(event) {
+      // The real ledger rejects here (progress.mjs), and a double that did not
+      // let this file assert the exact teardown ordering that made every bound
+      // run die on its last line.
+      if (!accepting) throw new Error('Progress ledger is closed');
       events.push(structuredClone(event));
       if (event.event === 'unit_started') {
         activeCorrelation = {
@@ -278,6 +326,14 @@ function baseOptions(overrides = {}) {
     seeds: [17],
     ...HASHES,
     amendment002Path: AMENDMENT_002_PATH,
+    amendment003Path: AMENDMENT_003_PATH,
+    amendment004Path: AMENDMENT_004_PATH,
+    amendment005Path: AMENDMENT_005_PATH,
+    amendment005SidecarPath: AMENDMENT_005_SIDECAR_PATH,
+    amendment006Path: AMENDMENT_006_PATH,
+    amendment006SidecarPath: AMENDMENT_006_SIDECAR_PATH,
+    amendment008Path: AMENDMENT_008_PATH,
+    amendment008SidecarPath: AMENDMENT_008_SIDECAR_PATH,
     progress,
     persistUnit: async () => {},
     now: clock.now,
@@ -413,12 +469,14 @@ function assertNoAcceptanceClaims(value) {
 
 test('integrated runner executes retrieve → outer → persist → verify and checkpoints every terminal unit', async () => {
   const trace = [];
+  const operationSlots = [];
   let phaseAPersisted = false;
   const progress = progressRecorder();
   const options = baseOptions({
     progress,
-    executeAdapter: async (request) => {
+    executeAdapter: async (request, { operationSlot }) => {
       trace.push(`${request.phase}:${request.operation}`);
+      operationSlots.push(`${request.phase}:${request.operation}:${operationSlot}`);
       if (request.phase === 'A' && request.operation === 'persist') phaseAPersisted = true;
       return adapterEnvelope(request);
     },
@@ -448,6 +506,28 @@ test('integrated runner executes retrieve → outer → persist → verify and c
     trace.filter((entry) => entry.startsWith('E:')),
     ['E:persist', 'E:verify', 'E:retrieve', 'E:outer', 'E:persist', 'E:verify']
   );
+  assert.deepEqual(
+    operationSlots.filter((entry) => entry.startsWith('E:')),
+    [
+      'E:persist:setupPersist',
+      'E:verify:setupVerify',
+      'E:retrieve:retrieve',
+      'E:persist:persist',
+      'E:verify:verify'
+    ]
+  );
+  for (const phase of ['ISOLATION_PROJECT', 'ISOLATION_USER']) {
+    assert.deepEqual(
+      trace.filter((entry) => entry.startsWith(`${phase}:`)),
+      [
+        `${phase}:reset`,
+        `${phase}:retrieve`,
+        `${phase}:outer`,
+        `${phase}:persist`,
+        `${phase}:verify`
+      ]
+    );
+  }
   assert.equal(raw.units.find((unit) => unit.phase === 'A').status, 'MEASURED');
   assert.equal(raw.arms[0].status, 'MEASURED');
 
@@ -462,6 +542,61 @@ test('integrated runner executes retrieve → outer → persist → verify and c
     if (nextStarted !== -1) assert.ok(nextStarted >= 1, 'checkpoint must precede the next unit');
   }
   assertNoAcceptanceClaims(raw);
+});
+
+test('runner refuses an untrusted scored-eligibility receipt before effects', async () => {
+  const candidate = await loadV11ScoredDefinition({ repositoryRoot: REPOSITORY_ROOT });
+  const progress = progressRecorder();
+  let effects = 0;
+  await assert.rejects(
+    runV11Benchmark(baseOptions({
+      scored: true,
+      finalProfile: true,
+      acceptanceEligibility: {
+        schema: 'shadowgraph.v11.acceptance-eligibility',
+        version: 1,
+        status: 'ELIGIBLE_FOR_SCORED',
+        runId: 'accepted-run',
+        attemptId: 'accepted-attempt',
+        implementationLockHash: '4'.repeat(64),
+        amendment009Sha256: candidate.sourceHashes.amendment009Sha256,
+        rawSha256: 'a'.repeat(64),
+        providerReconciliationSha256: 'b'.repeat(64),
+        counts: { totalUnits: 308, applicableUnits: 288, excludedUnits: 20, failedUnits: 0 },
+        issuedAt: '2026-09-08T10:00:00.000Z'
+      },
+      arms: candidate.definition.arms,
+      scenarios: candidate.scenarios,
+      repetitions: candidate.definition.commonExecution.repetitions,
+      seeds: candidate.definition.commonExecution.randomSeeds,
+      ...candidate.sourceHashes,
+      amendment009Path: AMENDMENT_009_PATH,
+      amendment009SidecarPath: AMENDMENT_009_SIDECAR_PATH,
+      progress,
+      buildOuterRequest: buildV11Prompt,
+      executeAdapter: async () => { effects += 1; },
+      requestOuter: async () => { effects += 1; },
+      persistUnit: async () => { effects += 1; }
+    })),
+    /issued or artifact-verified/iu
+  );
+  assert.equal(progress.events.length, 0);
+  assert.equal(effects, 0);
+});
+
+test('runner requires Amendment 008 identity/campaign source binding before any unit runs', async () => {
+  let calls = 0;
+  await assert.rejects(
+    runV11Benchmark(baseOptions({
+      amendment008Sha256: undefined,
+      executeAdapter: async (request) => {
+        calls += 1;
+        return adapterEnvelope(request);
+      }
+    })),
+    /amendment008Sha256/u
+  );
+  assert.equal(calls, 0);
 });
 
 test('a failed unit remains raw evidence, later units continue, and arm status is derived mechanically', async () => {
@@ -579,7 +714,16 @@ test('diagnostic resume never replaces a started unit that had no terminal evide
     scenarios: [scenario()],
     marketingThresholds: { noResultText: 'unused', measuredOnlyText: 'unused' }
   };
-  assert.equal(validateRawRun(resumed, definition, HASHES.preregistrationSha256).valid, true);
+  assert.equal(validateRawRun(resumed, definition, HASHES.preregistrationSha256, {
+    preregistrationSha256: HASHES.preregistrationSha256,
+    amendment001Sha256: HASHES.amendment001Sha256,
+    amendment002Sha256: HASHES.amendment002Sha256,
+    amendment003Sha256: HASHES.amendment003Sha256,
+    amendment004Sha256: HASHES.amendment004Sha256,
+    amendment005Sha256: HASHES.amendment005Sha256,
+    amendment006Sha256: HASHES.amendment006Sha256,
+    amendment008Sha256: HASHES.amendment008Sha256
+  }).valid, true);
 });
 
 test('resume rejects lock changes, reused attempt ids, infrastructure repair, and digest changes', async (t) => {
@@ -827,6 +971,104 @@ test('outer correlation mismatch fails closed after retrieve and before persist 
       message: 'Isolation verification requires a valid measured Phase A unit'
     });
   }
+});
+
+test('retrieved native context is capped at the frozen limit before the common prompt', async () => {
+  const observed = [];
+  const raw = await runV11Benchmark(baseOptions({
+    executeAdapter: async (request) => {
+      const envelope = adapterEnvelope(request);
+      if (request.phase === 'B' && request.operation === 'retrieve') {
+        envelope.result.nativeContext = Array.from({ length: 21 }, (_unused, index) => ({
+          type: 'decision',
+          id: `decision-${index}`,
+          content: { recommendation: `item-${index}` }
+        }));
+      }
+      return envelope;
+    },
+    buildOuterRequest: ({ phase, nativeContext }) => {
+      if (phase === 'B') observed.push(nativeContext.length);
+      return {
+        system: 'Common system instruction.',
+        prompt: `Common prompt for ${phase}.`,
+        responseSchema: { ...STANDARD_DECISION_RESPONSE_SCHEMA }
+      };
+    }
+  }));
+
+  assert.equal(raw.units.find(({ phase }) => phase === 'B').status, 'MEASURED');
+  assert.deepEqual(observed, [20, 20]);
+});
+
+test('provider-reported input usage above 8192 fails before persistence without losing evidence', async () => {
+  const trace = [];
+  const raw = await runV11Benchmark(baseOptions({
+    executeAdapter: async (request) => {
+      trace.push(`${request.phase}:${request.operation}`);
+      return adapterEnvelope(request);
+    },
+    requestOuter: async ({ correlation }) => ({
+      decision: decision(correlation.phase),
+      usage: {
+        prompt_tokens: correlation.phase === 'B' ? 8193 : 3,
+        completion_tokens: 2,
+        total_tokens: correlation.phase === 'B' ? 8195 : 5
+      },
+      providerModel: 'provider-model',
+      requestCount: 1,
+      correlation: { ...correlation }
+    })
+  }));
+  const unit = raw.units.find(({ phase }) => phase === 'B');
+
+  assert.equal(unit.status, 'FAILED');
+  assert.deepEqual(unit.failure, {
+    cause: 'CONTRACT_FAILURE',
+    operation: 'outer',
+    message: 'Provider-reported input usage exceeds the frozen maximum'
+  });
+  assert.equal(unit.providerUsage.prompt_tokens, 8193);
+  assert.notEqual(unit.decisionResponse, null);
+  assert.equal(trace.includes('B:persist'), false);
+  assert.equal(trace.includes('B:verify'), false);
+});
+
+test('a null D_FALSE prediction is retained but fails before persistence', async () => {
+  const trace = [];
+  const raw = await runV11Benchmark(baseOptions({
+    executeAdapter: async (request) => {
+      trace.push(`${request.phase}:${request.operation}`);
+      return adapterEnvelope(request);
+    },
+    requestOuter: async ({ correlation }) => ({
+      decision: {
+        ...decision(correlation.phase),
+        ...(correlation.phase === 'D_FALSE_0' ? { changedFactDetected: null } : {})
+      },
+      usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+      providerModel: 'provider-model',
+      requestCount: 1,
+      correlation: { ...correlation }
+    })
+  }));
+
+  const probe = raw.units.find((unit) => unit.phase === 'D_FALSE_0');
+  assert.equal(probe.status, 'FAILED');
+  assert.deepEqual(probe.failure, {
+    cause: 'CONTRACT_FAILURE',
+    operation: 'outer',
+    message: 'D_FALSE requires a boolean changed-fact prediction'
+  });
+  assert.equal(probe.decisionResponse.changedFactDetected, null);
+  assert.deepEqual(probe.providerUsage, { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 });
+  assert.equal(probe.operations.outerDecisionModelCalls, 1);
+  assert.deepEqual(
+    trace.filter((entry) => entry.startsWith('D_FALSE_0:')),
+    ['D_FALSE_0:retrieve']
+  );
+  assert.equal(probe.adapterEvidence.persist, null);
+  assert.equal(probe.adapterEvidence.verify, null);
 });
 
 test('trusted outer HTTP statuses map to public causes without retry or response-detail leakage', async () => {
@@ -1102,6 +1344,85 @@ test('runner rejects changed Amendment 002 bytes and arm-matrix contradictions b
   }
 });
 
+test('runner binds Amendment 003 bytes and its effective Graphiti correction before side effects', async (t) => {
+  const source = await readFile(AMENDMENT_003_PATH);
+  assert.equal(sha256(source), HASHES.amendment003Sha256);
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-amendment-003-');
+  const changedPath = path.join(directory, 'amendment-003.changed.json');
+  await writeFile(changedPath, Buffer.concat([source, Buffer.from('\n')]));
+  const changedHash = sha256(await readFile(changedPath));
+  const graphitiSupported = arm({ id: 'graphiti', name: 'Graphiti' });
+
+  for (const overrides of [
+    { amendment003Path: changedPath },
+    { amendment003Path: changedPath, amendment003Sha256: changedHash },
+    { arms: [graphitiSupported] }
+  ]) {
+    let adapterCalls = 0;
+    const progress = progressRecorder();
+    await assert.rejects(
+      runV11Benchmark(baseOptions({
+        ...overrides,
+        progress,
+        executeAdapter: async (request) => {
+          adapterCalls += 1;
+          return adapterEnvelope(request);
+        }
+      })),
+      /Amendment 003|effective amendment matrix|applicability/iu
+    );
+    assert.equal(progress.events.length, 0);
+    assert.equal(adapterCalls, 0);
+  }
+});
+
+test('runner binds Amendment 005 bytes before it can call an adapter', async (t) => {
+  const source = await readFile(AMENDMENT_005_PATH);
+  assert.equal(sha256(source), HASHES.amendment005Sha256);
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-amendment-005-');
+  const changedPath = path.join(directory, 'amendment-005.changed.json');
+  await writeFile(changedPath, Buffer.concat([source, Buffer.from('\n')]));
+
+  let adapterCalls = 0;
+  const progress = progressRecorder();
+  await assert.rejects(
+    runV11Benchmark(baseOptions({
+      amendment005Path: changedPath,
+      progress,
+      executeAdapter: async (request) => {
+        adapterCalls += 1;
+        return adapterEnvelope(request);
+      }
+    })),
+    /Amendment 5 source bytes|Amendment 005/iu
+  );
+  assert.equal(progress.events.length, 0);
+  assert.equal(adapterCalls, 0);
+});
+
+test('runner binds Amendment 005 sidecar bytes before it can call an adapter', async (t) => {
+  const source = await readFile(AMENDMENT_005_SIDECAR_PATH);
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-amendment-005-sidecar-');
+  const changedPath = path.join(directory, 'amendment-005.changed.sha256');
+  await writeFile(changedPath, Buffer.concat([source, Buffer.from('# changed\n')]));
+
+  let adapterCalls = 0;
+  const progress = progressRecorder();
+  await assert.rejects(
+    runV11Benchmark(baseOptions({
+      amendment005SidecarPath: changedPath,
+      progress,
+      executeAdapter: async (request) => {
+        adapterCalls += 1;
+        return adapterEnvelope(request);
+      }
+    })),
+    /Amendment 005 sidecar/iu
+  );
+  assert.equal(progress.events.length, 0);
+  assert.equal(adapterCalls, 0);
+});
+
 test('watchdog aborts and races a non-cooperative unit once with exact correlation', async () => {
   let watchdogCalls = 0;
   let resetCalls = 0;
@@ -1139,7 +1460,11 @@ test('watchdog aborts and races a non-cooperative unit once with exact correlati
   assert.deepEqual(raw.units.find((unit) => unit.phase === 'RESET').failure, {
     cause: 'TIMEOUT',
     operation: 'runner',
-    message: 'Measured unit exceeded the 120000ms monotonic deadline'
+    // From the constant, not a literal: the property is that the failure names
+    // the deadline it hit, so a reviewer reading an artifact can tell a harness
+    // ceiling from a product failure. The number itself is sized against the
+    // pinned model and has moved once already.
+    message: `Measured unit exceeded the ${UNIT_TIMEOUT_MS}ms monotonic deadline`
   });
   await new Promise((resolve) => setTimeout(resolve, 40));
   const reset = raw.units.find((unit) => unit.phase === 'RESET');
@@ -1148,12 +1473,32 @@ test('watchdog aborts and races a non-cooperative unit once with exact correlati
   assert.equal(reset.operations.memoryWriteOperations, 0);
 });
 
-test('120000ms monotonic unit bound fires even when recent heartbeats report no stall', async () => {
+test('unit watchdog permits elapsed time below the frozen 600000ms bound', async () => {
+  let monotonicCalls = 0;
+  let resetCalls = 0;
+  const raw = await runV11Benchmark(baseOptions({
+    heartbeatIntervalMs: 1,
+    monotonicNow: () => (monotonicCalls++ === 0 ? 0 : 120_001),
+    executeAdapter: async (request) => {
+      if (request.phase === 'RESET') {
+        resetCalls += 1;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      return adapterEnvelope(request);
+    }
+  }));
+
+  assert.equal(UNIT_TIMEOUT_MS, 600_000);
+  assert.equal(resetCalls, 1);
+  assert.equal(raw.units.find((unit) => unit.phase === 'RESET').failure, null);
+});
+
+test('the frozen monotonic unit bound fires even when recent heartbeats report no stall', async () => {
   let monotonic = 0;
   let resetCalls = 0;
   const raw = await runV11Benchmark(baseOptions({
     heartbeatIntervalMs: 1,
-    monotonicNow: () => (monotonic += 120_001),
+    monotonicNow: () => (monotonic += UNIT_TIMEOUT_MS + 1),
     executeAdapter: async (request) => {
       if (request.phase === 'RESET') {
         resetCalls += 1;
@@ -1193,7 +1538,7 @@ test('nested endpoint errors retain ENDPOINT_UNAVAILABLE instead of becoming con
   assert.equal(raw.units.find((unit) => unit.phase === 'B').status, 'MEASURED');
 });
 
-test('isolation phases retrieve, model, persist, and verify in the actual probed namespace', async () => {
+test('isolation phases reset and retrieve the probed namespace before primary persistence and verification', async () => {
   const adapterRequests = [];
   const outerRequests = [];
   await runV11Benchmark(baseOptions({
@@ -1226,13 +1571,14 @@ test('isolation phases retrieve, model, persist, and verify in the actual probed
   };
   for (const [phase, namespace] of Object.entries(expected)) {
     const phaseRequests = adapterRequests.filter((request) => request.phase === phase);
-    assert.deepEqual(phaseRequests.map((request) => request.operation), ['retrieve', 'persist', 'verify']);
+    assert.deepEqual(phaseRequests.map((request) => request.operation), ['reset', 'retrieve', 'persist', 'verify']);
     assert.deepEqual(phaseRequests[0].namespace, namespace);
-    assert.deepEqual(phaseRequests[1].namespace, {
+    assert.deepEqual(phaseRequests[1].namespace, namespace);
+    assert.deepEqual(phaseRequests[2].namespace, {
       projectId: 'project-primary',
       userId: 'user-primary'
     });
-    assert.deepEqual(phaseRequests[2].namespace, {
+    assert.deepEqual(phaseRequests[3].namespace, {
       projectId: 'project-primary',
       userId: 'user-primary'
     });
@@ -1241,7 +1587,7 @@ test('isolation phases retrieve, model, persist, and verify in the actual probed
     assert.equal(phaseRequests.at(-1).payload.expectedAbsentRecord.type, 'decision');
     assert.match(phaseRequests.at(-1).payload.expectedAbsentRecord.contentSha256, /^[a-f0-9]{64}$/u);
     assert.match(phaseRequests[0].namespaceRef, /^[a-f0-9]{64}$/u);
-    assert.notEqual(phaseRequests[0].namespaceRef, phaseRequests[1].namespaceRef);
+    assert.notEqual(phaseRequests[0].namespaceRef, phaseRequests[2].namespaceRef);
     assert.deepEqual(outerRequests.find((request) => request.correlation.phase === phase).namespace, namespace);
   }
   const failedAttemptVerify = adapterRequests.find((request) => request.phase === 'E'
@@ -1253,7 +1599,7 @@ test('isolation phases retrieve, model, persist, and verify in the actual probed
   );
 });
 
-test('persisted decision ids are deterministic per unit and keep the model decisionId in content', async () => {
+test('persisted decision ids are deterministic per unit and never store the model decisionId', async () => {
   const persisted = [];
   await runV11Benchmark(baseOptions({
     arms: [noMemoryArm()],
@@ -1279,8 +1625,11 @@ test('persisted decision ids are deterministic per unit and keep the model decis
 
   assert.equal(persisted.length, V11_PHASES.length - 2);
   assert.equal(new Set(persisted.map((record) => record.id)).size, persisted.length);
-  assert.ok(persisted.every((record) => record.content.decisionId === 'shared-model-decision'));
-  assert.ok(persisted.every((record) => record.id !== record.content.decisionId));
+  // Storage ids are the harness's, minted per unit. The model's own decisionId
+  // is not stored at all (F37), so there is no second id to confuse with the
+  // first - which is what this test was guarding against.
+  assert.ok(persisted.every((record) => !Object.hasOwn(record.content, 'decisionId')));
+  assert.ok(persisted.every((record) => record.id.startsWith('decision:')));
 });
 
 test('no-memory project isolation proves only empty alternate retrieval and records no persistence claims', async () => {
@@ -1438,14 +1787,134 @@ test('one acceptance artifact flows through the integrated runner, validator, an
     }
   };
 
-  assert.equal(validateRawRun(raw, definition, HASHES.preregistrationSha256).valid, true);
+  assert.equal(validateRawRun(raw, definition, HASHES.preregistrationSha256, {
+    preregistrationSha256: HASHES.preregistrationSha256,
+    amendment001Sha256: HASHES.amendment001Sha256,
+    amendment002Sha256: HASHES.amendment002Sha256,
+    amendment003Sha256: HASHES.amendment003Sha256,
+    amendment004Sha256: HASHES.amendment004Sha256,
+    amendment005Sha256: HASHES.amendment005Sha256,
+    amendment006Sha256: HASHES.amendment006Sha256,
+    amendment008Sha256: HASHES.amendment008Sha256
+  }).valid, true);
   const aggregate = aggregateRun(raw, definition, {
     trustedSourceHashes: {
       preregistrationSha256: HASHES.preregistrationSha256,
       amendment001Sha256: HASHES.amendment001Sha256,
-      amendment002Sha256: HASHES.amendment002Sha256
+      amendment002Sha256: HASHES.amendment002Sha256,
+      amendment003Sha256: HASHES.amendment003Sha256,
+      amendment004Sha256: HASHES.amendment004Sha256,
+      amendment005Sha256: HASHES.amendment005Sha256,
+      amendment006Sha256: HASHES.amendment006Sha256,
+      amendment008Sha256: HASHES.amendment008Sha256
     }
   });
   assert.equal(aggregate.mode, 'ACCEPTANCE');
   assertNoAcceptanceClaims(aggregate);
+
+  // Coverage has to survive into the aggregate, per arm and per phase. Before
+  // this existed the file carried seven arm statuses and a single unit count, so
+  // a run with eighty-four failed units read exactly like one with none, and
+  // PARTIAL_FAILED covered both an arm that failed four and an arm that failed
+  // forty. The assertions are reconciliation rather than literals on purpose:
+  // what has to hold is that every number here is the units, counted.
+  const statuses = ['MEASURED', 'FAILED', 'NOT_MEASURED', 'EXCLUDED'];
+  const total = (tally) => statuses.reduce((sum, status) => sum + tally[status], 0);
+
+  assert.equal(aggregate.coverage.units.planned, raw.units.length);
+  assert.equal(total(aggregate.coverage.units), raw.units.length);
+
+  assert.deepEqual(
+    aggregate.coverage.byArm.map((entry) => entry.armId).sort(),
+    [...new Set(raw.units.map((unit) => unit.armId))].sort()
+  );
+  assert.equal(
+    aggregate.coverage.byArm.reduce((sum, entry) => sum + total(entry), 0),
+    raw.units.length
+  );
+  for (const entry of aggregate.coverage.byArm) {
+    assert.equal(total(entry), entry.planned);
+    assert.equal(
+      entry.planned,
+      raw.units.filter((unit) => unit.armId === entry.armId).length
+    );
+  }
+
+  assert.equal(
+    aggregate.coverage.byPhase.reduce((sum, entry) => sum + total(entry), 0),
+    raw.units.length
+  );
+  for (const entry of aggregate.coverage.byPhase) {
+    assert.equal(total(entry), entry.planned);
+  }
+
+  // A failure that reached a terminal record carries a cause, and the causes
+  // have to be countable without reopening the raw ledger.
+  const recordedCauses = raw.units.filter((unit) => unit.failure?.cause).length;
+  assert.equal(
+    Object.values(aggregate.coverage.failureCauses).reduce((sum, n) => sum + n, 0),
+    recordedCauses
+  );
+});
+
+test('the run path composition completes: the real ledgers, closed the way the CLI closes them', async (t) => {
+  // The regression this exists for shipped green. `closeResources` was the CLI's
+  // whole teardown, so the runner closed the progress ledger and then tried to
+  // append `run_finished` to it - every bound run executing every unit,
+  // validating its own raw record, and dying on its last line with no artifact.
+  // Nothing caught it, because the only ordering test used a double that
+  // accepted appends after close.
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-runner-close-');
+  const ledgerPath = path.join(directory, 'progress.ndjson');
+  const unitPath = path.join(directory, 'units.ndjson');
+  const progress = await createProgressLedger({
+    path: ledgerPath,
+    runId: 'run-v11-1',
+    attemptId: 'attempt-v11-1'
+  });
+  const unitEvidence = await createUnitEvidenceLedger({
+    path: unitPath,
+    runId: 'run-v11-1',
+    attemptId: 'attempt-v11-1',
+    sensitiveValues: []
+  });
+  const meterClosedAt = [];
+  const resources = createV11RunResources({
+    meter: {
+      close: async () => {
+        meterClosedAt.push(
+          (await readFile(ledgerPath, 'utf8')).trimEnd().split('\n').map((line) => JSON.parse(line)).at(-1).event
+        );
+      }
+    },
+    progress,
+    unitEvidence
+  });
+
+  const raw = await runV11Benchmark(baseOptions({
+    progress,
+    persistUnit: (unit) => unitEvidence.append(unit),
+    closeResources: resources.closeMeasurement
+  }));
+  await resources.close();
+
+  const records = (await readFile(ledgerPath, 'utf8'))
+    .trimEnd()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+
+  assert.equal(raw.status, 'COMPLETE');
+  assert.equal(records.at(-1).event, 'run_finished', 'a bound run must end durably');
+  // And the meter closed before that terminal event was written, which is the
+  // whole reason the runner has this hook: the provider ledger is complete at
+  // the moment the run declares itself finished.
+  assert.deepEqual(meterClosedAt, ['checkpoint'], 'the meter must close before any terminal event exists');
+  await assert.rejects(progress.append({
+    event: 'run_finished',
+    armId: null,
+    scenarioId: null,
+    repetition: null,
+    phase: null,
+    evidence: {}
+  }), /Progress ledger is closed/u);
 });

@@ -12,6 +12,7 @@ const WINDOWS_PROFILE_MODEL = `${WINDOWS_PROFILE_PREFIX}/account/model`;
 
 import { requestOuterDecision, STANDARD_DECISION_RESPONSE_SCHEMA } from '../benchmark/lib/outer-model.mjs';
 import { startProviderMeter } from '../benchmark/lib/provider-meter.mjs';
+import { runProviderReconciliation } from '../benchmark/lib/v11-provider-reconciler.mjs';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const EVENT_FIELDS = [
@@ -26,7 +27,9 @@ const EVENT_FIELDS = [
   'repetition',
   'phase',
   'requestClass',
+  'rootOperation',
   'requestedModel',
+  'responseFormat',
   'providerModel',
   'latencyMs',
   'outcome',
@@ -285,8 +288,8 @@ async function sendIncompleteRequest(url, { method = 'POST', contentLength }) {
  * stuck. For the meters configured well under a second, the floor is what
  * applies.
  */
-async function startTrackedMeter(t, config) {
-  const meter = await startProviderMeter(config);
+async function startTrackedMeter(t, config, options = {}) {
+  const meter = await startProviderMeter(config, options);
   const budgetMs = Math.max(5_000, (config.upstreamTimeoutMs ?? 0) * 2 + 3_000);
   t.after(() => boundedCleanup(
     () => meter.close(),
@@ -296,7 +299,7 @@ async function startTrackedMeter(t, config) {
   return meter;
 }
 
-async function meterFor(t, upstreamBaseUrl, overrides = {}) {
+async function meterFor(t, upstreamBaseUrl, overrides = {}, meterOptions = {}) {
   const directory = await temporaryDirectory(t);
   const ledgerPath = path.join(directory, 'provider-requests.ndjson');
   const meter = await startTrackedMeter(t, {
@@ -306,7 +309,7 @@ async function meterFor(t, upstreamBaseUrl, overrides = {}) {
     ledgerPath,
     upstreamTimeoutMs: 2_000,
     ...overrides
-  });
+  }, meterOptions);
   return { meter, ledgerPath };
 }
 
@@ -317,6 +320,8 @@ function assertExactEvent(event, expected = {}) {
   assert.equal(event.event, 'provider_request');
   assert.ok(Number.isSafeInteger(event.requestNumber) && event.requestNumber > 0);
   assert.ok(Number.isFinite(event.latencyMs) && event.latencyMs >= 0);
+  assert.equal(event.rootOperation, expected.rootOperation ?? null);
+  assert.equal(event.responseFormat, expected.responseFormat ?? null);
   for (const [key, value] of Object.entries(expected)) assert.deepEqual(event[key], value, key);
 }
 
@@ -356,6 +361,31 @@ test('configuration is loopback-only, ledgers are collision-safe, and bindings r
     /upstreamBaseUrl.*credentials/i
   );
 
+  const rawAuthorityBypasses = [
+    ['listenerUrl', 'http://@127.0.0.1:0'],
+    ['upstreamBaseUrl', `http://:@127.0.0.1:${new URL(upstream.origin).port}/v1`],
+    ['upstreamBaseUrl', String.raw`http:\\@127.0.0.1:${new URL(upstream.origin).port}/v1`],
+    ['upstreamBaseUrl', String.raw`http:/\\:@127.0.0.1:${new URL(upstream.origin).port}/v1`]
+  ];
+  for (const [index, [field, unsafeEndpoint]] of rawAuthorityBypasses.entries()) {
+    const ledgerPath = path.join(directory, `raw-authority-${index}.ndjson`);
+    let unexpectedMeter = null;
+    try {
+      await assert.rejects(
+        startProviderMeter({ ...baseConfig, [field]: unsafeEndpoint, ledgerPath })
+          .then((meter) => {
+            unexpectedMeter = meter;
+            return meter;
+          }),
+        /canonical.*URL.*credentials/i,
+        `${field} must reject ${unsafeEndpoint}`
+      );
+      await assert.rejects(readFile(ledgerPath, 'utf8'), { code: 'ENOENT' });
+    } finally {
+      await unexpectedMeter?.close();
+    }
+  }
+
   await writeFile(baseConfig.ledgerPath, 'preserve-me\n', { flag: 'wx' });
   await assert.rejects(startProviderMeter(baseConfig), /ledger already exists/i);
   assert.equal(await readFile(baseConfig.ledgerPath, 'utf8'), 'preserve-me\n');
@@ -373,8 +403,215 @@ test('configuration is loopback-only, ledgers are collision-safe, and bindings r
   );
   assert.throws(
     () => fresh.bindEndpoint({ ...BASE_CORRELATION, extra: 'not-allowed' }),
-    /Unknown provider meter correlation field/i
+    /Unknown provider meter binding field/i
   );
+});
+
+test('provider meter records the capability-bound root operation for every provider request', async (t) => {
+  const upstream = await listen(t, async (request, response) => {
+    await readBody(request);
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(providerPayload()));
+  });
+  const { meter, ledgerPath } = await meterFor(t, upstream.origin, {}, { requireRootOperation: true });
+  assert.throws(() => meter.bindEndpoint(BASE_CORRELATION), /Missing required provider meter binding field: rootOperation/);
+  const endpoint = meter.bindEndpoint({ ...BASE_CORRELATION, rootOperation: 'persist' });
+
+  const response = await fetch(`${endpoint}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'requested-outer-model', messages: [] })
+  });
+  assert.equal(response.status, 200);
+  await meter.close();
+
+  const [event] = await ledgerEvents(ledgerPath);
+  assert.equal(event.rootOperation, 'persist');
+});
+
+test('native caps bind exact root invocation plus request class across plan slots and correlations', async (t) => {
+  let upstreamCalls = 0;
+  const upstream = await listen(t, async (request, response) => {
+    upstreamCalls += 1;
+    await readBody(request);
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(providerPayload()));
+  });
+  const directory = await temporaryDirectory(t);
+  const baseConfig = {
+    listenerUrl: 'http://127.0.0.1:0',
+    upstreamBaseUrl: upstream.origin,
+    upstreamAuthorization: `Bearer ${UPSTREAM_SECRET}`,
+    ledgerPath: path.join(directory, 'provider-requests.ndjson'),
+    upstreamTimeoutMs: 2_000
+  };
+  let unexpectedlyStarted = null;
+  try {
+    await assert.rejects(
+      startProviderMeter(baseConfig, {
+        requireRootOperation: true,
+        maxAttemptsPerRootRequestClass: 1
+      }).then((meter) => {
+        unexpectedlyStarted = meter;
+        throw new Error('native cap configuration unexpectedly started without planned root identity');
+      }),
+      /maxAttemptsPerRootRequestClass requires planned dispatch identity/i
+    );
+  } finally {
+    await unexpectedlyStarted?.close();
+  }
+
+  const { meter, ledgerPath } = await meterFor(t, upstream.origin, {}, {
+    requireRootOperation: true,
+    requireDispatchPlans: true,
+    maxAttemptsPerRootRequestClass: 1
+  });
+  const route = async (rootInvocationId, planSlot, scenarioId = BASE_CORRELATION.scenarioId) => meter.bindPlannedEndpoint({
+    ...BASE_CORRELATION,
+    scenarioId,
+    rootOperation: 'persist',
+    rootInvocationId,
+    planSlot,
+    identityMode: 'static'
+  });
+  const [firstRootFirst, sameRootDifferentScenario, independentRoot] = await Promise.all([
+    route('native-cap-root-a', 'first'),
+    route('native-cap-root-a', 'different-scenario', 'S02_DIFFERENT_CAP_SCOPE'),
+    route('native-cap-root-b', 'first')
+  ]);
+  const request = (endpoint) => fetch(`${endpoint}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'requested-outer-model', messages: [] })
+  });
+
+  assert.equal((await request(firstRootFirst.endpoint)).status, 200);
+  assert.equal((await request(sameRootDifferentScenario.endpoint)).status, 403);
+  assert.equal((await request(independentRoot.endpoint)).status, 200);
+  await meter.close();
+
+  const events = await ledgerEvents(ledgerPath);
+  assert.equal(upstreamCalls, 2);
+  assert.equal(events.length, 3);
+  assert.equal(events[1].failure.code, 'NATIVE_ATTEMPT_CAP_EXHAUSTED');
+  assert.equal(events[1].rootInvocationId, 'native-cap-root-a');
+  assert.equal(events[1].scenarioId, 'S02_DIFFERENT_CAP_SCOPE');
+  assert.equal(events[2].rootInvocationId, 'native-cap-root-b');
+});
+
+test('provider-meter 500-to-200 B trace preserves missing usage as accounting failure, not fallback', async (t) => {
+  let upstreamRequests = 0;
+  const upstream = await listen(t, async (request, response) => {
+    upstreamRequests += 1;
+    await readBody(request);
+    if (upstreamRequests === 1) {
+      response.writeHead(500, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ error: 'transient loopback failure' }));
+      return;
+    }
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(providerPayload({ model: 'pinned-embedding-model' })));
+  });
+  const correlation = {
+    ...BASE_CORRELATION,
+    armId: 'mem0-oss',
+    scenarioId: 'ACC_ONE',
+    phase: 'B',
+    requestClass: 'embedding'
+  };
+  const { meter, ledgerPath } = await meterFor(t, upstream.origin, {}, {
+    requireRootOperation: true
+  });
+  const endpoint = meter.bindEndpoint({ ...correlation, rootOperation: 'persist' });
+  const request = () => fetch(`${endpoint}/embeddings`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'pinned-embedding-model', input: ['loopback'] })
+  });
+
+  assert.equal((await request()).status, 500);
+  assert.equal((await request()).status, 200);
+  await meter.close();
+
+  const events = await ledgerEvents(ledgerPath);
+  assert.equal(events.length, 2);
+  assert.equal(events[0].outcome, 'FAILED');
+  assert.equal(events[0].providerModel, null);
+  assert.equal(events[0].httpStatus, 500);
+  assert.equal(events[1].outcome, 'SUCCEEDED');
+  assert.equal(events[1].providerModel, 'pinned-embedding-model');
+
+  const report = runProviderReconciliation({
+    ledgerText: await readFile(ledgerPath, 'utf8'),
+    ledgerPath,
+    raw: {
+      units: [{
+        unitId: 'unit-meter-b',
+        status: 'SUCCEEDED',
+        runId: correlation.runId,
+        attemptId: correlation.attemptId,
+        armId: correlation.armId,
+        scenarioId: correlation.scenarioId,
+        repetition: correlation.repetition,
+        phase: correlation.phase,
+        operations: {
+          memoryReadOperations: 0,
+          memoryWriteOperations: 0,
+          mcpToolCalls: 0,
+          outerDecisionModelCalls: 0,
+          internalMemoryModelCalls: 0,
+          embeddingCalls: 2,
+          persistenceVerificationOperations: 0
+        }
+      }]
+    },
+    attemptId: correlation.attemptId,
+    pinnedModels: {
+      internal_memory_llm: { modelId: 'pinned-decision-model' },
+      embedding: { modelId: 'pinned-embedding-model' }
+    },
+    nativeAttemptPolicy: {
+      schema: 'shadowgraph.v11.native-attempt-policy',
+      version: 1,
+      maxAttemptsPerRootRequestClass: 24,
+      arms: [{
+        armId: correlation.armId,
+        recovery: { outer_decision_llm: [], internal_memory_llm: [], embedding: ['B'] }
+      }]
+    }
+  });
+
+  assert.equal(report.status, 'DISCREPANT');
+  assert.deepEqual(report.nativeAttemptTrace.trace.map((entry) => entry.category), ['INITIAL', 'B']);
+  assert.deepEqual(report.nativeAttemptTrace.findings, []);
+  assert.deepEqual(report.findings.map((finding) => finding.code), ['INCOMPLETE_USAGE']);
+});
+
+test('provider meter records only the structured-output mode, never its schema body', async (t) => {
+  const upstream = await listen(t, async (request, response) => {
+    await readBody(request);
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(providerPayload()));
+  });
+  const { meter, ledgerPath } = await meterFor(t, upstream.origin);
+  const endpoint = meter.bindEndpoint(BASE_CORRELATION);
+  const schemaSentinel = 'do-not-retain-this-schema';
+
+  const response = await fetch(`${endpoint}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'requested-outer-model',
+      messages: [],
+      response_format: { type: 'json_object', json_schema: { name: schemaSentinel } }
+    })
+  });
+  assert.equal(response.status, 200);
+  await meter.close();
+
+  const [event] = await ledgerEvents(ledgerPath);
+  assert.equal(event.responseFormat, 'json_object');
+  assert.ok(!(await readFile(ledgerPath, 'utf8')).includes(schemaSentinel));
 });
 
 test('Task 3 outer requests traverse one opaque bound endpoint and preserve exact usage', async (t) => {
@@ -421,6 +658,7 @@ test('Task 3 outer requests traverse one opaque bound endpoint and preserve exac
     requestNumber: 1,
     ...BASE_CORRELATION,
     requestedModel: 'requested-outer-model',
+    responseFormat: 'json_object',
     providerModel: 'reported-provider-model',
     outcome: 'SUCCEEDED',
     failure: null,
@@ -587,6 +825,72 @@ test('request-class routes and methods cannot be mislabeled and every bound reje
       usage: null
     });
   }
+});
+
+test('a client that spells the resource with its own /v1 is metered, not refused', async (t) => {
+  // F27. The bound capability is a whole URL and the upstream's version segment
+  // is already inside it, so clients disagree about whether to append
+  // `/embeddings` or `/v1/embeddings`. Mem0's OpenAI client appends the first;
+  // Cognee's `openai_compatible` embedding engine appends the second, always -
+  // handing it a URL already ending in `/embeddings` produced
+  // `/embeddings/v1/embeddings`, so no endpoint shape fixes it.
+  //
+  // Every one of Cognee's embedding requests was refused in zero milliseconds,
+  // its persist failed, and all twenty of its later units failed behind that.
+  // The arm was reported as failing over a path segment.
+  let upstreamCount = 0;
+  const upstreamPaths = [];
+  const upstream = await listen(t, async (request, response) => {
+    upstreamCount += 1;
+    upstreamPaths.push(new URL(request.url, 'http://127.0.0.1').pathname);
+    await readBody(request);
+    response.end('{}');
+  });
+  const { meter, ledgerPath } = await meterFor(t, upstream.origin);
+  const embeddingEndpoint = meter.bindEndpoint({ ...BASE_CORRELATION, requestClass: 'embedding' });
+  const outerEndpoint = meter.bindEndpoint(BASE_CORRELATION);
+
+  const post = (url, model) => fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model })
+  });
+
+  // Both spellings of the bound resource reach upstream.
+  const bare = await post(`${embeddingEndpoint}/embeddings`, 'embedding-model');
+  const versioned = await post(`${embeddingEndpoint}/v1/embeddings`, 'embedding-model');
+  const chat = await post(`${outerEndpoint}/v1/chat/completions`, 'outer-model');
+  assert.equal(bare.status, 200);
+  assert.equal(versioned.status, 200, 'a leading /v1 names the same resource');
+  assert.equal(chat.status, 200);
+  assert.equal(upstreamCount, 3);
+
+  // And what the check is actually for is untouched: a capability bound for one
+  // class still cannot be used for another, in either spelling.
+  const crossed = await post(`${embeddingEndpoint}/v1/chat/completions`, 'embedding-model');
+  const crossedBack = await post(`${outerEndpoint}/v1/embeddings`, 'outer-model');
+  const doubled = await post(`${embeddingEndpoint}/v1/v1/embeddings`, 'embedding-model');
+  const nested = await post(`${embeddingEndpoint}/embeddings/v1/embeddings`, 'embedding-model');
+  // Only at the front, and only once. Stripping a `/v1` from the middle would
+  // accept a path the upstream never serves - the comment above says "leading",
+  // and nothing pinned it until this line.
+  const middle = await post(`${outerEndpoint}/chat/v1/completions`, 'outer-model');
+  assert.equal(crossed.status, 400);
+  assert.equal(crossedBack.status, 400);
+  assert.equal(doubled.status, 400, 'only one /v1 is normalised, and only at the front');
+  assert.equal(nested.status, 400);
+  assert.equal(middle.status, 400, 'a /v1 in the middle is not a spelling of the resource');
+  assert.equal(upstreamCount, 3, 'no crossed or misspelled request reached upstream');
+
+  // The proxy still forwards the upstream's own path, not the client's spelling.
+  assert.deepEqual(upstreamPaths, ['/embeddings', '/embeddings', '/chat/completions'],
+    'the client spelling is normalised before it is forwarded, or an upstream whose base already ends in /v1 gets /v1/v1/embeddings');
+
+  const events = await ledgerEvents(ledgerPath);
+  assert.equal(events.length, 8, 'three metered, five refused');
+  assert.deepEqual(events.map((event) => event.outcome), [
+    'SUCCEEDED', 'SUCCEEDED', 'SUCCEEDED', 'FAILED', 'FAILED', 'FAILED', 'FAILED', 'FAILED'
+  ]);
 });
 
 test('early bound rejections close incomplete bodies and cannot block meter shutdown', async (t) => {
@@ -1024,6 +1328,131 @@ test('upstream timeout is an absolute deadline even when response bytes keep arr
     httpStatus: null,
     usage: null
   });
+});
+
+test('planned cancellation waits for the durable downstream-abort completion before upstream release', async (t) => {
+  let releaseUpstream;
+  let markStarted;
+  const started = new Promise((resolve) => { markStarted = resolve; });
+  const upstream = await listen(t, async (request, response) => {
+    await readBody(request);
+    markStarted();
+    await new Promise((resolve) => { releaseUpstream = resolve; });
+    if (!response.writableEnded) {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify(providerPayload()));
+    }
+  });
+  const directory = await temporaryDirectory(t);
+  const ledgerPath = path.join(directory, 'planned-cancellation.ndjson');
+  const meter = await startProviderMeter({
+    listenerUrl: 'http://127.0.0.1:0',
+    upstreamBaseUrl: upstream.origin,
+    upstreamAuthorization: `Bearer ${UPSTREAM_SECRET}`,
+    ledgerPath,
+    upstreamTimeoutMs: 2_000
+  }, {
+    requireRootOperation: true,
+    requireDispatchPlans: true,
+    maxAttemptsPerRootRequestClass: 2
+  });
+  t.after(() => {
+    releaseUpstream?.();
+    return meter.close();
+  });
+  const route = await meter.bindPlannedEndpoint({
+    runId: 'run-planned-cancellation',
+    attemptId: 'attempt-planned-cancellation',
+    armId: 'cognee',
+    scenarioId: 'native-cancellation',
+    repetition: 0,
+    phase: 'probe',
+    requestClass: 'embedding',
+    rootOperation: 'persist',
+    rootInvocationId: 'planned-cancellation-root',
+    planSlot: 'planned-cancellation-root',
+    identityMode: 'static'
+  });
+  assert.ok(route.completion instanceof Promise, 'static planned route exposes a terminal completion promise');
+  const payload = JSON.stringify({ model: 'nomic-embed-text:v1.5', input: ['cancellation'] });
+  let clientRequest;
+  const clientSettled = new Promise((resolve) => {
+    clientRequest = httpRequest(`${route.endpoint}/embeddings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) }
+    }, (response) => {
+      response.resume();
+      response.once('end', resolve);
+    });
+    clientRequest.once('error', resolve);
+    clientRequest.end(payload);
+  });
+  await started;
+  clientRequest.destroy();
+  await clientSettled;
+  const completion = await within(route.completion, 1_000, 'planned cancellation did not reach a terminal meter completion');
+  assert.equal(completion.outcome, 'FAILED');
+  assert.equal(completion.failure?.code, 'DOWNSTREAM_ABORTED');
+  releaseUpstream();
+  const [event] = await ledgerEvents(ledgerPath);
+  assert.equal(event.outcome, 'FAILED');
+  assert.equal(event.failure?.code, 'DOWNSTREAM_ABORTED');
+});
+
+test('planned completion remains succeeded when client destruction occurs after response completion', async (t) => {
+  const upstream = await listen(t, async (request, response) => {
+    await readBody(request);
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify(providerPayload()));
+  });
+  const directory = await temporaryDirectory(t);
+  const ledgerPath = path.join(directory, 'planned-completion-control.ndjson');
+  const meter = await startProviderMeter({
+    listenerUrl: 'http://127.0.0.1:0',
+    upstreamBaseUrl: upstream.origin,
+    upstreamAuthorization: `Bearer ${UPSTREAM_SECRET}`,
+    ledgerPath,
+    upstreamTimeoutMs: 2_000
+  }, {
+    requireRootOperation: true,
+    requireDispatchPlans: true,
+    maxAttemptsPerRootRequestClass: 2
+  });
+  t.after(() => meter.close());
+  const route = await meter.bindPlannedEndpoint({
+    runId: 'run-planned-completion',
+    attemptId: 'attempt-planned-completion',
+    armId: 'cognee',
+    scenarioId: 'native-completion-control',
+    repetition: 0,
+    phase: 'probe',
+    requestClass: 'embedding',
+    rootOperation: 'persist',
+    rootInvocationId: 'planned-completion-root',
+    planSlot: 'planned-completion-root',
+    identityMode: 'static'
+  });
+  assert.ok(route.completion instanceof Promise, 'static planned route exposes a terminal completion promise');
+  const payload = JSON.stringify({ model: 'nomic-embed-text:v1.5', input: ['completion'] });
+  let clientRequest;
+  await new Promise((resolve, reject) => {
+    clientRequest = httpRequest(`${route.endpoint}/embeddings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) }
+    }, (response) => {
+      response.resume();
+      response.once('end', resolve);
+    });
+    clientRequest.once('error', reject);
+    clientRequest.end(payload);
+  });
+  clientRequest.destroy();
+  const completion = await within(route.completion, 1_000, 'planned completion was not durable');
+  assert.equal(completion.outcome, 'SUCCEEDED');
+  assert.equal(completion.failure, null);
+  const [event] = await ledgerEvents(ledgerPath);
+  assert.equal(event.outcome, 'SUCCEEDED');
+  assert.equal(event.failure, null);
 });
 
 test('downstream aborts are recorded and close drains in-flight handlers before closing the ledger', async (t) => {

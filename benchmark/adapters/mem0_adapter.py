@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import atexit
 import copy
+import os
 
 from envelope import ContractError, build_envelope, empty_operations, not_available_storage, record_content_sha256, validate_request
 from python_runtime import (
@@ -14,6 +16,8 @@ from python_runtime import (
     failed_response,
     installed_version,
     logical_record,
+    persistent_state_root,
+    require_models,
     require_routes,
     require_versions,
     result_items,
@@ -23,6 +27,9 @@ from python_runtime import (
 
 ADAPTER_ID = "mem0-oss"
 PINNED_PACKAGES = {"mem0ai": "2.0.19"}
+COLLECTION_NAME = "shadowgraph_benchmark"
+HTTP_TIMEOUT_SECONDS = 120.0
+UNUSED_API_KEY = "not-a-secret"
 STORAGE = not_available_storage(
     "Mem0 exact project/user scope",
     "No exact attributable native storage byte scope is available",
@@ -33,26 +40,173 @@ def _filters(namespace: dict) -> dict:
     return {"agent_id": namespace["projectId"], "user_id": namespace["userId"]}
 
 
-def _runtime_config(routes: dict) -> dict:
+def _runtime_config(routes: dict, models: dict, state_root: str) -> dict:
+    embedding = models["embedding"]
     return {
         "package": {"name": "mem0ai", "version": "2.0.19"},
         "llm": {
             "provider": "openai",
-            "config": {"openai_base_url": routes["internal_memory_llm"]},
+            "config": {
+                "openai_base_url": routes["internal_memory_llm"],
+                # Left unset, mem0 2.0.19 asks for "gpt-5-mini", which the pinned
+                # Ollama does not serve.
+                "model": models["internal_memory_llm"]["modelId"],
+                # Mem0 builds both SDK clients during construction, and the
+                # OpenAI client refuses to exist without a key. The endpoint is
+                # the benchmark's own metered proxy and authenticates nothing,
+                # so this fills the slot and is never a credential - the host
+                # strips every real one from the environment before an adapter
+                # is imported, which is why the slot has to be filled here.
+                "api_key": UNUSED_API_KEY,
+            },
         },
         "embedder": {
             "provider": "openai",
-            "config": {"openai_base_url": routes["embedding"]},
+            "config": {
+                "openai_base_url": routes["embedding"],
+                # And here it asks for "text-embedding-3-small" and, more
+                # quietly, sizes its vector collection to that model's 1536
+                # dimensions. The pinned embedder returns 768: unset, the
+                # collection is built the wrong width for the vectors that will
+                # be written into it.
+                "model": embedding["modelId"],
+                "embedding_dims": embedding["embeddingDimension"],
+                "api_key": UNUSED_API_KEY,
+            },
         },
+        # Mem0's own default store, in the mode that needs no service: a local
+        # path, which qdrant-client commits to SQLite on every write. It was the
+        # subject of D2, and the answer was that the store was never the
+        # problem - the runtime was not closed, and `python_host` closes it.
+        "vector_store": {
+            "provider": "qdrant",
+            "config": {
+                "collection_name": COLLECTION_NAME,
+                "path": os.path.join(state_root, "qdrant"),
+                "embedding_model_dims": embedding["embeddingDimension"],
+                "on_disk": True,
+            },
+        },
+        "history_db_path": os.path.join(state_root, "history.db"),
         "automatic_retries": 0,
         "retry_proof": "task8_runtime_meter_required",
     }
 
 
-def _default_client_factory(_config, _provider_call):
-    raise RuntimeUnavailable(
-        "Mem0 real runtime requires the Task 8 immutable service and model lock"
+def _memory_config(config: dict) -> dict:
+    """The subset of the runtime config Mem0 itself accepts.
+
+    The runtime config is the adapter's declaration of what it is running, and
+    it says more than Mem0's own model can hold - the pinned package, the retry
+    proof. Deriving the library config from it rather than keeping a second one
+    means what a test asserts about the declaration is what the library is
+    actually handed.
+    """
+    return {
+        "llm": copy.deepcopy(config["llm"]),
+        "embedder": copy.deepcopy(config["embedder"]),
+        "vector_store": copy.deepcopy(config["vector_store"]),
+        "history_db_path": config["history_db_path"],
+    }
+
+
+def _metered_http_client(httpx_module, provider_call, request_class: str):
+    """An HTTP client that reports every request it puts on the wire.
+
+    The count has to be of requests sent, not of calls made into the SDK. A
+    retry is a second request for one call, and the ledger exists precisely so
+    that it can disagree with the meter's when one happens - a count taken at
+    the call site would agree by construction and prove nothing.
+    """
+
+    class _MeteredTransport(httpx_module.HTTPTransport):
+        def handle_request(self, request):
+            provider_call(request_class)
+            return super().handle_request(request)
+
+    return httpx_module.Client(
+        transport=_MeteredTransport(retries=0),
+        timeout=httpx_module.Timeout(HTTP_TIMEOUT_SECONDS),
     )
+
+
+def _bind_metered_client(openai_client, httpx_module, holder, endpoint, provider_call, request_class):
+    """Replace a constructed Mem0 SDK client with a metered, retry-free one.
+
+    Mem0 2.0.19 builds `OpenAI(api_key, base_url)` directly in both
+    `OpenAILLM.__init__` and `OpenAIEmbedding.__init__`, with no `http_client`
+    argument and no retry setting reachable from configuration. So the SDK's
+    default of two retries stands, and nothing observes a request - which makes
+    the adapter's declared `automatic_retries: 0` a statement about nothing and
+    leaves a transparent retry invisible, the one thing the frozen retry rule
+    forbids.
+
+    Rebinding the constructed client is what the library leaves available. It
+    changes no memory behaviour: the same class, the same base URL, the same
+    model. It sets the retry count the adapter already declares, and it puts a
+    counter on the wire.
+    """
+    if not hasattr(holder, "client"):
+        raise RuntimeUnavailable("Pinned Mem0 runtime does not expose a rebindable client")
+    client = openai_client(
+        # The endpoint is the benchmark's own metered proxy and authenticates
+        # nothing. The SDK refuses to construct without a key, so this fills the
+        # slot and is never a credential.
+        api_key=UNUSED_API_KEY,
+        base_url=endpoint,
+        max_retries=0,
+        http_client=_metered_http_client(httpx_module, provider_call, request_class),
+    )
+    holder.client = client
+    if holder.client is not client or client.max_retries != 0:
+        raise RuntimeUnavailable("Pinned Mem0 client could not be bound retry-free")
+    return client
+
+
+def _default_client_factory(config, provider_call):
+    """The real pinned Mem0, metered and retry-free, on local disk."""
+    try:
+        import httpx
+        from mem0 import Memory
+        from openai import OpenAI
+    except ImportError as error:
+        raise RuntimeUnavailable(
+            "Mem0 2.0.19 and its OpenAI transport are not importable from the pinned runtime"
+        ) from error
+
+    try:
+        memory = Memory.from_config(_memory_config(config))
+    except Exception as error:
+        raise RuntimeUnavailable(
+            "Mem0 could not be constructed from the pinned local store and metered routes"
+        ) from error
+
+    _bind_metered_client(
+        OpenAI, httpx, memory.llm,
+        config["llm"]["config"]["openai_base_url"], provider_call, "internal_memory_llm",
+    )
+    _bind_metered_client(
+        OpenAI, httpx, memory.embedding_model,
+        config["embedder"]["config"]["openai_base_url"], provider_call, "embedding",
+    )
+
+    # qdrant-client commits each point as it is written, but the collection
+    # metadata and the process-wide file lock are released on close. Every
+    # invocation is a fresh process that exits after one unit, so releasing at
+    # exit is releasing at the right time - and leaving the lock held would make
+    # the next unit's process fail to open the store it is supposed to read.
+    store = getattr(memory, "vector_store", None)
+    inner = getattr(store, "client", None)
+    if inner is not None and hasattr(inner, "close"):
+        atexit.register(_close_quietly, inner)
+    return memory
+
+
+def _close_quietly(closeable) -> None:
+    try:
+        closeable.close()
+    except Exception:  # noqa: BLE001 - a close failure at exit must not rewrite the outcome
+        pass
 
 
 def _native_records(value) -> list[dict]:
@@ -62,6 +216,7 @@ def _native_records(value) -> list[dict]:
 async def execute(
     request: dict,
     config: dict,
+    models: dict,
     *,
     client_factory=_default_client_factory,
     version_getter=installed_version,
@@ -80,8 +235,12 @@ async def execute(
         if not isinstance(namespace["userId"], str) or not namespace["userId"].strip():
             raise ContractError("Mem0 requires a native user scope")
         require_routes(config, required=True)
+        require_models(models, required=True)
         require_versions(PINNED_PACKAGES, version_getter)
-        client = await await_native(client_factory(_runtime_config(config), provider_calls))
+        state_root = persistent_state_root("Mem0")
+        client = await await_native(
+            client_factory(_runtime_config(config, models, state_root), provider_calls)
+        )
         operation = request["operation"]
         if operation == "reset":
             operations["memoryWriteOperations"] += 1

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { readFileSync } from 'node:fs';
 import { chmod, mkdir, readFile, readdir, stat, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
@@ -10,11 +11,19 @@ import {
   PythonAdapterExecutorError,
   createPythonAdapterExecutor
 } from '../benchmark/lib/python-adapter-executor.mjs';
+import { providerModelsFor } from '../benchmark/lib/v11-provider-models.mjs';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+
+// The real lock, not a fixture. What crosses this protocol has to be the
+// model the benchmark actually pins, and a test that invented its own ids
+// would keep passing if the wiring quietly stopped reading the lock.
+const MODEL_WEIGHTS = JSON.parse(readFileSync(
+  new URL('../benchmark/model-weights.lock.json', import.meta.url),
+  'utf8'
+));
 
 function decisionContent() {
   return {
-    decisionId: 'decision-python-1',
     choiceId: 'choice-python-1',
     recalledAlternativeIds: [],
     recalledRejectionReasonIds: [],
@@ -22,8 +31,6 @@ function decisionContent() {
     evidenceIdsCited: [],
     riskIdsRecognized: [],
     reviewTriggerIds: [],
-    changedFactDetected: false,
-    changedFactId: null,
     recommendation: 'Use the bounded option.',
     failedAttemptIdsAvoided: [],
     failedAttemptReasonIdsCited: [],
@@ -63,8 +70,8 @@ import sys
 
 raw = sys.stdin.buffer.read()
 wrapper = json.loads(raw.decode("utf-8"))
-assert set(wrapper) == {"schemaVersion", "adapterId", "request", "providerRoutes"}
-assert wrapper["schemaVersion"] == 1
+assert set(wrapper) == {"schemaVersion", "adapterId", "request", "providerRoutes", "providerModels"}
+assert wrapper["schemaVersion"] == 2
 assert wrapper["adapterId"] == ${JSON.stringify(adapterId)}
 ${assertions}
 request = wrapper["request"]
@@ -120,15 +127,22 @@ function endpointFactory(calls) {
   };
 }
 
+function pinnedModelsFor(armId) {
+  return providerModelsFor(MODEL_WEIGHTS, PYTHON_ADAPTER_SPECS[armId].requestClasses);
+}
+
 function executorOptions(hostPath, overrides = {}) {
+  const armId = overrides.armId ?? 'mem0-oss';
   return {
     adapterId: overrides.adapterId ?? 'mem0-oss',
-    armId: overrides.armId ?? 'mem0-oss',
+    armId,
     pythonExecutable: overrides.pythonExecutable ?? 'python3',
     hostPath,
     stateRoot: overrides.stateRoot ?? path.join(path.dirname(hostPath), 'persistent-state'),
     providerEndpointFor: overrides.providerEndpointFor,
+    providerModels: 'providerModels' in overrides ? overrides.providerModels : pinnedModelsFor(armId),
     spawnProcess: overrides.spawnProcess,
+    container: overrides.container,
     timeoutMs: overrides.timeoutMs ?? 2_000,
     maxRequestBytes: overrides.maxRequestBytes,
     maxOutputBytes: overrides.maxOutputBytes
@@ -148,22 +162,26 @@ test('public adapter specs bind four exact ids, arms, versions, and provider req
     'mem0-oss': {
       armId: 'mem0-oss',
       packages: { mem0ai: '2.0.19' },
-      requestClasses: ['internal_memory_llm', 'embedding']
+      requestClasses: ['internal_memory_llm', 'embedding'],
+      dispatchIdentityMode: 'static'
     },
     'basic-memory': {
       armId: 'basic-memory',
       packages: { 'basic-memory': '0.23.2' },
-      requestClasses: []
+      requestClasses: [],
+      dispatchIdentityMode: 'static'
     },
     graphiti: {
       armId: 'graphiti',
       packages: { 'graphiti-core': '0.29.3', httpx: '0.28.1' },
-      requestClasses: ['internal_memory_llm', 'embedding']
+      requestClasses: ['internal_memory_llm', 'embedding'],
+      dispatchIdentityMode: 'dynamic'
     },
     cognee: {
       armId: 'cognee',
       packages: { cognee: '1.5.3' },
-      requestClasses: ['internal_memory_llm', 'embedding']
+      requestClasses: ['internal_memory_llm', 'embedding'],
+      dispatchIdentityMode: 'dynamic'
     }
   });
 });
@@ -252,9 +270,46 @@ assert os.path.realpath(os.environ["TEMP"]).startswith(os.path.dirname(os.path.r
   for (const call of calls) {
     assert.equal(call.correlation.armId, 'mem0-oss');
     assert.equal(call.correlation.requestClass, call.requestClass);
+    assert.equal(call.correlation.rootOperation, 'retrieve');
     assert.equal(Object.hasOwn(call.correlation, 'operation'), false);
   }
   assert.doesNotMatch(JSON.stringify(first), /provider-meter|43100/u);
+});
+
+processGroupTest('Cognee planned routes share one root invocation and use dynamic dispatch mode', async (t) => {
+  const calls = [];
+  const { hostPath } = await makeHost(t, successHostSource({
+    adapterId: 'cognee',
+    assertions: String.raw`assert wrapper["providerRoutes"]["internal_memory_llm"].startswith("http://127.")
+assert wrapper["providerRoutes"]["embedding"].startswith("http://127.")`
+  }));
+  const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
+    adapterId: 'cognee',
+    armId: 'cognee',
+    providerEndpointFor: async (requestClass, correlation, plan) => {
+      calls.push({ requestClass, correlation: structuredClone(correlation), plan: structuredClone(plan) });
+      return {
+        endpoint: `http://127.0.0.1:43100/provider-meter/v1/${String(calls.length).padStart(48, 'a')}`
+      };
+    }
+  }));
+  await executor.execute(requestFor('persist', { armId: 'cognee' }));
+
+  assert.deepEqual(calls.map(({ requestClass }) => requestClass), [
+    'internal_memory_llm',
+    'embedding'
+  ]);
+  assert.equal(new Set(calls.map(({ plan }) => plan.rootInvocationId)).size, 1);
+  assert.match(calls[0].plan.rootInvocationId, /^[0-9a-f]{8}-[0-9a-f-]{27}$/u);
+  assert.deepEqual(calls.map(({ plan }) => plan.identityMode), ['dynamic', 'dynamic']);
+  assert.deepEqual(calls.map(({ plan }) => plan.planSlot), [
+    'adapter-internal_memory_llm',
+    'adapter-embedding'
+  ]);
+  for (const call of calls) {
+    assert.equal(call.correlation.rootOperation, 'persist');
+    assert.equal(call.plan.rootOperation, 'persist');
+  }
 });
 
 processGroupTest('basic-memory launches with both provider routes null and never invokes route callback', async (t) => {
@@ -638,4 +693,428 @@ processGroupTest('request and output limits fail closed and every created source
     return true;
   });
   assert.equal((await stat(hostPath)).mode & 0o111, 0);
+});
+
+// --- pinned-container execution ------------------------------------------
+//
+// The competitor lock pins an interpreter image so that a recorded number
+// describes software somebody can reconstruct. Until now the executor spawned
+// whatever `python3` the host carried, and set PYTHONPATH empty against a bare
+// image, so no Python arm could have imported its library at all. These tests
+// pin the invocation that fixes both.
+
+const PINNED_IMAGE = 'python@sha256:47ae396f09c1303b8653019811a8498470603d7ffefc29cb07c88f1f8cb3d19f';
+
+function successResponse(request) {
+  return {
+    schemaVersion: 1,
+    operation: request.operation,
+    runId: request.runId,
+    attemptId: request.attemptId,
+    phase: request.phase,
+    armId: request.armId,
+    scenarioId: request.scenarioId,
+    repetition: request.repetition,
+    status: 'SUCCEEDED',
+    result: { nativeContext: [], persistenceEvidence: null, isolationEvidence: null },
+    failure: null,
+    operations: {
+      memoryReadOperations: 0,
+      memoryWriteOperations: 0,
+      mcpToolCalls: 0,
+      outerDecisionModelCalls: 0,
+      internalMemoryModelCalls: 0,
+      embeddingCalls: 0,
+      persistenceVerificationOperations: 0
+    },
+    storage: {
+      status: 'NOT_AVAILABLE',
+      bytes: null,
+      scope: 'Fake Python native scope',
+      method: null,
+      reason: 'No exact attributable byte scope',
+      blockedClaims: ['storage bytes']
+    }
+  };
+}
+
+/** A spawn seam that records every invocation and answers the first one. */
+function recordingSpawn(request, { answer = true } = {}) {
+  const calls = [];
+  const spawnProcess = (command, args, options = {}) => {
+    calls.push({ command, args: [...args], options });
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = new EventEmitter();
+    child.stdin.end = () => {
+      if (!answer || calls.length > 1) return;
+      setImmediate(() => {
+        child.stdout.emit('data', Buffer.from(`${JSON.stringify(successResponse(request))}\n`, 'utf8'));
+        child.emit('close', 0, null);
+      });
+    };
+    child.kill = () => true;
+    child.unref = () => {};
+    return child;
+  };
+  return { calls, spawnProcess };
+}
+
+function flagValues(args, flag) {
+  const values = [];
+  for (let index = 0; index < args.length - 1; index += 1) {
+    if (args[index] === flag) values.push(args[index + 1]);
+  }
+  return values;
+}
+
+function envMap(args) {
+  return Object.fromEntries(flagValues(args, '--env').map((entry) => {
+    const separator = entry.indexOf('=');
+    return [entry.slice(0, separator), entry.slice(separator + 1)];
+  }));
+}
+
+processGroupTest('a container-bound executor runs the pinned image, not the host interpreter', async (t) => {
+  const { hostPath } = await makeHost(t, successHostSource());
+  const request = requestFor();
+  const { calls, spawnProcess } = recordingSpawn(request);
+  const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
+    providerEndpointFor: endpointFactory([]),
+    spawnProcess,
+    container: { image: PINNED_IMAGE, runtimeRoot: '/srv/shadowgraph/runtime' }
+  }));
+
+  const response = await executor.execute(request);
+  assert.equal(response.status, 'SUCCEEDED');
+
+  const [launch] = calls;
+  assert.equal(launch.command, 'docker');
+  assert.equal(launch.args[0], 'run');
+  assert.ok(launch.args.includes(PINNED_IMAGE));
+  assert.ok(launch.args.includes('--read-only'));
+  assert.deepEqual(flagValues(launch.args, '--network'), ['host']);
+});
+
+processGroupTest('the wheel runtime is mounted read-only and named by PYTHONPATH', async (t) => {
+  // The two halves have to agree. A mount nobody points PYTHONPATH at, or a
+  // PYTHONPATH naming a path nobody mounted, both fail at import - and only one
+  // of them looks wrong when you read it.
+  const { hostPath } = await makeHost(t, successHostSource());
+  const request = requestFor();
+  const { calls, spawnProcess } = recordingSpawn(request);
+  const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
+    providerEndpointFor: endpointFactory([]),
+    spawnProcess,
+    container: { image: PINNED_IMAGE, runtimeRoot: '/srv/shadowgraph/runtime' }
+  }));
+  await executor.execute(request);
+
+  const { args } = calls[0];
+  const mounts = flagValues(args, '--mount');
+  const runtimeMount = mounts.find((mount) => mount.includes('/srv/shadowgraph/runtime'));
+  assert.ok(runtimeMount, 'the runtime must be mounted');
+  assert.ok(runtimeMount.endsWith(',readonly'), 'an arm must not rewrite the packages it is measured on');
+
+  const target = runtimeMount.split('target=')[1].split(',')[0];
+  assert.equal(envMap(args).PYTHONPATH, target);
+});
+
+processGroupTest('the adapter environment travels as arguments and names container paths', async (t) => {
+  const { hostPath } = await makeHost(t, successHostSource());
+  const request = requestFor();
+  const { calls, spawnProcess } = recordingSpawn(request);
+  const stateRoot = path.join(path.dirname(hostPath), 'persistent-state');
+  const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
+    providerEndpointFor: endpointFactory([]),
+    spawnProcess,
+    stateRoot,
+    container: { image: PINNED_IMAGE, runtimeRoot: '/srv/shadowgraph/runtime' }
+  }));
+  await executor.execute(request);
+
+  const { args, options } = calls[0];
+  const environment = envMap(args);
+  const stateLeaf = environment.SHADOWGRAPH_PYTHON_ADAPTER_STATE_ROOT;
+  assert.ok(stateLeaf.startsWith('/run/shadowgraph/state/'), stateLeaf);
+  assert.ok(!stateLeaf.includes(stateRoot), 'the adapter must not be handed a host path');
+  assert.equal(environment.HOME, `${stateLeaf}/home`);
+  assert.equal(environment.BASIC_MEMORY_CONFIG_DIR, `${stateLeaf}/config/basic-memory`);
+  assert.equal(environment.TMPDIR, '/tmp');
+  assert.equal(environment.PYTHONHASHSEED, '0');
+
+  // The docker client's own environment is not the adapter's. Passing the
+  // adapter environment to the client would leak the host's PATH into a run
+  // whose whole point is not to depend on the host.
+  assert.equal(options.env.SHADOWGRAPH_PYTHON_ADAPTER_STATE_ROOT, undefined);
+  assert.equal(options.env.PYTHONPATH, undefined);
+});
+
+processGroupTest('each invocation gets its own container name, and a timeout removes it', async (t) => {
+  const { hostPath } = await makeHost(t, successHostSource());
+  const request = requestFor();
+  const { calls, spawnProcess } = recordingSpawn(request, { answer: false });
+  const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
+    providerEndpointFor: endpointFactory([]),
+    spawnProcess,
+    timeoutMs: 120,
+    container: { image: PINNED_IMAGE, runtimeRoot: '/srv/shadowgraph/runtime' }
+  }));
+
+  await assert.rejects(() => executor.execute(request), (error) => {
+    assert.equal(error.adapterCause, 'TIMEOUT');
+    return true;
+  });
+
+  const launch = calls[0];
+  const containerName = flagValues(launch.args, '--name')[0];
+  assert.match(containerName, /^shadowgraph-v11-[0-9a-f]{32}$/u);
+
+  // Signalling the foreground client is not enough: a SIGKILLed client leaves
+  // the container running.
+  const removal = calls.find((call) => call.args[0] === 'rm');
+  assert.ok(removal, 'a timed-out invocation must remove its container by name');
+  assert.deepEqual(removal.args, ['rm', '--force', containerName]);
+});
+
+processGroupTest('a container image that is not digest-pinned is refused', async (t) => {
+  const { hostPath } = await makeHost(t, successHostSource());
+  const request = requestFor();
+  const { spawnProcess } = recordingSpawn(request);
+  const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
+    providerEndpointFor: endpointFactory([]),
+    spawnProcess,
+    container: { image: 'python:3.12.11-slim' }
+  }));
+  await assert.rejects(() => executor.execute(request), (error) => {
+    assert.equal(error.adapterCause, 'CONTRACT_FAILURE');
+    assert.match(error.message, /container invocation is invalid/u);
+    return true;
+  });
+});
+
+test('malformed container options are refused at construction', async (t) => {
+  const { hostPath } = await makeHost(t, successHostSource());
+  for (const container of [
+    'python',
+    { runtimeRoot: '/srv/runtime' },
+    { image: PINNED_IMAGE, runtimeRoot: 'relative/runtime' },
+    { image: PINNED_IMAGE, dockerExecutable: '' }
+  ]) {
+    assert.throws(
+      () => createPythonAdapterExecutor(executorOptions(hostPath, {
+        providerEndpointFor: endpointFactory([]),
+        container
+      })),
+      PythonAdapterExecutorError,
+      `${JSON.stringify(container)} must be refused`
+    );
+  }
+});
+
+processGroupTest('without container options the executor still runs the host interpreter', async (t) => {
+  const { hostPath } = await makeHost(t, successHostSource());
+  const request = requestFor();
+  const { calls, spawnProcess } = recordingSpawn(request);
+  const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
+    providerEndpointFor: endpointFactory([]),
+    spawnProcess
+  }));
+  await executor.execute(request);
+
+  assert.equal(calls[0].command, 'python3');
+  assert.deepEqual(calls[0].args, [hostPath]);
+  assert.equal(calls[0].options.env.PYTHONPATH, '', 'the host path still blanks PYTHONPATH');
+});
+
+processGroupTest('a client killed from outside still has its container removed', async (t) => {
+  // Found by review. The timeout and abort paths removed the container, but a
+  // client that dies without this harness asking - an operator kill, the OOM
+  // killer, a broken attach to a remote daemon - reached the close handler with
+  // no failure latched and nothing addressed the container. `--rm` does not
+  // help: it fires when the container exits, which is exactly what has not
+  // happened, and least of all when the adapter is hung.
+  const { hostPath } = await makeHost(t, successHostSource());
+  const request = requestFor();
+  const calls = [];
+  const spawnProcess = (command, args, options = {}) => {
+    calls.push({ command, args: [...args], options });
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = new EventEmitter();
+    child.stdin.end = () => {
+      if (calls.length > 1) return;
+      // The client is killed; the container it started is not.
+      setImmediate(() => child.emit('close', null, 'SIGKILL'));
+    };
+    child.kill = () => true;
+    child.unref = () => {};
+    return child;
+  };
+
+  const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
+    providerEndpointFor: endpointFactory([]),
+    spawnProcess,
+    container: { image: PINNED_IMAGE, runtimeRoot: '/srv/shadowgraph/runtime' }
+  }));
+
+  await assert.rejects(() => executor.execute(request));
+
+  const containerName = flagValues(calls[0].args, '--name')[0];
+  const removal = calls.find((call) => call.args[0] === 'rm');
+  assert.ok(removal, 'a client killed from outside must still remove its container');
+  assert.deepEqual(removal.args, ['rm', '--force', containerName]);
+});
+
+processGroupTest('two invocations for one unit get two different container names', async (t) => {
+  // The previous test performed a single invocation and asserted the name
+  // matched a pattern, so deriving the name from the state leaf - which a reset
+  // and a persist for one unit share - kept it green while reintroducing the
+  // collision the random name exists to prevent.
+  const { hostPath } = await makeHost(t, successHostSource());
+  const calls = [];
+  const spawnProcess = (command, args, options = {}) => {
+    calls.push({ command, args: [...args], options });
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = new EventEmitter();
+    const index = calls.length;
+    child.stdin.end = () => {
+      setImmediate(() => {
+        const forRequest = index === 1 ? requestFor('reset') : requestFor('persist');
+        child.stdout.emit('data', Buffer.from(`${JSON.stringify(successResponse(forRequest))}\n`, 'utf8'));
+        child.emit('close', 0, null);
+      });
+    };
+    child.kill = () => true;
+    child.unref = () => {};
+    return child;
+  };
+
+  const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
+    providerEndpointFor: endpointFactory([]),
+    spawnProcess,
+    container: { image: PINNED_IMAGE, runtimeRoot: '/srv/shadowgraph/runtime' }
+  }));
+
+  // A reset and a persist for the same unit resolve to the same state leaf.
+  await executor.execute(requestFor('reset'));
+  await executor.execute(requestFor('persist'));
+
+  const runs = calls.filter((call) => call.args[0] === 'run');
+  assert.equal(runs.length, 2);
+  const [first, second] = runs.map((call) => flagValues(call.args, '--name')[0]);
+  assert.match(first, /^shadowgraph-v11-[0-9a-f]{32}$/u);
+  assert.notEqual(first, second, 'two invocations must not contend for one container name');
+});
+
+
+// --------------------------------------------------------------------------
+// The pinned models the wrapper carries.
+//
+// Routes say where an internal call goes. Until the wrapper carried models,
+// nothing said what to ask for, so each library used its own default: mem0
+// 2.0.19 asks for gpt-5-mini and text-embedding-3-small, and sizes its vector
+// collection to the latter's 1536 dimensions. Against the pinned Ollama - which
+// serves qwen2.5:7b and a 768-wide nomic-embed-text - the first is a model
+// that is not there and the second is a collection the wrong width for the
+// vectors written into it. Neither is visible in a route.
+
+processGroupTest('the wrapper carries the locked model and dimension for every metered class', async (t) => {
+  const { hostPath } = await makeHost(t, successHostSource({
+    assertions: String.raw`assert wrapper["providerModels"] == {
+    "internal_memory_llm": {"modelId": "qwen2.5:7b", "embeddingDimension": None},
+    "embedding": {"modelId": "nomic-embed-text:v1.5", "embeddingDimension": 768},
+}`
+  }));
+  const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
+    providerEndpointFor: endpointFactory([])
+  }));
+  const response = await executor.execute(requestFor('retrieve'));
+  assert.equal(response.status, 'SUCCEEDED');
+
+  // And the literals above are the lock's, not this test's.
+  const locked = pinnedModelsFor('mem0-oss');
+  assert.equal(locked.internal_memory_llm.modelId, 'qwen2.5:7b');
+  assert.equal(locked.embedding.modelId, 'nomic-embed-text:v1.5');
+  assert.equal(locked.embedding.embeddingDimension, 768);
+});
+
+processGroupTest('an arm that meters nothing is handed no model either', async (t) => {
+  const { hostPath } = await makeHost(t, successHostSource({
+    adapterId: 'basic-memory',
+    assertions: 'assert wrapper["providerModels"] == {"internal_memory_llm": None, "embedding": None}'
+  }));
+  const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
+    adapterId: 'basic-memory',
+    armId: 'basic-memory'
+  }));
+  const response = await executor.execute(requestFor('retrieve', { armId: 'basic-memory' }));
+  assert.equal(response.status, 'SUCCEEDED');
+});
+
+test('a metered arm without its pinned models cannot be constructed', () => {
+  const hostPath = path.resolve('unused-host.py');
+  const bad = [
+    undefined,
+    null,
+    'qwen2.5:0.5b',
+    {},
+    // A model for one class and not the other.
+    { internal_memory_llm: { modelId: 'qwen2.5:7b', embeddingDimension: null }, embedding: null },
+    // The embedding width missing, which is the half that fails silently.
+    {
+      internal_memory_llm: { modelId: 'qwen2.5:7b', embeddingDimension: null },
+      embedding: { modelId: 'nomic-embed-text:v1.5', embeddingDimension: null }
+    },
+    // A width on the chat model, which would mean the two were transposed.
+    {
+      internal_memory_llm: { modelId: 'qwen2.5:7b', embeddingDimension: 768 },
+      embedding: { modelId: 'nomic-embed-text:v1.5', embeddingDimension: 768 }
+    },
+    // Ids that are not ids.
+    {
+      internal_memory_llm: { modelId: 'qwen 2.5', embeddingDimension: null },
+      embedding: { modelId: 'nomic-embed-text:v1.5', embeddingDimension: 768 }
+    },
+    {
+      internal_memory_llm: { modelId: '', embeddingDimension: null },
+      embedding: { modelId: 'nomic-embed-text:v1.5', embeddingDimension: 768 }
+    }
+  ];
+  for (const providerModels of bad) {
+    assert.throws(
+      () => createPythonAdapterExecutor(executorOptions(hostPath, {
+        providerEndpointFor: async () => 'http://127.0.0.1:43100/provider-meter/v1/aaaa',
+        providerModels
+      })),
+      PythonAdapterExecutorError,
+      `${JSON.stringify(providerModels)} must not construct`
+    );
+  }
+});
+
+test('an arm that meters nothing may not be handed a model for something', () => {
+  const hostPath = path.resolve('unused-host.py');
+  assert.throws(() => createPythonAdapterExecutor(executorOptions(hostPath, {
+    adapterId: 'basic-memory',
+    armId: 'basic-memory',
+    providerModels: pinnedModelsFor('mem0-oss')
+  })), PythonAdapterExecutorError);
+
+  // Explicit nulls are the same statement as saying nothing, and both stand.
+  for (const providerModels of [
+    undefined,
+    { internal_memory_llm: null, embedding: null }
+  ]) {
+    const executor = createPythonAdapterExecutor(executorOptions(hostPath, {
+      adapterId: 'basic-memory',
+      armId: 'basic-memory',
+      providerModels
+    }));
+    assert.equal(typeof executor.execute, 'function');
+  }
 });

@@ -1,8 +1,16 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+
+import {
+  PRECONDITION_EVIDENCE_SCHEMA,
+  REQUIRED_DEMONSTRATION_STEPS
+} from '../benchmark/lib/v11-precondition-evidence.mjs';
+import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const execFileAsync = promisify(execFile);
 const repositoryRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -19,6 +27,50 @@ async function runCli(args) {
     return { code: error.code ?? 1, stdout: error.stdout ?? '', stderr: error.stderr ?? '' };
   }
 }
+
+
+/**
+ * A demonstration record shaped exactly as the probe writes one.
+ *
+ * Every field here is checked against something committed - the precondition
+ * string the registry declares, the cognee version the competitor lock pins -
+ * so this fixture cannot drift away from what the harness actually requires
+ * without the verifier rejecting it.
+ */
+async function presentPreconditionEvidence(t, overrides = {}) {
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-precondition-');
+  const evidencePath = path.join(directory, 'precondition-evidence.json');
+  await writeFile(evidencePath, JSON.stringify({
+    schema: PRECONDITION_EVIDENCE_SCHEMA,
+    version: 1,
+    armId: 'cognee',
+    precondition: 'pinned backend access-control configuration',
+    observedAt: new Date().toISOString(),
+    package: { name: 'cognee', version: '1.5.3' },
+    outcome: 'PASS',
+    backendAccessControlEnabled: true,
+    steps: REQUIRED_DEMONSTRATION_STEPS.cognee.map((step) => ({ step, outcome: 'PASS' })),
+    ...overrides
+  }), 'utf8');
+  return evidencePath;
+}
+
+test('v11-preflight selects the exact scored profile only with --mode scored', async () => {
+  const scored = await runCli(['v11-preflight', '--mode', 'scored']);
+  const report = JSON.parse(scored.stdout);
+  assert.equal(report.scored, true);
+  assert.equal(report.declaredCounts.totalUnits, 2310);
+  assert.equal(report.declaredCounts.excludedUnits, 150);
+  assert.equal(report.declaredCounts.measuredUnits, 2160);
+  assert.equal(report.declaredCounts.outerDecisionCalls, 1950);
+  assert.equal(report.readiness, 'NOT READY');
+  assert.notEqual(scored.code, 0);
+
+  const unknown = await runCli(['v11-preflight', '--mode', 'not-a-mode']);
+  assert.notEqual(unknown.code, 0);
+  assert.equal(unknown.stdout, '');
+  assert.match(unknown.stderr, /mode must be acceptance or scored/iu);
+});
 
 test('v11-preflight reports the candidate without contacting a service or scoring it', async () => {
   const { code, stdout } = await runCli(['v11-preflight']);
@@ -39,6 +91,35 @@ test('v11-preflight reports the candidate without contacting a service or scorin
   // an operator proceed on a green shell result.
   assert.equal(report.readiness, 'NOT READY');
   assert.notEqual(code, 0);
+});
+
+test('v11-run selects the scored profile and refuses it without output when prerequisites are absent', async (t) => {
+  const output = path.join(await scratchDirectory(t, 'v11-scored-refusal-'), 'result');
+  const result = await runCli([
+    'v11-run', '--mode', 'scored',
+    '--run-id', 'v11-scored-refusal',
+    '--attempt-id', 'v11-scored-refusal-attempt-1',
+    '--out', output
+  ]);
+  const report = JSON.parse(result.stdout);
+
+  assert.notEqual(result.code, 0);
+  assert.equal(report.status, 'REFUSED');
+  assert.match(report.reason, /scored run/iu);
+  assert.equal(report.readiness.declaredCounts.totalUnits, 2310);
+  assert.equal(report.readiness.declaredCounts.outerDecisionCalls, 1950);
+  assert.deepEqual(report.artifactsWritten, []);
+  await assert.rejects(readFile(output), (error) => error.code === 'ENOENT');
+});
+
+test('v11-preflight reports missing campaign configuration as a run blocker', async () => {
+  const { code, stdout } = await runCli(['v11-preflight']);
+  const report = JSON.parse(stdout);
+
+  assert.notEqual(code, 0);
+  assert.ok(report.blockers.some((blocker) => (
+    blocker.kind === 'campaign' && blocker.code === 'CAMPAIGN_CONFIGURATION_REQUIRED'
+  )));
 });
 
 test('every frozen arm is bound to a runtime and its observed isolation', async () => {
@@ -67,16 +148,14 @@ test('every frozen arm is bound to a runtime and its observed isolation', async 
   assert.equal(byId['mem0-oss'].nativeUserNamespace, 'user_id');
 });
 
-test('the declared applicability contradiction is surfaced as a blocker', async () => {
+test('the Amendment 003 applicability correction removes the Graphiti contradiction', async () => {
   const { stdout } = await runCli(['v11-preflight']);
   const report = JSON.parse(stdout);
 
   assert.equal(report.applicability.status, 'INCONSISTENT');
-  const graphiti = report.blockers.find((blocker) => (
+  assert.equal(report.blockers.some((blocker) => (
     blocker.kind === 'applicability' && blocker.armId === 'graphiti'
-  ));
-  assert.equal(graphiti.code, 'DECLARED_ISOLATION_UNAVAILABLE');
-  assert.equal(graphiti.declared, 'SUPPORTED');
+  )), false);
 
   // Cognee is a different case and must not be collapsed into the same one: the
   // capability exists but its configuration is not pinned.
@@ -112,12 +191,15 @@ test('services that are not provisioned are named as blockers, not assumed prese
   assert.deepEqual(services.map((blocker) => blocker.armId).sort(), ['cognee', 'graphiti']);
 });
 
-test('a satisfied precondition clears only its own blocker', async () => {
-  const { stdout } = await runCli([
-    'v11-preflight',
-    '--preconditions=pinned backend access-control configuration'
-  ]);
+test('a demonstrated precondition clears only its own blocker', async (t) => {
+  const evidencePath = await presentPreconditionEvidence(t);
+  const { stdout } = await runCli(['v11-preflight', '--precondition-evidence', evidencePath]);
   const report = JSON.parse(stdout);
+
+  assert.deepEqual(
+    report.preconditionEvidence.satisfiedPreconditions,
+    ['pinned backend access-control configuration']
+  );
 
   assert.equal(
     report.blockers.some((blocker) => blocker.code === 'DECLARED_ISOLATION_PRECONDITION_UNMET'),
@@ -125,7 +207,7 @@ test('a satisfied precondition clears only its own blocker', async () => {
   );
   // Graphiti has no precondition to satisfy: its capability is absent, so the
   // blocker must survive.
-  assert.ok(report.blockers.some((blocker) => blocker.code === 'DECLARED_ISOLATION_UNAVAILABLE'));
+  assert.equal(report.blockers.some((blocker) => blocker.code === 'DECLARED_ISOLATION_UNAVAILABLE'), false);
   assert.equal(report.readiness, 'NOT READY');
 });
 
@@ -150,24 +232,22 @@ test('authenticated immutable prerequisites clear their own gates', async () => 
     .sort();
 
   assert.deepEqual(requirements, []);
-  assert.ok(report.blockers.some((blocker) => blocker.code === 'DECLARED_ISOLATION_UNAVAILABLE'));
+  assert.equal(report.blockers.some((blocker) => blocker.code === 'DECLARED_ISOLATION_UNAVAILABLE'), false);
   assert.equal(report.readiness, 'NOT READY');
 });
 
-test('clearing every applicability precondition still leaves Graphiti blocked', async () => {
+test('clearing every applicability precondition still leaves required services blocked', async (t) => {
   // Cognee's ACL precondition and the immutable prerequisites are satisfied, but
   // Graphiti's declared native user isolation is still unavailable.
-  const { stdout } = await runCli([
-    'v11-preflight',
-    '--preconditions=pinned backend access-control configuration'
-  ]);
+  const evidencePath = await presentPreconditionEvidence(t);
+  const { stdout } = await runCli(['v11-preflight', '--precondition-evidence', evidencePath]);
   const report = JSON.parse(stdout);
   assert.equal(report.readiness, 'NOT READY');
   assert.equal(report.blockers.some((blocker) => blocker.kind === 'immutable-prerequisite'), false);
-  assert.ok(report.blockers.some((blocker) => blocker.code === 'DECLARED_ISOLATION_UNAVAILABLE'));
+  assert.equal(report.blockers.some((blocker) => blocker.code === 'DECLARED_ISOLATION_UNAVAILABLE'), false);
 });
 
-test('v11-preflight reports exactly the four current blockers', async () => {
+test('v11-preflight retains the three methodology blockers and requires operational authorization', async () => {
   const { code, stdout } = await runCli(['v11-preflight']);
   const report = JSON.parse(stdout);
 
@@ -175,16 +255,123 @@ test('v11-preflight reports exactly the four current blockers', async () => {
   assert.equal(report.readiness, 'NOT READY');
   assert.deepEqual(
     report.blockers.map((blocker) => {
+      if (blocker.kind === 'operational-budget') return `${blocker.kind}:${blocker.code}`;
       if (blocker.kind === 'applicability') {
         return `${blocker.kind}:${blocker.code}:${blocker.armId}`;
+      }
+      if (blocker.kind === 'native-attempt-evidence') {
+        return `${blocker.kind}:${blocker.code}:${blocker.armId}:${blocker.requestClass}:${blocker.category}`;
       }
       return `${blocker.kind}:${blocker.armId}:${blocker.service}`;
     }).sort(),
     [
       'applicability:DECLARED_ISOLATION_PRECONDITION_UNMET:cognee',
-      'applicability:DECLARED_ISOLATION_UNAVAILABLE:graphiti',
+      'campaign:undefined:undefined',
+      'native-attempt-evidence:NATIVE_ATTEMPT_EVIDENCE_REQUIRED:cognee:embedding:B',
+      'native-attempt-evidence:NATIVE_ATTEMPT_EVIDENCE_REQUIRED:cognee:internal_memory_llm:B',
+      'native-attempt-evidence:NATIVE_ATTEMPT_EVIDENCE_REQUIRED:cognee:internal_memory_llm:C',
+      'native-attempt-evidence:NATIVE_ATTEMPT_EVIDENCE_REQUIRED:graphiti:internal_memory_llm:B',
+      'operational-budget:PROVIDER_BUDGET_REQUIRED',
       'required-service:cognee:common LLM and embedding endpoint',
-      'required-service:graphiti:Neo4j-compatible graph database plus common LLM and embedding endpoint'
+      'required-service:graphiti:Neo4j-compatible graph database plus common LLM and embedding endpoint',
+      'service-evidence:undefined:undefined'
     ].sort()
   );
+});
+
+test('the flag that only asserted a precondition is refused by name', async () => {
+  // Removing it silently would leave every script that passes it quietly
+  // weaker than it was, with no signal that the guarantee changed.
+  const { code, stderr } = await runCli([
+    'v11-preflight',
+    '--preconditions=pinned backend access-control configuration'
+  ]);
+  assert.notEqual(code, 0);
+  assert.match(stderr, /asserted a precondition rather than demonstrating one/u);
+  assert.match(stderr, /v11-precondition-probe/u);
+});
+
+test('a demonstration that failed clears nothing, however complete its shape', async (t) => {
+  const evidencePath = await presentPreconditionEvidence(t, { outcome: 'FAIL' });
+  const { stdout } = await runCli(['v11-preflight', '--precondition-evidence', evidencePath]);
+  const report = JSON.parse(stdout);
+
+  assert.deepEqual(report.preconditionEvidence.satisfiedPreconditions, []);
+  assert.ok(report.blockers.some((blocker) => (
+    blocker.code === 'DECLARED_ISOLATION_PRECONDITION_UNMET' && blocker.armId === 'cognee'
+  )));
+});
+
+test('a demonstration missing its refusal step clears nothing', async (t) => {
+  // The step that carries the whole claim. A record without it describes a
+  // product that was configured, not a boundary that was enforced.
+  const evidencePath = await presentPreconditionEvidence(t, {
+    steps: REQUIRED_DEMONSTRATION_STEPS.cognee
+      .filter((step) => step !== 'cross-user-read-refused')
+      .map((step) => ({ step, outcome: 'PASS' }))
+  });
+  const { stdout } = await runCli(['v11-preflight', '--precondition-evidence', evidencePath]);
+  const report = JSON.parse(stdout);
+
+  assert.deepEqual(report.preconditionEvidence.satisfiedPreconditions, []);
+  assert.ok(report.preconditionEvidence.findings.some((finding) => (
+    finding.code === 'DEMONSTRATION_STEP_MISSING' && finding.demonstrationStep === 'cross-user-read-refused'
+  )));
+});
+
+test('a demonstration of a different product version clears nothing', async (t) => {
+  const evidencePath = await presentPreconditionEvidence(t, {
+    package: { name: 'cognee', version: '1.5.2' }
+  });
+  const { stdout } = await runCli(['v11-preflight', '--precondition-evidence', evidencePath]);
+  const report = JSON.parse(stdout);
+
+  assert.deepEqual(report.preconditionEvidence.satisfiedPreconditions, []);
+  assert.ok(report.preconditionEvidence.findings.some((finding) => (
+    finding.code === 'PRECONDITION_PACKAGE_MISMATCH'
+  )));
+});
+
+
+test('the arm probe refuses an arm it has no demonstration for', async () => {
+  // An arm without an entry is refused by name rather than silently skipped,
+  // because "the probe reported nothing" and "the probe was never run" look the
+  // same in a record.
+  for (const args of [
+    ['v11-arm-probe'],
+    ['v11-arm-probe', '--arm', 'graphiti'],
+    ['v11-arm-probe', '--arm', 'shadowgraph-full']
+  ]) {
+    const { code, stderr } = await runCli(args);
+    assert.notEqual(code, 0, args.join(' '));
+    assert.match(stderr, /v11-arm-probe requires --arm/u);
+  }
+});
+
+test('an arm probe that needs a model endpoint says so rather than inventing one', async () => {
+  const missing = await runCli([
+    'v11-arm-probe', '--arm', 'mem0-oss', '--runtime', '/nonexistent', '--work', '/nonexistent'
+  ]);
+  assert.notEqual(missing.code, 0);
+  assert.match(missing.stderr, /--arm mem0-oss requires --model-endpoint/u);
+
+  // And one that has an endpoint still needs somewhere to run.
+  const noRoots = await runCli([
+    'v11-arm-probe', '--arm', 'mem0-oss', '--model-endpoint', 'http://127.0.0.1:11434/v1'
+  ]);
+  assert.notEqual(noRoots.code, 0);
+  assert.match(noRoots.stderr, /requires --runtime .* and --work/u);
+});
+
+test('the fence probe needs a runtime and a place to work', async () => {
+  const { code, stderr } = await runCli(['v11-fence-probe']);
+  assert.notEqual(code, 0);
+  assert.match(stderr, /v11-fence-probe requires --runtime .* and --work/u);
+});
+
+test('every probe command appears in the usage line', async () => {
+  const usage = await runCli([]);
+  for (const command of ['v11-fence-probe', 'v11-arm-probe', 'v11-precondition-probe']) {
+    assert.ok(usage.stderr.includes(command), command);
+  }
 });

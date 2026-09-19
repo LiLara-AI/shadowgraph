@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { copyFile, cp, mkdir, writeFile } from 'node:fs/promises';
+import { copyFile, cp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -29,8 +29,27 @@ const requiredFixtureFiles = [
   'benchmark/lib/preregistration.mjs',
   'benchmark/lib/scoring.mjs',
   'benchmark/lib/validate.mjs',
+  'benchmark/lib/v11-native-attempts.mjs',
+  'benchmark/lib/v11-native-attempt-evidence.mjs',
+  'benchmark/lib/v11-native-attempt-evidence-loader.mjs',
+  'benchmark/probes/cognee_retry_taxonomy_demonstration.py',
+  'benchmark/probes/cognee_embedding_retry_taxonomy_demonstration.py',
   'benchmark/preregistration.json',
   'benchmark/preregistration.sha256',
+  'benchmark/preregistration-amendment-001.json',
+  'benchmark/preregistration-amendment-001.sha256',
+  'benchmark/preregistration-amendment-002.json',
+  'benchmark/preregistration-amendment-002.sha256',
+  'benchmark/preregistration-amendment-003.json',
+  'benchmark/preregistration-amendment-003.sha256',
+  'benchmark/preregistration-amendment-004.json',
+  'benchmark/preregistration-amendment-004.sha256',
+  'benchmark/preregistration-amendment-005.json',
+  'benchmark/preregistration-amendment-005.sha256',
+  'benchmark/preregistration-amendment-006.json',
+  'benchmark/preregistration-amendment-006.sha256',
+  'benchmark/acceptance/definition.json',
+  'benchmark/acceptance/scenarios.json',
   'integrations/claude-code.mcp.json',
   'integrations/codex.mcp.toml',
   'integrations/cursor.mcp.json',
@@ -40,6 +59,8 @@ const requiredFixtureFiles = [
   'scripts/check-mcp.mjs',
   'scripts/mcp-wire-size.mjs',
   'scripts/check-package.mjs',
+  'scripts/check-benchmark-python-syntax.mjs',
+  'scripts/check-benchmark-syntax.mjs',
   'scripts/bench-journal.mjs',
   'scripts/smoke-package.mjs',
   'scripts/validate-bench-journal.mjs',
@@ -93,6 +114,49 @@ function runChecker(root, { env: envOverrides = {}, withoutNpmExecpath = false }
     windowsHide: true
   });
 }
+
+test('check-package requires every effective v1.1 methodology source', async (t) => {
+  const root = await packageFixture(t, '# Harmless package audit\n');
+  const required = [
+    'benchmark/acceptance/definition.json',
+    'benchmark/acceptance/scenarios.json',
+    'benchmark/preregistration-amendment-003.json',
+    'benchmark/preregistration-amendment-003.sha256',
+    'benchmark/preregistration-amendment-004.json',
+    'benchmark/preregistration-amendment-004.sha256',
+    'benchmark/preregistration-amendment-005.json',
+    'benchmark/preregistration-amendment-005.sha256',
+    'benchmark/preregistration-amendment-006.json',
+    'benchmark/preregistration-amendment-006.sha256'
+  ];
+  for (const relativePath of required) {
+    await rm(join(root, ...relativePath.split('/')), { force: true });
+    await assert.rejects(runChecker(root), new RegExp(`required package file is missing: ${relativePath.replace(/[.]/gu, '\\.')}`, 'u'));
+    await writeFile(join(root, ...relativePath.split('/')), 'restored fixture source\n', 'utf8');
+  }
+});
+
+test('check-package requires native methodology modules, probes, and portable syntax launcher', async (t) => {
+  const root = await packageFixture(t, '# Harmless package audit\n');
+  const required = [
+    'benchmark/lib/v11-native-attempts.mjs',
+    'benchmark/lib/v11-native-attempt-evidence.mjs',
+    'benchmark/lib/v11-native-attempt-evidence-loader.mjs',
+    'benchmark/probes/cognee_retry_taxonomy_demonstration.py',
+    'benchmark/probes/cognee_embedding_retry_taxonomy_demonstration.py',
+    'scripts/check-benchmark-python-syntax.mjs',
+    'scripts/check-benchmark-syntax.mjs'
+  ];
+  for (const relativePath of required) {
+    const target = join(root, ...relativePath.split('/'));
+    await rm(target, { force: true });
+    await assert.rejects(
+      runChecker(root),
+      new RegExp(`required package file is missing: ${relativePath.replace(/[.]/gu, '\\.')}`, 'u')
+    );
+    await writeFile(target, 'restored fixture source\n', 'utf8');
+  }
+});
 
 test('check-package rejects packaged docs containing local profile paths or credential literals without disclosing them', async (t) => {
   const windowsPath = String.raw`C:\\Users\\release-fixture\\AppData\\Local\\private-tool\\venv`;
