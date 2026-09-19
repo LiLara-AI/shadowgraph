@@ -16,7 +16,7 @@ here.
 
 | | |
 |---|---|
-| Repository | `C:/benchmark-engineering/worktrees/shadowgraph-v11-acceptance` (WSL: `/mnt/c/benchmark-engineering/worktrees/shadowgraph-v11-acceptance`) |
+| Repository | `<benchmark-engineering>/worktrees/shadowgraph-v11-acceptance` (WSL: `<benchmark-engineering>/worktrees/shadowgraph-v11-acceptance`) |
 | Branch | `benchmark/v1.1-nonscored-acceptance` |
 | **Pinned code commit** | **`50745b611f760b6b7fabc12a6396fcd2719cd1f1`** |
 | HEAD | the tip of `benchmark/v1.1-nonscored-acceptance`. It is at or ahead of the pinned commit, and **every commit after it is documentation only** |
@@ -29,7 +29,7 @@ check below proves nothing executable moved after it.
 ### Verify the checkout before anything else
 
 ```bash
-cd /mnt/c/benchmark-engineering/worktrees/shadowgraph-v11-acceptance && git status --porcelain=v1 --untracked-files=all | wc -l && git diff HEAD | sha256sum && git merge-base --is-ancestor 50745b611f760b6b7fabc12a6396fcd2719cd1f1 HEAD && echo PINNED-COMMIT-IS-ANCESTOR && git diff --stat 50745b611f760b6b7fabc12a6396fcd2719cd1f1..HEAD -- benchmark/lib benchmark/adapters benchmark/acceptance benchmark/preregistration.json benchmark/preregistration-amendment-001.json benchmark/preregistration-amendment-002.json benchmark/preregistration-amendment-003.json benchmark/preregistration-amendment-004.json src scripts test package.json
+cd <benchmark-engineering>/worktrees/shadowgraph-v11-acceptance && git status --porcelain=v1 --untracked-files=all | wc -l && git diff HEAD | sha256sum && git merge-base --is-ancestor 50745b611f760b6b7fabc12a6396fcd2719cd1f1 HEAD && echo PINNED-COMMIT-IS-ANCESTOR && git diff --stat 50745b611f760b6b7fabc12a6396fcd2719cd1f1..HEAD -- benchmark/lib benchmark/adapters benchmark/acceptance benchmark/preregistration.json benchmark/preregistration-amendment-001.json benchmark/preregistration-amendment-002.json benchmark/preregistration-amendment-003.json benchmark/preregistration-amendment-004.json src scripts test package.json
 ```
 
 Expect, in order: `0`; then `e3b0c442…b855`; then `PINNED-COMMIT-IS-ANCESTOR`;
@@ -42,7 +42,7 @@ test, script, package, lock or methodology file changed after the pinned commit.
 ## 2. Immutable locks and methodology hashes
 
 ```bash
-cd /mnt/c/benchmark-engineering/worktrees/shadowgraph-v11-acceptance && sha256sum benchmark/preregistration.json benchmark/preregistration-amendment-00[1-4].json && sha256sum -c benchmark/preregistration-amendment-004.sha256
+cd <benchmark-engineering>/worktrees/shadowgraph-v11-acceptance && sha256sum benchmark/preregistration.json benchmark/preregistration-amendment-00[1-4].json && sha256sum -c benchmark/preregistration-amendment-004.sha256
 ```
 
 | File | SHA-256 |
@@ -123,7 +123,7 @@ correctly, because `npm pack` would ship it.
 
 | | |
 |---|---|
-| Host | Windows 11 with WSL2, distro **Ubuntu-26.04**; the repository is on the Windows filesystem under `/mnt/c` |
+| Host | Windows 11 with WSL2, distro **Ubuntu-26.04**; the repository is on the Windows filesystem, reached through the WSL drive mount |
 | Node | **v20.20.2** at `$HOME/.nvm/versions/node/v20.20.2/bin` — **not on `PATH` by default**; export it in every script |
 | Python | `python3` (3.14.x observed). Always `-B` |
 | Container runtime | Docker, for the pinned Python image and the two services |
@@ -144,7 +144,7 @@ Container names: `shadowgraph-v11-neo4j`, `shadowgraph-v11-ollama`.
   `export PATH="$HOME/.nvm/versions/node/v20.20.2/bin:$PATH"`.
 - Do not inline `$(...)`, `$VAR` or backticks in `wsl bash -c` from a Windows
   shell — they expand in the **outer** shell. Write a script **file** and run
-  `MSYS_NO_PATHCONV=1 wsl bash /mnt/c/.../script.sh`.
+  `MSYS_NO_PATHCONV=1 wsl bash <benchmark-engineering>/.../script.sh`.
 - Neo4j HTTP Basic wants `user:password`, not Neo4j's `user/password` form.
 
 ---
@@ -188,7 +188,7 @@ weaken the gate.
 ### Step 1 — regenerate service evidence *(live provider traffic)*
 
 ```bash
-cd /mnt/c/benchmark-engineering/worktrees/shadowgraph-v11-acceptance && node benchmark/cli.mjs v11-service-probe --endpoints benchmark/probe-records/service-endpoints.json
+cd <benchmark-engineering>/worktrees/shadowgraph-v11-acceptance && node benchmark/cli.mjs v11-service-probe --endpoints benchmark/probe-records/service-endpoints.json
 ```
 
 `benchmark/probe-records/` is gitignored and `service-endpoints.json` is **not
@@ -250,7 +250,7 @@ Only after §7 step 3 reports READY.
   the suite fails if a results directory exists, and the runner writes there.
 
 ```bash
-cd /mnt/c/benchmark-engineering/worktrees/shadowgraph-v11-acceptance && node benchmark/cli.mjs v11-run --run-id v11-acceptance-003 --precondition-evidence benchmark/probe-records/precondition-evidence.json --service-evidence benchmark/probe-records/service-evidence.json --state-root <fresh-node-state> --python-state-root <fresh-python-state> --python-runtime <runtime-site> --adapter-config <adapters.json>
+cd <benchmark-engineering>/worktrees/shadowgraph-v11-acceptance && node benchmark/cli.mjs v11-run --run-id v11-acceptance-003 --precondition-evidence benchmark/probe-records/precondition-evidence.json --service-evidence benchmark/probe-records/service-evidence.json --state-root <fresh-node-state> --python-state-root <fresh-python-state> --python-runtime <runtime-site> --adapter-config <adapters.json>
 ```
 
 Expect roughly **3 hours** wall clock; run 002 took 2h52m for the same shape.

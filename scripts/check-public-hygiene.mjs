@@ -136,6 +136,30 @@ export const ALLOWED = Object.freeze([
     categories: ['absolute-posix-profile-path', 'absolute-windows-profile-path', 'wsl-mount-path'],
     reason: 'synthetic path fixtures for the redaction scanner'
   },
+  // A container-internal path is not a machine path. The pinned Ollama image
+  // keeps its model manifests under the container root account's home, and a
+  // pure unit test asserts the exact string the probe reads there. Rewriting it
+  // would falsify the assertion rather than remove a leak.
+  {
+    path: 'test/benchmark-v11-service-probe.test.js',
+    categories: ['absolute-posix-profile-path'],
+    reason: 'container-internal Ollama manifest path asserted by a unit test'
+  },
+  // Two benchmark evidence documents trip the credential classifier on ordinary
+  // prose. Both were read and carry no key material: one documents a client
+  // constructor whose operands are all bracketed placeholders rather than
+  // values, the other has a sentence in which a status word follows the word
+  // authorization and a colon, which reads as a header assignment.
+  {
+    path: 'benchmark/evidence/v11-mem0-execution-2026-09-05.md',
+    categories: ['credential-literal'],
+    reason: 'documented client constructor with bracketed placeholder operands'
+  },
+  {
+    path: 'benchmark/evidence/v11-operational-budget-repair.md',
+    categories: ['credential-literal'],
+    reason: 'a prose status phrase that parses as a header assignment'
+  },
   // Ignore files exist to NAME the directories that must stay out. Listing a
   // local tool directory there is the fix, not the leak.
   { path: '.npmignore', categories: ['local-hermes-path'], reason: 'ignore rules naming excluded local tool directories' },

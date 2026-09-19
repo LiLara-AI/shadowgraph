@@ -184,7 +184,7 @@ the fence, so the two are independent and either one alone would have stopped it
 ## The runtime verification, checked against the real site
 
 The bind-time refusal added for F7 was run against the actual built runtime at
-`/home/khouly/shadowgraph-v11-runtime/site`: `verifyPythonRuntime` returns
+`~/shadowgraph-v11-runtime/site`: `verifyPythonRuntime` returns
 `valid: true` with zero findings against `python-wheels.lock.json` and the pinned
 image, and the manifest is where the run path looks for it
 (`dirname(site)/runtime-manifest.json`). A new refusal that would have blocked a

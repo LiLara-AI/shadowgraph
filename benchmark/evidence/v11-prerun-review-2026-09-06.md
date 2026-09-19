@@ -133,12 +133,12 @@ against the repository root rather than the working directory:
 ```
 node benchmark/cli.mjs v11-run \
   --run-id v11-acceptance-001 \
-  --service-evidence /home/khouly/shadowgraph-v11-run-evidence/service-evidence.json \
-  --precondition-evidence /home/khouly/shadowgraph-v11-run-evidence/precondition-evidence.json \
+  --service-evidence ~/shadowgraph-v11-run-evidence/service-evidence.json \
+  --precondition-evidence ~/shadowgraph-v11-run-evidence/precondition-evidence.json \
   --provider-upstream http://127.0.0.1:11434/v1 \
-  --state-root /home/khouly/shadowgraph-v11-run-state/node \
-  --python-state-root /home/khouly/shadowgraph-v11-run-state/python \
-  --python-runtime /home/khouly/shadowgraph-v11-runtime/site
+  --state-root ~/shadowgraph-v11-run-state/node \
+  --python-state-root ~/shadowgraph-v11-run-state/python \
+  --python-runtime ~/shadowgraph-v11-runtime/site
 ```
 
 `--python-runtime` must name the **site** directory: the binder reads the
