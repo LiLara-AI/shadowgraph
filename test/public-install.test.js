@@ -53,7 +53,7 @@ test('CLI setup initializes a clean store and doctor reports actionable health',
   const doctor = JSON.parse((await runCli(['doctor'], env)).stdout);
   assert.equal(doctor.ok, true);
   assert.equal(doctor.command, 'doctor');
-  assert.match(doctor.version, /^0\.40\.0$/);
+  assert.match(doctor.version, /^0\.41\.0$/);
   assert.equal(doctor.node.supported, true);
   assert.deepEqual(doctor.storage, { type: 'json', path: resolve(file), initialized: true, readable: true, writable: true });
   assert.equal(doctor.graph.valid, true);

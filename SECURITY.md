@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-ShadowGraph 0.40.0 is a **Technical Preview / Early Access** release, installed from GitHub and not published to npm. Only the current `main` branch is supported; there are no patched older versions. Do not treat a Technical Preview build as a production security boundary.
+ShadowGraph 0.41.0 is a **Technical Preview / Early Access** release, installed from GitHub and not published to npm. Only the current `main` branch is supported; there are no patched older versions. Do not treat a Technical Preview build as a production security boundary.
 
 ## Security review status
 
