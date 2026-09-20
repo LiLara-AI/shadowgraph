@@ -1097,7 +1097,7 @@ test('a metered arm without its pinned models cannot be constructed', () => {
   }
 });
 
-test('an arm that meters nothing may not be handed a model for something', () => {
+processGroupTest('an arm that meters nothing may not be handed a model for something', () => {
   const hostPath = path.resolve('unused-host.py');
   assert.throws(() => createPythonAdapterExecutor(executorOptions(hostPath, {
     adapterId: 'basic-memory',

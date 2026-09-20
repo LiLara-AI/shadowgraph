@@ -687,7 +687,7 @@ processGroupTest('an arm that meters nothing is handed no model and no network',
   );
 });
 
-test('a failure the harness wrote is not evidence that the arm ran', async (t) => {
+processGroupTest('a failure the harness wrote is not evidence that the arm ran', async (t) => {
   // The distinction the binding demonstration rests its headline count on. Every
   // `PythonAdapterExecutorError` becomes a returned FAILED envelope, so counting
   // arms that "did not throw" counted a container that never launched: with the
