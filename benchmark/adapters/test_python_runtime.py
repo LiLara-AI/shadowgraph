@@ -3,12 +3,12 @@ from __future__ import annotations
 import unittest
 from uuid import UUID
 
+import python_runtime
 from envelope import ContractError
 from python_runtime import (
     ENCODING_PREFIX,
     classify_native_error,
     decode_content,
-    deterministic_dataset_uuid,
     deterministic_native_uuid,
     encode_content,
     require_routes,
@@ -45,14 +45,24 @@ class PythonRuntimeTests(unittest.TestCase):
         self.assertIn("reversible network probe timed out", encoded)
         self.assertEqual(decode_content(encoded), content)
 
-    def test_cognee_dataset_uuid_uses_a_distinct_typed_deterministic_domain(self) -> None:
-        dataset_id = deterministic_dataset_uuid("cognee", "project-1")
-        self.assertIsInstance(dataset_id, UUID)
-        self.assertEqual(str(dataset_id), "f68d9708-304c-57b8-80a7-09ef1e12a274")
-        self.assertNotEqual(
-            str(dataset_id),
-            deterministic_native_uuid("cognee", "project-1"),
-        )
+    def test_no_helper_computes_a_dataset_id_this_runtime_does_not_own(self) -> None:
+        """Record ids are ours to assign; dataset ids are Cognee's.
+
+        `deterministic_dataset_uuid` computed a uuid5 of the arm and the project
+        and the Cognee adapter held the store to it. Cognee derives its own from
+        the dataset name, the owning user and the tenant, and reads a supplied
+        id as a reference to an existing dataset the caller may write to -
+        against the real library the computed id raised PermissionDeniedError
+        and created nothing. The adapter now resolves by name and adopts the id
+        it finds, and the helper is gone rather than left for someone to reach
+        for.
+
+        A record id is a different case and stays: nothing else assigns it, and
+        the adapter needs it to be the same across processes.
+        """
+        self.assertFalse(hasattr(python_runtime, "deterministic_dataset_uuid"))
+        self.assertFalse(hasattr(python_runtime, "COGNEE_DATASET_UUID_NAMESPACE"))
+        self.assertTrue(callable(python_runtime.deterministic_native_uuid))
 
     def test_native_failure_classification_preserves_actual_public_cause_without_detail(self) -> None:
         cases = [

@@ -26,6 +26,16 @@ export class EvidenceBundleError extends Error {
 
 const BARE_SHA256 = /^[a-f0-9]{64}$/u;
 const GIT_OBJECT = /^[a-f0-9]{40}$/u;
+const REQUIRED_SOURCE_HASH_FIELDS = Object.freeze([
+  'preregistrationSha256',
+  'amendment001Sha256',
+  'amendment002Sha256',
+  'amendment003Sha256',
+  'amendment004Sha256',
+  'amendment005Sha256',
+  'amendment006Sha256',
+  'amendment008Sha256'
+]);
 
 /** What an indexed artifact is evidence of. Anything else is refused. */
 export const EVIDENCE_KINDS = Object.freeze([
@@ -152,7 +162,12 @@ export function buildReviewBundle(input) {
   if (!isPlainObject(sourceHashes)) {
     reject('CONTRACT_FAILURE', 'review bundle requires the frozen source hashes');
   }
-  for (const field of ['preregistrationSha256', 'amendment001Sha256', 'amendment002Sha256']) {
+  const sourceHashFields = Object.keys(sourceHashes);
+  if (sourceHashFields.length !== REQUIRED_SOURCE_HASH_FIELDS.length
+    || sourceHashFields.some((field) => !REQUIRED_SOURCE_HASH_FIELDS.includes(field))) {
+    reject('CONTRACT_FAILURE', 'review bundle source hashes must name exactly the effective v1.1 methodology chain');
+  }
+  for (const field of REQUIRED_SOURCE_HASH_FIELDS) {
     assertDigest(sourceHashes[field], `frozen source hash ${field}`);
   }
   if (scored !== false) {
@@ -193,7 +208,12 @@ export function buildReviewBundle(input) {
     sourceHashes: {
       preregistrationSha256: sourceHashes.preregistrationSha256,
       amendment001Sha256: sourceHashes.amendment001Sha256,
-      amendment002Sha256: sourceHashes.amendment002Sha256
+      amendment002Sha256: sourceHashes.amendment002Sha256,
+      amendment003Sha256: sourceHashes.amendment003Sha256,
+      amendment004Sha256: sourceHashes.amendment004Sha256,
+      amendment005Sha256: sourceHashes.amendment005Sha256,
+      amendment006Sha256: sourceHashes.amendment006Sha256,
+      amendment008Sha256: sourceHashes.amendment008Sha256
     },
     evidenceIndexDigest: evidenceIndexDigest(validated),
     index: validated

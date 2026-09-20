@@ -14,10 +14,29 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
+import { parseServiceManifestDocument } from './implementation-lock.mjs';
 import { aggregateRun } from './aggregate.mjs';
+import { verifyPreconditionEvidence } from './v11-precondition-evidence.mjs';
+import { verifyNativeAttemptEvidence } from './v11-native-attempt-evidence.mjs';
+import { loadNativeAttemptProbeReports } from './v11-native-attempt-evidence-loader.mjs';
+import { validateNativeAttemptPolicy } from './v11-native-attempts.mjs';
 import { buildV11Prompt } from './v11-prompts.mjs';
+import { providerModelsFromLock } from './v11-provider-models.mjs';
+import {
+  captureVerifiedServiceEvidence,
+  resolveVerifiedServiceEvidence,
+  validateV11LiveServiceAttestation,
+  verifyServiceEvidence
+} from './v11-service-evidence.mjs';
+import {
+  issueV11AcceptanceEligibility,
+  validateV11AcceptanceEligibility
+} from './v11-acceptance-eligibility.mjs';
 import { validateRawRun } from './validate.mjs';
 import { runV11Benchmark } from './v11-runner.mjs';
+import { validateProviderBudget } from './v11-budget.mjs';
+import { validateV11FinalProgramPolicy } from './v11-program-budget.mjs';
+import { assertRestrictedCampaignExecutionPolicy, verifyCampaignPolicyLineage } from './v11-campaign-budget.mjs';
 
 export class V11RunError extends Error {
   constructor(code, message) {
@@ -29,12 +48,6 @@ export class V11RunError extends Error {
 
 const FULL_SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const BARE_SHA256 = /^[a-f0-9]{64}$/u;
-
-// A lockable service reference: a repository plus an explicit tag, with no
-// digest suffix. Kept deliberately in step with `assertLockableImage` and
-// `MUTABLE_LATEST` in implementation-lock.mjs, which owns this file's contract.
-const LOCKABLE_IMAGE = /^[A-Za-z0-9][A-Za-z0-9._/-]*:[A-Za-z0-9][A-Za-z0-9._-]*$/u;
-const MUTABLE_LATEST = /(?:^|[/:@])latest(?:$|[/:@])/iu;
 
 function isPlainRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -65,24 +78,16 @@ export const V11_PREREQUISITE_GATES = Object.freeze([
   Object.freeze({
     requirement: 'service-manifest',
     file: 'service-images.json',
-    // The canonical `services` array is what implementation-lock.mjs parses at
-    // this path; `serviceImages` is accepted for the older shape. An image must
-    // be a lockable repository reference - a repository plus an explicit,
-    // non-`latest` tag. Requiring an inline `@sha256:` digest here would be
-    // wrong: assertLockableImage refuses a reference containing '@', so such a
-    // manifest could satisfy readiness and still never produce a lock. Digests
-    // are operator-supplied run evidence; the manifest is the committed
-    // statement of which services must carry one.
+    // The implementation-lock parser owns the exact service identity grammar.
+    // A readiness gate must never accept a tag-only/index/config-ID shape that
+    // the lock or service-evidence verifier would later reject.
     isSatisfied: (value) => {
-      const services = Array.isArray(value?.services) ? value.services : value?.serviceImages;
-      return Array.isArray(services) && services.length > 0
-        && services.every((service) => (
-          isPlainRecord(service)
-          && typeof service.name === 'string' && service.name.length > 0
-          && typeof service.image === 'string'
-          && LOCKABLE_IMAGE.test(service.image)
-          && !MUTABLE_LATEST.test(service.image)
-        ));
+      try {
+        parseServiceManifestDocument(value);
+        return true;
+      } catch {
+        return false;
+      }
     }
   }),
   Object.freeze({
@@ -107,7 +112,7 @@ export async function readGateJson(filePath, readFileImpl = readFile) {
     return { state: 'unreadable' };
   }
   try {
-    return { state: 'present', value: JSON.parse(text) };
+    return { state: 'present', value: JSON.parse(text), text };
   } catch {
     return { state: 'malformed' };
   }
@@ -133,13 +138,57 @@ export async function computeV11Readiness(input) {
     registry,
     definition,
     scenarios,
+    nativeAttemptPolicy = null,
+    sourceHashes = null,
+    campaign = null,
     benchmarkRoot,
+    // An operator's unverified declaration that a precondition holds. Retained
+    // for the tests that drive applicability directly; the CLI never populates
+    // it, because a declaration is not a demonstration.
     satisfiedPreconditions = [],
-    readFileImpl = readFile
+    preconditionEvidencePath = null,
+    nativeAttemptEvidencePath = null,
+    serviceEvidencePath = null,
+    // A module-minted snapshot may be carried from the readiness decision into
+    // runtime binding. It is deliberately preferred over a path: reopening a
+    // mutable path would turn a passed preflight into a different evidence claim.
+    verifiedServiceEvidence = null,
+    liveServiceAttestation = null,
+    implementationLockHash = null,
+    // Deliberately not called `now`: elsewhere in this module `now` is the
+    // clock function a run is given, and freshness here is an instant, not a
+    // clock. One name for two types is how a run would end up handing a
+    // function to a comparison and getting a silent answer.
+    verificationInstant = Date.now(),
+    readFileImpl = readFile,
+    verifyCampaignLineage = verifyCampaignPolicyLineage,
+    assertRestrictedCampaignPolicy = assertRestrictedCampaignExecutionPolicy
   } = input;
 
+  // A precondition is met when a demonstration establishes it, not when someone
+  // says so. The declared side of that comparison comes from the registry and
+  // the lock, never from the record being checked.
+  const preconditionEvidenceGate = preconditionEvidencePath === null
+    ? { state: 'absent' }
+    : await readGateJson(preconditionEvidencePath, readFileImpl);
+  const preconditionEvidence = verifyPreconditionEvidence({
+    evidence: preconditionEvidenceGate.state === 'present' ? preconditionEvidenceGate.value : null,
+    declaredPreconditions: Object.fromEntries(registry.descriptors.map((descriptor) => [
+      descriptor.armId,
+      descriptor.isolation?.userNamespacePrecondition ?? null
+    ])),
+    pinnedPackages: Object.fromEntries(registry.descriptors.map((descriptor) => [
+      descriptor.armId,
+      { name: descriptor.packageName ?? null, version: descriptor.version ?? null }
+    ])),
+    now: verificationInstant
+  });
+
   const declared = Object.fromEntries(definition.arms.map((arm) => [arm.id, arm.applicability]));
-  const applicability = registry.verifyApplicability(declared, satisfiedPreconditions);
+  const applicability = registry.verifyApplicability(declared, [
+    ...satisfiedPreconditions,
+    ...preconditionEvidence.satisfiedPreconditions
+  ]);
   const derivedCounts = registry.expectedCounts({
     scenarios: scenarios.length,
     repetitions: definition.commonExecution.repetitions,
@@ -152,26 +201,74 @@ export async function computeV11Readiness(input) {
     .map((key) => ({ count: key, declared: declaredCounts[key], derived: derivedCounts[key] }));
 
   const blockers = [];
+  if (campaign === null) {
+    blockers.push({ kind: 'campaign', code: 'CAMPAIGN_CONFIGURATION_REQUIRED' });
+  } else {
+    const checkInstant = typeof verificationInstant === 'number'
+      ? verificationInstant
+      : Date.parse(verificationInstant);
+    if (campaign.policy?.deadline && Date.parse(campaign.policy.deadline) <= checkInstant) {
+      blockers.push({
+        kind: 'campaign',
+        code: 'CAMPAIGN_EXPIRED',
+        note: 'campaign deadline has expired'
+      });
+    }
+    if (definition?.finalProfile === true) {
+      try {
+        validateV11FinalProgramPolicy(campaign.policy, implementationLockHash);
+      } catch (error) {
+        blockers.push({
+          kind: 'campaign',
+          code: error.code ?? 'PROGRAM_BUDGET_MISMATCH',
+          note: error.message
+        });
+      }
+    }
+    const assertPolicy = input.assertCampaignPolicy ?? assertRestrictedCampaignPolicy;
+    const verifyLineage = input.verifyCampaignPolicyLineage ?? verifyCampaignLineage;
+    try {
+      assertPolicy(campaign.policy);
+      await verifyLineage(campaign.policy, {
+        currentLedgerPath: path.join(campaign.root, 'campaign.ndjson')
+      });
+    } catch (error) {
+      blockers.push({
+        kind: 'campaign',
+        code: /continuation is unsupported/u.test(String(error?.message))
+          ? 'CAMPAIGN_CONTINUATION_UNSUPPORTED'
+          : 'CAMPAIGN_CONTINUITY_INVALID'
+      });
+    }
+  }
+  let providerBudget = null;
+  try {
+    providerBudget = validateProviderBudget(input.providerBudget, {
+      runId: input.runId, attemptId: input.attemptId,
+      implementationLockHash: input.implementationLockHash
+    });
+  } catch (error) {
+    blockers.push({ kind: 'operational-budget', code: error.code, detail: error.message });
+  }
   for (const finding of applicability.findings) {
     blockers.push({ kind: 'applicability', ...finding });
   }
   for (const mismatch of countMismatches) {
     blockers.push({ kind: 'expected-counts', ...mismatch });
   }
-  for (const descriptor of registry.descriptors) {
-    if (descriptor.requiredService !== null) {
-      blockers.push({
-        kind: 'required-service',
-        armId: descriptor.armId,
-        service: descriptor.requiredService
-      });
-    }
-  }
+  // The prerequisite gates are read first because two of the files they check -
+  // the service manifest and the model weight lock - are also the committed
+  // baseline a service probe record is checked against. Reading them once means
+  // readiness cannot end up comparing evidence to one version of the manifest
+  // while reporting the gate against another.
+  const gateValues = new Map();
+  const prerequisiteBlockers = [];
   for (const { requirement, file, isSatisfied } of V11_PREREQUISITE_GATES) {
     const gate = await readGateJson(path.join(benchmarkRoot, file), readFileImpl);
+    gateValues.set(file, gate.state === 'present' ? gate.value : null);
     const reason = unmetReason(gate, isSatisfied);
     if (reason !== null) {
-      blockers.push({
+      prerequisiteBlockers.push({
         kind: 'immutable-prerequisite',
         requirement,
         detail: reason,
@@ -180,10 +277,177 @@ export async function computeV11Readiness(input) {
     }
   }
 
+  // A required service is cleared only by exact probe bytes that agree with the
+  // committed baselines. When a prior readiness decision supplies its trusted
+  // snapshot, never reopen the mutable operator-selected path.
+  let capturedServiceEvidence = verifiedServiceEvidence;
+  let serviceEvidence;
+  if (capturedServiceEvidence !== null) {
+    serviceEvidence = resolveVerifiedServiceEvidence({
+      snapshot: capturedServiceEvidence,
+      serviceManifest: gateValues.get('service-images.json'),
+      modelWeights: gateValues.get('model-weights.lock.json'),
+      now: verificationInstant
+    });
+  } else {
+    const serviceEvidenceGate = serviceEvidencePath === null
+      ? { state: 'absent' }
+      : await readGateJson(serviceEvidencePath, readFileImpl);
+    if (serviceEvidenceGate.state === 'present') {
+      try {
+        capturedServiceEvidence = captureVerifiedServiceEvidence({
+          evidenceText: serviceEvidenceGate.text,
+          serviceManifest: gateValues.get('service-images.json'),
+          modelWeights: gateValues.get('model-weights.lock.json'),
+          now: verificationInstant
+        });
+        serviceEvidence = resolveVerifiedServiceEvidence({
+          snapshot: capturedServiceEvidence,
+          serviceManifest: gateValues.get('service-images.json'),
+          modelWeights: gateValues.get('model-weights.lock.json'),
+          now: verificationInstant
+        });
+      } catch {
+        capturedServiceEvidence = null;
+        serviceEvidence = verifyServiceEvidence({
+          evidence: serviceEvidenceGate.value,
+          serviceManifest: gateValues.get('service-images.json'),
+          modelWeights: gateValues.get('model-weights.lock.json'),
+          now: verificationInstant
+        });
+      }
+    } else {
+      serviceEvidence = verifyServiceEvidence({
+        evidence: null,
+        serviceManifest: gateValues.get('service-images.json'),
+        modelWeights: gateValues.get('model-weights.lock.json'),
+        now: verificationInstant
+      });
+    }
+  }
+
+  if (definition?.finalProfile === true) {
+    let attestationValid = false;
+    if (liveServiceAttestation !== null && serviceEvidence?.evidenceSha256) {
+      try {
+        validateV11LiveServiceAttestation(liveServiceAttestation, serviceEvidence.evidenceSha256);
+        attestationValid = true;
+      } catch {
+        attestationValid = false;
+      }
+    }
+    if (!attestationValid) {
+      blockers.push({
+        kind: 'service-evidence',
+        code: 'SERVICE_LIVE_ATTESTATION_REQUIRED',
+        note: 'live service attestation is required for final execution'
+      });
+    }
+  }
+
+  let nativeAttemptEvidence = null;
+  let normalizedNativeAttemptPolicy = null;
+  if (nativeAttemptPolicy !== null) {
+    const nativeEvidenceGate = nativeAttemptEvidencePath === null
+      ? { state: 'absent' }
+      : await readGateJson(nativeAttemptEvidencePath, readFileImpl);
+    try {
+      normalizedNativeAttemptPolicy = validateNativeAttemptPolicy(nativeAttemptPolicy);
+      const nativeProbeReports = nativeEvidenceGate.state === 'present'
+        ? await loadNativeAttemptProbeReports({
+          evidencePath: nativeAttemptEvidencePath,
+          evidence: nativeEvidenceGate.value
+        })
+        : new Map();
+      const pinnedModels = providerModelsFromLock(gateValues.get('model-weights.lock.json'));
+      nativeAttemptEvidence = verifyNativeAttemptEvidence({
+        evidence: nativeEvidenceGate.state === 'present' ? nativeEvidenceGate.value : null,
+        policy: nativeAttemptPolicy,
+        amendment006Sha256: sourceHashes?.amendment006Sha256,
+        amendment008Sha256: sourceHashes?.amendment008Sha256,
+        pinnedPackages: Object.fromEntries(registry.descriptors.map((descriptor) => [
+          descriptor.armId,
+          { name: descriptor.packageName ?? null, version: descriptor.version ?? null }
+        ])),
+        pinnedModels,
+        probeReports: nativeProbeReports,
+        now: verificationInstant
+      });
+    } catch {
+      nativeAttemptEvidence = Object.freeze({
+        satisfiedRecoveries: new Set(),
+        findings: Object.freeze([{ code: 'NATIVE_ATTEMPT_EVIDENCE_CONTEXT_INVALID' }]),
+        note: 'the native-attempt policy or committed runtime pins could not be verified'
+      });
+    }
+    for (const [armId, recovery] of normalizedNativeAttemptPolicy?.policies ?? []) {
+      for (const [requestClass, categories] of Object.entries(recovery)) {
+        for (const category of categories) {
+          const key = `${armId}\u001f${requestClass}\u001f${category}`;
+          if (nativeAttemptEvidence.satisfiedRecoveries.has(key)) continue;
+          blockers.push({
+            kind: 'native-attempt-evidence',
+            code: 'NATIVE_ATTEMPT_EVIDENCE_REQUIRED',
+            armId,
+            requestClass,
+            category,
+            note: nativeAttemptEvidence.note
+          });
+        }
+      }
+    }
+    if (normalizedNativeAttemptPolicy === null) {
+      blockers.push({
+        kind: 'native-attempt-evidence',
+        code: 'NATIVE_ATTEMPT_POLICY_INVALID',
+        note: nativeAttemptEvidence.note
+      });
+    }
+  }
+
+  for (const descriptor of registry.descriptors) {
+    if (descriptor.requiredService === null) continue;
+    const unverified = descriptor.requiredServiceNames
+      .filter((name) => !serviceEvidence.verifiedServices.has(name));
+    if (unverified.length === 0) continue;
+    blockers.push({
+      kind: 'required-service',
+      armId: descriptor.armId,
+      service: descriptor.requiredService,
+      unverified,
+      note: serviceEvidence.note
+    });
+  }
+  blockers.push(...prerequisiteBlockers);
+
   return {
     applicability,
+    providerBudget,
     declaredCounts,
     derivedCounts,
+    preconditionEvidence: {
+      satisfiedPreconditions: [...preconditionEvidence.satisfiedPreconditions].sort(),
+      findings: preconditionEvidence.findings,
+      note: preconditionEvidence.note
+    },
+    nativeAttemptEvidence: nativeAttemptEvidence === null ? {
+      satisfiedRecoveries: [],
+      findings: [],
+      note: 'no native recovery policy was supplied to this direct readiness call'
+    } : {
+      satisfiedRecoveries: [...nativeAttemptEvidence.satisfiedRecoveries].sort(),
+      findings: nativeAttemptEvidence.findings,
+      note: nativeAttemptEvidence.note
+    },
+    serviceEvidence: {
+      evidenceSha256: serviceEvidence.evidenceSha256 ?? null,
+      verifiedServices: [...serviceEvidence.verifiedServices].sort(),
+      findings: serviceEvidence.findings,
+      note: serviceEvidence.note
+    },
+    // Not rendered by the CLI preflight report. The run path consumes this
+    // module-minted snapshot instead of reopening --service-evidence.
+    verifiedServiceEvidence: serviceEvidence.evidenceSha256 === null ? null : capturedServiceEvidence,
     readiness: blockers.length === 0 ? 'READY' : 'NOT READY',
     blockers
   };
@@ -197,11 +461,36 @@ export async function computeV11Readiness(input) {
  * host that happens to be available - running an arm on a runtime the lock does
  * not describe would report a measurement of software nobody pinned.
  */
+const PHASE_E_OPERATION_SLOTS = Object.freeze({
+  persist: Object.freeze(['setupPersist', 'persist']),
+  verify: Object.freeze(['setupVerify', 'verify']),
+  retrieve: Object.freeze(['retrieve']),
+  reset: Object.freeze(['reset'])
+});
+
 export function createV11AdapterExecutor(input) {
   const { registry, hosts } = input;
   if (!isPlainRecord(hosts)) {
     throw new V11RunError('CONTRACT_FAILURE', 'adapter hosts must be an object');
   }
+  const measuredRoots = new Set();
+  const measuredRootKey = (request, slot) => {
+    if (!isPlainRecord(request)) return null;
+    const fields = ['runId', 'attemptId', 'armId', 'scenarioId', 'phase', 'operation'];
+    if (fields.some((field) => (
+      typeof request[field] !== 'string' || request[field].trim().length === 0
+    ))
+      || !Number.isSafeInteger(request.repetition) || request.repetition < 0) {
+      return null;
+    }
+    const parts = [...fields.slice(0, 4), 'repetition', fields[4], fields[5], String(slot)];
+    return parts
+      .map((part) => {
+        const value = part === 'repetition' ? String(request.repetition) : (part === String(slot) ? String(slot) : String(request[part]));
+        return `${value.length}:${value}`;
+      })
+      .join('|');
+  };
   const byArm = new Map();
   for (const descriptor of registry.descriptors) {
     const host = hosts[descriptor.kind];
@@ -215,11 +504,31 @@ export function createV11AdapterExecutor(input) {
   }
 
   return async function executeAdapter(request, options) {
+    if (request?.phase === 'E') {
+      const validSlots = PHASE_E_OPERATION_SLOTS[request.operation];
+      const slot = options?.operationSlot;
+      if (!validSlots || typeof slot !== 'string' || !validSlots.includes(slot)) {
+        throw new V11RunError('HARNESS_OPERATION_SLOT_INVALID', `Phase E ${request.operation} requires a valid operationSlot`);
+      }
+    } else {
+      if (options?.operationSlot !== undefined && options.operationSlot !== request?.operation) {
+        throw new V11RunError('HARNESS_OPERATION_SLOT_INVALID', `Operation slot ${options.operationSlot} is invalid for phase ${request?.phase}`);
+      }
+    }
+    const slot = options?.operationSlot ?? request?.operation;
+    const root = measuredRootKey(request, slot);
+    if (root !== null) {
+      if (measuredRoots.has(root)) {
+        throw new V11RunError('HARNESS_OPERATION_REEXECUTION', 'A measured adapter root operation may be invoked only once');
+      }
+      measuredRoots.add(root);
+    }
     const execute = byArm.get(request.armId);
     if (execute === undefined) {
       throw new V11RunError('RUNTIME_UNAVAILABLE', `no runtime is bound to arm ${request.armId}`);
     }
-    return await execute(request, options);
+    const { operationSlot, ...forwardOptions } = options ?? {};
+    return await execute(request, forwardOptions);
   };
 }
 
@@ -237,8 +546,15 @@ export async function executeV11AcceptanceRun(input) {
     registry,
     definition,
     scenarios,
+    nativeAttemptPolicy = null,
     benchmarkRoot,
     satisfiedPreconditions = [],
+    preconditionEvidencePath = null,
+    nativeAttemptEvidencePath = null,
+    serviceEvidencePath = null,
+    verifiedServiceEvidence = null,
+    liveServiceAttestation = null,
+    verificationInstant = undefined,
     runId,
     attemptId,
     executeAdapter,
@@ -252,10 +568,39 @@ export async function executeV11AcceptanceRun(input) {
     implementationLockHash,
     environmentLockHash,
     amendment002Path,
+    amendment003Path,
+    amendment004Path,
+    amendment005Path,
+    amendment005SidecarPath,
+    amendment006Path,
+    amendment006SidecarPath,
+    amendment008Path,
+    amendment008SidecarPath,
+    amendment009Path = undefined,
+    amendment009SidecarPath = undefined,
     resume = null,
     signal = undefined,
+    // A production run owns a provider meter and two ledgers. The runner already
+    // knows how to close them at the right moment - after the plan loop and
+    // before the terminal progress event - but this function did not forward the
+    // hook, so the only place left to close them was the caller's `finally`,
+    // i.e. after the run record had already been written. A provider ledger that
+    // is still being appended to when the run declares itself COMPLETE is not
+    // evidence of that run.
+    closeResources = undefined,
+    heartbeatIntervalMs = undefined,
+    // The run's own provider evidence, judged before the run is reported.
+    //
+    // Required rather than optional, and called here rather than by the
+    // caller, for the reason the reconciliation exists at all: the meter wrote
+    // a ledger on every run and nothing read it back, so three of the
+    // reconciler's discrepancy codes were unreachable in production. Making it
+    // the caller's step would leave the same hole one level up - a review
+    // deleted exactly that call from the CLI and the whole suite stayed green.
+    reconcileProviderEvidence,
     readFileImpl = readFile
   } = input;
+
 
   // A real run uses the one prompt builder this methodology defines. Nothing
   // else may be substituted here.
@@ -282,11 +627,26 @@ export async function executeV11AcceptanceRun(input) {
   }
 
   const readinessReport = await computeV11Readiness({
+    providerBudget: input.providerBudget,
+    runId,
+    attemptId,
+    implementationLockHash,
     registry,
     definition,
     scenarios,
+    nativeAttemptPolicy,
+    sourceHashes,
+    campaign: input.campaign ?? null,
+    verifyCampaignLineage: input.verifyCampaignLineage,
+    assertRestrictedCampaignPolicy: input.assertRestrictedCampaignPolicy,
     benchmarkRoot,
     satisfiedPreconditions,
+    preconditionEvidencePath,
+    nativeAttemptEvidencePath,
+    serviceEvidencePath,
+    verifiedServiceEvidence,
+    liveServiceAttestation,
+    verificationInstant,
     readFileImpl
   });
   if (readinessReport.readiness !== 'READY') {
@@ -294,6 +654,13 @@ export async function executeV11AcceptanceRun(input) {
       new V11RunError('NOT_READY', 'The v1.1 candidate is not ready to execute an acceptance run'),
       { readiness: readinessReport }
     );
+  }
+
+  // After the readiness refusal, so a blocked candidate still refuses by name,
+  // and before the plan loop, so a run cannot execute 308 units and only then
+  // discover it has no way to judge its own provider traffic.
+  if (typeof reconcileProviderEvidence !== 'function') {
+    throw new Error('a v1.1 acceptance run must reconcile its own provider evidence');
   }
 
   const raw = await runV11Benchmark({
@@ -311,9 +678,25 @@ export async function executeV11AcceptanceRun(input) {
     preregistrationSha256: sourceHashes.preregistrationSha256,
     amendment001Sha256: sourceHashes.amendment001Sha256,
     amendment002Sha256: sourceHashes.amendment002Sha256,
+    amendment003Sha256: sourceHashes.amendment003Sha256,
+    amendment004Sha256: sourceHashes.amendment004Sha256,
+    amendment005Sha256: sourceHashes.amendment005Sha256,
+    amendment006Sha256: sourceHashes.amendment006Sha256,
+    amendment008Sha256: sourceHashes.amendment008Sha256,
+    ...(sourceHashes.amendment009Sha256 !== undefined ? { amendment009Sha256: sourceHashes.amendment009Sha256 } : {}),
     implementationLockHash,
     environmentLockHash,
     amendment002Path,
+    amendment003Path,
+    amendment004Path,
+    amendment005Path,
+    amendment005SidecarPath,
+    amendment006Path,
+    amendment006SidecarPath,
+    amendment008Path,
+    amendment008SidecarPath,
+    amendment009Path,
+    amendment009SidecarPath,
     progress,
     persistUnit,
     now,
@@ -322,8 +705,17 @@ export async function executeV11AcceptanceRun(input) {
     buildOuterRequest,
     requestOuter,
     ...(resume === null ? {} : { resume }),
-    ...(signal === undefined ? {} : { signal })
+    ...(signal === undefined ? {} : { signal }),
+    ...(closeResources === undefined ? {} : { closeResources }),
+    ...(heartbeatIntervalMs === undefined ? {} : { heartbeatIntervalMs })
   });
+
+  // Reconcile provider evidence before aggregation so aggregateRun observes it.
+  const providerEvidence = await reconcileProviderEvidence(raw);
+  if (providerEvidence === null || typeof providerEvidence !== 'object'
+    || typeof providerEvidence.status !== 'string') {
+    throw new Error('provider evidence reconciliation must report a status');
+  }
 
   // The validator and the aggregator take the resolved plan, not the acceptance
   // file: on disk `definition.scenarios` is a path and a digest, and the run
@@ -338,10 +730,215 @@ export async function executeV11AcceptanceRun(input) {
       repetitions: definition.commonExecution.repetitions,
       randomSeeds: [...definition.commonExecution.randomSeeds]
     },
-    scenarios: structuredClone(scenarios)
+    scenarios: structuredClone(scenarios),
+    marketingThresholds: definition.marketingThresholds
   };
-  const validation = validateRawRun(raw, resolvedDefinition, sourceHashes.preregistrationSha256);
+  const validation = validateRawRun(
+    raw,
+    resolvedDefinition,
+    sourceHashes.preregistrationSha256,
+    sourceHashes
+  );
   const aggregate = aggregateRun(raw, resolvedDefinition, { trustedSourceHashes: sourceHashes });
 
-  return { readiness: readinessReport, raw, validation, aggregate };
+  return { readiness: readinessReport, raw, validation, aggregate, providerEvidence };
+}
+
+export async function executeV11FinalAcceptanceRun(input) {
+  const outcome = await executeV11AcceptanceRun(input);
+  const acceptanceEligibility = issueV11AcceptanceEligibility({
+    raw: outcome.raw,
+    providerReconciliation: outcome.providerEvidence,
+    definition: {
+      ...input.definition,
+      scenarios: input.scenarios ?? input.definition.scenarios
+    },
+    sourceHashes: input.sourceHashes
+  });
+  return {
+    ...outcome,
+    acceptanceEligibility
+  };
+}
+
+export async function executeV11ScoredRun(input) {
+  if (input.definition?.scored !== true) {
+    throw new V11RunError('PROFILE_MODE_MISMATCH', 'scored execution requires the scored profile definition');
+  }
+  if (!input.acceptanceEligibility || !input.nativeAttemptPolicy) {
+    throw new V11RunError('ACCEPTANCE_GATE_REQUIRED', 'acceptance eligibility and native attempt policy are required');
+  }
+  try {
+    validateV11AcceptanceEligibility(input.acceptanceEligibility, {
+      implementationLockHash: input.implementationLockHash,
+      amendment009Sha256: input.sourceHashes?.amendment009Sha256
+    });
+  } catch (err) {
+    throw new V11RunError('ACCEPTANCE_GATE_REQUIRED', err.message);
+  }
+
+  const {
+    registry,
+    definition,
+    scenarios,
+    nativeAttemptPolicy = null,
+    benchmarkRoot,
+    satisfiedPreconditions = [],
+    preconditionEvidencePath = null,
+    nativeAttemptEvidencePath = null,
+    serviceEvidencePath = null,
+    verifiedServiceEvidence = null,
+    liveServiceAttestation = null,
+    verificationInstant = undefined,
+    runId,
+    attemptId,
+    executeAdapter,
+    buildOuterRequest,
+    requestOuter,
+    progress,
+    persistUnit,
+    now,
+    monotonicNow,
+    sourceHashes,
+    implementationLockHash,
+    environmentLockHash,
+    amendment002Path,
+    amendment003Path,
+    amendment004Path,
+    amendment005Path,
+    amendment005SidecarPath,
+    amendment006Path,
+    amendment006SidecarPath,
+    amendment008Path,
+    amendment008SidecarPath,
+    amendment009Path = undefined,
+    amendment009SidecarPath = undefined,
+    resume = null,
+    signal = undefined,
+    closeResources = undefined,
+    heartbeatIntervalMs = undefined,
+    reconcileProviderEvidence,
+    readFileImpl = readFile
+  } = input;
+
+  if (buildOuterRequest !== buildV11Prompt) {
+    throw new V11RunError(
+      'NON_CANONICAL_PROMPT_BUILDER',
+      'a scored run may only use the frozen v1.1 prompt builder'
+    );
+  }
+
+  const readinessReport = await computeV11Readiness({
+    providerBudget: input.providerBudget,
+    runId,
+    attemptId,
+    implementationLockHash,
+    registry,
+    definition,
+    scenarios,
+    nativeAttemptPolicy,
+    sourceHashes,
+    campaign: input.campaign ?? null,
+    verifyCampaignLineage: input.verifyCampaignLineage,
+    assertRestrictedCampaignPolicy: input.assertRestrictedCampaignPolicy,
+    benchmarkRoot,
+    satisfiedPreconditions,
+    preconditionEvidencePath,
+    nativeAttemptEvidencePath,
+    serviceEvidencePath,
+    verifiedServiceEvidence,
+    liveServiceAttestation,
+    verificationInstant,
+    readFileImpl
+  });
+  if (readinessReport.readiness !== 'READY') {
+    throw Object.assign(
+      new V11RunError('NOT_READY', 'The v1.1 candidate is not ready to execute a scored run'),
+      { readiness: readinessReport }
+    );
+  }
+
+  if (typeof reconcileProviderEvidence !== 'function') {
+    throw new Error('a v1.1 scored run must reconcile its own provider evidence');
+  }
+
+  const raw = await runV11Benchmark({
+    runId,
+    attemptId,
+    scored: true,
+    acceptanceEligibility: input.acceptanceEligibility,
+    arms: definition.arms.map(({ id, name, applicability }) => ({
+      id,
+      name,
+      applicability: structuredClone(applicability)
+    })),
+    scenarios: structuredClone(scenarios),
+    repetitions: definition.commonExecution.repetitions,
+    seeds: [...definition.commonExecution.randomSeeds],
+    preregistrationSha256: sourceHashes.preregistrationSha256,
+    amendment001Sha256: sourceHashes.amendment001Sha256,
+    amendment002Sha256: sourceHashes.amendment002Sha256,
+    amendment003Sha256: sourceHashes.amendment003Sha256,
+    amendment004Sha256: sourceHashes.amendment004Sha256,
+    amendment005Sha256: sourceHashes.amendment005Sha256,
+    amendment006Sha256: sourceHashes.amendment006Sha256,
+    amendment008Sha256: sourceHashes.amendment008Sha256,
+    ...(sourceHashes.amendment009Sha256 !== undefined ? { amendment009Sha256: sourceHashes.amendment009Sha256 } : {}),
+    implementationLockHash,
+    environmentLockHash,
+    amendment002Path,
+    amendment003Path,
+    amendment004Path,
+    amendment005Path,
+    amendment005SidecarPath,
+    amendment006Path,
+    amendment006SidecarPath,
+    amendment008Path,
+    amendment008SidecarPath,
+    amendment009Path,
+    amendment009SidecarPath,
+    progress,
+    persistUnit,
+    now,
+    monotonicNow,
+    executeAdapter,
+    buildOuterRequest,
+    requestOuter,
+    ...(resume === null ? {} : { resume }),
+    ...(signal === undefined ? {} : { signal }),
+    ...(closeResources === undefined ? {} : { closeResources }),
+    ...(heartbeatIntervalMs === undefined ? {} : { heartbeatIntervalMs })
+  });
+
+  const providerEvidence = await reconcileProviderEvidence(raw);
+  if (providerEvidence === null || typeof providerEvidence !== 'object'
+    || typeof providerEvidence.status !== 'string') {
+    throw new Error('provider evidence reconciliation must report a status');
+  }
+
+  const resolvedDefinition = {
+    arms: definition.arms.map(({ id, name, applicability }) => ({
+      id,
+      name,
+      applicability: structuredClone(applicability)
+    })),
+    commonExecution: {
+      repetitions: definition.commonExecution.repetitions,
+      randomSeeds: [...definition.commonExecution.randomSeeds]
+    },
+    scenarios: structuredClone(scenarios),
+    marketingThresholds: definition.marketingThresholds
+  };
+  const validation = validateRawRun(
+    raw,
+    resolvedDefinition,
+    sourceHashes.preregistrationSha256,
+    sourceHashes
+  );
+  const aggregate = aggregateRun(raw, resolvedDefinition, {
+    trustedSourceHashes: sourceHashes,
+    providerReconciliation: providerEvidence
+  });
+
+  return { readiness: readinessReport, raw, validation, aggregate, providerEvidence };
 }

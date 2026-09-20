@@ -28,6 +28,18 @@ const FILE_SPECS = Object.freeze([
   { role: 'amendment_001_sidecar', path: 'benchmark/preregistration-amendment-001.sha256' },
   { role: 'amendment_002', path: 'benchmark/preregistration-amendment-002.json' },
   { role: 'amendment_002_sidecar', path: 'benchmark/preregistration-amendment-002.sha256' },
+  { role: 'amendment_003', path: 'benchmark/preregistration-amendment-003.json' },
+  { role: 'amendment_003_sidecar', path: 'benchmark/preregistration-amendment-003.sha256' },
+  { role: 'amendment_004', path: 'benchmark/preregistration-amendment-004.json' },
+  { role: 'amendment_004_sidecar', path: 'benchmark/preregistration-amendment-004.sha256' },
+  { role: 'amendment_005', path: 'benchmark/preregistration-amendment-005.json' },
+  { role: 'amendment_005_sidecar', path: 'benchmark/preregistration-amendment-005.sha256' },
+  { role: 'amendment_006', path: 'benchmark/preregistration-amendment-006.json' },
+  { role: 'amendment_006_sidecar', path: 'benchmark/preregistration-amendment-006.sha256' },
+  { role: 'amendment_008', path: 'benchmark/preregistration-amendment-008.json' },
+  { role: 'amendment_008_sidecar', path: 'benchmark/preregistration-amendment-008.sha256' },
+  { role: 'amendment_009', path: 'benchmark/preregistration-amendment-009.json' },
+  { role: 'amendment_009_sidecar', path: 'benchmark/preregistration-amendment-009.sha256' },
   { role: 'runner', path: 'benchmark/lib/v11-runner.mjs' },
   { role: 'validator', path: 'benchmark/lib/validate.mjs' },
   { role: 'aggregator', path: 'benchmark/lib/aggregate.mjs' },
@@ -79,18 +91,88 @@ const MODELS = Object.freeze([
 
 // The committed service manifest is the ground truth for which services must
 // carry a digest; these declarations must cover it exactly.
+const FIXTURE_NEO4J_ATTESTATION = rawRegistryAttestation({
+  repository: 'library/neo4j',
+  tag: '5.26.0'
+});
+const FIXTURE_QDRANT_ATTESTATION = rawRegistryAttestation({
+  repository: 'qdrant/qdrant',
+  tag: 'v1.12.4'
+});
+
 const MANIFEST_SERVICES = Object.freeze([
-  Object.freeze({ name: 'fixture-neo4j', image: 'neo4j:5.26.0' }),
-  Object.freeze({ name: 'fixture-qdrant', image: 'qdrant/qdrant:v1.12.4' })
+  Object.freeze({
+    name: 'fixture-neo4j', image: 'neo4j:5.26.0', digest: FIXTURE_NEO4J_ATTESTATION.digest,
+    digestKind: 'oci-platform-manifest', platform: 'linux/amd64',
+    registryAttestation: FIXTURE_NEO4J_ATTESTATION.registryAttestation
+  }),
+  Object.freeze({
+    name: 'fixture-qdrant', image: 'qdrant/qdrant:v1.12.4', digest: FIXTURE_QDRANT_ATTESTATION.digest,
+    digestKind: 'oci-platform-manifest', platform: 'linux/amd64',
+    registryAttestation: FIXTURE_QDRANT_ATTESTATION.registryAttestation
+  })
 ]);
 
 const SERVICE_IMAGES = Object.freeze([
-  Object.freeze({ name: 'fixture-neo4j', image: 'neo4j:5.26.0', digest: `sha256:${'c'.repeat(64)}` }),
-  Object.freeze({ name: 'fixture-qdrant', image: 'qdrant/qdrant:v1.12.4', digest: `sha256:${'d'.repeat(64)}` })
+  Object.freeze({
+    name: 'fixture-neo4j', image: 'neo4j:5.26.0', digest: FIXTURE_NEO4J_ATTESTATION.digest
+  }),
+  Object.freeze({
+    name: 'fixture-qdrant', image: 'qdrant/qdrant:v1.12.4', digest: FIXTURE_QDRANT_ATTESTATION.digest
+  })
 ]);
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function rawRegistryAttestation({
+  repository,
+  tag,
+  mediaType = 'application/vnd.oci.image.manifest.v1+json',
+  mutateIndex = () => {},
+  mutateManifest = () => {}
+}) {
+  const platformManifest = {
+    schemaVersion: 2,
+    mediaType,
+    config: {
+      mediaType: 'application/vnd.oci.image.config.v1+json',
+      digest: `sha256:${'a'.repeat(64)}`,
+      size: 1
+    },
+    layers: [{
+      mediaType: 'application/vnd.oci.image.layer.v1.tar+gzip',
+      digest: `sha256:${'b'.repeat(64)}`,
+      size: 1
+    }]
+  };
+  mutateManifest(platformManifest);
+  const platformManifestBytes = Buffer.from(JSON.stringify(platformManifest));
+  const digest = `sha256:${sha256(platformManifestBytes)}`;
+  const indexDocument = {
+    schemaVersion: 2,
+    mediaType: 'application/vnd.oci.image.index.v1+json',
+    manifests: [{
+      mediaType,
+      digest,
+      size: platformManifestBytes.length,
+      platform: { os: 'linux', architecture: 'amd64' }
+    }]
+  };
+  mutateIndex(indexDocument);
+  const indexBytes = Buffer.from(JSON.stringify(indexDocument));
+  return Object.freeze({
+    digest,
+    registryAttestation: Object.freeze({
+      registry: 'registry-1.docker.io',
+      repository,
+      tag,
+      indexDigest: `sha256:${sha256(indexBytes)}`,
+      indexBase64: indexBytes.toString('base64'),
+      platformManifestBase64: platformManifestBytes.toString('base64')
+    })
+  });
 }
 
 async function temporaryDirectory(t, prefix = 'shadowgraph-lock-') {
@@ -98,13 +180,35 @@ async function temporaryDirectory(t, prefix = 'shadowgraph-lock-') {
   return directory;
 }
 
+const GIT_REPOSITORY_SELECTORS = Object.freeze([
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_COMMON_DIR',
+  'GIT_INDEX_FILE',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_CEILING_DIRECTORIES'
+]);
+
+function environmentWithoutGitSelectors(base = process.env) {
+  const environment = { ...base };
+  for (const key of GIT_REPOSITORY_SELECTORS) delete environment[key];
+  return environment;
+}
+
+async function independentGit(repository, args) {
+  return execFile('git', ['-C', repository, ...args], {
+    env: environmentWithoutGitSelectors()
+  });
+}
+
 async function git(repository, args, { date = FIXTURE_DATE } = {}) {
   return execFile('git', ['-C', repository, ...args], {
-    env: {
+    env: environmentWithoutGitSelectors({
       ...process.env,
       GIT_AUTHOR_DATE: date,
       GIT_COMMITTER_DATE: date
-    }
+    })
   });
 }
 
@@ -126,7 +230,7 @@ async function writeRepositoryFile(repository, portablePath, content) {
 function serviceManifestBytes(services, overrides = {}) {
   return `${JSON.stringify({
     schema: 'shadowgraph.service-images',
-    version: 1,
+    version: 3,
     services,
     ...overrides
   }, null, 2)}\n`;
@@ -141,7 +245,8 @@ function fixtureInput(repository) {
     repoRoot: repository,
     files: FILE_SPECS.map((entry) => ({ ...entry })),
     models: MODELS.map((entry) => ({ ...entry })),
-    serviceImages: SERVICE_IMAGES.map((entry) => ({ ...entry }))
+    serviceImages: SERVICE_IMAGES.map((entry) => ({ ...entry })),
+    serviceEvidenceSha256: 'c'.repeat(64)
   };
 }
 
@@ -153,7 +258,7 @@ async function createFixture(t) {
   const base = await temporaryDirectory(t);
   const repository = path.join(base, 'repo');
   await mkdir(repository, { recursive: true });
-  await execFile('git', ['-C', repository, 'init', '--quiet']);
+  await independentGit(repository, ['init', '--quiet']);
 
   const primaryFiles = new Map([
     ['.gitattributes', '* -text\n'],
@@ -162,6 +267,12 @@ async function createFixture(t) {
     ['benchmark/preregistration.json', '{"fixture":"preregistration"}\n'],
     ['benchmark/preregistration-amendment-001.json', '{"fixture":"amendment-001"}\n'],
     ['benchmark/preregistration-amendment-002.json', '{"fixture":"amendment-002"}\n'],
+    ['benchmark/preregistration-amendment-003.json', '{"fixture":"amendment-003"}\n'],
+    ['benchmark/preregistration-amendment-004.json', '{"fixture":"amendment-004"}\n'],
+    ['benchmark/preregistration-amendment-005.json', '{"fixture":"amendment-005"}\n'],
+    ['benchmark/preregistration-amendment-006.json', '{"fixture":"amendment-006"}\n'],
+    ['benchmark/preregistration-amendment-008.json', '{"fixture":"amendment-008"}\n'],
+    ['benchmark/preregistration-amendment-009.json', '{"fixture":"amendment-009"}\n'],
     ['benchmark/lib/v11-runner.mjs', 'export const fixtureRunner = true;\n'],
     ['benchmark/lib/validate.mjs', 'export const fixtureValidator = true;\n'],
     ['benchmark/lib/aggregate.mjs', 'export const fixtureAggregator = true;\n'],
@@ -208,6 +319,36 @@ async function createFixture(t) {
       'benchmark/preregistration-amendment-002.sha256',
       'benchmark/preregistration-amendment-002.json',
       'preregistration-amendment-002.json'
+    ],
+    [
+      'benchmark/preregistration-amendment-003.sha256',
+      'benchmark/preregistration-amendment-003.json',
+      'benchmark/preregistration-amendment-003.json'
+    ],
+    [
+      'benchmark/preregistration-amendment-004.sha256',
+      'benchmark/preregistration-amendment-004.json',
+      'preregistration-amendment-004.json'
+    ],
+    [
+      'benchmark/preregistration-amendment-005.sha256',
+      'benchmark/preregistration-amendment-005.json',
+      'preregistration-amendment-005.json'
+    ],
+    [
+      'benchmark/preregistration-amendment-006.sha256',
+      'benchmark/preregistration-amendment-006.json',
+      'preregistration-amendment-006.json'
+    ],
+    [
+      'benchmark/preregistration-amendment-008.sha256',
+      'benchmark/preregistration-amendment-008.json',
+      'preregistration-amendment-008.json'
+    ],
+    [
+      'benchmark/preregistration-amendment-009.sha256',
+      'benchmark/preregistration-amendment-009.json',
+      'benchmark/preregistration-amendment-009.json'
     ]
   ];
   for (const [sidecarPath, targetPath, recordedPath] of sidecars) {
@@ -218,6 +359,48 @@ async function createFixture(t) {
   await commitAll(repository, 'fixture baseline');
   return { base, repository, input: fixtureInput(repository) };
 }
+
+test('fixture Git commands cannot inherit a caller repository selector', async (t) => {
+  const sentinelBase = await temporaryDirectory(t, 'shadowgraph-lock-git-selector-');
+  const sentinel = path.join(sentinelBase, 'sentinel');
+  await mkdir(sentinel, { recursive: true });
+  await independentGit(sentinel, ['init', '--quiet']);
+  await writeRepositoryFile(sentinel, 'sentinel.txt', 'unchanged\n');
+  await independentGit(sentinel, ['add', '--all']);
+  await independentGit(sentinel, [
+    '-c', 'user.name=Sentinel Fixture',
+    '-c', 'user.email=sentinel@example.invalid',
+    'commit', '--quiet', '--no-gpg-sign', '-m', 'sentinel baseline'
+  ]);
+  const sentinelHead = String((await independentGit(sentinel, ['rev-parse', 'HEAD'])).stdout).trim();
+
+  const before = Object.fromEntries(GIT_REPOSITORY_SELECTORS.map((key) => [key, process.env[key]]));
+  try {
+    process.env.GIT_DIR = path.join(sentinel, '.git');
+    process.env.GIT_WORK_TREE = sentinel;
+    for (const key of GIT_REPOSITORY_SELECTORS) {
+      if (key !== 'GIT_DIR' && key !== 'GIT_WORK_TREE') delete process.env[key];
+    }
+    let fixture = null;
+    let fixtureError = null;
+    try {
+      fixture = await createFixture(t);
+    } catch (error) {
+      fixtureError = error;
+    }
+    assert.equal(fixtureError, null, 'fixture must create and commit its own repository');
+    const fixtureHead = String((await independentGit(fixture.repository, ['rev-parse', 'HEAD'])).stdout).trim();
+    assert.match(fixtureHead, /^[a-f0-9]{40}$/u);
+  } finally {
+    for (const key of GIT_REPOSITORY_SELECTORS) {
+      if (before[key] === undefined) delete process.env[key];
+      else process.env[key] = before[key];
+    }
+  }
+
+  const sentinelAfter = String((await independentGit(sentinel, ['rev-parse', 'HEAD'])).stdout).trim();
+  assert.equal(sentinelAfter, sentinelHead, 'fixture Git must not move caller-selected repository HEAD');
+});
 
 function replaceModel(input, kind, replacement) {
   return {
@@ -232,7 +415,9 @@ test('lock is deterministic, comprehensive, path-portable, and verifies in a byt
 
   const cloneBase = await temporaryDirectory(t, 'shadowgraph-lock-clone-');
   const clone = path.join(cloneBase, 'repo-copy');
-  await execFile('git', ['clone', '--quiet', '--no-local', fixture.repository, clone]);
+  await execFile('git', ['clone', '--quiet', '--no-local', fixture.repository, clone], {
+    env: environmentWithoutGitSelectors()
+  });
   const cloneInput = fixtureInput(clone);
   cloneInput.files.reverse();
   cloneInput.models.reverse();
@@ -241,7 +426,8 @@ test('lock is deterministic, comprehensive, path-portable, and verifies in a byt
   const clonedLock = await createImplementationLock(cloneInput);
   assert.deepEqual(clonedLock, lock, 'input order and clone path must not change the lock');
   assert.equal(lock.schema, 'shadowgraph.implementation-lock');
-  assert.equal(lock.version, 2);
+  assert.equal(lock.version, 3);
+  assert.equal(lock.serviceEvidenceSha256, fixture.input.serviceEvidenceSha256);
   assert.match(lock.repository.headCommit, /^[a-f0-9]{40,64}$/u);
   assert.match(lock.lockSha256, /^[a-f0-9]{64}$/u);
   assert.deepEqual(new Set(lock.files.map((entry) => entry.role)), new Set(FILE_SPECS.map((entry) => entry.role)));
@@ -507,6 +693,18 @@ test('verification fails closed for changed bytes, changed evidence, and lock ta
     /does not match/i
   );
 
+  const changedEvidenceHash = { ...fixture.input, serviceEvidenceSha256: 'd'.repeat(64) };
+  const evidenceBoundLock = await createImplementationLock(changedEvidenceHash);
+  assert.notEqual(evidenceBoundLock.lockSha256, currentLock.lockSha256,
+    'a distinct verified service-evidence byte hash must produce a distinct official lock');
+  await assert.rejects(
+    verifyImplementationLock({ ...changedEvidenceHash, lock: currentLock }),
+    /does not match/i
+  );
+  const missingEvidenceHash = { ...fixture.input };
+  delete missingEvidenceHash.serviceEvidenceSha256;
+  await assert.rejects(createImplementationLock(missingEvidenceHash), /serviceEvidenceSha256|input/i);
+
   const tampered = structuredClone(currentLock);
   tampered.files[0].sha256 = 'f'.repeat(64);
   await assert.rejects(
@@ -630,6 +828,209 @@ test('model identities require complete immutable weight evidence for exactly bo
   await assert.rejects(createImplementationLock(duplicated), /duplicate.*decision_llm/i);
 });
 
+test('a raw OCI index cannot masquerade as a committed platform manifest', async (t) => {
+  const fixture = await createFixture(t);
+  const neo4j = rawRegistryAttestation({
+    repository: 'library/neo4j',
+    tag: '5.26.0',
+    mediaType: 'application/vnd.oci.image.index.v1+json'
+  });
+  const qdrant = rawRegistryAttestation({
+    repository: 'qdrant/qdrant',
+    tag: 'v1.12.4'
+  });
+  await writeServiceManifest(fixture.repository, [
+    { ...MANIFEST_SERVICES[0], digest: neo4j.digest, registryAttestation: neo4j.registryAttestation },
+    { ...MANIFEST_SERVICES[1], digest: qdrant.digest, registryAttestation: qdrant.registryAttestation }
+  ], { version: 3 });
+  await commitAll(fixture.repository, 'attested service manifest');
+
+  await assert.rejects(
+    createImplementationLock(fixture.input),
+    /single-image OCI manifest|platform manifest media type|selected descriptor.*mediaType/i
+  );
+});
+
+for (const {
+  label,
+  mutateIndex = undefined,
+  mutateManifest = undefined,
+  expected
+} of [
+  {
+    label: 'an index without OCI schemaVersion 2',
+    mutateIndex: (index) => { delete index.schemaVersion; },
+    expected: /index.*schemaVersion/i
+  },
+  {
+    label: 'a platform manifest without OCI schemaVersion 2',
+    mutateManifest: (manifest) => { delete manifest.schemaVersion; },
+    expected: /platformManifestBase64.*schemaVersion/i
+  },
+  {
+    label: 'a platform config without mediaType',
+    mutateManifest: (manifest) => { delete manifest.config.mediaType; },
+    expected: /config.*mediaType/i
+  },
+  {
+    label: 'a platform config without positive size',
+    mutateManifest: (manifest) => { delete manifest.config.size; },
+    expected: /config.*size/i
+  },
+  {
+    label: 'a platform layer without mediaType',
+    mutateManifest: (manifest) => { delete manifest.layers[0].mediaType; },
+    expected: /layers\[0\].*mediaType/i
+  },
+  {
+    label: 'a platform layer without positive size',
+    mutateManifest: (manifest) => { delete manifest.layers[0].size; },
+    expected: /layers\[0\].*size/i
+  }
+]) {
+  test(`a raw OCI attestation rejects ${label}`, async (t) => {
+    const fixture = await createFixture(t);
+    const neo4j = rawRegistryAttestation({
+      repository: 'library/neo4j',
+      tag: '5.26.0',
+      mutateIndex,
+      mutateManifest
+    });
+    const qdrant = rawRegistryAttestation({ repository: 'qdrant/qdrant', tag: 'v1.12.4' });
+    await writeServiceManifest(fixture.repository, [
+      { ...MANIFEST_SERVICES[0], digest: neo4j.digest, registryAttestation: neo4j.registryAttestation },
+      { ...MANIFEST_SERVICES[1], digest: qdrant.digest, registryAttestation: qdrant.registryAttestation }
+    ]);
+    await commitAll(fixture.repository, `malformed raw OCI attestation: ${label}`);
+
+    await assert.rejects(createImplementationLock(fixture.input), expected);
+  });
+}
+
+test('a service reference cannot contain more than one tag separator', async (t) => {
+  const fixture = await createFixture(t);
+  const malformed = rawRegistryAttestation({
+    repository: 'library/neo4j:5.20',
+    tag: 'extra'
+  });
+  const qdrant = rawRegistryAttestation({ repository: 'qdrant/qdrant', tag: 'v1.12.4' });
+  await writeServiceManifest(fixture.repository, [
+    {
+      ...MANIFEST_SERVICES[0],
+      image: 'neo4j:5.20:extra',
+      digest: malformed.digest,
+      registryAttestation: malformed.registryAttestation
+    },
+    { ...MANIFEST_SERVICES[1], digest: qdrant.digest, registryAttestation: qdrant.registryAttestation }
+  ]);
+  await commitAll(fixture.repository, 'malformed service reference');
+
+  await assert.rejects(
+    createImplementationLock({
+      ...fixture.input,
+      serviceImages: [
+        { ...fixture.input.serviceImages[0], image: 'neo4j:5.20:extra', digest: malformed.digest },
+        { ...fixture.input.serviceImages[1], digest: qdrant.digest }
+      ]
+    }),
+    /invalid Docker image reference|explicit image tag/i
+  );
+});
+
+test('a service reference cannot use uppercase repository components', async (t) => {
+  const fixture = await createFixture(t);
+  const malformed = rawRegistryAttestation({ repository: 'library/Neo4j', tag: '5.26.0' });
+  await writeServiceManifest(fixture.repository, [
+    {
+      ...MANIFEST_SERVICES[0],
+      image: 'Neo4j:5.26.0',
+      digest: malformed.digest,
+      registryAttestation: malformed.registryAttestation
+    },
+    { ...MANIFEST_SERVICES[1] }
+  ]);
+  await commitAll(fixture.repository, 'uppercase repository component');
+
+  await assert.rejects(
+    createImplementationLock({
+      ...fixture.input,
+      serviceImages: [
+        { ...fixture.input.serviceImages[0], image: 'Neo4j:5.26.0', digest: malformed.digest },
+        { ...fixture.input.serviceImages[1] }
+      ]
+    }),
+    /invalid Docker image reference/i
+  );
+});
+
+test('a service reference cannot use an invalid registry DNS host', async (t) => {
+  const fixture = await createFixture(t);
+  const malformed = rawRegistryAttestation({ repository: 'team/image', tag: '1' });
+  await writeServiceManifest(fixture.repository, [
+    {
+      ...MANIFEST_SERVICES[0],
+      image: 'registry..example/team/image:1',
+      digest: malformed.digest,
+      registryAttestation: malformed.registryAttestation
+    },
+    { ...MANIFEST_SERVICES[1] }
+  ]);
+  await commitAll(fixture.repository, 'invalid registry DNS host');
+
+  await assert.rejects(createImplementationLock(fixture.input), /invalid registry host/i);
+});
+
+test('a service reference cannot exceed Docker repository-name length', async (t) => {
+  const fixture = await createFixture(t);
+  const repositoryComponent = 'a'.repeat(256);
+  const malformed = rawRegistryAttestation({ repository: `library/${repositoryComponent}`, tag: '1' });
+  await writeServiceManifest(fixture.repository, [
+    {
+      ...MANIFEST_SERVICES[0],
+      image: `${repositoryComponent}:1`,
+      digest: malformed.digest,
+      registryAttestation: malformed.registryAttestation
+    },
+    { ...MANIFEST_SERVICES[1] }
+  ]);
+  await commitAll(fixture.repository, 'overlong Docker repository');
+
+  await assert.rejects(
+    createImplementationLock({
+      ...fixture.input,
+      serviceImages: [
+        { ...fixture.input.serviceImages[0], image: `${repositoryComponent}:1`, digest: malformed.digest },
+        { ...fixture.input.serviceImages[1] }
+      ]
+    }),
+    /repository name.*255|invalid Docker image reference/i
+  );
+});
+
+test('a Docker Hub-qualified service reference canonicalizes to the short-form provenance', async (t) => {
+  const fixture = await createFixture(t);
+  const neo4j = rawRegistryAttestation({ repository: 'library/neo4j', tag: '5.26.0' });
+  await writeServiceManifest(fixture.repository, [
+    {
+      ...MANIFEST_SERVICES[0],
+      image: 'docker.io/library/neo4j:5.26.0',
+      digest: neo4j.digest,
+      registryAttestation: neo4j.registryAttestation
+    },
+    { ...MANIFEST_SERVICES[1] }
+  ]);
+  await commitAll(fixture.repository, 'qualified Docker Hub service reference');
+
+  const lock = await createImplementationLock({
+    ...fixture.input,
+    serviceImages: [
+      { ...fixture.input.serviceImages[0], image: 'docker.io/library/neo4j:5.26.0', digest: neo4j.digest },
+      { ...fixture.input.serviceImages[1] }
+    ]
+  });
+  assert.equal(lock.serviceImages[0].image, 'docker.io/library/neo4j:5.26.0');
+});
+
 test('service images require public immutable digest references and reject model-digest substitution', async (t) => {
   const fixture = await createFixture(t);
   const [baseImage, otherImage] = fixture.input.serviceImages;
@@ -703,6 +1104,21 @@ test('declared service images must cover the committed service manifest exactly'
   );
 });
 
+test('declared service image evidence must equal the committed OCI platform-manifest digest', async (t) => {
+  const fixture = await createFixture(t);
+  const [neo4j, qdrant] = fixture.input.serviceImages;
+  await assert.rejects(
+    createImplementationLock({
+      ...fixture.input,
+      serviceImages: [
+        { ...neo4j, digest: `sha256:${'e'.repeat(64)}` },
+        { ...qdrant }
+      ]
+    }),
+    /does not match.*platform.*manifest.*digest/iu
+  );
+});
+
 test('the committed service manifest is itself validated and bound to the lock', async (t) => {
   const fixture = await createFixture(t);
   const lock = await createImplementationLock(fixture.input);
@@ -736,7 +1152,7 @@ test('the committed service manifest is itself validated and bound to the lock',
   await assert.rejects(createImplementationLock(fixture.input), /unknown.*service image manifest field/iu);
 
   await rewrite(
-    serviceManifestBytes([{ name: 'fixture-neo4j', image: 'neo4j:latest' }]),
+    serviceManifestBytes([{ ...MANIFEST_SERVICES[0], image: 'neo4j:latest' }]),
     'mutable manifest image',
     '2000-02-05T00:00:00Z'
   );
@@ -744,8 +1160,8 @@ test('the committed service manifest is itself validated and bound to the lock',
 
   await rewrite(
     serviceManifestBytes([
-      { name: 'fixture-neo4j', image: 'neo4j:5.26.0' },
-      { name: 'fixture-neo4j', image: 'neo4j:5.26.1' }
+      { ...MANIFEST_SERVICES[0] },
+      { ...MANIFEST_SERVICES[0] }
     ]),
     'duplicate manifest service',
     '2000-02-06T00:00:00Z'
@@ -753,10 +1169,15 @@ test('the committed service manifest is itself validated and bound to the lock',
   await assert.rejects(createImplementationLock(fixture.input), /duplicate.*service/i);
 
   // Manifest growth invalidates a previously issued lock rather than passing silently.
+  const postgres = rawRegistryAttestation({ repository: 'library/postgres', tag: '16.4' });
   await rewrite(
     serviceManifestBytes([
       ...MANIFEST_SERVICES.map((entry) => ({ ...entry })),
-      { name: 'fixture-postgres', image: 'postgres:16.4' }
+      {
+        name: 'fixture-postgres', image: 'postgres:16.4', digest: postgres.digest,
+        digestKind: 'oci-platform-manifest', platform: 'linux/amd64',
+        registryAttestation: postgres.registryAttestation
+      }
     ]),
     'manifest grows a service',
     '2000-02-07T00:00:00Z'

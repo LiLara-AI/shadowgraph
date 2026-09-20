@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   CONTAINER_PATHS,
@@ -199,4 +201,81 @@ test('the launch contract is frozen against accidental mutation', () => {
   assert.ok(Object.isFrozen(invocation.args));
   assert.ok(Object.isFrozen(NETWORK_MODES));
   assert.ok(Object.isFrozen(CONTAINER_PATHS));
+});
+
+test('the pinned wheel runtime is mounted read-only, and only when one is supplied', () => {
+  // The pinned image is a bare interpreter. Without this mount every Python arm
+  // fails at import, and with it writable the arm could rewrite the packages it
+  // is being measured on.
+  const withoutRuntime = buildContainerInvocation(options());
+  assert.ok(
+    !withoutRuntime.args.some((argument) => argument.includes(CONTAINER_PATHS.runtime)),
+    'no runtime mount unless one is supplied'
+  );
+
+  const { args } = buildContainerInvocation(options({ runtimeRoot: '/srv/shadowgraph/runtime' }));
+  assert.ok(args.includes(
+    `type=bind,source=/srv/shadowgraph/runtime,target=${CONTAINER_PATHS.runtime},readonly`
+  ));
+});
+
+test('a relative or control-bearing runtime root is refused', () => {
+  for (const runtimeRoot of ['relative/runtime', '/injected\nflag', '']) {
+    assert.throws(
+      () => buildContainerInvocation(options({ runtimeRoot })),
+      ContainerRuntimeError,
+      `${JSON.stringify(runtimeRoot)} must be refused`
+    );
+  }
+});
+
+test('the container is given stdin, because the adapter protocol arrives on it', () => {
+  // Regression: the invocation was written before anything called it, and
+  // omitted --interactive. Every real invocation then failed with the host
+  // script reading EOF, which surfaces as an adapter fault rather than as the
+  // launch defect it is.
+  const { args } = buildContainerInvocation(options());
+  assert.ok(args.includes('--interactive'), 'stdin must be attached');
+  assert.ok(!args.includes('--tty') && !args.includes('-t'), 'a TTY would corrupt the protocol stream');
+  assert.ok(args.indexOf('--interactive') < args.indexOf(PINNED_IMAGE), 'flags precede the image');
+});
+
+
+test('the image the competitor lock pins is one this runtime can launch', async () => {
+  // The regression test for a defect that survived because the two halves were
+  // only ever tested apart. `competitors.lock.json` pins
+  // `python:3.12.11-slim@sha256:...`; DIGEST_PINNED_IMAGE forbade the tag; and
+  // every case above uses a tagless image, so this runtime and the only image
+  // the benchmark has had never met. On a real run all four container arms
+  // would have failed at launch, and - because the refusal becomes a
+  // PythonAdapterExecutorError that the host binding faithfully translates -
+  // been recorded as contract failures of the products.
+  //
+  // Note what the list above did and did not say: `python:3.12.11-slim` is
+  // there, correctly, as a tag with no digest. `tag@digest` was in neither
+  // column. It was refused by an accident of the pattern that nothing asserted.
+  //
+  // Asserting against the lock rather than a literal is the point: a reference
+  // format this runtime cannot launch is a defect whichever side changes.
+  const lock = JSON.parse(await readFile(
+    fileURLToPath(new URL('../benchmark/competitors.lock.json', import.meta.url)),
+    'utf8'
+  ));
+  assert.match(lock.pythonImage, /@sha256:[a-f0-9]{64}$/u, 'the lock must pin by digest');
+  const { args } = buildContainerInvocation(options({ image: lock.pythonImage }));
+  // The whole reference reaches docker, tag included, exactly as the lock
+  // spells it - nothing strips the tag on the way through.
+  assert.ok(args.includes(lock.pythonImage));
+});
+
+test('permitting the tag did not permit a moving reference', () => {
+  // A tag alone names whatever it points at today, which is the thing a lock
+  // exists to prevent. The digest still has to be there.
+  assert.throws(
+    () => buildContainerInvocation(options({ image: 'python:3.12.11-slim' })),
+    ContainerRuntimeError
+  );
+  assert.doesNotThrow(() => buildContainerInvocation(options({
+    image: `python:3.12.11-slim@sha256:${'a'.repeat(64)}`
+  })));
 });

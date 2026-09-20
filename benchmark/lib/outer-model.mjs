@@ -243,6 +243,27 @@ export function validateDecisionResponse(decision) {
   validateDecision(decision, STANDARD_DECISION_RESPONSE_SCHEMA);
 }
 
+/**
+ * The contract a stored decision record's content satisfies: the response schema
+ * minus the three probe-answer fields a record must not carry. See
+ * `DECISION_PROBE_ANSWER_FIELDS` in `v11-contract.mjs` for why (F37).
+ *
+ * A separate contract, not a loosened one. Content that still carries
+ * `changedFactDetected` is rejected here, which is what stops the leak returning
+ * through an adapter that echoes back whatever it was handed. The error label
+ * stays "decision response" so the persist rejection reads the same as before.
+ */
+export const DECISION_RECORD_CONTENT_SCHEMA = Object.freeze(
+  Object.fromEntries(
+    Object.entries(STANDARD_DECISION_RESPONSE_SCHEMA)
+      .filter(([field]) => !['changedFactDetected', 'changedFactId', 'decisionId'].includes(field))
+  )
+);
+
+export function validateDecisionRecordContent(content) {
+  validateDecision(content, DECISION_RECORD_CONTENT_SCHEMA);
+}
+
 function parseProviderPayload(text) {
   let payload;
   try {

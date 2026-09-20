@@ -8,7 +8,7 @@ import { isPlaceholder } from './placeholder.mjs';
 
 const execFile = promisify(execFileCallback);
 
-const INPUT_FIELDS = ['repoRoot', 'files', 'models', 'serviceImages'];
+const INPUT_FIELDS = ['repoRoot', 'files', 'models', 'serviceImages', 'serviceEvidenceSha256'];
 const VERIFY_FIELDS = [...INPUT_FIELDS, 'lock'];
 const FILE_SPEC_FIELDS = ['role', 'path'];
 const MODEL_FIELDS = [
@@ -31,6 +31,18 @@ const SINGLETON_FILE_ROLES = Object.freeze([
   'amendment_001_sidecar',
   'amendment_002',
   'amendment_002_sidecar',
+  'amendment_003',
+  'amendment_003_sidecar',
+  'amendment_004',
+  'amendment_004_sidecar',
+  'amendment_005',
+  'amendment_005_sidecar',
+  'amendment_006',
+  'amendment_006_sidecar',
+  'amendment_008',
+  'amendment_008_sidecar',
+  'amendment_009',
+  'amendment_009_sidecar',
   'runner',
   'validator',
   'aggregator',
@@ -54,14 +66,57 @@ const FILE_ROLES = new Set([...SINGLETON_FILE_ROLES, ...REPEATABLE_FILE_ROLES]);
 const SIDECAR_TARGETS = Object.freeze({
   preregistration_sidecar: 'preregistration',
   amendment_001_sidecar: 'amendment_001',
-  amendment_002_sidecar: 'amendment_002'
+  amendment_002_sidecar: 'amendment_002',
+  amendment_003_sidecar: 'amendment_003',
+  amendment_004_sidecar: 'amendment_004',
+  amendment_005_sidecar: 'amendment_005',
+  amendment_006_sidecar: 'amendment_006',
+  amendment_008_sidecar: 'amendment_008',
+  amendment_009_sidecar: 'amendment_009'
 });
 
 const SERVICE_MANIFEST_PATH = 'benchmark/service-images.json';
 const SERVICE_MANIFEST_SCHEMA = 'shadowgraph.service-images';
-const SERVICE_MANIFEST_VERSION = 1;
+const SERVICE_MANIFEST_VERSION = 3;
 const SERVICE_MANIFEST_FIELDS = ['schema', 'version', 'services'];
-const SERVICE_MANIFEST_ENTRY_FIELDS = ['name', 'image'];
+const SERVICE_MANIFEST_ENTRY_FIELDS = [
+  'name', 'image', 'digest', 'digestKind', 'platform', 'registryAttestation'
+];
+const SERVICE_MANIFEST_DIGEST_KIND = 'oci-platform-manifest';
+const SERVICE_MANIFEST_PLATFORM = 'linux/amd64';
+const REGISTRY_ATTESTATION_FIELDS = [
+  'registry', 'repository', 'tag', 'indexDigest', 'indexBase64', 'platformManifestBase64'
+];
+const DOCKER_HUB_REGISTRY = 'registry-1.docker.io';
+const OCI_INDEX_MEDIA_TYPES = new Set([
+  'application/vnd.oci.image.index.v1+json',
+  'application/vnd.docker.distribution.manifest.list.v2+json'
+]);
+const OCI_SINGLE_IMAGE_MANIFEST_MEDIA_TYPES = new Set([
+  'application/vnd.oci.image.manifest.v1+json',
+  'application/vnd.docker.distribution.manifest.v2+json'
+]);
+const OCI_IMAGE_CONFIG_MEDIA_TYPES = new Set([
+  'application/vnd.oci.image.config.v1+json',
+  'application/vnd.docker.container.image.v1+json'
+]);
+const OCI_IMAGE_LAYER_MEDIA_TYPES = new Set([
+  'application/vnd.oci.image.layer.v1.tar',
+  'application/vnd.oci.image.layer.v1.tar+gzip',
+  'application/vnd.oci.image.layer.v1.tar+zstd',
+  'application/vnd.docker.image.rootfs.diff.tar.gzip',
+  'application/vnd.docker.image.rootfs.foreign.diff.tar.gzip'
+]);
+const DOCKER_HUB_REGISTRY_ALIASES = new Set([
+  'docker.io',
+  'index.docker.io',
+  'registry-1.docker.io'
+]);
+const IMAGE_PATH_COMPONENT = /^[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*$/u;
+const IMAGE_TAG = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/u;
+const REGISTRY_DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
+const REGISTRY_PORT = /^\d{1,5}$/u;
+const MAX_DOCKER_REPOSITORY_LENGTH = 255;
 
 /**
  * The completeness contract, as one reviewable table.
@@ -83,6 +138,18 @@ const COVERAGE_SELECTORS = Object.freeze([
   { role: 'amendment_001_sidecar', kind: 'path', value: 'benchmark/preregistration-amendment-001.sha256' },
   { role: 'amendment_002', kind: 'path', value: 'benchmark/preregistration-amendment-002.json' },
   { role: 'amendment_002_sidecar', kind: 'path', value: 'benchmark/preregistration-amendment-002.sha256' },
+  { role: 'amendment_003', kind: 'path', value: 'benchmark/preregistration-amendment-003.json' },
+  { role: 'amendment_003_sidecar', kind: 'path', value: 'benchmark/preregistration-amendment-003.sha256' },
+  { role: 'amendment_004', kind: 'path', value: 'benchmark/preregistration-amendment-004.json' },
+  { role: 'amendment_004_sidecar', kind: 'path', value: 'benchmark/preregistration-amendment-004.sha256' },
+  { role: 'amendment_005', kind: 'path', value: 'benchmark/preregistration-amendment-005.json' },
+  { role: 'amendment_005_sidecar', kind: 'path', value: 'benchmark/preregistration-amendment-005.sha256' },
+  { role: 'amendment_006', kind: 'path', value: 'benchmark/preregistration-amendment-006.json' },
+  { role: 'amendment_006_sidecar', kind: 'path', value: 'benchmark/preregistration-amendment-006.sha256' },
+  { role: 'amendment_008', kind: 'path', value: 'benchmark/preregistration-amendment-008.json' },
+  { role: 'amendment_008_sidecar', kind: 'path', value: 'benchmark/preregistration-amendment-008.sha256' },
+  { role: 'amendment_009', kind: 'path', value: 'benchmark/preregistration-amendment-009.json' },
+  { role: 'amendment_009_sidecar', kind: 'path', value: 'benchmark/preregistration-amendment-009.sha256' },
   { role: 'runner', kind: 'path', value: 'benchmark/lib/v11-runner.mjs' },
   { role: 'validator', kind: 'path', value: 'benchmark/lib/validate.mjs' },
   { role: 'aggregator', kind: 'path', value: 'benchmark/lib/aggregate.mjs' },
@@ -460,31 +527,222 @@ function normalizeDigest(value, label) {
   return value.toLowerCase();
 }
 
-function assertLockableImage(value, label) {
+function normalizeEvidenceSha256(value) {
+  assertNonEmptyString(value, 'serviceEvidenceSha256');
+  if (!/^[a-f0-9]{64}$/u.test(value)) {
+    throw new Error('serviceEvidenceSha256 must be a lowercase SHA-256 hex digest');
+  }
+  return value;
+}
+
+function parseRegistryHost(value, label) {
+  const normalized = value.toLowerCase();
+  if (DOCKER_HUB_REGISTRY_ALIASES.has(normalized)) return DOCKER_HUB_REGISTRY;
+  const parts = normalized.split(':');
+  if (parts.length > 2 || parts[0].length === 0) {
+    throw new Error(`${label} has an invalid registry host`);
+  }
+  const host = parts[0];
+  if (host.split('.').some((dnsLabel) => !REGISTRY_DNS_LABEL.test(dnsLabel))) {
+    throw new Error(`${label} has an invalid registry host`);
+  }
+  if (parts.length === 1) return host;
+  if (!REGISTRY_PORT.test(parts[1])) throw new Error(`${label} has an invalid registry port`);
+  const port = Number(parts[1]);
+  if (port < 1 || port > 65535) throw new Error(`${label} has an invalid registry port`);
+  return `${host}:${port}`;
+}
+
+function parseLockableImageReference(value, label) {
   assertPublicValue(value, label, PUBLIC_IMAGE);
   if (value.includes('@') || BARE_SHA256.test(value) || /^sha256:/iu.test(value)) {
     throw new Error(`${label} must be an image repository/name, not an image ID`);
   }
+  const segments = value.split('/');
+  if (segments.length === 0 || segments.some((segment) => segment.length === 0)) {
+    throw new Error(`${label} is an invalid Docker image reference`);
+  }
+  const finalSegment = segments.at(-1);
+  const tagSeparator = finalSegment.indexOf(':');
+  if (tagSeparator <= 0 || tagSeparator !== finalSegment.lastIndexOf(':')
+    || tagSeparator === finalSegment.length - 1) {
+    throw new Error(`${label} must include one explicit image tag after the repository name`);
+  }
+  const tag = finalSegment.slice(tagSeparator + 1);
+  const finalRepositoryComponent = finalSegment.slice(0, tagSeparator);
+  if (!IMAGE_TAG.test(tag) || !IMAGE_PATH_COMPONENT.test(finalRepositoryComponent)) {
+    throw new Error(`${label} is an invalid Docker image reference`);
+  }
+
+  const repositoryParts = segments.slice(0, -1);
+  let registry = DOCKER_HUB_REGISTRY;
+  if (repositoryParts.length > 0) {
+    const first = repositoryParts[0];
+    if (first === 'localhost' || first.includes('.') || first.includes(':')) {
+      registry = parseRegistryHost(first, label);
+      repositoryParts.shift();
+    }
+  }
+  repositoryParts.push(finalRepositoryComponent);
+  if (repositoryParts.some((component) => !IMAGE_PATH_COMPONENT.test(component))) {
+    throw new Error(`${label} is an invalid Docker image reference`);
+  }
   if (MUTABLE_LATEST.test(value)) throw new Error('Mutable latest service-image references are forbidden');
+
+  const repository = repositoryParts.join('/');
+  const dockerHubRepository = registry === DOCKER_HUB_REGISTRY && repositoryParts.length === 1
+    ? `library/${repository}`
+    : repository;
+  if (dockerHubRepository.length > MAX_DOCKER_REPOSITORY_LENGTH) {
+    throw new Error(`${label} repository name must not exceed ${MAX_DOCKER_REPOSITORY_LENGTH} characters`);
+  }
+  return Object.freeze({
+    registry,
+    tag,
+    dockerHubRepository
+  });
+}
+
+function assertLockableImage(value, label) {
+  return parseLockableImageReference(value, label);
+}
+
+function digestOfBytes(bytes) {
+  return `sha256:${sha256(bytes)}`;
+}
+
+function decodeCanonicalBase64(value, label) {
+  assertNonEmptyString(value, label);
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value)) {
+    throw new Error(`${label} must be canonical base64`);
+  }
+  const bytes = Buffer.from(value, 'base64');
+  if (bytes.length === 0 || bytes.toString('base64') !== value) {
+    throw new Error(`${label} must be non-empty canonical base64`);
+  }
+  return bytes;
+}
+
+function parseRawRegistryJson(bytes, label) {
+  let parsed;
+  try {
+    parsed = JSON.parse(bytes.toString('utf8'));
+  } catch {
+    throw new Error(`${label} must decode to JSON`);
+  }
+  if (!isPlainObject(parsed)) throw new Error(`${label} must decode to a JSON object`);
+  return parsed;
+}
+
+function assertOciSchemaVersionTwo(document, label) {
+  if (document.schemaVersion !== 2) throw new Error(`${label} must declare schemaVersion 2`);
+}
+
+function assertOciDescriptor(descriptor, label, permittedMediaTypes) {
+  if (!isPlainObject(descriptor)) throw new Error(`${label} must be an object`);
+  if (!permittedMediaTypes.has(descriptor.mediaType)) {
+    throw new Error(`${label}.mediaType is not an accepted OCI media type`);
+  }
+  normalizeDigest(descriptor.digest, `${label}.digest`);
+  assertPositiveSafeInteger(descriptor.size, `${label}.size`);
+}
+
+function verifyRegistryAttestation(service, index, digest, tagged) {
+  const label = `service image manifest services[${index}].registryAttestation`;
+  const attestation = service.registryAttestation;
+  assertExactKeys(attestation, REGISTRY_ATTESTATION_FIELDS, label);
+  if (tagged.registry !== DOCKER_HUB_REGISTRY || attestation.registry !== DOCKER_HUB_REGISTRY) {
+    throw new Error(`${label}.registry must be ${DOCKER_HUB_REGISTRY}`);
+  }
+  if (attestation.repository !== tagged.dockerHubRepository) {
+    throw new Error(`${label}.repository must match the committed image repository`);
+  }
+  if (attestation.tag !== tagged.tag) {
+    throw new Error(`${label}.tag must match the committed image tag`);
+  }
+
+  const indexDigest = normalizeDigest(attestation.indexDigest, `${label}.indexDigest`);
+  const indexBytes = decodeCanonicalBase64(attestation.indexBase64, `${label}.indexBase64`);
+  if (digestOfBytes(indexBytes) !== indexDigest) {
+    throw new Error(`${label}.indexBase64 does not hash to indexDigest`);
+  }
+  const indexDocument = parseRawRegistryJson(indexBytes, `${label}.indexBase64`);
+  assertOciSchemaVersionTwo(indexDocument, `${label}.indexBase64`);
+  if (!OCI_INDEX_MEDIA_TYPES.has(indexDocument.mediaType)) {
+    throw new Error(`${label}.indexBase64 must be an OCI image index or Docker manifest list`);
+  }
+  if (!Array.isArray(indexDocument.manifests) || indexDocument.manifests.length === 0) {
+    throw new Error(`${label}.indexBase64 must declare one or more manifests`);
+  }
+
+  const [os, architecture] = service.platform.split('/');
+  const descriptors = indexDocument.manifests.filter((descriptor) => (
+    isPlainObject(descriptor)
+    && descriptor.digest === digest
+    && isPlainObject(descriptor.platform)
+    && descriptor.platform.os === os
+    && descriptor.platform.architecture === architecture
+  ));
+  if (descriptors.length !== 1) {
+    throw new Error(`${label}.indexBase64 must select exactly one ${service.platform} descriptor for ${digest}`);
+  }
+  const descriptor = descriptors[0];
+  assertOciDescriptor(
+    descriptor,
+    `${label}.indexBase64 selected descriptor`,
+    OCI_SINGLE_IMAGE_MANIFEST_MEDIA_TYPES
+  );
+
+  const manifestBytes = decodeCanonicalBase64(
+    attestation.platformManifestBase64,
+    `${label}.platformManifestBase64`
+  );
+  if (digestOfBytes(manifestBytes) !== digest) {
+    throw new Error(`${label}.platformManifestBase64 does not hash to the committed platform digest`);
+  }
+  if (descriptor.size !== manifestBytes.length) {
+    throw new Error(`${label}.indexBase64 descriptor size does not match platformManifestBase64`);
+  }
+  const manifestDocument = parseRawRegistryJson(manifestBytes, `${label}.platformManifestBase64`);
+  assertOciSchemaVersionTwo(manifestDocument, `${label}.platformManifestBase64`);
+  if (!OCI_SINGLE_IMAGE_MANIFEST_MEDIA_TYPES.has(manifestDocument.mediaType)) {
+    throw new Error(`${label}.platformManifestBase64 must be a single-image OCI manifest`);
+  }
+  if (manifestDocument.mediaType !== descriptor.mediaType) {
+    throw new Error(`${label} descriptor media type does not match platformManifestBase64`);
+  }
+  assertOciDescriptor(
+    manifestDocument.config,
+    `${label}.platformManifestBase64 config`,
+    OCI_IMAGE_CONFIG_MEDIA_TYPES
+  );
+  if (!Array.isArray(manifestDocument.layers) || manifestDocument.layers.length === 0) {
+    throw new Error(`${label}.platformManifestBase64 must declare one or more image layers`);
+  }
+  for (const [layerIndex, layer] of manifestDocument.layers.entries()) {
+    assertOciDescriptor(
+      layer,
+      `${label}.platformManifestBase64 layers[${layerIndex}]`,
+      OCI_IMAGE_LAYER_MEDIA_TYPES
+    );
+  }
+  return Object.freeze({ indexDigest });
 }
 
 /**
  * Parse the committed service manifest that grounds service-image completeness.
  *
- * The manifest names every service whose image can influence execution. It
- * carries no digests: digests are operator-supplied run evidence, while the
- * manifest is the reviewed, committed statement of which digests must exist.
+ * A tagged image reference identifies the intended repository/tag for people and
+ * registry lookup. `digest` is separately the exact OCI platform-manifest
+ * digest the benchmark may run, never the multi-platform index or a local image
+ * config ID. `registryAttestation` embeds exact raw tag-index and selected
+ * manifest bytes; parsing re-hashes both and proves the linux/amd64 descriptor
+ * is a single-image manifest before accepting the claimed digest kind. Keeping
+ * those identities separate is deliberate: a label alone cannot establish OCI
+ * object type, while the committed raw bytes make the type check offline and
+ * lock-governed.
  */
-function parseServiceManifest(content) {
-  if (content === undefined) {
-    throw new Error(`Service image manifest is missing: ${SERVICE_MANIFEST_PATH}`);
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(content.toString('utf8'));
-  } catch {
-    throw new Error(`Service image manifest is not valid JSON: ${SERVICE_MANIFEST_PATH}`);
-  }
+export function parseServiceManifestDocument(parsed) {
   assertExactKeys(parsed, SERVICE_MANIFEST_FIELDS, 'service image manifest');
   if (parsed.schema !== SERVICE_MANIFEST_SCHEMA) {
     throw new Error(`Service image manifest declares an unknown schema: ${String(parsed.schema)}`);
@@ -500,14 +758,49 @@ function parseServiceManifest(content) {
   for (const [index, service] of parsed.services.entries()) {
     assertExactKeys(service, SERVICE_MANIFEST_ENTRY_FIELDS, `service image manifest services[${index}]`);
     assertPublicValue(service.name, `service image manifest services[${index}].name`);
-    assertLockableImage(service.image, `service image manifest services[${index}].image`);
+    const imageReference = assertLockableImage(
+      service.image,
+      `service image manifest services[${index}].image`
+    );
+    const digest = normalizeDigest(service.digest, `service image manifest services[${index}].digest`);
+    if (service.digestKind !== SERVICE_MANIFEST_DIGEST_KIND) {
+      throw new Error(
+        `service image manifest services[${index}].digestKind must be ${SERVICE_MANIFEST_DIGEST_KIND}`
+      );
+    }
+    if (service.platform !== SERVICE_MANIFEST_PLATFORM) {
+      throw new Error(
+        `service image manifest services[${index}].platform must be ${SERVICE_MANIFEST_PLATFORM}`
+      );
+    }
+    const registryAttestation = verifyRegistryAttestation(service, index, digest, imageReference);
     const foldedName = service.name.toLowerCase();
     if (required.has(foldedName)) {
       throw new Error(`Duplicate service in the service image manifest: ${service.name}`);
     }
-    required.set(foldedName, { name: service.name, image: service.image });
+    required.set(foldedName, {
+      name: service.name,
+      image: service.image,
+      digest,
+      digestKind: service.digestKind,
+      platform: service.platform,
+      registryIndexDigest: registryAttestation.indexDigest
+    });
   }
   return required;
+}
+
+function parseServiceManifest(content) {
+  if (content === undefined) {
+    throw new Error(`Service image manifest is missing: ${SERVICE_MANIFEST_PATH}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(content.toString('utf8'));
+  } catch {
+    throw new Error(`Service image manifest is not valid JSON: ${SERVICE_MANIFEST_PATH}`);
+  }
+  return parseServiceManifestDocument(parsed);
 }
 
 /**
@@ -559,6 +852,12 @@ function validateServiceImages(serviceImages, modelDigests, requiredServices) {
       throw new Error(
         `Declared service image does not match the committed service manifest: ${service.name} `
         + `(declared ${service.image}, required ${required.image})`
+      );
+    }
+    if (required.digest !== service.digest) {
+      throw new Error(
+        `Declared service image digest does not match the committed OCI platform manifest digest: ${service.name} `
+        + `(declared ${service.digest}, required ${required.digest})`
       );
     }
   }
@@ -625,6 +924,28 @@ function validateModels(models) {
  * requires. The returned object contains no timestamps or absolute paths and
  * binds exact file bytes plus immutable runtime identities.
  */
+/**
+ * The governed-source manifest `createImplementationLock` will accept.
+ *
+ * The lock refuses a manifest that omits any tracked governed source, declares
+ * anything outside the governed surface, or gives a file the wrong role - and
+ * the table that decides all three is private to this module. So until now no
+ * caller could produce a valid `files` array without keeping a second copy of
+ * the coverage table, which is exactly the drift the table exists to prevent.
+ *
+ * This returns what the repository currently tracks, classified by that same
+ * table. It is deliberately not a shortcut around the validation: the lock
+ * still discovers independently and still refuses a manifest that disagrees, so
+ * a caller passing this in is asking the same question twice and getting the
+ * same answer, rather than being trusted.
+ */
+export async function discoverImplementationLockFiles(repoRoot) {
+  const { trackedPaths } = await inspectRepository(repoRoot);
+  return [...discoverGovernedSources(trackedPaths).entries()]
+    .map(([trackedPath, role]) => ({ role, path: trackedPath }))
+    .sort((left, right) => compareText(left.path, right.path));
+}
+
 export async function createImplementationLock(input) {
   assertExactKeys(input, INPUT_FIELDS, 'implementation-lock input');
   const before = await inspectRepository(input.repoRoot);
@@ -635,6 +956,7 @@ export async function createImplementationLock(input) {
   const { entries: files, contentBySingletonRole } = await hashManifestFiles(before, specs);
   const requiredServices = parseServiceManifest(contentBySingletonRole.get('service_manifest'));
   const serviceImages = validateServiceImages(input.serviceImages, modelDigests, requiredServices);
+  const serviceEvidenceSha256 = normalizeEvidenceSha256(input.serviceEvidenceSha256);
   const after = await inspectRepository(input.repoRoot);
   if (after.headCommit !== before.headCommit) {
     throw new Error('Repository HEAD changed while creating the implementation lock');
@@ -645,7 +967,7 @@ export async function createImplementationLock(input) {
 
   const core = {
     schema: 'shadowgraph.implementation-lock',
-    version: 2,
+    version: 3,
     repository: { headCommit: before.headCommit },
     coverage: {
       serviceManifest: SERVICE_MANIFEST_PATH,
@@ -657,7 +979,8 @@ export async function createImplementationLock(input) {
     },
     files,
     models,
-    serviceImages
+    serviceImages,
+    serviceEvidenceSha256
   };
   const lock = {
     ...core,
@@ -677,7 +1000,8 @@ export async function verifyImplementationLock(input) {
     repoRoot: input.repoRoot,
     files: input.files,
     models: input.models,
-    serviceImages: input.serviceImages
+    serviceImages: input.serviceImages,
+    serviceEvidenceSha256: input.serviceEvidenceSha256
   });
   if (canonicalStringify(input.lock) !== canonicalStringify(expected)) {
     throw new Error('Implementation lock does not match current bytes and evidence');

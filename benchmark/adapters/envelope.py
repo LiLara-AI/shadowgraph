@@ -75,6 +75,20 @@ DECISION_SCHEMA = {
     "memoryProjectId": "string|null",
     "memoryUserId": "string|null",
 }
+# The contract a stored decision record's content satisfies: the response schema
+# minus the three probe-answer fields a record must not carry. See
+# DECISION_PROBE_ANSWER_FIELDS in benchmark/lib/v11-contract.mjs for why (F37).
+# A separate contract, not a loosened one - content still carrying
+# changedFactDetected is rejected, which is what stops the leak returning
+# through an adapter that echoes back whatever it was handed.
+DECISION_PROBE_ANSWER_FIELDS = ("changedFactDetected", "changedFactId", "decisionId")
+DECISION_RECORD_SCHEMA = {
+    field: kind
+    for field, kind in DECISION_SCHEMA.items()
+    if field not in DECISION_PROBE_ANSWER_FIELDS
+}
+
+
 FORBIDDEN_KEYS = {
     "apikey",
     "applicability",
@@ -233,9 +247,12 @@ def _namespace_correlation(request: dict) -> dict:
     }
 
 
-def _validate_decision(content: Any) -> None:
-    _exact_keys(content, tuple(DECISION_SCHEMA), "decision response")
-    for field, kind in DECISION_SCHEMA.items():
+def _validate_decision(content: Any, schema: dict) -> None:
+    # No default. The response and the record are different contracts (F37), and
+    # a caller that forgot to say which one it meant would silently get the
+    # fifteen-field response schema - which on a record is the hole this closed.
+    _exact_keys(content, tuple(schema), "decision response")
+    for field, kind in schema.items():
         value = content[field]
         if kind == "string" and not isinstance(value, str):
             raise ContractError(f"decision response.{field} must be a string")
@@ -297,7 +314,7 @@ def validate_request(request: Any) -> None:
         if not _is_non_empty_string(record["id"]):
             raise ContractError("persist record id must be a non-empty string")
         if record["type"] == "decision":
-            _validate_decision(record["content"])
+            _validate_decision(record["content"], DECISION_RECORD_SCHEMA)
         elif record["type"] == "failed_attempt":
             _exact_keys(record["content"], ("id", "approachId", "reasonId", "reason"), "failed attempt")
             if any(not _is_non_empty_string(record["content"][field]) for field in record["content"]):

@@ -3,6 +3,7 @@ node_modules/
 .shadowgraph/
 coverage/
 benchmark/results/
+benchmark/probe-records/
 *.log
 __pycache__/
 *.py[cod]

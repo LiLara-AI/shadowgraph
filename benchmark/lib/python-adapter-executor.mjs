@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   lstat,
   mkdir,
@@ -18,7 +18,13 @@ import { TextDecoder } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
 import { validateAdapterRequest, validateAdapterResponse } from './adapter-protocol.mjs';
+import {
+  CONTAINER_PATHS,
+  buildContainerInvocation,
+  buildContainerKillInvocation
+} from './python-container-runtime.mjs';
 import { canonicalJson } from './v11-contract.mjs';
+import { PROVIDER_MODEL_CLASSES, isPinnedModelId } from './v11-provider-models.mjs';
 
 const DEFAULT_HOST_PATH = fileURLToPath(new URL('../adapters/python_host.py', import.meta.url));
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -43,27 +49,101 @@ export const PYTHON_ADAPTER_SPECS = Object.freeze({
   'mem0-oss': Object.freeze({
     armId: 'mem0-oss',
     packages: Object.freeze({ mem0ai: '2.0.19' }),
-    requestClasses: Object.freeze(['internal_memory_llm', 'embedding'])
+    requestClasses: Object.freeze(['internal_memory_llm', 'embedding']),
+    dispatchIdentityMode: 'static'
   }),
   graphiti: Object.freeze({
     armId: 'graphiti',
     packages: Object.freeze({ 'graphiti-core': '0.29.3', httpx: '0.28.1' }),
-    requestClasses: Object.freeze(['internal_memory_llm', 'embedding'])
+    requestClasses: Object.freeze(['internal_memory_llm', 'embedding']),
+    dispatchIdentityMode: 'dynamic'
   }),
   'basic-memory': Object.freeze({
     armId: 'basic-memory',
     packages: Object.freeze({ 'basic-memory': '0.23.2' }),
-    requestClasses: Object.freeze([])
+    requestClasses: Object.freeze([]),
+    dispatchIdentityMode: 'static'
   }),
   cognee: Object.freeze({
     armId: 'cognee',
     packages: Object.freeze({ cognee: '1.5.3' }),
-    requestClasses: Object.freeze(['internal_memory_llm', 'embedding'])
+    requestClasses: Object.freeze(['internal_memory_llm', 'embedding']),
+    dispatchIdentityMode: 'dynamic'
   })
 });
 
 function isNonEmptyString(value) {
   return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isPlainRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+// The pinned model for each class the arm meters, in the same shape as the
+// route record: present and null for a class this arm does not use. Validated
+// here rather than trusted from the caller, because the wrapper this produces
+// is the only thing standing between a library's default model and a
+// measurement that silently describes different weights than the lock pins.
+function normalizeProviderModels(value, requestClasses) {
+  if (requestClasses.length === 0) {
+    if (value !== undefined && value !== null) {
+      const declared = isPlainRecord(value)
+        && PROVIDER_MODEL_CLASSES.every((requestClass) => value[requestClass] === null);
+      if (!declared) {
+        throw new PythonAdapterExecutorError(
+          'CONTRACT_FAILURE',
+          'This Python adapter does not accept pinned provider models'
+        );
+      }
+    }
+    return Object.fromEntries(PROVIDER_MODEL_CLASSES.map((requestClass) => [requestClass, null]));
+  }
+  if (!isPlainRecord(value)) {
+    throw new PythonAdapterExecutorError(
+      'CONTRACT_FAILURE',
+      'Python adapter pinned provider models are required'
+    );
+  }
+  const normalized = {};
+  for (const requestClass of PROVIDER_MODEL_CLASSES) {
+    const model = value[requestClass];
+    if (!requestClasses.includes(requestClass)) {
+      if (model !== null && model !== undefined) {
+        throw new PythonAdapterExecutorError(
+          'CONTRACT_FAILURE',
+          'Python adapter received a model for a class it does not meter'
+        );
+      }
+      normalized[requestClass] = null;
+      continue;
+    }
+    if (!isPlainRecord(model) || !isPinnedModelId(model.modelId)) {
+      throw new PythonAdapterExecutorError(
+        'CONTRACT_FAILURE',
+        'Python adapter pinned provider model is invalid'
+      );
+    }
+    const dimension = model.embeddingDimension ?? null;
+    // Only the embedding class carries a width, and it must carry one: a
+    // client told the model but not its dimension sizes its own storage from
+    // a default, which is how a 768-wide vector meets a 1536-wide collection.
+    if (requestClass === 'embedding') {
+      if (!Number.isSafeInteger(dimension) || dimension <= 0) {
+        throw new PythonAdapterExecutorError(
+          'CONTRACT_FAILURE',
+          'Python adapter pinned embedding model must record its dimension'
+        );
+      }
+    } else if (dimension !== null) {
+      throw new PythonAdapterExecutorError(
+        'CONTRACT_FAILURE',
+        'Only the pinned embedding model may record a dimension'
+      );
+    }
+    normalized[requestClass] = { modelId: model.modelId, embeddingDimension: dimension };
+  }
+  return normalized;
 }
 
 function boundedInteger(value, fallback, { minimum, maximum, label }) {
@@ -109,6 +189,14 @@ function validateProviderEndpoint(value) {
   return endpoint.toString().replace(/\/$/u, '');
 }
 
+function validateProviderRouteAllocation(value) {
+  if (typeof value === 'string') return validateProviderEndpoint(value);
+  if (!isPlainRecord(value) || Object.keys(value).length !== 1 || !Object.hasOwn(value, 'endpoint')) {
+    throw new PythonAdapterExecutorError('CONTRACT_FAILURE', 'A fresh metered provider endpoint is required');
+  }
+  return validateProviderEndpoint(value.endpoint);
+}
+
 function providerCorrelation(request, requestClass) {
   return {
     runId: request.runId,
@@ -117,7 +205,8 @@ function providerCorrelation(request, requestClass) {
     scenarioId: request.scenarioId,
     repetition: request.repetition,
     phase: request.phase,
-    requestClass
+    requestClass,
+    rootOperation: request.operation
   };
 }
 
@@ -209,6 +298,120 @@ function childEnvironment(stateLeaf, invocationRoot) {
     OTEL_SDK_DISABLED: 'true'
   });
   return environment;
+}
+
+/**
+ * The environment the adapter sees inside the pinned container.
+ *
+ * The same variables `childEnvironment` sets, resolved to the in-container
+ * layout, plus the one the host path deliberately blanks: `PYTHONPATH` names
+ * the read-only mount holding the wheel set the lock pins, because the pinned
+ * image is a bare interpreter and every arm would otherwise fail at import.
+ *
+ * Nothing is inherited from the host here. `childEnvironment` forwards an
+ * allowlist because a host interpreter needs the host's PATH; a container has
+ * the image's own, and forwarding the host's would make the run depend on the
+ * machine it was started from.
+ */
+function containerAdapterEnvironment(stateLeafName) {
+  const stateLeaf = path.posix.join(CONTAINER_PATHS.state, stateLeafName);
+  const homeRoot = path.posix.join(stateLeaf, 'home');
+  const configRoot = path.posix.join(stateLeaf, 'config');
+  const cacheRoot = path.posix.join(stateLeaf, 'cache');
+  const dataRoot = path.posix.join(stateLeaf, 'data');
+  const tempRoot = CONTAINER_PATHS.scratch;
+  return {
+    HOME: homeRoot,
+    XDG_CONFIG_HOME: configRoot,
+    XDG_CACHE_HOME: cacheRoot,
+    XDG_DATA_HOME: dataRoot,
+    TEMP: tempRoot,
+    TMP: tempRoot,
+    TMPDIR: tempRoot,
+    SHADOWGRAPH_PYTHON_ADAPTER_STATE_ROOT: stateLeaf,
+    PYTHONNOUSERSITE: '1',
+    PYTHONDONTWRITEBYTECODE: '1',
+    PYTHONUNBUFFERED: '1',
+    PYTHONHASHSEED: '0',
+    PYTHONPATH: CONTAINER_PATHS.runtime,
+    PYTHONSTARTUP: '',
+    PIP_CONFIG_FILE: '/dev/null',
+    MEM0_TELEMETRY: 'false',
+    GRAPHITI_TELEMETRY_ENABLED: 'false',
+    TELEMETRY_DISABLED: '1',
+    BASIC_MEMORY_FORCE_LOCAL: 'true',
+    BASIC_MEMORY_MODE: 'local',
+    BASIC_MEMORY_CONFIG_DIR: path.posix.join(configRoot, 'basic-memory'),
+    COGNEE_TRACING_ENABLED: 'false',
+    COGNEE_SYSTEM_ROOT_DIRECTORY: path.posix.join(dataRoot, 'cognee-system'),
+    COGNEE_DATA_ROOT_DIRECTORY: path.posix.join(dataRoot, 'cognee-data'),
+    OTEL_SDK_DISABLED: 'true'
+  };
+}
+
+/**
+ * The environment the container *client* runs with.
+ *
+ * Not the adapter's environment - that travels as explicit `--env` arguments.
+ * This is only what the local `docker` binary needs to find its daemon.
+ */
+function containerClientEnvironment() {
+  const environment = {};
+  for (const name of [...ENVIRONMENT_ALLOWLIST, 'DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_CONFIG', 'HOME']) {
+    if (process.env[name] !== undefined) environment[name] = process.env[name];
+  }
+  return environment;
+}
+
+/**
+ * Assemble the one invocation that runs an adapter inside the pinned image.
+ *
+ * The container gets a fresh name per invocation rather than one derived from
+ * the unit: a reset and a persist for the same unit share a state leaf, so a
+ * name derived from that leaf would collide with a container that had not
+ * finished being removed, and Docker would refuse the second one for a reason
+ * that has nothing to do with the measurement.
+ */
+function containerLaunch({ container, hostPath, invocationRoot, stateRoot, stateLeafName }) {
+  const containerName = `shadowgraph-v11-${randomUUID().replaceAll('-', '')}`;
+  const environment = containerAdapterEnvironment(stateLeafName);
+  let invocation;
+  try {
+    invocation = buildContainerInvocation({
+      image: container.image,
+      containerName,
+      hostPath,
+      adaptersDirectory: path.dirname(hostPath),
+      runtimeRoot: container.runtimeRoot ?? null,
+      invocationRoot,
+      stateRoot,
+      uid: process.getuid(),
+      gid: process.getgid(),
+      networkMode: container.networkMode ?? 'host',
+      environment,
+      dockerExecutable: container.dockerExecutable ?? 'docker'
+    });
+  } catch (error) {
+    throw new PythonAdapterExecutorError(
+      'CONTRACT_FAILURE',
+      `Python adapter container invocation is invalid: ${error?.message ?? 'unknown reason'}`
+    );
+  }
+  return {
+    command: invocation.command,
+    commandArgs: [...invocation.args],
+    childEnv: containerClientEnvironment(),
+    containerName,
+    dockerExecutable: container.dockerExecutable ?? 'docker',
+    // The adapter sees container paths, so those are the strings that could
+    // appear in its output and must be redacted alongside the host ones.
+    fragments: [
+      environment.SHADOWGRAPH_PYTHON_ADAPTER_STATE_ROOT,
+      CONTAINER_PATHS.state,
+      CONTAINER_PATHS.runtime,
+      containerName
+    ]
+  };
 }
 
 function protectedVariants(value) {
@@ -500,10 +703,12 @@ function parseStrictResponse(stdout, request, protectedFragments) {
 function runChild({
   spawnProcess,
   processGroupIsolation,
-  pythonExecutable,
-  hostPath,
+  command,
+  commandArgs,
+  childEnv,
+  containerName,
+  dockerExecutable,
   invocationRoot,
-  environment,
   input,
   request,
   maxOutputBytes,
@@ -514,9 +719,9 @@ function runChild({
   return new Promise((resolve, reject) => {
     let child;
     try {
-      child = spawnProcess(pythonExecutable, [hostPath], {
+      child = spawnProcess(command, commandArgs, {
         cwd: path.join(invocationRoot, 'cwd'),
-        env: environment,
+        env: childEnv,
         detached: processGroupIsolation,
         shell: false,
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -575,10 +780,34 @@ function runChild({
       }
     };
 
+    // Signalling the foreground `docker run` client does not reach the
+    // container if that client is SIGKILLed, so cleanup addresses the container
+    // by name as well. Fire-and-forget: the invocation's own settlement path
+    // stays authoritative, and a removal that fails must not turn a completed
+    // measurement into a failed one.
+    let containerRemoved = false;
+    const removeContainer = () => {
+      if (containerName === null || containerRemoved) return;
+      containerRemoved = true;
+      try {
+        const kill = buildContainerKillInvocation(containerName, dockerExecutable);
+        const remover = spawnProcess(kill.command, [...kill.args], {
+          stdio: 'ignore',
+          shell: false,
+          windowsHide: true
+        });
+        remover?.unref?.();
+        remover?.on?.('error', () => {});
+      } catch {
+        // The hard-settlement timer remains authoritative.
+      }
+    };
+
     const beginTermination = (error) => {
       if (failure === null) failure = error;
       if (closed || settled) return;
       signalProcessTree('SIGTERM');
+      removeContainer();
       if (closed || settled) return;
       if (killTimer === null) {
         killTimer = setTimeout(() => {
@@ -610,6 +839,7 @@ function runChild({
         );
       }
       signalProcessTree('SIGKILL');
+      removeContainer();
       child.stdin.destroy?.();
       child.stdout.destroy?.();
       child.stderr.destroy?.();
@@ -648,6 +878,13 @@ function runChild({
     child.on('close', (code, exitSignal) => {
       closed = true;
       if (settled) return;
+      // The client can die without this harness having asked it to: an operator
+      // kill, the OOM killer, a session teardown, a broken attach to a remote
+      // daemon. `beginTermination` never ran, so nothing has addressed the
+      // container, and `--rm` cannot help because the container did not exit -
+      // least of all when the adapter is hung, which is exactly when it matters.
+      // Removal by name is the only thing that reaches it.
+      if (exitSignal !== null) removeContainer();
       if (failure !== null) {
         finish(reject, failure);
         return;
@@ -729,9 +966,13 @@ export function createPythonAdapterExecutor(options) {
       'Python adapter execution requires process-group isolation'
     );
   }
+  // The ceiling is one second under the runner's unit deadline, so that when a
+  // unit does stall it is the unit watchdog that reports it rather than this
+  // one. The two numbers move together; see UNIT_TIMEOUT_MS in v11-runner.mjs
+  // for what sized them.
   const timeoutMs = boundedInteger(options.timeoutMs, DEFAULT_TIMEOUT_MS, {
     minimum: 50,
-    maximum: 119_000,
+    maximum: 599_000,
     label: 'Python adapter timeout'
   });
   const maxRequestBytes = boundedInteger(options.maxRequestBytes, DEFAULT_MAX_REQUEST_BYTES, {
@@ -747,15 +988,44 @@ export function createPythonAdapterExecutor(options) {
   if (spec.requestClasses.length > 0 && typeof options.providerEndpointFor !== 'function') {
     throw new PythonAdapterExecutorError('CONTRACT_FAILURE', 'Python adapter provider routing is required');
   }
+  const providerModels = normalizeProviderModels(options.providerModels, spec.requestClasses);
+
+  // Container execution is opt-in. Without it the adapter runs on whatever
+  // interpreter the host carries, which is right for the unit tests and wrong
+  // for a measurement: the competitor lock pins an image precisely so that a
+  // recorded number describes software somebody can reconstruct.
+  const container = options.container ?? null;
+  if (container !== null) {
+    if (!isPlainRecord(container)) {
+      throw new PythonAdapterExecutorError('CONTRACT_FAILURE', 'Python adapter container options must be an object');
+    }
+    if (!isNonEmptyString(container.image)) {
+      throw new PythonAdapterExecutorError('CONTRACT_FAILURE', 'Python adapter container requires a pinned image');
+    }
+    if (container.runtimeRoot !== undefined
+      && container.runtimeRoot !== null
+      && (!isNonEmptyString(container.runtimeRoot) || !path.isAbsolute(container.runtimeRoot))) {
+      throw new PythonAdapterExecutorError('CONTRACT_FAILURE', 'Python adapter runtime root must be an absolute path');
+    }
+    if (container.dockerExecutable !== undefined && !isNonEmptyString(container.dockerExecutable)) {
+      throw new PythonAdapterExecutorError('CONTRACT_FAILURE', 'Python adapter container executable is invalid');
+    }
+  }
   const usedEndpoints = new Set();
 
-  async function routesFor(request, deadlineAt, signal) {
+  async function routesFor(request, deadlineAt, signal, rootInvocationId) {
     const routes = { internal_memory_llm: null, embedding: null };
     const allocated = [];
     for (const requestClass of spec.requestClasses) {
       const correlation = providerCorrelation(request, requestClass);
-      const endpoint = validateProviderEndpoint(await waitBounded(
-        Promise.resolve().then(() => options.providerEndpointFor(requestClass, correlation)),
+      const plan = Object.freeze({
+        rootInvocationId,
+        rootOperation: correlation.rootOperation,
+        planSlot: `adapter-${requestClass}`,
+        identityMode: spec.dispatchIdentityMode
+      });
+      const endpoint = validateProviderRouteAllocation(await waitBounded(
+        Promise.resolve().then(() => options.providerEndpointFor(requestClass, correlation, plan)),
         deadlineAt,
         signal,
         new PythonAdapterExecutorError(
@@ -792,12 +1062,14 @@ export function createPythonAdapterExecutor(options) {
         'Python adapter operation was interrupted'
       );
     }
-    const routes = await routesFor(request, deadlineAt, signal);
+    const rootInvocationId = randomUUID();
+    const routes = await routesFor(request, deadlineAt, signal, rootInvocationId);
     const wrapper = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       adapterId: options.adapterId,
       request,
-      providerRoutes: routes
+      providerRoutes: routes,
+      providerModels
     };
     let input;
     try {
@@ -821,14 +1093,31 @@ export function createPythonAdapterExecutor(options) {
         signal
       );
       invocationRoot = await prepareInvocationRoot(deadlineAt, signal);
-      const environment = childEnvironment(stateLeaf, invocationRoot);
+      const launch = container === null
+        ? {
+            command: pythonExecutable,
+            commandArgs: [hostPath],
+            childEnv: childEnvironment(stateLeaf, invocationRoot),
+            containerName: null,
+            dockerExecutable: 'docker',
+            fragments: []
+          }
+        : containerLaunch({
+            container,
+            hostPath,
+            invocationRoot,
+            stateRoot,
+            stateLeafName: path.basename(stateLeaf)
+          });
       result = await runChild({
         spawnProcess,
         processGroupIsolation,
-        pythonExecutable,
-        hostPath,
+        command: launch.command,
+        commandArgs: launch.commandArgs,
+        childEnv: launch.childEnv,
+        containerName: launch.containerName,
+        dockerExecutable: launch.dockerExecutable,
         invocationRoot,
-        environment,
         input,
         request,
         maxOutputBytes,
@@ -839,7 +1128,8 @@ export function createPythonAdapterExecutor(options) {
           stateRoot,
           stateLeaf,
           invocationRoot,
-          hostPath
+          hostPath,
+          ...launch.fragments
         ].flatMap(protectedVariants)
       });
     } catch (error) {

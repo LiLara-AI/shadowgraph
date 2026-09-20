@@ -5,7 +5,9 @@ import { isDeepStrictEqual } from 'node:util';
 
 import { createAdapterRequest, validateAdapterResponse } from './adapter-protocol.mjs';
 import { OUTER_HTTP_ERROR_CODE, validateDecisionResponse } from './outer-model.mjs';
+import { validateV11AcceptanceEligibility } from './v11-acceptance-eligibility.mjs';
 import { validateV11RawRun } from './validate.mjs';
+import { validateNativeAttemptPolicy } from './v11-native-attempts.mjs';
 import {
   OPERATION_FIELDS,
   V11_PHASES,
@@ -33,8 +35,41 @@ export const OUTER_REQUEST_INPUT_FIELDS = Object.freeze(['phase', 'scenario', 'n
 const HASH = /^[a-f0-9]{64}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
 const AMENDMENT_002_SHA256 = '08e12eca3f93bd67cfeaf90a2064f91beb240e78a8fd63ed8645da78c0d88f1b';
+const AMENDMENT_003_SHA256 = '726de2018584aca399fc27d2bba15585d8b6fb9454bc24083578daed22f0be0a';
+const AMENDMENT_004_SHA256 = 'b0c3a2553608efb78147a8c1f1ef9af51a7d0eebaa0037ce4ad7b64616b1c5f9';
+const AMENDMENT_005_SHA256 = 'c435fa9d772c151c83214ef3a4180e0646236cd2cbb079be082b8341c4e6e223';
+const AMENDMENT_005_SIDECAR = `${AMENDMENT_005_SHA256}  benchmark/preregistration-amendment-005.json\n`;
+const AMENDMENT_006_SHA256 = '3bc9308a19e44ecc06d15dc0144239aa907b49cf897a11f9fab7cfe116966760';
+const AMENDMENT_006_SIDECAR = `${AMENDMENT_006_SHA256}  benchmark/preregistration-amendment-006.json\n`;
+const AMENDMENT_008_SHA256 = '184ba096d3b3d762f96e37c9a594925dd22e9628b9649a89d4a0a0c8fdff5ff9';
+const AMENDMENT_008_SIDECAR = `${AMENDMENT_008_SHA256}  benchmark/preregistration-amendment-008.json\n`;
+const AMENDMENT_009_SHA256 = '804d1f3bf0ae9f8f8e38f01676c66dc5e7c16b722f1ce438cc63a33b9a84c2e2';
+const AMENDMENT_009_SIDECAR = `${AMENDMENT_009_SHA256}  benchmark/preregistration-amendment-009.json\n`;
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
-const UNIT_TIMEOUT_MS = 120_000;
+// Exported because a production caller has to build the progress ledger with
+// the same deadline. Restating it there would make the ledger's `stalled`
+// verdict and this hard deadline agree by coincidence rather than by
+// construction.
+//
+// Sized against the configuration being measured, not chosen. It was 120s when
+// the pinned decision model was `qwen2.5:0.5b`. At `qwen2.5:7b` on a CPU-only
+// endpoint a decision unit is retrieve + outer decision + persist, and the
+// slowest arm was measured at 38.7 + ~29.6 + 105.9 = ~175s - so the old ceiling
+// would have failed Cognee's every decision unit and the artifact would have
+// read as the product failing rather than as this number being too small. The
+// value is deliberately well clear of the measurement rather than fitted just
+// above it: one observation is not a distribution, and a ceiling that is too
+// tight manufactures failures while one that is too loose only costs time on a
+// unit that is genuinely stuck. See
+// benchmark/evidence/v11-prerun-review-2026-09-06.md (F25).
+export const UNIT_TIMEOUT_MS = 600_000;
+
+// What one adapter operation inside that unit may take. Strictly below the unit
+// deadline, because a unit runs several operations and the unit's own watchdog
+// has to be the one that fires last. The run path passes this explicitly:
+// leaving it to `python-adapter-executor.mjs`'s own default is what produced
+// F25, since that default is 30s and no test entered the line that omitted it.
+export const ADAPTER_OPERATION_TIMEOUT_MS = 300_000;
 const RESUME_PROGRESS_EVENTS = new Set([
   'run_started',
   'unit_started',
@@ -238,7 +273,7 @@ function throwIfAborted(signal) {
   throw Object.assign(new Error('Measured operation was aborted'), { name: 'AbortError' });
 }
 
-async function loadAmendment002(options) {
+async function loadAmendments(options) {
   if (options.amendment002Sha256 !== AMENDMENT_002_SHA256) {
     throw new Error('Amendment 002 hash is not the exact locked v1.1 source digest');
   }
@@ -275,19 +310,220 @@ async function loadAmendment002(options) {
       throw new Error(`Amendment 002 armMatrix entry ${armId} is invalid`, { cause: error });
     }
   }
+  if (options.amendment003Sha256 !== AMENDMENT_003_SHA256) {
+    throw new Error('Amendment 003 hash is not the exact locked v1.1 source digest');
+  }
+  let amendment003Source;
+  try {
+    amendment003Source = await readFile(options.amendment003Path);
+  } catch {
+    throw new Error('Unable to read Amendment 003 source');
+  }
+  const amendment003ActualHash = createHash('sha256').update(amendment003Source).digest('hex');
+  if (amendment003ActualHash !== options.amendment003Sha256) {
+    throw new Error('Amendment 003 source bytes do not match amendment003Sha256');
+  }
+  let amendment003;
+  try {
+    amendment003 = JSON.parse(amendment003Source.toString('utf8'));
+  } catch {
+    throw new Error('Amendment 003 source is not valid JSON');
+  }
+  const correction = amendment003?.applicabilityCorrection;
+  if (amendment003?.amendmentId !== 'amendment-003'
+    || amendment003?.status !== 'AUTHORIZED_FOR_NON_SCORED_V1_1_ACCEPTANCE'
+    || amendment003?.supersedes?.preregistrationSha256 !== options.preregistrationSha256
+    || amendment003?.supersedes?.amendment001Sha256 !== options.amendment001Sha256
+    || amendment003?.supersedes?.amendment002Sha256 !== options.amendment002Sha256
+    || correction?.armId !== 'graphiti'
+    || correction?.capability !== 'userIsolation'
+    || correction?.evidence?.userIdEncodedIntoGroupId !== false
+    || amendment003?.executionConstraints?.noSyntheticNamespaces !== true
+    || amendment003?.executionConstraints?.noUserIdIntoGraphitiGroupId !== true) {
+    throw new Error('Amendment 003 does not match the authorized applicability correction');
+  }
+  const historical = matrix[correction.armId]?.[correction.capability];
+  if (!isDeepStrictEqual(historical, correction.from)) {
+    throw new Error('Amendment 003 correction does not match Amendment 002 armMatrix');
+  }
+  const effectiveMatrix = structuredClone(matrix);
+  effectiveMatrix[correction.armId][correction.capability] = structuredClone(correction.to);
+  for (const [armId, declared] of Object.entries(effectiveMatrix)) {
+    try {
+      validateApplicability(declared);
+    } catch (error) {
+      throw new Error(`Effective applicability entry ${armId} is invalid`, { cause: error });
+    }
+  }
   for (const arm of options.arms) {
-    const declared = matrix[arm.id];
-    if (!Object.hasOwn(matrix, arm.id)) {
-      throw new Error(`Arm ${arm.id} is absent from Amendment 002 armMatrix`);
+    const declared = effectiveMatrix[arm.id];
+    if (!Object.hasOwn(effectiveMatrix, arm.id)) {
+      throw new Error(`Arm ${arm.id} is absent from the effective applicability matrix`);
     }
     for (const capability of ['userIsolation', 'persistence']) {
       if (arm.applicability[capability].status !== declared[capability].status
         || arm.applicability[capability].reason !== declared[capability].reason) {
-        throw new Error(`Arm ${arm.id} applicability contradicts Amendment 002 armMatrix`);
+        throw new Error(`Arm ${arm.id} applicability contradicts the effective amendment matrix`);
       }
     }
   }
-  return amendment;
+
+  async function loadExactAmendment(number, hashField, expectedHash, sourcePath) {
+    if (options[hashField] !== expectedHash) {
+      throw new Error(`Amendment ${number} hash is not the exact locked v1.1 source digest`);
+    }
+    let amendmentSource;
+    try {
+      amendmentSource = await readFile(sourcePath);
+    } catch {
+      throw new Error(`Unable to read Amendment ${number} source`);
+    }
+    if (createHash('sha256').update(amendmentSource).digest('hex') !== expectedHash) {
+      throw new Error(`Amendment ${number} source bytes do not match amendment${number}Sha256`);
+    }
+    try {
+      return JSON.parse(amendmentSource.toString('utf8'));
+    } catch {
+      throw new Error(`Amendment ${number} source is not valid JSON`);
+    }
+  }
+
+  async function loadExactAmendmentSidecar(number, expectedBytes, sourcePath) {
+    let sidecar;
+    try {
+      sidecar = await readFile(sourcePath, 'utf8');
+    } catch {
+      throw new Error(`Unable to read Amendment ${String(number).padStart(3, '0')} sidecar`);
+    }
+    if (sidecar !== expectedBytes) {
+      throw new Error(`Amendment ${String(number).padStart(3, '0')} sidecar does not authenticate the exact locked source bytes`);
+    }
+  }
+
+  const amendment004 = await loadExactAmendment(
+    4,
+    'amendment004Sha256',
+    AMENDMENT_004_SHA256,
+    options.amendment004Path
+  );
+  if (amendment004?.amendmentId !== 'amendment-004'
+    || amendment004?.status !== 'AUTHORIZED_FOR_NON_SCORED_V1_1_ACCEPTANCE'
+    || amendment004?.supersedes?.amendment003Sha256 !== options.amendment003Sha256
+    || amendment004?.invariants?.scored !== false
+    || amendment004?.retrospectiveEffect?.rescoreExistingRuns !== false) {
+    throw new Error('Amendment 004 does not match the authorized prospective prompt correction');
+  }
+
+  const amendment005 = await loadExactAmendment(
+    5,
+    'amendment005Sha256',
+    AMENDMENT_005_SHA256,
+    options.amendment005Path
+  );
+  await loadExactAmendmentSidecar(5, AMENDMENT_005_SIDECAR, options.amendment005SidecarPath);
+  const taxonomy = amendment005?.retryTaxonomy;
+  const enforcement = taxonomy?.enforcement;
+  if (amendment005?.amendmentId !== 'amendment-005'
+    || amendment005?.status !== 'AUTHORIZED_FOR_NON_SCORED_V1_1_ACCEPTANCE'
+    || amendment005?.supersedes?.amendment004Sha256 !== options.amendment004Sha256
+    || amendment005?.invariants?.scored !== false
+    || amendment005?.invariants?.comparativeClaimsEnabled !== false
+    || amendment005?.invariants?.providerBudgetsRelaxed !== false
+    || amendment005?.prospectiveEffect?.rescoreExistingRuns !== false
+    || taxonomy?.categories?.A?.allowed !== false
+    || taxonomy?.categories?.E?.allowed !== false
+    || enforcement?.harnessOperationRetries !== 0
+    || enforcement?.outerDecisionRetries !== 0
+    || enforcement?.allProviderAttemptsMeteredBeforeDispatch !== true
+    || enforcement?.fallbackModelOrProviderProhibited !== true
+    || enforcement?.rootOperationFailureDoesNotTriggerHarnessRerun !== true
+    || enforcement?.nativeAttemptEligibilityRuleIsArmNeutral !== true) {
+    throw new Error('Amendment 005 does not match the authorized arm-neutral native-attempt policy');
+  }
+  const amendment006 = await loadExactAmendment(
+    6,
+    'amendment006Sha256',
+    AMENDMENT_006_SHA256,
+    options.amendment006Path
+  );
+  await loadExactAmendmentSidecar(6, AMENDMENT_006_SIDECAR, options.amendment006SidecarPath);
+  const traceContract = amendment006?.nativeAttemptTraceContract;
+  if (amendment006?.amendmentId !== 'amendment-006'
+    || amendment006?.status !== 'AUTHORIZED_FOR_NON_SCORED_V1_1_ACCEPTANCE'
+    || amendment006?.supersedes?.amendment005Sha256 !== options.amendment005Sha256
+    || amendment006?.invariants?.scored !== false
+    || amendment006?.invariants?.comparativeClaimsEnabled !== false
+    || amendment006?.invariants?.providerBudgetsRelaxed !== false
+    || amendment006?.prospectiveEffect?.rescoreExistingRuns !== false
+    || amendment006?.prospectiveEffect?.rewriteHistoricalArtifacts !== false
+    || amendment006?.prospectiveEffect?.resumeHistoricalRuns !== false
+    || traceContract?.maxAttemptsPerRootRequestClass !== 24
+    || traceContract?.meterOwnedEvidence?.rootOperationRequiredBeforeDispatch !== true
+    || traceContract?.meterOwnedEvidence?.rootOperationReexecutionProhibited !== true
+    || traceContract?.preconditionEvidence?.allArmsMustHavePolicyEntries !== true
+    || traceContract?.preconditionEvidence?.nonemptyRecoveryPolicyRequiresFreshPinnedLoopbackFaultInjection !== true
+    || traceContract?.accounting?.admissionBeforeDispatch !== true
+    || traceContract?.accounting?.nativeSuccessDoesNotCreateANewHarnessAttempt !== true) {
+    throw new Error('Amendment 006 does not match the authorized arm-neutral native-attempt trace contract');
+  }
+  const amendment008 = await loadExactAmendment(
+    8,
+    'amendment008Sha256',
+    AMENDMENT_008_SHA256,
+    options.amendment008Path
+  );
+  await loadExactAmendmentSidecar(8, AMENDMENT_008_SIDECAR, options.amendment008SidecarPath);
+  const attribution = amendment008?.prospectiveAttributionAndCampaignContract;
+  if (amendment008?.amendmentId !== 'amendment-008'
+    || amendment008?.status !== 'AUTHORIZED_PROSPECTIVE_REMEDIATION_PENDING_PINNED_LOOPBACK'
+    || amendment008?.supersedes?.amendment006Sha256 !== options.amendment006Sha256
+    || amendment008?.invariants?.scored !== false
+    || amendment008?.invariants?.comparativeClaimsEnabled !== false
+    || amendment008?.invariants?.providerBudgetsRelaxed !== false
+    || amendment008?.prospectiveEffect?.rescoreExistingRuns !== false
+    || amendment008?.prospectiveEffect?.rewriteHistoricalArtifacts !== false
+    || amendment008?.prospectiveEffect?.resumeHistoricalRuns !== false
+    || attribution?.planAuthority !== 'meter-issued durable pre-dispatch root and dispatch plans'
+    || attribution?.campaignNoResetRule !== 'new run IDs and session IDs do not reset consumed campaign totals or per-class limits'
+    || amendment008?.acceptanceGates?.freshPinnedCogneeLoopbackFaultInjectionRequired !== true
+    || amendment008?.acceptanceGates?.cumulativeCampaignPolicyRequired !== true) {
+    throw new Error('Amendment 008 does not match the authorized prospective attribution and campaign contract');
+  }
+  let amendment009 = null;
+  if (options.amendment009Path !== undefined) {
+    amendment009 = await loadExactAmendment(
+      9,
+      'amendment009Sha256',
+      AMENDMENT_009_SHA256,
+      options.amendment009Path
+    );
+    await loadExactAmendmentSidecar(9, AMENDMENT_009_SIDECAR, options.amendment009SidecarPath);
+  }
+  let nativeAttemptPolicy;
+  try {
+    nativeAttemptPolicy = validateNativeAttemptPolicy(traceContract.armNeutralRecoveryPolicy);
+    for (const arm of options.arms) {
+      if (!nativeAttemptPolicy.policies.has(arm.id)) {
+        throw new Error(`policy has no entry for selected arm ${arm.id}`);
+      }
+    }
+    if (nativeAttemptPolicy.maxAttemptsPerRootRequestClass !== traceContract.maxAttemptsPerRootRequestClass) {
+      throw new Error('policy cap differs from trace cap');
+    }
+  } catch {
+    throw new Error('Amendment 006 native-attempt policy is invalid');
+  }
+  return {
+    amendment002: amendment,
+    amendment003,
+    amendment004,
+    amendment005,
+    amendment006,
+    amendment008,
+    amendment009,
+    nativeAttemptPolicy,
+    effectiveMatrix
+  };
 }
 
 function validateArm(arm, seen) {
@@ -329,6 +565,20 @@ function validationDefinition(options) {
       randomSeeds: [...options.seeds]
     },
     scenarios: structuredClone(options.scenarios)
+  };
+}
+
+function validationSourceHashes(options) {
+  return {
+    preregistrationSha256: options.preregistrationSha256,
+    amendment001Sha256: options.amendment001Sha256,
+    amendment002Sha256: options.amendment002Sha256,
+    amendment003Sha256: options.amendment003Sha256,
+    amendment004Sha256: options.amendment004Sha256,
+    amendment005Sha256: options.amendment005Sha256,
+    amendment006Sha256: options.amendment006Sha256,
+    amendment008Sha256: options.amendment008Sha256,
+    ...(options.amendment009Sha256 !== undefined ? { amendment009Sha256: options.amendment009Sha256 } : {})
   };
 }
 
@@ -609,7 +859,17 @@ async function validateResume(options, plannedIds) {
   if (previousRaw.environmentLockHash !== options.environmentLockHash) {
     throw new Error('Changed environment lock requires a new runId');
   }
-  for (const field of ['preregistrationSha256', 'amendment001Sha256', 'amendment002Sha256']) {
+  for (const field of [
+    'preregistrationSha256',
+    'amendment001Sha256',
+    'amendment002Sha256',
+    'amendment003Sha256',
+    'amendment004Sha256',
+    'amendment005Sha256',
+    'amendment006Sha256',
+    'amendment008Sha256',
+    ...(options.amendment009Sha256 !== undefined ? ['amendment009Sha256'] : [])
+  ]) {
     if (previousRaw[field] !== options[field]) {
       throw new Error(`Changed ${field} requires a new runId`);
     }
@@ -620,7 +880,12 @@ async function validateResume(options, plannedIds) {
   if (previousRaw.status !== 'INTERRUPTED') {
     throw new Error('Diagnostic resume requires an INTERRUPTED previous raw run');
   }
-  validateV11RawRun(previousRaw, validationDefinition(options), options.preregistrationSha256);
+  validateV11RawRun(
+    previousRaw,
+    validationDefinition(options),
+    options.preregistrationSha256,
+    validationSourceHashes(options)
+  );
   if (previousRaw.attemptIds.length !== resume.attemptLedgers.length
     || previousRaw.attemptIds.some((attemptId, index) => (
       attemptId !== resume.attemptLedgers[index]?.attemptId
@@ -678,7 +943,13 @@ function validateOptions(options) {
   // place that can hold the line for a caller who reaches it without going
   // through executeV11AcceptanceRun.
   if (options.scored) {
-    throw new Error('This candidate may not execute a scored run');
+    if (!options.acceptanceEligibility) {
+      throw new Error('This candidate may not execute a scored run without the final Amendment 009 profile and acceptance eligibility');
+    }
+    validateV11AcceptanceEligibility(options.acceptanceEligibility, {
+      implementationLockHash: options.implementationLockHash,
+      amendment009Sha256: options.amendment009Sha256
+    });
   }
   if (!Array.isArray(options.arms) || options.arms.length === 0) throw new Error('arms must be non-empty');
   if (!Array.isArray(options.scenarios) || options.scenarios.length === 0) throw new Error('scenarios must be non-empty');
@@ -698,11 +969,49 @@ function validateOptions(options) {
     'preregistrationSha256',
     'amendment001Sha256',
     'amendment002Sha256',
+    'amendment003Sha256',
+    'amendment004Sha256',
+    'amendment005Sha256',
+    'amendment006Sha256',
+    'amendment008Sha256',
     'implementationLockHash',
     'environmentLockHash'
   ]) requireHash(options[field], field);
   if (!isNonEmptyString(options.amendment002Path)) {
     throw new Error('amendment002Path must identify the exact Amendment 002 source file');
+  }
+  if (!isNonEmptyString(options.amendment003Path)) {
+    throw new Error('amendment003Path must identify the exact Amendment 003 source file');
+  }
+  if (!isNonEmptyString(options.amendment004Path)) {
+    throw new Error('amendment004Path must identify the exact Amendment 004 source file');
+  }
+  if (!isNonEmptyString(options.amendment005Path)) {
+    throw new Error('amendment005Path must identify the exact Amendment 005 source file');
+  }
+  if (!isNonEmptyString(options.amendment005SidecarPath)) {
+    throw new Error('amendment005SidecarPath must identify the exact Amendment 005 hash sidecar');
+  }
+  if (!isNonEmptyString(options.amendment006Path)) {
+    throw new Error('amendment006Path must identify the exact Amendment 006 source file');
+  }
+  if (!isNonEmptyString(options.amendment006SidecarPath)) {
+    throw new Error('amendment006SidecarPath must identify the exact Amendment 006 hash sidecar');
+  }
+  if (!isNonEmptyString(options.amendment008Path)) {
+    throw new Error('amendment008Path must identify the exact Amendment 008 source file');
+  }
+  if (!isNonEmptyString(options.amendment008SidecarPath)) {
+    throw new Error('amendment008SidecarPath must identify the exact Amendment 008 hash sidecar');
+  }
+  if (options.amendment009Sha256 !== undefined) {
+    requireHash(options.amendment009Sha256, 'amendment009Sha256');
+    if (!isNonEmptyString(options.amendment009Path)) {
+      throw new Error('amendment009Path must identify the exact Amendment 009 source file');
+    }
+    if (!isNonEmptyString(options.amendment009SidecarPath)) {
+      throw new Error('amendment009SidecarPath must identify the exact Amendment 009 hash sidecar');
+    }
   }
   if (!isPlainObject(options.progress)
     || typeof options.progress.append !== 'function'
@@ -1024,7 +1333,7 @@ async function invokeAdapter(
   let response;
   try {
     throwIfAborted(signal);
-    response = await options.executeAdapter(request, { signal });
+    response = await options.executeAdapter(request, { signal, operationSlot: evidenceKey });
     throwIfAborted(signal);
     validateAdapterResponse({ request, response });
     addOperations(unit.operations, response.operations);
@@ -1278,6 +1587,9 @@ async function executeDecision(options, spec, unit, signal, completedUnits, oute
       'setupVerify'
     );
   }
+  if (probeNamespace !== null) {
+    await invokeAdapter(options, spec, 'reset', probeNamespace, {}, unit, signal);
+  }
   const retrieved = await invokeAdapter(options, spec, 'retrieve', retrievalNamespace, {
     query: { scenarioId: spec.scenario.id, task: spec.scenario.task }
   }, unit, signal);
@@ -1299,7 +1611,7 @@ async function executeDecision(options, spec, unit, signal, completedUnits, oute
       const available = {
         phase: spec.phase,
         scenario: structuredClone(spec.scenario),
-        nativeContext: structuredClone(retrieved.result.nativeContext)
+        nativeContext: structuredClone(retrieved.result.nativeContext).slice(0, 20)
       };
       return options.buildOuterRequest(Object.fromEntries(
         OUTER_REQUEST_INPUT_FIELDS.map((field) => [field, available[field]])
@@ -1325,6 +1637,25 @@ async function executeDecision(options, spec, unit, signal, completedUnits, oute
   unit.decisionResponse = structuredClone(outer.decision);
   unit.providerUsage = structuredClone(outer.usage);
   unit.providerModel = outer.providerModel;
+
+  if (outer.usage?.prompt_tokens > 8192) {
+    throw Object.assign(new Error('PROVIDER_USAGE_EXCEEDED'), {
+      unitFailure: publicFailure(
+        'CONTRACT_FAILURE',
+        'outer',
+        'Provider-reported input usage exceeds the frozen maximum'
+      )
+    });
+  }
+  if (spec.phase.startsWith('D_FALSE_') && typeof outer.decision?.changedFactDetected !== 'boolean') {
+    throw Object.assign(new Error('D_FALSE_PREDICTION_INVALID'), {
+      unitFailure: publicFailure(
+        'CONTRACT_FAILURE',
+        'outer',
+        'D_FALSE requires a boolean changed-fact prediction'
+      )
+    });
+  }
 
   const record = standardizedDecisionRecord({
     armId: spec.arm.id,
@@ -1436,7 +1767,7 @@ function zeroResultFor(units, interrupted) {
  * receive memory-only requests; the outer decision call remains centralized.
  */
 async function executeV11Benchmark(options, closeResources) {
-  await loadAmendment002(options);
+  await loadAmendments(options);
   const plan = createPlan(options);
   const plannedIds = new Set(plan.map((spec) => spec.unitId));
   const resume = await validateResume(options, plannedIds);
@@ -1489,6 +1820,13 @@ async function executeV11Benchmark(options, closeResources) {
     preregistrationSha256: options.preregistrationSha256,
     amendment001Sha256: options.amendment001Sha256,
     amendment002Sha256: options.amendment002Sha256,
+    amendment003Sha256: options.amendment003Sha256,
+    amendment004Sha256: options.amendment004Sha256,
+    amendment005Sha256: options.amendment005Sha256,
+    amendment006Sha256: options.amendment006Sha256,
+    amendment008Sha256: options.amendment008Sha256,
+    ...(options.amendment009Sha256 !== undefined ? { amendment009Sha256: options.amendment009Sha256 } : {}),
+    ...(options.scored && options.acceptanceEligibility ? { acceptanceEligibilitySha256: createHash('sha256').update(canonicalJson(options.acceptanceEligibility)).digest('hex') } : {}),
     implementationLockHash: options.implementationLockHash,
     environmentLockHash: options.environmentLockHash,
     startedAt,
@@ -1503,7 +1841,12 @@ async function executeV11Benchmark(options, closeResources) {
     arms,
     units
   };
-  validateV11RawRun(result, validationDefinition(options), options.preregistrationSha256);
+  validateV11RawRun(
+    result,
+    validationDefinition(options),
+    options.preregistrationSha256,
+    validationSourceHashes(options)
+  );
 
   if (interrupted) {
     await appendProgress(options, 'run_interrupted', null, { cause: 'OPERATOR_INTERRUPTION' });

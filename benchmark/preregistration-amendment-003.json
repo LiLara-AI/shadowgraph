@@ -1,0 +1,66 @@
+{
+  "amendmentVersion": "1.1.0",
+  "amendmentId": "amendment-003",
+  "status": "AUTHORIZED_FOR_NON_SCORED_V1_1_ACCEPTANCE",
+  "proposedAt": "2026-09-04T00:00:00Z",
+  "authorizedAt": "2026-09-04T00:00:00Z",
+  "supersedes": {
+    "preregistrationFile": "benchmark/preregistration.json",
+    "preregistrationSha256": "738ee8b4813fab77da2e4e24582b12e756686650e4c39fad41c5337f831f5dac",
+    "amendment001File": "benchmark/preregistration-amendment-001.json",
+    "amendment001Sha256": "2b209df6ca46a179e332acd4ed0b16a35a089f5c14575dd86353db0dc7249c4a",
+    "amendment002File": "benchmark/preregistration-amendment-002.json",
+    "amendment002Sha256": "08e12eca3f93bd67cfeaf90a2064f91beb240e78a8fd63ed8645da78c0d88f1b"
+  },
+  "reason": {
+    "validComparativeResultObserved": false,
+    "partialStateReuse": false,
+    "correction": "Graphiti 0.29.3 exposes group_id only and has no native user namespace. Its declared user isolation is therefore NOT_APPLICABLE for this non-scored acceptance. No user identifier may be encoded into group_id."
+  },
+  "invariants": {
+    "scored": false,
+    "scenariosChanged": false,
+    "seedsChanged": false,
+    "repetitionsChanged": false,
+    "armSetChanged": false,
+    "frozenSourcesChanged": false,
+    "comparativeClaimsEnabled": false
+  },
+  "applicabilityCorrection": {
+    "armId": "graphiti",
+    "capability": "userIsolation",
+    "from": {
+      "status": "SUPPORTED",
+      "reason": null
+    },
+    "to": {
+      "status": "NOT_APPLICABLE",
+      "reason": "Graphiti 0.29.3 exposes only native group_id scope and no native user namespace"
+    },
+    "evidence": {
+      "probe": "benchmark/evidence/probe-graphiti-0.29.3.json",
+      "observedNativeProjectNamespace": "group_id",
+      "observedNativeUserNamespace": null,
+      "userIdEncodedIntoGroupId": false
+    }
+  },
+  "countDerivation": {
+    "rule": "Recompute from the amended applicability matrix, scenario count, repetitions, and phases; do not copy declared totals.",
+    "expected": {
+      "totalUnits": 308,
+      "excludedUnits": 20,
+      "measuredUnits": 288,
+      "resetUnits": 28,
+      "outerDecisionCalls": 260
+    }
+  },
+  "executionConstraints": {
+    "measuredOperationRetries": 0,
+    "diagnosticRetriesSubstituteMeasuredEvidence": false,
+    "commonLocalProviderOnly": true,
+    "noPaidOrRemoteInference": true,
+    "noSyntheticNamespaces": true,
+    "noUserIdIntoGraphitiGroupId": true,
+    "officialRunAllowedOnlyWhenPreflightReady": true
+  }
+}

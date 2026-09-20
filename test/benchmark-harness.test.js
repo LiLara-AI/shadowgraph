@@ -1081,6 +1081,11 @@ test('fixed scorer implements every preregistered lifecycle metric without an LL
     rejectionReasonRecall: 1,
     changedFactDetection: 1,
     falseAlertRate: 0,
+    // Probe coverage now travels beside the rate, so a null rate can be told
+    // apart from a probe set that never ran. Every score above is unchanged.
+    falseAlertProbesRequired: 3,
+    falseAlertProbesValid: 3,
+    falseAlertProbesFailed: 0,
     failedAttemptAvoidance: 1,
     projectIsolation: 1,
     userIsolation: 1

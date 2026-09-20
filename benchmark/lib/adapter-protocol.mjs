@@ -3,7 +3,7 @@ import {
   namespaceRefFor,
   validateAdapterEnvelope
 } from './v11-contract.mjs';
-import { validateDecisionResponse } from './outer-model.mjs';
+import { validateDecisionRecordContent } from './outer-model.mjs';
 
 const REQUEST_FIELDS = [
   'schemaVersion',
@@ -238,7 +238,7 @@ function validatePayload(operation, payload, request) {
     if (!isNonEmptyString(payload.record.type)) throw new Error('persist payload.record.type must be a non-empty string');
     if (!isPlainObject(payload.record.content)) throw new Error('persist payload.record.content must be an object');
     if (payload.record.type === 'decision') {
-      validateDecisionResponse(payload.record.content);
+      validateDecisionRecordContent(payload.record.content);
     } else if (payload.record.type === 'failed_attempt') {
       assertExactKeys(payload.record.content, ['id', 'approachId', 'reasonId', 'reason'], 'failed attempt record content');
       for (const field of ['id', 'approachId', 'reasonId', 'reason']) {

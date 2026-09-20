@@ -1,0 +1,69 @@
+{
+  "amendmentVersion": "1.1.0",
+  "amendmentId": "amendment-004",
+  "status": "AUTHORIZED_FOR_NON_SCORED_V1_1_ACCEPTANCE",
+  "proposedAt": "2026-09-06T00:00:00Z",
+  "authorizedAt": "2026-09-06T00:00:00Z",
+  "supersedes": {
+    "preregistrationFile": "benchmark/preregistration.json",
+    "preregistrationSha256": "738ee8b4813fab77da2e4e24582b12e756686650e4c39fad41c5337f831f5dac",
+    "amendment001File": "benchmark/preregistration-amendment-001.json",
+    "amendment001Sha256": "2b209df6ca46a179e332acd4ed0b16a35a089f5c14575dd86353db0dc7249c4a",
+    "amendment002File": "benchmark/preregistration-amendment-002.json",
+    "amendment002Sha256": "08e12eca3f93bd67cfeaf90a2064f91beb240e78a8fd63ed8645da78c0d88f1b",
+    "amendment003File": "benchmark/preregistration-amendment-003.json",
+    "amendment003Sha256": "726de2018584aca399fc27d2bba15585d8b6fb9454bc24083578daed22f0be0a"
+  },
+  "reason": {
+    "validComparativeResultObserved": false,
+    "partialStateReuse": false,
+    "finding": "F31",
+    "correction": "The frozen response schema requests decisionId and types it string|null, and a decision record's id is present in adapter-native context, but nothing in the frozen prompt contract states what decisionId should contain. A model returning null therefore complies with everything it was told, and scoring.decisionRetrievalAccuracy - which requires a non-empty decisionId - evaluates to 0 for every arm regardless of what the arm recalled. Run v11-acceptance-002 observed decisionId null x152, the invented placeholder 'D001' x28 (every one in a unit with nativeContextCount 0), and a real decision:<hex> x4. This amendment supplies the missing semantics in the common outer system instruction. It does not change the scoring rule."
+  },
+  "invariants": {
+    "scored": false,
+    "scenariosChanged": false,
+    "seedsChanged": false,
+    "repetitionsChanged": false,
+    "armSetChanged": false,
+    "frozenSourcesChanged": false,
+    "comparativeClaimsEnabled": false,
+    "scoringRulesChanged": false,
+    "responseSchemaChanged": false,
+    "applicabilityMatrixChanged": false
+  },
+  "promptContractCorrection": {
+    "target": "commonOuterSystemInstruction",
+    "appliesTo": "every arm and every measured decision phase, identically",
+    "addedSentence": "When adapter-native context contains records, decisionId is the id of the record your answer is drawn from, copied exactly; return null when no such record is present.",
+    "rationale": "The instruction names the field's referent and nothing else. It states no expected value, names no scenario fixture, and gives no arm information any other arm does not receive: it is part of the single common system instruction that auditOuterRequest already requires to be identical across every phase and arm.",
+    "difficultyNeutrality": {
+      "armSpecificWordingUsed": false,
+      "expectedAnswersExposed": false,
+      "fixtureIdentifiersExposed": false,
+      "note": "An arm holding no records returns null and scores 0 on decisionRetrievalAccuracy. That is the frozen rule operating as written, not a difficulty change introduced here: the control has no memory to retrieve from, and the metric exists to measure retrieval."
+    }
+  },
+  "promptBindingEffect": {
+    "systemSha256Changes": true,
+    "responseSchemaSha256Changes": false,
+    "priorSystemSha256": "24010602c784bbb015997f859a0819ef41b0a872a0addd087ad69d8ca84d8065",
+    "priorResponseSchemaSha256": "fad37bf4a43a6278be3d815f2a606c2c381c391c733a07a5f291754b1d6e0f75",
+    "comparability": "Runs executed before and after this amendment are not comparable on decisionRetrievalAccuracy, and no comparison between them may be reported. Every raw run records its own outerPromptBinding, so which contract a run executed under is always recoverable from the artifact."
+  },
+  "retrospectiveEffect": {
+    "rescoreExistingRuns": false,
+    "appliesToRunsStartedBefore": false,
+    "note": "v11-acceptance-002 is not re-scored, not re-run and not overwritten. Its artifacts remain preserved read-only outside the repository, and its recorded outerPromptBinding continues to identify the contract it actually executed under. This amendment governs runs started after its authorisation only."
+  },
+  "countDerivation": {
+    "rule": "Unchanged. Amendment 003's derivation continues to govern; this amendment alters no applicability, scenario, seed, repetition or phase.",
+    "expected": {
+      "totalUnits": 308,
+      "excludedUnits": 20,
+      "measuredUnits": 288,
+      "resetUnits": 28,
+      "outerDecisionCalls": 260
+    }
+  }
+}
