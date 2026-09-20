@@ -415,12 +415,13 @@ separately.
 
 ## Limitations and Technical Preview status
 
-ShadowGraph 0.40.0 is a **Technical Preview / Early Access** release. It is not Beta and not stable.
+ShadowGraph 0.41.0 is a **Technical Preview / Early Access** release. It is not Beta and not stable.
 
 - **Interfaces and the storage schema may still change.** Do not use it for data you cannot
   reproduce.
-- **Not on npm.** The package is deliberately `private: true`. No npm publication, Git tag, or
-  GitHub release has been created, and none is authorized.
+- **Not on npm.** The package is deliberately `private: true`. The `v0.41.0` Git tag and GitHub
+  Release are maintainer-authorized for this Technical Preview; **npm publication is not
+  authorized** and has not occurred.
 - **No comparative benchmark has been measured.** Comparative benchmark infrastructure was executed,
   but no arm was measured because no common local/free LLM and embedding endpoint was available. No
   comparative performance, quality, token, cost, or 'best' claim is supported. ShadowGraph makes no

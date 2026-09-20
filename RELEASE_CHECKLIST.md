@@ -1,10 +1,14 @@
-# Release checklist — ShadowGraph 0.40.0 (Technical Preview → publication)
+# Release checklist — ShadowGraph 0.41.0 (Technical Preview → publication)
 
-No publish, tag, GitHub release, commit, push, or release-branch action is part of this checklist run.
+This checklist governs **npm publication**, which is not authorized and has not occurred.
+
+The `v0.41.0` Git tag and GitHub Release are separately maintainer-authorized as a Technical
+Preview and are tracked in [`docs/launch/launch-checklist.md`](docs/launch/launch-checklist.md).
+They publish no package, and they close none of the gates below.
 
 ## Current publication decision
 
-- [x] Package and lockfile use the identical name/version: `shadowgraph-unified-plugin@0.40.0`.
+- [x] Package and lockfile use the identical name/version: `shadowgraph-unified-plugin@0.41.0`.
 - [x] The exact name was syntactically accepted by `npm pack` and the live registry returned HTTP 404 / npm `E404` on 2026-08-27.
 - [x] Recheck the exact registry name immediately before publication; the 404 is evidence at one point in time, not a reservation.
 - [x] Keep `"private": true` and retain Technical Preview status while the actual preregistered comparative measurement and the human third-party security audit remain open. The valid zero-measurement run and local journal benchmark do not satisfy the benchmark gate, and the recorded AI-assisted security review does not satisfy the human-audit gate.
@@ -48,7 +52,11 @@ No publish, tag, GitHub release, commit, push, or release-branch action is part 
 - [ ] **Human third-party security audit — NOT performed.** The AI-assisted review above is a control, not a substitute. A human expert audit or penetration test remains outstanding and is required before any claim stronger than Technical Preview.
 - [ ] **Actual preregistered benchmark comparison.** The retained record is valid but has `MEASURED=0`, `NOT_MEASURED=7`, and `measurements=0` because no common local/free LLM and embedding endpoint existed. Run all seven arms under the frozen equal-configuration rules, retain raw outputs, validate/aggregate them, and obtain independent interpretation. Dependency import probes and the local journal benchmark do not satisfy this gate. Until then, `best` and equivalent overall-superiority wording are prohibited.
 - [ ] Maintainer signs off on release wording, package ownership/access, provenance, and support contact.
-- [ ] Explicit authorization to remove `private`, publish npm, create a Git tag, and create a GitHub release.
+- [ ] **Explicit authorization to remove `private` and publish to npm — NOT given.** The package
+      stays `private: true`.
+- [x] **Explicit authorization to create the `v0.41.0` Git tag and GitHub Release — given** by the
+      maintainer for this Technical Preview. This authorization covers `v0.41.0` only, publishes no
+      package, and does not extend to npm.
 
 ## Publication-day commands (only after all gates are checked)
 
@@ -72,4 +80,6 @@ git diff --check
 git status --short --branch
 ```
 
-Do not run `npm publish`, create a tag, or create a GitHub release without the explicit authorization gate above.
+Do not run `npm publish` — it is not authorized, and `private: true` stays. The `v0.41.0` tag and
+GitHub Release are authorized above; no other tag or release is, and neither may be created without
+its own explicit authorization gate.

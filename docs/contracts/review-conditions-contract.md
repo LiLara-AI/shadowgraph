@@ -298,69 +298,6 @@ acknowledgement state. That is a **known product backlog item, not fixed** — s
 `test/compact-review-ack.test.js`: restart preserves the acknowledgement, and a genuinely new breach
 still surfaces.
 
-## 11. Reconsideration (`reconsider()`)
-
-`reconsider()` is a **projection of the same pass** `review()` runs, never a second evaluation.
-One pass, one evaluator (`evaluateRule()`), one set of verdicts — so the two can never disagree
-about whether a stored rule fires, does not fire, or cannot be evaluated. A separate operator table
-on the reconsideration side is the specific defect this design exists to make impossible: a rule
-using an operator only one route understood would report `unchanged` with complete confidence on
-one and a breach on the other.
-
-### Verdict and completeness
-
-| Verdict | When | Completeness |
-| --- | --- | --- |
-| `review_recommended` | At least one relevant rule definitely fired | `complete`, or `partial` when something else could not be settled |
-| `unchanged` | Evaluation was complete and nothing fired | **always** `complete` |
-| `manual_review` | Nothing definitely fired, but something could not be settled | **always** `partial` |
-
-- The **mixed case** — one rule fires while another is unknown — is `review_recommended` **and**
-  `partial`. Both the breach evidence and the unevaluated condition stay visible; neither outcome
-  hides the other.
-- `unchanged` is reported **only** with `complete`. That pairing is the contract's promise, and it
-  is why an unevaluable condition can never be mistaken for a healthy decision.
-- The top level aggregates every decision in scope: a definite trigger outranks uncertainty, which
-  outranks `unchanged`; any `partial` decision makes the whole call `partial`.
-
-### What each collection carries
-
-| Field | Contents |
-| --- | --- |
-| `triggeredRules` | Conditions with verdict `true` |
-| `triggeredBy` | Causes with no rule behind them: a matched `changedFacts` token, `review date reached`, `decision outcome failed` |
-| `groundedConditions` | Conditions with verdict `false` — so `unchanged` rests on stated evidence rather than on an empty list |
-| `rulesNotEvaluated` | Conditions with verdict `unknown`, and **only** those |
-| `contestedConditions` | Conditions the evaluator did decide, on equally applicable facts that disagree |
-| `affectedAlternatives` | Labels of the rejected alternatives worth reconsidering |
-| `factsConsidered` | Every observation the verdicts were computed from, named once each |
-
-`contestedConditions` is reported **apart from** `rulesNotEvaluated` because the evaluator did
-reach a verdict; calling that unevaluated would overstate it. It withholds completeness all the
-same — a verdict resting on facts that disagree is exactly the silent pass §5 exists to prevent.
-
-### Scope, and failing closed
-
-`reconsider({ project, decisionId })` narrows to one decision. Each of these is an **error**, never
-an empty result:
-
-- an unknown `decisionId` — `Decision not found`;
-- a `decisionId` belonging to another project — `Decision is not accessible in this project`;
-- a decision that is `archived`, `superseded` or `abandoned` — `not open for reconsideration`.
-
-An empty `unchanged` + `complete` for a mis-addressed decision would read exactly like "checked,
-and this decision is fine". A focused call evaluates only its decision, and therefore raises no
-review signal for any other.
-
-### What it does and does not write
-
-It can open a review signal, by **exactly** the identity `review()` uses (§8), so reconsidering
-twice settles on one signal and an acknowledgement holds across later calls. It never writes
-decision status, confidence or lifecycle state, and never rewrites a stored rule.
-
-Matching is **literal**. A rule key and a fact key that differ in spelling do not match, and no
-meaning is inferred from the near miss; the condition is `unknown`.
-
 ## 9. Attempt reuse (`reusableWhen`)
 
 `attempts[].reusableWhen` has been normalised and persisted since schema 4 with **nothing ever
@@ -441,3 +378,66 @@ heuristic would wrongly claim).
 - the full and compact MCP reconsideration surfaces, failing closed over the wire, a legacy
   caller-supplied `sessionId` still accepted while runtime session provenance is authoritative, and
   the HTTP and CLI pass-through: `test/reconsideration-mcp.test.js`.
+
+## 11. Reconsideration (`reconsider()`)
+
+`reconsider()` is a **projection of the same pass** `review()` runs, never a second evaluation.
+One pass, one evaluator (`evaluateRule()`), one set of verdicts — so the two can never disagree
+about whether a stored rule fires, does not fire, or cannot be evaluated. A separate operator table
+on the reconsideration side is the specific defect this design exists to make impossible: a rule
+using an operator only one route understood would report `unchanged` with complete confidence on
+one and a breach on the other.
+
+### Verdict and completeness
+
+| Verdict | When | Completeness |
+| --- | --- | --- |
+| `review_recommended` | At least one relevant rule definitely fired | `complete`, or `partial` when something else could not be settled |
+| `unchanged` | Evaluation was complete and nothing fired | **always** `complete` |
+| `manual_review` | Nothing definitely fired, but something could not be settled | **always** `partial` |
+
+- The **mixed case** — one rule fires while another is unknown — is `review_recommended` **and**
+  `partial`. Both the breach evidence and the unevaluated condition stay visible; neither outcome
+  hides the other.
+- `unchanged` is reported **only** with `complete`. That pairing is the contract's promise, and it
+  is why an unevaluable condition can never be mistaken for a healthy decision.
+- The top level aggregates every decision in scope: a definite trigger outranks uncertainty, which
+  outranks `unchanged`; any `partial` decision makes the whole call `partial`.
+
+### What each collection carries
+
+| Field | Contents |
+| --- | --- |
+| `triggeredRules` | Conditions with verdict `true` |
+| `triggeredBy` | Causes with no rule behind them: a matched `changedFacts` token, `review date reached`, `decision outcome failed` |
+| `groundedConditions` | Conditions with verdict `false` — so `unchanged` rests on stated evidence rather than on an empty list |
+| `rulesNotEvaluated` | Conditions with verdict `unknown`, and **only** those |
+| `contestedConditions` | Conditions the evaluator did decide, on equally applicable facts that disagree |
+| `affectedAlternatives` | Labels of the rejected alternatives worth reconsidering |
+| `factsConsidered` | Every observation the verdicts were computed from, named once each |
+
+`contestedConditions` is reported **apart from** `rulesNotEvaluated` because the evaluator did
+reach a verdict; calling that unevaluated would overstate it. It withholds completeness all the
+same — a verdict resting on facts that disagree is exactly the silent pass §5 exists to prevent.
+
+### Scope, and failing closed
+
+`reconsider({ project, decisionId })` narrows to one decision. Each of these is an **error**, never
+an empty result:
+
+- an unknown `decisionId` — `Decision not found`;
+- a `decisionId` belonging to another project — `Decision is not accessible in this project`;
+- a decision that is `archived`, `superseded` or `abandoned` — `not open for reconsideration`.
+
+An empty `unchanged` + `complete` for a mis-addressed decision would read exactly like "checked,
+and this decision is fine". A focused call evaluates only its decision, and therefore raises no
+review signal for any other.
+
+### What it does and does not write
+
+It can open a review signal, by **exactly** the identity `review()` uses (§8), so reconsidering
+twice settles on one signal and an acknowledgement holds across later calls. It never writes
+decision status, confidence or lifecycle state, and never rewrites a stored rule.
+
+Matching is **literal**. A rule key and a fact key that differ in spelling do not match, and no
+meaning is inferred from the near miss; the condition is `unknown`.

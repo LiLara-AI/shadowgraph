@@ -104,8 +104,10 @@ These are the things that must **not** happen as part of announcing the preview.
 
 - [x] `private: true` unchanged in `package.json`.
 - [x] **No** `npm publish`.
-- [x] **No** Git tag created.
-- [x] **No** GitHub Release created.
+- [x] Git tag `v0.41.0` — **authorized** by the maintainer for this Technical Preview release. No
+      other tag is authorized.
+- [x] GitHub Release for `v0.41.0` — **authorized** by the maintainer for this Technical Preview
+      release. It publishes no package.
 - [x] No cloud service, hosted sync, or telemetry added.
 - [x] No product features added during launch preparation.
 - [x] Old Git history untouched.
@@ -135,9 +137,10 @@ These are the things that must **not** happen as part of announcing the preview.
 | --- | --- |
 | Actual preregistered comparative benchmark | **Open** — zero arms measured; no comparative claim permitted |
 | Human third-party security audit | **Open** — only an AI-assisted review exists |
-| npm publication authorization | **Open** — `private: true`, not published |
-| Git tag / GitHub Release | **Open** — none created, none authorized |
+| npm publication authorization | **Open** — `private: true`, not published, not authorized |
+| Git tag / GitHub Release | **Authorized for `v0.41.0`** — Technical Preview only; publishes no package |
 | GitHub Support privacy cleanup | **Status item** — confirm before announcing |
 
-None of these blocks announcing a Technical Preview. All of them block calling it Beta, Stable, or
-Production Ready.
+None of these blocks announcing a Technical Preview. The `v0.41.0` tag and GitHub Release close
+none of the still-open gates above, and all of those gates continue to block calling this release
+Beta, Stable, or Production Ready.

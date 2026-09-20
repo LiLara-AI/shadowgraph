@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.41.0 — Technical Preview (2026-09-20; GitHub release, not published to npm)
 
 ### Added
 
