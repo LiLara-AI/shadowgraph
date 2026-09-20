@@ -111,6 +111,7 @@ async function runOneShot() {
       result = await syncMarkdownWorkspace({ graph, ...value, ...(persist ? { persist, loadPersisted } : {}) });
     }
     else if (command === 'review') { result = graph.review(parse(input || '{}')); await store.save(graph.exportData()); }
+    else if (command === 'reconsider') { result = graph.reconsider(parse(input || '{}')); await store.save(graph.exportData()); }
     else if (command === 'fact') { result = graph.addFact(parse(input)); await store.save(graph.exportData()); }
     else if (command === 'outcome') { const value = parse(input); result = graph.setOutcome(value.decisionId, value.outcome); await store.save(graph.exportData()); }
     else if (command === 'status') { const value = parse(input); result = graph.updateDecisionStatus(value.decisionId, value.status); await store.save(graph.exportData()); }
@@ -136,7 +137,7 @@ async function runOneShot() {
     else if (command === 'decision') { result = graph.addDecision(parse(input)); await store.save(graph.exportData()); }
     else if (command === 'attempt') { result = graph.addAttempt(parse(input)); await store.save(graph.exportData()); }
     else {
-      throw new Error('Usage: shadowgraph <setup|doctor|serve|mcp|stats|list|search|retrieve|recall|remember|markdown-sync|context|review|maintain|signals|ack|validate|repair-plan|backup|restore|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge> [JSON/path]');
+      throw new Error('Usage: shadowgraph <setup|doctor|serve|mcp|stats|list|search|retrieve|recall|remember|markdown-sync|context|review|reconsider|maintain|signals|ack|validate|repair-plan|backup|restore|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge> [JSON/path]');
     }
     return result;
   } finally {

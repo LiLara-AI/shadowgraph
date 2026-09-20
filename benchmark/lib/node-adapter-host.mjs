@@ -49,7 +49,8 @@ export const FULL_TOOL_NAMES = Object.freeze([
   'shadowgraph_ack_review',
   'shadowgraph_repair_plan',
   'shadowgraph_backup',
-  'shadowgraph_restore'
+  'shadowgraph_restore',
+  'shadowgraph_reconsider'
 ]);
 
 export const COMPACT_TOOL_NAMES = Object.freeze([
@@ -70,7 +71,8 @@ export const COMPACT_TOOL_NAMES = Object.freeze([
   // exact equality against tools/list, so it has to track the product surface or
   // every compact adapter session fails the contract check. Surface inventory
   // only -- no scenario, scoring, or execution behaviour is affected.
-  'shadowgraph_ack_review'
+  'shadowgraph_ack_review',
+  'shadowgraph_reconsider'
 ]);
 
 const ENVIRONMENT_ALLOWLIST = Object.freeze([

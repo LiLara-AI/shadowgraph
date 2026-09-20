@@ -178,7 +178,7 @@ contribution to the decision's confidence history rather than overwriting a numb
 
 ## 2. MCP
 
-The same story through the stdio MCP server in compact mode, which advertises 13 workflow tools.
+The same story through the stdio MCP server in compact mode, which advertises 14 workflow tools.
 
 ```bash
 SHADOWGRAPH_MCP_COMPACT=1 shadowgraph mcp
@@ -209,7 +209,7 @@ An agent calls, in order:
 ```
 
 Compact mode changes only which tools are advertised. The full relational graph, memories, facts,
-alternatives, and outcomes are stored unchanged, and full mode (27 tools) exposes the rest of the
+alternatives, and outcomes are stored unchanged, and full mode (28 tools) exposes the rest of the
 surface. See [MCP compatibility](mcp-compatibility.md).
 
 A copy-ready agent policy is in [`integrations/agent-policy.md`](../integrations/agent-policy.md).

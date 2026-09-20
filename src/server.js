@@ -20,7 +20,7 @@ const NUMBER_PARAMS = ['minConfidence'];
 const BOOLEAN_PARAMS = ['requireFullHistory', 'hard'];
 const RESTORE_BLOCKED_MUTATIONS = new Set([
   '/facts', '/memories', '/outcomes', '/status', '/relationships', '/supersede', '/decisions', '/attempts',
-  '/context', '/review', '/maintain', '/review-signals/ack', '/confidence-evidence', '/projects', '/restore'
+  '/context', '/review', '/reconsider', '/maintain', '/review-signals/ack', '/confidence-evidence', '/projects', '/restore'
 ]);
 const UNCONFIRMED_RECOVERY_CODES = new Set(['json_restore_recovery_unconfirmed', 'sqlite_restore_recovery_unconfirmed']);
 
@@ -160,6 +160,7 @@ export async function createShadowGraphServer(options = {}) {
     if (method === 'POST' && path === '/decisions') return mutateAndPersist(() => graph.addDecision(body));
     if (method === 'POST' && path === '/attempts') return mutateAndPersist(() => graph.addAttempt(body));
     if (method === 'POST' && path === '/review') return mutateAndPersist(() => graph.review(body ?? {}));
+    if (method === 'POST' && path === '/reconsider') return mutateAndPersist(() => graph.reconsider(body ?? {}));
     if (method === 'POST' && path === '/maintain') return mutateAndPersist(() => graph.maintain(body ?? {}));
     if (method === 'GET' && path === '/review-signals') return graph.getReviewSignals(body ?? {});
     if (method === 'POST' && path === '/review-signals/ack') return mutateAndPersist(() => graph.acknowledgeReview(body?.id));

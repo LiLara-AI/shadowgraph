@@ -52,7 +52,8 @@ const FULL_TOOL_NAMES = [
   'shadowgraph_ack_review',
   'shadowgraph_repair_plan',
   'shadowgraph_backup',
-  'shadowgraph_restore'
+  'shadowgraph_restore',
+  'shadowgraph_reconsider'
 ];
 const COMPACT_EXPECTED = [
   'shadowgraph_record_decision',
@@ -70,7 +71,8 @@ const COMPACT_EXPECTED = [
   // Promoted into compact on 2026-09-14. A compact client could see reviews
   // through shadowgraph_context but had no advertised route to acknowledge one,
   // so signals accumulated with no way to clear them.
-  'shadowgraph_ack_review'
+  'shadowgraph_ack_review',
+  'shadowgraph_reconsider'
 ];
 // The exact set src/mcp.js used to spell out inline as a name list. A tool that
 // writes but is missing here would silently stop being saved.
@@ -82,6 +84,7 @@ const PERSISTING_EXPECTED = [
   'shadowgraph_link',
   'shadowgraph_maintain',
   'shadowgraph_purge',
+  'shadowgraph_reconsider',
   'shadowgraph_record_attempt',
   'shadowgraph_record_decision',
   'shadowgraph_record_fact',
@@ -129,6 +132,7 @@ const ANNOTATIONS_EXPECTED = {
   shadowgraph_repair_plan: [true, false, true, false],
   shadowgraph_backup: [false, true, false, true],
   shadowgraph_restore: [false, true, false, true],
+  shadowgraph_reconsider: [false, false, false, false],
   shadowgraph_verify_fact: [false, false, false, true]
 };
 // Overlapping tools must name the siblings a model would otherwise confuse them
@@ -140,6 +144,7 @@ const ROUTING_EXPECTED = {
   shadowgraph_context: ['shadowgraph_search', 'shadowgraph_retrieve', 'shadowgraph_recall', 'shadowgraph_review'],
   shadowgraph_traverse: ['shadowgraph_search', 'shadowgraph_recall', 'shadowgraph_retrieve'],
   shadowgraph_review: ['shadowgraph_review_signals', 'shadowgraph_ack_review', 'shadowgraph_maintain'],
+  shadowgraph_reconsider: ['shadowgraph_review', 'shadowgraph_ack_review'],
   shadowgraph_review_signals: ['shadowgraph_review', 'shadowgraph_ack_review'],
   shadowgraph_ack_review: ['shadowgraph_review_signals', 'shadowgraph_review', 'shadowgraph_update_status', 'shadowgraph_supersede'],
   shadowgraph_maintain: ['shadowgraph_review', 'shadowgraph_validate', 'shadowgraph_update_status'],
@@ -193,6 +198,7 @@ const INPUT_CONSTRAINTS_EXPECTED = {
   shadowgraph_repair_plan: { required: null, enums: {} },
   shadowgraph_backup: { required: ['destination'], enums: {} },
   shadowgraph_restore: { required: ['source'], enums: {} },
+  shadowgraph_reconsider: { required: null, enums: {} },
   shadowgraph_verify_fact: { required: ['factId', 'evidencePath'], enums: {} }
 };
 
@@ -268,25 +274,25 @@ function walkNodes(node, visit, path = 'schema', depth = 0) {
 
 test('the catalog advertises exactly the documented full, compact, and verifier inventories', () => {
   assert.deepEqual(fullCatalog.map((entry) => entry.name), FULL_TOOL_NAMES);
-  assert.equal(fullCatalog.length, 27);
+  assert.equal(fullCatalog.length, 28);
   assert.deepEqual(verifierCatalog.map((entry) => entry.name), [...FULL_TOOL_NAMES, 'shadowgraph_verify_fact']);
-  assert.equal(verifierCatalog.length, 28);
+  assert.equal(verifierCatalog.length, 29);
 
   const compact = selectTools(fullCatalog, { compact: true });
   assert.deepEqual(compact.map((entry) => entry.name), COMPACT_EXPECTED);
-  assert.equal(compact.length, 13);
+  assert.equal(compact.length, 14);
   assert.deepEqual([...COMPACT_TOOL_NAMES], COMPACT_EXPECTED);
 
   // The optional verification tool is a full-mode capability only.
   const compactWithVerifier = selectTools(verifierCatalog, { compact: true });
   assert.deepEqual(compactWithVerifier.map((entry) => entry.name), COMPACT_EXPECTED);
 
-  assert.equal(new Set(verifierCatalog.map((entry) => entry.name)).size, 28);
+  assert.equal(new Set(verifierCatalog.map((entry) => entry.name)).size, 29);
   for (const entry of verifierCatalog) assert.match(entry.name, /^shadowgraph_[a-z_]+$/u);
 });
 
 test('every tool carries the four behavioural annotations its handler actually justifies', () => {
-  assert.equal(Object.keys(ANNOTATIONS_EXPECTED).length, 28);
+  assert.equal(Object.keys(ANNOTATIONS_EXPECTED).length, 29);
   for (const entry of verifierCatalog) {
     const expected = ANNOTATIONS_EXPECTED[entry.name];
     assert.ok(expected, `${entry.name} has no expected annotation row`);
@@ -303,7 +309,7 @@ test('every tool carries the four behavioural annotations its handler actually j
 test('a read-only tool never persists, and every other writing tool does except restore', () => {
   const persisting = verifierCatalog.filter((entry) => entry.persists).map((entry) => entry.name).sort();
   assert.deepEqual(persisting, PERSISTING_EXPECTED);
-  assert.equal(persisting.length, 16);
+  assert.equal(persisting.length, 17);
   for (const entry of verifierCatalog) {
     // shadowgraph_restore writes, but its storage backend commits the
     // replacement itself, so src/mcp.js must not save again afterwards.
@@ -346,12 +352,18 @@ const DESCRIPTION_CAP = 350;
 // compact client could close the review loop it could already see. Measured, not
 // estimated: the compact total went 3,997 -> 4,338 characters, the whole
 // difference being that tool's own 341-character description, which is itself
-// under the 350 per-description cap. `full` and `verifier` are unchanged,
-// because the tool was already advertised there.
+// under the 350 per-description cap.
+//
+// Raised again to 4750 on 2026-09-20, for the 14th compact tool,
+// shadowgraph_reconsider. Measured the same way: compact went 4,338 -> 4,684
+// characters, the whole difference being that tool's own 346-character
+// description, itself under the per-description cap. `full` (8,861) and
+// `verifier` (9,210) both grew by the same 346 and still sit under their
+// existing budgets, so neither was moved.
 const DESCRIPTION_TOTALS = {
   full: 9100,
   verifier: 9400,
-  compact: 4450
+  compact: 4750
 };
 // A tool whose result a caller could destroy something with has to say so in
 // its own words. The check is on meaning, not on a keyword: each of these must
@@ -439,11 +451,27 @@ test('the advertised description text stays within its aggregate budget', () => 
 // observed values and the fact the verdict came from, instead of a
 // comma-separated list of keys. Budgets keep roughly 2% headroom so the guard
 // still catches unplanned growth.
+//
+// Re-measured on 2026-09-20 for shadowgraph_reconsider, the 28th full and 14th
+// compact tool. Measured, not estimated -- `npm run size:mcp`:
+//
+//   withoutVerifier.full        bare 43,711  annotated 46,651  structured 187,359
+//   withoutVerifier.compact     bare 30,958  annotated 32,433  structured 123,799
+//   withVerifier.full           bare 44,627  annotated 47,672  structured 191,674
+//   withVerifier.compact        bare 30,958  annotated 32,433  structured 123,799
+//
+// Compact pays the largest relative increase because the new tool is advertised
+// there, and its structured cost is again evaluatedConditionSchema inlined --
+// four more sites, for triggeredRules, groundedConditions, rulesNotEvaluated and
+// contestedConditions -- since this catalog forbids . What a structured
+// client buys for it is a reconsideration that states which conditions fired,
+// which did not, and which could not be evaluated, rather than a bare due list.
+// Budgets below keep roughly 2% headroom, as before.
 const WIRE_BUDGETS = {
-  'withoutVerifier.full': { bare: 44_500, annotated: 47_500, structured: 176_000 },
-  'withoutVerifier.compact': { bare: 30_000, annotated: 31_500, structured: 110_000 },
-  'withVerifier.full': { bare: 45_500, annotated: 48_500, structured: 181_000 },
-  'withVerifier.compact': { bare: 30_000, annotated: 31_500, structured: 110_000 }
+  'withoutVerifier.full': { bare: 44_500, annotated: 47_500, structured: 191_000 },
+  'withoutVerifier.compact': { bare: 31_500, annotated: 33_000, structured: 126_000 },
+  'withVerifier.full': { bare: 45_500, annotated: 48_500, structured: 195_500 },
+  'withVerifier.compact': { bare: 31_500, annotated: 33_000, structured: 126_000 }
 };
 
 test('the advertised tool list stays within its wire-size budget, at every tier', () => {
@@ -466,7 +494,7 @@ test('the advertised tool list stays within its wire-size budget, at every tier'
 
 test('overlapping tools route to their siblings by name, and every named sibling exists', () => {
   const known = new Set(verifierCatalog.map((entry) => entry.name));
-  assert.equal(Object.keys(ROUTING_EXPECTED).length, 28);
+  assert.equal(Object.keys(ROUTING_EXPECTED).length, 29);
   for (const entry of verifierCatalog) {
     const siblings = ROUTING_EXPECTED[entry.name];
     assert.ok(siblings, `${entry.name} has no expected routing row`);
@@ -499,7 +527,7 @@ test('every input property, at every nesting level, carries a meaningful descrip
 });
 
 test('input schemas keep the constraints they had before descriptions were written', () => {
-  assert.equal(Object.keys(INPUT_CONSTRAINTS_EXPECTED).length, 28);
+  assert.equal(Object.keys(INPUT_CONSTRAINTS_EXPECTED).length, 29);
   for (const entry of verifierCatalog) {
     const expected = INPUT_CONSTRAINTS_EXPECTED[entry.name];
     assert.ok(expected, `${entry.name} has no expected constraint row`);
@@ -526,7 +554,7 @@ test('output schemas are declared for every tool that returns an object, and del
     // The description carries the return shape when no schema can.
     assert.match(byName.get(name).description, /bare JSON array/u);
   }
-  assert.equal(verifierCatalog.filter((entry) => entry.outputSchema).length, 26);
+  assert.equal(verifierCatalog.filter((entry) => entry.outputSchema).length, 27);
 });
 
 test('every output schema is portable: object-rooted, single-typed, and free of references', () => {

@@ -316,6 +316,48 @@ const conditionDiagnosticSchema = {
     conditions: { type: 'array', items: evaluatedConditionSchema, description: 'The unresolved or contested conditions.' }
   }
 };
+// One decision, read as a reconsideration rather than as a breach list. Every
+// condition here comes from the same pass and the same evaluator that
+// shadowgraph_review uses, so the two can never disagree about whether a rule
+// fired, did not fire, or could not be evaluated.
+const reconsideredDecisionSchema = {
+  type: 'object',
+  description: 'One decision reconsidered, with the evidence behind all three outcomes.',
+  required: ['decisionId', 'verdict', 'evaluationCompleteness'],
+  properties: {
+    decisionId: { type: 'string', description: 'The decision reconsidered.' },
+    title: stringOrNull('Decision title, when the stored decision has one.'),
+    verdict: { type: 'string', enum: ['review_recommended', 'unchanged', 'manual_review'], description: 'review_recommended: a rule definitely fired. unchanged: evaluation was complete and nothing fired. manual_review: nothing definitely fired, but something could not be settled.' },
+    evaluationCompleteness: { type: 'string', enum: ['complete', 'partial'], description: 'partial when any condition could not be evaluated or rests on facts that disagree. unchanged is only ever reported with complete.' },
+    triggeredRules: { type: 'array', items: evaluatedConditionSchema, description: 'Rules that definitely fired.' },
+    triggeredBy: { type: 'array', description: 'Causes with no structured rule behind them: a matched changedFacts token, a reached review date, a failed outcome.' },
+    groundedConditions: { type: 'array', items: evaluatedConditionSchema, description: 'Rules that were evaluated and definitely did NOT fire, so unchanged rests on stated evidence rather than on an empty list.' },
+    rulesNotEvaluated: { type: 'array', items: evaluatedConditionSchema, description: 'Conditions that could not be evaluated. Never a pass; this is what makes the verdict manual_review or the completeness partial.' },
+    contestedConditions: { type: 'array', items: evaluatedConditionSchema, description: 'Conditions the evaluator did decide, but on equally applicable facts that disagree. Reported apart from rulesNotEvaluated, and they also withhold completeness.' },
+    affectedAlternatives: { type: 'array', items: { type: 'string' }, description: 'Labels of the rejected alternatives worth reconsidering.' },
+    factsConsidered: { type: 'array', description: 'Every observation the verdicts were computed from, named once each.' },
+    reviewSignalId: { type: 'string', description: 'Signal raised or matched for this decision; pass it to shadowgraph_ack_review.' },
+    reviewSignalStatus: { type: 'string', enum: ['open', 'acknowledged'], description: 'Whether that signal is already handled.' }
+  }
+};
+const reconsiderationSchema = {
+  type: 'object',
+  description: 'The result of reconsidering one decision or a whole project.',
+  required: ['verdict', 'evaluationCompleteness', 'scope', 'decisions'],
+  properties: {
+    verdict: { type: 'string', enum: ['review_recommended', 'unchanged', 'manual_review'], description: 'Aggregate over every decision in scope: a definite trigger outranks uncertainty, which outranks unchanged.' },
+    evaluationCompleteness: { type: 'string', enum: ['complete', 'partial'], description: 'partial when any decision in scope was partial.' },
+    scope: {
+      type: 'object',
+      description: 'What was reconsidered.',
+      properties: {
+        project: stringOrNull('Project evaluated, or null for every project.'),
+        decisionId: stringOrNull('The single decision asked about, or null when the whole project was reconsidered.')
+      }
+    },
+    decisions: { type: 'array', items: reconsideredDecisionSchema, description: 'One entry per decision in scope, including decisions with nothing to report.' }
+  }
+};
 const reusableAttemptSchema = {
   type: 'object',
   description: 'An attempt whose reusableWhen conditions ALL hold now, with none unresolved. It may be worth reconsidering: the recorded failure still stands and this is not authorisation to retry.',
@@ -602,7 +644,7 @@ function compose({ does, route, effects, returns }) {
 // ---------------------------------------------------------------------------
 // The catalog
 // ---------------------------------------------------------------------------
-// `compact` marks the 13 everyday workflow tools advertised when
+// `compact` marks the 14 everyday workflow tools advertised when
 // SHADOWGRAPH_MCP_COMPACT=1. `persists` marks the tools whose successful call is
 // followed by a durable save in src/mcp.js; shadowgraph_restore is deliberately
 // false because the storage backend commits the replacement itself.
@@ -1458,6 +1500,28 @@ const CATALOG = [
         temporaryArtifact: { type: 'string', description: 'Retained temporary file, when one is left behind.' }
       }
     }
+  },
+  {
+    name: 'shadowgraph_reconsider',
+    compact: true,
+    persists: true,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    describe: {
+      does: 'Reconsider a decision or project: review_recommended, unchanged, or manual_review, with the conditions behind each.',
+      route: 'shadowgraph_review lists the same due decisions; shadowgraph_ack_review closes a signal.',
+      effects: 'Persists a signal per newly due decision, deduped as shadowgraph_review does.',
+      returns: 'unchanged only ever comes with evaluationCompleteness complete.'
+    },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Reconsider this project. Omit to reconsider every project.' },
+        decisionId: { type: 'string', description: 'Reconsider only this decision. An unknown id, or one belonging to another project, is an error rather than an empty result, so a mis-addressed request can never read as "nothing changed".' },
+        changedFacts: changedFactsProperty,
+        facts: factsOverrideProperty
+      }
+    },
+    outputSchema: reconsiderationSchema
   },
   {
     name: 'shadowgraph_verify_fact',

@@ -651,7 +651,7 @@ test('unconfirmed restore and its degraded latch use distinct finite numeric ser
 
   const diagnostics = await rpc.call({ jsonrpc: '2.0', id: 'degraded-diagnostics', method: 'tools/list' });
   assert.equal(diagnostics.error, undefined, diagnostics.error?.message);
-  assert.equal(diagnostics.result.tools.length, 27, 'non-stateful protocol diagnostics remain available');
+  assert.equal(diagnostics.result.tools.length, 28, 'non-stateful protocol diagnostics remain available');
   assert.notEqual(restore.error.code, blockedTool.error.code, 'initial restore failure and fail-closed latch remain distinguishable');
 });
 

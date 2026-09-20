@@ -1559,19 +1559,41 @@ export function createShadowGraph(options = {}) {
   // signal, so before this existed that uncertainty was indistinguishable from
   // a clean pass. `diagnostics` carries it out instead. A diagnostic is NOT a
   // review signal -- it claims neither a breach nor a confirmed-safe decision.
-  function evaluateReview(context = {}) {
+  // The two options below are INTERNAL. Neither is routed through
+  // validateReviewInput(), so review()'s accepted input, its return shape, and
+  // the diagnostics context()/maintain() publish are untouched by their
+  // existence.
+  //
+  //   onlyDecisionId  restrict the pass to one decision, so a focused
+  //                   reconsider() cannot raise a review signal for a decision
+  //                   the caller did not ask about.
+  //   collectGrounded also keep what this pass already computes and then drops:
+  //                   the conditions that were genuinely FALSE, and the matches
+  //                   with no structured rule behind them. Off by default, so
+  //                   review(), context() and maintain() pay nothing for it and
+  //                   publish nothing new.
+  function evaluateReview(context = {}, { onlyDecisionId, collectGrounded = false } = {}) {
     const prepared = validateReviewInput(context);
     const project = prepared.project;
-    const changed = new Set(prepared.changedFacts); const due = []; const diagnostics = [];
+    const changed = new Set(prepared.changedFacts); const due = []; const diagnostics = []; const explained = [];
     const reviewAt = prepared.asOf ?? now();
     for (const record of records.values()) {
       if (record.kind !== 'decision') continue;
+      if (onlyDecisionId !== undefined && record.id !== onlyDecisionId) continue;
       if (['archived', 'superseded', 'abandoned'].includes(record.status)) continue;
       if (project !== undefined && record.project !== project) continue;
       const matches = [];
-      const reconsider = new Set();
+      // Renamed from `reconsider` so it cannot be misread as the public
+      // reconsider() defined below. It holds alternative labels, nothing else.
+      const reconsiderLabels = new Set();
       const violatedConditions = [];
       const unresolved = [];
+      // Populated only under collectGrounded. `settled` holds the conditions
+      // that definitely did NOT fire, and `unruled` the causes that are not
+      // rules at all, so a caller can be shown WHY nothing changed instead of
+      // being handed an empty list that proves nothing.
+      const settled = [];
+      const unruled = [];
       // What this decision's review signal would actually cover. `matches` is a
       // human-readable reason list and collapses duplicates -- two thresholds on
       // one fact key both read as that key -- so it cannot serve as identity.
@@ -1586,8 +1608,24 @@ export function createShadowGraph(options = {}) {
       for (const alternative of record.alternatives) for (const rule of alternative.reopenWhen) {
         if (typeof rule === 'string') {
           if (changed.has(rule)) {
-            matches.push(rule); reconsider.add(alternative.label);
+            matches.push(rule); reconsiderLabels.add(alternative.label);
             coverage.add(conditionCoverageId(rule, null));
+            if (collectGrounded) unruled.push({ cause: rule, kind: 'changed_fact_token', alternativeId: alternative.id, alternativeLabel: alternative.label });
+          } else {
+            // NOT a pass. A token rule matches `changedFacts` only -- durable
+            // facts are deliberately never fed into that list -- so when the
+            // caller supplies nothing, there is no evidence either way. This
+            // was the last silent path on the reopen side: the condition
+            // produced neither a breach nor a diagnostic, which is
+            // indistinguishable from "checked, and this decision is fine". The
+            // text is reported verbatim and never interpreted, exactly as
+            // reusableWhen already treats legacy free text. It stays out of
+            // `matches` and `coverage`, so it raises no review signal and
+            // changes no signal identity.
+            unresolved.push(conditionDetail(record, alternative, { key: null }, {
+              operator: null, expected: rule, actual: undefined, verdict: 'unknown',
+              reason: 'Legacy string condition this evaluator cannot settle from stored facts'
+            }, stored, false));
           }
           continue;
         }
@@ -1603,7 +1641,7 @@ export function createShadowGraph(options = {}) {
         const evaluation = ruleVerdict(rule, knownFacts[rule.key]);
         const detail = conditionDetail(record, alternative, rule, evaluation, stored, callerSupplied);
         if (evaluation.verdict === 'true') {
-          matches.push(rule.key); reconsider.add(alternative.label);
+          matches.push(rule.key); reconsiderLabels.add(alternative.label);
           coverage.add(conditionCoverageId(alternative, rule));
           violatedConditions.push(detail);
           // A breach still fires when the evidence behind it is contested --
@@ -1612,19 +1650,34 @@ export function createShadowGraph(options = {}) {
           if (detail.conflictingEvidence) unresolved.push(detail);
         } else if (evaluation.verdict === 'unknown') {
           unresolved.push(detail);
-        } else if (detail.conflictingEvidence) {
-          // A "no review needed" resting on facts that disagree is exactly the
-          // silent pass this reports.
-          unresolved.push(detail);
+        } else {
+          if (detail.conflictingEvidence) {
+            // A "no review needed" resting on facts that disagree is exactly the
+            // silent pass this reports.
+            unresolved.push(detail);
+          }
+          // A genuinely false condition. The review path drops it, because
+          // review() reports breaches; it is kept here so that `unchanged` can
+          // be shown to rest on something rather than on an empty list.
+          //
+          // Contested evidence is excluded deliberately. A false verdict whose
+          // facts disagree is already reported as contested, and listing it
+          // here as well would describe disputed evidence as a grounded
+          // negative -- the same condition counted once as "we checked, and it
+          // is fine" and once as "we cannot settle this". It is one or the
+          // other, never both.
+          if (collectGrounded && !detail.conflictingEvidence) settled.push(detail);
         }
       }
       if (record.reviewAfter && compareInstants(record.reviewAfter, reviewAt) <= 0) {
         matches.push('review date reached');
         coverage.add(conditionCoverageId('review date reached', null));
+        if (collectGrounded) unruled.push({ cause: 'review date reached', kind: 'review_date' });
       }
       if (record.outcome?.status === 'failed') {
         matches.push('decision outcome failed');
         coverage.add(conditionCoverageId('decision outcome failed', null));
+        if (collectGrounded) unruled.push({ cause: 'decision outcome failed', kind: 'outcome_failed' });
       }
       if (matches.length) {
         // detachDetail() covers the wrapper too: `title` and the alternative
@@ -1634,7 +1687,7 @@ export function createShadowGraph(options = {}) {
         const entry = detachDetail({
           decisionId: record.id, title: record.title,
           reason: [...new Set(matches)].join(', '),
-          alternativesToReconsider: reconsider.size ? [...reconsider] : record.alternatives.map((item) => item.label),
+          alternativesToReconsider: reconsiderLabels.size ? [...reconsiderLabels] : record.alternatives.map((item) => item.label),
           coverage: [...coverage].sort()
         });
         entry.violatedConditions = violatedConditions;
@@ -1644,6 +1697,16 @@ export function createShadowGraph(options = {}) {
         const entry = detachDetail({ decisionId: record.id, title: record.title });
         entry.conditions = unresolved;
         diagnostics.push(entry);
+      }
+      // One bundle per decision in scope, whether or not anything fired, so a
+      // decision with nothing to report is visibly present rather than absent
+      // for an unstated reason. `unruled` is detached because its causes carry
+      // stored record text; `conditions` holds details conditionDetail() has
+      // already detached.
+      if (collectGrounded) {
+        const entry = detachDetail({ decisionId: record.id, title: record.title, unruled });
+        entry.conditions = settled;
+        explained.push(entry);
       }
     }
     for (const item of due) {
@@ -1686,11 +1749,148 @@ export function createShadowGraph(options = {}) {
       // does not travel there.
       delete item.coverage;
     }
-    return { due, diagnostics };
+    return { due, diagnostics, explained };
   }
 
   // Public shape is unchanged: a bare array of due decisions.
   function review(context = {}) { return evaluateReview(context).due; }
+
+  // Which observations a verdict was computed from, named once each. A detail
+  // already carries its evidence inline; this lifts it to the decision so a
+  // caller can see the whole basis without walking every condition. Caller
+  // supplied values carry no fact id, so they are keyed by the rule key they
+  // answered.
+  function factsConsideredFrom(details) {
+    const seen = new Map();
+    for (const detail of details) {
+      if (detail.evidence?.source === 'stored_fact') {
+        if (!seen.has(detail.evidence.factId)) seen.set(detail.evidence.factId, { key: detail.key, ...detail.evidence });
+      } else if (detail.evidence?.source === 'caller_supplied') {
+        // A supplied value has no fact id, so it is named by the rule key it
+        // answered. The prefix keeps it from colliding with a stored fact id.
+        const suppliedName = `caller_supplied:${detail.key}`;
+        if (!seen.has(suppliedName)) seen.set(suppliedName, { key: detail.key, source: 'caller_supplied', value: detail.observed });
+      }
+      // The verdict was computed from the winner, but every disagreeing
+      // observation is part of what was considered and is named as such.
+      for (const conflict of detail.conflictingEvidence ?? []) {
+        if (!seen.has(conflict.factId)) seen.set(conflict.factId, { key: detail.key, source: 'stored_fact', ...conflict });
+      }
+    }
+    return [...seen.values()];
+  }
+
+  /**
+   * Reconsideration: a PROJECTION of evaluateReview(), never a second
+   * evaluation.
+   *
+   * review() and reconsider() cannot disagree about whether a stored rule
+   * fires, does not fire, or cannot be evaluated, because there is one pass,
+   * one evaluator (src/condition-eval.js) and one set of verdicts. A second
+   * operator table here is the specific defect this design exists to make
+   * impossible: a rule using an operator one side understood and the other did
+   * not would report `unchanged` with complete confidence on one route while
+   * the other reported a breach.
+   *
+   * What this adds is the reading a caller needs in order to act -- a top-level
+   * verdict, whether the evaluation was complete, and the evidence behind all
+   * three outcomes, including the conditions that were genuinely false so that
+   * `unchanged` is grounded rather than vacuous.
+   *
+   * It writes no decision status, no confidence and no lifecycle state. It can
+   * open a review signal, by exactly the path and identity review() uses, so
+   * calling it twice settles on one signal rather than two.
+   */
+  function reconsider(input = {}) {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('reconsider input must be an object');
+    const requestedProject = input.project === undefined ? undefined : normalizeProject(input.project);
+    let onlyDecisionId;
+    let scopedProject = requestedProject;
+    if (input.decisionId !== undefined && input.decisionId !== null) {
+      // Fail closed. An unaddressable decision must never read as a grounded
+      // negative: an empty `unchanged` / `complete` for a typo'd id, or for an
+      // id belonging to another project, is indistinguishable from "checked,
+      // and this decision is fine" -- the exact confusion three-valued
+      // evaluation exists to prevent. So each of these is an error, never a
+      // quiet empty result.
+      if (typeof input.decisionId !== 'string' || !input.decisionId.trim()) throw new Error('decisionId must be a non-empty string');
+      const record = records.get(input.decisionId);
+      if (!record || record.kind !== 'decision') throw new Error('Decision not found');
+      if (requestedProject !== undefined && record.project !== requestedProject) throw new Error('Decision is not accessible in this project');
+      if (['archived', 'superseded', 'abandoned'].includes(record.status)) throw new Error(`Decision is not open for reconsideration (status ${record.status})`);
+      onlyDecisionId = record.id;
+      scopedProject = record.project;
+    }
+    const evaluated = evaluateReview({
+      ...(requestedProject === undefined ? {} : { project: requestedProject }),
+      ...(input.changedFacts === undefined ? {} : { changedFacts: input.changedFacts }),
+      ...(input.facts === undefined ? {} : { facts: input.facts }),
+      ...(input.asOf === undefined ? {} : { asOf: input.asOf })
+    }, { onlyDecisionId, collectGrounded: true });
+
+    const byDecision = new Map();
+    const entryFor = (decisionId, title) => {
+      let entry = byDecision.get(decisionId);
+      if (!entry) {
+        entry = {
+          decisionId, title,
+          verdict: 'unchanged', evaluationCompleteness: 'complete',
+          triggeredRules: [], triggeredBy: [], groundedConditions: [],
+          rulesNotEvaluated: [], contestedConditions: [],
+          affectedAlternatives: [], factsConsidered: []
+        };
+        byDecision.set(decisionId, entry);
+      }
+      return entry;
+    };
+    // Seed from `explained` first: it carries every decision in scope, so one
+    // that neither fired nor raised a diagnostic is still visibly present
+    // rather than absent for an unstated reason.
+    for (const item of evaluated.explained) {
+      const entry = entryFor(item.decisionId, item.title);
+      entry.groundedConditions = item.conditions;
+      entry.triggeredBy = item.unruled;
+    }
+    for (const item of evaluated.due) {
+      const entry = entryFor(item.decisionId, item.title);
+      entry.triggeredRules = item.violatedConditions;
+      entry.affectedAlternatives = item.alternativesToReconsider;
+      entry.reviewSignalId = item.reviewSignalId;
+      entry.reviewSignalStatus = item.reviewSignalStatus;
+    }
+    for (const item of evaluated.diagnostics) {
+      const entry = entryFor(item.decisionId, item.title);
+      entry.rulesNotEvaluated = item.conditions.filter((condition) => condition.verdict === 'unknown');
+      // Decided, but on observations that disagree. Reported apart from
+      // `rulesNotEvaluated` because the evaluator DID reach a verdict here, and
+      // calling that unevaluated would overstate it. It still withholds
+      // completeness: a pass resting on contested facts is exactly the silent
+      // pass the review-conditions contract exists to prevent.
+      entry.contestedConditions = item.conditions.filter((condition) => condition.conflictingEvidence && condition.verdict !== 'unknown');
+    }
+    for (const entry of byDecision.values()) {
+      entry.factsConsidered = factsConsideredFrom([
+        ...entry.triggeredRules, ...entry.groundedConditions, ...entry.rulesNotEvaluated, ...entry.contestedConditions
+      ]);
+      const incomplete = entry.rulesNotEvaluated.length > 0 || entry.contestedConditions.length > 0;
+      entry.evaluationCompleteness = incomplete ? 'partial' : 'complete';
+      // A definite trigger outranks uncertainty: the mixed case is
+      // `review_recommended` AND `partial`, so neither the breach nor the
+      // unevaluated condition is hidden by the other.
+      entry.verdict = entry.triggeredRules.length || entry.triggeredBy.length
+        ? 'review_recommended'
+        : incomplete ? 'manual_review' : 'unchanged';
+    }
+    const decisions = [...byDecision.values()];
+    return {
+      verdict: decisions.some((item) => item.verdict === 'review_recommended') ? 'review_recommended'
+        : decisions.some((item) => item.verdict === 'manual_review') ? 'manual_review'
+          : 'unchanged',
+      evaluationCompleteness: decisions.some((item) => item.evaluationCompleteness === 'partial') ? 'partial' : 'complete',
+      scope: { project: scopedProject ?? null, decisionId: onlyDecisionId ?? null },
+      decisions
+    };
+  }
 
   // A declared classification wins; the legacy text heuristic is the fallback for
   // records written before `resultClass` existed, so no stored attempt changes
@@ -2934,6 +3134,7 @@ export function createShadowGraph(options = {}) {
     projectSummary,
     purgeProject: transactional('purgeProject', purgeProject, { mode: 'snapshot' }),
     review: transactional('review', review),
+    reconsider: transactional('reconsider', reconsider),
     maintain: transactional('maintain', maintain),
     getReviewSignals,
     acknowledgeReview: transactional('acknowledgeReview', acknowledgeReview),

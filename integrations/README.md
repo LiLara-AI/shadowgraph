@@ -22,7 +22,7 @@ shadowgraph doctor
 
 The global install makes the `shadowgraph` binary available to GUI clients that may not launch from a project containing `node_modules/.bin`. If `shadowgraph doctor` is not found, add npm's global bin directory to the environment used by the client and restart it.
 
-All templates recommend `SHADOWGRAPH_MCP_COMPACT=1`: 12 workflow tools with the same full-fidelity stored graph. To use all 27 tools, remove that environment variable or set it to `0`; compact mode is a tool-advertisement choice, not lossy storage.
+All templates recommend `SHADOWGRAPH_MCP_COMPACT=1`: 14 workflow tools with the same full-fidelity stored graph. To use all 28 tools, remove that environment variable or set it to `0`; compact mode is a tool-advertisement choice, not lossy storage.
 
 By default, data is project-local at `.shadowgraph/data.json` under the MCP process working directory. To pin one store across launches, add an absolute `SHADOWGRAPH_FILE` value to the same `env` mapping.
 
@@ -119,7 +119,7 @@ Restart Hermes after registration. Hermes exposes discovered tools with its `mcp
 ## What was verified
 
 - `scripts/check-integrations.mjs` validates every JSON template and the required Codex TOML/Hermes YAML launch fields.
-- `scripts/smoke-package.mjs` builds a real tarball, installs it into a new directory whose path contains spaces, launches `shadowgraph mcp` only from that installed package, verifies 27 full and 12 compact tools, and performs MCP remember/restart/recall.
+- `scripts/smoke-package.mjs` builds a real tarball, installs it into a new directory whose path contains spaces, launches `shadowgraph mcp` only from that installed package, verifies 28 full and 14 compact tools, and performs MCP remember/restart/recall.
 - `npm run check:mcp` runs pinned official Inspector strict checks in both modes, then the pinned Glama `mcp-proxy@6.4.3` gate.
 - Product config shapes and commands follow the current official Claude Code, Cursor, Codex, and Hermes MCP documentation. A host application still needs to be installed locally to measure its own discovery UI and lifecycle.
 

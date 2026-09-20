@@ -83,7 +83,7 @@ test('MCP initialize answers a per-request-only revision with the latest handsha
   assert.deepEqual(Object.keys(initialized.result.capabilities).sort(), ['prompts', 'resources', 'tools']);
 
   const listed = await rpc.call({ jsonrpc: '2.0', id: 'legacy-tools', method: 'tools/list', params: {} });
-  assert.equal(listed.result.tools.length, 27);
+  assert.equal(listed.result.tools.length, 28);
   assert.equal(Object.hasOwn(listed.result, 'resultType'), false);
   const called = await rpc.call({
     jsonrpc: '2.0', id: 'legacy-call', method: 'tools/call',
@@ -105,7 +105,7 @@ test('MCP modern discovery and every advertised primitive use 2026-07-28 result 
   assertModernComplete(discovered.result);
 
   const tools = await rpc.call({ jsonrpc: '2.0', id: 'tools', method: 'tools/list', params: modernParams() });
-  assert.equal(tools.result.tools.length, 27);
+  assert.equal(tools.result.tools.length, 28);
   assert.equal(tools.result.cacheScope, 'public');
   assert.equal(tools.result.ttlMs, 0);
   assertModernComplete(tools.result);
@@ -195,12 +195,12 @@ test('MCP modern notifications are accepted without any response', async (t) => 
   assert.deepEqual(rpc.unsolicited, []);
   const listed = await rpc.call({ jsonrpc: '2.0', id: 'after-notification', method: 'tools/list', params: modernParams() });
   assert.equal(listed.id, 'after-notification');
-  assert.equal(listed.result.tools.length, 27);
+  assert.equal(listed.result.tools.length, 28);
 });
 
-test('MCP modern compact mode advertises exactly 13 tools', async (t) => {
+test('MCP modern compact mode advertises exactly 14 tools', async (t) => {
   const rpc = await startMcp(t, { SHADOWGRAPH_MCP_COMPACT: '1' });
   const listed = await rpc.call({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: modernParams() });
-  assert.equal(listed.result.tools.length, 13);
+  assert.equal(listed.result.tools.length, 14);
   assertModernComplete(listed.result);
 });

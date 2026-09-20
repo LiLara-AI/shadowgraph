@@ -79,7 +79,7 @@ test('compact can list a review, acknowledge it, keep that across restart, and s
   t.after(() => first.stop());
   const listed = await first.send('tools/list', {});
   const names = listed.result.tools.map((tool) => tool.name);
-  assert.equal(names.length, 13);
+  assert.equal(names.length, 14);
   assert.ok(names.includes('shadowgraph_context'), 'listing route');
   assert.ok(names.includes('shadowgraph_ack_review'), 'acknowledgement route');
 

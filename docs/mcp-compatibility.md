@@ -34,15 +34,15 @@ Modern complete results include `resultType: 'complete'` and server identity met
 
 | Mode | Verifier | Advertised tools |
 | --- | --- | ---: |
-| Full | not configured | 27 |
-| Full | configured | 28 (`shadowgraph_verify_fact` is added) |
-| Compact | either | 12 |
+| Full | not configured | 28 |
+| Full | configured | 29 (`shadowgraph_verify_fact` is added) |
+| Compact | either | 14 |
 
 `SHADOWGRAPH_MCP_COMPACT=1` must be passed to the server process, not merely assumed from the Inspector launch shell. The automated gate uses Inspector's server environment option and verifies the returned list count.
 
 ### Tool inventory
 
-The **13 compact tools** are the everyday agent workflow. They are also present in full mode:
+The **14 compact tools** are the everyday agent workflow. They are also present in full mode:
 
 | Tool | Purpose |
 | --- | --- |
@@ -56,10 +56,12 @@ The **13 compact tools** are the everyday agent workflow. They are also present 
 | `shadowgraph_retrieve` | Bounded retrieval with declared completeness |
 | `shadowgraph_search` | Content search across decisions, attempts, and facts |
 | `shadowgraph_review` | Evaluate reopen rules against stored facts and persist review signals |
+| `shadowgraph_reconsider` | The same evaluation, read as a verdict: `review_recommended`, `unchanged`, or `manual_review`, with the conditions behind each |
+| `shadowgraph_ack_review` | Acknowledge one review signal |
 | `shadowgraph_validate` | Report graph diagnostics by severity |
 | `shadowgraph_maintain` | Stale decisions past `reviewAfter`, expire facts, then review |
 
-**Full mode adds these 15**, for 27 total:
+**Full mode adds these 14**, for 28 total:
 
 | Tool | Purpose |
 | --- | --- |
@@ -71,7 +73,6 @@ The **13 compact tools** are the everyday agent workflow. They are also present 
 | `shadowgraph_purge` | Logical (default) or explicit irreversible hard project purge |
 | `shadowgraph_purge_preview` | Show deletion counts without changing storage |
 | `shadowgraph_review_signals` | Read persisted review signals |
-| `shadowgraph_ack_review` | Acknowledge one review signal |
 | `shadowgraph_repair_plan` | Return a non-destructive repair plan (`apply:false`) |
 | `shadowgraph_journal` | Read journal entries with declared pagination |
 | `shadowgraph_rebuild` | Replay the journal into a projection |
@@ -79,10 +80,10 @@ The **13 compact tools** are the everyday agent workflow. They are also present 
 | `shadowgraph_restore` | Restore a validated JSON or SQLite backup |
 | `shadowgraph_confidence_evidence` | Apply one keyed confidence contribution |
 
-A 28th tool, `shadowgraph_verify_fact`, appears in full mode **only** when
+A 29th tool, `shadowgraph_verify_fact`, appears in full mode **only** when
 `SHADOWGRAPH_VERIFIER_CONFIG` names a local trust configuration. The caller supplies just `factId`
 and an evidence path inside the configured root — never verifier identity, key, signature, method,
-or target status. Compact mode stays at exactly 13 regardless.
+or target status. Compact mode stays at exactly 14 regardless.
 
 Compact mode is a tool-advertisement choice, not lossy storage: the full relational graph,
 memories, facts, alternatives, and outcomes are stored identically in both modes. Every tool listed
@@ -139,7 +140,7 @@ agrees nothing. Every reply in a batch is held until the last member finishes, s
 costs memory in proportion to its results.
 
 **Compatibility guarantee.** For a session negotiated at `2024-11-05`, the top-level member set of
-every tool object (`name`, `description`, `inputSchema`), the tool names and the 27/12/28 counts, and
+every tool object (`name`, `description`, `inputSchema`), the tool names and the 28/14/29 counts, and
 the serialized text result (`content[0].text`, the tool's return value as
 `JSON.stringify(value, null, 2)`) are the same as before this metadata existed, and that text block
 is identical in every tier: `structuredContent` is an addition beside it, never a replacement. Tool
@@ -227,7 +228,7 @@ Six of these are worth stating plainly, because a reader would otherwise guess w
 
 ### Output schemas, and two deliberate omissions
 
-25 of the 27 full-mode tools (26 of 28 with a verifier configured, 12 of 13 in compact mode) declare
+26 of the 28 full-mode tools (27 of 29 with a verifier configured, 13 of 14 in compact mode) declare
 an `outputSchema` and return `structuredContent` that conforms to it. Two do not:
 
 | Tool | Why no output schema |
@@ -264,7 +265,11 @@ envelope adds a constant 44 bytes. "Before" is this branch prior to the rewrite;
 release before any of this metadata existed, when a tool object carried only `name`, `description`,
 and `inputSchema`.
 
-| Mode and tier | Base | Before | Now |
+The rewrite figures below were measured on a 27-tool full surface and a 12-tool compact one, and
+are left exactly as measured rather than restated for today's surface — a historical measurement
+re-labelled is a historical measurement falsified.
+
+| Mode and tier (as measured 2026-09-03) | Base | Before | Now |
 | --- | ---: | ---: | ---: |
 | Full 27, bare | 17,839 | 52,215 | **41,680** |
 | Full 27, annotated | n/a | 55,043 | **44,514** |
@@ -272,6 +277,21 @@ and `inputSchema`.
 | Compact 12, bare | 12,310 | 33,454 | **28,254** |
 | Compact 12, structured | n/a | 95,553 | **90,356** |
 | Description text, 27 tools | 3,712 chars | 18,429 chars | **8,515 chars** |
+
+The current surface, re-measured with `npm run size:mcp` on 2026-09-20 after
+`shadowgraph_reconsider` became the 28th full and 14th compact tool:
+
+| Mode and tier | Bare | Annotated | Structured |
+| --- | ---: | ---: | ---: |
+| Full 28 | 43,711 | 46,651 | 187,359 |
+| Compact 14 | 30,958 | 32,433 | 123,799 |
+
+Compact pays the largest relative increase because the new tool is advertised there, and its
+structured cost is again `evaluatedConditionSchema` inlined — four more sites, for
+`triggeredRules`, `groundedConditions`, `rulesNotEvaluated` and `contestedConditions` — because
+this catalog forbids `$ref`, so a shared shape cannot be shared on the wire. What a structured
+client buys for those bytes is a reconsideration that states which conditions fired, which did not,
+and which could not be evaluated, instead of a bare due list.
 
 Output schemas account for 111,308 of the 155,847 bytes in the full structured tier, and they were
 not touched. An output schema is a promise a validating client enforces, so trimming one to reduce a
@@ -313,10 +333,10 @@ Detail that used to sit in a description, kept here because it is worth having s
 
 ### Glama inspection profile
 
-Glama inspects this server in **full mode**, advertising all 27 tools. Compact mode is not used for
+Glama inspects this server in **full mode**, advertising all 28 tools. Compact mode is not used for
 inspection: the published `glama.json` schema accepts only `maintainers`, so there is no supported
 way to declare the compact environment variable or to disclose in the generated configuration that
-the listing was produced from a reduced surface. Advertising 13 tools while the server offers 27
+the listing was produced from a reduced surface. Advertising 14 tools while the server offers 28
 would understate what the server does, so the tool-count penalty is accepted instead.
 
 Glama's generated container does not talk to this server directly. It runs `mcp-proxy@6.4.3` in front
@@ -335,7 +355,7 @@ over streamable HTTP, and asserts the recording and the HTTP replies against eac
   `protocolVersion: "2025-11-25"`;
 - this server negotiates `2025-11-25` with it, asserted by equality, so a silent fall-back to an
   older revision fails the gate instead of quietly hiding metadata from Glama;
-- the `tools/list` the scanner receives over HTTP is exactly 27 tools, each with four boolean
+- the `tools/list` the scanner receives over HTTP is exactly 28 tools, each with four boolean
   annotations, and an object-rooted `outputSchema` on every tool except the two documented omissions;
 - that list is deep-equal to the one the server wrote to stdio, so the proxy forwarded it without
   dropping or rewriting a member. The comparison is deep rather than byte-for-byte because the
@@ -345,8 +365,9 @@ Because that SDK compiles every advertised output schema while listing, a schema
 fails the gate rather than passing quietly. The gate also prints the revision the proxy negotiated
 with the scanner over HTTP; that value is a property of the proxy's SDK, not of this server.
 
-Measured on 2026-09-03: `requested=2025-11-25 negotiated=2025-11-25 http=2025-11-25 tools=27
-annotated=27 outputSchemas=25 forwarded=deep-equal`.
+Measured on 2026-09-03, on the 27-tool surface of that date: `requested=2025-11-25
+negotiated=2025-11-25 http=2025-11-25 tools=27 annotated=27 outputSchemas=25 forwarded=deep-equal`.
+The gate now asserts 28 tools and 26 output schemas; the reading above is left as it was taken.
 
 **Residual risk.** Only the pinned proxy is under test. Glama's own scanner client, the revision it
 declares to the proxy, and how it renders what it receives are not reproduced here. The proxy version
@@ -382,8 +403,8 @@ tooling install, the scripts fall back to the same exact versions through `npx`.
 
 - Inspector exits non-zero;
 - Inspector writes any strict schema finding to stderr;
-- Full mode is not exactly 27 tools without a verifier;
-- Compact mode is not exactly 13 tools;
+- Full mode is not exactly 28 tools without a verifier;
+- Compact mode is not exactly 14 tools;
 - any advertised tool is missing one of the four boolean annotations;
 - any tool other than the two documented omissions is missing an object-rooted `outputSchema`.
 
@@ -399,7 +420,7 @@ fails when:
 - the proxy sends anything other than exactly one `initialize`, or requests a revision other than
   `2025-11-25`;
 - this server negotiates anything other than `2025-11-25` with it;
-- the `tools/list` received over HTTP is not exactly 27 tools with the annotation and output-schema
+- the `tools/list` received over HTTP is not exactly 28 tools with the annotation and output-schema
   coverage above;
 - that list is not deep-equal to the one the server wrote to stdio.
 

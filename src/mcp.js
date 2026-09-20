@@ -187,6 +187,36 @@ let legacyTier = METADATA_TIER.BARE;
 // never defined batching and 2025-06-18 removed it.
 let batchesAccepted = false;
 
+// Session provenance the runtime KNOWS, rather than provenance a caller merely
+// asserts. `sessionId` has always been a caller-owned string, so two unrelated
+// clients could claim the same one, and a client that sent none left the audit
+// trail with a null where the grouping belonged. This server mints one id per
+// process and stamps it on every write it performs, so writes from one MCP
+// session are attributable to that session by construction.
+//
+// A caller-supplied `sessionId` stays ACCEPTED -- it is never an error, and no
+// existing client breaks -- but it is superseded, not merged: asserted
+// provenance cannot outrank observed provenance. That supersession is stated in
+// the tool input schema and in docs/contracts/provenance-contract.md rather
+// than left for a caller to discover from stored data.
+const RUNTIME_SESSION_ID = `mcp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+
+// The per-operation override inside applyMemoryPlan() reads operation.sessionId
+// ahead of the call-level one, so stamping only the top level would let one
+// operation in a batch claim a different session.
+function withRuntimeSession(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return args;
+  const stamped = { ...args, sessionId: RUNTIME_SESSION_ID };
+  if (Array.isArray(args.operations)) {
+    stamped.operations = args.operations.map((operation) => (
+      operation && typeof operation === 'object' && !Array.isArray(operation)
+        ? { ...operation, sessionId: RUNTIME_SESSION_ID }
+        : operation
+    ));
+  }
+  return stamped;
+}
+
 async function addConfiguredEmbeddings(args = {}) {
   if (!embeddingClient) return args;
   if (Array.isArray(args.operations)) {
@@ -207,13 +237,14 @@ async function callUnqueued(name, args, tier) {
   const before = graph.exportData();
   let value;
   try {
-  if (name === 'shadowgraph_record_decision') value = graph.addDecision(args);
-  else if (name === 'shadowgraph_record_attempt') value = graph.addAttempt(args);
+  if (name === 'shadowgraph_record_decision') value = graph.addDecision(withRuntimeSession(args));
+  else if (name === 'shadowgraph_record_attempt') value = graph.addAttempt(withRuntimeSession(args));
   else if (name === 'shadowgraph_review') value = graph.review(args ?? {});
+  else if (name === 'shadowgraph_reconsider') value = graph.reconsider(args ?? {});
   else if (name === 'shadowgraph_search') value = graph.search(args?.query ?? '', args ?? {});
   else if (name === 'shadowgraph_context') value = graph.context(args ?? {});
   else if (name === 'shadowgraph_remember') {
-    const prepared = await addConfiguredEmbeddings(args ?? {});
+    const prepared = withRuntimeSession(await addConfiguredEmbeddings(args ?? {}));
     value = Array.isArray(prepared.operations) ? graph.applyMemoryPlan(prepared) : graph.remember(prepared);
   }
   else if (name === 'shadowgraph_recall') {
@@ -227,10 +258,10 @@ async function callUnqueued(name, args, tier) {
     value = graph.recall(query, prepared);
     if (embeddingFailure) value.signals.semantic = { ...value.signals.semantic, available: false, matched: 0, reason: embeddingFailure };
   }
-  else if (name === 'shadowgraph_record_fact') value = graph.addFact(args);
+  else if (name === 'shadowgraph_record_fact') value = graph.addFact(withRuntimeSession(args));
   else if (name === 'shadowgraph_verify_fact' && verifier) value = await graph.verifyFact(args ?? {});
   else if (name === 'shadowgraph_record_outcome') value = graph.setOutcome(args?.decisionId, args?.outcome);
-  else if (name === 'shadowgraph_confidence_evidence') value = graph.addConfidenceEvidence(args ?? {});
+  else if (name === 'shadowgraph_confidence_evidence') value = graph.addConfidenceEvidence(withRuntimeSession(args ?? {}));
   else if (name === 'shadowgraph_update_status') value = graph.updateDecisionStatus(args?.decisionId, args?.status);
   else if (name === 'shadowgraph_link') value = graph.link(args);
   else if (name === 'shadowgraph_traverse') value = graph.traverse(args ?? {});

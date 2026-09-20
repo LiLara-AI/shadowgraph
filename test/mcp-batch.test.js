@@ -152,14 +152,14 @@ test('a session negotiated at 2025-03-26 answers a batch as one array, in member
 
   // The notification carries no id and so contributes no member to the reply.
   assert.deepEqual(idsOf(batch), ['b1', 'b2']);
-  assert.equal(batch[0].result.tools.length, 27);
+  assert.equal(batch[0].result.tools.length, 28);
   assert.equal(batch[1].result.content[0].type, 'text');
   assert.equal(Object.hasOwn(batch[1].result, 'structuredContent'), false, '2025-03-26 defines annotations, not structured content');
 
   // A single message on its own line still answers as an object, not an array.
   const single = await rpc.call({ jsonrpc: '2.0', id: 'single', method: 'tools/list', params: {} });
   assert.equal(Array.isArray(single), false);
-  assert.equal(single.result.tools.length, 27);
+  assert.equal(single.result.tools.length, 28);
 });
 
 test('a batch of notifications alone writes nothing, yet every member still runs', async (t) => {
@@ -290,7 +290,7 @@ test('every member of a batch is answered, including the invalid ones, in order'
   for (const index of [0, 2, 3, 4]) {
     assert.deepEqual(batch[index], INVALID_REQUEST, `member ${index}`);
   }
-  assert.equal(batch[1].result.tools.length, 27);
+  assert.equal(batch[1].result.tools.length, 28);
   assert.equal(batch[5].error.code, -32600);
   assert.equal(batch[5].error.message, 'Invalid Request: jsonrpc must be 2.0');
 });
@@ -409,7 +409,7 @@ test('a batch is an invalid request in every session that did not negotiate 2025
     // The single request that follows is answered after the array line was
     // rejected, so the rejection is already recorded once this resolves.
     const probe = await rpc.call({ jsonrpc: '2.0', id: `probe-${version}`, method: 'tools/list', params: {} });
-    assert.equal(probe.result.tools.length, 27);
+    assert.equal(probe.result.tools.length, 28);
     assert.deepEqual(rpc.lines.slice(before, -1), [INVALID_REQUEST], `negotiated ${version}`);
   }
 
@@ -422,6 +422,6 @@ test('a batch is an invalid request in every session that did not negotiate 2025
   const before = rpc.lines.length;
   rpc.sendRaw(JSON.stringify(batch));
   const probe = await rpc.call({ jsonrpc: '2.0', id: 'probe-after', method: 'tools/list', params: {} });
-  assert.equal(probe.result.tools.length, 27);
+  assert.equal(probe.result.tools.length, 28);
   assert.deepEqual(rpc.lines.slice(before, -1), [INVALID_REQUEST]);
 });

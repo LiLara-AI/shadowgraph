@@ -36,7 +36,7 @@ jobs:
       - name: Install pinned MCP gate clients
         if: matrix.node-version == 24
         run: npm ci --prefix tooling/mcp-gates --ignore-scripts
-      - name: Strict MCP Inspector (27 full / 12 compact) and pinned Glama mcp-proxy gate
+      - name: Strict MCP Inspector (28 full / 14 compact) and pinned Glama mcp-proxy gate
         if: matrix.node-version == 24
         run: npm run check:mcp
       - name: Assert SQLite coverage (zero skips, todos, or failures)
