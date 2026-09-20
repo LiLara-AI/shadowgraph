@@ -184,12 +184,12 @@ try {
   const [fullList] = await rpc(installedCli, { SHADOWGRAPH_FILE: fullFile, SHADOWGRAPH_MCP_COMPACT: '0' }, [
     { jsonrpc: '2.0', id: 1, method: 'tools/list' }
   ]);
-  assert.equal(fullList.result.tools.length, 27);
+  assert.equal(fullList.result.tools.length, 28);
   const compactFile = join(appDirectory, 'mcp compact', 'data.json');
   const [compactList] = await rpc(installedCli, { SHADOWGRAPH_FILE: compactFile, SHADOWGRAPH_MCP_COMPACT: '1' }, [
     { jsonrpc: '2.0', id: 2, method: 'tools/list' }
   ]);
-  assert.equal(compactList.result.tools.length, 13);
+  assert.equal(compactList.result.tools.length, 14);
   const [mcpRemember] = await rpc(installedCli, { SHADOWGRAPH_FILE: compactFile, SHADOWGRAPH_MCP_COMPACT: '1' }, [
     { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'shadowgraph_remember', arguments: {
       project: 'mcp-demo', memoryType: 'note', key: 'package', text: 'Loaded from installed tarball'

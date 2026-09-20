@@ -68,7 +68,15 @@ const graph = createShadowGraph({ now });   // `now` is an injectable clock, use
 
 ### Reconsideration
 
-`review(context)` — evaluates `reopenWhen` rules against **stored** facts, so it works after a restart. Caller-supplied `facts` override stored facts of the same key; string-form rules match `changedFacts` only. `context`, `project`, `asOf`, `changedFacts`, `facts`, and nested fact values are preflight-validated before a review signal can be inserted.
+`review(context)` — evaluates `reopenWhen` rules against **stored** facts, so it works after a restart. Caller-supplied `facts` override stored facts of the same key; string-form rules match `changedFacts` only. `context`, `project`, `asOf`, `changedFacts`, `facts`, and nested fact values are preflight-validated before a review signal can be inserted. Returns a bare array of due decisions.
+
+`reconsider({ project, decisionId, changedFacts, facts, asOf })` — **a projection of the same pass**, never a second evaluation, so it can never disagree with `review()` about whether a rule fires, does not fire, or cannot be evaluated. Returns `{ verdict, evaluationCompleteness, scope, decisions }`:
+
+- `verdict` is `review_recommended` (a rule definitely fired), `unchanged` (evaluation was complete and nothing fired), or `manual_review` (nothing definitely fired, but something could not be settled);
+- `evaluationCompleteness` is `complete` or `partial`. **`unchanged` is only ever reported with `complete`.** One rule firing while another is unknown is `review_recommended` **and** `partial`, with both sets of evidence visible;
+- each decision carries `triggeredRules`, `triggeredBy`, `groundedConditions` (the rules that definitely did *not* fire, so `unchanged` rests on stated evidence), `rulesNotEvaluated` (verdict `unknown` only), `contestedConditions` (decided, but on facts that disagree — these also force `partial`), `affectedAlternatives`, `factsConsidered`, and `reviewSignalId` / `reviewSignalStatus`.
+
+Key matching is **literal**; a near-miss key is `unknown`, not a match. A stored string-form rule that `changedFacts` does not name is reported as unevaluated rather than passed. `decisionId` **fails closed**: an unknown id, an id from another project, and a closed decision are each an error, never an empty `unchanged` result. It raises signals under the identity `review()` already uses, so a repeat adds none, and it writes no status, confidence or lifecycle state. Contract: [review conditions](contracts/review-conditions-contract.md) §11.
 
 `maintain(options)` preflights its object shape, `now`, `changedFacts`, `facts`, and the complete delegated review input before staling decisions, expiring facts, or appending journal entries. A rejected core or MCP maintain call leaves state, review signals, journal sequence, revision, and durable state unchanged. MCP restores the pre-call graph snapshot on any domain-operation exception before persistence. · `acknowledgeReview(id)`
 
@@ -147,7 +155,7 @@ MCP exposes `shadowgraph_verify_fact` only in full mode when `SHADOWGRAPH_VERIFI
 
 | Surface | Entry point | Notes |
 | --- | --- | --- |
-| MCP | `shadowgraph mcp` (from a clone: `npm run mcp`) | Dual-era: `initialize` negotiates `2024-11-05`, `2025-03-26`, `2025-06-18`, or `2025-11-25`, and modern `2026-07-28` is served per request; see [MCP compatibility](mcp-compatibility.md). `SHADOWGRAPH_MCP_COMPACT=1` advertises 13 tools instead of 27. |
+| MCP | `shadowgraph mcp` (from a clone: `npm run mcp`) | Dual-era: `initialize` negotiates `2024-11-05`, `2025-03-26`, `2025-06-18`, or `2025-11-25`, and modern `2026-07-28` is served per request; see [MCP compatibility](mcp-compatibility.md). `SHADOWGRAPH_MCP_COMPACT=1` advertises 14 tools instead of 28. |
 | HTTP | `shadowgraph serve` (from a clone: `npm start`) | Binds `127.0.0.1`; optional Bearer auth via `SHADOWGRAPH_API_TOKEN`. |
 | CLI | `shadowgraph <command>` (from a clone: `node src/cli.js <command>`) | Each invocation is a separate process that reopens the store. |
 

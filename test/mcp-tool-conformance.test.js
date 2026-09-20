@@ -224,7 +224,7 @@ test('every advertised output schema accepts the result its own tool really retu
   const rpc = await startMcp(t);
   await rpc.initialize('2025-06-18');
   const listed = await rpc.listTools({});
-  assert.equal(listed.tools.length, 27);
+  assert.equal(listed.tools.length, 28);
 
   const schemas = new Map();
   for (const tool of listed.tools) {
@@ -237,7 +237,7 @@ test('every advertised output schema accepts the result its own tool really retu
     assert.equal(tool.outputSchema.type, 'object');
     schemas.set(tool.name, tool.outputSchema);
   }
-  assert.equal(schemas.size, 25);
+  assert.equal(schemas.size, 26);
 
   const exercised = new Set();
   const callTool = conformingCaller(rpc, schemas, exercised);
@@ -267,6 +267,13 @@ test('every advertised output schema accepts the result its own tool really retu
   const due = await callTool('shadowgraph_review', { project });
   assert.equal(Array.isArray(due), true, 'shadowgraph_review returns a bare array');
   assert.equal(due.some((item) => item.decisionId === decisionA.id), true);
+
+  // The same evaluation, read as a reconsideration. Its result is object
+  // rooted, so unlike shadowgraph_review it can and does carry an output schema.
+  const reconsidered = await callTool('shadowgraph_reconsider', { project });
+  assert.equal(reconsidered.verdict, 'review_recommended');
+  assert.equal(reconsidered.evaluationCompleteness, 'complete');
+  assert.equal(reconsidered.decisions.some((item) => item.decisionId === decisionA.id), true);
 
   const signals = await callTool('shadowgraph_review_signals', { project, status: 'open' });
   assert.equal(Array.isArray(signals), true, 'shadowgraph_review_signals returns a bare array');
@@ -355,7 +362,7 @@ test('the verifier build advertises and satisfies the verification tool contract
   const rpc = await startMcp(t, { SHADOWGRAPH_VERIFIER_CONFIG: configPath });
   await rpc.initialize('2025-11-25');
   const listed = await rpc.listTools({});
-  assert.equal(listed.tools.length, 28);
+  assert.equal(listed.tools.length, 29);
   const verifyTool = listed.tools.find((tool) => tool.name === 'shadowgraph_verify_fact');
   assert.ok(verifyTool, 'the verification tool must be advertised when a verifier is configured');
   assert.deepEqual(verifyTool.annotations, { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true });
@@ -402,7 +409,7 @@ test('initialize negotiates a revision, and the wire shape follows the one it RE
     const wire = WIRE_BY_NEGOTIATED[negotiated];
     assert.ok(wire, `no expectation recorded for negotiated revision ${negotiated}`);
     const listed = await rpc.listTools({});
-    assert.equal(listed.tools.length, 27, `requested ${requested}`);
+    assert.equal(listed.tools.length, 28, `requested ${requested}`);
     const validateTool = listed.tools.find((tool) => tool.name === 'shadowgraph_validate');
     assert.deepEqual(Object.keys(validateTool), wire.toolKeys, `negotiated ${negotiated} tool members`);
     // A tool that declares no output schema never gains that member, at any tier.
@@ -471,7 +478,7 @@ test('a later initialize renegotiates, in both directions', async (t) => {
 });
 
 test('a session that never initializes keeps the pre-2025 wire shape, in full and compact mode', async (t) => {
-  for (const [mode, expectedCount] of [['0', 27], ['1', 13]]) {
+  for (const [mode, expectedCount] of [['0', 28], ['1', 14]]) {
     const rpc = await startMcp(t, { SHADOWGRAPH_MCP_COMPACT: mode });
     const listed = await rpc.listTools({});
     assert.equal(listed.tools.length, expectedCount, `compact=${mode}`);
@@ -486,7 +493,7 @@ test('a session that never initializes keeps the pre-2025 wire shape, in full an
 test('modern requests receive the full metadata regardless of any handshake', async (t) => {
   const rpc = await startMcp(t);
   const listed = await rpc.call('tools/list', modernParams());
-  assert.equal(listed.result.tools.length, 27);
+  assert.equal(listed.result.tools.length, 28);
   assert.equal(listed.result.resultType, 'complete');
   const validateTool = listed.result.tools.find((tool) => tool.name === 'shadowgraph_validate');
   assert.deepEqual(Object.keys(validateTool), ['name', 'description', 'inputSchema', 'annotations', 'outputSchema']);

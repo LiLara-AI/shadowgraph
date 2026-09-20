@@ -9,8 +9,8 @@ const INSPECTOR_VERSION = '2.4.0';
 // npx remains a bounded fallback for a source checkout without those tools.
 const INSPECTOR_TIMEOUT_MS = 300_000;
 const expected = [
-  { name: 'Full', count: 27, env: [] },
-  { name: 'Compact', count: 13, env: ['SHADOWGRAPH_MCP_COMPACT=1'] }
+  { name: 'Full', count: 28, env: [] },
+  { name: 'Compact', count: 14, env: ['SHADOWGRAPH_MCP_COMPACT=1'] }
 ];
 // These two return a bare JSON array, so they cannot carry an object-rooted
 // output schema. See src/mcp-tools.js and docs/mcp-compatibility.md.

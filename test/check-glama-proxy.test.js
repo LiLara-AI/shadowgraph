@@ -25,11 +25,11 @@ function toolFixture(name, { outputSchema = true } = {}) {
     ...(outputSchema ? { outputSchema: { type: 'object' } } : {})
   };
 }
-// 27 tools, two of which legitimately carry no output schema.
+// 28 tools, two of which legitimately carry no output schema.
 const TOOLS = [
   toolFixture('shadowgraph_review', { outputSchema: false }),
   toolFixture('shadowgraph_review_signals', { outputSchema: false }),
-  ...Array.from({ length: 25 }, (_, index) => toolFixture(`shadowgraph_tool_${index}`))
+  ...Array.from({ length: 26 }, (_, index) => toolFixture(`shadowgraph_tool_${index}`))
 ];
 
 function recordOf({ requested = '2025-11-25', negotiated = '2025-11-25', tools = TOOLS, initializes = 1, listings = 1 } = {}) {
@@ -111,13 +111,13 @@ test('the handshake assertion accepts the pinned exchange and rejects every way 
 
 test('the tool assertion compares what the scanner received against what the server wrote', () => {
   const record = recordOf();
-  assert.equal(assertTools(TOOLS, record), 25, 'twenty-five of the twenty-seven declare an output schema');
+  assert.equal(assertTools(TOOLS, record), 26, 'twenty-six of the twenty-eight declare an output schema');
 
   // Key order may differ across the proxy's schema rebuild; values may not.
   const reordered = TOOLS.map((tool) => Object.fromEntries(Object.entries(tool).reverse()));
-  assert.equal(assertTools(reordered, record), 25);
+  assert.equal(assertTools(reordered, record), 26);
 
-  assert.throws(() => assertTools(TOOLS.slice(1), record), /received 26 tools/u);
+  assert.throws(() => assertTools(TOOLS.slice(1), record), /received 27 tools/u);
   assert.throws(() => assertTools(TOOLS, recordOf({ listings: 2 })), /sent 2 tools\/list requests/u);
 
   const dropped = TOOLS.map((tool, index) => (index === 5 ? { ...tool, annotations: undefined } : tool));

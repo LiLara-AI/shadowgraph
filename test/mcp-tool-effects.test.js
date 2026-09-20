@@ -268,6 +268,14 @@ test('every advertised tool annotation matches the effects the server actually h
   assert.equal(review.repeat.changedExisting.length, 0, 'signals dedupe by decision and reason');
   assert.equal(review.repeat.revisionDelta, 1, 'a repeat that changes no signal still commits a revision');
 
+  // Reconsideration runs the SAME evaluation, so it must show the same effects:
+  // it can persist a signal, and a repeat adds none because the identity is the
+  // one shadowgraph_review already used.
+  const reconsidered = await observe('shadowgraph_reconsider', { project: PROJECT });
+  assert.equal(reconsidered.firstResult.verdict, 'review_recommended', 'the same changed fact recommends review');
+  assert.equal(reconsidered.first.journalDelta, 0, 'reconsideration is not journalled either');
+  assert.equal(reconsidered.repeat.changedExisting.length, 0, 'a repeat reuses the signal review already raised');
+
   await observe('shadowgraph_context', { project: PROJECT });
   await observe('shadowgraph_remember', {
     project: PROJECT, memoryType: 'preference', key: 'store-style', text: 'prefers embedded databases',
@@ -379,7 +387,7 @@ test('every advertised tool annotation matches the effects the server actually h
 
   // --- the assertion this file exists for ---------------------------------
   const tools = await rpc.listTools();
-  assert.equal(tools.length, 27);
+  assert.equal(tools.length, 28);
   const missing = tools.map((tool) => tool.name).filter((name) => !observed.has(name));
   assert.deepEqual(missing, [], `these advertised tools were never observed: ${missing.join(', ')}`);
 
@@ -404,6 +412,7 @@ test('every advertised tool annotation matches the effects the server actually h
     'shadowgraph_link',
     'shadowgraph_maintain',
     'shadowgraph_purge',
+    'shadowgraph_reconsider',
     'shadowgraph_record_attempt',
     'shadowgraph_record_decision',
     'shadowgraph_record_fact',
@@ -482,7 +491,7 @@ test('the verification tool reads a caller-selected path, inside the configured 
   verified.external = { read: true, overwrite: false };
 
   const tools = await rpc.listTools();
-  assert.equal(tools.length, 28);
+  assert.equal(tools.length, 29);
   const verifyTool = tools.find((tool) => tool.name === 'shadowgraph_verify_fact');
   assert.deepEqual(verifyTool.annotations, deriveAnnotations(verified), 'verify_fact annotations must equal the observed behaviour');
 });

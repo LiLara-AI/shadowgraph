@@ -90,6 +90,28 @@ Added to **decisions**: `sourceClass`, `actor`, `client`, `sessionId` (same sema
 
 Non-string `actor`/`client`/`sessionId` throw. All values are JSON-serializable and survive `exportData()` → `importData()`.
 
+### `sessionId` on an MCP-originated write (changed 2026-09-20)
+
+`sessionId` was caller-owned in every direction: two unrelated clients could claim the same one, and
+a client that sent none left a `null` where the grouping belonged. The MCP server now mints **one id
+per process**, shaped `mcp_<base36>`, and records it on every write it performs, so writes from one
+MCP session are attributable to that session by construction rather than by assertion.
+
+Stated plainly, because it is a behaviour change a client can observe:
+
+- a caller-supplied `sessionId` is still **accepted** — it is never an error, and no existing client
+  breaks;
+- it is **superseded, not merged**: the runtime value is what gets stored. Asserted provenance does
+  not outrank observed provenance;
+- this applies to the per-operation `sessionId` inside an `applyMemoryPlan` batch as well, so one
+  operation cannot claim a different session from the call that carried it;
+- `actor` and `client` are untouched. They remain caller-owned claims, stored for audit and never
+  used to grant trust.
+
+CLI, HTTP and direct core callers are unaffected: nothing mints a session for them, and `sessionId`
+stays exactly what the caller passed. The field's type and default are unchanged, so no migration
+is involved and stored data is never rewritten.
+
 ## 6. Import / restore behaviour
 
 `importData()` **preserves stored values as-is and never elevates trust.** A legacy fact on disk carrying `verificationStatus: 'verified'` keeps it.

@@ -4,6 +4,45 @@
 
 ### Added
 
+- **`reconsider()`, and `shadowgraph_reconsider` in both MCP modes.** `review()` answered one
+  question — which decisions are due — and said nothing about the decisions it passed over. A caller
+  could not tell "checked, and nothing fired" from "could not check". `reconsider()` gives the three
+  readings the product actually needs: `review_recommended` when a rule definitely fired,
+  `unchanged` when evaluation was **complete** and nothing fired, and `manual_review` when nothing
+  definitely fired but something could not be settled. `unchanged` is reported **only** with
+  `evaluationCompleteness: 'complete'`; a rule firing while another is unknown is
+  `review_recommended` **and** `partial`, with both sets of evidence visible so neither hides the
+  other.
+
+  It is a **projection of the same pass** `review()` runs, not a second evaluation. One pass, one
+  evaluator (`src/condition-eval.js`), one set of verdicts, so the two cannot disagree about whether
+  a stored rule fires, does not fire, or cannot be evaluated. A separate operator table on the
+  reconsideration side would have meant a rule using `gte` — or any operator only one route
+  understood — reporting `unchanged` with complete confidence on one route and a breach on the
+  other. `test/reconsideration.test.js` proves the agreement operator by operator, driven from the
+  canonical `RULE_OPERATORS` export rather than a second list that could drift.
+
+  Each decision carries the evidence behind all three outcomes: `triggeredRules`, `triggeredBy`,
+  `groundedConditions` (the rules that definitely did *not* fire, so `unchanged` rests on something
+  rather than on an empty list), `rulesNotEvaluated`, `contestedConditions`, `affectedAlternatives`
+  and `factsConsidered`. Signals are raised under the identity `review()` already uses, so a repeat
+  adds none and an acknowledgement holds. Nothing is written to decision status, confidence or
+  lifecycle state, and no stored rule is rewritten. Key matching stays **literal**: a near-miss key
+  is `unknown`, never a match. Reaching it: `shadowgraph_reconsider` (full and compact),
+  `POST /reconsider`, and `shadowgraph reconsider` on the CLI.
+
+  `decisionId` **fails closed**. An unknown id, an id belonging to another project, and a closed
+  decision are each an error rather than an empty result, because an empty `unchanged` + `complete`
+  for a mis-addressed decision reads exactly like a healthy one. A focused call evaluates only its
+  decision and raises no signal for any other.
+- **MCP writes carry a session the runtime knows.** `sessionId` was caller-owned in every direction:
+  two unrelated clients could claim the same one, and a client that sent none left a `null` where
+  the grouping belonged. The MCP server now mints one id per process and records it on every write
+  it performs. A caller-supplied `sessionId` is still **accepted** — never an error, no existing
+  client breaks — but it is superseded rather than merged, because asserted provenance does not
+  outrank observed provenance. This covers the per-operation `sessionId` inside an `applyMemoryPlan`
+  batch too. `actor` and `client` are untouched, CLI and HTTP callers are unaffected, and the
+  field's type and default are unchanged, so no migration is involved.
 - **A local workspace for raw development material, outside the repository.** Repository hygiene
   used to offer only one place for internal handoffs, session state, backups, debugging logs and
   private benchmark material: an ignored directory *inside* the repository, one forced add away
@@ -32,6 +71,25 @@
 
 ### Fixed
 
+- **A stored string reopen rule that did not match is no longer silent.** A token rule matches
+  `changedFacts` only, and durable facts are deliberately never fed into that list, so when a caller
+  supplies nothing there is no evidence either way. Such a rule previously produced neither a `due`
+  entry nor a diagnostic — the last silent path on the reopen side, indistinguishable from a checked
+  and healthy decision. It is now `unknown`, with the reason
+  `Legacy string condition this evaluator cannot settle from stored facts`, exactly as `reusableWhen`
+  already treats legacy free text. The text is preserved verbatim and never interpreted; no meaning
+  is invented for it. It stays out of `matches` and `coverage`, so it raises **no** review signal and
+  changes **no** signal identity, and `review()`'s own return is byte-identical. The entry is
+  additive on `context().conditionDiagnostics` and `maintain().diagnostics`.
+- **Stale MCP tool counts across the documentation and the CI label.** `docs/mcp-compatibility.md`
+  advertised compact as 12 in its mode table while the same document said 13 in five other places,
+  its compact inventory table was missing `shadowgraph_ack_review` (listing it as full-mode-only),
+  and the `2024-11-05` compatibility guarantee quoted "27/12/28". `integrations/README.md` claimed 12
+  workflow tools and misdescribed what `smoke:package` verifies, and the CI step was labelled
+  "27 full / 12 compact" while the gate it runs asserted 13. Every count is now derived from
+  `buildToolCatalog()` and `npm run check:mcp` rather than restated by hand: **28 full, 14 compact,
+  29 with a verifier configured.** Historical measurements are left as they were taken and labelled
+  with the surface they were measured on, rather than re-labelled to match today's.
 - **A rule that states no operand is `unknown`, for every operator.** Only the ordered, range and
   set operators noticed a missing `value`. `equals` and `contains` compared against `undefined` and
   returned a confident `false`; `not_equals` returned **`true`**, because `500 !== undefined`, so a
