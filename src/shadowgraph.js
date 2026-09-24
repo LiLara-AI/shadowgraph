@@ -2983,12 +2983,19 @@ export function createShadowGraph(options = {}) {
         const value = item.value;
         const entity = value?.kind === 'fact' ? finalFacts.get(value.id) : finalRecords.get(value?.id);
         if (typeof item.key !== 'string' || !value || typeof value !== 'object' || typeof value.id !== 'string' || !entity) throw new Error('Idempotency entry must reference an existing entity');
-        const sameOwner = entity.project === value.project
+        // The value is checked in the migrated form its entity has, as the
+        // semantic check below always was. A legacy entity stored with no
+        // project is filed under "default" by migration; so is a retry value
+        // that stores no project, which is what a rebuild replays from that
+        // entity's own journal entry (F-26). Owners are compared by the one
+        // owner model, so a legacy retry value never names a real-"default"
+        // entity, nor a real-"default" value a legacy one.
+        const migratedValue = value.kind === 'fact' ? migrateFact(value) : migrateRecord(value);
+        const sameOwner = entity.project === migratedValue.project && sameOwnerKey(entity, migratedValue)
           && (entity.attribution === 'unattributed') === (value.attribution === 'unattributed')
           && (value.attribution !== 'unattributed' || (usableOriginId(value.originId) !== null && entity.originId === value.originId));
-        if (entity.kind !== value.kind || !sameOwner || !item.key.startsWith(idempotencyKeyPrefix(value))) throw new Error('Idempotency entry identity does not match its entity');
+        if (entity.kind !== value.kind || !sameOwner || !item.key.startsWith(idempotencyKeyPrefix(migratedValue))) throw new Error('Idempotency entry identity does not match its entity');
         if (value.kind === 'memory' && memoryScopeKey(entity) !== memoryScopeKey(value)) throw new Error('Idempotency entry identity does not match its entity');
-        const migratedValue = value.kind === 'fact' ? migrateFact(value) : migrateRecord(value);
         if (!idempotencySemanticallyMatches(migratedValue, entity)) throw new Error(`Idempotency entry semantic mismatch with canonical entity ${value.id}`);
         item.value = clone(entity);
       }

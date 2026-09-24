@@ -31,8 +31,7 @@ async function sqliteOrSkip(t) {
 // keys and identities in an explicit legacy project, and records stored with
 // no project. With `projectlessRetry`, the projectless decision also has a
 // retry entry naming "default" -- data a schema-5 build accepts on import,
-// but whose journal no build can rebuild (replay gives the retry value no
-// project), so tests using it check validation and reload only.
+// and which its own journal now rebuilds the same way (F-26).
 function legacyPayload({ projectlessRetry = false } = {}) {
   const graph = createShadowGraph({ now });
   for (const [project, suffix] of [['default', 'legacy'], ['alpha', 'alpha']]) {
@@ -91,10 +90,10 @@ const entity = (graph, id) => {
   return structuredClone([...snapshot.records, ...snapshot.facts].find((item) => item.id === id));
 };
 
-function assertHealthy(graph, label, { rebuild = true } = {}) {
+function assertHealthy(graph, label) {
   const validation = graph.validate();
   assert.equal(validation.valid, true, `${label}: ${JSON.stringify(validation.issues)}`);
-  const rebuilt = rebuild ? graph.rebuild() : { rebuildable: true };
+  const rebuilt = graph.rebuild();
   assert.equal(rebuilt.rebuildable, true, `${label}: ${rebuilt.reason}`);
   const reloaded = createShadowGraph({ now });
   reloaded.importData(JSON.parse(JSON.stringify(privilegedSnapshot(graph))));
@@ -187,7 +186,7 @@ for (const [stage, open] of Object.entries(STAGES)) {
       assert.notEqual(created.id, 'decision-projectless', project);
     }
     assert.deepEqual(entity(graph, 'decision-projectless'), legacy);
-    assertHealthy(graph, stage, { rebuild: false });
+    assertHealthy(graph, stage);
   });
 
   test(`an unambiguous legacy project keeps its retries and its identities (${stage})`, () => {
