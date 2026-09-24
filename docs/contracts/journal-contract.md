@@ -54,11 +54,11 @@ Cost, stated honestly: storage grows with `entity size × mutation count`, not w
 
 ## 5. Entry types
 
-`REPLAYABLE_ENTRY_TYPES` (17) — `projection.baseline`, `decision.recorded`, `decision.status_changed`, `decision.superseded`, `decision.aged`, `attempt.recorded`, `fact.observed`, `fact.superseded`, `fact.expired`, `outcome.recorded`, `confidence.changed`, `relation.created`, `memory.recorded`, `memory.indexed`, `memory.superseded`, `memory.invalidated`, `project.purged`.
+`REPLAYABLE_ENTRY_TYPES` (20) — `projection.baseline`, `decision.recorded`, `decision.status_changed`, `decision.superseded`, `decision.aged`, `decision.staled`, `attempt.recorded`, `memory.recorded`, `memory.indexed`, `memory.superseded`, `memory.invalidated`, `fact.observed`, `fact.verified`, `fact.superseded`, `fact.expired`, `outcome.recorded`, `confidence.changed`, `relation.created`, `project.purged`, `entity.attributed`.
 
-`NON_REPLAYABLE_ENTRY_TYPES` (1) — `legacy_metadata_event`.
+`NON_REPLAYABLE_ENTRY_TYPES` (1) — `legacy_metadata_event`. `JOURNAL_ENTRY_TYPES` is the 21 together.
 
-**Every listed type is produced by real code.** No aspirational types. `appendJournal()` throws `Unknown journal entry type: <type>` on anything else, so a typo cannot silently create a new type.
+**Every listed type except `entity.attributed` is produced by real code.** `entity.attributed` is read first and written later (reader-first, plan v1.4.4 §9.2): it records a change to which project, or which capture origin, a decision, attempt, memory or fact belongs. Its payload is the complete post-change entity plus one `attributionChange` object (`previousProject`, `previousAttribution`, `reason: migration | user`) that is audit only and never part of the replayed entity; the entry's `project` is the new one, or `null` for an unattributed entity. It replays by the same last-snapshot-wins fold as every other entity entry, so a rebuild reproduces the new owner. On a fact it may move the fact between owners but may not revive, end or verify it. Entries up to schema 6 are readable; schema-6 entries follow the same purge-artifact rules as schema 5. `appendJournal()` throws `Unknown journal entry type: <type>` on anything else, so a typo cannot silently create a new type.
 
 **Alternatives deliberately have no entry type.** They have no independent mutation API — they are created inside `addDecision` and read by `review()` — so giving them entries would imply an editing capability that does not exist. They ride inside the decision snapshot. This is a documented design decision, not an omission.
 

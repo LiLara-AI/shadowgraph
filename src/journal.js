@@ -9,6 +9,14 @@
 import { effectiveFactExpirationBoundary, factValidityPolicyIssue, isValidIsoInstant } from './fact-validity.js';
 
 export const JOURNAL_SCHEMA_VERSION = 5;
+// The highest entry schema this reader interprets. It runs ahead of the writer
+// (plan v1.4.4 §9.2): widen the reader, ship it, and only then raise the writer.
+export const READABLE_JOURNAL_SCHEMA_VERSION = 6;
+// Schema 5 introduced canonical purge artifacts; every readable schema from it
+// on follows the same rules.
+function canonicalPurgeSchema(version) {
+  return Number.isInteger(version) && version >= 5 && version <= READABLE_JOURNAL_SCHEMA_VERSION;
+}
 export const INVALID_BASELINE_PLACEMENT_CODE = 'invalid_projection_baseline_placement';
 export const NONCANONICAL_SCHEMA5_PURGE_ARTIFACT_CODE = 'noncanonical_schema5_purge_artifact';
 export const INVALID_JOURNAL_SEQUENCE_CODE = 'invalid_journal_sequence';
@@ -101,8 +109,26 @@ export const REPLAYABLE_ENTRY_TYPES = Object.freeze([
   'outcome.recorded',
   'confidence.changed',
   'relation.created',
-  'project.purged'
+  'project.purged',
+  'entity.attributed'
 ]);
+
+// `entity.attributed` records a change to which project or origin an entity
+// belongs (P1 reconciliation F-13). Its payload is the complete post-change
+// entity plus one `attributionChange` object -- { previousProject,
+// previousAttribution, reason } -- that is audit only and never part of the
+// replayed entity. The entry's own `project` is the new one (null when the
+// entity is unattributed). It is the one replayable type that serves several
+// entity kinds. This build reads it; no writer here emits it yet.
+export const ATTRIBUTED_ENTITY_KINDS = Object.freeze(['decision', 'attempt', 'memory', 'fact']);
+export const ATTRIBUTION_CHANGE_REASONS = Object.freeze(['migration', 'user']);
+
+// The entity an entry's payload contributes to a projection.
+export function replayedEntity(entry) {
+  if (entry?.type !== 'entity.attributed' || !entry.payload || typeof entry.payload !== 'object') return entry?.payload;
+  const { attributionChange, ...entity } = entry.payload;
+  return entity;
+}
 
 // Entry types recorded for audit that intentionally do not mutate a projection.
 export const NON_REPLAYABLE_ENTRY_TYPES = Object.freeze(['legacy_metadata_event']);
@@ -145,8 +171,8 @@ const KIND_TO_COLLECTION = Object.freeze({
  */
 export function schema5PurgeArtifactIssue(entry, sourceSchemaVersion = undefined) {
   const entrySchemaVersion = Number.isInteger(entry?.schemaVersion) ? entry.schemaVersion : sourceSchemaVersion;
-  const currentEnvelope = sourceSchemaVersion === JOURNAL_SCHEMA_VERSION;
-  if ((!currentEnvelope && entrySchemaVersion !== JOURNAL_SCHEMA_VERSION) || !entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+  const currentEnvelope = canonicalPurgeSchema(sourceSchemaVersion);
+  if ((!currentEnvelope && !canonicalPurgeSchema(entrySchemaVersion)) || !entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
   const canonicalNullProvenance = (value) => value
     && typeof value === 'object'
     && !Array.isArray(value)
@@ -170,7 +196,7 @@ export function schema5PurgeArtifactIssue(entry, sourceSchemaVersion = undefined
     if (forbidden) return `redacted purge skeleton contains forbidden identity field ${forbidden}`;
     if (entry.entityId !== null || entry.payload !== null) return 'redacted purge skeleton must erase entityId and payload';
     if (!canonicalNullProvenance(entry.provenance)) return 'redacted purge skeleton must erase provenance identity';
-    const allowedReasons = entrySchemaVersion === JOURNAL_SCHEMA_VERSION
+    const allowedReasons = canonicalPurgeSchema(entrySchemaVersion)
       ? ['project_purged']
       : ['project_purged', 'legacy_project_purged'];
     if (!allowedReasons.includes(entry.redactedReason)) return 'redacted purge skeleton has a noncanonical redactedReason';
@@ -213,8 +239,25 @@ export function schema5PurgeArtifactIssue(entry, sourceSchemaVersion = undefined
   return null;
 }
 
+function attributionEntryIssue(entry) {
+  const payload = entry.payload;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return 'entity.attributed requires an entity payload';
+  if (!ATTRIBUTED_ENTITY_KINDS.includes(payload.kind)) return `entity.attributed cannot carry a ${payload.kind ?? 'kind-less'} entity`;
+  if (entry.entityKind != null && entry.entityKind !== payload.kind) return 'entity.attributed entityKind must match payload.kind';
+  const change = payload.attributionChange;
+  if (!change || typeof change !== 'object' || Array.isArray(change) || !ATTRIBUTION_CHANGE_REASONS.includes(change.reason)) {
+    return 'entity.attributed requires an attributionChange whose reason is migration or user';
+  }
+  if (payload.kind === 'fact' && Number.isInteger(entry.schemaVersion) && entry.schemaVersion >= 5) {
+    const validityIssue = factValidityPolicyIssue(replayedEntity(entry), { required: true });
+    if (validityIssue) return `entity.attributed has invalid fact validity: ${validityIssue}`;
+  }
+  return null;
+}
+
 export function journalEntryPostconditionIssue(entry) {
   if (!entry || entry.redacted === true || entry.payload === null) return null;
+  if (entry.type === 'entity.attributed') return attributionEntryIssue(entry);
   if (!['fact.verified', 'fact.expired', 'fact.superseded'].includes(entry.type)) return null;
   const fact = entry.payload;
   if (!fact || typeof fact !== 'object' || Array.isArray(fact) || fact.kind !== 'fact') return `${entry.type} requires a fact payload`;
@@ -287,6 +330,30 @@ export function journalFactLifecycleIssues(entries = [], options = {}) {
     if (entry.type === 'project.purged') {
       const project = entry.payload?.project ?? entry.project;
       for (const [factId, state] of states) if (state.project === project) states.delete(factId);
+      continue;
+    }
+    // Re-attribution moves a fact between owners. It may not revive, end or
+    // verify one: the lifecycle it carries must be the lifecycle it found. When
+    // no earlier state survives -- a purge of the fact's former project removed
+    // its history -- the complete snapshot it carries establishes the state, as
+    // fact.observed would.
+    if (entry.type === 'entity.attributed' && (entry.entityKind ?? entry.payload?.kind) === 'fact') {
+      const factId = entry.entityId ?? entry.payload?.id;
+      if (!factId) continue;
+      const fact = replayedEntity(entry);
+      const terminalType = ['expired', 'superseded'].includes(fact.status) ? fact.status : null;
+      const verified = fact.verificationStatus === 'verified' && Boolean(fact.verification);
+      const project = entry.project ?? fact.project ?? null;
+      const state = states.get(factId);
+      if (!state) {
+        states.set(factId, { project, phase: terminalType ? 'terminal' : 'active', terminalType, verified });
+        continue;
+      }
+      if ((terminalType ? 'terminal' : 'active') !== state.phase || terminalType !== state.terminalType || verified !== state.verified) {
+        fail(entry, 'entity.attributed cannot change a fact lifecycle');
+        continue;
+      }
+      state.project = project;
       continue;
     }
     if (!['fact.observed', 'fact.verified', 'fact.expired', 'fact.superseded'].includes(entry.type)) continue;
@@ -487,8 +554,8 @@ export function journalBaselinePlacementIssues(entries = [], options = {}) {
     }
     const collection = KIND_TO_COLLECTION[entry.entityKind];
     if (collection && entry.entityId && entry.payload && typeof entry.payload === 'object') {
-      putEntity(entry.payload, collection, entry.project);
-      if (entry.idempotencyKey) currentIdempotency.set(entry.idempotencyKey, entry.payload);
+      putEntity(replayedEntity(entry), collection, entry.project);
+      if (entry.idempotencyKey) currentIdempotency.set(entry.idempotencyKey, replayedEntity(entry));
     }
     priorReplayableEntries += 1;
   }
@@ -544,8 +611,8 @@ function hardPurgeMarkerRelationshipIssues(entries = [], options = {}) {
   }
   if (report.firstUnexplained !== null) {
     for (const marker of entries) {
-      const currentSchemaArtifact = sourceSchemaVersion === JOURNAL_SCHEMA_VERSION
-        || marker?.schemaVersion === JOURNAL_SCHEMA_VERSION;
+      const currentSchemaArtifact = canonicalPurgeSchema(sourceSchemaVersion)
+        || canonicalPurgeSchema(marker?.schemaVersion);
       if (!currentSchemaArtifact
         || marker?.type !== 'project.purged'
         || marker?.payload?.mode !== 'hard'
@@ -594,7 +661,7 @@ export function rebuildProjection(entries = [], options = {}) {
       skipped.push({ seq: null, type: null, why: 'not_an_object' });
       continue;
     }
-    if (Number.isInteger(entry.schemaVersion) && entry.schemaVersion > JOURNAL_SCHEMA_VERSION) {
+    if (Number.isInteger(entry.schemaVersion) && entry.schemaVersion > READABLE_JOURNAL_SCHEMA_VERSION) {
       skipped.push({ seq: entry.seq, type: entry.type, why: 'unsupported_schema_version' });
       continue;
     }
@@ -660,7 +727,8 @@ export function rebuildProjection(entries = [], options = {}) {
       continue;
     }
     const expectedEntityKind = JOURNAL_TYPE_ENTITY_KIND[entry.type];
-    if (expectedEntityKind && entry.entityKind != null && KIND_TO_COLLECTION[entry.entityKind] && entry.entityKind !== expectedEntityKind) {
+    if ((expectedEntityKind && entry.entityKind != null && KIND_TO_COLLECTION[entry.entityKind] && entry.entityKind !== expectedEntityKind)
+      || (entry.type === 'entity.attributed' && entry.entityKind != null && !ATTRIBUTED_ENTITY_KINDS.includes(entry.entityKind))) {
       skipped.push({ seq: entry.seq, type: entry.type, why: 'type_entity_kind_mismatch' });
       continue;
     }
@@ -776,8 +844,9 @@ export function rebuildProjection(entries = [], options = {}) {
     // Last writer per entity wins. Because every payload is a COMPLETE snapshot,
     // no ordering-sensitive merge is required and a corrupt entry damages one
     // entity rather than poisoning the chain.
-    entities.set(entry.entityId, { collection, entity: entry.payload, project: entry.project ?? entry.payload?.project ?? null });
-    if (entry.idempotencyKey) idempotency.set(normalizeIdempotencyKey(entry.idempotencyKey, entry.payload), entry.payload);
+    const entity = replayedEntity(entry);
+    entities.set(entry.entityId, { collection, entity, project: entry.project ?? entity?.project ?? null });
+    if (entry.idempotencyKey) idempotency.set(normalizeIdempotencyKey(entry.idempotencyKey, entity), entity);
     applied += 1;
   }
 

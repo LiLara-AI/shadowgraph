@@ -8,20 +8,70 @@
 //   search-contract.md      — content fields vs filters
 //   confidence-contract.md  — evidence-weighted bounded confidence
 
-import { assertHardPurgeGapLedgers, assertJournalBaselinePlacement, assertJournalEntrySequence, assertUniqueJournalSequences, rebuildProjection, journalGaps, duplicateSequences, journalBaselinePlacementIssues, journalEntryPostconditionIssue, journalEntrySequenceIssue, journalFactLifecycleIssues, schema5PurgeArtifactIssue, JOURNAL_ENTRY_TYPES, JOURNAL_TYPE_ENTITY_KIND, REPLAYABLE_ENTRY_TYPES } from './journal.js';
+import { assertHardPurgeGapLedgers, assertJournalBaselinePlacement, assertJournalEntrySequence, assertUniqueJournalSequences, rebuildProjection, journalGaps, duplicateSequences, journalBaselinePlacementIssues, journalEntryPostconditionIssue, journalEntrySequenceIssue, journalFactLifecycleIssues, schema5PurgeArtifactIssue, ATTRIBUTED_ENTITY_KINDS, JOURNAL_ENTRY_TYPES, JOURNAL_TYPE_ENTITY_KIND, REPLAYABLE_ENTRY_TYPES } from './journal.js';
 import { createConfidence, applyContribution, setOutcomeContribution, computeConfidence, summarizeBasis, CONFIDENCE_POLICY } from './confidence.js';
 import { hybridSearch, foldText } from './hybrid-search.js';
 import { effectiveFactExpirationBoundary, factValidityPolicyIssue, isValidIsoInstant } from './fact-validity.js';
 import { evaluateRule, isSupportedOperator, isSupportedUnit, ruleOperandIssue } from './condition-eval.js';
 import { privilegedSnapshot, registerPrivilegedSnapshot } from './internal/snapshot.js';
+import { extraCollections, NATIVE_STORE_KEYS } from './internal/collections.js';
+import { usableOriginId } from './scope.js';
 import { createHash } from 'node:crypto';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
 // docs/api-reference.md) and are frozen so a consumer cannot mutate validation
 // behaviour at a distance.
+//
+// SCHEMA_VERSION is what this build WRITES. It reads one version further
+// (plan v1.4.4 §9.2): the reader is widened and shipped before the writer is
+// raised, so the build before a writer bump can always load what it writes.
 export const SCHEMA_VERSION = 5;
-export const SUPPORTED_SCHEMA_VERSIONS = Object.freeze([1, 2, 3, 4, 5]);
+export const SUPPORTED_SCHEMA_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6]);
+const READABLE_SCHEMA_VERSION = 6;
 const GLOBAL_ENTITY_NAMESPACE_SCHEMA_VERSION = 4;
+
+// Schema 6 records say whose they are (plan v1.4.4 §9.3, §10.3): a named
+// project, one capture origin and no project (`unattributed`, project null), or
+// one of the two legacy states a migration assigns. This build reads them; it
+// does not write them yet.
+const ATTRIBUTIONS = Object.freeze(['project', 'unattributed', 'legacy_ambiguous', 'legacy_unattributed']);
+
+function attributionIssue(entity) {
+  if (entity.originId !== undefined && usableOriginId(entity.originId) === null) return 'originId must be a non-empty string';
+  if (entity.attribution === undefined) return null;
+  if (!ATTRIBUTIONS.includes(entity.attribution)) return `unknown attribution ${JSON.stringify(entity.attribution)}`;
+  if (entity.attribution === 'unattributed') {
+    if (entity.project !== null && entity.project !== undefined) return 'an unattributed entity belongs to no project';
+    if (usableOriginId(entity.originId) === null) return 'an unattributed entity requires its originId';
+  }
+  if (['project', 'legacy_ambiguous'].includes(entity.attribution) && (typeof entity.project !== 'string' || !entity.project.trim())) {
+    return `a ${entity.attribution} entity requires a project`;
+  }
+  return null;
+}
+
+// Who owns an entity, for keys that must never merge two owners: an
+// unattributed entity belongs to its origin, never to a project, so its key is
+// an array a project name can never equal. An unattributed entity without a
+// usable origin is invalid (validate() says so) and is keyed by its own id, so
+// two absent origins never share a bucket. Everything else keeps the project
+// key it always had.
+function ownerKey(entity, projectOf) {
+  if (entity?.attribution !== 'unattributed') return projectOf(entity?.project);
+  return ['origin', usableOriginId(entity.originId) ?? ['unowned', entity.id ?? null]];
+}
+
+// The prefix an idempotency key must carry for the entity it maps to. An
+// unattributed entity's keys live under its origin (`kind@"origin":`), a
+// namespace no project-scoped key (`kind:project:`) can reach.
+function idempotencyKeyPrefix(value) {
+  const scope = value?.scope ?? {};
+  const identity = value?.kind === 'memory'
+    ? `${JSON.stringify([scope.userId ?? null, scope.agentId ?? null, scope.runId ?? null, value.memoryType ?? null, value.key ?? null])}:`
+    : '';
+  const owner = value?.attribution === 'unattributed' ? `@${JSON.stringify(value.originId ?? null)}:` : `:${value?.project}:`;
+  return `${value?.kind}${owner}${identity}`;
+}
 
 // A source class records WHAT WAS CLAIMED about a fact's origin. It is never proof
 // and never by itself grants trust.
@@ -551,6 +601,10 @@ export function createShadowGraph(options = {}) {
   const relations = new TransactionMap();
   const reviewSignals = new TransactionMap();
   const idempotency = new TransactionMap();
+  // Top-level collections this build does not understand, carried verbatim
+  // through import and the privileged snapshot (axis A-5). They are never
+  // interpreted, and never part of a public read.
+  const extras = new TransactionMap();
   let revision = Number.isInteger(options.revision) ? options.revision : 0;
   let journalSeq = 0;
   let journalEpoch = null;
@@ -571,6 +625,7 @@ export function createShadowGraph(options = {}) {
       relations: [...relations],
       reviewSignals: [...reviewSignals],
       idempotency: [...idempotency],
+      extras: [...extras],
       revision,
       journalSeq,
       journalEpoch
@@ -589,6 +644,7 @@ export function createShadowGraph(options = {}) {
     restoreMap(relations, snapshot.relations);
     restoreMap(reviewSignals, snapshot.reviewSignals);
     restoreMap(idempotency, snapshot.idempotency);
+    restoreMap(extras, snapshot.extras);
     events.length = 0;
     for (const item of snapshot.events) events.push(item);
     journal.length = 0;
@@ -737,6 +793,7 @@ export function createShadowGraph(options = {}) {
     };
     const expectedKind = JOURNAL_TYPE_ENTITY_KIND[entry.type];
     if (expectedKind && entry.entityKind !== expectedKind) throw new Error(`${entry.type} requires entityKind ${expectedKind}`);
+    if (entry.type === 'entity.attributed' && !ATTRIBUTED_ENTITY_KINDS.includes(entry.entityKind)) throw new Error(`entity.attributed requires entityKind ${ATTRIBUTED_ENTITY_KINDS.join(', ')}`);
     if (entry.payload?.id !== undefined && entry.entityId !== entry.payload.id) throw new Error(`${entry.type} entityId must match payload.id`);
     if (entry.payload?.project !== undefined && entry.project !== entry.payload.project) throw new Error(`${entry.type} project must match payload.project`);
     if (entry.payload?.kind !== undefined && entry.entityKind !== entry.payload.kind) throw new Error(`${entry.type} entityKind must match payload.kind`);
@@ -2072,6 +2129,9 @@ export function createShadowGraph(options = {}) {
       const original = originalBaselineCollections.get(baselineKey(entry));
       if (original !== undefined && original !== baselineCollections(entry)) sanitizeRewrittenBaseline(entry);
     }
+    // The output is a read: collections this build cannot interpret stay out of
+    // it (plan v1.4.4 §10.9.6).
+    for (const key of Object.keys(transformed)) if (!NATIVE_STORE_KEYS.includes(key)) delete transformed[key];
     return transformed;
   }
 
@@ -2238,7 +2298,7 @@ export function createShadowGraph(options = {}) {
         if (intervalIssue) push('error', 'contradictory_journal_fact_interval', { entryId: entry.id ?? null, seq: entry.seq ?? null, recordId: fact.id ?? null, detail: intervalIssue });
       }
       if (!JOURNAL_ENTRY_TYPES.includes(entry.type)) push('unsupported', 'unsupported_journal_entry', { entryId: entry.id, seq: entry.seq ?? null, type: entry.type ?? null });
-      else if (Number.isInteger(entry.schemaVersion) && entry.schemaVersion > SCHEMA_VERSION) push('unsupported', 'unsupported_journal_schema_version', { entryId: entry.id, seq: entry.seq, schemaVersion: entry.schemaVersion });
+      else if (Number.isInteger(entry.schemaVersion) && entry.schemaVersion > READABLE_SCHEMA_VERSION) push('unsupported', 'unsupported_journal_schema_version', { entryId: entry.id, seq: entry.seq, schemaVersion: entry.schemaVersion });
     }
     for (const issue of journalBaselinePlacementIssues(journal, {
       journalEpoch,
@@ -2253,21 +2313,26 @@ export function createShadowGraph(options = {}) {
     // verbatim (never downgraded) and reported so a caller knows this build
     // cannot fully interpret them.
     for (const record of records.values()) {
-      if (Number.isInteger(record.schemaVersion) && record.schemaVersion > SCHEMA_VERSION) push('unsupported', 'unsupported_record_schema_version', { recordId: record.id, schemaVersion: record.schemaVersion });
+      if (Number.isInteger(record.schemaVersion) && record.schemaVersion > READABLE_SCHEMA_VERSION) push('unsupported', 'unsupported_record_schema_version', { recordId: record.id, schemaVersion: record.schemaVersion });
     }
     for (const fact of facts.values()) {
-      if (Number.isInteger(fact.schemaVersion) && fact.schemaVersion > SCHEMA_VERSION) push('unsupported', 'unsupported_fact_schema_version', { recordId: fact.id, schemaVersion: fact.schemaVersion });
+      if (Number.isInteger(fact.schemaVersion) && fact.schemaVersion > READABLE_SCHEMA_VERSION) push('unsupported', 'unsupported_fact_schema_version', { recordId: fact.id, schemaVersion: fact.schemaVersion });
     }
-    // P2-15: the invariant is ONE active fact per (project, key). More than one is
+    for (const entity of [...records.values(), ...facts.values()]) {
+      const detail = attributionIssue(entity);
+      if (detail) push('error', 'invalid_attribution', { recordId: entity.id, detail });
+    }
+    // P2-15: the invariant is ONE active fact per (owner, key). More than one is
     // corrupt data: import applies a deterministic recency rule so behaviour is
     // stable, but the ambiguity is still declared rather than hidden.
     const activeScopes = new Map();
     for (const fact of facts.values()) {
       if (fact.status !== 'active') continue;
-      const scope = `${fact.project ?? 'default'}::${fact.key}`;
-      activeScopes.set(scope, (activeScopes.get(scope) ?? 0) + 1);
+      const key = JSON.stringify([ownerKey(fact, (project) => project ?? 'default'), fact.key]);
+      const scope = fact.attribution === 'unattributed' ? `origin:${fact.originId}::${fact.key}` : `${fact.project ?? 'default'}::${fact.key}`;
+      activeScopes.set(key, { scope, count: (activeScopes.get(key)?.count ?? 0) + 1 });
     }
-    for (const [scope, count] of activeScopes) if (count > 1) push('error', 'duplicate_active_fact_scope', { scope, count });
+    for (const { scope, count } of activeScopes.values()) if (count > 1) push('error', 'duplicate_active_fact_scope', { scope, count });
     // A legacy id collision left these references pointing at an id that now
     // belongs to a different entity. The link still resolves, which is what makes
     // it dangerous, so it is declared rather than left to look healthy.
@@ -2441,11 +2506,7 @@ export function createShadowGraph(options = {}) {
     };
   }
 
-  // The privileged snapshot (plan v1.4.4 §11): the complete, unscoped store --
-  // every project and collection, the journal, idempotency and revision. It is
-  // the persistence primitive, reachable only through src/internal/snapshot.js,
-  // and it is not a read of the memory product.
-  function snapshot() {
+  function nativeCollections() {
     return {
       schemaVersion: SCHEMA_VERSION, revision,
       records: [...records.values()].map(clone), facts: [...facts.values()].map(clone),
@@ -2455,11 +2516,20 @@ export function createShadowGraph(options = {}) {
     };
   }
 
-  // The public export (`GET /records`, the `list` verb). For now it returns
-  // exactly the privileged snapshot; the two are separate functions so the
-  // public contract can change without touching persistence.
+  // The privileged snapshot (plan v1.4.4 §11): the complete, unscoped store --
+  // every project and collection, the journal, idempotency and revision, and
+  // every top-level collection this build does not understand. It is the
+  // persistence primitive, reachable only through src/internal/snapshot.js, and
+  // it is not a read of the memory product.
+  function snapshot() {
+    return { ...nativeCollections(), ...Object.fromEntries([...extras].map(([key, value]) => [key, clone(value)])) };
+  }
+
+  // The public export (`GET /records`, the `list` verb): the collections this
+  // build understands. A collection it cannot interpret -- the authority
+  // collections among them -- is never part of a public read.
   function exportData() {
-    return snapshot();
+    return nativeCollections();
   }
 
   // P0-2: ATOMIC. The previous implementation cleared every map and THEN parsed
@@ -2494,7 +2564,7 @@ export function createShadowGraph(options = {}) {
     // The staged snapshot is already migrated and validated, so this import cannot
     // fail. Only now is the live state discarded.
     const staged = privilegedSnapshot(staging);
-    records.clear(); currentMemories.clear(); facts.clear(); currentFacts.clear(); relations.clear(); reviewSignals.clear(); idempotency.clear();
+    records.clear(); currentMemories.clear(); facts.clear(); currentFacts.clear(); relations.clear(); reviewSignals.clear(); idempotency.clear(); extras.clear();
     events.length = 0; journal.length = 0; revision = 0; journalSeq = 0; journalEpoch = null;
     return importData(staged);
   }
@@ -2553,6 +2623,7 @@ export function createShadowGraph(options = {}) {
     const importedSignals = (source.reviewSignals ?? []).map((signal) => clone(signal));
     const importedIdempotency = (source.idempotency ?? []).map((item) => ({ key: importIdempotencyKey(item.key, item.value), value: clone(item.value) }));
     const importedEvents = (source.events ?? []).map((item) => clone(item));
+    const importedExtras = extraCollections(source).map(([key, value]) => [key, clone(value)]);
     let pendingMigrationBaseline = null;
     let pendingJournalEntries = [];
     let pendingJournalSequence = null;
@@ -2754,11 +2825,10 @@ export function createShadowGraph(options = {}) {
         const value = item.value;
         const entity = value?.kind === 'fact' ? finalFacts.get(value.id) : finalRecords.get(value?.id);
         if (typeof item.key !== 'string' || !value || typeof value !== 'object' || typeof value.id !== 'string' || !entity) throw new Error('Idempotency entry must reference an existing entity');
-        const scope = value?.scope ?? {};
-        const expectedKeyPrefix = value?.kind === 'memory'
-          ? `memory:${value.project}:${JSON.stringify([scope.userId ?? null, scope.agentId ?? null, scope.runId ?? null, value.memoryType ?? null, value.key ?? null])}:`
-          : `${value?.kind}:${value?.project}:`;
-        if (entity.kind !== value.kind || entity.project !== value.project || !item.key.startsWith(expectedKeyPrefix)) throw new Error('Idempotency entry identity does not match its entity');
+        const sameOwner = entity.project === value.project
+          && (entity.attribution === 'unattributed') === (value.attribution === 'unattributed')
+          && (value.attribution !== 'unattributed' || (usableOriginId(value.originId) !== null && entity.originId === value.originId));
+        if (entity.kind !== value.kind || !sameOwner || !item.key.startsWith(idempotencyKeyPrefix(value))) throw new Error('Idempotency entry identity does not match its entity');
         if (value.kind === 'memory' && memoryScopeKey(entity) !== memoryScopeKey(value)) throw new Error('Idempotency entry identity does not match its entity');
         const migratedValue = value.kind === 'fact' ? migrateFact(value) : migrateRecord(value);
         if (!idempotencySemanticallyMatches(migratedValue, entity)) throw new Error(`Idempotency entry semantic mismatch with canonical entity ${value.id}`);
@@ -2993,7 +3063,7 @@ export function createShadowGraph(options = {}) {
     const scopeCandidates = new Map();
     for (const fact of facts.values()) {
       if (fact.status !== 'active') continue;
-      const scope = JSON.stringify([fact.project ?? 'default', fact.key]);
+      const scope = JSON.stringify([ownerKey(fact, (project) => project ?? 'default'), fact.key]);
       if (!scopeCandidates.has(scope)) scopeCandidates.set(scope, []);
       scopeCandidates.get(scope).push(fact);
     }
@@ -3008,6 +3078,7 @@ export function createShadowGraph(options = {}) {
     for (const signal of importedSignals) reviewSignals.set(reviewSignalKey(signal.decisionId, signal.reason, signal.coverage), signal);
     for (const item of pendingIdempotencyUpdates) idempotency.set(item.key, item.value);
     for (const importedEvent of importedEvents) events.push(importedEvent);
+    for (const [key, value] of importedExtras) extras.set(key, value);
 
     if (importedJournal.length) {
       for (const importedEntry of importedJournal) journal.push(importedEntry);
@@ -3317,7 +3388,7 @@ function sameMemoryScopeValues(left, right) {
 
 function memoryScopeKey(input) {
   const scope = normalizeMemoryScope(input.scope);
-  return JSON.stringify([normalizeProject(input.project), scope.userId, scope.agentId, scope.runId, input.memoryType ?? null, input.key ?? null]);
+  return JSON.stringify([ownerKey(input, normalizeProject), scope.userId, scope.agentId, scope.runId, input.memoryType ?? null, input.key ?? null]);
 }
 
 function normalizeEmbedding(value) {
@@ -3482,7 +3553,8 @@ function validateImportShape(source) {
     if (item.kind === 'memory') {
       if (!MEMORY_TYPES.includes(item.memoryType) || typeof item.key !== 'string' || !item.key.trim() || typeof item.text !== 'string' || !item.text.trim()) throw new Error(`records[${index}] memory requires memoryType, key, and text`);
       normalizeMemoryScope(item.scope);
-      if (item.project !== undefined && typeof item.project !== 'string') throw new Error(`records[${index}].project must be a string`);
+      const ownerless = item.project === null && ['unattributed', 'legacy_unattributed'].includes(item.attribution);
+      if (item.project !== undefined && typeof item.project !== 'string' && !ownerless) throw new Error(`records[${index}].project must be a string`);
       if (item.metadata !== undefined && (!item.metadata || typeof item.metadata !== 'object' || Array.isArray(item.metadata))) throw new Error(`records[${index}].metadata must be an object`);
       if (item.tags !== undefined && (!Array.isArray(item.tags) || item.tags.some((tag) => typeof tag !== 'string'))) throw new Error(`records[${index}].tags must be an array of strings`);
       normalizeEmbedding(item.embedding);
@@ -3513,7 +3585,7 @@ function validateImportShape(source) {
     const intervalIssue = factEffectiveExpirationIntervalIssue(fact);
     if (intervalIssue) throw new Error(`facts[${index}] ${intervalIssue}`);
     const factSchemaVersion = Number.isInteger(fact.schemaVersion) ? fact.schemaVersion : source.schemaVersion;
-    if (factSchemaVersion === SCHEMA_VERSION) {
+    if (factSchemaVersion >= 5 && factSchemaVersion <= READABLE_SCHEMA_VERSION) {
       const validityIssue = factValidityPolicyIssue(fact, { required: true });
       if (validityIssue) throw new Error(`facts[${index}] ${validityIssue}`);
       if (!['active', 'expired', 'superseded'].includes(fact.status)) throw new Error(`facts[${index}] has invalid fact lifecycle status`);
@@ -3567,6 +3639,7 @@ function validateImportShape(source) {
     if (purgeArtifactIssue) throw new Error(`journal[${index}] has noncanonical schema 5 purge artifact: ${purgeArtifactIssue}`);
     const expectedEntityKind = JOURNAL_TYPE_ENTITY_KIND[entry.type];
     if (expectedEntityKind && entry.entityKind != null && entry.entityKind !== expectedEntityKind) throw new Error(`journal[${index}] type ${entry.type} requires entityKind ${expectedEntityKind}`);
+    if (entry.type === 'entity.attributed' && entry.entityKind != null && !ATTRIBUTED_ENTITY_KINDS.includes(entry.entityKind)) throw new Error(`journal[${index}] type entity.attributed requires entityKind ${ATTRIBUTED_ENTITY_KINDS.join(', ')}`);
     if (source.schemaVersion >= 3) {
       if (typeof entry.id !== 'string' || !entry.id) throw new Error(`journal[${index}].id must be a non-empty string`);
       if (journalIds.has(entry.id)) throw new Error(`Duplicate journal id ${entry.id}`);
@@ -3632,7 +3705,19 @@ function assertUniqueEntityIds(...collections) {
   }
 }
 
+// A schema-6 entity already says whose it is. Its project is kept exactly as
+// stored -- null for an unattributed one -- and never defaulted to "default",
+// which would hand it to a project it does not belong to.
+function keepAttributedProject(migrated, source) {
+  if (typeof source.attribution === 'string') migrated.project = source.project ?? null;
+  return migrated;
+}
+
 function migrateRecord(item) {
+  return keepAttributedProject(migrateRecordFields(item), item);
+}
+
+function migrateRecordFields(item) {
   if (item.kind === 'memory') {
     const source = clone(item);
     const recordedAt = source.temporal?.recordedAt ?? source.createdAt ?? null;
@@ -3696,6 +3781,10 @@ function migrateRecord(item) {
 // anything reading sourceClass got undefined. Backfill the class from the stored
 // label, keep the original verbatim, and NEVER raise verification (contract §6).
 function migrateFact(fact) {
+  return keepAttributedProject(migrateFactFields(fact), fact);
+}
+
+function migrateFactFields(fact) {
   const source = clone(fact);
   // P2-14: a fact written by a NEWER build keeps its own schemaVersion rather than
   // being relabelled as one this build understands. validate() reports it as

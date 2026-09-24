@@ -1,7 +1,7 @@
 import { copyFile, mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { createDestinationFence, currentRevision, nextRevisionAfter } from './revision-store.js';
-import { requiresLegacyPurgeMigration, validateRestorePayload } from './restore-validation.js';
+import { guardAuthorityRestore, requiresLegacyPurgeMigration, validateRestorePayload } from './restore-validation.js';
 
 export async function backupFile(source, destination, options = {}) {
   await mkdir(dirname(destination), { recursive: true });
@@ -18,8 +18,12 @@ export async function restoreFile(source, destination, options = {}) {
 
 async function restoreJsonFileFenced(source, destination, options) {
   if (options.storage === 'sqlite' || destination.toLowerCase().endsWith('.db')) throw new Error('JSON restore cannot overwrite a SQLite database; use the SQLite backup snapshot directly or a database-aware restore');
-  const payload = JSON.parse(await readFile(source, 'utf8'));
-  if (!payload || typeof payload !== 'object' || !Array.isArray(payload.records)) throw new Error('Backup is not a JSON ShadowGraph export; SQLite files require a database-aware restore');
+  const backupPayload = JSON.parse(await readFile(source, 'utf8'));
+  if (!backupPayload || typeof backupPayload !== 'object' || !Array.isArray(backupPayload.records)) throw new Error('Backup is not a JSON ShadowGraph export; SQLite files require a database-aware restore');
+  // Refused if it carries authority, unless memory only was asked for, in which
+  // case the authority collections are stripped before anything is validated
+  // or installed (R16 rev 2 §7.2).
+  const payload = guardAuthorityRestore(backupPayload, { memoryOnly: options.memoryOnly === true });
   let normalizedPayload = validateRestorePayload(payload);
   if (options.validate && options.validate !== validateRestorePayload) {
     const customNormalized = await options.validate(payload);

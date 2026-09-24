@@ -20,6 +20,30 @@ export function createRestoreValidator(options = {}) {
   return (payload) => validateRestorePayload(payload, options);
 }
 
+// R16 rev 2 §7.2. This build carries the authority collections through an
+// ordinary save, but it has none of the semantics a safe restore of them needs
+// (the narrowing merge arrives with the grant lifecycle), so it refuses to
+// restore a backup that contains them. The check is by key name only. A
+// memory-only restore strips both keys and restores everything else: memory is
+// never withheld because authority could not be restored, and no authority is
+// installed that could later be reactivated.
+export const AUTHORITY_COLLECTIONS = Object.freeze(['access', 'accessRevocations']);
+export const AUTHORITY_RESTORE_UNSUPPORTED = 'authority_restore_unsupported_at_this_build';
+
+export function guardAuthorityRestore(payload, { memoryOnly = false } = {}) {
+  const present = payload && typeof payload === 'object' ? AUTHORITY_COLLECTIONS.filter((key) => Object.hasOwn(payload, key)) : [];
+  if (!present.length) return payload;
+  if (!memoryOnly) {
+    const error = new Error(`Refusing to restore authority collections (${present.join(', ')}): this build preserves them but cannot restore them safely; restore memory only to proceed without them`);
+    error.code = AUTHORITY_RESTORE_UNSUPPORTED;
+    error.collections = present;
+    throw error;
+  }
+  const memory = { ...payload };
+  for (const key of present) delete memory[key];
+  return memory;
+}
+
 export function requiresLegacyPurgeMigration(payload) {
   const sourceVersion = payload?.schemaVersion;
   if (Number.isInteger(sourceVersion) && sourceVersion >= 5) return false;
@@ -29,6 +53,7 @@ export function requiresLegacyPurgeMigration(payload) {
 }
 
 export function validateRestorePayload(payload, options = {}) {
+  guardAuthorityRestore(payload);
   const staging = createShadowGraph(options);
   staging.importData(payload);
   const validation = staging.validate();

@@ -6,9 +6,17 @@ import { copyFile, mkdir, rename, stat, unlink } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { nextRevision, assertRevision, createDestinationFence, currentRevision, nextRevisionAfter } from './revision-store.js';
-import { createRestoreValidator, requiresLegacyPurgeMigration } from './restore-validation.js';
+import { createRestoreValidator, guardAuthorityRestore, requiresLegacyPurgeMigration } from './restore-validation.js';
 import { NODE_SQLITE_NOT_APPLICABLE_REASON } from './runtime-capabilities.js';
 import { SCHEMA_VERSION } from './shadowgraph.js';
+import { extraCollections, isExtraCollectionKey } from './internal/collections.js';
+
+// One generic carrier for every top-level collection this build does not
+// handle natively (plan v1.4.4 §10.9.8): one row per collection, the whole
+// value as JSON. It is created on every open, read on every load and rewritten
+// on every save inside the same transaction, so what the build does not
+// understand round-trips instead of being dropped (axis A-5).
+const EXTRA_TABLE = 'CREATE TABLE IF NOT EXISTS shadowgraph_extra (collection TEXT PRIMARY KEY, payload TEXT NOT NULL);';
 
 const EMPTY = { schemaVersion: SCHEMA_VERSION, revision: 0, records: [], facts: [], relations: [], reviewSignals: [], idempotency: [], events: [], journal: [], journalSeq: 0, journalEpoch: null };
 
@@ -44,7 +52,8 @@ export async function createSqliteStore(filePath, options = {}) {
       CREATE TABLE IF NOT EXISTS shadowgraph_events (id TEXT PRIMARY KEY, project TEXT, payload TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS shadowgraph_journal (id TEXT PRIMARY KEY, seq INTEGER, type TEXT, project TEXT, entity_id TEXT, payload TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS shadowgraph_journal_seq ON shadowgraph_journal (seq);
-      CREATE TABLE IF NOT EXISTS shadowgraph_state (id INTEGER PRIMARY KEY CHECK (id = 1), payload TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS shadowgraph_state (id INTEGER PRIMARY KEY CHECK (id = 1), payload TEXT NOT NULL);
+      ${EXTRA_TABLE}`);
   }
 
   function prepareDatabase(database, stage) {
@@ -66,11 +75,19 @@ export async function createSqliteStore(filePath, options = {}) {
     for (const row of database.prepare('SELECT payload FROM shadowgraph_events ORDER BY rowid').all()) result.events.push(JSON.parse(row.payload));
     // Ordered by seq, not rowid: seq is the journal's contract ordering key.
     for (const row of database.prepare('SELECT payload FROM shadowgraph_journal ORDER BY seq, rowid').all()) result.journal.push(JSON.parse(row.payload));
+    // A snapshot written by an older build has no carrier table at all. A row
+    // named after a native key is never allowed to overwrite real data; it is
+    // ignored here and removed by the next save.
+    if (database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'shadowgraph_extra'").get()) {
+      for (const row of database.prepare('SELECT collection, payload FROM shadowgraph_extra ORDER BY rowid').all()) {
+        if (isExtraCollectionKey(row.collection)) result[row.collection] = JSON.parse(row.payload);
+      }
+    }
     return result;
   }
 
   function replaceRelational(database, data) {
-    database.exec('DELETE FROM shadowgraph_entities; DELETE FROM shadowgraph_relations; DELETE FROM shadowgraph_reviews; DELETE FROM shadowgraph_idempotency; DELETE FROM shadowgraph_events; DELETE FROM shadowgraph_journal; DELETE FROM shadowgraph_meta;');
+    database.exec(`${EXTRA_TABLE} DELETE FROM shadowgraph_entities; DELETE FROM shadowgraph_relations; DELETE FROM shadowgraph_reviews; DELETE FROM shadowgraph_idempotency; DELETE FROM shadowgraph_events; DELETE FROM shadowgraph_journal; DELETE FROM shadowgraph_meta; DELETE FROM shadowgraph_extra;`);
     const meta = database.prepare('INSERT INTO shadowgraph_meta (key,value) VALUES (?,?)');
     meta.run('schemaVersion', String(data.schemaVersion ?? SCHEMA_VERSION));
     meta.run('revision', String(data.revision ?? 0));
@@ -90,6 +107,8 @@ export async function createSqliteStore(filePath, options = {}) {
     // leave the journal describing a state that was not committed.
     const journalRow = database.prepare('INSERT INTO shadowgraph_journal (id,seq,type,project,entity_id,payload) VALUES (?,?,?,?,?,?)');
     for (const item of data.journal ?? []) journalRow.run(item.id, Number.isInteger(item.seq) ? item.seq : null, item.type ?? null, item.project ?? null, item.entityId ?? null, JSON.stringify(item));
+    const extraRow = database.prepare('INSERT INTO shadowgraph_extra (collection,payload) VALUES (?,?)');
+    for (const [collection, value] of extraCollections(data)) extraRow.run(collection, JSON.stringify(value));
   }
 
   function migrateLegacyPayload(database) {
@@ -118,10 +137,12 @@ export async function createSqliteStore(filePath, options = {}) {
   ];
 
   function removesPersistedRows(current, next) {
-    return persistedCollections.some(([collection, key]) => {
-      const nextKeys = new Set((next[collection] ?? []).map((item) => item?.[key]));
-      return (current[collection] ?? []).some((item) => !nextKeys.has(item?.[key]));
-    });
+    const nextExtras = new Set(extraCollections(next).map(([collection]) => collection));
+    return extraCollections(current).some(([collection]) => !nextExtras.has(collection))
+      || persistedCollections.some(([collection, key]) => {
+        const nextKeys = new Set((next[collection] ?? []).map((item) => item?.[key]));
+        return (current[collection] ?? []).some((item) => !nextKeys.has(item?.[key]));
+      });
   }
 
   function persistedPayload(data) {
@@ -141,6 +162,7 @@ export async function createSqliteStore(filePath, options = {}) {
     for (const item of [...(data.records ?? []), ...(data.facts ?? [])]) {
       (item.kind === 'fact' ? result.facts : result.records).push(item);
     }
+    for (const [collection, value] of extraCollections(data)) result[collection] = value;
     return result;
   }
 
@@ -366,7 +388,12 @@ export async function createSqliteStore(filePath, options = {}) {
         catch { /* recovery/cleanup continues */ }
       };
 
-      const validateSnapshot = async (payload) => {
+      // An authority-bearing snapshot is refused at this build, or restored as
+      // memory only with the authority collections stripped (R16 rev 2 §7.2). A
+      // stripped payload differs from the staged file, so the staged copy is
+      // rewritten without them before it can be installed.
+      const validateSnapshot = async (snapshotPayload) => {
+        const payload = guardAuthorityRestore(snapshotPayload, { memoryOnly: restoreOptions.memoryOnly === true });
         let normalized = await configuredRestoreValidator(payload);
         if (restoreOptions.validate && restoreOptions.validate !== configuredRestoreValidator) {
           const customNormalized = await restoreOptions.validate(payload);

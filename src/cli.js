@@ -132,13 +132,19 @@ async function runOneShot() {
     else if (command === 'validate') result = graph.validate();
     else if (command === 'repair-plan') result = graph.repairPlan();
     else if (command === 'backup') result = await backupFile(file, input || `${file}.backup`, { store });
-    else if (command === 'restore') result = store.restore
-      ? await store.restore(input, { validate: restoreValidator, afterReplace: (payload) => graph.replaceData(payload) })
-      : await restoreFile(input, file, { storage: storageType, validate: restoreValidator, afterReplace: (payload) => graph.replaceData(payload) });
+    else if (command === 'restore') {
+      // `--memory-only` restores memory from a backup that carries authority
+      // collections, which this build otherwise refuses (R16 rev 2 §7.2).
+      const memoryOnly = rest.includes('--memory-only');
+      const source = rest.filter((argument) => argument !== '--memory-only').join(' ');
+      result = store.restore
+        ? await store.restore(source, { memoryOnly, validate: restoreValidator, afterReplace: (payload) => graph.replaceData(payload) })
+        : await restoreFile(source, file, { memoryOnly, storage: storageType, validate: restoreValidator, afterReplace: (payload) => graph.replaceData(payload) });
+    }
     else if (command === 'decision') { result = graph.addDecision(parse(input)); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'attempt') { result = graph.addAttempt(parse(input)); await store.save(privilegedSnapshot(graph)); }
     else {
-      throw new Error('Usage: shadowgraph <setup|doctor|serve|mcp|stats|list|search|retrieve|recall|remember|markdown-sync|context|review|reconsider|maintain|signals|ack|validate|repair-plan|backup|restore|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge> [JSON/path]');
+      throw new Error('Usage: shadowgraph <setup|doctor|serve|mcp|stats|list|search|retrieve|recall|remember|markdown-sync|context|review|reconsider|maintain|signals|ack|validate|repair-plan|backup|restore|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge> [JSON/path] (restore <path> [--memory-only])');
     }
     return result;
   } finally {
