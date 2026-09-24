@@ -13,6 +13,12 @@
     "A retired path must meet its whole target: the unresolved half AND the",
     "selected-project half.",
     "",
+    "The read boundary of the core read paths (matchesFilters, search, retrieve,",
+    "recall, context) is conformant and retired: plan v1.4.4 PR-08. What an",
+    "unresolved read reports about itself -- complete:false and a scoped-coverage",
+    "limitation -- is plan PR-11's, so it is checked separately as",
+    "<path>.coverage, and those rows record that envelope as PR-08 left it.",
+    "",
     "Fixture: projects alpha and beta, plus a decision and a memory in the literal",
     "project default (where identity-less writes landed until the schema-6 writer",
     "refused them), and a deliberate cross-project link from an alpha decision to a beta",
@@ -21,25 +27,25 @@
   ],
   "recordedAt": "v0.41.0 (a264c86)",
   "paths": {
-    "matchesFilters": {
-      "group": "core-read-paths",
-      "observed": { "withheldProjects": ["alpha", "beta", "default"], "selectedProjects": ["alpha"] }
+    "search.coverage": {
+      "group": "coverage-envelope",
+      "recordedAt": "PR-08",
+      "observed": { "scopeProject": "all", "complete": true, "limitation": false }
     },
-    "search": {
-      "group": "core-read-paths",
-      "observed": { "withheldProjects": ["alpha", "beta", "default"], "scopeProject": "all", "complete": true, "limitation": false, "selectedProjects": ["alpha"] }
+    "retrieve.coverage": {
+      "group": "coverage-envelope",
+      "recordedAt": "PR-08",
+      "observed": { "scopeProject": "all", "complete": true, "limitation": false }
     },
-    "retrieve": {
-      "group": "core-read-paths",
-      "observed": { "withheldProjects": ["alpha", "beta", "default"], "graphExpandedProjects": ["alpha", "beta"], "scopeProject": "all", "complete": true, "limitation": false, "selectedProjects": ["alpha"], "selectedGraphExpandedProjects": ["alpha"] }
+    "recall.coverage": {
+      "group": "coverage-envelope",
+      "recordedAt": "PR-08",
+      "observed": { "scopeProject": null, "complete": true, "limitation": false }
     },
-    "recall": {
-      "group": "core-read-paths",
-      "observed": { "withheldProjects": ["default"], "scopeProject": "default", "complete": true, "limitation": false, "selectedProjects": ["alpha"] }
-    },
-    "context": {
-      "group": "core-read-paths",
-      "observed": { "withheldProjects": ["default"], "scopeProject": "default", "complete": true, "limitation": false, "selectedProjects": ["alpha"] }
+    "context.coverage": {
+      "group": "coverage-envelope",
+      "recordedAt": "PR-08",
+      "observed": { "scopeProject": null, "complete": true, "limitation": false }
     },
     "entity": {
       "group": "by-id-and-traversal",

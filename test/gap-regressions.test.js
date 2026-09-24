@@ -1470,19 +1470,24 @@ describe('G7 (S2) — FIXED: search matches declared content fields only', () =>
     graph.addDecision({ project: 'a', title: 'Cache A', chosen: 'redis' });
     graph.addDecision({ project: 'b', title: 'Cache B', chosen: 'redis' });
 
-    assert.equal(graph.search('cache', {}).items.length, 2);
+    // project_only (plan v1.4.4 PR-08): with no project selected, no project's
+    // records are searched -- not both, and not one "default" bucket.
+    assert.equal(graph.search('cache', {}).items.length, 0);
     assert.equal(graph.search('cache', { project: 'a' }).items.length, 1);
     assert.equal(graph.search('cache', { project: 'a' }).items[0].record.project, 'a');
-    assert.equal(graph.search('cache', { kind: 'attempt' }).items.length, 0);
+    assert.equal(graph.search('cache', { project: 'a', kind: 'attempt' }).items.length, 0);
+    assert.equal(graph.search('cache', { project: 'a', kind: 'decision' }).items.length, 1);
   });
 
-  it('ACCEPTANCE: an empty query with no filters returns everything, explained', () => {
+  it('ACCEPTANCE: an empty query returns the whole selected project, explained', () => {
     const graph = createShadowGraph();
     graph.addDecision({ project: 'p', title: 'One', chosen: 'C' });
     graph.addAttempt({ project: 'p', solution: 'two', result: 'ok' });
-    const result = graph.search('', {});
+    graph.addDecision({ project: 'q', title: 'Other', chosen: 'C' });
+    const result = graph.search('', { project: 'p' });
     assert.equal(result.items.length, 2);
     assert.ok(result.items.every((item) => item.matchedBy === 'filter'));
+    assert.equal(graph.search('', {}).items.length, 0, 'no project selected, nothing listed (PR-08)');
   });
 });
 

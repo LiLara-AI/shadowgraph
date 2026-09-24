@@ -73,6 +73,6 @@ test('search requires every query term', () => {
   graph.addDecision({ project: 'default', title: 'Database selection', chosen: 'PostgreSQL' });
   graph.addDecision({ project: 'default', title: 'Cache selection', chosen: 'Redis' });
   // G6: paginated envelope; every term must still match a content field (G7).
-  assert.equal(graph.search('database postgres').items.length, 1);
-  assert.equal(graph.search('database redis').items.length, 0);
+  assert.equal(graph.search('database postgres', { project: 'default' }).items.length, 1);
+  assert.equal(graph.search('database redis', { project: 'default' }).items.length, 0);
 });

@@ -31,6 +31,14 @@
 //   project, so retiring a row cannot drop either half of the target;
 // - a path whose target cannot yet be stated in full may not be retired at all
 //   (`retireOnlyWith`): it must first gain the missing target.
+//
+// The core read paths are checked twice, because two change-sets make them
+// conformant: `search`, `retrieve`, `recall` and `context` check the read
+// boundary -- which records an unresolved or a selected read returns, and
+// where a graph expansion may go -- and `<path>.coverage` checks what an
+// unresolved read says about itself (complete:false, a scoped-coverage
+// limitation). The boundary is plan v1.4.4 PR-08's; the coverage envelope is
+// PR-11's, and its rows stay recorded until PR-11 retires them.
 import { readFile } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { createShadowGraph } from '../src/shadowgraph.js';
@@ -67,7 +75,9 @@ const envelope = (result) => ({
   complete: result.completeness.complete,
   limitation: result.completeness.limitation?.code === 'scoped_coverage'
 });
-const unresolvedTarget = { withheldProjects: [], complete: false, limitation: true };
+// An unresolved read returns no record, and says so.
+const coverageTarget = { complete: false, limitation: true };
+const unresolvedTarget = { withheldProjects: [], ...coverageTarget };
 // Every `selected*` observation below is a read with project `alpha`.
 const recordsIn = (context) => [...context.activeDecisions, ...context.staleAssumptions, ...context.failedAttemptsToAvoid, ...context.reusableAttempts];
 
@@ -83,11 +93,15 @@ const PATHS = {
     target: { withheldProjects: [], selectedProjects: ['alpha'] }
   },
   search: {
-    observe: ({ graph }) => {
-      const result = graph.search('MARKER', {});
-      return { withheldProjects: itemProjects(result), ...envelope(result), selectedProjects: itemProjects(graph.search('MARKER', { project: 'alpha' })) };
-    },
-    target: { ...unresolvedTarget, selectedProjects: ['alpha'] }
+    observe: ({ graph }) => ({
+      withheldProjects: itemProjects(graph.search('MARKER', {})),
+      selectedProjects: itemProjects(graph.search('MARKER', { project: 'alpha' }))
+    }),
+    target: { withheldProjects: [], selectedProjects: ['alpha'] }
+  },
+  'search.coverage': {
+    observe: ({ graph }) => envelope(graph.search('MARKER', {})),
+    target: coverageTarget
   },
   retrieve: {
     observe: ({ graph }) => {
@@ -97,26 +111,39 @@ const PATHS = {
       return {
         withheldProjects: itemProjects(result),
         graphExpandedProjects: expanded(result),
-        ...envelope(result),
         selectedProjects: itemProjects(selected),
         selectedGraphExpandedProjects: expanded(selected)
       };
     },
-    target: { ...unresolvedTarget, graphExpandedProjects: [], selectedProjects: ['alpha'], selectedGraphExpandedProjects: ['alpha'] }
+    target: { withheldProjects: [], graphExpandedProjects: [], selectedProjects: ['alpha'], selectedGraphExpandedProjects: ['alpha'] }
+  },
+  'retrieve.coverage': {
+    observe: ({ graph }) => envelope(graph.retrieve('MARKER', {})),
+    target: coverageTarget
   },
   recall: {
-    observe: ({ graph }) => {
-      const result = graph.recall('MEMORY-MARKER', {});
-      return { withheldProjects: itemProjects(result), ...envelope(result), selectedProjects: itemProjects(graph.recall('MEMORY-MARKER', { project: 'alpha' })) };
-    },
-    target: { ...unresolvedTarget, selectedProjects: ['alpha'] }
+    observe: ({ graph }) => ({
+      withheldProjects: itemProjects(graph.recall('MEMORY-MARKER', {})),
+      selectedProjects: itemProjects(graph.recall('MEMORY-MARKER', { project: 'alpha' }))
+    }),
+    target: { withheldProjects: [], selectedProjects: ['alpha'] }
   },
+  'recall.coverage': {
+    observe: ({ graph }) => envelope(graph.recall('MEMORY-MARKER', {})),
+    target: coverageTarget
+  },
+  // Every record collection context() returns, for both the unresolved and the
+  // selected read.
   context: {
-    observe: ({ graph }) => {
-      const result = graph.context({});
-      return { withheldProjects: projectsOf(result.activeDecisions), ...envelope(result), selectedProjects: projectsOf(recordsIn(graph.context({ project: 'alpha' }))) };
-    },
-    target: { ...unresolvedTarget, selectedProjects: ['alpha'] }
+    observe: ({ graph }) => ({
+      withheldProjects: projectsOf(recordsIn(graph.context({}))),
+      selectedProjects: projectsOf(recordsIn(graph.context({ project: 'alpha' })))
+    }),
+    target: { withheldProjects: [], selectedProjects: ['alpha'] }
+  },
+  'context.coverage': {
+    observe: ({ graph }) => envelope(graph.context({})),
+    target: coverageTarget
   },
   // A by-id read. traverse() is the public entry point that resolves an
   // arbitrary id, through entity(). Outside the boundary the target is no
@@ -230,5 +257,6 @@ for (const [name, path] of Object.entries(PATHS)) {
 
 for (const { name, ok, detail } of results) console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}: ${detail}`);
 const failed = results.filter((result) => !result.ok).length;
-console.log(`scope conformance: ${Object.keys(PATHS).length} paths, ${Object.keys(rows).length} baseline rows, ${failed} failing`);
+const readPaths = new Set(Object.keys(PATHS).map((name) => name.split('.')[0])).size;
+console.log(`scope conformance: ${readPaths} paths, ${Object.keys(PATHS).length} checks, ${Object.keys(rows).length} baseline rows, ${failed} failing`);
 process.exitCode = failed ? 1 : 0;

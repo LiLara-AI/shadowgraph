@@ -499,10 +499,15 @@ test('project-only search and retrieve cannot expose scoped memories', () => {
   assert.deepEqual(projectSearchMemories.map((item) => item.record.id), [shared.id]);
   assert.deepEqual(projectRetrieveMemories.map((item) => item.record.id), [shared.id]);
 
-  const omittedProjectSearch = graph.search('', {}).items.filter((item) => item.record.kind === 'memory');
-  const omittedProjectRetrieve = graph.retrieve('', {}).items.filter((item) => item.record.kind === 'memory');
-  assert.deepEqual(omittedProjectSearch.map((item) => item.record.id), [defaultShared.id]);
-  assert.deepEqual(omittedProjectRetrieve.map((item) => item.record.id), [defaultShared.id]);
+  // project_only (plan v1.4.4 PR-08): a read that selects no project exposes
+  // no memory and no record at all -- the "default" project's included, which
+  // a read reaches only by selecting it.
+  assert.deepEqual(graph.search('', {}).items, []);
+  assert.deepEqual(graph.retrieve('', {}).items, []);
+  const defaultSearchMemories = graph.search('', { project: 'default' }).items.filter((item) => item.record.kind === 'memory');
+  const defaultRetrieveMemories = graph.retrieve('', { project: 'default' }).items.filter((item) => item.record.kind === 'memory');
+  assert.deepEqual(defaultSearchMemories.map((item) => item.record.id), [defaultShared.id]);
+  assert.deepEqual(defaultRetrieveMemories.map((item) => item.record.id), [defaultShared.id]);
 
   const aliceSearchMemories = graph.search('', { project: 'app', scope: { userId: 'alice' } }).items.filter((item) => item.record.kind === 'memory');
   const aliceRetrieveMemories = graph.retrieve('', { project: 'app', scope: { userId: 'alice' } }).items.filter((item) => item.record.kind === 'memory');
@@ -518,15 +523,18 @@ test('project-only search and retrieve cannot expose scoped memories', () => {
   assert.throws(() => graph.traverse({ id: alice.id }), /outside the requested memory scope/);
 });
 
-test('omitted project recall is confined to the default project', () => {
+test('omitted project recall reads no project, not even "default"', () => {
   const graph = createShadowGraph({ now: () => '2026-04-01T00:00:00.000Z' });
   const defaultMemory = graph.remember({ project: 'default', memoryType: 'note', key: 'default', text: 'Default project' }).memory;
   graph.remember({ project: 'alpha', memoryType: 'note', key: 'private', text: 'Alpha private' });
   graph.remember({ project: 'beta', memoryType: 'note', key: 'private', text: 'Beta private' });
 
+  // project_only (plan v1.4.4 PR-08): no project selected is not the
+  // "default" project, and is not reported as one.
   const recalled = graph.recall('', {});
-  assert.deepEqual(recalled.items.map((item) => item.record.id), [defaultMemory.id]);
-  assert.equal(recalled.completeness.scope.project, 'default');
+  assert.deepEqual(recalled.items, []);
+  assert.equal(recalled.completeness.scope.project, null);
+  assert.deepEqual(graph.recall('', { project: 'default' }).items.map((item) => item.record.id), [defaultMemory.id]);
 });
 
 test('memory project must be a non-empty string on writes, plans, and recall', () => {

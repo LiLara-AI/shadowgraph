@@ -170,7 +170,12 @@ test('MCP context persists review signals that it creates', async (t) => {
   assert.equal(durable.reviewSignals[0].decisionId, 'due-decision');
 });
 
-test('MCP context resource persists review signals that it creates', async (t) => {
+// The context resource cannot name a project, so its read resolves no scope:
+// it no longer reads the shared "default" bucket (plan v1.4.4 PR-08), and so
+// it evaluates nothing and raises no signal to persist. Giving the resource
+// the session's scope is P1 reconciliation F-05 (PR-13). The persistence of
+// signals a context does raise is covered by the tool test above.
+test('MCP context resource reads no project and creates no review signal', async (t) => {
   const directory = await scratchDirectory(t, 'shadowgraph-mcp-resource-context-');
   const file = join(directory, 'data.json');
   const seed = createShadowGraph({ now: () => '2026-08-27T00:00:00.000Z' });
@@ -187,10 +192,10 @@ test('MCP context resource persists review signals that it creates', async (t) =
     jsonrpc: '2.0', id: 2, method: 'resources/read', params: { uri: 'shadowgraph://context' }
   });
   const payload = JSON.parse(response.result.contents[0].text);
-  assert.equal(payload.openReviews.length, 1);
+  assert.equal(payload.project, null);
+  assert.deepEqual([payload.activeDecisions, payload.openReviews], [[], []]);
   const durable = JSON.parse(await readFile(file, 'utf8'));
-  assert.equal(durable.reviewSignals.length, 1);
-  assert.equal(durable.reviewSignals[0].decisionId, 'resource-due');
+  assert.equal(durable.reviewSignals.length, 0);
 });
 
 test('MCP serializes restore with a concurrent acknowledged memory write', async (t) => {

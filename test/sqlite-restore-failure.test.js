@@ -25,6 +25,11 @@ const snapshot = (id) => ({
   journalEpoch: null
 });
 
+// How many records with this title the in-memory graph holds. The fixture
+// records are legacy "default" data, which no project read returns (OD-1;
+// plan v1.4.4 PR-08), so the graph is inspected through the privileged snapshot.
+const heldTitled = (graph, title) => privilegedSnapshot(graph).records.filter((record) => record.title === title).length;
+
 const journalSnapshot = (title = 'NEW') => {
   const graph = createShadowGraph({ now: () => '2026-01-01T00:00:00.000Z' });
   graph.addDecision({ project: 'default', title, chosen: title });
@@ -593,8 +598,8 @@ test('HTTP SQLite restore failure keeps in-memory graph and persistent database 
     });
     assert.equal(response.status, 400);
     assert.match((await response.json()).error, /previous database restored/);
-    assert.equal(app.graph.search('OLD').page.total, 1);
-    assert.equal(app.graph.search('NEW').page.total, 0);
+    assert.equal(heldTitled(app.graph, 'OLD'), 1);
+    assert.equal(heldTitled(app.graph, 'NEW'), 0);
     assert.equal((await pair.live.load()).records[0].id, 'OLD');
   } finally {
     await new Promise((resolveClose) => app.server.close(resolveClose));
@@ -629,7 +634,7 @@ test('HTTP SQLite restore reports unconfirmed recovery as 500, retains rollback,
     });
     assert.equal(response.status, 500);
     assert.match((await response.json()).error, /rollback is unconfirmed/);
-    assert.equal(app.graph.search('OLD').page.total, 1, 'in-memory state must not be replaced after an unconfirmed disk recovery');
+    assert.equal(heldTitled(app.graph, 'OLD'), 1, 'in-memory state must not be replaced after an unconfirmed disk recovery');
 
     const base = `http://127.0.0.1:${app.server.address().port}`;
     const writeAfterFatal = await fetch(`${base}/decisions`, {
@@ -638,7 +643,7 @@ test('HTTP SQLite restore reports unconfirmed recovery as 500, retains rollback,
     });
     assert.equal(writeAfterFatal.status, 503, 'unconfirmed recovery must latch the server unavailable before graph mutation');
     assert.match((await writeAfterFatal.json()).error, /persistent storage unavailable/i);
-    assert.equal(app.graph.search('POST_FATAL').page.total, 0, 'a degraded server must not mutate in-memory graph state');
+    assert.equal(heldTitled(app.graph, 'POST_FATAL'), 0, 'a degraded server must not mutate in-memory graph state');
 
     const readAfterFatal = await fetch(`${base}/search?query=OLD`);
     assert.equal(readAfterFatal.status, 503, 'a degraded server must not serve potentially divergent graph reads');
@@ -944,7 +949,7 @@ test('HTTP rejects a concurrent mutation before graph state changes during resto
     });
     assert.equal(writeResponse.status, 400);
     assert.match((await writeResponse.json()).error, /restore is in progress/);
-    assert.equal(app.graph.search('RACE').page.total, 0, 'rejected write must not mutate the graph');
+    assert.equal(heldTitled(app.graph, 'RACE'), 0, 'rejected write must not mutate the graph');
     const contextResponse = await fetch(`${base}/context`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'default' })
     });
@@ -954,8 +959,8 @@ test('HTTP rejects a concurrent mutation before graph state changes during resto
     releaseStat();
     const restoreResponse = await restoreResponsePromise;
     assert.equal(restoreResponse.status, 200);
-    assert.equal(app.graph.search('NEW').page.total, 1);
-    assert.equal(app.graph.search('RACE').page.total, 0);
+    assert.equal(heldTitled(app.graph, 'NEW'), 1);
+    assert.equal(heldTitled(app.graph, 'RACE'), 0);
     assert.equal((await pair.live.load()).records.some((record) => record.title === 'RACE'), false);
   } finally {
     releaseStat();

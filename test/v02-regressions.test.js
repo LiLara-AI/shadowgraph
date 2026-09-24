@@ -11,8 +11,8 @@ test('superseding a fact exposes the old fact as stale context', () => {
   const graph = createShadowGraph();
   graph.addFact({ project: 'default', key: 'mode', value: 'cloud' });
   graph.addFact({ project: 'default', key: 'mode', value: 'local' });
-  assert.equal(graph.context().staleAssumptions.length, 1);
-  assert.equal(graph.context().staleAssumptions[0].value, 'cloud');
+  assert.equal(graph.context({ project: 'default' }).staleAssumptions.length, 1);
+  assert.equal(graph.context({ project: 'default' }).staleAssumptions[0].value, 'cloud');
 });
 
 test('review returns only alternatives whose rules matched', () => {

@@ -15,7 +15,7 @@ import { effectiveFactExpirationBoundary, factValidityPolicyIssue, isValidIsoIns
 import { evaluateRule, isSupportedOperator, isSupportedUnit, ruleOperandIssue } from './condition-eval.js';
 import { privilegedSnapshot, registerPrivilegedSnapshot } from './internal/snapshot.js';
 import { extraCollections, NATIVE_STORE_KEYS } from './internal/collections.js';
-import { resolveScope, usableOriginId } from './scope.js';
+import { resolveScope, sameOrigin, usableOriginId } from './scope.js';
 import { createHash } from 'node:crypto';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
@@ -1648,13 +1648,14 @@ export function createShadowGraph(options = {}) {
   }
 
   // G1: reconsideration must work from persisted state, not only from facts the
-  // caller happens to re-supply. Projects one project's ACTIVE facts into the same
+  // caller happens to re-supply. Projects one owner's ACTIVE facts into the same
   // { key: value } shape review({ facts }) already accepts, so stored and supplied
-  // facts share a single matching path. Project-scoped; superseded/expired skipped.
-  function storedFactValues(project, asOf) {
+  // facts share a single matching path. `inScope` says which facts are that
+  // owner's; superseded/expired skipped.
+  function storedFactValues(inScope, asOf) {
     const candidates = new Map();
     for (const fact of facts.values()) {
-      if ((fact.project ?? 'default') !== project) continue;
+      if (!inScope(fact)) continue;
       // Expiry is a property of the fact, not of whether housekeeping has run
       // yet. maintain() is what flips `status` to expired and stamps validTo,
       // and it may not have run since the boundary passed -- so read-time
@@ -1772,7 +1773,10 @@ export function createShadowGraph(options = {}) {
   //                   with no structured rule behind them. Off by default, so
   //                   review(), context() and maintain() pay nothing for it and
   //                   publish nothing new.
-  function evaluateReview(context = {}, { onlyDecisionId, collectGrounded = false } = {}) {
+  //   visible         context()'s read boundary: only the decisions and facts
+  //                   it admits are evaluated, so a context never reviews, or
+  //                   cites the facts of, another owner.
+  function evaluateReview(context = {}, { onlyDecisionId, collectGrounded = false, visible } = {}) {
     const prepared = validateReviewInput(context);
     const project = prepared.project;
     const changed = new Set(prepared.changedFacts); const due = []; const diagnostics = []; const explained = [];
@@ -1782,6 +1786,7 @@ export function createShadowGraph(options = {}) {
       if (onlyDecisionId !== undefined && record.id !== onlyDecisionId) continue;
       if (['archived', 'superseded', 'abandoned'].includes(record.status)) continue;
       if (project !== undefined && record.project !== project) continue;
+      if (visible && !visible(record)) continue;
       const matches = [];
       // Renamed from `reconsider` so it cannot be misread as the public
       // reconsider() defined below. It holds alternative labels, nothing else.
@@ -1803,7 +1808,7 @@ export function createShadowGraph(options = {}) {
       // matching `changedFacts` only: that list is an ephemeral "these just
       // changed" signal, whereas facts are durable state, so feeding state into it
       // would make every decision due forever.
-      const stored = storedFactValues(record.project ?? 'default', reviewAt);
+      const stored = storedFactValues(visible ?? ((fact) => (fact.project ?? 'default') === (record.project ?? 'default')), reviewAt);
       const knownFacts = { ...stored.values, ...prepared.facts };
       for (const alternative of record.alternatives) for (const rule of alternative.reopenWhen) {
         if (typeof rule === 'string') {
@@ -2112,12 +2117,12 @@ export function createShadowGraph(options = {}) {
   //
   // A satisfied condition means the attempt MAY be reconsidered. It does not
   // erase the recorded failure, and it does not authorise a retry.
-  function evaluateAttemptReuse(project, reviewAt, suppliedFacts) {
-    const stored = storedFactValues(project, reviewAt);
+  function evaluateAttemptReuse(inScope, reviewAt, suppliedFacts) {
+    const stored = storedFactValues(inScope, reviewAt);
     const knownFacts = { ...stored.values, ...suppliedFacts };
     const reusable = []; const diagnostics = [];
     for (const record of records.values()) {
-      if (record.kind !== 'attempt' || record.project !== project) continue;
+      if (record.kind !== 'attempt' || !inScope(record)) continue;
       // Every stored condition counts, including the legacy free-text form.
       // Filtering those out made an ALL decision over a SUBSET: an attempt with
       // one unprovable prose condition and one satisfied structured condition
@@ -2509,8 +2514,29 @@ export function createShadowGraph(options = {}) {
   function repairPlan() { return { apply: false, actions: validate().issues.map((issue) => issue.code.startsWith('missing_relation_') ? { action: 'remove_relation', relationId: issue.relationId, reason: issue.code } : { action: 'manual_review', ...issue }) }; }
 
   // ---- G6 / G7 read paths -------------------------------------------------
-  function matchesFilters(record, options) {
-    if (options.project && record.project !== options.project) return false;
+  // The boundary one read works in (plan v1.4.4 §10.2, §10.5). A selected
+  // project sees what that project owns; with no project, a presented origin
+  // sees its own unattributed records; with neither, the read sees nothing --
+  // never every project, and never the shared "default" bucket. Owners follow
+  // the owner model the writes use, so legacy data in "default", or stored with
+  // no project, belongs to no project a caller can name (OD-1).
+  function readBoundary(options = {}) {
+    const scope = resolveScope({ project: options.project, originId: options.originId });
+    const visible = (item) => {
+      if (!item) return false;
+      if (scope.state === 'project_selected') return ownerKey(item, (project) => project) === scope.project;
+      return item.attribution === 'unattributed' && sameOrigin(item.originId, scope.originId);
+    };
+    // A relation endpoint can be an alternative, which is its decision's.
+    const reaches = (id) => {
+      const found = entity(id);
+      return visible(found?.kind === 'alternative' ? records.get(found.decisionId) : found);
+    };
+    return { scope, visible, reaches };
+  }
+
+  function matchesFilters(record, options, boundary) {
+    if (!boundary.visible(record)) return false;
     if (options.status && record.status !== options.status) return false;
     if (options.kind && record.kind !== options.kind) return false;
     if (options.sourceClass && record.sourceClass !== options.sourceClass) return false;
@@ -2522,9 +2548,7 @@ export function createShadowGraph(options = {}) {
     return Object.fromEntries(SEARCH_FILTERS.filter((name) => options[name] !== undefined).map((name) => [name, options[name]]));
   }
 
-  function rank(query = '', options = {}) {
-    if (options.project !== undefined) normalizeProject(options.project);
-    const memoryProject = normalizeProject(options.project);
+  function rank(query = '', options = {}, boundary = readBoundary(options)) {
     const memoryScope = normalizeMemoryScope(options.scope);
     // Folded on both sides, or the match is one-directional: an unaccented query
     // would find an accented record but not the reverse.
@@ -2535,8 +2559,8 @@ export function createShadowGraph(options = {}) {
     const rawTerms = String(query).toLocaleLowerCase().split(/\s+/).filter(Boolean);
     const hits = [];
     for (const record of records.values()) {
-      if (!matchesFilters(record, options)) continue;
-      if (record.kind === 'memory' && (record.project !== memoryProject || !sameMemoryScopeValues(record.scope, memoryScope))) continue;
+      if (!matchesFilters(record, options, boundary)) continue;
+      if (record.kind === 'memory' && !sameMemoryScopeValues(record.scope, memoryScope)) continue;
       // G7: a term must match a DECLARED CONTENT FIELD. Schema keys and internal
       // metadata are not content, so `search('confidence')` no longer matches a
       // record merely because it has a confidence field.
@@ -2561,15 +2585,16 @@ export function createShadowGraph(options = {}) {
   }
 
   function retrieve(query = '', options = {}) {
-    const hits = rank(query, options);
-    const memoryProject = normalizeProject(options.project);
+    const boundary = readBoundary(options);
+    const hits = rank(query, options, boundary);
     const memoryScope = normalizeMemoryScope(options.scope);
     const directIds = new Set(hits.map((item) => item.record.id));
     const results = hits.map((item) => ({ ...item, graphBoost: 0, reasons: [item.reason] }));
+    // A neighbour joins only from inside the same boundary as the hits.
     for (const relation of relations.values()) {
       const relatedId = directIds.has(relation.from) ? relation.to : directIds.has(relation.to) ? relation.from : null;
       const related = relatedId && entity(relatedId);
-      if (related && related.kind !== 'alternative' && (!options.project || related.project === options.project) && (related.kind !== 'memory' || (related.project === memoryProject && sameMemoryScopeValues(related.scope, memoryScope))) && !directIds.has(relatedId)) {
+      if (related && related.kind !== 'alternative' && boundary.visible(related) && (related.kind !== 'memory' || sameMemoryScopeValues(related.scope, memoryScope)) && !directIds.has(relatedId)) {
         results.push({ record: clone(related), score: 1, graphBoost: 1, matched: ['relationship'], matchedBy: 'graph', reason: `Related by ${relation.relation}`, reasons: [`Related by ${relation.relation}`], filters: appliedFilters(options) });
         directIds.add(relatedId);
       }
@@ -2580,7 +2605,8 @@ export function createShadowGraph(options = {}) {
 
   function recall(query = '', options = {}) {
     validateTemporalFields(options, ['asOf', 'currentAt']);
-    const recallOptions = { ...options, project: normalizeProject(options.project), scope: normalizeMemoryScope(options.scope), currentAt: options.currentAt ?? (options.asOf ? null : now()) };
+    const boundary = readBoundary(options);
+    const recallOptions = { ...options, project: boundary.scope.project, scope: normalizeMemoryScope(options.scope), currentAt: options.currentAt ?? (options.asOf ? null : now()) };
     // Ranking only READS the graph, but this used to hand it `exportData()`,
     // which deep-clones every record, fact, relation, review signal, idempotency
     // entry, event and the entire journal -- on every call. Ranking reads three
@@ -2591,7 +2617,16 @@ export function createShadowGraph(options = {}) {
     // So rank over live entities and clone only the page actually returned. No
     // caller receives a reference into live state, which is the property the
     // wholesale clone was really providing.
-    const rankingView = { records: [...records.values()], facts: [...facts.values()], relations: [...relations.values()] };
+    //
+    // Only what lies inside the read boundary is ranked, and the graph signal
+    // walks only relations between such entities: it cannot pass through
+    // another project, and a focus outside the boundary reaches nothing, just
+    // as one that does not exist.
+    const rankingView = {
+      records: [...records.values()].filter(boundary.visible),
+      facts: [...facts.values()].filter(boundary.visible),
+      relations: [...relations.values()].filter((relation) => boundary.reaches(relation.from) && boundary.reaches(relation.to))
+    };
     const result = hybridSearch(rankingView, query, recallOptions);
     const envelope = paginate(
       result.items,
@@ -2609,25 +2644,31 @@ export function createShadowGraph(options = {}) {
 
   // context() returns several collections. Each one declares its own total and
   // whether it was truncated, so a caller can never be silently short-changed.
+  // Everything context() reads, evaluates or cites -- decisions, facts,
+  // attempts and the review signals it may raise -- lies inside one read
+  // boundary; a context with no project selected evaluates nothing and
+  // reports no project.
   function context(input = {}) {
-    const project = normalizeProject(input.project);
+    const boundary = readBoundary(input);
+    const project = boundary.scope.project;
+    const inScope = boundary.visible;
     const limit = input.limit;
     const collect = (items) => {
       const page = resolvePage({ limit, offset: 0 }, items.length);
       return { items: items.slice(0, page.limit), total: items.length, returned: Math.min(page.limit, items.length), hasMore: page.limit < items.length };
     };
-    const activeDecisions = collect([...records.values()].filter((x) => x.kind === 'decision' && x.project === project && CURRENT_DECISION_STATUSES.includes(x.status)).map(clone));
-    const staleAssumptions = collect([...facts.values()].filter((x) => x.project === project && x.status !== 'active').map(clone));
-    const failedAttemptsToAvoid = collect([...records.values()].filter((x) => x.kind === 'attempt' && x.project === project && attemptFailed(x)).map(clone));
-    const evaluated = evaluateReview({ project, changedFacts: input.changedFacts ?? [], facts: input.facts ?? {} });
+    const activeDecisions = collect([...records.values()].filter((x) => x.kind === 'decision' && inScope(x) && CURRENT_DECISION_STATUSES.includes(x.status)).map(clone));
+    const staleAssumptions = collect([...facts.values()].filter((x) => inScope(x) && x.status !== 'active').map(clone));
+    const failedAttemptsToAvoid = collect([...records.values()].filter((x) => x.kind === 'attempt' && inScope(x) && attemptFailed(x)).map(clone));
+    const evaluated = evaluateReview({ changedFacts: input.changedFacts ?? [], facts: input.facts ?? {} }, { visible: inScope });
     const openReviews = collect(evaluated.due);
     // Conditions that could not be settled travel as their own collection, so
     // they are bounded and declared by the same completeness contract as every
     // other collection here rather than riding along unbounded.
-    const reuse = evaluateAttemptReuse(project, now(), input.facts ?? {});
+    const reuse = evaluateAttemptReuse(inScope, now(), input.facts ?? {});
     const reusableAttempts = collect(reuse.reusable);
     const conditionDiagnostics = collect([...evaluated.diagnostics, ...reuse.diagnostics]);
-    const suggestedQuestions = collect([...records.values()].filter((x) => x.kind === 'decision' && x.project === project && (x.confidence?.current ?? 0) < 0.5).map((x) => `What evidence could change the decision: ${x.title}?`));
+    const suggestedQuestions = collect([...records.values()].filter((x) => x.kind === 'decision' && inScope(x) && (x.confidence?.current ?? 0) < 0.5).map((x) => `What evidence could change the decision: ${x.title}?`));
     const groups = { activeDecisions, staleAssumptions, failedAttemptsToAvoid, openReviews, suggestedQuestions, conditionDiagnostics, reusableAttempts };
     return {
       project,

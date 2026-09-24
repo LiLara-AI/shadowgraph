@@ -676,36 +676,53 @@ test('projected tools and results carry exactly the members each tier defines', 
 test('output schemas accept data imported from an older storage schema', () => {
   // Over-specifying an output schema is worse than omitting one: a client that
   // validates would turn a successful read of legacy data into an exception.
+  // The same schema-3 data, optionally stored under one explicit project.
+  const legacyData = (project) => {
+    const owned = (item) => (project === undefined ? item : { ...item, project });
+    return {
+      schemaVersion: 3,
+      records: [
+        owned({
+          id: 'legacy-decision-1',
+          kind: 'decision',
+          title: 'Ship the legacy build',
+          chosen: 'ship',
+          status: 'active',
+          confidence: 0.7,
+          assumptions: ['the deployment stays single-user'],
+          evidence: ['a hallway conversation'],
+          alternatives: [{ label: 'wait', reasonRejected: 'too slow', reopenWhen: [{ key: 'deployment', value: 'multi-user' }] }]
+        }),
+        owned({ id: 'legacy-attempt-1', kind: 'attempt', solution: 'tried the old path', result: 'failed during build' })
+      ],
+      facts: [owned({ id: 'legacy-fact-1', key: 'deployment', value: 'single-user', source: 'human-confirmed', verificationStatus: 'verified' })],
+      relations: [{ id: 'legacy-relation-1', from: 'legacy-decision-1', to: 'legacy-fact-1', relation: 'depends_on' }],
+      reviewSignals: [],
+      idempotency: [],
+      events: [],
+      journal: []
+    };
+  };
   const graph = createShadowGraph({ now: () => '2026-01-01T00:00:00.000Z' });
-  graph.importData({
-    schemaVersion: 3,
-    records: [
-      {
-        id: 'legacy-decision-1',
-        kind: 'decision',
-        title: 'Ship the legacy build',
-        chosen: 'ship',
-        status: 'active',
-        confidence: 0.7,
-        assumptions: ['the deployment stays single-user'],
-        evidence: ['a hallway conversation'],
-        alternatives: [{ label: 'wait', reasonRejected: 'too slow', reopenWhen: [{ key: 'deployment', value: 'multi-user' }] }]
-      },
-      { id: 'legacy-attempt-1', kind: 'attempt', solution: 'tried the old path', result: 'failed during build' }
-    ],
-    facts: [{ id: 'legacy-fact-1', key: 'deployment', value: 'single-user', source: 'human-confirmed', verificationStatus: 'verified' }],
-    relations: [{ id: 'legacy-relation-1', from: 'legacy-decision-1', to: 'legacy-fact-1', relation: 'depends_on' }],
-    reviewSignals: [],
-    idempotency: [],
-    events: [],
-    journal: []
-  });
+  graph.importData(legacyData());
+  // The core reads return only what a selected project owns (plan v1.4.4
+  // PR-08), and legacy data stored with no project belongs to none. So they
+  // read the same legacy shapes imported under an explicit legacy project,
+  // which the import keeps (WS-11 mapping i).
+  const owned = createShadowGraph({ now: () => '2026-01-01T00:00:00.000Z' });
+  owned.importData(legacyData('legacy-app'));
+  const read = { project: 'legacy-app' };
+  const [searched, retrieved, recalled, context] = [owned.search('', read), owned.retrieve('', read), owned.recall('', read), owned.context(read)];
+  assert.deepEqual(searched.items.map((item) => item.record.id), ['legacy-attempt-1', 'legacy-decision-1'], 'the core reads do read the legacy records');
+  assert.equal(retrieved.items.some((item) => item.record.id === 'legacy-fact-1' && item.matchedBy === 'graph'), true);
+  assert.equal(recalled.items.length, 3);
+  assert.deepEqual([context.activeDecisions.length, context.failedAttemptsToAvoid.length], [1, 1]);
 
   const checks = [
-    ['shadowgraph_search', graph.search('')],
-    ['shadowgraph_retrieve', graph.retrieve('')],
-    ['shadowgraph_recall', graph.recall('')],
-    ['shadowgraph_context', graph.context({})],
+    ['shadowgraph_search', searched],
+    ['shadowgraph_retrieve', retrieved],
+    ['shadowgraph_recall', recalled],
+    ['shadowgraph_context', context],
     ['shadowgraph_traverse', graph.traverse({ id: 'legacy-decision-1' })],
     ['shadowgraph_journal', graph.getJournal({})],
     ['shadowgraph_rebuild', graph.rebuild()],

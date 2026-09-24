@@ -172,7 +172,7 @@ test('HTTP SQLite restore rejects a missing source without replacing the valid d
     await fetch(`${base}/decisions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'default', title: 'KEEP MISSING SOURCE', chosen: 'x' }) });
     const response = await fetch(`${base}/restore`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: missing }) });
     assert.equal(response.status, 400);
-    assert.equal(app.graph.search('KEEP MISSING SOURCE').page.total, 1);
+    assert.equal(app.graph.search('KEEP MISSING SOURCE', { project: 'default' }).page.total, 1);
   } finally {
     await new Promise((resolve) => app.server.close(resolve));
   }
@@ -199,7 +199,7 @@ test('HTTP SQLite restore rejects malformed snapshots without replacing the vali
     await fetch(`${base}/decisions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'default', title: 'KEEP SQLITE', chosen: 'x' }) });
     const response = await fetch(`${base}/restore`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: backup }) });
     assert.equal(response.status, 400);
-    assert.equal(app.graph.search('KEEP SQLITE').page.total, 1);
+    assert.equal(app.graph.search('KEEP SQLITE', { project: 'default' }).page.total, 1);
   } finally {
     await new Promise((resolve) => app.server.close(resolve));
     liveStore.close();

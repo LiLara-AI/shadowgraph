@@ -631,7 +631,9 @@ test('unconfirmed restore and its degraded latch use distinct finite numeric ser
 
   const blockedTool = await rpc.call({
     jsonrpc: '2.0', id: 'degraded-tool', method: 'tools/call',
-    params: { name: 'shadowgraph_search', arguments: { query: privateSentinel } }
+    // Scoped to the sentinel's own project, so the read would find it if the
+    // degraded latch did not refuse it first (P1 reconciliation F-10, C6).
+    params: { name: 'shadowgraph_search', arguments: { query: privateSentinel, project: 'followup' } }
   });
   assertSafeToolFailure(blockedTool, {
     code: -32001,

@@ -19,7 +19,7 @@ test('keeps attempts searchable and exportable', () => {
   const graph = createShadowGraph();
   graph.addAttempt({ project: 'default', solution: 'Rewrite everything', result: 'Regression', reason: 'Too broad' });
   // G6: search() returns { items, page, completeness } — see completeness-contract.md.
-  assert.equal(graph.search('regression').items[0].record.result, 'Regression');
+  assert.equal(graph.search('regression', { project: 'default' }).items[0].record.result, 'Regression');
   assert.equal(graph.stats().attempts, 1);
 });
 
