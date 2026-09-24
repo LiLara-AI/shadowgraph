@@ -10,54 +10,59 @@
     "production suite -- by the change-set that makes its path conformant, never",
     "edited to follow a behaviour change. Rows are grouped by the change-set",
     "expected to retire them; the file is deleted once the last group is retired.",
+    "A retired path must meet its whole target: the unresolved half AND the",
+    "selected-project half.",
     "",
     "Fixture: projects alpha and beta, plus a decision and a memory written with no",
-    "project. 'withheld' means the read was made with no project argument."
+    "project, and a deliberate cross-project link from an alpha decision to a beta",
+    "attempt. 'withheld' means the read was made with no project argument;",
+    "'selected' means it was made with project alpha."
   ],
   "recordedAt": "v0.41.0 (a264c86)",
   "paths": {
     "matchesFilters": {
       "group": "core-read-paths",
-      "observed": { "withheldProjects": ["alpha", "beta", "default"], "selectedProjects": ["beta"] }
+      "observed": { "withheldProjects": ["alpha", "beta", "default"], "selectedProjects": ["alpha"] }
     },
     "search": {
       "group": "core-read-paths",
-      "observed": { "withheldProjects": ["alpha", "beta", "default"], "scopeProject": "all", "complete": true, "limitation": false }
+      "observed": { "withheldProjects": ["alpha", "beta", "default"], "scopeProject": "all", "complete": true, "limitation": false, "selectedProjects": ["alpha"] }
     },
     "retrieve": {
       "group": "core-read-paths",
-      "observed": { "withheldProjects": ["alpha", "beta", "default"], "graphExpandedProjects": ["alpha"], "scopeProject": "all", "complete": true, "limitation": false }
+      "observed": { "withheldProjects": ["alpha", "beta", "default"], "graphExpandedProjects": ["alpha", "beta"], "scopeProject": "all", "complete": true, "limitation": false, "selectedProjects": ["alpha"], "selectedGraphExpandedProjects": ["alpha"] }
     },
     "recall": {
       "group": "core-read-paths",
-      "observed": { "withheldProjects": ["default"], "scopeProject": "default", "complete": true, "limitation": false }
+      "observed": { "withheldProjects": ["default"], "scopeProject": "default", "complete": true, "limitation": false, "selectedProjects": ["alpha"] }
     },
     "context": {
       "group": "core-read-paths",
-      "observed": { "withheldProjects": ["default"], "scopeProject": "default", "complete": true, "limitation": false }
+      "observed": { "withheldProjects": ["default"], "scopeProject": "default", "complete": true, "limitation": false, "selectedProjects": ["alpha"] }
     },
     "entity": {
       "group": "by-id-and-traversal",
-      "observed": { "withheldReturnsRecord": true, "otherProjectReturnsRecord": true, "existenceDistinguishable": true }
+      "observed": { "withheldReturnsRecord": true, "otherProjectReturnsRecord": true, "existenceDistinguishable": true, "selectedReturnsRecord": true }
     },
     "traverse": {
       "group": "by-id-and-traversal",
-      "observed": { "withheldNodeProjects": ["alpha"], "withheldReachesMemory": false, "selectedReachesMemory": true }
+      "observed": { "withheldNodeProjects": ["alpha", "beta"], "withheldReachesMemory": false, "selectedReachesMemory": true, "selectedNodeProjects": ["alpha", "beta"] }
     },
     "getJournal": {
       "group": "journal-stats-redaction-export",
-      "observed": { "withheldProjects": ["alpha", "beta", "default"], "scopeProject": "all", "complete": true, "limitation": false }
+      "observed": { "withheldProjects": ["alpha", "beta", "default"], "scopeProject": "all", "complete": true, "limitation": false, "selectedProjects": ["alpha"], "selectedNamesBetaId": true }
     },
     "stats": {
       "group": "journal-stats-redaction-export",
-      "observed": { "withheldDecisions": 3, "selectedDecisions": 3 }
+      "observed": { "withheldDecisions": 3, "selectedDecisions": 3, "selectedAttempts": 2 }
     },
     "redact": {
       "group": "journal-stats-redaction-export",
-      "observed": { "withheldProjects": ["alpha", "beta", "default"], "selectedProjects": ["beta"] }
+      "observed": { "withheldProjects": ["alpha", "beta", "default"], "selectedProjects": ["alpha"], "selectedRelationsLeavingScope": 0, "selectedNamesBetaId": true }
     },
     "publicExport": {
       "group": "journal-stats-redaction-export",
+      "retirement": "The public export has no project parameter at v0.41.0, so only its unresolved behaviour is recorded. The change-set that scopes the public export must add a selected-project target to the harness in the same change before this row can be retired; the harness refuses the retirement until it does.",
       "observed": { "withheldProjects": ["alpha", "beta", "default"] }
     }
   }

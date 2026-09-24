@@ -1,5 +1,8 @@
 // Project-scoping conformance harness: eleven public read paths, each exercised
-// on its own against two projects plus records written with no project at all.
+// on its own against two projects plus records written with no project at all,
+// once with no project (unresolved scope) and once with project `alpha`
+// selected. The fixture links an alpha decision to a beta attempt, so a selected
+// read that follows a graph edge meets a boundary it could actually cross.
 //
 // NOT part of `npm test`, deliberately. The approved `project_only` rule says a
 // read with no resolved project returns nothing, reports `complete: false` and
@@ -23,7 +26,10 @@
 //   deleted row cannot hide a failing path;
 // - a row may only record NON-conformant behaviour -- a row that already meets
 //   the target is refused, so the baseline cannot be used to fake a pass;
-// - a path with no row must be conformant.
+// - a path with no row must be conformant, for the unresolved AND the selected
+//   project, so retiring a row cannot drop either half of the target;
+// - a path whose target cannot yet be stated in full may not be retired at all
+//   (`retireOnlyWith`): it must first gain the missing target.
 import { readFile } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { createShadowGraph } from '../src/shadowgraph.js';
@@ -38,11 +44,15 @@ function fixture() {
   graph.link({ from: alphaDecision.id, to: alphaAttempt.id, relation: 'tried' });
   graph.link({ from: alphaDecision.id, to: alphaMemory.id, relation: 'noted' });
   graph.addDecision({ project: 'beta', title: 'Beta MARKER cache', chosen: 'memcached' });
+  const betaAttempt = graph.addAttempt({ project: 'beta', solution: 'beta warm-up script', result: 'worked' });
   graph.remember({ project: 'beta', memoryType: 'note', key: 'beta', text: 'MEMORY-MARKER beta' });
+  // The deliberate cross-project edge. A read with `alpha` selected must not
+  // follow it into beta, however the read expands.
+  graph.link({ from: alphaDecision.id, to: betaAttempt.id, relation: 'related' });
   // The unresolved-scope case: written with no project at all.
   graph.addDecision({ title: 'Unscoped MARKER cache', chosen: 'none' });
   graph.remember({ memoryType: 'note', key: 'unscoped', text: 'MEMORY-MARKER unscoped' });
-  return { graph, alphaDecisionId: alphaDecision.id };
+  return { graph, alphaDecisionId: alphaDecision.id, betaAttemptId: betaAttempt.id };
 }
 
 const projectsOf = (records) => [...new Set(records.map((record) => record.project))].sort();
@@ -53,6 +63,8 @@ const envelope = (result) => ({
   limitation: result.completeness.limitation?.code === 'scoped_coverage'
 });
 const unresolvedTarget = { withheldProjects: [], complete: false, limitation: true };
+// Every `selected*` observation below is a read with project `alpha`.
+const recordsIn = (context) => [...context.activeDecisions, ...context.staleAssumptions, ...context.failedAttemptsToAvoid, ...context.reusableAttempts];
 
 // `observe` records what the path does; `target` holds only the fields that
 // decide conformance. Everything observed is compared against the row.
@@ -61,41 +73,45 @@ const PATHS = {
   matchesFilters: {
     observe: ({ graph }) => ({
       withheldProjects: itemProjects(graph.search('', { kind: 'decision' })),
-      selectedProjects: itemProjects(graph.search('', { kind: 'decision', project: 'beta' }))
+      selectedProjects: itemProjects(graph.search('', { kind: 'decision', project: 'alpha' }))
     }),
-    target: { withheldProjects: [], selectedProjects: ['beta'] }
+    target: { withheldProjects: [], selectedProjects: ['alpha'] }
   },
   search: {
     observe: ({ graph }) => {
       const result = graph.search('MARKER', {});
-      return { withheldProjects: itemProjects(result), ...envelope(result) };
+      return { withheldProjects: itemProjects(result), ...envelope(result), selectedProjects: itemProjects(graph.search('MARKER', { project: 'alpha' })) };
     },
-    target: unresolvedTarget
+    target: { ...unresolvedTarget, selectedProjects: ['alpha'] }
   },
   retrieve: {
     observe: ({ graph }) => {
+      const expanded = (result) => projectsOf(result.items.filter((item) => item.matchedBy === 'graph').map((item) => item.record));
       const result = graph.retrieve('MARKER', {});
+      const selected = graph.retrieve('MARKER', { project: 'alpha' });
       return {
         withheldProjects: itemProjects(result),
-        graphExpandedProjects: projectsOf(result.items.filter((item) => item.matchedBy === 'graph').map((item) => item.record)),
-        ...envelope(result)
+        graphExpandedProjects: expanded(result),
+        ...envelope(result),
+        selectedProjects: itemProjects(selected),
+        selectedGraphExpandedProjects: expanded(selected)
       };
     },
-    target: { ...unresolvedTarget, graphExpandedProjects: [] }
+    target: { ...unresolvedTarget, graphExpandedProjects: [], selectedProjects: ['alpha'], selectedGraphExpandedProjects: ['alpha'] }
   },
   recall: {
     observe: ({ graph }) => {
       const result = graph.recall('MEMORY-MARKER', {});
-      return { withheldProjects: itemProjects(result), ...envelope(result) };
+      return { withheldProjects: itemProjects(result), ...envelope(result), selectedProjects: itemProjects(graph.recall('MEMORY-MARKER', { project: 'alpha' })) };
     },
-    target: unresolvedTarget
+    target: { ...unresolvedTarget, selectedProjects: ['alpha'] }
   },
   context: {
     observe: ({ graph }) => {
       const result = graph.context({});
-      return { withheldProjects: projectsOf(result.activeDecisions), ...envelope(result) };
+      return { withheldProjects: projectsOf(result.activeDecisions), ...envelope(result), selectedProjects: projectsOf(recordsIn(graph.context({ project: 'alpha' }))) };
     },
-    target: unresolvedTarget
+    target: { ...unresolvedTarget, selectedProjects: ['alpha'] }
   },
   // A by-id read. traverse() is the public entry point that resolves an
   // arbitrary id, through entity(). Outside the boundary the target is no
@@ -110,10 +126,11 @@ const PATHS = {
       return {
         withheldReturnsRecord: outcome({ id: alphaDecisionId }) === 'returned',
         otherProjectReturnsRecord: otherProject === 'returned',
-        existenceDistinguishable: otherProject !== outcome({ id: 'decision_absent', project: 'beta' })
+        existenceDistinguishable: otherProject !== outcome({ id: 'decision_absent', project: 'beta' }),
+        selectedReturnsRecord: outcome({ id: alphaDecisionId, project: 'alpha' }) === 'returned'
       };
     },
-    target: { withheldReturnsRecord: false, otherProjectReturnsRecord: false, existenceDistinguishable: false }
+    target: { withheldReturnsRecord: false, otherProjectReturnsRecord: false, existenceDistinguishable: false, selectedReturnsRecord: true }
   },
   traverse: {
     observe: ({ graph, alphaDecisionId }) => {
@@ -122,37 +139,54 @@ const PATHS = {
       return {
         withheldNodeProjects: projectsOf(withheld.nodes),
         withheldReachesMemory: withheld.nodes.some((node) => node.kind === 'memory'),
-        selectedReachesMemory: selected.nodes.some((node) => node.kind === 'memory')
+        selectedReachesMemory: selected.nodes.some((node) => node.kind === 'memory'),
+        selectedNodeProjects: projectsOf(selected.nodes)
       };
     },
-    target: { withheldNodeProjects: [], selectedReachesMemory: true }
+    target: { withheldNodeProjects: [], selectedReachesMemory: true, selectedNodeProjects: ['alpha'] }
   },
+  // `selectedNamesBetaId` is observed but not yet targeted: the alpha-labelled
+  // entry for the cross-project link carries the beta id in its payload, and
+  // whether an in-scope entry may name an out-of-scope id is left to the
+  // change-set that scopes the journal. Recording it keeps it from moving silently.
   getJournal: {
-    observe: ({ graph }) => {
+    observe: ({ graph, betaAttemptId }) => {
       const result = graph.getJournal({});
-      return { withheldProjects: projectsOf(result.items), ...envelope(result) };
+      const selected = graph.getJournal({ project: 'alpha' }).items;
+      return { withheldProjects: projectsOf(result.items), ...envelope(result), selectedProjects: projectsOf(selected), selectedNamesBetaId: JSON.stringify(selected).includes(betaAttemptId) };
     },
-    target: unresolvedTarget
+    target: { ...unresolvedTarget, selectedProjects: ['alpha'] }
   },
-  // The fixture holds one decision in each of alpha, beta and the unscoped case.
+  // The fixture holds one decision in each of alpha, beta and the unscoped case,
+  // and one attempt in each of alpha and beta.
   stats: {
-    observe: ({ graph }) => ({
-      withheldDecisions: graph.stats().decisions,
-      selectedDecisions: graph.stats({ project: 'alpha' }).decisions
-    }),
-    target: { withheldDecisions: 0, selectedDecisions: 1 }
+    observe: ({ graph }) => {
+      const selected = graph.stats({ project: 'alpha' });
+      return { withheldDecisions: graph.stats().decisions, selectedDecisions: selected.decisions, selectedAttempts: selected.attempts };
+    },
+    target: { withheldDecisions: 0, selectedDecisions: 1, selectedAttempts: 1 }
   },
   redact: {
-    observe: ({ graph }) => ({
-      withheldProjects: projectsOf(graph.redact({}).records),
-      selectedProjects: projectsOf(graph.redact({ project: 'beta' }).records)
-    }),
-    target: { withheldProjects: [], selectedProjects: ['beta'] }
+    observe: ({ graph, betaAttemptId }) => {
+      const selected = graph.redact({ project: 'alpha' });
+      const ids = new Set([...selected.records, ...selected.facts].map((item) => item.id));
+      return {
+        withheldProjects: projectsOf(graph.redact({}).records),
+        selectedProjects: projectsOf([...selected.records, ...selected.facts, ...selected.journal]),
+        selectedRelationsLeavingScope: selected.relations.filter((relation) => !ids.has(relation.from) || !ids.has(relation.to)).length,
+        selectedNamesBetaId: JSON.stringify(selected).includes(betaAttemptId)   // observed, not targeted -- see getJournal
+      };
+    },
+    target: { withheldProjects: [], selectedProjects: ['alpha'], selectedRelationsLeavingScope: 0 }
   },
-  // exportData() is what GET /records and the `list` verb return today.
+  // exportData() is what GET /records and the `list` verb return today. It has
+  // no project parameter, so no selected-project target can be written for it
+  // without inventing an interface; retiring its row therefore requires adding
+  // that target in the same change-set that gives the public export its scope.
   publicExport: {
     observe: ({ graph }) => ({ withheldProjects: projectsOf(graph.exportData().records) }),
-    target: { withheldProjects: [] }
+    target: { withheldProjects: [] },
+    retireOnlyWith: 'a selected-project target, added in the same change-set that gives the public export a project scope'
   }
 };
 
@@ -170,7 +204,9 @@ for (const [name, path] of Object.entries(PATHS)) {
   try { observed = path.observe(fixture()); } catch (error) { observed = { harnessError: error.message }; }
   const conformant = meetsTarget(observed, path.target);
   const row = rows[name];
-  if (!row) {
+  if (!row && path.retireOnlyWith) {
+    results.push({ name, ok: false, detail: `row may not be retired until the harness has ${path.retireOnlyWith}` });
+  } else if (!row) {
     results.push({ name, ok: conformant, detail: conformant ? 'conformant (row retired)' : `non-conformant with no baseline row; observed ${JSON.stringify(observed)}` });
   } else if (meetsTarget(row.observed ?? {}, path.target)) {
     results.push({ name, ok: false, detail: 'baseline row records conformant behaviour; retire the row instead' });
