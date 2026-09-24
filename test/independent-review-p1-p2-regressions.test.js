@@ -12,6 +12,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const FIXED_NOW = '2026-08-27T12:00:00.000Z';
 const DUE_AT = '2026-08-27T11:00:00.000Z';
@@ -111,9 +112,9 @@ test('P1-4 independent review: review and maintain preflight every caller input 
   ];
   for (const input of malformedReviewInputs) {
     const graph = maintenanceFixture();
-    const before = graph.exportData();
+    const before = privilegedSnapshot(graph);
     assert.throws(() => graph.review(input));
-    assert.deepEqual(graph.exportData(), before, `review(${String(input)}) must be atomic`);
+    assert.deepEqual(privilegedSnapshot(graph), before, `review(${String(input)}) must be atomic`);
   }
 
   const malformedMaintainInputs = [
@@ -126,12 +127,12 @@ test('P1-4 independent review: review and maintain preflight every caller input 
   ];
   for (const input of malformedMaintainInputs) {
     const graph = maintenanceFixture();
-    const before = graph.exportData();
+    const before = privilegedSnapshot(graph);
     assert.throws(() => graph.maintain(input));
-    assert.deepEqual(graph.exportData(), before, `maintain(${String(input)}) must be atomic`);
+    assert.deepEqual(privilegedSnapshot(graph), before, `maintain(${String(input)}) must be atomic`);
 
     graph.addAttempt({ id: 'write-after-rejection', project: 'maintain-project', solution: 'continue safely', result: 'valid' });
-    const after = graph.exportData();
+    const after = privilegedSnapshot(graph);
     assertMaintenanceSeedUnchanged(after, before);
     assert.equal(after.journalSeq, before.journalSeq + 1, 'the rejected maintain call must not consume a sequence');
     assert.equal(after.journal.length, before.journal.length + 1, 'only the subsequent valid write may append');
@@ -145,7 +146,7 @@ test('P1-4 independent review: real MCP maintain rejection rolls live graph back
   const file = join(directory, 'state.json');
   const store = createJsonFileStore(file);
   const seed = maintenanceFixture();
-  await store.save(seed.exportData());
+  await store.save(privilegedSnapshot(seed));
   const before = await store.load();
   const beforeBytes = await readFile(file);
 
@@ -249,7 +250,7 @@ async function assertPurgeErasureAcrossBackend(t, backend, mode) {
   const sourcePath = join(directory, `source.${extension}`);
   const destinationPath = join(directory, `destination.${extension}`);
   const { graph, kept } = purgeFixture();
-  const before = graph.exportData();
+  const before = privilegedSnapshot(graph);
   assert.equal(before.records.filter((record) => record.project === PURGE_PROJECT).length, 2);
   assert.equal(before.facts.filter((fact) => fact.project === PURGE_PROJECT).length, 1);
   assert.equal(before.relations.length, 1);
@@ -257,7 +258,7 @@ async function assertPurgeErasureAcrossBackend(t, backend, mode) {
   assert.equal(before.idempotency.filter((entry) => entry.value.project === PURGE_PROJECT).length, 3);
 
   const result = graph.purgeProject(PURGE_PROJECT, { mode });
-  const live = graph.exportData();
+  const live = privilegedSnapshot(graph);
   assert.deepEqual(
     { records: result.records, facts: result.facts, relations: result.relations, removed: result.removed, idempotencyRemoved: result.idempotencyRemoved },
     { records: 2, facts: 1, relations: 1, removed: 4, idempotencyRemoved: 3 }
@@ -315,7 +316,7 @@ async function assertPurgeErasureAcrossBackend(t, backend, mode) {
   let destinationStore = await createStore(backend, destinationPath);
   const destinationSeed = createShadowGraph({ now: () => FIXED_NOW });
   destinationSeed.addDecision({ id: 'replace-me', project: 'destination', title: 'Replace me', chosen: 'old' });
-  await destinationStore.save(destinationSeed.exportData());
+  await destinationStore.save(privilegedSnapshot(destinationSeed));
   if (backend === 'sqlite') {
     await destinationStore.restore(sourcePath);
   } else {

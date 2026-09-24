@@ -10,6 +10,7 @@ import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createFactAttestation } from '../src/verification.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const BEFORE_BOUNDARY = '2099-08-28T00:00:00.999Z';
 const BOUNDARY = '2099-08-28T00:00:01.000Z';
@@ -208,8 +209,8 @@ test('committed expiration rejection is tagged for persistence adapters', async 
   assert.equal(typeof shadowgraph.isCommittedRejection, 'function');
   assert.equal(shadowgraph.isCommittedRejection(error), true);
   assert.match(error.message, /invalid or expired persisted fact verification/i);
-  assert.equal(graph.exportData().facts[0].verificationStatus, 'expired');
-  assert.equal(graph.exportData().journal.at(-1).type, 'fact.expired');
+  assert.equal(privilegedSnapshot(graph).facts[0].verificationStatus, 'expired');
+  assert.equal(privilegedSnapshot(graph).journal.at(-1).type, 'fact.expired');
 });
 
 test('MCP JSON persists a committed expiration before returning the legacy verification rejection', async (t) => {

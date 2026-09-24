@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { createShadowGraphServer } from '../src/server.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 async function post(base, path, body) {
   const response = await fetch(`${base}${path}`, {
@@ -37,7 +38,7 @@ test('HTTP exposes scoped remember and hybrid recall routes', async (t) => {
 });
 
 test('HTTP rolls live memory back when ordinary persistence fails', async (t) => {
-  const durable = createShadowGraph().exportData();
+  const durable = privilegedSnapshot(createShadowGraph());
   const store = {
     load: async () => structuredClone(durable),
     save: async () => { throw new Error('injected persistence failure'); },
@@ -54,12 +55,12 @@ test('HTTP rolls live memory back when ordinary persistence fails', async (t) =>
   });
   assert.equal(response.status, 400);
   assert.match(response.body.error, /injected persistence failure/);
-  assert.equal(app.graph.exportData().records.some((record) => record.key === 'must-not-stick'), false);
-  assert.equal(app.graph.exportData().journal.some((entry) => entry.payload?.key === 'must-not-stick'), false);
+  assert.equal(privilegedSnapshot(app.graph).records.some((record) => record.key === 'must-not-stick'), false);
+  assert.equal(privilegedSnapshot(app.graph).journal.some((entry) => entry.payload?.key === 'must-not-stick'), false);
 
   const failedFact = await post(base, '/facts', { project: 'app', key: 'fact-must-not-stick', value: true });
   assert.equal(failedFact.status, 400);
-  assert.equal(app.graph.exportData().facts.some((fact) => fact.key === 'fact-must-not-stick'), false);
+  assert.equal(privilegedSnapshot(app.graph).facts.some((fact) => fact.key === 'fact-must-not-stick'), false);
 });
 
 test('HTTP context persists review signals that it creates', async (t) => {
@@ -68,7 +69,7 @@ test('HTTP context persists review signals that it creates', async (t) => {
     id: 'due-decision', project: 'app', title: 'Due review', chosen: 'A',
     reviewAfter: '2026-01-01T00:00:00.000Z'
   });
-  let durable = seed.exportData();
+  let durable = privilegedSnapshot(seed);
   const store = {
     load: async () => structuredClone(durable),
     save: async (data) => { durable = structuredClone(data); return (durable.revision ?? 0) + 1; },

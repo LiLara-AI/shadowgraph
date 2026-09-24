@@ -34,6 +34,7 @@ import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createFactAttestation, createLocalEvidenceVerifier } from '../src/verification.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 // Smallest decision that carries a machine-checkable reopen condition.
 function decisionWithReopenRule(graph, project = 'p') {
@@ -93,7 +94,7 @@ describe('G1 (S1) — FIXED: reconsideration reads facts that are already stored
     const original = createShadowGraph();
     const decision = decisionWithReopenRule(original);
     original.addFact({ project: 'p', key: 'deployment', value: 'multi-user', source: 'tool_observed' });
-    await store.save(original.exportData());
+    await store.save(privilegedSnapshot(original));
 
     // Simulate a restart: brand new graph, state loaded from disk only.
     const reloaded = createShadowGraph();
@@ -123,7 +124,7 @@ describe('G1 (S1) — FIXED: reconsideration reads facts that are already stored
       const original = createShadowGraph();
       decisionWithReopenRule(original);
       original.addFact({ project: 'p', key: 'deployment', value: 'multi-user', source: 'tool_observed' });
-      await store.save(original.exportData());
+      await store.save(privilegedSnapshot(original));
     } finally { store.close(); }
 
     // Genuine backend restart: the first handle is closed, a new one is opened.
@@ -366,15 +367,15 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
     graph.addDecision({ title: 'T', chosen: 'C', sourceClass: 'tool_observed', actor: 'codex', client: 'codex-cli', sessionId: 's2' });
 
     const reloaded = createShadowGraph();
-    reloaded.importData(graph.exportData());
+    reloaded.importData(privilegedSnapshot(graph));
 
-    const [fact] = reloaded.exportData().facts;
+    const [fact] = privilegedSnapshot(reloaded).facts;
     assert.equal(fact.sourceClass, 'human_confirmed');
     assert.equal(fact.sourceRaw, 'human-confirmed');
     assert.equal(fact.verificationStatus, 'unverified', 'trust is not elevated by a round-trip');
     assert.deepEqual([fact.actor, fact.client, fact.sessionId], ['claude', 'cli', 's1']);
 
-    const [decision] = reloaded.exportData().records;
+    const [decision] = privilegedSnapshot(reloaded).records;
     assert.equal(decision.sourceClass, 'tool_observed');
     assert.deepEqual([decision.actor, decision.client, decision.sessionId], ['codex', 'codex-cli', 's2']);
   });
@@ -385,11 +386,11 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
 
     const original = createShadowGraph();
     original.addFact({ key: 'k', value: 'v', source: 'production_verified', actor: 'claude', sessionId: 's1' });
-    await store.save(original.exportData());
+    await store.save(privilegedSnapshot(original));
 
     const reloaded = createShadowGraph();
     reloaded.importData(await store.load());
-    const [fact] = reloaded.exportData().facts;
+    const [fact] = privilegedSnapshot(reloaded).facts;
 
     assert.equal(fact.sourceClass, 'production_verified');
     assert.equal(fact.verificationStatus, 'unverified');
@@ -412,14 +413,14 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
     try {
       const original = createShadowGraph();
       original.addFact({ key: 'k', value: 'v', source: 'human-confirmed', actor: 'claude', client: 'cli', sessionId: 's1' });
-      await store.save(original.exportData());
+      await store.save(privilegedSnapshot(original));
     } finally { store.close(); }
 
     const reopened = await createSqliteStore(file);
     try {
       const reloaded = createShadowGraph();
       reloaded.importData(await reopened.load());
-      const [fact] = reloaded.exportData().facts;
+      const [fact] = privilegedSnapshot(reloaded).facts;
 
       assert.equal(fact.sourceClass, 'human_confirmed');
       assert.equal(fact.sourceRaw, 'human-confirmed');
@@ -437,8 +438,8 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
     graph.importData({
       facts: [{ id: 'legacy', key: 'old', value: 1, source: 'human_confirmed', verificationStatus: 'verified', status: 'active' }]
     });
-    assert.equal(graph.exportData().facts[0].verificationStatus, 'unverified');
-    assert.equal(graph.exportData().facts[0].legacyVerificationStatus, 'verified');
+    assert.equal(privilegedSnapshot(graph).facts[0].verificationStatus, 'unverified');
+    assert.equal(privilegedSnapshot(graph).facts[0].legacyVerificationStatus, 'verified');
   });
 
   it('ACCEPTANCE (regression guard): the legacy `source` field still mirrors the class', () => {
@@ -486,7 +487,7 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
     delete missingReference.evidenceReference;
     await writeFile(evidencePath, JSON.stringify(missingReference));
     await assert.rejects(graph.verifyFact({ factId: fact.id, evidencePath }), /evidenceReference/);
-    assert.equal(graph.exportData().facts[0].verificationStatus, 'unverified');
+    assert.equal(privilegedSnapshot(graph).facts[0].verificationStatus, 'unverified');
   });
 });
 
@@ -521,13 +522,13 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
       const graph = createShadowGraph();
       const decision = graph.addDecision({ title: 'T', chosen: 'C' });
       for (const step of path) graph.updateDecisionStatus(decision.id, step);
-      assert.equal(graph.exportData().records[0].status, status, `${status} must be reachable`);
+      assert.equal(privilegedSnapshot(graph).records[0].status, status, `${status} must be reachable`);
     }
     const superseded = createShadowGraph();
     const previous = superseded.addDecision({ title: 'Old', chosen: 'A' });
     const replacement = superseded.addDecision({ title: 'New', chosen: 'B' });
     superseded.supersedeDecision({ decisionId: previous.id, replacementId: replacement.id });
-    assert.equal(superseded.exportData().records.find((item) => item.id === previous.id).status, 'superseded');
+    assert.equal(privilegedSnapshot(superseded).records.find((item) => item.id === previous.id).status, 'superseded');
   });
 
   it('ACCEPTANCE: the 5 previously-rejected states now work', () => {
@@ -543,7 +544,7 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
     for (const [status, path] of Object.entries(paths)) {
       const decision = graph.addDecision({ title: 'T', chosen: 'C' });
       for (const step of path) graph.updateDecisionStatus(decision.id, step);
-      assert.equal(graph.exportData().records.find((item) => item.id === decision.id).status, status);
+      assert.equal(privilegedSnapshot(graph).records.find((item) => item.id === decision.id).status, status);
     }
   });
 
@@ -554,8 +555,8 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
       id: `legacy-state-${index}`, kind: 'decision', schemaVersion: 4, project: 'app',
       title: 'Legacy', chosen: 'C', status, alternatives: []
     })) });
-    assert.deepEqual(graph.exportData().records.map((item) => item.status), ['proposed', 'stale', 'stale', 'archived']);
-    assert.deepEqual(graph.exportData().records.slice(0, 2).map((item) => item.migration.legacyDecisionStatus), ['active', 'aging']);
+    assert.deepEqual(privilegedSnapshot(graph).records.map((item) => item.status), ['proposed', 'stale', 'stale', 'archived']);
+    assert.deepEqual(privilegedSnapshot(graph).records.slice(0, 2).map((item) => item.migration.legacyDecisionStatus), ['active', 'aging']);
   });
 
   it('ACCEPTANCE: formatting aliases resolve to the canonical value', () => {
@@ -583,7 +584,7 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
     const decision = graph.addDecision({ project: 'p', title: 'Canonical', chosen: 'C' });
     graph.updateDecisionStatus(decision.id, 'IN-PROGRESS');
 
-    assert.equal(graph.exportData().records[0].status, 'in_progress');
+    assert.equal(privilegedSnapshot(graph).records[0].status, 'in_progress');
     assert.equal(graph.search('', { project: 'p', status: 'in_progress' }).items.length, 1);
   });
 
@@ -592,14 +593,14 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
     const decision = graph.addDecision({ title: 'T', chosen: 'C' });
     graph.updateDecisionStatus(decision.id, 'IN-PROGRESS');
 
-    const event = graph.exportData().events.filter((item) => item.type === 'decision.status').pop();
+    const event = privilegedSnapshot(graph).events.filter((item) => item.type === 'decision.status').pop();
     assert.equal(event.status, 'in_progress');
   });
 
   it('ACCEPTANCE: an unknown status is rejected clearly and nothing is written', () => {
     const graph = createShadowGraph();
     const decision = graph.addDecision({ title: 'T', chosen: 'C' });
-    const before = graph.exportData().records[0].status;
+    const before = privilegedSnapshot(graph).records[0].status;
 
     for (const bad of ['bogus', 'in progress', '', 'ACTIVE!', 123, null, undefined, {}]) {
       assert.throws(
@@ -608,7 +609,7 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
         `${JSON.stringify(bad)} must be rejected`
       );
     }
-    assert.equal(graph.exportData().records[0].status, before, 'no partial write occurred');
+    assert.equal(privilegedSnapshot(graph).records[0].status, before, 'no partial write occurred');
   });
 
   it('ACCEPTANCE L-1 (regression guard): the default entry state is `proposed`', () => {
@@ -626,7 +627,7 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
     });
 
     assert.equal(graph.stats().decisions, 4);
-    assert.deepEqual(graph.exportData().records.map((item) => item.status), ['proposed', 'stale', 'stale', 'archived']);
+    assert.deepEqual(privilegedSnapshot(graph).records.map((item) => item.status), ['proposed', 'stale', 'stale', 'archived']);
     assert.equal(graph.validate().valid, true, 'the migrated schema-5 states are canonical');
   });
 
@@ -637,7 +638,7 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
     graph.importData({
       records: [{ id: 'weird', kind: 'decision', title: 'W', chosen: 'C', status: 'totally_bogus', alternatives: [] }]
     });
-    assert.equal(graph.exportData().records[0].status, 'totally_bogus', 'data preserved');
+    assert.equal(privilegedSnapshot(graph).records[0].status, 'totally_bogus', 'data preserved');
 
     // ...and validate() surfaces it so it is discoverable rather than silent.
     // Severity `error` because a bogus status is genuinely invalid data, unlike a
@@ -677,7 +678,7 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
     // The missing status is still surfaced, with an explicit null — never guessed.
     const issue = result.issues.find((item) => item.code === 'legacy_missing_decision_status');
     assert.deepEqual(issue, { code: 'legacy_missing_decision_status', severity: 'legacy', recordId: 'old', status: null });
-    assert.equal(Object.prototype.hasOwnProperty.call(graph.exportData().records[0], 'status'), false, 'no status was fabricated');
+    assert.equal(Object.prototype.hasOwnProperty.call(privilegedSnapshot(graph).records[0], 'status'), false, 'no status was fabricated');
   });
 
   it('ACCEPTANCE: export/import preserves the canonical status', () => {
@@ -686,9 +687,9 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
     graph.updateDecisionStatus(decision.id, 'in-progress');
 
     const reloaded = createShadowGraph();
-    reloaded.importData(graph.exportData());
+    reloaded.importData(privilegedSnapshot(graph));
 
-    assert.equal(reloaded.exportData().records[0].status, 'in_progress');
+    assert.equal(privilegedSnapshot(reloaded).records[0].status, 'in_progress');
     assert.equal(reloaded.validate().valid, true);
   });
 
@@ -699,11 +700,11 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
     const original = createShadowGraph();
     const decision = original.addDecision({ title: 'T', chosen: 'C' });
     original.updateDecisionStatus(decision.id, 'ABANDONED');
-    await store.save(original.exportData());
+    await store.save(privilegedSnapshot(original));
 
     const reloaded = createShadowGraph();
     reloaded.importData(await store.load());
-    assert.equal(reloaded.exportData().records[0].status, 'abandoned');
+    assert.equal(privilegedSnapshot(reloaded).records[0].status, 'abandoned');
     assert.equal(reloaded.validate().valid, true);
   });
 
@@ -730,15 +731,15 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
       id: 'legacy-active', kind: 'decision', schemaVersion: 4, project: 'app',
       title: 'Legacy', chosen: 'A', status: 'active', alternatives: []
     }] });
-    assert.equal(legacy.exportData().records[0].status, 'proposed');
-    assert.equal(legacy.exportData().records[0].migration.legacyDecisionStatus, 'active');
+    assert.equal(privilegedSnapshot(legacy).records[0].status, 'proposed');
+    assert.equal(privilegedSnapshot(legacy).records[0].migration.legacyDecisionStatus, 'active');
 
     const directory = await scratchDirectory(t, 'shadowgraph-l1-restart-');
     const store = createJsonFileStore(join(directory, 'data.json'));
-    await store.save(graph.exportData());
+    await store.save(privilegedSnapshot(graph));
     const restarted = createShadowGraph();
     restarted.importData(await store.load());
-    assert.equal(restarted.exportData().records[0].status, 'proposed');
+    assert.equal(privilegedSnapshot(restarted).records[0].status, 'proposed');
     assert.equal(restarted.context({ project: 'app' }).activeDecisions.length, 1);
   });
 
@@ -751,16 +752,16 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
 
     const illegal = createShadowGraph();
     const fresh = illegal.addDecision({ id: 'illegal', project: 'app', title: 'Illegal', chosen: 'A' });
-    const before = illegal.exportData();
+    const before = privilegedSnapshot(illegal);
     assert.throws(() => illegal.updateDecisionStatus(fresh.id, 'validated'), /Illegal decision status transition: proposed -> validated/);
-    assert.deepEqual(illegal.exportData(), before);
+    assert.deepEqual(privilegedSnapshot(illegal), before);
     assert.throws(() => illegal.updateDecisionStatus(fresh.id, 'stale'), /stale is system-owned/);
-    assert.deepEqual(illegal.exportData(), before);
+    assert.deepEqual(privilegedSnapshot(illegal), before);
 
     assert.equal(illegal.updateDecisionStatus(fresh.id, 'archived').status, 'archived');
-    const archived = illegal.exportData();
+    const archived = privilegedSnapshot(illegal);
     assert.throws(() => illegal.updateDecisionStatus(fresh.id, 'planned'), /Illegal decision status transition: archived -> planned/);
-    assert.deepEqual(illegal.exportData(), archived);
+    assert.deepEqual(privilegedSnapshot(illegal), archived);
   });
 
   it('ACCEPTANCE L-5: maintain produces stale at the review deadline and archived is an explicit terminal disposition', () => {
@@ -785,7 +786,7 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
       { id: 'old-aging', kind: 'decision', schemaVersion: 4, project: 'app', title: 'Old aging', chosen: 'A', status: 'aging', alternatives: [] },
       { id: 'old-archived', kind: 'decision', schemaVersion: 4, project: 'app', title: 'Old archived', chosen: 'A', status: 'archived', alternatives: [] }
     ] });
-    assert.deepEqual(migrated.exportData().records.map((item) => item.status), ['stale', 'archived']);
+    assert.deepEqual(privilegedSnapshot(migrated).records.map((item) => item.status), ['stale', 'archived']);
   });
 });
 
@@ -802,7 +803,7 @@ describe('G4 (S2) — FIXED: the journal carries complete payloads and rebuilds 
     const graph = createShadowGraph();
     graph.addDecision({ project: 'p', title: 'T', chosen: 'C' });
 
-    const event = graph.exportData().events.find((item) => item.type === 'decision.recorded');
+    const event = privilegedSnapshot(graph).events.find((item) => item.type === 'decision.recorded');
     // Compare as a set — key order is not a guaranteed contract.
     assert.deepEqual(new Set(Object.keys(event)), new Set(['id', 'type', 'at', 'project', 'recordId']));
     for (const field of ['payload', 'actor', 'client', 'sessionId', 'schemaVersion', 'provenance', 'causation']) {
@@ -818,7 +819,7 @@ describe('G4 (S2) — FIXED: the journal carries complete payloads and rebuilds 
       alternatives: [{ label: 'postgres', reasonRejected: 'operational burden' }]
     });
 
-    const serialized = JSON.stringify(graph.exportData().events);
+    const serialized = JSON.stringify(privilegedSnapshot(graph).events);
     for (const content of ['sqlite', 'postgres', 'operational burden', 'single user', 'Use embedded storage']) {
       assert.equal(serialized.includes(content), false, `event log does not retain "${content}"`);
     }
@@ -829,7 +830,7 @@ describe('G4 (S2) — FIXED: the journal carries complete payloads and rebuilds 
     graph.addDecision({ project: 'p', title: 'T', chosen: 'C' });
     graph.addFact({ project: 'p', key: 'k', value: 'v' });
 
-    const events = graph.exportData().events;
+    const events = privilegedSnapshot(graph).events;
     assert.ok(events.length >= 2, 'events were emitted');
 
     const rebuilt = createShadowGraph();
@@ -937,7 +938,7 @@ describe('G4 (S2) — FIXED: the journal carries complete payloads and rebuilds 
     graph.setOutcome(first.id, { status: 'mixed', sourceClass: 'human_confirmed' });
     graph.supersedeDecision({ decisionId: first.id, replacementId: second.id });
 
-    const live = graph.exportData();
+    const live = privilegedSnapshot(graph);
     const rebuilt = graph.rebuild().projection;
     const canonical = (value) => JSON.stringify(value, Object.keys(value).sort ? undefined : undefined);
     const byId = (items) => [...items].sort((left, right) => String(left.id).localeCompare(String(right.id)));
@@ -964,7 +965,7 @@ describe('G4 (S2) — FIXED: the journal carries complete payloads and rebuilds 
     assert.deepEqual(rebuilt.idempotency.map((item) => item.key).sort(), ['decision:p:decision-1', 'fact:p:fact-1']);
 
     const restarted = createShadowGraph();
-    restarted.importData({ ...graph.exportData(), records: rebuilt.records, facts: rebuilt.facts, relations: rebuilt.relations, idempotency: rebuilt.idempotency });
+    restarted.importData({ ...privilegedSnapshot(graph), records: rebuilt.records, facts: rebuilt.facts, relations: rebuilt.relations, idempotency: rebuilt.idempotency });
     assert.equal(restarted.addDecision({ project: 'p', title: 'different', chosen: 'x', idempotencyKey: 'decision-1' }).id, originalDecision.id);
     assert.equal(restarted.addFact({ project: 'p', key: 'new', value: false, idempotencyKey: 'fact-1' }).id, originalFact.id);
   });
@@ -1004,7 +1005,7 @@ describe('G4 (S2) — FIXED: the journal carries complete payloads and rebuilds 
     // trust — but importing it through the graph cannot elevate anything either.
     const graph = createShadowGraph();
     graph.importData({ facts: rebuilt.facts });
-    const fact = graph.exportData().facts[0];
+    const fact = privilegedSnapshot(graph).facts[0];
     assert.equal(fact.sourceClass, 'human_confirmed', 'the claim is preserved');
     // And a NEW fact asserting the same thing is still unverified.
     assert.equal(graph.addFact({ key: 'fresh', value: 1, source: 'human_confirmed' }).verificationStatus, 'unverified');
@@ -1016,7 +1017,7 @@ describe('G4 (S2) — FIXED: the journal carries complete payloads and rebuilds 
     const graph = createShadowGraph();
     graph.addDecision({ project: 'p', title: 'Persisted', chosen: 'C' });
     graph.addFact({ project: 'p', key: 'k', value: 'v' });
-    await store.save(graph.exportData());
+    await store.save(privilegedSnapshot(graph));
 
     const reloaded = createShadowGraph();
     reloaded.importData(await store.load());
@@ -1041,8 +1042,8 @@ describe('G4 (S2) — FIXED: the journal carries complete payloads and rebuilds 
         return graph;
       };
       const jsonStore = createJsonFileStore(join(dir, 'data.json'));
-      await jsonStore.save(build().exportData());
-      await sqliteStore.save(build().exportData());
+      await jsonStore.save(privilegedSnapshot(build()));
+      await sqliteStore.save(privilegedSnapshot(build()));
 
       const fromJson = createShadowGraph(); fromJson.importData(await jsonStore.load());
       const fromSqlite = createShadowGraph(); fromSqlite.importData(await sqliteStore.load());
@@ -1223,7 +1224,7 @@ describe('G5 (S2) — FIXED: purge is logical by default, hard purge is explicit
     const graph = createShadowGraph();
     graph.importData({ schemaVersion: 2, records: [{ id: 'legacy-gone', kind: 'decision', project: 'gone', title: 'SECRET_LEGACY', chosen: 'x' }] });
     graph.purgeProject('gone', { mode: 'hard' });
-    assert.equal(JSON.stringify(graph.exportData().journal).includes('SECRET_LEGACY'), false);
+    assert.equal(JSON.stringify(privilegedSnapshot(graph).journal).includes('SECRET_LEGACY'), false);
   });
 
   it('ACCEPTANCE: purge leaves other projects untouched in state AND journal', () => {
@@ -1232,7 +1233,7 @@ describe('G5 (S2) — FIXED: purge is logical by default, hard purge is explicit
     graph.addDecision({ project: 'kept', title: 'B', chosen: 'C' });
 
     graph.purgeProject('gone', { mode: 'hard' });
-    const remaining = graph.exportData();
+    const remaining = privilegedSnapshot(graph);
     assert.equal(remaining.records.length, 1);
     assert.equal(remaining.records[0].project, 'kept');
     assert.equal(remaining.events.every((item) => item.project === 'kept'), true);
@@ -1591,7 +1592,7 @@ describe('G8 (S2) — FIXED: confidence has an auditable, evidence-weighted basi
     for (let index = 0; index < 10; index += 1) {
       graph.addConfidenceEvidence({ decisionId: low.id, key: `down-${index}`, supports: false, sourceClass: 'production_verified', reason: 'more doubt' });
     }
-    const records = graph.exportData().records;
+    const records = privilegedSnapshot(graph).records;
     assert.equal(records.find((item) => item.id === high.id).confidence.current, 1);
     assert.equal(records.find((item) => item.id === low.id).confidence.current, 0);
     assert.equal(graph.validate().valid, true);
@@ -1605,7 +1606,7 @@ describe('G8 (S2) — FIXED: confidence has an auditable, evidence-weighted basi
     const fact = graph.addFact({ project: 'p', key: 'k', value: 'v', source: 'human_confirmed' });
 
     assert.equal(fact.verificationStatus, 'unverified', 'still unverified — U-1');
-    const stored = graph.exportData().records.find((item) => item.id === decision.id);
+    const stored = privilegedSnapshot(graph).records.find((item) => item.id === decision.id);
     assert.equal(Object.prototype.hasOwnProperty.call(stored, 'verificationStatus'), false, 'decisions have no verification field');
   });
 
@@ -1617,7 +1618,7 @@ describe('G8 (S2) — FIXED: confidence has an auditable, evidence-weighted basi
     graph.addFact({ project: 'p', key: 'a', value: 1, source: 'agent_claimed' });
     graph.addFact({ project: 'p', key: 'b', value: 2, source: 'production_verified' });
 
-    const stored = graph.exportData().records.find((item) => item.id === decision.id);
+    const stored = privilegedSnapshot(graph).records.find((item) => item.id === decision.id);
     assert.equal(stored.confidence.current, 0.5);
     assert.equal(stored.confidence.basis.contributions.length, 0);
   });
@@ -1628,11 +1629,11 @@ describe('G8 (S2) — FIXED: confidence has an auditable, evidence-weighted basi
     const graph = createShadowGraph();
     const decision = graph.addDecision({ title: 'T', chosen: 'C' });
     graph.setOutcome(decision.id, { status: 'failed', sourceClass: 'tool_observed' });
-    await store.save(graph.exportData());
+    await store.save(privilegedSnapshot(graph));
 
     const reloaded = createShadowGraph();
     reloaded.importData(await store.load());
-    const stored = reloaded.exportData().records[0];
+    const stored = privilegedSnapshot(reloaded).records[0];
     assert.equal(stored.confidence.current, 0.36);
     assert.equal(stored.confidence.basis.contradictingEvidence, 1);
     assert.equal(stored.confidence.history.length, 1);
@@ -1657,13 +1658,13 @@ describe('ADVERSARIAL: bugs found by end-to-end review, now fixed', () => {
     const decision = graph.addDecision({ title: 'T', chosen: 'C' });
 
     graph.setOutcome(decision.id, { status: 'successful', sourceClass: 'tool_observed' });
-    const first = graph.exportData().records.find((item) => item.id === decision.id).confidence;
+    const first = privilegedSnapshot(graph).records.find((item) => item.id === decision.id).confidence;
 
     // Force a real clock tick between the two writes — this is what the old key
     // was sensitive to.
     await new Promise((resolve) => { setTimeout(resolve, 8); });
     graph.setOutcome(decision.id, { status: 'successful', sourceClass: 'tool_observed' });
-    const second = graph.exportData().records.find((item) => item.id === decision.id).confidence;
+    const second = privilegedSnapshot(graph).records.find((item) => item.id === decision.id).confidence;
 
     assert.equal(second.current, first.current, 'confidence must not move on a repeated identical outcome');
     assert.equal(second.basis.successfulOutcomes, 1, 'one outcome slot means one counted outcome');
@@ -1680,7 +1681,7 @@ describe('ADVERSARIAL: bugs found by end-to-end review, now fixed', () => {
 
     graph.setOutcome(decision.id, { status: 'successful', sourceClass: 'tool_observed' });
     graph.setOutcome(decision.id, { status: 'failed', sourceClass: 'tool_observed' });
-    const stored = graph.exportData().records.find((item) => item.id === decision.id);
+    const stored = privilegedSnapshot(graph).records.find((item) => item.id === decision.id);
 
     assert.equal(stored.outcome.status, 'failed');
     assert.equal(stored.confidence.basis.contributions.filter((item) => item.kind === 'outcome').length, 1);
@@ -1745,7 +1746,7 @@ describe('ADVERSARIAL: bugs found by end-to-end review, now fixed', () => {
 
     let graph = createShadowGraph();
     const restart = () => {
-      const data = graph.exportData();
+      const data = privilegedSnapshot(graph);
       const next = createShadowGraph();
       next.importData(data);
       graph = next;
@@ -1764,7 +1765,7 @@ describe('ADVERSARIAL: bugs found by end-to-end review, now fixed', () => {
     graph.addFact({ project: 'p', key: 'dep', value: 'multi', sourceClass: 'tool_observed' });
     restart();
 
-    const live = graph.exportData();
+    const live = privilegedSnapshot(graph);
     const rebuilt = graph.rebuild();
 
     assert.equal(rebuilt.rebuildable, true);
@@ -1786,7 +1787,7 @@ describe('ADVERSARIAL: bugs found by end-to-end review, now fixed', () => {
     graph.importData({ facts: [{ id: 'legacy', key: 'x', value: 1, source: 'human_confirmed', verificationStatus: 'verified' }] });
     graph.addFact({ project: 'default', key: 'y', value: 2, sourceClass: 'human_confirmed' });
 
-    const live = graph.exportData().facts;
+    const live = privilegedSnapshot(graph).facts;
     const rebuilt = graph.rebuild().projection.facts;
 
     for (const fact of rebuilt) {

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { foldText } from '../src/hybrid-search.js';
 import { groundCases, runEvaluation } from '../scripts/retrieval-eval.mjs';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const decision = (graph, title, project = 'p') =>
   graph.addDecision({ project, title, chosen: 'x' });
@@ -102,7 +103,7 @@ test('stored text is never rewritten by matching or ranking', () => {
   graph.search('علي', { project: 'p' });
   graph.search('resume', { project: 'p' });
 
-  const stored = graph.exportData().records.find((item) => item.id === record.id);
+  const stored = privilegedSnapshot(graph).records.find((item) => item.id === record.id);
   assert.equal(stored.title, original, 'the diacritics and alef maqsura are still there');
   assert.equal(stored.chosen, 'résumé-parser', 'and so is the accented identifier');
 });

@@ -20,6 +20,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const NODE_SQLITE = (await getRuntimeCapabilities()).nodeSqlite;
 const SQLITE_TEST_OPTIONS = NODE_SQLITE.available ? {} : { skip: NODE_SQLITE.reason };
@@ -242,7 +243,7 @@ test('a verdict resting on facts that disagree is reported apart, and withholds 
   // A second, equally applicable observation of the same key that disagrees.
   // Imported rather than written, because a second write of the same key
   // supersedes the first instead of contesting it.
-  const snapshot = seed.exportData();
+  const snapshot = privilegedSnapshot(seed);
   snapshot.facts = [...snapshot.facts, { ...snapshot.facts[0], id: 'fact:contested', value: '900ms' }];
   const graph = createShadowGraph();
   graph.importData(snapshot);
@@ -268,7 +269,7 @@ test('a contested false condition is contested, not a grounded negative', () => 
   const seed = createShadowGraph();
   decisionWith(seed, { key: 'replicaLagMs', operator: 'greater_than', value: 500, unit: 'ms' });
   seed.addFact({ project: 'p', key: 'replicaLagMs', value: '20ms', sourceClass: 'measured', validFrom: '2026-03-01T00:00:00Z' });
-  const snapshot = seed.exportData();
+  const snapshot = privilegedSnapshot(seed);
   snapshot.facts = [...snapshot.facts, { ...snapshot.facts[0], id: 'fact:contested', value: '30ms' }];
   const graph = createShadowGraph();
   graph.importData(snapshot);
@@ -377,11 +378,11 @@ test('reconsideration never moves decision status, confidence or lifecycle state
   const graph = createShadowGraph();
   const decision = decisionWith(graph, { key: 'replicaLagMs', operator: 'gte', value: 500 });
   graph.addFact({ project: 'p', key: 'replicaLagMs', value: 900, sourceClass: 'tool_observed' });
-  const before = graph.exportData().records.find((item) => item.id === decision.id);
+  const before = privilegedSnapshot(graph).records.find((item) => item.id === decision.id);
 
   graph.reconsider({ project: 'p' });
 
-  const after = graph.exportData().records.find((item) => item.id === decision.id);
+  const after = privilegedSnapshot(graph).records.find((item) => item.id === decision.id);
   assert.equal(after.status, before.status, 'status is untouched');
   assert.deepEqual(after.confidence, before.confidence, 'confidence is untouched');
   assert.deepEqual(after.alternatives, before.alternatives, 'the stored rule is never rewritten by evaluating it');
@@ -427,7 +428,7 @@ test('reconsideration survives a restart and is derived purely from stored state
   const original = createShadowGraph();
   decisionWith(original, { key: 'replicaLagMs', operator: 'gte', value: 500 });
   original.addFact({ project: 'p', key: 'replicaLagMs', value: 900, sourceClass: 'tool_observed' });
-  await store.save(original.exportData());
+  await store.save(privilegedSnapshot(original));
 
   // A brand new graph, state loaded from disk only. The new session does not
   // know which facts changed and supplies nothing.
@@ -444,7 +445,7 @@ test('reconsideration reads the same answer from JSON and from SQLite', async (t
   const source = createShadowGraph();
   decisionWith(source, { key: 'replicaLagMs', operator: 'gte', value: 500 });
   source.addFact({ project: 'p', key: 'replicaLagMs', value: 900, sourceClass: 'tool_observed' });
-  const snapshot = source.exportData();
+  const snapshot = privilegedSnapshot(source);
   const results = {};
 
   for (const backend of ['json', 'sqlite']) {

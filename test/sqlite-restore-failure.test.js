@@ -9,6 +9,7 @@ import { createShadowGraphServer } from '../src/server.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const snapshot = (id) => ({
   schemaVersion: 3,
@@ -27,7 +28,7 @@ const snapshot = (id) => ({
 const journalSnapshot = (title = 'NEW') => {
   const graph = createShadowGraph({ now: () => '2026-01-01T00:00:00.000Z' });
   graph.addDecision({ project: 'default', title, chosen: title });
-  return graph.exportData();
+  return privilegedSnapshot(graph);
 };
 
 const NODE_SQLITE = (await getRuntimeCapabilities()).nodeSqlite;
@@ -159,7 +160,7 @@ test('SQLite restore rejects an unexplained journal sequence gap without hard-pu
   graph.addDecision({ project: 'kept-a', title: 'A', chosen: 'A' });
   const removed = graph.addDecision({ project: 'missing-without-purge', title: 'REMOVED', chosen: 'REMOVED' });
   graph.addDecision({ project: 'kept-b', title: 'B', chosen: 'B' });
-  const unexplained = graph.exportData();
+  const unexplained = privilegedSnapshot(graph);
   unexplained.records = unexplained.records.filter((record) => record.id !== removed.id);
   unexplained.journal = unexplained.journal.filter((entry) => entry.entityId !== removed.id);
 
@@ -181,7 +182,7 @@ test('SQLite restore accepts a documented hard-purge journal gap with a matching
   graph.addDecision({ project: 'purged', title: 'PURGED', chosen: 'PURGED' });
   graph.addDecision({ project: 'kept-b', title: 'B', chosen: 'B' });
   graph.purgeProject('purged', { mode: 'hard' });
-  const hardPurged = graph.exportData();
+  const hardPurged = privilegedSnapshot(graph);
 
   await pair.source.save(hardPurged);
   pair.source.close();
@@ -211,7 +212,7 @@ test('SQLite restore accepts a documented hard purge that removes the leading jo
   graph.addDecision({ project: 'kept-a', title: 'A', chosen: 'A' });
   graph.addDecision({ project: 'kept-b', title: 'B', chosen: 'B' });
   graph.purgeProject('purged-first', { mode: 'hard' });
-  const hardPurged = graph.exportData();
+  const hardPurged = privilegedSnapshot(graph);
 
   await pair.source.save(hardPurged);
   pair.source.close();

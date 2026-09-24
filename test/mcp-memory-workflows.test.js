@@ -6,6 +6,7 @@ import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 function startJsonRpcChild(file, embeddingUrl, compact = true) {
   const child = spawn(process.execPath, ['src/mcp.js'], {
@@ -152,7 +153,7 @@ test('MCP context persists review signals that it creates', async (t) => {
     id: 'due-decision', project: 'app', title: 'Due review', chosen: 'A',
     reviewAfter: '2026-01-01T00:00:00.000Z'
   });
-  await writeFile(file, JSON.stringify(seed.exportData()), 'utf8');
+  await writeFile(file, JSON.stringify(privilegedSnapshot(seed)), 'utf8');
   const rpc = startJsonRpcChild(file);
   t.after(() => rpc.child.kill());
 
@@ -177,7 +178,7 @@ test('MCP context resource persists review signals that it creates', async (t) =
     id: 'resource-due', project: 'default', title: 'Resource due review', chosen: 'A',
     reviewAfter: '2026-01-01T00:00:00.000Z'
   });
-  await writeFile(file, JSON.stringify(seed.exportData()), 'utf8');
+  await writeFile(file, JSON.stringify(privilegedSnapshot(seed)), 'utf8');
   const rpc = startJsonRpcChild(file);
   t.after(() => rpc.child.kill());
 
@@ -197,12 +198,12 @@ test('MCP serializes restore with a concurrent acknowledged memory write', async
   const file = join(directory, 'data.json');
   const sourceFile = join(directory, 'source.json');
   const empty = createShadowGraph();
-  await writeFile(file, JSON.stringify(empty.exportData()), 'utf8');
+  await writeFile(file, JSON.stringify(privilegedSnapshot(empty)), 'utf8');
   const source = createShadowGraph({ now: () => '2026-08-27T00:00:00.000Z' });
   for (let index = 0; index < 2500; index += 1) {
     source.addDecision({ id: `restored-${index}`, project: 'restored', title: `Restored ${index}`, chosen: 'A' });
   }
-  await writeFile(sourceFile, JSON.stringify(source.exportData()), 'utf8');
+  await writeFile(sourceFile, JSON.stringify(privilegedSnapshot(source)), 'utf8');
   const rpc = startJsonRpcChild(file, undefined, false);
   t.after(() => rpc.child.kill());
   await rpc.call({ jsonrpc: '2.0', id: 1, method: 'tools/list' });

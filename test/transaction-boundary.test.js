@@ -9,13 +9,14 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const NOW = '2026-08-28T00:00:00.000Z';
 const LATER = '2026-08-29T00:00:00.000Z';
 const FAULT = 'injected transaction fault';
 
 function exportBytes(graph) {
-  return JSON.stringify(graph.exportData());
+  return JSON.stringify(privilegedSnapshot(graph));
 }
 
 function controlledClock(value = NOW) {
@@ -58,7 +59,7 @@ function projectionFromLive(data) {
 }
 
 function assertRebuildParity(graph, label) {
-  const live = graph.exportData();
+  const live = privilegedSnapshot(graph);
   const rebuilt = graph.rebuild();
   assert.equal(rebuilt.rebuildable, true, `${label}: journal remains rebuildable`);
   assert.deepEqual(projectionFromLive(rebuilt.projection), projectionFromLive(live), `${label}: rebuilt projection matches live state`);
@@ -447,7 +448,7 @@ test('transaction boundary: purge publication faults restore every live and audi
       }
       assert.equal(exportBytes(attempt.graph), before, `${mode}: delete ${failAt} restores exportData byte-for-byte`);
       await invokeAsPromise(attempt.invoke);
-      const after = attempt.graph.exportData();
+      const after = privilegedSnapshot(attempt.graph);
       assert.equal(after.records.some((item) => item.project === 'transaction'), false);
       assert.equal(after.records.some((item) => item.project === 'kept'), true);
       if (mode === 'logical') assertRebuildParity(attempt.graph, `${mode}: retry after delete ${failAt}`);
@@ -529,7 +530,7 @@ async function durableServerFaultScenario(backend, t) {
   }
   const seed = createShadowGraph({ now: () => NOW });
   seed.addDecision(decisionInput(`transaction-${backend}-kept`));
-  await store.save(seed.exportData());
+  await store.save(privilegedSnapshot(seed));
   const durableBefore = await store.load();
 
   const clock = controlledClock();
@@ -574,7 +575,7 @@ test('transaction boundary: HTTP rejection preserves SQLite durability and a lat
 function nearBoundaryPayload(id) {
   const graph = createShadowGraph({ now: () => NOW });
   graph.addDecision(decisionInput(id));
-  const data = graph.exportData();
+  const data = privilegedSnapshot(graph);
   data.journal[0].seq = Number.MAX_SAFE_INTEGER - 1;
   data.journalSeq = Number.MAX_SAFE_INTEGER - 1;
   data.journalEpoch = Number.MAX_SAFE_INTEGER - 1;

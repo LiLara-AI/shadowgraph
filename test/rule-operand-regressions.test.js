@@ -11,6 +11,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const NODE_SQLITE = (await getRuntimeCapabilities()).nodeSqlite;
 const SQLITE_TEST_OPTIONS = NODE_SQLITE.available ? {} : { skip: NODE_SQLITE.reason };
@@ -73,7 +74,7 @@ function graphWithStoredRule(rule, factValue) {
     project: 'p', id: 'decision:d1', title: 't', chosen: 'c',
     alternatives: [{ id: 'alternative:a1', label: 'alt-1', reasonRejected: 'r', reopenWhen: [{ key: 'lag', operator: 'gte', value: 1 }] }]
   });
-  const snapshot = seed.exportData();
+  const snapshot = privilegedSnapshot(seed);
   snapshot.records[0].alternatives[0].reopenWhen = [rule];
   const graph = createShadowGraph();
   graph.importData(snapshot);
@@ -98,7 +99,7 @@ test('the stored rule is never rewritten by evaluating it', () => {
   const graph = graphWithStoredRule({ key: 'lag', operator: 'not_equals' }, 500);
   graph.context({ project: 'p' });
   graph.maintain({});
-  const stored = graph.exportData().records[0].alternatives[0].reopenWhen[0];
+  const stored = privilegedSnapshot(graph).records[0].alternatives[0].reopenWhen[0];
   assert.deepEqual(stored, { key: 'lag', operator: 'not_equals' }, 'no operand was synthesised');
 });
 
@@ -117,7 +118,7 @@ function graphWithLegacySignal({ rule, historical, factValue }) {
     // can carry one.
     alternatives: [{ id: 'alternative:a1', label: 'alt-1', reasonRejected: 'r', reopenWhen: [{ key: 'lag', operator: 'gte', value: 1 }] }]
   });
-  const snapshot = seed.exportData();
+  const snapshot = privilegedSnapshot(seed);
   snapshot.records[0].alternatives[0].reopenWhen = [rule];
   snapshot.reviewSignals = [{
     id: 'review:legacy',
@@ -199,7 +200,7 @@ test('an operandless rule does not poison export or context', () => {
   assert.doesNotThrow(() => graph.exportData());
   assert.doesNotThrow(() => graph.context({ project: 'p' }));
   assert.deepEqual(
-    graph.exportData().records[0].alternatives[0].reopenWhen[0],
+    privilegedSnapshot(graph).records[0].alternatives[0].reopenWhen[0],
     { key: 'lag', operator: 'not_equals' },
     'and the rule round-trips exactly as stored'
   );
@@ -324,7 +325,7 @@ test('an unreconstructable legacy signal survives a restart untouched', async (t
     factValue: 600
   });
   assert.equal(reviewStatus(graph), 'open');
-  await store.save(graph.exportData());
+  await store.save(privilegedSnapshot(graph));
 
   const restored = createShadowGraph();
   restored.importData(await store.load());
@@ -342,7 +343,7 @@ test('operand handling is identical on JSON and SQLite', async (t) => {
     historical: { operator: 'gte' },
     factValue: 600
   });
-  const snapshot = source.exportData();
+  const snapshot = privilegedSnapshot(source);
   const results = {};
 
   for (const backend of ['json', 'sqlite']) {

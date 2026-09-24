@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createShadowGraph } from '../src/shadowgraph.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const AT = '2026-01-01T00:00:00Z';
 
@@ -26,7 +27,7 @@ const codes = (graph) => graph.validate().issues.map((issue) => issue.code);
 test('a legacy collision renames the later entity and leaves the old id in use', () => {
   const graph = createShadowGraph();
   graph.importData(legacyPayloadWithCollision());
-  const ids = graph.exportData().records.map((record) => `${record.kind}:${record.id}`);
+  const ids = privilegedSnapshot(graph).records.map((record) => `${record.kind}:${record.id}`);
   assert.ok(ids.includes('decision:x1'), 'the first entity keeps the id');
   assert.ok(ids.some((id) => id.startsWith('attempt:attempt_')), 'the colliding one is renamed');
 });
@@ -37,7 +38,7 @@ test('a reference left pointing at a reused legacy id is declared, not silently 
 
   // The relation still resolves -- to the decision -- which is exactly what makes
   // it dangerous. It must not look healthy.
-  const [relation] = graph.exportData().relations;
+  const [relation] = privilegedSnapshot(graph).relations;
   assert.equal(relation.from, 'x1');
   assert.equal(relation.to, 'x1');
   assert.deepEqual(relation.migration.ambiguousLegacyEndpoints, ['from', 'to']);
@@ -49,8 +50,8 @@ test('a reference left pointing at a reused legacy id is declared, not silently 
 test('the endpoint is never guessed at: no rebinding happens', () => {
   const graph = createShadowGraph();
   graph.importData(legacyPayloadWithCollision());
-  const renamed = graph.exportData().records.find((record) => record.kind === 'attempt').id;
-  const [relation] = graph.exportData().relations;
+  const renamed = privilegedSnapshot(graph).records.find((record) => record.kind === 'attempt').id;
+  const [relation] = privilegedSnapshot(graph).relations;
   assert.notEqual(relation.from, renamed, 'the import did not invent a link to the renamed entity');
   assert.notEqual(relation.to, renamed);
 });
@@ -62,7 +63,7 @@ test('record-level references to a reused legacy id are declared too', () => {
   payload.records[0].failedAttempts = ['x1'];
   graph.importData(payload);
 
-  const record = graph.exportData().records.find((item) => item.id === 'x1');
+  const record = privilegedSnapshot(graph).records.find((item) => item.id === 'x1');
   assert.deepEqual([...record.migration.ambiguousLegacyReferences].sort(), ['failedAttempts', 'supersedes']);
   assert.ok(codes(graph).includes('ambiguous_legacy_reference'));
 });
@@ -75,18 +76,18 @@ test('a legacy payload with no collision is not flagged', () => {
   graph.importData(payload);
 
   assert.ok(!codes(graph).includes('ambiguous_legacy_relation_endpoint'), 'no false positive');
-  const [relation] = graph.exportData().relations;
+  const [relation] = privilegedSnapshot(graph).relations;
   assert.equal(relation.migration, undefined, 'and no marker is written');
 });
 
 test('the ambiguity marker survives a repeated import unchanged', () => {
   const graph = createShadowGraph();
   graph.importData(legacyPayloadWithCollision());
-  const first = graph.exportData();
+  const first = privilegedSnapshot(graph);
   const reimported = createShadowGraph();
   reimported.importData(first);
 
-  const [relation] = reimported.exportData().relations;
+  const [relation] = privilegedSnapshot(reimported).relations;
   assert.deepEqual(relation.migration.ambiguousLegacyEndpoints, ['from', 'to'], 'it is not lost on round trip');
   assert.ok(codes(reimported).includes('ambiguous_legacy_relation_endpoint'), 'and it is still reported');
 });

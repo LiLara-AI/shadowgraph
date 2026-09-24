@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
+import { privilegedSnapshot } from './internal/snapshot.js';
 
 const STATE_FILE = '.shadowgraph-sync.json';
 
@@ -197,7 +198,7 @@ async function push({ graph, directory, state, project, dryRun }) {
 
 async function pull({ graph, directory, state, project, dryRun }) {
   const paths = await markdownFiles(directory);
-  const snapshot = graph.exportData();
+  const snapshot = privilegedSnapshot(graph);
   const allMemoriesById = new Map(snapshot.records.filter((record) => record.kind === 'memory').map((memory) => [memory.id, memory]));
   const active = snapshot.records.filter((record) => record.kind === 'memory' && record.status === 'active');
   const byIdentity = new Map(active.map((memory) => [identity(memory), memory]));
@@ -280,7 +281,7 @@ export async function syncMarkdownWorkspace(options = {}) {
   const directory = resolve(options.directory);
   await mkdir(directory, { recursive: true });
   const state = await loadState(directory);
-  const graphSnapshot = mode === 'pull' && options.dryRun !== true ? options.graph.exportData() : null;
+  const graphSnapshot = mode === 'pull' && options.dryRun !== true ? privilegedSnapshot(options.graph) : null;
   const stateSnapshot = JSON.parse(JSON.stringify(state));
   let canonicalPersisted = false;
   let persistenceAttempted = false;
@@ -296,7 +297,7 @@ export async function syncMarkdownWorkspace(options = {}) {
     }
     if (mode === 'pull' && options.dryRun !== true && options.persist) {
       persistenceAttempted = true;
-      await options.persist(options.graph.exportData());
+      await options.persist(privilegedSnapshot(options.graph));
       options.graph.replaceData(await options.loadPersisted());
       canonicalPersisted = true;
     }

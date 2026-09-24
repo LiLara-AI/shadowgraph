@@ -11,6 +11,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const NODE_SQLITE = (await getRuntimeCapabilities()).nodeSqlite;
 const SQLITE_TEST_OPTIONS = NODE_SQLITE.available ? {} : { skip: NODE_SQLITE.reason };
@@ -43,7 +44,7 @@ function graphWithObjectEvidence() {
     }]
   });
   seed.addFact({ project: 'p', key: 'lagProfile', value: ['spike'], validFrom: '2026-01-02T00:00:00.000Z' });
-  const snapshot = seed.exportData();
+  const snapshot = privilegedSnapshot(seed);
   const original = snapshot.facts[0];
   snapshot.facts = [...snapshot.facts, { ...original, id: 'fact:contested', value: ['spike', 'extra'] }];
   const graph = createShadowGraph();
@@ -56,7 +57,7 @@ test('mutating a returned violatedConditions value cannot reach canonical state'
   // Snapshot AFTER the first read: context() raises the review signal as a
   // documented side effect, and this test is about mutation, not that.
   graph.context({ project: 'p' });
-  const before = JSON.stringify(graph.exportData());
+  const before = JSON.stringify(privilegedSnapshot(graph));
 
   const breach = graph.context({ project: 'p' }).openReviews
     .flatMap((item) => item.violatedConditions ?? [])
@@ -68,7 +69,7 @@ test('mutating a returned violatedConditions value cannot reach canonical state'
   if (breach.evidence) breach.evidence.value = { tampered: true };
   for (const reference of breach.conflictingEvidence ?? []) reference.value = { tampered: true };
 
-  assert.equal(JSON.stringify(graph.exportData()), before, 'no canonical state moved');
+  assert.equal(JSON.stringify(privilegedSnapshot(graph)), before, 'no canonical state moved');
   const again = graph.context({ project: 'p' }).openReviews
     .flatMap((item) => item.violatedConditions ?? [])
     .find((item) => Array.isArray(item.observed));
@@ -79,7 +80,7 @@ test('mutating a returned violatedConditions value cannot reach canonical state'
 test('mutating a returned conditionDiagnostics value cannot reach canonical state', () => {
   const { graph, decision } = graphWithObjectEvidence();
   graph.context({ project: 'p' });
-  const before = JSON.stringify(graph.exportData());
+  const before = JSON.stringify(privilegedSnapshot(graph));
 
   const entry = graph.context({ project: 'p' }).conditionDiagnostics.find((item) => item.decisionId === decision.id);
   assert.ok(entry, 'the contested condition is reported as a diagnostic');
@@ -89,7 +90,7 @@ test('mutating a returned conditionDiagnostics value cannot reach canonical stat
     for (const reference of condition.conflictingEvidence ?? []) reference.value = null;
   }
 
-  assert.equal(JSON.stringify(graph.exportData()), before, 'no canonical state moved');
+  assert.equal(JSON.stringify(privilegedSnapshot(graph)), before, 'no canonical state moved');
 });
 
 test('mutating a returned attempt condition detail cannot reach canonical state', () => {
@@ -101,7 +102,7 @@ test('mutating a returned attempt condition detail cannot reach canonical state'
     reusableWhen: [{ key: 'limits', operator: 'gte', value: 600 }]
   });
   graph.addFact({ project: 'p', key: 'limits', value: ['raised', 'audited'] });
-  const before = JSON.stringify(graph.exportData());
+  const before = JSON.stringify(privilegedSnapshot(graph));
 
   const condition = graph.context({ project: 'p' }).conditionDiagnostics
     .filter((item) => item.attemptId).flatMap((item) => item.conditions)
@@ -110,7 +111,7 @@ test('mutating a returned attempt condition detail cannot reach canonical state'
   condition.observed.push('tampered');
   if (condition.evidence) condition.evidence.value = null;
 
-  assert.equal(JSON.stringify(graph.exportData()), before, 'no canonical state moved');
+  assert.equal(JSON.stringify(privilegedSnapshot(graph)), before, 'no canonical state moved');
   const again = graph.context({ project: 'p' }).conditionDiagnostics
     .filter((item) => item.attemptId).flatMap((item) => item.conditions)
     .find((item) => Array.isArray(item.observed));
@@ -124,14 +125,14 @@ test('a satisfied reusable attempt hands back detached condition details', () =>
     reusableWhen: [{ key: 'limits', operator: 'contains', value: 'raised' }]
   });
   graph.addFact({ project: 'p', key: 'limits', value: ['raised', 'audited'] });
-  const before = JSON.stringify(graph.exportData());
+  const before = JSON.stringify(privilegedSnapshot(graph));
 
   const reusable = graph.context({ project: 'p' }).reusableAttempts[0];
   assert.ok(reusable, 'the attempt is reported reusable');
   reusable.satisfiedConditions[0].observed.push('tampered');
   if (reusable.satisfiedConditions[0].evidence) reusable.satisfiedConditions[0].evidence.value = null;
 
-  assert.equal(JSON.stringify(graph.exportData()), before, 'no canonical state moved');
+  assert.equal(JSON.stringify(privilegedSnapshot(graph)), before, 'no canonical state moved');
   assert.deepEqual(
     graph.context({ project: 'p' }).reusableAttempts[0].satisfiedConditions[0].observed,
     ['raised', 'audited'],
@@ -152,7 +153,7 @@ test('a tampered response leaves the persisted rebuild identical', async (t) => 
   // Tamper BEFORE the snapshot, so a leak would be carried into what is saved.
   const breach = graph.context({ project: 'p' }).openReviews[0].violatedConditions[0];
   breach.observed.push('tampered');
-  await store.save(graph.exportData());
+  await store.save(privilegedSnapshot(graph));
 
   const restored = createShadowGraph();
   restored.importData(await store.load());
@@ -258,7 +259,7 @@ test('an acknowledgement survives a restart', async (t) => {
   twoThresholdDecision(graph);
   graph.addFact({ project: 'p', key: 'lag', value: 600 });
   graph.acknowledgeReview(graph.context({ project: 'p' }).openReviews[0].reviewSignalId);
-  await store.save(graph.exportData());
+  await store.save(privilegedSnapshot(graph));
 
   const restored = createShadowGraph();
   restored.importData(await store.load());
@@ -282,7 +283,7 @@ test('acknowledgement coverage behaves identically on JSON and SQLite', async (t
   twoThresholdDecision(source, { decision: 'decision:d1', low: 'alternative:low', high: 'alternative:high' });
   source.addFact({ project: 'p', key: 'lag', value: 600, id: 'fact:narrow' });
   source.acknowledgeReview(source.context({ project: 'p' }).openReviews[0].reviewSignalId);
-  const snapshot = source.exportData();
+  const snapshot = privilegedSnapshot(source);
 
   const snapshots = {};
   for (const backend of ['json', 'sqlite']) {
@@ -386,7 +387,7 @@ test('an expired candidate drops out of conflicting evidence rather than contest
   });
   // The surviving observation says no breach; the expiring one disagrees.
   seed.addFact({ project: 'p', key: 'lag', value: 100, validFrom: '2025-12-01T00:00:00.000Z' });
-  const snapshot = seed.exportData();
+  const snapshot = privilegedSnapshot(seed);
   const original = snapshot.facts[0];
   snapshot.facts = [...snapshot.facts, {
     ...original, id: 'fact:expiring', value: 600,

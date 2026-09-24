@@ -13,6 +13,7 @@ import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createShadowGraphServer } from '../src/server.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const exec = promisify(execFile);
 
@@ -49,11 +50,11 @@ async function signedFixture(t, options = {}) {
 }
 
 function factById(graph, id) {
-  return graph.exportData().facts.find((fact) => fact.id === id);
+  return privilegedSnapshot(graph).facts.find((fact) => fact.id === id);
 }
 
 function expirationEntries(graph, id) {
-  return graph.exportData().journal.filter((entry) => entry.type === 'fact.expired' && entry.entityId === id);
+  return privilegedSnapshot(graph).journal.filter((entry) => entry.type === 'fact.expired' && entry.entityId === id);
 }
 
 function startMcp(file) {
@@ -114,7 +115,7 @@ async function seedUnsignedValidTo(file, id, boundary) {
   const graph = createShadowGraph({ now: () => '2026-08-27T12:00:00.000Z' });
   graph.addFact({ id, project: 'ds-p1-005', key: id, value: true, validTo: boundary });
   const store = createJsonFileStore(file);
-  await store.save(graph.exportData());
+  await store.save(privilegedSnapshot(graph));
   store.close();
 }
 
@@ -216,9 +217,9 @@ test('DS-P1-005 seventh review: fact migration backfills canonical validity and 
     effectiveExpirationBoundary: boundary
   });
 
-  const before = graph.exportData();
+  const before = privilegedSnapshot(graph);
   assert.throws(() => graph.maintain({ now: boundary, changedFacts: {} }), /changedFacts/);
-  assert.deepEqual(graph.exportData(), before, 'invalid maintain must not expire, journal, or otherwise mutate');
+  assert.deepEqual(privilegedSnapshot(graph), before, 'invalid maintain must not expire, journal, or otherwise mutate');
 
   graph.maintain({ now: boundary });
   const expired = factById(graph, 'legacy-valid-to-only');
@@ -233,7 +234,7 @@ test('DS-P1-005 seventh review: an earlier current narrowing expires, while a su
     validTo: '2026-09-15T00:00:00.000Z',
     expiresAt: '2026-09-30T00:00:00.000Z'
   });
-  const narrowedPayload = narrowedSource.graph.exportData();
+  const narrowedPayload = privilegedSnapshot(narrowedSource.graph);
   const narrowedAt = '2026-08-29T00:00:00.000Z';
   narrowedPayload.facts.find((fact) => fact.id === narrowedSource.fact.id).temporal.validTo = narrowedAt;
   narrowedPayload.journal.findLast((entry) => entry.entityId === narrowedSource.fact.id && entry.payload).payload.temporal.validTo = narrowedAt;
@@ -271,7 +272,7 @@ test('DS-P1-005 seventh review: expired attestation survives import, rebuild, ve
     validTo: '2026-08-28T00:00:00.000Z'
   });
   fixture.graph.maintain({ now: '2026-08-28T00:00:00.000Z' });
-  const source = fixture.graph.exportData();
+  const source = privilegedSnapshot(fixture.graph);
   const terminal = structuredClone(source.facts.find((fact) => fact.id === fixture.fact.id));
 
   const configured = createShadowGraph({ verifier: fixture.verifier });
@@ -367,15 +368,15 @@ test('DS-P1-005 seventh review: persisted lifecycle contradictions and validity 
     expiresAt: '2026-09-30T00:00:00.000Z'
   });
   fixture.graph.maintain({ now: '2026-08-28T00:00:00.000Z' });
-  const legitimate = fixture.graph.exportData();
+  const legitimate = privilegedSnapshot(fixture.graph);
   const accepted = createShadowGraph({ verifier: fixture.verifier });
   assert.doesNotThrow(() => accepted.importData(legitimate));
 
   const assertRejected = (payload, pattern) => {
     const target = createShadowGraph({ verifier: fixture.verifier, now: () => '2026-08-27T12:00:00.000Z' });
-    const before = target.exportData();
+    const before = privilegedSnapshot(target);
     assert.throws(() => target.importData(payload), pattern);
-    assert.deepEqual(target.exportData(), before);
+    assert.deepEqual(privilegedSnapshot(target), before);
   };
   const mutateFinal = (payload, mutate) => {
     mutate(payload.facts.find((fact) => fact.id === fixture.fact.id));
@@ -400,7 +401,7 @@ test('DS-P1-005 seventh review: persisted lifecycle contradictions and validity 
   ]) fact.expiresAt = '2099-12-31T00:00:00.000Z';
   assertRejected(laterDeclaredExpiry, /validity|verification.*invalid|expiresAt/i);
   const noVerifier = createShadowGraph({ now: () => '2026-08-27T12:00:00.000Z' });
-  const noVerifierBefore = noVerifier.exportData();
+  const noVerifierBefore = privilegedSnapshot(noVerifier);
   assert.throws(() => noVerifier.importData(laterDeclaredExpiry), /validity|expiresAt/i);
-  assert.deepEqual(noVerifier.exportData(), noVerifierBefore, 'policy contradictions fail closed without a configured verifier too');
+  assert.deepEqual(privilegedSnapshot(noVerifier), noVerifierBefore, 'policy contradictions fail closed without a configured verifier too');
 });

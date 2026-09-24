@@ -12,6 +12,7 @@ import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { journalGaps, rebuildProjection } from '../src/journal.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const NOW = '2026-08-28T00:00:00.000Z';
 const RAW_ID = 'DS_P1_007_RAW_PURGED_ENTITY_SENTINEL';
@@ -192,7 +193,7 @@ test('DS-P1-007 ninth review RED: schema 4 raw purge ledgers and every reference
 
     const graph = createShadowGraph({ now: () => NOW });
     graph.importData(fixture);
-    const exported = graph.exportData();
+    const exported = privilegedSnapshot(graph);
     const after = rebuildProjection(exported.journal, { journalEpoch: exported.journalEpoch });
 
     assertRawIdentityAbsent(exported, `${mode} migrated export`);
@@ -234,7 +235,7 @@ test('DS-P1-007 ninth review: schemas 1-4 and a journal-bearing merge cannot res
   for (const schemaVersion of [1, 2, 3, 4]) {
     const graph = createShadowGraph({ now: () => NOW });
     graph.importData(fixtureForSchema(schemaVersion, { mode: 'logical' }));
-    assertRawIdentityAbsent(graph.exportData(), `schema ${schemaVersion} export`);
+    assertRawIdentityAbsent(privilegedSnapshot(graph), `schema ${schemaVersion} export`);
     assertRawIdentityAbsent(graph.rebuild(), `schema ${schemaVersion} rebuild`);
   }
 
@@ -285,7 +286,7 @@ test('DS-P1-007 ninth review: schemas 1-4 and a journal-bearing merge cannot res
     journalSeq: 5,
     journalEpoch: 1
   });
-  const merged = destination.exportData();
+  const merged = privilegedSnapshot(destination);
   assertRawIdentityAbsent(merged, 'merge export');
   assert.deepEqual(merged.records.map((item) => item.id).sort(), [host.id, kept.id].sort());
   assert.equal(destination.rebuild().rebuildable, true);
@@ -370,7 +371,7 @@ async function seedDestination(path) {
   const store = createJsonFileStore(path);
   const old = createShadowGraph({ now: () => NOW });
   old.addDecision({ id: `old-${path.split(/[\\/]/).pop()}`, project: 'old', title: 'Old', chosen: 'replace' });
-  await store.save(old.exportData());
+  await store.save(privilegedSnapshot(old));
   store.close();
 }
 
@@ -424,12 +425,12 @@ test('DS-P1-007 ninth review RED: raw schema-4 restores are normalized in JSON/S
 
     const expectedGraph = createShadowGraph({ now: () => NOW });
     expectedGraph.importData(sourcePayload);
-    const expected = expectedGraph.exportData();
+    const expected = privilegedSnapshot(expectedGraph);
 
     let store = await createSqliteStore(destination);
     const old = createShadowGraph({ now: () => NOW });
     old.addDecision({ id: 'sqlite-old', project: 'old', title: 'Old', chosen: 'replace' });
-    await store.save(old.exportData());
+    await store.save(privilegedSnapshot(old));
     const oldRevision = (await store.load()).revision;
     await store.restore(source);
     const restored = await store.load();
@@ -462,7 +463,7 @@ test('DS-P1-007 ninth review RED: raw schema-4 restores are normalized in JSON/S
     });
     const old = createShadowGraph({ now: () => NOW });
     old.addDecision({ id: 'sqlite-rollback-old', project: 'old', title: 'Old', chosen: 'preserve' });
-    await store.save(old.exportData());
+    await store.save(privilegedSnapshot(old));
     const destinationBefore = await store.load();
     await assert.rejects(store.restore(source), /injected delete-then-failure/);
     assert.deepEqual(await store.load(), destinationBefore, 'staged normalization failure preserves destination semantics and revision');
@@ -496,7 +497,7 @@ test('DS-P1-007 ninth review RED: raw schema-4 restores are normalized in JSON/S
       });
       assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
       assertRawIdentityAbsent(await response.text(), 'HTTP response');
-      assertRawIdentityAbsent(app.graph.exportData(), 'HTTP live graph');
+      assertRawIdentityAbsent(privilegedSnapshot(app.graph), 'HTTP live graph');
       assertRawIdentityAbsent(await readFile(destination), 'HTTP durable bytes');
     } finally {
       await new Promise((resolve) => app.server.close(resolve));
@@ -561,7 +562,7 @@ function baselineMetadataFixture() {
       { ...decision('ds-p1-008-private', 'ds-p1-008-private', 'Private baseline record'), schemaVersion: 3 }
     ]
   });
-  return addBaselineMetadata(source.exportData());
+  return addBaselineMetadata(privilegedSnapshot(source));
 }
 
 function assertSanitizedBaseline(payload, label, expectedRecordIds) {
@@ -590,7 +591,7 @@ function assertBaselineRebuildParity(payload, label) {
     payload.records.map((item) => item.id).sort(),
     `${label} rebuild records match live projection`
   );
-  return graph.exportData();
+  return privilegedSnapshot(graph);
 }
 
 async function assertBaselineAcrossPersistence(t, payload, label, expectedRecordIds) {
@@ -626,7 +627,7 @@ async function assertBaselineAcrossPersistence(t, payload, label, expectedRecord
       let destinationStore = await createStore(backend, destination);
       const old = createShadowGraph({ now: () => NOW });
       old.addDecision({ id: `${label}-${backend}-old`, project: 'old', title: 'Old', chosen: 'replace' });
-      await destinationStore.save(old.exportData());
+      await destinationStore.save(privilegedSnapshot(old));
       if (backend === 'sqlite') {
         await destinationStore.restore(backup);
       } else {
@@ -649,10 +650,10 @@ test('DS-P1-008 ninth review RED: rewritten baselines are selectively canonical 
   for (const mode of ['logical', 'hard']) {
     const graph = createShadowGraph({ now: () => NOW });
     graph.replaceData(baselineMetadataFixture());
-    const before = graph.exportData();
+    const before = privilegedSnapshot(graph);
     const baselineBefore = before.journal.find((entry) => entry.type === 'projection.baseline');
     graph.purgeProject('ds-p1-008-private', { mode });
-    const exported = graph.exportData();
+    const exported = privilegedSnapshot(graph);
     const baselineAfter = exported.journal.find((entry) => entry.type === 'projection.baseline');
     assert.equal(exported.journalEpoch, before.journalEpoch, `${mode} purge preserves journalEpoch`);
     assert.equal(baselineAfter.seq, baselineBefore.seq, `${mode} purge preserves baseline placement`);
@@ -665,7 +666,7 @@ test('DS-P1-008 ninth review RED: rewritten baselines are selectively canonical 
     const fixture = addBaselineMetadata(fixtureForSchema(schemaVersion, { mode: 'logical' }));
     const graph = createShadowGraph({ now: () => NOW });
     graph.importData(fixture);
-    const exported = graph.exportData();
+    const exported = privilegedSnapshot(graph);
     assertSanitizedBaseline(exported, `schema ${schemaVersion} legacy migration`, ['ds-p1-007-kept']);
     assertBaselineRebuildParity(exported, `schema ${schemaVersion} legacy migration`);
     persistedCases.push({ label: `legacy-schema-${schemaVersion}`, payload: exported, expectedRecordIds: ['ds-p1-007-kept'] });
@@ -680,7 +681,7 @@ test('DS-P1-008 ninth review RED: rewritten baselines are selectively canonical 
     assert.equal(redacted.records[0].secretNote, '[REDACTED]', 'redaction changes the live and baseline collection consistently');
     assert.equal(redacted.journal.find((entry) => entry.type === 'projection.baseline').payload.records[0].secretNote, '[REDACTED]');
     assertBaselineRebuildParity(redacted, 'redaction');
-    assert.equal(JSON.stringify(graph.exportData()).includes(BASELINE_METADATA_SENTINEL), true, 'redaction must not mutate the live baseline');
+    assert.equal(JSON.stringify(privilegedSnapshot(graph)).includes(BASELINE_METADATA_SENTINEL), true, 'redaction must not mutate the live baseline');
     persistedCases.push({
       label: 'redaction', payload: redacted,
       expectedRecordIds: ['ds-p1-008-kept', 'ds-p1-008-private']
@@ -691,7 +692,7 @@ test('DS-P1-008 ninth review RED: rewritten baselines are selectively canonical 
     const graph = createShadowGraph({ now: () => NOW });
     graph.replaceData(baselineMetadataFixture());
     graph.purgeProject('ds-p1-008-absent', { mode: 'logical' });
-    const untouched = graph.exportData();
+    const untouched = privilegedSnapshot(graph);
     const baseline = untouched.journal.find((entry) => entry.type === 'projection.baseline');
     assert.equal(baseline.arbitraryEnvelopeField, BASELINE_METADATA_SENTINEL, 'an untouched baseline envelope is not sanitized');
     assert.equal(baseline.payload.arbitraryPayloadField, BASELINE_METADATA_SENTINEL, 'an untouched baseline payload is not sanitized');

@@ -15,6 +15,7 @@ import { createShadowGraph, rebuildProjection, SUPPORTED_SCHEMA_VERSIONS } from 
 import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 // Canonical comparison: array order by id AND object keys sorted. JSON key
 // INSERTION order is not part of the data's meaning, so comparing raw
@@ -67,7 +68,7 @@ describe('P0-1 — purge removes idempotency entries for purged entities', () =>
 
     graph.purgeProject('gone');
 
-    const exported = JSON.stringify(graph.exportData().idempotency);
+    const exported = JSON.stringify(privilegedSnapshot(graph).idempotency);
     for (const leak of ['PURGED_TITLE', 'SECRET_CHOICE', 'PURGED_VALUE']) {
       assert.equal(exported.includes(leak), false, `idempotency cache still holds ${leak}`);
     }
@@ -101,7 +102,7 @@ describe('P0-1 — purge removes idempotency entries for purged entities', () =>
 
     const retried = graph.addDecision({ project: 'gone', title: 'FRESH', chosen: 'c', idempotencyKey: 'k1' });
     assert.notEqual(retried.id, original.id);
-    assert.equal(JSON.stringify(graph.exportData().idempotency).includes('PURGED_TITLE'), false);
+    assert.equal(JSON.stringify(privilegedSnapshot(graph).idempotency).includes('PURGED_TITLE'), false);
   });
 
   it('purge leaves an UNRELATED project\'s idempotency entries working', () => {
@@ -193,19 +194,19 @@ describe('P0-2 — a failed replace/import leaves the live graph untouched', () 
 
   it('a rejected replace leaves the previous graph semantically unchanged', () => {
     const graph = seeded();
-    const before = normalize(graph.exportData().records);
-    const beforeFacts = normalize(graph.exportData().facts);
+    const before = normalize(privilegedSnapshot(graph).records);
+    const beforeFacts = normalize(privilegedSnapshot(graph).facts);
 
     assert.throws(() => graph.replaceData({ schemaVersion: 999, records: [] }), /Unsupported data schemaVersion/);
 
-    assert.equal(normalize(graph.exportData().records), before, 'records survived the failed replace');
-    assert.equal(normalize(graph.exportData().facts), beforeFacts, 'facts survived the failed replace');
+    assert.equal(normalize(privilegedSnapshot(graph).records), before, 'records survived the failed replace');
+    assert.equal(normalize(privilegedSnapshot(graph).facts), beforeFacts, 'facts survived the failed replace');
     assert.equal(graph.stats().decisions, 1);
   });
 
   it('a replace carrying blocking validation errors is refused and changes nothing', () => {
     const graph = seeded();
-    const before = normalize(graph.exportData().records);
+    const before = normalize(privilegedSnapshot(graph).records);
 
     // A relation pointing at an entity that does not exist is a blocking error.
     assert.throws(
@@ -213,7 +214,7 @@ describe('P0-2 — a failed replace/import leaves the live graph untouched', () 
       /Refusing to replace data/
     );
 
-    assert.equal(normalize(graph.exportData().records), before);
+    assert.equal(normalize(privilegedSnapshot(graph).records), before);
   });
 
   it('the graph is still fully USABLE after a failed replace', () => {
@@ -233,7 +234,7 @@ describe('P0-2 — a failed replace/import leaves the live graph untouched', () 
     const graph = seeded();
     graph.replaceData({ schemaVersion: 3, records: [{ id: 'new1', kind: 'decision', title: 'REPLACED', chosen: 'x', alternatives: [] }] });
 
-    const exported = graph.exportData();
+    const exported = privilegedSnapshot(graph);
     assert.equal(exported.records.length, 1);
     assert.equal(exported.records[0].title, 'REPLACED');
     assert.equal(exported.facts.length, 0, 'old facts are gone after a successful replace');
@@ -245,7 +246,7 @@ describe('P0-2 — a failed replace/import leaves the live graph untouched', () 
     const store = createJsonFileStore(join(directory, 'data.json'));
 
     const graph = seeded();
-    await store.save(graph.exportData());
+    await store.save(privilegedSnapshot(graph));
 
     // A corrupt/newer file arrives where a good one used to be.
     assert.throws(() => graph.replaceData({ schemaVersion: 1000, records: [] }), /Unsupported data schemaVersion/);
@@ -270,7 +271,7 @@ describe('P1-8 — confidence is a summed fold, clamped once', () => {
     for (const [key, supports, sourceClass] of order) {
       graph.addConfidenceEvidence({ decisionId: decision.id, key, supports, sourceClass, reason: `reason ${key}` });
     }
-    return graph.exportData().records[0].confidence;
+    return privilegedSnapshot(graph).records[0].confidence;
   }
 
   const EVIDENCE = [
@@ -307,10 +308,10 @@ describe('P1-8 — confidence is a summed fold, clamped once', () => {
     for (let index = 0; index < 5; index += 1) {
       graph.addConfidenceEvidence({ decisionId: decision.id, key: `down${index}`, supports: false, sourceClass: 'production_verified', reason: 'r' });
     }
-    assert.equal(graph.exportData().records[0].confidence.current, 0, 'clamped to the floor');
+    assert.equal(privilegedSnapshot(graph).records[0].confidence.current, 0, 'clamped to the floor');
 
     graph.addConfidenceEvidence({ decisionId: decision.id, key: 'up', supports: true, sourceClass: 'agent_claimed', reason: 'r' });
-    assert.equal(graph.exportData().records[0].confidence.current, 0, 'one weak positive does not undo five strong negatives');
+    assert.equal(privilegedSnapshot(graph).records[0].confidence.current, 0, 'one weak positive does not undo five strong negatives');
   });
 
   it('confidence stays bounded to [0,1] under heavy evidence in both directions', () => {
@@ -320,7 +321,7 @@ describe('P1-8 — confidence is a summed fold, clamped once', () => {
       for (let index = 0; index < 50; index += 1) {
         graph.addConfidenceEvidence({ decisionId: decision.id, key: `k${index}`, supports, sourceClass: 'production_verified', reason: 'r' });
       }
-      const current = graph.exportData().records[0].confidence.current;
+      const current = privilegedSnapshot(graph).records[0].confidence.current;
       assert.ok(current >= 0 && current <= 1, `out of bounds: ${current}`);
       assert.equal(current, supports ? 1 : 0);
     }
@@ -332,7 +333,7 @@ describe('P1-8 — confidence is a summed fold, clamped once', () => {
     graph.setOutcome(decision.id, { status: 'successful', sourceClass: 'production_verified' });
     graph.setOutcome(decision.id, { status: 'failed', sourceClass: 'production_verified' });
 
-    const confidence = graph.exportData().records[0].confidence;
+    const confidence = privilegedSnapshot(graph).records[0].confidence;
     // Exactly as if the successful outcome had never been recorded.
     assert.equal(confidence.current, 0.3, '0.5 + (0.2 * 1 * -1)');
     assert.equal(confidence.basis.successfulOutcomes, 0);
@@ -345,7 +346,7 @@ describe('P1-8 — confidence is a summed fold, clamped once', () => {
     graph.addConfidenceEvidence({ decisionId: decision.id, key: 'e1', supports: true, sourceClass: 'tool_observed', reason: 'r' });
     graph.setOutcome(decision.id, { status: 'mixed', sourceClass: 'human_confirmed' });
 
-    const live = graph.exportData().records;
+    const live = privilegedSnapshot(graph).records;
     const rebuilt = graph.rebuild();
     assert.equal(rebuilt.rebuildable, true);
     assert.equal(normalize(live), normalize(rebuilt.projection.records), 'confidence is identical after replay');
@@ -385,11 +386,11 @@ describe('P1-9 — evidence dedupe requires a stable key', () => {
     const graph = createShadowGraph();
     const decision = graph.addDecision({ title: 'T', chosen: 'C' });
     graph.addConfidenceEvidence({ decisionId: decision.id, key: 'obs-1', supports: true, sourceClass: 'tool_observed', reason: 'r' });
-    const first = graph.exportData().records[0].confidence;
+    const first = privilegedSnapshot(graph).records[0].confidence;
 
     await new Promise((resolve) => { setTimeout(resolve, 8); });
     graph.addConfidenceEvidence({ decisionId: decision.id, key: 'obs-1', supports: true, sourceClass: 'tool_observed', reason: 'r' });
-    const second = graph.exportData().records[0].confidence;
+    const second = privilegedSnapshot(graph).records[0].confidence;
 
     assert.equal(second.current, first.current, 'a retry must not move confidence');
     assert.equal(second.basis.contributions.length, 1);
@@ -402,7 +403,7 @@ describe('P1-9 — evidence dedupe requires a stable key', () => {
     graph.addConfidenceEvidence({ decisionId: decision.id, key: 'obs-1', supports: true, sourceClass: 'tool_observed', reason: 'r' });
     graph.addConfidenceEvidence({ decisionId: decision.id, key: 'obs-2', supports: true, sourceClass: 'tool_observed', reason: 'r' });
 
-    assert.equal(graph.exportData().records[0].confidence.basis.contributions.length, 2);
+    assert.equal(privilegedSnapshot(graph).records[0].confidence.basis.contributions.length, 2);
   });
 });
 
@@ -422,7 +423,7 @@ describe('P1-10 — SQLite/JSON confidence parity across close and reopen', () =
 
     const directory = await scratchDirectory(t, 'shadowgraph-parity-');
     const store = await makeStore(directory);
-    await store.save(graph.exportData());
+    await store.save(privilegedSnapshot(graph));
     await store.close?.();
 
     const reopened = await makeStore(directory);
@@ -431,7 +432,7 @@ describe('P1-10 — SQLite/JSON confidence parity across close and reopen', () =
 
     const reloaded = createShadowGraph();
     reloaded.importData(loaded);
-    return { live: graph.exportData(), reloaded: reloaded.exportData() };
+    return { live: privilegedSnapshot(graph), reloaded: privilegedSnapshot(reloaded) };
   }
 
   const assertParity = (live, reloaded) => {
@@ -498,7 +499,7 @@ describe('P2-11 — an unnumbered journal never yields an Infinity epoch', () =>
     const graph = createShadowGraph();
     graph.importData({ journal: [{ id: 'e1', type: 'fact.observed' }, { id: 'e2', type: 'decision.recorded' }] });
 
-    const exported = graph.exportData();
+    const exported = privilegedSnapshot(graph);
     assert.notEqual(exported.journalEpoch, Infinity);
     assert.ok(exported.journalEpoch === null || Number.isInteger(exported.journalEpoch));
   });
@@ -551,13 +552,13 @@ describe('P2-12 — duplicate journal sequences are detected, not resolved by in
   it('import preflight rejects it before validate can observe a corrupted live graph', () => {
     const graph = createShadowGraph();
     graph.addDecision({ id: 'duplicate-seq-sentinel', project: 'duplicate-seq-sentinel', title: 'Keep', chosen: 'keep' });
-    const before = JSON.stringify(graph.exportData());
+    const before = JSON.stringify(privilegedSnapshot(graph));
 
     assert.throws(
       () => graph.importData({ journal: duplicated }),
       (error) => error?.code === 'duplicate_journal_sequence'
     );
-    assert.equal(JSON.stringify(graph.exportData()), before);
+    assert.equal(JSON.stringify(privilegedSnapshot(graph)), before);
     assert.equal(graph.validate().valid, true);
   });
 
@@ -613,13 +614,13 @@ describe('P2-14 — future live schemas are preserved and reported, never downgr
   it('a future record keeps its own schemaVersion', () => {
     const graph = createShadowGraph();
     graph.importData({ records: [{ id: 'fut', kind: 'decision', schemaVersion: 99, title: 'F', chosen: 'c', alternatives: [] }] });
-    assert.equal(graph.exportData().records[0].schemaVersion, 99);
+    assert.equal(privilegedSnapshot(graph).records[0].schemaVersion, 99);
   });
 
   it('a future fact keeps its own schemaVersion', () => {
     const graph = createShadowGraph();
     graph.importData({ facts: [{ id: 'ff', key: 'k', value: 1, schemaVersion: 99 }] });
-    assert.equal(graph.exportData().facts[0].schemaVersion, 99);
+    assert.equal(privilegedSnapshot(graph).facts[0].schemaVersion, 99);
   });
 
   it('validate() reports them as unsupported and refuses to call the graph valid', () => {
@@ -643,7 +644,7 @@ describe('P2-14 — future live schemas are preserved and reported, never downgr
 
     const result = graph.validate();
     assert.equal(result.counts.unsupported, 0, 'older data is readable, not unsupported');
-    assert.equal(graph.exportData().records[0].confidence.current, 0.7, 'migrated forward');
+    assert.equal(privilegedSnapshot(graph).records[0].confidence.current, 0.7, 'migrated forward');
   });
 });
 

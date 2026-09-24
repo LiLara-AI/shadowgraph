@@ -18,6 +18,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const NOW = '2026-08-28T12:00:00.000Z';
 const PROJECT = 'semantic-purge-project';
@@ -198,22 +199,22 @@ test('schema-5 purge marker values and relationships fail closed before pure fol
     );
 
     const direct = liveVictimGraph();
-    const directBefore = direct.exportData();
+    const directBefore = privilegedSnapshot(direct);
     assert.throws(
       () => direct.importData(currentEnvelope(marker)),
       testCase.detail,
       `${testCase.name}: direct import rejects`
     );
-    assert.deepEqual(direct.exportData(), directBefore, `${testCase.name}: direct import is atomic`);
+    assert.deepEqual(privilegedSnapshot(direct), directBefore, `${testCase.name}: direct import is atomic`);
 
     const replacement = liveVictimGraph();
-    const replacementBefore = replacement.exportData();
+    const replacementBefore = privilegedSnapshot(replacement);
     assert.throws(
       () => replacement.replaceData(currentEnvelope(marker)),
       testCase.detail,
       `${testCase.name}: replacement rejects`
     );
-    assert.deepEqual(replacement.exportData(), replacementBefore, `${testCase.name}: replacement is atomic`);
+    assert.deepEqual(privilegedSnapshot(replacement), replacementBefore, `${testCase.name}: replacement is atomic`);
 
     assert.throws(
       () => validateRestorePayload(currentEnvelope(marker), { now: () => NOW }),
@@ -265,14 +266,14 @@ test('hard-purge gap relationships are validated before pure fold and public gra
     assertPureRejected(rebuildProjection([seedEntry(), marker], { journalEpoch: 1 }), testCase);
 
     const direct = liveVictimGraph();
-    const directBefore = direct.exportData();
+    const directBefore = privilegedSnapshot(direct);
     assert.throws(() => direct.importData(currentEnvelope(marker)), /hard purge|journal sequence|removedJournalSequences/i);
-    assert.deepEqual(direct.exportData(), directBefore, `${testCase.name}: direct import is atomic`);
+    assert.deepEqual(privilegedSnapshot(direct), directBefore, `${testCase.name}: direct import is atomic`);
 
     const replacement = liveVictimGraph();
-    const replacementBefore = replacement.exportData();
+    const replacementBefore = privilegedSnapshot(replacement);
     assert.throws(() => replacement.replaceData(currentEnvelope(marker)), /hard purge|journal sequence|removedJournalSequences/i);
-    assert.deepEqual(replacement.exportData(), replacementBefore, `${testCase.name}: replacement is atomic`);
+    assert.deepEqual(privilegedSnapshot(replacement), replacementBefore, `${testCase.name}: replacement is atomic`);
 
     assert.throws(
       () => validateRestorePayload(currentEnvelope(marker), { now: () => NOW }),
@@ -393,7 +394,7 @@ async function writeOldDestination(path) {
   const old = createShadowGraph({ now: () => NOW });
   old.addDecision({ id: 'semantic-old-live', project: 'old', title: 'Old state', chosen: 'keep' });
   const store = createJsonFileStore(path);
-  await store.save(old.exportData());
+  await store.save(privilegedSnapshot(old));
   store.close();
 }
 
@@ -421,7 +422,7 @@ test('malformed marker rejection is atomic across JSON and SQLite restore', asyn
     const old = createShadowGraph({ now: () => NOW });
     old.addDecision({ id: 'semantic-old-sqlite', project: 'old', title: 'Old SQLite state', chosen: 'keep' });
     const destinationStore = await createSqliteStore(destination);
-    await destinationStore.save(old.exportData());
+    await destinationStore.save(privilegedSnapshot(old));
     const before = await destinationStore.load();
     await assert.rejects(destinationStore.restore(source), /mode must be exactly logical or hard/i);
     assert.deepEqual(await destinationStore.load(), before);
@@ -526,7 +527,7 @@ test('schemas 1-4 raw markers migrate compatibly while canonical schema-5 logica
     source.addDecision({ id: `valid-kept-${mode}`, project: 'valid-kept', title: 'Keep', chosen: 'keep' });
     source.addDecision({ id: `valid-purged-${mode}`, project: `valid-purged-${mode}`, title: 'Erase', chosen: 'erase' });
     source.purgeProject(`valid-purged-${mode}`, { mode });
-    const payload = source.exportData();
+    const payload = privilegedSnapshot(source);
     const marker = payload.journal.findLast((entry) => entry.type === 'project.purged');
     assert.equal(schema5PurgeArtifactIssue(marker), null, `${mode}: canonical marker`);
     if (mode === 'logical') assert.deepEqual(marker.payload.removedJournalSequences, []);

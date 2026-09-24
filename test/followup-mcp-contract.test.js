@@ -8,6 +8,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const MODERN_PROTOCOL = '2026-07-28';
 const LEGACY_PROTOCOL = '2024-11-05';
@@ -850,7 +851,7 @@ test('SQLite restore duplicate journal payload ids stay private in legacy and mo
   graph.addDecision({ id: 'sqlite-private-left', title: 'Left', chosen: 'keep' });
   graph.addDecision({ id: 'sqlite-private-right', title: 'Right', chosen: 'keep' });
   const sourceStore = await createSqliteStore(source);
-  await sourceStore.save(graph.exportData());
+  await sourceStore.save(privilegedSnapshot(graph));
   sourceStore.close();
 
   const sentinel = 'PRIVATE-SQLITE-DUPLICATE-JOURNAL-ID-128c';

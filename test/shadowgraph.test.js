@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { createShadowGraph, SCHEMA_VERSION } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 test('stores one decision and reopens it when facts change', () => {
   const graph = createShadowGraph({ now: () => '2026-01-01T00:00:00.000Z' });
@@ -27,7 +28,7 @@ test('persists records in a portable JSON file', async (t) => {
   const store = createJsonFileStore(join(directory, 'data.json'));
   const graph = createShadowGraph();
   graph.addDecision({ title: 'Use tests', chosen: 'Yes' });
-  await store.save(graph.exportData());
+  await store.save(privilegedSnapshot(graph));
   const loaded = await store.load();
   assert.equal(loaded.records.length, 1);
   assert.equal(JSON.parse(await readFile(join(directory, 'data.json'), 'utf8')).schemaVersion, SCHEMA_VERSION);

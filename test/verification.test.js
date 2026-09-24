@@ -12,6 +12,7 @@ import {
   createLocalEvidenceVerifier
 } from '../src/verification.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 function startMcp(file, extraEnv = {}) {
   const child = spawn(process.execPath, ['src/mcp.js'], {
@@ -96,16 +97,16 @@ test('U-1: writer-controlled fields, strong source claims, and unknown verificat
     graph.verifyFact({ factId: fact.id, evidencePath, verified: true, signature: 'writer supplied' }),
     /only accepts factId and evidencePath/
   );
-  assert.equal(graph.exportData().facts.find((item) => item.id === fact.id).verificationStatus, 'unverified');
+  assert.equal(privilegedSnapshot(graph).facts.find((item) => item.id === fact.id).verificationStatus, 'unverified');
 });
 
 test('U-1: tampered evidence, wrong signatures, missing references, and missing files are rejected atomically', async (t) => {
   const { graph, fact, document, evidencePath, directory, wrong } = await setup(t);
-  const before = graph.exportData();
+  const before = privilegedSnapshot(graph);
 
   await writeFile(evidencePath, JSON.stringify({ ...document, evidenceReference: 'ticket:TAMPERED' }), 'utf8');
   await assert.rejects(graph.verifyFact({ factId: fact.id, evidencePath }), /signature/i);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 
   const wrongDocument = createFactAttestation({
     fact, verifierIdentity: 'release-approver', evidenceReference: 'ticket:SG-42',
@@ -114,29 +115,29 @@ test('U-1: tampered evidence, wrong signatures, missing references, and missing 
   });
   await writeFile(evidencePath, JSON.stringify(wrongDocument), 'utf8');
   await assert.rejects(graph.verifyFact({ factId: fact.id, evidencePath }), /signature/i);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 
   const missingReference = { ...document };
   delete missingReference.evidenceReference;
   await writeFile(evidencePath, JSON.stringify(missingReference), 'utf8');
   await assert.rejects(graph.verifyFact({ factId: fact.id, evidencePath }), /evidenceReference/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 
   await assert.rejects(
     graph.verifyFact({ factId: fact.id, evidencePath: join(directory, 'missing.json') }),
     /evidence file.*not found/i
   );
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('U-1: verification retries are idempotent and conflicting attestations are refused', async (t) => {
   const { graph, fact, evidencePath, trusted, directory } = await setup(t);
   const first = await graph.verifyFact({ factId: fact.id, evidencePath });
-  const journalLength = graph.exportData().journal.length;
+  const journalLength = privilegedSnapshot(graph).journal.length;
   const retry = await graph.verifyFact({ factId: fact.id, evidencePath });
   assert.equal(retry.operation, 'NOOP');
   assert.deepEqual(retry.fact.verification, first.fact.verification);
-  assert.equal(graph.exportData().journal.length, journalLength);
+  assert.equal(privilegedSnapshot(graph).journal.length, journalLength);
 
   const conflicting = createFactAttestation({
     fact, verifierIdentity: 'release-approver', evidenceReference: 'ticket:OTHER',
@@ -146,29 +147,29 @@ test('U-1: verification retries are idempotent and conflicting attestations are 
   const conflictPath = join(directory, 'conflict.json');
   await writeFile(conflictPath, JSON.stringify(conflicting), 'utf8');
   await assert.rejects(graph.verifyFact({ factId: fact.id, evidencePath: conflictPath }), /already verified by a different attestation/);
-  assert.equal(graph.exportData().journal.length, journalLength);
+  assert.equal(privilegedSnapshot(graph).journal.length, journalLength);
 });
 
 test('U-1: signed verification survives export/import, journal rebuild, and JSON restart', async (t) => {
   const { graph, fact, evidencePath, verifier, directory } = await setup(t);
   await graph.verifyFact({ factId: fact.id, evidencePath });
-  const original = graph.exportData().facts.find((item) => item.id === fact.id);
+  const original = privilegedSnapshot(graph).facts.find((item) => item.id === fact.id);
 
   const imported = createShadowGraph({ verifier });
-  imported.importData(graph.exportData());
-  assert.deepEqual(imported.exportData().facts.find((item) => item.id === fact.id), original);
+  imported.importData(privilegedSnapshot(graph));
+  assert.deepEqual(privilegedSnapshot(imported).facts.find((item) => item.id === fact.id), original);
 
   const rebuilt = graph.rebuild();
   assert.equal(rebuilt.rebuildable, true);
   const fromJournal = createShadowGraph({ verifier });
-  fromJournal.importData({ ...rebuilt.projection, schemaVersion: graph.exportData().schemaVersion });
-  assert.deepEqual(fromJournal.exportData().facts.find((item) => item.id === fact.id), original);
+  fromJournal.importData({ ...rebuilt.projection, schemaVersion: privilegedSnapshot(graph).schemaVersion });
+  assert.deepEqual(privilegedSnapshot(fromJournal).facts.find((item) => item.id === fact.id), original);
 
   const store = createJsonFileStore(join(directory, 'data.json'));
-  await store.save(graph.exportData());
+  await store.save(privilegedSnapshot(graph));
   const restarted = createShadowGraph({ verifier });
   restarted.importData(await store.load());
-  assert.deepEqual(restarted.exportData().facts.find((item) => item.id === fact.id), original);
+  assert.deepEqual(privilegedSnapshot(restarted).facts.find((item) => item.id === fact.id), original);
 });
 
 test('U-1: signed verification has JSON and SQLite restart parity', async (t) => {
@@ -177,7 +178,7 @@ test('U-1: signed verification has JSON and SQLite restart parity', async (t) =>
   let sqlite;
   try { sqlite = await createSqliteStore(join(directory, 'data.db')); }
   catch (error) { if (/requires Node/.test(error.message)) return t.skip(error.message); throw error; }
-  await sqlite.save(graph.exportData());
+  await sqlite.save(privilegedSnapshot(graph));
   sqlite.close();
 
   const reopened = await createSqliteStore(join(directory, 'data.db'));
@@ -185,15 +186,15 @@ test('U-1: signed verification has JSON and SQLite restart parity', async (t) =>
   restarted.importData(await reopened.load());
   reopened.close();
   assert.deepEqual(
-    restarted.exportData().facts.find((item) => item.id === fact.id),
-    graph.exportData().facts.find((item) => item.id === fact.id)
+    privilegedSnapshot(restarted).facts.find((item) => item.id === fact.id),
+    privilegedSnapshot(graph).facts.find((item) => item.id === fact.id)
   );
 });
 
 test('U-1: modified persisted attestations cannot survive import', async (t) => {
   const { graph, fact, evidencePath, verifier } = await setup(t);
   await graph.verifyFact({ factId: fact.id, evidencePath });
-  const tampered = graph.exportData();
+  const tampered = privilegedSnapshot(graph);
   tampered.facts[0].value = false;
   const restarted = createShadowGraph({ verifier });
   assert.throws(() => restarted.importData(tampered), /persisted fact verification.*invalid/i);
@@ -208,27 +209,27 @@ test('U-1: verifier trust keys and evidence documents are strictly Ed25519 and c
   }), /Ed25519 public key/);
 
   const { graph, fact, document, evidencePath } = await setup(t);
-  const before = graph.exportData();
+  const before = privilegedSnapshot(graph);
   await writeFile(evidencePath, JSON.stringify({ ...document, unsignedComment: 'not covered by the signature' }), 'utf8');
   await assert.rejects(graph.verifyFact({ factId: fact.id, evidencePath }), /unknown field unsignedComment/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 
   await writeFile(evidencePath, JSON.stringify({ ...document, verifiedAt: 'March 1, 2026' }), 'utf8');
   await assert.rejects(graph.verifyFact({ factId: fact.id, evidencePath }), /verifiedAt must be a valid timestamp/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('U-1: restarting an expired signed fact never promotes it back to effectively verified', async (t) => {
   const { graph, fact, evidencePath, verifier } = await setup(t, { expiresAt: '2026-08-28T00:00:00.000Z' });
   await graph.verifyFact({ factId: fact.id, evidencePath });
   graph.maintain({ now: '2026-08-29T00:00:00.000Z' });
-  const expired = graph.exportData().facts.find((item) => item.id === fact.id);
+  const expired = privilegedSnapshot(graph).facts.find((item) => item.id === fact.id);
   assert.equal(expired.status, 'expired');
   assert.equal(expired.verificationStatus, 'expired');
 
   const restarted = createShadowGraph({ verifier });
-  restarted.importData(graph.exportData());
-  const imported = restarted.exportData().facts.find((item) => item.id === fact.id);
+  restarted.importData(privilegedSnapshot(graph));
+  const imported = privilegedSnapshot(restarted).facts.find((item) => item.id === fact.id);
   assert.equal(imported.status, 'expired');
   assert.equal(imported.verificationStatus, 'expired');
 });
@@ -239,10 +240,10 @@ test('U-1: redaction hides verification evidence and purge prevents signed evide
   const redacted = JSON.stringify(graph.redact({ project: 'app' }));
   assert.equal(redacted.includes('super-secret'), false);
   assert.equal(redacted.includes('secret-ticket:SG-42'), false);
-  assert.equal(redacted.includes(graph.exportData().facts[0].verification.signature), false);
+  assert.equal(redacted.includes(privilegedSnapshot(graph).facts[0].verification.signature), false);
 
   graph.purgeProject('app');
-  assert.equal(JSON.stringify(graph.exportData()).includes('secret-ticket:SG-42'), false);
+  assert.equal(JSON.stringify(privilegedSnapshot(graph)).includes('secret-ticket:SG-42'), false);
   assert.equal(JSON.stringify(graph.rebuild().projection).includes('secret-ticket:SG-42'), false);
   await assert.rejects(graph.verifyFact({ factId: fact.id, evidencePath }), /Fact not found/);
 });

@@ -13,6 +13,7 @@ import { JOURNAL_TYPE_ENTITY_KIND, REPLAYABLE_ENTRY_TYPES } from '../src/journal
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const BOUNDARY = '2026-08-28T00:00:01.000Z';
 const NODE_SQLITE = (await getRuntimeCapabilities()).nodeSqlite;
@@ -52,13 +53,13 @@ test('P1 premerge verifier slice: commit uses trusted now sampled after verifier
 
   for (const instant of [BOUNDARY, '2026-08-28T00:00:02.000Z']) {
     const rejected = await verifyAcrossIoBoundary(instant);
-    const stateBeforeVerification = rejected.graph.exportData();
+    const stateBeforeVerification = privilegedSnapshot(rejected.graph);
     await assert.rejects(
       rejected.graph.verifyFact({ factId: rejected.fact.id, evidencePath: 'trusted-local-evidence.json' }),
       /invalid or expired persisted fact verification/i
     );
     assert.deepEqual(rejected.validationInstants, [instant]);
-    assert.deepEqual(rejected.graph.exportData(), stateBeforeVerification, 'failed verification cannot elevate trust or append history');
+    assert.deepEqual(privilegedSnapshot(rejected.graph), stateBeforeVerification, 'failed verification cannot elevate trust or append history');
   }
 });
 
@@ -93,7 +94,7 @@ test('P1 follow-up verifier slice: identical retry crossing the signed boundary 
     /invalid or expired persisted fact verification/i
   );
   assert.deepEqual(validationInstants, ['2026-08-28T00:00:00.999Z', BOUNDARY], 'identical retry must validate with the post-I/O instant');
-  const after = graph.exportData();
+  const after = privilegedSnapshot(graph);
   const stored = after.facts.find((item) => item.id === fact.id);
   assert.equal(stored.status, 'expired');
   assert.equal(stored.verificationStatus, 'expired');
@@ -120,14 +121,14 @@ test('P1 follow-up verification transaction slice: sequence overflow leaves all 
     idempotencyKey: 'verification-overflow-retry'
   });
   graph.importData({ schemaVersion: 5, journal: [], journalSeq: Number.MAX_SAFE_INTEGER });
-  const before = graph.exportData();
+  const before = privilegedSnapshot(graph);
 
   await assert.rejects(
     graph.verifyFact({ factId: fact.id, evidencePath: 'trusted-local-evidence.json' }),
     /journal sequence overflow/i
   );
   assert.deepEqual(
-    graph.exportData(),
+    privilegedSnapshot(graph),
     before,
     'failed verification must preserve status, attestation, journal, events, idempotency, revision, and sequence'
   );
@@ -184,13 +185,13 @@ test('P1 premerge schema slice: schema 5 rejects raw purge ledgers instead of mi
 
     const live = createShadowGraph();
     live.addDecision({ id: `kept-${kind}`, project: 'kept', title: 'Keep live state', chosen: 'preserve' });
-    const before = live.exportData();
+    const before = privilegedSnapshot(live);
     assert.throws(
       () => live.replaceData(payload),
       /schema 5.*purge|noncanonical.*purge|forbidden.*purge/i,
       `${kind}: replacement must reject current-schema raw identity`
     );
-    assert.deepEqual(live.exportData(), before, `${kind}: failed replacement must be atomic`);
+    assert.deepEqual(privilegedSnapshot(live), before, `${kind}: failed replacement must be atomic`);
   }
 });
 
@@ -231,13 +232,13 @@ test('P1 follow-up schema slice: purge-reason and replayable payload-null skelet
 
     const live = createShadowGraph();
     live.addDecision({ id: `kept-disguised-${redactedMode}`, project: 'kept', title: 'Keep live state', chosen: 'preserve' });
-    const before = live.exportData();
+    const before = privilegedSnapshot(live);
     assert.throws(
       () => live.replaceData(payload),
       /schema 5.*purge|noncanonical.*purge|redacted true/i,
       `${redactedMode}: replacement must reject before mutation`
     );
-    assert.deepEqual(live.exportData(), before);
+    assert.deepEqual(privilegedSnapshot(live), before);
   }
 
   const rebuildPayload = schema5DisguisedPurgeSkeleton('payload-null-no-reason');
@@ -270,7 +271,7 @@ test('P1 follow-up schema slice: purge-reason and replayable payload-null skelet
   };
   const compatible = createShadowGraph();
   assert.doesNotThrow(() => compatible.importData(legacy));
-  assert.equal(compatible.exportData().journal[0].type, 'legacy_metadata_event');
+  assert.equal(privilegedSnapshot(compatible).journal[0].type, 'legacy_metadata_event');
   assert.equal(compatible.rebuild().reason === 'journal contains noncanonical schema-5 purge artifacts', false);
 });
 
@@ -287,9 +288,9 @@ test('P1 replayability schema slice: replayable:false cannot disguise a payload-
 
   const live = createShadowGraph();
   live.addDecision({ id: 'kept-replayable-contradiction', project: 'kept', title: 'Keep live state', chosen: 'preserve' });
-  const before = live.exportData();
+  const before = privilegedSnapshot(live);
   assert.throws(() => live.replaceData(payload), rejection, 'replacement must reject before mutation');
-  assert.deepEqual(live.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(live), before);
 
   const legacyEnvelope = structuredClone(payload);
   legacyEnvelope.schemaVersion = 4;
@@ -348,7 +349,7 @@ test('P1 replayability schema matrix: every payload-null replayable type is a pu
     provenance: { actor: 'legacy-actor', client: null, sessionId: null }
   };
   assert.doesNotThrow(() => compatible.importData(legacy));
-  assert.equal(compatible.exportData().journal[0].type, 'legacy_metadata_event');
+  assert.equal(privilegedSnapshot(compatible).journal[0].type, 'legacy_metadata_event');
 });
 
 function runCliCommand(destination, command, payload, storage = 'json') {
@@ -442,7 +443,7 @@ function startRestoreMcp(destination) {
 function safeRestorePayload(id) {
   const graph = createShadowGraph({ now: () => '2026-08-28T00:00:00.000Z' });
   graph.addDecision({ id, project: 'premerge-restore-kept', title: 'Keep destination', chosen: 'preserve' });
-  return graph.exportData();
+  return privilegedSnapshot(graph);
 }
 
 async function seedJsonRestoreDestination(path, id) {
@@ -494,7 +495,7 @@ test('P1 follow-up schema surfaces: redacted false, omitted, or replayable:false
     const httpDestination = join(directory, 'http.json');
     const httpBefore = await seedJsonRestoreDestination(httpDestination, `http-kept-${redactedMode}`);
     const app = await createShadowGraphServer({ file: httpDestination, now: () => '2026-08-28T00:00:00.000Z' });
-    const liveBefore = app.graph.exportData();
+    const liveBefore = privilegedSnapshot(app.graph);
     app.server.listen(0, '127.0.0.1');
     await once(app.server, 'listening');
     try {
@@ -504,7 +505,7 @@ test('P1 follow-up schema surfaces: redacted false, omitted, or replayable:false
       const body = await response.json();
       assert.equal(response.status, 400, `${redactedMode}: HTTP must reject`);
       assert.match(body.error, rejection);
-      assert.deepEqual(app.graph.exportData(), liveBefore, `${redactedMode}: HTTP live graph stays unchanged`);
+      assert.deepEqual(privilegedSnapshot(app.graph), liveBefore, `${redactedMode}: HTTP live graph stays unchanged`);
       assert.deepEqual(await readFile(httpDestination), httpBefore, `${redactedMode}: HTTP bytes stay unchanged`);
     } finally {
       await new Promise((resolve) => app.server.close(resolve));
@@ -538,7 +539,7 @@ test('P1 premerge expiration slice: effective expiration cannot precede validFro
     id: 'expiration-original', project: 'premerge-expiration', key: 'window', value: 'original',
     idempotencyKey: 'original-retry'
   });
-  const before = graph.exportData();
+  const before = privilegedSnapshot(graph);
   assert.throws(
     () => graph.addFact({
       id: 'expiration-invalid', project: 'premerge-expiration', key: 'window', value: 'must-not-land',
@@ -548,7 +549,7 @@ test('P1 premerge expiration slice: effective expiration cannot precede validFro
     }),
     /effective expiration boundary.*(?:precede|before).*validFrom/i
   );
-  assert.deepEqual(graph.exportData(), before, 'interval rejection must precede fact, journal, event, and idempotency mutation');
+  assert.deepEqual(privilegedSnapshot(graph), before, 'interval rejection must precede fact, journal, event, and idempotency mutation');
 
   const equalBoundary = graph.addFact({
     id: 'expiration-equal', project: 'premerge-expiration', key: 'equal-window', value: 'instantaneous',
@@ -562,7 +563,7 @@ test('P1 premerge expiration slice: effective expiration cannot precede validFro
     id: 'persisted-invalid-interval', project: 'premerge-expiration', key: 'persisted-window', value: true,
     validFrom: '2026-08-28T00:00:10.000Z', expiresAt: '2026-08-28T00:00:20.000Z'
   });
-  const payload = persisted.exportData();
+  const payload = privilegedSnapshot(persisted);
   const contradict = (fact) => {
     fact.expiresAt = '2026-08-28T00:00:05.000Z';
     fact.validityPolicy.declaredExpiresAt = fact.expiresAt;
@@ -606,24 +607,24 @@ test('P1 journal atomicity exact reproductions: addDecision and superseding addF
     const graph = createShadowGraph({ now: () => '2026-08-28T00:00:00.000Z' });
     graph.addDecision({ id: 'overflow-existing-decision', project: 'atomicity', title: 'Existing', chosen: 'preserve' });
     graph.importData({ schemaVersion: 5, journal: [], journalSeq: Number.MAX_SAFE_INTEGER });
-    const before = graph.exportData();
+    const before = privilegedSnapshot(graph);
     assert.throws(
       () => graph.addDecision({ id: 'overflow-new-decision', project: 'atomicity', title: 'Must not land', chosen: 'reject' }),
       /journal sequence overflow/i
     );
-    assert.deepEqual(graph.exportData(), before, 'addDecision overflow must not leave a record or breadcrumb event');
+    assert.deepEqual(privilegedSnapshot(graph), before, 'addDecision overflow must not leave a record or breadcrumb event');
   }
 
   {
     const graph = createShadowGraph({ now: () => '2026-08-28T00:00:00.000Z' });
     graph.addFact({ id: 'overflow-original-fact', project: 'atomicity', key: 'supersession', value: 'original' });
     graph.importData({ schemaVersion: 5, journal: [], journalSeq: Number.MAX_SAFE_INTEGER });
-    const before = graph.exportData();
+    const before = privilegedSnapshot(graph);
     assert.throws(
       () => graph.addFact({ id: 'overflow-replacement-fact', project: 'atomicity', key: 'supersession', value: 'must-not-land' }),
       /journal sequence overflow/i
     );
-    assert.deepEqual(graph.exportData(), before, 'addFact overflow must not supersede or narrow the original fact');
+    assert.deepEqual(privilegedSnapshot(graph), before, 'addFact overflow must not supersede or narrow the original fact');
   }
 });
 
@@ -773,24 +774,24 @@ test('P1 journal reservation matrix: every journal-writing public mutator has ex
   for (const scenario of JOURNAL_MUTATOR_CASES) {
     const success = scenario.build();
     success.graph.importData({ schemaVersion: 5, journal: [], journalSeq: Number.MAX_SAFE_INTEGER - scenario.required });
-    const successBefore = success.graph.exportData();
+    const successBefore = privilegedSnapshot(success.graph);
     assert.doesNotThrow(success.invoke, `${scenario.name}: exact reservation should succeed`);
-    const successAfter = success.graph.exportData();
+    const successAfter = privilegedSnapshot(success.graph);
     assert.equal(successAfter.journal.length - successBefore.journal.length, scenario.required, `${scenario.name}: journal entry inventory`);
     assert.equal(successAfter.journalSeq, Number.MAX_SAFE_INTEGER, `${scenario.name}: final reserved sequence`);
 
     const failure = scenario.build();
     failure.graph.importData({ schemaVersion: 5, journal: [], journalSeq: Number.MAX_SAFE_INTEGER - scenario.required + 1 });
-    const failureBefore = failure.graph.exportData();
+    const failureBefore = privilegedSnapshot(failure.graph);
     assert.throws(failure.invoke, /journal sequence overflow/i, `${scenario.name}: insufficient reservation must reject`);
-    assert.deepEqual(failure.graph.exportData(), failureBefore, `${scenario.name}: rejection must preserve exportData byte-for-byte`);
+    assert.deepEqual(privilegedSnapshot(failure.graph), failureBefore, `${scenario.name}: rejection must preserve exportData byte-for-byte`);
   }
 });
 
 function importDeltaAtSequence(sequence) {
   const seed = atomicGraph();
   const decision = seed.addDecision({ id: 'matrix-import-decision', project: 'matrix', title: 'Old import title', chosen: 'A' });
-  const envelope = seed.exportData();
+  const envelope = privilegedSnapshot(seed);
   envelope.journal[0].seq = sequence;
   envelope.journalSeq = sequence;
   envelope.journalEpoch = sequence;
@@ -814,10 +815,10 @@ test('P1 causation reservation: near-boundary multi-entry operations retain dete
   {
     const graph = atomicGraph();
     const decision = graph.addDecision({ id: 'causation-outcome', project: 'matrix', title: 'Outcome', chosen: 'A' });
-    const epoch = graph.exportData().journalEpoch;
+    const epoch = privilegedSnapshot(graph).journalEpoch;
     graph.importData({ schemaVersion: 5, journal: [], journalSeq: Number.MAX_SAFE_INTEGER - 2 });
     graph.setOutcome(decision.id, { status: 'successful', observedAt: ATOMIC_NOW });
-    const after = graph.exportData();
+    const after = privilegedSnapshot(graph);
     const entries = after.journal.slice(-2);
     assert.deepEqual(entries.map((entry) => [entry.seq, entry.type]), [
       [Number.MAX_SAFE_INTEGER - 1, 'outcome.recorded'],
@@ -831,10 +832,10 @@ test('P1 causation reservation: near-boundary multi-entry operations retain dete
     const graph = atomicGraph();
     const previous = graph.addDecision({ id: 'causation-old', project: 'matrix', title: 'Old', chosen: 'A' });
     const replacement = graph.addDecision({ id: 'causation-new', project: 'matrix', title: 'New', chosen: 'B' });
-    const epoch = graph.exportData().journalEpoch;
+    const epoch = privilegedSnapshot(graph).journalEpoch;
     graph.importData({ schemaVersion: 5, journal: [], journalSeq: Number.MAX_SAFE_INTEGER - 3 });
     graph.supersedeDecision({ decisionId: previous.id, replacementId: replacement.id });
-    const after = graph.exportData();
+    const after = privilegedSnapshot(graph);
     const entries = after.journal.slice(-3);
     assert.deepEqual(entries.map((entry) => [entry.seq, entry.type]), [
       [Number.MAX_SAFE_INTEGER - 2, 'relation.created'],
@@ -849,9 +850,9 @@ test('P1 causation reservation: near-boundary multi-entry operations retain dete
 test('P1 import-generated delta reservation: multi-entry import succeeds at the exact boundary or changes nothing', () => {
   const required = 3;
   const success = importDeltaAtSequence(Number.MAX_SAFE_INTEGER - required);
-  const successBefore = success.graph.exportData();
+  const successBefore = privilegedSnapshot(success.graph);
   assert.doesNotThrow(success.invoke);
-  const successAfter = success.graph.exportData();
+  const successAfter = privilegedSnapshot(success.graph);
   assert.equal(successAfter.journal.length - successBefore.journal.length, required);
   assert.deepEqual(successAfter.journal.slice(-required).map((entry) => entry.seq), [
     Number.MAX_SAFE_INTEGER - 2,
@@ -860,9 +861,9 @@ test('P1 import-generated delta reservation: multi-entry import succeeds at the 
   ]);
 
   const failure = importDeltaAtSequence(Number.MAX_SAFE_INTEGER - required + 1);
-  const failureBefore = failure.graph.exportData();
+  const failureBefore = privilegedSnapshot(failure.graph);
   assert.throws(failure.invoke, /journal sequence overflow/i);
-  assert.deepEqual(failure.graph.exportData(), failureBefore);
+  assert.deepEqual(privilegedSnapshot(failure.graph), failureBefore);
 });
 
 const ZERO_JOURNAL_MUTATOR_CASES = [
@@ -875,7 +876,7 @@ const ZERO_JOURNAL_MUTATOR_CASES = [
     build() {
       const graph = atomicGraph();
       graph.addDecision({ id: 'zero-replace', project: 'matrix', title: 'Replace', chosen: 'A' });
-      return { graph, afterBoundary: () => graph.exportData(), invoke: (snapshot) => graph.replaceData(snapshot) };
+      return { graph, afterBoundary: () => privilegedSnapshot(graph), invoke: (snapshot) => graph.replaceData(snapshot) };
     }
   },
   {
@@ -1002,9 +1003,9 @@ test('P1 zero-entry mutator inventory: journal-free public mutation paths remain
     const { graph, invoke, afterBoundary } = scenario.build();
     graph.importData({ schemaVersion: 5, journal: [], journalSeq: Number.MAX_SAFE_INTEGER });
     const argument = afterBoundary?.();
-    const before = graph.exportData();
+    const before = privilegedSnapshot(graph);
     assert.doesNotThrow(() => invoke(argument), `${scenario.name}: zero-entry path must not reserve a sequence`);
-    const after = graph.exportData();
+    const after = privilegedSnapshot(graph);
     assert.equal(after.journal.length, before.journal.length, `${scenario.name}: zero journal entries`);
     assert.equal(after.journalSeq, Number.MAX_SAFE_INTEGER, `${scenario.name}: high-water mark stays exact`);
   }
@@ -1018,17 +1019,17 @@ test('P1 verifyFact reservation: one-entry commit reaches MAX_SAFE_INTEGER and i
   const graph = createShadowGraph({ now: () => ATOMIC_NOW, verifier });
   const fact = graph.addFact({ id: 'matrix-verify', project: 'matrix', key: 'verify', value: true });
   graph.importData({ schemaVersion: 5, journal: [], journalSeq: Number.MAX_SAFE_INTEGER - 1 });
-  const before = graph.exportData();
+  const before = privilegedSnapshot(graph);
   const verified = await graph.verifyFact({ factId: fact.id, evidencePath: 'trusted.json' });
   assert.equal(verified.operation, 'VERIFIED');
-  const after = graph.exportData();
+  const after = privilegedSnapshot(graph);
   assert.equal(after.journal.length, before.journal.length + 1);
   assert.equal(after.journal.at(-1).seq, Number.MAX_SAFE_INTEGER);
 
-  const retryBefore = graph.exportData();
+  const retryBefore = privilegedSnapshot(graph);
   const retry = await graph.verifyFact({ factId: fact.id, evidencePath: 'trusted.json' });
   assert.equal(retry.operation, 'NOOP');
-  assert.deepEqual(graph.exportData(), retryBefore);
+  assert.deepEqual(privilegedSnapshot(graph), retryBefore);
 });
 
 test('P1 purge near-boundary reservation: logical and hard modes commit one exact final sequence', () => {
@@ -1038,24 +1039,24 @@ test('P1 purge near-boundary reservation: logical and hard modes commit one exac
     const source = atomicGraph();
     const decision = source.addDecision({ id: `near-purge-${mode}`, project: `near-purge-${mode}`, title: 'Purge', chosen: 'A' });
     graph.importData({ schemaVersion: 5, records: [decision] });
-    assert.equal(graph.exportData().journalSeq, Number.MAX_SAFE_INTEGER - 1);
+    assert.equal(privilegedSnapshot(graph).journalSeq, Number.MAX_SAFE_INTEGER - 1);
     const result = graph.purgeProject(`near-purge-${mode}`, { mode });
     assert.equal(result.mode, mode);
-    assert.equal(graph.exportData().journalSeq, Number.MAX_SAFE_INTEGER);
-    assert.equal(graph.exportData().journal.at(-1).type, 'project.purged');
+    assert.equal(privilegedSnapshot(graph).journalSeq, Number.MAX_SAFE_INTEGER);
+    assert.equal(privilegedSnapshot(graph).journal.at(-1).type, 'project.purged');
   }
 });
 
 test('P1 premerge purge slice: logical and hard purge preserve every collection on journal sequence overflow', () => {
   for (const mode of ['logical', 'hard']) {
     const graph = graphAtPurgeSequenceLimit(mode);
-    const before = graph.exportData();
+    const before = privilegedSnapshot(graph);
     assert.throws(
       () => graph.purgeProject('premerge-overflow', { mode }),
       /journal sequence overflow/i,
       `${mode}: the marker sequence must be rejected`
     );
-    assert.deepEqual(graph.exportData(), before, `${mode}: purge failure must be atomic across all live and audit collections`);
+    assert.deepEqual(privilegedSnapshot(graph), before, `${mode}: purge failure must be atomic across all live and audit collections`);
   }
 });
 
@@ -1063,7 +1064,7 @@ function sequenceOverflowPayload(id) {
   const graph = atomicGraph();
   graph.addDecision({ id, project: 'transport-overflow', title: 'Keep persisted state', chosen: 'preserve' });
   graph.importData({ schemaVersion: 5, journal: [], journalSeq: Number.MAX_SAFE_INTEGER });
-  return graph.exportData();
+  return privilegedSnapshot(graph);
 }
 
 async function seedOverflowStore(store, id) {
@@ -1079,7 +1080,7 @@ test('P1 journal overflow persistence: JSON/SQLite HTTP plus CLI and MCP reject 
       const store = backend === 'sqlite' ? await createSqliteStore(destination) : createJsonFileStore(destination);
       const durableBefore = await seedOverflowStore(store, `http-${backend}-kept`);
       const app = await createShadowGraphServer({ file: destination, storage: backend, store, now: () => ATOMIC_NOW });
-      const liveBefore = app.graph.exportData();
+      const liveBefore = privilegedSnapshot(app.graph);
       app.server.listen(0, '127.0.0.1');
       await once(app.server, 'listening');
       try {
@@ -1089,7 +1090,7 @@ test('P1 journal overflow persistence: JSON/SQLite HTTP plus CLI and MCP reject 
         });
         assert.equal(response.status, 400, `${backend}: HTTP overflow must reject`);
         assert.match((await response.json()).error, /journal sequence overflow/i);
-        assert.deepEqual(app.graph.exportData(), liveBefore, `${backend}: HTTP live state`);
+        assert.deepEqual(privilegedSnapshot(app.graph), liveBefore, `${backend}: HTTP live state`);
         assert.deepEqual(await store.load(), durableBefore, `${backend}: HTTP durable state`);
       } finally {
         await new Promise((resolve) => app.server.close(resolve));

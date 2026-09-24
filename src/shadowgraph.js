@@ -13,7 +13,7 @@ import { createConfidence, applyContribution, setOutcomeContribution, computeCon
 import { hybridSearch, foldText } from './hybrid-search.js';
 import { effectiveFactExpirationBoundary, factValidityPolicyIssue, isValidIsoInstant } from './fact-validity.js';
 import { evaluateRule, isSupportedOperator, isSupportedUnit, ruleOperandIssue } from './condition-eval.js';
-import { registerPrivilegedSnapshot } from './internal/snapshot.js';
+import { privilegedSnapshot, registerPrivilegedSnapshot } from './internal/snapshot.js';
 import { createHash } from 'node:crypto';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
@@ -2040,7 +2040,9 @@ export function createShadowGraph(options = {}) {
       }
       return value;
     };
-    const data = exportData();
+    // Redaction must see everything it could have to redact, so its input is the
+    // privileged snapshot (plan v1.4.4 §11.2 step 3); only its output is a read.
+    const data = snapshot();
     data.idempotency = data.idempotency.map((item) => ({ ...item, key: replacement }));
     if (project) {
       data.records = data.records.filter((item) => item.project === project);
@@ -2491,7 +2493,7 @@ export function createShadowGraph(options = {}) {
     }
     // The staged snapshot is already migrated and validated, so this import cannot
     // fail. Only now is the live state discarded.
-    const staged = staging.exportData();
+    const staged = privilegedSnapshot(staging);
     records.clear(); currentMemories.clear(); facts.clear(); currentFacts.clear(); relations.clear(); reviewSignals.clear(); idempotency.clear();
     events.length = 0; journal.length = 0; revision = 0; journalSeq = 0; journalEpoch = null;
     return importData(staged);
@@ -3073,7 +3075,7 @@ export function createShadowGraph(options = {}) {
       const validation = staging.validate();
       const blocking = validation.issues.filter((issue) => issue.severity === 'error' || issue.severity === 'unsupported');
       if (blocking.length) throw new Error(`Rebuilt projection has ${blocking.length} blocking validation issue(s)`);
-      const normalized = staging.exportData();
+      const normalized = privilegedSnapshot(staging);
       const preserveAuditKeyOrder = (item, rawById) => {
         const raw = rawById.get(item.id);
         if (!raw) return item;

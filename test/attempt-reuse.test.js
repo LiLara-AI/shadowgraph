@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { createShadowGraph, ATTEMPT_RESULT_CLASSES } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const failedIds = (graph, project = 'p') =>
   graph.context({ project }).failedAttemptsToAvoid.map((item) => item.id);
@@ -112,7 +113,7 @@ test('a reusable attempt keeps its recorded failure; it is not authorisation to 
   assert.equal(view.reusableAttempts.length, 1, 'it may be reconsidered');
   assert.ok(failedIds(graph).includes(attempt.id), 'and it is STILL listed as a failure to avoid');
 
-  const stored = graph.exportData().records.find((item) => item.id === attempt.id);
+  const stored = privilegedSnapshot(graph).records.find((item) => item.id === attempt.id);
   assert.equal(stored.resultClass, 'failed', 'the historical failure is untouched');
   assert.match(stored.result, /rate-limited/);
 });
@@ -169,11 +170,11 @@ test('resultClass and reusableWhen survive export, restart and journal rebuild',
     reusableWhen: [{ key: 'apiRateLimitPerMin', operator: 'gte', value: 600 }]
   });
   graph.addFact({ project: 'p', key: 'apiRateLimitPerMin', value: 1200, sourceClass: 'measured' });
-  await store.save(graph.exportData());
+  await store.save(privilegedSnapshot(graph));
 
   const reopened = createShadowGraph();
   reopened.importData(await store.load());
-  const stored = reopened.exportData().records.find((item) => item.id === attempt.id);
+  const stored = privilegedSnapshot(reopened).records.find((item) => item.id === attempt.id);
   assert.equal(stored.resultClass, 'failed');
   assert.equal(stored.reusableWhen[0].operator, 'gte');
   assert.ok(failedIds(reopened).includes(attempt.id), 'the declared failure still classifies after restart');
@@ -181,7 +182,7 @@ test('resultClass and reusableWhen survive export, restart and journal rebuild',
 
   // The journal projection must agree with the live graph.
   reopened.rebuild();
-  const fromJournal = reopened.exportData().records.find((item) => item.id === attempt.id);
+  const fromJournal = privilegedSnapshot(reopened).records.find((item) => item.id === attempt.id);
   assert.equal(fromJournal.resultClass, 'failed', 'rebuild preserves the declared class');
   assert.equal(fromJournal.reusableWhen[0].operator, 'gte');
 });

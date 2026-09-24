@@ -8,6 +8,7 @@ import { VERSION } from './version.js';
 import { createRestoreValidator } from './restore-validation.js';
 import { loadLocalEvidenceVerifier } from './verification.js';
 import { BATCH_PROTOCOL_VERSIONS, LEGACY_PROTOCOL_VERSIONS, METADATA_TIER, buildToolCatalog, metadataTierForProtocolVersion, negotiateLegacyProtocolVersion, projectTool, selectTools, toolResult } from './mcp-tools.js';
+import { privilegedSnapshot } from './internal/snapshot.js';
 
 const file = process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json';
 const injectedRestoreFaultStages = process.env.NODE_ENV === 'test'
@@ -83,7 +84,7 @@ const embeddingClient = process.env.SHADOWGRAPH_EMBEDDING_URL ? createEmbeddingC
   allowRemote: process.env.SHADOWGRAPH_ALLOW_REMOTE_EMBEDDINGS === '1'
 }) : null;
 let persistQueue = Promise.resolve();
-function persist() { const operation = persistQueue.then(async () => { const revision = await store.save(graph.exportData()); graph.setRevision(revision); }); persistQueue = operation.catch(() => {}); return operation; }
+function persist() { const operation = persistQueue.then(async () => { const revision = await store.save(privilegedSnapshot(graph)); graph.setRevision(revision); }); persistQueue = operation.catch(() => {}); return operation; }
 let callQueue = Promise.resolve();
 function queueCall(operation) { const queued = callQueue.then(operation); callQueue = queued.catch(() => {}); return queued; }
 let persistenceUnavailable = null;
@@ -138,7 +139,7 @@ function committedPersistenceError(persistenceError, durable, reconciliationErro
 }
 
 async function persistCommittedRejection(rejection) {
-  const committed = graph.exportData();
+  const committed = privilegedSnapshot(graph);
   let persistenceError = null;
   try { await persist(); }
   catch (error) { persistenceError = error; }
@@ -234,7 +235,7 @@ async function addConfiguredEmbeddings(args = {}) {
 
 async function callUnqueued(name, args, tier) {
   if (persistenceUnavailable) throw unavailableError();
-  const before = graph.exportData();
+  const before = privilegedSnapshot(graph);
   let value;
   try {
   if (name === 'shadowgraph_record_decision') value = graph.addDecision(withRuntimeSession(args));
@@ -655,7 +656,7 @@ async function handleMessage(request, emit) {
         // makes the latch closed rather than merely early. callUnqueued does the
         // same for tools/call.
         if (persistenceUnavailable) throw unavailableError();
-        const before = graph.exportData();
+        const before = privilegedSnapshot(graph);
         let value;
         try { value = graph.context({}); }
         catch (error) { graph.replaceData(before); throw error; }

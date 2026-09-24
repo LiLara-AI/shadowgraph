@@ -21,6 +21,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createShadowGraph } from '../src/shadowgraph.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const bytes = (value) => Buffer.byteLength(JSON.stringify(value), 'utf8');
 const PROJECT = 'bench';
@@ -111,7 +112,7 @@ export function measureCoverage(view, expected) {
 
 export function measure(options = {}) {
   const { graph, expected } = seedGraph(options);
-  const snapshot = graph.exportData();
+  const snapshot = privilegedSnapshot(graph);
 
   const view = graph.context({ project: PROJECT });
   const searchResult = graph.search('regional cache', { project: PROJECT });
@@ -120,7 +121,7 @@ export function measure(options = {}) {
 
   // recall() re-exports the whole graph on every call, so the clone is timed on
   // its own to show how much of recall is ranking and how much is copying.
-  const cloneMs = time(() => graph.exportData());
+  const cloneMs = time(() => privilegedSnapshot(graph));
   const recallMs = time(() => graph.recall('regional cache', { project: PROJECT }));
   const contextMs = time(() => graph.context({ project: PROJECT }));
   const searchMs = time(() => graph.search('regional cache', { project: PROJECT }));

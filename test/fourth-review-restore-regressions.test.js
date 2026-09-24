@@ -9,6 +9,7 @@ import { createShadowGraphServer } from '../src/server.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const FIXED_NOW = '2026-08-27T12:00:00.000Z';
 const API_TOKEN = 'fourth-review-token';
@@ -17,7 +18,7 @@ const JSON_ARTIFACT = /^\.restore\..+\.(?:tmp|rollback|recovery)$/;
 function graphPayload(id, title) {
   const graph = createShadowGraph({ now: () => FIXED_NOW });
   graph.addDecision({ id, project: 'fourth-review', title, chosen: title });
-  return graph.exportData();
+  return privilegedSnapshot(graph);
 }
 
 async function writePayload(path, payload) {

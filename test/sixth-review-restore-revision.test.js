@@ -11,6 +11,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const NOW = '2026-08-27T12:00:00.000Z';
 
@@ -35,7 +36,7 @@ function withDecision(payload, id) {
   const graph = createShadowGraph({ now: () => NOW });
   graph.importData(payload);
   graph.addDecision({ id, project: 'ds-p1-004', title: id, chosen: id });
-  return graph.exportData();
+  return privilegedSnapshot(graph);
 }
 
 async function createStore(backend, path) {
@@ -90,7 +91,7 @@ async function prepareRestoreScenario(backend, directory) {
   const destination = join(directory, backend === 'sqlite' ? 'live.db' : 'live.json');
   const source = join(directory, backend === 'sqlite' ? 'source.db' : 'source.json');
   const store = await createStore(backend, destination);
-  await store.save(sourceGraph().exportData());
+  await store.save(privilegedSnapshot(sourceGraph()));
   await backupFile(destination, source, { store });
   const sourceStore = await createStore(backend, source);
   const sourcePayload = await sourceStore.load();
@@ -203,7 +204,7 @@ for (const backend of ['json', 'sqlite']) {
     }
     t.after(() => { try { destinationStore?.close(); } catch {} });
 
-    assert.equal(await destinationStore.save(sourceGraph().exportData()), 1);
+    assert.equal(await destinationStore.save(privilegedSnapshot(sourceGraph())), 1);
     await backupFile(destination, source, { store: destinationStore });
     const sourceStore = await createStore(backend, source);
     const sourcePayload = await sourceStore.load();
@@ -224,7 +225,7 @@ for (const backend of ['json', 'sqlite']) {
 
     const installed = await destinationStore.load();
     assert.equal(installed.revision, 3, 'restore revision must be max(destination=2, source=1) + 1');
-    assert.equal(activated.exportData().revision, installed.revision, 'activated graph must expose the installed revision');
+    assert.equal(privilegedSnapshot(activated).revision, installed.revision, 'activated graph must expose the installed revision');
     assert.deepEqual(semanticSnapshot(installed), semanticSnapshot(sourcePayload), 'restore changes only the concurrency revision');
     assert.deepEqual(await readFile(source), sourceBytes, 'restore must not mutate backup bytes');
 
@@ -269,9 +270,9 @@ for (const backend of ['json', 'sqlite']) {
       throw error;
     }
     t.after(() => { try { destinationStore?.close(); } catch {} try { sourceStore?.close(); } catch {} });
-    await destinationStore.save(withDecision(sourceGraph().exportData(), 'newer-source-destination'));
+    await destinationStore.save(withDecision(privilegedSnapshot(sourceGraph()), 'newer-source-destination'));
     await advanceTo(destinationStore, 2);
-    await sourceStore.save(sourceGraph().exportData());
+    await sourceStore.save(privilegedSnapshot(sourceGraph()));
     await advanceTo(sourceStore, 5);
     const sourcePayload = await sourceStore.load();
     sourceStore.close();
@@ -306,9 +307,9 @@ for (const backend of ['json', 'sqlite']) {
         if (backend === 'sqlite' && /requires Node/.test(error.message)) return t.skip(error.message);
         throw error;
       }
-      await destinationStore.save(withDecision(sourceGraph().exportData(), 'legacy-destination'));
+      await destinationStore.save(withDecision(privilegedSnapshot(sourceGraph()), 'legacy-destination'));
       await advanceTo(destinationStore, 2);
-      await sourceStore.save(sourceGraph().exportData());
+      await sourceStore.save(privilegedSnapshot(sourceGraph()));
       sourceStore.close();
       await setStoredRevision(backend, source, legacyRevision);
       const inspectedSource = await createStore(backend, source);
@@ -338,7 +339,7 @@ for (const backend of ['json', 'sqlite']) {
       if (backend === 'sqlite' && /requires Node/.test(error.message)) return t.skip(error.message);
       throw error;
     }
-    await store.save(sourceGraph().exportData());
+    await store.save(privilegedSnapshot(sourceGraph()));
     const before = await readFile(path);
     const result = await restore(backend, store, path, path);
     assert.equal(result.unchanged, true);
@@ -362,8 +363,8 @@ for (const backend of ['json', 'sqlite']) {
       if (backend === 'sqlite' && /requires Node/.test(error.message)) return t.skip(error.message);
       throw error;
     }
-    await destinationStore.save(withDecision(sourceGraph().exportData(), 'overflow-old'));
-    await sourceStore.save(sourceGraph().exportData());
+    await destinationStore.save(withDecision(privilegedSnapshot(sourceGraph()), 'overflow-old'));
+    await sourceStore.save(privilegedSnapshot(sourceGraph()));
     sourceStore.close();
     await setStoredRevision(backend, source, Number.MAX_SAFE_INTEGER);
     const destinationBefore = await readFile(destination);
@@ -411,11 +412,11 @@ for (const backend of ['json', 'sqlite']) {
       if (backend === 'sqlite' && /requires Node/.test(error.message)) return t.skip(error.message);
       throw error;
     }
-    await destinationStore.save(withDecision(sourceGraph().exportData(), 'rollback-old'));
+    await destinationStore.save(withDecision(privilegedSnapshot(sourceGraph()), 'rollback-old'));
     await advanceTo(destinationStore, 2);
     const oldPayload = await destinationStore.load();
     const oldBytes = await readFile(destination);
-    await sourceStore.save(sourceGraph().exportData());
+    await sourceStore.save(privilegedSnapshot(sourceGraph()));
     sourceStore.close();
     const sourceBytes = await readFile(source);
     let activatedRevision;
@@ -512,7 +513,7 @@ for (const backend of ['json', 'sqlite']) {
     assert.equal(staleOutcome.name, 'RevisionConflictError');
     assert.equal(staleOutcome.expected, 2);
     assert.equal(staleOutcome.actual, 4);
-    assert.equal(app.graph.exportData().revision, 4);
+    assert.equal(privilegedSnapshot(app.graph).revision, 4);
     await closeServer(app.server);
 
     const reopened = await createStore(backend, scenario.destination);

@@ -12,6 +12,7 @@ import { createDestinationFence } from '../src/revision-store.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const FIXED_NOW = '2026-08-27T12:00:00.000Z';
 
@@ -28,14 +29,14 @@ function deferred() {
 function graphPayload(id, revision = 0) {
   const graph = createShadowGraph({ now: () => FIXED_NOW });
   graph.addDecision({ id, project: 'fifth-review', title: id, chosen: id });
-  return { ...graph.exportData(), revision };
+  return { ...privilegedSnapshot(graph), revision };
 }
 
 function writerPayload(current, id) {
   const graph = createShadowGraph({ now: () => FIXED_NOW });
   graph.importData(current);
   graph.addDecision({ id, project: 'fifth-review', title: id, chosen: id });
-  return graph.exportData();
+  return privilegedSnapshot(graph);
 }
 
 async function settleState(promise, milliseconds = 150) {
@@ -886,7 +887,7 @@ test('DS-P1-003 MCP restore fences an external JSON writer in a separate server 
   for (let index = 0; index < 3000; index += 1) {
     replacementGraph.addDecision({ id: `mcp-restored-${index}`, project: 'fifth-review', title: `MCP ${index}`, chosen: `MCP ${index}` });
   }
-  await writePayload(source, { ...replacementGraph.exportData(), revision: 17 });
+  await writePayload(source, { ...privilegedSnapshot(replacementGraph), revision: 17 });
   const writerStore = createJsonFileStore(destination);
   const stalePayload = writerPayload(await writerStore.load(), 'mcp-external-writer');
   const rpc = startMcp(destination);

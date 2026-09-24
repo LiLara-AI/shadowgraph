@@ -12,6 +12,7 @@ import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createFactAttestation, createLocalEvidenceVerifier } from '../src/verification.js';
 import { createRestoreValidator } from '../src/restore-validation.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 function startMcp(file, extraEnv = {}) {
   const child = spawn(process.execPath, ['src/mcp.js'], {
@@ -98,7 +99,7 @@ async function tamperedSignedSnapshot(directory, fixture) {
   })), 'utf8');
   await graph.verifyFact({ factId: fact.id, evidencePath });
 
-  const tampered = graph.exportData();
+  const tampered = privilegedSnapshot(graph);
   tampered.facts.find((item) => item.id === fact.id).value = 'tampered-after-signing';
   for (const entry of tampered.journal) {
     if (entry.entityId === fact.id && entry.payload?.verification) entry.payload.value = 'tampered-after-signing';
@@ -109,7 +110,7 @@ async function tamperedSignedSnapshot(directory, fixture) {
 async function seedDestination(store) {
   const graph = createShadowGraph({ now: () => '2026-08-27T11:00:00.000Z' });
   graph.addDecision({ id: 'keep-original', project: 'live', title: 'KEEP ORIGINAL', chosen: 'original' });
-  await store.save(graph.exportData());
+  await store.save(privilegedSnapshot(graph));
   return store.load();
 }
 
@@ -194,8 +195,8 @@ test('P1-1 independent review: JSON restore rolls durable bytes back when post-r
   original.addDecision({ id: 'rollback-original', title: 'ROLLBACK ORIGINAL', chosen: 'original' });
   const replacement = createShadowGraph({ now: () => '2026-08-27T11:00:00.000Z' });
   replacement.addDecision({ id: 'rollback-replacement', title: 'ROLLBACK REPLACEMENT', chosen: 'replacement' });
-  await writeFile(destination, `${JSON.stringify(original.exportData(), null, 2)}\n`, 'utf8');
-  await writeFile(source, `${JSON.stringify(replacement.exportData(), null, 2)}\n`, 'utf8');
+  await writeFile(destination, `${JSON.stringify(privilegedSnapshot(original), null, 2)}\n`, 'utf8');
+  await writeFile(source, `${JSON.stringify(privilegedSnapshot(replacement), null, 2)}\n`, 'utf8');
   const before = await readFile(destination);
 
   await assert.rejects(
@@ -238,7 +239,7 @@ async function verifiedSnapshot(directory, fixture, options = {}) {
       recordedAt: '2026-09-01T00:00:00.000Z'
     });
   }
-  return graph.exportData();
+  return privilegedSnapshot(graph);
 }
 
 function mutateLiveAndFinalJournal(payload, factId, mutate) {
@@ -270,9 +271,9 @@ function resurrectExpired(payload, factId) {
 
 function assertConfiguredImportRejects(payload, verifier, pattern) {
   const target = createShadowGraph({ verifier, now: () => '2026-08-27T12:00:00.000Z' });
-  const before = target.exportData();
+  const before = privilegedSnapshot(target);
   assert.throws(() => target.importData(payload), pattern);
-  assert.deepEqual(target.exportData(), before, 'configured import rejection must be atomic');
+  assert.deepEqual(privilegedSnapshot(target), before, 'configured import rejection must be atomic');
 }
 
 test('P1-2 independent review: signed claims reject declared and effective validity extensions on configured import', async (t) => {
@@ -382,7 +383,7 @@ test('P1-2 independent review: fact verification, expiration, and supersession j
     validFrom: '2026-09-01T00:00:00.000Z', observedAt: '2026-09-01T00:00:00.000Z',
     recordedAt: '2026-09-01T00:00:00.000Z'
   });
-  const superseded = supersededGraph.exportData();
+  const superseded = privilegedSnapshot(supersededGraph);
   superseded.journal.find((entry) => entry.type === 'fact.superseded').payload.status = 'active';
   assertConfiguredImportRejects(superseded, fixture.verifier, /fact\.superseded|postcondition|status/i);
 });
@@ -396,7 +397,7 @@ test('P1-2 independent review: legitimate system expiration and supersession nar
   ]) {
     const imported = createShadowGraph({ verifier: fixture.verifier });
     assert.doesNotThrow(() => imported.importData(payload));
-    const signed = imported.exportData().facts.find((fact) => fact.verification);
+    const signed = privilegedSnapshot(imported).facts.find((fact) => fact.verification);
     assert.ok(['expired', 'superseded'].includes(signed.status));
   }
 });
@@ -419,8 +420,8 @@ test('P1-3 independent review: verifier-less core reopen, rebuild, and rebuild-i
 
   const reopened = createShadowGraph();
   reopened.importData(payload);
-  assert.equal(reopened.exportData().facts[0].verificationStatus, 'unverified');
-  assert.equal(reopened.exportData().facts[0].verificationUntrustedReason, 'verifier_not_configured');
+  assert.equal(privilegedSnapshot(reopened).facts[0].verificationStatus, 'unverified');
+  assert.equal(privilegedSnapshot(reopened).facts[0].verificationUntrustedReason, 'verifier_not_configured');
 
   const report = reopened.rebuild();
   assert.equal(report.rebuildable, true);
@@ -429,8 +430,8 @@ test('P1-3 independent review: verifier-less core reopen, rebuild, and rebuild-i
 
   const imported = createShadowGraph();
   imported.importData(rebuiltPayload(report));
-  assert.equal(imported.exportData().facts[0].verificationStatus, 'unverified');
-  assert.deepEqual(reopened.exportData().journal, rawJournal, 'exposed rebuild normalization must not rewrite the raw audit journal');
+  assert.equal(privilegedSnapshot(imported).facts[0].verificationStatus, 'unverified');
+  assert.deepEqual(privilegedSnapshot(reopened).journal, rawJournal, 'exposed rebuild normalization must not rewrite the raw audit journal');
 });
 
 test('P1-3 independent review: verifier-less MCP rebuild cannot re-elevate a genuinely signed durable fact', async (t) => {
@@ -459,7 +460,7 @@ test('P1-3 independent review: verifier-less MCP rebuild cannot re-elevate a gen
 test('P1-3 independent review: exposed rebuild migrates pre-schema-5 lifecycle values without rewriting journal audit bytes', () => {
   const source = createShadowGraph({ now: () => '2026-08-27T12:00:00.000Z' });
   source.addDecision({ id: 'legacy-lifecycle', title: 'Legacy lifecycle', chosen: 'A' });
-  const payload = source.exportData();
+  const payload = privilegedSnapshot(source);
   payload.schemaVersion = 4;
   payload.records[0].schemaVersion = 4;
   payload.records[0].status = 'active';
@@ -473,14 +474,14 @@ test('P1-3 independent review: exposed rebuild migrates pre-schema-5 lifecycle v
 
   const graph = createShadowGraph();
   graph.importData(payload);
-  assert.equal(graph.exportData().records[0].status, 'proposed');
-  assert.equal(graph.exportData().journal[0].payload.status, 'active');
+  assert.equal(privilegedSnapshot(graph).records[0].status, 'proposed');
+  assert.equal(privilegedSnapshot(graph).journal[0].payload.status, 'active');
   const report = graph.rebuild();
   assert.equal(report.rebuildable, true);
   assert.equal(report.projection.schemaVersion, 5);
   assert.equal(report.projection.records[0].status, 'proposed');
   assert.equal(report.projection.records[0].schemaVersion, 5);
-  assert.equal(graph.exportData().journal[0].payload.status, 'active');
+  assert.equal(privilegedSnapshot(graph).journal[0].payload.status, 'active');
 });
 
 test('P1-3 independent review: invalid verified journal payload makes core and configured MCP rebuild incomplete without trust elevation', async (t) => {
@@ -493,13 +494,13 @@ test('P1-3 independent review: invalid verified journal payload makes core and c
 
   const graph = createShadowGraph({ verifier: fixture.verifier });
   graph.importData(payload);
-  assert.equal(graph.exportData().facts[0].verificationStatus, 'verified', 'live fact remains genuinely verified');
+  assert.equal(privilegedSnapshot(graph).facts[0].verificationStatus, 'verified', 'live fact remains genuinely verified');
   const coreReport = graph.rebuild();
   assert.equal(coreReport.rebuildable, false);
   assert.match(coreReport.reason, /verification|invalid.*projection/i);
   assert.notEqual(coreReport.projection.facts[0]?.verificationStatus, 'verified');
   assert.ok(coreReport.skipped.some((entry) => /verification|invalid.*projection/i.test(`${entry.why} ${entry.detail ?? ''}`)));
-  assert.deepEqual(graph.exportData().journal, rawJournal, 'core rebuild must retain raw audit evidence unchanged');
+  assert.deepEqual(privilegedSnapshot(graph).journal, rawJournal, 'core rebuild must retain raw audit evidence unchanged');
 
   const file = join(directory, 'invalid-journal.json');
   await writeFile(file, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');

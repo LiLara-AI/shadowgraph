@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createShadowGraphServer } from '../src/server.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 function client(file, env = {}) {
   const child = spawn(process.execPath, ['src/mcp.js'], {
@@ -138,7 +139,7 @@ test('an MCP write carries the runtime session, and a caller-supplied sessionId 
   // every write in one process shares it.
   const graph = createShadowGraph();
   graph.importData(JSON.parse(await readFile(file, 'utf8')));
-  const stored = graph.exportData().facts;
+  const stored = privilegedSnapshot(graph).facts;
   const first = stored.find((item) => item.id === fact.id);
   const other = stored.find((item) => item.id === second.id);
 

@@ -1,5 +1,6 @@
 import { createShadowGraph } from './shadowgraph.js';
 import { hardPurgeGapLedgerReport } from './journal.js';
+import { privilegedSnapshot } from './internal/snapshot.js';
 
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
@@ -37,7 +38,7 @@ export function validateRestorePayload(payload, options = {}) {
     throw new Error(`Refusing to restore data: ${blocking.length} blocking issue(s) — ${codes}`);
   }
 
-  const live = staging.exportData();
+  const live = privilegedSnapshot(staging);
   const rebuild = staging.rebuild();
   const corruptSkipped = rebuild.skipped;
   if (corruptSkipped.length) {
@@ -72,7 +73,7 @@ export function validateRestorePayload(payload, options = {}) {
     relations: rebuild.projection.relations,
     idempotency: rebuild.projection.idempotency
   });
-  const rebuilt = normalizedRebuild.exportData();
+  const rebuilt = privilegedSnapshot(normalizedRebuild);
 
   for (const key of ['records', 'facts', 'relations', 'idempotency']) {
     if (canonicalCollection(live[key]) !== canonicalCollection(rebuilt[key])) {

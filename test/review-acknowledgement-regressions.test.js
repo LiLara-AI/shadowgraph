@@ -10,6 +10,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const NODE_SQLITE = (await getRuntimeCapabilities()).nodeSqlite;
 const SQLITE_TEST_OPTIONS = NODE_SQLITE.available ? {} : { skip: NODE_SQLITE.reason };
@@ -71,7 +72,7 @@ function legacyAcknowledgedSignal({ withConditions = true } = {}) {
 // Build a graph holding the legacy signal, then observe `lag`.
 function graphWithLegacySignal({ withConditions = true, lag = 1200 } = {}) {
   const seed = seedGraph();
-  const snapshot = seed.exportData();
+  const snapshot = privilegedSnapshot(seed);
   snapshot.reviewSignals = [legacyAcknowledgedSignal({ withConditions })];
   const graph = createShadowGraph();
   graph.importData(snapshot);
@@ -131,7 +132,7 @@ test('legacy acknowledgement coverage survives export, import and restart', asyn
   const store = createJsonFileStore(join(directory, 'graph.json'));
   const graph = graphWithLegacySignal({ lag: 600 });
   assert.equal(openReview(graph).reviewSignalStatus, 'acknowledged');
-  await store.save(graph.exportData());
+  await store.save(privilegedSnapshot(graph));
 
   const restored = createShadowGraph();
   restored.importData(await store.load());
@@ -144,7 +145,7 @@ test('legacy acknowledgement coverage survives export, import and restart', asyn
 test('legacy acknowledgement handling is identical on JSON and SQLite', async (t) => {
   const directory = await scratchDirectory(t, 'legacy-ack-parity-');
   const source = graphWithLegacySignal({ lag: 600 });
-  const snapshot = source.exportData();
+  const snapshot = privilegedSnapshot(source);
   const results = {};
 
   for (const backend of ['json', 'sqlite']) {
@@ -203,7 +204,7 @@ function graphWithObjectRuleMetadata() {
     project: 'p', id: 'decision:d1', title: 't', chosen: 'c',
     alternatives: [{ id: 'alternative:a1', label: 'alt-1', reasonRejected: 'r', reopenWhen: [{ key: 'lag', operator: 'gte', value: 500 }] }]
   });
-  const snapshot = seed.exportData();
+  const snapshot = privilegedSnapshot(seed);
   snapshot.records[0].alternatives[0].reopenWhen = [{
     key: 'lag',
     operator: { name: ['gte'] },
@@ -223,7 +224,7 @@ const objectOperatorCondition = (graph) => graph.context({ project: 'p' }).condi
 test('object-valued operator and unit from a lenient import are detached', () => {
   const graph = graphWithObjectRuleMetadata();
   graph.context({ project: 'p' });
-  const before = JSON.stringify(graph.exportData());
+  const before = JSON.stringify(privilegedSnapshot(graph));
 
   const condition = objectOperatorCondition(graph);
   assert.ok(condition, 'the unevaluable condition is reported');
@@ -234,7 +235,7 @@ test('object-valued operator and unit from a lenient import are detached', () =>
   if (condition.observed && typeof condition.observed === 'object') condition.observed.observed.push(-1);
   if (condition.evidence) condition.evidence.value = { tampered: true };
 
-  assert.equal(JSON.stringify(graph.exportData()), before, 'no canonical state moved');
+  assert.equal(JSON.stringify(privilegedSnapshot(graph)), before, 'no canonical state moved');
   const again = objectOperatorCondition(graph);
   assert.deepEqual(again.operator, { name: ['gte'] }, 'a later response is unaffected');
   assert.deepEqual(again.unit, { name: ['ms'] });
@@ -257,13 +258,13 @@ test('an object-valued attempt rule from a lenient import is detached', () => {
     project: 'p', id: 'attempt:t1', solution: 's', result: 'failed', resultClass: 'failed',
     reusableWhen: [{ key: 'lag', operator: 'gte', value: 500 }]
   });
-  const snapshot = seed.exportData();
+  const snapshot = privilegedSnapshot(seed);
   snapshot.records[0].reusableWhen = [{ key: 'lag', operator: { name: ['gte'] }, unit: { name: ['ms'] }, value: [500] }];
   const graph = createShadowGraph();
   graph.importData(snapshot);
   graph.addFact({ project: 'p', key: 'lag', value: [600] });
   graph.context({ project: 'p' });
-  const before = JSON.stringify(graph.exportData());
+  const before = JSON.stringify(privilegedSnapshot(graph));
 
   const condition = graph.context({ project: 'p' }).conditionDiagnostics
     .filter((item) => item.attemptId).flatMap((item) => item.conditions)[0];
@@ -273,7 +274,7 @@ test('an object-valued attempt rule from a lenient import is detached', () => {
   condition.expected.push(-1);
   condition.observed.push(-1);
 
-  assert.equal(JSON.stringify(graph.exportData()), before, 'no canonical state moved');
+  assert.equal(JSON.stringify(privilegedSnapshot(graph)), before, 'no canonical state moved');
 });
 
 test('a tampered detail leaves the journal and a rebuild untouched', async (t) => {
@@ -281,14 +282,14 @@ test('a tampered detail leaves the journal and a rebuild untouched', async (t) =
   const store = createJsonFileStore(join(directory, 'graph.json'));
   const graph = graphWithObjectRuleMetadata();
   graph.context({ project: 'p' });
-  const journalBefore = JSON.stringify(graph.exportData().journal);
+  const journalBefore = JSON.stringify(privilegedSnapshot(graph).journal);
 
   const condition = objectOperatorCondition(graph);
   condition.operator.name.push('tampered');
   condition.unit.name.push('tampered');
 
-  assert.equal(JSON.stringify(graph.exportData().journal), journalBefore, 'the journal is unchanged');
-  await store.save(graph.exportData());
+  assert.equal(JSON.stringify(privilegedSnapshot(graph).journal), journalBefore, 'the journal is unchanged');
+  await store.save(privilegedSnapshot(graph));
   const restored = createShadowGraph();
   restored.importData(await store.load());
   const rebuilt = objectOperatorCondition(restored);
@@ -317,7 +318,7 @@ function acknowledgedTwoKeyGraph() {
 
 // Reverse the alternatives, which reverses the order the reasons are built in.
 function reimportReversed(graph) {
-  const snapshot = graph.exportData();
+  const snapshot = privilegedSnapshot(graph);
   const decision = snapshot.records.find((item) => item.kind === 'decision');
   decision.alternatives = [...decision.alternatives].reverse();
   const reopened = createShadowGraph();
@@ -356,7 +357,7 @@ test('a genuinely changed breach set still opens a new signal after a reorder', 
 
 test('reorder stability holds across a restart on JSON and SQLite', async (t) => {
   const directory = await scratchDirectory(t, 'reorder-parity-');
-  const snapshot = reimportReversed(acknowledgedTwoKeyGraph()).exportData();
+  const snapshot = privilegedSnapshot(reimportReversed(acknowledgedTwoKeyGraph()));
   const results = {};
 
   for (const backend of ['json', 'sqlite']) {

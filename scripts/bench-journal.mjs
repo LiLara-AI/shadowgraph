@@ -18,6 +18,7 @@ import {
 import { createShadowGraph, rebuildProjection } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const execFileAsync = promisify(execFile);
 const scriptPath = fileURLToPath(import.meta.url);
@@ -130,7 +131,7 @@ function buildGraph(target) {
     graph.updateDecisionStatus(decision.id, 'in_progress');
     graph.setOutcome(decision.id, { status: index % 3 === 0 ? 'failed' : 'successful', lesson: `lesson ${index}` });
   }
-  const exported = graph.exportData();
+  const exported = privilegedSnapshot(graph);
   graph = null;
   return exported;
 }

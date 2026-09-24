@@ -10,6 +10,7 @@ import { createRestoreValidator } from './restore-validation.js';
 import { syncMarkdownWorkspace } from './markdown-workspace.js';
 import { getRuntimeCapabilities } from './runtime-capabilities.js';
 import { VERSION } from './version.js';
+import { privilegedSnapshot } from './internal/snapshot.js';
 
 const [command, ...rest] = process.argv.slice(2);
 const input = rest.join(' ');
@@ -66,7 +67,7 @@ async function runOneShot() {
 
     if (command === 'setup') {
       if (!initializedBeforeOpen) {
-        const revision = await store.save(graph.exportData());
+        const revision = await store.save(privilegedSnapshot(graph));
         graph.setRevision(revision);
       }
       return {
@@ -101,8 +102,8 @@ async function runOneShot() {
     if (command === 'stats') result = graph.stats();
     else if (command === 'list') result = graph.exportData();
     else if (command === 'search') { const query = parse(input || '{}'); result = graph.search(query.query ?? '', query); }
-    else if (command === 'context') { result = graph.context(parse(input || '{}')); await store.save(graph.exportData()); }
-    else if (command === 'remember') { const value = parse(input); result = Array.isArray(value.operations) ? graph.applyMemoryPlan(value) : graph.remember(value); await store.save(graph.exportData()); }
+    else if (command === 'context') { result = graph.context(parse(input || '{}')); await store.save(privilegedSnapshot(graph)); }
+    else if (command === 'remember') { const value = parse(input); result = Array.isArray(value.operations) ? graph.applyMemoryPlan(value) : graph.remember(value); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'recall') { const value = parse(input || '{}'); result = graph.recall(value.query ?? '', value); }
     else if (command === 'markdown-sync') {
       const value = parse(input);
@@ -110,23 +111,23 @@ async function runOneShot() {
       const loadPersisted = persist ? async () => store.load() : undefined;
       result = await syncMarkdownWorkspace({ graph, ...value, ...(persist ? { persist, loadPersisted } : {}) });
     }
-    else if (command === 'review') { result = graph.review(parse(input || '{}')); await store.save(graph.exportData()); }
-    else if (command === 'reconsider') { result = graph.reconsider(parse(input || '{}')); await store.save(graph.exportData()); }
-    else if (command === 'fact') { result = graph.addFact(parse(input)); await store.save(graph.exportData()); }
-    else if (command === 'outcome') { const value = parse(input); result = graph.setOutcome(value.decisionId, value.outcome); await store.save(graph.exportData()); }
-    else if (command === 'status') { const value = parse(input); result = graph.updateDecisionStatus(value.decisionId, value.status); await store.save(graph.exportData()); }
-    else if (command === 'link') { result = graph.link(parse(input)); await store.save(graph.exportData()); }
+    else if (command === 'review') { result = graph.review(parse(input || '{}')); await store.save(privilegedSnapshot(graph)); }
+    else if (command === 'reconsider') { result = graph.reconsider(parse(input || '{}')); await store.save(privilegedSnapshot(graph)); }
+    else if (command === 'fact') { result = graph.addFact(parse(input)); await store.save(privilegedSnapshot(graph)); }
+    else if (command === 'outcome') { const value = parse(input); result = graph.setOutcome(value.decisionId, value.outcome); await store.save(privilegedSnapshot(graph)); }
+    else if (command === 'status') { const value = parse(input); result = graph.updateDecisionStatus(value.decisionId, value.status); await store.save(privilegedSnapshot(graph)); }
+    else if (command === 'link') { result = graph.link(parse(input)); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'traverse') result = graph.traverse(parse(input));
     else if (command === 'redact') result = graph.redact(parse(input));
-    else if (command === 'supersede') { result = graph.supersedeDecision(parse(input)); await store.save(graph.exportData()); }
+    else if (command === 'supersede') { result = graph.supersedeDecision(parse(input)); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'purge-preview') result = graph.projectSummary(parse(input).project);
-    else if (command === 'purge') { const value = parse(input); result = graph.purgeProject(value.project, { mode: value.mode }); await store.save(graph.exportData()); }
-    else if (command === 'confidence-evidence') { result = graph.addConfidenceEvidence(parse(input)); await store.save(graph.exportData()); }
+    else if (command === 'purge') { const value = parse(input); result = graph.purgeProject(value.project, { mode: value.mode }); await store.save(privilegedSnapshot(graph)); }
+    else if (command === 'confidence-evidence') { result = graph.addConfidenceEvidence(parse(input)); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'journal') result = graph.getJournal(parse(input || '{}'));
     else if (command === 'rebuild') result = graph.rebuild(parse(input || '{}'));
-    else if (command === 'maintain') { result = graph.maintain(parse(input || '{}')); await store.save(graph.exportData()); }
+    else if (command === 'maintain') { result = graph.maintain(parse(input || '{}')); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'signals') result = graph.getReviewSignals(parse(input || '{}'));
-    else if (command === 'ack') { result = graph.acknowledgeReview(parse(input).id); await store.save(graph.exportData()); }
+    else if (command === 'ack') { result = graph.acknowledgeReview(parse(input).id); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'retrieve') { const value = parse(input || '{}'); result = graph.retrieve(value.query ?? '', value); }
     else if (command === 'validate') result = graph.validate();
     else if (command === 'repair-plan') result = graph.repairPlan();
@@ -134,8 +135,8 @@ async function runOneShot() {
     else if (command === 'restore') result = store.restore
       ? await store.restore(input, { validate: restoreValidator, afterReplace: (payload) => graph.replaceData(payload) })
       : await restoreFile(input, file, { storage: storageType, validate: restoreValidator, afterReplace: (payload) => graph.replaceData(payload) });
-    else if (command === 'decision') { result = graph.addDecision(parse(input)); await store.save(graph.exportData()); }
-    else if (command === 'attempt') { result = graph.addAttempt(parse(input)); await store.save(graph.exportData()); }
+    else if (command === 'decision') { result = graph.addDecision(parse(input)); await store.save(privilegedSnapshot(graph)); }
+    else if (command === 'attempt') { result = graph.addAttempt(parse(input)); await store.save(privilegedSnapshot(graph)); }
     else {
       throw new Error('Usage: shadowgraph <setup|doctor|serve|mcp|stats|list|search|retrieve|recall|remember|markdown-sync|context|review|reconsider|maintain|signals|ack|validate|repair-plan|backup|restore|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge> [JSON/path]');
     }

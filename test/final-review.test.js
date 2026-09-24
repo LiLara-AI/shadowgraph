@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { createShadowGraph, rebuildProjection } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 function decision(id = 'd1') {
   return { id, kind: 'decision', schemaVersion: 3, project: 'p', title: 'T', chosen: 'C', status: 'active', alternatives: [] };
@@ -12,7 +13,7 @@ function decision(id = 'd1') {
 test('final review: legacy facts without ids receive generated ids during import', () => {
   const graph = createShadowGraph();
   graph.importData({ facts: [{ key: 'legacy-key', value: 1 }] });
-  const fact = graph.exportData().facts[0];
+  const fact = privilegedSnapshot(graph).facts[0];
   assert.match(fact.id, /^fact_/);
   assert.equal(fact.key, 'legacy-key');
 });
@@ -26,8 +27,8 @@ test('final review: generated legacy fact ids are deterministic and duplicate-sa
   const second = createShadowGraph();
   first.importData(payload);
   second.importData(payload);
-  const firstIds = first.exportData().facts.map((fact) => fact.id);
-  const secondIds = second.exportData().facts.map((fact) => fact.id);
+  const firstIds = privilegedSnapshot(first).facts.map((fact) => fact.id);
+  const secondIds = privilegedSnapshot(second).facts.map((fact) => fact.id);
   assert.deepEqual(firstIds, secondIds, 'same legacy payload must produce the same ids after restart/import');
   assert.equal(new Set(firstIds).size, 2, 'identical duplicate facts must not overwrite one another');
   assert.match(firstIds[0], /^fact_[a-f0-9]{20}$/);
@@ -67,7 +68,7 @@ test('final review: direct import preflights before merging valid entities', () 
   const graph = createShadowGraph();
   graph.addDecision({ id: 'kept', project: 'keep', title: 'ORIGINAL', chosen: 'sqlite' });
   assert.throws(() => graph.importData({ records: [decision('new'), { id: 'bad', kind: 'decision', title: 1, chosen: 'x' }] }));
-  assert.deepEqual(graph.exportData().records.map((item) => item.id), ['kept']);
+  assert.deepEqual(privilegedSnapshot(graph).records.map((item) => item.id), ['kept']);
 });
 
 test('final review: unknown confidence policy is preserved and reported unsupported', () => {
@@ -82,7 +83,7 @@ test('final review: unknown confidence policy is preserved and reported unsuppor
       history: []
     }
   }] });
-  const stored = graph.exportData().records[0].confidence;
+  const stored = privilegedSnapshot(graph).records[0].confidence;
   assert.equal(stored.current, 0.91, 'unknown policy values must not be recalculated by v1');
   assert.equal(stored.policy, 'future_policy_v9');
   assert.equal(stored.basis.policy, 'future_policy_v9');
@@ -103,7 +104,7 @@ test('final review: known confidence policy is internally consistent after migra
       history: []
     }
   }] });
-  const confidence = graph.exportData().records[0].confidence;
+  const confidence = privilegedSnapshot(graph).records[0].confidence;
   assert.equal(confidence.current, 0.64);
   assert.equal(confidence.policy, confidence.basis.policy);
 });
@@ -114,12 +115,12 @@ test('final review: separate JSON store instances cannot both commit the same re
   const first = createJsonFileStore(file);
   const second = createJsonFileStore(file);
   const seed = createShadowGraph();
-  const revision = await first.save(seed.exportData());
+  const revision = await first.save(privilegedSnapshot(seed));
   const left = createShadowGraph({ revision });
   left.addDecision({ id: 'left', title: 'Left', chosen: 'L' });
   const right = createShadowGraph({ revision });
   right.addDecision({ id: 'right', title: 'Right', chosen: 'R' });
-  const results = await Promise.allSettled([first.save(left.exportData()), second.save(right.exportData())]);
+  const results = await Promise.allSettled([first.save(privilegedSnapshot(left)), second.save(privilegedSnapshot(right))]);
   assert.equal(results.filter((item) => item.status === 'fulfilled').length, 1);
   assert.equal(results.filter((item) => item.status === 'rejected' && /revision conflict/i.test(item.reason.message)).length, 1);
   const loaded = await first.load();

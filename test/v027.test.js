@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createShadowGraph } from '../src/shadowgraph.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 test('traverses explainable relationships with depth and direction', () => {
   const graph = createShadowGraph();
@@ -37,23 +38,23 @@ test('redacts sensitive fields and purges a project with relations', () => {
   assert.equal(safe.events.some((item) => item.project === 'public'), false);
   assert.equal(graph.purgeProject('private').removed, 2);
   assert.equal(graph.stats().relations, 0);
-  assert.equal(graph.exportData().events.some((item) => item.project === 'private'), false);
+  assert.equal(privilegedSnapshot(graph).events.some((item) => item.project === 'private'), false);
 });
 
 test('traversal omits dangling relations and migration ids stay deterministic', () => {
   const graph = createShadowGraph();
   graph.importData({ records: [{ id: 'legacy', kind: 'decision', title: 'Legacy', chosen: 'A', alternatives: [{ label: 'B' }] }], relations: [{ id: 'dangling', from: 'legacy', to: 'missing', relation: 'depends_on' }] });
-  const first = graph.exportData().records[0].alternatives[0].id;
+  const first = privilegedSnapshot(graph).records[0].alternatives[0].id;
   assert.equal(graph.traverse({ id: 'legacy' }).relations.length, 0);
   const secondGraph = createShadowGraph();
   secondGraph.importData({ records: [{ id: 'legacy', kind: 'decision', title: 'Legacy', chosen: 'A', alternatives: [{ label: 'B' }] }] });
-  assert.equal(secondGraph.exportData().records[0].alternatives[0].id, first);
+  assert.equal(privilegedSnapshot(secondGraph).records[0].alternatives[0].id, first);
 });
 
 test('migration preserves confidence initial values and prevents supersession cycles', () => {
   const graph = createShadowGraph();
   graph.importData({ records: [{ id: 'd1', kind: 'decision', title: 'Old', chosen: 'A', confidence: { initial: 0.9, current: 0.2, history: [] }, alternatives: [] }, { id: 'd2', kind: 'decision', title: 'New', chosen: 'B', confidence: 0.5, alternatives: [] }] });
-  assert.equal(graph.exportData().records.find((item) => item.id === 'd1').confidence.initial, 0.9);
+  assert.equal(privilegedSnapshot(graph).records.find((item) => item.id === 'd1').confidence.initial, 0.9);
   graph.supersedeDecision({ decisionId: 'd1', replacementId: 'd2' });
   assert.throws(() => graph.supersedeDecision({ decisionId: 'd2', replacementId: 'd1' }), /invalid decision chain/);
 });
@@ -61,7 +62,7 @@ test('migration preserves confidence initial values and prevents supersession cy
 test('migration preserves legacy current confidence when adding first new evidence', () => {
   const graph = createShadowGraph();
   graph.importData({ records: [{ id: 'legacy-confidence', kind: 'decision', title: 'Old', chosen: 'A', confidence: { initial: 0.5, current: 0.9, history: [] }, alternatives: [] }] });
-  const before = graph.exportData().records[0].confidence;
+  const before = privilegedSnapshot(graph).records[0].confidence;
   assert.equal(before.current, 0.9);
   const after = graph.addConfidenceEvidence({ decisionId: 'legacy-confidence', key: 'new-observation', sourceClass: 'tool_observed', reason: 'new evidence' });
   assert.equal(after.confidence.current, 1.0, 'legacy current becomes the explicit baseline for the first new contribution');

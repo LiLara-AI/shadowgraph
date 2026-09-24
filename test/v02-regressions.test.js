@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { createJsonFileStore } from '../src/storage.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 test('superseding a fact exposes the old fact as stale context', () => {
   const graph = createShadowGraph();
@@ -30,5 +31,5 @@ test('loads a v0.1 array file through the storage boundary', async (t) => {
   const store = createJsonFileStore(file);
   const graph = createShadowGraph();
   graph.importData(await store.load());
-  assert.equal(graph.exportData().records[0].confidence.current, 0.7);
+  assert.equal(privilegedSnapshot(graph).records[0].confidence.current, 0.7);
 });

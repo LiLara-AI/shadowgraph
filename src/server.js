@@ -7,6 +7,7 @@ import { createShadowGraph } from './shadowgraph.js';
 import { backupFile, restoreFile } from './backup.js';
 import { VERSION, NAME } from './version.js';
 import { createRestoreValidator } from './restore-validation.js';
+import { privilegedSnapshot } from './internal/snapshot.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 
@@ -95,16 +96,16 @@ export async function createShadowGraphServer(options = {}) {
   }
   function persist() {
     return queuePersistence(
-      async () => { const snapshot = graph.exportData(); const revision = await store.save(snapshot); graph.setRevision(revision); },
+      async () => { const snapshot = privilegedSnapshot(graph); const revision = await store.save(snapshot); graph.setRevision(revision); },
       async (error) => { if (/revision conflict/i.test(error.message)) graph.replaceData(await store.load()); throw error; }
     );
   }
   function mutateAndPersist(operation) {
     return queuePersistence(async () => {
-      const before = graph.exportData();
+      const before = privilegedSnapshot(graph);
       try {
         const value = await operation();
-        const revision = await store.save(graph.exportData());
+        const revision = await store.save(privilegedSnapshot(graph));
         graph.setRevision(revision);
         return value;
       } catch (error) {

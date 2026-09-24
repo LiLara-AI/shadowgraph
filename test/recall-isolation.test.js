@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { seedGraph, measureCoverage } from '../scripts/context-size.mjs';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 // recall() ranks over live entities instead of a full exportData() clone, which
 // removed about 70% of its cost. The property that made the wholesale clone safe
@@ -28,7 +29,7 @@ test('a record returned by recall cannot be mutated back into live state', () =>
   first.items[0].record.title = 'MUTATED';
   if (Array.isArray(first.items[0].record.alternatives)) first.items[0].record.alternatives.push({ label: 'injected' });
 
-  const stored = graph.exportData().records.find((item) => item.id === targetId);
+  const stored = privilegedSnapshot(graph).records.find((item) => item.id === targetId);
   assert.notEqual(stored.title, 'MUTATED', 'live state was not reachable through the result');
   assert.ok(!(stored.alternatives ?? []).some((item) => item.label === 'injected'));
 });
@@ -40,7 +41,7 @@ test('a nested field of a recalled record is detached too, not shallow copied', 
   assert.ok(decision, 'a decision came back');
 
   decision.record.alternatives[0].reasonRejected = 'MUTATED';
-  const stored = graph.exportData().records.find((item) => item.id === decision.record.id);
+  const stored = privilegedSnapshot(graph).records.find((item) => item.id === decision.record.id);
   assert.notEqual(stored.alternatives[0].reasonRejected, 'MUTATED', 'the clone reaches nested objects');
 });
 
@@ -50,7 +51,7 @@ test('records returned by context are detached as well', () => {
   const targetId = view.activeDecisions[0].id;
   view.activeDecisions[0].title = 'MUTATED';
 
-  const stored = graph.exportData().records.find((item) => item.id === targetId);
+  const stored = privilegedSnapshot(graph).records.find((item) => item.id === targetId);
   assert.notEqual(stored.title, 'MUTATED');
 });
 
@@ -64,7 +65,7 @@ test('ranking over live entities did not change what recall returns', () => {
   assert.ok(result.signals.lexical, 'signals still describe why each hit matched');
   assert.equal(result.ranking.strategy, 'weighted_rrf');
   // A returned record is a full record, not a projection.
-  const stored = graph.exportData().records.find((item) => item.id === result.items[0].record.id);
+  const stored = privilegedSnapshot(graph).records.find((item) => item.id === result.items[0].record.id);
   assert.deepEqual(result.items[0].record, stored, 'items are full fidelity');
 });
 

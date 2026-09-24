@@ -23,6 +23,7 @@ import {
 } from '../src/mcp-tools.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { measureAll } from '../scripts/mcp-wire-size.mjs';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 // --- expected inventory ----------------------------------------------------
 const FULL_TOOL_NAMES = [
@@ -718,7 +719,7 @@ test('output schemas accept data imported from an older storage schema', () => {
     assertValid(byName.get(name).outputSchema, value, `${name} over schema-3 data`);
   }
   // The legacy verified fact is preserved rather than elevated or rejected.
-  const [fact] = graph.exportData().facts;
+  const [fact] = privilegedSnapshot(graph).facts;
   assert.equal(fact.verificationStatus, 'unverified');
   assert.equal(fact.legacyVerificationStatus, 'verified');
 });

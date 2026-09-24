@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { backupFile, restoreFile } from '../src/backup.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 test('normalizes common MCP aliases for rejection reasons and human sources', () => {
   const graph = createShadowGraph();
@@ -46,7 +47,7 @@ test('maintenance ages decisions, expires facts, and persists review signals', (
   const result = graph.maintain({ changedFacts: ['changed'] });
   assert.equal(result.agedDecisionIds[0], decision.id);
   assert.equal(graph.getReviewSignals().length, 1);
-  assert.equal(graph.exportData().facts[0].verificationStatus, 'expired');
+  assert.equal(privilegedSnapshot(graph).facts[0].verificationStatus, 'expired');
 });
 
 test('validation and retrieval provide graph-aware explanations', () => {
@@ -64,7 +65,7 @@ test('backup and restore round-trip a graph export', async (t) => {
   const dir = await scratchDirectory(t, 'shadowgraph-backup-');
   const source = join(dir, 'source.json'); const backup = join(dir, 'backup.json'); const restored = join(dir, 'restored.json');
   const graph = createShadowGraph(); graph.addDecision({ title: 'Backup', chosen: 'A' });
-  await import('node:fs/promises').then(({ writeFile }) => writeFile(source, JSON.stringify(graph.exportData())));
+  await import('node:fs/promises').then(({ writeFile }) => writeFile(source, JSON.stringify(privilegedSnapshot(graph))));
   await backupFile(source, backup); await restoreFile(backup, restored);
   assert.equal((await readFile(restored, 'utf8')).includes('Backup'), true);
 });

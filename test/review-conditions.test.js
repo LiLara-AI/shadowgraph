@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 // A decision whose rejected alternative reopens on a machine-checkable threshold.
 function decisionWithThreshold(graph, rule, project = 'p') {
@@ -90,7 +91,7 @@ test('a pass resting on facts that disagree is reported as contested', () => {
   graph.addFact({ project: 'p', key: 'replicaLagMs', value: '20ms', sourceClass: 'measured', validFrom: '2026-03-01T00:00:00Z' });
 
   // A second, equally applicable observation of the same key that disagrees.
-  const snapshot = graph.exportData();
+  const snapshot = privilegedSnapshot(graph);
   const original = snapshot.facts[0];
   snapshot.facts = [...snapshot.facts, { ...original, id: 'fact:contested', value: '900ms' }];
   const contested = createShadowGraph();
@@ -177,13 +178,13 @@ test('a caller write rejects an unusable operator or unit instead of storing a c
 test('a stored rule whose operator this build did not recognise is preserved, not rewritten', () => {
   const seeded = createShadowGraph();
   const decision = decisionWithThreshold(seeded, { key: 'replicaLagMs', operator: 'greater_than', value: 500 });
-  const snapshot = seeded.exportData();
+  const snapshot = privilegedSnapshot(seeded);
   // Simulate a record written by a build with an operator vocabulary we do not share.
   snapshot.records[0].alternatives[0].reopenWhen = [{ key: 'replicaLagMs', operator: 'within_stddev', value: 2 }];
 
   const graph = createShadowGraph();
   graph.importData(snapshot);
-  const stored = graph.exportData().records[0].alternatives[0].reopenWhen[0];
+  const stored = privilegedSnapshot(graph).records[0].alternatives[0].reopenWhen[0];
   assert.equal(stored.operator, 'within_stddev', 'the original rule survives import verbatim');
 
   graph.addFact({ project: 'p', key: 'replicaLagMs', value: 3, sourceClass: 'measured' });
@@ -201,11 +202,11 @@ test('a declared unit survives persistence and restart', async (t) => {
   const graph = createShadowGraph();
   decisionWithThreshold(graph, { key: 'replicaLagMs', operator: 'greater_than', value: 500, unit: 'ms' });
   graph.addFact({ project: 'p', key: 'replicaLagMs', value: '900ms', sourceClass: 'measured' });
-  await store.save(graph.exportData());
+  await store.save(privilegedSnapshot(graph));
 
   const reopened = createShadowGraph();
   reopened.importData(await store.load());
-  const rule = reopened.exportData().records[0].alternatives[0].reopenWhen[0];
+  const rule = privilegedSnapshot(reopened).records[0].alternatives[0].reopenWhen[0];
   assert.equal(rule.unit, 'ms', 'the unit was not dropped on the way to storage');
 
   const view = reopened.context({ project: 'p' });
