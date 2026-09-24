@@ -13,6 +13,7 @@ import { createConfidence, applyContribution, setOutcomeContribution, computeCon
 import { hybridSearch, foldText } from './hybrid-search.js';
 import { effectiveFactExpirationBoundary, factValidityPolicyIssue, isValidIsoInstant } from './fact-validity.js';
 import { evaluateRule, isSupportedOperator, isSupportedUnit, ruleOperandIssue } from './condition-eval.js';
+import { registerPrivilegedSnapshot } from './internal/snapshot.js';
 import { createHash } from 'node:crypto';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
@@ -2438,7 +2439,11 @@ export function createShadowGraph(options = {}) {
     };
   }
 
-  function exportData() {
+  // The privileged snapshot (plan v1.4.4 §11): the complete, unscoped store --
+  // every project and collection, the journal, idempotency and revision. It is
+  // the persistence primitive, reachable only through src/internal/snapshot.js,
+  // and it is not a read of the memory product.
+  function snapshot() {
     return {
       schemaVersion: SCHEMA_VERSION, revision,
       records: [...records.values()].map(clone), facts: [...facts.values()].map(clone),
@@ -2446,6 +2451,13 @@ export function createShadowGraph(options = {}) {
       idempotency: [...idempotency.entries()].map(([key, value]) => ({ key, value: clone(canonicalIdempotencyValue(value)) })),
       events: clone(events), journal: clone(journal), journalSeq, journalEpoch
     };
+  }
+
+  // The public export (`GET /records`, the `list` verb). For now it returns
+  // exactly the privileged snapshot; the two are separate functions so the
+  // public contract can change without touching persistence.
+  function exportData() {
+    return snapshot();
   }
 
   // P0-2: ATOMIC. The previous implementation cleared every map and THEN parsed
@@ -3109,7 +3121,7 @@ export function createShadowGraph(options = {}) {
     return { schemaVersion: SCHEMA_VERSION, total: all.length, decisions: all.filter((x) => x.kind === 'decision').length, attempts: all.filter((x) => x.kind === 'attempt').length, facts: facts.size, relations: relations.size, reviewSignals: reviewSignals.size, events: events.length, journal: journal.length };
   }
 
-  return {
+  return registerPrivilegedSnapshot({
     // Only direct public mutation entry points receive a transaction boundary.
     // Internal composition (applyMemoryPlan -> remember, supersedeDecision ->
     // link, maintain/context -> review, replaceData -> importData) stays inside
@@ -3149,7 +3161,7 @@ export function createShadowGraph(options = {}) {
     getJournal,
     rebuild,
     stats
-  };
+  }, snapshot);
 }
 
 // `strict` is for caller writes, where a typo should fail loudly instead of
