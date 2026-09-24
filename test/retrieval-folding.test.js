@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { foldText } from '../src/hybrid-search.js';
-import { runEvaluation } from '../scripts/retrieval-eval.mjs';
+import { groundCases, runEvaluation } from '../scripts/retrieval-eval.mjs';
 
 const decision = (graph, title, project = 'p') =>
   graph.addDecision({ project, title, chosen: 'x' });
@@ -164,4 +164,22 @@ test('the evaluation reports Arabic orthography and leaves meaning-based cases a
   const searchEngine = report.engines.search.byCategory;
   assert.equal(searchEngine.paraphrase.passed, 0, 'paraphrase still fails without embeddings');
   assert.ok(searchEngine.crossLanguage.passed < searchEngine.crossLanguage.cases, 'cross-language still fails');
+});
+
+test('the evaluation records what happened to each relevant record, and refuses a case the corpus cannot ground', () => {
+  const report = runEvaluation({ split: 'dev' });
+
+  for (const [name, engine] of Object.entries(report.engines)) {
+    for (const result of engine.cases) {
+      // The annotation agrees with the score it does not feed.
+      const delivered = result.relevant.filter((item) => item.outcome === 'delivered').length;
+      if (result.recall !== null) assert.equal(delivered, Math.round(result.recall * result.relevant.length), `${name} ${result.id}`);
+      for (const item of result.relevant) assert.equal(item.outcome === 'missed', item.rank === null, `${name} ${result.id} ${item.record}`);
+    }
+    const annotated = engine.cases.reduce((sum, result) => sum + result.relevant.length, 0);
+    assert.equal(Object.values(engine.relevantOutcomes).reduce((a, b) => a + b, 0), annotated);
+  }
+
+  assert.throws(() => groundCases([{ id: 'typo', expect: ['d-missing'] }]), /not in the corpus/);
+  assert.throws(() => groundCases([{ id: 'wrong-project', expect: ['d-trap'] }]), /outside project/);
 });

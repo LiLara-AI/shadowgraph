@@ -22,6 +22,10 @@
 // dev cases are for iterating. holdout cases are NOT to be looked at while
 // tuning, and a holdout number claimed after tuning on holdout is worthless.
 //
+// Each case also records, per known-relevant record, whether the engine
+// delivered it, ranked it too low, or missed it (`--json`, `cases[].relevant`).
+// That annotation does not feed the score.
+//
 // Usage:
 //   node scripts/retrieval-eval.mjs                 dev split, table
 //   node scripts/retrieval-eval.mjs --split holdout run the held-out cases
@@ -178,6 +182,35 @@ export function buildGraph() {
 
 const RANK_DEPTH = 5;
 
+// Every record a case names must exist in the corpus, and every record it
+// expects must belong to the project being evaluated. Without this a typo in
+// `expect` scored as an ordinary miss, and a relevance judgement nobody could
+// satisfy was indistinguishable from a retrieval failure.
+export function groundCases(cases = CASES, corpus = CORPUS) {
+  const byKey = new Map(corpus.map((entry) => [entry.id, entry]));
+  for (const testCase of cases) {
+    for (const key of [...(testCase.expect ?? []), ...(testCase.mustNotReturn ?? [])]) {
+      if (!byKey.has(key)) throw new Error(`case ${testCase.id} names ${key}, which is not in the corpus`);
+    }
+    for (const key of testCase.expect ?? []) {
+      if (byKey.get(key).project !== PROJECT) throw new Error(`case ${testCase.id} expects ${key}, which is outside project ${PROJECT}`);
+    }
+  }
+}
+
+// What happened to each known-relevant record, read from the engine's actual
+// output -- a miss is recorded, never inferred, and the record merely existing
+// in the store counts for nothing. `delivered` is inside the RANK_DEPTH the
+// scoring counts, `ranked` was returned below it, `missed` was not returned.
+// Annotation only: scoreCase() does not read it.
+function annotateRelevant(testCase, returnedIds, ids) {
+  return (testCase.expect ?? []).map((key) => {
+    const at = returnedIds.indexOf(ids.get(key));
+    const rank = at === -1 ? null : at + 1;
+    return { record: key, rank, outcome: rank === null ? 'missed' : rank <= RANK_DEPTH ? 'delivered' : 'ranked' };
+  });
+}
+
 // Recall@k over the expected set, plus reciprocal rank of the first hit, plus a
 // hard precision check: a case listing mustNotReturn fails outright if that
 // record appears anywhere in the results.
@@ -208,6 +241,7 @@ function scoreCase(testCase, returnedIds, ids) {
 export function runEvaluation({ split = 'dev' } = {}) {
   const { graph, ids } = buildGraph();
   const cases = CASES.filter((entry) => entry.split === split);
+  groundCases(cases);
   const engines = {
     search: (query) => graph.search(query, { project: PROJECT }).items.map((item) => item.id ?? item.record?.id),
     retrieve: (query) => graph.retrieve(query, { project: PROJECT }).items.map((item) => item.id ?? item.record?.id),
@@ -217,8 +251,14 @@ export function runEvaluation({ split = 'dev' } = {}) {
   const report = { split, rankDepth: RANK_DEPTH, cases: cases.length, engines: {} };
   for (const [name, run] of Object.entries(engines)) {
     const started = performance.now();
-    const scored = cases.map((testCase) => scoreCase(testCase, run(testCase.query) ?? [], ids));
+    const returned = cases.map((testCase) => run(testCase.query) ?? []);
+    const scored = cases.map((testCase, index) => scoreCase(testCase, returned[index], ids));
     const elapsed = Number((performance.now() - started).toFixed(3));
+    const relevantOutcomes = { delivered: 0, ranked: 0, missed: 0 };
+    scored.forEach((result, index) => {
+      result.relevant = annotateRelevant(cases[index], returned[index], ids);
+      for (const { outcome } of result.relevant) relevantOutcomes[outcome] += 1;
+    });
 
     const byCategory = {};
     for (const result of scored) {
@@ -239,6 +279,7 @@ export function runEvaluation({ split = 'dev' } = {}) {
       totalMs: elapsed,
       passed: scored.filter((result) => result.passed).length,
       leaks: scored.reduce((sum, result) => sum + result.leaked, 0),
+      relevantOutcomes,
       byCategory,
       cases: scored
     };
@@ -260,7 +301,7 @@ function formatReport(report) {
   }
   lines.push('');
   for (const [name, engine] of Object.entries(report.engines)) {
-    lines.push(`${name}: ${engine.passed}/${report.cases} passed, ${engine.leaks} cross-project leaks, ${engine.totalMs} ms`);
+    lines.push(`${name}: ${engine.passed}/${report.cases} passed, ${engine.leaks} cross-project leaks, ${engine.relevantOutcomes.missed} relevant records missed, ${engine.totalMs} ms`);
   }
   lines.push('');
   lines.push('paraphrase and crossLanguage are expected to be weak without embeddings.');
