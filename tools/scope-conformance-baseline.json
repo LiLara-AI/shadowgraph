@@ -1,0 +1,64 @@
+{
+  "_comment": [
+    "Recorded NON-conformance of the eleven public read paths against the approved",
+    "project_only rule, as observed by tools/scope-conformance.mjs on the v0.41.0",
+    "kernel. Every row here is a known failure, not an expectation to keep: the",
+    "harness exits 0 only while each path still behaves exactly as recorded, and",
+    "refuses any row that already meets the target.",
+    "",
+    "A row is retired -- deleted, with conformant assertions added to the",
+    "production suite -- by the change-set that makes its path conformant, never",
+    "edited to follow a behaviour change. Rows are grouped by the change-set",
+    "expected to retire them; the file is deleted once the last group is retired.",
+    "",
+    "Fixture: projects alpha and beta, plus a decision and a memory written with no",
+    "project. 'withheld' means the read was made with no project argument."
+  ],
+  "recordedAt": "v0.41.0 (a264c86)",
+  "paths": {
+    "matchesFilters": {
+      "group": "core-read-paths",
+      "observed": { "withheldProjects": ["alpha", "beta", "default"], "selectedProjects": ["beta"] }
+    },
+    "search": {
+      "group": "core-read-paths",
+      "observed": { "withheldProjects": ["alpha", "beta", "default"], "scopeProject": "all", "complete": true, "limitation": false }
+    },
+    "retrieve": {
+      "group": "core-read-paths",
+      "observed": { "withheldProjects": ["alpha", "beta", "default"], "graphExpandedProjects": ["alpha"], "scopeProject": "all", "complete": true, "limitation": false }
+    },
+    "recall": {
+      "group": "core-read-paths",
+      "observed": { "withheldProjects": ["default"], "scopeProject": "default", "complete": true, "limitation": false }
+    },
+    "context": {
+      "group": "core-read-paths",
+      "observed": { "withheldProjects": ["default"], "scopeProject": "default", "complete": true, "limitation": false }
+    },
+    "entity": {
+      "group": "by-id-and-traversal",
+      "observed": { "withheldReturnsRecord": true, "otherProjectReturnsRecord": true, "existenceDistinguishable": true }
+    },
+    "traverse": {
+      "group": "by-id-and-traversal",
+      "observed": { "withheldNodeProjects": ["alpha"], "withheldReachesMemory": false, "selectedReachesMemory": true }
+    },
+    "getJournal": {
+      "group": "journal-stats-redaction-export",
+      "observed": { "withheldProjects": ["alpha", "beta", "default"], "scopeProject": "all", "complete": true, "limitation": false }
+    },
+    "stats": {
+      "group": "journal-stats-redaction-export",
+      "observed": { "withheldDecisions": 3, "selectedDecisions": 3 }
+    },
+    "redact": {
+      "group": "journal-stats-redaction-export",
+      "observed": { "withheldProjects": ["alpha", "beta", "default"], "selectedProjects": ["beta"] }
+    },
+    "publicExport": {
+      "group": "journal-stats-redaction-export",
+      "observed": { "withheldProjects": ["alpha", "beta", "default"] }
+    }
+  }
+}
