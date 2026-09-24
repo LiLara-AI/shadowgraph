@@ -9,15 +9,15 @@ import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 test('superseding a fact exposes the old fact as stale context', () => {
   const graph = createShadowGraph();
-  graph.addFact({ key: 'mode', value: 'cloud' });
-  graph.addFact({ key: 'mode', value: 'local' });
+  graph.addFact({ project: 'default', key: 'mode', value: 'cloud' });
+  graph.addFact({ project: 'default', key: 'mode', value: 'local' });
   assert.equal(graph.context().staleAssumptions.length, 1);
   assert.equal(graph.context().staleAssumptions[0].value, 'cloud');
 });
 
 test('review returns only alternatives whose rules matched', () => {
   const graph = createShadowGraph();
-  graph.addDecision({ title: 'Architecture', chosen: 'A', alternatives: [
+  graph.addDecision({ project: 'default', title: 'Architecture', chosen: 'A', alternatives: [
     { label: 'B', reopenWhen: ['local'] },
     { label: 'C', reopenWhen: ['cloud'] }
   ] });

@@ -21,7 +21,7 @@ async function startServer(t, options = {}) {
 test('HTTP API records and reviews decisions without wildcard CORS', async (t) => {
   const { app, base } = await startServer(t);
   try {
-    const create = await fetch(`${base}/decisions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: 'Database', chosen: 'PostgreSQL', alternatives: [{ label: 'SQLite', reopenWhen: ['local'] }] }) });
+    const create = await fetch(`${base}/decisions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'default', title: 'Database', chosen: 'PostgreSQL', alternatives: [{ label: 'SQLite', reopenWhen: ['local'] }] }) });
     assert.equal(create.status, 200);
     assert.equal(create.headers.get('access-control-allow-origin'), null);
     const review = await fetch(`${base}/review`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ changedFacts: ['local'] }) });
@@ -71,7 +71,7 @@ test('HTTP API returns a useful status for unknown decisions', async (t) => {
 test('HTTP API preserves Unicode request text', async (t) => {
   const { app, base } = await startServer(t);
   try {
-    const response = await fetch(`${base}/decisions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: 'قرار عربي 🚀', chosen: 'حل محلي' }) });
+    const response = await fetch(`${base}/decisions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'default', title: 'قرار عربي 🚀', chosen: 'حل محلي' }) });
     assert.equal((await response.json()).title, 'قرار عربي 🚀');
   } finally {
     await new Promise((resolve) => app.server.close(resolve));
@@ -119,7 +119,7 @@ test('CLI persists a decision and reports stats', async (t) => {
     child.on('error', reject);
     child.on('close', (code) => code === 0 ? resolve(JSON.parse(stdout)) : reject(new Error(stderr)));
   });
-  await run(['decision', JSON.stringify({ title: 'Testing', chosen: 'Node' })]);
+  await run(['decision', JSON.stringify({ project: 'default', title: 'Testing', chosen: 'Node' })]);
   const stats = await run(['stats']);
   assert.deepEqual(stats, { schemaVersion: SCHEMA_VERSION, total: 1, decisions: 1, attempts: 0, facts: 0, relations: 0, reviewSignals: 0, events: 1, journal: 1 });
   assert.equal((await readFile(file, 'utf8')).includes('Testing'), true);
@@ -146,7 +146,7 @@ test('HTTP restore rejects malformed JSON without replacing the valid store', as
     app.server.listen(0, '127.0.0.1');
     await once(app.server, 'listening');
     const base = `http://127.0.0.1:${app.server.address().port}`;
-    await fetch(`${base}/decisions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: 'KEEP', chosen: 'x' }) });
+    await fetch(`${base}/decisions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'default', title: 'KEEP', chosen: 'x' }) });
     const response = await fetch(`${base}/restore`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: backup }) });
     assert.equal(response.status, 400);
     assert.match(await readFile(file, 'utf8'), /KEEP/);
@@ -169,7 +169,7 @@ test('HTTP SQLite restore rejects a missing source without replacing the valid d
     app.server.listen(0, '127.0.0.1');
     await once(app.server, 'listening');
     const base = `http://127.0.0.1:${app.server.address().port}`;
-    await fetch(`${base}/decisions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: 'KEEP MISSING SOURCE', chosen: 'x' }) });
+    await fetch(`${base}/decisions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'default', title: 'KEEP MISSING SOURCE', chosen: 'x' }) });
     const response = await fetch(`${base}/restore`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: missing }) });
     assert.equal(response.status, 400);
     assert.equal(app.graph.search('KEEP MISSING SOURCE').page.total, 1);
@@ -196,7 +196,7 @@ test('HTTP SQLite restore rejects malformed snapshots without replacing the vali
     app.server.listen(0, '127.0.0.1');
     await once(app.server, 'listening');
     const base = `http://127.0.0.1:${app.server.address().port}`;
-    await fetch(`${base}/decisions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: 'KEEP SQLITE', chosen: 'x' }) });
+    await fetch(`${base}/decisions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'default', title: 'KEEP SQLITE', chosen: 'x' }) });
     const response = await fetch(`${base}/restore`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: backup }) });
     assert.equal(response.status, 400);
     assert.equal(app.graph.search('KEEP SQLITE').page.total, 1);

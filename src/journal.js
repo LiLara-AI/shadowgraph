@@ -8,9 +8,10 @@
 
 import { effectiveFactExpirationBoundary, factValidityPolicyIssue, isValidIsoInstant } from './fact-validity.js';
 
-export const JOURNAL_SCHEMA_VERSION = 5;
-// The highest entry schema this reader interprets. It runs ahead of the writer
-// (plan v1.4.4 §9.2): widen the reader, ship it, and only then raise the writer.
+export const JOURNAL_SCHEMA_VERSION = 6;
+// The highest entry schema this reader interprets. The reader is widened and
+// shipped before the writer is raised (plan v1.4.4 §9.2), so it may run ahead of
+// JOURNAL_SCHEMA_VERSION but never behind it.
 export const READABLE_JOURNAL_SCHEMA_VERSION = 6;
 // Schema 5 introduced canonical purge artifacts; every readable schema from it
 // on follows the same rules.
@@ -119,7 +120,8 @@ export const REPLAYABLE_ENTRY_TYPES = Object.freeze([
 // previousAttribution, reason } -- that is audit only and never part of the
 // replayed entity. The entry's own `project` is the new one (null when the
 // entity is unattributed). It is the one replayable type that serves several
-// entity kinds. This build reads it; no writer here emits it yet.
+// entity kinds. The attribution migration writes it with reason `migration`;
+// a user's re-attribution arrives with the grant lifecycle.
 export const ATTRIBUTED_ENTITY_KINDS = Object.freeze(['decision', 'attempt', 'memory', 'fact']);
 export const ATTRIBUTION_CHANGE_REASONS = Object.freeze(['migration', 'user']);
 

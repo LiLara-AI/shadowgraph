@@ -125,6 +125,9 @@ const memoryProperties = {
 };
 const idempotencyKeyProperty = { type: 'string', maxLength: 200, description: 'Retry key scoped by project and operation: reuse it so a retry returns the first result instead of writing a duplicate. Without it every call creates a new entity.' };
 const projectProperty = { type: 'string', description: 'Project namespace. Defaults to "default"; an empty string is rejected.' };
+// Writes no longer fall back to "default": a record needs a project or an origin.
+const writeProjectProperty = { type: 'string', description: 'Owning project; required unless originId is set, else the write is refused.' };
+const originIdProperty = { type: 'string', description: 'Capture-origin id; with no project the record belongs to it alone.' };
 const decisionIdProperty = { type: 'string', description: 'Identifier of an existing decision, as returned by shadowgraph_record_decision, shadowgraph_search, or shadowgraph_retrieve.' };
 const changedFactsProperty = { type: 'array', items: { type: 'string' }, description: 'Fact keys that just changed. Only string-form reopenWhen rules match this list; it is an ephemeral signal, not durable state.' };
 const factsOverrideProperty = { type: 'object', description: 'Fact key/value overrides evaluated instead of the stored facts of the same key. Stored facts are used for every key not listed here, so reopen rules still work after a restart.' };
@@ -155,7 +158,7 @@ const storedEntityProperties = {
   id: { type: 'string', description: 'Stable entity identifier.' },
   kind: { type: 'string', description: 'Entity kind: decision, attempt, memory, fact, relation, review, or alternative.' },
   schemaVersion: { type: 'integer', description: 'Storage schema version this entity was written under. A value above the build’s own version is preserved rather than downgraded.' },
-  project: stringOrNull('Project namespace; records imported from a schema that predates projects may carry null.'),
+  project: stringOrNull('Project namespace; null for an unattributed record or one imported from before projects.'),
   sourceClass: stringOrNull('Claimed origin class recorded with the write. A claim, never proof.'),
   sourceRaw: stringOrNull('The original origin label when it differed from sourceClass. Audit only; never evidence.'),
   actor: stringOrNull('Who performed the write.'),
@@ -668,7 +671,8 @@ const CATALOG = [
         id: { type: 'string', minLength: 1, description: 'Optional caller-chosen decision identifier. Omit to generate one; a duplicate entity identifier is rejected.' },
         title: { type: 'string', description: 'Short name of the decision. Required, non-empty, and searchable content.' },
         chosen: { type: 'string', description: 'The option actually chosen. Required, non-empty, and searchable content.' },
-        project: projectProperty,
+        project: writeProjectProperty,
+        originId: originIdProperty,
         goal: { type: 'string', description: 'What the decision is meant to achieve. Searchable content.' },
         confidence: { type: 'number', minimum: 0, maximum: 1, description: 'Starting confidence, 0-1. Defaults to 0.5. Later outcomes and evidence move it from this baseline; it is a degree of belief, never a verification status.' },
         assumptions: { type: 'array', items: { type: 'string' }, description: 'What the decision takes for granted. Record each as a fact too if it should be able to reopen the decision.' },
@@ -711,7 +715,8 @@ const CATALOG = [
         solution: { type: 'string', description: 'What was tried. Required, non-empty, and searchable content.' },
         result: { type: 'string', description: 'What happened. Required, non-empty, and searchable content. With no resultClass, wording such as failed, error, or regression is what makes the attempt surface in shadowgraph_context as one to avoid.' },
         resultClass: { type: 'string', enum: ['failed', 'succeeded', 'inconclusive'], description: 'Classify the result instead of leaving it to the wording heuristic. Set it when the result text does not say failed, error, or regression, or when it does but the attempt did not fail.' },
-        project: projectProperty,
+        project: writeProjectProperty,
+        originId: originIdProperty,
         reason: { type: 'string', description: 'Why it turned out that way. Searchable content.' },
         environment: { type: 'string', description: 'Where it was tried, such as a runtime, OS, or version. Searchable content, so a later attempt can be matched to the same environment.' },
         idempotencyKey: idempotencyKeyProperty,
@@ -838,7 +843,8 @@ const CATALOG = [
     inputSchema: {
       type: 'object',
       properties: {
-        project: projectProperty,
+        project: writeProjectProperty,
+        originId: originIdProperty,
         ...memoryProperties,
         operations: {
           type: 'array',
@@ -954,7 +960,8 @@ const CATALOG = [
         value: jsonValueProperty,
         source: { type: 'string', description: 'Legacy alias for sourceClass. An unknown label downgrades to agent_claimed with the raw label kept in sourceRaw.' },
         confidence: { type: 'number', minimum: 0, maximum: 1, description: 'How much the caller trusts this observation, 0-1. Defaults to 0.5. It does not verify anything.' },
-        project: projectProperty,
+        project: writeProjectProperty,
+        originId: originIdProperty,
         expiresAt: { type: 'string', description: 'ISO 8601 instant after which shadowgraph_maintain expires this fact. Combined with validTo, the earlier boundary wins.' },
         verificationStatus: { type: 'string', enum: ['unverified', 'contradicted'], description: 'Only "contradicted" may be set by a caller, because it lowers trust. "verified" and "expired" are rejected: verification is not self-assertable and expiry is owned by shadowgraph_maintain.' },
         idempotencyKey: idempotencyKeyProperty,

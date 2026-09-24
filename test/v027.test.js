@@ -70,8 +70,8 @@ test('migration preserves legacy current confidence when adding first new eviden
 });
 test('search requires every query term', () => {
   const graph = createShadowGraph();
-  graph.addDecision({ title: 'Database selection', chosen: 'PostgreSQL' });
-  graph.addDecision({ title: 'Cache selection', chosen: 'Redis' });
+  graph.addDecision({ project: 'default', title: 'Database selection', chosen: 'PostgreSQL' });
+  graph.addDecision({ project: 'default', title: 'Cache selection', chosen: 'Redis' });
   // G6: paginated envelope; every term must still match a content field (G7).
   assert.equal(graph.search('database postgres').items.length, 1);
   assert.equal(graph.search('database redis').items.length, 0);

@@ -179,9 +179,10 @@ instructions, procedures, episodes, and notes under a project plus optional `use
 moment. Retrieval fuses lexical, vector, graph-distance, and temporal signals and declares which
 signals were unavailable rather than silently degrading.
 
-**Project and scope isolation.** Omitted project and scope mean the `default` project and all-null
-scope — never every project or every user. Purge is previewable, logical by default, and explicitly
-irreversible in hard mode.
+**Project and scope isolation.** Every write needs a project or a capture-origin id: a write with
+neither is refused (`write_scope_unresolved`) instead of landing in a shared `default` bucket, and
+`default` is an ordinary project name. Omitted scope means all-null scope. Purge is previewable,
+logical by default, and explicitly irreversible in hard mode.
 
 **Explainable retrieval.** Results expose raw scores, ranks, and reasons, and every bounded response
 declares its total, pages, and omitted scope. Nothing is silently summarized away.

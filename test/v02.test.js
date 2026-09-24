@@ -19,7 +19,7 @@ test('v0.2 creates explainable search results and context', () => {
 
 test('outcomes update confidence and produce review signals', () => {
   const graph = createShadowGraph();
-  const decision = graph.addDecision({ title: 'Use cache', chosen: 'Redis', confidence: 0.8 });
+  const decision = graph.addDecision({ project: 'default', title: 'Use cache', chosen: 'Redis', confidence: 0.8 });
   const updated = graph.setOutcome(decision.id, { status: 'failed', lessons: ['Cache invalidation was unsafe'] });
   // UPDATED for G8 (evidence_weighted_bounded_v1). Previously this asserted 0.6,
   // produced by a hardcoded -0.2 penalty with no stated basis — the exact defect
@@ -34,7 +34,7 @@ test('outcomes update confidence and produce review signals', () => {
 test('facts and v0.1 records migrate into the v0.2 export shape', () => {
   const graph = createShadowGraph();
   graph.importData([{ id: 'old', kind: 'decision', title: 'Old', chosen: 'A', confidence: 0.7, alternatives: [] }]);
-  graph.addFact({ key: 'users', value: 100, source: 'human_confirmed', confidence: 1 });
+  graph.addFact({ project: 'default', key: 'users', value: 100, source: 'human_confirmed', confidence: 1 });
   const data = graph.exportData();
   assert.equal(data.schemaVersion, SCHEMA_VERSION);
   assert.equal(data.records[0].confidence.current, 0.7);

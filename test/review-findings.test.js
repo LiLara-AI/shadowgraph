@@ -267,7 +267,7 @@ describe('P1-8 — confidence is a summed fold, clamped once', () => {
 
   function withEvidence(order) {
     const graph = createShadowGraph();
-    const decision = graph.addDecision({ title: 'T', chosen: 'C' });
+    const decision = graph.addDecision({ project: 'default', title: 'T', chosen: 'C' });
     for (const [key, supports, sourceClass] of order) {
       graph.addConfidenceEvidence({ decisionId: decision.id, key, supports, sourceClass, reason: `reason ${key}` });
     }
@@ -304,7 +304,7 @@ describe('P1-8 — confidence is a summed fold, clamped once', () => {
     // total is still deeply negative, so one supporting observation cannot undo
     // five contradicting ones.
     const graph = createShadowGraph();
-    const decision = graph.addDecision({ title: 'T', chosen: 'C' });
+    const decision = graph.addDecision({ project: 'default', title: 'T', chosen: 'C' });
     for (let index = 0; index < 5; index += 1) {
       graph.addConfidenceEvidence({ decisionId: decision.id, key: `down${index}`, supports: false, sourceClass: 'production_verified', reason: 'r' });
     }
@@ -317,7 +317,7 @@ describe('P1-8 — confidence is a summed fold, clamped once', () => {
   it('confidence stays bounded to [0,1] under heavy evidence in both directions', () => {
     for (const supports of [true, false]) {
       const graph = createShadowGraph();
-      const decision = graph.addDecision({ title: 'T', chosen: 'C' });
+      const decision = graph.addDecision({ project: 'default', title: 'T', chosen: 'C' });
       for (let index = 0; index < 50; index += 1) {
         graph.addConfidenceEvidence({ decisionId: decision.id, key: `k${index}`, supports, sourceClass: 'production_verified', reason: 'r' });
       }
@@ -329,7 +329,7 @@ describe('P1-8 — confidence is a summed fold, clamped once', () => {
 
   it('removal/replacement leaves no residue: a replaced outcome is fully re-derived', () => {
     const graph = createShadowGraph();
-    const decision = graph.addDecision({ title: 'T', chosen: 'C' });
+    const decision = graph.addDecision({ project: 'default', title: 'T', chosen: 'C' });
     graph.setOutcome(decision.id, { status: 'successful', sourceClass: 'production_verified' });
     graph.setOutcome(decision.id, { status: 'failed', sourceClass: 'production_verified' });
 
@@ -342,7 +342,7 @@ describe('P1-8 — confidence is a summed fold, clamped once', () => {
 
   it('rebuild equivalence: confidence survives a journal replay unchanged', () => {
     const graph = createShadowGraph();
-    const decision = graph.addDecision({ title: 'T', chosen: 'C' });
+    const decision = graph.addDecision({ project: 'default', title: 'T', chosen: 'C' });
     graph.addConfidenceEvidence({ decisionId: decision.id, key: 'e1', supports: true, sourceClass: 'tool_observed', reason: 'r' });
     graph.setOutcome(decision.id, { status: 'mixed', sourceClass: 'human_confirmed' });
 
@@ -363,7 +363,7 @@ describe('P1-9 — evidence dedupe requires a stable key', () => {
 
   it('omitting `key` is rejected with an explanation', () => {
     const graph = createShadowGraph();
-    const decision = graph.addDecision({ title: 'T', chosen: 'C' });
+    const decision = graph.addDecision({ project: 'default', title: 'T', chosen: 'C' });
     assert.throws(
       () => graph.addConfidenceEvidence({ decisionId: decision.id, supports: true, sourceClass: 'tool_observed', reason: 'r' }),
       /stable `key`/
@@ -372,7 +372,7 @@ describe('P1-9 — evidence dedupe requires a stable key', () => {
 
   it('a non-string or empty key is rejected', () => {
     const graph = createShadowGraph();
-    const decision = graph.addDecision({ title: 'T', chosen: 'C' });
+    const decision = graph.addDecision({ project: 'default', title: 'T', chosen: 'C' });
     for (const key of ['', '   ', 42, {}, null]) {
       assert.throws(
         () => graph.addConfidenceEvidence({ decisionId: decision.id, key, supports: true, sourceClass: 'tool_observed', reason: 'r' }),
@@ -384,7 +384,7 @@ describe('P1-9 — evidence dedupe requires a stable key', () => {
 
   it('the same key replayed across a real clock tick is a no-op', async () => {
     const graph = createShadowGraph();
-    const decision = graph.addDecision({ title: 'T', chosen: 'C' });
+    const decision = graph.addDecision({ project: 'default', title: 'T', chosen: 'C' });
     graph.addConfidenceEvidence({ decisionId: decision.id, key: 'obs-1', supports: true, sourceClass: 'tool_observed', reason: 'r' });
     const first = privilegedSnapshot(graph).records[0].confidence;
 
@@ -399,7 +399,7 @@ describe('P1-9 — evidence dedupe requires a stable key', () => {
 
   it('a genuinely different observation uses a different key and does count', () => {
     const graph = createShadowGraph();
-    const decision = graph.addDecision({ title: 'T', chosen: 'C' });
+    const decision = graph.addDecision({ project: 'default', title: 'T', chosen: 'C' });
     graph.addConfidenceEvidence({ decisionId: decision.id, key: 'obs-1', supports: true, sourceClass: 'tool_observed', reason: 'r' });
     graph.addConfidenceEvidence({ decisionId: decision.id, key: 'obs-2', supports: true, sourceClass: 'tool_observed', reason: 'r' });
 
@@ -415,7 +415,7 @@ describe('P1-10 — SQLite/JSON confidence parity across close and reopen', () =
 
   async function roundTrip(t, makeStore) {
     const graph = createShadowGraph();
-    const decision = graph.addDecision({ title: 'Storage', chosen: 'sqlite', confidence: 0.4 });
+    const decision = graph.addDecision({ project: 'default', title: 'Storage', chosen: 'sqlite', confidence: 0.4 });
     graph.addConfidenceEvidence({ decisionId: decision.id, key: 'e1', supports: true, sourceClass: 'human_confirmed', reason: 'reviewed' });
     graph.addConfidenceEvidence({ decisionId: decision.id, key: 'e2', supports: false, sourceClass: 'agent_claimed', reason: 'doubt' });
     graph.setOutcome(decision.id, { status: 'successful', sourceClass: 'tool_observed' });

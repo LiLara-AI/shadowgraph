@@ -704,7 +704,7 @@ for (const modern of [false, true]) {
     const seed = await rpc.call(toolRequest(
       `${era}-status-seed`,
       'shadowgraph_record_decision',
-      { id: `${era}-status-owner`, title: 'Status owner', chosen: 'keep' },
+      { id: `${era}-status-owner`, project: 'default', title: 'Status owner', chosen: 'keep' },
       { modern }
     ));
     assert.equal(seed.error, undefined, seed.error?.message);
@@ -816,7 +816,7 @@ test('modern nested restore causes and degraded latch stay private CallToolResul
   });
   const sentinel = 'PRIVATE-NESTED-RESTORE-PAYLOAD-ef59';
   const seeded = await rpc.call(toolRequest('nested-seed', 'shadowgraph_record_decision', {
-    id: 'nested-seed', title: sentinel, chosen: 'keep'
+    id: 'nested-seed', project: 'default', title: sentinel, chosen: 'keep'
   }));
   assert.equal(seeded.error, undefined, seeded.error?.message);
   const source = join(rpc.directory, 'PRIVATE-NESTED-RESTORE-SOURCE-f06a.json');
@@ -848,8 +848,8 @@ test('SQLite restore duplicate journal payload ids stay private in legacy and mo
   await rpc.call({ jsonrpc: '2.0', id: 'sqlite-ready', method: 'tools/list' });
   const source = join(rpc.directory, 'PRIVATE-SQLITE-RESTORE-SOURCE-017b.db');
   const graph = createShadowGraph({ now: () => '2026-08-28T12:00:00.000Z' });
-  graph.addDecision({ id: 'sqlite-private-left', title: 'Left', chosen: 'keep' });
-  graph.addDecision({ id: 'sqlite-private-right', title: 'Right', chosen: 'keep' });
+  graph.addDecision({ project: 'default', id: 'sqlite-private-left', title: 'Left', chosen: 'keep' });
+  graph.addDecision({ project: 'default', id: 'sqlite-private-right', title: 'Right', chosen: 'keep' });
   const sourceStore = await createSqliteStore(source);
   await sourceStore.save(privilegedSnapshot(graph));
   sourceStore.close();

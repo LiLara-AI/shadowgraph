@@ -1,5 +1,6 @@
 // Project-scoping conformance harness: eleven public read paths, each exercised
-// on its own against two projects plus records written with no project at all,
+// on its own against two projects plus records in the literal project `default`
+// (where identity-less writes landed before the schema-6 writer refused them),
 // once with no project (unresolved scope) and once with project `alpha`
 // selected. The fixture links an alpha decision to a beta attempt, so a selected
 // read that follows a graph edge meets a boundary it could actually cross.
@@ -49,9 +50,13 @@ function fixture() {
   // The deliberate cross-project edge. A read with `alpha` selected must not
   // follow it into beta, however the read expands.
   graph.link({ from: alphaDecision.id, to: betaAttempt.id, relation: 'related' });
-  // The unresolved-scope case: written with no project at all.
-  graph.addDecision({ title: 'Unscoped MARKER cache', chosen: 'none' });
-  graph.remember({ memoryType: 'note', key: 'unscoped', text: 'MEMORY-MARKER unscoped' });
+  // The unresolved-scope case. A write with neither a project nor an origin is
+  // refused since the schema-6 writer, so these records are written to the
+  // literal project "default" -- the bucket such writes used to land in, and
+  // the one an identity-less read still collapses to. Every observation below
+  // is unchanged by that: a read that leaks "default" is still caught.
+  graph.addDecision({ project: 'default', title: 'Unscoped MARKER cache', chosen: 'none' });
+  graph.remember({ project: 'default', memoryType: 'note', key: 'unscoped', text: 'MEMORY-MARKER unscoped' });
   return { graph, alphaDecisionId: alphaDecision.id, betaAttemptId: betaAttempt.id };
 }
 

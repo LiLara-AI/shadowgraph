@@ -50,6 +50,22 @@ function seeded({ link = true } = {}) {
 
 const entityOf = (payload, predicate) => [...payload.records, ...payload.facts].find(predicate);
 
+// What a schema-5 build wrote: no attribution, no origin, schema 5 throughout.
+function asSchema5(payload) {
+  const v5 = structuredClone(payload);
+  v5.schemaVersion = 5;
+  const strip = (entity) => {
+    if (!entity || typeof entity !== 'object') return;
+    delete entity.attribution;
+    delete entity.originId;
+    if (entity.schemaVersion === 6) entity.schemaVersion = 5;
+  };
+  for (const entity of [...v5.records, ...v5.facts, ...v5.relations]) strip(entity);
+  for (const item of v5.idempotency) strip(item.value);
+  for (const entry of v5.journal) { entry.schemaVersion = 5; strip(entry.payload); }
+  return v5;
+}
+
 // Rewrite a schema-5 snapshot into the shape a schema-6 writer produces: schema 6
 // throughout, every entity carrying its attribution. `owners` maps an entity id
 // to { project, attribution, originId } -- or to null to leave that entity as a
@@ -89,7 +105,7 @@ function toV6(payload, owners = {}) {
 }
 
 function v6Store(options) {
-  const snapshot = privilegedSnapshot(seeded(options));
+  const snapshot = asSchema5(privilegedSnapshot(seeded(options)));
   const captured = entityOf(snapshot, (entity) => entity.project === 'pending');
   const legacy = entityOf(snapshot, (entity) => entity.project === 'default');
   return toV6(snapshot, {
@@ -98,16 +114,17 @@ function v6Store(options) {
   });
 }
 
-test('the reader runs one version ahead of the writer on every versioned axis', () => {
-  assert.equal(SCHEMA_VERSION, 5);
+test('the writer writes only what the reader already reads, on every versioned axis', () => {
+  assert.equal(SCHEMA_VERSION, 6);
   assert.deepEqual(SUPPORTED_SCHEMA_VERSIONS, [1, 2, 3, 4, 5, 6]);
-  assert.equal(JOURNAL_SCHEMA_VERSION, 5);
+  assert.equal(JOURNAL_SCHEMA_VERSION, 6);
   assert.equal(READABLE_JOURNAL_SCHEMA_VERSION, 6);
+  assert.ok(JOURNAL_SCHEMA_VERSION <= READABLE_JOURNAL_SCHEMA_VERSION && SUPPORTED_SCHEMA_VERSIONS.includes(SCHEMA_VERSION));
   const graph = seeded();
   const snapshot = privilegedSnapshot(graph);
-  assert.equal(snapshot.schemaVersion, 5);
-  assert.deepEqual([...new Set([...snapshot.records, ...snapshot.facts, ...snapshot.journal].map((item) => item.schemaVersion))], [5]);
-  assert.equal([...snapshot.records, ...snapshot.facts].some((entity) => Object.hasOwn(entity, 'attribution') || Object.hasOwn(entity, 'originId')), false);
+  assert.equal(snapshot.schemaVersion, 6);
+  assert.deepEqual([...new Set([...snapshot.records, ...snapshot.facts, ...snapshot.journal].map((item) => item.schemaVersion))], [6]);
+  assert.equal([...snapshot.records, ...snapshot.facts].every((entity) => entity.attribution === 'project'), true);
 });
 
 test('a schema-6 store loads, validates, rebuilds and restores without being downgraded', () => {
@@ -420,7 +437,7 @@ test('a memory-only restore strips the authority collections and restores every 
   } finally { database.close(); }
 });
 
-test('entity.attributed is in the replay vocabulary before any writer emits it', async () => {
+test('entity.attributed is in the replay vocabulary, and only the attribution migration writes it', async () => {
   assert.equal(REPLAYABLE_ENTRY_TYPES.length, 20);
   assert.equal(JOURNAL_ENTRY_TYPES.length, 21);
   assert.equal(REPLAYABLE_ENTRY_TYPES.at(-1), 'entity.attributed');
@@ -430,7 +447,13 @@ test('entity.attributed is in the replay vocabulary before any writer emits it',
     if (!name.endsWith('.js')) continue;
     if (/type:\s*'entity\.attributed'/.test(await readFile(join(root, 'src', name), 'utf8'))) emitters.push(name);
   }
-  assert.deepEqual(emitters, [], 'the reader lands alone: no writer emits entity.attributed yet');
+  // The reader landed first with no writer; the schema-6 writer adds exactly one
+  // (migrateAttribution, reason `migration`). User re-attribution is later work.
+  assert.deepEqual(emitters, ['shadowgraph.js']);
+  const kernel = await readFile(join(root, 'src', 'shadowgraph.js'), 'utf8');
+  assert.equal(kernel.match(/type:\s*'entity\.attributed'/g).length, 1);
+  assert.match(kernel, /reason: 'migration'/);
+  assert.doesNotMatch(kernel, /reason: 'user'/);
 });
 
 // Append one entity.attributed entry carrying `next` (the post-change entity),

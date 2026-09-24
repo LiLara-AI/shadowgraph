@@ -6,7 +6,7 @@ import { once } from 'node:events';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { restoreFile } from '../src/backup.js';
-import { createShadowGraph } from '../src/shadowgraph.js';
+import { createShadowGraph, SCHEMA_VERSION } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createFactAttestation, createLocalEvidenceVerifier } from '../src/verification.js';
@@ -192,9 +192,9 @@ test('P1-1 independent review: JSON restore rolls durable bytes back when post-r
   const destination = join(directory, 'destination.json');
   const source = join(directory, 'source.json');
   const original = createShadowGraph({ now: () => '2026-08-27T10:00:00.000Z' });
-  original.addDecision({ id: 'rollback-original', title: 'ROLLBACK ORIGINAL', chosen: 'original' });
+  original.addDecision({ project: 'default', id: 'rollback-original', title: 'ROLLBACK ORIGINAL', chosen: 'original' });
   const replacement = createShadowGraph({ now: () => '2026-08-27T11:00:00.000Z' });
-  replacement.addDecision({ id: 'rollback-replacement', title: 'ROLLBACK REPLACEMENT', chosen: 'replacement' });
+  replacement.addDecision({ project: 'default', id: 'rollback-replacement', title: 'ROLLBACK REPLACEMENT', chosen: 'replacement' });
   await writeFile(destination, `${JSON.stringify(privilegedSnapshot(original), null, 2)}\n`, 'utf8');
   await writeFile(source, `${JSON.stringify(privilegedSnapshot(replacement), null, 2)}\n`, 'utf8');
   const before = await readFile(destination);
@@ -459,7 +459,7 @@ test('P1-3 independent review: verifier-less MCP rebuild cannot re-elevate a gen
 
 test('P1-3 independent review: exposed rebuild migrates pre-schema-5 lifecycle values without rewriting journal audit bytes', () => {
   const source = createShadowGraph({ now: () => '2026-08-27T12:00:00.000Z' });
-  source.addDecision({ id: 'legacy-lifecycle', title: 'Legacy lifecycle', chosen: 'A' });
+  source.addDecision({ project: 'default', id: 'legacy-lifecycle', title: 'Legacy lifecycle', chosen: 'A' });
   const payload = privilegedSnapshot(source);
   payload.schemaVersion = 4;
   payload.records[0].schemaVersion = 4;
@@ -478,7 +478,9 @@ test('P1-3 independent review: exposed rebuild migrates pre-schema-5 lifecycle v
   assert.equal(privilegedSnapshot(graph).journal[0].payload.status, 'active');
   const report = graph.rebuild();
   assert.equal(report.rebuildable, true);
-  assert.equal(report.projection.schemaVersion, 5);
+  // The envelope is this build's; the legacy entity stays at the last schema
+  // without attribution until the attribution migration moves it.
+  assert.equal(report.projection.schemaVersion, SCHEMA_VERSION);
   assert.equal(report.projection.records[0].status, 'proposed');
   assert.equal(report.projection.records[0].schemaVersion, 5);
   assert.equal(privilegedSnapshot(graph).journal[0].payload.status, 'active');

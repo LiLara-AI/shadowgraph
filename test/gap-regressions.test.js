@@ -233,7 +233,7 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
 
   it('ACCEPTANCE: self-asserted human-confirmed does NOT yield verified', () => {
     const graph = createShadowGraph();
-    const fact = graph.addFact({ key: 'reviewed', value: true, source: 'human-confirmed' });
+    const fact = graph.addFact({ project: 'default', key: 'reviewed', value: true, source: 'human-confirmed' });
 
     assert.equal(fact.verificationStatus, 'unverified', 'no human was actually in the loop');
     assert.equal(fact.sourceClass, 'human_confirmed', 'the claim is still recorded');
@@ -242,7 +242,7 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
 
   it('ACCEPTANCE: self-asserted production_verified does NOT yield verified', () => {
     const graph = createShadowGraph();
-    const fact = graph.addFact({ key: 'k', value: 'v', source: 'production_verified' });
+    const fact = graph.addFact({ project: 'default', key: 'k', value: 'v', source: 'production_verified' });
 
     assert.equal(fact.verificationStatus, 'unverified');
     assert.equal(fact.sourceClass, 'production_verified', 'now a recognised class');
@@ -255,7 +255,7 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
     // not just `human_confirmed`. ShadowGraph cannot tell an honest tool report
     // from a fabricated string — both arrive through the same tool call.
     const graph = createShadowGraph();
-    const fact = graph.addFact({ key: 'k', value: 'v', source: 'tool_observed' });
+    const fact = graph.addFact({ project: 'default', key: 'k', value: 'v', source: 'tool_observed' });
 
     assert.equal(fact.verificationStatus, 'unverified');
     assert.equal(fact.sourceClass, 'tool_observed');
@@ -265,12 +265,12 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
     const graph = createShadowGraph();
 
     assert.throws(
-      () => graph.addFact({ key: 'k', value: 'v', source: 'agent_claimed', verificationStatus: 'verified' }),
+      () => graph.addFact({ project: 'default', key: 'k', value: 'v', source: 'agent_claimed', verificationStatus: 'verified' }),
       /cannot set fact verificationStatus to verified/
     );
     // Also blocked when paired with a strong-sounding source claim.
     assert.throws(
-      () => graph.addFact({ key: 'k2', value: 'v', source: 'production_verified', verificationStatus: 'verified' }),
+      () => graph.addFact({ project: 'default', key: 'k2', value: 'v', source: 'production_verified', verificationStatus: 'verified' }),
       /cannot set fact verificationStatus to verified/
     );
     assert.equal(graph.stats().facts, 0, 'neither write was persisted');
@@ -279,25 +279,25 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
   it('ACCEPTANCE: a caller CANNOT set expired (owned by maintain)', () => {
     const graph = createShadowGraph();
     assert.throws(
-      () => graph.addFact({ key: 'k', value: 'v', verificationStatus: 'expired' }),
+      () => graph.addFact({ project: 'default', key: 'k', value: 'v', verificationStatus: 'expired' }),
       /cannot set fact verificationStatus to expired/
     );
   });
 
   it('ACCEPTANCE: contradicted IS accepted because it lowers trust', () => {
     const graph = createShadowGraph();
-    const fact = graph.addFact({ key: 'k', value: 'v', source: 'tool_observed', verificationStatus: 'contradicted' });
+    const fact = graph.addFact({ project: 'default', key: 'k', value: 'v', source: 'tool_observed', verificationStatus: 'contradicted' });
     assert.equal(fact.verificationStatus, 'contradicted');
   });
 
   it('ACCEPTANCE (regression guard): an unknown verificationStatus still throws the original error', () => {
     const graph = createShadowGraph();
-    assert.throws(() => graph.addFact({ key: 'k', value: 'v', verificationStatus: 'bogus' }), /Invalid fact verificationStatus/);
+    assert.throws(() => graph.addFact({ project: 'default', key: 'k', value: 'v', verificationStatus: 'bogus' }), /Invalid fact verificationStatus/);
   });
 
   it('ACCEPTANCE: an unknown source gets no more trust than agent_claimed, and the raw label is kept', () => {
     const graph = createShadowGraph();
-    const fact = graph.addFact({ key: 'k', value: 'v', source: 'totally_made_up_source' });
+    const fact = graph.addFact({ project: 'default', key: 'k', value: 'v', source: 'totally_made_up_source' });
 
     assert.equal(fact.sourceClass, 'agent_claimed', 'downgraded, not trusted');
     assert.equal(fact.sourceRaw, 'totally_made_up_source', 'claim preserved verbatim for audit');
@@ -307,19 +307,19 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
   it('ACCEPTANCE: a near-miss label cannot sneak into a trusted class', () => {
     const graph = createShadowGraph();
     // Spaces are deliberately NOT an alias — only case and hyphen/underscore are.
-    const spaced = graph.addFact({ key: 'a', value: 'v', source: 'Human Confirmed' });
+    const spaced = graph.addFact({ project: 'default', key: 'a', value: 'v', source: 'Human Confirmed' });
     assert.equal(spaced.sourceClass, 'agent_claimed');
     assert.equal(spaced.sourceRaw, 'Human Confirmed');
 
     // Case and hyphens ARE normalized.
-    const cased = graph.addFact({ key: 'b', value: 'v', source: 'TOOL-OBSERVED' });
+    const cased = graph.addFact({ project: 'default', key: 'b', value: 'v', source: 'TOOL-OBSERVED' });
     assert.equal(cased.sourceClass, 'tool_observed');
     assert.equal(cased.sourceRaw, 'TOOL-OBSERVED');
   });
 
   it('ACCEPTANCE: an omitted source defaults to agent_claimed with no raw label', () => {
     const graph = createShadowGraph();
-    const fact = graph.addFact({ key: 'k', value: 'v' });
+    const fact = graph.addFact({ project: 'default', key: 'k', value: 'v' });
 
     assert.equal(fact.sourceClass, 'agent_claimed');
     assert.equal(Object.prototype.hasOwnProperty.call(fact, 'sourceRaw'), false);
@@ -328,7 +328,7 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
 
   it('ACCEPTANCE: fact provenance metadata is stored as plain JSON', () => {
     const graph = createShadowGraph();
-    const fact = graph.addFact({
+    const fact = graph.addFact({ project: 'default',
       key: 'k', value: 'v', source: 'tool_observed',
       actor: 'claude', client: 'claude-cli', sessionId: 'sess-1'
     });
@@ -337,13 +337,13 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
     assert.equal(fact.client, 'claude-cli');
     assert.equal(fact.sessionId, 'sess-1');
     // Absent provenance is an explicit null, not a missing key.
-    const bare = graph.addFact({ key: 'k2', value: 'v' });
+    const bare = graph.addFact({ project: 'default', key: 'k2', value: 'v' });
     assert.deepEqual([bare.actor, bare.client, bare.sessionId], [null, null, null]);
   });
 
   it('ACCEPTANCE: decision provenance metadata is stored', () => {
     const graph = createShadowGraph();
-    const decision = graph.addDecision({
+    const decision = graph.addDecision({ project: 'default',
       title: 'T', chosen: 'C', sourceClass: 'tool_observed',
       actor: 'claude', client: 'claude-cli', sessionId: 'sess-1'
     });
@@ -356,15 +356,15 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
 
   it('ACCEPTANCE: non-string provenance values are rejected (no live objects stored)', () => {
     const graph = createShadowGraph();
-    assert.throws(() => graph.addFact({ key: 'k', value: 'v', actor: 123 }), /actor must be a string/);
-    assert.throws(() => graph.addFact({ key: 'k', value: 'v', client: {} }), /client must be a string/);
-    assert.throws(() => graph.addDecision({ title: 'T', chosen: 'C', sessionId: [] }), /sessionId must be a string/);
+    assert.throws(() => graph.addFact({ project: 'default', key: 'k', value: 'v', actor: 123 }), /actor must be a string/);
+    assert.throws(() => graph.addFact({ project: 'default', key: 'k', value: 'v', client: {} }), /client must be a string/);
+    assert.throws(() => graph.addDecision({ project: 'default', title: 'T', chosen: 'C', sessionId: [] }), /sessionId must be a string/);
   });
 
   it('ACCEPTANCE: provenance survives exportData / importData', () => {
     const graph = createShadowGraph();
-    graph.addFact({ key: 'k', value: 'v', source: 'human-confirmed', actor: 'claude', client: 'cli', sessionId: 's1' });
-    graph.addDecision({ title: 'T', chosen: 'C', sourceClass: 'tool_observed', actor: 'codex', client: 'codex-cli', sessionId: 's2' });
+    graph.addFact({ project: 'default', key: 'k', value: 'v', source: 'human-confirmed', actor: 'claude', client: 'cli', sessionId: 's1' });
+    graph.addDecision({ project: 'default', title: 'T', chosen: 'C', sourceClass: 'tool_observed', actor: 'codex', client: 'codex-cli', sessionId: 's2' });
 
     const reloaded = createShadowGraph();
     reloaded.importData(privilegedSnapshot(graph));
@@ -385,7 +385,7 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
     const store = createJsonFileStore(join(dir, 'data.json'));
 
     const original = createShadowGraph();
-    original.addFact({ key: 'k', value: 'v', source: 'production_verified', actor: 'claude', sessionId: 's1' });
+    original.addFact({ project: 'default', key: 'k', value: 'v', source: 'production_verified', actor: 'claude', sessionId: 's1' });
     await store.save(privilegedSnapshot(original));
 
     const reloaded = createShadowGraph();
@@ -412,7 +412,7 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
 
     try {
       const original = createShadowGraph();
-      original.addFact({ key: 'k', value: 'v', source: 'human-confirmed', actor: 'claude', client: 'cli', sessionId: 's1' });
+      original.addFact({ project: 'default', key: 'k', value: 'v', source: 'human-confirmed', actor: 'claude', client: 'cli', sessionId: 's1' });
       await store.save(privilegedSnapshot(original));
     } finally { store.close(); }
 
@@ -445,7 +445,7 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
   it('ACCEPTANCE (regression guard): the legacy `source` field still mirrors the class', () => {
     // test/v02.test.js asserts facts[0].source === 'human_confirmed'.
     const graph = createShadowGraph();
-    const fact = graph.addFact({ key: 'users', value: 100, source: 'human_confirmed', confidence: 1 });
+    const fact = graph.addFact({ project: 'default', key: 'users', value: 100, source: 'human_confirmed', confidence: 1 });
     assert.equal(fact.source, 'human_confirmed');
     assert.equal(fact.source, fact.sourceClass);
   });
@@ -455,7 +455,7 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
     const keys = generateKeyPairSync('ed25519');
     const verifier = createLocalEvidenceVerifier({ allowedEvidenceRoot: directory, trustedVerifiers: { approver: keys.publicKey } });
     const graph = createShadowGraph({ verifier });
-    const fact = graph.addFact({ id: 'u1-fact', key: 'release', value: 'ready', sourceClass: 'production_verified' });
+    const fact = graph.addFact({ project: 'default', id: 'u1-fact', key: 'release', value: 'ready', sourceClass: 'production_verified' });
     const evidencePath = join(directory, 'evidence.json');
     await writeFile(evidencePath, JSON.stringify(createFactAttestation({
       fact, verifierIdentity: 'approver', evidenceReference: 'ticket:42',
@@ -475,7 +475,7 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
     const keys = generateKeyPairSync('ed25519');
     const verifier = createLocalEvidenceVerifier({ allowedEvidenceRoot: directory, trustedVerifiers: { approver: keys.publicKey } });
     const graph = createShadowGraph({ verifier });
-    const fact = graph.addFact({ id: 'u1-offline-fact', key: 'build', value: 'green' });
+    const fact = graph.addFact({ project: 'default', id: 'u1-offline-fact', key: 'build', value: 'green' });
     const evidence = createFactAttestation({
       fact, verifierIdentity: 'approver', evidenceReference: 'ci:4821',
       verifiedAt: '2026-08-27T00:00:00.000Z', privateKey: keys.privateKey
@@ -520,13 +520,13 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
     };
     for (const [status, path] of Object.entries(paths)) {
       const graph = createShadowGraph();
-      const decision = graph.addDecision({ title: 'T', chosen: 'C' });
+      const decision = graph.addDecision({ project: 'default', title: 'T', chosen: 'C' });
       for (const step of path) graph.updateDecisionStatus(decision.id, step);
       assert.equal(privilegedSnapshot(graph).records[0].status, status, `${status} must be reachable`);
     }
     const superseded = createShadowGraph();
-    const previous = superseded.addDecision({ title: 'Old', chosen: 'A' });
-    const replacement = superseded.addDecision({ title: 'New', chosen: 'B' });
+    const previous = superseded.addDecision({ project: 'default', title: 'Old', chosen: 'A' });
+    const replacement = superseded.addDecision({ project: 'default', title: 'New', chosen: 'B' });
     superseded.supersedeDecision({ decisionId: previous.id, replacementId: replacement.id });
     assert.equal(privilegedSnapshot(superseded).records.find((item) => item.id === previous.id).status, 'superseded');
   });
@@ -542,7 +542,7 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
       abandoned: ['abandoned']
     };
     for (const [status, path] of Object.entries(paths)) {
-      const decision = graph.addDecision({ title: 'T', chosen: 'C' });
+      const decision = graph.addDecision({ project: 'default', title: 'T', chosen: 'C' });
       for (const step of path) graph.updateDecisionStatus(decision.id, step);
       assert.equal(privilegedSnapshot(graph).records.find((item) => item.id === decision.id).status, status);
     }
@@ -561,7 +561,7 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
 
   it('ACCEPTANCE: formatting aliases resolve to the canonical value', () => {
     const graph = createShadowGraph();
-    const decision = graph.addDecision({ title: 'T', chosen: 'C' });
+    const decision = graph.addDecision({ project: 'default', title: 'T', chosen: 'C' });
 
     for (const alias of ['IN_PROGRESS', 'in-progress', ' In-Progress ', 'In_Progress']) {
       assert.equal(graph.updateDecisionStatus(decision.id, alias).status, 'in_progress', `${JSON.stringify(alias)} must canonicalize`);
@@ -570,7 +570,7 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
 
   it('ACCEPTANCE: there are NO semantic aliases — meaning is never remapped', () => {
     const graph = createShadowGraph();
-    const decision = graph.addDecision({ title: 'T', chosen: 'C' });
+    const decision = graph.addDecision({ project: 'default', title: 'T', chosen: 'C' });
 
     // `archived` overlaps `abandoned` in spirit but must NOT be rewritten to it:
     // that would silently change what the record claims about itself.
@@ -590,7 +590,7 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
 
   it('ACCEPTANCE: the emitted event carries the canonical status', () => {
     const graph = createShadowGraph();
-    const decision = graph.addDecision({ title: 'T', chosen: 'C' });
+    const decision = graph.addDecision({ project: 'default', title: 'T', chosen: 'C' });
     graph.updateDecisionStatus(decision.id, 'IN-PROGRESS');
 
     const event = privilegedSnapshot(graph).events.filter((item) => item.type === 'decision.status').pop();
@@ -599,7 +599,7 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
 
   it('ACCEPTANCE: an unknown status is rejected clearly and nothing is written', () => {
     const graph = createShadowGraph();
-    const decision = graph.addDecision({ title: 'T', chosen: 'C' });
+    const decision = graph.addDecision({ project: 'default', title: 'T', chosen: 'C' });
     const before = privilegedSnapshot(graph).records[0].status;
 
     for (const bad of ['bogus', 'in progress', '', 'ACTIVE!', 123, null, undefined, {}]) {
@@ -614,7 +614,7 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
 
   it('ACCEPTANCE L-1 (regression guard): the default entry state is `proposed`', () => {
     const graph = createShadowGraph();
-    assert.equal(graph.addDecision({ title: 'T', chosen: 'C' }).status, 'proposed');
+    assert.equal(graph.addDecision({ project: 'default', title: 'T', chosen: 'C' }).status, 'proposed');
   });
 
   it('ACCEPTANCE: importing schema 4 data with all 4 former extra states does not break the graph', () => {
@@ -683,7 +683,7 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
 
   it('ACCEPTANCE: export/import preserves the canonical status', () => {
     const graph = createShadowGraph();
-    const decision = graph.addDecision({ title: 'R', chosen: 'C' });
+    const decision = graph.addDecision({ project: 'default', title: 'R', chosen: 'C' });
     graph.updateDecisionStatus(decision.id, 'in-progress');
 
     const reloaded = createShadowGraph();
@@ -698,7 +698,7 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
     const store = createJsonFileStore(join(dir, 'data.json'));
 
     const original = createShadowGraph();
-    const decision = original.addDecision({ title: 'T', chosen: 'C' });
+    const decision = original.addDecision({ project: 'default', title: 'T', chosen: 'C' });
     original.updateDecisionStatus(decision.id, 'ABANDONED');
     await store.save(privilegedSnapshot(original));
 
@@ -1008,7 +1008,7 @@ describe('G4 (S2) — FIXED: the journal carries complete payloads and rebuilds 
     const fact = privilegedSnapshot(graph).facts[0];
     assert.equal(fact.sourceClass, 'human_confirmed', 'the claim is preserved');
     // And a NEW fact asserting the same thing is still unverified.
-    assert.equal(graph.addFact({ key: 'fresh', value: 1, source: 'human_confirmed' }).verificationStatus, 'unverified');
+    assert.equal(graph.addFact({ project: 'default', key: 'fresh', value: 1, source: 'human_confirmed' }).verificationStatus, 'unverified');
   });
 
   it('ACCEPTANCE: the journal survives a JSON persist + reload and still rebuilds', async (t) => {
@@ -1497,7 +1497,7 @@ describe('G8 (S2) — FIXED: confidence has an auditable, evidence-weighted basi
   // confidence move; it never sets verificationStatus (G2 contract §2).
 
   it('ACCEPTANCE: confidence exposes an auditable basis', () => {
-    const decision = createShadowGraph().addDecision({ title: 'T', chosen: 'C', evidence: ['loadtest'] });
+    const decision = createShadowGraph().addDecision({ project: 'default', title: 'T', chosen: 'C', evidence: ['loadtest'] });
 
     assert.deepEqual(new Set(Object.keys(decision.confidence)), new Set(['initial', 'current', 'basis', 'history', 'policy']));
     assert.equal(decision.confidence.policy, 'evidence_weighted_bounded_v1');
@@ -1517,7 +1517,7 @@ describe('G8 (S2) — FIXED: confidence has an auditable, evidence-weighted basi
       { sourceClass: 'agent_claimed', status: 'failed', expected: 0.4 }
     ];
     for (const item of cases) {
-      const decision = graph.addDecision({ title: 'T', chosen: 'C' });
+      const decision = graph.addDecision({ project: 'default', title: 'T', chosen: 'C' });
       const after = graph.setOutcome(decision.id, { status: item.status, sourceClass: item.sourceClass });
       assert.equal(after.confidence.current, item.expected, `${item.sourceClass}/${item.status}`);
     }
@@ -1525,7 +1525,7 @@ describe('G8 (S2) — FIXED: confidence has an auditable, evidence-weighted basi
 
   it('ACCEPTANCE: an unknown outcome moves nothing — "we do not know" is not evidence', () => {
     const graph = createShadowGraph();
-    const decision = graph.addDecision({ title: 'T', chosen: 'C' });
+    const decision = graph.addDecision({ project: 'default', title: 'T', chosen: 'C' });
     const after = graph.setOutcome(decision.id, { status: 'unknown', sourceClass: 'tool_observed' });
     assert.equal(after.confidence.current, 0.5);
     assert.equal(after.confidence.history.length, 0, 'no zero-delta noise in the audit trail');
@@ -1533,7 +1533,7 @@ describe('G8 (S2) — FIXED: confidence has an auditable, evidence-weighted basi
 
   it('ACCEPTANCE: every history entry explains itself', () => {
     const graph = createShadowGraph();
-    const decision = graph.addDecision({ title: 'T', chosen: 'C', actor: 'claude', client: 'cli', sessionId: 's1' });
+    const decision = graph.addDecision({ project: 'default', title: 'T', chosen: 'C', actor: 'claude', client: 'cli', sessionId: 's1' });
     const after = graph.setOutcome(decision.id, { status: 'successful', sourceClass: 'tool_observed' });
 
     const [entry] = after.confidence.history;
@@ -1548,7 +1548,7 @@ describe('G8 (S2) — FIXED: confidence has an auditable, evidence-weighted basi
 
   it('ACCEPTANCE: evidence for and against is distinguishable and counted', () => {
     const graph = createShadowGraph();
-    const decision = graph.addDecision({ title: 'T', chosen: 'C' });
+    const decision = graph.addDecision({ project: 'default', title: 'T', chosen: 'C' });
     graph.addConfidenceEvidence({ decisionId: decision.id, key: 'bench', sourceClass: 'tool_observed', reason: 'benchmark supports it' });
     const after = graph.addConfidenceEvidence({ decisionId: decision.id, key: 'review', sourceClass: 'human_confirmed', supports: false, reason: 'reviewer disagrees' });
 
@@ -1562,7 +1562,7 @@ describe('G8 (S2) — FIXED: confidence has an auditable, evidence-weighted basi
 
   it('ACCEPTANCE: the same contribution cannot be counted twice (no double counting)', () => {
     const graph = createShadowGraph();
-    const decision = graph.addDecision({ title: 'T', chosen: 'C' });
+    const decision = graph.addDecision({ project: 'default', title: 'T', chosen: 'C' });
     const first = graph.addConfidenceEvidence({ decisionId: decision.id, key: 'bench-1', sourceClass: 'tool_observed', reason: 'benchmark' });
     const again = graph.addConfidenceEvidence({ decisionId: decision.id, key: 'bench-1', sourceClass: 'tool_observed', reason: 'benchmark' });
 
@@ -1574,7 +1574,7 @@ describe('G8 (S2) — FIXED: confidence has an auditable, evidence-weighted basi
 
   it('ACCEPTANCE: a repeated identical outcome does not inflate confidence', () => {
     const graph = createShadowGraph();
-    const decision = graph.addDecision({ title: 'T', chosen: 'C' });
+    const decision = graph.addDecision({ project: 'default', title: 'T', chosen: 'C' });
     const at = '2026-08-25T00:00:00.000Z';
     graph.setOutcome(decision.id, { status: 'successful', sourceClass: 'tool_observed', observedAt: at });
     const after = graph.setOutcome(decision.id, { status: 'successful', sourceClass: 'tool_observed', observedAt: at });
@@ -1584,11 +1584,11 @@ describe('G8 (S2) — FIXED: confidence has an auditable, evidence-weighted basi
 
   it('ACCEPTANCE: confidence is bounded to [0,1] however much evidence accumulates', () => {
     const graph = createShadowGraph();
-    const high = graph.addDecision({ title: 'H', chosen: 'C', confidence: 0.95 });
+    const high = graph.addDecision({ project: 'default', title: 'H', chosen: 'C', confidence: 0.95 });
     for (let index = 0; index < 10; index += 1) {
       graph.addConfidenceEvidence({ decisionId: high.id, key: `up-${index}`, sourceClass: 'production_verified', reason: 'more support' });
     }
-    const low = graph.addDecision({ title: 'L', chosen: 'C', confidence: 0.05 });
+    const low = graph.addDecision({ project: 'default', title: 'L', chosen: 'C', confidence: 0.05 });
     for (let index = 0; index < 10; index += 1) {
       graph.addConfidenceEvidence({ decisionId: low.id, key: `down-${index}`, supports: false, sourceClass: 'production_verified', reason: 'more doubt' });
     }
@@ -1627,7 +1627,7 @@ describe('G8 (S2) — FIXED: confidence has an auditable, evidence-weighted basi
     const dir = await scratchDirectory(t, 'shadowgraph-g8-');
     const store = createJsonFileStore(join(dir, 'data.json'));
     const graph = createShadowGraph();
-    const decision = graph.addDecision({ title: 'T', chosen: 'C' });
+    const decision = graph.addDecision({ project: 'default', title: 'T', chosen: 'C' });
     graph.setOutcome(decision.id, { status: 'failed', sourceClass: 'tool_observed' });
     await store.save(privilegedSnapshot(graph));
 
@@ -1655,7 +1655,7 @@ describe('ADVERSARIAL: bugs found by end-to-end review, now fixed', () => {
     // calls happened to fall inside the same millisecond, so the suite was green
     // while the defect was live. A real clock always ticks.
     const graph = createShadowGraph();
-    const decision = graph.addDecision({ title: 'T', chosen: 'C' });
+    const decision = graph.addDecision({ project: 'default', title: 'T', chosen: 'C' });
 
     graph.setOutcome(decision.id, { status: 'successful', sourceClass: 'tool_observed' });
     const first = privilegedSnapshot(graph).records.find((item) => item.id === decision.id).confidence;
@@ -1677,7 +1677,7 @@ describe('ADVERSARIAL: bugs found by end-to-end review, now fixed', () => {
     // exactly one outcome contribution. Correcting an outcome should re-derive
     // confidence, not layer a correction on top of the mistake.
     const graph = createShadowGraph();
-    const decision = graph.addDecision({ title: 'T', chosen: 'C' });
+    const decision = graph.addDecision({ project: 'default', title: 'T', chosen: 'C' });
 
     graph.setOutcome(decision.id, { status: 'successful', sourceClass: 'tool_observed' });
     graph.setOutcome(decision.id, { status: 'failed', sourceClass: 'tool_observed' });

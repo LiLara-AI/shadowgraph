@@ -168,7 +168,7 @@ function placementVariants() {
   duplicate.journalSeq = duplicateEntry.seq;
 
   const midstreamGraph = createShadowGraph({ now: () => NOW });
-  midstreamGraph.addDecision({ id: 'ds-p1-006-midstream-existing', title: 'Existing', chosen: 'keep' });
+  midstreamGraph.addDecision({ project: 'default', id: 'ds-p1-006-midstream-existing', title: 'Existing', chosen: 'keep' });
   const midstream = privilegedSnapshot(midstreamGraph);
   const midstreamEntry = structuredClone(baselineOnlyPayload(5, 'midstream').journal[0]);
   midstreamEntry.id = 'ds-p1-006-midstream-baseline';
@@ -305,7 +305,7 @@ test('DS-P1-006 eighth review: matching-live midstream baselines cannot resurrec
       assert.deepEqual(privilegedSnapshot(target), before, `${label}: failed merge import is atomic`);
 
       const replacement = createShadowGraph({ verifier, now: () => NOW });
-      replacement.addDecision({ id: `ds-p1-006-replace-old-${terminal}-${verifier ? 'v' : 'nv'}`, title: 'OLD', chosen: 'preserve' });
+      replacement.addDecision({ project: 'default', id: `ds-p1-006-replace-old-${terminal}-${verifier ? 'v' : 'nv'}`, title: 'OLD', chosen: 'preserve' });
       const replacementBefore = privilegedSnapshot(replacement);
       assertPlacementError(() => replacement.replaceData(attack.payload), `${label} replace`);
       assert.deepEqual(privilegedSnapshot(replacement), replacementBefore, `${label}: failed replacement is atomic`);
@@ -335,7 +335,7 @@ test('DS-P1-006 eighth review: duplicate, midstream, rewind, and wrong-epoch bas
     assert.deepEqual(privilegedSnapshot(target), before, `${label}: import destination unchanged`);
 
     const replacement = createShadowGraph({ now: () => NOW });
-    replacement.addDecision({ id: `ds-p1-006-${label.replaceAll(' ', '-')}-old`, title: 'OLD', chosen: 'preserve' });
+    replacement.addDecision({ project: 'default', id: `ds-p1-006-${label.replaceAll(' ', '-')}-old`, title: 'OLD', chosen: 'preserve' });
     const replacementBefore = privilegedSnapshot(replacement);
     assertPlacementError(() => replacement.replaceData(payload), `${label} replace`);
     assert.deepEqual(privilegedSnapshot(replacement), replacementBefore, `${label}: replace destination unchanged`);

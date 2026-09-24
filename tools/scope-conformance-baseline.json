@@ -13,8 +13,9 @@
     "A retired path must meet its whole target: the unresolved half AND the",
     "selected-project half.",
     "",
-    "Fixture: projects alpha and beta, plus a decision and a memory written with no",
-    "project, and a deliberate cross-project link from an alpha decision to a beta",
+    "Fixture: projects alpha and beta, plus a decision and a memory in the literal",
+    "project default (where identity-less writes landed until the schema-6 writer",
+    "refused them), and a deliberate cross-project link from an alpha decision to a beta",
     "attempt. 'withheld' means the read was made with no project argument;",
     "'selected' means it was made with project alpha."
   ],

@@ -488,7 +488,7 @@ test('project-only search and retrieve cannot expose scoped memories', () => {
   const shared = graph.remember({ project: 'app', memoryType: 'note', key: 'shared', text: 'Shared project note' }).memory;
   const alice = graph.remember({ project: 'app', scope: { userId: 'alice' }, memoryType: 'profile', key: 'private', text: 'Alice private' }).memory;
   const bob = graph.remember({ project: 'app', scope: { userId: 'bob' }, memoryType: 'profile', key: 'private', text: 'Bob private' }).memory;
-  const defaultShared = graph.remember({ memoryType: 'note', key: 'default-shared', text: 'Default shared' }).memory;
+  const defaultShared = graph.remember({ project: 'default', memoryType: 'note', key: 'default-shared', text: 'Default shared' }).memory;
   graph.remember({ project: 'other', memoryType: 'note', key: 'other-shared', text: 'Other shared' });
   const decision = graph.addDecision({ project: 'app', title: 'Public decision', chosen: 'A' });
   graph.link({ from: decision.id, to: alice.id, relation: 'personalized_by' });
@@ -520,7 +520,7 @@ test('project-only search and retrieve cannot expose scoped memories', () => {
 
 test('omitted project recall is confined to the default project', () => {
   const graph = createShadowGraph({ now: () => '2026-04-01T00:00:00.000Z' });
-  const defaultMemory = graph.remember({ memoryType: 'note', key: 'default', text: 'Default project' }).memory;
+  const defaultMemory = graph.remember({ project: 'default', memoryType: 'note', key: 'default', text: 'Default project' }).memory;
   graph.remember({ project: 'alpha', memoryType: 'note', key: 'private', text: 'Alpha private' });
   graph.remember({ project: 'beta', memoryType: 'note', key: 'private', text: 'Beta private' });
 

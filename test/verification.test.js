@@ -92,7 +92,7 @@ test('U-1: writer-controlled fields, strong source claims, and unknown verificat
   const { graph, fact, evidencePath } = await setup(t);
   assert.equal(fact.sourceClass, 'production_verified');
   assert.equal(fact.verificationStatus, 'unverified');
-  assert.throws(() => graph.addFact({ key: 'forged', value: true, verificationStatus: 'verified' }), /cannot set.*verified/);
+  assert.throws(() => graph.addFact({ project: 'default', key: 'forged', value: true, verificationStatus: 'verified' }), /cannot set.*verified/);
   await assert.rejects(
     graph.verifyFact({ factId: fact.id, evidencePath, verified: true, signature: 'writer supplied' }),
     /only accepts factId and evidencePath/

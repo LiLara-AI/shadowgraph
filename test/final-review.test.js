@@ -117,9 +117,9 @@ test('final review: separate JSON store instances cannot both commit the same re
   const seed = createShadowGraph();
   const revision = await first.save(privilegedSnapshot(seed));
   const left = createShadowGraph({ revision });
-  left.addDecision({ id: 'left', title: 'Left', chosen: 'L' });
+  left.addDecision({ project: 'default', id: 'left', title: 'Left', chosen: 'L' });
   const right = createShadowGraph({ revision });
-  right.addDecision({ id: 'right', title: 'Right', chosen: 'R' });
+  right.addDecision({ project: 'default', id: 'right', title: 'Right', chosen: 'R' });
   const results = await Promise.allSettled([first.save(privilegedSnapshot(left)), second.save(privilegedSnapshot(right))]);
   assert.equal(results.filter((item) => item.status === 'fulfilled').length, 1);
   assert.equal(results.filter((item) => item.status === 'rejected' && /revision conflict/i.test(item.reason.message)).length, 1);
@@ -139,17 +139,17 @@ test('final review: rebuild rejects sequence gaps and impossible epochs', () => 
 
 test('final review: decision, fact, and attempt idempotency namespaces survive rebuild and import', () => {
   const graph = createShadowGraph();
-  const d = graph.addDecision({ title: 'D', chosen: 'C', idempotencyKey: 'same' });
-  const f = graph.addFact({ key: 'F', value: 1, idempotencyKey: 'same' });
-  const a = graph.addAttempt({ solution: 'A', result: 'R', idempotencyKey: 'same' });
+  const d = graph.addDecision({ project: 'default', title: 'D', chosen: 'C', idempotencyKey: 'same' });
+  const f = graph.addFact({ project: 'default', key: 'F', value: 1, idempotencyKey: 'same' });
+  const a = graph.addAttempt({ project: 'default', solution: 'A', result: 'R', idempotencyKey: 'same' });
   const rebuilt = graph.rebuild();
   assert.equal(rebuilt.rebuildable, true);
   assert.deepEqual(rebuilt.projection.idempotency.map((item) => item.key).sort(), ['attempt:default:same', 'decision:default:same', 'fact:default:same']);
   const restarted = createShadowGraph();
   restarted.importData({ ...rebuilt.projection, schemaVersion: 3 });
-  assert.equal(restarted.addDecision({ title: 'other', chosen: 'x', idempotencyKey: 'same' }).id, d.id);
-  assert.equal(restarted.addFact({ key: 'other', value: 2, idempotencyKey: 'same' }).id, f.id);
-  assert.equal(restarted.addAttempt({ solution: 'other', result: 'x', idempotencyKey: 'same' }).id, a.id);
+  assert.equal(restarted.addDecision({ project: 'default', title: 'other', chosen: 'x', idempotencyKey: 'same' }).id, d.id);
+  assert.equal(restarted.addFact({ project: 'default', key: 'other', value: 2, idempotencyKey: 'same' }).id, f.id);
+  assert.equal(restarted.addAttempt({ project: 'default', solution: 'other', result: 'x', idempotencyKey: 'same' }).id, a.id);
 });
 
 test('final review: identical idempotency keys are isolated by project', () => {

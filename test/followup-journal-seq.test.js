@@ -10,6 +10,7 @@ import { createShadowGraphServer } from '../src/server.js';
 import { getRuntimeCapabilities, NODE_SQLITE_NOT_APPLICABLE_REASON } from '../src/runtime-capabilities.js';
 import {
   INVALID_JOURNAL_SEQUENCE_CODE,
+  JOURNAL_SCHEMA_VERSION,
   JOURNAL_TYPE_ENTITY_KIND,
   NONCANONICAL_SCHEMA5_PURGE_ARTIFACT_CODE,
   REPLAYABLE_ENTRY_TYPES
@@ -816,7 +817,7 @@ function assertDuplicateSequenceRebuild(report, scenario, label) {
   assert.equal(report.skipped.filter((item) => item.why === DUPLICATE_SEQUENCE_CODE).length, 2, `${label}: neither colliding entry is folded`);
   assert.equal(report.applied, 0, `${label}: arbitrary same-sequence ordering is never applied`);
   assert.deepEqual(report.projection, {
-    schemaVersion: 5,
+    schemaVersion: JOURNAL_SCHEMA_VERSION,
     records: [],
     facts: [],
     relations: [],
@@ -1190,7 +1191,7 @@ function collectMatrixFailure(failures, label, assertion) {
 
 test('DS-P1-011 every replayable type in schemas 1-5 requires a positive-safe sequence before import, replace, validation, or rebuild', () => {
   const failures = [];
-  const emptyProjection = { schemaVersion: 5, records: [], facts: [], relations: [], idempotency: [] };
+  const emptyProjection = { schemaVersion: JOURNAL_SCHEMA_VERSION, records: [], facts: [], relations: [], idempotency: [] };
   for (const schemaVersion of [1, 2, 3, 4, 5]) {
     for (const type of REPLAYABLE_ENTRY_TYPES) {
       for (const [variantLabel, variant] of ABSENT_SEQUENCE_VARIANTS) {

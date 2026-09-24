@@ -37,8 +37,8 @@ function assertMemoryState(graph) {
 }
 
 test('schema 5 memory state survives JSON restart and journal rebuild', async (t) => {
-  // The writer stays at 5 while the reader already accepts 6 (reader first).
-  assert.equal(SCHEMA_VERSION, 5);
+  // The writer now writes 6, which the reader already accepted before it did.
+  assert.equal(SCHEMA_VERSION, 6);
   assert.deepEqual(SUPPORTED_SCHEMA_VERSIONS, [1, 2, 3, 4, 5, 6]);
   const directory = await scratchDirectory(t, 'shadowgraph-memory-json-');
   const store = createJsonFileStore(join(directory, 'data.json'));

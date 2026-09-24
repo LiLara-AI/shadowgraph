@@ -8,6 +8,7 @@ import { createShadowGraph } from './shadowgraph.js';
 import { backupFile, restoreFile } from './backup.js';
 import { createRestoreValidator } from './restore-validation.js';
 import { syncMarkdownWorkspace } from './markdown-workspace.js';
+import { downgradeStore, migrateStore } from './schema-conversion.js';
 import { getRuntimeCapabilities } from './runtime-capabilities.js';
 import { VERSION } from './version.js';
 import { privilegedSnapshot } from './internal/snapshot.js';
@@ -141,10 +142,19 @@ async function runOneShot() {
         ? await store.restore(source, { memoryOnly, validate: restoreValidator, afterReplace: (payload) => graph.replaceData(payload) })
         : await restoreFile(source, file, { memoryOnly, storage: storageType, validate: restoreValidator, afterReplace: (payload) => graph.replaceData(payload) });
     }
+    else if (command === 'migrate' || command === 'downgrade') {
+      // Both write a verified preservation copy of the store first (plan v1.4.4
+      // §19.3.2); the default sits beside the store.
+      const value = parse(input || '{}');
+      const preservationCopy = value.preservationCopy ?? `${file}.preservation-${Date.now()}${storageType === 'sqlite' ? '.db' : '.json'}`;
+      result = command === 'migrate'
+        ? await migrateStore({ graph, store, file, storageType, batchSize: value.batchSize, preservationCopy })
+        : await downgradeStore({ graph, store, file, storageType, output: value.output, preservationCopy });
+    }
     else if (command === 'decision') { result = graph.addDecision(parse(input)); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'attempt') { result = graph.addAttempt(parse(input)); await store.save(privilegedSnapshot(graph)); }
     else {
-      throw new Error('Usage: shadowgraph <setup|doctor|serve|mcp|stats|list|search|retrieve|recall|remember|markdown-sync|context|review|reconsider|maintain|signals|ack|validate|repair-plan|backup|restore|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge> [JSON/path] (restore <path> [--memory-only])');
+      throw new Error('Usage: shadowgraph <setup|doctor|serve|mcp|stats|list|search|retrieve|recall|remember|markdown-sync|context|review|reconsider|maintain|signals|ack|validate|repair-plan|backup|restore|migrate|downgrade|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge> [JSON/path] (restore <path> [--memory-only])');
     }
     return result;
   } finally {

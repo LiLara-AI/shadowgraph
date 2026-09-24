@@ -15,25 +15,28 @@ import { effectiveFactExpirationBoundary, factValidityPolicyIssue, isValidIsoIns
 import { evaluateRule, isSupportedOperator, isSupportedUnit, ruleOperandIssue } from './condition-eval.js';
 import { privilegedSnapshot, registerPrivilegedSnapshot } from './internal/snapshot.js';
 import { extraCollections, NATIVE_STORE_KEYS } from './internal/collections.js';
-import { usableOriginId } from './scope.js';
+import { resolveScope, usableOriginId } from './scope.js';
 import { createHash } from 'node:crypto';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
 // docs/api-reference.md) and are frozen so a consumer cannot mutate validation
 // behaviour at a distance.
 //
-// SCHEMA_VERSION is what this build WRITES. It reads one version further
-// (plan v1.4.4 §9.2): the reader is widened and shipped before the writer is
-// raised, so the build before a writer bump can always load what it writes.
-export const SCHEMA_VERSION = 5;
+// SCHEMA_VERSION is what this build WRITES; SUPPORTED_SCHEMA_VERSIONS is what it
+// reads. The reader was widened to 6 and shipped before this writer (plan
+// v1.4.4 §9.2), so the build before this one loads everything this one writes.
+export const SCHEMA_VERSION = 6;
 export const SUPPORTED_SCHEMA_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6]);
 const READABLE_SCHEMA_VERSION = 6;
 const GLOBAL_ENTITY_NAMESPACE_SCHEMA_VERSION = 4;
+// The last schema whose entities carry no attribution. Import keeps a legacy
+// entity at this version rather than stamping it 6 without saying whose it is;
+// only a write or the attribution migration makes an entity schema 6.
+const PRE_ATTRIBUTION_SCHEMA_VERSION = 5;
 
 // Schema 6 records say whose they are (plan v1.4.4 §9.3, §10.3): a named
 // project, one capture origin and no project (`unattributed`, project null), or
-// one of the two legacy states a migration assigns. This build reads them; it
-// does not write them yet.
+// one of the two legacy states the attribution migration assigns.
 const ATTRIBUTIONS = Object.freeze(['project', 'unattributed', 'legacy_ambiguous', 'legacy_unattributed']);
 
 function attributionIssue(entity) {
@@ -358,7 +361,8 @@ function migrateLegacyPurgeArtifacts({
   importedEvents,
   journalEpoch: candidateJournalEpoch
 }) {
-  if (Number.isInteger(sourceSchemaVersion) && sourceSchemaVersion >= SCHEMA_VERSION) return;
+  // Schema 5 introduced canonical purge markers; only older sources need this.
+  if (Number.isInteger(sourceSchemaVersion) && sourceSchemaVersion >= 5) return;
   const legacyMarkers = importedJournal.filter((entry) => entry?.type === 'project.purged');
   for (const marker of legacyMarkers) {
     scrubPurgeMarkerIdentity(marker);
@@ -478,7 +482,10 @@ function idempotencySemanticEntity(value) {
   });
   if (value.kind === 'attempt') {
     const semantic = clone(value);
+    // Storage version and attribution are assigned by migration, not by the
+    // write a retry repeats.
     delete semantic.schemaVersion;
+    delete semantic.attribution;
     return canonical(semantic);
   }
   return canonical(common);
@@ -605,6 +612,12 @@ export function createShadowGraph(options = {}) {
   // through import and the privileged snapshot (axis A-5). They are never
   // interpreted, and never part of a public read.
   const extras = new TransactionMap();
+  // Ids of legacy entities that were stored with no project at all. Import
+  // defaults them into "default"; the attribution migration needs to know they
+  // had none (WS-11 mapping iii). Not persisted: once such a store is saved by
+  // any build the absence is no longer recorded, and the entity is as ambiguous
+  // as any other legacy "default" record.
+  const projectlessAtImport = new Set();
   let revision = Number.isInteger(options.revision) ? options.revision : 0;
   let journalSeq = 0;
   let journalEpoch = null;
@@ -844,20 +857,40 @@ export function createShadowGraph(options = {}) {
     if (typeof value !== 'string' || value.length > 200) throw new Error('idempotencyKey must be a string of at most 200 characters');
   }
 
-  function scopedIdempotencyKey(input, action) {
-    const project = normalizeProject(input?.project);
-    if (action !== 'memory') return `${action}:${project}:${input.idempotencyKey}`;
-    const scope = normalizeMemoryScope(input.scope);
-    const identity = JSON.stringify([scope.userId, scope.agentId, scope.runId, input.memoryType ?? null, input.key ?? null]);
-    return `memory:${project}:${identity}:${input.idempotencyKey}`;
+  // Who owns a new record (plan v1.4.4 §10.3; P1 reconciliation F-03). A
+  // selected project owns it -- the literal "default" included, as a real
+  // project of that name (owner decision OD-1). With no project, a presented
+  // origin owns it and no project does. With neither there is no owner, and the
+  // write is refused rather than stored under one nobody chose. The refusal
+  // blocks only ShadowGraph's own storage, never the caller's work (PC-15).
+  function writeOwner(input) {
+    const scope = resolveScope({ project: input?.project, originId: input?.originId });
+    if (scope.state === 'project_selected') return { project: scope.project, attribution: 'project', ...(scope.originId ? { originId: scope.originId } : {}) };
+    if (scope.originId) return { project: null, attribution: 'unattributed', originId: scope.originId };
+    const error = new Error('Write refused (write_scope_unresolved): no project was selected and no origin id was presented, so nothing would own this record. Pass a project, or an originId.');
+    error.code = 'write_scope_unresolved';
+    error.reason = 'no_project_and_no_origin';
+    throw error;
+  }
+
+  function scopedIdempotencyKey(input, action, owner = writeOwner(input)) {
+    const scope = action === 'memory' ? normalizeMemoryScope(input.scope) : null;
+    return `${idempotencyKeyPrefix({ kind: action, ...owner, scope, memoryType: input.memoryType, key: input.key })}${input.idempotencyKey}`;
   }
 
   function idempotent(input, action) {
     if (!input?.idempotencyKey) return undefined;
     validateIdempotencyKey(input.idempotencyKey);
-    const project = normalizeProject(input.project);
-    const existing = idempotency.get(scopedIdempotencyKey(input, action));
+    // A retry matches only within its own owner. With no owner there is nothing
+    // to match; the write itself is refused once its content is validated.
+    let owner;
+    try { owner = writeOwner(input); }
+    catch (error) { if (error.code === 'write_scope_unresolved') return undefined; throw error; }
+    const existing = idempotency.get(scopedIdempotencyKey(input, action, owner));
     if (existing) return clone(canonicalIdempotencyValue(existing));
+    // Legacy key forms predate origins; only a project-owned retry can match one.
+    if (owner.attribution !== 'project') return undefined;
+    const project = owner.project;
     // Legacy keys did not include project (all actions) or exact memory identity.
     // Reuse one only when the payload belongs to the same project and, for a
     // memory, the exact same scope/type/key; otherwise it would leak another
@@ -892,11 +925,11 @@ export function createShadowGraph(options = {}) {
     if (typeof confidence !== 'number' || confidence < 0 || confidence > 1) throw new Error('Decision confidence must be a number between 0 and 1');
     const alternatives = input.alternatives ?? [];
     if (!Array.isArray(alternatives) || alternatives.some((item) => !item || typeof item.label !== 'string' || !item.label.trim())) throw new Error('Decision alternatives must have non-empty label strings');
-    const project = normalizeProject(input.project);
+    const owner = writeOwner(input);
     const evidence = (input.evidence ?? []).map((item) => normalizeEvidence(item, now));
     const record = {
       id: input.id ?? id('decision'), kind: 'decision', schemaVersion: SCHEMA_VERSION,
-      project, title: input.title, goal: input.goal ?? '', chosen: input.chosen,
+      ...owner, title: input.title, goal: input.goal ?? '', chosen: input.chosen,
       // G2: provenance travels with the decision. Plain JSON values only.
       ...provenanceFields(input),
       // G8: confidence carries an auditable basis, not a bare number.
@@ -916,7 +949,7 @@ export function createShadowGraph(options = {}) {
     assertJournalCapacity(1);
     records.set(record.id, record);
     event('decision.recorded', { recordId: record.id });
-    appendJournal({ type: 'decision.recorded', entityKind: 'decision', entityId: record.id, project: record.project, payload: record, provenance: writeProvenance(record), idempotencyKey: input.idempotencyKey ? `decision:${record.project}:${input.idempotencyKey}` : undefined });
+    appendJournal({ type: 'decision.recorded', entityKind: 'decision', entityId: record.id, project: record.project, payload: record, provenance: writeProvenance(record), idempotencyKey: input.idempotencyKey ? scopedIdempotencyKey(input, 'decision', owner) : undefined });
     const result = clone(record); rememberIdempotency(input, 'decision', result); return result;
   }
 
@@ -927,13 +960,14 @@ export function createShadowGraph(options = {}) {
       throw new Error('Attempt resultClass must be failed, succeeded, or inconclusive');
     }
     validateTemporalFields(input, ['createdAt']);
-    const attempt = { id: input.id ?? id('attempt'), kind: 'attempt', schemaVersion: SCHEMA_VERSION, project: normalizeProject(input.project), ...provenanceFields(input), solution: input.solution, result: input.result, environment: input.environment ?? '', ...(input.resultClass === undefined ? {} : { resultClass: input.resultClass }), reason: input.reason ?? '', reusableWhen: normalizeRules(input.reusableWhen ?? [], { strict: true }), relatedTo: input.relatedTo ?? [], createdAt: input.createdAt ?? now() };
+    const owner = writeOwner(input);
+    const attempt = { id: input.id ?? id('attempt'), kind: 'attempt', schemaVersion: SCHEMA_VERSION, ...owner, ...provenanceFields(input), solution: input.solution, result: input.result, environment: input.environment ?? '', ...(input.resultClass === undefined ? {} : { resultClass: input.resultClass }), reason: input.reason ?? '', reusableWhen: normalizeRules(input.reusableWhen ?? [], { strict: true }), relatedTo: input.relatedTo ?? [], createdAt: input.createdAt ?? now() };
     clone(attempt);
     assertUnusedEntityId(attempt.id);
     assertJournalCapacity(1);
     records.set(attempt.id, attempt);
     event('attempt.recorded', { recordId: attempt.id });
-    appendJournal({ type: 'attempt.recorded', entityKind: 'attempt', entityId: attempt.id, project: attempt.project, payload: attempt, provenance: writeProvenance(attempt), idempotencyKey: input.idempotencyKey ? `attempt:${attempt.project}:${input.idempotencyKey}` : undefined });
+    appendJournal({ type: 'attempt.recorded', entityKind: 'attempt', entityId: attempt.id, project: attempt.project, payload: attempt, provenance: writeProvenance(attempt), idempotencyKey: input.idempotencyKey ? scopedIdempotencyKey(input, 'attempt', owner) : undefined });
     const result = clone(attempt); rememberIdempotency(input, 'attempt', result); return result;
   }
 
@@ -948,12 +982,13 @@ export function createShadowGraph(options = {}) {
     if (typeof input.text !== 'string' || !input.text.trim()) throw new Error('A memory requires non-empty text');
     if (input.metadata !== undefined && (!input.metadata || typeof input.metadata !== 'object' || Array.isArray(input.metadata))) throw new Error('Memory metadata must be an object');
     validateTemporalFields(input, ['recordedAt', 'createdAt', 'validFrom', 'validTo']);
-    const project = normalizeProject(input.project);
+    const owner = writeOwner(input);
+    const project = owner.project;
     const scope = normalizeMemoryScope(input.scope);
     const tags = strings(input.tags, 'tags');
     const metadata = clone(input.metadata ?? {});
     const embedding = normalizeEmbedding(input.embedding);
-    const scopeKey = memoryScopeKey({ project, scope, memoryType: input.memoryType, key: input.key });
+    const scopeKey = memoryScopeKey({ ...owner, scope, memoryType: input.memoryType, key: input.key });
     const previous = currentMemories.get(scopeKey);
     const latest = [...records.values()]
       .filter((record) => record.kind === 'memory' && memoryScopeKey(record) === scopeKey)
@@ -987,7 +1022,7 @@ export function createShadowGraph(options = {}) {
     const provenance = provenanceFields(input);
     const memory = {
       id: input.id ?? id('memory'), kind: 'memory', schemaVersion: SCHEMA_VERSION,
-      project, scope, memoryType: input.memoryType, key: input.key, text: input.text,
+      ...owner, scope, memoryType: input.memoryType, key: input.key, text: input.text,
       version: (latest?.version ?? 0) + 1,
       metadata, tags, embedding, ...provenance, verificationStatus: 'unverified', status: 'active',
       temporal: { validFrom, validTo, recordedAt, invalidatedAt: null },
@@ -1027,7 +1062,9 @@ export function createShadowGraph(options = {}) {
 
   function applyMemoryPlan(input = {}) {
     if (!Array.isArray(input.operations)) throw new Error('Memory plan operations must be an array');
-    const project = normalizeProject(input.project);
+    // One owner for the whole plan; each written memory inherits it.
+    const owner = writeOwner(input);
+    const project = owner.project;
     const defaultScope = normalizeMemoryScope(input.scope);
     const actions = new Set(['ADD', 'UPDATE', 'DELETE', 'NOOP']);
     const simulatedValidFrom = new Map([...currentMemories].map(([key, memory]) => [key, memory.temporal?.validFrom ?? null]));
@@ -1054,7 +1091,7 @@ export function createShadowGraph(options = {}) {
       }
       for (const name of ['actor', 'client', 'sessionId']) provenanceString(raw[name] ?? input[name], name);
       const recordedAt = ['ADD', 'UPDATE'].includes(action) ? (raw.recordedAt ?? now()) : raw.recordedAt;
-      const identityKey = memoryScopeKey({ project, scope, memoryType: raw.memoryType, key: raw.key });
+      const identityKey = memoryScopeKey({ ...owner, scope, memoryType: raw.memoryType, key: raw.key });
       if (['ADD', 'UPDATE'].includes(action)) {
         const validFrom = raw.validFrom ?? recordedAt;
         validateMemoryInterval(validFrom, raw.validTo ?? null);
@@ -1079,7 +1116,7 @@ export function createShadowGraph(options = {}) {
     const simulatedIdempotency = new Set();
     let requiredJournalEntries = 0;
     for (const operation of operations) {
-      const scopeKey = memoryScopeKey({ project, scope: operation.scope, memoryType: operation.memoryType, key: operation.key });
+      const scopeKey = memoryScopeKey({ ...owner, scope: operation.scope, memoryType: operation.memoryType, key: operation.key });
       const current = simulatedMemories.get(scopeKey);
       if (operation.action === 'NOOP' || (operation.action === 'DELETE' && !current)) continue;
       if (operation.action === 'DELETE') {
@@ -1088,7 +1125,7 @@ export function createShadowGraph(options = {}) {
         continue;
       }
 
-      const operationInput = { ...operation, project, scope: operation.scope };
+      const operationInput = { ...operation, project, originId: owner.originId, scope: operation.scope };
       const idempotencyKey = operation.idempotencyKey ? scopedIdempotencyKey(operationInput, 'memory') : null;
       if ((idempotencyKey && simulatedIdempotency.has(idempotencyKey)) || idempotent(operationInput, 'memory')) continue;
       const metadata = clone(operation.metadata ?? {});
@@ -1125,7 +1162,7 @@ export function createShadowGraph(options = {}) {
 
     const results = [];
     for (const operation of operations) {
-      const scopeKey = memoryScopeKey({ project, scope: operation.scope, memoryType: operation.memoryType, key: operation.key });
+      const scopeKey = memoryScopeKey({ ...owner, scope: operation.scope, memoryType: operation.memoryType, key: operation.key });
       const current = currentMemories.get(scopeKey);
       if (operation.action === 'NOOP' || (operation.action === 'DELETE' && !current)) {
         results.push({ operation: 'NOOP', memory: current ? clone(current) : null });
@@ -1153,6 +1190,7 @@ export function createShadowGraph(options = {}) {
       results.push(remember({
         ...operation,
         project,
+        originId: owner.originId,
         scope: operation.scope,
         sourceClass: operation.sourceClass ?? input.sourceClass,
         actor: operation.actor ?? input.actor,
@@ -1166,11 +1204,8 @@ export function createShadowGraph(options = {}) {
   function addFact(input) {
     if (!input || typeof input.key !== 'string' || !input.key.trim()) throw new Error('A fact requires a non-empty key');
     validateTemporalFields(input, ['recordedAt', 'observedAt', 'validFrom', 'validTo', 'expiresAt']);
-    const project = normalizeProject(input.project);
     const confidence = input.confidence ?? 0.5;
     if (typeof confidence !== 'number' || confidence < 0 || confidence > 1) throw new Error('Fact confidence must be a number between 0 and 1');
-    const factScope = JSON.stringify([project, input.key]);
-    const previous = currentFacts.get(factScope);
     // G2: a source label is a CLAIM about origin, not a grant of trust. Unknown or
     // non-canonical labels downgrade to agent_claimed with the raw label kept for
     // audit. See provenance-contract.md §4.
@@ -1195,13 +1230,18 @@ export function createShadowGraph(options = {}) {
     if (effectiveExpirationBoundary && compareInstants(effectiveExpirationBoundary, validFrom) < 0) {
       throw new Error('Fact effective expiration boundary must not precede validFrom');
     }
+    // Ownership is decided once the content is known to be valid, so a caller
+    // learns what is wrong with the fact before learning it has no owner.
+    const owner = writeOwner(input);
+    const factScope = JSON.stringify([ownerKey(owner, (project) => project), input.key]);
+    const previous = currentFacts.get(factScope);
     const existing = idempotent(input, 'fact'); if (existing) return existing;
     if (previous?.temporal?.validFrom && compareInstants(validFrom, previous.temporal.validFrom) < 0) {
       throw new Error('Facts for one scope must be recorded in non-decreasing validFrom order');
     }
     const fact = {
       id: input.id ?? id('fact'), kind: 'fact', schemaVersion: SCHEMA_VERSION,
-      project, key: input.key, value: input.value,
+      ...owner, key: input.key, value: input.value,
       source: provenance.sourceClass, ...provenance, confidence, verificationStatus,
       status: 'active', expiresAt: input.expiresAt ?? null, observedAt,
       validityPolicy: {
@@ -1229,8 +1269,50 @@ export function createShadowGraph(options = {}) {
     }
     facts.set(fact.id, fact); currentFacts.set(factScope, fact);
     event('fact.observed', { factId: fact.id, key: fact.key });
-    appendJournal({ type: 'fact.observed', entityKind: 'fact', entityId: fact.id, project: fact.project, payload: fact, provenance: writeProvenance(fact), idempotencyKey: input.idempotencyKey ? `fact:${fact.project}:${input.idempotencyKey}` : undefined });
+    appendJournal({ type: 'fact.observed', entityKind: 'fact', entityId: fact.id, project: fact.project, payload: fact, provenance: writeProvenance(fact), idempotencyKey: input.idempotencyKey ? scopedIdempotencyKey(input, 'fact', owner) : undefined });
     const result = clone(fact); rememberIdempotency(input, 'fact', result); return result;
+  }
+
+  // The attribution migration (plan v1.4.4 §9.6 step 3, WS-11), under owner
+  // decision OD-1, option B. Every entity written before schema 6 gets its
+  // attribution, and each change is journalled as entity.attributed with reason
+  // `migration`, so a rebuild reproduces it:
+  //   project "default"  -> legacy_ambiguous: kept inspectable and reassignable,
+  //                         never treated as a real project named "default"
+  //   no project stored  -> legacy_unattributed
+  //   any other project  -> project, kept exactly as it was
+  // No project is rewritten, none is inferred from content, nothing is deleted.
+  // Idempotent per entity and resumable: an entity that already has an
+  // attribution is skipped, so an interrupted run continues where it stopped.
+  // `limit` bounds one batch; the caller persists between batches. The last
+  // migrated id is the high-water mark, and the journal entry that records it
+  // is persisted with the batch.
+  function migrateAttribution(input = {}) {
+    const limit = input.limit ?? Number.MAX_SAFE_INTEGER;
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('Attribution migration limit must be a positive integer');
+    const kinds = ['decision', 'attempt', 'memory', 'fact'];
+    const pending = [...records.values(), ...facts.values()]
+      .filter((entity) => entity.attribution === undefined && !(Number.isInteger(entity.schemaVersion) && entity.schemaVersion > SCHEMA_VERSION))
+      .sort((left, right) => kinds.indexOf(left.kind) - kinds.indexOf(right.kind) || String(left.id).localeCompare(String(right.id)));
+    const batch = pending.slice(0, limit);
+    assertJournalCapacity(batch.length);
+    const counts = { project: 0, legacy_ambiguous: 0, legacy_unattributed: 0 };
+    for (const entity of batch) {
+      const previousProject = entity.project ?? null;
+      const attribution = previousProject === null || projectlessAtImport.has(entity.id)
+        ? 'legacy_unattributed'
+        : previousProject === 'default' ? 'legacy_ambiguous' : 'project';
+      touchMutableObject(entity);
+      entity.schemaVersion = SCHEMA_VERSION;
+      entity.attribution = attribution;
+      counts[attribution] += 1;
+      appendJournal({
+        type: 'entity.attributed', entityKind: entity.kind, entityId: entity.id, project: entity.project ?? null,
+        payload: { ...clone(entity), attributionChange: { previousProject, previousAttribution: null, reason: 'migration' } }
+      });
+    }
+    const remaining = pending.length - batch.length;
+    return { migrated: batch.length, attributions: counts, remaining, complete: remaining === 0, highWaterMark: batch.at(-1)?.id ?? null };
   }
 
   async function verifyFact(input = {}) {
@@ -1372,7 +1454,10 @@ export function createShadowGraph(options = {}) {
     const previous = records.get(input.decisionId); const replacement = records.get(input.replacementId);
     if (!previous || previous.kind !== 'decision' || !replacement || replacement.kind !== 'decision') throw new Error('Supersession requires two existing decisions');
     if (previous.id === replacement.id) throw new Error('A decision cannot supersede itself');
-    if (previous.project !== replacement.project) throw new Error('Superseding decisions must belong to the same project');
+    // Same owner, not merely equal project fields: two unattributed decisions
+    // both carry project null but belong to their own origins.
+    const ownerOf = (decision) => JSON.stringify(ownerKey(decision, (project) => project ?? null));
+    if (ownerOf(previous) !== ownerOf(replacement)) throw new Error('Superseding decisions must belong to the same project');
     if (previous.status === 'superseded' && previous.supersededBy === replacement.id) return { previous: clone(previous), replacement: clone(replacement), relation: [...relations.values()].find((item) => item.from === replacement.id && item.to === previous.id && item.relation === 'supersedes') ?? null };
     if (['superseded', 'archived'].includes(previous.status) || ['superseded', 'archived', 'abandoned', 'stale'].includes(replacement.status)) throw new Error('Supersession would create an invalid decision chain');
     assertJournalCapacity(3);
@@ -2564,7 +2649,7 @@ export function createShadowGraph(options = {}) {
     // The staged snapshot is already migrated and validated, so this import cannot
     // fail. Only now is the live state discarded.
     const staged = privilegedSnapshot(staging);
-    records.clear(); currentMemories.clear(); facts.clear(); currentFacts.clear(); relations.clear(); reviewSignals.clear(); idempotency.clear(); extras.clear();
+    records.clear(); currentMemories.clear(); facts.clear(); currentFacts.clear(); relations.clear(); reviewSignals.clear(); idempotency.clear(); extras.clear(); projectlessAtImport.clear();
     events.length = 0; journal.length = 0; revision = 0; journalSeq = 0; journalEpoch = null;
     return importData(staged);
   }
@@ -2602,6 +2687,14 @@ export function createShadowGraph(options = {}) {
       const factId = fact.id ?? legacyFactId(fact, index, allFacts);
       return migrateFact({ ...fact, id: factId });
     });
+    // Legacy entities stored with no project, which the migrations above placed
+    // in "default". Held by object, so the legacy id remapping below cannot lose
+    // track of them.
+    const storedWithoutProject = (item) => typeof item?.attribution !== 'string' && (item?.project === undefined || item?.project === null);
+    const projectless = [
+      ...(source.records ?? []).map((item, index) => storedWithoutProject(item) && importedRecords[index]),
+      ...(source.facts ?? []).map((item, index) => storedWithoutProject(item) && importedFacts[index])
+    ].filter((entity) => entity?.project === 'default');
     const trustedValidationInstant = verifier && importedFacts.some((fact) => fact.verification) ? now() : null;
     for (const fact of importedFacts) {
       if (fact.verification) {
@@ -3079,6 +3172,7 @@ export function createShadowGraph(options = {}) {
     for (const item of pendingIdempotencyUpdates) idempotency.set(item.key, item.value);
     for (const importedEvent of importedEvents) events.push(importedEvent);
     for (const [key, value] of importedExtras) extras.set(key, value);
+    for (const entity of projectless) projectlessAtImport.add(entity.id);
 
     if (importedJournal.length) {
       for (const importedEntry of importedJournal) journal.push(importedEntry);
@@ -3208,6 +3302,7 @@ export function createShadowGraph(options = {}) {
     applyMemoryPlan: transactional('applyMemoryPlan', applyMemoryPlan),
     memoryHistory,
     addFact: transactional('addFact', addFact),
+    migrateAttribution: transactional('migrateAttribution', migrateAttribution),
     verifyFact: transactional('verifyFact', verifyFact),
     setOutcome: transactional('setOutcome', setOutcome),
     addConfidenceEvidence: transactional('addConfidenceEvidence', addConfidenceEvidence),
@@ -3722,7 +3817,7 @@ function migrateRecordFields(item) {
     const source = clone(item);
     const recordedAt = source.temporal?.recordedAt ?? source.createdAt ?? null;
     return {
-      schemaVersion: SCHEMA_VERSION,
+      schemaVersion: PRE_ATTRIBUTION_SCHEMA_VERSION,
       project: source.project ?? 'default',
       ...source,
       scope: normalizeMemoryScope(source.scope),
@@ -3737,7 +3832,7 @@ function migrateRecordFields(item) {
       }
     };
   }
-  if (item.kind !== 'decision') return { schemaVersion: SCHEMA_VERSION, project: 'default', ...clone(item) };
+  if (item.kind !== 'decision') return { schemaVersion: PRE_ATTRIBUTION_SCHEMA_VERSION, project: 'default', ...clone(item) };
   const source = clone(item);
   const migratesLegacyStatus = !Number.isInteger(source.schemaVersion) || source.schemaVersion < 5;
   const legacyDecisionStatus = migratesLegacyStatus && ['active', 'aging'].includes(source.status) ? source.status : null;
@@ -3766,7 +3861,7 @@ function migrateRecordFields(item) {
     // that this build does not understand it. The original version is preserved
     // and validate() reports it as `unsupported`.
     ...source,
-    schemaVersion: Number.isInteger(source.schemaVersion) && source.schemaVersion > SCHEMA_VERSION ? source.schemaVersion : SCHEMA_VERSION,
+    schemaVersion: Number.isInteger(source.schemaVersion) && source.schemaVersion > PRE_ATTRIBUTION_SCHEMA_VERSION ? source.schemaVersion : PRE_ATTRIBUTION_SCHEMA_VERSION,
     project: source.project ?? 'default', confidence,
     ...(legacyDecisionStatus ? {
       status: migratedDecisionStatus,
@@ -3789,8 +3884,8 @@ function migrateFactFields(fact) {
   // P2-14: a fact written by a NEWER build keeps its own schemaVersion rather than
   // being relabelled as one this build understands. validate() reports it as
   // `unsupported` so the caller learns we cannot fully interpret it.
-  const future = Number.isInteger(source.schemaVersion) && source.schemaVersion > SCHEMA_VERSION;
-  const imported = { project: 'default', confidence: 0.5, status: 'active', ...source, schemaVersion: future ? source.schemaVersion : SCHEMA_VERSION };
+  const future = Number.isInteger(source.schemaVersion) && source.schemaVersion > PRE_ATTRIBUTION_SCHEMA_VERSION;
+  const imported = { project: 'default', confidence: 0.5, status: 'active', ...source, schemaVersion: future ? source.schemaVersion : PRE_ATTRIBUTION_SCHEMA_VERSION };
   if (!SOURCE_CLASSES.includes(imported.sourceClass)) {
     const { sourceClass, sourceRaw } = normalizeSourceClass(imported.sourceClass ?? imported.source);
     imported.sourceClass = sourceClass;
