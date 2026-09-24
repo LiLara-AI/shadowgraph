@@ -59,6 +59,7 @@ async function signedMidstreamBaselineAttack(directory, fixture, terminal, suffi
   });
   graph.link({
     id: `ds-p1-006-relation-${suffix}`,
+    project: 'ds-p1-006',
     from: decision.id,
     to: fact.id,
     relation: 'depends_on'
@@ -464,7 +465,7 @@ test('DS-P1-006 journal-less merge appends typed decision, attempt, fact, relati
     value: 'old-private-fact', idempotencyKey: 'fact-retry'
   });
   const relation = graph.link({
-    id: 'ds-p1-006-merge-relation', from: decision.id, to: fact.id,
+    id: 'ds-p1-006-merge-relation', project: 'ds-p1-006-merge', from: decision.id, to: fact.id,
     relation: 'depends_on'
   });
   const replacementSource = createShadowGraph({ now: () => '2026-09-01T00:00:00.000Z' });

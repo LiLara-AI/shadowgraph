@@ -816,10 +816,10 @@ export function createShadowGraph(options = {}) {
     const data = clone(payload);
     let project = data.project;
     const refId = data.recordId ?? data.factId;
-    if (!project && refId) project = entity(refId)?.project;
+    if (!project && refId) project = rawEntity(refId)?.project;
     if (!project && data.relationId) {
       const relation = relations.get(data.relationId);
-      project = entity(relation?.from)?.project ?? entity(relation?.to)?.project;
+      project = rawEntity(relation?.from)?.project ?? rawEntity(relation?.to)?.project;
     }
     events.push({ id: id('event'), type, at: now(), ...(project ? { project } : {}), ...data });
   }
@@ -1483,7 +1483,10 @@ export function createShadowGraph(options = {}) {
     return { operation: 'VERIFIED', fact: clone(current) };
   }
 
-  function entity(entityId) {
+  // An id resolved with no boundary at all. Internal, never exported and never
+  // returned: the kernel uses it only to label its own breadcrumbs and to check
+  // the whole store's references. Every by-id read goes through entity().
+  function rawEntity(entityId) {
     if (records.has(entityId)) return records.get(entityId);
     if (facts.has(entityId)) return facts.get(entityId);
     for (const record of records.values()) {
@@ -1493,9 +1496,34 @@ export function createShadowGraph(options = {}) {
     return undefined;
   }
 
+  // The by-id chokepoint (plan v1.4.4 §10.5). An id resolves only inside the
+  // boundary of the request that names it, and an alternative only where its
+  // decision does. Outside it -- another project, legacy data, another origin
+  // -- there is no entity, exactly as for an id that exists nowhere, so no
+  // by-id answer can tell the two apart. The boundary is required.
+  function entity(entityId, boundary) {
+    if (typeof boundary?.visible !== 'function') throw new Error('entity() requires the boundary of the request it serves');
+    const found = rawEntity(entityId);
+    return found && boundary.visible(found.kind === 'alternative' ? records.get(found.decisionId) : found) ? found : undefined;
+  }
+
+  // A new relation joins two entities of the one project -- or the one origin
+  // -- it is written for (P1 reconciliation F-16, as corrected by the owner).
+  // Its boundary comes from the write's own project or origin alone, so nothing
+  // that widens a read, a wider-read grant included, ever widens a write. An
+  // endpoint outside it is refused exactly as one that does not exist.
+  // Relations stored across projects before this rule are kept as they are;
+  // scoped reads do not cross them.
   function link(input) {
     if (!input || typeof input.from !== 'string' || typeof input.to !== 'string' || typeof input.relation !== 'string' || !input.relation.trim()) throw new Error('A relationship requires from, to, and relation');
-    if (!entity(input.from) || !entity(input.to)) throw new Error('Relation endpoints must exist before linking');
+    const boundary = readBoundary(writeOwner(input));
+    const from = entity(input.from, boundary);
+    const to = entity(input.to, boundary);
+    if (!from || !to) throw new Error('Relation endpoints must exist in the scope the relation is written for');
+    return addRelation(input, from.project ?? to.project ?? null);
+  }
+
+  function addRelation(input, project) {
     validateTemporalFields(input, ['recordedAt', 'createdAt', 'validFrom', 'validTo']);
     const recordedAt = input.recordedAt ?? now();
     const createdAt = input.createdAt ?? recordedAt;
@@ -1511,21 +1539,33 @@ export function createShadowGraph(options = {}) {
     assertJournalCapacity(1);
     relations.set(relation.id, relation);
     event('relation.created', { relationId: relation.id });
-    appendJournal({ type: 'relation.created', entityKind: 'relation', entityId: relation.id, project: entity(relation.from)?.project ?? entity(relation.to)?.project ?? null, payload: relation });
+    appendJournal({ type: 'relation.created', entityKind: 'relation', entityId: relation.id, project, payload: relation });
     return clone(relation);
   }
 
+  // A by-id read, and the walk from it, inside the boundary of the request
+  // (plan v1.4.4 §10.5). The root and every node reached resolve through
+  // entity(), so the walk never enters another project, legacy data or
+  // another origin -- not even to come back. A root outside the boundary, or
+  // outside the requested memory scope, is answered exactly as a root that does
+  // not exist: no node, no relation, and one notice that names nothing. Input
+  // is checked before any id is resolved, so a bad request fails the same way
+  // for every id.
   function traverse(input = {}) {
-    if (typeof input.id !== 'string' || !entity(input.id)) throw new Error('A traversal requires an existing id');
-    const memoryProject = normalizeProject(input.project);
+    if (typeof input?.id !== 'string' || !input.id) throw new Error('A traversal requires an id');
     const memoryScope = normalizeMemoryScope(input.scope);
-    const memoryVisible = (item) => item?.kind !== 'memory' || (item.project === memoryProject && sameMemoryScopeValues(item.scope, memoryScope));
-    if (!memoryVisible(entity(input.id))) throw new Error('Traversal root is outside the requested memory scope');
     const direction = input.direction ?? 'both';
     if (!['in', 'out', 'both'].includes(direction)) throw new Error('Traversal direction must be in, out, or both');
     const depth = input.depth ?? 1;
     if (!Number.isInteger(depth) || depth < 1 || depth > 10) throw new Error('Traversal depth must be an integer between 1 and 10');
-    const seen = new Set([input.id]); const nodes = [clone(entity(input.id))]; const edges = []; let frontier = [input.id];
+    const boundary = readBoundary(input);
+    const reach = (entityId) => {
+      const found = entity(entityId, boundary);
+      return found && (found.kind !== 'memory' || sameMemoryScopeValues(found.scope, memoryScope)) ? found : undefined;
+    };
+    const root = reach(input.id);
+    if (!root) return { root: input.id, direction, depth, nodes: [], relations: [], limitation: { code: 'scoped_coverage', detail: 'No record with this id is visible in the scope of this traversal.' } };
+    const seen = new Set([input.id]); const nodes = [clone(root)]; const edges = []; let frontier = [input.id];
     for (let level = 0; level < depth && frontier.length; level += 1) {
       const next = [];
       for (const relation of relations.values()) {
@@ -1534,10 +1574,10 @@ export function createShadowGraph(options = {}) {
         const toMatch = direction !== 'out' && frontier.includes(relation.to);
         if (!fromMatch && !toMatch) continue;
         const targetId = fromMatch ? relation.to : relation.from;
-        if (!entity(targetId)) continue;
-        if (!memoryVisible(entity(targetId))) continue;
+        const target = reach(targetId);
+        if (!target) continue;
         if (!edges.some((item) => item.id === relation.id)) edges.push(clone(relation));
-        if (!seen.has(targetId) && entity(targetId)) { seen.add(targetId); next.push(targetId); nodes.push(clone(entity(targetId))); }
+        if (!seen.has(targetId)) { seen.add(targetId); next.push(targetId); nodes.push(clone(target)); }
       }
       frontier = next;
     }
@@ -1559,7 +1599,7 @@ export function createShadowGraph(options = {}) {
     touchMutableObject(replacement);
     previous.status = 'superseded'; previous.supersededBy = replacement.id; previous.updatedAt = now();
     replacement.supersedes = [...new Set([...(replacement.supersedes ?? []), previous.id])]; replacement.updatedAt = now();
-    const relation = link({ from: replacement.id, to: previous.id, relation: 'supersedes' });
+    const relation = addRelation({ from: replacement.id, to: previous.id, relation: 'supersedes' }, replacement.project ?? previous.project ?? null);
     event('decision.superseded', { recordId: previous.id, replacementId: replacement.id });
     const cause = appendJournal({ type: 'decision.superseded', entityKind: 'decision', entityId: previous.id, project: previous.project, payload: clone(previous), provenance: writeProvenance(previous) });
     appendJournal({ type: 'decision.recorded', entityKind: 'decision', entityId: replacement.id, project: replacement.project, payload: clone(replacement), provenance: writeProvenance(replacement), causationId: cause.id });
@@ -2434,8 +2474,8 @@ export function createShadowGraph(options = {}) {
     const issues = [];
     const push = (severity, code, extra) => issues.push({ code, severity, ...extra });
     for (const relation of relations.values()) {
-      if (!entity(relation.from)) push('error', 'missing_relation_source', { relationId: relation.id, entityId: relation.from });
-      if (!entity(relation.to)) push('error', 'missing_relation_target', { relationId: relation.id, entityId: relation.to });
+      if (!rawEntity(relation.from)) push('error', 'missing_relation_source', { relationId: relation.id, entityId: relation.from });
+      if (!rawEntity(relation.to)) push('error', 'missing_relation_target', { relationId: relation.id, entityId: relation.to });
     }
     for (const record of records.values()) if (record.kind === 'decision') {
       if (record.supersededBy === record.id) push('error', 'self_supersession', { recordId: record.id });
@@ -2564,12 +2604,9 @@ export function createShadowGraph(options = {}) {
       if (scope.state === 'project_selected') return ownerKey(item, (project) => project) === scope.project;
       return item.attribution === 'unattributed' && sameOrigin(item.originId, scope.originId);
     };
-    // A relation endpoint can be an alternative, which is its decision's.
-    const reaches = (id) => {
-      const found = entity(id);
-      return visible(found?.kind === 'alternative' ? records.get(found.decisionId) : found);
-    };
-    return { scope, visible, reaches };
+    // Whether an id -- a relation endpoint, say -- resolves inside it.
+    const boundary = { scope, visible, reaches: (entityId) => entity(entityId, boundary) !== undefined };
+    return boundary;
   }
 
   function matchesFilters(record, options, boundary) {
@@ -2630,8 +2667,8 @@ export function createShadowGraph(options = {}) {
     // A neighbour joins only from inside the same boundary as the hits.
     for (const relation of relations.values()) {
       const relatedId = directIds.has(relation.from) ? relation.to : directIds.has(relation.to) ? relation.from : null;
-      const related = relatedId && entity(relatedId);
-      if (related && related.kind !== 'alternative' && boundary.visible(related) && (related.kind !== 'memory' || sameMemoryScopeValues(related.scope, memoryScope)) && !directIds.has(relatedId)) {
+      const related = relatedId && entity(relatedId, boundary);
+      if (related && related.kind !== 'alternative' && (related.kind !== 'memory' || sameMemoryScopeValues(related.scope, memoryScope)) && !directIds.has(relatedId)) {
         results.push({ record: clone(related), score: 1, graphBoost: 1, matched: ['relationship'], matchedBy: 'graph', reason: `Related by ${relation.relation}`, reasons: [`Related by ${relation.relation}`], filters: appliedFilters(options) });
         directIds.add(relatedId);
       }

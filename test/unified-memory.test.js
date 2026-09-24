@@ -137,7 +137,7 @@ test('recall fuses lexical, semantic, graph, and temporal signals while declarin
     text: 'Bob also likes boutique hotels', embedding: [1, 0]
   });
   const decision = graph.addDecision({ project: 'trip', title: 'Travel booking policy', chosen: 'Respect saved preferences' });
-  graph.link({ from: decision.id, to: currentHotel.id, relation: 'uses_preference' });
+  graph.link({ project: 'trip', from: decision.id, to: currentHotel.id, relation: 'uses_preference' });
 
   const fused = graph.recall('lodging taste', {
     project: 'trip', scope: alice, queryEmbedding: [0.99, 0.01], focalId: decision.id,
@@ -182,6 +182,7 @@ test('facts and relations preserve bi-temporal history for point-in-time recall'
 
   const decision = graph.addDecision({ project: 'deploy', title: 'Deployment architecture', chosen: 'Choose by active mode' });
   const relation = graph.link({
+    project: 'deploy',
     from: decision.id,
     to: newFact.id,
     relation: 'depends_on',
@@ -491,8 +492,8 @@ test('project-only search and retrieve cannot expose scoped memories', () => {
   const defaultShared = graph.remember({ project: 'default', memoryType: 'note', key: 'default-shared', text: 'Default shared' }).memory;
   graph.remember({ project: 'other', memoryType: 'note', key: 'other-shared', text: 'Other shared' });
   const decision = graph.addDecision({ project: 'app', title: 'Public decision', chosen: 'A' });
-  graph.link({ from: decision.id, to: alice.id, relation: 'personalized_by' });
-  graph.link({ from: decision.id, to: bob.id, relation: 'personalized_by' });
+  graph.link({ project: 'app', from: decision.id, to: alice.id, relation: 'personalized_by' });
+  graph.link({ project: 'app', from: decision.id, to: bob.id, relation: 'personalized_by' });
 
   const projectSearchMemories = graph.search('', { project: 'app' }).items.filter((item) => item.record.kind === 'memory');
   const projectRetrieveMemories = graph.retrieve('', { project: 'app' }).items.filter((item) => item.record.kind === 'memory');
@@ -517,10 +518,15 @@ test('project-only search and retrieve cannot expose scoped memories', () => {
 
   const unscopedTraversal = graph.traverse({ id: decision.id });
   assert.equal(unscopedTraversal.nodes.some((node) => node.id === alice.id || node.id === bob.id), false);
+  const projectTraversal = graph.traverse({ id: decision.id, project: 'app' });
+  assert.equal(projectTraversal.nodes[0].id, decision.id);
+  assert.equal(projectTraversal.nodes.some((node) => node.id === alice.id || node.id === bob.id), false);
   const aliceTraversal = graph.traverse({ id: decision.id, project: 'app', scope: { userId: 'alice' } });
   assert.equal(aliceTraversal.nodes.some((node) => node.id === alice.id), true);
   assert.equal(aliceTraversal.nodes.some((node) => node.id === bob.id), false);
-  assert.throws(() => graph.traverse({ id: alice.id }), /outside the requested memory scope/);
+  const outsideMemoryScope = graph.traverse({ id: alice.id, project: 'app' });
+  assert.deepEqual(outsideMemoryScope.nodes, []);
+  assert.deepEqual({ ...outsideMemoryScope, root: null }, { ...graph.traverse({ id: 'memory_absent', project: 'app' }), root: null });
 });
 
 test('omitted project recall reads no project, not even "default"', () => {
@@ -913,7 +919,7 @@ test('schema 4 entity ids are globally unique so JSON and SQLite accept the same
   reverse.addDecision({ id: 'from-id', project: 'app', title: 'From', chosen: 'A' });
   reverse.addDecision({ id: 'to-id', project: 'app', title: 'To', chosen: 'B' });
   const beforeRelation = privilegedSnapshot(reverse);
-  assert.throws(() => reverse.link({ id: 'record-id', from: 'from-id', to: 'to-id', relation: 'supports' }), /Entity id already exists/);
+  assert.throws(() => reverse.link({ id: 'record-id', project: 'app', from: 'from-id', to: 'to-id', relation: 'supports' }), /Entity id already exists/);
   assert.deepEqual(privilegedSnapshot(reverse), beforeRelation);
 
   const memory = {
@@ -952,7 +958,7 @@ test('direct link refuses missing endpoints before journaling or persistence', (
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
   graph.addDecision({ id: 'present', project: 'app', title: 'Present', chosen: 'A' });
   const before = privilegedSnapshot(graph);
-  assert.throws(() => graph.link({ from: 'present', to: 'missing', relation: 'supports' }), /Relation endpoints must exist/);
+  assert.throws(() => graph.link({ project: 'app', from: 'present', to: 'missing', relation: 'supports' }), /Relation endpoints must exist/);
   assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
@@ -962,7 +968,7 @@ test('journal rebuild preserves relations whose endpoint is a nested alternative
     id: 'decision-with-alt', project: 'app', title: 'Choose', chosen: 'A',
     alternatives: [{ id: 'alternative-b', label: 'B', reasonRejected: 'No' }]
   });
-  graph.link({ id: 'alt-link', from: decision.id, to: 'alternative-b', relation: 'rejects' });
+  graph.link({ id: 'alt-link', project: 'app', from: decision.id, to: 'alternative-b', relation: 'rejects' });
   const rebuilt = graph.rebuild();
   assert.equal(rebuilt.rebuildable, true);
   assert.equal(rebuilt.projection.relations.some((relation) => relation.id === 'alt-link'), true);
@@ -974,7 +980,7 @@ test('schema 4 merge cannot remove an alternative used by a live relation', () =
     id: 'decision-with-used-alt', project: 'app', title: 'Choose', chosen: 'A',
     alternatives: [{ id: 'used-alternative', label: 'B', reasonRejected: 'No' }]
   });
-  graph.link({ id: 'used-alt-link', from: 'decision-with-used-alt', to: 'used-alternative', relation: 'rejects' });
+  graph.link({ id: 'used-alt-link', project: 'app', from: 'decision-with-used-alt', to: 'used-alternative', relation: 'rejects' });
   const before = privilegedSnapshot(graph);
   const changed = { ...before.records.find((record) => record.id === 'decision-with-used-alt'), alternatives: [] };
   assert.throws(() => graph.importData({ schemaVersion: 4, records: [changed] }), /Relation endpoints must exist after import/);

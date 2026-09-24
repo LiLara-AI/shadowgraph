@@ -717,13 +717,15 @@ test('output schemas accept data imported from an older storage schema', () => {
   assert.equal(retrieved.items.some((item) => item.record.id === 'legacy-fact-1' && item.matchedBy === 'graph'), true);
   assert.equal(recalled.items.length, 3);
   assert.deepEqual([context.activeDecisions.length, context.failedAttemptsToAvoid.length], [1, 1]);
+  const traversed = owned.traverse({ id: 'legacy-decision-1', ...read });
+  assert.deepEqual(traversed.nodes.map((node) => node.id), ['legacy-decision-1', 'legacy-fact-1'], 'traverse reads the legacy records too');
 
   const checks = [
     ['shadowgraph_search', searched],
     ['shadowgraph_retrieve', retrieved],
     ['shadowgraph_recall', recalled],
     ['shadowgraph_context', context],
-    ['shadowgraph_traverse', graph.traverse({ id: 'legacy-decision-1' })],
+    ['shadowgraph_traverse', traversed],
     ['shadowgraph_journal', graph.getJournal({})],
     ['shadowgraph_rebuild', graph.rebuild()],
     ['shadowgraph_redact', graph.redact()],

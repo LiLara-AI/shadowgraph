@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { historicalRelation } from '../tools/historical-relation.js';
 
 // PR-08 (plan v1.4.4 §10.2, §10.5; owner decisions OD-1, OD-3): the five core
 // read paths -- the project predicate behind search, search itself, retrieve,
@@ -43,6 +44,10 @@ function legacyPayload() {
   return payload;
 }
 
+// A relation across projects, as a store written before PR-09 holds it;
+// link() refuses to create one now (P1 reconciliation F-16).
+const importHistoricalRelation = (graph, relation) => graph.importData(historicalRelation({ ...relation, seq: privilegedSnapshot(graph).journalSeq + 1, at: NOW }));
+
 function fixture() {
   const graph = createShadowGraph({ now });
   graph.importData(legacyPayload());
@@ -54,13 +59,13 @@ function fixture() {
     graph.addFact({ project, id: `${project}-fact-old`, key: 'latency', value: 10, observedAt: '2025-01-01T00:00:00.000Z' });
     graph.addFact({ project, id: `${project}-fact-new`, key: 'latency', value: 20, observedAt: '2025-02-01T00:00:00.000Z' });
   }
-  graph.link({ from: 'alpha-decision', to: 'alpha-attempt', relation: 'tried' });
-  graph.link({ from: 'alpha-decision', to: 'alpha-memory', relation: 'noted' });
+  graph.link({ project: 'alpha', from: 'alpha-decision', to: 'alpha-attempt', relation: 'tried' });
+  graph.link({ project: 'alpha', from: 'alpha-decision', to: 'alpha-memory', relation: 'noted' });
   // The deliberate cross-project edge, and a way back into alpha through beta:
   // a read in alpha must not follow either.
-  graph.link({ from: 'alpha-decision', to: 'beta-attempt', relation: 'related' });
+  importHistoricalRelation(graph, { id: 'relation-alpha-beta', from: 'alpha-decision', to: 'beta-attempt', relation: 'related', project: 'alpha' });
   graph.addDecision({ project: 'alpha', id: 'alpha-far-decision', title: 'alpha far decision', chosen: 'x' });
-  graph.link({ from: 'beta-attempt', to: 'alpha-far-decision', relation: 'related' });
+  importHistoricalRelation(graph, { id: 'relation-beta-alpha-far', from: 'beta-attempt', to: 'alpha-far-decision', relation: 'related', project: 'beta' });
   // The real project named "default", and two capture origins with no project.
   graph.addDecision({ project: 'default', id: 'default-decision', title: 'Real default MARKER cache', chosen: 'x' });
   graph.remember({ project: 'default', id: 'default-memory', memoryType: 'note', key: 'note', text: 'MEMORY-MARKER real default' });

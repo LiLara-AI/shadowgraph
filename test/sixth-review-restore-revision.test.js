@@ -28,7 +28,7 @@ function sourceGraph() {
   const fact = graph.addFact({
     id: 'aba-source-fact', project: 'ds-p1-004', key: 'restore-contract', value: 'preserved'
   });
-  graph.link({ id: 'aba-source-relation', from: decision.id, to: fact.id, relation: 'supported_by' });
+  graph.link({ id: 'aba-source-relation', project: 'ds-p1-004', from: decision.id, to: fact.id, relation: 'supported_by' });
   return graph;
 }
 

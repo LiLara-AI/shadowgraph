@@ -35,6 +35,7 @@ import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createFactAttestation, createLocalEvidenceVerifier } from '../src/verification.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { historicalRelation } from '../tools/historical-relation.js';
 
 // Smallest decision that carries a machine-checkable reopen condition.
 function decisionWithReopenRule(graph, project = 'p') {
@@ -911,7 +912,7 @@ describe('G4 (S2) — FIXED: the journal carries complete payloads and rebuilds 
     const graph = createShadowGraph();
     const decision = graph.addDecision({ project: 'p', title: 'T', chosen: 'C', alternatives: [{ label: 'alt', reasonRejected: 'why' }] });
     const fact = graph.addFact({ project: 'p', key: 'k', value: 'v' });
-    graph.link({ from: decision.id, to: fact.id, relation: 'depends_on' });
+    graph.link({ project: 'p', from: decision.id, to: fact.id, relation: 'depends_on' });
     graph.setOutcome(decision.id, { status: 'successful', sourceClass: 'tool_observed' });
 
     const result = graph.rebuild();
@@ -1193,7 +1194,7 @@ describe('G5 (S2) — FIXED: purge is logical by default, hard purge is explicit
     const keptDecision = graph.addDecision({ project: 'kept', title: 'Kept', chosen: 'C' });
     const goneDecision = graph.addDecision({ project: 'gone', title: 'Gone', chosen: 'C' });
     const goneFact = graph.addFact({ project: 'gone', key: 'k', value: 'v' });
-    graph.link({ from: goneDecision.id, to: goneFact.id, relation: 'depends_on' });
+    graph.link({ project: 'gone', from: goneDecision.id, to: goneFact.id, relation: 'depends_on' });
     graph.purgeProject('gone', { mode: 'hard' });
 
     const result = graph.rebuild();
@@ -1211,7 +1212,9 @@ describe('G5 (S2) — FIXED: purge is logical by default, hard purge is explicit
     const graph = createShadowGraph();
     const kept = graph.addDecision({ project: 'kept', title: 'Kept', chosen: 'C' });
     const gone = graph.addDecision({ project: 'gone', title: 'Gone', chosen: 'C' });
-    graph.link({ from: kept.id, to: gone.id, relation: 'depends_on' });
+    // link() no longer creates a relation across projects (PR-09); a store
+    // written before then holds one, and purging either end removes it.
+    graph.importData(historicalRelation({ id: 'relation-kept-gone', from: kept.id, to: gone.id, relation: 'depends_on', project: 'kept', seq: privilegedSnapshot(graph).journalSeq + 1, at: new Date().toISOString() }));
     graph.purgeProject('gone', { mode: 'hard' });
     const result = graph.rebuild();
     assert.equal(result.projection.relations.length, 0);

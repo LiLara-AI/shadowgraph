@@ -42,22 +42,27 @@
 import { readFile } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { createShadowGraph } from '../src/shadowgraph.js';
+import { historicalRelation } from './historical-relation.js';
 
 // A fresh graph per path, so one path's side effects cannot shape another's
 // observation.
 function fixture() {
-  const graph = createShadowGraph({ now: () => '2026-01-01T00:00:00.000Z' });
+  const NOW = '2026-01-01T00:00:00.000Z';
+  const graph = createShadowGraph({ now: () => NOW });
   const alphaDecision = graph.addDecision({ project: 'alpha', title: 'Alpha MARKER cache', chosen: 'redis' });
   const alphaAttempt = graph.addAttempt({ project: 'alpha', solution: 'alpha warm-up script', result: 'worked' });
   const alphaMemory = graph.remember({ project: 'alpha', memoryType: 'note', key: 'alpha', text: 'MEMORY-MARKER alpha' }).memory;
-  graph.link({ from: alphaDecision.id, to: alphaAttempt.id, relation: 'tried' });
-  graph.link({ from: alphaDecision.id, to: alphaMemory.id, relation: 'noted' });
+  graph.link({ project: 'alpha', from: alphaDecision.id, to: alphaAttempt.id, relation: 'tried' });
+  graph.link({ project: 'alpha', from: alphaDecision.id, to: alphaMemory.id, relation: 'noted' });
   graph.addDecision({ project: 'beta', title: 'Beta MARKER cache', chosen: 'memcached' });
   const betaAttempt = graph.addAttempt({ project: 'beta', solution: 'beta warm-up script', result: 'worked' });
   graph.remember({ project: 'beta', memoryType: 'note', key: 'beta', text: 'MEMORY-MARKER beta' });
   // The deliberate cross-project edge. A read with `alpha` selected must not
-  // follow it into beta, however the read expands.
-  graph.link({ from: alphaDecision.id, to: betaAttempt.id, relation: 'related' });
+  // follow it into beta, however the read expands. link() refuses a relation
+  // across projects since plan PR-09 (P1 reconciliation F-16), so the edge is
+  // imported as a store written before then holds it, as the fixture's ninth
+  // journal entry.
+  graph.importData(historicalRelation({ id: 'relation_alpha_beta', from: alphaDecision.id, to: betaAttempt.id, relation: 'related', project: 'alpha', seq: 9, at: NOW }));
   // The unresolved-scope case. A write with neither a project nor an origin is
   // refused since the schema-6 writer, so these records are written to the
   // literal project "default" -- the bucket such writes used to land in, and

@@ -303,7 +303,7 @@ function currentStore() {
   graph.migrateAttribution();
   graph.addDecision({ originId: 'origin_a', id: 'decision-captured', title: 'Captured', chosen: 'x', alternatives: [{ id: 'alt-captured', label: 'y' }] });
   graph.addAttempt({ originId: 'origin_a', id: 'attempt-captured', solution: 's', result: 'r' });
-  graph.link({ from: 'decision-captured', to: 'attempt-captured', relation: 'tried' });
+  graph.link({ originId: 'origin_a', from: 'decision-captured', to: 'attempt-captured', relation: 'tried' });
   graph.addDecision({ project: 'beta', originId: 'origin_a', id: 'decision-beta', title: 'Beta', chosen: 'z' });
   return { graph, payload: { ...privilegedSnapshot(graph), futureCollection: { kept: true } } };
 }

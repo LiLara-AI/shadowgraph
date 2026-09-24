@@ -17,7 +17,7 @@ function populated() {
   const attempt = graph.addAttempt({ project: 'alpha', solution: 'warm-up script', result: 'worked' });
   graph.remember({ project: 'alpha', memoryType: 'note', key: 'k', text: 'a note' });
   graph.addFact({ project: 'alpha', key: 'latency', value: 10 });
-  graph.link({ from: decision.id, to: attempt.id, relation: 'tried' });
+  graph.link({ project: 'alpha', from: decision.id, to: attempt.id, relation: 'tried' });
   return graph;
 }
 

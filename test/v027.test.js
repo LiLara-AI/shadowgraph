@@ -8,9 +8,9 @@ test('traverses explainable relationships with depth and direction', () => {
   const first = graph.addDecision({ project: 'app', title: 'First', chosen: 'A' });
   const second = graph.addDecision({ project: 'app', title: 'Second', chosen: 'B' });
   const fact = graph.addFact({ project: 'app', key: 'runtime', value: 'local' });
-  graph.link({ from: first.id, to: second.id, relation: 'supersedes' });
-  graph.link({ from: second.id, to: fact.id, relation: 'depends_on' });
-  const result = graph.traverse({ id: first.id, depth: 2, direction: 'out' });
+  graph.link({ project: 'app', from: first.id, to: second.id, relation: 'supersedes' });
+  graph.link({ project: 'app', from: second.id, to: fact.id, relation: 'depends_on' });
+  const result = graph.traverse({ project: 'app', id: first.id, depth: 2, direction: 'out' });
   assert.deepEqual(result.nodes.map((item) => item.id), [first.id, second.id, fact.id]);
   assert.equal(result.relations.length, 2);
 });
@@ -29,7 +29,7 @@ test('redacts sensitive fields and purges a project with relations', () => {
   const graph = createShadowGraph();
   const decision = graph.addDecision({ project: 'private', title: 'Use token', chosen: 'Bearer secret-value' });
   const fact = graph.addFact({ project: 'private', key: 'apiKey', value: 'super-secret' });
-  graph.link({ from: decision.id, to: fact.id, relation: 'depends_on' });
+  graph.link({ project: 'private', from: decision.id, to: fact.id, relation: 'depends_on' });
   graph.addDecision({ project: 'public', title: 'Public', chosen: 'Visible' });
   const safe = graph.redact({ project: 'private' });
   assert.equal(safe.records[0].chosen, 'Bearer [REDACTED]');
@@ -43,9 +43,11 @@ test('redacts sensitive fields and purges a project with relations', () => {
 
 test('traversal omits dangling relations and migration ids stay deterministic', () => {
   const graph = createShadowGraph();
-  graph.importData({ records: [{ id: 'legacy', kind: 'decision', title: 'Legacy', chosen: 'A', alternatives: [{ label: 'B' }] }], relations: [{ id: 'dangling', from: 'legacy', to: 'missing', relation: 'depends_on' }] });
+  graph.importData({ records: [{ id: 'legacy', kind: 'decision', project: 'legacy-app', title: 'Legacy', chosen: 'A', alternatives: [{ label: 'B' }] }], relations: [{ id: 'dangling', from: 'legacy', to: 'missing', relation: 'depends_on' }] });
   const first = privilegedSnapshot(graph).records[0].alternatives[0].id;
-  assert.equal(graph.traverse({ id: 'legacy' }).relations.length, 0);
+  const traversal = graph.traverse({ project: 'legacy-app', id: 'legacy' });
+  assert.deepEqual(traversal.nodes.map((node) => node.id), ['legacy']);
+  assert.equal(traversal.relations.length, 0);
   const secondGraph = createShadowGraph();
   secondGraph.importData({ records: [{ id: 'legacy', kind: 'decision', title: 'Legacy', chosen: 'A', alternatives: [{ label: 'B' }] }] });
   assert.equal(privilegedSnapshot(secondGraph).records[0].alternatives[0].id, first);

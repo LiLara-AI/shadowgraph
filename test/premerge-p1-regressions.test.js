@@ -596,7 +596,7 @@ function graphAtPurgeSequenceLimit(mode) {
     value: mode,
     idempotencyKey: `fact-retry-${mode}`
   });
-  graph.link({ id: `overflow-relation-${mode}`, from: decision.id, to: fact.id, relation: 'depends_on' });
+  graph.link({ id: `overflow-relation-${mode}`, project: 'premerge-overflow', from: decision.id, to: fact.id, relation: 'depends_on' });
   graph.addDecision({ id: `overflow-kept-${mode}`, project: 'premerge-kept', title: 'Unrelated state', chosen: 'keep' });
   graph.importData({ schemaVersion: 5, journal: [], journalSeq: Number.MAX_SAFE_INTEGER });
   return graph;
@@ -745,7 +745,7 @@ const JOURNAL_MUTATOR_CASES = [
       const graph = atomicGraph();
       const from = graph.addDecision({ id: 'matrix-link-from', project: 'matrix', title: 'From', chosen: 'A' });
       const to = graph.addDecision({ id: 'matrix-link-to', project: 'matrix', title: 'To', chosen: 'B' });
-      return { graph, invoke: () => graph.link({ id: 'matrix-link', from: from.id, to: to.id, relation: 'depends_on' }) };
+      return { graph, invoke: () => graph.link({ id: 'matrix-link', project: 'matrix', from: from.id, to: to.id, relation: 'depends_on' }) };
     }
   },
   {

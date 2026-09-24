@@ -85,7 +85,7 @@ test('HTTP API exposes traversal, supersession, redaction, and project purge', a
     const first = await (await post('/decisions', { project: 'private', title: 'Old', chosen: 'Bearer private-token' })).json();
     const second = await (await post('/decisions', { project: 'private', title: 'New', chosen: 'Safe' })).json();
     assert.equal((await post('/supersede', { decisionId: first.id, replacementId: second.id })).status, 200);
-    const traversal = await (await post('/traverse', { id: second.id })).json();
+    const traversal = await (await post('/traverse', { project: 'private', id: second.id })).json();
     assert.equal(traversal.nodes.length, 2);
     const redacted = await (await post('/redact', { project: 'private' })).json();
     assert.equal(redacted.records.some((item) => item.chosen === 'Bearer [REDACTED]'), true);

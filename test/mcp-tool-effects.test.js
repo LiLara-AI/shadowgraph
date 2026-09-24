@@ -288,7 +288,7 @@ test('every advertised tool annotation matches the effects the server actually h
     ['shadowgraph_search', { project: PROJECT, query: 'store' }],
     ['shadowgraph_retrieve', { project: PROJECT, query: 'store' }],
     ['shadowgraph_recall', { project: PROJECT, query: 'store' }],
-    ['shadowgraph_traverse', { id: 'effects-decision' }],
+    ['shadowgraph_traverse', { project: PROJECT, id: 'effects-decision' }],
     ['shadowgraph_validate', {}],
     ['shadowgraph_journal', { limit: 5 }],
     ['shadowgraph_rebuild', {}],
@@ -330,7 +330,7 @@ test('every advertised tool annotation matches the effects the server actually h
   assert.notEqual(evidence.firstResult.updatedAt, evidence.repeatResult.updatedAt, 'because updatedAt is restamped');
 
   await rpc.ok('shadowgraph_record_decision', { id: 'effects-replacement', project: PROJECT, title: 'Replacement', chosen: 'duckdb' });
-  const link = await observe('shadowgraph_link', { from: 'effects-decision', to: 'effects-replacement', relation: 'informs' });
+  const link = await observe('shadowgraph_link', { project: PROJECT, from: 'effects-decision', to: 'effects-replacement', relation: 'informs' });
   assert.notEqual(link.firstResult.id, link.repeatResult.id, 'every link mints a new relation id');
 
   // --- acknowledging a review signal: an unjournalled in-place overwrite ---

@@ -44,7 +44,7 @@ function seeded({ link = true } = {}) {
   graph.remember({ project: 'default', memoryType: 'note', key: 'legacy', text: 'a note from before attribution' });
   graph.addFact({ project: 'alpha', key: 'latency', value: 10 });
   graph.addDecision({ project: 'pending', title: 'Captured choice', chosen: 'queue', idempotencyKey: 'retry-1' });
-  if (link) graph.link({ from: decision.id, to: attempt.id, relation: 'tried' });
+  if (link) graph.link({ project: 'alpha', from: decision.id, to: attempt.id, relation: 'tried' });
   return graph;
 }
 

@@ -54,7 +54,7 @@ test('validation and retrieval provide graph-aware explanations', () => {
   const graph = createShadowGraph();
   const decision = graph.addDecision({ project: 'default', title: 'Database', chosen: 'Postgres' });
   const fact = graph.addFact({ project: 'default', key: 'deployment', value: 'local' });
-  graph.link({ from: decision.id, to: fact.id, relation: 'depends_on' });
+  graph.link({ project: 'default', from: decision.id, to: fact.id, relation: 'depends_on' });
   // G6: retrieve() returns a paginated envelope — see completeness-contract.md.
   const result = graph.retrieve('database', { project: 'default' });
   assert.equal(result.items.some((item) => item.record.id === fact.id && item.graphBoost === 1), true);

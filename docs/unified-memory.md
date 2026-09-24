@@ -56,7 +56,7 @@ A memory identity is the exact tuple:
 (project, userId, agentId, runId, memoryType, key)
 ```
 
-This exactness prevents a run-specific memory from leaking into a broader user-only read. A supplied project must be a non-empty string on every write and filtered read path. Scope must be an object containing only string/null `userId`, `agentId`, and `runId`; unknown keys and malformed selectors are rejected rather than collapsed to all-null. For memory records, omitted project/scope means the `default` project and explicit all-null scope across recall, search, retrieval, and graph traversal; it never means “all projects/users.” Shared decisions/facts retain their documented project-query behavior, while another project/user's scoped memory never rides along.
+This exactness prevents a run-specific memory from leaking into a broader user-only read. A supplied project must be a non-empty string on every write and filtered read path. Scope must be an object containing only string/null `userId`, `agentId`, and `runId`; unknown keys and malformed selectors are rejected rather than collapsed to all-null. For memory records, an omitted scope means the explicit all-null scope across recall, search, retrieval, and graph traversal; it never means “all users.” An omitted project reads no project at all -- never every project and never `default` -- for memories and for decisions, facts and attempts alike, so another project's records, and another user's scoped memory, never ride along.
 
 ## Reconciliation
 

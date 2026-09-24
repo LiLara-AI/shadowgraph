@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createShadowGraphServer } from '../src/server.js';
 import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { historicalRelation } from '../tools/historical-relation.js';
 
 // Plan v1.4.4 §11: the privileged snapshot is the persistence primitive --
 // complete, unscoped, side-effect free -- and it is internal. Nothing outside
@@ -32,7 +33,9 @@ function populated() {
   const attempt = graph.addAttempt({ project: 'beta', solution: 'warm-up script', result: 'failed' });
   graph.remember({ project: 'alpha', memoryType: 'note', key: 'k', text: 'a note' });
   graph.addFact({ project: 'alpha', key: 'latency', value: 10 });
-  graph.link({ from: decision.id, to: attempt.id, relation: 'tried' });
+  // A relation across projects, kept as history (link() refuses one since
+  // PR-09): the snapshot carries it like everything else.
+  graph.importData(historicalRelation({ id: 'relation-alpha-beta', from: decision.id, to: attempt.id, relation: 'tried', project: 'alpha', seq: privilegedSnapshot(graph).journalSeq + 1, at: NOW }));
   graph.review({ project: 'alpha' });
   return graph;
 }

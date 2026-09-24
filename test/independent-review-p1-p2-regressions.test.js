@@ -13,6 +13,7 @@ import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { historicalRelation } from '../tools/historical-relation.js';
 
 const FIXED_NOW = '2026-08-27T12:00:00.000Z';
 const DUE_AT = '2026-08-27T11:00:00.000Z';
@@ -233,9 +234,14 @@ function purgeFixture() {
     memoryType: 'profile', key: 'private-memory', text: 'private memory',
     idempotencyKey: `memory-retry_${PURGE_SECRET}`
   }).memory;
-  const relation = graph.link({
-    id: `relation_${PURGE_SECRET}`, from: kept.id, to: decision.alternatives[0].id, relation: 'depends_on'
+  // A relation into this project from another, as a store written before
+  // link() refused one holds it (PR-09); the purge removes it all the same.
+  const history = historicalRelation({
+    id: `relation_${PURGE_SECRET}`, from: kept.id, to: decision.alternatives[0].id, relation: 'depends_on',
+    project: 'kept-project', seq: privilegedSnapshot(graph).journalSeq + 1, at: FIXED_NOW
   });
+  graph.importData(history);
+  const [relation] = history.relations;
   graph.review({ project: PURGE_PROJECT, asOf: FIXED_NOW });
   return { graph, kept, decision, fact, memory, relation };
 }

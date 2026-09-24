@@ -9,7 +9,7 @@ test('v0.25 supports lifecycle, relationships, and retrieval filters', () => {
   for (const status of ['planned', 'in_progress', 'executed', 'validated']) graph.updateDecisionStatus(decision.id, status);
   assert.equal(privilegedSnapshot(graph).records[0].status, 'validated');
   graph.addFact({ id: 'fact_1', project: 'demo', key: 'storage-mode', value: 'local' });
-  const relation = graph.link({ from: decision.id, to: 'fact_1', relation: 'depends_on' });
+  const relation = graph.link({ project: 'demo', from: decision.id, to: 'fact_1', relation: 'depends_on' });
   assert.equal(relation.relation, 'depends_on');
   assert.equal(privilegedSnapshot(graph).relations.length, 1);
   // G6: paginated envelope. G7: 'SQLite' matches the `chosen` content field.

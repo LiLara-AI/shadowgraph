@@ -100,7 +100,7 @@ test('redaction drops links whose endpoint it did not include', () => {
   });
   const alternativeId = owner.alternatives[0].id;
   const other = graph.addDecision({ project: 'p', title: 'Other', chosen: 'b' });
-  graph.link({ from: other.id, to: alternativeId, relation: 'depends_on' });
+  graph.link({ project: 'p', from: other.id, to: alternativeId, relation: 'depends_on' });
   graph.addDecision({ project: 'other', title: 'Elsewhere', chosen: 'c' });
 
   const redacted = graph.redact({ project: 'p' });

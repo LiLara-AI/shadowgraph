@@ -156,7 +156,7 @@ const CLOCK_MUTATOR_CASES = [
       const from = graph.addDecision(decisionInput('transaction-link-from'));
       const to = graph.addDecision(decisionInput('transaction-link-to'));
       clock.arm();
-      return { graph, clock, invoke: () => graph.link({ id: 'transaction-link', from: from.id, to: to.id, relation: 'depends_on' }) };
+      return { graph, clock, invoke: () => graph.link({ id: 'transaction-link', project: 'transaction', from: from.id, to: to.id, relation: 'depends_on' }) };
     }
   },
   {

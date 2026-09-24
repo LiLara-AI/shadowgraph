@@ -302,8 +302,8 @@ test('every advertised output schema accepts the result its own tool really retu
   await callTool('shadowgraph_recall', { project, scope: { userId: 'alice' }, query: 'hotels', preferRecent: true, limit: 5 });
   await callTool('shadowgraph_search', { project, query: 'rollout' });
   await callTool('shadowgraph_context', { project });
-  await callTool('shadowgraph_link', { from: decisionA.id, to: decisionB.id, relation: 'informs' });
-  await callTool('shadowgraph_traverse', { id: decisionA.id, depth: 2, direction: 'both' });
+  await callTool('shadowgraph_link', { project, from: decisionA.id, to: decisionB.id, relation: 'informs' });
+  await callTool('shadowgraph_traverse', { project, id: decisionA.id, depth: 2, direction: 'both' });
   // Retrieved after the link so a one-hop graph neighbour is really present.
   const retrieved = await callTool('shadowgraph_retrieve', { project, query: '' });
   assert.equal(retrieved.completeness.includesGraphNeighbours, true);
