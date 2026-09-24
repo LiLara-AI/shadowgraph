@@ -74,6 +74,12 @@ function isLegacyOwned(entity) {
   return entity?.attribution === undefined && (entity?.project ?? 'default') === 'default';
 }
 
+// The order the attribution migration takes entities in, and the legacy
+// attribution review lists them in: by kind, then id.
+function attributionOrder(left, right) {
+  return ATTRIBUTED_ENTITY_KINDS.indexOf(left.kind) - ATTRIBUTED_ENTITY_KINDS.indexOf(right.kind) || String(left.id).localeCompare(String(right.id));
+}
+
 // The top-level list of legacy entities stored with no project that are still
 // waiting for the attribution migration (see `projectlessLegacy`). It is
 // deliberately not one of the NATIVE_STORE_KEYS: the storage backends, and
@@ -1347,18 +1353,14 @@ export function createShadowGraph(options = {}) {
   function migrateAttribution(input = {}) {
     const limit = input.limit ?? Number.MAX_SAFE_INTEGER;
     if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('Attribution migration limit must be a positive integer');
-    const kinds = ['decision', 'attempt', 'memory', 'fact'];
     const pending = [...records.values(), ...facts.values()]
       .filter((entity) => entity.attribution === undefined && !(Number.isInteger(entity.schemaVersion) && entity.schemaVersion > SCHEMA_VERSION))
-      .sort((left, right) => kinds.indexOf(left.kind) - kinds.indexOf(right.kind) || String(left.id).localeCompare(String(right.id)));
+      .sort(attributionOrder);
     const batch = pending.slice(0, limit);
     assertJournalCapacity(batch.length);
     const counts = { project: 0, legacy_ambiguous: 0, legacy_unattributed: 0 };
     for (const entity of batch) {
-      const previousProject = isStoredWithoutProject(entity) ? null : entity.project ?? null;
-      const attribution = previousProject === null
-        ? 'legacy_unattributed'
-        : previousProject === 'default' ? 'legacy_ambiguous' : 'project';
+      const { previousProject, attribution } = migrationMapping(entity);
       touchMutableObject(entity);
       entity.schemaVersion = SCHEMA_VERSION;
       entity.attribution = attribution;
@@ -1370,6 +1372,41 @@ export function createShadowGraph(options = {}) {
     }
     const remaining = pending.length - batch.length;
     return { migrated: batch.length, attributions: counts, remaining, complete: remaining === 0, highWaterMark: batch.at(-1)?.id ?? null };
+  }
+
+  // The attribution the migration gives an entity written before schema 6,
+  // decided only from what is stored and the recorded absence of a project.
+  function migrationMapping(entity) {
+    const previousProject = isStoredWithoutProject(entity) ? null : entity.project ?? null;
+    const attribution = previousProject === null
+      ? 'legacy_unattributed'
+      : previousProject === 'default' ? 'legacy_ambiguous' : 'project';
+    return { previousProject, attribution };
+  }
+
+  // Legacy attribution review (P1 finding F-27; OD-1 option B, plan v1.4.4
+  // §10.3). The records no project owns -- legacy "default" data
+  // (legacy_ambiguous) and data stored with no project (legacy_unattributed)
+  // -- are in no project's read, and this is where they can be inspected
+  // before anyone chooses where they belong. It is an administrative view,
+  // not a project: no read scope reaches these records, and it reaches nothing
+  // else. A record the migration has not reached yet is shown with the
+  // attribution the migration's own mapping gives it. Each entry carries the
+  // canonical record, and no project is inferred. It writes nothing;
+  // reassignment is a separate, explicit action.
+  function legacyAttributionReview(options = {}) {
+    const items = [...records.values(), ...facts.values()]
+      .filter(isLegacyOwned)
+      .sort(attributionOrder)
+      .map((entity) => ({
+        id: entity.id,
+        kind: entity.kind,
+        attribution: entity.attribution ?? migrationMapping(entity).attribution,
+        migrated: entity.attribution !== undefined,
+        assignedProject: null,
+        entity: clone(entity)
+      }));
+    return paginate(items, options, { view: 'legacy_attribution' });
   }
 
   async function verifyFact(input = {}) {
@@ -3417,6 +3454,7 @@ export function createShadowGraph(options = {}) {
     memoryHistory,
     addFact: transactional('addFact', addFact),
     migrateAttribution: transactional('migrateAttribution', migrateAttribution),
+    legacyAttributionReview,
     verifyFact: transactional('verifyFact', verifyFact),
     setOutcome: transactional('setOutcome', setOutcome),
     addConfidenceEvidence: transactional('addConfidenceEvidence', addConfidenceEvidence),

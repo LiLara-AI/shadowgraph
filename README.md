@@ -185,9 +185,11 @@ neither is refused (`write_scope_unresolved`) instead of landing in a shared `de
 selected project's own records, and the graph expansion they make stays in that project; with no
 project selected they return nothing, never every project and never a shared `default` bucket.
 Records written before schema 6 in `default`, or with no project, belong to no project a caller can
-name, so no project read returns them. Read scoping is still in progress: by-id reads and
-`traverse`, the journal, `stats`, `redact` and the whole-store export (`GET /records`, `list`) still
-read across projects, and a read with no project still reports its empty result as complete.
+name, so no project read returns them; the kernel's `legacyAttributionReview()` lists them for
+inspection, each with its legacy state and canonical record, and infers no project for them. Read
+scoping is still in progress: by-id reads and `traverse`, the journal, `stats`, `redact` and the
+whole-store export (`GET /records`, `list`) still read across projects, and a read with no project
+still reports its empty result as complete.
 Omitted scope means all-null scope. Purge is previewable, logical by default, and explicitly
 irreversible in hard mode.
 
