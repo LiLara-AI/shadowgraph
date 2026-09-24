@@ -194,9 +194,13 @@ test('the attribution migration maps legacy records by OD-1, journals each chang
   assert.equal(rebuilt.rebuildable, true, rebuilt.reason);
   assert.deepEqual(owners(rebuilt.projection), EXPECTED, 'a rebuild reproduces the attribution');
   assert.doesNotThrow(() => validateRestorePayload(after, { now }));
-  // Retries still find their records under the legacy keys.
+  // An unambiguous legacy project keeps its retries under the legacy keys. A
+  // legacy "default" record is legacy_ambiguous, so the real project named
+  // "default" does not inherit its retry key (OD-1; P1A correction IR-02).
   assert.equal(graph.addDecision({ project: 'alpha', title: 'Retry', chosen: 'x', idempotencyKey: 'retry' }).id, 'decision-retry');
-  assert.equal(graph.addAttempt({ project: 'default', solution: 'again', result: 'worked', idempotencyKey: 'retry' }).id, 'attempt-retry');
+  const realDefault = graph.addAttempt({ project: 'default', solution: 'again', result: 'worked', idempotencyKey: 'retry' });
+  assert.notEqual(realDefault.id, 'attempt-retry');
+  assert.equal(realDefault.attribution, 'project');
   // Idempotent: a second run changes nothing.
   const again = graph.migrateAttribution();
   assert.deepEqual({ migrated: again.migrated, complete: again.complete }, { migrated: 0, complete: true });
@@ -212,21 +216,23 @@ async function interruptedThenResumed(t, open) {
   const first = await open(legacy);
   const graph = createShadowGraph({ now });
   graph.importData(await first.load());
-  for (let batch = 0; batch < 3; batch += 1) {
+  for (let batch = 0; batch < 2; batch += 1) {
     const step = graph.migrateAttribution({ limit: 1 });
     graph.setRevision(await first.save(privilegedSnapshot(graph)));
     assert.equal(step.migrated, 1);
   }
   first.close?.();
-  // The process stops here. The partly migrated store is valid and readable.
+  // The process stops here, before the projectless record's turn. The partly
+  // migrated store is valid and readable.
   const second = await open();
   const resumed = createShadowGraph({ now });
   resumed.importData(await second.load());
   assert.equal(resumed.validate().valid, true, JSON.stringify(resumed.validate().issues));
   const partial = privilegedSnapshot(resumed);
-  assert.equal([...partial.records, ...partial.facts].filter((entity) => entity.attribution).length, 3);
+  assert.equal([...partial.records, ...partial.facts].filter((entity) => entity.attribution).length, 2);
+  assert.equal(partial.records.find((entity) => entity.id === 'decision-projectless').attribution, undefined);
   const rest = resumed.migrateAttribution({ limit: 2 });
-  assert.equal(rest.remaining, 3);
+  assert.equal(rest.remaining, 4);
   resumed.setRevision(await second.save(privilegedSnapshot(resumed)));
   const finish = resumed.migrateAttribution();
   assert.equal(finish.complete, true);
@@ -238,9 +244,9 @@ async function interruptedThenResumed(t, open) {
   final.importData(await third.load());
   third.close?.();
   const snapshot = privilegedSnapshot(final);
-  // The deterministic order reaches the projectless record in the first
-  // session, while its absent project is still known, so the resumed result is
-  // exactly the uninterrupted one.
+  // The projectless record migrates only after the restart. Its absent project
+  // was recorded in the saved store (P1A correction IR-01), so the resumed
+  // result is exactly the uninterrupted one.
   assert.deepEqual(owners(snapshot), expected);
   assert.equal(snapshot.journal.filter((entry) => entry.type === 'entity.attributed').length, 8, 'each entity attributed exactly once');
   assert.equal(final.validate().valid, true);

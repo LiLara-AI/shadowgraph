@@ -57,12 +57,38 @@ function attributionIssue(entity) {
 // unattributed entity belongs to its origin, never to a project, so its key is
 // an array a project name can never equal. An unattributed entity without a
 // usable origin is invalid (validate() says so) and is keyed by its own id, so
-// two absent origins never share a bucket. Everything else keeps the project
-// key it always had.
+// two absent origins never share a bucket. Legacy data in "default" -- stored
+// there or stored with no project -- belongs to no project anyone can name
+// (OD-1): before its attribution migration and after it, as legacy_ambiguous
+// or legacy_unattributed, it shares the one legacy key it always shared with
+// its own kind, which the real project called "default" never equals.
+// Everything else keeps the project key it always had.
 function ownerKey(entity, projectOf) {
-  if (entity?.attribution !== 'unattributed') return projectOf(entity?.project);
-  return ['origin', usableOriginId(entity.originId) ?? ['unowned', entity.id ?? null]];
+  if (entity?.attribution === 'unattributed') return ['origin', usableOriginId(entity.originId) ?? ['unowned', entity.id ?? null]];
+  if (isLegacyOwned(entity)) return ['legacy'];
+  return projectOf(entity?.project);
 }
+
+function isLegacyOwned(entity) {
+  if (entity?.attribution === 'legacy_ambiguous' || entity?.attribution === 'legacy_unattributed') return true;
+  return entity?.attribution === undefined && (entity?.project ?? 'default') === 'default';
+}
+
+// The top-level list of legacy entities stored with no project that are still
+// waiting for the attribution migration (see `projectlessLegacy`). It is
+// deliberately not one of the NATIVE_STORE_KEYS: the storage backends, and
+// every earlier build that reads schema 6, carry it with the generic top-level
+// carrier byte for byte (axis A-5), and no restore parity check compares it,
+// so a rollback to the reader floor neither loses it nor trips over it.
+const STORED_WITHOUT_PROJECT = 'storedWithoutProject';
+
+const sameOwnerKey = (left, right) => JSON.stringify(ownerKey(left, (project) => project ?? 'default')) === JSON.stringify(ownerKey(right, (project) => project ?? 'default'));
+
+// Caller idempotency keys are at most 200 characters (validateIdempotencyKey).
+// A retry stored beside another owner's key carries this after the caller's
+// key, so its text after the owner prefix is longer than any key a request can
+// send: no request can name it, and the prefix still binds it to its owner.
+const BESIDE_ANOTHER_OWNER = '#'.repeat(200);
 
 // The prefix an idempotency key must carry for the entity it maps to. An
 // unattributed entity's keys live under its origin (`kind@"origin":`), a
@@ -612,12 +638,19 @@ export function createShadowGraph(options = {}) {
   // through import and the privileged snapshot (axis A-5). They are never
   // interpreted, and never part of a public read.
   const extras = new TransactionMap();
-  // Ids of legacy entities that were stored with no project at all. Import
-  // defaults them into "default"; the attribution migration needs to know they
-  // had none (WS-11 mapping iii). Not persisted: once such a store is saved by
-  // any build the absence is no longer recorded, and the entity is as ambiguous
-  // as any other legacy "default" record.
-  const projectlessAtImport = new Set();
+  // Legacy entities stored with no project at all. Import files them under
+  // "default", as every build before schema 6 did, but the attribution
+  // migration must map them to legacy_unattributed, not legacy_ambiguous (WS-11
+  // mapping iii). So the absence is kept: here by id, and in the privileged
+  // snapshot as the top-level STORED_WITHOUT_PROJECT list of those still
+  // waiting for the migration. A save after an entity's migration no longer
+  // lists it. Evidence an older save already discarded is not recreated.
+  const projectlessLegacy = new TransactionMap();
+  // Only while the entity still sits unmigrated in the "default" it was filed
+  // under, so a listed id can never demote an entity with a real project.
+  function isStoredWithoutProject(entity) {
+    return projectlessLegacy.has(entity.id) && entity.attribution === undefined && (entity.project ?? 'default') === 'default';
+  }
   let revision = Number.isInteger(options.revision) ? options.revision : 0;
   let journalSeq = 0;
   let journalEpoch = null;
@@ -639,6 +672,7 @@ export function createShadowGraph(options = {}) {
       reviewSignals: [...reviewSignals],
       idempotency: [...idempotency],
       extras: [...extras],
+      projectlessLegacy: [...projectlessLegacy],
       revision,
       journalSeq,
       journalEpoch
@@ -658,6 +692,7 @@ export function createShadowGraph(options = {}) {
     restoreMap(reviewSignals, snapshot.reviewSignals);
     restoreMap(idempotency, snapshot.idempotency);
     restoreMap(extras, snapshot.extras);
+    restoreMap(projectlessLegacy, snapshot.projectlessLegacy);
     events.length = 0;
     for (const item of snapshot.events) events.push(item);
     journal.length = 0;
@@ -886,26 +921,45 @@ export function createShadowGraph(options = {}) {
     let owner;
     try { owner = writeOwner(input); }
     catch (error) { if (error.code === 'write_scope_unresolved') return undefined; throw error; }
-    const existing = idempotency.get(scopedIdempotencyKey(input, action, owner));
+    const existing = idempotency.get(retrySlot(input, action, owner));
     if (existing) return clone(canonicalIdempotencyValue(existing));
     // Legacy key forms predate origins; only a project-owned retry can match one.
     if (owner.attribution !== 'project') return undefined;
-    const project = owner.project;
     // Legacy keys did not include project (all actions) or exact memory identity.
-    // Reuse one only when the payload belongs to the same project and, for a
-    // memory, the exact same scope/type/key; otherwise it would leak another
-    // user's retry result.
-    const legacyKeys = [`${action}:${project}:${input.idempotencyKey}`, `${action}:${input.idempotencyKey}`];
+    // Reuse one only when the entity it names has this write's owner -- never a
+    // legacy "default" record, whose owner is not the real project "default"
+    // (OD-1) -- and, for a memory, the exact same scope/type/key; otherwise it
+    // would leak another owner's retry result.
+    const legacyKeys = [`${action}:${owner.project}:${input.idempotencyKey}`, `${action}:${input.idempotencyKey}`];
     for (const key of legacyKeys) {
       const legacy = idempotency.get(key);
-      if (!legacy || (legacy.project ?? 'default') !== project) continue;
-      if (action === 'memory' && memoryScopeKey(legacy) !== memoryScopeKey(input)) continue;
+      if (!legacy || !sameOwnerKey(idempotencyHolder(legacy), owner)) continue;
+      if (action === 'memory' && memoryScopeKey(legacy) !== memoryScopeKey({ ...input, ...owner })) continue;
       return clone(canonicalIdempotencyValue(legacy));
     }
     return undefined;
   }
+
+  function idempotencyHolder(value) {
+    return (value?.kind === 'fact' ? facts.get(value.id) : records.get(value?.id)) ?? value;
+  }
+
+  // Where a write's retry is stored and looked up. A key another owner already
+  // holds -- a legacy "default" record's, presented again by the real project
+  // called "default" -- stays with its holder, and this owner's retry is kept
+  // beside it rather than matched to it or written over it.
+  function retrySlot(input, action, owner = writeOwner(input)) {
+    const key = scopedIdempotencyKey(input, action, owner);
+    const held = idempotency.get(key);
+    if (!held || sameOwnerKey(idempotencyHolder(held), owner)) return key;
+    const beside = `${key}${BESIDE_ANOTHER_OWNER}`;
+    const alsoHeld = idempotency.get(beside);
+    if (alsoHeld && !sameOwnerKey(idempotencyHolder(alsoHeld), owner)) throw new Error('Idempotency key is already held by other owners');
+    return beside;
+  }
+
   function rememberIdempotency(input, action, value) {
-    if (input?.idempotencyKey) idempotency.set(scopedIdempotencyKey({ ...input, ...value }, action), clone(value));
+    if (input?.idempotencyKey) idempotency.set(retrySlot({ ...input, ...value }, action), clone(value));
   }
 
   function canonicalIdempotencyValue(value) {
@@ -949,7 +1003,7 @@ export function createShadowGraph(options = {}) {
     assertJournalCapacity(1);
     records.set(record.id, record);
     event('decision.recorded', { recordId: record.id });
-    appendJournal({ type: 'decision.recorded', entityKind: 'decision', entityId: record.id, project: record.project, payload: record, provenance: writeProvenance(record), idempotencyKey: input.idempotencyKey ? scopedIdempotencyKey(input, 'decision', owner) : undefined });
+    appendJournal({ type: 'decision.recorded', entityKind: 'decision', entityId: record.id, project: record.project, payload: record, provenance: writeProvenance(record), idempotencyKey: input.idempotencyKey ? retrySlot(input, 'decision', owner) : undefined });
     const result = clone(record); rememberIdempotency(input, 'decision', result); return result;
   }
 
@@ -967,7 +1021,7 @@ export function createShadowGraph(options = {}) {
     assertJournalCapacity(1);
     records.set(attempt.id, attempt);
     event('attempt.recorded', { recordId: attempt.id });
-    appendJournal({ type: 'attempt.recorded', entityKind: 'attempt', entityId: attempt.id, project: attempt.project, payload: attempt, provenance: writeProvenance(attempt), idempotencyKey: input.idempotencyKey ? scopedIdempotencyKey(input, 'attempt', owner) : undefined });
+    appendJournal({ type: 'attempt.recorded', entityKind: 'attempt', entityId: attempt.id, project: attempt.project, payload: attempt, provenance: writeProvenance(attempt), idempotencyKey: input.idempotencyKey ? retrySlot(input, 'attempt', owner) : undefined });
     const result = clone(attempt); rememberIdempotency(input, 'attempt', result); return result;
   }
 
@@ -1044,7 +1098,7 @@ export function createShadowGraph(options = {}) {
     records.set(memory.id, memory);
     currentMemories.set(scopeKey, memory);
     event('memory.recorded', { recordId: memory.id, project });
-    appendJournal({ type: 'memory.recorded', entityKind: 'memory', entityId: memory.id, project, payload: memory, provenance: writeProvenance(memory), idempotencyKey: input.idempotencyKey ? scopedIdempotencyKey({ ...input, ...memory }, 'memory') : undefined });
+    appendJournal({ type: 'memory.recorded', entityKind: 'memory', entityId: memory.id, project, payload: memory, provenance: writeProvenance(memory), idempotencyKey: input.idempotencyKey ? retrySlot({ ...input, ...memory }, 'memory') : undefined });
     rememberIdempotency(input, 'memory', memory);
     return { operation: previous ? 'UPDATE' : 'ADD', memory: clone(memory), ...(previous ? { previous: clone(previous) } : {}) };
   }
@@ -1052,9 +1106,12 @@ export function createShadowGraph(options = {}) {
   function memoryHistory(input = {}) {
     const project = normalizeProject(input.project);
     const scope = normalizeMemoryScope(input.scope);
-    const scopeKey = memoryScopeKey({ project, scope, memoryType: input.memoryType, key: input.key });
+    // A read still selects by the project field (OD-3); the legacy owner
+    // separates writes, not what a project read shows.
+    const readKey = (item) => memoryScopeKey(item.attribution === 'unattributed' ? item : { ...item, attribution: 'project' });
+    const scopeKey = readKey({ project, scope, memoryType: input.memoryType, key: input.key });
     const items = [...records.values()]
-      .filter((record) => record.kind === 'memory' && memoryScopeKey(record) === scopeKey)
+      .filter((record) => record.kind === 'memory' && readKey(record) === scopeKey)
       .sort((left, right) => (left.version ?? 1) - (right.version ?? 1) || compareInstants(left.temporal?.validFrom ?? left.createdAt, right.temporal?.validFrom ?? right.createdAt) || String(left.id).localeCompare(String(right.id)))
       .map(clone);
     return paginate(items, input, { project, scope, memoryType: input.memoryType, key: input.key }, { historical: true });
@@ -1269,7 +1326,7 @@ export function createShadowGraph(options = {}) {
     }
     facts.set(fact.id, fact); currentFacts.set(factScope, fact);
     event('fact.observed', { factId: fact.id, key: fact.key });
-    appendJournal({ type: 'fact.observed', entityKind: 'fact', entityId: fact.id, project: fact.project, payload: fact, provenance: writeProvenance(fact), idempotencyKey: input.idempotencyKey ? scopedIdempotencyKey(input, 'fact', owner) : undefined });
+    appendJournal({ type: 'fact.observed', entityKind: 'fact', entityId: fact.id, project: fact.project, payload: fact, provenance: writeProvenance(fact), idempotencyKey: input.idempotencyKey ? retrySlot(input, 'fact', owner) : undefined });
     const result = clone(fact); rememberIdempotency(input, 'fact', result); return result;
   }
 
@@ -1298,8 +1355,8 @@ export function createShadowGraph(options = {}) {
     assertJournalCapacity(batch.length);
     const counts = { project: 0, legacy_ambiguous: 0, legacy_unattributed: 0 };
     for (const entity of batch) {
-      const previousProject = entity.project ?? null;
-      const attribution = previousProject === null || projectlessAtImport.has(entity.id)
+      const previousProject = isStoredWithoutProject(entity) ? null : entity.project ?? null;
+      const attribution = previousProject === null
         ? 'legacy_unattributed'
         : previousProject === 'default' ? 'legacy_ambiguous' : 'project';
       touchMutableObject(entity);
@@ -2607,7 +2664,15 @@ export function createShadowGraph(options = {}) {
   // persistence primitive, reachable only through src/internal/snapshot.js, and
   // it is not a read of the memory product.
   function snapshot() {
-    return { ...nativeCollections(), ...Object.fromEntries([...extras].map(([key, value]) => [key, clone(value)])) };
+    const pending = [...projectlessLegacy.keys()].filter((id) => {
+      const entity = records.get(id) ?? facts.get(id);
+      return entity !== undefined && isStoredWithoutProject(entity);
+    }).sort();
+    return {
+      ...nativeCollections(),
+      ...(pending.length ? { [STORED_WITHOUT_PROJECT]: pending } : {}),
+      ...Object.fromEntries([...extras].map(([key, value]) => [key, clone(value)]))
+    };
   }
 
   // The public export (`GET /records`, the `list` verb): the collections this
@@ -2649,7 +2714,7 @@ export function createShadowGraph(options = {}) {
     // The staged snapshot is already migrated and validated, so this import cannot
     // fail. Only now is the live state discarded.
     const staged = privilegedSnapshot(staging);
-    records.clear(); currentMemories.clear(); facts.clear(); currentFacts.clear(); relations.clear(); reviewSignals.clear(); idempotency.clear(); extras.clear(); projectlessAtImport.clear();
+    records.clear(); currentMemories.clear(); facts.clear(); currentFacts.clear(); relations.clear(); reviewSignals.clear(); idempotency.clear(); extras.clear(); projectlessLegacy.clear();
     events.length = 0; journal.length = 0; revision = 0; journalSeq = 0; journalEpoch = null;
     return importData(staged);
   }
@@ -2689,7 +2754,7 @@ export function createShadowGraph(options = {}) {
     });
     // Legacy entities stored with no project, which the migrations above placed
     // in "default". Held by object, so the legacy id remapping below cannot lose
-    // track of them.
+    // track of them. The list an earlier save kept names the rest.
     const storedWithoutProject = (item) => typeof item?.attribution !== 'string' && (item?.project === undefined || item?.project === null);
     const projectless = [
       ...(source.records ?? []).map((item, index) => storedWithoutProject(item) && importedRecords[index]),
@@ -2716,7 +2781,7 @@ export function createShadowGraph(options = {}) {
     const importedSignals = (source.reviewSignals ?? []).map((signal) => clone(signal));
     const importedIdempotency = (source.idempotency ?? []).map((item) => ({ key: importIdempotencyKey(item.key, item.value), value: clone(item.value) }));
     const importedEvents = (source.events ?? []).map((item) => clone(item));
-    const importedExtras = extraCollections(source).map(([key, value]) => [key, clone(value)]);
+    const importedExtras = extraCollections(source).filter(([key]) => key !== STORED_WITHOUT_PROJECT).map(([key, value]) => [key, clone(value)]);
     let pendingMigrationBaseline = null;
     let pendingJournalEntries = [];
     let pendingJournalSequence = null;
@@ -3172,7 +3237,8 @@ export function createShadowGraph(options = {}) {
     for (const item of pendingIdempotencyUpdates) idempotency.set(item.key, item.value);
     for (const importedEvent of importedEvents) events.push(importedEvent);
     for (const [key, value] of importedExtras) extras.set(key, value);
-    for (const entity of projectless) projectlessAtImport.add(entity.id);
+    for (const entity of projectless) projectlessLegacy.set(entity.id, true);
+    for (const id of source[STORED_WITHOUT_PROJECT] ?? []) projectlessLegacy.set(id, true);
 
     if (importedJournal.length) {
       for (const importedEntry of importedJournal) journal.push(importedEntry);
@@ -3628,6 +3694,7 @@ function validateImportShape(source) {
   };
   if (source.journalSeq !== undefined && (!Number.isSafeInteger(source.journalSeq) || source.journalSeq < 0)) throw new Error('journalSeq must be a non-negative safe integer');
   if (source.journalEpoch !== undefined && source.journalEpoch !== null && (!Number.isSafeInteger(source.journalEpoch) || source.journalEpoch <= 0)) throw new Error('journalEpoch must be a positive safe integer or null');
+  if (array(STORED_WITHOUT_PROJECT).some((id) => typeof id !== 'string' || !id)) throw new Error(`${STORED_WITHOUT_PROJECT} must be an array of entity ids`);
   for (const [index, item] of array('records').entries()) {
     if (!item || typeof item !== 'object' || !['decision', 'attempt', 'memory'].includes(item.kind)) throw new Error(`records[${index}] is malformed`);
     if (typeof item.id !== 'string' || !item.id) throw new Error(`records[${index}].id must be a non-empty string`);

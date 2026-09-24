@@ -8,8 +8,8 @@
 // through ordinary journalled saves; the downgrade writes a separate new file
 // and leaves the current store untouched.
 import { createHash } from 'node:crypto';
-import { copyFile, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { copyFile, readFile, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { basename, dirname, join, resolve } from 'node:path';
 import { backupFile } from './backup.js';
 import { createStorage } from './storage.js';
 import { validateRestorePayload } from './restore-validation.js';
@@ -18,6 +18,16 @@ import { privilegedSnapshot } from './internal/snapshot.js';
 
 const sha256 = async (path) => createHash('sha256').update(await readFile(path)).digest('hex');
 const samePath = (left, right) => (process.platform === 'win32' ? resolve(left).toLowerCase() === resolve(right).toLowerCase() : resolve(left) === resolve(right));
+
+// The same file under another name -- through a linked directory, or a short
+// name -- is still the same file: an existing path is compared by its real
+// path, a file not yet written by the real path of its directory.
+async function canonicalPath(path) {
+  const absolute = resolve(path);
+  const real = await realpath(absolute).catch(() => null)
+    ?? join(await realpath(dirname(absolute)).catch(() => dirname(absolute)), basename(absolute));
+  return process.platform === 'win32' ? real.toLowerCase() : real;
+}
 
 async function exists(path) {
   try { await stat(path); return true; }
@@ -89,6 +99,8 @@ export async function migrateStore({ graph, store, file, storageType = 'json', b
 //   - attribution and originId fields;
 //   - unattributed entities, which schema 5 could only place in "default", and
 //     whatever refers to them;
+//   - memories and facts of the real project "default" that share an identity
+//     with legacy data, which schema 5 could only merge into it;
 //   - the journal history, which schema-5 readers cannot replay once it holds
 //     schema-6 entries -- the copy starts from one schema-5 baseline instead;
 //   - collections a schema-5 reader does not know.
@@ -97,11 +109,28 @@ export function downgradeToSchema5(snapshot, { now = () => new Date().toISOStrin
   const report = { fromSchemaVersion: source.schemaVersion, toSchemaVersion: 5, removedFields: [], excluded: [], excludedCollections: [], journal: null };
   const excludedIds = new Set();
   const byId = new Map();
+  // Schema 5 has a single "default". A memory or fact that the real project
+  // "default" wrote with the identity of a legacy one -- legacy data being
+  // "default" as stored, or stored with no project -- would share its scope
+  // there, and two active records in one scope is not valid schema 5. The real
+  // project's records of such an identity are left out and named.
+  const legacyOwned = (entity) => entity.attribution === 'legacy_ambiguous' || entity.attribution === 'legacy_unattributed'
+    || (entity.attribution === undefined && (entity.project ?? 'default') === 'default');
+  const identity = (entity) => (entity.kind === 'memory'
+    ? JSON.stringify(['memory', entity.scope?.userId ?? null, entity.scope?.agentId ?? null, entity.scope?.runId ?? null, entity.memoryType ?? null, entity.key ?? null])
+    : JSON.stringify(['fact', entity.key ?? null]));
+  const legacyIdentities = new Set([...(source.records ?? []), ...(source.facts ?? [])]
+    .filter((entity) => ['memory', 'fact'].includes(entity.kind) && legacyOwned(entity)).map(identity));
   const convert = (entity) => {
     if (entity.attribution === 'unattributed') {
       excludedIds.add(entity.id);
       for (const alternative of entity.alternatives ?? []) if (alternative?.id) excludedIds.add(alternative.id);
       report.excluded.push({ collection: entity.kind === 'fact' ? 'facts' : 'records', id: entity.id, kind: entity.kind, originId: entity.originId ?? null, reason: 'unattributed: schema 5 has no owner for it but "default"' });
+      return null;
+    }
+    if (entity.attribution === 'project' && entity.project === 'default' && ['memory', 'fact'].includes(entity.kind) && legacyIdentities.has(identity(entity))) {
+      excludedIds.add(entity.id);
+      report.excluded.push({ collection: entity.kind === 'fact' ? 'facts' : 'records', id: entity.id, kind: entity.kind, project: 'default', reason: 'the real project "default" shares this identity with legacy data: schema 5 cannot keep them apart' });
       return null;
     }
     const fields = ['attribution', 'originId'].filter((field) => Object.hasOwn(entity, field));
@@ -115,7 +144,7 @@ export function downgradeToSchema5(snapshot, { now = () => new Date().toISOStrin
   const facts = (source.facts ?? []).map(convert).filter(Boolean);
   const drop = (collection, items, refersToExcluded, describe) => items.filter((item) => {
     if (!refersToExcluded(item)) return true;
-    report.excluded.push({ collection, ...describe(item), reason: 'refers to an excluded unattributed entity' });
+    report.excluded.push({ collection, ...describe(item), reason: 'refers to an excluded entity' });
     return false;
   });
   const relations = drop('relations', source.relations ?? [], (item) => excludedIds.has(item.from) || excludedIds.has(item.to), (item) => ({ id: item.id }))
@@ -153,13 +182,33 @@ export function downgradeToSchema5(snapshot, { now = () => new Date().toISOStrin
 // the current store left untouched.
 export async function downgradeStore({ graph, store, file, storageType = 'json', output, preservationCopy, now }) {
   if (!output) throw new Error('A downgrade needs an output path');
-  if (samePath(output, file)) throw new Error('A downgrade never writes over the store it converts');
-  if (preservationCopy && samePath(output, preservationCopy)) throw new Error('A downgrade never writes over its preservation copy');
-  if (await exists(output)) throw new Error(`Refusing to overwrite an existing file with a downgrade: ${output}`);
+  if (!preservationCopy) throw new Error('A preservation copy needs a destination path');
   const reportPath = `${output}.report.json`;
+  // Four files with four jobs, told apart before anything is written: the
+  // report must never land on the preservation copy it vouches for (§19.3.2
+  // step 3), and nothing lands on the store or the output. A SQLite database
+  // also owns the side files SQLite writes next to it. An alias no path
+  // reveals (a different letter case on a volume that ignores case) is still
+  // caught: the report and the output are created only where nothing exists,
+  // after the preservation copy, so they fail rather than write over it.
+  const sidecars = (path) => (storageType === 'sqlite' ? [`${path}-wal`, `${path}-shm`, `${path}-journal`] : []);
+  const roles = [
+    ['the store it converts', [file, ...sidecars(file)]],
+    ['the downgraded output', [output, ...sidecars(output)]],
+    ['the preservation copy', [preservationCopy]],
+    ['the conversion report', [reportPath]]
+  ];
+  const canonical = await Promise.all(roles.map(async ([role, paths]) => [role, await Promise.all(paths.map(canonicalPath))]));
+  for (const [index, [role, paths]] of canonical.entries()) {
+    for (const [otherRole, otherPaths] of canonical.slice(index + 1)) {
+      if (paths.some((path) => otherPaths.includes(path))) throw new Error(`A downgrade needs distinct files: ${role} and ${otherRole} would be the same file`);
+    }
+  }
+  if (await exists(output)) throw new Error(`Refusing to overwrite an existing file with a downgrade: ${output}`);
   if (await exists(reportPath)) throw new Error(`Refusing to overwrite an existing report: ${reportPath}`);
   const preservation = await writePreservationCopy({ store, file, storageType, destination: preservationCopy });
-  await writeFile(reportPath, `${JSON.stringify({ status: 'converting', preservationCopy: preservation }, null, 2)}\n`, 'utf8');
+  await writeFile(reportPath, `${JSON.stringify({ status: 'converting', preservationCopy: preservation }, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
+  if (await exists(output)) throw new Error(`Refusing to overwrite an existing file with a downgrade: ${output}`);
   const { payload, report } = downgradeToSchema5(privilegedSnapshot(graph), { now });
   validateRestorePayload(payload);
   if (storageType === 'sqlite') {
@@ -171,6 +220,7 @@ export async function downgradeStore({ graph, store, file, storageType = 'json',
     await rename(temporary, output);
   }
   validateRestorePayload(await loadThrough(storageType, output));
+  if (await sha256(preservation.path) !== preservation.sha256) throw new Error('The preservation copy no longer matches the hash it was verified with');
   const result = { status: 'complete', preservationCopy: preservation, output, outputSha256: await sha256(output), ...report, note: 'Everything listed as removed or excluded is intact in the preservation copy; nothing was deleted, and the current-format store was not changed.' };
   await writeFile(reportPath, `${JSON.stringify(result, null, 2)}\n`, 'utf8');
   return { ...result, report: reportPath };
