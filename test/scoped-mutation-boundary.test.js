@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createShadowGraphServer } from '../src/server.js';
 import { createStorage } from '../src/storage.js';
-import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { privilegedSnapshot, privilegedValidate } from '../src/internal/snapshot.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
 // PR-10 (P1 findings F-30, F-06 and F-31): a change to an existing entity is a
@@ -191,4 +191,103 @@ test('review, reconsider and maintain evaluate and change only their own scope',
   for (const id of ['beta-fact', 'real-dflt-fact', 'legacy-dflt-fact', 'origin-a-fact']) assert.equal(status(id), 'active', id);
   assert.deepEqual(graph.maintain({ project: 'default', now: NOW }).staleDecisionIds, ['real-dflt-decision'], 'maintaining the real "default" leaves legacy data alone');
   assert.notEqual(status('legacy-dflt-decision'), 'stale');
+});
+
+// A store written before PR-10 by a build that chose review evidence by
+// project label (fbba512 and earlier): a real "default" decision's signal cites
+// a legacy "default" fact -- as its evidence, or among its conflicting
+// evidence -- and origin_a's decision's signal cites origin_b's fact, because
+// both origins' labels were empty. The correction package reproduces exactly
+// this across the real builds (v0.41.0, then fbba512, then this one). Here
+// every fact is written by the owner the history left it with, the signals are
+// raised by this kernel's own review while those ids were in scope, and the
+// store is admitted through importData. Only the conflicting reference, which
+// this kernel can no longer produce, is appended as that build recorded it.
+const reopen = (id, key, value) => [{ id, label: `${key} alternative`, reasonRejected: 'r', reopenWhen: [{ key, operator: 'greater_than', value }] }];
+const DECISIONS = [
+  [{ project: 'default' }, 'real-dflt-lag', reopen('alt-lag', 'lag', 5)],
+  [{ project: 'default' }, 'real-dflt-load', reopen('alt-load', 'load', 50)],
+  [{ originId: 'origin_a' }, 'origin-a-depth', reopen('alt-depth', 'depth', 5)]
+];
+const HIDDEN = ['legacy-lag-fact', 'legacy-load-fact', 'origin-b-depth-fact'];
+
+function labelMatchedHistory() {
+  const history = createShadowGraph({ now });
+  for (const [owner, id, alternatives] of DECISIONS) history.addDecision({ ...owner, id, title: id, chosen: 'x', alternatives });
+  history.addFact({ project: 'default', id: 'legacy-lag-fact', key: 'lag', value: 9, observedAt: OBSERVED });
+  history.addFact({ project: 'default', id: 'real-dflt-load-fact', key: 'load', value: 90, observedAt: NOW });
+  history.addFact({ originId: 'origin_a', id: 'origin-b-depth-fact', key: 'depth', value: 9, observedAt: NOW });
+  history.review({ project: 'default' });
+  history.review({ originId: 'origin_a' });
+  const signals = privilegedSnapshot(history).reviewSignals;
+
+  const legacy = createShadowGraph({ now });
+  legacy.addFact({ project: 'default', id: 'legacy-lag-fact', key: 'lag', value: 9, observedAt: OBSERVED });
+  legacy.addFact({ project: 'default', id: 'legacy-load-fact', key: 'load', value: 1, observedAt: OBSERVED });
+  const legacyPayload = privilegedSnapshot(legacy);
+  legacyPayload.schemaVersion = 5;
+  for (const entity of [...legacyPayload.facts, ...legacyPayload.journal.map((entry) => entry.payload)]) {
+    delete entity.attribution;
+    delete entity.originId;
+    entity.schemaVersion = 5;
+  }
+  for (const entry of legacyPayload.journal) entry.schemaVersion = 5;
+
+  const store = createShadowGraph({ now });
+  store.importData(legacyPayload);
+  for (const [owner, id, alternatives] of DECISIONS) store.addDecision({ ...owner, id, title: id, chosen: 'x', alternatives });
+  store.addFact({ project: 'default', id: 'real-dflt-load-fact', key: 'load', value: 90, observedAt: NOW });
+  store.addFact({ originId: 'origin_b', id: 'origin-b-depth-fact', key: 'depth', value: 9, observedAt: NOW });
+  const payload = privilegedSnapshot(store);
+  const reference = (id) => { const { value, observedAt, temporal, sourceClass, verificationStatus } = payload.facts.find((fact) => fact.id === id); return { factId: id, value, observedAt, validFrom: temporal?.validFrom ?? observedAt, sourceClass, verificationStatus }; };
+  signals.find((signal) => signal.decisionId === 'real-dflt-load').violatedConditions[0].conflictingEvidence = [reference('real-dflt-load-fact'), reference('legacy-load-fact')];
+  payload.reviewSignals = signals;
+  const graph = createShadowGraph({ now });
+  graph.importData(payload);
+  return graph;
+}
+
+const storedSignal = (graph, decisionId) => privilegedSnapshot(graph).reviewSignals.find((signal) => signal.decisionId === decisionId);
+
+test('acknowledging a signal an earlier build raised on hidden facts discloses none of them', () => {
+  const graph = labelMatchedHistory();
+  assert.equal(privilegedValidate(graph).valid, true, 'the store is admitted as a valid store');
+  for (const [, decisionId] of DECISIONS) assert.ok(storedSignal(graph, decisionId).violatedConditions.some((condition) => HIDDEN.includes(condition.evidence?.factId) || (condition.conflictingEvidence ?? []).some((item) => HIDDEN.includes(item.factId))), `${decisionId} cites a hidden fact`);
+  // review() names the load signal to its owner (identity is the rule, not the
+  // fact), so the owner must be able to close it.
+  const loadSignal = storedSignal(graph, 'real-dflt-load');
+  assert.equal(graph.review({ project: 'default' }).find((item) => item.decisionId === 'real-dflt-load')?.reviewSignalId, loadSignal.id);
+
+  for (const [owner, decisionId] of DECISIONS) {
+    const signal = storedSignal(graph, decisionId);
+    const history = JSON.stringify(signal.violatedConditions);
+    assert.equal(graph.getReviewSignals(owner).some((item) => item.id === signal.id), false, `${decisionId}: the read view withholds it`);
+    const answer = graph.acknowledgeReview(signal.id, owner);
+    assert.deepEqual(HIDDEN.filter((id) => JSON.stringify(answer).includes(id)), [], `${decisionId}: the answer names no hidden fact`);
+    assert.equal(Object.hasOwn(answer, 'violatedConditions'), false, `${decisionId}: no evidence the caller may not read`);
+    assert.equal(answer.limitation?.code, 'scoped_coverage');
+    assert.deepEqual([answer.id, answer.decisionId, answer.kind, answer.status], [signal.id, decisionId, 'review', 'acknowledged']);
+    for (const key of ['reason', 'alternativesToReconsider', 'createdAt', 'acknowledgedAt']) assert.ok(Object.hasOwn(answer, key), `${decisionId}: ${key}`);
+    const stored = storedSignal(graph, decisionId);
+    assert.equal(stored.status, 'acknowledged');
+    assert.equal(JSON.stringify(stored.violatedConditions), history, `${decisionId}: the recorded evidence is kept`);
+    const again = graph.acknowledgeReview(signal.id, owner);
+    assert.deepEqual(Object.keys(again).sort(), Object.keys(answer).sort(), `${decisionId}: a repeat answers the same way`);
+    assert.throws(() => graph.acknowledgeReview(signal.id, { project: 'alpha' }), { message: 'Review signal not found' });
+    assert.throws(() => graph.acknowledgeReview('review_absent', owner), { message: 'Review signal not found' });
+    assert.throws(() => graph.acknowledgeReview(signal.id, {}), { code: 'write_scope_unresolved' });
+  }
+  assert.equal(graph.review({ project: 'default' }).find((item) => item.decisionId === 'real-dflt-load').reviewSignalStatus, 'acknowledged');
+});
+
+test('acknowledging a signal whose evidence is all in scope returns the whole signal', () => {
+  const graph = createShadowGraph({ now });
+  graph.addDecision({ project: 'alpha', id: 'alpha-lag', title: 'alpha-lag', chosen: 'x', alternatives: reopen('alt-alpha', 'lag', 5) });
+  graph.addFact({ project: 'alpha', id: 'alpha-lag-fact', key: 'lag', value: 9, observedAt: NOW });
+  graph.review({ project: 'alpha' });
+  const signal = storedSignal(graph, 'alpha-lag');
+  const answer = graph.acknowledgeReview(signal.id, { project: 'alpha' });
+  assert.deepEqual(answer, storedSignal(graph, 'alpha-lag'));
+  assert.equal(answer.violatedConditions[0].evidence.factId, 'alpha-lag-fact');
+  assert.equal(Object.hasOwn(answer, 'limitation'), false);
 });

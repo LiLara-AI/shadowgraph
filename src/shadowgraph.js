@@ -14,7 +14,7 @@ import { hybridSearch, foldText } from './hybrid-search.js';
 import { effectiveFactExpirationBoundary, factValidityPolicyIssue, isValidIsoInstant } from './fact-validity.js';
 import { evaluateRule, isSupportedOperator, isSupportedUnit, ruleOperandIssue } from './condition-eval.js';
 import { privilegedSnapshot, privilegedValidate, registerPrivileged } from './internal/snapshot.js';
-import { extraCollections, refusePublicExport, NATIVE_STORE_KEYS, PUBLIC_EXPORT_KIND } from './internal/collections.js';
+import { extraCollections, refusePublicExport, NATIVE_STORE_KEYS, PUBLIC_EXPORT_KIND, REDACTION_EXPORT_KIND } from './internal/collections.js';
 import { isLegacyOwned, resolveScope, sameOrigin, usableOriginId } from './scope.js';
 import { createHash } from 'node:crypto';
 
@@ -2353,7 +2353,26 @@ export function createShadowGraph(options = {}) {
 
   // The review signals of the request's scope (P1 reconciliation F-04).
   function getReviewSignals(input = {}) { return scopedView(readBoundary(input)).reviewSignals.filter((item) => !input.status || item.status === input.status).map(clone); }
-  function acknowledgeReview(signalId, scope = {}) { const boundary = writeBoundary(scope); const item = [...reviewSignals.values()].find((candidate) => candidate.id === signalId && decisionIn(boundary, candidate.decisionId)); if (!item) throw new Error('Review signal not found'); touchMutableObject(item); item.status = 'acknowledged'; item.acknowledgedAt = now(); return clone(item); }
+  // A signal's own fields: its decision's and its lifecycle's. Its conditions
+  // carry the facts it was evaluated on.
+  const SIGNAL_OWN_FIELDS = ['id', 'kind', 'decisionId', 'title', 'reason', 'alternativesToReconsider', 'coverage', 'status', 'createdAt', 'acknowledgedAt'];
+
+  function acknowledgeReview(signalId, scope = {}) {
+    const boundary = writeBoundary(scope);
+    const item = [...reviewSignals.values()].find((candidate) => candidate.id === signalId && decisionIn(boundary, candidate.decisionId));
+    if (!item) throw new Error('Review signal not found');
+    touchMutableObject(item); item.status = 'acknowledged'; item.acknowledgedAt = now();
+    // The decision is the caller's, so the acknowledgement is too; the answer is
+    // a read. A build before PR-10 chose review evidence by project label, so a
+    // stored signal can cite a fact outside the decision's boundary; its
+    // conditions are then not returned, and what is stored stays as it was
+    // (P1 findings F-16, F-30).
+    if (scopedView(boundary).reviewSignals.includes(item)) return clone(item);
+    return {
+      ...Object.fromEntries(SIGNAL_OWN_FIELDS.filter((key) => item[key] !== undefined).map((key) => [key, clone(item[key])])),
+      limitation: { code: 'scoped_coverage', detail: 'This signal cites evidence outside this scope, so its conditions are not shown. It is acknowledged; what is stored is unchanged.' }
+    };
+  }
 
   function redact(input = {}) {
     const boundary = readBoundary(input);
@@ -2396,7 +2415,10 @@ export function createShadowGraph(options = {}) {
     // The output is a read: collections this build cannot interpret stay out of
     // it (plan v1.4.4 §10.9.6).
     for (const key of Object.keys(transformed)) if (!NATIVE_STORE_KEYS.includes(key)) delete transformed[key];
-    return transformed;
+    // And it says so, stamped after every pattern and replacement has run, so
+    // none can remove or alter it: no import, save or restore takes a scoped
+    // redaction for a store (finding F-36).
+    return { exportKind: REDACTION_EXPORT_KIND, ...transformed };
   }
 
   function projectSummary(project) {

@@ -394,6 +394,9 @@ export async function createSqliteStore(filePath, options = {}) {
       // stripped payload differs from the staged file, so the staged copy is
       // rewritten without them before it can be installed.
       const validateSnapshot = async (snapshotPayload) => {
+        // Before any validator, so a caller-supplied one cannot let a view in
+        // (finding F-36).
+        refusePublicExport(snapshotPayload);
         const payload = guardAuthorityRestore(snapshotPayload, { memoryOnly: restoreOptions.memoryOnly === true });
         let normalized = await configuredRestoreValidator(payload);
         if (restoreOptions.validate && restoreOptions.validate !== configuredRestoreValidator) {
