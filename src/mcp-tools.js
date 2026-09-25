@@ -633,7 +633,22 @@ const exportSchema = {
   properties: {
     schemaVersion: { type: 'integer', description: 'Storage schema version of this export.' },
     exportKind: { type: 'string', const: 'scoped_redaction', description: 'Marks a view that cannot be used as a store.' },
-    completeness: readCoverageSchema,
+    completeness: {
+      ...readCoverageSchema,
+      properties: {
+        ...readCoverageSchema.properties,
+        scope: {
+          ...readScopeSchema,
+          description: 'Actual request state with the project label withheld; not a reusable read boundary.',
+          required: [...readScopeSchema.required, 'projectLabelWithheld'],
+          properties: {
+            ...readScopeSchema.properties,
+            project: { type: 'null', description: 'Project labels are never echoed in redaction metadata.' },
+            projectLabelWithheld: { type: 'boolean', description: 'True for a selected project whose label is withheld; false when unresolved.' }
+          }
+        }
+      }
+    },
     records: { type: 'array', items: storedRecordSchema, description: 'Decisions, attempts, and memories.' },
     facts: { type: 'array', items: factRecordSchema, description: 'Observed facts with their provenance claims.' },
     relations: { type: 'array', items: storedRelationSchema, description: 'Relationships.' },

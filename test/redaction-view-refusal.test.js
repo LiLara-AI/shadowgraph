@@ -50,6 +50,7 @@ function views(graph) {
     'redact unresolved': graph.redact({}),
     'redact origin_a': graph.redact({ originId: 'origin_a' }),
     'redact alpha, no patterns': graph.redact({ project: 'alpha', patterns: [] }),
+    'redact alpha, project labels masked': graph.redact({ project: 'alpha', patterns: ['^project$'] }),
     'public export alpha': graph.exportData({ project: 'alpha' })
   };
   for (const [label, view] of Object.entries(emitted)) emitted[`${label} (JSON)`] = JSON.parse(JSON.stringify(view));

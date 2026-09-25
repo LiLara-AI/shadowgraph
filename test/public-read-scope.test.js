@@ -108,7 +108,8 @@ for (const [path, read] of Object.entries(COVERAGE_READS)) {
         requestState: result.completeness.scope.requestState,
         originPresented: result.completeness.scope.originPresented,
         grant: result.completeness.scope.grant
-      }, { project: scope.project ?? null, requestState: scope.project ? 'project_selected' : 'project_unresolved', originPresented: !!scope.originId, grant: null });
+      }, { project: path === 'redact' ? null : scope.project ?? null, requestState: scope.project ? 'project_selected' : 'project_unresolved', originPresented: !!scope.originId, grant: null });
+      if (path === 'redact') assert.equal(result.completeness.scope.projectLabelWithheld, !!scope.project);
       if (!scope.project) {
         assert.equal(result.completeness.complete, false);
         assert.equal(result.completeness.limitation?.code, 'scoped_coverage');

@@ -2464,10 +2464,16 @@ export function createShadowGraph(options = {}) {
     // none can remove or alter it: no import, save or restore takes a scoped
     // redaction for a store (finding F-36).
     for (const key of ['revision', 'journalSeq', 'journalEpoch']) delete transformed[key];
-    return scopedResult({ exportKind: REDACTION_EXPORT_KIND, ...transformed, completeness: {
+    const result = scopedResult({ exportKind: REDACTION_EXPORT_KIND, ...transformed, completeness: {
       complete: true, losslessItems: false,
       limitation: { code: 'scoped_coverage', detail: 'Only a redacted view of this scope. This transformed output is not a complete store and cannot be imported, saved or restored.' }
     } }, boundary, view.reviewSignals);
+    // Coverage describes the real boundary, but a redacted view must not echo
+    // its label after the body policy has run (including collection masking).
+    // Withhold it explicitly; neither null nor a replacement selects a scope.
+    result.completeness.scope.project = null;
+    result.completeness.scope.projectLabelWithheld = boundary.scope.state === 'project_selected';
+    return result;
   }
 
   function projectSummary(project) {
