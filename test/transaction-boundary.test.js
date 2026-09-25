@@ -9,7 +9,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
-import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { privilegedRebuild, privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const NOW = '2026-08-28T00:00:00.000Z';
 const LATER = '2026-08-29T00:00:00.000Z';
@@ -60,7 +60,7 @@ function projectionFromLive(data) {
 
 function assertRebuildParity(graph, label) {
   const live = privilegedSnapshot(graph);
-  const rebuilt = graph.rebuild();
+  const rebuilt = privilegedRebuild(graph);
   assert.equal(rebuilt.rebuildable, true, `${label}: journal remains rebuildable`);
   assert.deepEqual(projectionFromLive(rebuilt.projection), projectionFromLive(live), `${label}: rebuilt projection matches live state`);
 }
@@ -146,7 +146,7 @@ const CLOCK_MUTATOR_CASES = [
       const { graph, clock } = graphWithClock({ verifier });
       const fact = graph.addFact({ id: 'transaction-verify', project: 'transaction', key: 'verified', value: true });
       clock.arm();
-      return { graph, clock, invoke: () => graph.verifyFact({ factId: fact.id, evidencePath: 'trusted.json' }) };
+      return { graph, clock, invoke: () => graph.verifyFact({ project: 'transaction', factId: fact.id, evidencePath: 'trusted.json' }) };
     }
   },
   {
@@ -166,7 +166,7 @@ const CLOCK_MUTATOR_CASES = [
       const previous = graph.addDecision(decisionInput('transaction-supersede-old'));
       const replacement = graph.addDecision(decisionInput('transaction-supersede-new'));
       clock.arm();
-      return { graph, clock, invoke: () => graph.supersedeDecision({ decisionId: previous.id, replacementId: replacement.id }) };
+      return { graph, clock, invoke: () => graph.supersedeDecision({ project: 'transaction', decisionId: previous.id, replacementId: replacement.id }) };
     }
   },
   {
@@ -175,7 +175,7 @@ const CLOCK_MUTATOR_CASES = [
       const { graph, clock } = graphWithClock();
       const decision = graph.addDecision(decisionInput('transaction-status'));
       clock.arm();
-      return { graph, clock, invoke: () => graph.updateDecisionStatus(decision.id, 'planned') };
+      return { graph, clock, invoke: () => graph.updateDecisionStatus(decision.id, 'planned', { project: 'transaction' }) };
     }
   },
   {
@@ -184,7 +184,7 @@ const CLOCK_MUTATOR_CASES = [
       const { graph, clock } = graphWithClock();
       const decision = graph.addDecision(decisionInput('transaction-outcome'));
       clock.arm();
-      return { graph, clock, invoke: () => graph.setOutcome(decision.id, { status: 'successful' }) };
+      return { graph, clock, invoke: () => graph.setOutcome(decision.id, { status: 'successful' }, { project: 'transaction' }) };
     }
   },
   {
@@ -193,7 +193,7 @@ const CLOCK_MUTATOR_CASES = [
       const { graph, clock } = graphWithClock();
       const decision = graph.addDecision(decisionInput('transaction-confidence'));
       clock.arm();
-      return { graph, clock, invoke: () => graph.addConfidenceEvidence({ decisionId: decision.id, key: 'transaction-evidence', reason: 'evidence' }) };
+      return { graph, clock, invoke: () => graph.addConfidenceEvidence({ project: 'transaction', decisionId: decision.id, key: 'transaction-evidence', reason: 'evidence' }) };
     }
   },
   {
@@ -227,7 +227,7 @@ const CLOCK_MUTATOR_CASES = [
         graph.addFact({ id: `transaction-maintain-fact-${suffix}`, project: 'transaction', key: `maintain-${suffix}`, value: suffix, expiresAt: NOW });
       }
       clock.arm();
-      return { graph, clock, invoke: () => graph.maintain({ now: LATER }) };
+      return { graph, clock, invoke: () => graph.maintain({ project: 'transaction', now: LATER }) };
     }
   },
   {
@@ -238,9 +238,9 @@ const CLOCK_MUTATOR_CASES = [
         alternatives: [{ id: 'transaction-ack-alt', label: 'B', reopenWhen: ['changed'] }]
       }));
       graph.review({ project: 'transaction', changedFacts: ['changed'], asOf: NOW });
-      const signal = graph.getReviewSignals()[0];
+      const signal = graph.getReviewSignals({ project: 'transaction' })[0];
       clock.arm();
-      return { graph, clock, invoke: () => graph.acknowledgeReview(signal.id) };
+      return { graph, clock, invoke: () => graph.acknowledgeReview(signal.id, { project: 'transaction' }) };
     }
   },
   {
@@ -358,9 +358,9 @@ test('transaction boundary: reads and true no-op mutations do not clone the whol
     assert.equal(graph.addFact({ ...factInput, value: false }).id, factInput.id);
     assert.equal(graph.remember({ project: 'transaction', scope: {}, memoryType: 'note', key: 'noop-memory', text: 'same' }).operation, 'NOOP');
     assert.equal(graph.applyMemoryPlan({ project: 'transaction', scope: {}, operations: [{ action: 'NOOP', memoryType: 'note', key: 'absent' }] }).results[0].operation, 'NOOP');
-    assert.equal(graph.updateDecisionStatus(decision.id, 'proposed').status, 'proposed');
+    assert.equal(graph.updateDecisionStatus(decision.id, 'proposed', { project: 'transaction' }).status, 'proposed');
     assert.doesNotThrow(() => graph.search(''));
-    assert.doesNotThrow(() => graph.exportData());
+    assert.doesNotThrow(() => graph.exportData({ project: 'transaction' }));
   } finally {
     globalThis.structuredClone = original;
   }
@@ -472,12 +472,12 @@ test('transaction boundary: synchronous clock reentry fails explicitly and rolls
   const before = exportBytes(graph);
   reenter = true;
   assert.throws(
-    () => graph.updateDecisionStatus(decision.id, 'planned'),
+    () => graph.updateDecisionStatus(decision.id, 'planned', { project: 'transaction' }),
     /mutation.*(?:already|in progress)|reentrant/i
   );
   reenter = false;
   assert.equal(exportBytes(graph), before);
-  assert.equal(graph.updateDecisionStatus(decision.id, 'planned').status, 'planned', 'graph remains usable after rejected reentry');
+  assert.equal(graph.updateDecisionStatus(decision.id, 'planned', { project: 'transaction' }).status, 'planned', 'graph remains usable after rejected reentry');
 });
 
 test('transaction boundary: verifyFact spans await, rejects concurrent direct mutation explicitly, and releases after rejection', async () => {
@@ -494,7 +494,7 @@ test('transaction boundary: verifyFact spans await, rejects concurrent direct mu
   const graph = createShadowGraph({ now: () => NOW, verifier });
   const fact = graph.addFact({ id: 'transaction-async-fact', project: 'transaction', key: 'async', value: true });
   const before = exportBytes(graph);
-  const pending = graph.verifyFact({ factId: fact.id, evidencePath: 'trusted.json' });
+  const pending = graph.verifyFact({ project: 'transaction', factId: fact.id, evidencePath: 'trusted.json' });
   await entered;
 
   let concurrentError = null;
@@ -572,13 +572,17 @@ test('transaction boundary: HTTP rejection preserves SQLite durability and a lat
   await durableServerFaultScenario('sqlite', t);
 });
 
+// One safe journal sequence left: a supersession (three entries) overflows, a
+// confidence-evidence write (one entry) fits.
 function nearBoundaryPayload(id) {
   const graph = createShadowGraph({ now: () => NOW });
   graph.addDecision(decisionInput(id));
+  graph.addDecision(decisionInput(`${id}-replacement`));
   const data = privilegedSnapshot(graph);
-  data.journal[0].seq = Number.MAX_SAFE_INTEGER - 1;
+  data.journal[0].seq = Number.MAX_SAFE_INTEGER - 2;
+  data.journal[1].seq = Number.MAX_SAFE_INTEGER - 1;
   data.journalSeq = Number.MAX_SAFE_INTEGER - 1;
-  data.journalEpoch = Number.MAX_SAFE_INTEGER - 1;
+  data.journalEpoch = Number.MAX_SAFE_INTEGER - 2;
   return data;
 }
 
@@ -671,15 +675,22 @@ test('transaction boundary: CLI rejection preserves bytes, then a smaller succes
   await seedNearBoundaryFile(file, decisionId);
   const before = await readFile(file);
 
-  const rejected = await runCli(file, 'outcome', { decisionId, outcome: { status: 'successful', observedAt: NOW } });
+  // The outcome verb passes only the id, so until its transport is aligned
+  // (PR-13) it carries no write scope and is refused before any id resolves.
+  const unscoped = await runCli(file, 'outcome', { decisionId, outcome: { status: 'successful', observedAt: NOW } });
+  assert.notEqual(unscoped.code, 0);
+  assert.match(unscoped.stderr, /write_scope_unresolved/);
+  assert.deepEqual(await readFile(file), before, 'CLI refusal preserves exact durable bytes');
+
+  const rejected = await runCli(file, 'supersede', { project: 'transaction', decisionId, replacementId: `${decisionId}-replacement` });
   assert.notEqual(rejected.code, 0);
   assert.match(rejected.stderr, /journal sequence overflow/i);
   assert.deepEqual(await readFile(file), before, 'CLI rejection preserves exact durable bytes');
 
-  const successful = await runCli(file, 'status', { decisionId, status: 'planned' });
+  const successful = await runCli(file, 'confidence-evidence', { project: 'transaction', decisionId, key: 'cli-evidence', reason: 'fits in the last sequence' });
   assert.equal(successful.code, 0, successful.stderr);
   const persisted = JSON.parse(await readFile(file, 'utf8'));
-  assert.equal(persisted.records.find((item) => item.id === decisionId).status, 'planned');
+  assert.equal(persisted.records.find((item) => item.id === decisionId).confidence.basis.contributions.some((item) => item.key === 'cli-evidence'), true);
   assertPersistedRebuildParity(persisted, 'CLI later successful write');
 });
 
@@ -694,7 +705,7 @@ test('transaction boundary: MCP rejection preserves bytes, then a smaller succes
     await rpc.call({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
     const rejected = await rpc.call({
       jsonrpc: '2.0', id: 2, method: 'tools/call',
-      params: { name: 'shadowgraph_record_outcome', arguments: { decisionId, outcome: { status: 'successful', observedAt: NOW } } }
+      params: { name: 'shadowgraph_supersede', arguments: { project: 'transaction', decisionId, replacementId: `${decisionId}-replacement` } }
     });
     assert.equal(rejected.result, undefined, 'legacy tool failures use the numeric JSON-RPC error form');
     assert.deepEqual(rejected.error, { code: -32000, message: 'Tool execution failed' });
@@ -706,13 +717,13 @@ test('transaction boundary: MCP rejection preserves bytes, then a smaller succes
 
     const successful = await rpc.call({
       jsonrpc: '2.0', id: 3, method: 'tools/call',
-      params: { name: 'shadowgraph_update_status', arguments: { decisionId, status: 'planned' } }
+      params: { name: 'shadowgraph_confidence_evidence', arguments: { project: 'transaction', decisionId, key: 'mcp-evidence', reason: 'fits in the last sequence' } }
     });
     assert.equal(successful.error, undefined);
   } finally {
     await rpc.stop();
   }
   const persisted = JSON.parse(await readFile(file, 'utf8'));
-  assert.equal(persisted.records.find((item) => item.id === decisionId).status, 'planned');
+  assert.equal(persisted.records.find((item) => item.id === decisionId).confidence.basis.contributions.some((item) => item.key === 'mcp-evidence'), true);
   assertPersistedRebuildParity(persisted, 'MCP later successful write');
 });

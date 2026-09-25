@@ -5,7 +5,7 @@ import { createShadowGraph, SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS } from '..
 import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
-import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { privilegedRebuild, privilegedSnapshot } from '../src/internal/snapshot.js';
 
 function seedGraph() {
   const graph = createShadowGraph({ now: () => '2026-10-01T00:00:00.000Z' });
@@ -31,7 +31,7 @@ function assertMemoryState(graph) {
     project: 'assistant', scope: { userId: 'alice', agentId: 'helper' },
     currentAt: '2026-10-02T00:00:00.000Z'
   }).items[0].record.text, 'Concise and direct');
-  const rebuilt = graph.rebuild();
+  const rebuilt = graph.rebuild({ project: 'assistant' });
   assert.equal(rebuilt.rebuildable, true);
   assert.equal(rebuilt.projection.records.filter((item) => item.kind === 'memory').length, 2);
 }
@@ -95,5 +95,5 @@ test('schema 4 lifecycle snapshots migrate atomically to schema 5 with JSON and 
   fromSqlite.importData(await reopened.load());
   reopened.close();
   assert.deepEqual(privilegedSnapshot(fromSqlite).records, privilegedSnapshot(fromJson).records);
-  assert.deepEqual(fromSqlite.rebuild().projection.records, fromJson.rebuild().projection.records);
+  assert.deepEqual(privilegedRebuild(fromSqlite).projection.records, privilegedRebuild(fromJson).projection.records);
 });

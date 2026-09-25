@@ -19,7 +19,7 @@ import { createShadowGraph, rebuildProjection } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
-import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { privilegedRebuild, privilegedSnapshot, privilegedValidate } from '../src/internal/snapshot.js';
 
 const NOW = '2026-08-28T12:00:00.000Z';
 const INVALID_SEQUENCE = /invalid_journal_sequence|journal\[1\]\.seq must be a positive safe integer/i;
@@ -153,9 +153,9 @@ test('DS-P1-009 canonical schema 1/2 snapshots still migrate, validate, and rebu
   for (const schemaVersion of [1, 2]) {
     const graph = createShadowGraph({ now: () => NOW });
     assert.doesNotThrow(() => graph.importData(legacyPayload(schemaVersion)), `schema ${schemaVersion}: import`);
-    assert.equal(graph.validate().valid, true, `schema ${schemaVersion}: validation`);
-    assert.equal(graph.rebuild().rebuildable, true, `schema ${schemaVersion}: rebuild`);
-    assert.deepEqual(graph.rebuild().projection.records.map((record) => record.id), [`legacy-seq-${schemaVersion}`]);
+    assert.equal(privilegedValidate(graph).valid, true, `schema ${schemaVersion}: validation`);
+    assert.equal(privilegedRebuild(graph).rebuildable, true, `schema ${schemaVersion}: rebuild`);
+    assert.deepEqual(privilegedRebuild(graph).projection.records.map((record) => record.id), [`legacy-seq-${schemaVersion}`]);
   }
 });
 
@@ -574,9 +574,9 @@ test('DS-P1-009 canonical journal-less and hard-gap schema 1/2 data retains migr
     for (let restart = 0; restart < 3; restart += 1) {
       const graph = createShadowGraph({ now: () => NOW });
       assert.doesNotThrow(() => graph.importData(payload), `schema ${schemaVersion} restart ${restart}: import`);
-      assert.equal(graph.validate().valid, true, `schema ${schemaVersion} restart ${restart}: validation`);
-      assert.equal(graph.rebuild().rebuildable, true, `schema ${schemaVersion} restart ${restart}: rebuild`);
-      assert.deepEqual(graph.rebuild().projection.records.map((record) => record.id), [`journal-less-${schemaVersion}`]);
+      assert.equal(privilegedValidate(graph).valid, true, `schema ${schemaVersion} restart ${restart}: validation`);
+      assert.equal(privilegedRebuild(graph).rebuildable, true, `schema ${schemaVersion} restart ${restart}: rebuild`);
+      assert.deepEqual(privilegedRebuild(graph).projection.records.map((record) => record.id), [`journal-less-${schemaVersion}`]);
       assert.equal(privilegedSnapshot(graph).journal.some((entry) => entry.type === 'legacy_metadata_event'), true);
       assert.equal(privilegedSnapshot(graph).journal.some((entry) => entry.type === 'projection.baseline'), true);
       payload = privilegedSnapshot(graph);
@@ -585,7 +585,7 @@ test('DS-P1-009 canonical journal-less and hard-gap schema 1/2 data retains migr
     const hardGap = legacyHardGapPayload(schemaVersion);
     const hardGapGraph = createShadowGraph({ now: () => NOW });
     assert.doesNotThrow(() => hardGapGraph.importData(hardGap), `schema ${schemaVersion}: valid hard-gap import`);
-    assert.equal(hardGapGraph.validate().valid, true, `schema ${schemaVersion}: valid hard-gap validation`);
+    assert.equal(privilegedValidate(hardGapGraph).valid, true, `schema ${schemaVersion}: valid hard-gap validation`);
     assert.doesNotThrow(() => validateRestorePayload(hardGap, { now: () => NOW }), `schema ${schemaVersion}: valid hard-gap restore validation`);
   }
 });
@@ -603,8 +603,8 @@ test('DS-P1-009 canonical schema 1/2 data restores through JSON and migrates aft
     store.close();
     const restarted = createShadowGraph({ now: () => NOW });
     assert.doesNotThrow(() => restarted.importData(restoredPayload));
-    assert.equal(restarted.validate().valid, true);
-    assert.equal(restarted.rebuild().rebuildable, true);
+    assert.equal(privilegedValidate(restarted).valid, true);
+    assert.equal(privilegedRebuild(restarted).rebuildable, true);
     assert.deepEqual(privilegedSnapshot(restarted).records.map((record) => record.id), [`journal-less-${schemaVersion}`]);
   }
 });
@@ -626,8 +626,8 @@ test('DS-P1-009 canonical schema 1/2 data restores through SQLite and migrates a
     reopened.close();
     const restarted = createShadowGraph({ now: () => NOW });
     assert.doesNotThrow(() => restarted.importData(restoredPayload));
-    assert.equal(restarted.validate().valid, true);
-    assert.equal(restarted.rebuild().rebuildable, true);
+    assert.equal(privilegedValidate(restarted).valid, true);
+    assert.equal(privilegedRebuild(restarted).rebuildable, true);
     assert.deepEqual(privilegedSnapshot(restarted).records.map((record) => record.id), [`journal-less-${schemaVersion}`]);
   }
 });
@@ -901,7 +901,7 @@ test('DS-P1-010 explicitly unnumbered legacy journal arrays remain preserved as 
     assert.doesNotThrow(() => graph.importData(payload), `schema ${schemaVersion}: unnumbered legacy import`);
     assert.equal(privilegedSnapshot(graph).journal.length, 2, `schema ${schemaVersion}: both unnumbered entries preserved`);
     assert.equal(privilegedSnapshot(graph).journal.every((entry) => entry.seq === undefined), true, `schema ${schemaVersion}: migration does not invent source order`);
-    const rebuild = graph.rebuild();
+    const rebuild = privilegedRebuild(graph);
     assert.equal(rebuild.legacy.filter((entry) => entry.why === 'metadata_only_no_seq').length, 2, `schema ${schemaVersion}: both entries declared legacy`);
     assert.deepEqual(rebuild.duplicates, [], `schema ${schemaVersion}: missing sequences are not duplicates`);
   }
@@ -1341,10 +1341,10 @@ test('DS-P1-011 only true legacy unnumbered metadata remains compatible and is d
   for (const schemaVersion of [1, 2]) {
     const graph = createShadowGraph({ now: () => NOW });
     assert.doesNotThrow(() => graph.importData(rawLegacyMetadataPayload(schemaVersion)));
-    const validation = graph.validate();
+    const validation = privilegedValidate(graph);
     assert.equal(validation.valid, true, `schema ${schemaVersion}: legacy metadata remains readable`);
     assert.equal(validation.issues.filter((issue) => issue.code === 'legacy_metadata_without_sequence').length, 2);
-    const rebuild = graph.rebuild();
+    const rebuild = privilegedRebuild(graph);
     assert.equal(rebuild.rebuildable, true, `schema ${schemaVersion}: metadata does not claim projection mutations`);
     assert.equal(rebuild.applied, 0);
     assert.equal(rebuild.legacy.filter((entry) => entry.why === 'metadata_only_no_seq').length, 2);
@@ -1356,10 +1356,10 @@ test('DS-P1-011 only true legacy unnumbered metadata remains compatible and is d
       () => graph.importData(explicitLegacyMetadataPayload(schemaVersion, (entry) => { delete entry.seq; })),
       `schema ${schemaVersion}: explicit non-replayable metadata import`
     );
-    const validation = graph.validate();
+    const validation = privilegedValidate(graph);
     assert.equal(validation.valid, true, `schema ${schemaVersion}: explicit legacy metadata validates`);
     assert.equal(validation.issues.some((issue) => issue.code === 'legacy_metadata_without_sequence'), true);
-    const rebuild = graph.rebuild();
+    const rebuild = privilegedRebuild(graph);
     assert.equal(rebuild.rebuildable, true);
     assert.equal(rebuild.applied, 0);
     assert.equal(rebuild.legacy[0].why, 'metadata_only_no_seq');

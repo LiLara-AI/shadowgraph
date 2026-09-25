@@ -5,7 +5,7 @@ import { NODE_SQLITE_NOT_APPLICABLE_REASON } from '../src/runtime-capabilities.j
 import { createShadowGraph, SCHEMA_VERSION } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
-import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { privilegedSnapshot, privilegedValidate } from '../src/internal/snapshot.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
 // The legacy attribution review (P1 finding F-27) shows legacy data whose
@@ -98,7 +98,7 @@ test('the compatibility path keeps a newer-schema record as it arrived, and vali
     assert.deepEqual(entity.futureField, { kept: true }, `${id} keeps the field this build does not know`);
     assert.equal(entity.attribution, id === 'future-attributed-attempt' ? 'legacy_ambiguous' : undefined, `${id} keeps its attribution, or its lack of one`);
   }
-  const unsupported = graph.validate().issues.filter((issue) => issue.severity === 'unsupported');
+  const unsupported = privilegedValidate(graph).issues.filter((issue) => issue.severity === 'unsupported');
   assert.deepEqual(unsupported.map((issue) => [issue.code, issue.recordId, issue.schemaVersion]).sort(), [
     ['unsupported_fact_schema_version', 'future-projectless-fact', FUTURE],
     ['unsupported_record_schema_version', 'future-attributed-attempt', FUTURE],

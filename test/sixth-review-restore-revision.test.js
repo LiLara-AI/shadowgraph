@@ -495,13 +495,17 @@ for (const backend of ['json', 'sqlite']) {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: scenario.source })
     });
     assert.equal(restoreResponse.status, 200, await restoreResponse.text());
-    const live = await (await fetch(`${base}/records`)).json();
+    // The live store is compared whole through the privileged snapshot; the
+    // public export is one project's read and carries no revision.
+    const live = privilegedSnapshot(app.graph);
+    const exported = await (await fetch(`${base}/records?project=ds-p1-004`)).json();
     const durableStore = await createStore(backend, scenario.destination);
     const durable = await durableStore.load();
     durableStore.close();
     assert.equal(live.revision, 3);
     assert.equal(durable.revision, 3);
     assert.deepEqual(live, durable);
+    assert.deepEqual(exported.records, durable.records);
     assert.deepEqual(semanticSnapshot(durable), semanticSnapshot(scenario.sourcePayload));
 
     const writeResponse = await fetch(`${base}/decisions`, {
@@ -545,7 +549,7 @@ for (const backend of ['json', 'sqlite']) {
     assert.equal(restored.error, undefined, restored.error?.message);
     const redacted = await rpc.call({
       jsonrpc: '2.0', id: 3, method: 'tools/call',
-      params: { name: 'shadowgraph_redact', arguments: {} }
+      params: { name: 'shadowgraph_redact', arguments: { project: 'ds-p1-004' } }
     });
     assert.equal(redacted.error, undefined, redacted.error?.message);
     const live = JSON.parse(redacted.result.content[0].text);
@@ -554,7 +558,8 @@ for (const backend of ['json', 'sqlite']) {
     durableStore.close();
     assert.equal(live.revision, 3);
     assert.equal(durable.revision, 3);
-    assert.deepEqual(live, durable);
+    // Every record, fact and relation of the restored store is ds-p1-004's.
+    for (const collection of ['records', 'facts', 'relations']) assert.deepEqual(live[collection], durable[collection], collection);
     assert.deepEqual(semanticSnapshot(durable), semanticSnapshot(scenario.sourcePayload));
 
     const written = await rpc.call({

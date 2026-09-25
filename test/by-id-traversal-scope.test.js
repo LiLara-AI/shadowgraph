@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as kernel from '../src/shadowgraph.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
-import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { privilegedRebuild, privilegedSnapshot, privilegedValidate } from '../src/internal/snapshot.js';
 import { historicalRelation } from '../tools/historical-relation.js';
 
 // PR-09 (plan v1.4.4 §10.5; P1 reconciliation F-12, and F-16 as corrected by
@@ -235,8 +235,10 @@ test('relations written before this rule are kept, and scoped reads do not cross
   graph.traverse({ id: 'alpha-decision', project: 'alpha', depth: 10 });
   graph.link({ project: 'alpha', from: 'alpha-decision', to: 'alpha-fact', relation: 'depends_on' });
   assert.deepEqual(ids(privilegedSnapshot(graph)).filter((id) => before.includes(id)), before, 'nothing rewritten or deleted');
-  assert.equal(graph.validate().valid, true);
-  const rebuilt = graph.rebuild();
+  // Whole-store integrity is privileged (plan PR-10); a scoped rebuild never
+  // follows the historical alpha-beta relation, which is exactly the point.
+  assert.equal(privilegedValidate(graph).valid, true);
+  const rebuilt = privilegedRebuild(graph);
   assert.equal(rebuilt.rebuildable, true, rebuilt.reason);
   assert.ok(rebuilt.projection.relations.some((relation) => relation.id === 'relation-alpha-beta'));
 });

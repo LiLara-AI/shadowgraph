@@ -29,6 +29,11 @@ const WIRE_BY_NEGOTIATED = {
   '2025-11-25': { toolKeys: ['name', 'description', 'inputSchema', 'annotations', 'outputSchema'], structured: true }
 };
 const OMITTED_OUTPUT_SCHEMA = ['shadowgraph_review', 'shadowgraph_review_signals'];
+// Tools whose dispatch arm passes only an id, so it carries no write scope and
+// every call is refused before any id is resolved (P1 finding F-30), until
+// their transport is aligned (plan PR-13). Their output schemas cannot be
+// exercised until then; the list is asserted exact, so it cannot grow unseen.
+const AWAITING_TRANSPORT_SCOPE = ['shadowgraph_ack_review', 'shadowgraph_record_outcome', 'shadowgraph_update_status'];
 
 function modernParams(values = {}) {
   return {
@@ -278,8 +283,16 @@ test('every advertised output schema accepts the result its own tool really retu
   const signals = await callTool('shadowgraph_review_signals', { project, status: 'open' });
   assert.equal(Array.isArray(signals), true, 'shadowgraph_review_signals returns a bare array');
   assert.ok(signals.length >= 1);
-  const acknowledged = await callTool('shadowgraph_ack_review', { id: signals[0].id });
-  assert.equal(acknowledged.status, 'acknowledged');
+  const refusals = [
+    ['shadowgraph_ack_review', { project, id: signals[0].id }],
+    ['shadowgraph_update_status', { project, decisionId: decisionB.id, status: 'planned' }],
+    ['shadowgraph_record_outcome', { project, decisionId: decisionB.id, outcome: { status: 'successful', sourceClass: 'tool_observed', lessons: ['migration first'] } }]
+  ];
+  for (const [name, args] of refusals) {
+    const refused = await rpc.call('tools/call', { name, arguments: args });
+    assert.equal(refused.result, undefined, name);
+    assert.deepEqual(refused.error, { code: -32000, message: 'Tool execution failed' }, name);
+  }
 
   await callTool('shadowgraph_record_attempt', { project, solution: 'rolled out to everyone', result: 'failed during rollout', reason: 'no migration path', environment: 'node 24' });
 
@@ -308,18 +321,16 @@ test('every advertised output schema accepts the result its own tool really retu
   const retrieved = await callTool('shadowgraph_retrieve', { project, query: '' });
   assert.equal(retrieved.completeness.includesGraphNeighbours, true);
 
-  await callTool('shadowgraph_update_status', { decisionId: decisionB.id, status: 'planned' });
-  await callTool('shadowgraph_record_outcome', { decisionId: decisionB.id, outcome: { status: 'successful', sourceClass: 'tool_observed', lessons: ['migration first'] } });
-  await callTool('shadowgraph_confidence_evidence', { decisionId: decisionB.id, reason: 'a second successful rollout', key: 'evidence-1', supports: true });
-  const superseded = await callTool('shadowgraph_supersede', { decisionId: decisionA.id, replacementId: decisionB.id });
+  await callTool('shadowgraph_confidence_evidence', { project, decisionId: decisionB.id, reason: 'a second successful rollout', key: 'evidence-1', supports: true });
+  const superseded = await callTool('shadowgraph_supersede', { project, decisionId: decisionA.id, replacementId: decisionB.id });
   assert.equal(superseded.previous.status, 'superseded');
 
-  await callTool('shadowgraph_maintain', {});
+  await callTool('shadowgraph_maintain', { project });
   const validated = await callTool('shadowgraph_validate', {});
   assert.equal(validated.valid, true, `store must stay valid: ${JSON.stringify(validated.issues)}`);
   const journal = await callTool('shadowgraph_journal', { project, limit: 5 });
   assert.equal(journal.page.hasMore, true, 'a small limit must report that more entries exist');
-  await callTool('shadowgraph_rebuild', {});
+  await callTool('shadowgraph_rebuild', { project });
   await callTool('shadowgraph_purge_preview', { project });
   await callTool('shadowgraph_repair_plan', {});
   await callTool('shadowgraph_redact', { project });
@@ -336,13 +347,13 @@ test('every advertised output schema accepts the result its own tool really retu
   // exercised here is an unverified promise.
   const advertised = listed.tools.map((tool) => tool.name);
   const missing = advertised.filter((name) => !exercised.has(name));
-  assert.deepEqual(missing, [], `these advertised tools were never exercised: ${missing.join(', ')}`);
+  assert.deepEqual(missing.sort(), AWAITING_TRANSPORT_SCOPE, `these advertised tools were never exercised: ${missing.join(', ')}`);
 });
 
 test('a legacy tool-execution failure stays a protocol error and carries no structured content', async (t) => {
   const rpc = await startMcp(t);
   await rpc.initialize('2025-11-25');
-  const failed = await rpc.call('tools/call', { name: 'shadowgraph_update_status', arguments: { decisionId: 'missing', status: 'planned' } });
+  const failed = await rpc.call('tools/call', { name: 'shadowgraph_confidence_evidence', arguments: { project: 'conformance', decisionId: 'missing', reason: 'r', key: 'k' } });
   assert.equal(failed.result, undefined);
   assert.equal(failed.error.code, -32000);
   assert.match(failed.error.message, /Decision not found/u);
@@ -380,10 +391,10 @@ test('the verifier build advertises and satisfies the verification tool contract
     privateKey: keys.privateKey
   })), 'utf8');
 
-  const verified = await callTool('shadowgraph_verify_fact', { factId: fact.id, evidencePath });
+  const verified = await callTool('shadowgraph_verify_fact', { project: 'app', factId: fact.id, evidencePath });
   assert.equal(verified.operation, 'VERIFIED');
   assert.equal(verified.fact.verificationStatus, 'verified');
-  const repeated = await callTool('shadowgraph_verify_fact', { factId: fact.id, evidencePath });
+  const repeated = await callTool('shadowgraph_verify_fact', { project: 'app', factId: fact.id, evidencePath });
   assert.equal(repeated.operation, 'NOOP');
 });
 

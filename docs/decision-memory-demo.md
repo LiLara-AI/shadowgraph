@@ -269,12 +269,12 @@ reviews.
 **Process 1 — decide and persist:**
 
 ```js
-import { createStorage } from 'shadowgraph-unified-plugin/storage';
-import { createShadowGraph } from 'shadowgraph-unified-plugin';
+import { createShadowGraphServer } from 'shadowgraph-unified-plugin/server';
 
-const store = await createStorage({ type: 'json', file: './.shadowgraph/data.json' });
-const graph = createShadowGraph();
-graph.importData(await store.load());
+// Opens and loads the store; persist() saves the whole store. Nothing listens
+// until server.listen() is called. graph.exportData() is a read of one project,
+// not a store, and saving it is refused.
+const { graph, persist } = await createShadowGraphServer({ file: './.shadowgraph/data.json' });
 
 graph.addDecision({
   project: 'checkout-service',
@@ -303,8 +303,7 @@ graph.addFact({
   confidence: 1
 });
 
-await store.save(graph.exportData());
-store.close?.();
+await persist();
 ```
 
 **Process 2 — a cold start that knows nothing:**

@@ -236,7 +236,7 @@ test('DS-P1-001 HTTP: stat-denied inventory returns the fatal code and latches a
   restarted.server.listen(0, '127.0.0.1');
   await once(restarted.server, 'listening');
   const restartedBase = `http://127.0.0.1:${restarted.server.address().port}`;
-  const records = await (await fetch(`${restartedBase}/records`, { headers: authHeaders() })).json();
+  const records = await (await fetch(`${restartedBase}/records?project=fourth-review`, { headers: authHeaders() })).json();
   assert.deepEqual(records.records.map((record) => record.id), ['ds-p1-http-new']);
   assert.deepEqual(await readFile(rollbackPath), evidenceAfterFailure);
 });
@@ -468,7 +468,7 @@ test('DS-P2-002 HTTP: successful restore propagates retained rollback cleanup ev
   t.after(async () => { await unlink(rollbackPath).catch(() => {}); });
   assert.equal(resolve(result.retainedArtifacts[0]), resolve(rollbackPath));
   assert.deepEqual(await readFile(rollbackPath), originalBytes);
-  assert.deepEqual((await (await fetch(`${base}/records`, { headers: authHeaders() })).json()).records.map((record) => record.id), ['ds-p2-http-new']);
+  assert.deepEqual((await (await fetch(`${base}/records?project=fourth-review`, { headers: authHeaders() })).json()).records.map((record) => record.id), ['ds-p2-http-new']);
 
   await closeServer(app.server);
   const restarted = createJsonFileStore(destination);
@@ -519,7 +519,7 @@ test('DS-P2-002 HTTP: confirmed rollback propagates retained cleanup evidence wi
   assert.deepEqual(await readFile(rollbackPath), originalBytes);
   assert.deepEqual(await readFile(destination), originalBytes);
 
-  const recordsResponse = await fetch(`${base}/records`, { headers: authHeaders() });
+  const recordsResponse = await fetch(`${base}/records?project=fourth-review`, { headers: authHeaders() });
   const records = await recordsResponse.json();
   assert.equal(recordsResponse.status, 200, 'confirmed rollback must not latch degraded state');
   assert.deepEqual(records.records.map((record) => record.id), ['ds-p2-http-rollback-old']);

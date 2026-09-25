@@ -11,7 +11,7 @@ test('stores one decision and reopens it when facts change', () => {
   const graph = createShadowGraph({ now: () => '2026-01-01T00:00:00.000Z' });
   const decision = graph.addDecision({ project: 'default', title: 'Choose a database', chosen: 'PostgreSQL', assumptions: ['many-concurrent-writes'], alternatives: [{ label: 'SQLite', reasonRejected: 'Concurrency risk', reopenWhen: ['local-single-user'] }] });
   assert.equal(decision.alternatives[0].status, 'rejected');
-  const reviews = graph.review({ changedFacts: ['local-single-user'] });
+  const reviews = graph.review({ project: 'default', changedFacts: ['local-single-user'] });
   assert.equal(reviews[0].decisionId, decision.id);
 });
 
@@ -20,7 +20,7 @@ test('keeps attempts searchable and exportable', () => {
   graph.addAttempt({ project: 'default', solution: 'Rewrite everything', result: 'Regression', reason: 'Too broad' });
   // G6: search() returns { items, page, completeness } — see completeness-contract.md.
   assert.equal(graph.search('regression', { project: 'default' }).items[0].record.result, 'Regression');
-  assert.equal(graph.stats().attempts, 1);
+  assert.equal(graph.stats({ project: 'default' }).attempts, 1);
 });
 
 test('persists records in a portable JSON file', async (t) => {

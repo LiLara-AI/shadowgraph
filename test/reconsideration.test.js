@@ -322,11 +322,13 @@ test('an unaddressable decision is an error, never an empty unchanged result', (
   // and this decision is fine", which is the confusion the whole contract
   // exists to prevent.
   assert.throws(() => graph.reconsider({ project: 'p', decisionId: 'decision_does_not_exist' }), /Decision not found/);
-  assert.throws(() => graph.reconsider({ project: 'other', decisionId: mine.id }), /not accessible in this project/);
+  // Another project's decision gets exactly the answer of one that does not
+  // exist, so the error never says whether the id exists elsewhere (F-31).
+  assert.throws(() => graph.reconsider({ project: 'other', decisionId: mine.id }), /^Error: Decision not found$/);
   assert.throws(() => graph.reconsider({ project: 'p', decisionId: '' }), /decisionId must be a non-empty string/);
 
   // An id that exists but is closed is equally not a grounded negative.
-  graph.updateDecisionStatus(mine.id, 'archived');
+  graph.updateDecisionStatus(mine.id, 'archived', { project: 'p' });
   assert.throws(() => graph.reconsider({ project: 'p', decisionId: mine.id }), /not open for reconsideration/);
 });
 
@@ -363,7 +365,7 @@ test('reconsidering twice settles on one signal, and an acknowledgement survives
   assert.equal(second.reviewSignalId, first.reviewSignalId);
   assert.equal(second.reviewSignalStatus, 'open');
 
-  graph.acknowledgeReview(first.reviewSignalId);
+  graph.acknowledgeReview(first.reviewSignalId, { project: 'p' });
   const third = only(graph.reconsider({ project: 'p' }));
   assert.equal(third.reviewSignalId, first.reviewSignalId, 'no second signal for the same breach');
   assert.equal(third.reviewSignalStatus, 'acknowledged');

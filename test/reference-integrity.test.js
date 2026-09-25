@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createShadowGraph } from '../src/shadowgraph.js';
-import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { privilegedSnapshot, privilegedValidate } from '../src/internal/snapshot.js';
 
 const AT = '2026-01-01T00:00:00Z';
 
@@ -22,7 +22,7 @@ function legacyPayloadWithCollision(extra = {}) {
   };
 }
 
-const codes = (graph) => graph.validate().issues.map((issue) => issue.code);
+const codes = (graph) => privilegedValidate(graph).issues.map((issue) => issue.code);
 
 test('a legacy collision renames the later entity and leaves the old id in use', () => {
   const graph = createShadowGraph();
@@ -44,7 +44,7 @@ test('a reference left pointing at a reused legacy id is declared, not silently 
   assert.deepEqual(relation.migration.ambiguousLegacyEndpoints, ['from', 'to']);
 
   assert.ok(codes(graph).includes('ambiguous_legacy_relation_endpoint'));
-  assert.equal(graph.validate().valid, false, 'an ambiguous link makes the graph not valid');
+  assert.equal(privilegedValidate(graph).valid, false, 'an ambiguous link makes the graph not valid');
 });
 
 test('the endpoint is never guessed at: no rebinding happens', () => {

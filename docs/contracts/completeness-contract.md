@@ -76,7 +76,7 @@ Two further collections arrived on 2026-09-13, both additive and both bound by t
 
 ## 5. Journal reads
 
-`journalEntries(options)` uses the standard envelope and adds `journalEpoch`, `journalSeq`, and `gaps` to `completeness` — so a caller reading the journal learns the replay boundary and any hard-purge discontinuities in the same response.
+`getJournal(options)` uses the standard envelope and adds `journalEpoch`, `journalSeq`, `gaps` and a `scoped_coverage` `limitation` to `completeness` — so a caller reading the journal learns the replay boundary and the hard-purge discontinuities in the same response. The read is scoped like every other: it returns only entries that name nothing outside the request's project (or origin), none with neither, and positions only the gaps that scope's own hard purges left; sequence numbers are global, so the gaps between one scope's entries are not integrity gaps. The store-wide gap report is the privileged integrity check's.
 
 ## 6. Backward compatibility
 

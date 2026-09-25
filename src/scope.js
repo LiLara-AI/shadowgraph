@@ -27,6 +27,14 @@ export function mintOriginId() {
   return `origin_${randomUUID()}`;
 }
 
+// Data stored in the literal "default" before schema 6, or stored with no
+// project at all, belongs to no project anyone can name (owner decision OD-1)
+// -- not even the real project called "default".
+export function isLegacyOwned(entity) {
+  if (entity?.attribution === 'legacy_ambiguous' || entity?.attribution === 'legacy_unattributed') return true;
+  return entity?.attribution === undefined && (entity?.project ?? 'default') === 'default';
+}
+
 const nonEmptyString = (value) => typeof value === 'string' && Boolean(value.trim());
 
 export function resolveScope(context = {}) {

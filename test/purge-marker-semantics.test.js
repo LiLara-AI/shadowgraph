@@ -18,7 +18,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
-import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { privilegedRebuild, privilegedSnapshot, privilegedValidate } from '../src/internal/snapshot.js';
 
 const NOW = '2026-08-28T12:00:00.000Z';
 const PROJECT = 'semantic-purge-project';
@@ -294,13 +294,13 @@ test('graph validate and rebuild reuse one authoritative semantic marker diagnos
     journal: [marker], journalSeq: 2, journalEpoch: 1
   });
 
-  const validation = graph.validate();
+  const validation = privilegedValidate(graph);
   const markerIssues = validation.issues.filter((issue) => issue.code === INVALID_CODE);
   assert.equal(validation.valid, false);
   assert.equal(markerIssues.length, 1, 'validate reports the authoritative marker diagnostic once');
   assert.match(markerIssues[0].detail, /mode must be exactly logical or hard/i);
 
-  const rebuild = graph.rebuild();
+  const rebuild = privilegedRebuild(graph);
   assert.equal(rebuild.rebuildable, false);
   assert.equal(rebuild.reason, INVALID_REASON);
   assert.deepEqual(rebuild.projection.records.map((item) => item.id), [VICTIM.id]);
@@ -518,7 +518,7 @@ test('schemas 1-4 raw markers migrate compatibly while canonical schema-5 logica
     const imported = createShadowGraph({ now: () => NOW });
     assert.doesNotThrow(() => imported.importData(payload), `schema ${schemaVersion}: import migrates`);
     assert.equal(imported.validate().valid, true, `schema ${schemaVersion}: migrated graph validates`);
-    assert.equal(imported.rebuild().projection.records.length, 0, `schema ${schemaVersion}: migrated rebuild stays erased`);
+    assert.equal(privilegedRebuild(imported).projection.records.length, 0, `schema ${schemaVersion}: migrated rebuild stays erased`);
     assert.doesNotThrow(() => validateRestorePayload(payload, { now: () => NOW }), `schema ${schemaVersion}: restore migration remains compatible`);
   }
 

@@ -187,13 +187,19 @@ with no project selected they return nothing, never every project and never a sh
 bucket. An id outside the selected project -- or one that does not exist -- gets the same answer: no
 record. A new relationship joins two records of one project (`link` needs that project), and one
 across projects is refused like a missing endpoint; relationships stored across projects before are
-kept, and no read follows them.
+kept, and no read follows them. The journal, `stats`, `redact`'s output and the public export
+(`GET /records`, `list`) read the same way. A by-id change -- an outcome, a status, confidence
+evidence, a supersession, a fact verification, a review acknowledgement -- changes only what its own
+project or origin owns, and answers another project's id exactly as a missing one. Saving, backup and
+restore still cover the whole store; the public export is a read of one project and is refused as a
+store.
 Records written before schema 6 in `default`, or with no project, belong to no project a caller can
 name, so no project read returns them; the kernel's `legacyAttributionReview()` lists them for
-inspection, each with its legacy state and canonical record, and infers no project for them. Read
-scoping is still in progress: the journal, `stats`, `redact` and the whole-store export
-(`GET /records`, `list`) still read across projects, and a read with no project still reports its
-empty result as complete.
+inspection, each with its legacy state and canonical record, and infers no project for them. Still
+in progress: a read with no project reports its empty result as complete, and the transports are not
+yet aligned -- the MCP tools, HTTP routes and CLI verbs for outcomes, status and review
+acknowledgement pass no project yet, so they are refused, and `stats` over MCP, HTTP and the CLI
+counts nothing.
 Omitted scope means all-null scope. Purge is previewable, logical by default, and explicitly
 irreversible in hard mode.
 

@@ -13,13 +13,20 @@
     "A retired path must meet its whole target: the unresolved half AND the",
     "selected-project half.",
     "",
-    "The read boundary of the core read paths (matchesFilters, search, retrieve,",
-    "recall, context) is conformant and retired: plan v1.4.4 PR-08. What an",
-    "unresolved read reports about itself -- complete:false and a scoped-coverage",
-    "limitation -- is plan PR-11's, so it is checked separately as",
-    "<path>.coverage, and those rows record that envelope as PR-08 left it.",
-    "The by-id read (entity, through traverse) and traverse are conformant and",
-    "retired: plan v1.4.4 PR-09.",
+    "The read boundary of all eleven paths is conformant and retired: the core",
+    "read paths (matchesFilters, search, retrieve, recall, context) by plan v1.4.4",
+    "PR-08; the by-id read (entity, through traverse) and traverse by PR-09;",
+    "getJournal, stats, redact and the public export by PR-10, each with the",
+    "target that no selected answer names the beta id of the cross-project link.",
+    "",
+    "What an unresolved read reports about itself -- complete:false and a",
+    "scoped-coverage limitation -- is plan PR-11's, so it is checked separately",
+    "as <path>.coverage, for every path that returns a completeness envelope.",
+    "Those rows record that envelope as it stands before PR-11: the four core",
+    "rows as PR-08 left it, and getJournal's as PR-10 left it (which added the",
+    "scoped-coverage limitation of P1 reconciliation F-09 to every journal read,",
+    "but not complete:false). They are the last group; PR-11 retires them and",
+    "deletes this file.",
     "",
     "Fixture: projects alpha and beta, plus a decision and a memory in the literal",
     "project default (where identity-less writes landed until the schema-6 writer",
@@ -50,22 +57,10 @@
       "recordedAt": "PR-08",
       "observed": { "scopeProject": null, "complete": true, "limitation": false }
     },
-    "getJournal": {
-      "group": "journal-stats-redaction-export",
-      "observed": { "withheldProjects": ["alpha", "beta", "default"], "scopeProject": "all", "complete": true, "limitation": false, "selectedProjects": ["alpha"], "selectedNamesBetaId": true }
-    },
-    "stats": {
-      "group": "journal-stats-redaction-export",
-      "observed": { "withheldDecisions": 3, "selectedDecisions": 3, "selectedAttempts": 2 }
-    },
-    "redact": {
-      "group": "journal-stats-redaction-export",
-      "observed": { "withheldProjects": ["alpha", "beta", "default"], "selectedProjects": ["alpha"], "selectedRelationsLeavingScope": 0, "selectedNamesBetaId": true }
-    },
-    "publicExport": {
-      "group": "journal-stats-redaction-export",
-      "retirement": "The public export has no project parameter at v0.41.0, so only its unresolved behaviour is recorded. The change-set that scopes the public export must add a selected-project target to the harness in the same change before this row can be retired; the harness refuses the retirement until it does.",
-      "observed": { "withheldProjects": ["alpha", "beta", "default"] }
+    "getJournal.coverage": {
+      "group": "coverage-envelope",
+      "recordedAt": "PR-10",
+      "observed": { "scopeProject": "all", "complete": true, "limitation": true }
     }
   }
 }

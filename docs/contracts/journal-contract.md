@@ -105,7 +105,7 @@ The rule that matters: **a partial projection is never returned as if it were co
 
 Pre-existing events carry `{id, type, at, project, recordId}` and **no payload**. They cannot be replayed. Claiming retroactive rebuildability would be fabrication.
 
-`journalEpoch` is the first replayable boundary, persisted in `exportData()` and restored on import. Rebuild replays `seq >= journalEpoch`. A migration extension never advances an existing epoch. A leading hard-purge gap may leave the first surviving sequence greater than the epoch only when the purge ledger proves every missing sequence. With `options.requireFullHistory`, a journal containing pre-epoch metadata-only entries returns `rebuildable: false, reason: 'pre-epoch metadata-only entries are not replayable'`.
+`journalEpoch` is the first replayable boundary, persisted in the store snapshot and restored on import. Rebuild replays `seq >= journalEpoch`. A migration extension never advances an existing epoch. A leading hard-purge gap may leave the first surviving sequence greater than the epoch only when the purge ledger proves every missing sequence. With `options.requireFullHistory`, a journal containing pre-epoch metadata-only entries returns `rebuildable: false, reason: 'pre-epoch metadata-only entries are not replayable'`.
 
 `projection.baseline` carries a full projection snapshot for migrated stores. It is a **reconstruction from live state at migration time**, and is labelled as such — not as replayed history.
 
@@ -121,7 +121,7 @@ Both modes remove relations pointing at purged entities, so referential integrit
 
 ## 10. Atomicity — by co-location, not protocol
 
-The journal lives **inside the same payload as the state** and is written by the same operation. JSON: `exportData()` serializes both, `save()` does one temp-write plus `rename()`. SQLite: `save()` runs `BEGIN IMMEDIATE` → replace → `COMMIT`. State and journal therefore **cannot** diverge on a failed write.
+The journal lives **inside the same payload as the state** and is written by the same operation. JSON: the store snapshot serializes both, `save()` does one temp-write plus `rename()`. SQLite: `save()` runs `BEGIN IMMEDIATE` → replace → `COMMIT`. State and journal therefore **cannot** diverge on a failed write.
 
 **Binding rule for future work:** never persist the journal through a separate file, table write, or transaction. Doing so voids this guarantee and makes a two-phase protocol mandatory.
 

@@ -98,7 +98,7 @@ test('an imported rule with no operand raises no review and is visible as a diag
 test('the stored rule is never rewritten by evaluating it', () => {
   const graph = graphWithStoredRule({ key: 'lag', operator: 'not_equals' }, 500);
   graph.context({ project: 'p' });
-  graph.maintain({});
+  graph.maintain({ project: 'p' });
   const stored = privilegedSnapshot(graph).records[0].alternatives[0].reopenWhen[0];
   assert.deepEqual(stored, { key: 'lag', operator: 'not_equals' }, 'no operand was synthesised');
 });
@@ -197,7 +197,7 @@ test('an operandless rule does not poison export or context', () => {
   const graph = graphWithStoredRule({ key: 'lag', operator: 'not_equals' }, 500);
   // Writing `value: undefined` during import used to make every later clone()
   // of the record throw, taking exportData() and context() down with it.
-  assert.doesNotThrow(() => graph.exportData());
+  assert.doesNotThrow(() => graph.exportData({ project: 'p' }));
   assert.doesNotThrow(() => graph.context({ project: 'p' }));
   assert.deepEqual(
     privilegedSnapshot(graph).records[0].alternatives[0].reopenWhen[0],
@@ -379,7 +379,7 @@ test('the compact list and acknowledge path settles the uncovered breach', () =>
   assert.equal(listed.reviewSignalStatus, 'open');
   assert.notEqual(listed.reviewSignalId, 'review:legacy');
 
-  graph.acknowledgeReview(listed.reviewSignalId);
+  graph.acknowledgeReview(listed.reviewSignalId, { project: 'p' });
   assert.equal(reviewStatus(graph), 'acknowledged');
   assert.equal(legacyOf(graph).acknowledgedAt, '2026-01-02T00:00:00.000Z', 'the historical record is untouched');
 });

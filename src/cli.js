@@ -101,7 +101,7 @@ async function runOneShot() {
 
     let result;
     if (command === 'stats') result = graph.stats();
-    else if (command === 'list') result = graph.exportData();
+    else if (command === 'list') result = graph.exportData(parse(input || '{}'));
     else if (command === 'search') { const query = parse(input || '{}'); result = graph.search(query.query ?? '', query); }
     else if (command === 'context') { result = graph.context(parse(input || '{}')); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'remember') { const value = parse(input); result = Array.isArray(value.operations) ? graph.applyMemoryPlan(value) : graph.remember(value); await store.save(privilegedSnapshot(graph)); }

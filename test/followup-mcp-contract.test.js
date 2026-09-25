@@ -464,8 +464,8 @@ test('legacy JSON-RPC parse, request, method, params, primitive, and domain erro
   const domainFailure = await rpc.call({
     jsonrpc: '2.0', id: 'domain-failure', method: 'tools/call',
     params: {
-      name: 'shadowgraph_update_status',
-      arguments: { decisionId: 'missing-decision', status: 'planned' }
+      name: 'shadowgraph_confidence_evidence',
+      arguments: { project: 'p', decisionId: 'missing-decision', reason: 'no such decision', key: 'missing' }
     }
   });
 

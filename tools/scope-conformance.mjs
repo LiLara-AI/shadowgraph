@@ -8,9 +8,11 @@
 // NOT part of `npm test`, deliberately. The approved `project_only` rule says a
 // read with no resolved project returns nothing, reports `complete: false` and
 // declares a scoped-coverage limitation; a read for one project never returns
-// another project's record. The current build does not meet that on any of the
-// eleven paths. This harness records exactly how each path fails today and
-// exits 0 only while that recorded behaviour still holds. It exits 1 when any
+// another project's record, nor names one. The v0.41.0 build met that on none
+// of the eleven paths; the read boundary of all eleven is now conformant, and
+// what remains recorded is the coverage envelope below. This harness records
+// exactly how each check still fails and exits 0 only while that recorded
+// behaviour still holds. It exits 1 when any
 // path differs from its row in EITHER direction -- a new failure, or a path
 // that became conformant while its row was still recorded -- so a scoping
 // change can neither regress silently nor be claimed without retiring its row.
@@ -32,13 +34,15 @@
 // - a path whose target cannot yet be stated in full may not be retired at all
 //   (`retireOnlyWith`): it must first gain the missing target.
 //
-// The core read paths are checked twice, because two change-sets make them
-// conformant: `search`, `retrieve`, `recall` and `context` check the read
-// boundary -- which records an unresolved or a selected read returns, and
-// where a graph expansion may go -- and `<path>.coverage` checks what an
+// The paths that return a completeness envelope are checked twice, because two
+// change-sets make them conformant: `search`, `retrieve`, `recall`, `context`
+// and `getJournal` check the read boundary -- which records an unresolved or a
+// selected read returns, where a graph expansion may go, and that no selected
+// answer names an id outside the scope -- and `<path>.coverage` checks what an
 // unresolved read says about itself (complete:false, a scoped-coverage
-// limitation). The boundary is plan v1.4.4 PR-08's; the coverage envelope is
-// PR-11's, and its rows stay recorded until PR-11 retires them.
+// limitation). The boundary is plan v1.4.4 PR-08's (PR-10's for getJournal);
+// the coverage envelope is PR-11's, and its rows stay recorded until PR-11
+// retires them.
 import { readFile } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { createShadowGraph } from '../src/shadowgraph.js';
@@ -82,7 +86,6 @@ const envelope = (result) => ({
 });
 // An unresolved read returns no record, and says so.
 const coverageTarget = { complete: false, limitation: true };
-const unresolvedTarget = { withheldProjects: [], ...coverageTarget };
 // Every `selected*` observation below is a read with project `alpha`.
 const recordsIn = (context) => [...context.activeDecisions, ...context.staleAssumptions, ...context.failedAttemptsToAvoid, ...context.reusableAttempts];
 
@@ -182,17 +185,20 @@ const PATHS = {
     },
     target: { withheldNodeProjects: [], selectedReachesMemory: true, selectedNodeProjects: ['alpha'] }
   },
-  // `selectedNamesBetaId` is observed but not yet targeted: the alpha-labelled
-  // entry for the cross-project link carries the beta id in its payload, and
-  // whether an in-scope entry may name an out-of-scope id is left to the
-  // change-set that scopes the journal. Recording it keeps it from moving silently.
+  // The alpha-labelled journal entry for the cross-project link carries the beta
+  // id in its payload, so a selected read that returned it would name an id
+  // outside its scope (P1 reconciliation F-16): `selectedNamesBetaId` is
+  // targeted false here, for redact and for the public export.
   getJournal: {
     observe: ({ graph, betaAttemptId }) => {
-      const result = graph.getJournal({});
       const selected = graph.getJournal({ project: 'alpha' }).items;
-      return { withheldProjects: projectsOf(result.items), ...envelope(result), selectedProjects: projectsOf(selected), selectedNamesBetaId: JSON.stringify(selected).includes(betaAttemptId) };
+      return { withheldProjects: projectsOf(graph.getJournal({}).items), selectedProjects: projectsOf(selected), selectedNamesBetaId: JSON.stringify(selected).includes(betaAttemptId) };
     },
-    target: { ...unresolvedTarget, selectedProjects: ['alpha'] }
+    target: { withheldProjects: [], selectedProjects: ['alpha'], selectedNamesBetaId: false }
+  },
+  'getJournal.coverage': {
+    observe: ({ graph }) => envelope(graph.getJournal({})),
+    target: coverageTarget
   },
   // The fixture holds one decision in each of alpha, beta and the unscoped case,
   // and one attempt in each of alpha and beta.
@@ -211,19 +217,24 @@ const PATHS = {
         withheldProjects: projectsOf(graph.redact({}).records),
         selectedProjects: projectsOf([...selected.records, ...selected.facts, ...selected.journal]),
         selectedRelationsLeavingScope: selected.relations.filter((relation) => !ids.has(relation.from) || !ids.has(relation.to)).length,
-        selectedNamesBetaId: JSON.stringify(selected).includes(betaAttemptId)   // observed, not targeted -- see getJournal
+        selectedNamesBetaId: JSON.stringify(selected).includes(betaAttemptId)
       };
     },
-    target: { withheldProjects: [], selectedProjects: ['alpha'], selectedRelationsLeavingScope: 0 }
+    target: { withheldProjects: [], selectedProjects: ['alpha'], selectedRelationsLeavingScope: 0, selectedNamesBetaId: false }
   },
-  // exportData() is what GET /records and the `list` verb return today. It has
-  // no project parameter, so no selected-project target can be written for it
-  // without inventing an interface; retiring its row therefore requires adding
-  // that target in the same change-set that gives the public export its scope.
+  // exportData() is what GET /records and the `list` verb return. It gained its
+  // project scope in the change-set that retired its row, together with this
+  // selected-project target.
   publicExport: {
-    observe: ({ graph }) => ({ withheldProjects: projectsOf(graph.exportData().records) }),
-    target: { withheldProjects: [] },
-    retireOnlyWith: 'a selected-project target, added in the same change-set that gives the public export a project scope'
+    observe: ({ graph, betaAttemptId }) => {
+      const selected = graph.exportData({ project: 'alpha' });
+      return {
+        withheldProjects: projectsOf(graph.exportData().records),
+        selectedProjects: projectsOf([...selected.records, ...selected.facts]),
+        selectedNamesBetaId: JSON.stringify(selected).includes(betaAttemptId)
+      };
+    },
+    target: { withheldProjects: [], selectedProjects: ['alpha'], selectedNamesBetaId: false }
   }
 };
 

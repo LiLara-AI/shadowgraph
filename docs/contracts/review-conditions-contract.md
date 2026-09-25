@@ -425,13 +425,20 @@ same — a verdict resting on facts that disagree is exactly the silent pass §5
 `reconsider({ project, decisionId })` narrows to one decision. Each of these is an **error**, never
 an empty result:
 
-- an unknown `decisionId` — `Decision not found`;
-- a `decisionId` belonging to another project — `Decision is not accessible in this project`;
+- an unknown `decisionId`, or one outside the request's scope — another project's, legacy data's,
+  another origin's, or any id when neither `project` nor `originId` is given — `Decision not found`,
+  the same answer for all of them, so it never says whether the id exists elsewhere;
 - a decision that is `archived`, `superseded` or `abandoned` — `not open for reconsideration`.
 
 An empty `unchanged` + `complete` for a mis-addressed decision would read exactly like "checked,
 and this decision is fine". A focused call evaluates only its decision, and therefore raises no
 review signal for any other.
+
+`review`, `reconsider` and `maintain` evaluate — and `maintain` ages and expires — only what the
+request's `project` (or, with none, its `originId`) owns. With neither they evaluate and change
+nothing: `review` returns `[]`, and `reconsider` and `maintain` carry
+`limitation: { code: 'scoped_coverage' }`; `reconsider` then reports `manual_review` with
+`evaluationCompleteness: 'partial'`, never an `unchanged` resting on nothing.
 
 ### What it does and does not write
 

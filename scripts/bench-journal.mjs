@@ -128,8 +128,8 @@ function buildGraph(target) {
       sessionId: 'bench-session'
     });
     graph.addFact({ project, key: `fact_${index}`, value: index, sourceClass: 'tool_observed' });
-    graph.updateDecisionStatus(decision.id, 'in_progress');
-    graph.setOutcome(decision.id, { status: index % 3 === 0 ? 'failed' : 'successful', lesson: `lesson ${index}` });
+    graph.updateDecisionStatus(decision.id, 'in_progress', { project });
+    graph.setOutcome(decision.id, { status: index % 3 === 0 ? 'failed' : 'successful', lesson: `lesson ${index}` }, { project });
   }
   const exported = privilegedSnapshot(graph);
   graph = null;

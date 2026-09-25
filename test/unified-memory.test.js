@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createShadowGraph, rebuildProjection } from '../src/shadowgraph.js';
 import { validateRestorePayload } from '../src/restore-validation.js';
-import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { privilegedRebuild, privilegedSnapshot } from '../src/internal/snapshot.js';
 
 test('scoped memory reconciliation adds, deduplicates, and supersedes without losing history', () => {
   const times = [
@@ -66,7 +66,7 @@ test('scoped memory reconciliation adds, deduplicates, and supersedes without lo
   assert.deepEqual(history.items.map((item) => item.status), ['superseded', 'active']);
   assert.equal(history.completeness.complete, true);
 
-  const journalTypes = graph.getJournal({ limit: 20 }).items.map((entry) => entry.type);
+  const journalTypes = graph.getJournal({ project: 'trip', limit: 20 }).items.map((entry) => entry.type);
   assert.deepEqual(journalTypes, ['memory.recorded', 'memory.superseded', 'memory.recorded']);
 });
 
@@ -112,7 +112,7 @@ test('a validated memory plan invalidates in-scope state without partial writes 
   assert.deepEqual(aliceHistory.items.map((item) => item.status), ['invalidated']);
   assert.deepEqual(bobHistory.items.map((item) => item.text), ['Prefers light mode']);
   assert.deepEqual(bobHistory.items.map((item) => item.status), ['active']);
-  assert.equal(graph.getJournal({ limit: 20 }).items.at(-1).type, 'memory.invalidated');
+  assert.equal(graph.getJournal({ project: 'app', limit: 20 }).items.at(-1).type, 'memory.invalidated');
 });
 
 test('recall fuses lexical, semantic, graph, and temporal signals while declaring unavailable semantics', () => {
@@ -258,7 +258,7 @@ test('logical purge clears scoped memory indexes and rebuild cannot resurrect pu
   assert.equal(replacement.operation, 'ADD');
   assert.equal(replacement.previous, undefined);
 
-  const rebuilt = graph.rebuild();
+  const rebuilt = privilegedRebuild(graph);
   assert.equal(rebuilt.rebuildable, true);
   assert.equal(rebuilt.projection.records.some((record) => record.text === 'alice@example.test'), false);
   assert.equal(rebuilt.projection.records.some((record) => record.text === 'new@example.test'), true);
@@ -279,7 +279,7 @@ test('duplicate active memory scopes resolve deterministically and remain declar
   for (const records of [[newer, older], [older, newer]]) {
     const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
     graph.importData({ schemaVersion: 4, records });
-    assert.equal(graph.validate().issues.some((issue) => issue.code === 'duplicate_active_memory_scope'), true);
+    assert.equal(graph.validate({ project: 'app' }).issues.some((issue) => issue.code === 'duplicate_active_memory_scope'), true);
     const result = graph.remember({
       project: 'app', scope: { userId: 'alice' }, memoryType: 'preference', key: 'theme', text: 'System'
     });
@@ -468,7 +468,7 @@ test('memory idempotency retries are isolated by exact scope identity', () => {
   assert.equal(bob.operation, 'ADD');
   assert.equal(bob.memory.scope.userId, 'bob');
   assert.equal(privilegedSnapshot(graph).records.filter((record) => record.kind === 'memory').length, 2);
-  assert.equal(graph.rebuild().projection.idempotency.length, 2);
+  assert.equal(graph.rebuild({ project: 'app' }).projection.idempotency.length, 2);
 });
 
 test('project-only recall cannot expose memories from any scoped identity', () => {
@@ -671,7 +671,7 @@ test('same-content retries can refresh a derived embedding without creating a me
   assert.equal(refreshed.memory.id, added.memory.id);
   assert.equal(graph.memoryHistory({ project: 'app', memoryType: 'note', key: 'route' }).items.length, 1);
   assert.equal(graph.recall('', { project: 'app', queryEmbedding: [0, 1] }).items[0].scores.semantic, 1);
-  assert.deepEqual(graph.rebuild().projection.records.find((record) => record.id === added.memory.id).embedding, [0, 1]);
+  assert.deepEqual(graph.rebuild({ project: 'app' }).projection.records.find((record) => record.id === added.memory.id).embedding, [0, 1]);
 });
 
 test('maintenance closes an expired fact interval before review and recall', () => {
@@ -685,7 +685,7 @@ test('maintenance closes an expired fact interval before review and recall', () 
     validFrom: '2026-01-01T00:00:00.000Z', expiresAt: '2026-02-01T00:00:00.000Z'
   });
 
-  const maintenance = graph.maintain({ at: '2026-03-01T00:00:00.000Z' });
+  const maintenance = graph.maintain({ project: 'app', at: '2026-03-01T00:00:00.000Z' });
   const expired = privilegedSnapshot(graph).facts.find((item) => item.id === fact.id);
   assert.equal(maintenance.due.some((item) => item.decisionId === decision.id), false);
   assert.equal(expired.temporal.validTo, '2026-02-01T00:00:00.000Z');
@@ -969,7 +969,7 @@ test('journal rebuild preserves relations whose endpoint is a nested alternative
     alternatives: [{ id: 'alternative-b', label: 'B', reasonRejected: 'No' }]
   });
   graph.link({ id: 'alt-link', project: 'app', from: decision.id, to: 'alternative-b', relation: 'rejects' });
-  const rebuilt = graph.rebuild();
+  const rebuilt = privilegedRebuild(graph);
   assert.equal(rebuilt.rebuildable, true);
   assert.equal(rebuilt.projection.relations.some((relation) => relation.id === 'alt-link'), true);
 });

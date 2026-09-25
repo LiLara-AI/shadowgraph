@@ -6,7 +6,7 @@ import { NODE_SQLITE_NOT_APPLICABLE_REASON } from '../src/runtime-capabilities.j
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
-import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { privilegedRebuild, privilegedSnapshot, privilegedValidate } from '../src/internal/snapshot.js';
 import { downgradeToSchema5 } from '../src/schema-conversion.js';
 import { validateRestorePayload } from '../src/restore-validation.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
@@ -91,13 +91,13 @@ const entity = (graph, id) => {
 };
 
 function assertHealthy(graph, label) {
-  const validation = graph.validate();
+  const validation = privilegedValidate(graph);
   assert.equal(validation.valid, true, `${label}: ${JSON.stringify(validation.issues)}`);
-  const rebuilt = graph.rebuild();
+  const rebuilt = privilegedRebuild(graph);
   assert.equal(rebuilt.rebuildable, true, `${label}: ${rebuilt.reason}`);
   const reloaded = createShadowGraph({ now });
   reloaded.importData(JSON.parse(JSON.stringify(privilegedSnapshot(graph))));
-  assert.equal(reloaded.validate().valid, true, `${label}: reloaded`);
+  assert.equal(privilegedValidate(reloaded).valid, true, `${label}: reloaded`);
   return reloaded;
 }
 
@@ -111,7 +111,7 @@ for (const [stage, open] of Object.entries(STAGES)) {
     assert.deepEqual([created.project, created.attribution], ['default', 'project']);
     assert.deepEqual(entity(graph, 'decision-legacy'), legacy, 'the legacy record is untouched');
     assert.equal(graph.addDecision(input).id, created.id, 'the real owner\'s own retry deduplicates');
-    assert.throws(() => graph.supersedeDecision({ decisionId: 'decision-legacy', replacementId: created.id }), /same project/, 'a real "default" decision cannot supersede a legacy one');
+    assert.throws(() => graph.supersedeDecision({ project: 'default', decisionId: 'decision-legacy', replacementId: created.id }), /Supersession requires two existing decisions/, 'a real "default" decision cannot supersede a legacy one, which it cannot even tell exists');
     const reloaded = assertHealthy(graph, stage);
     assert.equal(reloaded.addDecision(input).id, created.id, 'the retry survives a reload');
     assert.deepEqual(entity(reloaded, 'decision-legacy'), legacy);
@@ -264,12 +264,12 @@ test('the separation survives a JSON and a SQLite save, a restart and a rebuild'
     assert.equal(entity(restarted, 'memory-legacy').attribution, 'legacy_ambiguous', backend);
     restarted.setRevision(await store.save(privilegedSnapshot(restarted)));
     store.close?.();
-    const rebuilt = restarted.rebuild();
+    const rebuilt = privilegedRebuild(restarted);
     assert.equal(rebuilt.rebuildable, true, `${backend}: ${rebuilt.reason}`);
     const byId = Object.fromEntries([...rebuilt.projection.records, ...rebuilt.projection.facts].map((item) => [item.id, item]));
     assert.equal(byId['memory-legacy'].status, 'active');
     assert.equal(byId[memory.memory.id].status, 'active');
     assert.equal(byId[created.id].attribution, 'project');
-    assert.equal(restarted.validate().valid, true, `${backend}: ${JSON.stringify(restarted.validate().issues)}`);
+    assert.equal(privilegedValidate(restarted).valid, true, `${backend}: ${JSON.stringify(privilegedValidate(restarted).issues)}`);
   }
 });

@@ -151,7 +151,7 @@ test('an acknowledged breach stays acknowledged, but a new distinct breach is no
   graph.review({ project: 'p' });
   const [first] = graph.getReviewSignals({ project: 'p', status: 'open' });
   assert.ok(first, 'the first breach raised a signal');
-  graph.acknowledgeReview(first.id);
+  graph.acknowledgeReview(first.id, { project: 'p' });
 
   // Re-evaluating unchanged evidence must not resurrect the acknowledged signal.
   graph.review({ project: 'p' });

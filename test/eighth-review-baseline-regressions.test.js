@@ -17,7 +17,7 @@ import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { createFactAttestation, createLocalEvidenceVerifier } from '../src/verification.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
-import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { privilegedRebuild, privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const NOW = '2026-08-27T12:00:00.000Z';
 const EXPIRES_AT = '2026-09-30T00:00:00.000Z';
@@ -72,14 +72,14 @@ async function signedMidstreamBaselineAttack(directory, fixture, terminal, suffi
     verifiedAt: '2026-08-27T12:05:00.000Z',
     privateKey: fixture.keys.privateKey
   })), 'utf8');
-  await graph.verifyFact({ factId: fact.id, evidencePath });
+  await graph.verifyFact({ project: fact.project, factId: fact.id, evidencePath });
   const copiedActive = privilegedSnapshot(graph);
   const copiedFact = structuredClone(copiedActive.facts.find((item) => item.id === fact.id));
   assert.equal(copiedFact.verificationStatus, 'verified');
 
   if (terminal === 'expired') {
     clock.value = '2026-10-01T00:00:00.000Z';
-    graph.maintain({ now: clock.value });
+    graph.maintain({ project: fact.project, now: clock.value });
   } else {
     graph.addFact({
       id: `ds-p1-006-replacement-${suffix}`,
@@ -360,7 +360,7 @@ test('DS-P1-006 eighth review: schema 1-5 and baseline-only migrations remain ca
       assert.doesNotThrow(() => validateRestorePayload(payload, { now: () => NOW }));
       const graph = createShadowGraph({ now: () => NOW });
       graph.importData(payload);
-      const report = graph.rebuild();
+      const report = privilegedRebuild(graph);
       assert.equal(report.rebuildable, true, `schema ${schemaVersion} restart ${restart}: rebuildable`);
       assert.deepEqual(report.projection.records, privilegedSnapshot(graph).records, `schema ${schemaVersion} restart ${restart}: projection parity`);
       payload = privilegedSnapshot(graph);
@@ -402,13 +402,13 @@ test('DS-P1-006 eighth review: baseline-only signed snapshots preserve verifier 
   const configured = createShadowGraph({ verifier: fixture.verifier, now: () => NOW });
   configured.importData(baselineOnly);
   assert.equal(privilegedSnapshot(configured).facts[0].verificationStatus, 'verified');
-  assert.equal(configured.rebuild().projection.facts[0].verificationStatus, 'verified');
+  assert.equal(privilegedRebuild(configured).projection.facts[0].verificationStatus, 'verified');
 
   const unconfigured = createShadowGraph({ now: () => NOW });
   unconfigured.importData(baselineOnly);
   assert.equal(privilegedSnapshot(unconfigured).facts[0].verificationStatus, 'unverified');
   assert.equal(privilegedSnapshot(unconfigured).facts[0].verificationUntrustedReason, 'verifier_not_configured');
-  assert.equal(unconfigured.rebuild().projection.facts[0].verificationStatus, 'unverified');
+  assert.equal(privilegedRebuild(unconfigured).projection.facts[0].verificationStatus, 'unverified');
 });
 
 test('DS-P1-006 eighth review: a monotonic migration extension preserves the signed terminal lifecycle and original replay epoch', async (t) => {
@@ -438,7 +438,7 @@ test('DS-P1-006 eighth review: a monotonic migration extension preserves the sig
 
     const exported = privilegedSnapshot(graph);
     assert.equal(exported.journalEpoch, originalEpoch, `${terminal}: migration cannot advance the replay boundary`);
-    const report = graph.rebuild();
+    const report = privilegedRebuild(graph);
     assert.equal(report.rebuildable, true, `${terminal}: the proven extension remains rebuildable`);
     assert.equal(report.replayedFrom, originalFirstSequence, `${terminal}: prior replay history remains in range`);
     assert.equal(report.projection.facts.find((fact) => fact.id === source.factId).status, terminal);
@@ -515,7 +515,7 @@ test('DS-P1-006 journal-less merge appends typed decision, attempt, fact, relati
   assert.equal(appended.at(-1).idempotencyKey, 'decision:ds-p1-006-merge:move-retry');
   assert.deepEqual(appended.map((entry) => entry.seq), [6, 7, 8, 9, 10, 11]);
 
-  const report = graph.rebuild();
+  const report = privilegedRebuild(graph);
   assert.equal(report.rebuildable, true, report.reason);
   const liveById = new Map([...after.records, ...after.facts, ...after.relations].map((item) => [item.id, item]));
   const rebuiltById = new Map([...report.projection.records, ...report.projection.facts, ...report.projection.relations].map((item) => [item.id, item]));
@@ -567,7 +567,7 @@ test('DS-P1-006 journal-less multi-memory overwrite uses recorded, superseded, a
   assert.equal(after.journalEpoch, before.journalEpoch);
   assert.deepEqual(after.journal.slice(0, before.journal.length), before.journal);
 
-  const report = graph.rebuild();
+  const report = privilegedRebuild(graph);
   assert.equal(report.rebuildable, true, report.reason);
   assert.deepEqual(
     new Map(report.projection.records.map((item) => [item.id, item])),
@@ -681,7 +681,7 @@ test('DS-P1-006 journal-less overwrite survives JSON and SQLite restart with reb
 
       const restarted = createShadowGraph({ now: () => NOW });
       restarted.importData(durable);
-      const report = restarted.rebuild();
+      const report = privilegedRebuild(restarted);
       const exported = privilegedSnapshot(restarted);
       assert.equal(report.rebuildable, true, `${backend}: ${report.reason}`);
       assert.deepEqual(report.projection.records, exported.records, `${backend}: records rebuild exactly`);
@@ -781,7 +781,7 @@ test('DS-P1-006 eighth review: CLI, HTTP, and MCP restore reject the same baseli
     assert.equal(response.status, 400);
     assert.equal(failure.code, INVALID_BASELINE_PLACEMENT_CODE);
     assert.deepEqual(await readFile(httpDestination), httpBefore);
-    const records = await (await fetch(`http://127.0.0.1:${app.server.address().port}/records`)).json();
+    const records = await (await fetch(`http://127.0.0.1:${app.server.address().port}/records?project=old`)).json();
     assert.deepEqual(records.records.map((record) => record.id), ['ds-p1-006-old-http']);
   } finally {
     await new Promise((resolve) => app.server.close(resolve));

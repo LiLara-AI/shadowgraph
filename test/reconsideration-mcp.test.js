@@ -15,6 +15,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createShadowGraphServer } from '../src/server.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { createJsonFileStore } from '../src/storage.js';
 
 function client(file, env = {}) {
   const child = spawn(process.execPath, ['src/mcp.js'], {
@@ -64,7 +65,8 @@ const decision = {
 
 test('compact mode advertises reconsideration and answers with a verdict and its evidence', async (t) => {
   const directory = await scratchDirectory(t, 'reconsider-compact-');
-  const rpc = client(join(directory, 'data.json'), { SHADOWGRAPH_MCP_COMPACT: '1' });
+  const file = join(directory, 'data.json');
+  const rpc = client(file, { SHADOWGRAPH_MCP_COMPACT: '1' });
   t.after(() => rpc.stop());
 
   const listed = await rpc.send('tools/list', {});
@@ -90,10 +92,24 @@ test('compact mode advertises reconsideration and answers with a verdict and its
   // The signal it raises is nameable and closable from compact alone.
   const signalId = recommended.decisions[0].reviewSignalId;
   assert.ok(signalId, 'the entry names the signal a client must acknowledge');
-  const acknowledged = await rpc.call('shadowgraph_ack_review', { id: signalId });
-  assert.equal(acknowledged.status, 'acknowledged');
+  // shadowgraph_ack_review passes only the signal id, so until its arm is
+  // aligned (plan PR-13) it carries no write scope and is refused (P1 finding
+  // F-30). The acknowledgement is made on the store, with the project's scope,
+  // while no server holds it.
+  const refused = await rpc.send('tools/call', { name: 'shadowgraph_ack_review', arguments: { project: 'p', id: signalId } });
+  assert.deepEqual(refused.error, { code: -32000, message: 'Tool execution failed' });
+  const exited = new Promise((resolve) => rpc.child.once('exit', resolve));
+  rpc.stop();
+  await exited;
+  const store = createJsonFileStore(file);
+  const graph = createShadowGraph();
+  graph.importData(await store.load());
+  assert.equal(graph.acknowledgeReview(signalId, { project: 'p' }).status, 'acknowledged');
+  await store.save(privilegedSnapshot(graph));
 
-  const settled = await rpc.call('shadowgraph_reconsider', { project: 'p' });
+  const reopened = client(file, { SHADOWGRAPH_MCP_COMPACT: '1' });
+  t.after(() => reopened.stop());
+  const settled = await reopened.call('shadowgraph_reconsider', { project: 'p' });
   assert.equal(settled.decisions[0].reviewSignalId, signalId, 'a repeat raises no second signal');
   assert.equal(settled.decisions[0].reviewSignalStatus, 'acknowledged');
 });

@@ -143,8 +143,8 @@ async function signedFactPayload(directory, fixture, options = {}) {
     verifiedAt: options.verifiedAt ?? '2026-08-27T12:05:00.000Z',
     privateKey: fixture.keys.privateKey
   })), 'utf8');
-  await graph.verifyFact({ factId: fact.id, evidencePath });
-  if (options.terminal === 'expired') graph.maintain({ now: options.expiredAt ?? '2026-10-01T00:00:00.000Z' });
+  await graph.verifyFact({ project: fact.project, factId: fact.id, evidencePath });
+  if (options.terminal === 'expired') graph.maintain({ project: fact.project, now: options.expiredAt ?? '2026-10-01T00:00:00.000Z' });
   if (options.terminal === 'superseded') {
     graph.addFact({
       id: `${fact.id}-replacement`, project: fact.project, key: fact.key, value: 'replacement',
@@ -560,7 +560,7 @@ test('RRV-02: an active signed fact is trusted before but never at or after its 
   rebuilding.importData(payload);
   const rawJournal = structuredClone(privilegedSnapshot(rebuilding).journal);
   trustedInstant = boundary;
-  const report = rebuilding.rebuild();
+  const report = rebuilding.rebuild({ project: 'rrv' });
   assert.equal(report.rebuildable, false);
   assert.notEqual(report.projection.facts[0]?.verificationStatus, 'verified');
   assert.deepEqual(privilegedSnapshot(rebuilding).journal, rawJournal, 'failed trusted rebuild must not rewrite audit evidence');
@@ -635,7 +635,7 @@ test('RRV-02: real HTTP and MCP restore reject lifecycle resurrection atomically
     assert.equal(response.status, 400);
     assert.match((await response.json()).error, /lifecycle|duplicate.*fact\.verified|monotonic/i);
     assert.deepEqual(await readFile(httpDestination), httpBefore);
-    const records = await (await fetch(`${base}/records`)).json();
+    const records = await (await fetch(`${base}/records?project=${old.records[0].project}`)).json();
     assert.deepEqual(records.records.map((record) => record.id), [old.records[0].id]);
   } finally {
     await new Promise((resolveClose) => app.server.close(resolveClose));
@@ -668,7 +668,7 @@ test('RRV-02: legitimate signed expiration and supersession remain importable an
     assert.doesNotThrow(() => graph.importData(payload), terminal);
     const signed = privilegedSnapshot(graph).facts.find((fact) => fact.verification);
     assert.equal(signed.status, terminal);
-    const report = graph.rebuild();
+    const report = graph.rebuild({ project: 'rrv' });
     assert.equal(report.rebuildable, true, `${terminal} journal must remain rebuildable`);
     assert.equal(report.projection.facts.find((fact) => fact.id === signed.id).status, terminal);
     assert.doesNotThrow(() => createRestoreValidator({
@@ -684,7 +684,7 @@ test('RRV-03: schemas 1-5 normalize legacy verified idempotency to the canonical
     graph.importData(legacyVerifiedIdempotencyPayload(schemaVersion));
     const canonical = assertCanonicalUnverifiedRetry(graph, schemaVersion);
 
-    const report = graph.rebuild();
+    const report = graph.rebuild({ project: 'rrv03' });
     assert.equal(report.rebuildable, true, `schema ${schemaVersion} journal must rebuild`);
     const rebuiltFact = report.projection.facts.find((fact) => fact.id === canonical.id);
     const rebuiltCache = report.projection.idempotency.find((item) => item.value.id === canonical.id);
@@ -761,9 +761,11 @@ test('RRV-03: CLI, HTTP, and real MCP retries expose only the canonical unverifi
     const retry = await response.json();
     assert.equal(response.status, 200);
     assert.equal(retry.verificationStatus, 'unverified');
-    const exported = await (await fetch(`${base}/records`)).json();
+    const exported = await (await fetch(`${base}/records?project=rrv03`)).json();
     assert.deepEqual(retry, exported.facts[0]);
-    assert.deepEqual(exported.idempotency[0].value, exported.facts[0]);
+    assert.equal(Object.hasOwn(exported, 'idempotency'), false, 'the public export carries no retry cache');
+    const httpDurable = JSON.parse(await readFile(httpFile, 'utf8'));
+    assert.deepEqual(httpDurable.idempotency[0].value, httpDurable.facts[0]);
   } finally {
     await new Promise((resolveClose) => app.server.close(resolveClose));
   }
@@ -796,14 +798,14 @@ test('RRV-03: valid signed facts return the final verified entity on retry when 
     fact, verifierIdentity: 'approver', evidenceReference: 'ticket:rrv03-valid',
     verifiedAt: '2026-08-27T12:05:00.000Z', privateKey: fixture.keys.privateKey
   })), 'utf8');
-  await graph.verifyFact({ factId: fact.id, evidencePath });
+  await graph.verifyFact({ project: 'rrv03', factId: fact.id, evidencePath });
   const canonical = privilegedSnapshot(graph).facts[0];
   assert.equal(canonical.verificationStatus, 'verified');
 
   const retryInput = { project: 'rrv03', key: 'ignored', value: false, idempotencyKey: 'valid-signed-retry' };
   assert.deepEqual(graph.addFact(retryInput), canonical, 'same-process retry must reflect verification');
   assert.deepEqual(privilegedSnapshot(graph).idempotency[0].value, canonical);
-  const report = graph.rebuild();
+  const report = graph.rebuild({ project: 'rrv03' });
   assert.equal(report.rebuildable, true);
   assert.deepEqual(report.projection.idempotency[0].value, report.projection.facts[0]);
   assert.equal(report.projection.idempotency[0].value.verificationStatus, 'verified');

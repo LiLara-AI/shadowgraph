@@ -182,7 +182,7 @@ test('the compact list and acknowledge flow settles the new breach without touch
   assert.equal(listed.reviewSignalStatus, 'open');
   assert.notEqual(listed.reviewSignalId, 'review:legacy', 'the new breach set has its own signal');
 
-  graph.acknowledgeReview(listed.reviewSignalId);
+  graph.acknowledgeReview(listed.reviewSignalId, { project: 'p' });
   assert.equal(openReview(graph).reviewSignalStatus, 'acknowledged', 'acknowledging it settles it');
 
   const legacy = graph.getReviewSignals({ project: 'p' }).find((item) => item.id === 'review:legacy');
@@ -312,7 +312,7 @@ function acknowledgedTwoKeyGraph() {
   graph.addFact({ project: 'p', key: 'load', value: 60 });
   const review = openReview(graph);
   assert.equal(review.reason, 'lag, load', 'both keys are named');
-  graph.acknowledgeReview(review.reviewSignalId);
+  graph.acknowledgeReview(review.reviewSignalId, { project: 'p' });
   return graph;
 }
 
@@ -337,7 +337,7 @@ test('reordering rules on different keys does not reopen an acknowledged review'
 test('reordering rules on the same key does not reopen an acknowledged review', () => {
   const graph = seedGraph({ rules: [LAG_LOW, LAG_HIGH] });
   graph.addFact({ project: 'p', key: 'lag', value: 1200 });
-  graph.acknowledgeReview(openReview(graph).reviewSignalId);
+  graph.acknowledgeReview(openReview(graph).reviewSignalId, { project: 'p' });
 
   const reordered = reimportReversed(graph);
   assert.equal(openReview(reordered).reviewSignalStatus, 'acknowledged');
@@ -347,7 +347,7 @@ test('reordering rules on the same key does not reopen an acknowledged review', 
 test('a genuinely changed breach set still opens a new signal after a reorder', () => {
   const graph = seedGraph({ rules: [LAG_LOW, LAG_HIGH] });
   graph.addFact({ project: 'p', key: 'lag', value: 600 });
-  graph.acknowledgeReview(openReview(graph).reviewSignalId);
+  graph.acknowledgeReview(openReview(graph).reviewSignalId, { project: 'p' });
 
   const reordered = reimportReversed(graph);
   assert.equal(openReview(reordered).reviewSignalStatus, 'acknowledged', 'the same coverage stays acknowledged');

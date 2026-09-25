@@ -40,15 +40,20 @@ function populated() {
   return graph;
 }
 
-test('the privileged snapshot is byte-equal to the exportData() output of this build', () => {
+// Byte-equal to exportData() when PR-05 introduced it; since PR-10 the public
+// export is a scoped read and the snapshot alone is the whole store.
+test('the privileged snapshot is the whole store; the public export is a scoped read of it', () => {
   const graph = populated();
   const snapshot = privilegedSnapshot(graph);
   for (const collection of ['records', 'facts', 'relations', 'reviewSignals', 'idempotency', 'events', 'journal']) {
     assert.ok(snapshot[collection].length > 0, `fixture must populate ${collection}`);
   }
-  assert.equal(JSON.stringify(snapshot), JSON.stringify(graph.exportData()));
-  const empty = createShadowGraph({ now: () => NOW });
-  assert.equal(JSON.stringify(privilegedSnapshot(empty)), JSON.stringify(empty.exportData()));
+  const alpha = graph.exportData({ project: 'alpha' });
+  assert.equal(alpha.exportKind, 'public_scoped');
+  assert.deepEqual(alpha.records.map((record) => record.id), snapshot.records.filter((record) => record.project === 'alpha').map((record) => record.id));
+  assert.deepEqual(alpha.relations, [], 'the relation across projects is stored and not exported');
+  for (const key of ['journal', 'idempotency', 'revision', 'journalSeq', 'journalEpoch']) assert.equal(Object.hasOwn(alpha, key), false, key);
+  assert.deepEqual(graph.exportData().records, []);
 });
 
 test('the privileged snapshot is complete, unscoped, detached and side-effect free', () => {
@@ -61,7 +66,7 @@ test('the privileged snapshot is complete, unscoped, detached and side-effect fr
   snapshot.journal.push({ forged: true });
   snapshot.revision = 99;
   assert.equal(JSON.stringify(privilegedSnapshot(graph)), before);
-  assert.equal(graph.stats().journal, JSON.parse(before).journal.length);
+  assert.equal(privilegedSnapshot(graph).journal.length, JSON.parse(before).journal.length);
 });
 
 test('only a graph built by createShadowGraph has a privileged snapshot', () => {
@@ -112,12 +117,12 @@ const sourceLines = async (path) => (await readFile(join(root, path), 'utf8')).s
 
 test('the public reads stay on the public export', async () => {
   const cliList = (await sourceLines('src/cli.js')).filter((line) => line.includes("command === 'list'"));
-  assert.deepEqual(cliList.map((line) => line.trim()), ["else if (command === 'list') result = graph.exportData();"]);
+  assert.deepEqual(cliList.map((line) => line.trim()), ["else if (command === 'list') result = graph.exportData(parse(input || '{}'));"]);
   const records = (await sourceLines('src/server.js')).filter((line) => line.includes("path === '/records'"));
-  assert.deepEqual(records.map((line) => line.trim()), ["if (method === 'GET' && path === '/records') return graph.exportData();"]);
+  assert.deepEqual(records.map((line) => line.trim()), ["if (method === 'GET' && path === '/records') return graph.exportData(body ?? {});"]);
   const markdown = (await readFile(join(root, 'src/markdown-workspace.js'), 'utf8'));
   const push = markdown.slice(markdown.indexOf('async function push('), markdown.indexOf('async function pull('));
-  assert.match(push, /graph\.exportData\(\)\.records/);
+  assert.match(push, /graph\.exportData\(\{ project \}\)\.records/);
   assert.doesNotMatch(push, /privilegedSnapshot/);
 });
 
@@ -146,7 +151,7 @@ test('HTTP persists the privileged snapshot and serves GET /records from the pub
   const saved = [];
   let revision = 0;
   const store = {
-    async load() { return createShadowGraph().exportData(); },
+    async load() { return privilegedSnapshot(createShadowGraph()); },
     async save(data) { saved.push(data); revision += 1; return revision; }
   };
   const app = await createShadowGraphServer({ store });

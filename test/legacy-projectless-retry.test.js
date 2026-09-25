@@ -6,7 +6,7 @@ import { NODE_SQLITE_NOT_APPLICABLE_REASON } from '../src/runtime-capabilities.j
 import { createShadowGraph, rebuildProjection } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
-import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { privilegedRebuild, privilegedSnapshot, privilegedValidate } from '../src/internal/snapshot.js';
 import { validateRestorePayload } from '../src/restore-validation.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
@@ -76,9 +76,9 @@ const owners = (payload) => Object.fromEntries([...payload.records, ...payload.f
 // Import, validation, the journal rebuild and restore validation all read the
 // same entities and the same retries.
 function assertOneMeaning(graph, label) {
-  const validation = graph.validate();
+  const validation = privilegedValidate(graph);
   assert.equal(validation.valid, true, `${label}: ${JSON.stringify(validation.issues)}`);
-  const rebuilt = graph.rebuild();
+  const rebuilt = privilegedRebuild(graph);
   assert.equal(rebuilt.rebuildable, true, `${label}: ${rebuilt.reason} ${JSON.stringify(rebuilt.skipped.at(-1) ?? null)}`);
   const live = privilegedSnapshot(graph);
   assert.deepEqual(ids(rebuilt.projection), ids(live), `${label}: the journal rebuilds every entity the store holds`);

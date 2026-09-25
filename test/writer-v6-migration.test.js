@@ -12,7 +12,7 @@ import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { validateRestorePayload } from '../src/restore-validation.js';
 import { downgradeStore, downgradeToSchema5 } from '../src/schema-conversion.js';
-import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { privilegedRebuild, privilegedSnapshot, privilegedValidate } from '../src/internal/snapshot.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
 // PR-07 (plan v1.4.4 §9.3, §9.6, §10.3, §19.3.2; P1 reconciliation F-03, F-13;
@@ -84,15 +84,15 @@ test('an origin with no project owns its records alone: unattributed, isolated r
   assert.equal(graph.addDecision({ originId: 'origin_a', title: 'Retry again', chosen: 'y', idempotencyKey: 'same' }).id, first.id, 'a retry within the origin returns the first result');
   assert.notEqual(graph.addDecision({ originId: 'origin_b', title: 'Other origin', chosen: 'x', idempotencyKey: 'same' }).id, first.id, 'another origin never matches');
   assert.notEqual(graph.addDecision({ project: 'default', title: 'A project', chosen: 'x', idempotencyKey: 'same' }).id, first.id, 'a project never matches an origin');
-  const journalled = graph.getJournal({ limit: 1000 }).items.find((entry) => entry.entityId === first.id);
+  const journalled = graph.getJournal({ originId: 'origin_a', limit: 1000 }).items.find((entry) => entry.entityId === first.id);
   assert.equal(journalled.project, null);
   assert.equal(journalled.idempotencyKey, 'decision@"origin_a":same');
 
   const mine = graph.addDecision({ originId: 'origin_a', title: 'Mine', chosen: 'x' });
   const theirs = graph.addDecision({ originId: 'origin_b', title: 'Theirs', chosen: 'x' });
-  assert.throws(() => graph.supersedeDecision({ decisionId: mine.id, replacementId: theirs.id }), /same project/, 'project null on both sides is not a shared owner');
+  assert.throws(() => graph.supersedeDecision({ originId: 'origin_a', decisionId: mine.id, replacementId: theirs.id }), /Supersession requires two existing decisions/, 'project null on both sides is not a shared owner: a decision of the other origin is outside this one');
   const mineToo = graph.addDecision({ originId: 'origin_a', title: 'Mine too', chosen: 'y' });
-  assert.equal(graph.supersedeDecision({ decisionId: mine.id, replacementId: mineToo.id }).previous.status, 'superseded');
+  assert.equal(graph.supersedeDecision({ originId: 'origin_a', decisionId: mine.id, replacementId: mineToo.id }).previous.status, 'superseded');
 
   // The same memory identity under two origins and under "default" stays three memories.
   graph.remember({ originId: 'origin_b', memoryType: 'note', key: 'k', text: 'b note' });
@@ -189,8 +189,8 @@ test('the attribution migration maps legacy records by OD-1, journals each chang
   assert.ok(entries.every((entry) => entry.payload.attributionChange.reason === 'migration' && entry.payload.attributionChange.previousAttribution === null));
   assert.equal(entries.find((entry) => entry.entityId === 'decision-default').payload.attributionChange.previousProject, 'default');
   assert.equal(result.highWaterMark, entries.at(-1).entityId);
-  assert.equal(graph.validate().valid, true, JSON.stringify(graph.validate().issues));
-  const rebuilt = graph.rebuild();
+  assert.equal(privilegedValidate(graph).valid, true, JSON.stringify(privilegedValidate(graph).issues));
+  const rebuilt = privilegedRebuild(graph);
   assert.equal(rebuilt.rebuildable, true, rebuilt.reason);
   assert.deepEqual(owners(rebuilt.projection), EXPECTED, 'a rebuild reproduces the attribution');
   assert.doesNotThrow(() => validateRestorePayload(after, { now }));

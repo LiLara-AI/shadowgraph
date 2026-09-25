@@ -87,7 +87,7 @@ test('final review: unknown confidence policy is preserved and reported unsuppor
   assert.equal(stored.current, 0.91, 'unknown policy values must not be recalculated by v1');
   assert.equal(stored.policy, 'future_policy_v9');
   assert.equal(stored.basis.policy, 'future_policy_v9');
-  const result = graph.validate();
+  const result = graph.validate({ project: 'p' });
   assert.equal(result.valid, false);
   assert.ok(result.issues.some((issue) => issue.code === 'unsupported_confidence_policy' && issue.severity === 'unsupported'));
 });
@@ -142,7 +142,7 @@ test('final review: decision, fact, and attempt idempotency namespaces survive r
   const d = graph.addDecision({ project: 'default', title: 'D', chosen: 'C', idempotencyKey: 'same' });
   const f = graph.addFact({ project: 'default', key: 'F', value: 1, idempotencyKey: 'same' });
   const a = graph.addAttempt({ project: 'default', solution: 'A', result: 'R', idempotencyKey: 'same' });
-  const rebuilt = graph.rebuild();
+  const rebuilt = graph.rebuild({ project: 'default' });
   assert.equal(rebuilt.rebuildable, true);
   assert.deepEqual(rebuilt.projection.idempotency.map((item) => item.key).sort(), ['attempt:default:same', 'decision:default:same', 'fact:default:same']);
   const restarted = createShadowGraph();
@@ -159,21 +159,22 @@ test('final review: identical idempotency keys are isolated by project', () => {
   assert.notEqual(second.id, first.id);
   assert.equal(graph.addDecision({ project: 'p1', title: 'retry', chosen: 'x', idempotencyKey: 'same' }).id, first.id);
   assert.equal(graph.addDecision({ project: 'p2', title: 'retry', chosen: 'x', idempotencyKey: 'same' }).id, second.id);
-  assert.equal(graph.rebuild().projection.idempotency.length, 2);
+  assert.deepEqual(graph.rebuild({ project: 'p1' }).projection.idempotency.map((item) => item.key), ['decision:p1:same']);
+  assert.deepEqual(graph.rebuild({ project: 'p2' }).projection.idempotency.map((item) => item.key), ['decision:p2:same']);
 });
 
 test('final review: declared journalSeq is not regressed on import', () => {
   const graph = createShadowGraph();
   graph.importData({ journalSeq: 99, journalEpoch: 1, journal: [{ id: 'j1', seq: 1, type: 'fact.observed', entityKind: 'fact', entityId: 'f1', schemaVersion: 3, payload: { id: 'f1', kind: 'fact', project: 'p', key: 'k', value: 1 } }] });
   graph.addFact({ project: 'p', key: 'next', value: 2 });
-  assert.equal(graph.getJournal({ limit: 100 }).items.at(-1).seq, 100);
+  assert.equal(graph.getJournal({ project: 'p', limit: 100 }).items.at(-1).seq, 100);
 });
 
 test('final review: an empty imported journal still preserves its declared sequence high-water mark', () => {
   const graph = createShadowGraph();
   graph.importData({ journalSeq: 99, journal: [] });
   graph.addFact({ project: 'p', key: 'next', value: 2 });
-  assert.equal(graph.getJournal({ limit: 100 }).items.at(-1).seq, 100);
+  assert.equal(graph.getJournal({ project: 'p', limit: 100 }).items.at(-1).seq, 100);
 });
 
 test('final review: legacy unscoped idempotency is migrated by payload project', () => {

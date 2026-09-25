@@ -732,7 +732,13 @@ test('output schemas accept data imported from an older storage schema', () => {
     ['shadowgraph_validate', graph.validate()],
     ['shadowgraph_repair_plan', graph.repairPlan()],
     ['shadowgraph_purge_preview', graph.projectSummary('default')],
-    ['shadowgraph_maintain', graph.maintain({})]
+    ['shadowgraph_maintain', graph.maintain({})],
+    ['shadowgraph_journal', owned.getJournal(read)],
+    ['shadowgraph_rebuild', owned.rebuild(read)],
+    ['shadowgraph_redact', owned.redact(read)],
+    ['shadowgraph_validate', owned.validate(read)],
+    ['shadowgraph_repair_plan', owned.repairPlan(read)],
+    ['shadowgraph_maintain', owned.maintain(read)]
   ];
   for (const [name, value] of checks) {
     assertValid(byName.get(name).outputSchema, value, `${name} over schema-3 data`);

@@ -3,6 +3,28 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { createShadowGraph } from '../src/shadowgraph.js';
+import { createJsonFileStore } from '../src/storage.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
+
+// shadowgraph_ack_review passes only the signal id, so until its arm is
+// aligned (plan PR-13) it carries no write scope and every call is refused
+// (P1 finding F-30). The acknowledgement is made on the store instead, with
+// the project's scope, while no server holds it; everything else here stays
+// on the compact MCP surface.
+async function acknowledgeOnStore(file, id) {
+  const store = createJsonFileStore(file);
+  const graph = createShadowGraph();
+  graph.importData(await store.load());
+  const acknowledged = graph.acknowledgeReview(id, { project: 'p' });
+  await store.save(privilegedSnapshot(graph));
+  return acknowledged;
+}
+
+async function assertAckRefused(mcp, id) {
+  const refused = await mcp.send('tools/call', { name: 'shadowgraph_ack_review', arguments: { project: 'p', id } });
+  assert.deepEqual(refused.error, { code: -32000, message: 'Tool execution failed' });
+}
 
 // End-to-end through the real MCP server in compact mode, not the core API,
 // because the gap being closed was specifically that the compact SURFACE had no
@@ -96,10 +118,11 @@ test('compact can list a review, acknowledge it, keep that across restart, and s
   assert.equal(review.violatedConditions[0].key, 'replicaLagMs');
 
   // --- acknowledge --------------------------------------------------------
-  const acknowledged = await first.call('shadowgraph_ack_review', { id: review.reviewSignalId });
+  await assertAckRefused(first, review.reviewSignalId);
+  await first.stop();
+  const acknowledged = await acknowledgeOnStore(file, review.reviewSignalId);
   assert.equal(acknowledged.status, 'acknowledged');
   assert.equal(acknowledged.id, review.reviewSignalId);
-  first.stop();
 
   // --- restart: the acknowledgement survives ------------------------------
   const second = client(file);
@@ -123,9 +146,12 @@ test('compact can list a review, acknowledge it, keep that across restart, and s
   assert.equal(stillAcknowledged.reviewSignalStatus, 'acknowledged');
 
   // --- and the loop can be closed again -----------------------------------
-  const secondAck = await second.call('shadowgraph_ack_review', { id: fresh[0].reviewSignalId });
+  await second.stop();
+  const secondAck = await acknowledgeOnStore(file, fresh[0].reviewSignalId);
   assert.equal(secondAck.status, 'acknowledged');
-  const settled = await second.call('shadowgraph_context', { project: 'p' });
+  const third = client(file);
+  t.after(() => third.stop());
+  const settled = await third.call('shadowgraph_context', { project: 'p' });
   assert.equal(settled.openReviews.filter((item) => item.reviewSignalStatus === 'open').length, 0, 'nothing is left unacknowledged');
 });
 
@@ -155,10 +181,14 @@ test('acknowledging one breach does not mute a broader breach on the same decisi
 
   const narrow = (await mcp.call('shadowgraph_context', { project: 'p' })).openReviews[0];
   assert.equal(narrow.reason, 'replicaLagMs');
-  await mcp.call('shadowgraph_ack_review', { id: narrow.reviewSignalId });
+  await assertAckRefused(mcp, narrow.reviewSignalId);
+  await mcp.stop();
+  await acknowledgeOnStore(file, narrow.reviewSignalId);
 
-  await mcp.call('shadowgraph_record_fact', { project: 'p', key: 'region', value: 'eu-west', sourceClass: 'human' });
-  const broadened = (await mcp.call('shadowgraph_context', { project: 'p' })).openReviews;
+  const reopened = client(file);
+  t.after(() => reopened.stop());
+  await reopened.call('shadowgraph_record_fact', { project: 'p', key: 'region', value: 'eu-west', sourceClass: 'human' });
+  const broadened = (await reopened.call('shadowgraph_context', { project: 'p' })).openReviews.filter((item) => item.reviewSignalStatus === 'open');
   assert.equal(broadened.length, 1);
   assert.equal(broadened[0].reason, 'replicaLagMs, region', 'the reason broadened');
   assert.notEqual(broadened[0].reviewSignalId, narrow.reviewSignalId);

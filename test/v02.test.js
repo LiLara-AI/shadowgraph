@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createShadowGraph, SCHEMA_VERSION } from '../src/shadowgraph.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 test('v0.2 creates explainable search results and context', () => {
   const graph = createShadowGraph({ now: () => '2026-08-24T00:00:00.000Z' });
@@ -20,7 +21,7 @@ test('v0.2 creates explainable search results and context', () => {
 test('outcomes update confidence and produce review signals', () => {
   const graph = createShadowGraph();
   const decision = graph.addDecision({ project: 'default', title: 'Use cache', chosen: 'Redis', confidence: 0.8 });
-  const updated = graph.setOutcome(decision.id, { status: 'failed', lessons: ['Cache invalidation was unsafe'] });
+  const updated = graph.setOutcome(decision.id, { status: 'failed', lessons: ['Cache invalidation was unsafe'] }, { project: 'default' });
   // UPDATED for G8 (evidence_weighted_bounded_v1). Previously this asserted 0.6,
   // produced by a hardcoded -0.2 penalty with no stated basis — the exact defect
   // G8 was raised for. The outcome here declares no source class, so it is an
@@ -28,14 +29,14 @@ test('outcomes update confidence and produce review signals', () => {
   // A stronger claim moves it further: production_verified would give 0.6.
   assert.equal(Number(updated.confidence.current.toFixed(2)), 0.7);
   assert.equal(updated.confidence.basis.failedOutcomes, 1);
-  assert.equal(graph.review().length, 1);
+  assert.equal(graph.review({ project: 'default' }).length, 1);
 });
 
 test('facts and v0.1 records migrate into the v0.2 export shape', () => {
   const graph = createShadowGraph();
   graph.importData([{ id: 'old', kind: 'decision', title: 'Old', chosen: 'A', confidence: 0.7, alternatives: [] }]);
   graph.addFact({ project: 'default', key: 'users', value: 100, source: 'human_confirmed', confidence: 1 });
-  const data = graph.exportData();
+  const data = privilegedSnapshot(graph);
   assert.equal(data.schemaVersion, SCHEMA_VERSION);
   assert.equal(data.records[0].confidence.current, 0.7);
   assert.equal(data.facts[0].source, 'human_confirmed');

@@ -13,7 +13,7 @@ import { JOURNAL_TYPE_ENTITY_KIND, REPLAYABLE_ENTRY_TYPES } from '../src/journal
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
-import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { privilegedRebuild, privilegedSnapshot, privilegedValidate } from '../src/internal/snapshot.js';
 
 const BOUNDARY = '2026-08-28T00:00:01.000Z';
 const NODE_SQLITE = (await getRuntimeCapabilities()).nodeSqlite;
@@ -46,7 +46,7 @@ async function verifyAcrossIoBoundary(postIoInstant) {
 
 test('P1 premerge verifier slice: commit uses trusted now sampled after verifier I/O at [before, at, after] boundary', async () => {
   const before = await verifyAcrossIoBoundary('2026-08-28T00:00:00.999Z');
-  const accepted = await before.graph.verifyFact({ factId: before.fact.id, evidencePath: 'trusted-local-evidence.json' });
+  const accepted = await before.graph.verifyFact({ project: before.fact.project, factId: before.fact.id, evidencePath: 'trusted-local-evidence.json' });
   assert.equal(accepted.operation, 'VERIFIED');
   assert.equal(accepted.fact.verificationStatus, 'verified');
   assert.deepEqual(before.validationInstants, ['2026-08-28T00:00:00.999Z']);
@@ -55,7 +55,7 @@ test('P1 premerge verifier slice: commit uses trusted now sampled after verifier
     const rejected = await verifyAcrossIoBoundary(instant);
     const stateBeforeVerification = privilegedSnapshot(rejected.graph);
     await assert.rejects(
-      rejected.graph.verifyFact({ factId: rejected.fact.id, evidencePath: 'trusted-local-evidence.json' }),
+      rejected.graph.verifyFact({ project: rejected.fact.project, factId: rejected.fact.id, evidencePath: 'trusted-local-evidence.json' }),
       /invalid or expired persisted fact verification/i
     );
     assert.deepEqual(rejected.validationInstants, [instant]);
@@ -86,11 +86,11 @@ test('P1 follow-up verifier slice: identical retry crossing the signed boundary 
     value: true,
     expiresAt: BOUNDARY
   });
-  const first = await graph.verifyFact({ factId: fact.id, evidencePath: 'trusted-local-evidence.json' });
+  const first = await graph.verifyFact({ project: 'premerge-verification', factId: fact.id, evidencePath: 'trusted-local-evidence.json' });
   assert.equal(first.operation, 'VERIFIED');
 
   await assert.rejects(
-    graph.verifyFact({ factId: fact.id, evidencePath: 'trusted-local-evidence.json' }),
+    graph.verifyFact({ project: 'premerge-verification', factId: fact.id, evidencePath: 'trusted-local-evidence.json' }),
     /invalid or expired persisted fact verification/i
   );
   assert.deepEqual(validationInstants, ['2026-08-28T00:00:00.999Z', BOUNDARY], 'identical retry must validate with the post-I/O instant');
@@ -124,7 +124,7 @@ test('P1 follow-up verification transaction slice: sequence overflow leaves all 
   const before = privilegedSnapshot(graph);
 
   await assert.rejects(
-    graph.verifyFact({ factId: fact.id, evidencePath: 'trusted-local-evidence.json' }),
+    graph.verifyFact({ project: fact.project, factId: fact.id, evidencePath: 'trusted-local-evidence.json' }),
     /journal sequence overflow/i
   );
   assert.deepEqual(
@@ -297,10 +297,10 @@ test('P1 replayability schema slice: replayable:false cannot disguise a payload-
   legacyEnvelope.journal[0].schemaVersion = 4;
   const validationProbe = createShadowGraph();
   assert.doesNotThrow(() => validationProbe.importData(legacyEnvelope), 'legacy envelopes remain readable');
-  const validation = validationProbe.validate();
+  const validation = privilegedValidate(validationProbe);
   assert.equal(validation.valid, false, 'current in-memory validation must classify the contradiction');
   assert.ok(validation.issues.some((issue) => issue.code === 'noncanonical_schema5_purge_artifact'));
-  const rebuild = validationProbe.rebuild();
+  const rebuild = privilegedRebuild(validationProbe);
   assert.equal(rebuild.rebuildable, false, 'rebuild must fail closed rather than silently dropping the entry');
   assert.match(rebuild.reason, /noncanonical schema-5 purge artifacts/i);
 });
@@ -712,7 +712,7 @@ const JOURNAL_MUTATOR_CASES = [
     build() {
       const graph = atomicGraph();
       const decision = graph.addDecision({ id: 'matrix-outcome', project: 'matrix', title: 'Outcome', chosen: 'A' });
-      return { graph, invoke: () => graph.setOutcome(decision.id, { status: 'successful', sourceClass: 'agent_claimed', observedAt: ATOMIC_NOW }) };
+      return { graph, invoke: () => graph.setOutcome(decision.id, { status: 'successful', sourceClass: 'agent_claimed', observedAt: ATOMIC_NOW }, { project: 'matrix' }) };
     }
   },
   {
@@ -720,7 +720,7 @@ const JOURNAL_MUTATOR_CASES = [
     build() {
       const graph = atomicGraph();
       const decision = graph.addDecision({ id: 'matrix-outcome-unknown', project: 'matrix', title: 'Unknown outcome', chosen: 'A' });
-      return { graph, invoke: () => graph.setOutcome(decision.id, { status: 'unknown', sourceClass: 'agent_claimed', observedAt: ATOMIC_NOW }) };
+      return { graph, invoke: () => graph.setOutcome(decision.id, { status: 'unknown', sourceClass: 'agent_claimed', observedAt: ATOMIC_NOW }, { project: 'matrix' }) };
     }
   },
   {
@@ -728,7 +728,7 @@ const JOURNAL_MUTATOR_CASES = [
     build() {
       const graph = atomicGraph();
       const decision = graph.addDecision({ id: 'matrix-confidence', project: 'matrix', title: 'Confidence', chosen: 'A' });
-      return { graph, invoke: () => graph.addConfidenceEvidence({ decisionId: decision.id, key: 'matrix-evidence', reason: 'Evidence' }) };
+      return { graph, invoke: () => graph.addConfidenceEvidence({ project: 'matrix', decisionId: decision.id, key: 'matrix-evidence', reason: 'Evidence' }) };
     }
   },
   {
@@ -736,7 +736,7 @@ const JOURNAL_MUTATOR_CASES = [
     build() {
       const graph = atomicGraph();
       const decision = graph.addDecision({ id: 'matrix-status', project: 'matrix', title: 'Status', chosen: 'A' });
-      return { graph, invoke: () => graph.updateDecisionStatus(decision.id, 'planned') };
+      return { graph, invoke: () => graph.updateDecisionStatus(decision.id, 'planned', { project: 'matrix' }) };
     }
   },
   {
@@ -754,7 +754,7 @@ const JOURNAL_MUTATOR_CASES = [
       const graph = atomicGraph();
       const previous = graph.addDecision({ id: 'matrix-supersede-old', project: 'matrix', title: 'Old', chosen: 'A' });
       const replacement = graph.addDecision({ id: 'matrix-supersede-new', project: 'matrix', title: 'New', chosen: 'B' });
-      return { graph, invoke: () => graph.supersedeDecision({ decisionId: previous.id, replacementId: replacement.id }) };
+      return { graph, invoke: () => graph.supersedeDecision({ project: 'matrix', decisionId: previous.id, replacementId: replacement.id }) };
     }
   },
   {
@@ -765,7 +765,7 @@ const JOURNAL_MUTATOR_CASES = [
       graph.addDecision({ id: 'matrix-maintain-decision-b', project: 'matrix', title: 'Due B', chosen: 'B', reviewAfter: ATOMIC_NOW });
       graph.addFact({ id: 'matrix-maintain-fact-a', project: 'matrix', key: 'due-a', value: 1, expiresAt: ATOMIC_NOW });
       graph.addFact({ id: 'matrix-maintain-fact-b', project: 'matrix', key: 'due-b', value: 2, expiresAt: ATOMIC_NOW });
-      return { graph, invoke: () => graph.maintain({ now: ATOMIC_LATER }) };
+      return { graph, invoke: () => graph.maintain({ project: 'matrix', now: ATOMIC_LATER }) };
     }
   }
 ];
@@ -817,7 +817,7 @@ test('P1 causation reservation: near-boundary multi-entry operations retain dete
     const decision = graph.addDecision({ id: 'causation-outcome', project: 'matrix', title: 'Outcome', chosen: 'A' });
     const epoch = privilegedSnapshot(graph).journalEpoch;
     graph.importData({ schemaVersion: 5, journal: [], journalSeq: Number.MAX_SAFE_INTEGER - 2 });
-    graph.setOutcome(decision.id, { status: 'successful', observedAt: ATOMIC_NOW });
+    graph.setOutcome(decision.id, { status: 'successful', observedAt: ATOMIC_NOW }, { project: 'matrix' });
     const after = privilegedSnapshot(graph);
     const entries = after.journal.slice(-2);
     assert.deepEqual(entries.map((entry) => [entry.seq, entry.type]), [
@@ -834,7 +834,7 @@ test('P1 causation reservation: near-boundary multi-entry operations retain dete
     const replacement = graph.addDecision({ id: 'causation-new', project: 'matrix', title: 'New', chosen: 'B' });
     const epoch = privilegedSnapshot(graph).journalEpoch;
     graph.importData({ schemaVersion: 5, journal: [], journalSeq: Number.MAX_SAFE_INTEGER - 3 });
-    graph.supersedeDecision({ decisionId: previous.id, replacementId: replacement.id });
+    graph.supersedeDecision({ project: 'matrix', decisionId: previous.id, replacementId: replacement.id });
     const after = privilegedSnapshot(graph);
     const entries = after.journal.slice(-3);
     assert.deepEqual(entries.map((entry) => [entry.seq, entry.type]), [
@@ -926,7 +926,7 @@ const ZERO_JOURNAL_MUTATOR_CASES = [
     build() {
       const graph = atomicGraph();
       const decision = graph.addDecision({ id: 'zero-confidence', project: 'matrix', title: 'Confidence', chosen: 'A' });
-      const input = { decisionId: decision.id, key: 'same-evidence', reason: 'same', observedAt: ATOMIC_NOW };
+      const input = { project: 'matrix', decisionId: decision.id, key: 'same-evidence', reason: 'same', observedAt: ATOMIC_NOW };
       graph.addConfidenceEvidence(input);
       return { graph, invoke: () => graph.addConfidenceEvidence(input) };
     }
@@ -936,7 +936,7 @@ const ZERO_JOURNAL_MUTATOR_CASES = [
     build() {
       const graph = atomicGraph();
       const decision = graph.addDecision({ id: 'zero-status', project: 'matrix', title: 'Status', chosen: 'A' });
-      return { graph, invoke: () => graph.updateDecisionStatus(decision.id, 'proposed') };
+      return { graph, invoke: () => graph.updateDecisionStatus(decision.id, 'proposed', { project: 'matrix' }) };
     }
   },
   {
@@ -945,8 +945,8 @@ const ZERO_JOURNAL_MUTATOR_CASES = [
       const graph = atomicGraph();
       const previous = graph.addDecision({ id: 'zero-supersede-old', project: 'matrix', title: 'Old', chosen: 'A' });
       const replacement = graph.addDecision({ id: 'zero-supersede-new', project: 'matrix', title: 'New', chosen: 'B' });
-      graph.supersedeDecision({ decisionId: previous.id, replacementId: replacement.id });
-      return { graph, invoke: () => graph.supersedeDecision({ decisionId: previous.id, replacementId: replacement.id }) };
+      graph.supersedeDecision({ project: 'matrix', decisionId: previous.id, replacementId: replacement.id });
+      return { graph, invoke: () => graph.supersedeDecision({ project: 'matrix', decisionId: previous.id, replacementId: replacement.id }) };
     }
   },
   {
@@ -973,7 +973,7 @@ const ZERO_JOURNAL_MUTATOR_CASES = [
   },
   {
     name: 'maintain with no lifecycle transitions',
-    build() { const graph = atomicGraph(); return { graph, invoke: () => graph.maintain({ now: ATOMIC_LATER }) }; }
+    build() { const graph = atomicGraph(); return { graph, invoke: () => graph.maintain({ project: 'matrix', now: ATOMIC_LATER }) }; }
   },
   {
     name: 'acknowledgeReview',
@@ -984,8 +984,8 @@ const ZERO_JOURNAL_MUTATOR_CASES = [
         alternatives: [{ id: 'zero-ack-alt', label: 'B', reopenWhen: ['changed'] }]
       });
       graph.review({ project: 'matrix', changedFacts: ['changed'] });
-      const signal = graph.getReviewSignals()[0];
-      return { graph, invoke: () => graph.acknowledgeReview(signal.id) };
+      const signal = graph.getReviewSignals({ project: 'matrix' })[0];
+      return { graph, invoke: () => graph.acknowledgeReview(signal.id, { project: 'matrix' }) };
     }
   },
   {
@@ -1020,14 +1020,14 @@ test('P1 verifyFact reservation: one-entry commit reaches MAX_SAFE_INTEGER and i
   const fact = graph.addFact({ id: 'matrix-verify', project: 'matrix', key: 'verify', value: true });
   graph.importData({ schemaVersion: 5, journal: [], journalSeq: Number.MAX_SAFE_INTEGER - 1 });
   const before = privilegedSnapshot(graph);
-  const verified = await graph.verifyFact({ factId: fact.id, evidencePath: 'trusted.json' });
+  const verified = await graph.verifyFact({ project: 'matrix', factId: fact.id, evidencePath: 'trusted.json' });
   assert.equal(verified.operation, 'VERIFIED');
   const after = privilegedSnapshot(graph);
   assert.equal(after.journal.length, before.journal.length + 1);
   assert.equal(after.journal.at(-1).seq, Number.MAX_SAFE_INTEGER);
 
   const retryBefore = privilegedSnapshot(graph);
-  const retry = await graph.verifyFact({ factId: fact.id, evidencePath: 'trusted.json' });
+  const retry = await graph.verifyFact({ project: 'matrix', factId: fact.id, evidencePath: 'trusted.json' });
   assert.equal(retry.operation, 'NOOP');
   assert.deepEqual(privilegedSnapshot(graph), retryBefore);
 });

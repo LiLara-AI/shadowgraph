@@ -9,7 +9,7 @@ import { nextRevision, assertRevision, createDestinationFence, currentRevision, 
 import { createRestoreValidator, guardAuthorityRestore, requiresLegacyPurgeMigration } from './restore-validation.js';
 import { NODE_SQLITE_NOT_APPLICABLE_REASON } from './runtime-capabilities.js';
 import { SCHEMA_VERSION } from './shadowgraph.js';
-import { extraCollections, isExtraCollectionKey } from './internal/collections.js';
+import { extraCollections, isExtraCollectionKey, refusePublicExport } from './internal/collections.js';
 
 // One generic carrier for every top-level collection this build does not
 // handle natively (plan v1.4.4 §10.9.8): one row per collection, the whole
@@ -305,6 +305,7 @@ export async function createSqliteStore(filePath, options = {}) {
     },
 
     async save(data) {
+      refusePublicExport(data);
       if (restoring) throw new Error('SQLite restore is in progress');
       if (permanentlyClosed) throw new Error('SQLite storage is closed');
       return fence.run(async () => {

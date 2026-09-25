@@ -207,7 +207,7 @@ test('a message sent in the same chunk as a batch cannot overtake its members', 
   ]);
   const dependent = JSON.stringify({
     jsonrpc: '2.0', id: 'dependent', method: 'tools/call',
-    params: { name: 'shadowgraph_update_status', arguments: { decisionId: 'chunk-decision', status: 'planned' } }
+    params: { name: 'shadowgraph_confidence_evidence', arguments: { project: 'chunking', decisionId: 'chunk-decision', key: 'dependent', reason: 'written after the batch' } }
   });
   const batched = rpc.waitFor((value) => Array.isArray(value), 'the batch response array');
   const followed = rpc.waitFor((value) => !Array.isArray(value) && value.id === 'dependent', 'the dependent call');
@@ -216,7 +216,7 @@ test('a message sent in the same chunk as a batch cannot overtake its members', 
   assert.deepEqual(idsOf(await batched), ['noop', 'write']);
   const response = await followed;
   assert.equal(response.error, undefined, response.error?.message);
-  assert.equal(JSON.parse(response.result.content[0].text).status, 'planned');
+  assert.equal(JSON.parse(response.result.content[0].text).confidence.basis.contributions.some((item) => item.key === 'dependent'), true);
 });
 
 test('an initialize with no id negotiates nothing, because nothing was agreed', async (t) => {
@@ -307,14 +307,14 @@ test('batch members are handled in order even when one of them is asynchronous',
     },
     {
       jsonrpc: '2.0', id: 'depends', method: 'tools/call',
-      params: { name: 'shadowgraph_update_status', arguments: { decisionId: 'ordered-decision', status: 'planned' } }
+      params: { name: 'shadowgraph_confidence_evidence', arguments: { project: 'ordering', decisionId: 'ordered-decision', key: 'depends', reason: 'the second member' } }
     },
     { jsonrpc: '2.0', id: 'list', method: 'tools/list', params: {} }
   ]);
 
   assert.deepEqual(idsOf(batch), ['write', 'depends', 'list']);
   assert.equal(batch[1].error, undefined, batch[1].error?.message);
-  assert.equal(JSON.parse(batch[1].result.content[0].text).status, 'planned');
+  assert.equal(JSON.parse(batch[1].result.content[0].text).confidence.basis.contributions.some((item) => item.key === 'depends'), true);
 });
 
 test('a modern per-request member keeps its own contract inside a batch', async (t) => {

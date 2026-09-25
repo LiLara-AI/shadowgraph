@@ -24,3 +24,16 @@ export function extraCollections(payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return [];
   return Object.entries(payload).filter(([key, value]) => isExtraCollectionKey(key) && value !== undefined);
 }
+
+// The public export is a read of one scope, not a store: it holds only what
+// that scope may see, and no journal. Taken for a store it would silently
+// drop every other project, so no import, replace, save or restore accepts
+// one (P1 reconciliation F-01).
+export const PUBLIC_EXPORT_KIND = 'public_scoped';
+
+export function refusePublicExport(payload) {
+  if (payload?.exportKind !== PUBLIC_EXPORT_KIND) return;
+  const error = new Error('Refusing a public export (public_export_not_a_store): it is a read of one scope, not a store, so it cannot be imported, saved or restored');
+  error.code = 'public_export_not_a_store';
+  throw error;
+}

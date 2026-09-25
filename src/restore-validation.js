@@ -1,6 +1,6 @@
 import { createShadowGraph } from './shadowgraph.js';
 import { hardPurgeGapLedgerReport } from './journal.js';
-import { privilegedSnapshot } from './internal/snapshot.js';
+import { privilegedRebuild, privilegedSnapshot, privilegedValidate } from './internal/snapshot.js';
 
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
@@ -56,7 +56,8 @@ export function validateRestorePayload(payload, options = {}) {
   guardAuthorityRestore(payload);
   const staging = createShadowGraph(options);
   staging.importData(payload);
-  const validation = staging.validate();
+  // The whole store is being restored, so it is checked whole (F-17).
+  const validation = privilegedValidate(staging);
   const blocking = validation.issues.filter((issue) => issue.severity === 'error' || issue.severity === 'unsupported');
   if (blocking.length) {
     const codes = [...new Set(blocking.map((issue) => issue.code))].join(', ');
@@ -64,7 +65,7 @@ export function validateRestorePayload(payload, options = {}) {
   }
 
   const live = privilegedSnapshot(staging);
-  const rebuild = staging.rebuild();
+  const rebuild = privilegedRebuild(staging);
   const corruptSkipped = rebuild.skipped;
   if (corruptSkipped.length) {
     const reasons = [...new Set(corruptSkipped.map((entry) => entry.why))].join(', ');

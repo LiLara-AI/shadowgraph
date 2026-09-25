@@ -175,8 +175,8 @@ test('MCP modern metadata, version, JSON-RPC, and tool errors remain distinguish
   const executionFailure = await rpc.call({
     jsonrpc: '2.0', id: 5, method: 'tools/call',
     params: modernParams({
-      name: 'shadowgraph_update_status',
-      arguments: { decisionId: 'missing', status: 'planned' }
+      name: 'shadowgraph_confidence_evidence',
+      arguments: { project: 'p', decisionId: 'missing', reason: 'no such decision', key: 'missing' }
     })
   });
   assert.equal(executionFailure.error, undefined);

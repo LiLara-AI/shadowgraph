@@ -2,6 +2,7 @@ import { readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { nextRevision, assertRevision, createDestinationFence } from './revision-store.js';
 import { SCHEMA_VERSION } from './shadowgraph.js';
+import { refusePublicExport } from './internal/collections.js';
 
 // Journal lives INSIDE the same payload as the state and is written by the same
 // atomic temp-write + rename. See journal-contract.md §atomicity: state and
@@ -17,6 +18,7 @@ export function createJsonFileStore(filePath, options = {}) {
       catch (error) { if (error.code === 'ENOENT') return empty(); throw new Error('ShadowGraph storage is invalid or unreadable'); }
     },
     async save(data) {
+      refusePublicExport(data);
       const input = data;
       const operation = saveQueue.then(() => fence.run(async () => {
           const current = await this.load();

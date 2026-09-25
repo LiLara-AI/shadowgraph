@@ -12,7 +12,7 @@ import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createFactAttestation, createLocalEvidenceVerifier } from '../src/verification.js';
 import { createRestoreValidator } from '../src/restore-validation.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
-import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { privilegedRebuild, privilegedSnapshot } from '../src/internal/snapshot.js';
 
 function startMcp(file, extraEnv = {}) {
   const child = spawn(process.execPath, ['src/mcp.js'], {
@@ -97,7 +97,7 @@ async function tamperedSignedSnapshot(directory, fixture) {
     verifiedAt: '2026-08-27T12:05:00.000Z',
     privateKey: fixture.keys.privateKey
   })), 'utf8');
-  await graph.verifyFact({ factId: fact.id, evidencePath });
+  await graph.verifyFact({ project: 'source', factId: fact.id, evidencePath });
 
   const tampered = privilegedSnapshot(graph);
   tampered.facts.find((item) => item.id === fact.id).value = 'tampered-after-signing';
@@ -230,8 +230,8 @@ async function verifiedSnapshot(directory, fixture, options = {}) {
     verifiedAt: '2026-08-27T12:05:00.000Z',
     privateKey: fixture.keys.privateKey
   })), 'utf8');
-  await graph.verifyFact({ factId: fact.id, evidencePath });
-  if (options.expire) graph.maintain({ now: '2026-10-01T00:00:00.000Z' });
+  await graph.verifyFact({ project: 'validity', factId: fact.id, evidencePath });
+  if (options.expire) graph.maintain({ project: 'validity', now: '2026-10-01T00:00:00.000Z' });
   if (options.supersede) {
     graph.addFact({
       id: `${id}-replacement`, project: 'validity', key: fact.key, value: 'replacement',
@@ -423,7 +423,7 @@ test('P1-3 independent review: verifier-less core reopen, rebuild, and rebuild-i
   assert.equal(privilegedSnapshot(reopened).facts[0].verificationStatus, 'unverified');
   assert.equal(privilegedSnapshot(reopened).facts[0].verificationUntrustedReason, 'verifier_not_configured');
 
-  const report = reopened.rebuild();
+  const report = reopened.rebuild({ project: 'validity' });
   assert.equal(report.rebuildable, true);
   assert.equal(report.projection.facts[0].verificationStatus, 'unverified');
   assert.equal(report.projection.facts[0].verificationUntrustedReason, 'verifier_not_configured');
@@ -447,7 +447,7 @@ test('P1-3 independent review: verifier-less MCP rebuild cannot re-elevate a gen
 
   const response = await rpc.call({
     jsonrpc: '2.0', id: 2, method: 'tools/call',
-    params: { name: 'shadowgraph_rebuild', arguments: {} }
+    params: { name: 'shadowgraph_rebuild', arguments: { project: 'validity' } }
   });
   assert.equal(response.error, undefined, response.error?.message);
   const report = JSON.parse(response.result.content[0].text);
@@ -476,7 +476,7 @@ test('P1-3 independent review: exposed rebuild migrates pre-schema-5 lifecycle v
   graph.importData(payload);
   assert.equal(privilegedSnapshot(graph).records[0].status, 'proposed');
   assert.equal(privilegedSnapshot(graph).journal[0].payload.status, 'active');
-  const report = graph.rebuild();
+  const report = privilegedRebuild(graph);
   assert.equal(report.rebuildable, true);
   // The envelope is this build's; the legacy entity stays at the last schema
   // without attribution until the attribution migration moves it.
@@ -497,7 +497,7 @@ test('P1-3 independent review: invalid verified journal payload makes core and c
   const graph = createShadowGraph({ verifier: fixture.verifier });
   graph.importData(payload);
   assert.equal(privilegedSnapshot(graph).facts[0].verificationStatus, 'verified', 'live fact remains genuinely verified');
-  const coreReport = graph.rebuild();
+  const coreReport = graph.rebuild({ project: 'validity' });
   assert.equal(coreReport.rebuildable, false);
   assert.match(coreReport.reason, /verification|invalid.*projection/i);
   assert.notEqual(coreReport.projection.facts[0]?.verificationStatus, 'verified');
@@ -511,7 +511,7 @@ test('P1-3 independent review: invalid verified journal payload makes core and c
   await rpc.call({ jsonrpc: '2.0', id: 10, method: 'tools/list' });
   const response = await rpc.call({
     jsonrpc: '2.0', id: 11, method: 'tools/call',
-    params: { name: 'shadowgraph_rebuild', arguments: {} }
+    params: { name: 'shadowgraph_rebuild', arguments: { project: 'validity' } }
   });
   assert.equal(response.error, undefined, response.error?.message);
   const mcpReport = JSON.parse(response.result.content[0].text);

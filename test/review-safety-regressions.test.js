@@ -225,7 +225,7 @@ test('a second threshold on the same key does not inherit the first acknowledgem
   graph.addFact({ project: 'p', key: 'lag', value: 600 });
   const first = graph.context({ project: 'p' }).openReviews[0];
   assert.equal(first.reviewSignalStatus, 'open');
-  graph.acknowledgeReview(first.reviewSignalId);
+  graph.acknowledgeReview(first.reviewSignalId, { project: 'p' });
   assert.equal(graph.context({ project: 'p' }).openReviews[0].reviewSignalStatus, 'acknowledged', 'an unchanged breach stays acknowledged');
 
   graph.addFact({ project: 'p', key: 'lag', value: 1200 });
@@ -241,7 +241,7 @@ test('narrowing back to the acknowledged breach set restores the acknowledgement
   const graph = createShadowGraph();
   twoThresholdDecision(graph);
   graph.addFact({ project: 'p', key: 'lag', value: 600 });
-  graph.acknowledgeReview(graph.context({ project: 'p' }).openReviews[0].reviewSignalId);
+  graph.acknowledgeReview(graph.context({ project: 'p' }).openReviews[0].reviewSignalId, { project: 'p' });
   graph.addFact({ project: 'p', key: 'lag', value: 1200 });
   assert.equal(graph.context({ project: 'p' }).openReviews[0].reviewSignalStatus, 'open');
 
@@ -258,7 +258,7 @@ test('an acknowledgement survives a restart', async (t) => {
   const graph = createShadowGraph();
   twoThresholdDecision(graph);
   graph.addFact({ project: 'p', key: 'lag', value: 600 });
-  graph.acknowledgeReview(graph.context({ project: 'p' }).openReviews[0].reviewSignalId);
+  graph.acknowledgeReview(graph.context({ project: 'p' }).openReviews[0].reviewSignalId, { project: 'p' });
   await store.save(privilegedSnapshot(graph));
 
   const restored = createShadowGraph();
@@ -282,7 +282,7 @@ test('acknowledgement coverage behaves identically on JSON and SQLite', async (t
   const source = createShadowGraph({ now: () => '2026-02-01T00:00:00.000Z' });
   twoThresholdDecision(source, { decision: 'decision:d1', low: 'alternative:low', high: 'alternative:high' });
   source.addFact({ project: 'p', key: 'lag', value: 600, id: 'fact:narrow' });
-  source.acknowledgeReview(source.context({ project: 'p' }).openReviews[0].reviewSignalId);
+  source.acknowledgeReview(source.context({ project: 'p' }).openReviews[0].reviewSignalId, { project: 'p' });
   const snapshot = privilegedSnapshot(source);
 
   const snapshots = {};
@@ -358,7 +358,7 @@ test('maintain changes housekeeping, not the semantic answer', () => {
   const clock = clockFrom('2026-01-02T00:00:00.000Z');
   const graph = expiringReuseGraph(clock);
   const before = graph.context({ project: 'p' });
-  graph.maintain({});
+  graph.maintain({ project: 'p' });
   const after = graph.context({ project: 'p' });
   assert.deepEqual(after.reusableAttempts, before.reusableAttempts);
   assert.deepEqual(after.conditionDiagnostics, before.conditionDiagnostics);

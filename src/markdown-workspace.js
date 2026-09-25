@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import { privilegedSnapshot } from './internal/snapshot.js';
+import { isLegacyOwned, resolveScope } from './scope.js';
 
 const STATE_FILE = '.shadowgraph-sync.json';
 
@@ -39,11 +40,15 @@ function jsonLine(name, value) {
 
 export function renderMemoryMarkdown(memory) {
   if (!memory || memory.kind !== 'memory') throw new Error('Only memory records can be rendered as Markdown');
+  // A file names the project that owns its memory. A memory no project owns --
+  // legacy data, or an origin's -- has no project to name, and is never filed
+  // under the real project "default" (P1 findings F-21, F-25).
+  if (typeof memory.project !== 'string' || !memory.project || isLegacyOwned(memory)) throw new Error('Only a memory a named project owns can be rendered as Markdown');
   const scope = normalizedScope(memory.scope);
   return [
     '---',
     jsonLine('shadowgraph_id', memory.id),
-    jsonLine('project', memory.project ?? 'default'),
+    jsonLine('project', memory.project),
     jsonLine('memory_type', memory.memoryType),
     jsonLine('key', memory.key),
     jsonLine('user_id', scope.userId),
@@ -147,9 +152,11 @@ async function markdownFiles(directory) {
   return output.sort((left, right) => left.localeCompare(right));
 }
 
+// Identity within one named project: every memory compared by it has already
+// been read inside that project (push, and pull's per-project matching).
 function identity(memory) {
   const scope = normalizedScope(memory.scope);
-  return JSON.stringify([memory.project ?? 'default', scope.userId, scope.agentId, scope.runId, memory.memoryType, memory.key]);
+  return JSON.stringify([memory.project, scope.userId, scope.agentId, scope.runId, memory.memoryType, memory.key]);
 }
 
 function memoryRelativePath(memory) {
@@ -159,8 +166,8 @@ function memoryRelativePath(memory) {
 }
 
 async function push({ graph, directory, state, project, dryRun }) {
-  const memories = graph.exportData().records
-    .filter((record) => record.kind === 'memory' && record.status === 'active' && (!project || record.project === project))
+  const memories = graph.exportData({ project }).records
+    .filter((record) => record.kind === 'memory' && record.status === 'active')
     .sort((left, right) => String(left.id).localeCompare(String(right.id)));
   const files = [];
   const conflicts = [];
@@ -200,8 +207,20 @@ async function pull({ graph, directory, state, project, dryRun }) {
   const paths = await markdownFiles(directory);
   const snapshot = privilegedSnapshot(graph);
   const allMemoriesById = new Map(snapshot.records.filter((record) => record.kind === 'memory').map((memory) => [memory.id, memory]));
-  const active = snapshot.records.filter((record) => record.kind === 'memory' && record.status === 'active');
-  const byIdentity = new Map(active.map((memory) => [identity(memory), memory]));
+  // A file names its project and is matched only to a memory that project
+  // owns -- never to legacy "default" data or an origin's memory (P1 finding
+  // F-25) -- read the way any read of that project is.
+  const owned = new Map();
+  const ownMemories = (name) => {
+    if (!owned.has(name)) {
+      const memories = graph.exportData({ project: name }).records.filter((record) => record.kind === 'memory');
+      owned.set(name, {
+        byId: new Map(memories.map((memory) => [memory.id, memory])),
+        byIdentity: new Map(memories.filter((memory) => memory.status === 'active').map((memory) => [identity(memory), memory]))
+      });
+    }
+    return owned.get(name);
+  };
   const files = [];
   const conflicts = [];
   const results = [];
@@ -217,18 +236,20 @@ async function pull({ graph, directory, state, project, dryRun }) {
       continue;
     }
     if (project && parsed.project !== project) continue;
+    const own = ownMemories(parsed.project);
     const fileHash = hash(content);
     const prior = state.files[relativePath];
-    const baselineMemory = prior ? allMemoriesById.get(prior.memoryId) : null;
-    if (prior && !baselineMemory) {
+    if (prior && !allMemoriesById.has(prior.memoryId)) {
       conflicts.push({ path, reason: 'canonical_memory_missing' });
       continue;
     }
-    if (baselineMemory && (parsed.id !== prior.memoryId || identity(parsed) !== identity(baselineMemory))) {
+    // A baseline that exists but belongs to another owner has changed identity.
+    const baselineMemory = prior ? own.byId.get(prior.memoryId) ?? null : null;
+    if (prior && (!baselineMemory || parsed.id !== prior.memoryId || identity(parsed) !== identity(baselineMemory))) {
       conflicts.push({ path, reason: 'identity_changed' });
       continue;
     }
-    const current = byIdentity.get(identity(parsed));
+    const current = own.byIdentity.get(identity(parsed));
     const currentHash = current ? memoryHash(current) : null;
     if (prior && fileHash === prior.baseHash) {
       unchanged += 1;
@@ -264,7 +285,7 @@ async function pull({ graph, directory, state, project, dryRun }) {
     results.push(result);
     if (result.operation !== 'NOOP') imported += 1;
     state.files[relativePath] = { baseHash: fileHash, memoryHash: memoryHash(result.memory), memoryId: result.memory.id };
-    byIdentity.set(identity(result.memory), result.memory);
+    own.byIdentity.set(identity(result.memory), result.memory);
     files.push({ path, relativePath, memoryId: result.memory.id });
   }
   return { imported, unchanged, files, conflicts, results };
@@ -278,6 +299,15 @@ export async function syncMarkdownWorkspace(options = {}) {
   if (options.persist && !options.loadPersisted) throw new Error('Markdown sync persist requires loadPersisted for durable reconciliation');
   const mode = options.mode ?? 'push';
   if (!['push', 'pull'].includes(mode)) throw new Error('Markdown sync mode must be push or pull');
+  // A push writes one named project's own memories and nothing else (P1
+  // findings F-08, F-21). With no project -- an origin included, which has no
+  // project to file its memories under -- it refuses and writes no file.
+  if (mode === 'push' && resolveScope({ project: options.project }).state !== 'project_selected') {
+    return {
+      mode, dryRun: options.dryRun === true, written: 0, unchanged: 0, files: [], conflicts: [],
+      limitation: { code: 'scoped_coverage', detail: 'No project was given, so no memory was pushed and no file was written.' }
+    };
+  }
   const directory = resolve(options.directory);
   await mkdir(directory, { recursive: true });
   const state = await loadState(directory);

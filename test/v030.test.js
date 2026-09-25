@@ -34,7 +34,7 @@ test('idempotency prevents duplicate decisions and facts', () => {
   assert.equal(first.id, second.id);
   graph.addFact({ project: 'default', key: 'mode', value: 'a', idempotencyKey: 'fact-x' });
   graph.addFact({ project: 'default', key: 'mode', value: 'b', idempotencyKey: 'fact-x' });
-  assert.equal(graph.stats().facts, 1);
+  assert.equal(graph.stats({ project: 'default' }).facts, 1);
 });
 
 test('maintenance ages decisions, expires facts, and persists review signals', () => {
@@ -44,9 +44,9 @@ test('maintenance ages decisions, expires facts, and persists review signals', (
     key: 'expiry', value: true,
     validFrom: '2025-01-01T00:00:00.000Z', expiresAt: '2026-01-01T00:00:00.000Z'
   });
-  const result = graph.maintain({ changedFacts: ['changed'] });
+  const result = graph.maintain({ project: 'default', changedFacts: ['changed'] });
   assert.equal(result.agedDecisionIds[0], decision.id);
-  assert.equal(graph.getReviewSignals().length, 1);
+  assert.equal(graph.getReviewSignals({ project: 'default' }).length, 1);
   assert.equal(privilegedSnapshot(graph).facts[0].verificationStatus, 'expired');
 });
 

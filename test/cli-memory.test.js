@@ -31,7 +31,7 @@ test('CLI remembers, recalls, and synchronizes Markdown memory', async (t) => {
   assert.equal(recalled.items[0].record.text, 'Prefers dark mode');
   assert.equal(recalled.signals.semantic.available, true);
 
-  const synced = await cli(file, 'markdown-sync', { directory: workspace, mode: 'push' });
+  const synced = await cli(file, 'markdown-sync', { directory: workspace, mode: 'push', project: 'app' });
   assert.equal(synced.written, 1);
   const markdown = await readFile(synced.files[0].path, 'utf8');
   assert.match(markdown, /Prefers dark mode/);

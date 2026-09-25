@@ -955,7 +955,7 @@ test('HTTP rejects a concurrent mutation before graph state changes during resto
     });
     assert.equal(contextResponse.status, 400, 'context can create review signals and must be blocked during restore');
     assert.match((await contextResponse.json()).error, /restore is in progress/);
-    assert.equal(app.graph.getReviewSignals().length, 0, 'blocked context must not create an in-memory-only review signal');
+    assert.equal(privilegedSnapshot(app.graph).reviewSignals.length, 0, 'blocked context must not create an in-memory-only review signal');
     releaseStat();
     const restoreResponse = await restoreResponsePromise;
     assert.equal(restoreResponse.status, 200);

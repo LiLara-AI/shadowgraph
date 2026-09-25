@@ -11,7 +11,7 @@ import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { restoreFile } from '../src/backup.js';
 import { AUTHORITY_RESTORE_UNSUPPORTED, requiresLegacyPurgeMigration, validateRestorePayload } from '../src/restore-validation.js';
-import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { privilegedRebuild, privilegedSnapshot, privilegedValidate } from '../src/internal/snapshot.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
 // PR-06 (plan v1.4.4 §9.2, §10.9.8; R16 rev 2 §7; P1 reconciliation F-13,
@@ -131,7 +131,7 @@ test('a schema-6 store loads, validates, rebuilds and restores without being dow
   const payload = v6Store();
   const graph = createShadowGraph({ now });
   graph.importData(payload);
-  const validation = graph.validate();
+  const validation = privilegedValidate(graph);
   assert.equal(validation.valid, true, JSON.stringify(validation.issues));
   assert.equal(validation.counts.unsupported, 0);
   const live = privilegedSnapshot(graph);
@@ -139,7 +139,7 @@ test('a schema-6 store loads, validates, rebuilds and restores without being dow
   assert.deepEqual({ project: captured.project, originId: captured.originId, schemaVersion: captured.schemaVersion }, { project: null, originId: 'origin_a', schemaVersion: 6 });
   const legacy = live.records.find((record) => record.project === 'default');
   assert.equal(Object.hasOwn(legacy, 'attribution'), false);
-  const rebuilt = graph.rebuild();
+  const rebuilt = privilegedRebuild(graph);
   assert.equal(rebuilt.rebuildable, true, rebuilt.reason);
   assert.deepEqual(byId(rebuilt.projection.records), byId(live.records));
   assert.doesNotThrow(() => validateRestorePayload(payload, { now }));
@@ -154,7 +154,7 @@ test('a schema-7 envelope is refused; a schema-7 entity loads but its store cann
   const graph = createShadowGraph({ now });
   graph.importData(payload);
   assert.equal(privilegedSnapshot(graph).records.find((record) => record.id === future.id).schemaVersion, 7, 'preserved verbatim, never downgraded');
-  assert.ok(graph.validate().issues.some((issue) => issue.code === 'unsupported_record_schema_version' && issue.severity === 'unsupported'));
+  assert.ok(privilegedValidate(graph).issues.some((issue) => issue.code === 'unsupported_record_schema_version' && issue.severity === 'unsupported'));
   assert.throws(() => validateRestorePayload(payload, { now }), /Refusing to restore data: .*unsupported_record_schema_version/);
 });
 
@@ -177,7 +177,7 @@ test('an unattributed entity never shares an owner with a project or with anothe
       owned(memory, 'memory-origin-b', { project: null, attribution: 'unattributed', originId: 'origin_b' })
     ]
   });
-  const validation = graph.validate();
+  const validation = privilegedValidate(graph);
   assert.equal(validation.issues.some((issue) => /duplicate_active_(fact|memory)_scope/.test(issue.code)), false, JSON.stringify(validation.issues));
   const live = privilegedSnapshot(graph);
   assert.deepEqual(live.facts.filter((item) => item.status === 'active').map((item) => item.id).sort(), ['fact-default', 'fact-origin-a', 'fact-origin-b']);
@@ -190,7 +190,7 @@ test('an unattributed entity never shares an owner with a project or with anothe
     owned(memory, 'memory-orphan-1', { project: null, attribution: 'unattributed' }),
     owned(memory, 'memory-orphan-2', { project: null, attribution: 'unattributed' })
   ] });
-  const orphanIssues = orphans.validate().issues;
+  const orphanIssues = privilegedValidate(orphans).issues;
   assert.equal(orphanIssues.filter((issue) => issue.code === 'invalid_attribution').length, 2);
   assert.equal(orphanIssues.some((issue) => issue.code === 'duplicate_active_memory_scope'), false);
 });
@@ -223,7 +223,7 @@ test('malformed attribution is declared as an error, not trusted', () => {
   ]) {
     const graph = createShadowGraph({ now });
     graph.importData({ schemaVersion: 6, records: [{ id: 'd1', kind: 'decision', title: 'T', chosen: 'C', schemaVersion: 6, ...owner }] });
-    assert.ok(graph.validate().issues.some((issue) => issue.code === 'invalid_attribution' && issue.severity === 'error'), label);
+    assert.ok(privilegedValidate(graph).issues.some((issue) => issue.code === 'invalid_attribution' && issue.severity === 'error'), label);
   }
 });
 
@@ -235,7 +235,7 @@ test('an unrecognised top-level collection is carried by the privileged snapshot
   assert.equal(bytes(snapshot.access), bytes(ACCESS));
   assert.equal(bytes(snapshot.accessRevocations), bytes(REVOCATIONS));
   assert.equal(Object.hasOwn(snapshot, 'expectedRevision'), false, 'a save instruction is not a collection');
-  for (const [label, read] of [['exportData', graph.exportData()], ['redact', graph.redact({})], ['redact(project)', graph.redact({ project: 'alpha' })]]) {
+  for (const [label, read] of [['exportData', graph.exportData()], ['exportData(project)', graph.exportData({ project: 'alpha' })], ['redact', graph.redact({})], ['redact(project)', graph.redact({ project: 'alpha' })]]) {
     for (const key of ['futureCollection', 'access', 'accessRevocations']) assert.equal(Object.hasOwn(read, key), false, `${label} must not expose ${key}`);
   }
   // Replacing the graph replaces them too; a rejected replace keeps them.
@@ -488,9 +488,9 @@ test('entity.attributed replays to the re-attributed entity: rebuild parity and 
   const { payload, ids } = reattributedStore();
   const graph = createShadowGraph({ now });
   graph.importData(payload);
-  assert.equal(graph.validate().valid, true, JSON.stringify(graph.validate().issues));
+  assert.equal(privilegedValidate(graph).valid, true, JSON.stringify(privilegedValidate(graph).issues));
   const live = privilegedSnapshot(graph);
-  const rebuilt = graph.rebuild();
+  const rebuilt = privilegedRebuild(graph);
   assert.equal(rebuilt.rebuildable, true, rebuilt.reason);
   assert.deepEqual(byId(rebuilt.projection.records), byId(live.records));
   assert.deepEqual(byId(rebuilt.projection.facts), byId(live.facts));
@@ -517,8 +517,8 @@ test('purging the source project after re-attribution keeps the re-attributed re
     for (const id of [ids.decision, ids.attempt]) assert.equal(live.records.find((record) => record.id === id)?.project, 'beta', `${mode}: ${id}`);
     assert.equal(live.facts.find((fact) => fact.id === ids.fact)?.project, 'beta');
     assert.equal(live.records.some((record) => record.project === 'alpha'), false);
-    assert.equal(graph.validate().valid, true, `${mode}: ${JSON.stringify(graph.validate().issues)}`);
-    const rebuilt = graph.rebuild();
+    assert.equal(privilegedValidate(graph).valid, true, `${mode}: ${JSON.stringify(privilegedValidate(graph).issues)}`);
+    const rebuilt = privilegedRebuild(graph);
     // A hard purge that removes the leading entries leaves a declared leading
     // gap; that is the existing contract, accepted by restore validation
     // through the purge ledger. Nothing else may stop the rebuild.

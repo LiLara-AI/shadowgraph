@@ -13,7 +13,7 @@ import { validateRestorePayload } from '../src/restore-validation.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
-import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { privilegedRebuild, privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const NOW = '2026-08-27T15:00:00.000Z';
 const NODE_SQLITE = (await getRuntimeCapabilities()).nodeSqlite;
@@ -166,7 +166,7 @@ test('RRV-04: schema-3 raw purge ids are migrated before an unrelated later purg
     const afterSanitization = privilegedSnapshot(graph);
     const rawRebuilt = rebuildProjection(afterSanitization.journal, { journalEpoch: afterSanitization.journalEpoch });
     assert.deepEqual(ids(rawRebuilt.projection), ids(rawProjection.projection), `${laterMode}: sanitization must preserve the pre-sanitization fold`);
-    const rebuilt = graph.rebuild();
+    const rebuilt = privilegedRebuild(graph);
     assert.equal(rebuilt.rebuildable, laterMode === 'logical');
     assertLegacySecretAbsent(afterSanitization, `${laterMode} live export`);
     assertLegacySecretAbsent(rawRebuilt, `${laterMode} raw rebuild`);
@@ -186,7 +186,7 @@ test('RRV-04 / DS-P1-007: every predecessor schema 1-4 raw purge marker is migra
     graph.importData(fixture);
     const exported = privilegedSnapshot(graph);
     assertLegacySecretAbsent(exported, `schema ${schemaVersion} migrated export`);
-    assertLegacySecretAbsent(graph.rebuild(), `schema ${schemaVersion} migrated rebuild`);
+    assertLegacySecretAbsent(privilegedRebuild(graph), `schema ${schemaVersion} migrated rebuild`);
     assert.equal(exported.journal.find((entry) => entry.id === 'rrv04-legacy-purge-marker').payload.purgedEntityIds, undefined);
   }
 
@@ -267,9 +267,9 @@ test('RRV-06: logical purge retains only non-identifying audit skeleton fields a
   assert.equal(live.events.length, 0);
   assert.equal(live.idempotency.length, 0);
   assertRrv06SecretsAbsent(live, 'logical purge live export');
-  assertRrv06SecretsAbsent(graph.getJournal({ limit: 1000 }), 'logical purge journal');
+  assertRrv06SecretsAbsent(graph.getJournal({ project: 'rrv06-private', limit: 1000 }), 'logical purge journal');
   assertRrv06SecretsAbsent(graph.redact({ project: 'rrv06-private' }), 'logical purge redaction');
-  assertRrv06SecretsAbsent(graph.rebuild(), 'logical purge rebuild');
+  assertRrv06SecretsAbsent(privilegedRebuild(graph), 'logical purge rebuild');
 });
 
 async function createStore(backend, path) {
@@ -332,7 +332,7 @@ test('RRV-04: migrated schema-3 purge stays erased through JSON/SQLite restart, 
     graph.purgeProject(`rrv04-persist-unrelated-${laterMode}`, { mode: laterMode });
     const payload = privilegedSnapshot(graph);
     assertLegacySecretAbsent(payload, `${laterMode} pre-persist export`);
-    assertLegacySecretAbsent(graph.rebuild(), `${laterMode} pre-persist rebuild`);
+    assertLegacySecretAbsent(privilegedRebuild(graph), `${laterMode} pre-persist rebuild`);
     await assertPayloadAcrossRestartBackupRestore(t, payload, assertLegacySecretAbsent, `rrv04-${laterMode}`);
   }
 });
@@ -342,7 +342,7 @@ test('RRV-06: logical purge identity metadata stays scrubbed through JSON/SQLite
   const payload = privilegedSnapshot(graph);
   assertRrv06SecretsAbsent(payload, 'RRV-06 pre-persist export');
   assertRrv06SecretsAbsent(graph.redact({ project: 'rrv06-private' }), 'RRV-06 pre-persist redaction');
-  assertRrv06SecretsAbsent(graph.rebuild(), 'RRV-06 pre-persist rebuild');
+  assertRrv06SecretsAbsent(privilegedRebuild(graph), 'RRV-06 pre-persist rebuild');
   await assertPayloadAcrossRestartBackupRestore(t, payload, assertRrv06SecretsAbsent, 'rrv06-logical');
 });
 

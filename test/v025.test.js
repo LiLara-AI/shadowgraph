@@ -6,7 +6,7 @@ import { privilegedSnapshot } from '../src/internal/snapshot.js';
 test('v0.25 supports lifecycle, relationships, and retrieval filters', () => {
   const graph = createShadowGraph();
   const decision = graph.addDecision({ project: 'demo', title: 'Use SQLite', chosen: 'SQLite', confidence: 0.8, assumptions: ['local'] });
-  for (const status of ['planned', 'in_progress', 'executed', 'validated']) graph.updateDecisionStatus(decision.id, status);
+  for (const status of ['planned', 'in_progress', 'executed', 'validated']) graph.updateDecisionStatus(decision.id, status, { project: 'demo' });
   assert.equal(privilegedSnapshot(graph).records[0].status, 'validated');
   graph.addFact({ id: 'fact_1', project: 'demo', key: 'storage-mode', value: 'local' });
   const relation = graph.link({ project: 'demo', from: decision.id, to: 'fact_1', relation: 'depends_on' });

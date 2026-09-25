@@ -12,7 +12,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
-import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { privilegedRebuild, privilegedSnapshot } from '../src/internal/snapshot.js';
 import { historicalRelation } from '../tools/historical-relation.js';
 
 const FIXED_NOW = '2026-08-27T12:00:00.000Z';
@@ -158,18 +158,18 @@ test('P1-4 independent review: real MCP maintain rejection rolls live graph back
     jsonrpc: '2.0', id: 2, method: 'tools/call',
     params: {
       name: 'shadowgraph_maintain',
-      arguments: { now: FIXED_NOW, changedFacts: {}, facts: {} }
+      arguments: { project: 'maintain-project', now: FIXED_NOW, changedFacts: {}, facts: {} }
     }
   });
   const bytesAfterRejection = await readFile(file);
 
   const journalResponse = await rpc.call({
     jsonrpc: '2.0', id: 3, method: 'tools/call',
-    params: { name: 'shadowgraph_journal', arguments: { limit: 1000 } }
+    params: { name: 'shadowgraph_journal', arguments: { project: 'maintain-project', limit: 1000 } }
   });
   const signalsResponse = await rpc.call({
     jsonrpc: '2.0', id: 4, method: 'tools/call',
-    params: { name: 'shadowgraph_review_signals', arguments: {} }
+    params: { name: 'shadowgraph_review_signals', arguments: { project: 'maintain-project' } }
   });
   const searchResponse = await rpc.call({
     jsonrpc: '2.0', id: 5, method: 'tools/call',
@@ -296,7 +296,7 @@ async function assertPurgeErasureAcrossBackend(t, backend, mode) {
     assert.ok(marker.payload.removedJournalSequences.length >= 4, 'hard purge gap evidence must survive without entity ids');
   }
 
-  const rebuild = graph.rebuild();
+  const rebuild = privilegedRebuild(graph);
   assertSecretAbsent(rebuild, `${mode} rebuild`);
   assert.equal(rebuild.projection.records.length, 1);
   assert.equal(rebuild.projection.records[0].id, kept.id);

@@ -8,7 +8,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { backupFile, restoreFile } from '../src/backup.js';
-import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { privilegedRebuild, privilegedSnapshot, privilegedValidate } from '../src/internal/snapshot.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
 // P1A correction IR-01 (F-22; plan v1.4.4 WS-11 mapping iii): a legacy entity
@@ -122,9 +122,9 @@ function assertMatchesUninterrupted(graph, snapshot, reference, defaults, label)
     const previous = PROJECTLESS.includes(entry.entityId) ? null : entry.entityId === 'decision-alpha' ? 'alpha' : 'default';
     assert.equal(entry.payload.attributionChange.previousProject, previous, `${label}: ${entry.entityId} audit records what was stored`);
   }
-  const validation = graph.validate();
+  const validation = privilegedValidate(graph);
   assert.equal(validation.valid, true, `${label}: ${JSON.stringify(validation.issues)}`);
-  const rebuilt = graph.rebuild();
+  const rebuilt = privilegedRebuild(graph);
   assert.equal(rebuilt.rebuildable, true, `${label}: ${rebuilt.reason}`);
   assert.deepEqual(owners(rebuilt.projection), expectedOwners(defaults), `${label}: a rebuild reproduces the attribution`);
 }

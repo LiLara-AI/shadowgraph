@@ -139,7 +139,7 @@ export async function createShadowGraphServer(options = {}) {
     if (method === 'GET' && path === '/health') return { ok: true, name: NAME, version: VERSION };
     if (method === 'GET' && path === '/dashboard') return { dashboard: dashboardRoot.href };
     if (method === 'GET' && path === '/stats') return graph.stats();
-    if (method === 'GET' && path === '/records') return graph.exportData();
+    if (method === 'GET' && path === '/records') return graph.exportData(body ?? {});
     if (method === 'GET' && path === '/search') return graph.search(body?.q ?? body?.query ?? '', body ?? {});
     if (method === 'POST' && path === '/context') return mutateAndPersist(() => graph.context(body ?? {}));
     if (method === 'POST' && path === '/memories') return mutateAndPersist(() => Array.isArray(body?.operations) ? graph.applyMemoryPlan(body) : graph.remember(body));

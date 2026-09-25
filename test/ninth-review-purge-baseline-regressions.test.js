@@ -12,7 +12,7 @@ import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { journalGaps, rebuildProjection } from '../src/journal.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
-import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { privilegedRebuild, privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const NOW = '2026-08-28T00:00:00.000Z';
 const RAW_ID = 'DS_P1_007_RAW_PURGED_ENTITY_SENTINEL';
@@ -197,8 +197,9 @@ test('DS-P1-007 ninth review RED: schema 4 raw purge ledgers and every reference
     const after = rebuildProjection(exported.journal, { journalEpoch: exported.journalEpoch });
 
     assertRawIdentityAbsent(exported, `${mode} migrated export`);
-    assertRawIdentityAbsent(graph.getJournal({ limit: 1000 }), `${mode} journal read`);
-    assertRawIdentityAbsent(graph.rebuild(), `${mode} exposed rebuild`);
+    assertRawIdentityAbsent(graph.getJournal({ project: 'ds-p1-007-kept', limit: 1000 }), `${mode} journal read`);
+    assertRawIdentityAbsent(privilegedSnapshot(graph).journal, `${mode} stored journal`);
+    assertRawIdentityAbsent(privilegedRebuild(graph), `${mode} whole-store rebuild`);
     assert.deepEqual(projectionIdentity(after), projectionIdentity(before), `${mode}: raw fold parity`);
     assert.deepEqual(journalGaps(exported.journal), beforeGaps, `${mode}: hard-gap evidence`);
     assert.equal(after.rebuildable, before.rebuildable, `${mode}: rebuildable parity`);
@@ -236,7 +237,7 @@ test('DS-P1-007 ninth review: schemas 1-4 and a journal-bearing merge cannot res
     const graph = createShadowGraph({ now: () => NOW });
     graph.importData(fixtureForSchema(schemaVersion, { mode: 'logical' }));
     assertRawIdentityAbsent(privilegedSnapshot(graph), `schema ${schemaVersion} export`);
-    assertRawIdentityAbsent(graph.rebuild(), `schema ${schemaVersion} rebuild`);
+    assertRawIdentityAbsent(privilegedRebuild(graph), `schema ${schemaVersion} rebuild`);
   }
 
   const destination = createShadowGraph({ now: () => NOW });
@@ -289,8 +290,8 @@ test('DS-P1-007 ninth review: schemas 1-4 and a journal-bearing merge cannot res
   const merged = privilegedSnapshot(destination);
   assertRawIdentityAbsent(merged, 'merge export');
   assert.deepEqual(merged.records.map((item) => item.id).sort(), [host.id, kept.id].sort());
-  assert.equal(destination.rebuild().rebuildable, true);
-  assert.deepEqual(destination.rebuild().projection.records.map((item) => item.id).sort(), [host.id, kept.id].sort());
+  assert.equal(privilegedRebuild(destination).rebuildable, true);
+  assert.deepEqual(privilegedRebuild(destination).projection.records.map((item) => item.id).sort(), [host.id, kept.id].sort());
 });
 
 async function createStore(backend, path) {
@@ -518,7 +519,7 @@ test('DS-P1-007 ninth review RED: raw schema-4 restores are normalized in JSON/S
       assertRawIdentityAbsent(response, 'MCP response');
       const journal = await rpc.call({
         jsonrpc: '2.0', id: 3, method: 'tools/call',
-        params: { name: 'shadowgraph_journal', arguments: { limit: 1000 } }
+        params: { name: 'shadowgraph_journal', arguments: { project: 'ds-p1-007-kept', limit: 1000 } }
       });
       assertRawIdentityAbsent(journal, 'MCP journal');
       assertRawIdentityAbsent(await readFile(destination), 'MCP durable bytes');
@@ -584,7 +585,7 @@ function assertSanitizedBaseline(payload, label, expectedRecordIds) {
 function assertBaselineRebuildParity(payload, label) {
   const graph = createShadowGraph({ now: () => NOW });
   graph.replaceData(payload);
-  const rebuilt = graph.rebuild();
+  const rebuilt = privilegedRebuild(graph);
   assert.equal(rebuilt.rebuildable, true, `${label} remains rebuildable`);
   assert.deepEqual(
     rebuilt.projection.records.map((item) => item.id).sort(),
@@ -673,19 +674,18 @@ test('DS-P1-008 ninth review RED: rewritten baselines are selectively canonical 
   }
 
   {
+    // Redaction is a read of one scope since plan PR-10: a projection baseline
+    // holds the whole store, so no redaction carries one, and none has a
+    // baseline to rewrite. Its output is a read, not a store to persist.
     const redactionFixture = addBaselineMetadata(baselineMetadataFixture(), { redactableCollection: true });
     const graph = createShadowGraph({ now: () => NOW });
     graph.replaceData(redactionFixture);
-    const redacted = graph.redact({ patterns: ['secretNote'], replacement: '[REDACTED]' });
-    assertSanitizedBaseline(redacted, 'redaction', ['ds-p1-008-kept', 'ds-p1-008-private']);
-    assert.equal(redacted.records[0].secretNote, '[REDACTED]', 'redaction changes the live and baseline collection consistently');
-    assert.equal(redacted.journal.find((entry) => entry.type === 'projection.baseline').payload.records[0].secretNote, '[REDACTED]');
-    assertBaselineRebuildParity(redacted, 'redaction');
+    const secret = privilegedSnapshot(graph).records.find((record) => record.secretNote === BASELINE_METADATA_SENTINEL);
+    const redacted = graph.redact({ project: secret.project, patterns: ['secretNote'], replacement: '[REDACTED]' });
+    assert.equal(redacted.records.find((record) => record.id === secret.id).secretNote, '[REDACTED]', 'redaction rewrites the live collection');
+    assert.equal(redacted.journal.some((entry) => entry.type === 'projection.baseline'), false, 'a scoped redaction carries no whole-store baseline');
+    assert.equal(JSON.stringify(redacted).includes(BASELINE_METADATA_SENTINEL), false, 'neither the secret nor baseline metadata leaves through redaction');
     assert.equal(JSON.stringify(privilegedSnapshot(graph)).includes(BASELINE_METADATA_SENTINEL), true, 'redaction must not mutate the live baseline');
-    persistedCases.push({
-      label: 'redaction', payload: redacted,
-      expectedRecordIds: ['ds-p1-008-kept', 'ds-p1-008-private']
-    });
   }
 
   {
