@@ -223,9 +223,9 @@ test('reconsideration does not consume a future-valid fact before its valid time
   graph.addFact({ project: 'deploy', key: 'deployment-mode', value: 'single-user', validFrom: '2026-08-01T00:00:00.000Z' });
   graph.addFact({ project: 'deploy', key: 'deployment-mode', value: 'multi-user', validFrom: '2026-09-01T00:00:00.000Z' });
 
-  assert.equal(graph.review({ project: 'deploy' }).some((item) => item.decisionId === decision.id), false);
+  assert.equal(graph.review({ project: 'deploy' }).items.some((item) => item.decisionId === decision.id), false);
   current = '2026-09-02T00:00:00.000Z';
-  assert.equal(graph.review({ project: 'deploy' }).some((item) => item.decisionId === decision.id), true);
+  assert.equal(graph.review({ project: 'deploy' }).items.some((item) => item.decisionId === decision.id), true);
 });
 
 test('out-of-order fact backfills are rejected before corrupting temporal intervals', () => {
@@ -613,8 +613,8 @@ test('empty project identifiers never become cross-project read wildcards', () =
     () => graph.search('', { project: '' }),
     () => graph.retrieve('', { project: '' }),
     () => graph.getJournal({ project: '' }),
-    () => graph.review({ project: '' }),
-    () => graph.getReviewSignals({ project: '' }),
+    () => graph.review({ project: '' }).items,
+    () => graph.getReviewSignals({ project: '' }).items,
     () => graph.redact({ project: '' }),
     () => graph.context({ project: '' })
   ];
@@ -771,9 +771,9 @@ test('review signal identity cannot collide across delimiter-bearing values', ()
   graph.addDecision({ id: 'x:y', project: 'app', title: 'First', chosen: 'A', alternatives: [{ label: 'B', reopenWhen: ['z'] }] });
   graph.addDecision({ id: 'x', project: 'app', title: 'Second', chosen: 'A', alternatives: [{ label: 'B', reopenWhen: ['y:z'] }] });
 
-  const due = graph.review({ project: 'app', changedFacts: ['z', 'y:z'] });
+  const due = graph.review({ project: 'app', changedFacts: ['z', 'y:z'] }).items;
   assert.equal(due.length, 2);
-  assert.equal(graph.getReviewSignals({ project: 'app' }).length, 2);
+  assert.equal(graph.getReviewSignals({ project: 'app' }).items.length, 2);
   assert.equal(privilegedSnapshot(graph).reviewSignals.length, 2);
 });
 

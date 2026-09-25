@@ -27,7 +27,7 @@ test('a condition with no recorded evidence is visible as unresolved, not a sile
 
   const view = graph.context({ project: 'p' });
   assert.equal(view.openReviews.length, 0, 'no evidence is not a breach');
-  assert.equal(graph.getReviewSignals({ project: 'p' }).length, 0, 'and raises no review signal');
+  assert.equal(graph.getReviewSignals({ project: 'p' }).items.length, 0, 'and raises no review signal');
 
   const conditions = conditionsFor(graph, decision.id);
   assert.equal(conditions.length, 1, 'but the uncertainty is reported');
@@ -148,20 +148,20 @@ test('an acknowledged breach stays acknowledged, but a new distinct breach is no
   });
   graph.addFact({ project: 'p', key: 'replicaLagMs', value: '900ms', sourceClass: 'measured' });
 
-  graph.review({ project: 'p' });
-  const [first] = graph.getReviewSignals({ project: 'p', status: 'open' });
+  graph.review({ project: 'p' }).items;
+  const [first] = graph.getReviewSignals({ project: 'p', status: 'open' }).items;
   assert.ok(first, 'the first breach raised a signal');
   graph.acknowledgeReview(first.id, { project: 'p' });
 
   // Re-evaluating unchanged evidence must not resurrect the acknowledged signal.
-  graph.review({ project: 'p' });
-  assert.equal(graph.getReviewSignals({ project: 'p', status: 'open' }).length, 0, 'unchanged evidence stays acknowledged');
+  graph.review({ project: 'p' }).items;
+  assert.equal(graph.getReviewSignals({ project: 'p', status: 'open' }).items.length, 0, 'unchanged evidence stays acknowledged');
 
   // A genuinely new applicable breach is a different reason, so it is not
   // permanently suppressed by the earlier acknowledgement.
   graph.addFact({ project: 'p', key: 'region', value: 'eu-west', sourceClass: 'human' });
-  graph.review({ project: 'p' });
-  const open = graph.getReviewSignals({ project: 'p', status: 'open' });
+  graph.review({ project: 'p' }).items;
+  const open = graph.getReviewSignals({ project: 'p', status: 'open' }).items;
   assert.equal(open.length, 1, 'the new breach raises its own signal');
   assert.match(open[0].reason, /region/);
 });

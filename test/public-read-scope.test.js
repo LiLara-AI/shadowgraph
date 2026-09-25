@@ -77,6 +77,49 @@ const SCOPES = {
   originB: { originId: 'origin_b' }
 };
 
+// PR-11: coverage describes the resolved request independently of whether a
+// finite local page happened to contain every known candidate.
+const COVERAGE_READS = {
+  search: (g, s) => g.search('', s),
+  retrieve: (g, s) => g.retrieve('', s),
+  recall: (g, s) => g.recall('', s),
+  context: (g, s) => g.context(s),
+  memoryHistory: (g, s) => g.memoryHistory({ ...s, memoryType: 'note', key: 'note' }),
+  traverse: (g, s) => g.traverse({ ...s, id: 'alpha-decision' }),
+  review: (g, s) => g.review(s),
+  getReviewSignals: (g, s) => g.getReviewSignals(s),
+  reconsider: (g, s) => g.reconsider(s),
+  maintain: (g, s) => g.maintain(s),
+  exportData: (g, s) => g.exportData(s),
+  redact: (g, s) => g.redact(s),
+  getJournal: (g, s) => g.getJournal(s),
+  stats: (g, s) => g.stats(s),
+  validate: (g, s) => g.validate(s),
+  repairPlan: (g, s) => g.repairPlan(s),
+  rebuild: (g, s) => g.rebuild(s)
+};
+
+for (const [path, read] of Object.entries(COVERAGE_READS)) {
+  for (const [name, scope] of Object.entries(SCOPES)) {
+    test(`PR-11 ${path}: serialized ${name} request coverage and boundary`, () => {
+      const result = JSON.parse(JSON.stringify(read(fixture(), { ...scope, grant: { project: 'beta', all: true } })));
+      assert.deepEqual(result.completeness?.scope && {
+        project: result.completeness.scope.project,
+        requestState: result.completeness.scope.requestState,
+        originPresented: result.completeness.scope.originPresented,
+        grant: result.completeness.scope.grant
+      }, { project: scope.project ?? null, requestState: scope.project ? 'project_selected' : 'project_unresolved', originPresented: !!scope.originId, grant: null });
+      if (!scope.project) {
+        assert.equal(result.completeness.complete, false);
+        assert.equal(result.completeness.limitation?.code, 'scoped_coverage');
+      }
+      // traverse echoes its caller-supplied root even when it cannot resolve it.
+      const { root, ...answer } = result;
+      assert.deepEqual(foreignIds(answer, name), []);
+    });
+  }
+}
+
 // The ids from outside `scope` that `output` names.
 function foreignIds(output, scope) {
   const text = JSON.stringify(output);
@@ -112,8 +155,8 @@ function fixture() {
   importHistoricalRelation(graph, { id: 'relation-alpha-legacy', from: 'alpha-decision', to: 'legacy-dflt-decision', relation: 'related', project: 'alpha' });
   importHistoricalRelation(graph, { id: 'relation-alpha-origin', from: 'alpha-decision', to: 'origin-a-decision', relation: 'related', project: 'alpha' });
   importHistoricalRelation(graph, { id: 'relation-origin-a-b', from: 'origin-a-attempt', to: 'origin-b-decision', relation: 'related', project: null });
-  graph.review({ project: 'alpha' });
-  graph.review({ project: 'beta' });
+  graph.review({ project: 'alpha' }).items;
+  graph.review({ project: 'beta' }).items;
   return graph;
 }
 
@@ -168,10 +211,10 @@ test('a scoped journal read positions only the gaps its own hard purges explain'
 test('stats counts only what the scope owns', () => {
   const graph = fixture();
   const zero = { total: 0, decisions: 0, attempts: 0, facts: 0, relations: 0, reviewSignals: 0, events: 0, journal: 0 };
-  const { schemaVersion, ...unresolved } = graph.stats();
+  const { schemaVersion, completeness, ...unresolved } = graph.stats();
   assert.equal(schemaVersion, 6);
   assert.deepEqual(unresolved, zero);
-  const counts = (scope) => { const { schemaVersion: version, ...rest } = graph.stats(scope); return rest; };
+  const counts = (scope) => { const { schemaVersion: version, completeness, ...rest } = graph.stats(scope); return rest; };
   const journalOf = (scope) => graph.getJournal({ ...scope, limit: 1000 }).page.total;
   assert.deepEqual(counts({ project: 'alpha' }), { total: 4, decisions: 2, attempts: 1, facts: 1, relations: 1, reviewSignals: 1, events: 6, journal: journalOf({ project: 'alpha' }) });
   assert.deepEqual(counts({ project: 'beta' }), { total: 4, decisions: 2, attempts: 1, facts: 1, relations: 1, reviewSignals: 1, events: 6, journal: journalOf({ project: 'beta' }) });
@@ -255,11 +298,11 @@ test('persistence saves and reloads every project while the public export is sco
 
 test('review signals are read inside the scope', () => {
   const graph = fixture();
-  assert.deepEqual(graph.getReviewSignals({}), []);
-  assert.deepEqual(graph.getReviewSignals({ project: 'alpha' }).map((signal) => signal.decisionId), ['alpha-due-decision']);
-  assert.deepEqual(graph.getReviewSignals({ project: 'beta', status: 'open' }).map((signal) => signal.decisionId), ['beta-due-decision']);
-  assert.deepEqual(graph.getReviewSignals({ project: 'default' }), []);
-  assert.deepEqual(graph.getReviewSignals({ originId: 'origin_a' }), []);
+  assert.deepEqual(graph.getReviewSignals({}).items, []);
+  assert.deepEqual(graph.getReviewSignals({ project: 'alpha' }).items.map((signal) => signal.decisionId), ['alpha-due-decision']);
+  assert.deepEqual(graph.getReviewSignals({ project: 'beta', status: 'open' }).items.map((signal) => signal.decisionId), ['beta-due-decision']);
+  assert.deepEqual(graph.getReviewSignals({ project: 'default' }).items, []);
+  assert.deepEqual(graph.getReviewSignals({ originId: 'origin_a' }).items, []);
 });
 
 test('memory history is read inside the scope', () => {

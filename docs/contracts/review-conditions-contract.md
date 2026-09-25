@@ -34,7 +34,7 @@ separately:
   declared in `completeness.collections.conditionDiagnostics` with `returned`/`total`/`hasMore`/
   `omitted`. It is never silently truncated and never unbounded.
 - `maintain().diagnostics` — the same entries, on an already-object return.
-- `review()` is **unchanged**: it still returns a bare array of due decisions.
+- `review()` preserves its due-entry content and now wraps it in `{ items, completeness }` for truthful scope coverage.
 - `reconsider()` reports the same conditions as a top-level reading — see §11.
 
 A diagnostic is **not** a review signal. It asserts neither a breach nor a confirmed-safe decision.

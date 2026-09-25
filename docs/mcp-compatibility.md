@@ -226,23 +226,11 @@ Six of these are worth stating plainly, because a reader would otherwise guess w
 - `shadowgraph_link` is **not** idempotent for a second reason beyond the revision: every call mints
   a new relation id, so repeating one duplicates the relationship. There is no unlink tool.
 
-### Output schemas, and two deliberate omissions
+### Output schemas and scope-coverage envelopes
 
-26 of the 28 full-mode tools (27 of 29 with a verifier configured, 13 of 14 in compact mode) declare
-an `outputSchema` and return `structuredContent` that conforms to it. Two do not:
+All 28 full-mode tools (29 with a verifier, 14 in compact mode) declare an object-rooted output schema. In structured protocol tiers their structuredContent matches the serialized text. Review and signal-history results now use `{ items, completeness }`, a deliberate breaking shape change; array consumers use `result.items`. Older protocol tiers still receive the same envelope in text.
 
-| Tool | Why no output schema |
-| --- | --- |
-| `shadowgraph_review` | Returns a bare JSON array of due decisions. |
-| `shadowgraph_review_signals` | Returns a bare JSON array of review signals. |
-
-`structuredContent` must be a JSON **object** for 2025-06-18 and 2025-11-25 clients, and the official
-TypeScript SDK additionally requires `outputSchema.type === "object"`. Wrapping either result would
-be a change to what the tool returns, not a change to how it is described, so both keep their shape,
-declare no schema, emit no structured content in any tier, and carry the return shape in their
-description instead. `test/mcp-tool-metadata.test.js` and `test/mcp-tool-conformance.test.js` both
-assert this exact pair, so an output schema cannot be added to one without the omission list being
-updated deliberately.
+The journal and rebuild schemas omit global envelope counters; redaction describes a marked scoped view rather than a complete store. The context schema permits unresolved project:null. Input-scoping limitations remain open.
 
 The schemas are written to be portable and, more importantly, to be **satisfiable by data imported
 from an older storage schema**. Advertising an output schema is a promise: a client that validates
@@ -367,7 +355,7 @@ with the scanner over HTTP; that value is a property of the proxy's SDK, not of 
 
 Measured on 2026-09-03, on the 27-tool surface of that date: `requested=2025-11-25
 negotiated=2025-11-25 http=2025-11-25 tools=27 annotated=27 outputSchemas=25 forwarded=deep-equal`.
-The gate now asserts 28 tools and 26 output schemas; the reading above is left as it was taken.
+The gate now asserts 28 tools and 28 output schemas; the reading above is left as it was taken.
 
 **Residual risk.** Only the pinned proxy is under test. Glama's own scanner client, the revision it
 declares to the proxy, and how it renders what it receives are not reproduced here. The proxy version
@@ -380,9 +368,6 @@ None of these are defects in the current release, and none were changed to impro
 
 - no `shadowgraph_unlink`: a relationship is removed only by purging its project;
 - no apply counterpart to `shadowgraph_repair_plan`;
-- `shadowgraph_review` and `shadowgraph_review_signals` return bare arrays rather than the
-  `{ items, page, completeness }` envelope every other read path uses, which is also what prevents an
-  output schema;
 - naming is mixed (bare verbs, `verb_object`, noun phrases, one abbreviation), and renaming a tool
   is a breaking change for every existing client configuration.
 

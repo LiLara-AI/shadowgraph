@@ -123,8 +123,8 @@ describe('security — project-scoped redaction', () => {
     const graph = createShadowGraph({ now: () => '2026-01-01T00:00:00.000Z' });
     const decisionA = graph.addDecision({ project: 'A', title: 'A', chosen: 'x', reviewAfter: '2025-01-01T00:00:00.000Z', idempotencyKey: 'token=TOPSECRET' });
     const decisionB = graph.addDecision({ project: 'B', title: 'B_CROSS_PROJECT_LEAK', chosen: 'x', reviewAfter: '2025-01-01T00:00:00.000Z', idempotencyKey: 'b-key' });
-    graph.review({ project: 'A' });
-    graph.review({ project: 'B' });
+    graph.review({ project: 'A' }).items;
+    graph.review({ project: 'B' }).items;
     const redactedData = graph.redact({ project: 'A' });
     const redacted = JSON.stringify(redactedData);
     assert.equal(redacted.includes('b-key'), false);
@@ -669,7 +669,7 @@ describe('P2-15 — duplicate active fact scopes resolve deterministically', () 
       project: 'p', title: 'T', chosen: 'x',
       alternatives: [{ label: 'a', reasonRejected: 'r', reopenWhen: [{ key: 'dep', operator: 'equals', value: 'NEW' }] }]
     });
-    return graph.review({ project: 'p' }).length;
+    return graph.review({ project: 'p' }).items.length;
   }
 
   it('reorder invariance: the newest observedAt wins regardless of array order', () => {
@@ -686,7 +686,7 @@ describe('P2-15 — duplicate active fact scopes resolve deterministically', () 
       const graph = createShadowGraph();
       graph.importData({ facts });
       graph.addDecision({ project: 'p', title: 'T', chosen: 'x', alternatives: [{ label: 'a', reasonRejected: 'r', reopenWhen: [{ key: 'dep', operator: 'equals', value: 'B' }] }] });
-      return graph.review({ project: 'p' }).length;
+      return graph.review({ project: 'p' }).items.length;
     };
     assert.equal(winner(tied), winner([...tied].reverse()), 'same winner either way');
   });

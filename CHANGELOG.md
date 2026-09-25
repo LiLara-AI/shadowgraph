@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — scope coverage
+
+- Normal read results declare the resolved request boundary and limitations. Unresolved project requests are incomplete even with an exact origin; known candidate counts do not promise total semantic recall.
+- Breaking: `review()` and `getReviewSignals()` return `{ items, completeness }`. Migrate array operations to `result.items`; their MCP results now have object output schemas.
+- Own historical signals with hidden evidence expose bounded identity/lifecycle projections and partial coverage. Stored evidence and acknowledgement behavior are preserved.
+- Public journal, redaction and rebuild envelopes omit global activity counters. Canonical journal entry sequences and privileged persistence/restore metadata remain unchanged.
+
+
 ## 0.41.0 — Technical Preview (2026-09-20; GitHub release, not published to npm)
 
 ### Added

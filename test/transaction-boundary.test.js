@@ -204,7 +204,7 @@ const CLOCK_MUTATOR_CASES = [
         alternatives: [{ id: `transaction-review-alt-${suffix}`, label: 'B', reopenWhen: ['changed'] }]
       }));
       clock.arm();
-      return { graph, clock, invoke: () => graph.review({ project: 'transaction', changedFacts: ['changed'] }) };
+      return { graph, clock, invoke: () => graph.review({ project: 'transaction', changedFacts: ['changed'] }).items };
     }
   },
   {
@@ -237,8 +237,8 @@ const CLOCK_MUTATOR_CASES = [
       graph.addDecision(decisionInput('transaction-ack', {
         alternatives: [{ id: 'transaction-ack-alt', label: 'B', reopenWhen: ['changed'] }]
       }));
-      graph.review({ project: 'transaction', changedFacts: ['changed'], asOf: NOW });
-      const signal = graph.getReviewSignals({ project: 'transaction' })[0];
+      graph.review({ project: 'transaction', changedFacts: ['changed'], asOf: NOW }).items;
+      const signal = graph.getReviewSignals({ project: 'transaction' }).items[0];
       clock.arm();
       return { graph, clock, invoke: () => graph.acknowledgeReview(signal.id, { project: 'transaction' }) };
     }

@@ -114,7 +114,7 @@ test('P1-4 independent review: review and maintain preflight every caller input 
   for (const input of malformedReviewInputs) {
     const graph = maintenanceFixture();
     const before = privilegedSnapshot(graph);
-    assert.throws(() => graph.review(input));
+    assert.throws(() => graph.review(input).items);
     assert.deepEqual(privilegedSnapshot(graph), before, `review(${String(input)}) must be atomic`);
   }
 
@@ -191,8 +191,9 @@ test('P1-4 independent review: real MCP maintain rejection rolls live graph back
 
   const liveJournal = JSON.parse(journalResponse.result.content[0].text);
   assert.deepEqual(liveJournal.items, before.journal, 'rejected MCP call must not alter the live journal');
-  assert.equal(liveJournal.completeness.journalSeq, before.journalSeq);
-  assert.deepEqual(JSON.parse(signalsResponse.result.content[0].text), before.reviewSignals);
+  assert.equal(Object.hasOwn(liveJournal.completeness, 'journalSeq'), false);
+  assert.equal(liveJournal.items.at(-1).seq, before.journalSeq, 'the complete scoped fixture retains its last canonical sequence');
+  assert.deepEqual(JSON.parse(signalsResponse.result.content[0].text).items, before.reviewSignals);
   const liveDecision = JSON.parse(searchResponse.result.content[0].text).items[0].record;
   assert.equal(liveDecision.status, 'proposed', 'rejected MCP call must restore the live decision');
   assert.equal(valid.error, undefined, valid.error?.message);
@@ -242,7 +243,7 @@ function purgeFixture() {
   });
   graph.importData(history);
   const [relation] = history.relations;
-  graph.review({ project: PURGE_PROJECT, asOf: FIXED_NOW });
+  graph.review({ project: PURGE_PROJECT, asOf: FIXED_NOW }).items;
   return { graph, kept, decision, fact, memory, relation };
 }
 

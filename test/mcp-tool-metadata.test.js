@@ -375,8 +375,8 @@ const DISCLOSURE_EXPECTED = {
   shadowgraph_restore: /replace/iu,
   shadowgraph_ack_review: /overwrit/iu,
   shadowgraph_link: /duplicat/iu,
-  shadowgraph_review: /bare JSON array/u,
-  shadowgraph_review_signals: /bare JSON array/u
+  shadowgraph_review: /items, completeness/u,
+  shadowgraph_review_signals: /items, completeness/u
 };
 
 test('every description is composed, single-line, and within its budget', () => {
@@ -469,10 +469,13 @@ test('the advertised description text stays within its aggregate budget', () => 
 // which did not, and which could not be evaluated, rather than a bare due list.
 // Budgets below keep roughly 2% headroom, as before.
 const WIRE_BUDGETS = {
-  'withoutVerifier.full': { bare: 44_500, annotated: 47_500, structured: 191_000 },
-  'withoutVerifier.compact': { bare: 31_500, annotated: 33_000, structured: 126_000 },
-  'withVerifier.full': { bare: 45_500, annotated: 48_500, structured: 195_500 },
-  'withVerifier.compact': { bare: 31_500, annotated: 33_000, structured: 126_000 }
+  // PR-11 adds schemas for both former arrays and explicit scope metadata.
+  // Measured structured bytes: 201955 / 132854 / 206270 / 132854.
+  // Only structured ceilings change; description and input budgets stay fixed.
+  'withoutVerifier.full': { bare: 44_500, annotated: 47_500, structured: 203_000 },
+  'withoutVerifier.compact': { bare: 31_500, annotated: 33_000, structured: 134_000 },
+  'withVerifier.full': { bare: 45_500, annotated: 48_500, structured: 207_500 },
+  'withVerifier.compact': { bare: 31_500, annotated: 33_000, structured: 134_000 }
 };
 
 test('the advertised tool list stays within its wire-size budget, at every tier', () => {
@@ -546,16 +549,16 @@ test('input schemas keep the constraints they had before descriptions were writt
   assert.equal(byName.get('shadowgraph_verify_fact').inputSchema.additionalProperties, false);
 });
 
-test('output schemas are declared for every tool that returns an object, and deliberately omitted for the two that do not', () => {
+test('output schemas are declared for every tool, including the two scope-coverage envelopes', () => {
   const withoutSchema = verifierCatalog.filter((entry) => !entry.outputSchema).map((entry) => entry.name).sort();
-  assert.deepEqual(withoutSchema, ['shadowgraph_review', 'shadowgraph_review_signals']);
+  assert.deepEqual(withoutSchema, []);
   assert.deepEqual(Object.keys(OUTPUT_SCHEMA_OMISSIONS).sort(), withoutSchema);
   for (const [name, reason] of Object.entries(OUTPUT_SCHEMA_OMISSIONS)) {
     assert.ok(reason.length >= 40, `${name} omission must be explained`);
     // The description carries the return shape when no schema can.
-    assert.match(byName.get(name).description, /bare JSON array/u);
+    assert.match(byName.get(name).description, /items, completeness/u);
   }
-  assert.equal(verifierCatalog.filter((entry) => entry.outputSchema).length, 27);
+  assert.equal(verifierCatalog.filter((entry) => entry.outputSchema).length, 29);
 });
 
 test('every output schema is portable: object-rooted, single-typed, and free of references', () => {
@@ -649,7 +652,7 @@ test('metadata tiers follow the revision the server negotiated', () => {
 
 test('projected tools and results carry exactly the members each tier defines', () => {
   const structured = byName.get('shadowgraph_validate');
-  const unstructured = byName.get('shadowgraph_review');
+  const { outputSchema: omitted, ...unstructured } = byName.get('shadowgraph_review'); // generic formatter fallback, no real tool omits it
 
   assert.deepEqual(Object.keys(projectTool(structured, METADATA_TIER.BARE)), ['name', 'description', 'inputSchema']);
   assert.deepEqual(Object.keys(projectTool(structured, METADATA_TIER.ANNOTATED)), ['name', 'description', 'inputSchema', 'annotations']);

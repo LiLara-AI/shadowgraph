@@ -28,7 +28,7 @@ const WIRE_BY_NEGOTIATED = {
   '2025-06-18': { toolKeys: ['name', 'description', 'inputSchema', 'annotations', 'outputSchema'], structured: true },
   '2025-11-25': { toolKeys: ['name', 'description', 'inputSchema', 'annotations', 'outputSchema'], structured: true }
 };
-const OMITTED_OUTPUT_SCHEMA = ['shadowgraph_review', 'shadowgraph_review_signals'];
+const OMITTED_OUTPUT_SCHEMA = [];
 // Tools whose dispatch arm passes only an id, so it carries no write scope and
 // every call is refused before any id is resolved (P1 finding F-30), until
 // their transport is aligned (plan PR-13). Their output schemas cannot be
@@ -242,7 +242,7 @@ test('every advertised output schema accepts the result its own tool really retu
     assert.equal(tool.outputSchema.type, 'object');
     schemas.set(tool.name, tool.outputSchema);
   }
-  assert.equal(schemas.size, 26);
+  assert.equal(schemas.size, 28);
 
   const exercised = new Set();
   const callTool = conformingCaller(rpc, schemas, exercised);
@@ -270,21 +270,23 @@ test('every advertised output schema accepts the result its own tool really retu
   await callTool('shadowgraph_record_fact', { project, key: 'deployment', value: 'multi-user', sourceClass: 'tool_observed', confidence: 0.9 });
 
   const due = await callTool('shadowgraph_review', { project });
-  assert.equal(Array.isArray(due), true, 'shadowgraph_review returns a bare array');
-  assert.equal(due.some((item) => item.decisionId === decisionA.id), true);
+  assert.equal(Array.isArray(due.items), true, 'review carries an items envelope');
+  assert.equal(due.completeness.scope.requestState, 'project_selected');
+  assert.equal(due.items.some((item) => item.decisionId === decisionA.id), true);
 
   // The same evaluation, read as a reconsideration. Its result is object
-  // rooted, so unlike shadowgraph_review it can and does carry an output schema.
+  // rooted, with its own evaluation verdict as well as scope coverage.
   const reconsidered = await callTool('shadowgraph_reconsider', { project });
   assert.equal(reconsidered.verdict, 'review_recommended');
   assert.equal(reconsidered.evaluationCompleteness, 'complete');
   assert.equal(reconsidered.decisions.some((item) => item.decisionId === decisionA.id), true);
 
   const signals = await callTool('shadowgraph_review_signals', { project, status: 'open' });
-  assert.equal(Array.isArray(signals), true, 'shadowgraph_review_signals returns a bare array');
-  assert.ok(signals.length >= 1);
+  assert.equal(Array.isArray(signals.items), true, 'signal history carries an items envelope');
+  assert.equal(signals.completeness.scope.requestState, 'project_selected');
+  assert.ok(signals.items.length >= 1);
   const refusals = [
-    ['shadowgraph_ack_review', { project, id: signals[0].id }],
+    ['shadowgraph_ack_review', { project, id: signals.items[0].id }],
     ['shadowgraph_update_status', { project, decisionId: decisionB.id, status: 'planned' }],
     ['shadowgraph_record_outcome', { project, decisionId: decisionB.id, outcome: { status: 'successful', sourceClass: 'tool_observed', lessons: ['migration first'] } }]
   ];
@@ -423,12 +425,12 @@ test('initialize negotiates a revision, and the wire shape follows the one it RE
     assert.equal(listed.tools.length, 28, `requested ${requested}`);
     const validateTool = listed.tools.find((tool) => tool.name === 'shadowgraph_validate');
     assert.deepEqual(Object.keys(validateTool), wire.toolKeys, `negotiated ${negotiated} tool members`);
-    // A tool that declares no output schema never gains that member, at any tier.
+    // The review envelope now participates in the same negotiated schema tier.
     const reviewTool = listed.tools.find((tool) => tool.name === 'shadowgraph_review');
     assert.deepEqual(
       Object.keys(reviewTool),
-      wire.toolKeys.filter((key) => key !== 'outputSchema'),
-      `negotiated ${negotiated} members of a tool with no output schema`
+      wire.toolKeys,
+      `negotiated ${negotiated} members of the review envelope`
     );
     if (wire.toolKeys.includes('annotations')) {
       assert.deepEqual(validateTool.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
@@ -441,7 +443,11 @@ test('initialize negotiates a revision, and the wire shape follows the one it RE
     );
     assert.equal(Object.hasOwn(called.result, 'resultType'), false, 'a handshake result never gains modern members');
     const reviewed = await rpc.call('tools/call', { name: 'shadowgraph_review', arguments: {} });
-    assert.deepEqual(Object.keys(reviewed.result), ['content'], 'a bare-array tool never emits structured content');
+    assert.deepEqual(Object.keys(reviewed.result), wire.structured ? ['content', 'structuredContent'] : ['content']);
+    const envelope = JSON.parse(reviewed.result.content[0].text);
+    assert.equal(envelope.completeness.complete, false);
+    assert.equal(envelope.completeness.limitation.code, 'scoped_coverage');
+    if (wire.structured) assert.deepEqual(reviewed.result.structuredContent, envelope);
   }
 });
 

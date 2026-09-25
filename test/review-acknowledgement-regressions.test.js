@@ -91,7 +91,7 @@ test('a legacy acknowledgement with no recorded conditions never covers a curren
   const graph = graphWithLegacySignal({ withConditions: false });
 
   assert.equal(openReview(graph).reviewSignalStatus, 'open', 'unknown historical scope cannot acknowledge anything');
-  const legacy = graph.getReviewSignals({ project: 'p' }).find((item) => item.id === 'review:legacy');
+  const legacy = graph.getReviewSignals({ project: 'p' }).items.find((item) => item.id === 'review:legacy');
   assert.ok(legacy, 'the legacy signal is kept as historical data');
   assert.equal(legacy.status, 'acknowledged', 'and is not rewritten');
   assert.equal(legacy.coverage, undefined, 'and is not stamped with coverage it never had');
@@ -101,7 +101,7 @@ test('a legacy acknowledgement is not widened onto a broader current breach set'
   const graph = graphWithLegacySignal({ lag: 1200 });
 
   assert.equal(openReview(graph).reviewSignalStatus, 'open', 'lag >= 1000 was never acknowledged');
-  const legacy = graph.getReviewSignals({ project: 'p' }).find((item) => item.id === 'review:legacy');
+  const legacy = graph.getReviewSignals({ project: 'p' }).items.find((item) => item.id === 'review:legacy');
   assert.equal(legacy.status, 'acknowledged', 'the legacy signal is preserved unchanged');
   assert.equal(legacy.coverage, undefined, 'and is never stamped with a wider coverage set');
 });
@@ -185,7 +185,7 @@ test('the compact list and acknowledge flow settles the new breach without touch
   graph.acknowledgeReview(listed.reviewSignalId, { project: 'p' });
   assert.equal(openReview(graph).reviewSignalStatus, 'acknowledged', 'acknowledging it settles it');
 
-  const legacy = graph.getReviewSignals({ project: 'p' }).find((item) => item.id === 'review:legacy');
+  const legacy = graph.getReviewSignals({ project: 'p' }).items.find((item) => item.id === 'review:legacy');
   assert.equal(legacy.status, 'acknowledged');
   assert.equal(legacy.acknowledgedAt, '2026-01-02T00:00:00.000Z', 'the historical record is untouched');
 });
@@ -331,7 +331,7 @@ test('reordering rules on different keys does not reopen an acknowledged review'
   const review = openReview(reordered);
   assert.equal(review.reason, 'load, lag', 'the reason follows the stored order and is not rewritten');
   assert.equal(review.reviewSignalStatus, 'acknowledged', 'but identity does not depend on that order');
-  assert.equal(reordered.getReviewSignals({ project: 'p', status: 'open' }).length, 0, 'no duplicate signal appears');
+  assert.equal(reordered.getReviewSignals({ project: 'p', status: 'open' }).items.length, 0, 'no duplicate signal appears');
 });
 
 test('reordering rules on the same key does not reopen an acknowledged review', () => {
@@ -341,7 +341,7 @@ test('reordering rules on the same key does not reopen an acknowledged review', 
 
   const reordered = reimportReversed(graph);
   assert.equal(openReview(reordered).reviewSignalStatus, 'acknowledged');
-  assert.equal(reordered.getReviewSignals({ project: 'p', status: 'open' }).length, 0);
+  assert.equal(reordered.getReviewSignals({ project: 'p', status: 'open' }).items.length, 0);
 });
 
 test('a genuinely changed breach set still opens a new signal after a reorder', () => {
@@ -373,7 +373,7 @@ test('reorder stability holds across a restart on JSON and SQLite', async (t) =>
 
       const graph = createShadowGraph();
       graph.importData(durable);
-      results[backend] = [openReview(graph).reviewSignalStatus, graph.getReviewSignals({ project: 'p', status: 'open' }).length];
+      results[backend] = [openReview(graph).reviewSignalStatus, graph.getReviewSignals({ project: 'p', status: 'open' }).items.length];
     });
   }
 

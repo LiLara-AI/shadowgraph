@@ -12,9 +12,8 @@ const expected = [
   { name: 'Full', count: 28, env: [] },
   { name: 'Compact', count: 14, env: ['SHADOWGRAPH_MCP_COMPACT=1'] }
 ];
-// These two return a bare JSON array, so they cannot carry an object-rooted
-// output schema. See src/mcp-tools.js and docs/mcp-compatibility.md.
-const outputSchemaOmitted = new Set(['shadowgraph_review', 'shadowgraph_review_signals']);
+// Every tool now has an object envelope and output schema.
+const outputSchemaOmitted = new Set();
 const annotationHints = ['readOnlyHint', 'destructiveHint', 'idempotentHint', 'openWorldHint'];
 
 // The Inspector connects through the official SDK and declares a revision that

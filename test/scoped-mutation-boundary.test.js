@@ -50,8 +50,8 @@ function fixture() {
     graph.addDecision({ ...owner, id: `${prefix}-replacement`, title: `${prefix} replacement`, chosen: 'y' });
     graph.addFact({ ...owner, id: `${prefix}-fact`, key: 'ttl', value: 1, observedAt: OBSERVED, expiresAt: PAST });
   }
-  graph.review({ project: 'alpha' });
-  graph.review({ project: 'default' });
+  graph.review({ project: 'alpha' }).items;
+  graph.review({ project: 'default' }).items;
   return graph;
 }
 
@@ -164,7 +164,7 @@ test('reconsider answers another project\'s decision exactly as a missing one', 
 test('review, reconsider and maintain with no scope evaluate and change nothing', () => {
   const graph = fixture();
   const before = JSON.stringify(privilegedSnapshot(graph));
-  assert.deepEqual(graph.review({}), []);
+  assert.deepEqual(graph.review({}).items, []);
   const reconsidered = graph.reconsider({});
   assert.deepEqual(reconsidered.decisions, []);
   assert.equal(reconsidered.limitation?.code, 'scoped_coverage');
@@ -177,9 +177,9 @@ test('review, reconsider and maintain with no scope evaluate and change nothing'
 
 test('review, reconsider and maintain evaluate and change only their own scope', () => {
   const graph = fixture();
-  assert.deepEqual(graph.review({ project: 'beta' }).map((item) => item.decisionId), ['beta-decision']);
-  assert.deepEqual(graph.review({ project: 'default' }).map((item) => item.decisionId), ['real-dflt-decision'], 'legacy "default" is not the real project');
-  assert.deepEqual(graph.review({ originId: 'origin_a' }).map((item) => item.decisionId), ['origin-a-decision']);
+  assert.deepEqual(graph.review({ project: 'beta' }).items.map((item) => item.decisionId), ['beta-decision']);
+  assert.deepEqual(graph.review({ project: 'default' }).items.map((item) => item.decisionId), ['real-dflt-decision'], 'legacy "default" is not the real project');
+  assert.deepEqual(graph.review({ originId: 'origin_a' }).items.map((item) => item.decisionId), ['origin-a-decision']);
   assert.deepEqual(graph.reconsider({ project: 'alpha' }).decisions.map((item) => item.decisionId).sort(), ['alpha-decision', 'alpha-replacement']);
   const maintained = graph.maintain({ project: 'alpha', now: NOW });
   assert.deepEqual(maintained.staleDecisionIds, ['alpha-decision']);
@@ -217,8 +217,8 @@ function labelMatchedHistory() {
   history.addFact({ project: 'default', id: 'legacy-lag-fact', key: 'lag', value: 9, observedAt: OBSERVED });
   history.addFact({ project: 'default', id: 'real-dflt-load-fact', key: 'load', value: 90, observedAt: NOW });
   history.addFact({ originId: 'origin_a', id: 'origin-b-depth-fact', key: 'depth', value: 9, observedAt: NOW });
-  history.review({ project: 'default' });
-  history.review({ originId: 'origin_a' });
+  history.review({ project: 'default' }).items;
+  history.review({ originId: 'origin_a' }).items;
   const signals = privilegedSnapshot(history).reviewSignals;
 
   const legacy = createShadowGraph({ now });
@@ -249,6 +249,51 @@ function labelMatchedHistory() {
 
 const storedSignal = (graph, decisionId) => privilegedSnapshot(graph).reviewSignals.find((signal) => signal.decisionId === decisionId);
 
+test('PR-11 historical signal reads expose only owner identity and lifecycle with partial coverage', () => {
+  const graph = labelMatchedHistory();
+  const before = JSON.stringify(privilegedSnapshot(graph));
+  for (const [owner, decisionId] of DECISIONS) {
+    const signal = storedSignal(graph, decisionId);
+    const response = JSON.parse(JSON.stringify(graph.getReviewSignals({ ...owner, status: 'open' })));
+    const item = response.items?.find((candidate) => candidate.id === signal.id);
+    assert.ok(item, `${decisionId}: the owner's stored signal must not look absent`);
+    assert.deepEqual(Object.keys(item).sort(), ['createdAt', 'decisionId', 'id', 'kind', 'limitation', 'status']);
+    assert.equal(item.limitation.code, 'scoped_coverage');
+    assert.equal(response.completeness.complete, false);
+    assert.equal(response.completeness.losslessItems, false);
+    assert.equal(response.completeness.limitation.code, 'scoped_coverage');
+    assert.deepEqual(HIDDEN.filter((id) => JSON.stringify(response).includes(id)), []);
+    assert.equal(response.completeness.total, owner.project ? 2 : 1, 'only owner signals counted');
+    for (const read of ['exportData', 'redact', 'stats']) {
+      const view = JSON.parse(JSON.stringify(graph[read](owner)));
+      assert.equal(view.completeness.complete, false, read);
+      assert.deepEqual(HIDDEN.filter((id) => JSON.stringify(view).includes(id)), [], read);
+      if (Array.isArray(view.reviewSignals)) assert.deepEqual(view.reviewSignals.find((s) => s.id === signal.id), item, read);
+    }
+    assert.deepEqual(graph.getReviewSignals({ ...owner, status: 'acknowledged' }).items, []);
+    item.status = 'changed by caller';
+  }
+  assert.equal(JSON.stringify(privilegedSnapshot(graph)), before, 'coverage adds no writes or historical reassessment');
+  assert.deepEqual(graph.getReviewSignals({ project: 'alpha' }).items, []);
+  assert.equal(graph.getReviewSignals({ project: 'alpha' }).completeness.complete, true, 'no other owner omission notice');
+});
+
+test('PR-11 all-in-scope signal reads remain full and status filtering does not inherit omitted detail', () => {
+  const graph = createShadowGraph({ now });
+  graph.addDecision({ project: 'alpha', id: 'alpha-signal', title: 'alpha', chosen: 'x', alternatives: reopen('alpha-alt', 'lag', 5) });
+  graph.addFact({ project: 'alpha', key: 'lag', value: 9, observedAt: NOW });
+  graph.review({ project: 'alpha' });
+  const signal = storedSignal(graph, 'alpha-signal');
+  const response = JSON.parse(JSON.stringify(graph.getReviewSignals({ project: 'alpha' })));
+  assert.deepEqual(response.items, [signal]);
+  assert.equal(response.completeness.complete, true);
+  assert.equal(response.completeness.losslessItems, true);
+  graph.acknowledgeReview(signal.id, { project: 'alpha' });
+  assert.deepEqual(graph.getReviewSignals({ project: 'alpha', status: 'open' }).items, []);
+  assert.equal(graph.getReviewSignals({ project: 'alpha', status: 'open' }).completeness.complete, true);
+  assert.equal(graph.getReviewSignals({ project: 'alpha', status: 'acknowledged' }).items[0].id, signal.id);
+});
+
 test('acknowledging a signal an earlier build raised on hidden facts discloses none of them', () => {
   const graph = labelMatchedHistory();
   assert.equal(privilegedValidate(graph).valid, true, 'the store is admitted as a valid store');
@@ -256,12 +301,12 @@ test('acknowledging a signal an earlier build raised on hidden facts discloses n
   // review() names the load signal to its owner (identity is the rule, not the
   // fact), so the owner must be able to close it.
   const loadSignal = storedSignal(graph, 'real-dflt-load');
-  assert.equal(graph.review({ project: 'default' }).find((item) => item.decisionId === 'real-dflt-load')?.reviewSignalId, loadSignal.id);
+  assert.equal(graph.review({ project: 'default' }).items.find((item) => item.decisionId === 'real-dflt-load')?.reviewSignalId, loadSignal.id);
 
   for (const [owner, decisionId] of DECISIONS) {
     const signal = storedSignal(graph, decisionId);
     const history = JSON.stringify(signal.violatedConditions);
-    assert.equal(graph.getReviewSignals(owner).some((item) => item.id === signal.id), false, `${decisionId}: the read view withholds it`);
+    assert.equal(graph.getReviewSignals(owner).items.find((item) => item.id === signal.id)?.limitation.code, 'scoped_coverage', `${decisionId}: the read view withholds detail explicitly`);
     const answer = graph.acknowledgeReview(signal.id, owner);
     assert.deepEqual(HIDDEN.filter((id) => JSON.stringify(answer).includes(id)), [], `${decisionId}: the answer names no hidden fact`);
     assert.equal(Object.hasOwn(answer, 'violatedConditions'), false, `${decisionId}: no evidence the caller may not read`);
@@ -277,14 +322,14 @@ test('acknowledging a signal an earlier build raised on hidden facts discloses n
     assert.throws(() => graph.acknowledgeReview('review_absent', owner), { message: 'Review signal not found' });
     assert.throws(() => graph.acknowledgeReview(signal.id, {}), { code: 'write_scope_unresolved' });
   }
-  assert.equal(graph.review({ project: 'default' }).find((item) => item.decisionId === 'real-dflt-load').reviewSignalStatus, 'acknowledged');
+  assert.equal(graph.review({ project: 'default' }).items.find((item) => item.decisionId === 'real-dflt-load').reviewSignalStatus, 'acknowledged');
 });
 
 test('acknowledging a signal whose evidence is all in scope returns the whole signal', () => {
   const graph = createShadowGraph({ now });
   graph.addDecision({ project: 'alpha', id: 'alpha-lag', title: 'alpha-lag', chosen: 'x', alternatives: reopen('alt-alpha', 'lag', 5) });
   graph.addFact({ project: 'alpha', id: 'alpha-lag-fact', key: 'lag', value: 9, observedAt: NOW });
-  graph.review({ project: 'alpha' });
+  graph.review({ project: 'alpha' }).items;
   const signal = storedSignal(graph, 'alpha-lag');
   const answer = graph.acknowledgeReview(signal.id, { project: 'alpha' });
   assert.deepEqual(answer, storedSignal(graph, 'alpha-lag'));

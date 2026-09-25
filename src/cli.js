@@ -94,7 +94,7 @@ async function runOneShot() {
         version: VERSION,
         node: { version: process.versions.node, supported: nodeSupported, requirement: '>=20' },
         storage: { type: storageType, path: file, initialized: true, readable: true, writable: true },
-        graph: { valid: graphValid, issues: validation.issues?.length ?? 0 },
+        graph: { valid: graphValid, issues: validation.issues?.length ?? 0, completeness: validation.completeness, limitation: validation.limitation },
         mcp: { available: true, recommendedMode: 'compact', fullMode: 'Set SHADOWGRAPH_MCP_COMPACT=0 or remove it.' }
       };
     }

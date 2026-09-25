@@ -42,7 +42,12 @@
       const [stats, signals, records] = await Promise.all([
         request('/stats'), request('/review-signals'), request('/records')
       ]);
-      $('stats').innerHTML = Object.entries(stats).map(([key, value]) => `<div class="card"><b>${key}</b><br>${value}</div>`).join('');
+      $('stats').replaceChildren(...Object.entries(stats).map(([key, value]) => {
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.textContent = `${key}: ${typeof value === 'object' ? JSON.stringify(value, null, 2) : value}`;
+        return card;
+      }));
       $('signals').textContent = JSON.stringify(signals, null, 2);
       $('records').textContent = JSON.stringify(records, null, 2);
     }

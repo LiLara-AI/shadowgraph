@@ -21,7 +21,7 @@ test('review returns only alternatives whose rules matched', () => {
     { label: 'B', reopenWhen: ['local'] },
     { label: 'C', reopenWhen: ['cloud'] }
   ] });
-  assert.deepEqual(graph.review({ project: 'default', changedFacts: ['local'] })[0].alternativesToReconsider, ['B']);
+  assert.deepEqual(graph.review({ project: 'default', changedFacts: ['local'] }).items[0].alternativesToReconsider, ['B']);
 });
 
 test('loads a v0.1 array file through the storage boundary', async (t) => {

@@ -29,7 +29,7 @@ test('outcomes update confidence and produce review signals', () => {
   // A stronger claim moves it further: production_verified would give 0.6.
   assert.equal(Number(updated.confidence.current.toFixed(2)), 0.7);
   assert.equal(updated.confidence.basis.failedOutcomes, 1);
-  assert.equal(graph.review({ project: 'default' }).length, 1);
+  assert.equal(graph.review({ project: 'default' }).items.length, 1);
 });
 
 test('facts and v0.1 records migrate into the v0.2 export shape', () => {

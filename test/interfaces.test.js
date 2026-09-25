@@ -25,7 +25,7 @@ test('HTTP API records and reviews decisions without wildcard CORS', async (t) =
     assert.equal(create.status, 200);
     assert.equal(create.headers.get('access-control-allow-origin'), null);
     const review = await fetch(`${base}/review`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'default', changedFacts: ['local'] }) });
-    assert.equal((await review.json()).length, 1);
+    assert.equal((await review.json()).items.length, 1);
   } finally {
     await new Promise((resolve) => app.server.close(resolve));
   }
@@ -130,7 +130,9 @@ test('CLI persists a decision and reports stats', async (t) => {
   await run(['decision', JSON.stringify({ project: 'default', title: 'Testing', chosen: 'Node' })]);
   // The stats verb passes no project until its arguments are aligned (PR-13),
   // so it counts nothing; the scoped list shows what was persisted.
-  const stats = await run(['stats']);
+  const { completeness, ...stats } = await run(['stats']);
+  assert.equal(completeness.complete, false);
+  assert.equal(completeness.limitation.code, 'scoped_coverage');
   assert.deepEqual(stats, { schemaVersion: SCHEMA_VERSION, total: 0, decisions: 0, attempts: 0, facts: 0, relations: 0, reviewSignals: 0, events: 0, journal: 0 });
   const listed = await run(['list', JSON.stringify({ project: 'default' })]);
   assert.deepEqual(listed.records.map((item) => item.title), ['Testing']);

@@ -28,7 +28,7 @@ test('the public export keeps its documented envelope', () => {
   assert.deepEqual(Object.keys(exported), ['exportKind', 'schemaVersion', 'records', 'facts', 'relations', 'reviewSignals', 'events', 'completeness']);
   assert.equal(exported.exportKind, 'public_scoped');
   assert.equal(exported.schemaVersion, SCHEMA_VERSION);
-  assert.deepEqual(exported.completeness.scope, { project: 'alpha' });
+  assert.deepEqual(exported.completeness.scope, { project: 'alpha', requestState: 'project_selected', originPresented: false, grant: null });
   assert.equal(exported.completeness.limitation.code, 'scoped_coverage');
   assert.equal(exported.records.length, 3);
   assert.equal(exported.facts.length, 1);

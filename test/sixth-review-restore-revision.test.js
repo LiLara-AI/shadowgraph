@@ -531,7 +531,7 @@ for (const backend of ['json', 'sqlite']) {
 }
 
 for (const backend of ['json', 'sqlite']) {
-  test(`DS-P1-004 MCP ${backend}: success exposes the exact fresh revision in graph and durable storage`, async (t) => {
+  test(`DS-P1-004 MCP ${backend}: success installs the exact fresh revision while the public read omits global counters`, async (t) => {
     const directory = await scratchDirectory(t, `shadowgraph ds-p1-004 MCP ${backend} `);
     let scenario;
     try { scenario = await prepareRestoreScenario(backend, directory); }
@@ -556,7 +556,7 @@ for (const backend of ['json', 'sqlite']) {
     const durableStore = await createStore(backend, scenario.destination);
     const durable = await durableStore.load();
     durableStore.close();
-    assert.equal(live.revision, 3);
+    assert.equal(Object.hasOwn(live, 'revision'), false, 'redaction is a scoped read, not a global revision cursor');
     assert.equal(durable.revision, 3);
     // Every record, fact and relation of the restored store is ds-p1-004's.
     for (const collection of ['records', 'facts', 'relations']) assert.deepEqual(live[collection], durable[collection], collection);

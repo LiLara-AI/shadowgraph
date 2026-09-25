@@ -162,7 +162,7 @@ async function snapshot(rpc) {
   }
   return {
     revision: durable.revision ?? 0,
-    journalSeq: journal.completeness.journalSeq,
+    journalSeq: durable.journalSeq ?? 0,
     serialized: JSON.stringify(durable),
     files: await listFiles(rpc.directory),
     entities,
@@ -268,7 +268,7 @@ test('every advertised tool annotation matches the effects the server actually h
 
   // --- reopen evaluation, which persists signals --------------------------
   const review = await observe('shadowgraph_review', { project: PROJECT });
-  assert.equal(review.firstResult.length, 1, 'the changed fact must make the decision due');
+  assert.equal(review.firstResult.items.length, 1, 'the changed fact must make the decision due');
   assert.equal(review.first.journalDelta, 0, 'review signals are persisted but not journalled');
   assert.equal(review.repeat.changedExisting.length, 0, 'signals dedupe by decision and reason');
   assert.equal(review.repeat.revisionDelta, 1, 'a repeat that changes no signal still commits a revision');
@@ -306,11 +306,11 @@ test('every advertised tool annotation matches the effects the server actually h
     assert.equal(read.first.revisionDelta, 0, `${name} must not commit a revision`);
     assert.equal(read.first.storeChanged, false, `${name} must leave the store byte-identical`);
   }
-  // The durable revision is visible on the wire through exactly one tool, which
-  // is what makes "a repeat still commits a revision" a client-observable claim.
+  // Global revision is privileged; the durable-effect assertions above remain.
   const redacted = observed.get('shadowgraph_redact').firstResult;
   const durableNow = await readStore(rpc.file);
-  assert.equal(redacted.revision, durableNow.revision, 'redact reports the durable revision');
+  assert.equal(Object.hasOwn(redacted, 'revision'), false, 'a scoped read does not expose the global durable revision');
+  assert.ok(Number.isInteger(durableNow.revision), 'mutation effects still use the truthful durable revision');
 
   // --- lifecycle writes ---------------------------------------------------
   const refusedWithoutEffect = async (name, args) => {
@@ -338,7 +338,7 @@ test('every advertised tool annotation matches the effects the server actually h
   assert.notEqual(link.firstResult.id, link.repeatResult.id, 'every link mints a new relation id');
 
   // --- acknowledging a review signal: an unjournalled in-place overwrite ---
-  const [signal] = await rpc.ok('shadowgraph_review_signals', { project: PROJECT, status: 'open' });
+  const { items: [signal] } = await rpc.ok('shadowgraph_review_signals', { project: PROJECT, status: 'open' });
   assert.ok(signal, 'a review signal must exist to acknowledge');
   await refusedWithoutEffect('shadowgraph_ack_review', { project: PROJECT, id: signal.id });
 

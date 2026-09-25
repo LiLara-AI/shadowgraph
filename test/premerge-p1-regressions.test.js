@@ -957,7 +957,7 @@ const ZERO_JOURNAL_MUTATOR_CASES = [
         id: 'zero-review', project: 'matrix', title: 'Review', chosen: 'A',
         alternatives: [{ id: 'zero-review-alt', label: 'B', reopenWhen: ['changed'] }]
       });
-      return { graph, invoke: () => graph.review({ project: 'matrix', changedFacts: ['changed'] }) };
+      return { graph, invoke: () => graph.review({ project: 'matrix', changedFacts: ['changed'] }).items };
     }
   },
   {
@@ -983,8 +983,8 @@ const ZERO_JOURNAL_MUTATOR_CASES = [
         id: 'zero-ack', project: 'matrix', title: 'Ack', chosen: 'A',
         alternatives: [{ id: 'zero-ack-alt', label: 'B', reopenWhen: ['changed'] }]
       });
-      graph.review({ project: 'matrix', changedFacts: ['changed'] });
-      const signal = graph.getReviewSignals({ project: 'matrix' })[0];
+      graph.review({ project: 'matrix', changedFacts: ['changed'] }).items;
+      const signal = graph.getReviewSignals({ project: 'matrix' }).items[0];
       return { graph, invoke: () => graph.acknowledgeReview(signal.id, { project: 'matrix' }) };
     }
   },

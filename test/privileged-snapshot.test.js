@@ -36,7 +36,7 @@ function populated() {
   // A relation across projects, kept as history (link() refuses one since
   // PR-09): the snapshot carries it like everything else.
   graph.importData(historicalRelation({ id: 'relation-alpha-beta', from: decision.id, to: attempt.id, relation: 'tried', project: 'alpha', seq: privilegedSnapshot(graph).journalSeq + 1, at: NOW }));
-  graph.review({ project: 'alpha' });
+  graph.review({ project: 'alpha' }).items;
   return graph;
 }
 

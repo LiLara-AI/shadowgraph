@@ -588,6 +588,37 @@ function paginate(items, options, scope, extra = {}) {
   };
 }
 
+// Completeness is relative to this request's known candidates, never a claim
+// of total semantic recall. An exact origin can read its unattributed records
+// while the project is still unresolved. No wider read grant exists here.
+function scopeCompleteness(scope, current = { complete: true }, signals = []) {
+  const partial = signals.some((signal) => signal.limitation?.code === 'scoped_coverage');
+  const details = [current.limitation?.detail];
+  if (scope.state === 'project_unresolved') details.push(scope.originId === null
+    ? 'No project or usable origin was resolved. No project content was searched.'
+    : 'No project was resolved. Only unattributed content belonging to the presented origin was searched.');
+  if (partial) details.push('Some own signals have historical detail outside this scope. Only their identity and lifecycle are shown.');
+  return {
+    ...current,
+    scope: { ...current.scope, project: scope.project, requestState: scope.state, originPresented: scope.originId !== null, grant: null },
+    complete: current.complete === true && scope.state === 'project_selected' && !partial,
+    ...(partial ? { losslessItems: false } : {}),
+    ...(details.some(Boolean) ? { limitation: { ...current.limitation, code: current.limitation?.code ?? 'scoped_coverage', detail: details.filter(Boolean).join(' ') } } : {})
+  };
+}
+
+function scopedResult(result, boundary, signals = []) {
+  return { ...result, completeness: scopeCompleteness(boundary.scope, result.completeness ?? { complete: true, ...(result.limitation ? { limitation: result.limitation } : {}) }, signals) };
+}
+
+function scopedPage(items, options, boundary, scope, extra = {}) {
+  return scopedResult(paginate(items, options, scope, extra), boundary);
+}
+
+function scopedItems(items, boundary, signals = []) {
+  return scopedResult({ items, completeness: { returned: items.length, total: items.length, omitted: 0, complete: true, losslessItems: true } }, boundary, signals);
+}
+
 export function createShadowGraph(options = {}) {
   const now = options.now ?? (() => new Date().toISOString());
   const verifier = options.verifier ?? null;
@@ -1142,7 +1173,7 @@ export function createShadowGraph(options = {}) {
       .filter((record) => record.kind === 'memory' && boundary.visible(record) && sameMemoryScopeValues(record.scope, scope) && record.memoryType === input.memoryType && record.key === input.key)
       .sort((left, right) => (left.version ?? 1) - (right.version ?? 1) || compareInstants(left.temporal?.validFrom ?? left.createdAt, right.temporal?.validFrom ?? right.createdAt) || String(left.id).localeCompare(String(right.id)))
       .map(clone);
-    return paginate(items, input, { project: boundary.scope.project, scope, memoryType: input.memoryType, key: input.key }, { historical: true });
+    return scopedPage(items, input, boundary, { scope, memoryType: input.memoryType, key: input.key }, { historical: true });
   }
 
   function applyMemoryPlan(input = {}) {
@@ -1590,7 +1621,7 @@ export function createShadowGraph(options = {}) {
       return found && (found.kind !== 'memory' || sameMemoryScopeValues(found.scope, memoryScope)) ? found : undefined;
     };
     const root = reach(input.id);
-    if (!root) return { root: input.id, direction, depth, nodes: [], relations: [], limitation: { code: 'scoped_coverage', detail: 'No record with this id is visible in the scope of this traversal.' } };
+    if (!root) return scopedResult({ root: input.id, direction, depth, nodes: [], relations: [], limitation: { code: 'scoped_coverage', detail: 'No record with this id is visible in the scope of this traversal.' } }, boundary);
     const seen = new Set([input.id]); const nodes = [clone(root)]; const edges = []; let frontier = [input.id];
     for (let level = 0; level < depth && frontier.length; level += 1) {
       const next = [];
@@ -1607,7 +1638,7 @@ export function createShadowGraph(options = {}) {
       }
       frontier = next;
     }
-    return { root: input.id, direction, depth, nodes, relations: edges };
+    return scopedResult({ root: input.id, direction, depth, nodes, relations: edges }, boundary);
   }
 
   // Both decisions resolve inside the one boundary of this write, so they
@@ -2063,9 +2094,13 @@ export function createShadowGraph(options = {}) {
     return { due, diagnostics, explained };
   }
 
-  // Public shape is unchanged: a bare array of due decisions -- those of the
-  // request's scope only, and none with no project and no origin.
-  function review(context = {}) { return evaluateReview(context, { visible: readBoundary(context).visible }).due; }
+  // Due entries keep their content; the serializable envelope declares the
+  // request boundary even when no decision can be evaluated.
+  function review(context = {}) {
+    const boundary = readBoundary(context);
+    const due = evaluateReview(context, { visible: boundary.visible }).due;
+    return scopedItems(due, boundary, referencedSignals(boundary, due));
+  }
 
   // What an operation that evaluated nothing says about itself (P1 finding
   // F-06): it had no project and no origin, so it read and changed nothing.
@@ -2203,16 +2238,16 @@ export function createShadowGraph(options = {}) {
     // read as "unchanged, complete" -- the same silent pass failing closed
     // exists to prevent. It is reported as not settled, and why.
     if (reachesNothing(boundary)) {
-      return { verdict: 'manual_review', evaluationCompleteness: 'partial', scope: { project: null, decisionId: null }, decisions, limitation: { ...UNRESOLVED_OPERATION } };
+      return scopedResult({ verdict: 'manual_review', evaluationCompleteness: 'partial', scope: { project: null, decisionId: null }, decisions, limitation: { ...UNRESOLVED_OPERATION } }, boundary);
     }
-    return {
+    return scopedResult({
       verdict: decisions.some((item) => item.verdict === 'review_recommended') ? 'review_recommended'
         : decisions.some((item) => item.verdict === 'manual_review') ? 'manual_review'
           : 'unchanged',
       evaluationCompleteness: decisions.some((item) => item.evaluationCompleteness === 'partial') ? 'partial' : 'complete',
       scope: { project: boundary.scope.project, decisionId: onlyDecisionId ?? null },
       decisions
-    };
+    }, boundary, referencedSignals(boundary, decisions));
   }
 
   // A declared classification wins; the legacy text heuristic is the fallback for
@@ -2313,7 +2348,7 @@ export function createShadowGraph(options = {}) {
     // (P1 finding F-06), so time-based ageing happens per project, when that
     // project is maintained. With no project and no origin it changes nothing.
     const boundary = readBoundary(input);
-    if (reachesNothing(boundary)) return { at, staleDecisionIds: [], agedDecisionIds: [], reviewSignals: [], due: [], diagnostics: [], limitation: { ...UNRESOLVED_OPERATION } };
+    if (reachesNothing(boundary)) return scopedResult({ at, staleDecisionIds: [], agedDecisionIds: [], reviewSignals: [], due: [], diagnostics: [], limitation: { ...UNRESOLVED_OPERATION } }, boundary);
     const decisionsToStale = [...records.values()].filter((record) => (
       record.kind === 'decision'
       && boundary.visible(record)
@@ -2348,11 +2383,21 @@ export function createShadowGraph(options = {}) {
       appendJournal({ type: 'fact.expired', entityKind: 'fact', entityId: fact.id, project: fact.project, payload: clone(fact) });
     }
     const { due, diagnostics } = evaluateReview(reviewInput, { visible: boundary.visible });
-    return { at, staleDecisionIds, agedDecisionIds: [...staleDecisionIds], reviewSignals: scopedView(boundary).reviewSignals.map(clone), due, diagnostics };
+    const signals = scopedView(boundary).reviewSignals.map(clone);
+    return scopedResult({ at, staleDecisionIds, agedDecisionIds: [...staleDecisionIds], reviewSignals: signals, due, diagnostics }, boundary, signals);
   }
 
   // The review signals of the request's scope (P1 reconciliation F-04).
-  function getReviewSignals(input = {}) { return scopedView(readBoundary(input)).reviewSignals.filter((item) => !input.status || item.status === input.status).map(clone); }
+  function getReviewSignals(input = {}) {
+    const boundary = readBoundary(input);
+    const items = scopedView(boundary).reviewSignals.filter((item) => !input.status || item.status === input.status).map(clone);
+    return scopedItems(items, boundary, items);
+  }
+
+  function referencedSignals(boundary, items) {
+    const ids = new Set(items.map((item) => item.reviewSignalId));
+    return scopedView(boundary).reviewSignals.filter((signal) => ids.has(signal.id));
+  }
   // A signal's own fields: its decision's and its lifecycle's. Its conditions
   // carry the facts it was evaluated on.
   const SIGNAL_OWN_FIELDS = ['id', 'kind', 'decisionId', 'title', 'reason', 'alternativesToReconsider', 'coverage', 'status', 'createdAt', 'acknowledgedAt'];
@@ -2397,13 +2442,13 @@ export function createShadowGraph(options = {}) {
     const data = snapshot();
     const view = scopedView(boundary);
     const chosen = (items) => new Set(items.map((item) => item.id));
-    const [recordIds, factIds, relationIds, signalIds] = [view.records, view.facts, view.relations, view.reviewSignals].map(chosen);
+    const [recordIds, factIds, relationIds] = [view.records, view.facts, view.relations].map(chosen);
     // The snapshot's events and journal are copies of the live arrays, in order.
     const [eventsKept, entriesKept] = [new Set(view.events), new Set(view.journal)];
     data.records = data.records.filter((item) => recordIds.has(item.id));
     data.facts = data.facts.filter((item) => factIds.has(item.id));
     data.relations = data.relations.filter((item) => relationIds.has(item.id));
-    data.reviewSignals = data.reviewSignals.filter((item) => signalIds.has(item.id));
+    data.reviewSignals = view.reviewSignals.map(clone);
     data.idempotency = data.idempotency.filter((item) => recordIds.has(item.value?.id) || factIds.has(item.value?.id)).map((item) => ({ ...item, key: replacement }));
     data.events = data.events.filter((item, index) => eventsKept.has(events[index]));
     data.journal = data.journal.filter((item, index) => entriesKept.has(journal[index]));
@@ -2418,7 +2463,11 @@ export function createShadowGraph(options = {}) {
     // And it says so, stamped after every pattern and replacement has run, so
     // none can remove or alter it: no import, save or restore takes a scoped
     // redaction for a store (finding F-36).
-    return { exportKind: REDACTION_EXPORT_KIND, ...transformed };
+    for (const key of ['revision', 'journalSeq', 'journalEpoch']) delete transformed[key];
+    return scopedResult({ exportKind: REDACTION_EXPORT_KIND, ...transformed, completeness: {
+      complete: true, losslessItems: false,
+      limitation: { code: 'scoped_coverage', detail: 'Only a redacted view of this scope. This transformed output is not a complete store and cannot be imported, saved or restored.' }
+    } }, boundary, view.reviewSignals);
   }
 
   function projectSummary(project) {
@@ -2678,15 +2727,18 @@ export function createShadowGraph(options = {}) {
       return issue.recordId !== undefined && ids.has(issue.recordId);
     };
     const issues = report.issues.filter(listed);
-    return {
+    return scopedResult({
       valid: report.valid,
       issues,
       counts: severityCounts(issues),
       limitation: { code: 'scoped_coverage', detail: 'valid is the verdict on the whole store. Only the issues about this scope\'s own records, facts and relations are listed and counted.' }
-    };
+    }, boundary);
   }
 
-  function repairPlan(options = {}) { return { apply: false, actions: validate(options).issues.map((issue) => issue.code.startsWith('missing_relation_') ? { action: 'remove_relation', relationId: issue.relationId, reason: issue.code } : { action: 'manual_review', ...issue }) }; }
+  function repairPlan(options = {}) {
+    const report = validate(options);
+    return { apply: false, actions: report.issues.map((issue) => issue.code.startsWith('missing_relation_') ? { action: 'remove_relation', relationId: issue.relationId, reason: issue.code } : { action: 'manual_review', ...issue }), completeness: report.completeness, limitation: report.limitation };
+  }
 
   // ---- G6 / G7 read paths -------------------------------------------------
   // The boundary one read works in (plan v1.4.4 §10.2, §10.5). A selected
@@ -2752,7 +2804,16 @@ export function createShadowGraph(options = {}) {
       records: inRecords,
       facts: inFacts,
       relations: inRelations,
-      reviewSignals: [...reviewSignals.values()].filter((signal) => ids.has(signal.decisionId) && cited(signal).every((id) => ids.has(id))),
+      reviewSignals: [...reviewSignals.values()].filter((signal) => ids.has(signal.decisionId)).map((signal) => {
+        if (cited(signal).every((id) => ids.has(id))) return signal;
+        // Older evaluators could match facts by label across today's boundary.
+        // Even coverage/reason can contain historical condition text. Expose
+        // only the owner's signal identity and lifecycle; never rewrite it.
+        return {
+          ...Object.fromEntries(['id', 'kind', 'decisionId', 'status', 'createdAt', 'acknowledgedAt'].filter((key) => signal[key] !== undefined).map((key) => [key, clone(signal[key])])),
+          limitation: { code: 'scoped_coverage', detail: 'Historical detail cites evidence outside this scope. Only this own signal\'s identity and lifecycle are shown.' }
+        };
+      }),
       events: events.filter(eventVisible),
       journal: journal.filter(entryVisible)
     };
@@ -2822,8 +2883,9 @@ export function createShadowGraph(options = {}) {
   }
 
   function search(query = '', options = {}) {
-    const hits = rank(query, options);
-    return paginate(hits, options, { project: options.project ?? 'all', query: String(query), filters: appliedFilters(options) }, { contentFields: [...CONTENT_SEARCH_FIELDS] });
+    const boundary = readBoundary(options);
+    const hits = rank(query, options, boundary);
+    return scopedPage(hits, options, boundary, { query: String(query), filters: appliedFilters(options) }, { contentFields: [...CONTENT_SEARCH_FIELDS] });
   }
 
   function retrieve(query = '', options = {}) {
@@ -2842,7 +2904,7 @@ export function createShadowGraph(options = {}) {
       }
     }
     const sorted = results.sort((a, b) => b.score - a.score || String(a.record.id).localeCompare(String(b.record.id)));
-    return paginate(sorted, options, { project: options.project ?? 'all', query: String(query), filters: appliedFilters(options) }, { includesGraphNeighbours: true, contentFields: [...CONTENT_SEARCH_FIELDS] });
+    return scopedPage(sorted, options, boundary, { query: String(query), filters: appliedFilters(options) }, { includesGraphNeighbours: true, contentFields: [...CONTENT_SEARCH_FIELDS] });
   }
 
   function recall(query = '', options = {}) {
@@ -2870,9 +2932,10 @@ export function createShadowGraph(options = {}) {
       relations: [...relations.values()].filter((relation) => boundary.reaches(relation.from) && boundary.reaches(relation.to))
     };
     const result = hybridSearch(rankingView, query, recallOptions);
-    const envelope = paginate(
+    const envelope = scopedPage(
       result.items,
       recallOptions,
+      boundary,
       { project: recallOptions.project, scope: recallOptions.scope, query: String(query), asOf: options.asOf ?? null },
       { signals: result.signals, ranking: result.ranking }
     );
@@ -2921,13 +2984,13 @@ export function createShadowGraph(options = {}) {
       suggestedQuestions: suggestedQuestions.items,
       conditionDiagnostics: conditionDiagnostics.items,
       reusableAttempts: reusableAttempts.items,
-      completeness: {
+      completeness: scopeCompleteness(boundary.scope, {
         scope: { project },
         complete: Object.values(groups).every((group) => !group.hasMore),
         limitSource: limit === undefined ? 'default' : 'caller',
         losslessItems: true,
         collections: Object.fromEntries(Object.entries(groups).map(([name, group]) => [name, { returned: group.returned, total: group.total, hasMore: group.hasMore, omitted: group.total - group.returned }]))
-      }
+      }, referencedSignals(boundary, openReviews.items))
     };
   }
 
@@ -2973,11 +3036,11 @@ export function createShadowGraph(options = {}) {
       schemaVersion: SCHEMA_VERSION,
       records: view.records.map(clone), facts: view.facts.map(clone), relations: view.relations.map(clone),
       reviewSignals: view.reviewSignals.map(clone), events: view.events.map(clone),
-      completeness: {
-        scope: { project: boundary.scope.project },
+      completeness: scopeCompleteness(boundary.scope, {
         complete: true,
+        losslessItems: true,
         limitation: { code: 'scoped_coverage', detail: 'Only what this scope may read. A public export is not a store: it has no journal, and nothing imports, saves or restores it.' }
-      }
+      }, view.reviewSignals)
     };
   }
 
@@ -3588,8 +3651,8 @@ export function createShadowGraph(options = {}) {
   function getJournal(options = {}) {
     const boundary = readBoundary(options);
     const entries = scopedView(boundary).journal;
-    return paginate(entries.map(clone), options, { project: boundary.scope.project ?? 'all' }, {
-      journalEpoch, journalSeq, gaps: explainedGaps(entries),
+    return scopedPage(entries.map(clone), options, boundary, {}, {
+      gaps: explainedGaps(entries),
       limitation: { code: 'scoped_coverage', detail: 'Only entries that name nothing outside this scope, and only the gaps this scope\'s own purges left; journal integrity outside this scope is not reported.' }
     });
   }
@@ -3691,8 +3754,10 @@ export function createShadowGraph(options = {}) {
       if (item?.relationId !== undefined) return relationIds.has(item.relationId);
       return true;
     });
-    return {
-      ...report,
+    return scopedResult({
+      ok: report.ok, rebuildable: report.rebuildable,
+      // Preserve the whole-store verdict without global sequence diagnostics.
+      reason: report.reason?.startsWith('journal contains duplicate sequence numbers (') ? 'The journal contains duplicate sequence numbers, so entry order is ambiguous.' : report.reason,
       projection: {
         schemaVersion: report.projection.schemaVersion,
         records: recordsInScope,
@@ -3700,18 +3765,22 @@ export function createShadowGraph(options = {}) {
         relations: report.projection.relations.filter((relation) => ids.has(relation.from) && ids.has(relation.to)),
         idempotency: report.projection.idempotency.filter((item) => ids.has(item?.value?.id))
       },
-      skipped: own(report.skipped),
+      skipped: own(report.skipped).map((item) => item.why === 'invalid_exposed_projection_verification'
+        ? { ...item, detail: 'Whole-store projection validation failed. Its unscoped diagnostics are not exposed by this read.' }
+        : item),
       legacy: own(report.legacy),
       duplicates: own(report.duplicates),
+      completeness: { complete: report.rebuildable, limitation: { code: 'scoped_coverage', detail: 'Whether the journal rebuilds is the verdict on the whole store. The projection and the entry diagnostics hold only this scope; an unsuccessful rebuild does not establish complete projection coverage.' } },
       limitation: { code: 'scoped_coverage', detail: 'Whether the journal rebuilds is the verdict on the whole store. The projection and the entry diagnostics hold only this scope.' }
-    };
+    }, boundary);
   }
 
   // Counts of what the request's scope may see (plan v1.4.4 PR-10): with no
   // project and no origin, all zero.
   function stats(options = {}) {
-    const view = scopedView(readBoundary(options));
-    return { schemaVersion: SCHEMA_VERSION, total: view.records.length, decisions: view.records.filter((x) => x.kind === 'decision').length, attempts: view.records.filter((x) => x.kind === 'attempt').length, facts: view.facts.length, relations: view.relations.length, reviewSignals: view.reviewSignals.length, events: view.events.length, journal: view.journal.length };
+    const boundary = readBoundary(options);
+    const view = scopedView(boundary);
+    return scopedResult({ schemaVersion: SCHEMA_VERSION, total: view.records.length, decisions: view.records.filter((x) => x.kind === 'decision').length, attempts: view.records.filter((x) => x.kind === 'attempt').length, facts: view.facts.length, relations: view.relations.length, reviewSignals: view.reviewSignals.length, events: view.events.length, journal: view.journal.length }, boundary, view.reviewSignals);
   }
 
   return registerPrivileged({

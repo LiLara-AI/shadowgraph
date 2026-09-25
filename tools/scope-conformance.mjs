@@ -1,49 +1,6 @@
-// Project-scoping conformance harness: eleven public read paths, each exercised
-// on its own against two projects plus records in the literal project `default`
-// (where identity-less writes landed before the schema-6 writer refused them),
-// once with no project (unresolved scope) and once with project `alpha`
-// selected. The fixture links an alpha decision to a beta attempt, so a selected
-// read that follows a graph edge meets a boundary it could actually cross.
-//
-// NOT part of `npm test`, deliberately. The approved `project_only` rule says a
-// read with no resolved project returns nothing, reports `complete: false` and
-// declares a scoped-coverage limitation; a read for one project never returns
-// another project's record, nor names one. The v0.41.0 build met that on none
-// of the eleven paths; the read boundary of all eleven is now conformant, and
-// what remains recorded is the coverage envelope below. This harness records
-// exactly how each check still fails and exits 0 only while that recorded
-// behaviour still holds. It exits 1 when any
-// path differs from its row in EITHER direction -- a new failure, or a path
-// that became conformant while its row was still recorded -- so a scoping
-// change can neither regress silently nor be claimed without retiring its row.
-//
-//   npm run test:scope-conformance
-//   node tools/scope-conformance.mjs [--baseline <file>]
-//
-// `node --test` runs every JavaScript file under test/, so a harness kept there
-// would run inside the production suite; tools/ already holds this repository's
-// other out-of-suite instruments (compare-failures.cjs / expected-failures.json).
-//
-// Rules the harness enforces rather than trusts:
-// - every path is observed on every run, whether or not it has a row, so a
-//   deleted row cannot hide a failing path;
-// - a row may only record NON-conformant behaviour -- a row that already meets
-//   the target is refused, so the baseline cannot be used to fake a pass;
-// - a path with no row must be conformant, for the unresolved AND the selected
-//   project, so retiring a row cannot drop either half of the target;
-// - a path whose target cannot yet be stated in full may not be retired at all
-//   (`retireOnlyWith`): it must first gain the missing target.
-//
-// The paths that return a completeness envelope are checked twice, because two
-// change-sets make them conformant: `search`, `retrieve`, `recall`, `context`
-// and `getJournal` check the read boundary -- which records an unresolved or a
-// selected read returns, where a graph expansion may go, and that no selected
-// answer names an id outside the scope -- and `<path>.coverage` checks what an
-// unresolved read says about itself (complete:false, a scoped-coverage
-// limitation). The boundary is plan v1.4.4 PR-08's (PR-10's for getJournal);
-// the coverage envelope is PR-11's, and its rows stay recorded until PR-11
-// retires them.
-import { readFile } from 'node:fs/promises';
+// All-positive project-scope conformance: eleven paths, sixteen checks.
+// Every path must satisfy its boundary and coverage target. The historical
+// alpha-to-beta relation fixture is retained unchanged. npm run test:scope-conformance
 import { isDeepStrictEqual } from 'node:util';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { historicalRelation } from './historical-relation.js';
@@ -81,11 +38,14 @@ const projectsOf = (records) => [...new Set(records.map((record) => record.proje
 const itemProjects = (result) => projectsOf(result.items.map((item) => item.record));
 const envelope = (result) => ({
   scopeProject: result.completeness.scope.project,
+  requestState: result.completeness.scope.requestState,
+  originPresented: result.completeness.scope.originPresented,
+  grant: result.completeness.scope.grant,
   complete: result.completeness.complete,
   limitation: result.completeness.limitation?.code === 'scoped_coverage'
 });
 // An unresolved read returns no record, and says so.
-const coverageTarget = { complete: false, limitation: true };
+const coverageTarget = { scopeProject: null, requestState: 'project_unresolved', originPresented: false, grant: null, complete: false, limitation: true };
 // Every `selected*` observation below is a read with project `alpha`.
 const recordsIn = (context) => [...context.activeDecisions, ...context.staleAssumptions, ...context.failedAttemptsToAvoid, ...context.reusableAttempts];
 
@@ -240,39 +200,15 @@ const PATHS = {
 
 const meetsTarget = (observed, target) => Object.entries(target).every(([key, value]) => isDeepStrictEqual(observed[key], value));
 
-const flag = process.argv.indexOf('--baseline');
-const baselinePath = flag === -1 ? new URL('./scope-conformance-baseline.json', import.meta.url) : process.argv[flag + 1];
-const { paths: rows = {} } = JSON.parse(await readFile(baselinePath, 'utf8'));
-
-const results = Object.keys(rows)
-  .filter((name) => !Object.hasOwn(PATHS, name))
-  .map((name) => ({ name, ok: false, detail: 'baseline row names no known read path' }));
+const results = [];
 for (const [name, path] of Object.entries(PATHS)) {
   let observed;
   try { observed = path.observe(fixture()); } catch (error) { observed = { harnessError: error.message }; }
-  const conformant = meetsTarget(observed, path.target);
-  const row = rows[name];
-  if (!row && path.retireOnlyWith) {
-    results.push({ name, ok: false, detail: `row may not be retired until the harness has ${path.retireOnlyWith}` });
-  } else if (!row) {
-    results.push({ name, ok: conformant, detail: conformant ? 'conformant (row retired)' : `non-conformant with no baseline row; observed ${JSON.stringify(observed)}` });
-  } else if (meetsTarget(row.observed ?? {}, path.target)) {
-    results.push({ name, ok: false, detail: 'baseline row records conformant behaviour; retire the row instead' });
-  } else if (!isDeepStrictEqual(observed, row.observed)) {
-    results.push({
-      name,
-      ok: false,
-      detail: `${conformant ? 'now conformant: retire this row in the same change-set' : 'drifted from the recorded baseline'}; `
-        + `recorded ${JSON.stringify(row.observed)}; observed ${JSON.stringify(observed)}`
-    });
-  } else {
-    const failing = Object.keys(path.target).filter((key) => !isDeepStrictEqual(observed[key], path.target[key]));
-    results.push({ name, ok: true, detail: `matches recorded non-conformance (${failing.join(', ')})` });
-  }
+  const ok = meetsTarget(observed, path.target);
+  results.push({ name, ok, detail: ok ? 'conformant' : `observed ${JSON.stringify(observed)}; expected ${JSON.stringify(path.target)}` });
 }
-
 for (const { name, ok, detail } of results) console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}: ${detail}`);
 const failed = results.filter((result) => !result.ok).length;
 const readPaths = new Set(Object.keys(PATHS).map((name) => name.split('.')[0])).size;
-console.log(`scope conformance: ${readPaths} paths, ${Object.keys(PATHS).length} checks, ${Object.keys(rows).length} baseline rows, ${failed} failing`);
+console.log(`scope conformance: ${readPaths} paths, ${Object.keys(PATHS).length} checks, all-positive, ${failed} failing`);
 process.exitCode = failed ? 1 : 0;

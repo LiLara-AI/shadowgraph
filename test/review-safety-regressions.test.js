@@ -232,7 +232,7 @@ test('a second threshold on the same key does not inherit the first acknowledgem
   const broadened = graph.context({ project: 'p' }).openReviews.find((item) => item.decisionId === decision.id);
   assert.equal(broadened.reviewSignalStatus, 'open', 'the newly breached alternative is not covered by the old acknowledgement');
   assert.equal(
-    graph.getReviewSignals({ project: 'p', status: 'open' }).length, 1,
+    graph.getReviewSignals({ project: 'p', status: 'open' }).items.length, 1,
     'and it is reachable as an open signal'
   );
 });
@@ -308,7 +308,7 @@ test('acknowledgement coverage behaves identically on JSON and SQLite', async (t
       // random id is the only minted value left. Coverage now sorts on identical
       // alternative ids, so its order is deterministic too.
       snapshots[backend] = JSON.stringify(
-        restarted.getReviewSignals({ project: 'p' }).sort((left, right) => left.status.localeCompare(right.status))
+        restarted.getReviewSignals({ project: 'p' }).items.sort((left, right) => left.status.localeCompare(right.status))
       ).replace(/review_\d+_[a-z0-9]+/g, 'review_MINTED');
     });
   }

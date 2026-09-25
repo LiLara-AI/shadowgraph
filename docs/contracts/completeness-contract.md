@@ -1,6 +1,6 @@
 # ShadowGraph — Completeness and Pagination Contract (G6)
 
-**Status:** implemented. Applies to `search()`, `retrieve()`, `context()`, `journalEntries()` in `src/shadowgraph.js`, and to their MCP/HTTP/CLI surfaces.
+**Status:** implemented. Applies to `search()`, `retrieve()`, `context()`, `getJournal()` in `src/shadowgraph.js`, and to their MCP/HTTP/CLI surfaces.
 
 Principle being satisfied: **no silent omission.** A caller must never receive a truncated result that looks complete.
 
@@ -15,7 +15,7 @@ Every paginated read path returns:
   "items": [ … ],
   "page": { "offset": 0, "limit": 50, "total": 137, "hasMore": true },
   "completeness": {
-    "scope": { "project": "default", "query": "cache", "filters": { … } },
+    "scope": { "project": "default", "requestState": "project_selected", "originPresented": false, "grant": null, "query": "cache", "filters": { … } },
     "returned": 50,
     "total": 137,
     "complete": false,
@@ -37,8 +37,8 @@ Every paginated read path returns:
 | `page.hasMore` | More items exist beyond this window |
 | `completeness.scope` | The project, query, and structured filters that produced this result — so a result explains its own derivation |
 | `completeness.returned` / `total` / `omitted` | Counts, with `omitted = total − returned` |
-| `completeness.complete` | `true` only when every matching item is in `items` |
-| `completeness.losslessItems` | **Each returned item is a full-fidelity record**, never a summary or a truncated field |
+| `completeness.complete` | `true` only for a resolved project when every known matching item is returned without withheld detail; never total semantic recall |
+| `completeness.losslessItems` | True for full-fidelity items; false for redaction or a bounded historical signal projection |
 | `completeness.limitSource` | `'caller'` when the caller set a limit, `'default'` when the default applied — so a caller can tell whose choice caused truncation |
 
 `losslessItems` is the load-bearing distinction for this product: compact retrieval may reduce the **number** of items with a declared total, but never the **content** of an item. Summarising away alternatives, rejection reasons, evidence, or provenance is prohibited.
@@ -61,7 +61,7 @@ Two further collections arrived on 2026-09-13, both additive and both bound by t
 
 ```jsonc
 "completeness": {
-  "scope": { "project": "default" },
+  "scope": { "project": "default", "requestState": "project_selected", "originPresented": false, "grant": null },
   "complete": true,
   "limitSource": "default",
   "losslessItems": true,
@@ -72,11 +72,11 @@ Two further collections arrived on 2026-09-13, both additive and both bound by t
 }
 ```
 
-`complete` is `true` only when **no** collection has more. Per-collection totals mean truncation is attributable to a specific collection rather than hidden in an aggregate.
+`complete` is `true` only for a resolved project when **no** collection has more and no referenced historical signal detail is withheld. Per-collection totals mean truncation is attributable to a specific collection rather than hidden in an aggregate.
 
 ## 5. Journal reads
 
-`getJournal(options)` uses the standard envelope and adds `journalEpoch`, `journalSeq`, `gaps` and a `scoped_coverage` `limitation` to `completeness` — so a caller reading the journal learns the replay boundary and the hard-purge discontinuities in the same response. The read is scoped like every other: it returns only entries that name nothing outside the request's project (or origin), none with neither, and positions only the gaps that scope's own hard purges left; sequence numbers are global, so the gaps between one scope's entries are not integrity gaps. The store-wide gap report is the privileged integrity check's.
+`getJournal(options)` retains its page/counts, scope-owned purge `gaps`, and `scoped_coverage` limitation. Public journal, redaction and rebuild envelopes omit global high-water, epoch, revision and replay-volume counters. Privileged persistence, integrity and restore retain them. Entry `seq` and own purge-gap coordinates remain canonical global ordering values: they can reveal interleaving when later own entries arrive, but are neither scoped activity counts nor freshness proof. A gap between scoped entries alone is not missing-journal corruption. The store-wide integrity/rebuild verdict is unchanged; public diagnostics and projections remain scoped.
 
 ## 6. Backward compatibility
 
@@ -84,4 +84,16 @@ Two further collections arrived on 2026-09-13, both additive and both bound by t
 
 ## 7. Tested boundaries
 
-Empty results (`total: 0`, `complete: true`); exact-boundary limit equal to total (`hasMore: false`); **invalid limits — `0`, negative, non-integer, above `MAX_PAGE_LIMIT` — all throw** and are asserted with `assert.throws`, never coerced; a bad offset throws; an omitted limit applies the default and reports `limitSource: 'default'`; offset past the end (empty `items`, `total` still truthful); filters reflected in `scope`; and `losslessItems` asserted against a full record comparison.
+Empty selected-project results (`total: 0`, `complete: true`); unresolved results (`complete: false`); exact-boundary limit equal to total (`hasMore: false`); **invalid limits — `0`, negative, non-integer, above `MAX_PAGE_LIMIT` — all throw** and are asserted with `assert.throws`, never coerced; a bad offset throws; an omitted limit applies the default and reports `limitSource: 'default'`; offset past the end (empty `items`, `total` still truthful); filters reflected in `scope`; and `losslessItems` asserted against a full record comparison.
+
+## 8. Resolved request coverage and history
+
+Every normal read carries `completeness.scope`: resolved `project` (or null), `requestState`, `originPresented` and `grant: null`. Unresolved requests always report `complete: false` with a scoped-coverage limitation. An exact origin reads only its own unattributed content; no project and no usable origin searches no project content. Grant-shaped inputs confer nothing. No expansion capability is advertised.
+
+Existing filters, query, temporal scope, paging counts, per-collection budgets and limitations remain. The separate legacy-attribution inspection and explicit administrative purge preview are not normal read scopes. Evaluation verdicts in reconsideration remain separate from request coverage.
+
+Breaking shape change: `review()` and `getReviewSignals()` now return `{ items, completeness }`. Array consumers use `result.items`. Both remain unpaginated; returned/total count known matching own items, omitted is zero, and there is no invented limitSource. MCP, HTTP and CLI serialize the envelope. MCP structured tiers now provide object output schemas for both tools; input-scope alignment remains separate work.
+
+An owner's historical signal citing out-of-scope facts is returned as identity/lifecycle fields plus a limitation. Historical condition text, coverage, reason, title and alternative labels are withheld together. Such a result is partial and not lossless; another owner's signals never create counts or notices. All-in-scope history stays full, status filters apply before coverage is calculated, and stored evidence/identity/acknowledgement remain unchanged. Export, redaction, statistics and maintenance carry the same partial signal coverage.
+
+Redaction stamps its marker and completeness after transformation/native-key filtering and is never lossless or a usable store. Statistics and integrity/action results add coverage without replacing their existing counts, verdicts or limitations. CLI doctor forwards validation coverage; dashboard object metadata renders as JSON text.

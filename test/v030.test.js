@@ -46,7 +46,7 @@ test('maintenance ages decisions, expires facts, and persists review signals', (
   });
   const result = graph.maintain({ project: 'default', changedFacts: ['changed'] });
   assert.equal(result.agedDecisionIds[0], decision.id);
-  assert.equal(graph.getReviewSignals({ project: 'default' }).length, 1);
+  assert.equal(graph.getReviewSignals({ project: 'default' }).items.length, 1);
   assert.equal(privilegedSnapshot(graph).facts[0].verificationStatus, 'expired');
 });
 

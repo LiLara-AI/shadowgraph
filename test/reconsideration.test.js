@@ -98,7 +98,7 @@ test('a condition that cannot be evaluated is manual_review and partial, never a
   assert.equal(entry.rulesNotEvaluated.length, 1);
   assert.equal(entry.rulesNotEvaluated[0].verdict, 'unknown');
   assert.match(entry.rulesNotEvaluated[0].reason, /No fact recorded/);
-  assert.equal(graph.getReviewSignals({ project: 'p' }).length, 0, 'and it raises no review signal');
+  assert.equal(graph.getReviewSignals({ project: 'p' }).items.length, 0, 'and it raises no review signal');
 });
 
 test('one rule firing while another is unevaluable recommends review AND reports partial', () => {
@@ -151,7 +151,7 @@ test('every operator the evaluator advertises reaches reconsideration with the s
     assert.equal(reported.verdict, expected, `${operator}: reconsideration must not re-decide the verdict`);
 
     // And the decision-level reading has to follow from that same verdict.
-    const due = graph.review({ project: 'p' });
+    const due = graph.review({ project: 'p' }).items;
     assert.equal(due.length, expected === 'true' ? 1 : 0, `${operator}: review() must agree about firing`);
     assert.equal(
       entry.verdict,
@@ -170,7 +170,7 @@ test('a declared unit converts identically for review and for reconsideration', 
   // Same quantity, expressed in the other unit the rule can read.
   graph.addFact({ project: 'p', key: 'replicaLag', value: '1500ms', sourceClass: 'tool_observed' });
 
-  assert.equal(graph.review({ project: 'p' }).length, 1, 'review converts and fires');
+  assert.equal(graph.review({ project: 'p' }).items.length, 1, 'review converts and fires');
   const entry = only(graph.reconsider({ project: 'p' }));
   assert.equal(entry.verdict, 'review_recommended', 'and reconsideration reaches the same answer');
   assert.equal(entry.triggeredRules[0].unit, 's', 'the rule unit travels with the breach');
@@ -180,7 +180,7 @@ test('a declared unit converts identically for review and for reconsideration', 
   const other = createShadowGraph();
   decisionWith(other, { key: 'replicaLag', operator: 'gte', value: 1, unit: 's' });
   other.addFact({ project: 'p', key: 'replicaLag', value: '40%', sourceClass: 'tool_observed' });
-  assert.equal(other.review({ project: 'p' }).length, 0);
+  assert.equal(other.review({ project: 'p' }).items.length, 0);
   const refused = only(other.reconsider({ project: 'p' }));
   assert.equal(refused.verdict, 'manual_review');
   assert.equal(refused.evaluationCompleteness, 'partial');
@@ -219,14 +219,14 @@ test('a stored string rule with nothing supplied is reported unevaluated, not pa
   assert.equal(entry.rulesNotEvaluated[0].expected, 'deployment model changed');
   assert.equal(entry.rulesNotEvaluated[0].key, null);
   assert.match(entry.rulesNotEvaluated[0].reason, /cannot settle from stored facts/);
-  assert.equal(graph.getReviewSignals({ project: 'p' }).length, 0, 'an unevaluated condition raises nothing');
+  assert.equal(graph.getReviewSignals({ project: 'p' }).items.length, 0, 'an unevaluated condition raises nothing');
 });
 
 test('the legacy string form still matches changedFacts, unchanged, on both routes', () => {
   const graph = createShadowGraph();
   decisionWith(graph, 'deployment model changed');
 
-  assert.equal(graph.review({ project: 'p', changedFacts: ['deployment model changed'] }).length, 1);
+  assert.equal(graph.review({ project: 'p', changedFacts: ['deployment model changed'] }).items.length, 1);
   const entry = only(graph.reconsider({ project: 'p', changedFacts: ['deployment model changed'] }));
   assert.equal(entry.verdict, 'review_recommended');
   assert.equal(entry.evaluationCompleteness, 'complete', 'a matched token is settled, not uncertain');
@@ -346,7 +346,7 @@ test('a focused reconsideration evaluates only its decision and raises no signal
   assert.equal(result.scope.decisionId, focused.id);
   assert.equal(result.scope.project, 'p');
 
-  const signals = graph.getReviewSignals({ project: 'p' });
+  const signals = graph.getReviewSignals({ project: 'p' }).items;
   assert.equal(signals.length, 1, 'and only that decision raises a signal');
   assert.equal(signals[0].decisionId, focused.id);
   assert.ok(!signals.some((item) => item.decisionId === sibling.id), 'the sibling was never evaluated');
@@ -361,7 +361,7 @@ test('reconsidering twice settles on one signal, and an acknowledgement survives
 
   const first = only(graph.reconsider({ project: 'p' }));
   const second = only(graph.reconsider({ project: 'p' }));
-  assert.equal(graph.getReviewSignals({ project: 'p' }).length, 1, 'the identity is the one review() already uses');
+  assert.equal(graph.getReviewSignals({ project: 'p' }).items.length, 1, 'the identity is the one review() already uses');
   assert.equal(second.reviewSignalId, first.reviewSignalId);
   assert.equal(second.reviewSignalStatus, 'open');
 
@@ -372,8 +372,8 @@ test('reconsidering twice settles on one signal, and an acknowledgement survives
   assert.equal(third.verdict, 'review_recommended', 'an acknowledgement settles the signal, not the evidence');
 
   // review() raises nothing new either, which is what shared identity means.
-  graph.review({ project: 'p' });
-  assert.equal(graph.getReviewSignals({ project: 'p' }).length, 1);
+  graph.review({ project: 'p' }).items;
+  assert.equal(graph.getReviewSignals({ project: 'p' }).items.length, 1);
 });
 
 test('reconsideration never moves decision status, confidence or lifecycle state', () => {
@@ -392,13 +392,13 @@ test('reconsideration never moves decision status, confidence or lifecycle state
 
 // --- L: review() keeps its public contract ---------------------------------
 
-test('review() returns exactly what it returned before reconsideration existed', () => {
+test('review() preserves due-entry content inside its scope-coverage envelope', () => {
   const graph = createShadowGraph();
   decisionWith(graph, { key: 'replicaLagMs', operator: 'gte', value: 500 });
   graph.addFact({ project: 'p', key: 'replicaLagMs', value: 900, sourceClass: 'tool_observed' });
 
-  const due = graph.review({ project: 'p' });
-  assert.ok(Array.isArray(due), 'still a bare array of due decisions');
+  const due = graph.review({ project: 'p' }).items;
+  assert.ok(Array.isArray(due), 'the items remain an array of due decisions');
   assert.deepEqual(Object.keys(due[0]).sort(), [
     'alternativesToReconsider', 'decisionId', 'reason', 'reviewSignalId', 'reviewSignalStatus', 'title', 'violatedConditions'
   ], 'no reconsideration field leaked onto the review entry');
@@ -407,7 +407,7 @@ test('review() returns exactly what it returned before reconsideration existed',
   // the same graph is asked twice with a reconsideration in between. Only the
   // generated ids differ between runs, and here there are none to differ.
   graph.reconsider({ project: 'p' });
-  assert.deepEqual(graph.review({ project: 'p' }), due, 'reconsidering first changes nothing review() reports');
+  assert.deepEqual(graph.review({ project: 'p' }).items, due, 'reconsidering first changes nothing review() reports');
 });
 
 test('a decision with no reopen rules is unchanged and complete, with nothing invented', () => {

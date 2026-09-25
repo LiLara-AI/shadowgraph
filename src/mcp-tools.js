@@ -375,7 +375,7 @@ const reusableAttemptSchema = {
 const reviewSignalSchema = {
   type: 'object',
   description: 'A persisted review signal.',
-  required: ['id', 'kind', 'decisionId', 'reason', 'alternativesToReconsider', 'status', 'createdAt'],
+  required: ['id', 'kind', 'decisionId', 'status', 'createdAt'],
   properties: {
     id: { type: 'string', description: 'Signal identifier, used by shadowgraph_ack_review.' },
     kind: { type: 'string', const: 'review', description: 'Always "review".' },
@@ -405,22 +405,45 @@ const pageSchema = {
     hasMore: { type: 'boolean', description: 'True when matching items exist beyond this window.' }
   }
 };
+const readScopeSchema = {
+  type: 'object', description: 'The resolved read boundary.', required: ['project', 'requestState', 'originPresented', 'grant'],
+  properties: {
+    project: stringOrNull('Resolved project, or null when unresolved.'),
+    requestState: { type: 'string', enum: ['project_selected', 'project_unresolved'], description: 'Whether a project was resolved.' },
+    originPresented: { type: 'boolean', description: 'Whether a usable origin was presented; not a project selection.' },
+    grant: { type: 'null', description: 'No wider read grant is implemented.' }
+  }
+};
+const readCoverageSchema = {
+  type: 'object', description: 'Request coverage and any withheld detail.', required: ['scope', 'complete'],
+  properties: {
+    scope: readScopeSchema,
+    complete: { type: 'boolean', description: 'Coverage of known candidates in this request, false when project_unresolved or detail is withheld; not total semantic recall.' },
+    losslessItems: { type: 'boolean', description: 'False when returned items have withheld or transformed detail.' },
+    limitation: { type: 'object', description: 'Limits of this view.', required: ['code', 'detail'], properties: { code: { type: 'string', description: 'Stable limitation code.' }, detail: { type: 'string', description: 'What this view cannot establish.' } } }
+  }
+};
 function completenessSchema(extraProperties = {}, extraRequired = []) {
   return {
     type: 'object',
     description: 'Declares exactly what this response left out, so a truncated result can never look complete.',
     required: ['scope', 'returned', 'total', 'complete', 'omitted', 'losslessItems', 'limitSource', ...extraRequired],
     properties: {
-      scope: { type: 'object', description: 'The project, query, and structured filters that produced this result, so it explains its own derivation.' },
+      ...readCoverageSchema.properties,
       returned: integerCount('Items in this response.'),
       total: integerCount('Items that matched in total.'),
-      complete: { type: 'boolean', description: 'True only when every matching item is present.' },
       omitted: integerCount('total minus returned.'),
-      losslessItems: { type: 'boolean', description: 'Always true: each returned item is a full-fidelity record, never a summary or a truncated field.' },
       limitSource: { type: 'string', enum: ['caller', 'default'], description: 'Whose choice bounded the result.' },
       ...extraProperties
     }
   };
+}
+function unpagedSchema(items) {
+  const coverage = completenessSchema();
+  return { type: 'object', required: ['items', 'completeness'], properties: {
+    items: { type: 'array', items, description: 'All known matching items inside this boundary.' },
+    completeness: { ...coverage, required: coverage.required.filter((key) => key !== 'limitSource') }
+  } };
 }
 function envelopeSchema(description, itemsSchema, extraProperties = {}, extraRequired = []) {
   return {
@@ -605,20 +628,19 @@ const projectionSchema = {
 };
 const exportSchema = {
   type: 'object',
-  description: 'A complete store export.',
-  required: ['schemaVersion', 'revision', 'records', 'facts', 'relations', 'reviewSignals', 'idempotency', 'events', 'journal', 'journalSeq', 'journalEpoch'],
+  description: 'A scoped redaction view; it cannot be used as a store.',
+  required: ['exportKind', 'schemaVersion', 'records', 'facts', 'relations', 'reviewSignals', 'idempotency', 'events', 'journal', 'completeness'],
   properties: {
     schemaVersion: { type: 'integer', description: 'Storage schema version of this export.' },
-    revision: { type: 'integer', description: 'Concurrency token of the state this export was taken from.' },
+    exportKind: { type: 'string', const: 'scoped_redaction', description: 'Marks a view that cannot be used as a store.' },
+    completeness: readCoverageSchema,
     records: { type: 'array', items: storedRecordSchema, description: 'Decisions, attempts, and memories.' },
     facts: { type: 'array', items: factRecordSchema, description: 'Observed facts with their provenance claims.' },
     relations: { type: 'array', items: storedRelationSchema, description: 'Relationships.' },
     reviewSignals: { type: 'array', items: reviewSignalSchema, description: 'Persisted review signals.' },
     idempotency: { type: 'array', description: 'Retry-key entries, each { key, value }.' },
     events: { type: 'array', description: 'Compatibility event log.' },
-    journal: { type: 'array', items: journalEntrySchema, description: 'The append-oriented journal.' },
-    journalSeq: { type: 'integer', description: 'Highest journal sequence issued.' },
-    journalEpoch: integerOrNull('First replayable sequence, or null when nothing is replayable.')
+    journal: { type: 'array', items: journalEntrySchema, description: 'Scoped entries retaining canonical global sequence numbers, not scoped counts.' }
   }
 };
 
@@ -629,8 +651,8 @@ const exportSchema = {
 // competes for context with every other tool in the list, so it carries only
 // what changes a caller's choice: `does` (verb, resource, scope), `route` (which
 // sibling to use instead), `effects` (what it persists, whether that is
-// reversible, and what a retry does), and `returns`, which is present only for
-// the two tools whose return shape no output schema can carry.
+// reversible, and what a retry does), and `returns`, which calls out the two
+// array-to-envelope compatibility transitions.
 //
 // Everything else lives where a caller can look it up without paying for it in
 // every listing: field rules in the input-schema property descriptions, result
@@ -734,7 +756,7 @@ const CATALOG = [
       does: 'List decisions whose rejected alternatives are due again, from reopenWhen rules over stored facts.',
       route: 'shadowgraph_review_signals reads persisted ones, shadowgraph_ack_review closes one, shadowgraph_maintain ages first.',
       effects: 'Persists one signal per newly due decision, deduped by decision and reason; a repeat commits a revision.',
-      returns: 'Returns a bare JSON array.'
+      returns: '{ items, completeness }.'
     },
     inputSchema: {
       type: 'object',
@@ -743,7 +765,8 @@ const CATALOG = [
         changedFacts: changedFactsProperty,
         facts: factsOverrideProperty
       }
-    }
+    },
+    outputSchema: unpagedSchema(reviewDueSchema)
   },
   {
     name: 'shadowgraph_search',
@@ -793,7 +816,7 @@ const CATALOG = [
       description: 'The working set for one project.',
       required: ['project', 'activeDecisions', 'staleAssumptions', 'failedAttemptsToAvoid', 'openReviews', 'suggestedQuestions', 'completeness'],
       properties: {
-        project: { type: 'string', description: 'The project this context describes.' },
+        project: stringOrNull('The resolved project, or null when unresolved.'),
         activeDecisions: { type: 'array', items: decisionRecordSchema, description: 'Decisions in a current, actionable state: proposed, planned, in_progress, executed, validated, or reconsidered.' },
         staleAssumptions: { type: 'array', items: factRecordSchema, description: 'Facts that are no longer active, such as superseded or expired ones, which earlier decisions may still rest on.' },
         failedAttemptsToAvoid: { type: 'array', items: attemptRecordSchema, description: 'Attempts whose result mentions failure, regression, or error.' },
@@ -806,10 +829,8 @@ const CATALOG = [
           description: 'Per-collection completeness. context returns several named collections, so one page object cannot describe it.',
           required: ['scope', 'complete', 'limitSource', 'losslessItems', 'collections'],
           properties: {
-            scope: { type: 'object', description: 'The project this result covers.' },
-            complete: { type: 'boolean', description: 'True only when no collection was truncated.' },
+            ...readCoverageSchema.properties,
             limitSource: { type: 'string', enum: ['caller', 'default'], description: 'Whose choice bounded the collections.' },
-            losslessItems: { type: 'boolean', description: 'Always true: items are full records, never summaries.' },
             collections: {
               type: 'object',
               description: 'One entry per returned collection.',
@@ -1297,14 +1318,12 @@ const CATALOG = [
       }
     },
     outputSchema: envelopeSchema(
-      'Journal entries with pagination, replay boundary, and declared gaps.',
+      'Scoped journal entries with pagination and scope-owned purge gaps. Entry sequences retain global ordering, not scoped volume or freshness.',
       journalEntrySchema,
       {
-        journalEpoch: integerOrNull('First replayable sequence, or null when nothing is replayable.'),
-        journalSeq: { type: 'integer', description: 'Highest sequence issued so far.' },
         gaps: { type: 'array', description: 'Sequence ranges missing from the journal, each { from, to }. A hard purge legitimately creates one; it is declared, not hidden.', items: { type: 'object', properties: { from: { type: 'integer', description: 'First missing sequence.' }, to: { type: 'integer', description: 'Last missing sequence.' } } } }
       },
-      ['journalEpoch', 'journalSeq', 'gaps']
+      ['gaps']
     )
   },
   {
@@ -1326,16 +1345,13 @@ const CATALOG = [
     outputSchema: {
       type: 'object',
       description: 'The rebuild report and the projection it produced.',
-      required: ['ok', 'rebuildable', 'reason', 'projection', 'journalEpoch', 'replayedFrom', 'replayedTo', 'applied', 'skipped', 'legacy', 'duplicates'],
+      required: ['ok', 'rebuildable', 'reason', 'projection', 'skipped', 'legacy', 'duplicates', 'completeness'],
       properties: {
         ok: { type: 'boolean', description: 'True when the fold ran; it does not by itself mean the projection is complete.' },
         rebuildable: { type: 'boolean', description: 'True only when every entry in the replay range was folded and the result is trustworthy.' },
         reason: stringOrNull('Why the projection is not rebuildable, or null when it is.'),
         projection: projectionSchema,
-        journalEpoch: integerOrNull('First replayable sequence.'),
-        replayedFrom: integerOrNull('Lowest sequence folded.'),
-        replayedTo: integerOrNull('Highest sequence folded.'),
-        applied: integerCount('Entries folded into the projection.'),
+        completeness: readCoverageSchema,
         skipped: { type: 'array', description: 'Entries not folded, each carrying seq, type, and a stable why such as unknown_entry_type or unsupported_schema_version.' },
         legacy: { type: 'array', description: 'Entries recognised as pre-journal or non-replayable, each with a why.' },
         duplicates: { type: 'array', description: 'Sequence numbers appearing more than once, each { seq, count }. A repeated sequence cannot be totally ordered, so it makes the fold untrustworthy.' }
@@ -1351,7 +1367,7 @@ const CATALOG = [
       does: 'List the review signals already persisted, optionally narrowed to a project or to open or acknowledged ones.',
       route: 'shadowgraph_review re-evaluates reopen rules and can create signals, shadowgraph_ack_review closes one.',
       effects: 'Reads only. Acknowledged signals are retained rather than deleted.',
-      returns: 'Returns a bare JSON array, not paginated.'
+      returns: 'Returns { items, completeness }, unpaginated.'
     },
     inputSchema: {
       type: 'object',
@@ -1359,7 +1375,8 @@ const CATALOG = [
         project: { type: 'string', description: 'Only signals whose decision belongs to this project. Omit for every project.' },
         status: { type: 'string', enum: ['open', 'acknowledged'], description: 'Filter by state. Omit to return both.' }
       }
-    }
+    },
+    outputSchema: unpagedSchema(reviewSignalSchema)
   },
   {
     name: 'shadowgraph_purge_preview',
@@ -1567,17 +1584,8 @@ const CATALOG = [
 // ---------------------------------------------------------------------------
 export const COMPACT_TOOL_NAMES = Object.freeze(CATALOG.filter((entry) => entry.compact).map((entry) => entry.name));
 
-// Two tools return a bare JSON array rather than an object. `structuredContent`
-// must be an object for 2025-06-18 and 2025-11-25 clients, and the TypeScript
-// SDK additionally requires outputSchema.type === "object", so wrapping them
-// would be a result-shape change rather than a metadata change. They therefore
-// declare no output schema and emit no structured content in any tier, and their
-// descriptions carry the return shape instead. Recorded as backlog in
-// docs/mcp-compatibility.md rather than fixed here.
-export const OUTPUT_SCHEMA_OMISSIONS = Object.freeze({
-  shadowgraph_review: 'Returns a bare JSON array of due decisions; an object-rooted output schema would require changing the result shape.',
-  shadowgraph_review_signals: 'Returns a bare JSON array of review signals; an object-rooted output schema would require changing the result shape.'
-});
+// Every tool returns an object envelope. Retain the registry for consumers.
+export const OUTPUT_SCHEMA_OMISSIONS = Object.freeze({});
 
 export function buildToolCatalog({ verifier = false, embeddingConfigured = false } = {}) {
   return Object.freeze(CATALOG

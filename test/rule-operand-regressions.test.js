@@ -87,7 +87,7 @@ test('an imported rule with no operand raises no review and is visible as a diag
 
   const view = graph.context({ project: 'p' });
   assert.equal(view.openReviews.length, 0, 'a rule that states no operand is not a breach');
-  assert.equal(graph.getReviewSignals({ project: 'p' }).length, 0, 'and raises no signal');
+  assert.equal(graph.getReviewSignals({ project: 'p' }).items.length, 0, 'and raises no signal');
 
   const condition = view.conditionDiagnostics.flatMap((item) => item.conditions)[0];
   assert.ok(condition, 'the unevaluable condition is reported');
@@ -147,7 +147,7 @@ function graphWithLegacySignal({ rule, historical, factValue }) {
 }
 
 const reviewStatus = (graph) => graph.context({ project: 'p' }).openReviews[0]?.reviewSignalStatus ?? 'none';
-const legacyOf = (graph) => graph.getReviewSignals({ project: 'p' }).find((item) => item.id === 'review:legacy');
+const legacyOf = (graph) => graph.getReviewSignals({ project: 'p' }).items.find((item) => item.id === 'review:legacy');
 
 test('a historical condition missing its expected operand is not reconstructable', () => {
   const graph = graphWithLegacySignal({

@@ -70,7 +70,7 @@ describe('G1 (S1) — FIXED: reconsideration reads facts that are already stored
     const decision = decisionWithReopenRule(graph);
     graph.addFact({ project: 'p', key: 'deployment', value: 'multi-user', source: 'tool_observed' });
 
-    const due = graph.review({ project: 'p' });
+    const due = graph.review({ project: 'p' }).items;
     assert.equal(due.length, 1, 'stored facts are now consulted');
     assert.equal(due[0].decisionId, decision.id);
     assert.deepEqual(due[0].alternativesToReconsider, ['postgres']);
@@ -81,7 +81,7 @@ describe('G1 (S1) — FIXED: reconsideration reads facts that are already stored
     const graph = createShadowGraph();
     const decision = decisionWithReopenRule(graph);
     // No stored fact at all — the argument path must still stand alone.
-    const due = graph.review({ project: 'p', facts: { deployment: 'multi-user' } });
+    const due = graph.review({ project: 'p', facts: { deployment: 'multi-user' } }).items;
 
     assert.equal(due.length, 1);
     assert.equal(due[0].decisionId, decision.id);
@@ -102,7 +102,7 @@ describe('G1 (S1) — FIXED: reconsideration reads facts that are already stored
     reloaded.importData(await store.load());
 
     // The new session does NOT know which facts changed and supplies nothing.
-    const due = reloaded.review({ project: 'p' });
+    const due = reloaded.review({ project: 'p' }).items;
     assert.equal(due.length, 1, 'signal is derived purely from persisted state');
     assert.equal(due[0].decisionId, decision.id);
     assert.deepEqual(due[0].alternativesToReconsider, ['postgres']);
@@ -133,7 +133,7 @@ describe('G1 (S1) — FIXED: reconsideration reads facts that are already stored
     try {
       const reloaded = createShadowGraph();
       reloaded.importData(await reopened.load());
-      const due = reloaded.review({ project: 'p' });
+      const due = reloaded.review({ project: 'p' }).items;
       assert.equal(due.length, 1);
       assert.deepEqual(due[0].alternativesToReconsider, ['postgres']);
     } finally { reopened.close(); }
@@ -144,7 +144,7 @@ describe('G1 (S1) — FIXED: reconsideration reads facts that are already stored
     decisionWithReopenRule(graph);
     // Right project, wrong key.
     graph.addFact({ project: 'p', key: 'unrelated', value: 'multi-user', source: 'tool_observed' });
-    assert.equal(graph.review({ project: 'p' }).length, 0);
+    assert.equal(graph.review({ project: 'p' }).items.length, 0);
   });
 
   it('ACCEPTANCE (false-positive guard): a stored fact with a non-matching VALUE produces NO signal', () => {
@@ -152,7 +152,7 @@ describe('G1 (S1) — FIXED: reconsideration reads facts that are already stored
     decisionWithReopenRule(graph);
     // Right project, right key, value that does not satisfy the rule.
     graph.addFact({ project: 'p', key: 'deployment', value: 'single-user', source: 'tool_observed' });
-    assert.equal(graph.review({ project: 'p' }).length, 0);
+    assert.equal(graph.review({ project: 'p' }).items.length, 0);
   });
 
   it('ACCEPTANCE (project scoping): a stored fact in project A never reopens a decision in project B', () => {
@@ -161,23 +161,23 @@ describe('G1 (S1) — FIXED: reconsideration reads facts that are already stored
     // Matching key AND value, but recorded against a different project.
     graph.addFact({ project: 'project-a', key: 'deployment', value: 'multi-user', source: 'tool_observed' });
 
-    assert.equal(graph.review({ project: 'project-b' }).length, 0, 'cross-project leakage must not occur');
+    assert.equal(graph.review({ project: 'project-b' }).items.length, 0, 'cross-project leakage must not occur');
 
     // Same fact in the decision's own project does fire, proving the guard is
     // scoping and not an inability to match.
     graph.addFact({ project: 'project-b', key: 'deployment', value: 'multi-user', source: 'tool_observed' });
-    assert.equal(graph.review({ project: 'project-b' }).length, 1);
+    assert.equal(graph.review({ project: 'project-b' }).items.length, 1);
   });
 
   it('ACCEPTANCE (superseded facts): a stale fact does not keep a decision permanently due', () => {
     const graph = createShadowGraph();
     decisionWithReopenRule(graph);
     graph.addFact({ project: 'p', key: 'deployment', value: 'multi-user', source: 'tool_observed' });
-    assert.equal(graph.review({ project: 'p' }).length, 1, 'fires while the matching fact is current');
+    assert.equal(graph.review({ project: 'p' }).items.length, 1, 'fires while the matching fact is current');
 
     // Supersede it with a value that no longer satisfies the rule.
     graph.addFact({ project: 'p', key: 'deployment', value: 'single-user', source: 'tool_observed' });
-    assert.equal(graph.review({ project: 'p' }).length, 0, 'superseded facts are ignored');
+    assert.equal(graph.review({ project: 'p' }).items.length, 0, 'superseded facts are ignored');
   });
 
   it('ACCEPTANCE (documented precedence): caller-supplied facts OVERRIDE stored facts of the same key', () => {
@@ -185,18 +185,18 @@ describe('G1 (S1) — FIXED: reconsideration reads facts that are already stored
     decisionWithReopenRule(graph);
     // Stored value matches the rule...
     graph.addFact({ project: 'p', key: 'deployment', value: 'multi-user', source: 'tool_observed' });
-    assert.equal(graph.review({ project: 'p' }).length, 1);
+    assert.equal(graph.review({ project: 'p' }).items.length, 1);
 
     // ...but the caller asserts a different current value, which wins.
-    assert.equal(graph.review({ project: 'p', facts: { deployment: 'single-user' } }).length, 0,
+    assert.equal(graph.review({ project: 'p', facts: { deployment: 'single-user' } }).items.length, 0,
       'call arguments take precedence over stored facts');
 
     // And the reverse direction: stored value does not match, caller's does.
     const other = createShadowGraph();
     decisionWithReopenRule(other);
     other.addFact({ project: 'p', key: 'deployment', value: 'single-user', source: 'tool_observed' });
-    assert.equal(other.review({ project: 'p' }).length, 0);
-    assert.equal(other.review({ project: 'p', facts: { deployment: 'multi-user' } }).length, 1);
+    assert.equal(other.review({ project: 'p' }).items.length, 0);
+    assert.equal(other.review({ project: 'p', facts: { deployment: 'multi-user' } }).items.length, 1);
   });
 
   it('ACCEPTANCE (documented semantics): string-form rules still match changedFacts only, not stored facts', () => {
@@ -210,8 +210,8 @@ describe('G1 (S1) — FIXED: reconsideration reads facts that are already stored
     });
     graph.addFact({ project: 'p', key: 'deployment', value: 'multi-user', source: 'tool_observed' });
 
-    assert.equal(graph.review({ project: 'p' }).length, 0, 'a stored fact does not satisfy a string rule');
-    assert.equal(graph.review({ project: 'p', changedFacts: ['deployment'] }).length, 1, 'the change signal still works');
+    assert.equal(graph.review({ project: 'p' }).items.length, 0, 'a stored fact does not satisfy a string rule');
+    assert.equal(graph.review({ project: 'p', changedFacts: ['deployment'] }).items.length, 1, 'the change signal still works');
   });
 });
 
@@ -780,7 +780,7 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
     graph.updateDecisionStatus(archived.id, 'archived', { project: 'app' });
     assert.equal(graph.search('', { project: 'app', status: 'archived' }).page.total, 1);
     assert.equal(graph.context({ project: 'app' }).activeDecisions.some((item) => item.id === archived.id), false);
-    assert.equal(graph.review({ project: 'app' }).some((item) => item.decisionId === archived.id), false);
+    assert.equal(graph.review({ project: 'app' }).items.some((item) => item.decisionId === archived.id), false);
 
     const migrated = createShadowGraph();
     migrated.importData({ schemaVersion: 4, records: [
@@ -1277,7 +1277,7 @@ describe('G6 (S1) — FIXED: every read path declares its completeness', () => {
 
     assert.equal(context.activeDecisions.length, 5);
     assert.equal(context.completeness.complete, true);
-    assert.deepEqual(context.completeness.scope, { project: 'p' });
+    assert.deepEqual(context.completeness.scope, { project: 'p', requestState: 'project_selected', originPresented: false, grant: null });
     assert.equal(context.completeness.collections.activeDecisions.total, 5);
     assert.equal(context.completeness.collections.activeDecisions.hasMore, false);
     assert.equal(context.completeness.collections.activeDecisions.omitted, 0);
@@ -1782,7 +1782,7 @@ describe('ADVERSARIAL: bugs found by end-to-end review, now fixed', () => {
     assert.equal(normalize(live.facts), normalize(rebuilt.projection.facts), 'facts must be equivalent');
 
     // The whole point of G1 surviving all of this:
-    assert.equal(graph.review({ project: 'p' }).length, 1, 'reconsideration still fires after four restarts');
+    assert.equal(graph.review({ project: 'p' }).items.length, 1, 'reconsideration still fires after four restarts');
     // And the provenance/lifecycle/confidence work survived too:
     const stored = live.records.find((item) => item.id === decision.id);
     assert.equal(stored.sourceClass, 'tool_observed');

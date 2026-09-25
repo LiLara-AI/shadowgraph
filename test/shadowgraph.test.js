@@ -11,7 +11,7 @@ test('stores one decision and reopens it when facts change', () => {
   const graph = createShadowGraph({ now: () => '2026-01-01T00:00:00.000Z' });
   const decision = graph.addDecision({ project: 'default', title: 'Choose a database', chosen: 'PostgreSQL', assumptions: ['many-concurrent-writes'], alternatives: [{ label: 'SQLite', reasonRejected: 'Concurrency risk', reopenWhen: ['local-single-user'] }] });
   assert.equal(decision.alternatives[0].status, 'rejected');
-  const reviews = graph.review({ project: 'default', changedFacts: ['local-single-user'] });
+  const reviews = graph.review({ project: 'default', changedFacts: ['local-single-user'] }).items;
   assert.equal(reviews[0].decisionId, decision.id);
 });
 
