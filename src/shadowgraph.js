@@ -74,6 +74,12 @@ function isLegacyOwned(entity) {
   return entity?.attribution === undefined && (entity?.project ?? 'default') === 'default';
 }
 
+// An entity written by a newer build than this one reads: kept as it arrived,
+// reported by validate() as unsupported, and given no meaning here.
+function isFutureEntity(entity) {
+  return Number.isInteger(entity?.schemaVersion) && entity.schemaVersion > READABLE_SCHEMA_VERSION;
+}
+
 // The order the attribution migration takes entities in, and the legacy
 // attribution review lists them in: by kind, then id.
 function attributionOrder(left, right) {
@@ -1391,12 +1397,14 @@ export function createShadowGraph(options = {}) {
   // before anyone chooses where they belong. It is an administrative view,
   // not a project: no read scope reaches these records, and it reaches nothing
   // else. A record the migration has not reached yet is shown with the
-  // attribution the migration's own mapping gives it. Each entry carries the
-  // canonical record, and no project is inferred. It writes nothing;
-  // reassignment is a separate, explicit action.
+  // attribution the migration's own mapping gives it. An entity from a newer
+  // schema is never listed: the migration skips it and validate() reports it
+  // unsupported, so its legacy meaning is not this build's to give. Each entry
+  // carries the canonical record, and no project is inferred. It writes
+  // nothing; reassignment is a separate, explicit action.
   function legacyAttributionReview(options = {}) {
     const items = [...records.values(), ...facts.values()]
-      .filter(isLegacyOwned)
+      .filter((entity) => !isFutureEntity(entity) && isLegacyOwned(entity))
       .sort(attributionOrder)
       .map((entity) => ({
         id: entity.id,
