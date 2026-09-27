@@ -1157,7 +1157,9 @@ describe('G5 (S2) — FIXED: purge is logical by default, hard purge is explicit
 
     const after = privilegedSnapshot(graph).journal.length;
     assert.ok(after < before + 1, 'the journal shrank despite adding a purge entry');
-    assert.equal(JSON.stringify(graph.getJournal({ limit: 1000 }).items).includes('"gone"') && false, false);
+    // Only the purge's own marker still names the purged project (WS-01 A16).
+    assert.deepEqual(graph.getJournal({ project: 'gone', limit: 1000 }).items.map((entry) => entry.type), ['project.purged']);
+    assert.deepEqual(privilegedSnapshot(graph).journal.filter((entry) => JSON.stringify(entry).includes('"gone"')).map((entry) => entry.type), ['project.purged']);
   });
 
   it('ACCEPTANCE: hard purge is NOT reachable from the default code path', () => {

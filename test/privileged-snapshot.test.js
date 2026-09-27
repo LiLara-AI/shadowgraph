@@ -22,7 +22,6 @@ const SNAPSHOT_IMPORTERS = [
   'src/shadowgraph.js', 'src/cli.js', 'src/server.js', 'src/mcp.js', 'src/markdown-workspace.js', 'src/restore-validation.js',
   'src/schema-conversion.js',
   'src/internal/access-transport.js',
-  'tools/scope-conformance.mjs',
   'scripts/bench-journal.mjs', 'scripts/context-size.mjs'
 ];
 

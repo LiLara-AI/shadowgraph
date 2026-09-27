@@ -87,7 +87,6 @@
   },
   "scripts": {
     "test": "node --test --test-concurrency=1",
-    "test:scope-conformance": "node tools/scope-conformance.mjs",
     "start": "node src/server.js",
     "serve": "node src/cli.js serve",
     "setup": "node src/cli.js setup",

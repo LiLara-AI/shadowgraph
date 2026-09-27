@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { privilegedSnapshot, privilegedIssueAccess, privilegedAccessInspection, privilegedBindProject, privilegedResolveProjectBinding } from '../src/internal/snapshot.js';
 import { ACCESS_AUDIT_POLICY } from '../src/access.js';
+import { historicalRelation } from '../tools/historical-relation.js';
 
 const NOW = '2026-01-01T00:00:00.000Z', END = '2026-02-01T00:00:00.000Z';
 const bounds = { scope: { projects: ['beta'] }, surfaces: ['cli', 'http', 'mcp'], expiresAt: END, reason: 'synthetic comparison' };
@@ -97,6 +98,23 @@ test('expiry and inherited expansion provenance recheck without silently widenin
   assert.equal(expired.completeness.scope.grant, null);
   assert.doesNotMatch(JSON.stringify(expired), /beta comparison/);
   assert.match(JSON.stringify(expired), /alpha comparison/);
+});
+
+test('a traversal widens only by its grant, and a revoked grant\'s inherited provenance keeps the original request', () => {
+  const { graph, ids } = fixture(); const grant = issue(graph);
+  // A relation stored across projects before link() refused one: only the grant may follow it.
+  graph.importData(historicalRelation({ id: 'relation-alpha-beta', from: ids.alpha, to: ids.beta, relation: 'related', project: 'alpha', seq: privilegedSnapshot(graph).journalSeq + 1, at: NOW }));
+  const projects = (result) => [...new Set(result.nodes.map((node) => node.project))].sort();
+  assert.deepEqual(projects(graph.traverse({ project: 'alpha', id: ids.alpha, depth: 3 })), ['alpha']);
+  const widened = graph.traverse({ project: 'alpha', accessId: grant.accessId, id: ids.alpha, depth: 3 });
+  assert.deepEqual(projects(widened), ['alpha', 'beta']);
+  assert.equal(widened.completeness.scope.grant.accessId, grant.accessId);
+  graph.revokeAccess({ accessId: grant.accessId });
+  // Reusing the widened provenance rechecks the grant at use; the call's own project cannot replace the original request.
+  const rechecked = graph.traverse({ id: ids.alpha, readProvenance: widened.readProvenance, project: 'default', depth: 3 });
+  assert.deepEqual(projects(rechecked), ['alpha']);
+  assert.equal(rechecked.completeness.scope.grant, null);
+  assert.equal(rechecked.completeness.scope.project, 'alpha');
 });
 
 test('delegated issuance is bounded, retry-stable, terminal and separately revocable', () => {
