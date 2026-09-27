@@ -14,6 +14,7 @@ import { privilegedSnapshot } from '../src/internal/snapshot.js';
 import { buildToolCatalog } from '../src/mcp-tools.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
+import { assertCliOutcomeEqual } from '../tools/assert-cli-outcome.js';
 
 const execute = promisify(execFile);
 const cliPath = fileURLToPath(new URL('../src/cli.js', import.meta.url));
@@ -58,8 +59,12 @@ async function connect(t, fixture, surface, { modern = false } = {}) {
   const environment = { ...process.env, SHADOWGRAPH_FILE: file, SHADOWGRAPH_STORAGE: backend, SHADOWGRAPH_API_TOKEN: '', SHADOWGRAPH_EMBEDDING_URL: '', SHADOWGRAPH_VERIFIER_CONFIG: '', SHADOWGRAPH_MCP_COMPACT: '0' };
   if (surface === 'cli') return async (operation, args) => {
     const rest = operation === 'restore' ? [args.source, ...(args.memoryOnly ? ['--memory-only'] : [])] : [JSON.stringify(args)];
-    try { const { stdout } = await execute(process.execPath, [cliPath, names[operation][0], ...rest], { cwd: directory, env: environment }); return { ok: true, value: JSON.parse(stdout) }; }
-    catch (error) { return { ok: false, error: error.stderr }; }
+    try {
+      const { stdout, stderr } = await execute(process.execPath, [cliPath, names[operation][0], ...rest], { cwd: directory, env: environment });
+      return { ok: true, value: JSON.parse(stdout), cli: { status: 0, signal: null, stdout, stderr } };
+    } catch (error) {
+      return { ok: false, error: error.stderr, cli: { status: error.code, signal: error.signal, stdout: error.stdout, stderr: error.stderr } };
+    }
   };
   if (surface === 'http') {
     const app = await createShadowGraphServer({ file, storage: backend, cwd: directory, apiToken: '' });
@@ -120,7 +125,11 @@ for (const backend of ['json', 'sqlite']) for (const surface of ['cli', 'http', 
       }
       const outside = await call('status', { ...owner, decisionId: state.records[2].id, status: 'planned' });
       const absent = await call('status', { ...owner, decisionId: 'absent-reference', status: 'planned' });
-      assert.equal(outside.ok, false); assert.deepEqual(outside, absent);
+      assert.equal(outside.ok, false);
+      if (surface === 'cli') {
+        t.diagnostic(`Raw CLI parity: ${JSON.stringify({ occupied: outside.cli, absent: absent.cli })}`);
+        assertCliOutcomeEqual(outside.cli, absent.cli);
+      } else assert.deepEqual(outside, absent);
     }
   });
   test(`PR13 F35 ${backend}/${surface}: ordinary diagnostics preserve caller scope`, async t => {

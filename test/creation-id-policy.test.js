@@ -11,6 +11,7 @@ import { createStorage } from '../src/storage.js';
 import { createShadowGraphServer } from '../src/server.js';
 import { backupFile, restoreFile } from '../src/backup.js';
 import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
+import { assertCliOutcomeEqual } from '../tools/assert-cli-outcome.js';
 const sqlite = (await getRuntimeCapabilities()).nodeSqlite;
 const backendOptions = backend => ({ skip: backend === 'sqlite' && !sqlite.available ? sqlite.reason : false });
 
@@ -230,7 +231,10 @@ for (const backend of ['json', 'sqlite']) for (const surface of ['cli', 'http', 
         messages.push({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: arm[4], arguments: input, ...(surface.startsWith('mcp-modern') ? { _meta: meta } : {}) } });
         const run = spawnSync(process.execPath, args, { cwd: dir, env: envFor(file, backend, surface.endsWith('-compact')), input: surface === 'cli' ? undefined : messages.map(m => JSON.stringify(m)).join('\n') + '\n', encoding: 'utf8', timeout: 20000 });
         assert.ifError(run.error);
-        if (surface === 'cli') return { failed: run.status !== 0, status: run.status, value: run.status ? run.stderr.trim() : JSON.parse(run.stdout) };
+        if (surface === 'cli') return {
+          failed: run.status !== 0, status: run.status, value: run.status ? run.stderr.trim() : JSON.parse(run.stdout),
+          cli: { status: run.status, signal: run.signal, stdout: run.stdout, stderr: run.stderr }
+        };
         assert.equal(run.status, 0, run.stderr);
         const response = run.stdout.trim().split(/\r?\n/).map(line => JSON.parse(line)).find(x => x.id === 2);
         assert.ok(response);
@@ -253,7 +257,10 @@ for (const backend of ['json', 'sqlite']) for (const surface of ['cli', 'http', 
       else assert.ok(restored.traverse({ project: 'alpha', id }).nodes.length);
       assert.equal(privilegedValidate(restored).valid, true);
     }
-    assert.deepEqual(outcomes[0], outcomes[1]);
+    if (surface === 'cli') {
+      t.diagnostic(`Raw CLI parity: ${JSON.stringify({ occupied: outcomes[0].cli, absent: outcomes[1].cli })}`);
+      assertCliOutcomeEqual(outcomes[0].cli, outcomes[1].cli);
+    } else assert.deepEqual(outcomes[0], outcomes[1]);
   });
 }
 
