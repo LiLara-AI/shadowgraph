@@ -1,6 +1,13 @@
 """Minimal Hermes-style Python tool wrapper around ShadowGraph's local HTTP API.
 
 Use the functions as tools in an agent that supports Python callables.
+
+Every helper works inside one project. `project` defaults to the real project
+"default", as the record helpers always have; pass the project your records
+belong to. An outcome, status or evidence call changes a decision only in the
+project it names, and answers another project's id as a missing one.
+`project=None` names no project: reads return nothing (completeness.complete is
+false) and changes are refused. It never means every project.
 """
 import json
 from urllib.parse import urlencode
@@ -17,7 +24,7 @@ def _request(method, path, payload=None):
         return json.loads(response.read().decode("utf-8"))
 
 
-def shadowgraph_search(query="", project=None, limit=None, offset=None):
+def shadowgraph_search(query="", project="default", limit=None, offset=None):
     """Search decisions and attempts before starting consequential work."""
     params = {"q": query}
     if project is not None:
@@ -34,7 +41,7 @@ def shadowgraph_context(project="default"):
     return _request("POST", "/context", {"project": project})
 
 
-def shadowgraph_retrieve(query="", project=None, limit=None, offset=None):
+def shadowgraph_retrieve(query="", project="default", limit=None, offset=None):
     """Retrieve complete decision records with an explicit completeness envelope."""
     payload = {"query": query}
     if project is not None:
@@ -79,10 +86,14 @@ def shadowgraph_record_fact(key, value, project="default", source_class="agent_c
     return _request("POST", "/facts", payload)
 
 
-def shadowgraph_record_outcome(decision_id, status, lessons=None, source_class="agent_claimed"):
+def shadowgraph_record_outcome(decision_id, status, lessons=None, source_class="agent_claimed",
+                               project="default"):
     """Record a decision outcome and its confidence contribution."""
-    return _request("POST", "/outcomes", {"decisionId": decision_id,
-        "outcome": {"status": status, "lessons": lessons or [], "sourceClass": source_class}})
+    payload = {"decisionId": decision_id,
+               "outcome": {"status": status, "lessons": lessons or [], "sourceClass": source_class}}
+    if project is not None:
+        payload["project"] = project
+    return _request("POST", "/outcomes", payload)
 
 
 def shadowgraph_record_attempt(solution, result, reason="", environment="", project="default",
@@ -97,12 +108,15 @@ def shadowgraph_record_attempt(solution, result, reason="", environment="", proj
     return _request("POST", "/attempts", payload)
 
 
-def shadowgraph_update_status(decision_id, status):
+def shadowgraph_update_status(decision_id, status, project="default"):
     """Persist a canonical decision lifecycle status."""
-    return _request("POST", "/status", {"decisionId": decision_id, "status": status})
+    payload = {"decisionId": decision_id, "status": status}
+    if project is not None:
+        payload["project"] = project
+    return _request("POST", "/status", payload)
 
 
-def shadowgraph_maintain(project=None, changed_facts=None):
+def shadowgraph_maintain(project="default", changed_facts=None):
     """Age decisions, expire facts, and create stored review signals."""
     payload = {}
     if project is not None:
@@ -113,10 +127,12 @@ def shadowgraph_maintain(project=None, changed_facts=None):
 
 
 def shadowgraph_confidence_evidence(decision_id, key, reason, supports=True,
-                                    source_class="agent_claimed", observed_at=None):
+                                    source_class="agent_claimed", observed_at=None, project="default"):
     """Add keyed confidence evidence; key must remain stable across retries."""
     payload = {"decisionId": decision_id, "key": key, "reason": reason,
                "supports": supports, "sourceClass": source_class}
     if observed_at is not None:
         payload["observedAt"] = observed_at
+    if project is not None:
+        payload["project"] = project
     return _request("POST", "/confidence-evidence", payload)

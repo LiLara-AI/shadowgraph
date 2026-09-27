@@ -6,6 +6,7 @@
 - Breaking: `review()` and `getReviewSignals()` return `{ items, completeness }`. Migrate array operations to `result.items`; their MCP results now have object output schemas.
 - Own historical signals with hidden evidence expose bounded identity/lifecycle projections and partial coverage. Stored evidence and acknowledgement behavior are preserved.
 - Public journal, redaction and rebuild envelopes omit global activity counters. Canonical journal entry sequences and privileged persistence/restore metadata remain unchanged.
+- Hermes Python wrapper (`integrations/hermes-agent.py`): `shadowgraph_record_outcome`, `shadowgraph_update_status` and `shadowgraph_confidence_evidence` take a trailing `project="default"` and send it, so their by-id changes are no longer refused as id-only writes. `shadowgraph_search`, `shadowgraph_retrieve` and `shadowgraph_maintain` now default to `project="default"` like the other helpers, instead of `None`, which reads nothing. Pass the project your records belong to; `project=None` names none, so reads return nothing (`complete: false`) and changes are refused.
 
 
 ## 0.41.0 — Technical Preview (2026-09-20; GitHub release, not published to npm)

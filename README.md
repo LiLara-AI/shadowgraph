@@ -195,11 +195,13 @@ restore still cover the whole store; the public export and a redaction are reads
 are refused as a store.
 Records written before schema 6 in `default`, or with no project, belong to no project a caller can
 name, so no project read returns them; the kernel's `legacyAttributionReview()` lists them for
-inspection, each with its legacy state and canonical record, and infers no project for them. Still
-in progress: a read with no project reports its empty result as complete, and the transports are not
-yet aligned -- the MCP tools, HTTP routes and CLI verbs for outcomes, status and review
-acknowledgement pass no project yet, so they are refused, and `stats` over MCP, HTTP and the CLI
-counts nothing.
+inspection, each with its legacy state and canonical record, and infers no project for them. A read
+with no project reports its empty result as incomplete (`completeness.complete: false`, with a
+`scoped_coverage` limitation), never as complete. The MCP tools, HTTP routes and CLI verbs pass the
+caller's `project` (or `originId`) to the same boundary: an outcome, a status change or a review
+acknowledgement sent with one changes only what it owns, and the same call without one is refused
+(`write_scope_unresolved`) alike for every id; `stats` over HTTP (`GET /stats?project=...`) and the
+CLI counts only the named project's content, and nothing without one.
 Omitted scope means all-null scope. Purge is previewable, logical by default, and explicitly
 irreversible in hard mode.
 

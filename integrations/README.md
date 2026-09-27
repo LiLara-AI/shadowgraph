@@ -127,7 +127,7 @@ Restart Hermes after registration. Hermes exposes discovered tools with its `mcp
 
 Run the local API with `shadowgraph serve`. The dashboard is served only from `http://127.0.0.1:8787/dashboard`; if `SHADOWGRAPH_API_TOKEN` is enabled, enter it in the password field. The page sends it only as an `Authorization` header and never writes it to cookies or local storage.
 
-`hermes-agent.py` remains an optional Python callable wrapper around the same local HTTP API. Other HTTP/OpenClaw/Antigravity examples are included for clients that do not consume stdio MCP.
+`hermes-agent.py` remains an optional Python callable wrapper around the same local HTTP API. Each helper takes `project` (default `"default"`, the project its record helpers write to) and sends it; `project=None` names no project, so reads return nothing and changes are refused. Other HTTP/OpenClaw/Antigravity examples are included for clients that do not consume stdio MCP.
 
 ## Agent loop
 
