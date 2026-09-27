@@ -259,7 +259,7 @@ The 14 compact tools are `shadowgraph_context`, `shadowgraph_remember`, `shadowg
 `shadowgraph_validate`, `shadowgraph_maintain`, `shadowgraph_ack_review` — so a compact client can
 clear a review it can already see, instead of accumulating signals with no way to acknowledge
 them — and `shadowgraph_reconsider`, which reads the same evaluation as a verdict: review
-recommended, unchanged, or a human should look. Full mode advertises 28 — see the
+recommended, unchanged, or a human should look. Full mode advertises 33 — see the
 [MCP compatibility guide](docs/mcp-compatibility.md) for the complete inventory, every protocol
 revision, and verified client behaviour.
 

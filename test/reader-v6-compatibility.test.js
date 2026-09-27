@@ -10,15 +10,14 @@ import { JOURNAL_ENTRY_TYPES, JOURNAL_SCHEMA_VERSION, READABLE_JOURNAL_SCHEMA_VE
 import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { restoreFile } from '../src/backup.js';
-import { AUTHORITY_RESTORE_UNSUPPORTED, requiresLegacyPurgeMigration, validateRestorePayload } from '../src/restore-validation.js';
+import { AUTHORITY_RESTORE_UNSUPPORTED, guardAuthorityRestore, requiresLegacyPurgeMigration, validateRestorePayload } from '../src/restore-validation.js';
 import { privilegedRebuild, privilegedSnapshot, privilegedValidate } from '../src/internal/snapshot.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
-// PR-06 (plan v1.4.4 §9.2, §10.9.8; R16 rev 2 §7; P1 reconciliation F-13,
-// F-14, F-15): the reader widens to schema 6 while the writer stays at 5, what
-// this build does not understand survives load, save and restore in both
-// backends, an authority-bearing restore is refused unless memory only was
-// asked for, and entity.attributed is readable before anything writes it.
+// Retained PR-06 reader/carrier controls, advanced through the accepted schema-6
+// writer and PR-12 narrowing restore. Historical builds keep their original
+// presence guard; current restore recovers memory and suspends backup-only
+// authority. The preservation-only helper still refuses authority verbatim.
 
 const NOW = '2026-01-01T00:00:00.000Z';
 const now = () => NOW;
@@ -365,12 +364,13 @@ test('SQLite restore keeps an unrecognised collection through restore, open, sav
   assert.equal((await target.load()).records.length, privilegedSnapshot(seeded()).records.length);
 });
 
-test('an authority-bearing restore is refused at this build (JSON, SQLite and restore validation)', async (t) => {
+test('current restore recovers memory and suspends backup-only authority while the preservation-only guard still refuses it', async (t) => {
   const backup = { ...privilegedSnapshot(seeded()), access: ACCESS, accessRevocations: REVOCATIONS };
-  assert.throws(() => validateRestorePayload(backup, { now }), (error) => error.code === AUTHORITY_RESTORE_UNSUPPORTED);
+  assert.doesNotThrow(() => validateRestorePayload(backup, { now }));
+  assert.throws(() => guardAuthorityRestore(backup), (error) => error.code === AUTHORITY_RESTORE_UNSUPPORTED);
   for (const key of ['access', 'accessRevocations']) {
     const one = { ...privilegedSnapshot(seeded()), [key]: key === 'access' ? ACCESS : REVOCATIONS };
-    assert.throws(() => validateRestorePayload(one, { now }), (error) => error.code === AUTHORITY_RESTORE_UNSUPPORTED && error.collections.join() === key);
+    assert.throws(() => guardAuthorityRestore(one), (error) => error.code === AUTHORITY_RESTORE_UNSUPPORTED && error.collections.join() === key);
   }
   const directory = await scratchDirectory(t, 'shadowgraph-v6-authority-');
   const source = join(directory, 'backup.json');
@@ -378,8 +378,11 @@ test('an authority-bearing restore is refused at this build (JSON, SQLite and re
   await writeFile(source, JSON.stringify(backup));
   const before = JSON.stringify(privilegedSnapshot(seeded()));
   await writeFile(destination, before);
-  await assert.rejects(restoreFile(source, destination), (error) => error.code === AUTHORITY_RESTORE_UNSUPPORTED);
-  assert.equal(await readFile(destination, 'utf8'), before, 'the destination is untouched');
+  await restoreFile(source, destination, { now: now() });
+  const recovered = JSON.parse(await readFile(destination, 'utf8'));
+  assert.equal(bytes(recovered.records), bytes(backup.records));
+  assert.equal(recovered.access.entries[0].state, 'suspended');
+  assert.equal(recovered.access.entries[0].suspendedReason, 'no_destination_authority_state');
 
   const DatabaseSync = await sqliteOrSkip(t);
   if (!DatabaseSync) return;
@@ -389,9 +392,12 @@ test('an authority-bearing restore is refused at this build (JSON, SQLite and re
   store.close();
   const target = await createSqliteStore(join(directory, 'data.db'));
   await target.save(privilegedSnapshot(seeded()));
-  const targetBefore = bytes(await target.load());
-  await assert.rejects(target.restore(sqliteSource), (error) => error.code === AUTHORITY_RESTORE_UNSUPPORTED);
-  assert.equal(bytes(await target.load()), targetBefore, 'the SQLite destination is untouched');
+  await target.restore(sqliteSource, { now: now() });
+  const installed = await target.load();
+  assert.equal(bytes(installed.records), bytes(backup.records));
+  assert.equal(installed.access.entries[0].state, 'suspended');
+  assert.equal(installed.access.entries[0].suspendedReason, 'no_destination_authority_state');
+  target.close();
 });
 
 test('a memory-only restore strips the authority collections and restores every memory collection (JSON, SQLite, CLI)', async (t) => {
@@ -410,9 +416,9 @@ test('a memory-only restore strips the authority collections and restores every 
   assert.equal(Object.hasOwn(privilegedSnapshot(live), 'access'), false, 'nothing to reactivate later');
 
   const cliDestination = join(directory, 'cli.json');
-  const refused = spawnSync(process.execPath, [cli, 'restore', source], { env: { ...process.env, SHADOWGRAPH_FILE: cliDestination, SHADOWGRAPH_STORAGE: 'json' }, encoding: 'utf8' });
-  assert.notEqual(refused.status, 0);
-  assert.match(refused.stderr, /Refusing to restore authority collections/);
+  const narrowed = spawnSync(process.execPath, [cli, 'restore', source], { env: { ...process.env, SHADOWGRAPH_FILE: cliDestination, SHADOWGRAPH_STORAGE: 'json' }, encoding: 'utf8' });
+  assert.equal(narrowed.status, 0, narrowed.stderr);
+  assert.equal(JSON.parse(await readFile(cliDestination, 'utf8')).access.entries[0].state, 'suspended');
   const accepted = spawnSync(process.execPath, [cli, 'restore', source, '--memory-only'], { env: { ...process.env, SHADOWGRAPH_FILE: cliDestination, SHADOWGRAPH_STORAGE: 'json' }, encoding: 'utf8' });
   assert.equal(accepted.status, 0, accepted.stderr);
   const cliInstalled = JSON.parse(await readFile(cliDestination, 'utf8'));
@@ -437,7 +443,7 @@ test('a memory-only restore strips the authority collections and restores every 
   } finally { database.close(); }
 });
 
-test('entity.attributed is in the replay vocabulary, and only the attribution migration writes it', async () => {
+test('entity.attributed vocabulary supports migration and explicit owner attribution writers', async () => {
   assert.equal(REPLAYABLE_ENTRY_TYPES.length, 20);
   assert.equal(JOURNAL_ENTRY_TYPES.length, 21);
   assert.equal(REPLAYABLE_ENTRY_TYPES.at(-1), 'entity.attributed');
@@ -447,13 +453,13 @@ test('entity.attributed is in the replay vocabulary, and only the attribution mi
     if (!name.endsWith('.js')) continue;
     if (/type:\s*'entity\.attributed'/.test(await readFile(join(root, 'src', name), 'utf8'))) emitters.push(name);
   }
-  // The reader landed first with no writer; the schema-6 writer adds exactly one
-  // (migrateAttribution, reason `migration`). User re-attribution is later work.
+  // The reader landed before either writer. PR-12 adds the explicit owner
+  // action beside the migration using the already supported user reason.
   assert.deepEqual(emitters, ['shadowgraph.js']);
   const kernel = await readFile(join(root, 'src', 'shadowgraph.js'), 'utf8');
-  assert.equal(kernel.match(/type:\s*'entity\.attributed'/g).length, 1);
+  assert.equal(kernel.match(/type:\s*'entity\.attributed'/g).length, 2);
   assert.match(kernel, /reason: 'migration'/);
-  assert.doesNotMatch(kernel, /reason: 'user'/);
+  assert.match(kernel, /reason: 'user'/);
 });
 
 // Append one entity.attributed entry carrying `next` (the post-change entity),
@@ -502,11 +508,8 @@ test('entity.attributed replays to the re-attributed entity: rebuild parity and 
   assert.doesNotThrow(() => validateRestorePayload(payload, { now }));
 });
 
-// Entities only: a relation.created entry keeps the project label of its source
-// at creation, so purging that project after both endpoints moved scrubs the
-// entry while the live relation survives. That is purge behaviour, not reading,
-// and it only arises once something writes a user re-attribution; it is
-// recorded for the change-set that does.
+// This original entity-only reader case remains beside the PR-12 relation
+// regression tests. Purge now retains historical snapshots of surviving entities.
 test('purging the source project after re-attribution keeps the re-attributed records and a clean rebuild (F-13)', () => {
   for (const mode of ['logical', 'hard']) {
     const { payload, ids } = reattributedStore({ link: false });
@@ -519,10 +522,9 @@ test('purging the source project after re-attribution keeps the re-attributed re
     assert.equal(live.records.some((record) => record.project === 'alpha'), false);
     assert.equal(privilegedValidate(graph).valid, true, `${mode}: ${JSON.stringify(privilegedValidate(graph).issues)}`);
     const rebuilt = privilegedRebuild(graph);
-    // A hard purge that removes the leading entries leaves a declared leading
-    // gap; that is the existing contract, accepted by restore validation
-    // through the purge ledger. Nothing else may stop the rebuild.
-    if (mode === 'hard' && !rebuilt.rebuildable) assert.equal(rebuilt.reason, 'journal epoch is outside the available sequence range');
+    // A hard purge may remove a leading or internal range; restore validation
+    // checks its complete gap ledger rather than assuming where removal occurs.
+    if (mode === 'hard' && !rebuilt.rebuildable) assert.ok(['journal epoch is outside the available sequence range', 'journal contains unexplained sequence gaps inside the replay range'].includes(rebuilt.reason));
     else assert.equal(rebuilt.rebuildable, true, `${mode}: ${rebuilt.reason}`);
     assert.deepEqual(byId(rebuilt.projection.records), byId(live.records), mode);
     assert.deepEqual(byId(rebuilt.projection.facts), byId(live.facts), mode);

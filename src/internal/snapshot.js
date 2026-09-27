@@ -39,3 +39,21 @@ export function privilegedValidate(graph) {
 export function privilegedRebuild(graph, options) {
   return primitive(graph, 'rebuild', 'privilegedRebuild')(options);
 }
+
+// Only the local CLI confirmation path calls the issuance primitive. These
+// internal helpers are absent from package exports and the graph API.
+export function privilegedIssueAccess(graph, input) {
+  return primitive(graph, 'issueAccess', 'privilegedIssueAccess')(input);
+}
+export function privilegedAccessInspection(graph) {
+  return primitive(graph, 'inspectAccess', 'privilegedAccessInspection')();
+}
+export function privilegedAccessRefusal(graph, input) {
+  return primitive(graph, 'accessRefusal', 'privilegedAccessRefusal')(input);
+}
+export function privilegedBindProject(graph, input) {
+  return primitive(graph, 'bindProject', 'privilegedBindProject')(input);
+}
+export function privilegedResolveProjectBinding(graph, input) {
+  return primitive(graph, 'resolveProjectBinding', 'privilegedResolveProjectBinding')(input);
+}

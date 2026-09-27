@@ -411,7 +411,11 @@ const readScopeSchema = {
     project: stringOrNull('Resolved project, or null when unresolved.'),
     requestState: { type: 'string', enum: ['project_selected', 'project_unresolved'], description: 'Whether a project was resolved.' },
     originPresented: { type: 'boolean', description: 'Whether a usable origin was presented; not a project selection.' },
-    grant: { type: 'null', description: 'No wider read grant is implemented.' }
+    grant: { anyOf: [{ type: 'null' }, { type: 'object', required: ['accessId', 'expiresAt', 'surface'], properties: {
+      accessId: { type: 'string', description: 'The currently rechecked grant identifier.' },
+      expiresAt: { type: 'string', description: 'Earliest effective expiry of this read authority.' },
+      surface: { type: 'string', enum: ['cli', 'mcp', 'http'], description: 'Actual runtime surface of this read.' }
+    } }], description: 'Rechecked effective grant, or null when none is usable.' }
   }
 };
 const readCoverageSchema = {
@@ -676,6 +680,38 @@ const exportSchema = {
 // cannot change the advertised bytes. test/mcp-tool-metadata.test.js caps each
 // description and the total across the advertised set.
 const CONTENT_FIELD_LIST = CONTENT_SEARCH_FIELDS.join(', ');
+const accessScopeProperty = { type: 'object', description: 'Finite explicit owner bounds; project names, origins and legacy attribution are disjoint.', properties: {
+  projects: stringList('Exact named projects, including a real project named default if requested.'),
+  originIds: stringList('Exact nonempty origin identifiers for unattributed content.'),
+  legacyAttributions: { type: 'array', items: { type: 'string', enum: ['legacy_ambiguous', 'legacy_unattributed'] }, description: 'Explicit legacy ownership classes; neither is a named project.' }
+} };
+const accessInputProperties = {
+  accessId: { type: 'string', description: 'Grant ID, rechecked at use.' },
+  grantId: { type: 'string', description: 'Alias for accessId; conflicting identifiers are refused.' },
+  readProvenance: { type: 'object', description: 'Original expansion bounds; cannot widen access.' }
+};
+const readProvenanceSchema = { type: 'object', description: 'Original read bounds; reuse intersects these with currently valid authority.', required: ['version', 'request', 'accessId', 'scope', 'surfaces', 'expiresAt'], properties: {
+  version: { type: 'integer', const: 1, description: 'Version of this bounded read provenance.' },
+  request: { type: 'object', description: 'Original request ownership, preserved during expansion.', required: ['project', 'originId'], properties: {
+    project: stringOrNull('Original resolved project, or null when unresolved.'),
+    originId: stringOrNull('Original capture origin, or null when absent.')
+  } },
+  accessId: { type: 'string', description: 'Original grant, revalidated on every reuse.' },
+  scope: accessScopeProperty,
+  surfaces: { type: 'array', items: { type: 'string', enum: ['cli', 'mcp', 'http'] }, description: 'Original permitted surfaces; reuse can only narrow them.' },
+  expiresAt: { type: 'string', description: 'Original effective expiry; reuse cannot extend it.' }
+} };
+const GRANT_READ_TOOLS = new Set(['shadowgraph_review', 'shadowgraph_search', 'shadowgraph_context', 'shadowgraph_recall', 'shadowgraph_traverse', 'shadowgraph_redact', 'shadowgraph_maintain', 'shadowgraph_retrieve', 'shadowgraph_validate', 'shadowgraph_journal', 'shadowgraph_rebuild', 'shadowgraph_review_signals', 'shadowgraph_repair_plan', 'shadowgraph_reconsider']);
+const ACCESS_DESCRIPTIONS = {
+  shadowgraph_review: { does: 'Evaluate reopen rules and list due decisions.', route: 'shadowgraph_review_signals reads signals; shadowgraph_ack_review closes one; shadowgraph_maintain ages first.', effects: 'Persists deduped own-scope signals and a revision; grant use also audits.' },
+  shadowgraph_search: { does: 'Match all query terms in declared content fields.', route: 'shadowgraph_retrieve adds neighbours; shadowgraph_recall ranks memory; shadowgraph_context builds context; shadowgraph_traverse walks IDs.' },
+  shadowgraph_context: { does: 'Build scoped decisions, assumptions, attempts and reviews.', route: 'shadowgraph_search and shadowgraph_retrieve find records; shadowgraph_recall ranks memory; shadowgraph_review evaluates rules.', effects: 'Evaluates and persists own-scope signals plus a revision; grants audit reads.' },
+  shadowgraph_recall: { does: 'Rank scoped memory by lexical, vector, graph and temporal signals.', route: 'shadowgraph_search matches content; shadowgraph_retrieve adds neighbours; shadowgraph_remember writes.' },
+  shadowgraph_maintain: { does: 'Age own-scope decisions and facts, then evaluate reopen rules.', route: 'shadowgraph_review evaluates; shadowgraph_validate reports; shadowgraph_update_status cannot set stale.', effects: 'Clock-dependent writes commit a revision even on repeats; grants audit reads.' },
+  shadowgraph_retrieve: { does: 'Match content and include authorized graph neighbours.', route: 'shadowgraph_search matches only; shadowgraph_recall ranks memory; shadowgraph_traverse walks IDs; shadowgraph_context builds context.' },
+  shadowgraph_validate: { does: 'Report integrity diagnostics by severity.', route: 'shadowgraph_repair_plan proposes fixes; shadowgraph_rebuild checks journal replay.' },
+  shadowgraph_reconsider: { does: 'Reconsider scoped decisions with grounded conditions and three-state verdicts.', route: 'shadowgraph_review lists due decisions; shadowgraph_ack_review closes signals.', effects: 'Persists deduped own-scope signals; grants audit reads.' }
+};
 
 function compose({ does, route, effects, returns }) {
   return [does, route, effects, returns].filter(Boolean).join(' ');
@@ -1563,6 +1599,59 @@ const CATALOG = [
     outputSchema: reconsiderationSchema
   },
   {
+    name: 'shadowgraph_request_wider_access',
+    compact: false, persists: true, accessLifecycle: true,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    describe: { does: 'Propose explicit wider-read bounds for owner approval; the request grants no access.', route: 'Use shadowgraph_revoke_grant to narrow an existing grant.', effects: 'Persists a request and audit event; issuance requires the owner CLI.' },
+    inputSchema: { type: 'object', required: ['scope', 'surfaces', 'expiresAt', 'reason'], properties: {
+      scope: accessScopeProperty,
+      surfaces: { type: 'array', items: { type: 'string', enum: ['cli', 'mcp', 'http'] }, description: 'Exact transport surfaces requested for wider reading.' },
+      expiresAt: { type: 'string', description: 'Requested absolute expiration; grants require a future expiration at issue.' },
+      reason: { type: 'string', description: 'Explanation shown to the owner reviewing these exact bounds.' }
+    } },
+    outputSchema: { type: 'object', description: 'A stored proposal that cannot authorize any read.', required: ['accessId', 'type', 'state'], properties: {
+      accessId: { type: 'string', description: 'Request identifier for subsequent owner review.' },
+      type: { type: 'string', enum: ['request'], description: 'A request confers no usable authority.' },
+      state: { type: 'string', enum: ['requested'], description: 'Awaiting a separate owner issuance decision.' }
+    } }
+  },
+  ...[
+    ['shadowgraph_revoke_grant', 'Revoke authority and its derived grants; the next wider read rechecks the narrowed state.'],
+    ['shadowgraph_discard_access', 'Discard authority with a terminal tombstone; no later restore can reactivate it.']
+  ].map(([name, does]) => ({
+    name, compact: false, persists: true, accessLifecycle: true,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    describe: { does, route: 'shadowgraph_request_wider_access only proposes new bounds.', effects: 'Persists terminal authority state and audit; does not delete memory.' },
+    inputSchema: { type: 'object', required: ['accessId'], properties: {
+      accessId: { type: 'string', description: 'Existing authority identifier to narrow permanently.' },
+      reason: { type: 'string', description: 'Optional explanation retained in the authority audit.' }
+    } },
+    outputSchema: { type: 'object', description: 'The terminal authority transition and its audit outcome.' }
+  })),
+  {
+    name: 'shadowgraph_bind', compact: false, persists: true,
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    describe: { does: 'Explicitly bind this workspace or shared repository to a project.', route: 'shadowgraph_attribute reassigns named material.', effects: 'Writes a local binding file and store audit; backs up any file it replaces. Paths are resolved locally.' },
+    inputSchema: { type: 'object', required: ['type', 'project', 'reason'], properties: {
+      type: { type: 'string', enum: ['worktree', 'shared_repository'], description: 'Explicitly choose this worktree or the shared Git repository.' },
+      project: { type: 'string', description: 'Exact project selected by this local binding.' },
+      reason: { type: 'string', description: 'Explicit reason for creating or replacing this mapping.' }
+    } },
+    outputSchema: { type: 'object', description: 'The confirmed mapping, activated local signal path and optional prior-file backup.' }
+  },
+  {
+    name: 'shadowgraph_attribute', compact: false, persists: true, accessLifecycle: true,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    describe: { does: 'Explicitly reassign named material or one exact origin to a project.', route: 'shadowgraph_bind selects a workspace project for future calls.', effects: 'Persists attribution and audit; keeps identity and provenance. Read grants cannot authorize this action.' },
+    inputSchema: { type: 'object', required: ['targetProject', 'reason'], properties: {
+      ids: stringList('Explicit material identifiers; supply either these or one originId.'),
+      originId: { type: 'string', description: 'Exact capture origin to reassign; alternative to explicit ids.' },
+      targetProject: { type: 'string', description: 'Exact project receiving the selected material.' },
+      reason: { type: 'string', description: 'Explicit reason retained in the attribution audit.' }
+    } },
+    outputSchema: { type: 'object', description: 'The explicit attribution result and affected material identifiers.' }
+  },
+  {
     name: 'shadowgraph_verify_fact',
     requires: 'verifier',
     compact: false,
@@ -1605,6 +1694,18 @@ export const OUTPUT_SCHEMA_OMISSIONS = Object.freeze({});
 export function buildToolCatalog({ verifier = false, embeddingConfigured = false } = {}) {
   return Object.freeze(CATALOG
     .filter((entry) => !entry.requires || (entry.requires === 'verifier' && verifier))
+    .map((entry) => {
+      if (!GRANT_READ_TOOLS.has(entry.name)) return entry;
+      const effects = entry.annotations.readOnlyHint
+        ? 'Grant reads persist bounded audit; own-scope reads do not.'
+        : `${entry.describe.effects ?? ''} Grant audit persists.`;
+      return { ...entry, persistsWithAccess: true, describe: { ...entry.describe, effects, ...ACCESS_DESCRIPTIONS[entry.name] },
+        ...(entry.name !== 'shadowgraph_redact' && entry.outputSchema ? { outputSchema: { ...entry.outputSchema, properties: { ...entry.outputSchema.properties, readProvenance: readProvenanceSchema } } } : {}),
+        inputSchema: { ...entry.inputSchema, properties: { ...entry.inputSchema.properties, accessId: accessInputProperties.accessId, grantId: accessInputProperties.grantId,
+          ...(['shadowgraph_recall', 'shadowgraph_retrieve', 'shadowgraph_traverse'].includes(entry.name) ? { readProvenance: accessInputProperties.readProvenance } : {}) } },
+        annotations: { ...entry.annotations, readOnlyHint: false, idempotentHint: false }
+      };
+    })
     .map((entry) => Object.freeze({
       name: entry.name,
       description: compose(entry.describe),
@@ -1616,7 +1717,9 @@ export function buildToolCatalog({ verifier = false, embeddingConfigured = false
         ...(entry.openWorldWhenEmbedding ? { openWorldHint: Boolean(embeddingConfigured) } : {})
       }),
       compact: entry.compact,
-      persists: entry.persists
+      persists: entry.persists,
+      ...(entry.persistsWithAccess ? { persistsWithAccess: true } : {}),
+      ...(entry.accessLifecycle ? { accessLifecycle: true } : {})
     })));
 }
 

@@ -50,7 +50,13 @@ export const FULL_TOOL_NAMES = Object.freeze([
   'shadowgraph_repair_plan',
   'shadowgraph_backup',
   'shadowgraph_restore',
-  'shadowgraph_reconsider'
+  'shadowgraph_reconsider',
+  // PR12 lifecycle/binding inventory only; no scenario or scoring change.
+  'shadowgraph_request_wider_access',
+  'shadowgraph_revoke_grant',
+  'shadowgraph_discard_access',
+  'shadowgraph_bind',
+  'shadowgraph_attribute'
 ]);
 
 export const COMPACT_TOOL_NAMES = Object.freeze([

@@ -20,13 +20,9 @@ export function createRestoreValidator(options = {}) {
   return (payload) => validateRestorePayload(payload, options);
 }
 
-// R16 rev 2 §7.2. This build carries the authority collections through an
-// ordinary save, but it has none of the semantics a safe restore of them needs
-// (the narrowing merge arrives with the grant lifecycle), so it refuses to
-// restore a backup that contains them. The check is by key name only. A
-// memory-only restore strips both keys and restores everything else: memory is
-// never withheld because authority could not be restored, and no authority is
-// installed that could later be reactivated.
+// The preservation-only guard remains available to callers that cannot merge
+// authority. PR12's restore paths use the narrowing merge; memory-only restore
+// still uses this helper to strip both collections before installation.
 export const AUTHORITY_COLLECTIONS = Object.freeze(['access', 'accessRevocations']);
 export const AUTHORITY_RESTORE_UNSUPPORTED = 'authority_restore_unsupported_at_this_build';
 
@@ -53,7 +49,6 @@ export function requiresLegacyPurgeMigration(payload) {
 }
 
 export function validateRestorePayload(payload, options = {}) {
-  guardAuthorityRestore(payload);
   const staging = createShadowGraph(options);
   staging.importData(payload);
   // The whole store is being restored, so it is checked whole (F-17).
@@ -107,4 +102,15 @@ export function validateRestorePayload(payload, options = {}) {
     }
   }
   return live;
+}
+
+// Mandatory validation can never be replaced by an extension. Extensions may
+// reject, including under a configured verifier, but cannot transform the
+// payload selected for installation or the object later activated in memory.
+export async function validateRestoreSnapshot(payload, { validators = [], ...options } = {}) {
+  const normalized = validateRestorePayload(payload, options);
+  for (const validator of new Set(validators)) {
+    if (typeof validator === 'function' && validator !== validateRestorePayload) await validator(structuredClone(payload));
+  }
+  return requiresLegacyPurgeMigration(payload) ? normalized : payload;
 }

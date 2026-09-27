@@ -8,7 +8,8 @@ import { VERSION } from './version.js';
 import { createRestoreValidator } from './restore-validation.js';
 import { loadLocalEvidenceVerifier } from './verification.js';
 import { BATCH_PROTOCOL_VERSIONS, LEGACY_PROTOCOL_VERSIONS, METADATA_TIER, buildToolCatalog, metadataTierForProtocolVersion, negotiateLegacyProtocolVersion, projectTool, selectTools, toolResult } from './mcp-tools.js';
-import { privilegedSnapshot } from './internal/snapshot.js';
+import { privilegedAccessRefusal, privilegedSnapshot } from './internal/snapshot.js';
+import { accessContext, bindWorkspaceProject, currentAccessOperation, discoverWorkspace, hasAccessReference } from './internal/access-transport.js';
 
 const file = process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json';
 const injectedRestoreFaultStages = process.env.NODE_ENV === 'test'
@@ -77,6 +78,7 @@ const JSON_RPC_ERROR = Symbol('shadowgraph.jsonRpcError');
 const PUBLIC_ERROR = Symbol('shadowgraph.publicError');
 const graph = createShadowGraph({ verifier, ...(injectedNow ? { now: injectedNow } : {}) });
 graph.importData(await store.load());
+const workspace = await discoverWorkspace();
 const embeddingClient = process.env.SHADOWGRAPH_EMBEDDING_URL ? createEmbeddingClient({
   baseUrl: process.env.SHADOWGRAPH_EMBEDDING_URL,
   model: process.env.SHADOWGRAPH_EMBEDDING_MODEL,
@@ -233,12 +235,30 @@ async function addConfiguredEmbeddings(args = {}) {
     : args;
 }
 
-async function callUnqueued(name, args, tier) {
+async function callUnqueued(name, args, tier, accessManaged = false) {
   if (persistenceUnavailable) throw unavailableError();
+  const tool = toolsByName.get(name);
+  if (name === 'shadowgraph_bind') return toolResult(tool, await bindWorkspaceProject(graph, store, workspace, { ...args, surface: 'mcp' }), tier);
+  if (!accessManaged && (tool?.accessLifecycle || (tool?.persistsWithAccess && hasAccessReference(args)))) {
+    return currentAccessOperation(graph, store, () => callUnqueued(name, args, tier, true));
+  }
+  if (args && typeof args === 'object' && !Array.isArray(args)) {
+    const { binding: ignoredBinding, surface: ignoredSurface, ...input } = args;
+    args = name === 'shadowgraph_attribute' ? { ...args, surface: 'mcp' } : tool?.persistsWithAccess || tool?.accessLifecycle || ['shadowgraph_record_decision', 'shadowgraph_record_attempt', 'shadowgraph_record_fact', 'shadowgraph_remember', 'shadowgraph_link', 'shadowgraph_supersede', 'shadowgraph_confidence_evidence'].includes(name)
+      ? accessContext(graph, input, 'mcp', workspace) : input;
+    if (name === 'shadowgraph_verify_fact' && input.project == null) {
+      const { binding } = accessContext(graph, input, 'mcp', workspace);
+      if (binding) args = { ...input, project: binding.project };
+    }
+  }
   const before = privilegedSnapshot(graph);
   let value;
   try {
-  if (name === 'shadowgraph_record_decision') value = graph.addDecision(withRuntimeSession(args));
+  if (name === 'shadowgraph_request_wider_access') value = graph.requestAccess(args ?? {});
+  else if (name === 'shadowgraph_revoke_grant') value = graph.revokeAccess(args ?? {});
+  else if (name === 'shadowgraph_discard_access') value = graph.discardAccess(args ?? {});
+  else if (name === 'shadowgraph_attribute') value = graph.attribute(args ?? {});
+  else if (name === 'shadowgraph_record_decision') value = graph.addDecision(withRuntimeSession(args));
   else if (name === 'shadowgraph_record_attempt') value = graph.addAttempt(withRuntimeSession(args));
   else if (name === 'shadowgraph_review') value = graph.review(args ?? {});
   else if (name === 'shadowgraph_reconsider') value = graph.reconsider(args ?? {});
@@ -271,13 +291,13 @@ async function callUnqueued(name, args, tier) {
   else if (name === 'shadowgraph_purge') value = graph.purgeProject(args?.project, { mode: args?.mode });
   else if (name === 'shadowgraph_maintain') value = graph.maintain(args ?? {});
   else if (name === 'shadowgraph_retrieve') value = graph.retrieve(args?.query ?? '', args ?? {});
-  else if (name === 'shadowgraph_validate') value = graph.validate();
+  else if (name === 'shadowgraph_validate') value = graph.validate(accessManaged ? args : undefined);
   else if (name === 'shadowgraph_journal') value = graph.getJournal(args ?? {});
   else if (name === 'shadowgraph_rebuild') value = graph.rebuild(args ?? {});
   else if (name === 'shadowgraph_review_signals') value = graph.getReviewSignals(args ?? {});
   else if (name === 'shadowgraph_purge_preview') value = graph.projectSummary(args?.project);
   else if (name === 'shadowgraph_ack_review') value = graph.acknowledgeReview(args?.id);
-  else if (name === 'shadowgraph_repair_plan') value = graph.repairPlan();
+  else if (name === 'shadowgraph_repair_plan') value = graph.repairPlan(accessManaged ? args : undefined);
   else if (name === 'shadowgraph_backup') { const { backupFile } = await import('./backup.js'); value = await backupFile(file, args?.destination, { store }); }
   else if (name === 'shadowgraph_restore') {
     value = store.restore
@@ -294,6 +314,7 @@ async function callUnqueued(name, args, tier) {
   else { const error = new Error('Unknown tool'); error.code = -32601; throw error; }
   } catch (error) {
     if (isCommittedRejection(error)) {
+      if (accessManaged) throw error;
       return persistCommittedRejection(error);
     }
     // P1-4: persistence rollback is too late for a domain operation that mutates
@@ -329,7 +350,7 @@ async function callUnqueued(name, args, tier) {
   // Which tools need a durable save is declared once, per tool, in the catalog.
   // shadowgraph_restore is deliberately absent: the storage backend commits the
   // replacement itself. See src/mcp-tools.js.
-  if (persistingTools.has(name)) {
+  if (!accessManaged && persistingTools.has(name)) {
     try { await persist(); }
     catch (error) {
       try { graph.replaceData(await store.load()); }
@@ -682,6 +703,9 @@ async function handleMessage(request, emit) {
       const args = request.params.arguments ?? {};
       if (typeof args !== 'object' || args === null || Array.isArray(args)) throw rpcError(-32602, 'Invalid params: arguments must be an object');
       if (!toolsByName.has(request.params.name)) {
+        if (!persistenceUnavailable && ['shadowgraph_issue_access', 'shadowgraph_delegate_access', 'shadowgraph_grant', 'shadowgraph_delegate', 'shadowgraph_import'].includes(request.params.name)) {
+          await queueCall(() => currentAccessOperation(graph, store, () => privilegedAccessRefusal(graph, { surface: 'mcp', reason: 'issuance_surface_unavailable' })));
+        }
         throw rpcError(modern ? -32602 : -32601, 'Unknown tool');
       }
       try {

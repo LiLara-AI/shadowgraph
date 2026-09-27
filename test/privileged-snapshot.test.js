@@ -21,6 +21,8 @@ const NOW = '2026-01-01T00:00:00.000Z';
 const SNAPSHOT_IMPORTERS = [
   'src/shadowgraph.js', 'src/cli.js', 'src/server.js', 'src/mcp.js', 'src/markdown-workspace.js', 'src/restore-validation.js',
   'src/schema-conversion.js',
+  'src/internal/access-transport.js',
+  'tools/scope-conformance.mjs',
   'scripts/bench-journal.mjs', 'scripts/context-size.mjs'
 ];
 
@@ -106,8 +108,10 @@ test('only allowlisted repository modules import the privileged snapshot', async
   const importers = [];
   for (const directory of ['src', 'scripts', 'tools', 'dashboard', 'integrations', 'benchmark']) {
     for (const path of await sourceFiles(directory)) {
-      if (path.split(sep).join('/') === 'src/internal/snapshot.js') continue;
-      if (/internal\/snapshot\.js/.test(await readFile(join(root, path), 'utf8'))) importers.push(relative(root, join(root, path)).split(sep).join('/'));
+      const normalized = path.split(sep).join('/');
+      if (normalized === 'src/internal/snapshot.js') continue;
+      const source = await readFile(join(root, path), 'utf8');
+      if (/internal\/snapshot\.js/.test(source) || (normalized.startsWith('src/internal/') && /from\s+['"]\.\/snapshot\.js['"]/.test(source))) importers.push(relative(root, join(root, path)).split(sep).join('/'));
     }
   }
   assert.deepEqual(importers.sort(), [...SNAPSHOT_IMPORTERS].sort());

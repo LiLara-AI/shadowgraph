@@ -253,7 +253,7 @@ test('U-1: MCP exposes verification only when a separate verifier is preconfigur
   const unconfigured = startMcp(join(directory, 'plain.json'));
   t.after(() => unconfigured.child.kill());
   const plainList = await unconfigured.call({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
-  assert.equal(plainList.result.tools.length, 28);
+  assert.equal(plainList.result.tools.length, 33);
   assert.equal(plainList.result.tools.some((tool) => tool.name === 'shadowgraph_verify_fact'), false);
 
   const keys = generateKeyPairSync('ed25519');
@@ -269,7 +269,7 @@ test('U-1: MCP exposes verification only when a separate verifier is preconfigur
   const configured = startMcp(join(directory, 'configured.json'), { SHADOWGRAPH_VERIFIER_CONFIG: configPath });
   t.after(() => configured.child.kill());
   const configuredList = await configured.call({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
-  assert.equal(configuredList.result.tools.length, 29);
+  assert.equal(configuredList.result.tools.length, 34);
   assert.equal(configuredList.result.tools.some((tool) => tool.name === 'shadowgraph_verify_fact'), true);
 
   const configuredCompact = startMcp(join(directory, 'configured-compact.json'), {

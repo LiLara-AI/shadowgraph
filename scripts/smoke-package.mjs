@@ -184,7 +184,7 @@ try {
   const [fullList] = await rpc(installedCli, { SHADOWGRAPH_FILE: fullFile, SHADOWGRAPH_MCP_COMPACT: '0' }, [
     { jsonrpc: '2.0', id: 1, method: 'tools/list' }
   ]);
-  assert.equal(fullList.result.tools.length, 28);
+  assert.equal(fullList.result.tools.length, 33);
   const compactFile = join(appDirectory, 'mcp compact', 'data.json');
   const [compactList] = await rpc(installedCli, { SHADOWGRAPH_FILE: compactFile, SHADOWGRAPH_MCP_COMPACT: '1' }, [
     { jsonrpc: '2.0', id: 2, method: 'tools/list' }

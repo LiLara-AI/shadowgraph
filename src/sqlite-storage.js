@@ -6,7 +6,8 @@ import { copyFile, mkdir, rename, stat, unlink } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { nextRevision, assertRevision, createDestinationFence, currentRevision, nextRevisionAfter } from './revision-store.js';
-import { createRestoreValidator, guardAuthorityRestore, requiresLegacyPurgeMigration } from './restore-validation.js';
+import { guardAuthorityRestore, validateRestorePayload, validateRestoreSnapshot } from './restore-validation.js';
+import { mergeAuthorityRestore } from './authority-restore.js';
 import { NODE_SQLITE_NOT_APPLICABLE_REASON } from './runtime-capabilities.js';
 import { SCHEMA_VERSION } from './shadowgraph.js';
 import { extraCollections, isExtraCollectionKey, refusePublicExport } from './internal/collections.js';
@@ -39,7 +40,7 @@ export async function createSqliteStore(filePath, options = {}) {
   };
   const fault = (stage) => options.restoreFault?.(stage);
   const saveFault = (stage, context) => options.saveFault?.(stage, context);
-  const configuredRestoreValidator = options.restoreValidator ?? createRestoreValidator();
+  const configuredRestoreValidator = options.restoreValidator;
   const fence = createDestinationFence(filePath, options);
 
   function prepareSchema(database) {
@@ -389,21 +390,15 @@ export async function createSqliteStore(filePath, options = {}) {
         catch { /* recovery/cleanup continues */ }
       };
 
-      // An authority-bearing snapshot is refused at this build, or restored as
-      // memory only with the authority collections stripped (R16 rev 2 §7.2). A
-      // stripped payload differs from the staged file, so the staged copy is
-      // rewritten without them before it can be installed.
+      const restoreNow = restoreOptions.now ?? new Date().toISOString();
+      // Source, stage, and replacement always receive the mandatory checks.
+      // Additional validators receive isolated copies and may only reject.
       const validateSnapshot = async (snapshotPayload) => {
         // Before any validator, so a caller-supplied one cannot let a view in
         // (finding F-36).
         refusePublicExport(snapshotPayload);
-        const payload = guardAuthorityRestore(snapshotPayload, { memoryOnly: restoreOptions.memoryOnly === true });
-        let normalized = await configuredRestoreValidator(payload);
-        if (restoreOptions.validate && restoreOptions.validate !== configuredRestoreValidator) {
-          const customNormalized = await restoreOptions.validate(payload);
-          if (customNormalized && typeof customNormalized === 'object' && Array.isArray(customNormalized.records)) normalized = customNormalized;
-        }
-        return requiresLegacyPurgeMigration(payload) ? normalized : payload;
+        const payload = restoreOptions.memoryOnly === true ? guardAuthorityRestore(snapshotPayload, { memoryOnly: true }) : snapshotPayload;
+        return validateRestoreSnapshot(payload, { validators: [configuredRestoreValidator, restoreOptions.validate] });
       };
 
       const confirmOldAtDestination = async () => {
@@ -465,7 +460,9 @@ export async function createSqliteStore(filePath, options = {}) {
         try {
           stagedHandle = openDatabase(stagedPath);
           const stagedPayload = exportFrom(stagedHandle);
-          const normalizedStagedPayload = await validateSnapshot(stagedPayload);
+          const validatedStagedPayload = await validateSnapshot(stagedPayload);
+          const normalizedStagedPayload = restoreOptions.memoryOnly === true ? validatedStagedPayload : mergeAuthorityRestore(validatedStagedPayload, destinationPayload, { now: restoreNow });
+          validateRestorePayload(normalizedStagedPayload);
           const stagedWasNormalized = normalizedStagedPayload !== stagedPayload;
           // A source snapshot may have arrived in WAL mode. At this isolated staged
           // file (never the caller's source or the live destination), checkpoint it
@@ -497,7 +494,7 @@ export async function createSqliteStore(filePath, options = {}) {
           // hook a second time at the staged path. The custom validator already
           // inspected the source/staged snapshot and runs again on the installed
           // replacement, where a failure is covered by verified rollback.
-          await configuredRestoreValidator(exportFrom(stagedHandle));
+          validateRestorePayload(exportFrom(stagedHandle));
         } finally {
           closeChecked(stagedHandle, 'staged');
           stagedHandle = undefined;

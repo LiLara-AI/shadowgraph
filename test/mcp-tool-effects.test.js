@@ -17,7 +17,11 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { relative, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createFactAttestation } from '../src/verification.js';
+import { createShadowGraph } from '../src/shadowgraph.js';
+import { createJsonFileStore } from '../src/storage.js';
+import { privilegedIssueAccess, privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const STRUCTURED_PROTOCOL = '2025-11-25';
 const PROJECT = 'effects';
@@ -36,8 +40,8 @@ async function startMcp(t, extraEnv = {}) {
   const file = join(storeDirectory, 'data.json');
   const clockFile = join(directory, 'clock.txt');
   await writeFile(clockFile, T0, 'utf8');
-  const child = spawn(process.execPath, ['src/mcp.js'], {
-    cwd: process.cwd(),
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../src/mcp.js', import.meta.url))], {
+    cwd: directory,
     env: {
       ...process.env,
       SHADOWGRAPH_FILE: file,
@@ -289,7 +293,7 @@ test('every advertised tool annotation matches the effects the server actually h
   assert.equal(observed.get('shadowgraph_remember').repeatResult.operation, 'NOOP', 'identical content must reconcile to a NOOP');
 
   // --- pure reads ---------------------------------------------------------
-  for (const [name, args] of [
+  const ownReadCases = [
     ['shadowgraph_search', { project: PROJECT, query: 'store' }],
     ['shadowgraph_retrieve', { project: PROJECT, query: 'store' }],
     ['shadowgraph_recall', { project: PROJECT, query: 'store' }],
@@ -301,7 +305,8 @@ test('every advertised tool annotation matches the effects the server actually h
     ['shadowgraph_purge_preview', { project: PROJECT }],
     ['shadowgraph_repair_plan', {}],
     ['shadowgraph_redact', { project: PROJECT }]
-  ]) {
+  ];
+  for (const [name, args] of ownReadCases) {
     const read = await observe(name, args);
     assert.equal(read.first.revisionDelta, 0, `${name} must not commit a revision`);
     assert.equal(read.first.storeChanged, false, `${name} must leave the store byte-identical`);
@@ -379,6 +384,28 @@ test('every advertised tool annotation matches the effects the server actually h
   assert.deepEqual(restored.first.newFilesOutsideStore, [], 'a restore writes no file outside the store');
   restored.external = { read: true, overwrite: false };
 
+  // PR12 preserves those own-read assertions and also measures each read's
+  // conditional durable audit. Fixture issuance uses the private owner hook;
+  // no agent-reachable MCP issuer is introduced for this test.
+  const owner = createShadowGraph({ now: () => at(180) });
+  owner.importData(await readStore(rpc.file));
+  const issued = privilegedIssueAccess(owner, { type: 'grant', scope: { projects: ['other'] }, surfaces: ['mcp'], expiresAt: '2099-01-01T00:00:00.000Z', reason: 'synthetic effects fixture' });
+  await createJsonFileStore(rpc.file).save(privilegedSnapshot(owner));
+  for (const [name, args] of ownReadCases.filter(([name]) => name !== 'shadowgraph_purge_preview')) {
+    const audited = await observe(name, { ...args, accessId: issued.entry.accessId });
+    assert.equal(audited.first.revisionDelta, 1, `${name} commits its grant audit`);
+    assert.equal(audited.repeat.revisionDelta, 1, `${name} commits repeated grant use`);
+    assert.equal(audited.first.journalDelta, 0, `${name} does not journal audit`);
+  }
+  const requested = await observe('shadowgraph_request_wider_access', { scope: { projects: ['other'] }, surfaces: ['mcp'], expiresAt: '2099-01-01T00:00:00.000Z', reason: 'synthetic effects proposal' });
+  await observe('shadowgraph_revoke_grant', { accessId: requested.firstResult.accessId });
+  await observe('shadowgraph_discard_access', { accessId: requested.repeatResult.accessId });
+  await observe('shadowgraph_attribute', { ids: ['effects-replacement'], targetProject: 'reassigned', reason: 'explicit synthetic attribution' });
+  const bound = await observe('shadowgraph_bind', { type: 'worktree', project: PROJECT, reason: 'explicit synthetic mapping' });
+  assert.equal(JSON.parse(await readFile(bound.firstResult.bindingFile, 'utf8')).project, PROJECT);
+  assert.equal(JSON.parse(await readFile(bound.repeatResult.backupFile, 'utf8')).project, PROJECT);
+  bound.external = { read: false, overwrite: true };
+
   // --- removal ------------------------------------------------------------
   const purged = await observe('shadowgraph_purge', { project: PROJECT, mode: 'logical' });
   assert.ok(purged.first.removed.length > 0, 'a purge removes stored entities');
@@ -386,7 +413,7 @@ test('every advertised tool annotation matches the effects the server actually h
 
   // --- the assertion this file exists for ---------------------------------
   const tools = await rpc.listTools();
-  assert.equal(tools.length, 28);
+  assert.equal(tools.length, 33);
   const missing = tools.map((tool) => tool.name).filter((name) => !observed.has(name));
   assert.deepEqual(missing.sort(), AWAITING_TRANSPORT_SCOPE, `these advertised tools were never observed: ${missing.join(', ')}`);
 
@@ -404,38 +431,41 @@ test('every advertised tool annotation matches the effects the server actually h
   // Cross-check from the wire alone: which tools commit a durable revision.
   const committing = [...observed].filter(([, record]) => record.first.revisionDelta > 0).map(([name]) => name).sort();
   assert.deepEqual(committing, [
+    'shadowgraph_attribute',
     'shadowgraph_backup',
+    'shadowgraph_bind',
     'shadowgraph_confidence_evidence',
     'shadowgraph_context',
+    'shadowgraph_discard_access',
+    'shadowgraph_journal',
     'shadowgraph_link',
     'shadowgraph_maintain',
     'shadowgraph_purge',
+    'shadowgraph_rebuild',
+    'shadowgraph_recall',
     'shadowgraph_reconsider',
     'shadowgraph_record_attempt',
     'shadowgraph_record_decision',
     'shadowgraph_record_fact',
-    'shadowgraph_remember',
-    'shadowgraph_restore',
-    'shadowgraph_review',
-    'shadowgraph_supersede'
-  ]);
-  const readOnly = [...observed].filter(([, record]) => record.first.revisionDelta === 0).map(([name]) => name).sort();
-  assert.deepEqual(readOnly, [
-    'shadowgraph_journal',
-    'shadowgraph_purge_preview',
-    'shadowgraph_rebuild',
-    'shadowgraph_recall',
     'shadowgraph_redact',
+    'shadowgraph_remember',
     'shadowgraph_repair_plan',
+    'shadowgraph_request_wider_access',
+    'shadowgraph_restore',
     'shadowgraph_retrieve',
+    'shadowgraph_review',
     'shadowgraph_review_signals',
+    'shadowgraph_revoke_grant',
     'shadowgraph_search',
+    'shadowgraph_supersede',
     'shadowgraph_traverse',
     'shadowgraph_validate'
-  ], 'exactly these eleven tools commit nothing');
+  ]);
+  const readOnly = [...observed].filter(([, record]) => record.first.revisionDelta === 0).map(([name]) => name).sort();
+  assert.deepEqual(readOnly, ['shadowgraph_purge_preview'], 'grant-capable reads now reflect their measured audit effects');
   // No tool may write outside the store unless it is one of the three that say so.
   const wroteOutside = [...observed].filter(([, record]) => record.first.newFilesOutsideStore.length > 0).map(([name]) => name).sort();
-  assert.deepEqual(wroteOutside, ['shadowgraph_backup'], 'only backup writes a file of its own outside the store');
+  assert.deepEqual(wroteOutside, ['shadowgraph_backup', 'shadowgraph_bind'], 'backup and explicit binding write their declared local files');
 });
 
 test('the verification tool reads a caller-selected path, inside the configured root only', async (t) => {
@@ -487,7 +517,7 @@ test('the verification tool reads a caller-selected path, inside the configured 
   verified.external = { read: true, overwrite: false };
 
   const tools = await rpc.listTools();
-  assert.equal(tools.length, 29);
+  assert.equal(tools.length, 34);
   const verifyTool = tools.find((tool) => tool.name === 'shadowgraph_verify_fact');
   assert.deepEqual(verifyTool.annotations, deriveAnnotations(verified), 'verify_fact annotations must equal the observed behaviour');
 });

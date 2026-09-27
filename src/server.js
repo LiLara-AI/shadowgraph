@@ -7,7 +7,8 @@ import { createShadowGraph } from './shadowgraph.js';
 import { backupFile, restoreFile } from './backup.js';
 import { VERSION, NAME } from './version.js';
 import { createRestoreValidator } from './restore-validation.js';
-import { privilegedSnapshot } from './internal/snapshot.js';
+import { privilegedAccessRefusal, privilegedSnapshot } from './internal/snapshot.js';
+import { accessContext, currentAccessOperation, discoverWorkspace, hasAccessReference } from './internal/access-transport.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 
@@ -24,6 +25,9 @@ const RESTORE_BLOCKED_MUTATIONS = new Set([
   '/context', '/review', '/reconsider', '/maintain', '/review-signals/ack', '/confidence-evidence', '/projects', '/restore'
 ]);
 const UNCONFIRMED_RECOVERY_CODES = new Set(['json_restore_recovery_unconfirmed', 'sqlite_restore_recovery_unconfirmed']);
+const ACCESS_LIFECYCLE_PATHS = new Set(['/access-requests', '/access-grants/revoke', '/access-grants/discard']);
+const UNAVAILABLE_ISSUANCE_PATHS = new Set(['/access-grants', '/access-grants/issue', '/access-delegations', '/import']);
+const ACCESS_READ_ROUTES = new Set(['GET /stats', 'GET /records', 'GET /search', 'POST /context', 'POST /recall', 'POST /traverse', 'POST /redact', 'GET /journal', 'POST /rebuild', 'POST /review', 'POST /reconsider', 'POST /maintain', 'GET /review-signals', 'POST /retrieve', 'GET /validate', 'POST /repair-plan']);
 
 function parseLoopbackAuthority(authority) {
   if (typeof authority !== 'string') return null;
@@ -75,6 +79,7 @@ export async function createShadowGraphServer(options = {}) {
   const store = options.store ?? await createStorage({ type: options.storage ?? process.env.SHADOWGRAPH_STORAGE, file: options.file ?? process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json', restoreValidator });
   const graph = createShadowGraph(options);
   graph.importData(await store.load());
+  const workspace = await discoverWorkspace(options.cwd);
   const dashboardRoot = new URL('../dashboard/', import.meta.url);
   const dashboardHtml = await readFile(new URL('index.html', dashboardRoot), 'utf8');
   const apiToken = options.apiToken ?? process.env.SHADOWGRAPH_API_TOKEN;
@@ -116,7 +121,7 @@ export async function createShadowGraphServer(options = {}) {
     });
   }
 
-  async function handle(path, method, body) {
+  async function handle(path, method, body, accessManaged = false) {
     if (persistenceUnavailable) {
       if (method === 'GET' && path === '/health') return {
         ok: false, name: NAME, version: VERSION, status: 'degraded',
@@ -135,39 +140,56 @@ export async function createShadowGraphServer(options = {}) {
     if (restoreInProgress && RESTORE_BLOCKED_MUTATIONS.has(path) && (method === 'POST' || method === 'DELETE')) {
       throw new Error('SQLite restore is in progress; write rejected before mutation');
     }
+    const unavailableIssuance = method === 'POST' && UNAVAILABLE_ISSUANCE_PATHS.has(path);
+    const accessOperation = (method === 'POST' && ACCESS_LIFECYCLE_PATHS.has(path)) || unavailableIssuance
+      || (ACCESS_READ_ROUTES.has(`${method} ${path}`) && hasAccessReference(body));
+    if (accessOperation && restoreInProgress) throw new Error('SQLite restore is in progress; access audit write rejected before mutation');
+    if (accessOperation && !accessManaged) return queuePersistence(() => currentAccessOperation(graph, store, () => handle(path, method, body, true)));
+    if (body && typeof body === 'object' && !Array.isArray(body)) {
+      const { binding: ignoredBinding, surface: ignoredSurface, ...input } = body;
+      body = accessContext(graph, input, 'http', workspace);
+    }
+    const commit = accessManaged ? async (operation) => operation() : mutateAndPersist;
+    if (unavailableIssuance) {
+      privilegedAccessRefusal(graph, { surface: 'http', reason: 'issuance_surface_unavailable' });
+      return { error: 'not found' };
+    }
+    if (method === 'POST' && path === '/access-requests') return graph.requestAccess(body ?? {});
+    if (method === 'POST' && path === '/access-grants/revoke') return graph.revokeAccess(body ?? {});
+    if (method === 'POST' && path === '/access-grants/discard') return graph.discardAccess(body ?? {});
     // P1-3: version comes from package.json via src/version.js — one source only.
     if (method === 'GET' && path === '/health') return { ok: true, name: NAME, version: VERSION };
     if (method === 'GET' && path === '/dashboard') return { dashboard: dashboardRoot.href };
-    if (method === 'GET' && path === '/stats') return graph.stats();
+    if (method === 'GET' && path === '/stats') return graph.stats(accessManaged ? body : undefined);
     if (method === 'GET' && path === '/records') return graph.exportData(body ?? {});
     if (method === 'GET' && path === '/search') return graph.search(body?.q ?? body?.query ?? '', body ?? {});
-    if (method === 'POST' && path === '/context') return mutateAndPersist(() => graph.context(body ?? {}));
-    if (method === 'POST' && path === '/memories') return mutateAndPersist(() => Array.isArray(body?.operations) ? graph.applyMemoryPlan(body) : graph.remember(body));
+    if (method === 'POST' && path === '/context') return commit(() => graph.context(body ?? {}));
+    if (method === 'POST' && path === '/memories') return commit(() => Array.isArray(body?.operations) ? graph.applyMemoryPlan(body) : graph.remember(body));
     if (method === 'POST' && path === '/recall') return graph.recall(body?.query ?? '', body ?? {});
-    if (method === 'POST' && path === '/facts') return mutateAndPersist(() => graph.addFact(body));
-    if (method === 'POST' && path === '/outcomes') return mutateAndPersist(() => graph.setOutcome(body.decisionId, body.outcome));
-    if (method === 'POST' && path === '/status') return mutateAndPersist(() => graph.updateDecisionStatus(body.decisionId, body.status));
-    if (method === 'POST' && path === '/relationships') return mutateAndPersist(() => graph.link(body));
+    if (method === 'POST' && path === '/facts') return commit(() => graph.addFact(body));
+    if (method === 'POST' && path === '/outcomes') return commit(() => graph.setOutcome(body.decisionId, body.outcome));
+    if (method === 'POST' && path === '/status') return commit(() => graph.updateDecisionStatus(body.decisionId, body.status));
+    if (method === 'POST' && path === '/relationships') return commit(() => graph.link(body));
     if (method === 'POST' && path === '/traverse') return graph.traverse(body ?? {});
     if (method === 'POST' && path === '/redact') return graph.redact(body ?? {});
-    if (method === 'POST' && path === '/supersede') return mutateAndPersist(() => graph.supersedeDecision(body));
+    if (method === 'POST' && path === '/supersede') return commit(() => graph.supersedeDecision(body));
     if (method === 'POST' && path === '/projects/purge-preview') return graph.projectSummary(body?.project);
     // G5: logical/tombstone purge is the default. `mode: 'hard'` must be asked for
     // explicitly and physically removes journal entries.
-    if (method === 'DELETE' && path === '/projects') return mutateAndPersist(() => graph.purgeProject(body?.project, { mode: body?.mode }));
-    if (method === 'POST' && path === '/confidence-evidence') return mutateAndPersist(() => graph.addConfidenceEvidence(body ?? {}));
+    if (method === 'DELETE' && path === '/projects') return commit(() => graph.purgeProject(body?.project, { mode: body?.mode }));
+    if (method === 'POST' && path === '/confidence-evidence') return commit(() => graph.addConfidenceEvidence(body ?? {}));
     if (method === 'GET' && path === '/journal') return graph.getJournal(body ?? {});
     if (method === 'POST' && path === '/rebuild') return graph.rebuild(body ?? {});
-    if (method === 'POST' && path === '/decisions') return mutateAndPersist(() => graph.addDecision(body));
-    if (method === 'POST' && path === '/attempts') return mutateAndPersist(() => graph.addAttempt(body));
-    if (method === 'POST' && path === '/review') return mutateAndPersist(() => graph.review(body ?? {}));
-    if (method === 'POST' && path === '/reconsider') return mutateAndPersist(() => graph.reconsider(body ?? {}));
-    if (method === 'POST' && path === '/maintain') return mutateAndPersist(() => graph.maintain(body ?? {}));
+    if (method === 'POST' && path === '/decisions') return commit(() => graph.addDecision(body));
+    if (method === 'POST' && path === '/attempts') return commit(() => graph.addAttempt(body));
+    if (method === 'POST' && path === '/review') return commit(() => graph.review(body ?? {}));
+    if (method === 'POST' && path === '/reconsider') return commit(() => graph.reconsider(body ?? {}));
+    if (method === 'POST' && path === '/maintain') return commit(() => graph.maintain(body ?? {}));
     if (method === 'GET' && path === '/review-signals') return graph.getReviewSignals(body ?? {});
-    if (method === 'POST' && path === '/review-signals/ack') return mutateAndPersist(() => graph.acknowledgeReview(body?.id));
+    if (method === 'POST' && path === '/review-signals/ack') return commit(() => graph.acknowledgeReview(body?.id));
     if (method === 'POST' && path === '/retrieve') return graph.retrieve(body?.query ?? '', body ?? {});
-    if (method === 'GET' && path === '/validate') return graph.validate();
-    if (method === 'POST' && path === '/repair-plan') return graph.repairPlan();
+    if (method === 'GET' && path === '/validate') return graph.validate(accessManaged ? body : undefined);
+    if (method === 'POST' && path === '/repair-plan') return graph.repairPlan(accessManaged ? body : undefined);
     if (method === 'POST' && path === '/backup') return backupFile(options.file ?? process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json', body?.destination, { store });
     if (method === 'POST' && path === '/restore') {
       restoreInProgress = true;

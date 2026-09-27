@@ -7,6 +7,7 @@
 // code paths — see ADR-0001 D4/D14).
 
 import { effectiveFactExpirationBoundary, factValidityPolicyIssue, isValidIsoInstant } from './fact-validity.js';
+import { isLegacyOwned } from './scope.js';
 
 export const JOURNAL_SCHEMA_VERSION = 6;
 // The highest entry schema this reader interprets. The reader is widened and
@@ -130,6 +131,36 @@ export function replayedEntity(entry) {
   if (entry?.type !== 'entity.attributed' || !entry.payload || typeof entry.payload !== 'object') return entry?.payload;
   const { attributionChange, ...entity } = entry.payload;
   return entity;
+}
+
+// v6 distinguishes the real project "default" from legacy storage labels.
+// Older purge markers retain their original bucket semantics.
+function purgedOwner(entity, project, marker, fallbackProject = null) {
+  if ((marker.schemaVersion ?? 0) < 6) return (entity?.project ?? fallbackProject) === project;
+  return !isLegacyOwned(entity) && entity?.attribution !== 'unattributed' && entity?.project === project;
+}
+
+// Attribution moves retry identities with their canonical entity. Journal folds
+// and the live writer use the same transition; no historical payload is edited.
+export function reattributeIdempotency(entries, entity) {
+  const prefix = (value) => {
+    const scope = value.scope ?? {};
+    const identity = value.kind === 'memory' ? `${JSON.stringify([scope.userId ?? null, scope.agentId ?? null, scope.runId ?? null, value.memoryType ?? null, value.key ?? null])}:` : '';
+    const owner = value.attribution === 'unattributed' ? `@${JSON.stringify(value.originId ?? null)}:` : `:${value.project ?? 'default'}:`;
+    return `${value.kind}${owner}${identity}`;
+  };
+  const result = new Map(entries);
+  for (const [key, value] of entries) {
+    if (value?.id !== entity.id) continue;
+    const oldPrefix = prefix(value);
+    if (!key.startsWith(oldPrefix)) throw new Error('Attribution retry identity does not match its entity');
+    const nextKey = `${prefix(entity)}${key.slice(oldPrefix.length)}`;
+    const held = result.get(nextKey);
+    if (held && held.id !== entity.id) throw new Error('Attribution would collide with an existing retry identity');
+    result.delete(key);
+    result.set(nextKey, entity);
+  }
+  return result;
 }
 
 // Entry types recorded for audit that intentionally do not mutate a projection.
@@ -322,6 +353,7 @@ export function journalFactLifecycleIssues(entries = [], options = {}) {
         if (!fact?.id) continue;
         states.set(fact.id, {
           project: fact.project ?? null,
+          attribution: fact.attribution,
           phase: ['expired', 'superseded'].includes(fact.status) ? 'terminal' : 'active',
           terminalType: ['expired', 'superseded'].includes(fact.status) ? fact.status : null,
           verified: fact.verificationStatus === 'verified' && Boolean(fact.verification)
@@ -331,7 +363,7 @@ export function journalFactLifecycleIssues(entries = [], options = {}) {
     }
     if (entry.type === 'project.purged') {
       const project = entry.payload?.project ?? entry.project;
-      for (const [factId, state] of states) if (state.project === project) states.delete(factId);
+      for (const [factId, state] of states) if (purgedOwner(state, project, entry)) states.delete(factId);
       continue;
     }
     // Re-attribution moves a fact between owners. It may not revive, end or
@@ -348,7 +380,7 @@ export function journalFactLifecycleIssues(entries = [], options = {}) {
       const project = entry.project ?? fact.project ?? null;
       const state = states.get(factId);
       if (!state) {
-        states.set(factId, { project, phase: terminalType ? 'terminal' : 'active', terminalType, verified });
+        states.set(factId, { project, attribution: fact.attribution, phase: terminalType ? 'terminal' : 'active', terminalType, verified });
         continue;
       }
       if ((terminalType ? 'terminal' : 'active') !== state.phase || terminalType !== state.terminalType || verified !== state.verified) {
@@ -356,6 +388,7 @@ export function journalFactLifecycleIssues(entries = [], options = {}) {
         continue;
       }
       state.project = project;
+      state.attribution = fact.attribution;
       continue;
     }
     if (!['fact.observed', 'fact.verified', 'fact.expired', 'fact.superseded'].includes(entry.type)) continue;
@@ -371,6 +404,7 @@ export function journalFactLifecycleIssues(entries = [], options = {}) {
       }
       states.set(factId, {
         project: entry.project ?? entry.payload?.project ?? null,
+        attribution: entry.payload?.attribution,
         phase: ['expired', 'superseded'].includes(entry.payload?.status) ? 'terminal' : 'active',
         terminalType: ['expired', 'superseded'].includes(entry.payload?.status) ? entry.payload.status : null,
         verified: entry.payload?.verificationStatus === 'verified' && Boolean(entry.payload?.verification)
@@ -496,14 +530,17 @@ export function journalBaselinePlacementIssues(entries = [], options = {}) {
     if (entry.type === 'project.purged') {
       const project = entry.payload?.project ?? entry.project;
       const purgedIds = new Set(entry.payload?.purgedEntityIds ?? []);
-      for (const [entityId, value] of currentEntities) if (value.project === project || value.entity?.project === project) purgedIds.add(entityId);
-      for (const [entityId, value] of [...currentEntities]) {
-        if (value.collection !== 'relations' && (purgedIds.has(entityId) || value.project === project || value.entity?.project === project)) currentEntities.delete(entityId);
+      for (const [entityId, value] of currentEntities) if (value.collection !== 'relations' && purgedOwner(value.entity, project, entry, value.project)) {
+        purgedIds.add(entityId);
+        for (const alternative of value.entity?.alternatives ?? []) if (alternative?.id) purgedIds.add(alternative.id);
       }
       for (const [entityId, value] of [...currentEntities]) {
-        if (value.collection === 'relations' && (value.project === project || purgedIds.has(value.entity?.from) || purgedIds.has(value.entity?.to))) currentEntities.delete(entityId);
+        if (value.collection !== 'relations' && purgedIds.has(entityId)) currentEntities.delete(entityId);
       }
-      for (const [key, value] of [...currentIdempotency]) if (value?.project === project || purgedIds.has(value?.id)) currentIdempotency.delete(key);
+      for (const [entityId, value] of [...currentEntities]) {
+        if (value.collection === 'relations' && (((entry.schemaVersion ?? 0) < 6 && value.project === project) || purgedIds.has(value.entity?.from) || purgedIds.has(value.entity?.to))) currentEntities.delete(entityId);
+      }
+      for (const [key, value] of [...currentIdempotency]) if (purgedOwner(value, project, entry) || purgedIds.has(value?.id)) currentIdempotency.delete(key);
       priorReplayableEntries += 1;
       continue;
     }
@@ -557,6 +594,11 @@ export function journalBaselinePlacementIssues(entries = [], options = {}) {
     const collection = KIND_TO_COLLECTION[entry.entityKind];
     if (collection && entry.entityId && entry.payload && typeof entry.payload === 'object') {
       putEntity(replayedEntity(entry), collection, entry.project);
+      if (entry.type === 'entity.attributed') {
+        const next = reattributeIdempotency(currentIdempotency, replayedEntity(entry));
+        currentIdempotency.clear();
+        for (const [key, value] of next) currentIdempotency.set(key, value);
+      }
       if (entry.idempotencyKey) currentIdempotency.set(entry.idempotencyKey, replayedEntity(entry));
     }
     priorReplayableEntries += 1;
@@ -790,22 +832,22 @@ export function rebuildProjection(entries = [], options = {}) {
       // entities (including nested alternatives) and remove relations by endpoint.
       const purgedIds = new Set(entry.payload?.purgedEntityIds ?? []);
       for (const [key, value] of entities) {
-        if (value.entity?.project !== project && value.project !== project && !purgedIds.has(key)) continue;
+        if (value.collection === 'relations' || (!purgedOwner(value.entity, project, entry, value.project) && !purgedIds.has(key))) continue;
         purgedIds.add(key);
         for (const alternative of value.entity?.alternatives ?? []) if (alternative?.id) purgedIds.add(alternative.id);
       }
       for (const [key, value] of [...entities]) {
-        if (value.collection !== 'relations' && (value.entity?.project === project || value.project === project || purgedIds.has(key))) entities.delete(key);
+        if (value.collection !== 'relations' && purgedIds.has(key)) entities.delete(key);
       }
       for (const [key, value] of [...entities]) {
         if (value.collection !== 'relations') continue;
         const relation = value.entity;
-        if (value.project === project || purgedIds.has(relation?.from) || purgedIds.has(relation?.to)) entities.delete(key);
+        if (((entry.schemaVersion ?? 0) < 6 && value.project === project) || purgedIds.has(relation?.from) || purgedIds.has(relation?.to)) entities.delete(key);
       }
       // P0-1: idempotency payloads are CLONES of purged entities. If a replay
       // rebuilt them, a retry with an old key would hand back deleted content and
       // the purge would be undone by the rebuild.
-      for (const [key, value] of [...idempotency]) if (value?.project === project || purgedIds.has(value?.id)) idempotency.delete(key);
+      for (const [key, value] of [...idempotency]) if (purgedOwner(value, project, entry) || purgedIds.has(value?.id)) idempotency.delete(key);
       applied += 1;
       continue;
     }
@@ -848,6 +890,11 @@ export function rebuildProjection(entries = [], options = {}) {
     // entity rather than poisoning the chain.
     const entity = replayedEntity(entry);
     entities.set(entry.entityId, { collection, entity, project: entry.project ?? entity?.project ?? null });
+    if (entry.type === 'entity.attributed') {
+      const next = reattributeIdempotency(idempotency, entity);
+      idempotency.clear();
+      for (const [key, value] of next) idempotency.set(key, value);
+    }
     if (entry.idempotencyKey) idempotency.set(normalizeIdempotencyKey(entry.idempotencyKey, entity), entity);
     applied += 1;
   }

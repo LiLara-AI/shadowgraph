@@ -54,7 +54,12 @@ const FULL_TOOL_NAMES = [
   'shadowgraph_repair_plan',
   'shadowgraph_backup',
   'shadowgraph_restore',
-  'shadowgraph_reconsider'
+  'shadowgraph_reconsider',
+  'shadowgraph_request_wider_access',
+  'shadowgraph_revoke_grant',
+  'shadowgraph_discard_access',
+  'shadowgraph_bind',
+  'shadowgraph_attribute'
 ];
 const COMPACT_EXPECTED = [
   'shadowgraph_record_decision',
@@ -79,9 +84,12 @@ const COMPACT_EXPECTED = [
 // writes but is missing here would silently stop being saved.
 const PERSISTING_EXPECTED = [
   'shadowgraph_ack_review',
+  'shadowgraph_attribute',
   'shadowgraph_backup',
+  'shadowgraph_bind',
   'shadowgraph_confidence_evidence',
   'shadowgraph_context',
+  'shadowgraph_discard_access',
   'shadowgraph_link',
   'shadowgraph_maintain',
   'shadowgraph_purge',
@@ -91,7 +99,9 @@ const PERSISTING_EXPECTED = [
   'shadowgraph_record_fact',
   'shadowgraph_record_outcome',
   'shadowgraph_remember',
+  'shadowgraph_request_wider_access',
   'shadowgraph_review',
+  'shadowgraph_revoke_grant',
   'shadowgraph_supersede',
   'shadowgraph_update_status',
   'shadowgraph_verify_fact'
@@ -102,43 +112,52 @@ const PERSISTING_EXPECTED = [
 // asserted separately because it depends on whether an embedding endpoint was
 // configured.
 //
-// Only the eleven pure reads are idempotent: every other tool commits a new
-// durable revision on each successful call, even when the domain result is a
-// no-op, and that revision is the concurrency token other writers compare.
+// Grant-capable reads declare their conditional audit write even though their
+// ordinary own-scope calls remain pure. Restore commits through its backend.
 const ANNOTATIONS_EXPECTED = {
+  shadowgraph_bind: [false, true, false, true],
+  shadowgraph_attribute: [false, false, false, false],
   shadowgraph_record_decision: [false, false, false, false],
   shadowgraph_record_attempt: [false, false, false, false],
   shadowgraph_review: [false, false, false, false],
-  shadowgraph_search: [true, false, true, false],
+  shadowgraph_search: [false, false, false, false],
   shadowgraph_context: [false, false, false, false],
   shadowgraph_remember: [false, false, false, false],
-  shadowgraph_recall: [true, false, true, false],
+  shadowgraph_recall: [false, false, false, false],
   shadowgraph_record_fact: [false, false, false, false],
   shadowgraph_record_outcome: [false, false, false, false],
   shadowgraph_confidence_evidence: [false, false, false, false],
   shadowgraph_update_status: [false, false, false, false],
   shadowgraph_link: [false, false, false, false],
-  shadowgraph_traverse: [true, false, true, false],
+  shadowgraph_traverse: [false, false, false, false],
   shadowgraph_supersede: [false, false, false, false],
-  shadowgraph_redact: [true, false, true, false],
+  shadowgraph_redact: [false, false, false, false],
   shadowgraph_purge: [false, true, false, false],
   shadowgraph_maintain: [false, false, false, false],
-  shadowgraph_retrieve: [true, false, true, false],
-  shadowgraph_validate: [true, false, true, false],
-  shadowgraph_journal: [true, false, true, false],
-  shadowgraph_rebuild: [true, false, true, false],
-  shadowgraph_review_signals: [true, false, true, false],
+  shadowgraph_retrieve: [false, false, false, false],
+  shadowgraph_validate: [false, false, false, false],
+  shadowgraph_journal: [false, false, false, false],
+  shadowgraph_rebuild: [false, false, false, false],
+  shadowgraph_review_signals: [false, false, false, false],
   shadowgraph_purge_preview: [true, false, true, false],
   shadowgraph_ack_review: [false, true, false, false],
-  shadowgraph_repair_plan: [true, false, true, false],
+  shadowgraph_repair_plan: [false, false, false, false],
   shadowgraph_backup: [false, true, false, true],
   shadowgraph_restore: [false, true, false, true],
   shadowgraph_reconsider: [false, false, false, false],
+  shadowgraph_request_wider_access: [false, false, false, false],
+  shadowgraph_revoke_grant: [false, false, false, false],
+  shadowgraph_discard_access: [false, false, false, false],
   shadowgraph_verify_fact: [false, false, false, true]
 };
 // Overlapping tools must name the siblings a model would otherwise confuse them
 // with, so routing is decidable from the description alone.
 const ROUTING_EXPECTED = {
+  shadowgraph_bind: ['shadowgraph_attribute'],
+  shadowgraph_attribute: ['shadowgraph_bind'],
+  shadowgraph_request_wider_access: ['shadowgraph_revoke_grant'],
+  shadowgraph_revoke_grant: ['shadowgraph_request_wider_access'],
+  shadowgraph_discard_access: ['shadowgraph_request_wider_access'],
   shadowgraph_search: ['shadowgraph_retrieve', 'shadowgraph_recall', 'shadowgraph_context', 'shadowgraph_traverse'],
   shadowgraph_retrieve: ['shadowgraph_search', 'shadowgraph_recall', 'shadowgraph_traverse', 'shadowgraph_context'],
   shadowgraph_recall: ['shadowgraph_search', 'shadowgraph_retrieve', 'shadowgraph_remember'],
@@ -172,6 +191,11 @@ const ROUTING_EXPECTED = {
 // Constraints that existed before descriptions were written, pinned so a
 // documentation pass cannot quietly change what a host will accept.
 const INPUT_CONSTRAINTS_EXPECTED = {
+  shadowgraph_bind: { required: ['type', 'project', 'reason'], enums: { type: ['worktree', 'shared_repository'] } },
+  shadowgraph_attribute: { required: ['targetProject', 'reason'], enums: {} },
+  shadowgraph_request_wider_access: { required: ['scope', 'surfaces', 'expiresAt', 'reason'], enums: {} },
+  shadowgraph_revoke_grant: { required: ['accessId'], enums: {} },
+  shadowgraph_discard_access: { required: ['accessId'], enums: {} },
   shadowgraph_record_decision: { required: ['title', 'chosen'], enums: {} },
   shadowgraph_record_attempt: { required: ['solution', 'result'], enums: {} },
   shadowgraph_review: { required: null, enums: {} },
@@ -275,9 +299,9 @@ function walkNodes(node, visit, path = 'schema', depth = 0) {
 
 test('the catalog advertises exactly the documented full, compact, and verifier inventories', () => {
   assert.deepEqual(fullCatalog.map((entry) => entry.name), FULL_TOOL_NAMES);
-  assert.equal(fullCatalog.length, 28);
+  assert.equal(fullCatalog.length, 33);
   assert.deepEqual(verifierCatalog.map((entry) => entry.name), [...FULL_TOOL_NAMES, 'shadowgraph_verify_fact']);
-  assert.equal(verifierCatalog.length, 29);
+  assert.equal(verifierCatalog.length, 34);
 
   const compact = selectTools(fullCatalog, { compact: true });
   assert.deepEqual(compact.map((entry) => entry.name), COMPACT_EXPECTED);
@@ -288,12 +312,12 @@ test('the catalog advertises exactly the documented full, compact, and verifier 
   const compactWithVerifier = selectTools(verifierCatalog, { compact: true });
   assert.deepEqual(compactWithVerifier.map((entry) => entry.name), COMPACT_EXPECTED);
 
-  assert.equal(new Set(verifierCatalog.map((entry) => entry.name)).size, 29);
+  assert.equal(new Set(verifierCatalog.map((entry) => entry.name)).size, 34);
   for (const entry of verifierCatalog) assert.match(entry.name, /^shadowgraph_[a-z_]+$/u);
 });
 
 test('every tool carries the four behavioural annotations its handler actually justifies', () => {
-  assert.equal(Object.keys(ANNOTATIONS_EXPECTED).length, 29);
+  assert.equal(Object.keys(ANNOTATIONS_EXPECTED).length, 34);
   for (const entry of verifierCatalog) {
     const expected = ANNOTATIONS_EXPECTED[entry.name];
     assert.ok(expected, `${entry.name} has no expected annotation row`);
@@ -307,15 +331,17 @@ test('every tool carries the four behavioural annotations its handler actually j
   }
 });
 
-test('a read-only tool never persists, and every other writing tool does except restore', () => {
+test('persistence is declared for ordinary writes and conditional grant audit writes', () => {
   const persisting = verifierCatalog.filter((entry) => entry.persists).map((entry) => entry.name).sort();
   assert.deepEqual(persisting, PERSISTING_EXPECTED);
-  assert.equal(persisting.length, 17);
+  assert.equal(persisting.length, 22);
+  const grantReads = ['shadowgraph_context', 'shadowgraph_journal', 'shadowgraph_maintain', 'shadowgraph_rebuild', 'shadowgraph_recall', 'shadowgraph_reconsider', 'shadowgraph_redact', 'shadowgraph_repair_plan', 'shadowgraph_retrieve', 'shadowgraph_review', 'shadowgraph_review_signals', 'shadowgraph_search', 'shadowgraph_traverse', 'shadowgraph_validate'];
+  assert.deepEqual(verifierCatalog.filter((entry) => entry.persistsWithAccess).map((entry) => entry.name).sort(), grantReads);
   for (const entry of verifierCatalog) {
     // shadowgraph_restore writes, but its storage backend commits the
     // replacement itself, so src/mcp.js must not save again afterwards.
     const expected = !entry.annotations.readOnlyHint && entry.name !== 'shadowgraph_restore';
-    assert.equal(entry.persists, expected, `${entry.name} persists flag must agree with readOnlyHint`);
+    assert.equal(entry.persists || entry.persistsWithAccess === true, expected, `${entry.name} persistence flags must agree with readOnlyHint`);
     if (entry.annotations.readOnlyHint) {
       assert.equal(entry.annotations.destructiveHint, false, `${entry.name} cannot be both read-only and destructive`);
       assert.equal(entry.annotations.idempotentHint, true, `${entry.name} is read-only, so repeating it changes nothing`);
@@ -329,11 +355,11 @@ test('a read-only tool never persists, and every other writing tool does except 
 test('recall and remember declare an open world only when an embedding endpoint is configured', () => {
   const withEmbedding = buildToolCatalog({ verifier: true, embeddingConfigured: true });
   const openWorld = withEmbedding.filter((entry) => entry.annotations.openWorldHint).map((entry) => entry.name).sort();
-  assert.deepEqual(openWorld, ['shadowgraph_backup', 'shadowgraph_recall', 'shadowgraph_remember', 'shadowgraph_restore', 'shadowgraph_verify_fact']);
+  assert.deepEqual(openWorld, ['shadowgraph_backup', 'shadowgraph_bind', 'shadowgraph_recall', 'shadowgraph_remember', 'shadowgraph_restore', 'shadowgraph_verify_fact']);
 
   const withoutEmbedding = buildToolCatalog({ verifier: true, embeddingConfigured: false });
   const closedWorld = withoutEmbedding.filter((entry) => entry.annotations.openWorldHint).map((entry) => entry.name).sort();
-  assert.deepEqual(closedWorld, ['shadowgraph_backup', 'shadowgraph_restore', 'shadowgraph_verify_fact']);
+  assert.deepEqual(closedWorld, ['shadowgraph_backup', 'shadowgraph_bind', 'shadowgraph_restore', 'shadowgraph_verify_fact']);
 
   // Only the annotation moves: the advertised text stays the same either way, so
   // one description cannot contradict the other deployment.
@@ -469,13 +495,14 @@ test('the advertised description text stays within its aggregate budget', () => 
 // which did not, and which could not be evaluated, rather than a bare due list.
 // Budgets below keep roughly 2% headroom, as before.
 const WIRE_BUDGETS = {
-  // PR-11 adds schemas for both former arrays and explicit scope metadata.
-  // Measured structured bytes: 201955 / 132854 / 206270 / 132854.
-  // Only structured ceilings change; description and input budgets stay fixed.
-  'withoutVerifier.full': { bare: 44_500, annotated: 47_500, structured: 203_000 },
-  'withoutVerifier.compact': { bare: 31_500, annotated: 33_000, structured: 134_000 },
-  'withVerifier.full': { bare: 45_500, annotated: 48_500, structured: 207_500 },
-  'withVerifier.compact': { bare: 31_500, annotated: 33_000, structured: 134_000 }
+  // PR12 adds five planned tools, grant inputs, effective grant fields and
+  // bounded read provenance. Exact measurement and transition accounting:
+  // docs/contracts/access-transports.md. These engineering wire ceilings do
+  // not change campaign, benchmark or audit-operation performance thresholds.
+  'withoutVerifier.full': { bare: 51_000, annotated: 54_600, structured: 239_400 },
+  'withoutVerifier.compact': { bare: 33_000, annotated: 34_500, structured: 152_100 },
+  'withVerifier.full': { bare: 51_900, annotated: 55_600, structured: 243_800 },
+  'withVerifier.compact': { bare: 33_000, annotated: 34_500, structured: 152_100 }
 };
 
 test('the advertised tool list stays within its wire-size budget, at every tier', () => {
@@ -498,7 +525,7 @@ test('the advertised tool list stays within its wire-size budget, at every tier'
 
 test('overlapping tools route to their siblings by name, and every named sibling exists', () => {
   const known = new Set(verifierCatalog.map((entry) => entry.name));
-  assert.equal(Object.keys(ROUTING_EXPECTED).length, 29);
+  assert.equal(Object.keys(ROUTING_EXPECTED).length, 34);
   for (const entry of verifierCatalog) {
     const siblings = ROUTING_EXPECTED[entry.name];
     assert.ok(siblings, `${entry.name} has no expected routing row`);
@@ -531,7 +558,7 @@ test('every input property, at every nesting level, carries a meaningful descrip
 });
 
 test('input schemas keep the constraints they had before descriptions were written', () => {
-  assert.equal(Object.keys(INPUT_CONSTRAINTS_EXPECTED).length, 29);
+  assert.equal(Object.keys(INPUT_CONSTRAINTS_EXPECTED).length, 34);
   for (const entry of verifierCatalog) {
     const expected = INPUT_CONSTRAINTS_EXPECTED[entry.name];
     assert.ok(expected, `${entry.name} has no expected constraint row`);
@@ -558,7 +585,7 @@ test('output schemas are declared for every tool, including the two scope-covera
     // The description carries the return shape when no schema can.
     assert.match(byName.get(name).description, /items, completeness/u);
   }
-  assert.equal(verifierCatalog.filter((entry) => entry.outputSchema).length, 29);
+  assert.equal(verifierCatalog.filter((entry) => entry.outputSchema).length, 34);
 });
 
 test('every output schema is portable: object-rooted, single-typed, and free of references', () => {

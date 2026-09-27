@@ -1,7 +1,8 @@
 import { copyFile, mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { createDestinationFence, currentRevision, nextRevisionAfter } from './revision-store.js';
-import { guardAuthorityRestore, requiresLegacyPurgeMigration, validateRestorePayload } from './restore-validation.js';
+import { guardAuthorityRestore, validateRestorePayload, validateRestoreSnapshot } from './restore-validation.js';
+import { mergeAuthorityRestore } from './authority-restore.js';
 
 export async function backupFile(source, destination, options = {}) {
   await mkdir(dirname(destination), { recursive: true });
@@ -20,16 +21,8 @@ async function restoreJsonFileFenced(source, destination, options) {
   if (options.storage === 'sqlite' || destination.toLowerCase().endsWith('.db')) throw new Error('JSON restore cannot overwrite a SQLite database; use the SQLite backup snapshot directly or a database-aware restore');
   const backupPayload = JSON.parse(await readFile(source, 'utf8'));
   if (!backupPayload || typeof backupPayload !== 'object' || !Array.isArray(backupPayload.records)) throw new Error('Backup is not a JSON ShadowGraph export; SQLite files require a database-aware restore');
-  // Refused if it carries authority, unless memory only was asked for, in which
-  // case the authority collections are stripped before anything is validated
-  // or installed (R16 rev 2 §7.2).
-  const payload = guardAuthorityRestore(backupPayload, { memoryOnly: options.memoryOnly === true });
-  let normalizedPayload = validateRestorePayload(payload);
-  if (options.validate && options.validate !== validateRestorePayload) {
-    const customNormalized = await options.validate(payload);
-    if (customNormalized && typeof customNormalized === 'object' && Array.isArray(customNormalized.records)) normalizedPayload = customNormalized;
-  }
-  const sourceForInstallation = requiresLegacyPurgeMigration(payload) ? normalizedPayload : payload;
+  const payload = options.memoryOnly === true ? guardAuthorityRestore(backupPayload, { memoryOnly: true }) : backupPayload;
+  const sourceForInstallation = await validateRestoreSnapshot(payload, { validators: [options.validate] });
   currentRevision(payload, 'Restore source');
   const normalizePath = (path) => process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path);
   if (normalizePath(source) === normalizePath(destination)) {
@@ -59,7 +52,11 @@ async function restoreJsonFileFenced(source, destination, options) {
     destinationExisted = false;
   }
   const previousPayload = destinationExisted ? JSON.parse(Buffer.from(previousBytes).toString('utf8')) : {};
-  const installedPayload = { ...sourceForInstallation, revision: nextRevisionAfter(previousPayload, payload) };
+  const merged = options.memoryOnly === true ? sourceForInstallation : mergeAuthorityRestore(sourceForInstallation, previousPayload, { now: options.now ?? new Date().toISOString() });
+  const installedPayload = { ...merged, revision: nextRevisionAfter(previousPayload, payload) };
+  // Validate the exact candidate after authority/audit merging and legacy
+  // normalization. The source callback is observational and cannot alter it.
+  validateRestorePayload(installedPayload);
   const assertExactBytes = async (path, expected, label) => {
     const actual = await restoreFs.readFile(path);
     if (!Buffer.from(actual).equals(Buffer.from(expected))) throw new Error(`${label} does not match the original destination bytes`);

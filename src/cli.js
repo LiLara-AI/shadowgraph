@@ -12,8 +12,19 @@ import { downgradeStore, migrateStore } from './schema-conversion.js';
 import { getRuntimeCapabilities } from './runtime-capabilities.js';
 import { VERSION } from './version.js';
 import { privilegedSnapshot } from './internal/snapshot.js';
+import * as privileged from './internal/snapshot.js';
+import { accessContext, bindWorkspaceProject, currentAccessOperation, discoverWorkspace, hasAccessReference } from './internal/access-transport.js';
+import { confirmOwnerAction, ownerAnswer } from './internal/owner-confirmation.js';
 
-const [command, ...rest] = process.argv.slice(2);
+const [requestedCommand, ...arguments_] = process.argv.slice(2);
+let command = ({ grant: 'issue-access', delegate: 'delegate-access' })[requestedCommand] ?? requestedCommand;
+let rest = arguments_;
+if (requestedCommand === 'access' && ['discard', 'revoke', 'status'].includes(rest[0])) {
+  command = ({ discard: 'discard-access', revoke: 'revoke-access', status: 'access-status' })[rest[0]];
+  rest = rest[0] === 'status' ? rest.slice(1) : [JSON.stringify({ accessId: rest[1] })];
+} else if (['issue-access', 'delegate-access'].includes(command) && rest[0] === '--request' && rest.length === 2) {
+  rest = [JSON.stringify({ requestId: rest[1] })];
+}
 const input = rest.join(' ');
 const storageType = process.env.SHADOWGRAPH_STORAGE ?? 'json';
 const file = resolve(process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json');
@@ -65,6 +76,96 @@ async function runOneShot() {
   try {
     const graph = createShadowGraph();
     graph.importData(await store.load());
+    const workspace = await discoverWorkspace();
+    const prepared = (value = {}) => accessContext(graph, value, 'cli', workspace);
+    const refuseIssuance = async (reason, error, value = {}) => {
+      await currentAccessOperation(graph, store, () => privileged.privilegedAccessRefusal(graph, { requestId: value.requestId, surface: 'cli', reason }));
+      throw error;
+    };
+
+    if (['request-access', 'issue-access', 'delegate-access', 'revoke-access', 'discard-access', 'access-status', 'bind', 'attribute'].includes(command)) {
+      let value;
+      try { value = parse(input || '{}'); }
+      catch (error) {
+        if (['issue-access', 'delegate-access'].includes(command)) return await refuseIssuance('grant_bounds_invalid', error);
+        throw error;
+      }
+      if (['issue-access', 'delegate-access'].includes(command) && (!value || typeof value !== 'object' || Array.isArray(value))) {
+        return await refuseIssuance('grant_bounds_invalid', new Error('Issuance requires a JSON object'));
+      }
+      if (command === 'access-status') return privileged.privilegedAccessInspection(graph);
+      if (command === 'bind') {
+        if (typeof value.project !== 'string' || !value.project.trim()) throw new Error('bind requires a non-empty project');
+        process.stdout.write(`Worktree mapping: ${workspace.worktreeRoot}\nShared repository mapping: ${workspace.commonDir ?? '(not a Git repository)'}\n`);
+        const choice = await ownerAnswer('Select worktree or shared_repository: ');
+        if (!['worktree', 'shared_repository'].includes(choice) || (choice === 'shared_repository' && !workspace.commonDir)) throw new Error('binding_requires_owner_confirmation');
+        const binding = { type: choice, path: choice === 'worktree' ? workspace.worktreeRoot : workspace.commonDir, project: value.project, reason: value.reason, surface: 'cli' };
+        if (!await confirmOwnerAction('Confirm project binding', binding)) throw new Error('binding_requires_owner_confirmation');
+        return await bindWorkspaceProject(graph, store, workspace, binding);
+      }
+      if (command === 'attribute') {
+        const attribution = { ...value, surface: 'cli' };
+        if (!await confirmOwnerAction('Confirm explicit attribution', attribution)) throw new Error('attribution_requires_owner_confirmation');
+        return await currentAccessOperation(graph, store, () => graph.attribute(attribution));
+      }
+      if (command === 'request-access') return await currentAccessOperation(graph, store, () => graph.requestAccess(prepared(value)));
+      if (command === 'revoke-access') return await currentAccessOperation(graph, store, () => graph.revokeAccess(prepared(value)));
+      if (command === 'discard-access') return await currentAccessOperation(graph, store, () => graph.discardAccess(prepared(value)));
+      const type = command === 'delegate-access' ? 'delegation' : 'grant';
+      // A delegation may issue a grant only. The kernel rechecks all limits and
+      // consumes its issuance budget in the same saved payload as the witness.
+      if (type === 'grant' && value.delegationId) {
+        const result = await currentAccessOperation(graph, store, () => graph.issueAccess(prepared({ ...value, type })));
+        if (!result.ok) process.exitCode = 1;
+        return result;
+      }
+      if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) {
+        const result = await currentAccessOperation(graph, store, () => graph.issueAccess(prepared({ ...value, type, delegationId: undefined })));
+        process.exitCode = 1;
+        return result;
+      }
+      const { normalizeAccessScope, normalizeSurfaces } = await import('./access.js');
+      const request = value.requestId ? privileged.privilegedAccessInspection(graph).access?.entries?.find((entry) => entry.accessId === value.requestId && entry.type === 'request') : null;
+      if (value.requestId && !request) return await refuseIssuance('access_request_not_available', new Error('Access request not found'), value);
+      let scope, surfaces;
+      try { scope = normalizeAccessScope(value.scope ?? request?.scope); surfaces = normalizeSurfaces(value.surfaces ?? request?.surfaces); }
+      catch (error) { return await refuseIssuance('grant_bounds_invalid', error, value); }
+      const resolved = {
+        type, scope, surfaces,
+        expiresAt: value.expiresAt ?? request?.expiresAt, reason: value.reason ?? request?.reason,
+        ...(value.requestId ? { requestId: value.requestId } : {}),
+        ...(value.idempotencyKey ? { idempotencyKey: value.idempotencyKey } : {}),
+        ...(type === 'delegation' ? { issuanceLimit: value.issuanceLimit } : {})
+      };
+      if (!Number.isFinite(Date.parse(resolved.expiresAt)) || Date.parse(resolved.expiresAt) <= Date.now()) return await refuseIssuance('grant_bounds_invalid', new Error('A future expiresAt is required'), value);
+      if (type === 'delegation' && (!Number.isSafeInteger(resolved.issuanceLimit) || resolved.issuanceLimit < 1)) return await refuseIssuance('delegation_budget_invalid', new Error('issuanceLimit must be a positive safe integer'), value);
+      if (!await confirmOwnerAction(`Issue ${type}`, resolved)) {
+        const result = await currentAccessOperation(graph, store, () => graph.issueAccess(prepared(resolved)));
+        process.exitCode = 1;
+        return result;
+      }
+      const result = await currentAccessOperation(graph, store, () => privileged.privilegedIssueAccess(graph, prepared(resolved)));
+      if (!result.ok) process.exitCode = 1;
+      return result;
+    }
+
+    const readCommands = {
+      stats: (value) => graph.stats(value), list: (value) => graph.exportData(value), search: (value) => graph.search(value.query ?? '', value),
+      retrieve: (value) => graph.retrieve(value.query ?? '', value), recall: (value) => graph.recall(value.query ?? '', value),
+      context: (value) => graph.context(value), review: (value) => graph.review(value), reconsider: (value) => graph.reconsider(value),
+      maintain: (value) => graph.maintain(value), traverse: (value) => graph.traverse(value), redact: (value) => graph.redact(value),
+      journal: (value) => graph.getJournal(value), rebuild: (value) => graph.rebuild(value), signals: (value) => graph.getReviewSignals(value),
+      validate: (value) => graph.validate(value), 'repair-plan': (value) => graph.repairPlan(value)
+    };
+    if (readCommands[command]) {
+      const value = parse(input || '{}');
+      if (hasAccessReference(value)) return await currentAccessOperation(graph, store, () => readCommands[command](prepared(value)));
+      // Existing owner-scope evaluation writes remain unchanged. Ordinary reads
+      // do not gain a save merely because grant-bearing calls are audited.
+      const result = readCommands[command](prepared(['stats', 'validate', 'repair-plan'].includes(command) ? {} : value));
+      if (['context', 'review', 'reconsider', 'maintain'].includes(command)) await store.save(privilegedSnapshot(graph));
+      return result;
+    }
 
     if (command === 'setup') {
       if (!initializedBeforeOpen) {
@@ -104,7 +205,7 @@ async function runOneShot() {
     else if (command === 'list') result = graph.exportData(parse(input || '{}'));
     else if (command === 'search') { const query = parse(input || '{}'); result = graph.search(query.query ?? '', query); }
     else if (command === 'context') { result = graph.context(parse(input || '{}')); await store.save(privilegedSnapshot(graph)); }
-    else if (command === 'remember') { const value = parse(input); result = Array.isArray(value.operations) ? graph.applyMemoryPlan(value) : graph.remember(value); await store.save(privilegedSnapshot(graph)); }
+    else if (command === 'remember') { const value = prepared(parse(input)); result = Array.isArray(value.operations) ? graph.applyMemoryPlan(value) : graph.remember(value); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'recall') { const value = parse(input || '{}'); result = graph.recall(value.query ?? '', value); }
     else if (command === 'markdown-sync') {
       const value = parse(input);
@@ -114,16 +215,16 @@ async function runOneShot() {
     }
     else if (command === 'review') { result = graph.review(parse(input || '{}')); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'reconsider') { result = graph.reconsider(parse(input || '{}')); await store.save(privilegedSnapshot(graph)); }
-    else if (command === 'fact') { result = graph.addFact(parse(input)); await store.save(privilegedSnapshot(graph)); }
+    else if (command === 'fact') { result = graph.addFact(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'outcome') { const value = parse(input); result = graph.setOutcome(value.decisionId, value.outcome); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'status') { const value = parse(input); result = graph.updateDecisionStatus(value.decisionId, value.status); await store.save(privilegedSnapshot(graph)); }
-    else if (command === 'link') { result = graph.link(parse(input)); await store.save(privilegedSnapshot(graph)); }
+    else if (command === 'link') { result = graph.link(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'traverse') result = graph.traverse(parse(input));
     else if (command === 'redact') result = graph.redact(parse(input));
-    else if (command === 'supersede') { result = graph.supersedeDecision(parse(input)); await store.save(privilegedSnapshot(graph)); }
+    else if (command === 'supersede') { result = graph.supersedeDecision(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'purge-preview') result = graph.projectSummary(parse(input).project);
     else if (command === 'purge') { const value = parse(input); result = graph.purgeProject(value.project, { mode: value.mode }); await store.save(privilegedSnapshot(graph)); }
-    else if (command === 'confidence-evidence') { result = graph.addConfidenceEvidence(parse(input)); await store.save(privilegedSnapshot(graph)); }
+    else if (command === 'confidence-evidence') { result = graph.addConfidenceEvidence(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'journal') result = graph.getJournal(parse(input || '{}'));
     else if (command === 'rebuild') result = graph.rebuild(parse(input || '{}'));
     else if (command === 'maintain') { result = graph.maintain(parse(input || '{}')); await store.save(privilegedSnapshot(graph)); }
@@ -151,10 +252,10 @@ async function runOneShot() {
         ? await migrateStore({ graph, store, file, storageType, batchSize: value.batchSize, preservationCopy })
         : await downgradeStore({ graph, store, file, storageType, output: value.output, preservationCopy });
     }
-    else if (command === 'decision') { result = graph.addDecision(parse(input)); await store.save(privilegedSnapshot(graph)); }
-    else if (command === 'attempt') { result = graph.addAttempt(parse(input)); await store.save(privilegedSnapshot(graph)); }
+    else if (command === 'decision') { result = graph.addDecision(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
+    else if (command === 'attempt') { result = graph.addAttempt(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
     else {
-      throw new Error('Usage: shadowgraph <setup|doctor|serve|mcp|stats|list|search|retrieve|recall|remember|markdown-sync|context|review|reconsider|maintain|signals|ack|validate|repair-plan|backup|restore|migrate|downgrade|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge> [JSON/path] (restore <path> [--memory-only])');
+      throw new Error('Usage: shadowgraph <setup|doctor|serve|mcp|stats|list|search|retrieve|recall|remember|markdown-sync|context|review|reconsider|maintain|signals|ack|validate|repair-plan|backup|restore|migrate|downgrade|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge|request-access|issue-access|delegate-access|revoke-access|discard-access|access-status|bind|attribute> [JSON/path] (restore <path> [--memory-only])');
     }
     return result;
   } finally {

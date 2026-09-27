@@ -8,7 +8,7 @@
 //   search-contract.md      — content fields vs filters
 //   confidence-contract.md  — evidence-weighted bounded confidence
 
-import { assertHardPurgeGapLedgers, assertJournalBaselinePlacement, assertJournalEntrySequence, assertUniqueJournalSequences, rebuildProjection, journalGaps, duplicateSequences, journalBaselinePlacementIssues, journalEntryPostconditionIssue, journalEntrySequenceIssue, journalFactLifecycleIssues, replayedEntity, schema5PurgeArtifactIssue, ATTRIBUTED_ENTITY_KINDS, JOURNAL_ENTRY_TYPES, JOURNAL_TYPE_ENTITY_KIND, REPLAYABLE_ENTRY_TYPES } from './journal.js';
+import { assertHardPurgeGapLedgers, assertJournalBaselinePlacement, assertJournalEntrySequence, assertUniqueJournalSequences, rebuildProjection, journalGaps, duplicateSequences, journalBaselinePlacementIssues, journalEntryPostconditionIssue, journalEntrySequenceIssue, journalFactLifecycleIssues, replayedEntity, reattributeIdempotency, schema5PurgeArtifactIssue, ATTRIBUTED_ENTITY_KINDS, JOURNAL_ENTRY_TYPES, JOURNAL_TYPE_ENTITY_KIND, REPLAYABLE_ENTRY_TYPES } from './journal.js';
 import { createConfidence, applyContribution, setOutcomeContribution, computeConfidence, summarizeBasis, CONFIDENCE_POLICY } from './confidence.js';
 import { hybridSearch, foldText } from './hybrid-search.js';
 import { effectiveFactExpirationBoundary, factValidityPolicyIssue, isValidIsoInstant } from './fact-validity.js';
@@ -17,6 +17,8 @@ import { privilegedSnapshot, privilegedValidate, registerPrivileged } from './in
 import { extraCollections, refusePublicExport, NATIVE_STORE_KEYS, PUBLIC_EXPORT_KIND, REDACTION_EXPORT_KIND } from './internal/collections.js';
 import { isLegacyOwned, resolveScope, sameOrigin, usableOriginId } from './scope.js';
 import { createHash } from 'node:crypto';
+import { accessScopeContains, validateAccess, intersectAccessScope, accessDiagnostics, reconcileAccessLedger } from './access.js';
+import { createAccessLifecycle } from './internal/access-lifecycle.js';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
 // docs/api-reference.md) and are frozen so a consumer cannot mutate validation
@@ -67,6 +69,10 @@ function ownerKey(entity, projectOf) {
   if (entity?.attribution === 'unattributed') return ['origin', usableOriginId(entity.originId) ?? ['unowned', entity.id ?? null]];
   if (isLegacyOwned(entity)) return ['legacy'];
   return projectOf(entity?.project);
+}
+
+function ownedByProject(entity, project) {
+  return entity?.project === project && entity?.attribution !== 'unattributed' && !isLegacyOwned(entity);
 }
 
 // An entity written by a newer build than this one reads: kept as it arrived,
@@ -352,7 +358,7 @@ function journalEntryReferencesPurge(entry, ids, project) {
 function rewriteBaselineForProjectPurge(entry, project, removed, removedRelationIds) {
   if (entry?.type !== 'projection.baseline' || !entry.payload || entry.redacted === true) return false;
   const payload = entry.payload;
-  const keep = (value) => value?.project !== project && !removed.has(value?.id);
+  const keep = (value) => !removed.has(value?.id);
   const records = (payload.records ?? []).filter(keep);
   const facts = (payload.facts ?? []).filter(keep);
   const relations = (payload.relations ?? []).filter((relation) => (
@@ -590,18 +596,21 @@ function paginate(items, options, scope, extra = {}) {
 
 // Completeness is relative to this request's known candidates, never a claim
 // of total semantic recall. An exact origin can read its unattributed records
-// while the project is still unresolved. No wider read grant exists here.
+// while the project is still unresolved. A grant augments only the read set.
 function scopeCompleteness(scope, current = { complete: true }, signals = []) {
   const partial = signals.some((signal) => signal.limitation?.code === 'scoped_coverage');
   const details = [current.limitation?.detail];
-  if (scope.state === 'project_unresolved') details.push(scope.originId === null
+  if (scope.state === 'project_unresolved') details.push(scope.grant
+    ? 'No project was resolved. The explicit wider grant augmented any permitted origin-owned content; project identity remains unresolved.'
+    : scope.originId === null
     ? 'No project or usable origin was resolved. No project content was searched.'
     : 'No project was resolved. Only unattributed content belonging to the presented origin was searched.');
   if (partial) details.push('Some own signals have historical detail outside this scope. Only their identity and lifecycle are shown.');
+  if (scope.grantLimitation) details.push(`Wider access was refused (${scope.grantLimitation}); permitted own-scope access is retained.`);
   return {
     ...current,
-    scope: { ...current.scope, project: scope.project, requestState: scope.state, originPresented: scope.originId !== null, grant: null },
-    complete: current.complete === true && scope.state === 'project_selected' && !partial,
+    scope: { ...current.scope, project: scope.project, requestState: scope.state, originPresented: scope.originId !== null, grant: scope.grant ?? null },
+    complete: current.complete === true && scope.state === 'project_selected' && !partial && !scope.grantLimitation,
     ...(partial ? { losslessItems: false } : {}),
     ...(details.some(Boolean) ? { limitation: { ...current.limitation, code: current.limitation?.code ?? 'scoped_coverage', detail: details.filter(Boolean).join(' ') } } : {})
   };
@@ -681,6 +690,70 @@ export function createShadowGraph(options = {}) {
   // through import and the privileged snapshot (axis A-5). They are never
   // interpreted, and never part of a public read.
   const extras = new TransactionMap();
+  let readOperation = null;
+  const authority = createAccessLifecycle({
+    now,
+    read: () => ({ access: extras.get('access'), accessRevocations: extras.get('accessRevocations'), events }),
+    write: payload => {
+      if (payload.access !== undefined) extras.set('access', clone(payload.access));
+      if (payload.accessRevocations !== undefined) extras.set('accessRevocations', clone(payload.accessRevocations));
+      const previous = [...events];
+      if (transactionContext?.mode === 'undo') transactionContext.undo.push(() => { events.length = 0; Array.prototype.push.apply(events, previous); });
+      events.length = 0; Array.prototype.push.apply(events, clone(payload.events));
+    }
+  });
+
+  function bindProject(input = {}) {
+    if (!['worktree', 'shared_repository'].includes(input.type) || typeof input.path !== 'string' || !input.path.trim() || typeof input.project !== 'string' || !input.project.trim()) throw new Error('Binding requires explicit mapping type, resolved path and project');
+    const current = extras.get('projectBindings') ?? { entries: [] };
+    if (!Array.isArray(current.entries)) throw new Error('Project bindings are malformed');
+    const binding = { type: input.type, path: input.path, project: input.project, confirmed: true, confirmedAt: now() };
+    extras.set('projectBindings', { entries: [...current.entries.filter(item => !(item.type === input.type && item.path === input.path)), binding] });
+    event('project.bound', { mode: 'confirmation', activationSignal: 'local_binding_file', mappingType: binding.type, path: binding.path, boundProject: binding.project, reason: input.reason ?? null, surface: input.surface ?? 'local-owner' });
+    return clone(binding);
+  }
+  function resolveProjectBinding({ worktreeRoot, commonDir } = {}) {
+    const entries = extras.get('projectBindings')?.entries;
+    if (!Array.isArray(entries)) return null;
+    const found = entries.find(item => item.confirmed === true && item.type === 'worktree' && item.path === worktreeRoot)
+      ?? entries.find(item => item.confirmed === true && item.type === 'shared_repository' && item.path === commonDir);
+    return found ? { project: found.project, confirmed: true } : null;
+  }
+
+  // One aggregate per public delivery, even when it composes multiple reads.
+  // Failed operations roll back canonical effects before a separate refusal
+  // audit commit. Transports persist that committed rejection before delivery.
+  function auditedRead(name, operation) {
+    return (...args) => {
+      const previous = readOperation;
+      const current = { boundary: null };
+      try {
+        return transactional(name, () => {
+          readOperation = current;
+          const result = operation(...args), boundary = current.boundary;
+          if (boundary?.requestedAccess) {
+            const ids = new Set();
+            const visit = value => {
+              if (!value || typeof value !== 'object') return;
+              for (const id of [value.id, value.decisionId]) if (typeof id === 'string' && rawEntity(id) && boundary.visible(rawEntity(id))) ids.add(id);
+              for (const item of Object.values(value)) if (typeof item === 'object') visit(item);
+            };
+            visit(result);
+            if (boundary.widerRead || boundary.scope.grantLimitation) authority.aggregate({ accessId: boundary.accessId, surface: boundary.surface, reason: boundary.scope.grantLimitation ?? null, used: Boolean(boundary.scope.grant), recordsReturned: ids.size, resolvedScope: boundary.scope, grantScope: boundary.provenance?.scope });
+            if (name !== 'redact' && boundary.provenance && result && typeof result === 'object') result.readProvenance = clone(boundary.provenance);
+          }
+          return result;
+        })();
+      } catch (error) {
+        const boundary = current.boundary;
+        if (boundary?.requestedAccess && boundary.scope.grantLimitation) {
+          transactional('accessRefusal', () => authority.aggregate({ accessId: boundary.accessId, surface: boundary.surface, reason: boundary.scope.grantLimitation, recordsReturned: 0, resolvedScope: boundary.scope }))();
+          Object.defineProperty(error, COMMITTED_REJECTION, { value: true });
+        }
+        throw error;
+      } finally { readOperation = previous; }
+    };
+  }
   // The entity whose owner an integrity issue belongs to, for the issues that
   // name an owner only inside a composite key (duplicate fact and memory scopes).
   const issueOwners = new WeakMap();
@@ -945,7 +1018,7 @@ export function createShadowGraph(options = {}) {
   // write is refused rather than stored under one nobody chose. The refusal
   // blocks only ShadowGraph's own storage, never the caller's work (PC-15).
   function writeOwner(input) {
-    const scope = resolveScope({ project: input?.project, originId: input?.originId });
+    const scope = resolveScope({ project: input?.project, originId: input?.originId, binding: input?.binding });
     if (scope.state === 'project_selected') return { project: scope.project, attribution: 'project', ...(scope.originId ? { originId: scope.originId } : {}) };
     if (scope.originId) return { project: null, attribution: 'unattributed', originId: scope.originId };
     const error = new Error('Write refused (write_scope_unresolved): no project was selected and no origin id was presented, so nothing would own this record. Pass a project, or an originId.');
@@ -1437,6 +1510,62 @@ export function createShadowGraph(options = {}) {
     return { previousProject, attribution };
   }
 
+  // Explicit local-owner administration. A grant is read authority and cannot
+  // select or widen this mutation. Attribution changes ownership only; the
+  // original origin, time, source, trust, and provenance remain byte-for-byte.
+  function attribute(input = {}) {
+    const named = Object.hasOwn(input, 'ids');
+    const origin = Object.hasOwn(input, 'originId');
+    if (named === origin) throw new Error('Attribution requires exactly one of ids or originId');
+    if (typeof input.targetProject !== 'string' || !input.targetProject.trim()) throw new Error('Attribution requires a non-empty targetProject');
+    if (typeof input.reason !== 'string' || !input.reason.trim()) throw new Error('Attribution requires an explicit reason');
+    if (input.surface !== undefined && (typeof input.surface !== 'string' || !input.surface.trim())) throw new Error('Attribution surface must be non-empty');
+    if (['grant', 'grantId', 'accessId', 'scope', 'binding'].some((key) => Object.hasOwn(input, key))) throw new Error('Read authority cannot authorize attribution');
+    if (named && (!Array.isArray(input.ids) || !input.ids.length || input.ids.some((value) => typeof value !== 'string' || !value.trim()) || new Set(input.ids).size !== input.ids.length)) throw new Error('Attribution ids must be distinct non-empty entity ids');
+    if (origin && usableOriginId(input.originId) === null) throw new Error('Attribution requires a named originId');
+    const selected = named ? input.ids.map((entityId) => {
+      const entity = records.get(entityId) ?? facts.get(entityId);
+      if (!entity) throw new Error(`Attribution entity not found: ${entityId}`);
+      return entity;
+    }) : [...records.values(), ...facts.values()].filter((entity) => entity.attribution === 'unattributed' && entity.originId === input.originId);
+    if (!selected.length) throw new Error('Attribution origin has no unattributed material');
+    if (selected.some(isFutureEntity)) throw new Error('Attribution cannot change an unsupported future entity');
+    const changed = selected.filter((entity) => !ownedByProject(entity, input.targetProject));
+    assertJournalCapacity(changed.length);
+    const candidate = snapshot();
+    let retries = new Map(candidate.idempotency.map((item) => [item.key, item.value]));
+    for (const previous of changed) {
+      const next = { ...clone(previous), schemaVersion: SCHEMA_VERSION, project: input.targetProject, attribution: 'project' };
+      const collection = next.kind === 'fact' ? candidate.facts : candidate.records;
+      collection[collection.findIndex((entity) => entity.id === next.id)] = next;
+      retries = reattributeIdempotency(retries, next);
+      candidate.journal.push(prebuildJournalEntry({
+        type: 'entity.attributed', entityKind: next.kind, entityId: next.id, project: next.project,
+        payload: { ...next, attributionChange: { previousProject: isStoredWithoutProject(previous) ? null : previous.project ?? null, previousAttribution: previous.attribution ?? null, reason: 'user' } },
+        provenance: writeProvenance(previous)
+      }, ++candidate.journalSeq));
+      candidate.events.push({
+        id: id('event'), type: 'attribution.changed', at: now(), project: next.project,
+        [next.kind === 'fact' ? 'factId' : 'recordId']: next.id,
+        previousProject: isStoredWithoutProject(previous) ? null : previous.project ?? null,
+        previousAttribution: previous.attribution ?? null, targetProject: next.project,
+        reason: input.reason, surface: input.surface ?? 'local-owner',
+        ...(previous.originId ? { originId: previous.originId } : {})
+      });
+    }
+    // A move cannot silently supersede or merge another owner's active identity.
+    const moved = new Set(changed.map((entity) => entity.id));
+    for (const collection of [candidate.records.filter((item) => item.kind === 'memory'), candidate.facts]) {
+      const active = collection.filter((item) => item.status === 'active');
+      const key = (item) => item.kind === 'memory' ? memoryScopeKey(item) : JSON.stringify([ownerKey(item, (project) => project ?? 'default'), item.key]);
+      for (const entity of active.filter((item) => moved.has(item.id))) if (active.some((other) => other.id !== entity.id && key(other) === key(entity))) throw new Error('Attribution would collide with an active memory or fact identity');
+    }
+    candidate.idempotency = [...retries].map(([key, value]) => ({ key, value }));
+    if (candidate[STORED_WITHOUT_PROJECT]) candidate[STORED_WITHOUT_PROJECT] = candidate[STORED_WITHOUT_PROJECT].filter((entityId) => !moved.has(entityId));
+    if (changed.length) replaceData(candidate);
+    return { attributed: changed.length, targetProject: input.targetProject, ids: changed.map((entity) => entity.id) };
+  }
+
   // Legacy attribution review (P1 finding F-27; OD-1 option B, plan v1.4.4
   // §10.3). The records no project owns -- legacy "default" data
   // (legacy_ambiguous) and data stored with no project (legacy_unattributed)
@@ -1914,7 +2043,7 @@ export function createShadowGraph(options = {}) {
   //                   review, reconsideration, maintenance or context ever
   //                   reviews, or cites the facts of, another owner (P1
   //                   findings F-06, F-31).
-  function evaluateReview(context = {}, { onlyDecisionId, collectGrounded = false, visible } = {}) {
+  function evaluateReview(context = {}, { onlyDecisionId, collectGrounded = false, visible, persistSignals = true } = {}) {
     if (typeof visible !== 'function') throw new Error('evaluateReview() requires the boundary of the request it serves');
     const prepared = validateReviewInput(context);
     const changed = new Set(prepared.changedFacts); const due = []; const diagnostics = []; const explained = [];
@@ -2073,7 +2202,7 @@ export function createShadowGraph(options = {}) {
       const key = reviewSignalKey(item.decisionId, item.reason, item.coverage);
       let signal = reviewSignals.get(key);
       if (!signal) signal = legacySignalCovering(item.decisionId, item.coverage);
-      if (!signal) {
+      if (!signal && persistSignals) {
         signal = { id: id('review'), kind: 'review', ...clone(item), status: 'open', createdAt: now() };
         reviewSignals.set(key, signal);
       }
@@ -2083,8 +2212,8 @@ export function createShadowGraph(options = {}) {
       // acknowledge. `status` comes along because `due` is recomputed from
       // current evidence on every call and does not drop an acknowledged item,
       // so a caller needs to see which ones are already handled.
-      item.reviewSignalId = signal.id;
-      item.reviewSignalStatus = signal.status;
+      if (signal) { item.reviewSignalId = signal.id; item.reviewSignalStatus = signal.status; }
+      else item.reviewSignalStatus = 'unpersisted';
       // Coverage is signal identity, and it is persisted on the signal where a
       // caller can read it through shadowgraph_review_signals. On a due entry it
       // would be redundant with violatedConditions and pure wire weight, so it
@@ -2094,18 +2223,26 @@ export function createShadowGraph(options = {}) {
     return { due, diagnostics, explained };
   }
 
+  function evaluateForRead(input, boundary, options = {}) {
+    // Existing own-scope evaluation still persists. A wider evaluation can read
+    // more evidence, but cannot persist signals even for an own decision using
+    // newly granted foreign evidence. This keeps the current API, not P2's split.
+    if (boundary.scope.grant) evaluateReview(input, { ...options, visible: boundary.baseVisible });
+    return evaluateReview(input, { ...options, visible: boundary.visible, persistSignals: !boundary.scope.grant });
+  }
+
   // Due entries keep their content; the serializable envelope declares the
   // request boundary even when no decision can be evaluated.
   function review(context = {}) {
     const boundary = readBoundary(context);
-    const due = evaluateReview(context, { visible: boundary.visible }).due;
+    const due = evaluateForRead(context, boundary).due;
     return scopedItems(due, boundary, referencedSignals(boundary, due));
   }
 
   // What an operation that evaluated nothing says about itself (P1 finding
   // F-06): it had no project and no origin, so it read and changed nothing.
   function reachesNothing(boundary) {
-    return boundary.scope.state !== 'project_selected' && boundary.scope.originId === null;
+    return boundary.scope.state !== 'project_selected' && boundary.scope.originId === null && !boundary.scope.grant;
   }
   const UNRESOLVED_OPERATION = Object.freeze({ code: 'scoped_coverage', detail: 'No project and no origin was given, so nothing was evaluated or changed.' });
 
@@ -2174,11 +2311,11 @@ export function createShadowGraph(options = {}) {
       if (['archived', 'superseded', 'abandoned'].includes(record.status)) throw new Error(`Decision is not open for reconsideration (status ${record.status})`);
       onlyDecisionId = record.id;
     }
-    const evaluated = evaluateReview({
+    const evaluated = evaluateForRead({
       ...(input.changedFacts === undefined ? {} : { changedFacts: input.changedFacts }),
       ...(input.facts === undefined ? {} : { facts: input.facts }),
       ...(input.asOf === undefined ? {} : { asOf: input.asOf })
-    }, { onlyDecisionId, collectGrounded: true, visible: boundary.visible });
+    }, boundary, { onlyDecisionId, collectGrounded: true });
 
     const byDecision = new Map();
     const entryFor = (decisionId, title) => {
@@ -2351,14 +2488,14 @@ export function createShadowGraph(options = {}) {
     if (reachesNothing(boundary)) return scopedResult({ at, staleDecisionIds: [], agedDecisionIds: [], reviewSignals: [], due: [], diagnostics: [], limitation: { ...UNRESOLVED_OPERATION } }, boundary);
     const decisionsToStale = [...records.values()].filter((record) => (
       record.kind === 'decision'
-      && boundary.visible(record)
+      && boundary.baseVisible(record)
       && record.reviewAfter
       && compareInstants(record.reviewAfter, at) <= 0
       && CURRENT_DECISION_STATUSES.includes(record.status)
     ));
     const factsToExpire = [...facts.values()].filter((fact) => {
       const expirationBoundary = effectiveFactExpirationBoundary(fact);
-      return boundary.visible(fact) && fact.status === 'active' && expirationBoundary && compareInstants(expirationBoundary, at) <= 0;
+      return boundary.baseVisible(fact) && fact.status === 'active' && expirationBoundary && compareInstants(expirationBoundary, at) <= 0;
     });
     assertJournalCapacity(decisionsToStale.length + factsToExpire.length);
 
@@ -2382,7 +2519,7 @@ export function createShadowGraph(options = {}) {
       };
       appendJournal({ type: 'fact.expired', entityKind: 'fact', entityId: fact.id, project: fact.project, payload: clone(fact) });
     }
-    const { due, diagnostics } = evaluateReview(reviewInput, { visible: boundary.visible });
+    const { due, diagnostics } = evaluateForRead(reviewInput, boundary);
     const signals = scopedView(boundary).reviewSignals.map(clone);
     return scopedResult({ at, staleDecisionIds, agedDecisionIds: [...staleDecisionIds], reviewSignals: signals, due, diagnostics }, boundary, signals);
   }
@@ -2476,13 +2613,32 @@ export function createShadowGraph(options = {}) {
     return result;
   }
 
-  function projectSummary(project) {
+  function projectPurgeSelection(project) {
     if (typeof project !== 'string' || !project.trim()) throw new Error('A project name is required');
-    const recordsForProject = [...records.values()].filter((item) => item.project === project);
+    const recordsForProject = [...records.values()].filter((item) => ownedByProject(item, project));
+    const factsForProject = [...facts.values()].filter((item) => ownedByProject(item, project));
     const ids = new Set(recordsForProject.map((item) => item.id));
     for (const record of recordsForProject) for (const alternative of record.alternatives ?? []) ids.add(alternative.id);
-    for (const fact of facts.values()) if (fact.project === project) ids.add(fact.id);
-    return { project, records: recordsForProject.length, facts: [...facts.values()].filter((item) => item.project === project).length, relations: [...relations.values()].filter((item) => ids.has(item.from) || ids.has(item.to)).length, events: events.filter((item) => item.project === project || ids.has(item.recordId) || ids.has(item.factId)).length, journal: journal.filter((item) => item.project === project).length };
+    for (const fact of factsForProject) ids.add(fact.id);
+    const relationIds = new Set([...relations.values()].filter((item) => ids.has(item.from) || ids.has(item.to)).map((item) => item.id));
+    const referencesRemoved = (item) => {
+      const entityId = item.entityId ?? item.recordId ?? item.factId;
+      const relationId = item.relationId ?? (item.entityKind === 'relation' ? entityId : null);
+      if (relationId) return relationIds.has(relationId) || (!relations.has(relationId) && item.project === project && project !== 'default');
+      if (entityId) {
+        if (ids.has(entityId)) return true;
+        if (rawEntity(entityId)) return false;
+      }
+      if (item.type === 'project.purged') return item.project === project;
+      // An unreferenced legacy "default" breadcrumb cannot establish ownership.
+      return item.payload ? ownedByProject(item.payload, project) : item.project === project && project !== 'default';
+    };
+    const removedEvents = new Set(events.filter(referencesRemoved));
+    return { ids, relationIds, removedEvents, referencesRemoved, summary: { project, records: recordsForProject.length, facts: factsForProject.length, relations: relationIds.size, events: removedEvents.size, journal: journal.filter(referencesRemoved).length } };
+  }
+
+  function projectSummary(project) {
+    return projectPurgeSelection(project).summary;
   }
 
   // G5: `mode` defaults to a LOGICAL purge. Content is removed and an auditable
@@ -2493,23 +2649,10 @@ export function createShadowGraph(options = {}) {
   function purgeProject(project, purgeOptions = {}) {
     const mode = purgeOptions.mode ?? (purgeOptions.hard === true ? 'hard' : 'logical');
     if (!['logical', 'hard'].includes(mode)) throw new Error('Purge mode must be logical or hard');
-    const summary = projectSummary(project);
-    const projectRecords = [...records.values()].filter((item) => item.project === project);
-    const removed = new Set(projectRecords.map((item) => item.id));
-    for (const record of projectRecords) for (const alternative of record.alternatives ?? []) removed.add(alternative.id);
-    for (const fact of facts.values()) if (fact.project === project) removed.add(fact.id);
-    const removedRelationIds = new Set([...relations]
-      .filter(([, relation]) => removed.has(relation.from) || removed.has(relation.to))
-      .map(([relationId]) => relationId));
+    const { summary, ids: removed, relationIds: removedRelationIds, removedEvents: eventsToRemove, referencesRemoved } = projectPurgeSelection(project);
     const idempotencyKeysToRemove = [...idempotency]
-      .filter(([, value]) => value?.project === project || removed.has(value?.id))
+      .filter(([, value]) => removed.has(value?.id))
       .map(([key]) => key);
-    const eventsToRemove = new Set(events.filter((item) => (
-      item.project === project
-      || removed.has(item.recordId)
-      || removed.has(item.factId)
-      || (item.relationId && (removedRelationIds.has(item.relationId) || !relations.has(item.relationId)))
-    )));
 
     // Stage every journal rewrite and fully validate the marker before touching any
     // live collection. In particular, sequence overflow must leave records, facts,
@@ -2525,7 +2668,7 @@ export function createShadowGraph(options = {}) {
     if (mode === 'hard') {
       for (let index = stagedJournal.length - 1; index >= 0; index -= 1) {
         const item = stagedJournal[index];
-        if (item.project === project || removed.has(item.entityId) || removedRelationIds.has(item.entityId)) {
+        if (referencesRemoved(item)) {
           if (Number.isInteger(item.seq)) removedJournalSequences.push(item.seq);
           stagedJournal.splice(index, 1);
           journalEntriesRemoved += 1;
@@ -2534,7 +2677,7 @@ export function createShadowGraph(options = {}) {
     } else {
       for (const item of stagedJournal) {
         if (item.type === 'project.purged' && item.project === project && item.payload?.mode === 'hard') continue;
-        if (item.project === project || removed.has(item.entityId) || removedRelationIds.has(item.entityId)) {
+        if (referencesRemoved(item)) {
           if (item.payload !== null || item.redacted !== true) journalEntriesRedacted += 1;
           scrubLogicalPurgeSkeleton(item);
         }
@@ -2559,9 +2702,9 @@ export function createShadowGraph(options = {}) {
       sourceSchemaVersion: SCHEMA_VERSION
     });
 
-    for (const [recordId, record] of records) if (record.project === project) records.delete(recordId);
-    for (const [scopeKey, memory] of currentMemories) if (memory.project === project) currentMemories.delete(scopeKey);
-    for (const [factId, fact] of facts) if (fact.project === project) facts.delete(factId);
+    for (const recordId of removed) records.delete(recordId);
+    for (const [scopeKey, memory] of currentMemories) if (removed.has(memory.id)) currentMemories.delete(scopeKey);
+    for (const factId of removed) facts.delete(factId);
     for (const relationId of removedRelationIds) relations.delete(relationId);
     for (const [key, fact] of currentFacts) if (removed.has(fact.id)) currentFacts.delete(key);
     for (const [key, signal] of reviewSignals) if (removed.has(signal.decisionId)) reviewSignals.delete(key);
@@ -2570,6 +2713,7 @@ export function createShadowGraph(options = {}) {
     journal.splice(0, journal.length, ...stagedJournal);
     journalSeq = purgeEntry.seq;
     journalEpoch = stagedJournalEpoch;
+    authority.purge(project);
 
     return {
       ...summary,
@@ -2698,6 +2842,7 @@ export function createShadowGraph(options = {}) {
     }
     for (const [scope, { count, owner }] of activeMemoryScopes) if (count > 1) issueOwners.set(push('error', 'duplicate_active_memory_scope', { scope, count }), owner);
     for (const gap of journalGaps(journal)) push('info', 'journal_gap', gap);
+    for (const issue of accessDiagnostics({ access: extras.get('access'), accessRevocations: extras.get('accessRevocations'), events }, now())) push('info', issue.code, { accessId: issue.accessId });
     // `valid` is false for genuine errors AND for data this build cannot
     // interpret. Saying "valid" while holding an unsupported schema would be a
     // claim we cannot support. `legacy` and `info` do NOT invalidate: readable
@@ -2754,14 +2899,38 @@ export function createShadowGraph(options = {}) {
   // the owner model the writes use, so legacy data in "default", or stored with
   // no project, belongs to no project a caller can name (OD-1).
   function readBoundary(options = {}) {
-    const scope = resolveScope({ project: options.project, originId: options.originId });
-    const visible = (item) => {
+    const inherited = options.readProvenance;
+    const request = inherited === undefined ? options : inherited?.version === 1 && inherited.request && typeof inherited.request === 'object' ? inherited.request : {};
+    const scope = { ...resolveScope({ project: request.project, originId: request.originId, binding: inherited === undefined ? options.binding : undefined }) };
+    const baseVisible = (item) => {
       if (!item) return false;
       if (scope.state === 'project_selected') return ownerKey(item, (project) => project) === scope.project;
       return item.attribution === 'unattributed' && sameOrigin(item.originId, scope.originId);
     };
+    const accessId = inherited === undefined ? options.accessId ?? options.grantId : inherited?.accessId;
+    const requestedAccess = accessId !== undefined && accessId !== null || inherited !== undefined;
+    const surface = options.surface ?? 'cli';
+    let authorizedScope = null, provenance = null;
+    if (requestedAccess) {
+      const decision = inherited === undefined && options.accessId !== undefined && options.grantId !== undefined && options.accessId !== options.grantId
+        ? { ok: false, reason: 'grant_identity_conflict' }
+        : validateAccess({ access: extras.get('access'), accessRevocations: extras.get('accessRevocations'), events }, accessId, { now: now(), surface });
+      if (decision.ok && (inherited === undefined || (inherited.version === 1 && Array.isArray(inherited.surfaces) && inherited.surfaces.includes(surface) && isValidIsoInstant(inherited.expiresAt) && compareInstants(now(), inherited.expiresAt) < 0))) {
+        authorizedScope = inherited === undefined ? decision.entry.scope : intersectAccessScope(decision.entry.scope, inherited.scope);
+        scope.grant = { accessId, expiresAt: inherited === undefined || compareInstants(decision.entry.expiresAt, inherited.expiresAt) < 0 ? decision.entry.expiresAt : inherited.expiresAt, surface };
+        provenance = { version: 1, request: { project: scope.project, originId: scope.originId }, accessId, scope: clone(authorizedScope), surfaces: inherited === undefined ? [...decision.entry.surfaces] : decision.entry.surfaces.filter(value => inherited.surfaces.includes(value)), expiresAt: scope.grant.expiresAt };
+      } else scope.grantLimitation = decision.reason ?? 'grant_provenance_refused';
+    }
+    const visible = item => {
+      if (!item) return false;
+      if (baseVisible(item)) return true;
+      const allowed = authorizedScope !== null && accessScopeContains(authorizedScope, isStoredWithoutProject(item) ? { ...item, attribution: 'legacy_unattributed' } : item);
+      if (allowed) boundary.widerRead = true;
+      return allowed;
+    };
     // Whether an id -- a relation endpoint, say -- resolves inside it.
-    const boundary = { scope, visible, reaches: (entityId) => entity(entityId, boundary) !== undefined };
+    const boundary = { scope, visible, baseVisible, accessId, surface, requestedAccess, provenance, widerRead: false, reaches: (entityId) => entity(entityId, boundary) !== undefined };
+    if (readOperation && requestedAccess) readOperation.boundary ??= boundary;
     return boundary;
   }
 
@@ -2916,7 +3085,7 @@ export function createShadowGraph(options = {}) {
   function recall(query = '', options = {}) {
     validateTemporalFields(options, ['asOf', 'currentAt']);
     const boundary = readBoundary(options);
-    const recallOptions = { ...options, project: boundary.scope.project, scope: normalizeMemoryScope(options.scope), currentAt: options.currentAt ?? (options.asOf ? null : now()) };
+    const recallOptions = { ...options, project: boundary.scope.grant ? null : boundary.scope.project, scope: normalizeMemoryScope(options.scope), currentAt: options.currentAt ?? (options.asOf ? null : now()) };
     // Ranking only READS the graph, but this used to hand it `exportData()`,
     // which deep-clones every record, fact, relation, review signal, idempotency
     // entry, event and the entire journal -- on every call. Ranking reads three
@@ -2971,7 +3140,7 @@ export function createShadowGraph(options = {}) {
     const activeDecisions = collect([...records.values()].filter((x) => x.kind === 'decision' && inScope(x) && CURRENT_DECISION_STATUSES.includes(x.status)).map(clone));
     const staleAssumptions = collect([...facts.values()].filter((x) => inScope(x) && x.status !== 'active').map(clone));
     const failedAttemptsToAvoid = collect([...records.values()].filter((x) => x.kind === 'attempt' && inScope(x) && attemptFailed(x)).map(clone));
-    const evaluated = evaluateReview({ changedFacts: input.changedFacts ?? [], facts: input.facts ?? {} }, { visible: inScope });
+    const evaluated = evaluateForRead({ changedFacts: input.changedFacts ?? [], facts: input.facts ?? {} }, boundary);
     const openReviews = collect(evaluated.due);
     // Conditions that could not be settled travel as their own collection, so
     // they are bounded and declared by the same completeness contract as every
@@ -3613,6 +3782,7 @@ export function createShadowGraph(options = {}) {
     for (const item of pendingIdempotencyUpdates) idempotency.set(item.key, item.value);
     for (const importedEvent of importedEvents) events.push(importedEvent);
     for (const [key, value] of importedExtras) extras.set(key, value);
+    if (extras.has('access')) extras.set('access', reconcileAccessLedger(extras.get('access'), extras.get('accessRevocations')));
     for (const entity of projectless) projectlessLegacy.set(entity.id, true);
     for (const id of source[STORED_WITHOUT_PROJECT] ?? []) projectlessLegacy.set(id, true);
 
@@ -3801,9 +3971,10 @@ export function createShadowGraph(options = {}) {
     addAttempt: transactional('addAttempt', addAttempt),
     remember: transactional('remember', remember),
     applyMemoryPlan: transactional('applyMemoryPlan', applyMemoryPlan),
-    memoryHistory,
+    memoryHistory: auditedRead('memoryHistory', memoryHistory),
     addFact: transactional('addFact', addFact),
     migrateAttribution: transactional('migrateAttribution', migrateAttribution),
+    attribute: transactional('attribute', attribute, { mode: 'snapshot' }),
     legacyAttributionReview,
     verifyFact: transactional('verifyFact', verifyFact),
     setOutcome: transactional('setOutcome', setOutcome),
@@ -3811,27 +3982,34 @@ export function createShadowGraph(options = {}) {
     updateDecisionStatus: transactional('updateDecisionStatus', updateDecisionStatus),
     supersedeDecision: transactional('supersedeDecision', supersedeDecision),
     link: transactional('link', link),
-    traverse,
-    redact,
+    traverse: auditedRead('traverse', traverse),
+    redact: auditedRead('redact', redact),
     projectSummary,
     purgeProject: transactional('purgeProject', purgeProject, { mode: 'snapshot' }),
-    review: transactional('review', review),
-    reconsider: transactional('reconsider', reconsider),
-    maintain: transactional('maintain', maintain),
-    getReviewSignals,
+    review: auditedRead('review', review),
+    reconsider: auditedRead('reconsider', reconsider),
+    maintain: auditedRead('maintain', maintain),
+    getReviewSignals: auditedRead('getReviewSignals', getReviewSignals),
     acknowledgeReview: transactional('acknowledgeReview', acknowledgeReview),
-    search,
-    retrieve,
-    recall,
-    validate,
-    repairPlan,
-    context: transactional('context', context),
-    exportData,
+    search: auditedRead('search', search),
+    retrieve: auditedRead('retrieve', retrieve),
+    recall: auditedRead('recall', recall),
+    validate: auditedRead('validate', validate),
+    repairPlan: auditedRead('repairPlan', repairPlan),
+    context: auditedRead('context', context),
+    exportData: auditedRead('exportData', exportData),
     importData: transactional('importData', importData),
-    getJournal,
-    rebuild,
-    stats
-  }, { snapshot, validate: integrity, rebuild: replay });
+    getJournal: auditedRead('getJournal', getJournal),
+    rebuild: auditedRead('rebuild', rebuild),
+    stats: auditedRead('stats', stats),
+    requestAccess: transactional('requestAccess', authority.request),
+    issueAccess: transactional('issueAccess', authority.issue),
+    revokeAccess: transactional('revokeAccess', authority.revoke),
+    discardAccess: transactional('discardAccess', authority.discard)
+  }, { snapshot, validate: integrity, rebuild: replay,
+    issueAccess: transactional('ownerIssueAccess', authority.issueOwner), inspectAccess: authority.inspect,
+    accessRefusal: transactional('accessRefusal', authority.transportRefusal),
+    bindProject: transactional('bindProject', bindProject), resolveProjectBinding });
 }
 
 // `strict` is for caller writes, where a typo should fail loudly instead of

@@ -4,6 +4,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { historicalRelation } from './historical-relation.js';
+import { privilegedIssueAccess } from '../src/internal/snapshot.js';
 
 // A fresh graph per path, so one path's side effects cannot shape another's
 // observation.
@@ -52,6 +53,18 @@ const recordsIn = (context) => [...context.activeDecisions, ...context.staleAssu
 // `observe` records what the path does; `target` holds only the fields that
 // decide conformance. Everything observed is compared against the row.
 const PATHS = {
+  'authority.boundary': {
+    observe: ({ graph, alphaDecisionId }) => {
+      const grant = privilegedIssueAccess(graph, { scope: { projects: ['beta'] }, surfaces: ['cli'], expiresAt: '2026-02-01T00:00:00.000Z', reason: 'synthetic scope conformance' }).entry;
+      const options = { project: 'alpha', accessId: grant.accessId };
+      const expanded = graph.traverse({ ...options, id: alphaDecisionId, depth: 3 });
+      const searchProjects = itemProjects(graph.search('MARKER', options));
+      graph.revokeAccess({ accessId: grant.accessId });
+      const rechecked = graph.traverse({ id: alphaDecisionId, readProvenance: expanded.readProvenance, project: 'default', depth: 3 });
+      return { expandedProjects: projectsOf(expanded.nodes), searchProjects, recheckedProjects: projectsOf(rechecked.nodes), refusedGrant: rechecked.completeness.scope.grant, retainedRequest: rechecked.completeness.scope.project };
+    },
+    target: { expandedProjects: ['alpha', 'beta'], searchProjects: ['alpha', 'beta'], recheckedProjects: ['alpha'], refusedGrant: null, retainedRequest: 'alpha' }
+  },
   // The project predicate on its own: a filter-only query, no content terms.
   matchesFilters: {
     observe: ({ graph }) => ({

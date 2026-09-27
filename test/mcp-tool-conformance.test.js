@@ -13,6 +13,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createFactAttestation } from '../src/verification.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
@@ -105,8 +106,8 @@ async function terminateChild(child, { gracefulMs = GRACEFUL_STOP_MS, forcedMs =
 
 async function startMcp(t, extraEnv = {}) {
   const directory = await scratchDirectory(t, 'shadowgraph-conformance-');
-  const child = spawn(process.execPath, ['src/mcp.js'], {
-    cwd: process.cwd(),
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../src/mcp.js', import.meta.url))], {
+    cwd: directory,
     env: { ...process.env, SHADOWGRAPH_FILE: join(directory, 'data.json'), ...extraEnv },
     stdio: ['pipe', 'pipe', 'inherit']
   });
@@ -229,7 +230,7 @@ test('every advertised output schema accepts the result its own tool really retu
   const rpc = await startMcp(t);
   await rpc.initialize('2025-06-18');
   const listed = await rpc.listTools({});
-  assert.equal(listed.tools.length, 28);
+  assert.equal(listed.tools.length, 33);
 
   const schemas = new Map();
   for (const tool of listed.tools) {
@@ -242,7 +243,7 @@ test('every advertised output schema accepts the result its own tool really retu
     assert.equal(tool.outputSchema.type, 'object');
     schemas.set(tool.name, tool.outputSchema);
   }
-  assert.equal(schemas.size, 28);
+  assert.equal(schemas.size, 33);
 
   const exercised = new Set();
   const callTool = conformingCaller(rpc, schemas, exercised);
@@ -344,6 +345,13 @@ test('every advertised output schema accepts the result its own tool really retu
   assert.equal(restored.source, destination);
   const purged = await callTool('shadowgraph_purge', { project, mode: 'logical' });
   assert.equal(purged.mode, 'logical');
+  const proposal = await callTool('shadowgraph_request_wider_access', { scope: { projects: ['other'] }, surfaces: ['mcp'], expiresAt: '2099-01-01T00:00:00.000Z', reason: 'synthetic schema conformance' });
+  await callTool('shadowgraph_revoke_grant', { accessId: proposal.accessId });
+  const discarded = await callTool('shadowgraph_request_wider_access', { scope: { projects: ['other'] }, surfaces: ['mcp'], expiresAt: '2099-01-01T00:00:00.000Z', reason: 'synthetic discard conformance' });
+  await callTool('shadowgraph_discard_access', { accessId: discarded.accessId });
+  const material = await callTool('shadowgraph_record_decision', { project, title: 'attribution schema probe', chosen: 'kept' });
+  await callTool('shadowgraph_attribute', { ids: [material.id], targetProject: 'reassigned', reason: 'explicit synthetic attribution' });
+  await callTool('shadowgraph_bind', { type: 'worktree', project, reason: 'explicit synthetic mapping' });
 
   // Nothing may be left untested: a tool that advertises a schema but is never
   // exercised here is an unverified promise.
@@ -375,7 +383,7 @@ test('the verifier build advertises and satisfies the verification tool contract
   const rpc = await startMcp(t, { SHADOWGRAPH_VERIFIER_CONFIG: configPath });
   await rpc.initialize('2025-11-25');
   const listed = await rpc.listTools({});
-  assert.equal(listed.tools.length, 29);
+  assert.equal(listed.tools.length, 34);
   const verifyTool = listed.tools.find((tool) => tool.name === 'shadowgraph_verify_fact');
   assert.ok(verifyTool, 'the verification tool must be advertised when a verifier is configured');
   assert.deepEqual(verifyTool.annotations, { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true });
@@ -422,7 +430,7 @@ test('initialize negotiates a revision, and the wire shape follows the one it RE
     const wire = WIRE_BY_NEGOTIATED[negotiated];
     assert.ok(wire, `no expectation recorded for negotiated revision ${negotiated}`);
     const listed = await rpc.listTools({});
-    assert.equal(listed.tools.length, 28, `requested ${requested}`);
+    assert.equal(listed.tools.length, 33, `requested ${requested}`);
     const validateTool = listed.tools.find((tool) => tool.name === 'shadowgraph_validate');
     assert.deepEqual(Object.keys(validateTool), wire.toolKeys, `negotiated ${negotiated} tool members`);
     // The review envelope now participates in the same negotiated schema tier.
@@ -433,7 +441,7 @@ test('initialize negotiates a revision, and the wire shape follows the one it RE
       `negotiated ${negotiated} members of the review envelope`
     );
     if (wire.toolKeys.includes('annotations')) {
-      assert.deepEqual(validateTool.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
+      assert.deepEqual(validateTool.annotations, { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false });
     }
     const called = await rpc.call('tools/call', { name: 'shadowgraph_validate', arguments: {} });
     assert.deepEqual(
@@ -495,7 +503,7 @@ test('a later initialize renegotiates, in both directions', async (t) => {
 });
 
 test('a session that never initializes keeps the pre-2025 wire shape, in full and compact mode', async (t) => {
-  for (const [mode, expectedCount] of [['0', 28], ['1', 14]]) {
+  for (const [mode, expectedCount] of [['0', 33], ['1', 14]]) {
     const rpc = await startMcp(t, { SHADOWGRAPH_MCP_COMPACT: mode });
     const listed = await rpc.listTools({});
     assert.equal(listed.tools.length, expectedCount, `compact=${mode}`);
@@ -510,7 +518,7 @@ test('a session that never initializes keeps the pre-2025 wire shape, in full an
 test('modern requests receive the full metadata regardless of any handshake', async (t) => {
   const rpc = await startMcp(t);
   const listed = await rpc.call('tools/list', modernParams());
-  assert.equal(listed.result.tools.length, 28);
+  assert.equal(listed.result.tools.length, 33);
   assert.equal(listed.result.resultType, 'complete');
   const validateTool = listed.result.tools.find((tool) => tool.name === 'shadowgraph_validate');
   assert.deepEqual(Object.keys(validateTool), ['name', 'description', 'inputSchema', 'annotations', 'outputSchema']);
