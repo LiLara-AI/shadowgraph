@@ -29,7 +29,6 @@ async function signedFixture(t, options = {}) {
   const clock = { value: options.now ?? '2026-08-27T12:00:00.000Z' };
   const graph = createShadowGraph({ verifier, now: () => clock.value });
   const fact = graph.addFact({
-    id: options.id ?? 'ds-p1-005-valid-to-first',
     project: options.project ?? 'ds-p1-005',
     key: options.key ?? 'boundary-valid-to',
     value: options.value ?? true,
@@ -113,10 +112,11 @@ function startMcp(file) {
 
 async function seedUnsignedValidTo(file, id, boundary) {
   const graph = createShadowGraph({ now: () => '2026-08-27T12:00:00.000Z' });
-  graph.addFact({ id, project: 'ds-p1-005', key: id, value: true, validTo: boundary });
+  const fact = graph.addFact({ project: 'ds-p1-005', key: id, value: true, validTo: boundary });
   const store = createJsonFileStore(file);
   await store.save(privilegedSnapshot(graph));
   store.close();
+  return fact.id;
 }
 
 async function loadJson(file) {
@@ -191,7 +191,7 @@ test('DS-P1-005 seventh review: validTo-only, expiresAt-first, timezone offsets,
 
   const unsigned = createShadowGraph({ now: () => '2026-08-27T12:00:00.000Z' });
   const unsignedFact = unsigned.addFact({
-    id: 'unsigned-valid-to-only', project: 'ds-p1-005', key: 'unsigned-window', value: true,
+    project: 'ds-p1-005', key: 'unsigned-window', value: true,
     validTo: '2026-08-28T00:00:00.000Z'
   });
   unsigned.maintain({ project: 'ds-p1-005', now: '2026-08-28T00:00:00.000Z' });
@@ -254,7 +254,7 @@ test('DS-P1-005 seventh review: an earlier current narrowing expires, while a su
     expiresAt: '2026-09-30T00:00:00.000Z'
   });
   superseded.graph.addFact({
-    id: 'replacement-after-narrowing', project: 'ds-p1-005', key: 'superseded-boundary', value: false,
+    project: 'ds-p1-005', key: 'superseded-boundary', value: false,
     validFrom: '2026-08-28T00:00:00.000Z', observedAt: '2026-08-28T00:00:00.000Z',
     recordedAt: '2026-08-28T00:00:00.000Z'
   });
@@ -323,20 +323,20 @@ test('DS-P1-005 seventh review: JS, CLI, HTTP, and MCP maintain expire validTo-o
   const boundary = '2030-01-01T00:00:00.000Z';
 
   const js = createShadowGraph({ now: () => '2029-01-01T00:00:00.000Z' });
-  const jsFact = js.addFact({ id: 'js-valid-to-only', project: 'ds-p1-005', key: 'js-valid-to-only', value: true, validTo: boundary });
+  const jsFact = js.addFact({ project: 'ds-p1-005', key: 'js-valid-to-only', value: true, validTo: boundary });
   js.maintain({ project: 'ds-p1-005', now: boundary });
   assert.equal(factById(js, jsFact.id).status, 'expired');
 
   const cliFile = join(directory, 'cli.json');
-  await seedUnsignedValidTo(cliFile, 'cli-valid-to-only', boundary);
+  const cliId = await seedUnsignedValidTo(cliFile, 'cli-valid-to-only', boundary);
   const cli = await exec(process.execPath, ['src/cli.js', 'maintain', JSON.stringify({ project: 'ds-p1-005', now: boundary })], {
     cwd: process.cwd(), env: { ...process.env, SHADOWGRAPH_FILE: cliFile }
   });
   assert.equal(cli.stderr, '');
-  assert.equal((await loadJson(cliFile)).facts.find((fact) => fact.id === 'cli-valid-to-only').status, 'expired');
+  assert.equal((await loadJson(cliFile)).facts.find((fact) => fact.id === cliId).status, 'expired');
 
   const httpFile = join(directory, 'http.json');
-  await seedUnsignedValidTo(httpFile, 'http-valid-to-only', boundary);
+  const httpId = await seedUnsignedValidTo(httpFile, 'http-valid-to-only', boundary);
   const app = await createShadowGraphServer({ file: httpFile });
   await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve));
   t.after(() => app.server.close());
@@ -344,10 +344,10 @@ test('DS-P1-005 seventh review: JS, CLI, HTTP, and MCP maintain expire validTo-o
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'ds-p1-005', now: boundary })
   });
   assert.equal(response.status, 200);
-  assert.equal((await loadJson(httpFile)).facts.find((fact) => fact.id === 'http-valid-to-only').status, 'expired');
+  assert.equal((await loadJson(httpFile)).facts.find((fact) => fact.id === httpId).status, 'expired');
 
   const mcpFile = join(directory, 'mcp.json');
-  await seedUnsignedValidTo(mcpFile, 'mcp-valid-to-only', boundary);
+  const mcpId = await seedUnsignedValidTo(mcpFile, 'mcp-valid-to-only', boundary);
   const rpc = startMcp(mcpFile);
   t.after(async () => { await rpc.stop(); });
   await rpc.call({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
@@ -358,7 +358,7 @@ test('DS-P1-005 seventh review: JS, CLI, HTTP, and MCP maintain expire validTo-o
   assert.equal(maintained.error, undefined, maintained.error?.message);
   assert.notEqual(maintained.result?.isError, true);
   await rpc.stop();
-  assert.equal((await loadJson(mcpFile)).facts.find((fact) => fact.id === 'mcp-valid-to-only').status, 'expired');
+  assert.equal((await loadJson(mcpFile)).facts.find((fact) => fact.id === mcpId).status, 'expired');
 });
 
 test('DS-P1-005 seventh review: persisted lifecycle contradictions and validity extensions fail atomically', async (t) => {

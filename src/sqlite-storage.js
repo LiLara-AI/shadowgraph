@@ -290,6 +290,30 @@ export async function createSqliteStore(filePath, options = {}) {
   });
 
   return {
+    async validate() {
+      if (restoring) throw new Error('SQLite restore is in progress');
+      if (permanentlyClosed) throw new Error('SQLite storage is closed');
+      return fence.run(async () => {
+        if (restoring) throw new Error('SQLite restore is in progress');
+        if (permanentlyClosed) throw new Error('SQLite storage is closed');
+        let database;
+        try {
+          // Diagnose carrier collisions without materializing schema or reading
+          // payloads. Only the finite native/control key set can be reported.
+          database = openDatabase(filePath, { readOnly: true });
+          const hasCarrier = database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'shadowgraph_extra'").get();
+          const issues = hasCarrier
+            ? database.prepare('SELECT collection FROM shadowgraph_extra ORDER BY collection').all()
+              .filter(({ collection }) => !isExtraCollectionKey(collection))
+              .map(({ collection }) => ({ code: 'sqlite_extra_reserved_key', collection }))
+            : [];
+          return { valid: issues.length === 0, issues };
+        } finally {
+          closeChecked(database, 'validate');
+        }
+      });
+    },
+
     async load() {
       if (restoring) throw new Error('SQLite restore is in progress');
       if (permanentlyClosed) throw new Error('SQLite storage is closed');

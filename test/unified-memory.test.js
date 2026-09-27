@@ -1,3 +1,11 @@
+import { historicalIds } from '../tools/historical-ids.js';
+const fixtureIds = {};
+// Capture already-created results; creation inputs never pass through this helper.
+function captureId(label, result, alternatives = []) {
+  fixtureIds[label] = (result.memory ?? result).id;
+  alternatives.forEach((name, index) => { fixtureIds[name] = result.alternatives[index].id; });
+  return result;
+}
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createShadowGraph, rebuildProjection } from '../src/shadowgraph.js';
@@ -165,14 +173,14 @@ test('recall fuses lexical, semantic, graph, and temporal signals while declarin
 
 test('facts and relations preserve bi-temporal history for point-in-time recall', () => {
   const graph = createShadowGraph({ now: () => '2026-09-02T12:00:00.000Z' });
-  const oldFact = graph.addFact({
-    id: 'fact-old', project: 'deploy', key: 'deployment-mode', value: 'single-user',
+  const oldFact = captureId('fact-old', graph.addFact({
+    project: 'deploy', key: 'deployment-mode', value: 'single-user',
     validFrom: '2026-08-01T00:00:00.000Z', observedAt: '2026-08-02T00:00:00.000Z'
-  });
-  const newFact = graph.addFact({
-    id: 'fact-new', project: 'deploy', key: 'deployment-mode', value: 'multi-user',
+  }));
+  const newFact = captureId('fact-new', graph.addFact({
+    project: 'deploy', key: 'deployment-mode', value: 'multi-user',
     validFrom: '2026-09-01T00:00:00.000Z', observedAt: '2026-09-02T00:00:00.000Z'
-  });
+  }));
   const storedOld = privilegedSnapshot(graph).facts.find((fact) => fact.id === oldFact.id);
   assert.equal(storedOld.status, 'superseded');
   assert.equal(storedOld.temporal.validTo, '2026-09-01T00:00:00.000Z');
@@ -580,27 +588,27 @@ test('all runtime entity writes require a non-empty string project', () => {
 test('runtime writes reject non-JSON values before mutating canonical state', () => {
   const graph = createShadowGraph({ now: () => '2026-04-01T00:00:00.000Z' });
   const before = privilegedSnapshot(graph);
-  assert.throws(() => graph.addFact({ id: 'bigint-fact', project: 'app', key: 'bad', value: 1n }), /serialize a BigInt/);
+  assert.throws(() => captureId('bigint-fact', graph.addFact({ project: 'app', key: 'bad', value: 1n })), /serialize a BigInt/);
   assert.deepEqual(privilegedSnapshot(graph), before);
 
-  assert.throws(() => graph.addFact({ id: 'nan-fact', project: 'app', key: 'bad', value: Number.NaN }), /Non-finite numbers are not JSON-serializable/);
+  assert.throws(() => captureId('nan-fact', graph.addFact({ project: 'app', key: 'bad', value: Number.NaN })), /Non-finite numbers are not JSON-serializable/);
   assert.deepEqual(privilegedSnapshot(graph), before);
-  assert.throws(() => graph.addFact({ id: 'infinite-fact', project: 'app', key: 'bad', value: Number.POSITIVE_INFINITY }), /Non-finite numbers are not JSON-serializable/);
+  assert.throws(() => captureId('infinite-fact', graph.addFact({ project: 'app', key: 'bad', value: Number.POSITIVE_INFINITY })), /Non-finite numbers are not JSON-serializable/);
   assert.deepEqual(privilegedSnapshot(graph), before);
-  assert.throws(() => graph.addFact({
-    id: 'lossy-fact', project: 'app', key: 'bad',
+  assert.throws(() => captureId('lossy-fact', graph.addFact({
+    project: 'app', key: 'bad',
     value: { missing: undefined, when: new Date('2026-01-01T00:00:00.000Z'), map: new Map([['x', 1]]) }
-  }), /plain JSON data/);
+  })), /plain JSON data/);
   assert.deepEqual(privilegedSnapshot(graph), before);
 
   const cyclic = {};
   cyclic.self = cyclic;
-  assert.throws(() => graph.addFact({ id: 'cyclic-fact', project: 'app', key: 'bad', value: cyclic }), /circular structure/i);
+  assert.throws(() => captureId('cyclic-fact', graph.addFact({ project: 'app', key: 'bad', value: cyclic })), /circular structure/i);
   assert.deepEqual(privilegedSnapshot(graph), before);
 
-  assert.throws(() => graph.addDecision({
-    id: 'bigint-decision', project: 'app', title: 'Bad', chosen: 'A', failedAttempts: [{ payload: 1n }]
-  }), /serialize a BigInt/);
+  assert.throws(() => captureId('bigint-decision', graph.addDecision({
+    project: 'app', title: 'Bad', chosen: 'A', failedAttempts: [{ payload: 1n }]
+  })), /serialize a BigInt/);
   assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
@@ -624,26 +632,26 @@ test('empty project identifiers never become cross-project read wildcards', () =
 
 test('caller-owned memory ids cannot overwrite an existing graph entity', () => {
   const graph = createShadowGraph({ now: () => '2026-04-01T00:00:00.000Z' });
-  const decision = graph.addDecision({ id: 'shared-id', project: 'app', title: 'Keep this decision', chosen: 'A' });
+  const decision = captureId('shared-id', graph.addDecision({ project: 'app', title: 'Keep this decision', chosen: 'A' }));
   const before = privilegedSnapshot(graph);
 
   assert.throws(() => graph.remember({
     id: decision.id, project: 'app', memoryType: 'note', key: 'collision', text: 'Must not overwrite'
-  }), /Entity id already exists/);
+  }), { code: 'creation_id_not_allowed' });
   assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
-test('memory plan reserves caller-owned ids before applying any operation', () => {
+test('memory plan rejects caller-owned ids before applying any operation', () => {
   const graph = createShadowGraph({ now: () => '2026-04-01T00:00:00.000Z' });
-  graph.addDecision({ id: 'reserved-id', project: 'app', title: 'Existing', chosen: 'A' });
+  captureId('reserved-id', graph.addDecision({ project: 'app', title: 'Existing', chosen: 'A' }));
   const before = privilegedSnapshot(graph);
   assert.throws(() => graph.applyMemoryPlan({
     project: 'app',
     operations: [
-      { action: 'ADD', id: 'new-id', memoryType: 'note', key: 'first', text: 'Must not land' },
-      { action: 'ADD', id: 'reserved-id', memoryType: 'note', key: 'second', text: 'Collision' }
+      { action: 'ADD', memoryType: 'note', key: 'first', text: 'Must not land' },
+      { action: 'ADD', id: fixtureIds['reserved-id'], memoryType: 'note', key: 'second', text: 'Collision' }
     ]
-  }), /Entity id already exists/);
+  }), { code: 'creation_id_not_allowed' });
   assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
@@ -726,7 +734,7 @@ test('malformed persisted memory envelopes are rejected atomically', () => {
 
 test('schema 4 restore rejects orphaned review signals', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addDecision({ id: 'kept-decision', project: 'A', title: 'Keep', chosen: 'A' });
+  captureId('kept-decision', graph.addDecision({ project: 'A', title: 'Keep', chosen: 'A' }));
   const before = privilegedSnapshot(graph);
   const payload = {
     ...before,
@@ -738,13 +746,13 @@ test('schema 4 restore rejects orphaned review signals', () => {
 
 test('schema 4 restore rejects duplicate review signal ids', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addDecision({ id: 'kept-decision', project: 'A', title: 'Keep', chosen: 'A' });
+  captureId('kept-decision', graph.addDecision({ project: 'A', title: 'Keep', chosen: 'A' }));
   const before = privilegedSnapshot(graph);
   const payload = {
     ...before,
     reviewSignals: [
-      { id: 'same-review-id', kind: 'review', decisionId: 'kept-decision', reason: 'one', status: 'open' },
-      { id: 'same-review-id', kind: 'review', decisionId: 'kept-decision', reason: 'two', status: 'open' }
+      { id: 'same-review-id', kind: 'review', decisionId: fixtureIds['kept-decision'], reason: 'one', status: 'open' },
+      { id: 'same-review-id', kind: 'review', decisionId: fixtureIds['kept-decision'], reason: 'two', status: 'open' }
     ]
   };
   assert.throws(() => graph.replaceData(payload), /Duplicate review signal id/);
@@ -753,13 +761,13 @@ test('schema 4 restore rejects duplicate review signal ids', () => {
 
 test('schema 4 restore rejects duplicate review signal identities', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addDecision({ id: 'reviewed-decision', project: 'A', title: 'Keep', chosen: 'A' });
+  captureId('reviewed-decision', graph.addDecision({ project: 'A', title: 'Keep', chosen: 'A' }));
   const before = privilegedSnapshot(graph);
   const payload = {
     ...before,
     reviewSignals: [
-      { id: 'review-one', kind: 'review', decisionId: 'reviewed-decision', reason: 'same', status: 'open' },
-      { id: 'review-two', kind: 'review', decisionId: 'reviewed-decision', reason: 'same', status: 'acknowledged' }
+      { id: 'review-one', kind: 'review', decisionId: fixtureIds['reviewed-decision'], reason: 'same', status: 'open' },
+      { id: 'review-two', kind: 'review', decisionId: fixtureIds['reviewed-decision'], reason: 'same', status: 'acknowledged' }
     ]
   };
   assert.throws(() => graph.replaceData(payload), /Duplicate review signal identity/);
@@ -768,8 +776,10 @@ test('schema 4 restore rejects duplicate review signal identities', () => {
 
 test('review signal identity cannot collide across delimiter-bearing values', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addDecision({ id: 'x:y', project: 'app', title: 'First', chosen: 'A', alternatives: [{ label: 'B', reopenWhen: ['z'] }] });
-  graph.addDecision({ id: 'x', project: 'app', title: 'Second', chosen: 'A', alternatives: [{ label: 'B', reopenWhen: ['y:z'] }] });
+  captureId('x:y', graph.addDecision({ project: 'app', title: 'First', chosen: 'A', alternatives: [{ label: 'B', reopenWhen: ['z'] }] }));
+  captureId('x', graph.addDecision({ project: 'app', title: 'Second', chosen: 'A', alternatives: [{ label: 'B', reopenWhen: ['y:z'] }] }));
+  // These pre-policy stored identities deliberately exercise delimiter collisions.
+  graph.replaceData(historicalIds(privilegedSnapshot(graph), { 'x:y': fixtureIds['x:y'], x: fixtureIds['x'] }));
 
   const due = graph.review({ project: 'app', changedFacts: ['z', 'y:z'] }).items;
   assert.equal(due.length, 2);
@@ -779,7 +789,7 @@ test('review signal identity cannot collide across delimiter-bearing values', ()
 
 test('schema 4 restore rejects duplicate compatibility event ids', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addDecision({ id: 'kept-decision', project: 'A', title: 'Keep', chosen: 'A' });
+  captureId('kept-decision', graph.addDecision({ project: 'A', title: 'Keep', chosen: 'A' }));
   const before = privilegedSnapshot(graph);
   const duplicate = structuredClone(before.events[0]);
   const payload = { ...before, events: [before.events[0], duplicate] };
@@ -790,8 +800,8 @@ test('schema 4 restore rejects duplicate compatibility event ids', () => {
 test('all supported schemas reject duplicate idempotency keys', () => {
   for (const schemaVersion of [1, 2, 3, 4]) {
     const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-    const first = graph.addDecision({ id: `idem-first-${schemaVersion}`, project: 'app', title: 'First', chosen: 'A' });
-    const second = graph.addDecision({ id: `idem-second-${schemaVersion}`, project: 'app', title: 'Second', chosen: 'B' });
+    const first = captureId(`idem-first-${schemaVersion}`, graph.addDecision({ project: 'app', title: 'First', chosen: 'A' }));
+    const second = captureId(`idem-second-${schemaVersion}`, graph.addDecision({ project: 'app', title: 'Second', chosen: 'B' }));
     const before = privilegedSnapshot(graph);
     const payload = {
       ...before,
@@ -809,8 +819,8 @@ test('all supported schemas reject duplicate idempotency keys', () => {
 test('legacy idempotency keys cannot collide after canonicalization', () => {
   for (const schemaVersion of [1, 2, 3]) {
     const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-    const first = graph.addDecision({ id: `legacy-idem-first-${schemaVersion}`, project: 'app', title: 'First', chosen: 'A' });
-    const second = graph.addDecision({ id: `legacy-idem-second-${schemaVersion}`, project: 'app', title: 'Second', chosen: 'B' });
+    const first = captureId(`legacy-idem-first-${schemaVersion}`, graph.addDecision({ project: 'app', title: 'First', chosen: 'A' }));
+    const second = captureId(`legacy-idem-second-${schemaVersion}`, graph.addDecision({ project: 'app', title: 'Second', chosen: 'B' }));
     const before = privilegedSnapshot(graph);
     const payload = {
       ...before,
@@ -827,7 +837,7 @@ test('legacy idempotency keys cannot collide after canonicalization', () => {
 
 test('schema 4 restore rejects idempotency entries for missing entities', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addDecision({ id: 'kept-decision', project: 'A', title: 'Keep', chosen: 'A' });
+  captureId('kept-decision', graph.addDecision({ project: 'A', title: 'Keep', chosen: 'A' }));
   const before = privilegedSnapshot(graph);
   const payload = {
     ...before,
@@ -843,10 +853,10 @@ test('schema 4 restore rejects idempotency entries for missing entities', () => 
 
 test('schema 4 restore rejects memory idempotency keys for a different scope', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  const memory = graph.remember({
-    id: 'alice-memory', project: 'app', scope: { userId: 'alice' },
+  const memory = captureId('alice-memory', graph.remember({
+    project: 'app', scope: { userId: 'alice' },
     memoryType: 'note', key: 'k', text: 'Alice secret'
-  }).memory;
+  })).memory;
   const before = privilegedSnapshot(graph);
   const payload = {
     ...before,
@@ -903,23 +913,23 @@ test('persisted entity ids must be unique within the records collection', () => 
 
 test('schema 4 entity ids are globally unique so JSON and SQLite accept the same graph', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addFact({ id: 'shared-id', project: 'app', key: 'mode', value: 'safe' });
+  captureId('shared-id', graph.addFact({ project: 'app', key: 'mode', value: 'safe' }));
   const before = privilegedSnapshot(graph);
   assert.throws(() => graph.remember({
-    id: 'shared-id', project: 'app', memoryType: 'note', key: 'collision', text: 'Must not land'
-  }), /Entity id already exists/);
+    id: fixtureIds['shared-id'], project: 'app', memoryType: 'note', key: 'collision', text: 'Must not land'
+  }), { code: 'creation_id_not_allowed' });
   assert.deepEqual(privilegedSnapshot(graph), before);
 
   const reverse = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  reverse.remember({ id: 'record-id', project: 'app', memoryType: 'note', key: 'record', text: 'Record' });
+  captureId('record-id', reverse.remember({ project: 'app', memoryType: 'note', key: 'record', text: 'Record' }));
   const reverseBefore = privilegedSnapshot(reverse);
-  assert.throws(() => reverse.addFact({ id: 'record-id', project: 'app', key: 'fact', value: true }), /Entity id already exists/);
+  assert.throws(() => reverse.addFact({ id: fixtureIds['record-id'], project: 'app', key: 'fact', value: true }), { code: 'creation_id_not_allowed' });
   assert.deepEqual(privilegedSnapshot(reverse), reverseBefore);
 
-  reverse.addDecision({ id: 'from-id', project: 'app', title: 'From', chosen: 'A' });
-  reverse.addDecision({ id: 'to-id', project: 'app', title: 'To', chosen: 'B' });
+  captureId('from-id', reverse.addDecision({ project: 'app', title: 'From', chosen: 'A' }));
+  captureId('to-id', reverse.addDecision({ project: 'app', title: 'To', chosen: 'B' }));
   const beforeRelation = privilegedSnapshot(reverse);
-  assert.throws(() => reverse.link({ id: 'record-id', project: 'app', from: 'from-id', to: 'to-id', relation: 'supports' }), /Entity id already exists/);
+  assert.throws(() => reverse.link({ id: fixtureIds['record-id'], project: 'app', from: fixtureIds['from-id'], to: fixtureIds['to-id'], relation: 'supports' }), { code: 'creation_id_not_allowed' });
   assert.deepEqual(privilegedSnapshot(reverse), beforeRelation);
 
   const memory = {
@@ -934,20 +944,20 @@ test('schema 4 entity ids are globally unique so JSON and SQLite accept the same
 
 test('alternative ids share the schema 4 entity namespace and cannot target another project', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.remember({ id: 'shared-alternative-id', project: 'project-b', memoryType: 'note', key: 'protected', text: 'Protected' });
+  captureId('shared-alternative-id', graph.remember({ project: 'project-b', memoryType: 'note', key: 'protected', text: 'Protected' }));
   const before = privilegedSnapshot(graph);
   assert.throws(() => graph.addDecision({
     id: 'decision-a', project: 'project-a', title: 'Decision A', chosen: 'A',
-    alternatives: [{ id: 'shared-alternative-id', label: 'B', reasonRejected: 'No' }]
-  }), /Entity id already exists/);
+    alternatives: [{ id: fixtureIds['shared-alternative-id'], label: 'B', reasonRejected: 'No' }]
+  }), { code: 'creation_id_not_allowed' });
   assert.deepEqual(privilegedSnapshot(graph), before);
 
   const source = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  const importedMemory = source.remember({ id: 'import-shared-id', project: 'project-b', memoryType: 'note', key: 'protected', text: 'Protected' }).memory;
-  const importedDecision = source.addDecision({
-    id: 'import-decision', project: 'project-a', title: 'Decision A', chosen: 'A',
-    alternatives: [{ id: 'initial-alternative-id', label: 'B', reasonRejected: 'No' }]
-  });
+  const importedMemory = captureId('import-shared-id', source.remember({ project: 'project-b', memoryType: 'note', key: 'protected', text: 'Protected' })).memory;
+  const importedDecision = captureId('import-decision', source.addDecision({
+    project: 'project-a', title: 'Decision A', chosen: 'A',
+    alternatives: [{ label: 'B', reasonRejected: 'No' }]
+  }), ['initial-alternative-id']);
   const payload = privilegedSnapshot(source);
   payload.records.find((record) => record.id === importedDecision.id).alternatives[0].id = importedMemory.id;
   assert.throws(() => graph.replaceData(payload), /Duplicate entity id/);
@@ -956,33 +966,33 @@ test('alternative ids share the schema 4 entity namespace and cannot target anot
 
 test('direct link refuses missing endpoints before journaling or persistence', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addDecision({ id: 'present', project: 'app', title: 'Present', chosen: 'A' });
+  captureId('present', graph.addDecision({ project: 'app', title: 'Present', chosen: 'A' }));
   const before = privilegedSnapshot(graph);
-  assert.throws(() => graph.link({ project: 'app', from: 'present', to: 'missing', relation: 'supports' }), /Relation endpoints must exist/);
+  assert.throws(() => graph.link({ project: 'app', from: fixtureIds['present'], to: 'missing', relation: 'supports' }), /Relation endpoints must exist/);
   assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('journal rebuild preserves relations whose endpoint is a nested alternative', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  const decision = graph.addDecision({
-    id: 'decision-with-alt', project: 'app', title: 'Choose', chosen: 'A',
-    alternatives: [{ id: 'alternative-b', label: 'B', reasonRejected: 'No' }]
-  });
-  graph.link({ id: 'alt-link', project: 'app', from: decision.id, to: 'alternative-b', relation: 'rejects' });
+  const decision = captureId('decision-with-alt', graph.addDecision({
+    project: 'app', title: 'Choose', chosen: 'A',
+    alternatives: [{ label: 'B', reasonRejected: 'No' }]
+  }), ['alternative-b']);
+  captureId('alt-link', graph.link({ project: 'app', from: decision.id, to: fixtureIds['alternative-b'], relation: 'rejects' }));
   const rebuilt = privilegedRebuild(graph);
   assert.equal(rebuilt.rebuildable, true);
-  assert.equal(rebuilt.projection.relations.some((relation) => relation.id === 'alt-link'), true);
+  assert.equal(rebuilt.projection.relations.some((relation) => relation.id === fixtureIds['alt-link']), true);
 });
 
 test('schema 4 merge cannot remove an alternative used by a live relation', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addDecision({
-    id: 'decision-with-used-alt', project: 'app', title: 'Choose', chosen: 'A',
-    alternatives: [{ id: 'used-alternative', label: 'B', reasonRejected: 'No' }]
-  });
-  graph.link({ id: 'used-alt-link', project: 'app', from: 'decision-with-used-alt', to: 'used-alternative', relation: 'rejects' });
+  captureId('decision-with-used-alt', graph.addDecision({
+    project: 'app', title: 'Choose', chosen: 'A',
+    alternatives: [{ label: 'B', reasonRejected: 'No' }]
+  }), ['used-alternative']);
+  captureId('used-alt-link', graph.link({ project: 'app', from: fixtureIds['decision-with-used-alt'], to: fixtureIds['used-alternative'], relation: 'rejects' }));
   const before = privilegedSnapshot(graph);
-  const changed = { ...before.records.find((record) => record.id === 'decision-with-used-alt'), alternatives: [] };
+  const changed = { ...before.records.find((record) => record.id === fixtureIds['decision-with-used-alt']), alternatives: [] };
   assert.throws(() => graph.importData({ schemaVersion: 4, records: [changed] }), /Relation endpoints must exist after import/);
   assert.deepEqual(privilegedSnapshot(graph), before);
 });
@@ -1078,7 +1088,7 @@ test('schema 4 restore rejects malformed fact and relation temporal fields atomi
 
 test('schema 4 import rejects malformed projects and alternative ids before merge', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addDecision({ id: 'keep', project: 'safe', title: 'Keep', chosen: 'A' });
+  captureId('keep', graph.addDecision({ project: 'safe', title: 'Keep', chosen: 'A' }));
   const before = privilegedSnapshot(graph);
   const decision = {
     id: 'bad-decision', kind: 'decision', schemaVersion: 4, project: { tenant: 'bad' },
@@ -1104,23 +1114,23 @@ test('schema 4 import rejects malformed projects and alternative ids before merg
 
 test('schema 4 merge import rejects cross-collection ids already present in live state', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addDecision({ id: 'live-id', project: 'safe', title: 'Live', chosen: 'A' });
+  captureId('live-id', graph.addDecision({ project: 'safe', title: 'Live', chosen: 'A' }));
   const before = privilegedSnapshot(graph);
   assert.throws(() => graph.importData({
     schemaVersion: 4,
-    facts: [{ id: 'live-id', kind: 'fact', schemaVersion: 4, project: 'safe', key: 'collision', value: true }]
+    facts: [{ id: fixtureIds['live-id'], kind: 'fact', schemaVersion: 4, project: 'safe', key: 'collision', value: true }]
   }), /Entity id already exists/);
   assert.deepEqual(privilegedSnapshot(graph), before);
 
   const collidingMemory = {
-    id: 'live-id', kind: 'memory', schemaVersion: 4, project: 'safe',
+    id: fixtureIds['live-id'], kind: 'memory', schemaVersion: 4, project: 'safe',
     scope: { userId: null, agentId: null, runId: null }, memoryType: 'note', key: 'collision', text: 'Collision', version: 1, status: 'active'
   };
-  assert.throws(() => graph.importData({ schemaVersion: 4, records: [collidingMemory] }), /Existing entity id live-id cannot change kind or project/);
+  assert.throws(() => graph.importData({ schemaVersion: 4, records: [collidingMemory] }), { message: `Existing entity id ${fixtureIds['live-id']} cannot change kind or project` });
   assert.deepEqual(privilegedSnapshot(graph), before);
 
-  const movedDecision = { ...before.records.find((record) => record.id === 'live-id'), project: 'other', title: 'Moved' };
-  assert.throws(() => graph.importData({ schemaVersion: 4, records: [movedDecision] }), /Existing entity id live-id cannot change kind or project/);
+  const movedDecision = { ...before.records.find((record) => record.id === fixtureIds['live-id']), project: 'other', title: 'Moved' };
+  assert.throws(() => graph.importData({ schemaVersion: 4, records: [movedDecision] }), { message: `Existing entity id ${fixtureIds['live-id']} cannot change kind or project` });
   assert.deepEqual(privilegedSnapshot(graph), before);
 
   const existingEntry = before.journal[0];
@@ -1130,22 +1140,22 @@ test('schema 4 merge import rejects cross-collection ids already present in live
 
 test('schema 4 merge import cannot change an existing memory identity', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.remember({
-    id: 'immutable-memory', project: 'app', scope: { userId: 'alice' },
+  captureId('immutable-memory', graph.remember({
+    project: 'app', scope: { userId: 'alice' },
     memoryType: 'profile', key: 'email', text: 'Alice secret'
-  });
+  }));
   const before = privilegedSnapshot(graph);
   const changed = {
-    ...before.records.find((record) => record.id === 'immutable-memory'),
+    ...before.records.find((record) => record.id === fixtureIds['immutable-memory']),
     scope: { userId: 'bob', agentId: null, runId: null }
   };
-  assert.throws(() => graph.importData({ schemaVersion: 4, records: [changed] }), /Existing memory id immutable-memory cannot change scope, type, or key/);
+  assert.throws(() => graph.importData({ schemaVersion: 4, records: [changed] }), { message: `Existing memory id ${fixtureIds['immutable-memory']} cannot change scope, type, or key` });
   assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('schema 4 merge import rejects dangling relations before mutation', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addDecision({ id: 'present-import-node', project: 'safe', title: 'Present', chosen: 'A' });
+  captureId('present-import-node', graph.addDecision({ project: 'safe', title: 'Present', chosen: 'A' }));
   const before = privilegedSnapshot(graph);
   assert.throws(() => graph.importData({
     schemaVersion: 4,
@@ -1156,19 +1166,19 @@ test('schema 4 merge import rejects dangling relations before mutation', () => {
 
 test('large schema 4 journal import avoids call-stack failure and partial mutation', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addDecision({ id: 'keep-large-import', project: 'safe', title: 'Keep', chosen: 'A' });
+  captureId('keep-large-import', graph.addDecision({ project: 'safe', title: 'Keep', chosen: 'A' }));
   const journal = Array.from({ length: 150000 }, (_, index) => ({
     id: `large-journal-${index}`, seq: index + 2, type: 'legacy_metadata_event',
     schemaVersion: 4, project: null, entityKind: null, entityId: null, payload: null
   }));
   assert.doesNotThrow(() => graph.importData({ schemaVersion: 4, journal, journalSeq: journal.length + 1, journalEpoch: 1 }));
   assert.equal(privilegedSnapshot(graph).journal.length, journal.length + 1);
-  assert.equal(privilegedSnapshot(graph).records.some((record) => record.id === 'keep-large-import'), true);
+  assert.equal(privilegedSnapshot(graph).records.some((record) => record.id === fixtureIds['keep-large-import']), true);
 });
 
 test('schema 4 direct import rejects duplicate incoming journal sequences atomically', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addDecision({ id: 'keep-sequence', project: 'safe', title: 'Keep', chosen: 'A' });
+  captureId('keep-sequence', graph.addDecision({ project: 'safe', title: 'Keep', chosen: 'A' }));
   const before = privilegedSnapshot(graph);
   const entry = {
     type: 'legacy_metadata_event', schemaVersion: 4, seq: 2,
@@ -1195,15 +1205,15 @@ test('schema 4 direct import rejects duplicate incoming journal sequences atomic
 
 test('merge import rebuilds the current-memory index instead of retaining overwritten private payloads', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.remember({
-    id: 'same-memory-id', project: 'app', scope: { userId: 'alice' },
+  captureId('same-memory-id', graph.remember({
+    project: 'app', scope: { userId: 'alice' },
     memoryType: 'profile', key: 'email', text: 'old-secret@example.test',
     validFrom: '2026-01-01T00:00:00.000Z'
-  });
+  }));
   graph.importData({
     schemaVersion: 4,
     records: [{
-      id: 'same-memory-id', kind: 'memory', schemaVersion: 4, project: 'app',
+      id: fixtureIds['same-memory-id'], kind: 'memory', schemaVersion: 4, project: 'app',
       scope: { userId: 'alice', agentId: null, runId: null }, memoryType: 'profile',
       key: 'email', text: 'invalidated placeholder', version: 1, status: 'invalidated',
       metadata: {}, tags: [], embedding: null,
@@ -1298,7 +1308,7 @@ test('semantic recall requires embedding model compatibility, not dimension alon
 test('journal-bearing schema 3 snapshots remain restorable after schema 4 migration', () => {
   const now = () => '2026-03-01T00:00:00.000Z';
   const legacy = createShadowGraph({ now });
-  legacy.addDecision({ id: 'legacy-decision', project: 'app', title: 'Legacy', chosen: 'A' });
+  captureId('legacy-decision', legacy.addDecision({ project: 'app', title: 'Legacy', chosen: 'A' }));
   const payload = privilegedSnapshot(legacy);
   payload.schemaVersion = 3;
   payload.records = payload.records.map((record) => ({ ...record, schemaVersion: 3 }));
@@ -1314,8 +1324,8 @@ test('journal-bearing schema 3 snapshots remain restorable after schema 4 migrat
 test('an unrelated empty hard-purge marker cannot excuse arbitrary journal gaps', () => {
   const now = () => '2026-03-01T00:00:00.000Z';
   const graph = createShadowGraph({ now });
-  const kept = graph.addDecision({ id: 'kept', project: 'kept', title: 'Kept', chosen: 'A' });
-  const removed = graph.addDecision({ id: 'removed', project: 'removed', title: 'Removed', chosen: 'B' });
+  const kept = captureId('kept', graph.addDecision({ project: 'kept', title: 'Kept', chosen: 'A' }));
+  const removed = captureId('removed', graph.addDecision({ project: 'removed', title: 'Removed', chosen: 'B' }));
   const payload = privilegedSnapshot(graph);
   payload.records = payload.records.filter((record) => record.id !== removed.id);
   payload.journal = payload.journal.filter((entry) => entry.entityId !== removed.id);
@@ -1336,7 +1346,7 @@ test('an unrelated empty hard-purge marker cannot excuse arbitrary journal gaps'
 test('restore rejects huge hard-purge gaps without expanding every missing sequence', () => {
   const now = () => '2026-03-01T00:00:00.000Z';
   const graph = createShadowGraph({ now });
-  graph.addDecision({ id: 'gap-kept', project: 'kept', title: 'Kept', chosen: 'A' });
+  captureId('gap-kept', graph.addDecision({ project: 'kept', title: 'Kept', chosen: 'A' }));
   const payload = privilegedSnapshot(graph);
   payload.journal.push({
     id: 'huge-gap-marker', seq: 100002, type: 'project.purged', schemaVersion: 5,
@@ -1354,7 +1364,7 @@ test('restore rejects huge hard-purge gaps without expanding every missing seque
 test('restore rejects journal identity mismatches and duplicate journal ids', () => {
   const now = () => '2026-03-01T00:00:00.000Z';
   const graph = createShadowGraph({ now });
-  graph.addDecision({ id: 'journal-record', project: 'app', title: 'Journal', chosen: 'A' });
+  captureId('journal-record', graph.addDecision({ project: 'app', title: 'Journal', chosen: 'A' }));
   const mismatched = privilegedSnapshot(graph);
   mismatched.journal[0].entityId = 'different-entity';
   assert.throws(() => validateRestorePayload(mismatched, { now }), /journal.*entityId.*payload\.id/i);
@@ -1416,12 +1426,12 @@ test('direct journal rebuild rejects type and entity-kind mismatches', () => {
 
 test('legacy merge import cannot create schema 4 cross-collection id collisions', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addFact({ id: 'legacy-shared-id', project: 'safe', key: 'keep', value: true });
+  captureId('legacy-shared-id', graph.addFact({ project: 'safe', key: 'keep', value: true }));
   const before = privilegedSnapshot(graph);
   assert.throws(() => graph.importData({
     schemaVersion: 3,
     records: [{
-      id: 'legacy-shared-id', kind: 'memory', project: 'safe',
+      id: fixtureIds['legacy-shared-id'], kind: 'memory', project: 'safe',
       scope: { userId: null, agentId: null, runId: null }, memoryType: 'note', key: 'collision', text: 'Must not land', status: 'active', version: 1
     }]
   }), /Entity id already exists|Duplicate entity id/);
@@ -1431,15 +1441,15 @@ test('legacy merge import cannot create schema 4 cross-collection id collisions'
 test('legacy collision migration remaps dependent journal and idempotency identities', () => {
   const now = () => '2026-03-01T00:00:00.000Z';
   const source = createShadowGraph({ now });
-  source.addDecision({ id: 'legacy-shared', project: 'app', title: 'Decision', chosen: 'A' });
-  source.addFact({ id: 'legacy-fact-original', project: 'app', key: 'mode', value: 'safe', idempotencyKey: 'fact-retry' });
+  captureId('legacy-shared', source.addDecision({ project: 'app', title: 'Decision', chosen: 'A' }));
+  captureId('legacy-fact-original', source.addFact({ project: 'app', key: 'mode', value: 'safe', idempotencyKey: 'fact-retry' }));
   const payload = privilegedSnapshot(source);
   payload.schemaVersion = 3;
   payload.records = payload.records.map((record) => ({ ...record, schemaVersion: 3 }));
-  payload.facts = payload.facts.map((fact) => ({ ...fact, id: 'legacy-shared', schemaVersion: 3 }));
-  payload.idempotency = payload.idempotency.map((item) => ({ ...item, value: { ...item.value, id: 'legacy-shared', schemaVersion: 3 } }));
+  payload.facts = payload.facts.map((fact) => ({ ...fact, id: fixtureIds['legacy-shared'], schemaVersion: 3 }));
+  payload.idempotency = payload.idempotency.map((item) => ({ ...item, value: { ...item.value, id: fixtureIds['legacy-shared'], schemaVersion: 3 } }));
   payload.journal = payload.journal.map((entry) => entry.entityKind === 'fact'
-    ? { ...entry, schemaVersion: 3, entityId: 'legacy-shared', payload: { ...entry.payload, id: 'legacy-shared', schemaVersion: 3 } }
+    ? { ...entry, schemaVersion: 3, entityId: fixtureIds['legacy-shared'], payload: { ...entry.payload, id: fixtureIds['legacy-shared'], schemaVersion: 3 } }
     : { ...entry, schemaVersion: 3, payload: entry.payload ? { ...entry.payload, schemaVersion: 3 } : entry.payload });
 
   assert.doesNotThrow(() => validateRestorePayload(payload, { now }));
@@ -1447,7 +1457,7 @@ test('legacy collision migration remaps dependent journal and idempotency identi
   restored.replaceData(payload);
   const exported = privilegedSnapshot(restored);
   const migratedFact = exported.facts[0];
-  assert.notEqual(migratedFact.id, 'legacy-shared');
+  assert.notEqual(migratedFact.id, fixtureIds['legacy-shared']);
   assert.equal(exported.idempotency[0].value.id, migratedFact.id);
   const factJournal = exported.journal.find((entry) => entry.entityKind === 'fact');
   assert.equal(factJournal.entityId, migratedFact.id);
@@ -1458,7 +1468,7 @@ test('hard-purge sequence evidence survives later hard and logical purges of the
   const now = () => '2026-03-01T00:00:00.000Z';
   for (const secondMode of ['hard', 'logical']) {
     const graph = createShadowGraph({ now });
-    graph.addDecision({ id: `gone-${secondMode}`, project: 'gone', title: 'Gone', chosen: 'A' });
+    captureId(`gone-${secondMode}`, graph.addDecision({ project: 'gone', title: 'Gone', chosen: 'A' }));
     graph.purgeProject('gone', { mode: 'hard' });
     graph.purgeProject('gone', { mode: secondMode });
     assert.doesNotThrow(() => validateRestorePayload(privilegedSnapshot(graph), { now }));

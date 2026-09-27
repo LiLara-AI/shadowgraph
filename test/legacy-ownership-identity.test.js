@@ -1,3 +1,4 @@
+import { historicalIds } from '../tools/historical-ids.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
@@ -33,17 +34,18 @@ async function sqliteOrSkip(t) {
 // retry entry naming "default" -- data a schema-5 build accepts on import,
 // and which its own journal now rebuilds the same way (F-26).
 function legacyPayload({ projectlessRetry = false } = {}) {
+  const historical = {};
   const graph = createShadowGraph({ now });
   for (const [project, suffix] of [['default', 'legacy'], ['alpha', 'alpha']]) {
-    graph.addDecision({ project, id: `decision-${suffix}`, title: `Legacy ${project} decision`, chosen: 'x', idempotencyKey: `retry-decision-${suffix}` });
-    graph.addAttempt({ project, id: `attempt-${suffix}`, solution: `Legacy ${project} attempt`, result: 'worked', idempotencyKey: `retry-attempt-${suffix}` });
-    graph.remember({ project, id: `memory-${suffix}`, memoryType: 'note', key: 'same-key', text: `Legacy ${project} memory`, idempotencyKey: `retry-memory-${suffix}` });
-    graph.addFact({ project, id: `fact-${suffix}`, key: 'same-key', value: `legacy ${project}`, idempotencyKey: `retry-fact-${suffix}` });
+    historical[`decision-${suffix}`] = graph.addDecision({ project, title: `Legacy ${project} decision`, chosen: 'x', idempotencyKey: `retry-decision-${suffix}` }).id;
+    historical[`attempt-${suffix}`] = graph.addAttempt({ project, solution: `Legacy ${project} attempt`, result: 'worked', idempotencyKey: `retry-attempt-${suffix}` }).id;
+    historical[`memory-${suffix}`] = graph.remember({ project, memoryType: 'note', key: 'same-key', text: `Legacy ${project} memory`, idempotencyKey: `retry-memory-${suffix}` }).memory.id;
+    historical[`fact-${suffix}`] = graph.addFact({ project, key: 'same-key', value: `legacy ${project}`, idempotencyKey: `retry-fact-${suffix}` }).id;
   }
-  graph.addDecision({ project: 'default', id: 'decision-projectless', title: 'Stored without a project', chosen: 'y', ...(projectlessRetry ? { idempotencyKey: 'retry-projectless' } : {}) });
-  graph.remember({ project: 'default', id: 'memory-projectless', memoryType: 'note', key: 'projectless-key', text: 'Stored without a project' });
-  graph.addFact({ project: 'default', id: 'fact-projectless', key: 'projectless-key', value: 'stored without a project' });
-  const payload = privilegedSnapshot(graph);
+  historical['decision-projectless'] = graph.addDecision({ project: 'default', title: 'Stored without a project', chosen: 'y', ...(projectlessRetry ? { idempotencyKey: 'retry-projectless' } : {}) }).id;
+  historical['memory-projectless'] = graph.remember({ project: 'default', memoryType: 'note', key: 'projectless-key', text: 'Stored without a project' }).memory.id;
+  historical['fact-projectless'] = graph.addFact({ project: 'default', key: 'projectless-key', value: 'stored without a project' }).id;
+  const payload = historicalIds(privilegedSnapshot(graph), historical, { now });
   payload.schemaVersion = 5;
   const strip = (entity) => {
     if (!entity || typeof entity !== 'object') return;

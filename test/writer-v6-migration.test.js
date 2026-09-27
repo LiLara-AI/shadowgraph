@@ -1,3 +1,4 @@
+import { historicalIds } from '../tools/historical-ids.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -132,15 +133,16 @@ test('HTTP and the CLI refuse an ownerless write and accept an origin', async (t
 // "default" bucket (one record whose text names another project, to show no
 // inference), and records stored with no project at all.
 function legacyStore() {
+  const historical = {};
   const graph = createShadowGraph({ now });
-  graph.addDecision({ project: 'alpha', id: 'decision-alpha', title: 'Alpha cache', chosen: 'redis' });
-  graph.addDecision({ project: 'default', id: 'decision-default', title: 'DataPulse ingestion for the datapulse project', chosen: 'kafka' });
-  graph.addAttempt({ project: 'default', id: 'attempt-default', solution: 'retry', result: 'worked' });
-  graph.remember({ project: 'default', id: 'memory-default', memoryType: 'note', key: 'n', text: 'a note' });
-  graph.addFact({ project: 'default', id: 'fact-default', key: 'latency', value: 10 });
-  graph.addDecision({ project: 'alpha', id: 'decision-retry', title: 'Retry', chosen: 'x', idempotencyKey: 'retry' });
-  graph.addAttempt({ project: 'default', id: 'attempt-retry', solution: 'again', result: 'worked', idempotencyKey: 'retry' });
-  const payload = privilegedSnapshot(graph);
+  historical['decision-alpha'] = graph.addDecision({ project: 'alpha', title: 'Alpha cache', chosen: 'redis' }).id;
+  historical['decision-default'] = graph.addDecision({ project: 'default', title: 'DataPulse ingestion for the datapulse project', chosen: 'kafka' }).id;
+  historical['attempt-default'] = graph.addAttempt({ project: 'default', solution: 'retry', result: 'worked' }).id;
+  historical['memory-default'] = graph.remember({ project: 'default', memoryType: 'note', key: 'n', text: 'a note' }).memory.id;
+  historical['fact-default'] = graph.addFact({ project: 'default', key: 'latency', value: 10 }).id;
+  historical['decision-retry'] = graph.addDecision({ project: 'alpha', title: 'Retry', chosen: 'x', idempotencyKey: 'retry' }).id;
+  historical['attempt-retry'] = graph.addAttempt({ project: 'default', solution: 'again', result: 'worked', idempotencyKey: 'retry' }).id;
+  const payload = historicalIds(privilegedSnapshot(graph), historical, { now });
   payload.schemaVersion = 5;
   const strip = (entity) => {
     if (!entity || typeof entity !== 'object') return;
@@ -301,22 +303,22 @@ function currentStore() {
   const graph = createShadowGraph({ now });
   graph.importData(legacyStore());
   graph.migrateAttribution();
-  graph.addDecision({ originId: 'origin_a', id: 'decision-captured', title: 'Captured', chosen: 'x', alternatives: [{ id: 'alt-captured', label: 'y' }] });
-  graph.addAttempt({ originId: 'origin_a', id: 'attempt-captured', solution: 's', result: 'r' });
-  graph.link({ originId: 'origin_a', from: 'decision-captured', to: 'attempt-captured', relation: 'tried' });
-  graph.addDecision({ project: 'beta', originId: 'origin_a', id: 'decision-beta', title: 'Beta', chosen: 'z' });
-  return { graph, payload: { ...privilegedSnapshot(graph), futureCollection: { kept: true } } };
+  const captured = graph.addDecision({ originId: 'origin_a', title: 'Captured', chosen: 'x', alternatives: [{ label: 'y' }] });
+  const attempt = graph.addAttempt({ originId: 'origin_a', solution: 's', result: 'r' });
+  graph.link({ originId: 'origin_a', from: captured.id, to: attempt.id, relation: 'tried' });
+  const beta = graph.addDecision({ project: 'beta', originId: 'origin_a', title: 'Beta', chosen: 'z' });
+  return { graph, captured, attempt, beta, payload: { ...privilegedSnapshot(graph), futureCollection: { kept: true } } };
 }
 
 test('downgradeToSchema5 keeps what schema 5 can hold and names everything it cannot', () => {
-  const { payload } = currentStore();
+  const { payload, captured, attempt, beta } = currentStore();
   const { payload: v5, report } = downgradeToSchema5(payload, { now });
   assert.equal(v5.schemaVersion, 5);
   assert.equal([...v5.records, ...v5.facts].some((entity) => Object.hasOwn(entity, 'attribution') || Object.hasOwn(entity, 'originId') || entity.schemaVersion === 6), false);
-  assert.deepEqual(report.excluded.filter((item) => item.collection === 'records').map((item) => item.id).sort(), ['attempt-captured', 'decision-captured']);
+  assert.deepEqual(report.excluded.filter((item) => item.collection === 'records').map((item) => item.id).sort(), [attempt.id, captured.id].sort());
   assert.ok(report.excluded.some((item) => item.collection === 'relations'));
   assert.deepEqual(report.excludedCollections, ['futureCollection']);
-  assert.ok(report.removedFields.some((item) => item.id === 'decision-beta' && item.fields.includes('originId')));
+  assert.ok(report.removedFields.some((item) => item.id === beta.id && item.fields.includes('originId')));
   assert.equal(report.journal.replacedEntries, payload.journal.length);
   assert.equal(v5.journal.length, 1);
   assert.equal(v5.journal[0].type, 'projection.baseline');
@@ -329,7 +331,7 @@ test('downgradeToSchema5 keeps what schema 5 can hold and names everything it ca
 test('downgrade writes a separate schema-5 file after a verified preservation copy and leaves the store untouched (JSON, CLI)', async (t) => {
   const directory = await scratchDirectory(t, 'shadowgraph-v6-downgrade-json-');
   const file = join(directory, 'data.json');
-  const { payload } = currentStore();
+  const { payload, captured, attempt, beta } = currentStore();
   await writeFile(file, JSON.stringify(payload, null, 2));
   const before = await readFile(file);
   const output = join(directory, 'schema5.json');
@@ -344,7 +346,7 @@ test('downgrade writes a separate schema-5 file after a verified preservation co
   assert.equal(written.outputSha256, sha256(await readFile(output)));
   const v5 = JSON.parse(await readFile(output, 'utf8'));
   assert.equal(v5.schemaVersion, 5);
-  assert.equal(v5.records.some((record) => record.id === 'decision-captured'), false);
+  assert.equal(v5.records.some((record) => record.id === captured.id), false);
   for (const refused of [{ output: file }, { output }]) {
     assert.notEqual(runCli(['downgrade', JSON.stringify({ ...refused, preservationCopy: join(directory, `other-${Math.random()}.json`) })], file).status, 0, `refused ${refused.output}`);
   }

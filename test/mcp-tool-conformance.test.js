@@ -30,12 +30,6 @@ const WIRE_BY_NEGOTIATED = {
   '2025-11-25': { toolKeys: ['name', 'description', 'inputSchema', 'annotations', 'outputSchema'], structured: true }
 };
 const OMITTED_OUTPUT_SCHEMA = [];
-// Tools whose dispatch arm passes only an id, so it carries no write scope and
-// every call is refused before any id is resolved (P1 finding F-30), until
-// their transport is aligned (plan PR-13). Their output schemas cannot be
-// exercised until then; the list is asserted exact, so it cannot grow unseen.
-const AWAITING_TRANSPORT_SCOPE = ['shadowgraph_ack_review', 'shadowgraph_record_outcome', 'shadowgraph_update_status'];
-
 function modernParams(values = {}) {
   return {
     ...values,
@@ -286,15 +280,14 @@ test('every advertised output schema accepts the result its own tool really retu
   assert.equal(Array.isArray(signals.items), true, 'signal history carries an items envelope');
   assert.equal(signals.completeness.scope.requestState, 'project_selected');
   assert.ok(signals.items.length >= 1);
-  const refusals = [
+  const lifecycleWrites = [
     ['shadowgraph_ack_review', { project, id: signals.items[0].id }],
     ['shadowgraph_update_status', { project, decisionId: decisionB.id, status: 'planned' }],
     ['shadowgraph_record_outcome', { project, decisionId: decisionB.id, outcome: { status: 'successful', sourceClass: 'tool_observed', lessons: ['migration first'] } }]
   ];
-  for (const [name, args] of refusals) {
-    const refused = await rpc.call('tools/call', { name, arguments: args });
-    assert.equal(refused.result, undefined, name);
-    assert.deepEqual(refused.error, { code: -32000, message: 'Tool execution failed' }, name);
+  for (const [name, args] of lifecycleWrites) {
+    const result = await callTool(name, args);
+    assert.ok(result, `${name} returns its schema-validated successful result`);
   }
 
   await callTool('shadowgraph_record_attempt', { project, solution: 'rolled out to everyone', result: 'failed during rollout', reason: 'no migration path', environment: 'node 24' });
@@ -357,7 +350,7 @@ test('every advertised output schema accepts the result its own tool really retu
   // exercised here is an unverified promise.
   const advertised = listed.tools.map((tool) => tool.name);
   const missing = advertised.filter((name) => !exercised.has(name));
-  assert.deepEqual(missing.sort(), AWAITING_TRANSPORT_SCOPE, `these advertised tools were never exercised: ${missing.join(', ')}`);
+  assert.deepEqual(missing.sort(), [], `these advertised tools were never exercised: ${missing.join(', ')}`);
 });
 
 test('a legacy tool-execution failure stays a protocol error and carries no structured content', async (t) => {

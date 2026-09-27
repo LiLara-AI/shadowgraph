@@ -175,7 +175,7 @@ test('a batch of notifications alone writes nothing, yet every member still runs
     { jsonrpc: '2.0', method: 'notifications/initialized' },
     {
       jsonrpc: '2.0', method: 'tools/call',
-      params: { name: 'shadowgraph_record_decision', arguments: { id: 'batch-decision', project: 'batching', title: 'Batch member', chosen: 'execute' } }
+      params: { name: 'shadowgraph_record_decision', arguments: { project: 'batching', title: 'Batch member', chosen: 'execute' } }
     }
   ]);
   const search = JSON.stringify({
@@ -188,35 +188,46 @@ test('a batch of notifications alone writes nothing, yet every member still runs
   const hits = JSON.parse((await searched).result.content[0].text);
   assert.equal(rpc.lines.length, before + 1, `unexpected output: ${JSON.stringify(rpc.lines.slice(before))}`);
   assert.equal(hits.items.length, 1, 'the notification member must have executed, and before the line that followed it');
-  assert.equal(hits.items[0].record.id, 'batch-decision');
+  const recorded = hits.items[0].record;
+  assert.equal(typeof recorded.id, 'string');
+  assert.ok(recorded.id);
+  assert.equal(recorded.title, 'Batch member');
+  assert.equal(recorded.chosen, 'execute');
+  const persisted = JSON.parse(await readFile(rpc.file, 'utf8'));
+  assert.deepEqual(persisted.records.find(({ id }) => id === recorded.id), recorded);
 });
 
 test('a message sent in the same chunk as a batch cannot overtake its members', async (t) => {
   const rpc = await startMcp(t);
   await rpc.negotiate(BATCHING_PROTOCOL);
 
-  // The batch records a decision; the line flushed with it moves that decision
-  // on. If the second line were dispatched between the batch members, the status
-  // change would run against a decision that did not exist yet.
+  // The batch records a decision; the line flushed with it reads that decision.
+  // If the second line overtook the batch's write, the search would be empty.
   const batch = JSON.stringify([
     { jsonrpc: '2.0', id: 'noop', method: 'tools/list', params: {} },
     {
       jsonrpc: '2.0', id: 'write', method: 'tools/call',
-      params: { name: 'shadowgraph_record_decision', arguments: { id: 'chunk-decision', project: 'chunking', title: 'Chunked', chosen: 'first' } }
+      params: { name: 'shadowgraph_record_decision', arguments: { project: 'chunking', title: 'Chunked', chosen: 'first' } }
     }
   ]);
   const dependent = JSON.stringify({
     jsonrpc: '2.0', id: 'dependent', method: 'tools/call',
-    params: { name: 'shadowgraph_confidence_evidence', arguments: { project: 'chunking', decisionId: 'chunk-decision', key: 'dependent', reason: 'written after the batch' } }
+    params: { name: 'shadowgraph_search', arguments: { project: 'chunking', query: 'Chunked', kind: 'decision' } }
   });
   const batched = rpc.waitFor((value) => Array.isArray(value), 'the batch response array');
   const followed = rpc.waitFor((value) => !Array.isArray(value) && value.id === 'dependent', 'the dependent call');
   rpc.writeRaw(`${batch}\n${dependent}\n`);
 
-  assert.deepEqual(idsOf(await batched), ['noop', 'write']);
+  const batchResponse = await batched;
+  assert.deepEqual(idsOf(batchResponse), ['noop', 'write']);
+  assert.equal(batchResponse[1].error, undefined, batchResponse[1].error?.message);
+  const recorded = JSON.parse(batchResponse[1].result.content[0].text);
   const response = await followed;
   assert.equal(response.error, undefined, response.error?.message);
-  assert.equal(JSON.parse(response.result.content[0].text).confidence.basis.contributions.some((item) => item.key === 'dependent'), true);
+  const hits = JSON.parse(response.result.content[0].text).items;
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].record.id, recorded.id);
+  assert.equal(hits[0].record.chosen, 'first');
 });
 
 test('an initialize with no id negotiates nothing, because nothing was agreed', async (t) => {
@@ -299,22 +310,29 @@ test('batch members are handled in order even when one of them is asynchronous',
   const rpc = await startMcp(t);
   await rpc.negotiate(BATCHING_PROTOCOL);
 
-  // The second member can only succeed if the first has already been applied.
+  // The second member can only find the record if the asynchronous first
+  // member has already been applied and persisted.
   const batch = await rpc.sendBatch([
     {
       jsonrpc: '2.0', id: 'write', method: 'tools/call',
-      params: { name: 'shadowgraph_record_decision', arguments: { id: 'ordered-decision', project: 'ordering', title: 'Ordered', chosen: 'first' } }
+      params: { name: 'shadowgraph_record_decision', arguments: { project: 'ordering', title: 'Ordered', chosen: 'first' } }
     },
     {
       jsonrpc: '2.0', id: 'depends', method: 'tools/call',
-      params: { name: 'shadowgraph_confidence_evidence', arguments: { project: 'ordering', decisionId: 'ordered-decision', key: 'depends', reason: 'the second member' } }
+      params: { name: 'shadowgraph_search', arguments: { project: 'ordering', query: 'Ordered', kind: 'decision' } }
     },
     { jsonrpc: '2.0', id: 'list', method: 'tools/list', params: {} }
   ]);
 
   assert.deepEqual(idsOf(batch), ['write', 'depends', 'list']);
+  assert.equal(batch[0].error, undefined, batch[0].error?.message);
   assert.equal(batch[1].error, undefined, batch[1].error?.message);
-  assert.equal(JSON.parse(batch[1].result.content[0].text).confidence.basis.contributions.some((item) => item.key === 'depends'), true);
+  const recorded = JSON.parse(batch[0].result.content[0].text);
+  const hits = JSON.parse(batch[1].result.content[0].text).items;
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].record.id, recorded.id);
+  const persisted = JSON.parse(await readFile(rpc.file, 'utf8'));
+  assert.deepEqual(persisted.records.find(({ id }) => id === recorded.id), hits[0].record);
 });
 
 test('a modern per-request member keeps its own contract inside a batch', async (t) => {
@@ -348,11 +366,13 @@ test('a read batched behind a restore that degrades the server is refused, not s
   const sentinel = 'PRIVATE-BATCH-LATCH-PAYLOAD-4f21';
   const seeded = await rpc.call({
     jsonrpc: '2.0', id: 'latch-seed', method: 'tools/call',
-    params: { name: 'shadowgraph_record_decision', arguments: { id: 'latch-seed', project: 'latch', title: sentinel, chosen: 'keep' } }
+    params: { name: 'shadowgraph_record_decision', arguments: { project: 'latch', title: sentinel, chosen: 'keep' } }
   });
   assert.equal(seeded.error, undefined, seeded.error?.message);
   const source = join(rpc.directory, 'restore-source.json');
   await writeFile(source, await readFile(rpc.file));
+  const seededId = JSON.parse(seeded.result.content[0].text).id;
+  assert.equal(JSON.parse(await readFile(source, 'utf8')).records.find(({ id }) => id === seededId).title, sentinel);
 
   const batch = await rpc.sendBatch([
     { jsonrpc: '2.0', id: 'degrading-restore', method: 'tools/call', params: { name: 'shadowgraph_restore', arguments: { source } } },

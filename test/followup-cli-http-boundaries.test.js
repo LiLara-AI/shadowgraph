@@ -10,6 +10,7 @@ import { createShadowGraphServer } from '../src/server.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { historicalIds } from '../tools/historical-ids.js';
 
 const API_TOKEN = 'followup-boundary-token';
 const FIXED_NOW = '2026-08-28T12:00:00.000Z';
@@ -39,8 +40,9 @@ async function pathExists(path) {
 
 function graphPayload(id, title) {
   const graph = createShadowGraph({ now: () => FIXED_NOW });
-  graph.addDecision({ id, project: 'followup-private', title, chosen: title });
-  return privilegedSnapshot(graph);
+  const decision = graph.addDecision({ project: 'followup-private', title, chosen: title });
+  // Restore fixtures model stored pre-policy identities, including journal references.
+  return historicalIds(privilegedSnapshot(graph), { [id]: decision.id }, { now: () => FIXED_NOW });
 }
 
 async function writePayload(path, payload) {
@@ -194,7 +196,7 @@ test('follow-up HTTP P1: real listener requires the exact loopback port before t
   const base = `http://127.0.0.1:${localPort}`;
 
   const decisionBody = (id) => JSON.stringify({
-    id, project: 'origin-boundary', title: id, chosen: 'persist only after authority validation'
+    project: 'origin-boundary', title: id, chosen: 'persist only after authority validation'
   });
   const postDecision = (id, headers) => rawRequest(`${base}/decisions`, {
     method: 'POST',
@@ -214,7 +216,8 @@ test('follow-up HTTP P1: real listener requires the exact loopback port before t
 
   const exactOrigin = await postDecision('exact-origin-port-persists', { origin: base });
   assert.equal(exactOrigin.status, 200, exactOrigin.body);
-  assert.equal(JSON.parse(exactOrigin.body).id, 'exact-origin-port-persists');
+  const exactOriginDecision = JSON.parse(exactOrigin.body);
+  assert.equal(exactOriginDecision.title, 'exact-origin-port-persists');
   assert.equal(saveCalls, 1, 'the exact actual listener port must pass and persist');
 
   const beforeWrongHost = privilegedSnapshot(app.graph);
@@ -239,7 +242,7 @@ test('follow-up HTTP P1: real listener requires the exact loopback port before t
   assert.equal(saveCalls, 3, 'localhost and an absent Origin must remain supported');
   assert.deepEqual(
     privilegedSnapshot(app.graph).records.map((record) => record.id),
-    ['exact-origin-port-persists', 'localhost-authority-persists', 'non-browser-without-origin-persists']
+    [exactOriginDecision.id, JSON.parse(localhost.body).id, JSON.parse(missingOrigin.body).id]
   );
 });
 
@@ -263,7 +266,7 @@ test('follow-up HTTP P2: real IPv6 listener accepts only canonical loopback Host
   const localPort = app.server.address().port;
   const base = `http://[::1]:${localPort}`;
   const decisionBody = (id) => JSON.stringify({
-    id, project: 'ipv6-origin-boundary', title: id, chosen: 'canonical IPv6 only'
+    project: 'ipv6-origin-boundary', title: id, chosen: 'canonical IPv6 only'
   });
   const postDecision = (id, headers) => rawRequest(`${base}/decisions`, {
     method: 'POST',
@@ -273,7 +276,7 @@ test('follow-up HTTP P2: real IPv6 listener accepts only canonical loopback Host
 
   const canonical = await postDecision('canonical-ipv6-persists', { origin: base });
   assert.equal(canonical.status, 200, canonical.body);
-  assert.equal(JSON.parse(canonical.body).id, 'canonical-ipv6-persists');
+  assert.equal(JSON.parse(canonical.body).title, 'canonical-ipv6-persists');
   assert.equal(saveCalls, 1);
 
   const invalidOrigins = [

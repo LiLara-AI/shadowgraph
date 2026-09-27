@@ -1,3 +1,4 @@
+import { historicalIds } from '../tools/historical-ids.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
@@ -34,15 +35,16 @@ const PROJECTLESS = ['legacy-projectless-decision', 'future-projectless-memory',
 const LEGACY = { 'legacy-default-decision': 'legacy_ambiguous', 'legacy-projectless-decision': 'legacy_unattributed' };
 
 function payload() {
+  const historical = {};
   const writer = createShadowGraph({ now });
-  writer.addDecision({ project: 'default', id: 'legacy-default-decision', title: 'Legacy default', chosen: 'x' });
-  writer.addDecision({ project: 'default', id: 'legacy-projectless-decision', title: 'Legacy projectless', chosen: 'x' });
-  writer.addDecision({ project: 'default', id: 'future-default-decision', title: 'Future default', chosen: 'x' });
-  writer.remember({ project: 'default', id: 'future-projectless-memory', memoryType: 'note', key: 'future', text: 'Future projectless' });
-  writer.addFact({ project: 'default', id: 'future-projectless-fact', key: 'future-key', value: 1 });
-  writer.addAttempt({ project: 'default', id: 'future-attributed-attempt', solution: 'future solution', result: 'future result' });
-  writer.addDecision({ project: 'alpha', id: 'alpha-decision', title: 'Alpha', chosen: 'x' });
-  const data = privilegedSnapshot(writer);
+  historical['legacy-default-decision'] = writer.addDecision({ project: 'default', title: 'Legacy default', chosen: 'x' }).id;
+  historical['legacy-projectless-decision'] = writer.addDecision({ project: 'default', title: 'Legacy projectless', chosen: 'x' }).id;
+  historical['future-default-decision'] = writer.addDecision({ project: 'default', title: 'Future default', chosen: 'x' }).id;
+  historical['future-projectless-memory'] = writer.remember({ project: 'default', memoryType: 'note', key: 'future', text: 'Future projectless' }).memory.id;
+  historical['future-projectless-fact'] = writer.addFact({ project: 'default', key: 'future-key', value: 1 }).id;
+  historical['future-attributed-attempt'] = writer.addAttempt({ project: 'default', solution: 'future solution', result: 'future result' }).id;
+  historical['alpha-decision'] = writer.addDecision({ project: 'alpha', title: 'Alpha', chosen: 'x' }).id;
+  const data = historicalIds(privilegedSnapshot(writer), historical, { now });
   data.schemaVersion = 5;
   const shape = (entity) => {
     if (!entity || typeof entity !== 'object' || entity.id === 'alpha-decision') return;

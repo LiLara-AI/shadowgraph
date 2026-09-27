@@ -123,11 +123,12 @@ const memoryProperties = {
   validTo: described(nullableStringProperty, 'ISO 8601 instant after which it stops being true, or null for open-ended. Must be later than validFrom.'),
   embedding: embeddingProperty
 };
-const idempotencyKeyProperty = { type: 'string', maxLength: 200, description: 'Retry key scoped by project and operation: reuse it so a retry returns the first result instead of writing a duplicate. Without it every call creates a new entity.' };
-const projectProperty = { type: 'string', description: 'Project namespace. Defaults to "default"; an empty string is rejected.' };
+const idempotencyKeyProperty = { type: 'string', maxLength: 200, description: 'Retry identity within the project or origin and operation (also scope/type/key for memory). Reuse it to recover the original canonical ID; this key is never an entity ID.' };
+const projectProperty = { type: 'string', description: 'Project or confirmed workspace binding; otherwise origin-only. No identity returns an empty scoped view.' };
 // Writes no longer fall back to "default": a record needs a project or an origin.
 const writeProjectProperty = { type: 'string', description: 'Owning project; required unless originId is set, else the write is refused.' };
 const originIdProperty = { type: 'string', description: 'Capture-origin id; with no project the record belongs to it alone.' };
+const creationIdPolicy = { description: 'ShadowGraph generates and returns canonical IDs. Supplying a creation id is refused before lookup or retry; keep returned IDs for later references.', not: { required: ['id'] } };
 const decisionIdProperty = { type: 'string', description: 'Identifier of an existing decision, as returned by shadowgraph_record_decision, shadowgraph_search, or shadowgraph_retrieve.' };
 const changedFactsProperty = { type: 'array', items: { type: 'string' }, description: 'Fact keys that just changed. Only string-form reopenWhen rules match this list; it is an ephemeral signal, not durable state.' };
 const factsOverrideProperty = { type: 'object', description: 'Fact key/value overrides evaluated instead of the stored facts of the same key. Stored facts are used for every key not listed here, so reopen rules still work after a restart.' };
@@ -305,7 +306,7 @@ const reviewDueSchema = {
     alternativesToReconsider: stringList('Labels of the alternatives to look at again; all of them when the trigger was not alternative-specific.'),
     violatedConditions: { type: 'array', items: evaluatedConditionSchema, description: 'The conditions that actually fired, each naming its operator, expected and observed value, and the fact it was computed from.' },
     reviewSignalId: { type: 'string', description: 'Pass this to shadowgraph_ack_review to acknowledge this review.' },
-    reviewSignalStatus: { type: 'string', enum: ['open', 'acknowledged'], description: 'Whether this review was already acknowledged. Entries are recomputed from current evidence on every call and an acknowledged one still appears, so check this before acting.' }
+    reviewSignalStatus: { type: 'string', enum: ['open', 'acknowledged', 'unpersisted'], description: 'Whether this review was acknowledged or remains unpersisted after wider evaluation. Entries are recomputed from current evidence; an acknowledged one still appears.' }
   }
 };
 const conditionDiagnosticSchema = {
@@ -340,7 +341,7 @@ const reconsideredDecisionSchema = {
     affectedAlternatives: { type: 'array', items: { type: 'string' }, description: 'Labels of the rejected alternatives worth reconsidering.' },
     factsConsidered: { type: 'array', description: 'Every observation the verdicts were computed from, named once each.' },
     reviewSignalId: { type: 'string', description: 'Signal raised or matched for this decision; pass it to shadowgraph_ack_review.' },
-    reviewSignalStatus: { type: 'string', enum: ['open', 'acknowledged'], description: 'Whether that signal is already handled.' }
+    reviewSignalStatus: { type: 'string', enum: ['open', 'acknowledged', 'unpersisted'], description: 'Whether that signal is handled, or remains unpersisted after wider evaluation.' }
   }
 };
 const reconsiderationSchema = {
@@ -354,7 +355,7 @@ const reconsiderationSchema = {
       type: 'object',
       description: 'What was reconsidered.',
       properties: {
-        project: stringOrNull('Project evaluated, or null for every project.'),
+        project: stringOrNull('Resolved project, or null when project identity is unresolved.'),
         decisionId: stringOrNull('The single decision asked about, or null when the whole project was reconsidered.')
       }
     },
@@ -739,9 +740,9 @@ const CATALOG = [
     },
     inputSchema: {
       type: 'object',
+      ...creationIdPolicy,
       required: ['title', 'chosen'],
       properties: {
-        id: { type: 'string', minLength: 1, description: 'Optional caller-chosen decision identifier. Omit to generate one; a duplicate entity identifier is rejected.' },
         title: { type: 'string', description: 'Short name of the decision. Required, non-empty, and searchable content.' },
         chosen: { type: 'string', description: 'The option actually chosen. Required, non-empty, and searchable content.' },
         project: writeProjectProperty,
@@ -755,8 +756,8 @@ const CATALOG = [
           description: 'Options considered and rejected. Alternatives belong to the decision and have no separate write API; they are what shadowgraph_review reconsiders.',
           items: {
             type: 'object',
+            ...creationIdPolicy,
             properties: {
-              id: { type: 'string', minLength: 1, description: 'Optional caller-chosen identifier for this alternative. Omit to generate one; identifiers must remain unique.' },
               label: { type: 'string', description: 'Name of the rejected option. Required in practice: an alternative without a non-empty label is rejected.' },
               reasonRejected: { type: 'string', description: 'Why it was rejected. Searchable content.' },
               reason: { type: 'string', description: 'Accepted as an alias of reasonRejected for older callers.' },
@@ -782,9 +783,9 @@ const CATALOG = [
     },
     inputSchema: {
       type: 'object',
+      ...creationIdPolicy,
       required: ['solution', 'result'],
       properties: {
-        id: { type: 'string', minLength: 1, description: 'Optional caller-chosen attempt identifier. Omit to generate one; a duplicate entity identifier is rejected.' },
         solution: { type: 'string', description: 'What was tried. Required, non-empty, and searchable content.' },
         result: { type: 'string', description: 'What happened. Required, non-empty, and searchable content. With no resultClass, wording such as failed, error, or regression is what makes the attempt surface in shadowgraph_context as one to avoid.' },
         resultClass: { type: 'string', enum: ['failed', 'succeeded', 'inconclusive'], description: 'Classify the result instead of leaving it to the wording heuristic. Set it when the result text does not say failed, error, or regression, or when it does but the attempt did not fail.' },
@@ -914,6 +915,8 @@ const CATALOG = [
     },
     inputSchema: {
       type: 'object',
+      ...creationIdPolicy,
+      description: 'Every envelope and operation rejects a supplied id, including retries, DELETE and NOOP. Memory is selected by its scoped identity tuple; canonical IDs are generated and returned.',
       properties: {
         project: writeProjectProperty,
         originId: originIdProperty,
@@ -924,12 +927,14 @@ const CATALOG = [
           items: {
             type: 'object',
             required: ['action', 'memoryType', 'key'],
+            not: { required: ['id'] },
             properties: {
               action: { type: 'string', enum: ['ADD', 'UPDATE', 'DELETE', 'NOOP'], description: 'ADD and UPDATE both reconcile against the current memory and require text; DELETE invalidates the current one, keeping history; NOOP records that nothing should change.' },
               ...memoryProperties
             }
           }
         },
+        idempotencyKey: idempotencyKeyProperty,
         ...provenanceProperties
       },
       oneOf: [{ required: ['memoryType', 'key', 'text'] }, { required: ['operations'] }]
@@ -1025,6 +1030,7 @@ const CATALOG = [
     },
     inputSchema: {
       type: 'object',
+      ...creationIdPolicy,
       $defs: { jsonValue: jsonValueProperty },
       required: ['key'],
       properties: {
@@ -1128,6 +1134,7 @@ const CATALOG = [
     },
     inputSchema: {
       type: 'object',
+      ...creationIdPolicy,
       required: ['from', 'to', 'relation'],
       properties: {
         from: { type: 'string', description: 'Source entity id. Must already exist: a decision, attempt, memory, fact, or alternative.' },
@@ -1145,17 +1152,17 @@ const CATALOG = [
     describe: {
       does: 'Walk relationships outward from one entity id and return what is reached.',
       route: 'Find ids first with shadowgraph_search or shadowgraph_recall; shadowgraph_retrieve searches content and adds neighbours.',
-      effects: 'Reads only. Memory outside the requested project and scope stays hidden.'
+      effects: 'Every node stays inside the request boundary; memory also requires the exact user/agent/run scope.'
     },
     inputSchema: {
       type: 'object',
       required: ['id'],
       properties: {
-        id: { type: 'string', description: 'Entity id to start from. Must exist.' },
+        id: { type: 'string', description: 'Existing entity reference. An absent or out-of-scope root returns an empty subgraph with a coverage limitation.' },
         depth: { type: 'integer', minimum: 1, maximum: 10, description: 'How many relationship hops to follow, 1-10. Defaults to 1. Anything outside the range is rejected.' },
         direction: { type: 'string', enum: ['in', 'out', 'both'], description: 'out follows relationships whose from is in the frontier, in follows their to, both follows either. Defaults to both.' },
         relation: { type: 'string', description: 'Follow only relationships with this exact name. Omit to follow all of them.' },
-        project: { type: 'string', description: 'Project whose memory nodes are visible during the walk. Defaults to "default"; decisions, facts, and attempts are not filtered by it.' },
+        project: projectProperty,
         scope: memoryScopeProperty
       }
     },
@@ -1547,15 +1554,16 @@ const CATALOG = [
     persists: false,
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     describe: {
-      does: 'Replace the entire live store with the contents of a JSON or SQLite backup.',
-      route: 'Recovery only, never a merge: shadowgraph_purge removes one project, shadowgraph_backup makes the snapshot this reads.',
-      effects: 'Destructive: every record and journal entry is replaced and a strictly greater revision installed. A failure is rolled back.'
+      does: 'Restore memory from a JSON or SQLite backup, preserving historical IDs.',
+      route: 'Use shadowgraph_backup first; recovers shadowgraph_purge deletions. memoryOnly excludes authority.',
+      effects: 'Replaces memory and journal, advances revision, and can only narrow destination authority. Recovery failures may require restart.'
     },
     inputSchema: {
       type: 'object',
       required: ['source'],
       properties: {
-        source: { type: 'string', description: 'Server-side path of the backup to install. Required. It must match the configured storage backend: a JSON export cannot overwrite a SQLite database. The backup file itself is never rewritten.' }
+        source: { type: 'string', description: 'Server-side path of the backup to install. Required. It must match the configured storage backend: a JSON export cannot overwrite a SQLite database. The backup file itself is never rewritten.' },
+        memoryOnly: { type: 'boolean', description: 'Restore memory without installing access or accessRevocations. Defaults to false, which retains the destination-bound authority narrowing rules. Mandatory validation still applies.' }
       }
     },
     outputSchema: {
@@ -1694,6 +1702,15 @@ export const OUTPUT_SCHEMA_OMISSIONS = Object.freeze({});
 export function buildToolCatalog({ verifier = false, embeddingConfigured = false } = {}) {
   return Object.freeze(CATALOG
     .filter((entry) => !entry.requires || (entry.requires === 'verifier' && verifier))
+    .map((entry) => {
+      const scopedWrite = ['shadowgraph_record_outcome', 'shadowgraph_update_status', 'shadowgraph_ack_review', 'shadowgraph_confidence_evidence', 'shadowgraph_supersede', 'shadowgraph_link', 'shadowgraph_verify_fact'].includes(entry.name);
+      if (!scopedWrite && !GRANT_READ_TOOLS.has(entry.name)) return entry;
+      return { ...entry, inputSchema: { ...entry.inputSchema, properties: {
+        ...entry.inputSchema.properties,
+        project: scopedWrite ? writeProjectProperty : projectProperty,
+        originId: originIdProperty
+      } } };
+    })
     .map((entry) => {
       if (!GRANT_READ_TOOLS.has(entry.name)) return entry;
       const effects = entry.annotations.readOnlyHint

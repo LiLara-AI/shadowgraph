@@ -499,10 +499,14 @@ const WIRE_BUDGETS = {
   // bounded read provenance. Exact measurement and transition accounting:
   // docs/contracts/access-transports.md. These engineering wire ceilings do
   // not change campaign, benchmark or audit-operation performance thresholds.
-  'withoutVerifier.full': { bare: 51_000, annotated: 54_600, structured: 239_400 },
-  'withoutVerifier.compact': { bare: 33_000, annotated: 34_500, structured: 152_100 },
-  'withVerifier.full': { bare: 51_900, annotated: 55_600, structured: 243_800 },
-  'withVerifier.compact': { bare: 33_000, annotated: 34_500, structured: 152_100 }
+  // PR13: explicit scope inputs, creation-ID refusal and truthful restore/read
+  // contracts. Measured bare/annotated/structured: full 54921/58409/239685,
+  // verifier full 56069/59662/244232, compact 34848/36331/151693.
+  // Retain ~2% headroom where needed; compact structured ceiling is unchanged.
+  'withoutVerifier.full': { bare: 56_100, annotated: 59_600, structured: 244_500 },
+  'withoutVerifier.compact': { bare: 35_600, annotated: 37_100, structured: 152_100 },
+  'withVerifier.full': { bare: 57_200, annotated: 60_900, structured: 249_200 },
+  'withVerifier.compact': { bare: 35_600, annotated: 37_100, structured: 152_100 }
 };
 
 test('the advertised tool list stays within its wire-size budget, at every tier', () => {

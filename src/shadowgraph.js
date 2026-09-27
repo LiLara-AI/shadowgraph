@@ -19,6 +19,7 @@ import { isLegacyOwned, resolveScope, sameOrigin, usableOriginId } from './scope
 import { createHash } from 'node:crypto';
 import { accessScopeContains, validateAccess, intersectAccessScope, accessDiagnostics, reconcileAccessLedger } from './access.js';
 import { createAccessLifecycle } from './internal/access-lifecycle.js';
+import { assertCreationInput } from './internal/creation-id.js';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
 // docs/api-reference.md) and are frozen so a consumer cannot mutate validation
@@ -911,12 +912,19 @@ export function createShadowGraph(options = {}) {
   }
 
   function setRevision(value) { if (Number.isInteger(value) && value >= revision) revision = value; }
-  function assertUnusedEntityId(value, reserved = null) {
-    if (typeof value !== 'string' || !value) throw new Error('Entity id must be a non-empty string');
-    const alternativeExists = [...records.values()].some((record) => (record.alternatives ?? []).some((alternative) => alternative.id === value));
-    if (records.has(value) || facts.has(value) || relations.has(value) || alternativeExists || reserved?.has(value)) {
-      throw new Error(`Entity id already exists: ${value}`);
+  function allocateEntityId(prefix, reserved = new Set()) {
+    // Entity IDs share one namespace, including nested alternatives. Retry
+    // internally; neither a collided candidate nor occupancy leaves this API.
+    for (let attempt = 0; attempt < 128; attempt += 1) {
+      const candidate = id(prefix);
+      if (records.has(candidate) || facts.has(candidate) || relations.has(candidate) || reserved.has(candidate)) continue;
+      if ([...records.values()].some((record) => (record.alternatives ?? []).some((alternative) => alternative.id === candidate))) continue;
+      reserved.add(candidate);
+      return candidate;
     }
+    const error = new Error('Unable to allocate an entity ID');
+    error.code = 'entity_id_allocation_failed';
+    throw error;
   }
 
   function id(prefix) {
@@ -1105,6 +1113,7 @@ export function createShadowGraph(options = {}) {
   }
 
   function addDecision(input) {
+    assertCreationInput('decision', input);
     const existing = idempotent(input, 'decision'); if (existing) return existing;
     if (!input || typeof input !== 'object' || typeof input.title !== 'string' || !input.title.trim() || typeof input.chosen !== 'string' || !input.chosen.trim()) throw new Error('A decision requires non-empty title and chosen strings');
     validateTemporalFields(input, ['createdAt', 'reviewAfter']);
@@ -1114,25 +1123,20 @@ export function createShadowGraph(options = {}) {
     if (!Array.isArray(alternatives) || alternatives.some((item) => !item || typeof item.label !== 'string' || !item.label.trim())) throw new Error('Decision alternatives must have non-empty label strings');
     const owner = writeOwner(input);
     const evidence = (input.evidence ?? []).map((item) => normalizeEvidence(item, now));
+    const reservedIds = new Set();
     const record = {
-      id: input.id ?? id('decision'), kind: 'decision', schemaVersion: SCHEMA_VERSION,
+      id: allocateEntityId('decision', reservedIds), kind: 'decision', schemaVersion: SCHEMA_VERSION,
       ...owner, title: input.title, goal: input.goal ?? '', chosen: input.chosen,
       // G2: provenance travels with the decision. Plain JSON values only.
       ...provenanceFields(input),
       // G8: confidence carries an auditable basis, not a bare number.
       confidence: createConfidence(confidence, evidence.length), status: 'proposed',
       assumptions: strings(input.assumptions, 'assumptions'), evidence,
-      alternatives: alternatives.map((item) => ({ id: item.id ?? id('alternative'), label: item.label, reasonRejected: item.reasonRejected ?? item.reason ?? '', reopenWhen: normalizeRules(item.reopenWhen ?? [], { strict: true }), status: 'rejected' })),
+      alternatives: alternatives.map((item) => ({ id: allocateEntityId('alternative', reservedIds), label: item.label, reasonRejected: item.reasonRejected ?? item.reason ?? '', reopenWhen: normalizeRules(item.reopenWhen ?? [], { strict: true }), status: 'rejected' })),
       failedAttempts: [...(input.failedAttempts ?? [])], outcome: input.outcome ?? null,
       reviewAfter: input.reviewAfter ?? null, createdAt: input.createdAt ?? now(), updatedAt: now()
     };
     clone(record);
-    assertUnusedEntityId(record.id);
-    const reservedIds = new Set([record.id]);
-    for (const alternative of record.alternatives) {
-      assertUnusedEntityId(alternative.id, reservedIds);
-      reservedIds.add(alternative.id);
-    }
     assertJournalCapacity(1);
     records.set(record.id, record);
     event('decision.recorded', { recordId: record.id });
@@ -1141,6 +1145,7 @@ export function createShadowGraph(options = {}) {
   }
 
   function addAttempt(input) {
+    assertCreationInput('attempt', input);
     const existing = idempotent(input, 'attempt'); if (existing) return existing;
     if (!input || typeof input !== 'object' || typeof input.solution !== 'string' || !input.solution.trim() || typeof input.result !== 'string' || !input.result.trim()) throw new Error('An attempt requires non-empty solution and result strings');
     if (input.resultClass !== undefined && !ATTEMPT_RESULT_CLASSES.includes(input.resultClass)) {
@@ -1148,9 +1153,8 @@ export function createShadowGraph(options = {}) {
     }
     validateTemporalFields(input, ['createdAt']);
     const owner = writeOwner(input);
-    const attempt = { id: input.id ?? id('attempt'), kind: 'attempt', schemaVersion: SCHEMA_VERSION, ...owner, ...provenanceFields(input), solution: input.solution, result: input.result, environment: input.environment ?? '', ...(input.resultClass === undefined ? {} : { resultClass: input.resultClass }), reason: input.reason ?? '', reusableWhen: normalizeRules(input.reusableWhen ?? [], { strict: true }), relatedTo: input.relatedTo ?? [], createdAt: input.createdAt ?? now() };
+    const attempt = { id: allocateEntityId('attempt'), kind: 'attempt', schemaVersion: SCHEMA_VERSION, ...owner, ...provenanceFields(input), solution: input.solution, result: input.result, environment: input.environment ?? '', ...(input.resultClass === undefined ? {} : { resultClass: input.resultClass }), reason: input.reason ?? '', reusableWhen: normalizeRules(input.reusableWhen ?? [], { strict: true }), relatedTo: input.relatedTo ?? [], createdAt: input.createdAt ?? now() };
     clone(attempt);
-    assertUnusedEntityId(attempt.id);
     assertJournalCapacity(1);
     records.set(attempt.id, attempt);
     event('attempt.recorded', { recordId: attempt.id });
@@ -1161,6 +1165,7 @@ export function createShadowGraph(options = {}) {
   // Scoped memory covers profile and continuity use cases without flattening
   // decisions, alternatives, evidence, and outcomes into generic text.
   function remember(input) {
+    assertCreationInput('memory', input);
     const existingRetry = idempotent(input, 'memory');
     if (existingRetry) return { operation: 'NOOP', memory: existingRetry };
     if (!input || typeof input !== 'object') throw new Error('A memory requires an input object');
@@ -1208,7 +1213,7 @@ export function createShadowGraph(options = {}) {
     }
     const provenance = provenanceFields(input);
     const memory = {
-      id: input.id ?? id('memory'), kind: 'memory', schemaVersion: SCHEMA_VERSION,
+      id: allocateEntityId('memory'), kind: 'memory', schemaVersion: SCHEMA_VERSION,
       ...owner, scope, memoryType: input.memoryType, key: input.key, text: input.text,
       version: (latest?.version ?? 0) + 1,
       metadata, tags, embedding, ...provenance, verificationStatus: 'unverified', status: 'active',
@@ -1216,7 +1221,6 @@ export function createShadowGraph(options = {}) {
       createdAt: input.createdAt ?? recordedAt, updatedAt: recordedAt,
       ...(previous ? { supersedes: previous.id } : {})
     };
-    assertUnusedEntityId(memory.id);
     assertJournalCapacity(previous ? 2 : 1);
 
     if (previous) {
@@ -1250,6 +1254,7 @@ export function createShadowGraph(options = {}) {
   }
 
   function applyMemoryPlan(input = {}) {
+    assertCreationInput('memoryPlan', input);
     if (!Array.isArray(input.operations)) throw new Error('Memory plan operations must be an array');
     // One owner for the whole plan; each written memory inherits it.
     const owner = writeOwner(input);
@@ -1257,8 +1262,6 @@ export function createShadowGraph(options = {}) {
     const defaultScope = normalizeMemoryScope(input.scope);
     const actions = new Set(['ADD', 'UPDATE', 'DELETE', 'NOOP']);
     const simulatedValidFrom = new Map([...currentMemories].map(([key, memory]) => [key, memory.temporal?.validFrom ?? null]));
-    const reservedIds = new Set();
-
     // Preflight the complete plan before mutating anything. Extraction output is
     // untrusted input; one malformed late operation must not leave a partial plan.
     const operations = input.operations.map((raw) => {
@@ -1274,10 +1277,6 @@ export function createShadowGraph(options = {}) {
       validateIdempotencyKey(raw.idempotencyKey);
       validateTemporalFields(raw, ['recordedAt', 'createdAt', 'validFrom', 'validTo', 'validAt']);
       const scope = normalizeMemoryScope(raw.scope ?? defaultScope);
-      if (['ADD', 'UPDATE'].includes(action) && raw.id !== undefined) {
-        assertUnusedEntityId(raw.id, reservedIds);
-        reservedIds.add(raw.id);
-      }
       for (const name of ['actor', 'client', 'sessionId']) provenanceString(raw[name] ?? input[name], name);
       const recordedAt = ['ADD', 'UPDATE'].includes(action) ? (raw.recordedAt ?? now()) : raw.recordedAt;
       const identityKey = memoryScopeKey({ ...owner, scope, memoryType: raw.memoryType, key: raw.key });
@@ -1336,7 +1335,7 @@ export function createShadowGraph(options = {}) {
       } else {
         requiredJournalEntries += current ? 2 : 1;
         simulatedMemories.set(scopeKey, {
-          id: operation.id ?? `reserved-memory-${simulatedMemories.size}`,
+          id: `reserved-memory-${simulatedMemories.size}`,
           kind: 'memory', project, scope: operation.scope, memoryType: operation.memoryType,
           key: operation.key, text: operation.text, metadata, tags, embedding, status: 'active',
           temporal: { validFrom, validTo, recordedAt: operation.recordedAt, invalidatedAt: null }
@@ -1391,6 +1390,7 @@ export function createShadowGraph(options = {}) {
   }
 
   function addFact(input) {
+    assertCreationInput('fact', input);
     if (!input || typeof input.key !== 'string' || !input.key.trim()) throw new Error('A fact requires a non-empty key');
     validateTemporalFields(input, ['recordedAt', 'observedAt', 'validFrom', 'validTo', 'expiresAt']);
     const confidence = input.confidence ?? 0.5;
@@ -1429,7 +1429,7 @@ export function createShadowGraph(options = {}) {
       throw new Error('Facts for one scope must be recorded in non-decreasing validFrom order');
     }
     const fact = {
-      id: input.id ?? id('fact'), kind: 'fact', schemaVersion: SCHEMA_VERSION,
+      id: allocateEntityId('fact'), kind: 'fact', schemaVersion: SCHEMA_VERSION,
       ...owner, key: input.key, value: input.value,
       source: provenance.sourceClass, ...provenance, confidence, verificationStatus,
       status: 'active', expiresAt: input.expiresAt ?? null, observedAt,
@@ -1441,7 +1441,6 @@ export function createShadowGraph(options = {}) {
       temporal: { validFrom, validTo, recordedAt, invalidatedAt: null }
     };
     clone(fact);
-    assertUnusedEntityId(fact.id);
     assertJournalCapacity(previous ? 2 : 1);
     if (previous) {
       touchMutableObject(previous);
@@ -1701,6 +1700,7 @@ export function createShadowGraph(options = {}) {
   // Relations stored across projects before this rule are kept as they are;
   // scoped reads do not cross them.
   function link(input) {
+    assertCreationInput('relation', input);
     if (!input || typeof input.from !== 'string' || typeof input.to !== 'string' || typeof input.relation !== 'string' || !input.relation.trim()) throw new Error('A relationship requires from, to, and relation');
     const boundary = writeBoundary(input);
     const from = entity(input.from, boundary);
@@ -1717,11 +1717,10 @@ export function createShadowGraph(options = {}) {
     const validTo = input.validTo ?? null;
     if (validTo && compareInstants(validTo, validFrom) <= 0) throw new Error('Relation validTo must be later than validFrom');
     const relation = {
-      id: input.id ?? id('relation'), kind: 'relation', schemaVersion: SCHEMA_VERSION,
+      id: allocateEntityId('relation'), kind: 'relation', schemaVersion: SCHEMA_VERSION,
       from: input.from, to: input.to, relation: input.relation, createdAt,
       temporal: { validFrom, validTo, recordedAt, invalidatedAt: null }
     };
-    assertUnusedEntityId(relation.id);
     assertJournalCapacity(1);
     relations.set(relation.id, relation);
     event('relation.created', { relationId: relation.id });

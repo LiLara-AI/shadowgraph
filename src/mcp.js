@@ -1,3 +1,4 @@
+import { assertToolCreationInput } from './internal/creation-id.js';
 import { createInterface } from 'node:readline';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { stat as fsStat, unlink as fsUnlink } from 'node:fs/promises';
@@ -244,7 +245,7 @@ async function callUnqueued(name, args, tier, accessManaged = false) {
   }
   if (args && typeof args === 'object' && !Array.isArray(args)) {
     const { binding: ignoredBinding, surface: ignoredSurface, ...input } = args;
-    args = name === 'shadowgraph_attribute' ? { ...args, surface: 'mcp' } : tool?.persistsWithAccess || tool?.accessLifecycle || ['shadowgraph_record_decision', 'shadowgraph_record_attempt', 'shadowgraph_record_fact', 'shadowgraph_remember', 'shadowgraph_link', 'shadowgraph_supersede', 'shadowgraph_confidence_evidence'].includes(name)
+    args = name === 'shadowgraph_attribute' ? { ...args, surface: 'mcp' } : tool?.persistsWithAccess || tool?.accessLifecycle || ['shadowgraph_record_decision', 'shadowgraph_record_attempt', 'shadowgraph_record_fact', 'shadowgraph_remember', 'shadowgraph_link', 'shadowgraph_supersede', 'shadowgraph_confidence_evidence', 'shadowgraph_record_outcome', 'shadowgraph_update_status', 'shadowgraph_ack_review'].includes(name)
       ? accessContext(graph, input, 'mcp', workspace) : input;
     if (name === 'shadowgraph_verify_fact' && input.project == null) {
       const { binding } = accessContext(graph, input, 'mcp', workspace);
@@ -281,9 +282,9 @@ async function callUnqueued(name, args, tier, accessManaged = false) {
   }
   else if (name === 'shadowgraph_record_fact') value = graph.addFact(withRuntimeSession(args));
   else if (name === 'shadowgraph_verify_fact' && verifier) value = await graph.verifyFact(args ?? {});
-  else if (name === 'shadowgraph_record_outcome') value = graph.setOutcome(args?.decisionId, args?.outcome);
+  else if (name === 'shadowgraph_record_outcome') value = graph.setOutcome(args?.decisionId, args?.outcome, args);
   else if (name === 'shadowgraph_confidence_evidence') value = graph.addConfidenceEvidence(withRuntimeSession(args ?? {}));
-  else if (name === 'shadowgraph_update_status') value = graph.updateDecisionStatus(args?.decisionId, args?.status);
+  else if (name === 'shadowgraph_update_status') value = graph.updateDecisionStatus(args?.decisionId, args?.status, args);
   else if (name === 'shadowgraph_link') value = graph.link(args);
   else if (name === 'shadowgraph_traverse') value = graph.traverse(args ?? {});
   else if (name === 'shadowgraph_supersede') value = graph.supersedeDecision(args ?? {});
@@ -291,18 +292,20 @@ async function callUnqueued(name, args, tier, accessManaged = false) {
   else if (name === 'shadowgraph_purge') value = graph.purgeProject(args?.project, { mode: args?.mode });
   else if (name === 'shadowgraph_maintain') value = graph.maintain(args ?? {});
   else if (name === 'shadowgraph_retrieve') value = graph.retrieve(args?.query ?? '', args ?? {});
-  else if (name === 'shadowgraph_validate') value = graph.validate(accessManaged ? args : undefined);
+  else if (name === 'shadowgraph_validate') value = graph.validate(args ?? {});
   else if (name === 'shadowgraph_journal') value = graph.getJournal(args ?? {});
   else if (name === 'shadowgraph_rebuild') value = graph.rebuild(args ?? {});
   else if (name === 'shadowgraph_review_signals') value = graph.getReviewSignals(args ?? {});
   else if (name === 'shadowgraph_purge_preview') value = graph.projectSummary(args?.project);
-  else if (name === 'shadowgraph_ack_review') value = graph.acknowledgeReview(args?.id);
-  else if (name === 'shadowgraph_repair_plan') value = graph.repairPlan(accessManaged ? args : undefined);
+  else if (name === 'shadowgraph_ack_review') value = graph.acknowledgeReview(args?.id, args);
+  else if (name === 'shadowgraph_repair_plan') value = graph.repairPlan(args ?? {});
   else if (name === 'shadowgraph_backup') { const { backupFile } = await import('./backup.js'); value = await backupFile(file, args?.destination, { store }); }
   else if (name === 'shadowgraph_restore') {
+    if (args?.memoryOnly !== undefined && typeof args.memoryOnly !== 'boolean') throw new Error('memoryOnly must be a boolean');
     value = store.restore
-      ? await store.restore(args?.source, { validate: restoreValidator, afterReplace: (payload) => graph.replaceData(payload) })
+      ? await store.restore(args?.source, { memoryOnly: args?.memoryOnly === true, validate: restoreValidator, afterReplace: (payload) => graph.replaceData(payload) })
       : await (await import('./backup.js')).restoreFile(args?.source, file, {
+        memoryOnly: args?.memoryOnly === true,
         storage: process.env.SHADOWGRAPH_STORAGE,
         validate: restoreValidator,
         restoreFs: injectedRestoreFs,
@@ -412,6 +415,7 @@ const PUBLIC_RPC_FALLBACK_MESSAGES = new Map([
 // Only stable codes documented by the storage/journal contracts cross the MCP
 // boundary. In particular, platform codes such as ENOENT/EACCES are private.
 const PUBLIC_DOMAIN_CODES = new Set([
+  'creation_id_not_allowed',
   'committed_rejection_persistence_unconfirmed',
   'duplicate_hard_purge_ledger_sequence',
   'duplicate_journal_sequence',
@@ -500,6 +504,7 @@ function publicDomainCode(error) {
 }
 
 function publicErrorDetails(error) {
+  if (error?.code === 'creation_id_not_allowed') return { message: 'Caller-supplied creation IDs are not supported' };
   const tagged = error?.[PUBLIC_ERROR];
   if (tagged) return tagged;
 
@@ -600,7 +605,7 @@ const promptText = verifier
 // The old code fell through to `reply(request.id, {})` for any unrecognised
 // method, emitting `{"id": null, "result": {}}` for notifications — a protocol
 // violation that a strict client can treat as a spurious response.
-async function handleMessage(request, emit) {
+async function handleMessage(request, emit, batchFailure = null) {
   let isNotification = false;
   try {
     if (!request || typeof request !== 'object' || Array.isArray(request)) throw rpcError(-32600, 'Invalid Request');
@@ -616,6 +621,16 @@ async function handleMessage(request, emit) {
       if (!isNotification) emit(responseFor(request.id, result, error));
     };
     const modern = requestUsesModernProtocol(request);
+    // No member of a creation-policy-invalid batch may run, including reads
+    // with durable effects and notifications. Preserve each protocol's error
+    // envelope without entering the shared mutation queue.
+    if (batchFailure) {
+      if (modern && request.method === 'tools/call') {
+        respond(modernResult({ content: [{ type: 'text', text: publicErrorMessage(batchFailure) }], isError: true }));
+        return;
+      }
+      throw batchFailure;
+    }
 
     if (persistenceUnavailable && request.method === 'resources/read') throw unavailableError();
 
@@ -679,7 +694,7 @@ async function handleMessage(request, emit) {
         if (persistenceUnavailable) throw unavailableError();
         const before = privilegedSnapshot(graph);
         let value;
-        try { value = graph.context({}); }
+        try { value = graph.context(accessContext(graph, {}, 'mcp', workspace)); }
         catch (error) { graph.replaceData(before); throw error; }
         try { await persist(); }
         catch (error) {
@@ -713,6 +728,7 @@ async function handleMessage(request, emit) {
         // revision that defines it, or to a modern `_meta` request, and only for
         // a tool that advertises an output schema at that tier. A failed call
         // stays content-only.
+        assertToolCreationInput(request.params.name, args);
         const result = await call(request.params.name, args, modern ? METADATA_TIER.STRUCTURED : legacyTier);
         respond(eraResult(modern, modern ? { ...result, isError: false } : result));
       } catch (error) {
@@ -748,8 +764,14 @@ async function handleBatch(batch) {
     writeLine(responseFor(null, null, rpcError(-32600, 'Invalid Request')));
     return;
   }
+  let batchFailure = null;
+  try {
+    for (const member of batch) {
+      if (member?.method === 'tools/call') assertToolCreationInput(member.params?.name, member.params?.arguments);
+    }
+  } catch (error) { batchFailure = error; }
   const collected = batch.map(() => []);
-  const settled = batch.map((member, index) => handleMessage(member, (response) => collected[index].push(response)));
+  const settled = batch.map((member, index) => handleMessage(member, (response) => collected[index].push(response), batchFailure));
   await Promise.all(settled);
   const responses = collected.flat();
   if (responses.length) writeLine(responses);

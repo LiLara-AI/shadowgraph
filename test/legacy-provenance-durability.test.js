@@ -1,3 +1,4 @@
+import { historicalIds } from '../tools/historical-ids.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -32,17 +33,18 @@ const PROJECTLESS = ['decision-z-projectless', 'attempt-z-projectless', 'memory-
 // its kind so the migration reaches it after the others -- the projectless
 // fact last of all.
 function legacyPayload({ defaults = 3 } = {}) {
+  const historical = {};
   const graph = createShadowGraph({ now });
-  graph.addDecision({ project: 'alpha', id: 'decision-alpha', title: 'Alpha', chosen: 'x' });
-  for (let index = 1; index <= defaults; index += 1) graph.addDecision({ project: 'default', id: `decision-default-${String(index).padStart(2, '0')}`, title: `Default ${index}`, chosen: 'y' });
-  graph.addDecision({ project: 'default', id: 'decision-z-projectless', title: 'Stored without a project', chosen: 'z' });
-  graph.addAttempt({ project: 'default', id: 'attempt-default', solution: 's', result: 'r' });
-  graph.addAttempt({ project: 'default', id: 'attempt-z-projectless', solution: 's2', result: 'r2' });
-  graph.remember({ project: 'default', id: 'memory-default', memoryType: 'note', key: 'kept', text: 'default note' });
-  graph.remember({ project: 'default', id: 'memory-z-projectless', memoryType: 'note', key: 'other', text: 'projectless note' });
-  graph.addFact({ project: 'default', id: 'fact-default', key: 'latency', value: 10 });
-  graph.addFact({ project: 'default', id: 'fact-z-projectless', key: 'throughput', value: 5 });
-  const payload = privilegedSnapshot(graph);
+  historical['decision-alpha'] = graph.addDecision({ project: 'alpha', title: 'Alpha', chosen: 'x' }).id;
+  for (let index = 1; index <= defaults; index += 1) historical[`decision-default-${String(index).padStart(2, '0')}`] = graph.addDecision({ project: 'default', title: `Default ${index}`, chosen: 'y' }).id;
+  historical['decision-z-projectless'] = graph.addDecision({ project: 'default', title: 'Stored without a project', chosen: 'z' }).id;
+  historical['attempt-default'] = graph.addAttempt({ project: 'default', solution: 's', result: 'r' }).id;
+  historical['attempt-z-projectless'] = graph.addAttempt({ project: 'default', solution: 's2', result: 'r2' }).id;
+  historical['memory-default'] = graph.remember({ project: 'default', memoryType: 'note', key: 'kept', text: 'default note' }).memory.id;
+  historical['memory-z-projectless'] = graph.remember({ project: 'default', memoryType: 'note', key: 'other', text: 'projectless note' }).memory.id;
+  historical['fact-default'] = graph.addFact({ project: 'default', key: 'latency', value: 10 }).id;
+  historical['fact-z-projectless'] = graph.addFact({ project: 'default', key: 'throughput', value: 5 }).id;
+  const payload = historicalIds(privilegedSnapshot(graph), historical, { now });
   payload.schemaVersion = 5;
   const strip = (entity) => {
     if (!entity || typeof entity !== 'object') return;

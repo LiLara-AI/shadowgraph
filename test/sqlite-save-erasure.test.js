@@ -1,3 +1,4 @@
+const fixtureIds = {};
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -32,13 +33,12 @@ test('normal SQLite save physically erases bytes removed by a graph hard purge',
   const sentinel = `SQLITE-NORMAL-SAVE-PURGE-${randomUUID()}-${'secret'.repeat(15)}`;
   const graph = createShadowGraph({ now: () => '2026-08-28T00:00:00.000Z' });
   graph.addDecision({
-    id: `decision-${sentinel}`,
     project: 'private-project',
     title: sentinel,
     chosen: sentinel,
     idempotencyKey: `retry-${sentinel}`
   });
-  graph.addDecision({ id: 'kept-decision', project: 'kept-project', title: 'Keep', chosen: 'safe' });
+  fixtureIds['kept-decision'] = graph.addDecision({ project: 'kept-project', title: 'Keep', chosen: 'safe' }).id;
 
   let store = await createSqliteStore(file);
   const firstRevision = await store.save(privilegedSnapshot(graph));
@@ -74,13 +74,12 @@ test('normal SQLite save physically erases bytes removed by a graph hard purge',
 function secretGraph(sentinel, privateProject = 'private-project') {
   const graph = createShadowGraph({ now: () => '2026-08-28T00:00:00.000Z' });
   graph.addDecision({
-    id: `decision-${sentinel}`,
     project: privateProject,
     title: sentinel,
     chosen: sentinel,
     idempotencyKey: `retry-${sentinel}`
   });
-  graph.addDecision({ id: 'kept-decision', project: 'kept-project', title: 'Keep', chosen: 'safe' });
+  fixtureIds['kept-decision'] = graph.addDecision({ project: 'kept-project', title: 'Keep', chosen: 'safe' }).id;
   return graph;
 }
 
@@ -195,9 +194,9 @@ test('append-only SQLite saves do not pay the destructive VACUUM path', async (t
     }
   });
   const graph = createShadowGraph({ now: () => '2026-08-28T00:00:00.000Z' });
-  graph.addDecision({ id: 'append-one', project: 'append', title: 'One', chosen: 'one' });
+  fixtureIds['append-one'] = graph.addDecision({ project: 'append', title: 'One', chosen: 'one' }).id;
   const firstRevision = await store.save(privilegedSnapshot(graph));
-  graph.addDecision({ id: 'append-two', project: 'append', title: 'Two', chosen: 'two' });
+  fixtureIds['append-two'] = graph.addDecision({ project: 'append', title: 'Two', chosen: 'two' }).id;
   assert.equal(await store.save({ ...privilegedSnapshot(graph), expectedRevision: firstRevision }), firstRevision + 1);
   store.close();
   assert.equal(statements.some((sql) => /\bVACUUM\b/i.test(sql)), false, 'append-only saves must skip compaction');

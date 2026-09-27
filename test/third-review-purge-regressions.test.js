@@ -1,3 +1,4 @@
+const fixtureIds = {};
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -46,7 +47,7 @@ function legacySchema3PurgeFixture() {
   const relation = {
     id: 'rrv04-legacy-secret-relation',
     schemaVersion: 3,
-    from: 'rrv04-host',
+    from: fixtureIds['rrv04-host'],
     to: LEGACY_PURGED_ID,
     relation: 'depends_on'
   };
@@ -146,7 +147,7 @@ function assertLegacySecretAbsent(value, label) {
 test('RRV-04: schema-3 raw purge ids are migrated before an unrelated later purge can change rebuild projection', () => {
   for (const laterMode of ['logical', 'hard']) {
     const graph = createShadowGraph({ now: () => NOW });
-    graph.addDecision({ id: 'rrv04-host', project: 'rrv04-host-project', title: 'Host', chosen: 'keep' });
+    fixtureIds['rrv04-host'] = graph.addDecision({ project: 'rrv04-host-project', title: 'Host', chosen: 'keep' }).id;
     const fixture = legacySchema3PurgeFixture();
     const rawProjection = rebuildProjection(
       [...privilegedSnapshot(graph).journal, ...fixture.journal],
@@ -156,7 +157,6 @@ test('RRV-04: schema-3 raw purge ids are migrated before an unrelated later purg
 
     graph.importData(fixture);
     graph.addDecision({
-      id: `rrv04-unrelated-${laterMode}`,
       project: `rrv04-unrelated-${laterMode}`,
       title: 'Unrelated later content',
       chosen: 'remove only this'
@@ -177,7 +177,7 @@ test('RRV-04: schema-3 raw purge ids are migrated before an unrelated later purg
 test('RRV-04 / DS-P1-007: every predecessor schema 1-4 raw purge marker is migrated', () => {
   for (const schemaVersion of [1, 2, 3, 4]) {
     const graph = createShadowGraph({ now: () => NOW });
-    if (schemaVersion < 4) graph.addDecision({ id: 'rrv04-host', project: 'rrv04-host-project', title: 'Host', chosen: 'keep' });
+    if (schemaVersion < 4) fixtureIds['rrv04-host'] = graph.addDecision({ project: 'rrv04-host-project', title: 'Host', chosen: 'keep' }).id;
     const fixture = legacySchema3PurgeFixture();
     fixture.schemaVersion = schemaVersion;
     fixture.records = fixture.records.map((item) => ({ ...item, schemaVersion }));
@@ -204,7 +204,7 @@ test('RRV-04 / DS-P1-007: every predecessor schema 1-4 raw purge marker is migra
     journalSeq: 1,
     journalEpoch: 1
   });
-  migratedSchema4.addDecision({ id: 'rrv04-other', project: 'rrv04-other', title: 'Other', chosen: 'erase' });
+  fixtureIds['rrv04-other'] = migratedSchema4.addDecision({ project: 'rrv04-other', title: 'Other', chosen: 'erase' }).id;
   migratedSchema4.purgeProject('rrv04-other', { mode: 'logical' });
   const marker = privilegedSnapshot(migratedSchema4).journal.find((entry) => entry.id === 'rrv04-schema4-unrelated-marker');
   assert.equal(Object.hasOwn(marker.payload, 'purgedEntityIds'), false);
@@ -219,7 +219,6 @@ function assertRrv06SecretsAbsent(value, label) {
 function rrv06LogicalPurgeGraph() {
   const seed = createShadowGraph({ now: () => NOW });
   seed.addDecision({
-    id: 'rrv06-private-decision',
     project: 'rrv06-private',
     title: 'Private decision',
     chosen: 'erase',
@@ -300,7 +299,7 @@ async function assertPayloadAcrossRestartBackupRestore(t, payload, assertSafe, l
 
       let destinationStore = await createStore(backend, destinationPath);
       const old = createShadowGraph({ now: () => NOW });
-      old.addDecision({ id: `${label}-${backend}-old`, project: 'old', title: 'Old', chosen: 'replace' });
+      fixtureIds[`${label}-${backend}-old`] = old.addDecision({ project: 'old', title: 'Old', chosen: 'replace' }).id;
       await destinationStore.save(privilegedSnapshot(old));
       if (backend === 'sqlite') {
         await destinationStore.restore(backupPath);
@@ -321,10 +320,9 @@ async function assertPayloadAcrossRestartBackupRestore(t, payload, assertSafe, l
 test('RRV-04: migrated schema-3 purge stays erased through JSON/SQLite restart, backup, and restore', async (t) => {
   for (const laterMode of ['logical', 'hard']) {
     const graph = createShadowGraph({ now: () => NOW });
-    graph.addDecision({ id: 'rrv04-host', project: 'rrv04-host-project', title: 'Host', chosen: 'keep' });
+    fixtureIds['rrv04-host'] = graph.addDecision({ project: 'rrv04-host-project', title: 'Host', chosen: 'keep' }).id;
     graph.importData(legacySchema3PurgeFixture());
     graph.addDecision({
-      id: `rrv04-persist-unrelated-${laterMode}`,
       project: `rrv04-persist-unrelated-${laterMode}`,
       title: 'Unrelated persisted content',
       chosen: 'remove only this'
@@ -348,8 +346,8 @@ test('RRV-06: logical purge identity metadata stays scrubbed through JSON/SQLite
 
 function forgedFutureLedgerPayload() {
   const graph = createShadowGraph({ now: () => NOW });
-  graph.addDecision({ id: 'rrv07-kept-before', project: 'rrv07-kept', title: 'Before', chosen: 'keep' });
-  graph.addDecision({ id: 'rrv07-kept-after', project: 'rrv07-kept', title: 'After', chosen: 'keep' });
+  fixtureIds['rrv07-kept-before'] = graph.addDecision({ project: 'rrv07-kept', title: 'Before', chosen: 'keep' }).id;
+  fixtureIds['rrv07-kept-after'] = graph.addDecision({ project: 'rrv07-kept', title: 'After', chosen: 'keep' }).id;
   const payload = privilegedSnapshot(graph);
   payload.journal[1].seq = 4;
   payload.journal.splice(1, 0, {
@@ -382,7 +380,7 @@ test('RRV-07: an earlier hard-purge marker cannot authorize a future missing seq
   assert.deepEqual(privilegedSnapshot(target), before, 'rejected direct import must be atomic');
 
   const replacement = createShadowGraph({ now: () => NOW });
-  replacement.addDecision({ id: 'rrv07-old-live', project: 'old', title: 'Old', chosen: 'keep' });
+  fixtureIds['rrv07-old-live'] = replacement.addDecision({ project: 'old', title: 'Old', chosen: 'keep' }).id;
   const replacementBefore = privilegedSnapshot(replacement);
   assert.throws(() => replacement.replaceData(payload), /removedJournalSequences|hard purge ledger|earlier than/i);
   assert.deepEqual(privilegedSnapshot(replacement), replacementBefore, 'rejected replacement must be atomic');
@@ -391,9 +389,9 @@ test('RRV-07: an earlier hard-purge marker cannot authorize a future missing seq
 
 function validInternalGapPayload() {
   const graph = createShadowGraph({ now: () => NOW });
-  graph.addDecision({ id: 'rrv07-internal-before', project: 'rrv07-kept', title: 'Before', chosen: 'keep' });
-  graph.addDecision({ id: 'rrv07-internal-gone', project: 'rrv07-gone', title: 'Gone', chosen: 'erase' });
-  graph.addDecision({ id: 'rrv07-internal-after', project: 'rrv07-kept', title: 'After', chosen: 'keep' });
+  fixtureIds['rrv07-internal-before'] = graph.addDecision({ project: 'rrv07-kept', title: 'Before', chosen: 'keep' }).id;
+  fixtureIds['rrv07-internal-gone'] = graph.addDecision({ project: 'rrv07-gone', title: 'Gone', chosen: 'erase' }).id;
+  fixtureIds['rrv07-internal-after'] = graph.addDecision({ project: 'rrv07-kept', title: 'After', chosen: 'keep' }).id;
   graph.purgeProject('rrv07-gone', { mode: 'hard' });
   return privilegedSnapshot(graph);
 }
@@ -421,13 +419,13 @@ test('RRV-07: real leading/internal gaps and transitive later same-project hard 
   const accepted = [validInternalGapPayload()];
 
   const leading = createShadowGraph({ now: () => NOW });
-  leading.addDecision({ id: 'rrv07-leading-gone', project: 'rrv07-leading', title: 'Gone first', chosen: 'erase' });
-  leading.addDecision({ id: 'rrv07-leading-kept', project: 'rrv07-kept', title: 'Kept second', chosen: 'keep' });
+  fixtureIds['rrv07-leading-gone'] = leading.addDecision({ project: 'rrv07-leading', title: 'Gone first', chosen: 'erase' }).id;
+  fixtureIds['rrv07-leading-kept'] = leading.addDecision({ project: 'rrv07-kept', title: 'Kept second', chosen: 'keep' }).id;
   leading.purgeProject('rrv07-leading', { mode: 'hard' });
   accepted.push(privilegedSnapshot(leading));
 
   const transitive = createShadowGraph({ now: () => NOW });
-  transitive.addDecision({ id: 'rrv07-transitive-gone', project: 'rrv07-transitive', title: 'Gone', chosen: 'erase' });
+  fixtureIds['rrv07-transitive-gone'] = transitive.addDecision({ project: 'rrv07-transitive', title: 'Gone', chosen: 'erase' }).id;
   transitive.purgeProject('rrv07-transitive', { mode: 'hard' });
   transitive.purgeProject('rrv07-transitive', { mode: 'hard' });
   accepted.push(privilegedSnapshot(transitive));
@@ -529,7 +527,7 @@ test('RRV-07: forged future ledgers fail closed in JSON/SQLite restore and CLI/H
   const sourceJson = join(directory, 'forged.json');
   await writeFile(sourceJson, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
   const old = createShadowGraph({ now: () => NOW });
-  old.addDecision({ id: 'rrv07-surface-old', project: 'old', title: 'Old', chosen: 'keep' });
+  fixtureIds['rrv07-surface-old'] = old.addDecision({ project: 'old', title: 'Old', chosen: 'keep' }).id;
 
   await t.test('direct JSON restore', async () => {
     const destination = join(directory, 'direct-live.json');

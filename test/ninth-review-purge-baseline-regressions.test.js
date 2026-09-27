@@ -1,3 +1,4 @@
+const fixtureIds = {};
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -242,7 +243,7 @@ test('DS-P1-007 ninth review: schemas 1-4 and a journal-bearing merge cannot res
 
   const destination = createShadowGraph({ now: () => NOW });
   const host = destination.addDecision({
-    id: 'ds-p1-007-merge-host', project: 'ds-p1-007-existing',
+    project: 'ds-p1-007-existing',
     title: 'Existing nonpurged project', chosen: 'preserve', idempotencyKey: 'host-retry'
   });
   const purged = {
@@ -371,7 +372,7 @@ function startMcp(file) {
 async function seedDestination(path) {
   const store = createJsonFileStore(path);
   const old = createShadowGraph({ now: () => NOW });
-  old.addDecision({ id: `old-${path.split(/[\\/]/).pop()}`, project: 'old', title: 'Old', chosen: 'replace' });
+  fixtureIds[`old-${path.split(/[\\/]/).pop()}`] = old.addDecision({ project: 'old', title: 'Old', chosen: 'replace' }).id;
   await store.save(privilegedSnapshot(old));
   store.close();
 }
@@ -430,7 +431,7 @@ test('DS-P1-007 ninth review RED: raw schema-4 restores are normalized in JSON/S
 
     let store = await createSqliteStore(destination);
     const old = createShadowGraph({ now: () => NOW });
-    old.addDecision({ id: 'sqlite-old', project: 'old', title: 'Old', chosen: 'replace' });
+    fixtureIds['sqlite-old'] = old.addDecision({ project: 'old', title: 'Old', chosen: 'replace' }).id;
     await store.save(privilegedSnapshot(old));
     const oldRevision = (await store.load()).revision;
     await store.restore(source);
@@ -463,7 +464,7 @@ test('DS-P1-007 ninth review RED: raw schema-4 restores are normalized in JSON/S
       }
     });
     const old = createShadowGraph({ now: () => NOW });
-    old.addDecision({ id: 'sqlite-rollback-old', project: 'old', title: 'Old', chosen: 'preserve' });
+    fixtureIds['sqlite-rollback-old'] = old.addDecision({ project: 'old', title: 'Old', chosen: 'preserve' }).id;
     await store.save(privilegedSnapshot(old));
     const destinationBefore = await store.load();
     await assert.rejects(store.restore(source), /injected delete-then-failure/);
@@ -627,7 +628,7 @@ async function assertBaselineAcrossPersistence(t, payload, label, expectedRecord
 
       let destinationStore = await createStore(backend, destination);
       const old = createShadowGraph({ now: () => NOW });
-      old.addDecision({ id: `${label}-${backend}-old`, project: 'old', title: 'Old', chosen: 'replace' });
+      fixtureIds[`${label}-${backend}-old`] = old.addDecision({ project: 'old', title: 'Old', chosen: 'replace' }).id;
       await destinationStore.save(privilegedSnapshot(old));
       if (backend === 'sqlite') {
         await destinationStore.restore(backup);

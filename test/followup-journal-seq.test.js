@@ -98,14 +98,15 @@ const INVALID_ENTRY_SEQUENCES = Object.freeze([
   ['MAX_SAFE_INTEGER plus one', Number.MAX_SAFE_INTEGER + 1]
 ]);
 
+// Administrative historical seed; its fixed identity belongs to restore fixtures.
 function seededGraph() {
   const graph = createShadowGraph({ now: () => NOW });
-  graph.addDecision({
+  graph.importData({ records: [{ kind: 'decision',
     id: 'ds-p1-009-live',
     project: 'ds-p1-009-live',
     title: 'Must survive rejection',
     chosen: 'keep'
-  });
+   }] });
   return graph;
 }
 
@@ -329,12 +330,12 @@ async function writeJson(path, payload) {
 
 function livePayload(id) {
   const graph = createShadowGraph({ now: () => NOW });
-  graph.addDecision({
+  graph.importData({ records: [{ kind: 'decision',
     id,
     project: 'ds-p1-009-live',
     title: 'Must survive rejected restore',
     chosen: 'keep'
-  });
+   }] });
   return privilegedSnapshot(graph);
 }
 

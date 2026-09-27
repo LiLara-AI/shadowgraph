@@ -158,7 +158,7 @@ async function setupVerifiedMcp(t, backend, label) {
   t.after(async () => { await rpc.stop(); });
   await rpc.call({ jsonrpc: '2.0', id: `${label}-list`, method: 'tools/list' });
   const fact = toolPayload(await rpc.call(toolRequest(`${label}-record`, 'shadowgraph_record_fact', {
-    id: `${label}-${backend}-fact`,
+
     project: label,
     key: 'release-ready',
     value: true,
@@ -189,12 +189,12 @@ function committedExpirationFixture() {
   };
   const graph = shadowgraph.createShadowGraph({ verifier, now: () => clock.value });
   const fact = graph.addFact({
-    id: attestation.factId,
     project: 'mcp-committed-expiration',
     key: 'release-ready',
     value: true,
     expiresAt: BOUNDARY
   });
+  attestation.factId = fact.id;
   return { graph, fact, clock };
 }
 
@@ -227,7 +227,7 @@ test('MCP JSON persists a committed expiration before returning the legacy verif
   await rpc.call({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
 
   const fact = toolPayload(await rpc.call(toolRequest(2, 'shadowgraph_record_fact', {
-    id: 'mcp-json-committed-expiration',
+
     project: 'mcp-committed-expiration',
     key: 'release-ready',
     value: true,
@@ -312,7 +312,7 @@ test('MCP SQLite persists a committed expiration with JSON-equivalent restart an
   await rpc.call({ jsonrpc: '2.0', id: 20, method: 'tools/list' });
 
   const fact = toolPayload(await rpc.call(toolRequest(21, 'shadowgraph_record_fact', {
-    id: 'mcp-sqlite-committed-expiration',
+
     project: 'mcp-committed-expiration',
     key: 'release-ready',
     value: true,
@@ -390,7 +390,7 @@ test('MCP JSON fails closed and latches after committed expiration persistence f
   const blockedRead = await scenario.rpc.call(toolRequest('precommit-blocked-read', 'shadowgraph_journal', { limit: 100 }));
   assert.equal(blockedRead.error.code, -32001);
   const blockedWrite = await scenario.rpc.call(toolRequest('precommit-blocked-write', 'shadowgraph_record_decision', {
-    id: 'must-not-land', title: 'Must not land', chosen: 'blocked'
+     title: 'Must not land', chosen: 'blocked'
   }));
   assert.equal(blockedWrite.error.code, -32001);
   assert.equal((await loadJson(scenario.file)).revision, 2);
@@ -447,12 +447,12 @@ for (const backend of ['json', 'sqlite']) {
     assert.equal(committed.journal.at(-1).type, 'fact.expired');
 
     const later = toolPayload(await scenario.rpc.call(toolRequest(`${backend}-postcommit-later`, 'shadowgraph_record_decision', {
-      id: `${backend}-later-decision`,
+
       project: 'later-operations',
       title: 'Later operation',
       chosen: 'queue and revision remain usable'
     })));
-    assert.equal(later.id, `${backend}-later-decision`);
+    assert.equal(typeof later.id === 'string' && later.id.length > 0, true);
     const afterLater = await loadBackend(backend, scenario.file);
     assert.equal(afterLater.revision, 4, 'read-back must advance the live expected revision before the later save');
     assert.equal(afterLater.records.some((record) => record.id === later.id), true);
@@ -469,12 +469,12 @@ for (const backend of ['json', 'sqlite']) {
     t.after(async () => { await writer.stop(); });
     await writer.call({ jsonrpc: '2.0', id: `${backend}-writer-list`, method: 'tools/list' });
     const independent = toolPayload(await writer.call(toolRequest(`${backend}-writer-save`, 'shadowgraph_record_decision', {
-      id: `${backend}-independent-winner`,
+
       project: 'independent-writer',
       title: 'Independent writer wins',
       chosen: 'preserve its committed revision'
     })));
-    assert.equal(independent.id, `${backend}-independent-winner`);
+    assert.equal(typeof independent.id === 'string' && independent.id.length > 0, true);
     await writer.stop();
     const afterWriter = await loadBackend(backend, scenario.file);
     assert.equal(afterWriter.revision, 3);
@@ -520,7 +520,7 @@ for (const backend of ['json', 'sqlite']) {
       forbidden: [scenario.fact.id, 'expirationDurable', 'persistenceError', 'revision conflict']
     });
     const blockedWrite = await scenario.rpc.call(toolRequest(`${backend}-conflict-blocked-write`, 'shadowgraph_record_decision', {
-      id: `${backend}-blocked-after-conflict`, title: 'Blocked', chosen: 'must not persist'
+       title: 'Blocked', chosen: 'must not persist'
     }));
     assertPrivateLegacyToolFailure(blockedWrite, {
       code: -32001,

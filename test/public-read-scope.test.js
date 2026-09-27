@@ -1,3 +1,4 @@
+import { historicalIds } from '../tools/historical-ids.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
@@ -13,6 +14,9 @@ import { syncMarkdownWorkspace } from '../src/markdown-workspace.js';
 import { privilegedSnapshot } from '../src/internal/snapshot.js';
 import { historicalRelation } from '../tools/historical-relation.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+
+// Labels below refer to IDs returned by ordinary creation, never supplied IDs.
+const fixtureIds = {};
 
 // PR-10 (plan v1.4.4 §10.5, §11; P1 reconciliation F-01, F-04, F-08, F-09,
 // F-16, F-17, F-21, F-25): the last public reads take the request's scope.
@@ -32,11 +36,12 @@ const PAST = '2025-01-01T00:00:00.000Z';
 // What a store written before schema 6 holds: a decision and a memory in the
 // literal "default", and a decision stored with no project at all.
 function legacyPayload() {
+  const historical = {};
   const writer = createShadowGraph({ now });
-  writer.addDecision({ project: 'default', id: 'legacy-dflt-decision', title: 'Legacy decision', chosen: 'x' });
-  writer.remember({ project: 'default', id: 'legacy-dflt-memory', memoryType: 'note', key: 'note', text: 'Legacy note' });
-  writer.addDecision({ project: 'default', id: 'legacy-projectless-decision', title: 'Projectless decision', chosen: 'x' });
-  const payload = privilegedSnapshot(writer);
+  historical['legacy-dflt-decision'] = writer.addDecision({ project: 'default', title: 'Legacy decision', chosen: 'x' }).id;
+  historical['legacy-dflt-memory'] = writer.remember({ project: 'default', memoryType: 'note', key: 'note', text: 'Legacy note' }).memory.id;
+  historical['legacy-projectless-decision'] = writer.addDecision({ project: 'default', title: 'Projectless decision', chosen: 'x' }).id;
+  const payload = historicalIds(privilegedSnapshot(writer), historical, { now });
   payload.schemaVersion = 5;
   const strip = (entity) => {
     if (!entity || typeof entity !== 'object') return;
@@ -57,17 +62,17 @@ function legacyPayload() {
 const importHistoricalRelation = (graph, relation) => graph.importData(historicalRelation({ ...relation, seq: privilegedSnapshot(graph).journalSeq + 1, at: NOW }));
 
 // Every id a scope owns. No id is a substring of another.
-const OWNED = {
-  alpha: ['alpha-decision', 'alpha-alternative', 'alpha-attempt', 'alpha-memory', 'alpha-fact', 'alpha-due-decision', 'relation-alpha-tried'],
-  beta: ['beta-decision', 'beta-attempt', 'beta-memory', 'beta-fact', 'beta-due-decision', 'relation-beta-tried'],
-  default: ['real-dflt-decision', 'real-dflt-memory'],
+const OWNED = () => ({
+  alpha: [fixtureIds['alpha-decision'], fixtureIds['alpha-alternative'], fixtureIds['alpha-attempt'], fixtureIds['alpha-memory'], fixtureIds['alpha-fact'], fixtureIds['alpha-due-decision'], fixtureIds['relation-alpha-tried']].sort(),
+  beta: [fixtureIds['beta-decision'], fixtureIds['beta-attempt'], fixtureIds['beta-memory'], fixtureIds['beta-fact'], fixtureIds['beta-due-decision'], fixtureIds['relation-beta-tried']].sort(),
+  default: [fixtureIds['real-dflt-decision'], fixtureIds['real-dflt-memory']].sort(),
   legacy: ['legacy-dflt-decision', 'legacy-dflt-memory', 'legacy-projectless-decision'],
-  originA: ['origin-a-decision', 'origin-a-attempt', 'origin-a-memory', 'relation-origin-a-tried'],
-  originB: ['origin-b-decision']
-};
+  originA: [fixtureIds['origin-a-decision'], fixtureIds['origin-a-attempt'], fixtureIds['origin-a-memory'], fixtureIds['relation-origin-a-tried']].sort(),
+  originB: [fixtureIds['origin-b-decision']]
+});
 // Relations stored across a boundary: no scope owns them.
 const CROSSING = ['relation-alpha-beta', 'relation-beta-alpha', 'relation-alpha-dflt', 'relation-alpha-legacy', 'relation-alpha-origin', 'relation-origin-a-b'];
-const EVERY_ID = [...Object.values(OWNED).flat(), ...CROSSING];
+const EVERY_ID = () => [...Object.values(OWNED()).flat(), ...CROSSING];
 const SCOPES = {
   unresolved: {},
   alpha: { project: 'alpha' },
@@ -85,7 +90,7 @@ const COVERAGE_READS = {
   recall: (g, s) => g.recall('', s),
   context: (g, s) => g.context(s),
   memoryHistory: (g, s) => g.memoryHistory({ ...s, memoryType: 'note', key: 'note' }),
-  traverse: (g, s) => g.traverse({ ...s, id: 'alpha-decision' }),
+  traverse: (g, s) => g.traverse({ ...s, id: fixtureIds['alpha-decision'] }),
   review: (g, s) => g.review(s),
   getReviewSignals: (g, s) => g.getReviewSignals(s),
   reconsider: (g, s) => g.reconsider(s),
@@ -124,47 +129,49 @@ for (const [path, read] of Object.entries(COVERAGE_READS)) {
 // The ids from outside `scope` that `output` names.
 function foreignIds(output, scope) {
   const text = JSON.stringify(output);
-  const own = new Set(OWNED[scope] ?? []);
-  return EVERY_ID.filter((id) => !own.has(id) && text.includes(`"${id}"`));
+  const own = new Set(OWNED()[scope] ?? []);
+  return EVERY_ID().filter((id) => !own.has(id) && text.includes(`"${id}"`));
 }
 
 function fixture() {
   const graph = createShadowGraph({ now });
   graph.importData(legacyPayload());
-  graph.addDecision({ project: 'alpha', id: 'alpha-decision', title: 'Alpha cache', chosen: 'redis', alternatives: [{ id: 'alpha-alternative', label: 'memcached', reasonRejected: 'slower' }] });
-  graph.addAttempt({ project: 'alpha', id: 'alpha-attempt', solution: 'alpha warm-up', result: 'worked' });
-  graph.remember({ project: 'alpha', id: 'alpha-memory', memoryType: 'note', key: 'note', text: 'Alpha note, header Bearer alpha-secret-token' });
-  graph.addFact({ project: 'alpha', id: 'alpha-fact', key: 'latency', value: 10 });
-  graph.addDecision({ project: 'alpha', id: 'alpha-due-decision', title: 'Alpha due', chosen: 'x', reviewAfter: PAST });
-  graph.link({ project: 'alpha', id: 'relation-alpha-tried', from: 'alpha-decision', to: 'alpha-attempt', relation: 'tried' });
-  graph.addDecision({ project: 'beta', id: 'beta-decision', title: 'Beta cache', chosen: 'memcached' });
-  graph.addAttempt({ project: 'beta', id: 'beta-attempt', solution: 'beta warm-up', result: 'worked' });
-  graph.remember({ project: 'beta', id: 'beta-memory', memoryType: 'note', key: 'note', text: 'Beta note' });
-  graph.addFact({ project: 'beta', id: 'beta-fact', key: 'latency', value: 99 });
-  graph.addDecision({ project: 'beta', id: 'beta-due-decision', title: 'Beta due', chosen: 'x', reviewAfter: PAST });
-  graph.link({ project: 'beta', id: 'relation-beta-tried', from: 'beta-decision', to: 'beta-attempt', relation: 'tried' });
-  graph.addDecision({ project: 'default', id: 'real-dflt-decision', title: 'Real default decision', chosen: 'x' });
-  graph.remember({ project: 'default', id: 'real-dflt-memory', memoryType: 'note', key: 'note', text: 'Real default note' });
-  graph.addDecision({ originId: 'origin_a', id: 'origin-a-decision', title: 'Origin a decision', chosen: 'x' });
-  graph.addAttempt({ originId: 'origin_a', id: 'origin-a-attempt', solution: 'origin a script', result: 'worked' });
-  graph.remember({ originId: 'origin_a', id: 'origin-a-memory', memoryType: 'note', key: 'note', text: 'Origin a note' });
-  graph.link({ originId: 'origin_a', id: 'relation-origin-a-tried', from: 'origin-a-decision', to: 'origin-a-attempt', relation: 'tried' });
-  graph.addDecision({ originId: 'origin_b', id: 'origin-b-decision', title: 'Origin b decision', chosen: 'x' });
-  importHistoricalRelation(graph, { id: 'relation-alpha-beta', from: 'alpha-decision', to: 'beta-attempt', relation: 'related', project: 'alpha' });
-  importHistoricalRelation(graph, { id: 'relation-beta-alpha', from: 'beta-decision', to: 'alpha-attempt', relation: 'related', project: 'beta' });
-  importHistoricalRelation(graph, { id: 'relation-alpha-dflt', from: 'alpha-decision', to: 'real-dflt-decision', relation: 'related', project: 'alpha' });
-  importHistoricalRelation(graph, { id: 'relation-alpha-legacy', from: 'alpha-decision', to: 'legacy-dflt-decision', relation: 'related', project: 'alpha' });
-  importHistoricalRelation(graph, { id: 'relation-alpha-origin', from: 'alpha-decision', to: 'origin-a-decision', relation: 'related', project: 'alpha' });
-  importHistoricalRelation(graph, { id: 'relation-origin-a-b', from: 'origin-a-attempt', to: 'origin-b-decision', relation: 'related', project: null });
+  const created = graph.addDecision({ project: 'alpha', title: 'Alpha cache', chosen: 'redis', alternatives: [{ label: 'memcached', reasonRejected: 'slower' }] });
+  fixtureIds['alpha-decision'] = created.id;
+  fixtureIds['alpha-alternative'] = created.alternatives[0].id;
+  fixtureIds['alpha-attempt'] = graph.addAttempt({ project: 'alpha', solution: 'alpha warm-up', result: 'worked' }).id;
+  fixtureIds['alpha-memory'] = graph.remember({ project: 'alpha', memoryType: 'note', key: 'note', text: 'Alpha note, header Bearer alpha-secret-token' }).memory.id;
+  fixtureIds['alpha-fact'] = graph.addFact({ project: 'alpha', key: 'latency', value: 10 }).id;
+  fixtureIds['alpha-due-decision'] = graph.addDecision({ project: 'alpha', title: 'Alpha due', chosen: 'x', reviewAfter: PAST }).id;
+  fixtureIds['relation-alpha-tried'] = graph.link({ project: 'alpha', from: fixtureIds['alpha-decision'], to: fixtureIds['alpha-attempt'], relation: 'tried' }).id;
+  fixtureIds['beta-decision'] = graph.addDecision({ project: 'beta', title: 'Beta cache', chosen: 'memcached' }).id;
+  fixtureIds['beta-attempt'] = graph.addAttempt({ project: 'beta', solution: 'beta warm-up', result: 'worked' }).id;
+  fixtureIds['beta-memory'] = graph.remember({ project: 'beta', memoryType: 'note', key: 'note', text: 'Beta note' }).memory.id;
+  fixtureIds['beta-fact'] = graph.addFact({ project: 'beta', key: 'latency', value: 99 }).id;
+  fixtureIds['beta-due-decision'] = graph.addDecision({ project: 'beta', title: 'Beta due', chosen: 'x', reviewAfter: PAST }).id;
+  fixtureIds['relation-beta-tried'] = graph.link({ project: 'beta', from: fixtureIds['beta-decision'], to: fixtureIds['beta-attempt'], relation: 'tried' }).id;
+  fixtureIds['real-dflt-decision'] = graph.addDecision({ project: 'default', title: 'Real default decision', chosen: 'x' }).id;
+  fixtureIds['real-dflt-memory'] = graph.remember({ project: 'default', memoryType: 'note', key: 'note', text: 'Real default note' }).memory.id;
+  fixtureIds['origin-a-decision'] = graph.addDecision({ originId: 'origin_a', title: 'Origin a decision', chosen: 'x' }).id;
+  fixtureIds['origin-a-attempt'] = graph.addAttempt({ originId: 'origin_a', solution: 'origin a script', result: 'worked' }).id;
+  fixtureIds['origin-a-memory'] = graph.remember({ originId: 'origin_a', memoryType: 'note', key: 'note', text: 'Origin a note' }).memory.id;
+  fixtureIds['relation-origin-a-tried'] = graph.link({ originId: 'origin_a', from: fixtureIds['origin-a-decision'], to: fixtureIds['origin-a-attempt'], relation: 'tried' }).id;
+  fixtureIds['origin-b-decision'] = graph.addDecision({ originId: 'origin_b', title: 'Origin b decision', chosen: 'x' }).id;
+  importHistoricalRelation(graph, { id: 'relation-alpha-beta', from: fixtureIds['alpha-decision'], to: fixtureIds['beta-attempt'], relation: 'related', project: 'alpha' });
+  importHistoricalRelation(graph, { id: 'relation-beta-alpha', from: fixtureIds['beta-decision'], to: fixtureIds['alpha-attempt'], relation: 'related', project: 'beta' });
+  importHistoricalRelation(graph, { id: 'relation-alpha-dflt', from: fixtureIds['alpha-decision'], to: fixtureIds['real-dflt-decision'], relation: 'related', project: 'alpha' });
+  importHistoricalRelation(graph, { id: 'relation-alpha-legacy', from: fixtureIds['alpha-decision'], to: 'legacy-dflt-decision', relation: 'related', project: 'alpha' });
+  importHistoricalRelation(graph, { id: 'relation-alpha-origin', from: fixtureIds['alpha-decision'], to: fixtureIds['origin-a-decision'], relation: 'related', project: 'alpha' });
+  importHistoricalRelation(graph, { id: 'relation-origin-a-b', from: fixtureIds['origin-a-attempt'], to: fixtureIds['origin-b-decision'], relation: 'related', project: null });
   graph.review({ project: 'alpha' }).items;
   graph.review({ project: 'beta' }).items;
   return graph;
 }
 
 test('the fixture ids cannot mask one another', () => {
-  for (const id of EVERY_ID) assert.deepEqual(EVERY_ID.filter((other) => other !== id && other.includes(id)), [], id);
   const snapshot = privilegedSnapshot(fixture());
-  for (const id of EVERY_ID) assert.ok(JSON.stringify(snapshot).includes(`"${id}"`), `the store holds ${id}`);
+  for (const id of EVERY_ID()) assert.deepEqual(EVERY_ID().filter((other) => other !== id && other.includes(id)), [], id);
+  for (const id of EVERY_ID()) assert.ok(JSON.stringify(snapshot).includes(`"${id}"`), `the store holds ${id}`);
   assert.equal(snapshot.reviewSignals.length, 2);
 });
 
@@ -173,8 +180,8 @@ test('getJournal answers inside the scope and names nothing outside it', () => {
   for (const [name, scope] of Object.entries(SCOPES)) {
     const result = graph.getJournal({ ...scope, limit: 1000 });
     assert.deepEqual(foreignIds(result, name), [], name);
-    for (const id of OWNED[name] ?? []) {
-      if (id.includes('alternative')) continue;
+    for (const id of OWNED()[name] ?? []) {
+      if (id === fixtureIds['alpha-alternative']) continue;
       assert.ok(result.items.some((entry) => entry.entityId === id), `${name} sees its own entry for ${id}`);
     }
   }
@@ -191,10 +198,10 @@ test('getJournal answers inside the scope and names nothing outside it', () => {
 
 test('a scoped journal read positions only the gaps its own hard purges explain', () => {
   const graph = createShadowGraph({ now });
-  graph.addDecision({ project: 'alpha', id: 'a1', title: 'A', chosen: 'x' });
-  graph.addDecision({ project: 'beta', id: 'b1', title: 'B', chosen: 'x' });
-  graph.addDecision({ project: 'gamma', id: 'g1', title: 'G', chosen: 'x' });
-  graph.addDecision({ project: 'alpha', id: 'a2', title: 'A2', chosen: 'x' });
+  fixtureIds['a1'] = graph.addDecision({ project: 'alpha', title: 'A', chosen: 'x' }).id;
+  fixtureIds['b1'] = graph.addDecision({ project: 'beta', title: 'B', chosen: 'x' }).id;
+  fixtureIds['g1'] = graph.addDecision({ project: 'gamma', title: 'G', chosen: 'x' }).id;
+  fixtureIds['a2'] = graph.addDecision({ project: 'alpha', title: 'A2', chosen: 'x' }).id;
   graph.purgeProject('beta', { mode: 'hard' });
   const alpha = graph.getJournal({ project: 'alpha', limit: 1000 });
   assert.deepEqual(alpha.completeness.gaps, [], 'a gap beta left is not positioned for alpha');
@@ -230,11 +237,11 @@ test('redact returns only the scope, still redacted, and names nothing outside i
   for (const collection of ['records', 'facts', 'relations', 'reviewSignals', 'idempotency', 'events', 'journal']) assert.deepEqual(unresolved[collection], [], collection);
   for (const [name, scope] of Object.entries(SCOPES)) assert.deepEqual(foreignIds(graph.redact(scope), name), [], name);
   const alpha = graph.redact({ project: 'alpha' });
-  assert.deepEqual(alpha.records.map((record) => record.id).sort(), ['alpha-attempt', 'alpha-decision', 'alpha-due-decision', 'alpha-memory']);
-  assert.deepEqual(alpha.relations.map((relation) => relation.id), ['relation-alpha-tried']);
+  assert.deepEqual(alpha.records.map((record) => record.id).sort(), [fixtureIds['alpha-attempt'], fixtureIds['alpha-decision'], fixtureIds['alpha-due-decision'], fixtureIds['alpha-memory']].sort());
+  assert.deepEqual(alpha.relations.map((relation) => relation.id), [fixtureIds['relation-alpha-tried']]);
   assert.ok(alpha.journal.length > 0);
   assert.doesNotMatch(JSON.stringify(alpha), /alpha-secret-token/, 'the journal copy is redacted too');
-  assert.deepEqual(graph.redact({ project: 'default' }).records.map((record) => record.id).sort(), ['real-dflt-decision', 'real-dflt-memory']);
+  assert.deepEqual(graph.redact({ project: 'default' }).records.map((record) => record.id).sort(), [fixtureIds['real-dflt-decision'], fixtureIds['real-dflt-memory']].sort());
 });
 
 test('the public export is scoped and carries none of the store internals', () => {
@@ -249,9 +256,9 @@ test('the public export is scoped and carries none of the store internals', () =
     assert.deepEqual(foreignIds(exported, name), [], name);
   }
   assert.deepEqual(graph.exportData().records, []);
-  assert.deepEqual(graph.exportData({ project: 'alpha' }).records.map((record) => record.id).sort(), ['alpha-attempt', 'alpha-decision', 'alpha-due-decision', 'alpha-memory']);
-  assert.deepEqual(graph.exportData({ project: 'default' }).records.map((record) => record.id).sort(), ['real-dflt-decision', 'real-dflt-memory']);
-  assert.deepEqual(graph.exportData({ originId: 'origin_a' }).relations.map((relation) => relation.id), ['relation-origin-a-tried']);
+  assert.deepEqual(graph.exportData({ project: 'alpha' }).records.map((record) => record.id).sort(), [fixtureIds['alpha-attempt'], fixtureIds['alpha-decision'], fixtureIds['alpha-due-decision'], fixtureIds['alpha-memory']].sort());
+  assert.deepEqual(graph.exportData({ project: 'default' }).records.map((record) => record.id).sort(), [fixtureIds['real-dflt-decision'], fixtureIds['real-dflt-memory']].sort());
+  assert.deepEqual(graph.exportData({ originId: 'origin_a' }).relations.map((relation) => relation.id), [fixtureIds['relation-origin-a-tried']]);
 });
 
 test('a public export is never accepted as a store', async (t) => {
@@ -290,9 +297,9 @@ test('persistence saves and reloads every project while the public export is sco
       const reloaded = createShadowGraph({ now });
       reloaded.importData(await store.load());
       const stored = privilegedSnapshot(reloaded);
-      for (const id of EVERY_ID) assert.ok(JSON.stringify(stored).includes(`"${id}"`), `${type} keeps ${id}`);
+      for (const id of EVERY_ID()) assert.ok(JSON.stringify(stored).includes(`"${id}"`), `${type} keeps ${id}`);
       for (const scope of Object.values(SCOPES)) assert.deepEqual(reloaded.exportData(scope), graph.exportData(scope), `${type} ${JSON.stringify(scope)}`);
-      assert.deepEqual(reloaded.exportData({ project: 'alpha' }).records.map((record) => record.id).sort(), ['alpha-attempt', 'alpha-decision', 'alpha-due-decision', 'alpha-memory']);
+      assert.deepEqual(reloaded.exportData({ project: 'alpha' }).records.map((record) => record.id).sort(), [fixtureIds['alpha-attempt'], fixtureIds['alpha-decision'], fixtureIds['alpha-due-decision'], fixtureIds['alpha-memory']].sort());
     } finally { store.close?.(); }
   }
 });
@@ -300,8 +307,8 @@ test('persistence saves and reloads every project while the public export is sco
 test('review signals are read inside the scope', () => {
   const graph = fixture();
   assert.deepEqual(graph.getReviewSignals({}).items, []);
-  assert.deepEqual(graph.getReviewSignals({ project: 'alpha' }).items.map((signal) => signal.decisionId), ['alpha-due-decision']);
-  assert.deepEqual(graph.getReviewSignals({ project: 'beta', status: 'open' }).items.map((signal) => signal.decisionId), ['beta-due-decision']);
+  assert.deepEqual(graph.getReviewSignals({ project: 'alpha' }).items.map((signal) => signal.decisionId), [fixtureIds['alpha-due-decision']]);
+  assert.deepEqual(graph.getReviewSignals({ project: 'beta', status: 'open' }).items.map((signal) => signal.decisionId), [fixtureIds['beta-due-decision']]);
   assert.deepEqual(graph.getReviewSignals({ project: 'default' }).items, []);
   assert.deepEqual(graph.getReviewSignals({ originId: 'origin_a' }).items, []);
 });
@@ -310,9 +317,9 @@ test('memory history is read inside the scope', () => {
   const graph = fixture();
   const history = (scope) => graph.memoryHistory({ ...scope, memoryType: 'note', key: 'note' }).items.map((memory) => memory.id);
   assert.deepEqual(history({}), [], 'no project is not the legacy "default" bucket');
-  assert.deepEqual(history({ project: 'default' }), ['real-dflt-memory']);
-  assert.deepEqual(history({ project: 'alpha' }), ['alpha-memory']);
-  assert.deepEqual(history({ originId: 'origin_a' }), ['origin-a-memory']);
+  assert.deepEqual(history({ project: 'default' }), [fixtureIds['real-dflt-memory']]);
+  assert.deepEqual(history({ project: 'alpha' }), [fixtureIds['alpha-memory']]);
+  assert.deepEqual(history({ originId: 'origin_a' }), [fixtureIds['origin-a-memory']]);
 });
 
 // A store with an integrity error in beta only: a beta decision whose stored
@@ -359,8 +366,8 @@ test('rebuild returns the projection of the scope only', () => {
   for (const collection of ['records', 'facts', 'relations', 'idempotency']) assert.deepEqual(unresolved.projection[collection], [], collection);
   for (const [name, scope] of Object.entries(SCOPES)) assert.deepEqual(foreignIds(graph.rebuild(scope), name), [], name);
   const alpha = graph.rebuild({ project: 'alpha' });
-  assert.deepEqual(alpha.projection.records.map((record) => record.id).sort(), ['alpha-attempt', 'alpha-decision', 'alpha-due-decision', 'alpha-memory']);
-  assert.deepEqual(alpha.projection.relations.map((relation) => relation.id), ['relation-alpha-tried']);
+  assert.deepEqual(alpha.projection.records.map((record) => record.id).sort(), [fixtureIds['alpha-attempt'], fixtureIds['alpha-decision'], fixtureIds['alpha-due-decision'], fixtureIds['alpha-memory']].sort());
+  assert.deepEqual(alpha.projection.relations.map((relation) => relation.id), [fixtureIds['relation-alpha-tried']]);
 });
 
 async function runCli(env, args) {
@@ -410,11 +417,11 @@ test('markdown push writes only a named project\'s own memories and never collid
   assert.deepEqual(await files(join(directory, 'origin')), []);
 
   const alpha = await syncMarkdownWorkspace({ graph, directory: join(directory, 'alpha'), mode: 'push', project: 'alpha' });
-  assert.deepEqual(alpha.files.map((item) => item.memoryId), ['alpha-memory']);
+  assert.deepEqual(alpha.files.map((item) => item.memoryId), [fixtureIds['alpha-memory']]);
 
   const defaults = join(directory, 'default');
   const real = await syncMarkdownWorkspace({ graph, directory: defaults, mode: 'push', project: 'default' });
-  assert.deepEqual(real.files.map((item) => item.memoryId), ['real-dflt-memory'], 'legacy "default" memory is never pushed as the real project');
+  assert.deepEqual(real.files.map((item) => item.memoryId), [fixtureIds['real-dflt-memory']], 'legacy "default" memory is never pushed as the real project');
   const written = await readFile(real.files[0].path, 'utf8');
   assert.match(written, /Real default note/);
   // Pull the real project's file back after an edit: it updates the real
@@ -423,6 +430,6 @@ test('markdown push writes only a named project\'s own memories and never collid
   const legacyBefore = JSON.stringify(privilegedSnapshot(graph).records.find((record) => record.id === 'legacy-dflt-memory'));
   const pulled = await syncMarkdownWorkspace({ graph, directory: defaults, mode: 'pull', project: 'default' });
   assert.deepEqual(pulled.conflicts, []);
-  assert.equal(pulled.results[0].previous.id, 'real-dflt-memory');
+  assert.equal(pulled.results[0].previous.id, fixtureIds['real-dflt-memory']);
   assert.equal(JSON.stringify(privilegedSnapshot(graph).records.find((record) => record.id === 'legacy-dflt-memory')), legacyBefore);
 });

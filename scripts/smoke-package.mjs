@@ -178,7 +178,7 @@ try {
     project: 'beta-demo', key: 'deployment', value: 'multi-user', sourceClass: 'human_confirmed'
   })], { cwd: appDirectory, env: cliEnv });
   const reviewAfterRestart = JSON.parse((await runInstalledCli(installedCli, ['review', JSON.stringify({ project: 'beta-demo' })], { cwd: appDirectory, env: cliEnv })).stdout);
-  assert.equal(reviewAfterRestart.some((item) => item.decisionId === decision.id), true);
+  assert.equal(reviewAfterRestart.items.some((item) => item.decisionId === decision.id), true);
 
   const fullFile = join(appDirectory, 'mcp full', 'data.json');
   const [fullList] = await rpc(installedCli, { SHADOWGRAPH_FILE: fullFile, SHADOWGRAPH_MCP_COMPACT: '0' }, [

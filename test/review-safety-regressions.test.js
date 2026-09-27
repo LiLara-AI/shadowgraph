@@ -203,17 +203,14 @@ test('an attempt whose conditions are all structured and true is still reusable'
 // Finding 3 -- an acknowledgement covers exactly the breach set it acknowledged.
 // ---------------------------------------------------------------------------
 
-// `ids` supplies stable identifiers where a test needs two graphs to be
-// comparable; without them every run generates fresh ones.
-function twoThresholdDecision(graph, ids = {}) {
+function twoThresholdDecision(graph) {
   return graph.addDecision({
     project: 'p',
-    ...(ids.decision ? { id: ids.decision } : {}),
     title: 'Serve reads from the local replica',
     chosen: 'local-replica',
     alternatives: [
-      { ...(ids.low ? { id: ids.low } : {}), label: 'primary-only', reasonRejected: 'lag was acceptable', reopenWhen: [{ key: 'lag', operator: 'gte', value: 500 }] },
-      { ...(ids.high ? { id: ids.high } : {}), label: 'dual-write', reasonRejected: 'lag was well under budget', reopenWhen: [{ key: 'lag', operator: 'gte', value: 1000 }] }
+      { label: 'primary-only', reasonRejected: 'lag was acceptable', reopenWhen: [{ key: 'lag', operator: 'gte', value: 500 }] },
+      { label: 'dual-write', reasonRejected: 'lag was well under budget', reopenWhen: [{ key: 'lag', operator: 'gte', value: 1000 }] }
     ]
   });
 }
@@ -272,7 +269,7 @@ test('an acknowledgement survives a restart', async (t) => {
 test('acknowledgement coverage behaves identically on JSON and SQLite', async (t) => {
   const directory = await scratchDirectory(t, 'review-ack-parity-');
 
-  // ONE snapshot, with fixed identifiers, feeds both backends. An earlier
+  // One snapshot, with generated identifiers, feeds both backends. An earlier
   // version built a graph per backend, so each got freshly generated alternative
   // ids; coverage sorts on those ids, and masking them afterwards left two
   // correct-but-differently-ordered arrays. That made the test fail about half
@@ -280,8 +277,8 @@ test('acknowledgement coverage behaves identically on JSON and SQLite', async (t
   // Fixed clocks too, so the only value minted per backend is the new signal's
   // random id.
   const source = createShadowGraph({ now: () => '2026-02-01T00:00:00.000Z' });
-  twoThresholdDecision(source, { decision: 'decision:d1', low: 'alternative:low', high: 'alternative:high' });
-  source.addFact({ project: 'p', key: 'lag', value: 600, id: 'fact:narrow' });
+  twoThresholdDecision(source);
+  source.addFact({ project: 'p', key: 'lag', value: 600 });
   source.acknowledgeReview(source.context({ project: 'p' }).openReviews[0].reviewSignalId, { project: 'p' });
   const snapshot = privilegedSnapshot(source);
 
@@ -301,15 +298,15 @@ test('acknowledgement coverage behaves identically on JSON and SQLite', async (t
       restarted.importData(durable);
       assert.equal(restarted.context({ project: 'p' }).openReviews[0].reviewSignalStatus, 'acknowledged', `${backend}: the acknowledgement survives`);
 
-      restarted.addFact({ project: 'p', key: 'lag', value: 1200, id: 'fact:broad' });
+      const broad = restarted.addFact({ project: 'p', key: 'lag', value: 1200 });
       assert.equal(restarted.context({ project: 'p' }).openReviews[0].reviewSignalStatus, 'open', `${backend}: the broadened breach is open`);
 
-      // Every identifier and timestamp above is fixed, so the new signal's own
-      // random id is the only minted value left. Coverage now sorts on identical
+      // Both backends import the same generated identities. Normalize only
+      // the new fact and signal IDs each backend generated independently. Coverage now sorts on identical
       // alternative ids, so its order is deterministic too.
       snapshots[backend] = JSON.stringify(
         restarted.getReviewSignals({ project: 'p' }).items.sort((left, right) => left.status.localeCompare(right.status))
-      ).replace(/review_\d+_[a-z0-9]+/g, 'review_MINTED');
+      ).replaceAll(broad.id, 'fact_MINTED').replace(/review_\d+_[a-z0-9]+/g, 'review_MINTED');
     });
   }
 

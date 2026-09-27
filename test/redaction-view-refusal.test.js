@@ -9,6 +9,9 @@ import { validateRestorePayload } from '../src/restore-validation.js';
 import { privilegedSnapshot } from '../src/internal/snapshot.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
+// Labels below refer to IDs returned by ordinary creation, never supplied IDs.
+const fixtureIds = {};
+
 // P1 finding F-36 (PR-10 targeted correction): a scoped redaction is a read of
 // one scope, like the public export. Taken for a store it would replace every
 // other project with nothing, so every redaction result says what it is --
@@ -22,21 +25,21 @@ const NOW = '2026-01-01T00:00:00.000Z';
 const now = () => NOW;
 const FUTURE = { opaque: [{ id: 'f1', nested: { values: [1, 'two', null, true] } }], note: 'a collection this build does not know' };
 const ACCESS = { lineageId: 'lineage-test', entries: [{ accessId: 'grant-1', type: 'grant', state: 'active' }] };
-const OWNERS = ['alpha-decision', 'beta-decision', 'real-dflt-decision', 'origin-a-decision'];
+const OWNERS = () => [fixtureIds['alpha-decision'], fixtureIds['beta-decision'], fixtureIds['real-dflt-decision'], fixtureIds['origin-a-decision']].sort();
 
 // Two projects, the real "default", an origin, a relation, a secret, and a
 // collection this build does not know plus an authority collection.
 function fixture() {
   const writer = createShadowGraph({ now });
-  writer.addDecision({ project: 'alpha', id: 'alpha-decision', title: 'Alpha cache', chosen: 'redis' });
-  writer.addAttempt({ project: 'alpha', id: 'alpha-attempt', solution: 'alpha warm-up', result: 'worked' });
-  writer.link({ project: 'alpha', id: 'relation-alpha', from: 'alpha-decision', to: 'alpha-attempt', relation: 'tried' });
-  writer.remember({ project: 'alpha', id: 'alpha-memory', memoryType: 'note', key: 'note', text: 'Alpha note, header Bearer alpha-view-token' });
-  writer.addFact({ project: 'alpha', id: 'alpha-fact', key: 'latency', value: 10 });
-  writer.addDecision({ project: 'beta', id: 'beta-decision', title: 'Beta cache', chosen: 'memcached' });
-  writer.addFact({ project: 'beta', id: 'beta-fact', key: 'latency', value: 99 });
-  writer.addDecision({ project: 'default', id: 'real-dflt-decision', title: 'Real default', chosen: 'x' });
-  writer.addDecision({ originId: 'origin_a', id: 'origin-a-decision', title: 'Origin a', chosen: 'x' });
+  fixtureIds['alpha-decision'] = writer.addDecision({ project: 'alpha', title: 'Alpha cache', chosen: 'redis' }).id;
+  fixtureIds['alpha-attempt'] = writer.addAttempt({ project: 'alpha', solution: 'alpha warm-up', result: 'worked' }).id;
+  fixtureIds['relation-alpha'] = writer.link({ project: 'alpha', from: fixtureIds['alpha-decision'], to: fixtureIds['alpha-attempt'], relation: 'tried' }).id;
+  fixtureIds['alpha-memory'] = writer.remember({ project: 'alpha', memoryType: 'note', key: 'note', text: 'Alpha note, header Bearer alpha-view-token' }).memory.id;
+  fixtureIds['alpha-fact'] = writer.addFact({ project: 'alpha', key: 'latency', value: 10 }).id;
+  fixtureIds['beta-decision'] = writer.addDecision({ project: 'beta', title: 'Beta cache', chosen: 'memcached' }).id;
+  fixtureIds['beta-fact'] = writer.addFact({ project: 'beta', key: 'latency', value: 99 }).id;
+  fixtureIds['real-dflt-decision'] = writer.addDecision({ project: 'default', title: 'Real default', chosen: 'x' }).id;
+  fixtureIds['origin-a-decision'] = writer.addDecision({ originId: 'origin_a', title: 'Origin a', chosen: 'x' }).id;
   const graph = createShadowGraph({ now });
   graph.importData({ ...privilegedSnapshot(writer), futureCollection: FUTURE, access: ACCESS });
   return graph;
@@ -94,8 +97,8 @@ test('import, merge and replace refuse every scoped view and leave the graph unc
     assert.equal(JSON.stringify(privilegedSnapshot(graph)), before, `${label}: nothing changed`);
   }
   // Still usable.
-  graph.addDecision({ project: 'beta', id: 'beta-after', title: 'After', chosen: 'y' });
-  assert.ok(privilegedSnapshot(graph).records.some((record) => record.id === 'beta-after'));
+  fixtureIds['beta-after'] = graph.addDecision({ project: 'beta', title: 'After', chosen: 'y' }).id;
+  assert.ok(privilegedSnapshot(graph).records.some((record) => record.id === fixtureIds['beta-after']));
 });
 
 test('JSON and SQLite stores refuse to save a scoped view over an existing two-project store', async (t) => {
@@ -124,10 +127,10 @@ test('JSON and SQLite stores refuse to save a scoped view over an existing two-p
       // The destination is still a working store.
       const reopened = createShadowGraph({ now });
       reopened.importData(await store.load());
-      reopened.addDecision({ project: 'alpha', id: `alpha-after-${type}`, title: 'After', chosen: 'y' });
+      fixtureIds[`alpha-after-${type}`] = reopened.addDecision({ project: 'alpha', title: 'After', chosen: 'y' }).id;
       await store.save(privilegedSnapshot(reopened));
       const after = await store.load();
-      for (const id of [...OWNERS, `alpha-after-${type}`]) assert.ok(after.records.some((record) => record.id === id), `${type} keeps ${id}`);
+      for (const id of [...OWNERS(), fixtureIds[`alpha-after-${type}`]]) assert.ok(after.records.some((record) => record.id === id), `${type} keeps ${id}`);
     } finally { store.close?.(); }
   }
 });
@@ -148,7 +151,7 @@ test('restore refuses a scoped view and leaves an existing destination whole (JS
     assert.deepEqual(await readFile(destination), destinationBytes, `json ${label}: destination bytes unchanged`);
   }
   const loaded = await destinationStore.load();
-  for (const id of OWNERS) assert.ok(loaded.records.some((record) => record.id === id), `json keeps ${id}`);
+  for (const id of OWNERS()) assert.ok(loaded.records.some((record) => record.id === id), `json keeps ${id}`);
 
   // SQLite: the supported restore installs another database. A view can reach
   // one only through a build without this guard, which keeps a key it does not
@@ -173,7 +176,7 @@ test('restore refuses a scoped view and leaves an existing destination whole (JS
       await assert.rejects(live.restore(sourceFile), /public_export_not_a_store/, `sqlite ${label}`);
       assert.deepEqual(await live.load(), before, `sqlite ${label}: destination unchanged`);
     }
-    for (const id of OWNERS) assert.ok(before.records.some((record) => record.id === id), `sqlite keeps ${id}`);
+    for (const id of OWNERS()) assert.ok(before.records.some((record) => record.id === id), `sqlite keeps ${id}`);
   } finally { live.close(); }
 });
 
@@ -228,7 +231,7 @@ test('the complete store still saves, backs up and restores whole (JSON and SQLi
     liveStore.close?.();
     const destinationStore = await createStorage({ type, file: destination });
     const other = createShadowGraph({ now });
-    other.addDecision({ project: 'gamma', id: `gamma-${type}`, title: 'Replaced by the restore', chosen: 'x' });
+    fixtureIds[`gamma-${type}`] = other.addDecision({ project: 'gamma', title: 'Replaced by the restore', chosen: 'x' }).id;
     await destinationStore.save(privilegedSnapshot(other));
     if (type === 'sqlite') await destinationStore.restore(backup);
     else { destinationStore.close?.(); await restoreFile(backup, destination, {}); }
@@ -236,10 +239,10 @@ test('the complete store still saves, backs up and restores whole (JSON and SQLi
     const restored = await reopened.load();
     reopened.close?.();
     if (type === 'sqlite') destinationStore.close();
-    for (const id of OWNERS) assert.ok(restored.records.some((record) => record.id === id), `${type} restores ${id}`);
+    for (const id of OWNERS()) assert.ok(restored.records.some((record) => record.id === id), `${type} restores ${id}`);
     assert.deepEqual(restored.futureCollection, FUTURE, `${type} keeps the unknown collection`);
     const reloaded = createShadowGraph({ now });
     reloaded.importData(restored);
-    assert.deepEqual(reloaded.exportData({ project: 'beta' }).records.map((record) => record.id), ['beta-decision']);
+    assert.deepEqual(reloaded.exportData({ project: 'beta' }).records.map((record) => record.id), [fixtureIds['beta-decision']]);
   }
 });

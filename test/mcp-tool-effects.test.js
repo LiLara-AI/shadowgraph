@@ -25,11 +25,6 @@ import { privilegedIssueAccess, privilegedSnapshot } from '../src/internal/snaps
 
 const STRUCTURED_PROTOCOL = '2025-11-25';
 const PROJECT = 'effects';
-// Tools whose dispatch arm passes only an id, so it carries no write scope and
-// every call is refused before any id is resolved (P1 finding F-30), until
-// their transport is aligned (plan PR-13). Their effects cannot be observed
-// until then; the list is asserted exact, so it cannot grow unseen.
-const AWAITING_TRANSPORT_SCOPE = ['shadowgraph_ack_review', 'shadowgraph_record_outcome', 'shadowgraph_update_status'];
 const T0 = '2030-01-01T00:00:00.000Z';
 const at = (minutes) => new Date(Date.parse(T0) + minutes * 60_000).toISOString();
 
@@ -250,7 +245,7 @@ test('every advertised tool annotation matches the effects the server actually h
 
   // --- writes that mint new entities -------------------------------------
   const decision = await observe('shadowgraph_record_decision', {
-    id: 'effects-decision', project: PROJECT, title: 'Choose a store', chosen: 'sqlite',
+    project: PROJECT, title: 'Choose a store', chosen: 'sqlite',
     idempotencyKey: 'effects-decision-key',
     alternatives: [{ label: 'postgres', reasonRejected: 'operational cost', reopenWhen: [{ key: 'deployment', operator: 'equals', value: 'multi-user' }] }]
   });
@@ -297,7 +292,7 @@ test('every advertised tool annotation matches the effects the server actually h
     ['shadowgraph_search', { project: PROJECT, query: 'store' }],
     ['shadowgraph_retrieve', { project: PROJECT, query: 'store' }],
     ['shadowgraph_recall', { project: PROJECT, query: 'store' }],
-    ['shadowgraph_traverse', { project: PROJECT, id: 'effects-decision' }],
+    ['shadowgraph_traverse', { project: PROJECT, id: decision.firstResult.id }],
     ['shadowgraph_validate', {}],
     ['shadowgraph_journal', { project: PROJECT, limit: 5 }],
     ['shadowgraph_rebuild', { project: PROJECT }],
@@ -318,36 +313,32 @@ test('every advertised tool annotation matches the effects the server actually h
   assert.ok(Number.isInteger(durableNow.revision), 'mutation effects still use the truthful durable revision');
 
   // --- lifecycle writes ---------------------------------------------------
-  const refusedWithoutEffect = async (name, args) => {
-    const before = await snapshot(rpc);
-    const refused = await rpc.fails(name, args);
-    assert.equal(refused.code, -32000, name);
-    const after = await snapshot(rpc);
-    assert.equal(after.revision, before.revision, `${name}: a refused call commits nothing`);
-    assert.equal(after.journalSeq, before.journalSeq, name);
-  };
-  await refusedWithoutEffect('shadowgraph_update_status', { project: PROJECT, decisionId: 'effects-decision', status: 'planned' });
-  await refusedWithoutEffect('shadowgraph_record_outcome', { project: PROJECT, decisionId: 'effects-decision', outcome: { status: 'successful', sourceClass: 'tool_observed' } });
+  const status = await observe('shadowgraph_update_status', { project: PROJECT, decisionId: decision.firstResult.id, status: 'planned' });
+  assert.equal(status.firstResult.status, 'planned');
+  const outcome = await observe('shadowgraph_record_outcome', { project: PROJECT, decisionId: decision.firstResult.id, outcome: { status: 'successful', sourceClass: 'tool_observed' } });
+  assert.equal(outcome.firstResult.outcome.status, 'successful');
 
   const evidence = await observe(
     'shadowgraph_confidence_evidence',
-    { project: PROJECT, decisionId: 'effects-decision', reason: 'benchmark held', key: 'effects-evidence', supports: true },
+    { project: PROJECT, decisionId: decision.firstResult.id, reason: 'benchmark held', key: 'effects-evidence', supports: true },
     { between: () => rpc.setClock(at(2)) }
   );
   assert.equal(evidence.repeat.journalDelta, 0, 'a duplicate evidence key contributes nothing');
-  assert.deepEqual(evidence.repeat.changedExisting, ['effects-decision'], 'but the decision is still rewritten');
+  assert.deepEqual(evidence.repeat.changedExisting, [decision.firstResult.id], 'but the decision is still rewritten');
   assert.notEqual(evidence.firstResult.updatedAt, evidence.repeatResult.updatedAt, 'because updatedAt is restamped');
 
-  await rpc.ok('shadowgraph_record_decision', { id: 'effects-replacement', project: PROJECT, title: 'Replacement', chosen: 'duckdb' });
-  const link = await observe('shadowgraph_link', { project: PROJECT, from: 'effects-decision', to: 'effects-replacement', relation: 'informs' });
+  const replacement = await rpc.ok('shadowgraph_record_decision', { project: PROJECT, title: 'Replacement', chosen: 'duckdb' });
+  const link = await observe('shadowgraph_link', { project: PROJECT, from: decision.firstResult.id, to: replacement.id, relation: 'informs' });
   assert.notEqual(link.firstResult.id, link.repeatResult.id, 'every link mints a new relation id');
 
   // --- acknowledging a review signal: an unjournalled in-place overwrite ---
   const { items: [signal] } = await rpc.ok('shadowgraph_review_signals', { project: PROJECT, status: 'open' });
   assert.ok(signal, 'a review signal must exist to acknowledge');
-  await refusedWithoutEffect('shadowgraph_ack_review', { project: PROJECT, id: signal.id });
+  const acknowledged = await observe('shadowgraph_ack_review', { project: PROJECT, id: signal.id });
+  assert.equal(acknowledged.firstResult.status, 'acknowledged');
+  assert.equal(acknowledged.first.journalDelta, 0);
 
-  const superseded = await observe('shadowgraph_supersede', { project: PROJECT, decisionId: 'effects-decision', replacementId: 'effects-replacement' });
+  const superseded = await observe('shadowgraph_supersede', { project: PROJECT, decisionId: decision.firstResult.id, replacementId: replacement.id });
   assert.ok(superseded.first.journalDelta >= 1, 'supersession is journalled');
   assert.equal(superseded.repeat.journalDelta, 0, 'repeating it writes nothing');
   assert.equal(superseded.repeat.revisionDelta, 1, 'yet it still commits a durable revision');
@@ -373,9 +364,9 @@ test('every advertised tool annotation matches the effects the server actually h
   backup.external = { read: false, overwrite: true };
 
   // Something for the restore to discard, so removal is observable.
-  await rpc.ok('shadowgraph_record_decision', { id: 'effects-after-backup', project: PROJECT, title: 'Recorded after the snapshot', chosen: 'temporary' });
+  const afterBackup = await rpc.ok('shadowgraph_record_decision', { project: PROJECT, title: 'Recorded after the snapshot', chosen: 'temporary' });
   const restored = await observe('shadowgraph_restore', { source: destination });
-  assert.ok(restored.first.removed.includes('effects-after-backup'), 'restoring discards everything recorded after the snapshot');
+  assert.ok(restored.first.removed.includes(afterBackup.id), 'restoring discards everything recorded after the snapshot');
   assert.ok(restored.first.revisionDelta > 0, 'a restore installs a strictly greater revision');
   assert.ok(restored.repeat.revisionDelta > 0, 'and does so again on a repeat');
   // Restoring rewrites the store through the storage backend rather than a
@@ -400,7 +391,7 @@ test('every advertised tool annotation matches the effects the server actually h
   const requested = await observe('shadowgraph_request_wider_access', { scope: { projects: ['other'] }, surfaces: ['mcp'], expiresAt: '2099-01-01T00:00:00.000Z', reason: 'synthetic effects proposal' });
   await observe('shadowgraph_revoke_grant', { accessId: requested.firstResult.accessId });
   await observe('shadowgraph_discard_access', { accessId: requested.repeatResult.accessId });
-  await observe('shadowgraph_attribute', { ids: ['effects-replacement'], targetProject: 'reassigned', reason: 'explicit synthetic attribution' });
+  await observe('shadowgraph_attribute', { ids: [replacement.id], targetProject: 'reassigned', reason: 'explicit synthetic attribution' });
   const bound = await observe('shadowgraph_bind', { type: 'worktree', project: PROJECT, reason: 'explicit synthetic mapping' });
   assert.equal(JSON.parse(await readFile(bound.firstResult.bindingFile, 'utf8')).project, PROJECT);
   assert.equal(JSON.parse(await readFile(bound.repeatResult.backupFile, 'utf8')).project, PROJECT);
@@ -415,10 +406,10 @@ test('every advertised tool annotation matches the effects the server actually h
   const tools = await rpc.listTools();
   assert.equal(tools.length, 33);
   const missing = tools.map((tool) => tool.name).filter((name) => !observed.has(name));
-  assert.deepEqual(missing.sort(), AWAITING_TRANSPORT_SCOPE, `these advertised tools were never observed: ${missing.join(', ')}`);
+  assert.deepEqual(missing.sort(), [], `these advertised tools were never observed: ${missing.join(', ')}`);
 
   const mismatches = [];
-  for (const tool of tools.filter((candidate) => !AWAITING_TRANSPORT_SCOPE.includes(candidate.name))) {
+  for (const tool of tools) {
     const derived = deriveAnnotations(observed.get(tool.name));
     try {
       assert.deepEqual(tool.annotations, derived);
@@ -431,6 +422,7 @@ test('every advertised tool annotation matches the effects the server actually h
   // Cross-check from the wire alone: which tools commit a durable revision.
   const committing = [...observed].filter(([, record]) => record.first.revisionDelta > 0).map(([name]) => name).sort();
   assert.deepEqual(committing, [
+    'shadowgraph_ack_review',
     'shadowgraph_attribute',
     'shadowgraph_backup',
     'shadowgraph_bind',
@@ -447,6 +439,7 @@ test('every advertised tool annotation matches the effects the server actually h
     'shadowgraph_record_attempt',
     'shadowgraph_record_decision',
     'shadowgraph_record_fact',
+    'shadowgraph_record_outcome',
     'shadowgraph_redact',
     'shadowgraph_remember',
     'shadowgraph_repair_plan',
@@ -459,6 +452,7 @@ test('every advertised tool annotation matches the effects the server actually h
     'shadowgraph_search',
     'shadowgraph_supersede',
     'shadowgraph_traverse',
+    'shadowgraph_update_status',
     'shadowgraph_validate'
   ]);
   const readOnly = [...observed].filter(([, record]) => record.first.revisionDelta === 0).map(([name]) => name).sort();

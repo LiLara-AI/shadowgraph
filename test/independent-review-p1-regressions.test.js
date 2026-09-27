@@ -86,7 +86,7 @@ async function tamperedSignedSnapshot(directory, fixture) {
     now: () => '2026-08-27T12:00:00.000Z'
   });
   const fact = graph.addFact({
-    id: 'signed-source-fact', project: 'source', key: 'release', value: 'signed-original',
+    project: 'source', key: 'release', value: 'signed-original',
     expiresAt: '2026-09-30T00:00:00.000Z'
   });
   const evidencePath = join(fixture.evidenceRoot, 'source-attestation.json');
@@ -109,7 +109,7 @@ async function tamperedSignedSnapshot(directory, fixture) {
 
 async function seedDestination(store) {
   const graph = createShadowGraph({ now: () => '2026-08-27T11:00:00.000Z' });
-  graph.addDecision({ id: 'keep-original', project: 'live', title: 'KEEP ORIGINAL', chosen: 'original' });
+  graph.addDecision({ project: 'live', title: 'KEEP ORIGINAL', chosen: 'original' });
   await store.save(privilegedSnapshot(graph));
   return store.load();
 }
@@ -192,9 +192,9 @@ test('P1-1 independent review: JSON restore rolls durable bytes back when post-r
   const destination = join(directory, 'destination.json');
   const source = join(directory, 'source.json');
   const original = createShadowGraph({ now: () => '2026-08-27T10:00:00.000Z' });
-  original.addDecision({ project: 'default', id: 'rollback-original', title: 'ROLLBACK ORIGINAL', chosen: 'original' });
+  original.addDecision({ project: 'default', title: 'ROLLBACK ORIGINAL', chosen: 'original' });
   const replacement = createShadowGraph({ now: () => '2026-08-27T11:00:00.000Z' });
-  replacement.addDecision({ project: 'default', id: 'rollback-replacement', title: 'ROLLBACK REPLACEMENT', chosen: 'replacement' });
+  replacement.addDecision({ project: 'default', title: 'ROLLBACK REPLACEMENT', chosen: 'replacement' });
   await writeFile(destination, `${JSON.stringify(privilegedSnapshot(original), null, 2)}\n`, 'utf8');
   await writeFile(source, `${JSON.stringify(privilegedSnapshot(replacement), null, 2)}\n`, 'utf8');
   const before = await readFile(destination);
@@ -215,7 +215,6 @@ async function verifiedSnapshot(directory, fixture, options = {}) {
     now: () => '2026-08-27T12:00:00.000Z'
   });
   const fact = graph.addFact({
-    id,
     project: 'validity',
     key: options.key ?? id,
     value: options.value ?? 'signed-value',
@@ -234,7 +233,7 @@ async function verifiedSnapshot(directory, fixture, options = {}) {
   if (options.expire) graph.maintain({ project: 'validity', now: '2026-10-01T00:00:00.000Z' });
   if (options.supersede) {
     graph.addFact({
-      id: `${id}-replacement`, project: 'validity', key: fact.key, value: 'replacement',
+      project: 'validity', key: fact.key, value: 'replacement',
       validFrom: '2026-09-01T00:00:00.000Z', observedAt: '2026-09-01T00:00:00.000Z',
       recordedAt: '2026-09-01T00:00:00.000Z'
     });
@@ -243,8 +242,10 @@ async function verifiedSnapshot(directory, fixture, options = {}) {
 }
 
 function mutateLiveAndFinalJournal(payload, factId, mutate) {
-  mutate(payload.facts.find((fact) => fact.id === factId));
-  const finalEntry = [...payload.journal].reverse().find((entry) => entry.entityId === factId && entry.payload);
+  const fact = payload.facts.find((item) => item.key === factId);
+  assert.ok(fact, `fixture requires the signed fact for ${factId}`);
+  mutate(fact);
+  const finalEntry = [...payload.journal].reverse().find((entry) => entry.entityId === fact.id && entry.payload);
   assert.ok(finalEntry, `fixture requires a final journal payload for ${factId}`);
   mutate(finalEntry.payload);
   return payload;
@@ -377,9 +378,9 @@ test('P1-2 independent review: fact verification, expiration, and supersession j
   assertConfiguredImportRejects(expired, fixture.verifier, /fact\.expired|postcondition|status/i);
 
   const supersededGraph = createShadowGraph({ now: () => '2026-08-27T12:00:00.000Z' });
-  supersededGraph.addFact({ id: 'journal-superseded', project: 'validity', key: 'superseded', value: 1 });
+  supersededGraph.addFact({ project: 'validity', key: 'superseded', value: 1 });
   supersededGraph.addFact({
-    id: 'journal-superseding', project: 'validity', key: 'superseded', value: 2,
+    project: 'validity', key: 'superseded', value: 2,
     validFrom: '2026-09-01T00:00:00.000Z', observedAt: '2026-09-01T00:00:00.000Z',
     recordedAt: '2026-09-01T00:00:00.000Z'
   });
@@ -459,14 +460,14 @@ test('P1-3 independent review: verifier-less MCP rebuild cannot re-elevate a gen
 
 test('P1-3 independent review: exposed rebuild migrates pre-schema-5 lifecycle values without rewriting journal audit bytes', () => {
   const source = createShadowGraph({ now: () => '2026-08-27T12:00:00.000Z' });
-  source.addDecision({ project: 'default', id: 'legacy-lifecycle', title: 'Legacy lifecycle', chosen: 'A' });
+  const legacy = source.addDecision({ project: 'default', title: 'Legacy lifecycle', chosen: 'A' });
   const payload = privilegedSnapshot(source);
   payload.schemaVersion = 4;
   payload.records[0].schemaVersion = 4;
   payload.records[0].status = 'active';
   for (const entry of payload.journal) {
     entry.schemaVersion = 4;
-    if (entry.payload?.id === 'legacy-lifecycle') {
+    if (entry.payload?.id === legacy.id) {
       entry.payload.schemaVersion = 4;
       entry.payload.status = 'active';
     }

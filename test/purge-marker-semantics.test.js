@@ -1,3 +1,5 @@
+import { historicalIds } from '../tools/historical-ids.js';
+const fixtureIds = {};
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -160,13 +162,14 @@ function currentEnvelope(marker) {
 
 function liveVictimGraph() {
   const graph = createShadowGraph({ now: () => NOW });
-  graph.addDecision({
-    id: VICTIM.id,
+  const victim = graph.addDecision({
     project: PROJECT,
     title: VICTIM.title,
     chosen: VICTIM.chosen,
     idempotencyKey: 'semantic-retry'
   });
+  // The marker is a stored artifact addressing this historical identity.
+  graph.replaceData(historicalIds(privilegedSnapshot(graph), { [VICTIM.id]: victim.id }, { now: () => NOW }));
   return graph;
 }
 
@@ -392,7 +395,7 @@ function startMcp(file) {
 
 async function writeOldDestination(path) {
   const old = createShadowGraph({ now: () => NOW });
-  old.addDecision({ id: 'semantic-old-live', project: 'old', title: 'Old state', chosen: 'keep' });
+  fixtureIds['semantic-old-live'] = old.addDecision({ project: 'old', title: 'Old state', chosen: 'keep' }).id;
   const store = createJsonFileStore(path);
   await store.save(privilegedSnapshot(old));
   store.close();
@@ -420,7 +423,7 @@ test('malformed marker rejection is atomic across JSON and SQLite restore', asyn
     sourceStore.close();
 
     const old = createShadowGraph({ now: () => NOW });
-    old.addDecision({ id: 'semantic-old-sqlite', project: 'old', title: 'Old SQLite state', chosen: 'keep' });
+    fixtureIds['semantic-old-sqlite'] = old.addDecision({ project: 'old', title: 'Old SQLite state', chosen: 'keep' }).id;
     const destinationStore = await createSqliteStore(destination);
     await destinationStore.save(privilegedSnapshot(old));
     const before = await destinationStore.load();
@@ -524,8 +527,8 @@ test('schemas 1-4 raw markers migrate compatibly while canonical schema-5 logica
 
   for (const mode of ['logical', 'hard']) {
     const source = createShadowGraph({ now: () => NOW });
-    source.addDecision({ id: `valid-kept-${mode}`, project: 'valid-kept', title: 'Keep', chosen: 'keep' });
-    source.addDecision({ id: `valid-purged-${mode}`, project: `valid-purged-${mode}`, title: 'Erase', chosen: 'erase' });
+    fixtureIds[`valid-kept-${mode}`] = source.addDecision({ project: 'valid-kept', title: 'Keep', chosen: 'keep' }).id;
+    fixtureIds[`valid-purged-${mode}`] = source.addDecision({ project: `valid-purged-${mode}`, title: 'Erase', chosen: 'erase' }).id;
     source.purgeProject(`valid-purged-${mode}`, { mode });
     const payload = privilegedSnapshot(source);
     const marker = payload.journal.findLast((entry) => entry.type === 'project.purged');

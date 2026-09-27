@@ -15,7 +15,8 @@ import {
 } from '../lib/node-adapter-host.mjs';
 import { canonicalJson, recordContentSha256 } from '../lib/v11-contract.mjs';
 
-const ENCODING_PREFIX = 'shadowgraph-benchmark-record:v1:';
+const ENCODING_PREFIX = 'shadowgraph-benchmark-record:v2:';
+const LEGACY_ENCODING_PREFIX = 'shadowgraph-benchmark-record:v1:';
 const PAGE_LIMIT = 1000;
 const MAX_PAGES = 10_000;
 const ARM_FOR_MODE = Object.freeze({
@@ -34,15 +35,15 @@ function unavailableStorage(reason) {
   };
 }
 
-function encodeContent(content) {
-  return `${ENCODING_PREFIX}${Buffer.from(canonicalJson(content), 'utf8').toString('base64url')}`;
+function encodeContent(content, prefix = ENCODING_PREFIX) {
+  return `${prefix}${Buffer.from(canonicalJson(content), 'utf8').toString('base64url')}`;
 }
 
-function decodeContent(value) {
-  if (typeof value !== 'string' || !value.startsWith(ENCODING_PREFIX)) {
+function decodeContent(value, prefix) {
+  if (typeof value !== 'string' || !value.startsWith(prefix)) {
     throw new AdapterHostError('CONTRACT_FAILURE', 'Native record does not contain benchmark-owned encoded content');
   }
-  const encoded = value.slice(ENCODING_PREFIX.length);
+  const encoded = value.slice(prefix.length);
   if (!/^[A-Za-z0-9_-]+$/u.test(encoded)) {
     throw new AdapterHostError('CONTRACT_FAILURE', 'Native benchmark record encoding is malformed');
   }
@@ -54,7 +55,7 @@ function decodeContent(value) {
   } catch (error) {
     throw new AdapterHostError('CONTRACT_FAILURE', 'Native benchmark record content is malformed', { cause: error });
   }
-  if (canonicalJson(content) !== serialized || encodeContent(content) !== value) {
+  if (canonicalJson(content) !== serialized || encodeContent(content, prefix) !== value) {
     throw new AdapterHostError('CONTRACT_FAILURE', 'Native benchmark record content is not canonical');
   }
   return content;
@@ -126,14 +127,24 @@ function nativeKind(recordType) {
   throw new AdapterHostError('CONTRACT_FAILURE', 'Unsupported benchmark record type');
 }
 
-function decodeNativeRecord(record) {
-  if (record.kind === 'decision') {
-    return { id: record.id, type: 'decision', content: decodeContent(record.goal) };
+// The context id is the benchmark record identity; nativeEntityId is the
+// independently allocated product identity. Both come from the native read.
+function decodeNativeRecord(record, request) {
+  const type = record.kind === 'decision' ? 'decision' : record.kind === 'attempt' ? 'failed_attempt' : null;
+  if (!type || typeof record.id !== 'string' || !record.id.trim()) {
+    throw new AdapterHostError('CONTRACT_FAILURE', 'Invalid native ShadowGraph record identity');
   }
-  if (record.kind === 'attempt') {
-    return { id: record.id, type: 'failed_attempt', content: decodeContent(record.reason) };
+  const value = type === 'decision' ? record.goal : record.reason;
+  const legacy = typeof value === 'string' && value.startsWith(LEGACY_ENCODING_PREFIX);
+  const decoded = decodeContent(value, legacy ? LEGACY_ENCODING_PREFIX : ENCODING_PREFIX);
+  const logicalRecord = legacy ? { id: record.id, type, content: decoded } : decoded;
+  try {
+    validateAdapterRequest({ ...request, operation: 'persist', payload: { record: logicalRecord } });
+    if (logicalRecord.type !== type) throw new Error('Native kind differs from encoded type');
+  } catch (error) {
+    throw new AdapterHostError('CONTRACT_FAILURE', 'Native benchmark record identity or content is invalid', { cause: error });
   }
-  throw new AdapterHostError('CONTRACT_FAILURE', 'Unsupported native ShadowGraph record kind');
+  return { ...logicalRecord, nativeEntityId: record.id };
 }
 
 function exactScenarioRecord(record, scenarioId) {
@@ -146,16 +157,14 @@ function decisionArguments(request) {
   const { record } = request.payload;
   const content = record.content;
   const alternatives = content.recalledAlternativeIds.map((label, index) => ({
-    id: `${record.id}:alternative:${index}`,
     label: label.trim() || `remembered-alternative-${index}`,
     reasonRejected: content.recalledRejectionReasonIds[index] ?? ''
   }));
   return {
-    id: record.id,
     title: request.scenarioId,
     chosen: content.recommendation.trim() || content.choiceId?.trim() || 'recorded-benchmark-decision',
     project: request.namespace.projectId,
-    goal: encodeContent(content),
+    goal: encodeContent(record),
     alternatives
   };
 }
@@ -163,11 +172,10 @@ function decisionArguments(request) {
 function attemptArguments(request) {
   const { record } = request.payload;
   return {
-    id: record.id,
     solution: record.content.approachId,
     result: 'failed',
     project: request.namespace.projectId,
-    reason: encodeContent(record.content),
+    reason: encodeContent(record),
     environment: request.scenarioId
   };
 }
@@ -182,9 +190,11 @@ async function retrieveOperation(client, request, operations) {
     }, operations, 'memoryReadOperations');
     nativeRecords.push(...records.filter((record) => exactScenarioRecord(record, request.scenarioId)));
   }
-  return nativeRecords
-    .map(decodeNativeRecord)
-    .sort((left, right) => left.id.localeCompare(right.id));
+  const decoded = nativeRecords.map((record) => decodeNativeRecord(record, request));
+  if (new Set(decoded.map(({ id }) => id)).size !== decoded.length) {
+    throw new AdapterHostError('CONTRACT_FAILURE', 'Native records contain duplicate benchmark identities');
+  }
+  return decoded.sort((left, right) => left.id.localeCompare(right.id));
 }
 
 async function persistOperation(client, request, operations) {
@@ -200,9 +210,21 @@ async function persistOperation(client, request, operations) {
     ambiguousOnInvalidResponse: true,
     commitRisk: true
   });
-  if (!recorded || recorded.id !== request.payload.record.id || recorded.kind !== nativeKind(request.payload.record.type)) {
+  try {
+    const { nativeEntityId, ...logicalRecord } = decodeNativeRecord(recorded, request);
+    const alternatives = recorded.kind === 'decision' ? recorded.alternatives : [];
+    const nativeIds = [nativeEntityId, ...alternatives.map(({ id }) => id)];
+    if (recorded.project !== request.namespace.projectId
+      || !exactScenarioRecord(recorded, request.scenarioId)
+      || canonicalJson(logicalRecord) !== canonicalJson(request.payload.record)
+      || (recorded.kind === 'decision' && alternatives.length !== args.alternatives.length)
+      || nativeIds.some((id) => typeof id !== 'string' || !id.trim())
+      || new Set(nativeIds).size !== nativeIds.length) {
+      throw new Error('Native persist response identity mismatch');
+    }
+  } catch (error) {
     throw new AdapterHostError('CONTRACT_FAILURE', 'ShadowGraph persist response did not identify the exact native record', {
-      ambiguous: true
+      ambiguous: true, cause: error
     });
   }
 }
@@ -215,8 +237,8 @@ async function recordsForReference(client, project, reference, operations) {
   }, operations, 'persistenceVerificationOperations');
 }
 
-function safelyDecodedHash(record) {
-  return recordContentSha256(decodeNativeRecord(record).content);
+function decodedHash(record) {
+  return recordContentSha256(record.content);
 }
 
 async function verifyOperation(client, request, operations) {
@@ -227,8 +249,9 @@ async function verifyOperation(client, request, operations) {
     expected,
     operations
   );
-  const idMatches = primaryRecords.filter(({ id }) => id === expected.id);
-  const observedContentSha256 = idMatches.length === 1 ? safelyDecodedHash(idMatches[0]) : null;
+  const decodedPrimary = primaryRecords.map((record) => decodeNativeRecord(record, request));
+  const idMatches = decodedPrimary.filter(({ id }) => id === expected.id);
+  const observedContentSha256 = idMatches.length === 1 ? decodedHash(idMatches[0]) : null;
   const persistenceEvidence = {
     verified: idMatches.length === 1 && observedContentSha256 === expected.contentSha256,
     expectedRecord: expected,
@@ -246,15 +269,16 @@ async function verifyOperation(client, request, operations) {
       absent,
       operations
     );
+    const decodedAlternate = alternateRecords.map((record) => decodeNativeRecord(record, request));
     let matchingContentCount = 0;
-    for (const record of alternateRecords) {
-      if (safelyDecodedHash(record) === absent.contentSha256) matchingContentCount += 1;
+    for (const record of decodedAlternate) {
+      if (decodedHash(record) === absent.contentSha256) matchingContentCount += 1;
     }
     isolationEvidence = {
-      verified: alternateRecords.every(({ id }) => id !== absent.id) && matchingContentCount === 0,
+      verified: decodedAlternate.every(({ id }) => id !== absent.id) && matchingContentCount === 0,
       expectedAbsentRecord: absent,
       alternateNamespaceRef: request.payload.alternateNamespaceRef,
-      matchingRecordIdCount: alternateRecords.filter(({ id }) => id === absent.id).length,
+      matchingRecordIdCount: decodedAlternate.filter(({ id }) => id === absent.id).length,
       matchingContentCount
     };
   }

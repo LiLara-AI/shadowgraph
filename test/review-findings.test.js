@@ -553,7 +553,7 @@ describe('P2-12 — duplicate journal sequences are detected, not resolved by in
 
   it('import preflight rejects it before validate can observe a corrupted live graph', () => {
     const graph = createShadowGraph();
-    graph.addDecision({ id: 'duplicate-seq-sentinel', project: 'duplicate-seq-sentinel', title: 'Keep', chosen: 'keep' });
+    graph.addDecision({ project: 'duplicate-seq-sentinel', title: 'Keep', chosen: 'keep' });
     const before = JSON.stringify(privilegedSnapshot(graph));
 
     assert.throws(

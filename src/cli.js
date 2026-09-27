@@ -162,7 +162,7 @@ async function runOneShot() {
       if (hasAccessReference(value)) return await currentAccessOperation(graph, store, () => readCommands[command](prepared(value)));
       // Existing owner-scope evaluation writes remain unchanged. Ordinary reads
       // do not gain a save merely because grant-bearing calls are audited.
-      const result = readCommands[command](prepared(['stats', 'validate', 'repair-plan'].includes(command) ? {} : value));
+      const result = readCommands[command](prepared(value));
       if (['context', 'review', 'reconsider', 'maintain'].includes(command)) await store.save(privilegedSnapshot(graph));
       return result;
     }
@@ -184,17 +184,19 @@ async function runOneShot() {
     if (command === 'doctor') {
       await access(file, fsConstants.R_OK | fsConstants.W_OK);
       const validation = graph.validate();
+      const storageDiagnostics = await store.validate?.();
       const mcpPath = fileURLToPath(new URL('./mcp.js', import.meta.url));
       await access(mcpPath, fsConstants.R_OK);
       const nodeMajor = Number.parseInt(process.versions.node.split('.')[0], 10);
       const nodeSupported = nodeMajor >= 20;
       const graphValid = validation.valid === true;
       return {
-        ok: nodeSupported && graphValid,
+        ok: nodeSupported && graphValid && storageDiagnostics?.valid !== false,
         command: 'doctor',
         version: VERSION,
         node: { version: process.versions.node, supported: nodeSupported, requirement: '>=20' },
-        storage: { type: storageType, path: file, initialized: true, readable: true, writable: true },
+        storage: { type: storageType, path: file, initialized: true, readable: true, writable: true,
+          ...(storageDiagnostics?.issues?.length ? { diagnostics: storageDiagnostics } : {}) },
         graph: { valid: graphValid, issues: validation.issues?.length ?? 0, completeness: validation.completeness, limitation: validation.limitation },
         mcp: { available: true, recommendedMode: 'compact', fullMode: 'Set SHADOWGRAPH_MCP_COMPACT=0 or remove it.' }
       };
@@ -216,8 +218,8 @@ async function runOneShot() {
     else if (command === 'review') { result = graph.review(parse(input || '{}')); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'reconsider') { result = graph.reconsider(parse(input || '{}')); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'fact') { result = graph.addFact(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
-    else if (command === 'outcome') { const value = parse(input); result = graph.setOutcome(value.decisionId, value.outcome); await store.save(privilegedSnapshot(graph)); }
-    else if (command === 'status') { const value = parse(input); result = graph.updateDecisionStatus(value.decisionId, value.status); await store.save(privilegedSnapshot(graph)); }
+    else if (command === 'outcome') { const value = prepared(parse(input)); result = graph.setOutcome(value.decisionId, value.outcome, value); await store.save(privilegedSnapshot(graph)); }
+    else if (command === 'status') { const value = prepared(parse(input)); result = graph.updateDecisionStatus(value.decisionId, value.status, value); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'link') { result = graph.link(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'traverse') result = graph.traverse(parse(input));
     else if (command === 'redact') result = graph.redact(parse(input));
@@ -229,14 +231,14 @@ async function runOneShot() {
     else if (command === 'rebuild') result = graph.rebuild(parse(input || '{}'));
     else if (command === 'maintain') { result = graph.maintain(parse(input || '{}')); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'signals') result = graph.getReviewSignals(parse(input || '{}'));
-    else if (command === 'ack') { result = graph.acknowledgeReview(parse(input).id); await store.save(privilegedSnapshot(graph)); }
+    else if (command === 'ack') { const value = prepared(parse(input)); result = graph.acknowledgeReview(value.id, value); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'retrieve') { const value = parse(input || '{}'); result = graph.retrieve(value.query ?? '', value); }
     else if (command === 'validate') result = graph.validate();
     else if (command === 'repair-plan') result = graph.repairPlan();
     else if (command === 'backup') result = await backupFile(file, input || `${file}.backup`, { store });
     else if (command === 'restore') {
-      // `--memory-only` restores memory from a backup that carries authority
-      // collections, which this build otherwise refuses (R16 rev 2 §7.2).
+      // `--memory-only` excludes authority collections; ordinary restore keeps
+      // the destination-bound narrowing rules (R16 / PR12).
       const memoryOnly = rest.includes('--memory-only');
       const source = rest.filter((argument) => argument !== '--memory-only').join(' ');
       result = store.restore
@@ -255,7 +257,7 @@ async function runOneShot() {
     else if (command === 'decision') { result = graph.addDecision(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'attempt') { result = graph.addAttempt(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
     else {
-      throw new Error('Usage: shadowgraph <setup|doctor|serve|mcp|stats|list|search|retrieve|recall|remember|markdown-sync|context|review|reconsider|maintain|signals|ack|validate|repair-plan|backup|restore|migrate|downgrade|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge|request-access|issue-access|delegate-access|revoke-access|discard-access|access-status|bind|attribute> [JSON/path] (restore <path> [--memory-only])');
+      throw new Error('Usage: shadowgraph <setup|doctor|serve|mcp|stats|list|search|retrieve|recall|remember|markdown-sync|context|review|reconsider|maintain|signals|ack|validate|repair-plan|backup|restore|migrate|downgrade|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge|request-access|issue-access|delegate-access|revoke-access|discard-access|access-status|bind|attribute> [JSON/path] (restore <path> [--memory-only]). Writes require project or originId (or confirmed workspace binding). Creation IDs are generated: omit id, retain returned IDs, and use idempotencyKey for retries. Reference IDs remain supported.');
     }
     return result;
   } finally {

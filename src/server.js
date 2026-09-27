@@ -160,15 +160,15 @@ export async function createShadowGraphServer(options = {}) {
     // P1-3: version comes from package.json via src/version.js — one source only.
     if (method === 'GET' && path === '/health') return { ok: true, name: NAME, version: VERSION };
     if (method === 'GET' && path === '/dashboard') return { dashboard: dashboardRoot.href };
-    if (method === 'GET' && path === '/stats') return graph.stats(accessManaged ? body : undefined);
+    if (method === 'GET' && path === '/stats') return graph.stats(body ?? {});
     if (method === 'GET' && path === '/records') return graph.exportData(body ?? {});
     if (method === 'GET' && path === '/search') return graph.search(body?.q ?? body?.query ?? '', body ?? {});
     if (method === 'POST' && path === '/context') return commit(() => graph.context(body ?? {}));
     if (method === 'POST' && path === '/memories') return commit(() => Array.isArray(body?.operations) ? graph.applyMemoryPlan(body) : graph.remember(body));
     if (method === 'POST' && path === '/recall') return graph.recall(body?.query ?? '', body ?? {});
     if (method === 'POST' && path === '/facts') return commit(() => graph.addFact(body));
-    if (method === 'POST' && path === '/outcomes') return commit(() => graph.setOutcome(body.decisionId, body.outcome));
-    if (method === 'POST' && path === '/status') return commit(() => graph.updateDecisionStatus(body.decisionId, body.status));
+    if (method === 'POST' && path === '/outcomes') return commit(() => graph.setOutcome(body.decisionId, body.outcome, body));
+    if (method === 'POST' && path === '/status') return commit(() => graph.updateDecisionStatus(body.decisionId, body.status, body));
     if (method === 'POST' && path === '/relationships') return commit(() => graph.link(body));
     if (method === 'POST' && path === '/traverse') return graph.traverse(body ?? {});
     if (method === 'POST' && path === '/redact') return graph.redact(body ?? {});
@@ -186,12 +186,13 @@ export async function createShadowGraphServer(options = {}) {
     if (method === 'POST' && path === '/reconsider') return commit(() => graph.reconsider(body ?? {}));
     if (method === 'POST' && path === '/maintain') return commit(() => graph.maintain(body ?? {}));
     if (method === 'GET' && path === '/review-signals') return graph.getReviewSignals(body ?? {});
-    if (method === 'POST' && path === '/review-signals/ack') return commit(() => graph.acknowledgeReview(body?.id));
+    if (method === 'POST' && path === '/review-signals/ack') return commit(() => graph.acknowledgeReview(body?.id, body));
     if (method === 'POST' && path === '/retrieve') return graph.retrieve(body?.query ?? '', body ?? {});
-    if (method === 'GET' && path === '/validate') return graph.validate(accessManaged ? body : undefined);
-    if (method === 'POST' && path === '/repair-plan') return graph.repairPlan(accessManaged ? body : undefined);
+    if (method === 'GET' && path === '/validate') return graph.validate(body ?? {});
+    if (method === 'POST' && path === '/repair-plan') return graph.repairPlan(body ?? {});
     if (method === 'POST' && path === '/backup') return backupFile(options.file ?? process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json', body?.destination, { store });
     if (method === 'POST' && path === '/restore') {
+      if (body?.memoryOnly !== undefined && typeof body.memoryOnly !== 'boolean') throw new Error('memoryOnly must be a boolean');
       restoreInProgress = true;
       try {
         return await queuePersistence(async () => {
@@ -201,6 +202,7 @@ export async function createShadowGraphServer(options = {}) {
               catch (error) { if (error.code === 'ENOENT') throw new Error('Restore source does not exist'); throw error; }
               let activated = false;
               const value = await store.restore(body?.source, {
+                memoryOnly: body?.memoryOnly === true,
                 validate: restoreValidator,
                 afterReplace(payload) { graph.replaceData(payload); activated = true; }
               });
@@ -209,6 +211,7 @@ export async function createShadowGraphServer(options = {}) {
             }
             const destination = options.file ?? process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json';
             return await restoreFile(body?.source, destination, {
+              memoryOnly: body?.memoryOnly === true,
               storage: options.storage ?? process.env.SHADOWGRAPH_STORAGE,
               validate: restoreValidator,
               restoreFs: options.restoreFs,

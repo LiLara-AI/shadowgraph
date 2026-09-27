@@ -3,27 +3,13 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { scratchDirectory } from '../tools/scratch-directory.js';
-import { createShadowGraph } from '../src/shadowgraph.js';
-import { createJsonFileStore } from '../src/storage.js';
-import { privilegedSnapshot } from '../src/internal/snapshot.js';
-
-// shadowgraph_ack_review passes only the signal id, so until its arm is
-// aligned (plan PR-13) it carries no write scope and every call is refused
-// (P1 finding F-30). The acknowledgement is made on the store instead, with
-// the project's scope, while no server holds it; everything else here stays
-// on the compact MCP surface.
-async function acknowledgeOnStore(file, id) {
-  const store = createJsonFileStore(file);
-  const graph = createShadowGraph();
-  graph.importData(await store.load());
-  const acknowledged = graph.acknowledgeReview(id, { project: 'p' });
-  await store.save(privilegedSnapshot(graph));
-  return acknowledged;
-}
+import { readFile } from 'node:fs/promises';
 
 async function assertAckRefused(mcp, id) {
-  const refused = await mcp.send('tools/call', { name: 'shadowgraph_ack_review', arguments: { project: 'p', id } });
+  const before = await readFile(mcp.file);
+  const refused = await mcp.send('tools/call', { name: 'shadowgraph_ack_review', arguments: { id } });
   assert.deepEqual(refused.error, { code: -32000, message: 'Tool execution failed' });
+  assert.deepEqual(await readFile(mcp.file), before, 'an unscoped acknowledgement cannot mutate durable state');
 }
 
 // End-to-end through the real MCP server in compact mode, not the core API,
@@ -61,7 +47,7 @@ function client(file) {
     assert.ok(!message.error, `${name} failed: ${JSON.stringify(message.error)}`);
     return JSON.parse(message.result.content[0].text);
   };
-  return { child, send, call, stop: () => child.kill() };
+  return { child, file, send, call, stop: () => child.kill() };
 }
 
 // Two independent decisions, so "the acknowledgement held" and "a new breach
@@ -119,8 +105,8 @@ test('compact can list a review, acknowledge it, keep that across restart, and s
 
   // --- acknowledge --------------------------------------------------------
   await assertAckRefused(first, review.reviewSignalId);
+  const acknowledged = await first.call('shadowgraph_ack_review', { project: 'p', id: review.reviewSignalId });
   await first.stop();
-  const acknowledged = await acknowledgeOnStore(file, review.reviewSignalId);
   assert.equal(acknowledged.status, 'acknowledged');
   assert.equal(acknowledged.id, review.reviewSignalId);
 
@@ -146,8 +132,8 @@ test('compact can list a review, acknowledge it, keep that across restart, and s
   assert.equal(stillAcknowledged.reviewSignalStatus, 'acknowledged');
 
   // --- and the loop can be closed again -----------------------------------
+  const secondAck = await second.call('shadowgraph_ack_review', { project: 'p', id: fresh[0].reviewSignalId });
   await second.stop();
-  const secondAck = await acknowledgeOnStore(file, fresh[0].reviewSignalId);
   assert.equal(secondAck.status, 'acknowledged');
   const third = client(file);
   t.after(() => third.stop());
@@ -182,8 +168,9 @@ test('acknowledging one breach does not mute a broader breach on the same decisi
   const narrow = (await mcp.call('shadowgraph_context', { project: 'p' })).openReviews[0];
   assert.equal(narrow.reason, 'replicaLagMs');
   await assertAckRefused(mcp, narrow.reviewSignalId);
+  const acknowledged = await mcp.call('shadowgraph_ack_review', { project: 'p', id: narrow.reviewSignalId });
+  assert.equal(acknowledged.status, 'acknowledged');
   await mcp.stop();
-  await acknowledgeOnStore(file, narrow.reviewSignalId);
 
   const reopened = client(file);
   t.after(() => reopened.stop());

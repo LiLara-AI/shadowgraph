@@ -58,7 +58,7 @@ test('final review: malformed replace is atomic for records, facts, alternatives
     { journal: [null] }
   ]) {
     const graph = createShadowGraph();
-    graph.addDecision({ id: 'kept', project: 'keep', title: 'ORIGINAL', chosen: 'sqlite' });
+    const kept = graph.addDecision({ project: 'keep', title: 'ORIGINAL', chosen: 'sqlite' });
     assert.throws(() => graph.replaceData(payload));
     assert.equal(graph.search('ORIGINAL', { project: 'keep' }).page.total, 1);
   }
@@ -66,9 +66,9 @@ test('final review: malformed replace is atomic for records, facts, alternatives
 
 test('final review: direct import preflights before merging valid entities', () => {
   const graph = createShadowGraph();
-  graph.addDecision({ id: 'kept', project: 'keep', title: 'ORIGINAL', chosen: 'sqlite' });
+  const kept = graph.addDecision({ project: 'keep', title: 'ORIGINAL', chosen: 'sqlite' });
   assert.throws(() => graph.importData({ records: [decision('new'), { id: 'bad', kind: 'decision', title: 1, chosen: 'x' }] }));
-  assert.deepEqual(privilegedSnapshot(graph).records.map((item) => item.id), ['kept']);
+  assert.deepEqual(privilegedSnapshot(graph).records.map((item) => item.id), [kept.id]);
 });
 
 test('final review: unknown confidence policy is preserved and reported unsupported', () => {
@@ -117,9 +117,9 @@ test('final review: separate JSON store instances cannot both commit the same re
   const seed = createShadowGraph();
   const revision = await first.save(privilegedSnapshot(seed));
   const left = createShadowGraph({ revision });
-  left.addDecision({ project: 'default', id: 'left', title: 'Left', chosen: 'L' });
+  left.addDecision({ project: 'default', title: 'Left', chosen: 'L' });
   const right = createShadowGraph({ revision });
-  right.addDecision({ project: 'default', id: 'right', title: 'Right', chosen: 'R' });
+  right.addDecision({ project: 'default', title: 'Right', chosen: 'R' });
   const results = await Promise.allSettled([first.save(privilegedSnapshot(left)), second.save(privilegedSnapshot(right))]);
   assert.equal(results.filter((item) => item.status === 'fulfilled').length, 1);
   assert.equal(results.filter((item) => item.status === 'rejected' && /revision conflict/i.test(item.reason.message)).length, 1);

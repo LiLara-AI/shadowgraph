@@ -499,7 +499,7 @@ test('modern notifications with omitted clientInfo execute when applicable and n
     jsonrpc: '2.0', method: 'tools/call',
     params: modernParams({
       name: 'shadowgraph_record_decision',
-      arguments: { id: 'notification-decision', project: 'followup', title: 'Notification write', chosen: 'keep' }
+      arguments: { project: 'followup', title: 'Notification write', chosen: 'keep' }
     })
   });
 
@@ -530,7 +530,7 @@ test('persistence conflicts remain numeric in legacy mode and become private too
     jsonrpc: '2.0', id: 'seed', method: 'tools/call',
     params: {
       name: 'shadowgraph_record_decision',
-      arguments: { id: 'seed-decision', project: 'followup', title: privateSentinel, chosen: 'keep' }
+      arguments: { project: 'followup', title: privateSentinel, chosen: 'keep' }
     }
   });
   assert.equal(seeded.error, undefined, seeded.error?.message);
@@ -545,7 +545,7 @@ test('persistence conflicts remain numeric in legacy mode and become private too
     jsonrpc: '2.0', id: 'legacy-conflict', method: 'tools/call',
     params: {
       name: 'shadowgraph_record_decision',
-      arguments: { id: 'legacy-conflict-write', project: 'followup', title: 'Must roll back', chosen: 'reject' }
+      arguments: { project: 'followup', title: 'Must roll back', chosen: 'reject' }
     }
   });
   assertSafeToolFailure(legacyConflict, {
@@ -561,7 +561,7 @@ test('persistence conflicts remain numeric in legacy mode and become private too
     jsonrpc: '2.0', id: 'modern-conflict', method: 'tools/call',
     params: modernParams({
       name: 'shadowgraph_record_decision',
-      arguments: { id: 'modern-conflict-write', project: 'followup', title: 'Must also roll back', chosen: 'reject' }
+      arguments: { project: 'followup', title: 'Must also roll back', chosen: 'reject' }
     })
   });
   assertSafeToolFailure(modernConflict, {
@@ -609,7 +609,7 @@ test('unconfirmed restore and its degraded latch use distinct finite numeric ser
     jsonrpc: '2.0', id: 'degraded-seed', method: 'tools/call',
     params: {
       name: 'shadowgraph_record_decision',
-      arguments: { id: 'degraded-seed', project: 'followup', title: privateSentinel, chosen: 'keep' }
+      arguments: { project: 'followup', title: privateSentinel, chosen: 'keep' }
     }
   });
   assert.equal(seeded.error, undefined, seeded.error?.message);
@@ -690,7 +690,7 @@ for (const modern of [false, true]) {
     const malformedProject = await rpc.call(toolRequest(
       `${era}-malformed-project`,
       'shadowgraph_record_decision',
-      { id: 'direct-project', project: { sentinel: projectSentinel }, title: 'Private project', chosen: 'reject' },
+      { project: { sentinel: projectSentinel }, title: 'Private project', chosen: 'reject' },
       { modern }
     ));
     assertSafeToolFailure(malformedProject, { modern, forbidden: [projectSentinel, 'project must be'] });
@@ -698,7 +698,7 @@ for (const modern of [false, true]) {
     const malformedTemporal = await rpc.call(toolRequest(
       `${era}-malformed-temporal`,
       'shadowgraph_record_decision',
-      { id: 'direct-temporal', title: 'Private temporal', chosen: 'reject', createdAt: temporalSentinel },
+      { title: 'Private temporal', chosen: 'reject', createdAt: temporalSentinel },
       { modern }
     ));
     assertSafeToolFailure(malformedTemporal, { modern, forbidden: [temporalSentinel, 'createdAt must be'] });
@@ -706,14 +706,14 @@ for (const modern of [false, true]) {
     const seed = await rpc.call(toolRequest(
       `${era}-status-seed`,
       'shadowgraph_record_decision',
-      { id: `${era}-status-owner`, project: 'default', title: 'Status owner', chosen: 'keep' },
+      { project: 'default', title: 'Status owner', chosen: 'keep' },
       { modern }
     ));
     assert.equal(seed.error, undefined, seed.error?.message);
     const malformedStatus = await rpc.call(toolRequest(
       `${era}-malformed-status`,
       'shadowgraph_update_status',
-      { decisionId: `${era}-status-owner`, status: statusSentinel },
+      { decisionId: JSON.parse(seed.result.content[0].text).id, status: statusSentinel },
       { modern }
     ));
     assertSafeToolFailure(malformedStatus, { modern, forbidden: [statusSentinel, 'Invalid decision status'] });
@@ -798,13 +798,13 @@ test('plain persistence faults are private in legacy and remain CallToolResult f
   const sentinel = 'PRIVATE-PERSISTENCE-PAYLOAD-de48';
 
   const legacy = await rpc.call(toolRequest('legacy-private-persistence', 'shadowgraph_record_decision', {
-    id: sentinel, title: sentinel, chosen: 'reject disclosure'
+     title: sentinel, chosen: 'reject disclosure'
   }));
   assertSafeToolFailure(legacy, { forbidden: [sentinel, faultFile, 'beforeCommit', 'injected MCP persistence fault'] });
 
   await writeFile(faultFile, 'beforeCommit', 'utf8');
   const modern = await rpc.call(toolRequest('modern-private-persistence', 'shadowgraph_record_decision', {
-    id: `${sentinel}-modern`, title: sentinel, chosen: 'reject disclosure'
+     title: sentinel, chosen: 'reject disclosure'
   }, { modern: true }));
   assertSafeToolFailure(modern, { modern: true, forbidden: [sentinel, faultFile, 'beforeCommit', 'injected MCP persistence fault'] });
 });
@@ -818,7 +818,7 @@ test('modern nested restore causes and degraded latch stay private CallToolResul
   });
   const sentinel = 'PRIVATE-NESTED-RESTORE-PAYLOAD-ef59';
   const seeded = await rpc.call(toolRequest('nested-seed', 'shadowgraph_record_decision', {
-    id: 'nested-seed', project: 'default', title: sentinel, chosen: 'keep'
+    project: 'default', title: sentinel, chosen: 'keep'
   }));
   assert.equal(seeded.error, undefined, seeded.error?.message);
   const source = join(rpc.directory, 'PRIVATE-NESTED-RESTORE-SOURCE-f06a.json');
@@ -850,8 +850,8 @@ test('SQLite restore duplicate journal payload ids stay private in legacy and mo
   await rpc.call({ jsonrpc: '2.0', id: 'sqlite-ready', method: 'tools/list' });
   const source = join(rpc.directory, 'PRIVATE-SQLITE-RESTORE-SOURCE-017b.db');
   const graph = createShadowGraph({ now: () => '2026-08-28T12:00:00.000Z' });
-  graph.addDecision({ project: 'default', id: 'sqlite-private-left', title: 'Left', chosen: 'keep' });
-  graph.addDecision({ project: 'default', id: 'sqlite-private-right', title: 'Right', chosen: 'keep' });
+  graph.addDecision({ project: 'default', title: 'Left', chosen: 'keep' });
+  graph.addDecision({ project: 'default', title: 'Right', chosen: 'keep' });
   const sourceStore = await createSqliteStore(source);
   await sourceStore.save(privilegedSnapshot(graph));
   sourceStore.close();

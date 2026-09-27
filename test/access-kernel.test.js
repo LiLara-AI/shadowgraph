@@ -9,11 +9,12 @@ const bounds = { scope: { projects: ['beta'] }, surfaces: ['cli', 'http', 'mcp']
 function fixture() {
   let at = NOW;
   const graph = createShadowGraph({ now: () => at });
+  const ids = {};
   for (const project of ['alpha', 'beta', 'gamma', 'default']) {
-    graph.addDecision({ id: project, project, title: `${project} comparison`, chosen: 'x', reviewAfter: '2025-01-01T00:00:00.000Z' });
-    graph.remember({ id: `${project}-note`, project, memoryType: 'note', key: 'note', text: `${project} comparison` });
+    ids[project] = graph.addDecision({ project, title: `${project} comparison`, chosen: 'x', reviewAfter: '2025-01-01T00:00:00.000Z' }).id;
+    graph.remember({ project, memoryType: 'note', key: 'note', text: `${project} comparison` });
   }
-  return { graph, advance: value => { at = value; } };
+  return { graph, ids, advance: value => { at = value; } };
 }
 const issue = (graph, overrides = {}) => privilegedIssueAccess(graph, { ...bounds, ...overrides }).entry;
 
@@ -41,10 +42,10 @@ test('planned grantId read alias rechecks current authority and conflicting ids 
 });
 
 test('an origin-only grant read remains project-unresolved and describes the actual wider read', () => {
-  const { graph } = fixture(); const grant = issue(graph);
-  graph.addDecision({ id: 'origin', originId: 'synthetic-origin', title: 'origin comparison', chosen: 'x' });
+  const { graph, ids } = fixture(); const grant = issue(graph);
+  const origin = graph.addDecision({ originId: 'synthetic-origin', title: 'origin comparison', chosen: 'x' });
   const result = graph.search('comparison', { originId: 'synthetic-origin', grantId: grant.accessId });
-  assert.deepEqual(result.items.map(item => item.record.id).sort(), ['beta', 'origin']);
+  assert.deepEqual(result.items.map(item => item.record.id).sort(), [ids.beta, origin.id].sort());
   assert.equal(result.completeness.scope.requestState, 'project_unresolved');
   assert.equal(result.completeness.scope.project, null);
   assert.equal(result.completeness.complete, false);
@@ -53,7 +54,7 @@ test('an origin-only grant read remains project-unresolved and describes the act
 
 for (const method of ['search', 'retrieve', 'recall', 'context', 'review', 'reconsider', 'exportData', 'redact', 'stats', 'getJournal', 'rebuild', 'validate', 'getReviewSignals']) {
   test(`grant current-state lookup reaches ${method} while preserving foreign canonical state`, () => {
-    const { graph } = fixture(); const grant = issue(graph);
+    const { graph, ids } = fixture(); const grant = issue(graph);
     const options = { project: 'alpha', accessId: grant.accessId, surface: 'cli', limit: 100 };
     const before = privilegedSnapshot(graph);
     const call = () => ['search', 'retrieve', 'recall'].includes(method) ? graph[method]('comparison', options) : graph[method](options);
@@ -63,7 +64,7 @@ for (const method of ['search', 'retrieve', 'recall', 'context', 'review', 'reco
     assert.doesNotMatch(JSON.stringify(result), /gamma comparison/);
     const after = privilegedSnapshot(graph);
     for (const key of ['records', 'facts', 'relations']) assert.deepEqual(after[key], before[key], key);
-    assert.equal(after.reviewSignals.some(x => x.decisionId === 'beta'), false);
+    assert.equal(after.reviewSignals.some(x => x.decisionId === ids.beta), false);
     graph.revokeAccess({ accessId: grant.accessId });
     const denied = call();
     assert.equal(denied.completeness.scope.grant, null);
@@ -72,15 +73,15 @@ for (const method of ['search', 'retrieve', 'recall', 'context', 'review', 'reco
 }
 
 test('read grants never widen maintenance, canonical writes or acknowledgement ownership', () => {
-  const { graph } = fixture(); const grant = issue(graph);
+  const { graph, ids } = fixture(); const grant = issue(graph);
   graph.review({ project: 'beta' });
   const before = privilegedSnapshot(graph);
   const input = { project: 'alpha', accessId: grant.accessId };
   graph.maintain(input);
   assert.deepEqual(privilegedSnapshot(graph).records.filter(x => x.project === 'beta'), before.records.filter(x => x.project === 'beta'));
-  assert.throws(() => graph.updateDecisionStatus('beta', 'abandoned', input), /not found/i);
-  assert.throws(() => graph.setOutcome('beta', 'bad', input), /not found/i);
-  const review = before.reviewSignals.find(x => x.decisionId === 'beta');
+  assert.throws(() => graph.updateDecisionStatus(ids.beta, 'abandoned', input), /not found/i);
+  assert.throws(() => graph.setOutcome(ids.beta, 'bad', input), /not found/i);
+  const review = before.reviewSignals.find(x => x.decisionId === ids.beta);
   assert.throws(() => graph.acknowledgeReview(review.id, input), /not found/i);
 });
 
@@ -163,7 +164,7 @@ for (const mode of ['logical', 'hard']) test(`purge ${mode} retains authority wi
 test('wider fact evaluation cannot persist an own decision signal from foreign evidence', () => {
   for (const method of ['review', 'reconsider', 'context', 'maintain']) {
     const graph = createShadowGraph({ now: () => NOW });
-    graph.addDecision({ project: 'alpha', id: 'd', title: 'check latency', chosen: 'x', reopenWhen: [{ key: 'latency', operator: 'gt', value: 10 }] });
+    graph.addDecision({ project: 'alpha', title: 'check latency', chosen: 'x', reopenWhen: [{ key: 'latency', operator: 'gt', value: 10 }] });
     graph.addFact({ project: 'beta', key: 'latency', value: 30, observedAt: NOW });
     const grant = issue(graph);
     graph[method]({ project: 'alpha', accessId: grant.accessId });

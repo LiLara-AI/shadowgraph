@@ -65,8 +65,8 @@ test('HTTP rolls live memory back when ordinary persistence fails', async (t) =>
 
 test('HTTP context persists review signals that it creates', async (t) => {
   const seed = createShadowGraph({ now: () => '2026-08-27T00:00:00.000Z' });
-  seed.addDecision({
-    id: 'due-decision', project: 'app', title: 'Due review', chosen: 'A',
+  const due = seed.addDecision({
+    project: 'app', title: 'Due review', chosen: 'A',
     reviewAfter: '2026-01-01T00:00:00.000Z'
   });
   let durable = privilegedSnapshot(seed);
@@ -85,5 +85,5 @@ test('HTTP context persists review signals that it creates', async (t) => {
   assert.equal(response.status, 200);
   assert.equal(response.body.openReviews.length, 1);
   assert.equal(durable.reviewSignals.length, 1);
-  assert.equal(durable.reviewSignals[0].decisionId, 'due-decision');
+  assert.equal(durable.reviewSignals[0].decisionId, due.id);
 });

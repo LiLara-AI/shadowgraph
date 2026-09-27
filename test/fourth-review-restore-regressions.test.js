@@ -10,6 +10,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { historicalIds } from '../tools/historical-ids.js';
 
 const FIXED_NOW = '2026-08-27T12:00:00.000Z';
 const API_TOKEN = 'fourth-review-token';
@@ -17,8 +18,9 @@ const JSON_ARTIFACT = /^\.restore\..+\.(?:tmp|rollback|recovery)$/;
 
 function graphPayload(id, title) {
   const graph = createShadowGraph({ now: () => FIXED_NOW });
-  graph.addDecision({ id, project: 'fourth-review', title, chosen: title });
-  return privilegedSnapshot(graph);
+  const decision = graph.addDecision({ project: 'fourth-review', title, chosen: title });
+  // Restore fixtures model stored pre-policy identities, including journal references.
+  return historicalIds(privilegedSnapshot(graph), { [id]: decision.id }, { now: () => FIXED_NOW });
 }
 
 async function writePayload(path, payload) {
@@ -205,7 +207,7 @@ test('DS-P1-001 HTTP: stat-denied inventory returns the fatal code and latches a
   const blockedWrite = await fetch(`${base}/decisions`, {
     method: 'POST',
     headers: authHeaders({ 'content-type': 'application/json' }),
-    body: JSON.stringify({ id: 'ds-p1-http-must-not-land', title: 'MUST NOT LAND', chosen: 'unsafe' })
+    body: JSON.stringify({ project: 'fourth-review', title: 'ds-p1-http-must-not-land', chosen: 'unsafe' })
   });
   const blockedRead = await fetch(`${base}/records`, { headers: authHeaders() });
   assert.equal(blockedWrite.status, 503);
@@ -285,7 +287,7 @@ test('DS-P1-001 MCP: stat-denied inventory latches all graph tools while protoco
   const evidenceAfterFailure = await readFile(rollbackPath);
 
   const blockedWrite = await rpc.call(mcpTool(3, 'shadowgraph_record_decision', {
-    id: 'ds-p1-mcp-must-not-land', project: 'fourth-review', title: 'MUST NOT LAND', chosen: 'unsafe'
+    project: 'fourth-review', title: 'ds-p1-mcp-must-not-land', chosen: 'unsafe'
   }));
   const blockedRead = await rpc.call(mcpTool(4, 'shadowgraph_search', { project: 'fourth-review', query: 'DS P1' }));
   const publicLatchError = {

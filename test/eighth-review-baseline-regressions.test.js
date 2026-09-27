@@ -44,21 +44,18 @@ async function signedMidstreamBaselineAttack(directory, fixture, terminal, suffi
   const clock = { value: NOW };
   const graph = createShadowGraph({ verifier: fixture.verifier, now: () => clock.value });
   const decision = graph.addDecision({
-    id: `ds-p1-006-decision-${suffix}`,
     project: 'ds-p1-006',
     title: `DS-P1-006 ${terminal} relation host`,
     chosen: 'preserve lifecycle'
   });
   const fact = graph.addFact({
-    id: `ds-p1-006-fact-${suffix}`,
     project: 'ds-p1-006',
     key: `signed-${suffix}`,
     value: { signed: true, terminal },
     expiresAt: EXPIRES_AT,
     idempotencyKey: `retry-${suffix}`
   });
-  graph.link({
-    id: `ds-p1-006-relation-${suffix}`,
+  const relation = graph.link({
     project: 'ds-p1-006',
     from: decision.id,
     to: fact.id,
@@ -82,7 +79,6 @@ async function signedMidstreamBaselineAttack(directory, fixture, terminal, suffi
     graph.maintain({ project: fact.project, now: clock.value });
   } else {
     graph.addFact({
-      id: `ds-p1-006-replacement-${suffix}`,
       project: fact.project,
       key: fact.key,
       value: { replacement: true },
@@ -122,7 +118,7 @@ async function signedMidstreamBaselineAttack(directory, fixture, terminal, suffi
   terminalPayload.facts = structuredClone(baseline.payload.facts);
   terminalPayload.relations = structuredClone(baseline.payload.relations);
   terminalPayload.idempotency = structuredClone(baseline.payload.idempotency);
-  return { payload: terminalPayload, legitimateTerminalPayload, factId: fact.id, relationId: `ds-p1-006-relation-${suffix}` };
+  return { payload: terminalPayload, legitimateTerminalPayload, factId: fact.id, relationId: relation.id };
 }
 
 function assertPlacementError(action, label) {
@@ -169,7 +165,7 @@ function placementVariants() {
   duplicate.journalSeq = duplicateEntry.seq;
 
   const midstreamGraph = createShadowGraph({ now: () => NOW });
-  midstreamGraph.addDecision({ project: 'default', id: 'ds-p1-006-midstream-existing', title: 'Existing', chosen: 'keep' });
+  midstreamGraph.addDecision({ project: 'default', title: 'Existing', chosen: 'keep' });
   const midstream = privilegedSnapshot(midstreamGraph);
   const midstreamEntry = structuredClone(baselineOnlyPayload(5, 'midstream').journal[0]);
   midstreamEntry.id = 'ds-p1-006-midstream-baseline';
@@ -201,7 +197,7 @@ async function writePayload(path, payload) {
 
 function oldPayload(suffix) {
   const graph = createShadowGraph({ now: () => NOW });
-  graph.addDecision({ id: `ds-p1-006-old-${suffix}`, project: 'old', title: `OLD ${suffix}`, chosen: 'preserve' });
+  graph.addDecision({ project: 'old', title: `OLD ${suffix}`, chosen: 'preserve' });
   return privilegedSnapshot(graph);
 }
 
@@ -306,7 +302,7 @@ test('DS-P1-006 eighth review: matching-live midstream baselines cannot resurrec
       assert.deepEqual(privilegedSnapshot(target), before, `${label}: failed merge import is atomic`);
 
       const replacement = createShadowGraph({ verifier, now: () => NOW });
-      replacement.addDecision({ project: 'default', id: `ds-p1-006-replace-old-${terminal}-${verifier ? 'v' : 'nv'}`, title: 'OLD', chosen: 'preserve' });
+      replacement.addDecision({ project: 'default', title: 'OLD', chosen: 'preserve' });
       const replacementBefore = privilegedSnapshot(replacement);
       assertPlacementError(() => replacement.replaceData(attack.payload), `${label} replace`);
       assert.deepEqual(privilegedSnapshot(replacement), replacementBefore, `${label}: failed replacement is atomic`);
@@ -336,7 +332,7 @@ test('DS-P1-006 eighth review: duplicate, midstream, rewind, and wrong-epoch bas
     assert.deepEqual(privilegedSnapshot(target), before, `${label}: import destination unchanged`);
 
     const replacement = createShadowGraph({ now: () => NOW });
-    replacement.addDecision({ project: 'default', id: `ds-p1-006-${label.replaceAll(' ', '-')}-old`, title: 'OLD', chosen: 'preserve' });
+    replacement.addDecision({ project: 'default', title: 'OLD', chosen: 'preserve' });
     const replacementBefore = privilegedSnapshot(replacement);
     assertPlacementError(() => replacement.replaceData(payload), `${label} replace`);
     assert.deepEqual(privilegedSnapshot(replacement), replacementBefore, `${label}: replace destination unchanged`);
@@ -449,28 +445,28 @@ test('DS-P1-006 eighth review: a monotonic migration extension preserves the sig
 test('DS-P1-006 journal-less merge appends typed decision, attempt, fact, relation, and idempotency snapshots', () => {
   const graph = createShadowGraph({ now: () => NOW });
   const decision = graph.addDecision({
-    id: 'ds-p1-006-merge-decision', project: 'ds-p1-006-merge',
+    project: 'ds-p1-006-merge',
     title: 'Old private decision', chosen: 'preserve', idempotencyKey: 'move-retry'
   });
   const retryTarget = graph.addDecision({
-    id: 'ds-p1-006-retry-target', project: 'ds-p1-006-merge',
+    project: 'ds-p1-006-merge',
     title: 'Retry target', chosen: 'canonical'
   });
   const attempt = graph.addAttempt({
-    id: 'ds-p1-006-merge-attempt', project: 'ds-p1-006-merge',
+    project: 'ds-p1-006-merge',
     solution: 'old private attempt', result: 'failed'
   });
   const fact = graph.addFact({
-    id: 'ds-p1-006-merge-fact', project: 'ds-p1-006-merge', key: 'mode',
+    project: 'ds-p1-006-merge', key: 'mode',
     value: 'old-private-fact', idempotencyKey: 'fact-retry'
   });
   const relation = graph.link({
-    id: 'ds-p1-006-merge-relation', project: 'ds-p1-006-merge', from: decision.id, to: fact.id,
+    project: 'ds-p1-006-merge', from: decision.id, to: fact.id,
     relation: 'depends_on'
   });
   const replacementSource = createShadowGraph({ now: () => '2026-09-01T00:00:00.000Z' });
   const replacement = replacementSource.addFact({
-    id: 'ds-p1-006-merge-fact-next', project: 'ds-p1-006-merge', key: 'mode',
+    project: 'ds-p1-006-merge', key: 'mode',
     value: 'safe-current-fact', validFrom: '2026-09-01T00:00:00.000Z'
   });
   const before = privilegedSnapshot(graph);
@@ -529,15 +525,15 @@ test('DS-P1-006 journal-less merge appends typed decision, attempt, fact, relati
 test('DS-P1-006 journal-less multi-memory overwrite uses recorded, superseded, and invalidated snapshots', () => {
   const graph = createShadowGraph({ now: () => NOW });
   const active = graph.remember({
-    id: 'ds-p1-006-memory-active', project: 'ds-p1-006-memory', memoryType: 'profile',
+    project: 'ds-p1-006-memory', memoryType: 'profile',
     key: 'active', text: 'old-active-private', idempotencyKey: 'active-retry'
   }).memory;
   const superseded = graph.remember({
-    id: 'ds-p1-006-memory-superseded', project: 'ds-p1-006-memory', memoryType: 'note',
+    project: 'ds-p1-006-memory', memoryType: 'note',
     key: 'superseded', text: 'old-superseded-private'
   }).memory;
   const invalidated = graph.remember({
-    id: 'ds-p1-006-memory-invalidated', project: 'ds-p1-006-memory', memoryType: 'goal',
+    project: 'ds-p1-006-memory', memoryType: 'goal',
     key: 'invalidated', text: 'old-invalidated-private'
   }).memory;
   const before = privilegedSnapshot(graph);
@@ -548,7 +544,7 @@ test('DS-P1-006 journal-less multi-memory overwrite uses recorded, superseded, a
       { ...active, text: 'sanitized-active', updatedAt: '2026-09-01T00:00:00.000Z' },
       {
         ...superseded, text: 'sanitized-superseded', status: 'superseded',
-        supersededBy: 'ds-p1-006-memory-active',
+        supersededBy: active.id,
         temporal: { ...superseded.temporal, validTo: '2026-09-01T00:00:00.000Z', invalidatedAt: '2026-09-01T00:00:00.000Z' }
       },
       {
@@ -601,7 +597,7 @@ test('DS-P1-006 journal-less merge rejects terminal verified fact resurrection a
 test('DS-P1-006 journal-less merge preflights sequence overflow and snapshot postconditions before mutation', () => {
   const overflow = createShadowGraph({ now: () => NOW });
   const overflowDecision = overflow.addDecision({
-    id: 'ds-p1-006-overflow-decision', project: 'ds-p1-006-overflow',
+    project: 'ds-p1-006-overflow',
     title: 'Overflow original', chosen: 'preserve'
   });
   overflow.importData({ schemaVersion: 5, journal: [], journalSeq: Number.MAX_SAFE_INTEGER });
@@ -617,11 +613,11 @@ test('DS-P1-006 journal-less merge preflights sequence overflow and snapshot pos
 
   const postcondition = createShadowGraph({ now: () => NOW });
   const decision = postcondition.addDecision({
-    id: 'ds-p1-006-postcondition-decision', project: 'ds-p1-006-postcondition',
+    project: 'ds-p1-006-postcondition',
     title: 'Postcondition original', chosen: 'preserve'
   });
   const fact = postcondition.addFact({
-    id: 'ds-p1-006-postcondition-fact', project: 'ds-p1-006-postcondition',
+    project: 'ds-p1-006-postcondition',
     key: 'expiry', value: 'active'
   });
   const postconditionBefore = privilegedSnapshot(postcondition);
@@ -647,7 +643,7 @@ test('DS-P1-006 journal-less overwrite survives JSON and SQLite restart with reb
   const directory = await scratchDirectory(t, 'shadowgraph-ds-p1-006-journal-less-restart-');
   const graph = createShadowGraph({ now: () => NOW });
   const memory = graph.remember({
-    id: 'ds-p1-006-restart-memory', project: 'ds-p1-006-restart',
+    project: 'ds-p1-006-restart',
     memoryType: 'profile', key: 'secret', text: 'restart-old-private',
     idempotencyKey: 'restart-retry'
   }).memory;
@@ -694,8 +690,8 @@ test('DS-P1-006 journal-less overwrite survives JSON and SQLite restart with reb
 
 test('DS-P1-006 eighth review: hard-purge leading gaps and sequence ledgers remain valid without a baseline', () => {
   const graph = createShadowGraph({ now: () => NOW });
-  graph.addDecision({ id: 'ds-p1-006-hard-gone', project: 'gone', title: 'Gone', chosen: 'erase' });
-  graph.addDecision({ id: 'ds-p1-006-hard-kept', project: 'kept', title: 'Kept', chosen: 'preserve' });
+  graph.addDecision({ project: 'gone', title: 'Gone', chosen: 'erase' });
+  const kept = graph.addDecision({ project: 'kept', title: 'Kept', chosen: 'preserve' });
   graph.purgeProject('gone', { mode: 'hard' });
   const payload = privilegedSnapshot(graph);
   assert.equal(payload.journal.some((entry) => entry.type === 'projection.baseline'), false);
@@ -704,7 +700,7 @@ test('DS-P1-006 eighth review: hard-purge leading gaps and sequence ledgers rema
   assert.doesNotThrow(() => validateRestorePayload(payload, { now: () => NOW }));
   const restarted = createShadowGraph({ now: () => NOW });
   assert.doesNotThrow(() => restarted.importData(payload));
-  assert.deepEqual(privilegedSnapshot(restarted).records.map((record) => record.id), ['ds-p1-006-hard-kept']);
+  assert.deepEqual(privilegedSnapshot(restarted).records.map((record) => record.id), [kept.id]);
 });
 
 test('DS-P1-006 eighth review: JSON and SQLite restore reject both terminal resurrection snapshots atomically', async (t) => {
@@ -753,7 +749,7 @@ test('DS-P1-006 eighth review: JSON and SQLite restore reject both terminal resu
 test('DS-P1-006 eighth review: CLI, HTTP, and MCP restore reject the same baseline code and preserve destinations', async (t) => {
   const directory = await scratchDirectory(t, 'shadowgraph-eighth-review-interfaces-');
   const fixture = await verifierFixture(directory);
-  const { payload } = await signedMidstreamBaselineAttack(directory, fixture, 'expired', 'interfaces');
+  const { payload, factId } = await signedMidstreamBaselineAttack(directory, fixture, 'expired', 'interfaces');
   const source = join(directory, 'attack.json');
   await writePayload(source, payload);
 
@@ -782,7 +778,7 @@ test('DS-P1-006 eighth review: CLI, HTTP, and MCP restore reject the same baseli
     assert.equal(failure.code, INVALID_BASELINE_PLACEMENT_CODE);
     assert.deepEqual(await readFile(httpDestination), httpBefore);
     const records = await (await fetch(`http://127.0.0.1:${app.server.address().port}/records?project=old`)).json();
-    assert.deepEqual(records.records.map((record) => record.id), ['ds-p1-006-old-http']);
+    assert.deepEqual(records.records.map((record) => record.id), JSON.parse(httpBefore).records.map((record) => record.id));
   } finally {
     await new Promise((resolve) => app.server.close(resolve));
   }
@@ -808,7 +804,7 @@ test('DS-P1-006 eighth review: CLI, HTTP, and MCP restore reject the same baseli
     source,
     'projection baseline placement',
     'ds-p1-006-forged-baseline-interfaces',
-    'ds-p1-006-fact-interfaces'
+    factId
   ]) {
     assert.equal(publicFailure.includes(privateValue), false, `MCP failure disclosed ${privateValue}`);
   }

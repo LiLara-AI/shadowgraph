@@ -40,13 +40,13 @@ test('CLI remembers, recalls, and synchronizes Markdown memory', async (t) => {
 test('CLI context persists review signals that it creates', async (t) => {
   const directory = await scratchDirectory(t, 'shadowgraph-cli-context-');
   const file = join(directory, 'data.json');
-  await cli(file, 'decision', {
-    id: 'cli-due', project: 'app', title: 'CLI due review', chosen: 'A',
+  const decision = await cli(file, 'decision', {
+    project: 'app', title: 'CLI due review', chosen: 'A',
     reviewAfter: '2020-01-01T00:00:00.000Z'
   });
   const context = await cli(file, 'context', { project: 'app' });
   assert.equal(context.openReviews.length, 1);
   const durable = JSON.parse(await readFile(file, 'utf8'));
   assert.equal(durable.reviewSignals.length, 1);
-  assert.equal(durable.reviewSignals[0].decisionId, 'cli-due');
+  assert.equal(durable.reviewSignals[0].decisionId, decision.id);
 });

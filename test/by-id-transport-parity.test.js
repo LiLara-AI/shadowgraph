@@ -11,6 +11,9 @@ import { privilegedSnapshot } from '../src/internal/snapshot.js';
 import { historicalRelation } from '../tools/historical-relation.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
+// Labels below refer to IDs returned by ordinary creation, never supplied IDs.
+const fixtureIds = {};
+
 // PR-09's by-id non-disclosure, observed where callers meet it: the kernel,
 // POST /traverse, the MCP shadowgraph_traverse tool and the CLI traverse verb.
 // On each, an id that exists outside the caller's scope and an id that does
@@ -24,10 +27,10 @@ const NOW = '2026-01-01T00:00:00.000Z';
 const ABSENT = 'decision-absent-0000';
 const NOTICE = { code: 'scoped_coverage', detail: 'No record with this id is visible in the scope of this traversal.' };
 // Everything a caller scoped to alpha, or to nothing, may not learn.
-const HIDDEN = ['beta-decision', 'default-decision', 'legacy-default-decision', 'origin-decision', 'relation-hidden-cross', 'HIDDEN', 'beta', 'origin_hidden'];
-const CASES = [
-  { scope: { project: 'alpha' }, hidden: ['beta-decision', 'default-decision', 'legacy-default-decision', 'origin-decision'] },
-  { scope: {}, hidden: ['alpha-decision', 'beta-decision', 'origin-decision'] }
+const HIDDEN = () => [fixtureIds['beta-decision'], fixtureIds['default-decision'], 'legacy-default-decision', fixtureIds['origin-decision'], 'relation-hidden-cross', 'HIDDEN', 'beta', 'origin_hidden'].sort();
+const CASES = () => [
+  { scope: { project: 'alpha' }, hidden: [fixtureIds['beta-decision'], fixtureIds['default-decision'], 'legacy-default-decision', fixtureIds['origin-decision']].sort() },
+  { scope: {}, hidden: [fixtureIds['alpha-decision'], fixtureIds['beta-decision'], fixtureIds['origin-decision']].sort() }
 ];
 
 async function seededStore(t) {
@@ -35,13 +38,13 @@ async function seededStore(t) {
   const file = join(directory, 'data.json');
   const graph = createShadowGraph({ now: () => NOW });
   graph.importData({ schemaVersion: 5, records: [{ id: 'legacy-default-decision', kind: 'decision', schemaVersion: 5, project: 'default', title: 'Legacy HIDDEN', chosen: 'x' }] });
-  graph.addDecision({ project: 'alpha', id: 'alpha-decision', title: 'Alpha decision', chosen: 'x' });
-  graph.addAttempt({ project: 'alpha', id: 'alpha-attempt', solution: 'alpha script', result: 'worked' });
-  graph.link({ project: 'alpha', id: 'relation-alpha-tried', from: 'alpha-decision', to: 'alpha-attempt', relation: 'tried' });
-  graph.addDecision({ project: 'beta', id: 'beta-decision', title: 'Beta HIDDEN', chosen: 'x' });
-  graph.addDecision({ project: 'default', id: 'default-decision', title: 'Real default HIDDEN', chosen: 'x' });
-  graph.addDecision({ originId: 'origin_hidden', id: 'origin-decision', title: 'Origin HIDDEN', chosen: 'x' });
-  graph.importData(historicalRelation({ id: 'relation-hidden-cross', from: 'beta-decision', to: 'alpha-decision', relation: 'related', project: 'beta', seq: privilegedSnapshot(graph).journalSeq + 1, at: NOW }));
+  fixtureIds['alpha-decision'] = graph.addDecision({ project: 'alpha', title: 'Alpha decision', chosen: 'x' }).id;
+  fixtureIds['alpha-attempt'] = graph.addAttempt({ project: 'alpha', solution: 'alpha script', result: 'worked' }).id;
+  fixtureIds['relation-alpha-tried'] = graph.link({ project: 'alpha', from: fixtureIds['alpha-decision'], to: fixtureIds['alpha-attempt'], relation: 'tried' }).id;
+  fixtureIds['beta-decision'] = graph.addDecision({ project: 'beta', title: 'Beta HIDDEN', chosen: 'x' }).id;
+  fixtureIds['default-decision'] = graph.addDecision({ project: 'default', title: 'Real default HIDDEN', chosen: 'x' }).id;
+  fixtureIds['origin-decision'] = graph.addDecision({ originId: 'origin_hidden', title: 'Origin HIDDEN', chosen: 'x' }).id;
+  graph.importData(historicalRelation({ id: 'relation-hidden-cross', from: fixtureIds['beta-decision'], to: fixtureIds['alpha-decision'], relation: 'related', project: 'beta', seq: privilegedSnapshot(graph).journalSeq + 1, at: NOW }));
   const store = createJsonFileStore(file);
   await store.save(privilegedSnapshot(graph));
   return file;
@@ -52,21 +55,21 @@ async function seededStore(t) {
 const normalise = (outcome, id) => JSON.parse(JSON.stringify(outcome).split(id).join('<caller-id>'));
 
 async function assertParity(label, traverse) {
-  for (const { scope, hidden } of CASES) {
+  for (const { scope, hidden } of CASES()) {
     const absent = normalise(await traverse({ ...scope, id: ABSENT }), ABSENT);
     for (const id of hidden) {
       const outside = normalise(await traverse({ ...scope, id }), id);
       assert.deepEqual(outside, absent, `${label}: ${id} under ${JSON.stringify(scope)} answers like an absent id`);
       const text = JSON.stringify(outside);
-      for (const name of HIDDEN) assert.equal(text.includes(name), false, `${label}: the answer for ${id} names ${name}`);
+      for (const name of HIDDEN()) assert.equal(text.includes(name), false, `${label}: the answer for ${id} names ${name}`);
     }
     assert.deepEqual(absent.traversal.limitation, NOTICE, `${label}: the notice`);
     assert.deepEqual([absent.traversal.nodes, absent.traversal.relations], [[], []]);
   }
   // In scope, the same surface does return the record, and still nothing hidden.
-  const own = await traverse({ project: 'alpha', id: 'alpha-decision', depth: 3 });
-  assert.deepEqual(own.traversal.nodes.map((node) => node.id).sort(), ['alpha-attempt', 'alpha-decision'], `${label}: in scope`);
-  for (const name of HIDDEN) assert.equal(JSON.stringify(own).includes(name), false, `${label}: the in-scope walk names ${name}`);
+  const own = await traverse({ project: 'alpha', id: fixtureIds['alpha-decision'], depth: 3 });
+  assert.deepEqual(own.traversal.nodes.map((node) => node.id).sort(), [fixtureIds['alpha-attempt'], fixtureIds['alpha-decision']].sort(), `${label}: in scope`);
+  for (const name of HIDDEN()) assert.equal(JSON.stringify(own).includes(name), false, `${label}: the in-scope walk names ${name}`);
 }
 
 test('kernel: an out-of-scope id and a missing id get the same traverse answer', async (t) => {

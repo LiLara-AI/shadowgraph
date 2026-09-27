@@ -1,3 +1,5 @@
+import { historicalIds } from '../tools/historical-ids.js';
+const fixtureIds = {};
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -21,7 +23,7 @@ const JSON_ARTIFACT = /^\.restore\..+\.(?:tmp|rollback)$/;
 
 function graphPayload(id, title) {
   const graph = createShadowGraph({ now: () => FIXED_NOW });
-  graph.addDecision({ id, project: 'rrv', title, chosen: title });
+  fixtureIds[id] = graph.addDecision({ project: 'rrv', title, chosen: title }).id;
   return privilegedSnapshot(graph);
 }
 
@@ -132,9 +134,10 @@ async function verifierFixture(directory) {
 async function signedFactPayload(directory, fixture, options = {}) {
   const graph = createShadowGraph({ verifier: fixture.verifier, now: () => options.now ?? FIXED_NOW });
   const fact = graph.addFact({
-    id: options.id ?? 'rrv02-signed-fact', project: 'rrv', key: options.key ?? 'rrv02-key',
+    project: 'rrv', key: options.key ?? 'rrv02-key',
     value: options.value ?? 'signed', expiresAt: options.expiresAt ?? '2026-09-30T00:00:00.000Z'
   });
+  fixtureIds[options.id ?? 'rrv02-signed-fact'] = fact.id;
   const evidencePath = join(fixture.evidenceRoot, `${fact.id}.json`);
   await writeFile(evidencePath, JSON.stringify(createFactAttestation({
     fact,
@@ -147,7 +150,7 @@ async function signedFactPayload(directory, fixture, options = {}) {
   if (options.terminal === 'expired') graph.maintain({ project: fact.project, now: options.expiredAt ?? '2026-10-01T00:00:00.000Z' });
   if (options.terminal === 'superseded') {
     graph.addFact({
-      id: `${fact.id}-replacement`, project: fact.project, key: fact.key, value: 'replacement',
+      project: fact.project, key: fact.key, value: 'replacement',
       validFrom: '2026-09-01T00:00:00.000Z', observedAt: '2026-09-01T00:00:00.000Z',
       recordedAt: '2026-09-01T00:00:00.000Z'
     });
@@ -156,6 +159,7 @@ async function signedFactPayload(directory, fixture, options = {}) {
 }
 
 function appendVerifiedResurrection(payload, factId) {
+  factId = fixtureIds[factId] ?? factId;
   const verified = payload.journal.find((entry) => entry.type === 'fact.verified' && entry.entityId === factId);
   assert.ok(verified, 'fixture requires a verified journal entry');
   const resurrection = structuredClone(verified);
@@ -169,6 +173,7 @@ function appendVerifiedResurrection(payload, factId) {
 }
 
 function rewriteTerminalAsDuplicateVerification(payload, factId) {
+  factId = fixtureIds[factId] ?? factId;
   const verified = payload.journal.find((entry) => entry.type === 'fact.verified' && entry.entityId === factId);
   const terminal = payload.journal.findLast((entry) => ['fact.expired', 'fact.superseded'].includes(entry.type) && entry.entityId === factId);
   assert.ok(verified && terminal, 'fixture requires verified and terminal journal entries');
@@ -180,11 +185,11 @@ function rewriteTerminalAsDuplicateVerification(payload, factId) {
 
 function legacyVerifiedIdempotencyPayload(schemaVersion, suffix = String(schemaVersion)) {
   const graph = createShadowGraph({ now: () => FIXED_NOW });
-  graph.addFact({
-    id: `rrv03-fact-${suffix}`, project: 'rrv03', key: `legacy-${suffix}`, value: { schemaVersion, stable: true },
+  const fact = graph.addFact({
+    project: 'rrv03', key: `legacy-${suffix}`, value: { schemaVersion, stable: true },
     sourceClass: 'human_confirmed', actor: 'legacy-writer', idempotencyKey: `retry-${suffix}`
   });
-  const payload = privilegedSnapshot(graph);
+  const payload = historicalIds(privilegedSnapshot(graph), { [`rrv03-fact-${suffix}`]: fact.id }, { now: () => FIXED_NOW });
   payload.schemaVersion = schemaVersion;
   const markLegacyVerified = (fact) => {
     fact.schemaVersion = schemaVersion;
@@ -359,7 +364,7 @@ test('RRV-01: real HTTP JSON restore latches degraded state, exposes retained ev
 
   const blockedWrite = await fetch(`${base}/decisions`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ id: 'rrv01-http-post-fatal', title: 'MUST NOT LAND', chosen: 'unsafe' })
+    body: JSON.stringify({ title: 'MUST NOT LAND', chosen: 'unsafe' })
   });
   assert.equal(blockedWrite.status, 503);
   assert.equal((await blockedWrite.json()).code, 'persistence_unavailable');
@@ -408,7 +413,7 @@ test('RRV-01: real MCP JSON restore fail-closes after unconfirmed recovery and p
   const evidenceBeforeLaterCalls = await readFile(retainedPath);
 
   const blockedWrite = await rpc.call(mcpTool(3, 'shadowgraph_record_decision', {
-    id: 'rrv01-mcp-post-fatal', project: 'rrv', title: 'MUST NOT LAND', chosen: 'unsafe'
+    project: 'rrv', title: 'MUST NOT LAND', chosen: 'unsafe'
   }));
   assertPrivateLegacyMcpFailure(blockedWrite, {
     code: -32001,
@@ -472,11 +477,11 @@ test('RRV-01: real MCP SQLite unconfirmed recovery uses the same fail-closed lat
   assert.equal(rollbackNames.length, 1, 'unconfirmed SQLite recovery retains one complete rollback database');
   const rollbackPath = join(directory, rollbackNames[0]);
   const retained = await createSqliteStore(rollbackPath);
-  try { assert.equal((await retained.load()).records[0].id, 'rrv01-mcp-sqlite-old'); }
+  try { assert.equal((await retained.load()).records[0].id, fixtureIds['rrv01-mcp-sqlite-old']); }
   finally { retained.close(); }
 
   const blockedWrite = await rpc.call(mcpTool(22, 'shadowgraph_record_decision', {
-    id: 'rrv01-mcp-sqlite-post-fatal', title: 'MUST NOT LAND SQLITE', chosen: 'unsafe'
+    title: 'MUST NOT LAND SQLITE', chosen: 'unsafe'
   }));
   const blockedRead = await rpc.call(mcpTool(23, 'shadowgraph_search', { query: 'RRV01' }));
   const sqliteLatch = {
@@ -790,7 +795,7 @@ test('RRV-03: valid signed facts return the final verified entity on retry when 
   const fixture = await verifierFixture(directory);
   const graph = createShadowGraph({ verifier: fixture.verifier, now: () => FIXED_NOW });
   const fact = graph.addFact({
-    id: 'rrv03-valid-signed', project: 'rrv03', key: 'valid-signed', value: true,
+    project: 'rrv03', key: 'valid-signed', value: true,
     expiresAt: '2026-12-31T00:00:00.000Z', idempotencyKey: 'valid-signed-retry'
   });
   const evidencePath = join(fixture.evidenceRoot, 'rrv03-valid-signed.json');

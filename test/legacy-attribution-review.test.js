@@ -1,3 +1,4 @@
+import { historicalIds } from '../tools/historical-ids.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
@@ -9,6 +10,9 @@ import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { privilegedSnapshot } from '../src/internal/snapshot.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+
+// Labels below refer to IDs returned by ordinary creation, never supplied IDs.
+const fixtureIds = {};
 
 // P1 finding F-27 (owner decision OD-1, option B; plan v1.4.4 §10.3): legacy
 // data whose owner is uncertain -- the literal "default" of a store written
@@ -38,17 +42,18 @@ const LITERAL_DEFAULT = ['decision-default', 'attempt-default', 'memory-default'
 const PROJECTLESS = ['decision-projectless', 'attempt-projectless', 'memory-projectless', 'fact-projectless'];
 
 function legacyPayload() {
+  const historical = {};
   const writer = createShadowGraph({ now });
-  writer.addDecision({ project: 'default', id: 'decision-default', title: 'Legacy MARKER default decision', chosen: 'x' });
-  writer.addAttempt({ project: 'default', id: 'attempt-default', solution: 'legacy MARKER default attempt', result: 'failed' });
-  writer.remember({ project: 'default', id: 'memory-default', memoryType: 'note', key: 'legacy-default', text: 'MEMORY-MARKER legacy default' });
-  writer.addFact({ project: 'default', id: 'fact-default', key: 'legacy-default-latency', value: 10 });
-  writer.addDecision({ project: 'default', id: 'decision-projectless', title: 'Legacy MARKER projectless decision', chosen: 'y' });
-  writer.addAttempt({ project: 'default', id: 'attempt-projectless', solution: 'legacy MARKER projectless attempt', result: 'failed' });
-  writer.remember({ project: 'default', id: 'memory-projectless', memoryType: 'note', key: 'legacy-projectless', text: 'MEMORY-MARKER legacy projectless' });
-  writer.addFact({ project: 'default', id: 'fact-projectless', key: 'legacy-projectless-latency', value: 20 });
-  writer.addDecision({ project: 'alpha', id: 'decision-legacy-alpha', title: 'Legacy MARKER alpha decision', chosen: 'z' });
-  const payload = privilegedSnapshot(writer);
+  historical['decision-default'] = writer.addDecision({ project: 'default', title: 'Legacy MARKER default decision', chosen: 'x' }).id;
+  historical['attempt-default'] = writer.addAttempt({ project: 'default', solution: 'legacy MARKER default attempt', result: 'failed' }).id;
+  historical['memory-default'] = writer.remember({ project: 'default', memoryType: 'note', key: 'legacy-default', text: 'MEMORY-MARKER legacy default' }).memory.id;
+  historical['fact-default'] = writer.addFact({ project: 'default', key: 'legacy-default-latency', value: 10 }).id;
+  historical['decision-projectless'] = writer.addDecision({ project: 'default', title: 'Legacy MARKER projectless decision', chosen: 'y' }).id;
+  historical['attempt-projectless'] = writer.addAttempt({ project: 'default', solution: 'legacy MARKER projectless attempt', result: 'failed' }).id;
+  historical['memory-projectless'] = writer.remember({ project: 'default', memoryType: 'note', key: 'legacy-projectless', text: 'MEMORY-MARKER legacy projectless' }).memory.id;
+  historical['fact-projectless'] = writer.addFact({ project: 'default', key: 'legacy-projectless-latency', value: 20 }).id;
+  historical['decision-legacy-alpha'] = writer.addDecision({ project: 'alpha', title: 'Legacy MARKER alpha decision', chosen: 'z' }).id;
+  const payload = historicalIds(privilegedSnapshot(writer), historical, { now });
   payload.schemaVersion = 5;
   const strip = (entity) => {
     if (!entity || typeof entity !== 'object') return;
@@ -74,22 +79,22 @@ function legacyPayload() {
 // Cases 5, 6 and 7 are written by this build: the real project named
 // "default", ordinary projects alpha and beta, and records owned by a capture
 // origin with no project.
-const REAL_DEFAULT = ['real-default-decision', 'real-default-memory', 'real-default-fact'];
-const NAMED = ['alpha-decision', 'alpha-memory', 'alpha-fact', 'beta-decision', 'beta-memory', 'decision-legacy-alpha'];
-const ORIGIN = ['origin-decision', 'origin-memory', 'origin-fact'];
+const REAL_DEFAULT = () => [fixtureIds['real-default-decision'], fixtureIds['real-default-memory'], fixtureIds['real-default-fact']].sort();
+const NAMED = () => [fixtureIds['alpha-decision'], fixtureIds['alpha-memory'], fixtureIds['alpha-fact'], fixtureIds['beta-decision'], fixtureIds['beta-memory'], 'decision-legacy-alpha'].sort();
+const ORIGIN = () => [fixtureIds['origin-decision'], fixtureIds['origin-memory'], fixtureIds['origin-fact']].sort();
 
 function writeCurrent(graph) {
-  graph.addDecision({ project: 'default', id: 'real-default-decision', title: 'Real default MARKER decision', chosen: 'x' });
-  graph.remember({ project: 'default', id: 'real-default-memory', memoryType: 'note', key: 'legacy-default', text: 'MEMORY-MARKER real default' });
-  graph.addFact({ project: 'default', id: 'real-default-fact', key: 'legacy-default-latency', value: 30 });
+  fixtureIds['real-default-decision'] = graph.addDecision({ project: 'default', title: 'Real default MARKER decision', chosen: 'x' }).id;
+  fixtureIds['real-default-memory'] = graph.remember({ project: 'default', memoryType: 'note', key: 'legacy-default', text: 'MEMORY-MARKER real default' }).memory.id;
+  fixtureIds['real-default-fact'] = graph.addFact({ project: 'default', key: 'legacy-default-latency', value: 30 }).id;
   for (const project of ['alpha', 'beta']) {
-    graph.addDecision({ project, id: `${project}-decision`, title: `${project} MARKER decision`, chosen: 'x' });
-    graph.remember({ project, id: `${project}-memory`, memoryType: 'note', key: 'note', text: `MEMORY-MARKER ${project}` });
+    fixtureIds[`${project}-decision`] = graph.addDecision({ project, title: `${project} MARKER decision`, chosen: 'x' }).id;
+    fixtureIds[`${project}-memory`] = graph.remember({ project, memoryType: 'note', key: 'note', text: `MEMORY-MARKER ${project}` }).memory.id;
   }
-  graph.addFact({ project: 'alpha', id: 'alpha-fact', key: 'latency', value: 40 });
-  graph.addDecision({ originId: 'origin_synthetic', id: 'origin-decision', title: 'Origin MARKER decision', chosen: 'x' });
-  graph.remember({ originId: 'origin_synthetic', id: 'origin-memory', memoryType: 'note', key: 'note', text: 'MEMORY-MARKER origin' });
-  graph.addFact({ originId: 'origin_synthetic', id: 'origin-fact', key: 'latency', value: 50 });
+  fixtureIds['alpha-fact'] = graph.addFact({ project: 'alpha', key: 'latency', value: 40 }).id;
+  fixtureIds['origin-decision'] = graph.addDecision({ originId: 'origin_synthetic', title: 'Origin MARKER decision', chosen: 'x' }).id;
+  fixtureIds['origin-memory'] = graph.remember({ originId: 'origin_synthetic', memoryType: 'note', key: 'note', text: 'MEMORY-MARKER origin' }).memory.id;
+  fixtureIds['origin-fact'] = graph.addFact({ originId: 'origin_synthetic', key: 'latency', value: 50 }).id;
   return graph;
 }
 
@@ -145,7 +150,7 @@ test('the real project "default", named projects, a legacy record of an explicit
   for (const run of [() => null, () => graph.migrateAttribution()]) {
     run();
     const listed = new Set(everything(graph).items.map((item) => item.id));
-    for (const id of [...REAL_DEFAULT, ...NAMED, ...ORIGIN]) assert.equal(listed.has(id), false, id);
+    for (const id of [...REAL_DEFAULT(), ...NAMED(), ...ORIGIN()]) assert.equal(listed.has(id), false, id);
   }
   // A store holding only data this build wrote has nothing legacy to review.
   const current = writeCurrent(createShadowGraph({ now }));
@@ -312,7 +317,7 @@ for (const backend of Object.keys(BACKENDS)) {
         const finished = await session(backend, file, (graph) => everything(graph));
         assert.deepEqual(classification(finished), EXPECTED);
         assert.ok(finished.items.every((item) => item.migrated));
-        for (const id of [...REAL_DEFAULT, ...NAMED, ...ORIGIN]) assert.equal(finished.items.some((item) => item.id === id), false, id);
+        for (const id of [...REAL_DEFAULT(), ...NAMED(), ...ORIGIN()]) assert.equal(finished.items.some((item) => item.id === id), false, id);
       });
     }
   });

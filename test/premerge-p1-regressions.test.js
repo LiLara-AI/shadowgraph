@@ -35,7 +35,6 @@ async function verifyAcrossIoBoundary(postIoInstant) {
   };
   const graph = createShadowGraph({ now: () => clock.value, verifier });
   const fact = graph.addFact({
-    id: `verification-${postIoInstant}`,
     project: 'premerge-verification',
     key: 'boundary',
     value: postIoInstant,
@@ -80,12 +79,12 @@ test('P1 follow-up verifier slice: identical retry crossing the signed boundary 
   };
   const graph = createShadowGraph({ now: () => clock.value, verifier });
   const fact = graph.addFact({
-    id: attestation.factId,
     project: 'premerge-verification',
     key: 'identical-retry-boundary',
     value: true,
     expiresAt: BOUNDARY
   });
+  attestation.factId = fact.id;
   const first = await graph.verifyFact({ project: 'premerge-verification', factId: fact.id, evidencePath: 'trusted-local-evidence.json' });
   assert.equal(first.operation, 'VERIFIED');
 
@@ -114,7 +113,6 @@ test('P1 follow-up verification transaction slice: sequence overflow leaves all 
   };
   const graph = createShadowGraph({ now: () => '2026-08-28T00:00:00.000Z', verifier });
   const fact = graph.addFact({
-    id: 'verification-sequence-overflow',
     project: 'premerge-verification-overflow',
     key: 'verification-transaction',
     value: 'must remain unverified',
@@ -184,7 +182,7 @@ test('P1 premerge schema slice: schema 5 rejects raw purge ledgers instead of mi
     );
 
     const live = createShadowGraph();
-    live.addDecision({ id: `kept-${kind}`, project: 'kept', title: 'Keep live state', chosen: 'preserve' });
+    live.addDecision({ project: 'kept', title: 'Keep live state', chosen: 'preserve' });
     const before = privilegedSnapshot(live);
     assert.throws(
       () => live.replaceData(payload),
@@ -231,7 +229,7 @@ test('P1 follow-up schema slice: purge-reason and replayable payload-null skelet
     );
 
     const live = createShadowGraph();
-    live.addDecision({ id: `kept-disguised-${redactedMode}`, project: 'kept', title: 'Keep live state', chosen: 'preserve' });
+    live.addDecision({ project: 'kept', title: 'Keep live state', chosen: 'preserve' });
     const before = privilegedSnapshot(live);
     assert.throws(
       () => live.replaceData(payload),
@@ -287,7 +285,7 @@ test('P1 replayability schema slice: replayable:false cannot disguise a payload-
   );
 
   const live = createShadowGraph();
-  live.addDecision({ id: 'kept-replayable-contradiction', project: 'kept', title: 'Keep live state', chosen: 'preserve' });
+  live.addDecision({ project: 'kept', title: 'Keep live state', chosen: 'preserve' });
   const before = privilegedSnapshot(live);
   assert.throws(() => live.replaceData(payload), rejection, 'replacement must reject before mutation');
   assert.deepEqual(privilegedSnapshot(live), before);
@@ -442,7 +440,7 @@ function startRestoreMcp(destination) {
 
 function safeRestorePayload(id) {
   const graph = createShadowGraph({ now: () => '2026-08-28T00:00:00.000Z' });
-  graph.addDecision({ id, project: 'premerge-restore-kept', title: 'Keep destination', chosen: 'preserve' });
+  graph.addDecision({ project: 'premerge-restore-kept', title: 'Keep destination', chosen: 'preserve' });
   return privilegedSnapshot(graph);
 }
 
@@ -536,13 +534,13 @@ test('P1 follow-up schema surfaces: redacted false, omitted, or replayable:false
 test('P1 premerge expiration slice: effective expiration cannot precede validFrom or mutate fact state', () => {
   const graph = createShadowGraph({ now: () => '2026-08-28T00:00:00.000Z' });
   graph.addFact({
-    id: 'expiration-original', project: 'premerge-expiration', key: 'window', value: 'original',
+    project: 'premerge-expiration', key: 'window', value: 'original',
     idempotencyKey: 'original-retry'
   });
   const before = privilegedSnapshot(graph);
   assert.throws(
     () => graph.addFact({
-      id: 'expiration-invalid', project: 'premerge-expiration', key: 'window', value: 'must-not-land',
+      project: 'premerge-expiration', key: 'window', value: 'must-not-land',
       validFrom: '2026-08-28T00:00:10.000Z',
       expiresAt: '2026-08-28T00:00:05.000Z',
       idempotencyKey: 'invalid-retry'
@@ -552,7 +550,7 @@ test('P1 premerge expiration slice: effective expiration cannot precede validFro
   assert.deepEqual(privilegedSnapshot(graph), before, 'interval rejection must precede fact, journal, event, and idempotency mutation');
 
   const equalBoundary = graph.addFact({
-    id: 'expiration-equal', project: 'premerge-expiration', key: 'equal-window', value: 'instantaneous',
+    project: 'premerge-expiration', key: 'equal-window', value: 'instantaneous',
     validFrom: '2026-08-28T00:00:10.000Z',
     expiresAt: '2026-08-28T00:00:10.000Z'
   });
@@ -560,7 +558,7 @@ test('P1 premerge expiration slice: effective expiration cannot precede validFro
 
   const persisted = createShadowGraph({ now: () => '2026-08-28T00:00:00.000Z' });
   persisted.addFact({
-    id: 'persisted-invalid-interval', project: 'premerge-expiration', key: 'persisted-window', value: true,
+    project: 'premerge-expiration', key: 'persisted-window', value: true,
     validFrom: '2026-08-28T00:00:10.000Z', expiresAt: '2026-08-28T00:00:20.000Z'
   });
   const payload = privilegedSnapshot(persisted);
@@ -582,22 +580,20 @@ test('P1 premerge expiration slice: effective expiration cannot precede validFro
 function graphAtPurgeSequenceLimit(mode) {
   const graph = createShadowGraph({ now: () => '2026-08-28T00:00:00.000Z' });
   const decision = graph.addDecision({
-    id: `overflow-decision-${mode}`,
     project: 'premerge-overflow',
     title: 'Atomic purge target',
     chosen: 'preserve everything on failure',
-    alternatives: [{ id: `overflow-alternative-${mode}`, label: 'Alternative identity' }],
+    alternatives: [{ label: 'Alternative identity' }],
     idempotencyKey: `decision-retry-${mode}`
   });
   const fact = graph.addFact({
-    id: `overflow-fact-${mode}`,
     project: 'premerge-overflow',
     key: 'atomic-purge-fact',
     value: mode,
     idempotencyKey: `fact-retry-${mode}`
   });
-  graph.link({ id: `overflow-relation-${mode}`, project: 'premerge-overflow', from: decision.id, to: fact.id, relation: 'depends_on' });
-  graph.addDecision({ id: `overflow-kept-${mode}`, project: 'premerge-kept', title: 'Unrelated state', chosen: 'keep' });
+  graph.link({ project: 'premerge-overflow', from: decision.id, to: fact.id, relation: 'depends_on' });
+  graph.addDecision({ project: 'premerge-kept', title: 'Unrelated state', chosen: 'keep' });
   graph.importData({ schemaVersion: 5, journal: [], journalSeq: Number.MAX_SAFE_INTEGER });
   return graph;
 }
@@ -605,11 +601,11 @@ function graphAtPurgeSequenceLimit(mode) {
 test('P1 journal atomicity exact reproductions: addDecision and superseding addFact cannot mutate before sequence overflow', () => {
   {
     const graph = createShadowGraph({ now: () => '2026-08-28T00:00:00.000Z' });
-    graph.addDecision({ id: 'overflow-existing-decision', project: 'atomicity', title: 'Existing', chosen: 'preserve' });
+    graph.addDecision({ project: 'atomicity', title: 'Existing', chosen: 'preserve' });
     graph.importData({ schemaVersion: 5, journal: [], journalSeq: Number.MAX_SAFE_INTEGER });
     const before = privilegedSnapshot(graph);
     assert.throws(
-      () => graph.addDecision({ id: 'overflow-new-decision', project: 'atomicity', title: 'Must not land', chosen: 'reject' }),
+      () => graph.addDecision({ project: 'atomicity', title: 'Must not land', chosen: 'reject' }),
       /journal sequence overflow/i
     );
     assert.deepEqual(privilegedSnapshot(graph), before, 'addDecision overflow must not leave a record or breadcrumb event');
@@ -617,11 +613,11 @@ test('P1 journal atomicity exact reproductions: addDecision and superseding addF
 
   {
     const graph = createShadowGraph({ now: () => '2026-08-28T00:00:00.000Z' });
-    graph.addFact({ id: 'overflow-original-fact', project: 'atomicity', key: 'supersession', value: 'original' });
+    graph.addFact({ project: 'atomicity', key: 'supersession', value: 'original' });
     graph.importData({ schemaVersion: 5, journal: [], journalSeq: Number.MAX_SAFE_INTEGER });
     const before = privilegedSnapshot(graph);
     assert.throws(
-      () => graph.addFact({ id: 'overflow-replacement-fact', project: 'atomicity', key: 'supersession', value: 'must-not-land' }),
+      () => graph.addFact({ project: 'atomicity', key: 'supersession', value: 'must-not-land' }),
       /journal sequence overflow/i
     );
     assert.deepEqual(privilegedSnapshot(graph), before, 'addFact overflow must not supersede or narrow the original fact');
@@ -638,29 +634,29 @@ function atomicGraph() {
 const JOURNAL_MUTATOR_CASES = [
   {
     name: 'addDecision ADD', required: 1,
-    build() { const graph = atomicGraph(); return { graph, invoke: () => graph.addDecision({ id: 'matrix-decision', project: 'matrix', title: 'Decision', chosen: 'A' }) }; }
+    build() { const graph = atomicGraph(); return { graph, invoke: () => graph.addDecision({ project: 'matrix', title: 'Decision', chosen: 'A' }) }; }
   },
   {
     name: 'addAttempt ADD', required: 1,
-    build() { const graph = atomicGraph(); return { graph, invoke: () => graph.addAttempt({ id: 'matrix-attempt', project: 'matrix', solution: 'Try', result: 'Failed safely' }) }; }
+    build() { const graph = atomicGraph(); return { graph, invoke: () => graph.addAttempt({ project: 'matrix', solution: 'Try', result: 'Failed safely' }) }; }
   },
   {
     name: 'remember ADD', required: 1,
-    build() { const graph = atomicGraph(); return { graph, invoke: () => graph.remember({ id: 'matrix-memory-add', project: 'matrix', scope: {}, memoryType: 'note', key: 'add', text: 'add' }) }; }
+    build() { const graph = atomicGraph(); return { graph, invoke: () => graph.remember({ project: 'matrix', scope: {}, memoryType: 'note', key: 'add', text: 'add' }) }; }
   },
   {
     name: 'remember UPDATE', required: 2,
     build() {
       const graph = atomicGraph();
-      graph.remember({ id: 'matrix-memory-old', project: 'matrix', scope: {}, memoryType: 'note', key: 'update', text: 'old' });
-      return { graph, invoke: () => graph.remember({ id: 'matrix-memory-new', project: 'matrix', scope: {}, memoryType: 'note', key: 'update', text: 'new' }) };
+      graph.remember({ project: 'matrix', scope: {}, memoryType: 'note', key: 'update', text: 'old' });
+      return { graph, invoke: () => graph.remember({ project: 'matrix', scope: {}, memoryType: 'note', key: 'update', text: 'new' }) };
     }
   },
   {
     name: 'remember index refresh', required: 1,
     build() {
       const graph = atomicGraph();
-      graph.remember({ id: 'matrix-memory-index', project: 'matrix', scope: {}, memoryType: 'note', key: 'index', text: 'same' });
+      graph.remember({ project: 'matrix', scope: {}, memoryType: 'note', key: 'index', text: 'same' });
       return { graph, invoke: () => graph.remember({ project: 'matrix', scope: {}, memoryType: 'note', key: 'index', text: 'same', embedding: [0.1, 0.2] }) };
     }
   },
@@ -668,13 +664,13 @@ const JOURNAL_MUTATOR_CASES = [
     name: 'applyMemoryPlan mixed batch', required: 4,
     build() {
       const graph = atomicGraph();
-      graph.remember({ id: 'matrix-plan-update-old', project: 'matrix', scope: {}, memoryType: 'note', key: 'update', text: 'old' });
-      graph.remember({ id: 'matrix-plan-delete', project: 'matrix', scope: {}, memoryType: 'note', key: 'delete', text: 'delete' });
+      graph.remember({ project: 'matrix', scope: {}, memoryType: 'note', key: 'update', text: 'old' });
+      graph.remember({ project: 'matrix', scope: {}, memoryType: 'note', key: 'delete', text: 'delete' });
       return {
         graph,
         invoke: () => graph.applyMemoryPlan({ project: 'matrix', scope: {}, operations: [
-          { action: 'ADD', id: 'matrix-plan-add', memoryType: 'note', key: 'add', text: 'add' },
-          { action: 'UPDATE', id: 'matrix-plan-update-new', memoryType: 'note', key: 'update', text: 'new' },
+          { action: 'ADD', memoryType: 'note', key: 'add', text: 'add' },
+          { action: 'UPDATE', memoryType: 'note', key: 'update', text: 'new' },
           { action: 'DELETE', memoryType: 'note', key: 'delete' },
           { action: 'NOOP', memoryType: 'note', key: 'noop' }
         ] })
@@ -685,33 +681,33 @@ const JOURNAL_MUTATOR_CASES = [
     name: 'applyMemoryPlan index refresh followed by same-key content update', required: 3,
     build() {
       const graph = atomicGraph();
-      graph.remember({ id: 'matrix-plan-index-old', project: 'matrix', scope: {}, memoryType: 'note', key: 'index-then-update', text: 'old' });
+      graph.remember({ project: 'matrix', scope: {}, memoryType: 'note', key: 'index-then-update', text: 'old' });
       return {
         graph,
         invoke: () => graph.applyMemoryPlan({ project: 'matrix', scope: {}, operations: [
           { action: 'UPDATE', memoryType: 'note', key: 'index-then-update', text: 'old', embedding: [0.1], idempotencyKey: 'same-key' },
-          { action: 'UPDATE', id: 'matrix-plan-index-new', memoryType: 'note', key: 'index-then-update', text: 'new', idempotencyKey: 'same-key' }
+          { action: 'UPDATE', memoryType: 'note', key: 'index-then-update', text: 'new', idempotencyKey: 'same-key' }
         ] })
       };
     }
   },
   {
     name: 'addFact ADD', required: 1,
-    build() { const graph = atomicGraph(); return { graph, invoke: () => graph.addFact({ id: 'matrix-fact-add', project: 'matrix', key: 'add', value: 1 }) }; }
+    build() { const graph = atomicGraph(); return { graph, invoke: () => graph.addFact({ project: 'matrix', key: 'add', value: 1 }) }; }
   },
   {
     name: 'addFact supersession', required: 2,
     build() {
       const graph = atomicGraph();
-      graph.addFact({ id: 'matrix-fact-old', project: 'matrix', key: 'update', value: 'old' });
-      return { graph, invoke: () => graph.addFact({ id: 'matrix-fact-new', project: 'matrix', key: 'update', value: 'new' }) };
+      graph.addFact({ project: 'matrix', key: 'update', value: 'old' });
+      return { graph, invoke: () => graph.addFact({ project: 'matrix', key: 'update', value: 'new' }) };
     }
   },
   {
     name: 'setOutcome with confidence contribution', required: 2,
     build() {
       const graph = atomicGraph();
-      const decision = graph.addDecision({ id: 'matrix-outcome', project: 'matrix', title: 'Outcome', chosen: 'A' });
+      const decision = graph.addDecision({ project: 'matrix', title: 'Outcome', chosen: 'A' });
       return { graph, invoke: () => graph.setOutcome(decision.id, { status: 'successful', sourceClass: 'agent_claimed', observedAt: ATOMIC_NOW }, { project: 'matrix' }) };
     }
   },
@@ -719,7 +715,7 @@ const JOURNAL_MUTATOR_CASES = [
     name: 'setOutcome unknown without confidence contribution', required: 1,
     build() {
       const graph = atomicGraph();
-      const decision = graph.addDecision({ id: 'matrix-outcome-unknown', project: 'matrix', title: 'Unknown outcome', chosen: 'A' });
+      const decision = graph.addDecision({ project: 'matrix', title: 'Unknown outcome', chosen: 'A' });
       return { graph, invoke: () => graph.setOutcome(decision.id, { status: 'unknown', sourceClass: 'agent_claimed', observedAt: ATOMIC_NOW }, { project: 'matrix' }) };
     }
   },
@@ -727,7 +723,7 @@ const JOURNAL_MUTATOR_CASES = [
     name: 'addConfidenceEvidence changed', required: 1,
     build() {
       const graph = atomicGraph();
-      const decision = graph.addDecision({ id: 'matrix-confidence', project: 'matrix', title: 'Confidence', chosen: 'A' });
+      const decision = graph.addDecision({ project: 'matrix', title: 'Confidence', chosen: 'A' });
       return { graph, invoke: () => graph.addConfidenceEvidence({ project: 'matrix', decisionId: decision.id, key: 'matrix-evidence', reason: 'Evidence' }) };
     }
   },
@@ -735,7 +731,7 @@ const JOURNAL_MUTATOR_CASES = [
     name: 'updateDecisionStatus transition', required: 1,
     build() {
       const graph = atomicGraph();
-      const decision = graph.addDecision({ id: 'matrix-status', project: 'matrix', title: 'Status', chosen: 'A' });
+      const decision = graph.addDecision({ project: 'matrix', title: 'Status', chosen: 'A' });
       return { graph, invoke: () => graph.updateDecisionStatus(decision.id, 'planned', { project: 'matrix' }) };
     }
   },
@@ -743,17 +739,17 @@ const JOURNAL_MUTATOR_CASES = [
     name: 'link relation', required: 1,
     build() {
       const graph = atomicGraph();
-      const from = graph.addDecision({ id: 'matrix-link-from', project: 'matrix', title: 'From', chosen: 'A' });
-      const to = graph.addDecision({ id: 'matrix-link-to', project: 'matrix', title: 'To', chosen: 'B' });
-      return { graph, invoke: () => graph.link({ id: 'matrix-link', project: 'matrix', from: from.id, to: to.id, relation: 'depends_on' }) };
+      const from = graph.addDecision({ project: 'matrix', title: 'From', chosen: 'A' });
+      const to = graph.addDecision({ project: 'matrix', title: 'To', chosen: 'B' });
+      return { graph, invoke: () => graph.link({ project: 'matrix', from: from.id, to: to.id, relation: 'depends_on' }) };
     }
   },
   {
     name: 'supersedeDecision relation and causation chain', required: 3,
     build() {
       const graph = atomicGraph();
-      const previous = graph.addDecision({ id: 'matrix-supersede-old', project: 'matrix', title: 'Old', chosen: 'A' });
-      const replacement = graph.addDecision({ id: 'matrix-supersede-new', project: 'matrix', title: 'New', chosen: 'B' });
+      const previous = graph.addDecision({ project: 'matrix', title: 'Old', chosen: 'A' });
+      const replacement = graph.addDecision({ project: 'matrix', title: 'New', chosen: 'B' });
       return { graph, invoke: () => graph.supersedeDecision({ project: 'matrix', decisionId: previous.id, replacementId: replacement.id }) };
     }
   },
@@ -761,10 +757,10 @@ const JOURNAL_MUTATOR_CASES = [
     name: 'maintain lifecycle batch', required: 4,
     build() {
       const graph = atomicGraph();
-      graph.addDecision({ id: 'matrix-maintain-decision-a', project: 'matrix', title: 'Due A', chosen: 'A', reviewAfter: ATOMIC_NOW });
-      graph.addDecision({ id: 'matrix-maintain-decision-b', project: 'matrix', title: 'Due B', chosen: 'B', reviewAfter: ATOMIC_NOW });
-      graph.addFact({ id: 'matrix-maintain-fact-a', project: 'matrix', key: 'due-a', value: 1, expiresAt: ATOMIC_NOW });
-      graph.addFact({ id: 'matrix-maintain-fact-b', project: 'matrix', key: 'due-b', value: 2, expiresAt: ATOMIC_NOW });
+      graph.addDecision({ project: 'matrix', title: 'Due A', chosen: 'A', reviewAfter: ATOMIC_NOW });
+      graph.addDecision({ project: 'matrix', title: 'Due B', chosen: 'B', reviewAfter: ATOMIC_NOW });
+      graph.addFact({ project: 'matrix', key: 'due-a', value: 1, expiresAt: ATOMIC_NOW });
+      graph.addFact({ project: 'matrix', key: 'due-b', value: 2, expiresAt: ATOMIC_NOW });
       return { graph, invoke: () => graph.maintain({ project: 'matrix', now: ATOMIC_LATER }) };
     }
   }
@@ -790,7 +786,7 @@ test('P1 journal reservation matrix: every journal-writing public mutator has ex
 
 function importDeltaAtSequence(sequence) {
   const seed = atomicGraph();
-  const decision = seed.addDecision({ id: 'matrix-import-decision', project: 'matrix', title: 'Old import title', chosen: 'A' });
+  const decision = seed.addDecision({ project: 'matrix', title: 'Old import title', chosen: 'A' });
   const envelope = privilegedSnapshot(seed);
   envelope.journal[0].seq = sequence;
   envelope.journalSeq = sequence;
@@ -799,7 +795,7 @@ function importDeltaAtSequence(sequence) {
   graph.importData(envelope);
 
   const factSource = atomicGraph();
-  const fact = factSource.addFact({ id: 'matrix-import-fact', project: 'matrix', key: 'imported', value: true });
+  const fact = factSource.addFact({ project: 'matrix', key: 'imported', value: true });
   return {
     graph,
     invoke: () => graph.importData({
@@ -814,7 +810,7 @@ function importDeltaAtSequence(sequence) {
 test('P1 causation reservation: near-boundary multi-entry operations retain deterministic order, causation IDs, and epoch', () => {
   {
     const graph = atomicGraph();
-    const decision = graph.addDecision({ id: 'causation-outcome', project: 'matrix', title: 'Outcome', chosen: 'A' });
+    const decision = graph.addDecision({ project: 'matrix', title: 'Outcome', chosen: 'A' });
     const epoch = privilegedSnapshot(graph).journalEpoch;
     graph.importData({ schemaVersion: 5, journal: [], journalSeq: Number.MAX_SAFE_INTEGER - 2 });
     graph.setOutcome(decision.id, { status: 'successful', observedAt: ATOMIC_NOW }, { project: 'matrix' });
@@ -830,8 +826,8 @@ test('P1 causation reservation: near-boundary multi-entry operations retain dete
 
   {
     const graph = atomicGraph();
-    const previous = graph.addDecision({ id: 'causation-old', project: 'matrix', title: 'Old', chosen: 'A' });
-    const replacement = graph.addDecision({ id: 'causation-new', project: 'matrix', title: 'New', chosen: 'B' });
+    const previous = graph.addDecision({ project: 'matrix', title: 'Old', chosen: 'A' });
+    const replacement = graph.addDecision({ project: 'matrix', title: 'New', chosen: 'B' });
     const epoch = privilegedSnapshot(graph).journalEpoch;
     graph.importData({ schemaVersion: 5, journal: [], journalSeq: Number.MAX_SAFE_INTEGER - 3 });
     graph.supersedeDecision({ project: 'matrix', decisionId: previous.id, replacementId: replacement.id });
@@ -875,7 +871,7 @@ const ZERO_JOURNAL_MUTATOR_CASES = [
     name: 'replaceData with an already journaled snapshot',
     build() {
       const graph = atomicGraph();
-      graph.addDecision({ id: 'zero-replace', project: 'matrix', title: 'Replace', chosen: 'A' });
+      graph.addDecision({ project: 'matrix', title: 'Replace', chosen: 'A' });
       return { graph, afterBoundary: () => privilegedSnapshot(graph), invoke: (snapshot) => graph.replaceData(snapshot) };
     }
   },
@@ -883,7 +879,7 @@ const ZERO_JOURNAL_MUTATOR_CASES = [
     name: 'addDecision idempotent retry',
     build() {
       const graph = atomicGraph();
-      const input = { id: 'zero-decision', project: 'matrix', title: 'Decision', chosen: 'A', idempotencyKey: 'retry' };
+      const input = { project: 'matrix', title: 'Decision', chosen: 'A', idempotencyKey: 'retry' };
       graph.addDecision(input);
       return { graph, invoke: () => graph.addDecision({ ...input, title: 'Ignored retry' }) };
     }
@@ -892,7 +888,7 @@ const ZERO_JOURNAL_MUTATOR_CASES = [
     name: 'addAttempt idempotent retry',
     build() {
       const graph = atomicGraph();
-      const input = { id: 'zero-attempt', project: 'matrix', solution: 'Try', result: 'Result', idempotencyKey: 'retry' };
+      const input = { project: 'matrix', solution: 'Try', result: 'Result', idempotencyKey: 'retry' };
       graph.addAttempt(input);
       return { graph, invoke: () => graph.addAttempt({ ...input, result: 'Ignored retry' }) };
     }
@@ -901,7 +897,7 @@ const ZERO_JOURNAL_MUTATOR_CASES = [
     name: 'remember unchanged',
     build() {
       const graph = atomicGraph();
-      graph.remember({ id: 'zero-memory', project: 'matrix', scope: {}, memoryType: 'note', key: 'same', text: 'same' });
+      graph.remember({ project: 'matrix', scope: {}, memoryType: 'note', key: 'same', text: 'same' });
       return { graph, invoke: () => graph.remember({ project: 'matrix', scope: {}, memoryType: 'note', key: 'same', text: 'same' }) };
     }
   },
@@ -916,7 +912,7 @@ const ZERO_JOURNAL_MUTATOR_CASES = [
     name: 'addFact idempotent retry',
     build() {
       const graph = atomicGraph();
-      const input = { id: 'zero-fact', project: 'matrix', key: 'fact', value: true, idempotencyKey: 'retry' };
+      const input = { project: 'matrix', key: 'fact', value: true, idempotencyKey: 'retry' };
       graph.addFact(input);
       return { graph, invoke: () => graph.addFact({ ...input, value: false }) };
     }
@@ -925,7 +921,7 @@ const ZERO_JOURNAL_MUTATOR_CASES = [
     name: 'addConfidenceEvidence duplicate',
     build() {
       const graph = atomicGraph();
-      const decision = graph.addDecision({ id: 'zero-confidence', project: 'matrix', title: 'Confidence', chosen: 'A' });
+      const decision = graph.addDecision({ project: 'matrix', title: 'Confidence', chosen: 'A' });
       const input = { project: 'matrix', decisionId: decision.id, key: 'same-evidence', reason: 'same', observedAt: ATOMIC_NOW };
       graph.addConfidenceEvidence(input);
       return { graph, invoke: () => graph.addConfidenceEvidence(input) };
@@ -935,7 +931,7 @@ const ZERO_JOURNAL_MUTATOR_CASES = [
     name: 'updateDecisionStatus same status',
     build() {
       const graph = atomicGraph();
-      const decision = graph.addDecision({ id: 'zero-status', project: 'matrix', title: 'Status', chosen: 'A' });
+      const decision = graph.addDecision({ project: 'matrix', title: 'Status', chosen: 'A' });
       return { graph, invoke: () => graph.updateDecisionStatus(decision.id, 'proposed', { project: 'matrix' }) };
     }
   },
@@ -943,8 +939,8 @@ const ZERO_JOURNAL_MUTATOR_CASES = [
     name: 'supersedeDecision idempotent retry',
     build() {
       const graph = atomicGraph();
-      const previous = graph.addDecision({ id: 'zero-supersede-old', project: 'matrix', title: 'Old', chosen: 'A' });
-      const replacement = graph.addDecision({ id: 'zero-supersede-new', project: 'matrix', title: 'New', chosen: 'B' });
+      const previous = graph.addDecision({ project: 'matrix', title: 'Old', chosen: 'A' });
+      const replacement = graph.addDecision({ project: 'matrix', title: 'New', chosen: 'B' });
       graph.supersedeDecision({ project: 'matrix', decisionId: previous.id, replacementId: replacement.id });
       return { graph, invoke: () => graph.supersedeDecision({ project: 'matrix', decisionId: previous.id, replacementId: replacement.id }) };
     }
@@ -954,8 +950,8 @@ const ZERO_JOURNAL_MUTATOR_CASES = [
     build() {
       const graph = atomicGraph();
       graph.addDecision({
-        id: 'zero-review', project: 'matrix', title: 'Review', chosen: 'A',
-        alternatives: [{ id: 'zero-review-alt', label: 'B', reopenWhen: ['changed'] }]
+        project: 'matrix', title: 'Review', chosen: 'A',
+        alternatives: [{ label: 'B', reopenWhen: ['changed'] }]
       });
       return { graph, invoke: () => graph.review({ project: 'matrix', changedFacts: ['changed'] }).items };
     }
@@ -965,8 +961,8 @@ const ZERO_JOURNAL_MUTATOR_CASES = [
     build() {
       const graph = atomicGraph();
       graph.addDecision({
-        id: 'zero-context', project: 'matrix', title: 'Context', chosen: 'A',
-        alternatives: [{ id: 'zero-context-alt', label: 'B', reopenWhen: ['changed'] }]
+        project: 'matrix', title: 'Context', chosen: 'A',
+        alternatives: [{ label: 'B', reopenWhen: ['changed'] }]
       });
       return { graph, invoke: () => graph.context({ project: 'matrix', changedFacts: ['changed'] }) };
     }
@@ -980,8 +976,8 @@ const ZERO_JOURNAL_MUTATOR_CASES = [
     build() {
       const graph = atomicGraph();
       graph.addDecision({
-        id: 'zero-ack', project: 'matrix', title: 'Ack', chosen: 'A',
-        alternatives: [{ id: 'zero-ack-alt', label: 'B', reopenWhen: ['changed'] }]
+        project: 'matrix', title: 'Ack', chosen: 'A',
+        alternatives: [{ label: 'B', reopenWhen: ['changed'] }]
       });
       graph.review({ project: 'matrix', changedFacts: ['changed'] }).items;
       const signal = graph.getReviewSignals({ project: 'matrix' }).items[0];
@@ -992,7 +988,7 @@ const ZERO_JOURNAL_MUTATOR_CASES = [
     name: 'importData semantic NOOP',
     build() {
       const graph = atomicGraph();
-      const decision = graph.addDecision({ id: 'zero-import', project: 'matrix', title: 'Import', chosen: 'A' });
+      const decision = graph.addDecision({ project: 'matrix', title: 'Import', chosen: 'A' });
       return { graph, invoke: () => graph.importData({ schemaVersion: 5, records: [decision] }) };
     }
   }
@@ -1017,7 +1013,7 @@ test('P1 verifyFact reservation: one-entry commit reaches MAX_SAFE_INTEGER and i
     validateStored() { return true; }
   };
   const graph = createShadowGraph({ now: () => ATOMIC_NOW, verifier });
-  const fact = graph.addFact({ id: 'matrix-verify', project: 'matrix', key: 'verify', value: true });
+  const fact = graph.addFact({ project: 'matrix', key: 'verify', value: true });
   graph.importData({ schemaVersion: 5, journal: [], journalSeq: Number.MAX_SAFE_INTEGER - 1 });
   const before = privilegedSnapshot(graph);
   const verified = await graph.verifyFact({ project: 'matrix', factId: fact.id, evidencePath: 'trusted.json' });
@@ -1037,7 +1033,7 @@ test('P1 purge near-boundary reservation: logical and hard modes commit one exac
     const graph = atomicGraph();
     graph.importData({ schemaVersion: 5, journal: [], journalSeq: Number.MAX_SAFE_INTEGER - 2 });
     const source = atomicGraph();
-    const decision = source.addDecision({ id: `near-purge-${mode}`, project: `near-purge-${mode}`, title: 'Purge', chosen: 'A' });
+    const decision = source.addDecision({ project: `near-purge-${mode}`, title: 'Purge', chosen: 'A' });
     graph.importData({ schemaVersion: 5, records: [decision] });
     assert.equal(privilegedSnapshot(graph).journalSeq, Number.MAX_SAFE_INTEGER - 1);
     const result = graph.purgeProject(`near-purge-${mode}`, { mode });
@@ -1062,7 +1058,7 @@ test('P1 premerge purge slice: logical and hard purge preserve every collection 
 
 function sequenceOverflowPayload(id) {
   const graph = atomicGraph();
-  graph.addDecision({ id, project: 'transport-overflow', title: 'Keep persisted state', chosen: 'preserve' });
+  graph.addDecision({ project: 'transport-overflow', title: 'Keep persisted state', chosen: 'preserve' });
   graph.importData({ schemaVersion: 5, journal: [], journalSeq: Number.MAX_SAFE_INTEGER });
   return privilegedSnapshot(graph);
 }
@@ -1086,7 +1082,7 @@ test('P1 journal overflow persistence: JSON/SQLite HTTP plus CLI and MCP reject 
       try {
         const response = await fetch(`http://127.0.0.1:${app.server.address().port}/decisions`, {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ id: `http-${backend}-must-not-land`, project: 'transport-overflow', title: 'Must not land', chosen: 'reject' })
+          body: JSON.stringify({ project: 'transport-overflow', title: 'Must not land', chosen: 'reject' })
         });
         assert.equal(response.status, 400, `${backend}: HTTP overflow must reject`);
         assert.match((await response.json()).error, /journal sequence overflow/i);
@@ -1106,7 +1102,7 @@ test('P1 journal overflow persistence: JSON/SQLite HTTP plus CLI and MCP reject 
   cliStore.close();
   const cliBefore = await readFile(cliDestination);
   const cli = await runCliCommand(cliDestination, 'decision', {
-    id: 'cli-must-not-land', project: 'transport-overflow', title: 'Must not land', chosen: 'reject'
+    project: 'transport-overflow', title: 'Must not land', chosen: 'reject'
   });
   assert.notEqual(cli.code, 0);
   assert.match(cli.stderr, /journal sequence overflow/i);
@@ -1124,14 +1120,14 @@ test('P1 journal overflow persistence: JSON/SQLite HTTP plus CLI and MCP reject 
       jsonrpc: '2.0', id: 31, method: 'tools/call',
       params: {
         name: 'shadowgraph_record_decision',
-        arguments: { id: 'mcp-must-not-land', project: 'transport-overflow', title: 'Must not land', chosen: 'reject' }
+        arguments: { project: 'transport-overflow', title: 'mcp-must-not-land', chosen: 'reject' }
       }
     });
     assert.equal(response.result, undefined, 'legacy tool failures use the numeric JSON-RPC error form');
     assert.deepEqual(response.error, { code: -32000, message: 'Tool execution failed' });
     const publicFailure = JSON.stringify(response);
     assert.equal(publicFailure.includes(mcpDestination), false, 'overflow failure disclosed the storage path');
-    assert.equal(publicFailure.includes('mcp-must-not-land'), false, 'overflow failure disclosed the rejected entity id');
+    assert.equal(publicFailure.includes('mcp-must-not-land'), false, 'overflow failure disclosed the rejected title');
     assert.equal(publicFailure.includes('journal sequence overflow'), false, 'overflow failure disclosed the raw journal diagnostic');
     assert.deepEqual(await readFile(mcpDestination), mcpBefore, 'MCP destination bytes');
   } finally {

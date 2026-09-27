@@ -1,3 +1,4 @@
+const fixtureIds = {};
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -23,19 +24,19 @@ function semanticSnapshot(payload) {
 function sourceGraph() {
   const graph = createShadowGraph({ now: () => NOW });
   const decision = graph.addDecision({
-    id: 'aba-source-decision', project: 'ds-p1-004', title: 'Restored decision', chosen: 'safe'
+    project: 'ds-p1-004', title: 'Restored decision', chosen: 'safe'
   });
   const fact = graph.addFact({
-    id: 'aba-source-fact', project: 'ds-p1-004', key: 'restore-contract', value: 'preserved'
+    project: 'ds-p1-004', key: 'restore-contract', value: 'preserved'
   });
-  graph.link({ id: 'aba-source-relation', project: 'ds-p1-004', from: decision.id, to: fact.id, relation: 'supported_by' });
+  graph.link({ project: 'ds-p1-004', from: decision.id, to: fact.id, relation: 'supported_by' });
   return graph;
 }
 
 function withDecision(payload, id) {
   const graph = createShadowGraph({ now: () => NOW });
   graph.importData(payload);
-  graph.addDecision({ id, project: 'ds-p1-004', title: id, chosen: id });
+  fixtureIds[id] = graph.addDecision({ project: 'ds-p1-004', title: id, chosen: id }).id;
   return privilegedSnapshot(graph);
 }
 
@@ -245,9 +246,9 @@ for (const backend of ['json', 'sqlite']) {
     const durable = await reopened.load();
     reopened.close();
     assert.equal(durable.revision, 4);
-    assert.equal(durable.records.some((record) => record.id === 'legitimate-post-restore-write'), true);
-    assert.equal(durable.records.some((record) => record.id === 'retained-stale-write'), false);
-    assert.equal(durable.records.some((record) => record.id === 'pre-restore-write'), false);
+    assert.equal(durable.records.some((record) => record.id === fixtureIds['legitimate-post-restore-write']), true);
+    assert.equal(durable.records.some((record) => record.id === fixtureIds['retained-stale-write']), false);
+    assert.equal(durable.records.some((record) => record.id === fixtureIds['pre-restore-write']), false);
     assert.deepEqual(durable.facts, sourcePayload.facts);
     assert.deepEqual(durable.relations, sourcePayload.relations);
     assert.deepEqual(durable.journal.slice(0, sourcePayload.journal.length), sourcePayload.journal);
@@ -468,8 +469,8 @@ for (const backend of ['json', 'sqlite']) {
     const durable = await reopened.load();
     reopened.close();
     assert.equal(durable.revision, 4);
-    assert.equal(durable.records.some((record) => record.id === 'process-legitimate-post-restore'), true);
-    assert.equal(durable.records.some((record) => record.id === 'interface-retained-stale'), false);
+    assert.equal(durable.records.some((record) => record.id === fixtureIds['process-legitimate-post-restore']), true);
+    assert.equal(durable.records.some((record) => record.id === fixtureIds['interface-retained-stale']), false);
     assert.deepEqual(await readFile(scenario.source), scenario.sourceBytes);
   });
 }
@@ -510,9 +511,10 @@ for (const backend of ['json', 'sqlite']) {
 
     const writeResponse = await fetch(`${base}/decisions`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id: `http-${backend}-post-restore`, project: 'ds-p1-004', title: 'HTTP post restore', chosen: 'keep' })
+      body: JSON.stringify({ project: 'ds-p1-004', title: 'HTTP post restore', chosen: 'keep' })
     });
-    assert.equal(writeResponse.status, 200, await writeResponse.text());
+    const created = await writeResponse.json();
+    assert.equal(writeResponse.status, 200, JSON.stringify(created));
     const staleOutcome = await externalSave(backend, scenario.destination, scenario.stalePayload);
     assert.equal(staleOutcome.name, 'RevisionConflictError');
     assert.equal(staleOutcome.expected, 2);
@@ -524,8 +526,8 @@ for (const backend of ['json', 'sqlite']) {
     const final = await reopened.load();
     reopened.close();
     assert.equal(final.revision, 4);
-    assert.equal(final.records.some((record) => record.id === `http-${backend}-post-restore`), true);
-    assert.equal(final.records.some((record) => record.id === 'interface-retained-stale'), false);
+    assert.equal(final.records.some((record) => record.id === created.id), true);
+    assert.equal(final.records.some((record) => record.id === fixtureIds['interface-retained-stale']), false);
     assert.deepEqual(await readFile(scenario.source), scenario.sourceBytes);
   });
 }
@@ -566,7 +568,7 @@ for (const backend of ['json', 'sqlite']) {
       jsonrpc: '2.0', id: 4, method: 'tools/call',
       params: {
         name: 'shadowgraph_record_decision',
-        arguments: { id: `mcp-${backend}-post-restore`, project: 'ds-p1-004', title: 'MCP post restore', chosen: 'keep' }
+        arguments: { project: 'ds-p1-004', title: 'MCP post restore', chosen: 'keep' }
       }
     });
     assert.equal(written.error, undefined, written.error?.message);
@@ -580,8 +582,8 @@ for (const backend of ['json', 'sqlite']) {
     const final = await reopened.load();
     reopened.close();
     assert.equal(final.revision, 4);
-    assert.equal(final.records.some((record) => record.id === `mcp-${backend}-post-restore`), true);
-    assert.equal(final.records.some((record) => record.id === 'interface-retained-stale'), false);
+    assert.equal(final.records.some((record) => record.id === JSON.parse(written.result.content[0].text).id), true);
+    assert.equal(final.records.some((record) => record.id === fixtureIds['interface-retained-stale']), false);
     assert.deepEqual(await readFile(scenario.source), scenario.sourceBytes);
   });
 }

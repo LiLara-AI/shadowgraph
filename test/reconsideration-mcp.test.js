@@ -15,7 +15,6 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createShadowGraphServer } from '../src/server.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 import { privilegedSnapshot } from '../src/internal/snapshot.js';
-import { createJsonFileStore } from '../src/storage.js';
 
 function client(file, env = {}) {
   const child = spawn(process.execPath, ['src/mcp.js'], {
@@ -74,7 +73,7 @@ test('compact mode advertises reconsideration and answers with a verdict and its
   assert.ok(names.includes('shadowgraph_reconsider'), 'a compact client can reach reconsideration');
   assert.ok(names.includes('shadowgraph_ack_review'), 'and can still close what it raises');
 
-  await rpc.call('shadowgraph_record_decision', decision);
+  const recorded = await rpc.call('shadowgraph_record_decision', decision);
 
   // No evidence yet: uncertainty, never a clean pass.
   const unevaluated = await rpc.call('shadowgraph_reconsider', { project: 'p' });
@@ -88,24 +87,17 @@ test('compact mode advertises reconsideration and answers with a verdict and its
   assert.equal(recommended.verdict, 'review_recommended');
   assert.equal(recommended.evaluationCompleteness, 'complete');
   assert.equal(recommended.decisions[0].triggeredRules[0].key, 'replicaLagMs');
+  assert.equal(recommended.decisions[0].decisionId, recorded.id);
 
   // The signal it raises is nameable and closable from compact alone.
   const signalId = recommended.decisions[0].reviewSignalId;
   assert.ok(signalId, 'the entry names the signal a client must acknowledge');
-  // shadowgraph_ack_review passes only the signal id, so until its arm is
-  // aligned (plan PR-13) it carries no write scope and is refused (P1 finding
-  // F-30). The acknowledgement is made on the store, with the project's scope,
-  // while no server holds it.
-  const refused = await rpc.send('tools/call', { name: 'shadowgraph_ack_review', arguments: { project: 'p', id: signalId } });
-  assert.deepEqual(refused.error, { code: -32000, message: 'Tool execution failed' });
+  const acknowledged = await rpc.call('shadowgraph_ack_review', { project: 'p', id: signalId });
+  assert.equal(acknowledged.id, signalId);
+  assert.equal(acknowledged.status, 'acknowledged');
   const exited = new Promise((resolve) => rpc.child.once('exit', resolve));
   rpc.stop();
   await exited;
-  const store = createJsonFileStore(file);
-  const graph = createShadowGraph();
-  graph.importData(await store.load());
-  assert.equal(graph.acknowledgeReview(signalId, { project: 'p' }).status, 'acknowledged');
-  await store.save(privilegedSnapshot(graph));
 
   const reopened = client(file, { SHADOWGRAPH_MCP_COMPACT: '1' });
   t.after(() => reopened.stop());

@@ -26,16 +26,17 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+// Administrative historical fixtures retain named identities across restore races.
 function graphPayload(id, revision = 0) {
   const graph = createShadowGraph({ now: () => FIXED_NOW });
-  graph.addDecision({ id, project: 'fifth-review', title: id, chosen: id });
+  graph.importData({ records: [{ kind: 'decision', id, project: 'fifth-review', title: id, chosen: id  }] });
   return { ...privilegedSnapshot(graph), revision };
 }
 
 function writerPayload(current, id) {
   const graph = createShadowGraph({ now: () => FIXED_NOW });
   graph.importData(current);
-  graph.addDecision({ id, project: 'fifth-review', title: id, chosen: id });
+  graph.importData({ records: [{ kind: 'decision', id, project: 'fifth-review', title: id, chosen: id  }] });
   return privilegedSnapshot(graph);
 }
 
@@ -885,7 +886,7 @@ test('DS-P1-003 MCP restore fences an external JSON writer in a separate server 
   seed.close();
   const replacementGraph = createShadowGraph({ now: () => FIXED_NOW });
   for (let index = 0; index < 3000; index += 1) {
-    replacementGraph.addDecision({ id: `mcp-restored-${index}`, project: 'fifth-review', title: `MCP ${index}`, chosen: `MCP ${index}` });
+    replacementGraph.addDecision({ project: 'fifth-review', title: `MCP ${index}`, chosen: `MCP ${index}` });
   }
   await writePayload(source, { ...privilegedSnapshot(replacementGraph), revision: 17 });
   const writerStore = createJsonFileStore(destination);

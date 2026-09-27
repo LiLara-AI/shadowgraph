@@ -18,8 +18,8 @@ const scoped = (g) => ({ journal: g.getJournal({ project: 'alpha' }), redact: g.
 test('PR-11 blocked rebuild coverage withholds global issue counts while preserving the whole-store verdict', () => {
   const read = (betaCount) => {
     const writer = createShadowGraph({ now });
-    writer.addDecision({ project: 'alpha', id: 'alpha', title: 'alpha', chosen: 'x' });
-    for (let i = 0; i < betaCount; i++) writer.addDecision({ project: 'beta', id: `beta-${i}`, title: 'beta', chosen: 'x' });
+    writer.addDecision({ project: 'alpha', title: 'alpha', chosen: 'x' });
+    for (let i = 0; i < betaCount; i++) writer.addDecision({ project: 'beta', title: 'beta', chosen: 'x' });
     const payload = privilegedSnapshot(writer);
     for (const record of payload.records.filter((r) => r.project === 'beta')) record.confidence.policy = 'unsupported';
     for (const entry of payload.journal.filter((e) => e.project === 'beta')) entry.payload.confidence.policy = 'unsupported';
@@ -37,10 +37,10 @@ test('PR-11 blocked rebuild coverage withholds global issue counts while preserv
 
 test('PR-11 beta-only activity does not change alpha journal envelopes; privileged counters remain truthful', () => {
   const graph = createShadowGraph({ now });
-  graph.addDecision({ project: 'alpha', id: 'alpha', title: 'alpha', chosen: 'x' });
+  graph.addDecision({ project: 'alpha', title: 'alpha', chosen: 'x' });
   const before = json(scoped(graph));
   const stored = privilegedSnapshot(graph);
-  graph.addDecision({ project: 'beta', id: 'beta', title: 'beta', chosen: 'y' });
+  graph.addDecision({ project: 'beta', title: 'beta', chosen: 'y' });
   graph.setRevision(7);
   const after = json(scoped(graph));
   assert.deepEqual(after, before, 'unchanged alpha query cannot reveal beta-only activity through global envelope counters');
@@ -51,7 +51,7 @@ test('PR-11 beta-only activity does not change alpha journal envelopes; privileg
   assert.equal(full.journalSeq, stored.journalSeq + 1);
   assert.equal(full.revision, 7);
   assert.equal(privilegedRebuild(graph).applied, 2);
-  graph.addDecision({ project: 'alpha', id: 'alpha-next', title: 'next', chosen: 'z' });
+  graph.addDecision({ project: 'alpha', title: 'next', chosen: 'z' });
   assert.deepEqual(graph.getJournal({ project: 'alpha' }).items.map((entry) => entry.seq), [1, 3], 'canonical ordering is retained, never relabelled as scoped numbering');
   assert.deepEqual(graph.getJournal({ project: 'alpha' }).completeness.gaps, [], 'interleaving alone is not missing history');
 });
@@ -83,14 +83,15 @@ for (const path of ['search', 'retrieve', 'recall', 'getJournal', 'memoryHistory
 
 test('PR-11 context budgets and absent/outside traversal remain non-disclosing', () => {
   const graph = createShadowGraph({ now });
-  for (const project of ['alpha', 'beta']) for (let i = 0; i < 3; i++) graph.addDecision({ project, id: `${project}-${i}`, title: `${project} ${i}`, chosen: 'x' });
+  const ids = {};
+  for (const project of ['alpha', 'beta']) for (let i = 0; i < 3; i++) ids[`${project}-${i}`] = graph.addDecision({ project, title: `${project} ${i}`, chosen: 'x' }).id;
   const page = graph.context({ project: 'alpha', limit: 1 });
   assert.equal(page.completeness.complete, false);
   assert.deepEqual(page.completeness.collections.activeDecisions, { returned: 1, total: 3, hasMore: true, omitted: 2 });
   assert.equal(page.completeness.limitSource, 'caller');
   assert.equal(graph.context({ project: 'alpha' }).completeness.complete, true);
-  assert.deepEqual({ ...graph.traverse({ project: 'alpha', id: 'beta-0' }), root: null }, { ...graph.traverse({ project: 'alpha', id: 'absent' }), root: null });
-  assert.equal(graph.traverse({ id: 'alpha-0' }).completeness?.complete, false);
+  assert.deepEqual({ ...graph.traverse({ project: 'alpha', id: ids['beta-0'] }), root: null }, { ...graph.traverse({ project: 'alpha', id: 'absent' }), root: null });
+  assert.equal(graph.traverse({ id: ids['alpha-0'] }).completeness?.complete, false);
 });
 
 test('PR-11 redaction stamps truthful metadata after custom transformations and adds no writes', () => {

@@ -23,8 +23,8 @@ const cases = [
 
 for (const scenario of cases) test(`redaction metadata withholds the project label: ${scenario.name}`, () => {
   const graph = createShadowGraph({ now });
-  graph.addDecision({ project: scenario.project, id: 'owned', title: 'Ordinary', chosen: 'x' });
-  graph.addDecision({ project: 'unrelated', id: 'outside', title: 'Other', chosen: 'y' });
+  graph.addDecision({ project: scenario.project, title: 'Ordinary', chosen: 'x' });
+  const outside = graph.addDecision({ project: 'unrelated', title: 'Other', chosen: 'y' });
   const before = JSON.stringify(privilegedSnapshot(graph));
   const result = graph.redact({ project: scenario.project, patterns: scenario.patterns, replacement: '[MASKED]' });
   const { completeness, ...body } = result;
@@ -34,7 +34,7 @@ for (const scenario of cases) test(`redaction metadata withholds the project lab
   assert.equal(completeness.complete, true);
   assert.equal(completeness.losslessItems, false);
   assert.equal(result.exportKind, 'scoped_redaction');
-  assert.equal(JSON.stringify(result).includes('outside'), false);
+  assert.equal(JSON.stringify(result).includes(outside.id), false);
   assert.equal(graph.exportData({ project: scenario.project }).completeness.scope.project, scenario.project, 'ordinary reads retain the actual scope label');
   assert.equal(JSON.stringify(privilegedSnapshot(graph)), before);
 });
@@ -57,13 +57,13 @@ test('redaction protects structural coverage from caller patterns and replacemen
 
 test('withheld redaction labels preserve selected, exact-origin and unresolved content boundaries', () => {
   const graph = createShadowGraph({ now });
-  graph.addDecision({ project: 'alpha', id: 'selected', title: 'Project', chosen: 'x' });
-  graph.addDecision({ originId: 'origin_a', id: 'own-origin', title: 'Origin', chosen: 'x' });
-  graph.addDecision({ originId: 'origin_b', id: 'other-origin', title: 'Other', chosen: 'x' });
+  const selected = graph.addDecision({ project: 'alpha', title: 'Project', chosen: 'x' });
+  const ownOrigin = graph.addDecision({ originId: 'origin_a', title: 'Origin', chosen: 'x' });
+  const otherOrigin = graph.addDecision({ originId: 'origin_b', title: 'Other', chosen: 'x' });
   const before = JSON.stringify(privilegedSnapshot(graph));
   for (const [input, ids, scope, complete] of [
-    [{ project: 'alpha', originId: 'origin_a' }, ['selected'], { ...selectedScope, originPresented: true }, true],
-    [{ originId: 'origin_a' }, ['own-origin'], { project: null, projectLabelWithheld: false, requestState: 'project_unresolved', originPresented: true, grant: null }, false],
+    [{ project: 'alpha', originId: 'origin_a' }, [selected.id], { ...selectedScope, originPresented: true }, true],
+    [{ originId: 'origin_a' }, [ownOrigin.id], { project: null, projectLabelWithheld: false, requestState: 'project_unresolved', originPresented: true, grant: null }, false],
     [{}, [], { project: null, projectLabelWithheld: false, requestState: 'project_unresolved', originPresented: false, grant: null }, false],
     [{ project: 'empty-project' }, [], selectedScope, true]
   ]) {
@@ -72,7 +72,7 @@ test('withheld redaction labels preserve selected, exact-origin and unresolved c
     assert.deepEqual(result.completeness.scope, scope);
     assert.equal(result.completeness.complete, complete);
     assert.equal(result.completeness.losslessItems, false);
-    assert.equal(JSON.stringify(result).includes('other-origin'), false);
+    assert.equal(JSON.stringify(result).includes(otherOrigin.id), false);
   }
   assert.equal(JSON.stringify(privilegedSnapshot(graph)), before);
 });
@@ -99,8 +99,8 @@ test('HTTP redaction serializes safe scope metadata without changing the graph o
   const directory = await scratchDirectory(t, 'shadowgraph-redaction-scope-');
   const file = join(directory, 'store.json');
   const app = await createShadowGraphServer({ storage: 'json', file });
-  app.graph.addDecision({ project: 'customer-orion', id: 'owned', title: 'Ordinary', chosen: 'x' });
-  app.graph.addDecision({ project: 'unrelated', id: 'outside', title: 'Other', chosen: 'y' });
+  app.graph.addDecision({ project: 'customer-orion', title: 'Ordinary', chosen: 'x' });
+  const outside = app.graph.addDecision({ project: 'unrelated', title: 'Other', chosen: 'y' });
   await app.persist();
   const before = JSON.stringify(privilegedSnapshot(app.graph));
   const bytes = await readFile(file);
@@ -114,7 +114,7 @@ test('HTTP redaction serializes safe scope metadata without changing the graph o
     assert.equal(response.status, 200);
     const serialized = await response.text();
     assert.equal(serialized.includes('customer-orion'), false);
-    assert.equal(serialized.includes('outside'), false);
+    assert.equal(serialized.includes(outside.id), false);
     const result = JSON.parse(serialized);
     assert.equal(result.records[0].project, '[MASKED]');
     assert.deepEqual(result.completeness.scope, selectedScope);

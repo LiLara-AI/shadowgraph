@@ -70,15 +70,15 @@ test('a valid complete rule is unaffected', () => {
 // A decision carrying one rule, imported so lenient storage keeps it verbatim.
 function graphWithStoredRule(rule, factValue) {
   const seed = createShadowGraph();
-  seed.addDecision({
+  seed.importData({ records: [{ kind: 'decision',
     project: 'p', id: 'decision:d1', title: 't', chosen: 'c',
     alternatives: [{ id: 'alternative:a1', label: 'alt-1', reasonRejected: 'r', reopenWhen: [{ key: 'lag', operator: 'gte', value: 1 }] }]
-  });
+   }] });
   const snapshot = privilegedSnapshot(seed);
   snapshot.records[0].alternatives[0].reopenWhen = [rule];
   const graph = createShadowGraph();
   graph.importData(snapshot);
-  graph.addFact({ project: 'p', key: 'lag', value: factValue, id: 'fact:lag' });
+  graph.addFact({ project: 'p', key: 'lag', value: factValue, });
   return graph;
 }
 
@@ -111,13 +111,13 @@ test('the stored rule is never rewritten by evaluating it', () => {
 // acknowledged signal whose recorded breach is `historical`.
 function graphWithLegacySignal({ rule, historical, factValue }) {
   const seed = createShadowGraph();
-  seed.addDecision({
+  seed.importData({ records: [{ kind: 'decision',
     project: 'p', id: 'decision:d1', title: 't', chosen: 'c',
     // Seeded with a valid rule, then replaced in the snapshot: write-time
     // validation rejects an operandless rule, so only the lenient import path
     // can carry one.
     alternatives: [{ id: 'alternative:a1', label: 'alt-1', reasonRejected: 'r', reopenWhen: [{ key: 'lag', operator: 'gte', value: 1 }] }]
-  });
+   }] });
   const snapshot = privilegedSnapshot(seed);
   snapshot.records[0].alternatives[0].reopenWhen = [rule];
   snapshot.reviewSignals = [{
@@ -142,7 +142,7 @@ function graphWithLegacySignal({ rule, historical, factValue }) {
   }];
   const graph = createShadowGraph();
   graph.importData(snapshot);
-  graph.addFact({ project: 'p', key: 'lag', value: factValue, id: 'fact:lag' });
+  graph.addFact({ project: 'p', key: 'lag', value: factValue, });
   return graph;
 }
 

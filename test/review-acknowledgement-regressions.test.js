@@ -25,7 +25,7 @@ const LAG_HIGH = { key: 'lag', operator: 'gte', value: 1000 };
 
 function seedGraph({ rules = [LAG_LOW, LAG_HIGH] } = {}) {
   const graph = createShadowGraph();
-  graph.addDecision({
+  graph.importData({ records: [{ kind: 'decision',
     project: 'p', id: 'decision:d1', title: 'Serve reads from the local replica', chosen: 'local-replica',
     alternatives: rules.map((rule, index) => ({
       id: `alternative:a${index + 1}`,
@@ -33,7 +33,7 @@ function seedGraph({ rules = [LAG_LOW, LAG_HIGH] } = {}) {
       reasonRejected: 'was acceptable',
       reopenWhen: [rule]
     }))
-  });
+   }] });
   return graph;
 }
 
@@ -162,7 +162,7 @@ test('legacy acknowledgement handling is identical on JSON and SQLite', async (t
       const graph = createShadowGraph();
       graph.importData(durable);
       const narrow = openReview(graph);
-      graph.addFact({ project: 'p', key: 'lag', value: 1200, id: 'fact:broad' });
+      graph.addFact({ project: 'p', key: 'lag', value: 1200, });
       const broad = openReview(graph);
       results[backend] = [narrow.reviewSignalId, narrow.reviewSignalStatus, broad.reviewSignalStatus];
     });
@@ -200,10 +200,10 @@ test('the compact list and acknowledge flow settles the new breach without touch
 // response can carry it and must not carry it by reference.
 function graphWithObjectRuleMetadata() {
   const seed = createShadowGraph();
-  seed.addDecision({
+  seed.importData({ records: [{ kind: 'decision',
     project: 'p', id: 'decision:d1', title: 't', chosen: 'c',
     alternatives: [{ id: 'alternative:a1', label: 'alt-1', reasonRejected: 'r', reopenWhen: [{ key: 'lag', operator: 'gte', value: 500 }] }]
-  });
+   }] });
   const snapshot = privilegedSnapshot(seed);
   snapshot.records[0].alternatives[0].reopenWhen = [{
     key: 'lag',
@@ -254,10 +254,10 @@ test('a detached detail keeps a key whose value is undefined', () => {
 
 test('an object-valued attempt rule from a lenient import is detached', () => {
   const seed = createShadowGraph();
-  seed.addAttempt({
+  seed.importData({ records: [{ kind: 'attempt',
     project: 'p', id: 'attempt:t1', solution: 's', result: 'failed', resultClass: 'failed',
     reusableWhen: [{ key: 'lag', operator: 'gte', value: 500 }]
-  });
+   }] });
   const snapshot = privilegedSnapshot(seed);
   snapshot.records[0].reusableWhen = [{ key: 'lag', operator: { name: ['gte'] }, unit: { name: ['ms'] }, value: [500] }];
   const graph = createShadowGraph();

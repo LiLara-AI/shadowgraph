@@ -5,9 +5,12 @@ import { privilegedIssueAccess, privilegedSnapshot, privilegedAccessRefusal } fr
 import { ACCESS_AUDIT_POLICY } from '../src/access.js';
 import { mergeAuthorityRestore } from '../src/authority-restore.js';
 
+const fixtureIds = new WeakMap();
 function auditFixture() {
   const graph = createShadowGraph({ now: () => '2026-01-01T00:00:00.000Z' });
-  for (const project of ['alpha', 'beta', 'gamma']) graph.addDecision({ id: project, project, title: project, chosen: 'x', reviewAfter: '2025-01-01T00:00:00.000Z' });
+  const ids = {};
+  for (const project of ['alpha', 'beta', 'gamma']) ids[project] = graph.addDecision({ project, title: project, chosen: 'x', reviewAfter: '2025-01-01T00:00:00.000Z' }).id;
+  fixtureIds.set(graph, ids);
   return graph;
 }
 function grant(graph, projects = ['beta']) {
@@ -26,7 +29,7 @@ test('private transport refusal audit cannot issue authority and rejects caller-
 
 test('a failing by-id read commits only the bounded grant refusal after canonical rollback', () => {
   const graph = auditFixture(), before = privilegedSnapshot(graph);
-  assert.throws(() => graph.reconsider({ project: 'alpha', accessId: 'missing', decisionId: 'beta' }), error => error.message === 'Decision not found' && isCommittedRejection(error));
+  assert.throws(() => graph.reconsider({ project: 'alpha', accessId: 'missing', decisionId: fixtureIds.get(graph).beta }), error => error.message === 'Decision not found' && isCommittedRejection(error));
   const after = privilegedSnapshot(graph);
   for (const key of ['records', 'facts', 'relations', 'reviewSignals', 'journal', 'idempotency']) assert.deepEqual(after[key], before[key], key);
   const refusal = after.events.find(event => event.type === 'access.refused');
@@ -68,10 +71,10 @@ test('partial scope purge narrows grants and delegations before recreated materi
   const graph = auditFixture(), access = grant(graph, ['beta', 'gamma']);
   const delegation = privilegedIssueAccess(graph, { type: 'delegation', issuanceLimit: 2, scope: { projects: ['beta', 'gamma'] }, surfaces: ['cli'], expiresAt: '2026-12-31T00:00:00.000Z', reason: 'synthetic purge test' }).entry;
   graph.purgeProject('beta', { mode: 'logical' });
-  graph.addDecision({ id: 'new-beta', project: 'beta', title: 'new beta', chosen: 'x' });
+  graph.addDecision({ project: 'beta', title: 'new beta', chosen: 'x' });
   const state = privilegedSnapshot(graph);
   for (const id of [access.accessId, delegation.accessId]) assert.deepEqual(state.access.entries.find(entry => entry.accessId === id).scope.projects, ['gamma']);
-  assert.deepEqual(graph.exportData({ project: 'alpha', accessId: access.accessId }).records.map(record => record.id).sort(), ['alpha', 'gamma']);
+  assert.deepEqual(graph.exportData({ project: 'alpha', accessId: access.accessId }).records.map(record => record.id).sort(), [fixtureIds.get(graph).alpha, fixtureIds.get(graph).gamma].sort());
   graph.purgeProject('gamma', { mode: 'logical' });
   const terminal = privilegedSnapshot(graph);
   for (const id of [access.accessId, delegation.accessId]) {
@@ -95,8 +98,8 @@ test('restore preserves the audit explaining a retained destination scope restri
 test('operational audit retains the most recent bounded sample and expires aggregates without expiring witnesses', () => {
   let at = '2026-01-01T00:00:00.000Z';
   const graph = createShadowGraph({ now: () => at });
-  graph.addDecision({ id: 'a', project: 'alpha', title: 'a', chosen: 'a' });
-  graph.addDecision({ id: 'b', project: 'beta', title: 'b', chosen: 'b' });
+  graph.addDecision({ project: 'alpha', title: 'a', chosen: 'a' });
+  graph.addDecision({ project: 'beta', title: 'b', chosen: 'b' });
   const grant = privilegedIssueAccess(graph, { scope: { projects: ['beta'] }, surfaces: ['cli'], expiresAt: '2026-12-31T00:00:00.000Z', reason: 'synthetic audit test' }).entry;
   const before = privilegedSnapshot(graph);
   for (let second = 1; second <= 5; second++) { at = `2026-01-01T00:00:0${second}.000Z`; graph.search('', { project: 'alpha', accessId: grant.accessId }); }

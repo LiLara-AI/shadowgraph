@@ -52,7 +52,7 @@ async function setup(t, options = {}) {
   });
   const graph = createShadowGraph({ verifier, now: () => '2026-08-27T12:00:00.000Z' });
   const fact = graph.addFact({
-    id: options.factId ?? 'fact-release', project: 'app', key: options.key ?? 'release-ready',
+    project: 'app', key: options.key ?? 'release-ready',
     value: options.value ?? true, sourceClass: 'production_verified', actor: 'writer-agent',
     ...(options.expiresAt ? { expiresAt: options.expiresAt } : {})
   });

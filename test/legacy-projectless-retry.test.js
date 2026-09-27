@@ -1,3 +1,5 @@
+import { historicalIds } from '../tools/historical-ids.js';
+const fixtureIds = {};
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
@@ -29,10 +31,10 @@ async function sqliteOrSkip(t) {
 
 // `key` is a memory's or fact's identity; decisions and attempts have none.
 const WRITE = {
-  decision: (graph, { key, ...input }) => graph.addDecision({ ...input, title: `Decision ${input.id}`, chosen: 'x' }),
-  attempt: (graph, { key, ...input }) => graph.addAttempt({ ...input, solution: `Attempt ${input.id}`, result: 'worked' }),
-  memory: (graph, input) => graph.remember({ ...input, memoryType: 'note', text: `Memory ${input.id}` }).memory,
-  fact: (graph, input) => graph.addFact({ ...input, value: `fact ${input.id}` })
+  decision: (graph, { key, ...input }) => graph.addDecision({ ...input, title: `Decision ${input.idempotencyKey}`, chosen: 'x' }),
+  attempt: (graph, { key, ...input }) => graph.addAttempt({ ...input, solution: `Attempt ${input.idempotencyKey}`, result: 'worked' }),
+  memory: (graph, input) => graph.remember({ ...input, memoryType: 'note', text: `Memory ${input.key}` }).memory,
+  fact: (graph, input) => graph.addFact({ ...input, value: `fact ${input.key}` })
 };
 
 // A schema-5 store with, per kind, an `alpha` entity, a literal "default"
@@ -41,13 +43,14 @@ const WRITE = {
 // value names "default"; with `exactRetry` it is an exact copy of the record,
 // with no project either.
 function legacyPayload({ kinds = KINDS, exactRetry = false } = {}) {
+  const historical = {};
   const graph = createShadowGraph({ now });
   for (const kind of kinds) {
     for (const [project, suffix] of [['alpha', 'alpha'], ['default', 'literal'], ['default', 'projectless']]) {
-      WRITE[kind](graph, { project, id: `${kind}-${suffix}`, key: `${kind}-${suffix}`, idempotencyKey: `retry-${kind}-${suffix}` });
+      historical[`${kind}-${suffix}`] = WRITE[kind](graph, { project, key: `${kind}-${suffix}`, idempotencyKey: `retry-${kind}-${suffix}` }).id;
     }
   }
-  const payload = privilegedSnapshot(graph);
+  const payload = historicalIds(privilegedSnapshot(graph), historical, { now });
   payload.schemaVersion = 5;
   const strip = (entity) => {
     if (!entity || typeof entity !== 'object') return;
@@ -92,7 +95,7 @@ function expectedOwners(kinds = KINDS, real = false) {
     expected[`${kind}-alpha`] = 'project';
     expected[`${kind}-literal`] = 'legacy_ambiguous';
     expected[`${kind}-projectless`] = 'legacy_unattributed';
-    if (real) for (const suffix of ['literal', 'projectless']) expected[`${kind}-real-${suffix}`] = 'project';
+    if (real) for (const suffix of ['literal', 'projectless']) expected[fixtureIds[`${kind}-real-${suffix}`]] = 'project';
   }
   return expected;
 }
@@ -119,9 +122,11 @@ test('the entity stored with no project stays apart from the literal legacy "def
   // identities, gets its own entities, and its own retries return them.
   for (const kind of KINDS) {
     for (const suffix of ['literal', 'projectless']) {
-      const input = { project: 'default', id: `${kind}-real-${suffix}`, key: `${kind}-${suffix}`, idempotencyKey: `retry-${kind}-${suffix}` };
-      assert.equal(WRITE[kind](graph, input).id, input.id, `${kind} ${suffix}: a new real-default entity`);
-      assert.equal(WRITE[kind](graph, { ...input, id: undefined }).id, input.id, `${kind} ${suffix}: its retry returns it`);
+      const input = { project: 'default', key: `${kind}-${suffix}`, idempotencyKey: `retry-${kind}-${suffix}` };
+      const created = WRITE[kind](graph, input);
+      fixtureIds[`${kind}-real-${suffix}`] = created.id;
+      assert.notEqual(created.id, `${kind}-${suffix}`, `${kind} ${suffix}: a new real-default entity`);
+      assert.equal(WRITE[kind](graph, input).id, created.id, `${kind} ${suffix}: its retry returns it`);
     }
   }
   assertOneMeaning(graph, 'before migration');
@@ -173,7 +178,7 @@ for (const backend of Object.keys(BACKENDS)) {
     await BACKENDS[backend].seed(file, legacyPayload());
     const created = await session(backend, file, (graph) => {
       assertOneMeaning(graph, `${backend}: loaded`);
-      return WRITE.decision(graph, { project: 'default', id: 'decision-real-projectless', idempotencyKey: 'retry-decision-projectless' }).id;
+      return WRITE.decision(graph, { project: 'default', idempotencyKey: 'retry-decision-projectless' }).id;
     });
     await session(backend, file, (graph) => {
       assertOneMeaning(graph, `${backend}: restarted`);
@@ -185,7 +190,7 @@ for (const backend of Object.keys(BACKENDS)) {
       assert.equal(graph.migrateAttribution().complete, true);
     });
     await session(backend, file, (graph) => {
-      const expected = { ...expectedOwners(), 'decision-real-projectless': 'project' };
+      const expected = { ...expectedOwners(), [created]: 'project' };
       assert.deepEqual(owners(privilegedSnapshot(graph)), expected, `${backend}: three distinct legacy mappings and the real project`);
       assertOneMeaning(graph, `${backend}: migrated`);
     });
@@ -196,7 +201,7 @@ for (const backend of Object.keys(BACKENDS)) {
 // strictly, by the same owner model the writes use.
 test('a retry value never binds to an entity of another owner', () => {
   const graph = createShadowGraph({ now });
-  graph.addDecision({ project: 'default', id: 'decision-real', title: 'Real default', chosen: 'r', idempotencyKey: 'retry-real' });
+  graph.addDecision({ project: 'default', title: 'Real default', chosen: 'r', idempotencyKey: 'retry-real' });
   const real = privilegedSnapshot(graph);
   for (const [label, forge] of Object.entries({
     'legacy form naming "default"': (value) => { delete value.attribution; },

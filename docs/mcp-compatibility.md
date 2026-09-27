@@ -227,8 +227,9 @@ Six of these are worth stating plainly, because a reader would otherwise guess w
   read-only or idempotent. Their ordinary own-scope read path still commits
   nothing; the effects test retains that check and separately measures grant
   reads. Lifecycle writes and ordinary writing tools advance the revision even
-  on a domain no-op. The old ID-only outcome, status and acknowledgement arms
-  remain deferred to PR13 and are still tested as scope refusals.
+  on a domain no-op. Outcome, status and acknowledgement now forward the
+  explicit project/origin or confirmed workspace scope; their successful
+  results and durable effects are covered by the conformance/effects suites.
 - `shadowgraph_ack_review` is **destructive**: it rewrites a signal's `status` and `acknowledgedAt`
   in place and appends nothing to the journal, so the previous acknowledgement cannot be recovered
   and a journal rebuild does not reconstruct it. A repeat replaces the timestamp again.
@@ -447,3 +448,25 @@ remains 14.
 ## 7. Verification boundary
 
 Automated raw-stdio tests prove exact dual-era payloads and errors, prove what each negotiated revision advertises and returns, prove batch receiving and its revision boundary, and exercise every tool that declares an output schema against a real store so the advertised schema is checked against the result the tool actually returns. The official Inspector proves strict tool-schema portability, exact full/compact counts, and that a real client using the official SDK accepts the annotations and output schemas on this machine. The pinned Glama proxy gate proves what that proxy requests, what this server negotiates with it, and that the tool list reaches an HTTP scanner unchanged; it does not exercise Glama’s own scanner. This does not by itself measure every third-party host, network transport, latency, answer quality, or future protocol revision.
+
+## Creation identity and scope alignment
+
+Creation inputs reject caller-supplied canonical IDs; reference IDs remain
+supported. See [creation identity](contracts/creation-identity.md). A policy
+violation anywhere in a supported JSON-RPC batch prevents every member from
+running. This preflight does not make arbitrary tool batches transactional.
+
+The context resource resolves the current confirmed workspace binding through
+the same access context as tools, inside the existing serialized persistence
+path. It still evaluates and persists review signals; no read/evaluate split
+is introduced. Unresolved context project identity is nullable. Link and
+traverse describe the request boundary for every entity kind; an out-of-scope
+root is indistinguishable from an absent root. `memoryOnly` is a boolean restore
+input and retains mandatory validation and recovery semantics.
+
+PR13 metadata wire measurements (bare / annotated / structured bytes): full
+54,921 / 58,409 / 239,685; full with verifier 56,069 / 59,662 / 244,232; compact
+34,848 / 36,331 / 151,693. The engineering ceilings retain about 2% headroom
+where necessary; the compact structured ceiling is unchanged. These changes
+cover explicit scope inputs and truthful creation/restore contracts, not
+benchmark campaign or audit-operation performance thresholds.

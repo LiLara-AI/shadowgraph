@@ -456,7 +456,7 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
     const keys = generateKeyPairSync('ed25519');
     const verifier = createLocalEvidenceVerifier({ allowedEvidenceRoot: directory, trustedVerifiers: { approver: keys.publicKey } });
     const graph = createShadowGraph({ verifier });
-    const fact = graph.addFact({ project: 'default', id: 'u1-fact', key: 'release', value: 'ready', sourceClass: 'production_verified' });
+    const fact = graph.addFact({ project: 'default', key: 'release', value: 'ready', sourceClass: 'production_verified' });
     const evidencePath = join(directory, 'evidence.json');
     await writeFile(evidencePath, JSON.stringify(createFactAttestation({
       fact, verifierIdentity: 'approver', evidenceReference: 'ticket:42',
@@ -476,7 +476,7 @@ describe('G2 (S1) — FIXED: provenance is a claim, and trust cannot be self-ass
     const keys = generateKeyPairSync('ed25519');
     const verifier = createLocalEvidenceVerifier({ allowedEvidenceRoot: directory, trustedVerifiers: { approver: keys.publicKey } });
     const graph = createShadowGraph({ verifier });
-    const fact = graph.addFact({ project: 'default', id: 'u1-offline-fact', key: 'build', value: 'green' });
+    const fact = graph.addFact({ project: 'default', key: 'build', value: 'green' });
     const evidence = createFactAttestation({
       fact, verifierIdentity: 'approver', evidenceReference: 'ci:4821',
       verifiedAt: '2026-08-27T00:00:00.000Z', privateKey: keys.privateKey
@@ -723,9 +723,9 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
 
   it('ACCEPTANCE L-1: new decisions enter proposed and remain current in context across migration and restart', async (t) => {
     const graph = createShadowGraph();
-    const created = graph.addDecision({ id: 'new-entry', project: 'app', title: 'Entry', chosen: 'A' });
+    const created = graph.addDecision({ project: 'app', title: 'Entry', chosen: 'A' });
     assert.equal(created.status, 'proposed');
-    assert.deepEqual(graph.context({ project: 'app' }).activeDecisions.map((item) => item.id), ['new-entry']);
+    assert.deepEqual(graph.context({ project: 'app' }).activeDecisions.map((item) => item.id), [created.id]);
 
     const legacy = createShadowGraph();
     legacy.importData({ schemaVersion: 4, records: [{
@@ -746,13 +746,13 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
 
   it('ACCEPTANCE L-2: legal transitions are explicit and illegal transitions reject before any partial write', () => {
     const graph = createShadowGraph();
-    const decision = graph.addDecision({ id: 'lifecycle', project: 'app', title: 'Lifecycle', chosen: 'A' });
+    const decision = graph.addDecision({ project: 'app', title: 'Lifecycle', chosen: 'A' });
     for (const status of ['planned', 'in_progress', 'executed', 'validated', 'reconsidered', 'planned']) {
       assert.equal(graph.updateDecisionStatus(decision.id, status, { project: 'app' }).status, status);
     }
 
     const illegal = createShadowGraph();
-    const fresh = illegal.addDecision({ id: 'illegal', project: 'app', title: 'Illegal', chosen: 'A' });
+    const fresh = illegal.addDecision({ project: 'app', title: 'Illegal', chosen: 'A' });
     const before = privilegedSnapshot(illegal);
     assert.throws(() => illegal.updateDecisionStatus(fresh.id, 'validated', { project: 'app' }), /Illegal decision status transition: proposed -> validated/);
     assert.deepEqual(privilegedSnapshot(illegal), before);
@@ -768,7 +768,7 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
   it('ACCEPTANCE L-5: maintain produces stale at the review deadline and archived is an explicit terminal disposition', () => {
     const graph = createShadowGraph({ now: () => '2026-08-27T00:00:00.000Z' });
     const due = graph.addDecision({
-      id: 'due', project: 'app', title: 'Due', chosen: 'A', reviewAfter: '2026-08-26T00:00:00.000Z'
+      project: 'app', title: 'Due', chosen: 'A', reviewAfter: '2026-08-26T00:00:00.000Z'
     });
     const maintenance = graph.maintain({ project: 'app', now: '2026-08-27T00:00:00.000Z' });
     assert.deepEqual(maintenance.staleDecisionIds, [due.id]);
@@ -776,7 +776,7 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
     assert.equal(graph.context({ project: 'app' }).activeDecisions.length, 0);
     assert.equal(graph.context({ project: 'app' }).openReviews.length, 1);
 
-    const archived = graph.addDecision({ id: 'archived', project: 'app', title: 'Archive me', chosen: 'A' });
+    const archived = graph.addDecision({ project: 'app', title: 'Archive me', chosen: 'A' });
     graph.updateDecisionStatus(archived.id, 'archived', { project: 'app' });
     assert.equal(graph.search('', { project: 'app', status: 'archived' }).page.total, 1);
     assert.equal(graph.context({ project: 'app' }).activeDecisions.some((item) => item.id === archived.id), false);
@@ -1037,14 +1037,15 @@ describe('G4 (S2) — FIXED: the journal carries complete payloads and rebuilds 
     try {
       const build = () => {
         const graph = createShadowGraph({ now: () => '2026-08-25T00:00:00.000Z' });
-        const decision = graph.addDecision({ id: 'd1', project: 'p', title: 'Parity', chosen: 'C' });
-        graph.addFact({ id: 'f1', project: 'p', key: 'k', value: 'v' });
+        const decision = graph.addDecision({ project: 'p', title: 'Parity', chosen: 'C' });
+        graph.addFact({ project: 'p', key: 'k', value: 'v' });
         graph.setOutcome(decision.id, { status: 'successful', sourceClass: 'tool_observed', observedAt: '2026-08-25T00:00:00.000Z' }, { project: 'p' });
         return graph;
       };
       const jsonStore = createJsonFileStore(join(dir, 'data.json'));
-      await jsonStore.save(privilegedSnapshot(build()));
-      await sqliteStore.save(privilegedSnapshot(build()));
+      const payload = privilegedSnapshot(build());
+      await jsonStore.save(payload);
+      await sqliteStore.save(payload);
 
       const fromJson = createShadowGraph(); fromJson.importData(await jsonStore.load());
       const fromSqlite = createShadowGraph(); fromSqlite.importData(await sqliteStore.load());
