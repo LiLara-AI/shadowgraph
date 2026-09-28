@@ -646,3 +646,38 @@ export function verifiedClaims(claims, sources) {
   }
   return { accepted, unsupported, countsByDimension };
 }
+
+// Plan v1.4.4 §17, G-5 §3.1 (PR-25): the negating words of a text, read as the
+// claim verifier reads words (NFKC, format characters ignored, apostrophes
+// folded, contractions split), after combining marks are taken off, so an
+// accented letter cannot hide a negator. The claim verifier's whole polarity
+// lexicon counts, except in the text of an outcome itself (`outcome: true`: an
+// attempt's result, a decision's outcome), where the words that state an
+// outcome ("failed", "error", "pending") are what the outcome is. A word mixing
+// ASCII letters with any other letter is counted, since it may stand for a
+// negator ("nøt"); that can over-count ("straße", "50µs"), and over-counting
+// only asks for the full record.
+const OUTCOME_WORDS = new Set(['fail', 'fails', 'failed', 'failing', 'failure', 'failures', 'error', 'errors', 'unsuccessful', 'unsuccessfully', 'timed', 'crashed', 'aborted', 'cancelled', 'canceled', 'killed', 'broke', 'broken', 'pending', 'blocked', 'incomplete', 'removed', 'deprecated', 'obsolete']);
+const NEGATORS = new Set(CLAIM_MARKERS.polarity);
+const OUTCOME_NEGATORS = new Set(CLAIM_MARKERS.polarity.filter((word) => !OUTCOME_WORDS.has(word)));
+const MIXED_LETTERS = (word) => /[a-z]/i.test(word) && /[^\u0000-\u007f]/u.test(word);
+// Letters that read as a Latin letter, by code point, so a negator written
+// wholly in lookalikes ("NO" in Greek capitals, small capitals, Armenian) is
+// read as the word it looks like.
+// ponytail: a hand-picked table, not Unicode's full confusables list; add a
+// letter when one is found standing in for a negator.
+const CONFUSABLE = new Map([[0x391, 'a'], [0x392, 'b'], [0x395, 'e'], [0x396, 'z'], [0x397, 'h'], [0x399, 'i'], [0x39a, 'k'], [0x39c, 'm'], [0x39d, 'n'], [0x39f, 'o'], [0x3a1, 'p'], [0x3a4, 't'], [0x3a5, 'y'], [0x3a7, 'x'], [0x3b1, 'a'], [0x3b9, 'i'], [0x3ba, 'k'], [0x3bd, 'v'], [0x3bf, 'o'], [0x3c1, 'p'], [0x3c4, 't'], [0x3c5, 'u'], [0x3c7, 'x'], [0x410, 'a'], [0x412, 'b'], [0x415, 'e'], [0x41a, 'k'], [0x41c, 'm'], [0x41d, 'h'], [0x41e, 'o'], [0x420, 'p'], [0x421, 'c'], [0x422, 't'], [0x423, 'y'], [0x425, 'x'], [0x430, 'a'], [0x435, 'e'], [0x43e, 'o'], [0x43f, 'n'], [0x440, 'p'], [0x441, 'c'], [0x443, 'y'], [0x445, 'x'], [0x455, 's'], [0x456, 'i'], [0x458, 'j'], [0x501, 'd'], [0x570, 'h'], [0x578, 'n'], [0x57d, 'u'], [0x585, 'o'], [0xf8, 'o'], [0x251, 'a'], [0x261, 'g'], [0x262, 'g'], [0x269, 'i'], [0x26a, 'i'], [0x274, 'n'], [0x280, 'r'], [0x28f, 'y'], [0x299, 'b'], [0x29c, 'h'], [0x29f, 'l'], [0x1d00, 'a'], [0x1d04, 'c'], [0x1d05, 'd'], [0x1d07, 'e'], [0x1d0a, 'j'], [0x1d0b, 'k'], [0x1d0d, 'm'], [0x1d0f, 'o'], [0x1d18, 'p'], [0x1d1b, 't'], [0x1d1c, 'u'], [0x1d20, 'v'], [0x1d21, 'w'], [0x1d22, 'z'], [0xa731, 's']].map(([code, letter]) => [String.fromCodePoint(code), letter]));
+const skeleton = (word) => [...word].map((character) => CONFUSABLE.get(character) ?? character).join('');
+export function negationsIn(text, { outcome = false } = {}) {
+  if (typeof text !== 'string') return [];
+  const negators = outcome ? OUTCOME_NEGATORS : NEGATORS;
+  const folded = text.normalize('NFKD').replace(/\p{M}/gu, '');
+  return wordsOf(folded)
+    .filter(({ word, base, suffix, start, end }) => {
+      // The skeleton is read from the letters as written: a capital lookalike
+      // may stand for another letter than its lower case does.
+      const looks = skeleton(folded.slice(start, end)).toLowerCase();
+      return negators.has(base) || negators.has(word) || negators.has(looks) || NEGATED_AUXILIARY.test(looks) || suffix === "n't" || NEGATED_AUXILIARY.test(word) || MIXED_SCRIPT(word) || MIXED_LETTERS(word);
+    })
+    .map(({ start, end }) => folded.slice(start, end));
+}
