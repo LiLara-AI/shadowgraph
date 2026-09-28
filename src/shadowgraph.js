@@ -2222,12 +2222,13 @@ export function createShadowGraph(options = {}) {
     return { due, diagnostics, explained };
   }
 
-  function evaluateForRead(input, boundary, options = {}) {
-    // Existing own-scope evaluation still persists. A wider evaluation can read
-    // more evidence, but cannot persist signals even for an own decision using
-    // newly granted foreign evidence. This keeps the current API, not P2's split.
-    if (boundary.scope.grant) evaluateReview(input, { ...options, visible: boundary.baseVisible });
-    return evaluateReview(input, { ...options, visible: boundary.visible, persistSignals: !boundary.scope.grant });
+  function evaluateForRead(input, boundary, { persistSignals = true, ...options } = {}) {
+    // Own-scope evaluation persists unless the caller asks for a pure read (the
+    // default-path read, plan v1.4.4 §13.1). A wider evaluation can read more
+    // evidence, but never persists signals, even for an own decision using
+    // newly granted foreign evidence.
+    if (persistSignals && boundary.scope.grant) evaluateReview(input, { ...options, visible: boundary.baseVisible });
+    return evaluateReview(input, { ...options, visible: boundary.visible, persistSignals: persistSignals && !boundary.scope.grant });
   }
 
   // Due entries keep their content; the serializable envelope declares the
@@ -3128,6 +3129,17 @@ export function createShadowGraph(options = {}) {
   // boundary; a context with no project selected evaluates nothing and
   // reports no project.
   function context(input = {}) {
+    return buildContext(input, { persistSignals: true });
+  }
+
+  // The default-path read (plan v1.4.4 §13.1, PC-25): the same working set as
+  // context(), evaluated without persisting any review signal, so reading it
+  // changes no canonical truth. Signals already persisted are still reported.
+  function readContext(input = {}) {
+    return buildContext(input, { persistSignals: false });
+  }
+
+  function buildContext(input, { persistSignals }) {
     const boundary = readBoundary(input);
     const project = boundary.scope.project;
     const inScope = boundary.visible;
@@ -3139,7 +3151,7 @@ export function createShadowGraph(options = {}) {
     const activeDecisions = collect([...records.values()].filter((x) => x.kind === 'decision' && inScope(x) && CURRENT_DECISION_STATUSES.includes(x.status)).map(clone));
     const staleAssumptions = collect([...facts.values()].filter((x) => inScope(x) && x.status !== 'active').map(clone));
     const failedAttemptsToAvoid = collect([...records.values()].filter((x) => x.kind === 'attempt' && inScope(x) && attemptFailed(x)).map(clone));
-    const evaluated = evaluateForRead({ changedFacts: input.changedFacts ?? [], facts: input.facts ?? {} }, boundary);
+    const evaluated = evaluateForRead({ changedFacts: input.changedFacts ?? [], facts: input.facts ?? {} }, boundary, { persistSignals });
     const openReviews = collect(evaluated.due);
     // Conditions that could not be settled travel as their own collection, so
     // they are bounded and declared by the same completeness contract as every
@@ -3996,6 +4008,7 @@ export function createShadowGraph(options = {}) {
     validate: auditedRead('validate', validate),
     repairPlan: auditedRead('repairPlan', repairPlan),
     context: auditedRead('context', context),
+    readContext: auditedRead('readContext', readContext),
     exportData: auditedRead('exportData', exportData),
     importData: transactional('importData', importData),
     getJournal: auditedRead('getJournal', getJournal),
