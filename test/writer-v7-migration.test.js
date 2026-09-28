@@ -395,7 +395,7 @@ function v7Fixture() {
   const payload = { ...privilegedSnapshot(graph), futureCollection: FUTURE };
   const [claimed, captured] = payload.records.filter((record) => record.kind === 'attempt');
   const copies = (id) => [...payload.records, ...payload.idempotency.map((item) => item.value), ...payload.journal.map((entry) => entry.payload)].filter((entity) => entity?.id === id);
-  for (const entity of copies(claimed.id)) Object.assign(entity, { claims: [{ text: 'the lock timed out', class: 'quoted', sourceRef: 'capture:c1' }], causalClaim: { statement: 'the lock timed out', state: 'recorded', class: 'quoted' }, outcomeEvidence: { state: 'observed', source: 'exit_status', exitStatus: 1 } });
+  for (const entity of copies(claimed.id)) Object.assign(entity, { claims: [{ text: 'the lock timed out', class: 'quoted', sourceRef: 'capture:c1', verifierVersion: 'claim-verifier-v1' }], causalClaim: { statement: 'the lock timed out', state: 'recorded', class: 'quoted' }, outcomeEvidence: { state: 'observed', source: 'exit_status', exitStatus: 1 } });
   for (const entity of copies(captured.id)) Object.assign(entity, { captureRef: 'capture:c2', outcomeEvidence: { state: 'absent' } });
   return { payload, claimed, captured };
 }

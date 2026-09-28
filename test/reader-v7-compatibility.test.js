@@ -40,8 +40,8 @@ const byId = (items) => [...items].sort((left, right) => String(left.id).localeC
 const V7_ATTEMPT_FIELDS = Object.freeze({
   claims: [
     { text: 'the migration did not complete', class: 'quoted', sourceRef: 'capture:c1', span: { start: 0, end: 30 }, checks: { quantifier: 'consistent', polarity: 'consistent', actor: 'consistent', time: 'consistent', scope: 'consistent', modality: 'consistent' }, verifierVersion: 'verifier-v1', futureField: { kept: true } },
-    { text: 'the lock timed out before the migration completed', class: 'entailed', rule: 'temporal-precedence-v1', sourceRef: 'capture:c1', checks: {} },
-    { text: 'the job stopped', class: 'ambiguous', readings: ['stopped by the user', 'stopped by a crash'], sourceRef: 'capture:c1' }
+    { text: 'the lock timed out before the migration completed', class: 'entailed', rule: 'temporal-precedence-v1', sourceRef: 'capture:c1', checks: {}, verifierVersion: 'verifier-v1' },
+    { text: 'the job stopped', class: 'ambiguous', readings: ['stopped by the user', 'stopped by a crash'], sourceRef: 'capture:c1', verifierVersion: 'verifier-v1' }
   ],
   causalClaim: { statement: 'the lock timed out', class: 'entailed', sourceClass: 'tool_observed', evidence: [{ sourceRef: 'capture:c1' }], state: 'recorded' },
   captureRef: 'capture:c1',

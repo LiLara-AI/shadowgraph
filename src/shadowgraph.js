@@ -57,11 +57,15 @@ function attributionIssue(entity) {
   return null;
 }
 
-// The claim-evidence model of schema 7 (plan v1.4.4 §9.4, §14). Only its closed
-// vocabularies and cross-field rules are checked; every other field -- text,
-// sourceRef, span, checks, verifierVersion, rule, readings, captureRef, and any
-// field a later build adds -- is carried verbatim. A stored record never carries
-// an unsupported claim: that stays in a capture item's extraction output.
+// The claim-evidence model of schema 7 (plan v1.4.4 §9.4, §14). Checked: the
+// closed vocabularies and cross-field rules, and the shape each stored claim's
+// class needs (plan v1.4.4 PR-22): its text and sourceRef, a verifierVersion, a
+// rule if entailed, readings if ambiguous, and a well-formed span if it has one.
+// Values are checked for presence and shape, not against this build's verifier,
+// so a later verifier's output stays readable. Every other field -- checks,
+// captureRef, and any field a later build adds -- is carried verbatim. A stored
+// record never carries an unsupported claim: that stays in a capture item's
+// extraction output.
 const CLAIM_CLASSES = Object.freeze(['quoted', 'entailed', 'ambiguous', 'unsupported']);
 const CAUSAL_STATES = Object.freeze(['recorded', 'unknown', 'not_recorded', 'legacy_freetext']);
 const OUTCOME_EVIDENCE_STATES = Object.freeze(['observed', 'absent', 'not_applicable']);
@@ -85,6 +89,12 @@ function claimModelIssue(entity) {
     for (const [index, claim] of entity.claims.entries()) {
       if (!isPlainObject(claim) || !CLAIM_CLASSES.includes(claim.class)) return `claims[${index}].class must be one of ${CLAIM_CLASSES.join(', ')}`;
       if (claim.class === 'unsupported') return `claims[${index}] is unsupported, which a stored record never carries`;
+      const named = (value) => typeof value === 'string' && value.trim() !== '';
+      if (!named(claim.verifierVersion)) return `claims[${index}] carries no verifierVersion: a claim's class comes from the claim verifier`;
+      if (!named(claim.text) || !named(claim.sourceRef)) return `claims[${index}] names no text or sourceRef`;
+      if (claim.class === 'entailed' && !named(claim.rule)) return `claims[${index}] is entailed and names no rule`;
+      if (claim.class === 'ambiguous' && (!Array.isArray(claim.readings) || !claim.readings.length || !claim.readings.every(named))) return `claims[${index}] is ambiguous and records no readings`;
+      if (claim.span !== undefined && !(isPlainObject(claim.span) && Number.isSafeInteger(claim.span.start) && Number.isSafeInteger(claim.span.end) && claim.span.start >= 0 && claim.span.start < claim.span.end)) return `claims[${index}].span must be a start before an end`;
     }
   }
   if (entity.causalClaim !== undefined) {
