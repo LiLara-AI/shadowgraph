@@ -199,7 +199,7 @@ const decisionRecordSchema = entityRecordSchema('A stored decision, including it
 const attemptRecordSchema = entityRecordSchema('A stored attempt and its result.', {
   solution: stringOrNull('What was tried.'),
   result: stringOrNull('What happened.'),
-  resultClass: stringOrNull('Declared classification: failed, succeeded, or inconclusive. Absent means only the legacy wording heuristic classified this attempt.'),
+  resultClass: stringOrNull('Declared or observed: failed, succeeded, or inconclusive. If absent: not captured (no captureRef or outcomeEvidence), the wording heuristic classifies; captured, the outcome is undetermined.'),
   reason: stringOrNull('Why it turned out that way, verbatim as recorded.'),
   causalClaim: { type: 'object', description: 'The cause, attributed apart from the attempt: state recorded (the reason, agent_claimed), unknown, not_recorded, or legacy_freetext (a reason stored before causes were, never classed or evidenced).' },
   environment: stringOrNull('Where it was tried.'),
@@ -370,7 +370,7 @@ const reusableAttemptSchema = {
   properties: {
     attemptId: { type: 'string', description: 'The attempt.' },
     solution: { type: 'string', description: 'What was tried.' },
-    resultClass: stringOrNull('Declared result class, or null when only the legacy text heuristic classified it.'),
+    resultClass: stringOrNull('Declared or observed result class, or null when the wording heuristic classified it.'),
     satisfiedConditions: { type: 'array', items: evaluatedConditionSchema, description: 'Every condition that had to hold, and the evidence for each.' }
   }
 };
@@ -583,6 +583,11 @@ const collectionCompletenessSchema = (description) => ({
     omitted: integerCount('total minus returned for this collection.')
   }
 });
+// PR-24: the failed collection also counts the attempts whose outcome is undetermined.
+const failedCompletenessSchema = (description) => {
+  const schema = collectionCompletenessSchema(description);
+  return { ...schema, required: [...schema.required, 'undetermined'], properties: { ...schema.properties, undetermined: integerCount('Captured attempts with no resultClass: undetermined, in no collection.') } };
+};
 const journalEntrySchema = {
   type: 'object',
   description: 'One journal entry: a complete post-operation snapshot. Entries imported from older schemas may lack seq or payload.',
@@ -763,7 +768,7 @@ const reviewContextOutputSchema = {
     project: stringOrNull('The resolved project, or null when unresolved.'),
     activeDecisions: { type: 'array', items: decisionRecordSchema, description: 'Decisions in a current, actionable state: proposed, planned, in_progress, executed, validated, or reconsidered.' },
     staleAssumptions: { type: 'array', items: factRecordSchema, description: 'Facts that are no longer active, such as superseded or expired ones, which earlier decisions may still rest on.' },
-    failedAttemptsToAvoid: { type: 'array', items: attemptRecordSchema, description: 'Attempts whose result mentions failure, regression, or error.' },
+    failedAttemptsToAvoid: { type: 'array', items: attemptRecordSchema, description: 'Attempts that failed: resultClass failed or, with none and not captured, a result mentioning failure, regression, or error.' },
     openReviews: { type: 'array', items: reviewDueSchema, description: 'Decisions currently due for reconsideration.' },
     suggestedQuestions: stringList('Questions for the low-confidence decisions in this project.'),
     conditionDiagnostics: { type: 'array', items: conditionDiagnosticSchema, description: 'Conditions that could not be settled, or that rest on facts which disagree. Neither a breach nor a confirmed-safe decision.' },
@@ -782,7 +787,7 @@ const reviewContextOutputSchema = {
           properties: {
             activeDecisions: collectionCompletenessSchema('Counts for activeDecisions.'),
             staleAssumptions: collectionCompletenessSchema('Counts for staleAssumptions.'),
-            failedAttemptsToAvoid: collectionCompletenessSchema('Counts for failedAttemptsToAvoid.'),
+            failedAttemptsToAvoid: failedCompletenessSchema('Counts for failedAttemptsToAvoid.'),
             openReviews: collectionCompletenessSchema('Counts for openReviews.'),
             suggestedQuestions: collectionCompletenessSchema('Counts for suggestedQuestions.'),
             conditionDiagnostics: collectionCompletenessSchema('Counts for conditionDiagnostics.'),
@@ -852,7 +857,7 @@ const contextOutputSchema = {
           properties: {
             activeDecisions: collectionCompletenessSchema('Counts for activeDecisions.'),
             staleAssumptions: collectionCompletenessSchema('Counts for staleAssumptions.'),
-            failedAttempts: collectionCompletenessSchema('Counts for failedAttempts.'),
+            failedAttempts: failedCompletenessSchema('Counts for failedAttempts.'),
             firedConditions: collectionCompletenessSchema('Counts for firedConditions.'),
             belowConfidenceThreshold: collectionCompletenessSchema('Counts for belowConfidenceThreshold.'),
             conditionDiagnostics: collectionCompletenessSchema('Counts for conditionDiagnostics.'),
@@ -933,7 +938,7 @@ const CATALOG = [
       required: ['solution', 'result'],
       properties: {
         solution: { type: 'string', description: 'What was tried. Required, non-empty, and searchable content.' },
-        result: { type: 'string', description: 'What happened. Required, non-empty, and searchable content. With no resultClass, wording such as failed, error, or regression is what places the attempt in shadowgraph_context failedAttempts.' },
+        result: { type: 'string', description: 'What happened. Required, non-empty, and searchable content. With no resultClass, wording such as failed, error, or regression is what places the attempt in shadowgraph_context failedAttempts; a captured attempt\'s wording is never read.' },
         resultClass: { type: 'string', enum: ['failed', 'succeeded', 'inconclusive'], description: 'Classify the result instead of leaving it to the wording heuristic. Set it when the result text does not say failed, error, or regression, or when it does but the attempt did not fail.' },
         project: writeProjectProperty,
         originId: originIdProperty,

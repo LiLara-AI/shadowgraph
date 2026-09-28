@@ -344,13 +344,26 @@ It is deliberately **not** called an outcome. `outcome` in this codebase is a de
 single-slot concept that weights confidence and writes an `outcome.recorded` journal entry; none
 of that applies to an attempt, and reusing the word would import those semantics by implication.
 
-Precedence: a declared `resultClass` decides. When it is absent, the legacy
-`/fail|regression|error/i` test over the free-text `result` still classifies, so **no stored
-attempt changes meaning**. The two are distinguishable by whether `resultClass` is present, and an
-inferred classification is never written back as though it were declared — a guess about prose is
-not a verified failure. This matters for results worded `"no error, but the cache stayed cold"`
-(a real failure the heuristic misses) and `"regression suite passed clean"` (a success the
-heuristic would wrongly claim).
+Whether an attempt failed has three answers (plan v1.4.4 PR-24): `failed`, `not_failed` and
+`undetermined`. Precedence: a declared `resultClass` decides. A captured attempt -- one carrying a
+`captureRef` or `outcomeEvidence`, which only capture writes -- with no class (absent or `null`) is
+`undetermined`: its prose is never read, it is in no collection (not even `reusableAttempts`: its
+reuse conditions are not evaluated), it is never implied to have succeeded, and `context()` counts
+it as `undetermined` on the failed collection's completeness entry. Every other attempt is
+classified as it always was: a legacy `null` class is not a failure, and with no class the legacy
+`/fail|regression|error/i` test over the free-text `result` decides, so **no stored attempt
+changes meaning**. `resultClass` keeps its three literals; `inconclusive` never stands for missing
+evidence.
+
+`resultClass` can therefore be absent for two reasons, and whether the attempt was captured tells
+them apart: with neither `captureRef` nor `outcomeEvidence`, the wording heuristic classifies the
+attempt; with either, the outcome is undetermined, and `outcomeEvidence.state` (`absent` or
+`not_applicable`) says why when it is recorded. An `observed` outcome carries the
+`resultClass` its exit status gave: 0 succeeded, any other integer failed. An inferred
+classification is never written back as though it were declared — a guess about prose is not a
+verified failure. This matters for results worded `"no error, but the cache stayed cold"` (a real
+failure the heuristic misses) and `"regression suite passed clean"` (a success the heuristic
+would wrongly claim).
 
 ## 10. Regression evidence
 

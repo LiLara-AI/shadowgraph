@@ -49,7 +49,20 @@ function scenarioGraph() {
   graph.setOutcome(cache.id, { status: 'failed', sourceClass: 'tool_observed' }, { project: 'p' });
   graph.addDecision({ project: 'p', title: 'lag', chosen: 'a', alternatives: [{ label: 'b', reopenWhen: [{ key: 'lagProfile', operator: 'contains', value: 'spike' }] }] });
   graph.addFact({ project: 'p', key: 'lagProfile', value: ['spike'], validFrom: '2025-12-01T00:00:00.000Z' });
+  const captured = graph.addAttempt({ project: 'p', solution: 'deploy script', result: 'exit 1', resultClass: 'failed' });
   const snapshot = privilegedSnapshot(graph);
+  // An attempt as capture stores it (P6): a captureRef and observed outcome evidence.
+  for (const entity of [...snapshot.records, ...snapshot.journal.map((entry) => entry.payload)].filter((item) => item?.id === captured.id)) {
+    Object.assign(entity, {
+      captureRef: 'capture:register', outcomeEvidence: { state: 'observed', source: 'exit_status', exitStatus: 1 },
+      // Claims as the extractor (P7) will store them: one of each accepted class.
+      claims: [
+        { text: 'the deploy failed', class: 'quoted', sourceRef: 'capture:register', span: { start: 0, end: 17 }, checks: { quantifier: 'consistent', polarity: 'consistent', actor: 'consistent', time: 'consistent', scope: 'consistent', modality: 'consistent' }, verifierVersion: 'claim-verifier-v1' },
+        { text: 'the deploy did not finish', class: 'entailed', rule: 'contraction-expansion-v1', sourceRef: 'capture:register', verifierVersion: 'claim-verifier-v1' },
+        { text: 'the job stopped', class: 'ambiguous', readings: ['the job stopped', 'the job stopped in staging'], sourceRef: 'capture:register', verifierVersion: 'claim-verifier-v1' }
+      ]
+    });
+  }
   // Two equally applicable facts that disagree, as review-safety-regressions builds them.
   const lag = snapshot.facts.find((fact) => fact.key === 'lagProfile');
   snapshot.facts.push({ ...lag, id: 'fact:contested', value: ['calm'], erasureToken: 'tok_contested' });
@@ -193,6 +206,19 @@ test('the register uses only the AC-060 labels and the recorded interface varian
     if (item.metadata !== null) assert.ok([...METADATA_CLASSES, ...VARIANCE_METADATA_CLASSES].includes(item.metadata), `${item.pattern}: ${item.metadata}`);
   }
   assert.equal(new Set(REGISTER.map((item) => item.pattern)).size, REGISTER.length, 'no pattern is registered twice');
+});
+
+// PR-24: a claim's words are extracted statements; everything else about it,
+// its checks included, is how the verifier related them to their source.
+test('claim fields keep their classes wherever a claim sits', () => {
+  for (const collection of ['failedAttempts', 'activeDecisions', 'staleAssumptions']) {
+    const at = (field) => { const item = classify(`${collection}[].claims[].${field}`); return [item.content, item.metadata]; };
+    assert.deepEqual(at('text'), ['extracted statement', null], collection);
+    assert.deepEqual(at('readings[]'), ['extracted statement', null], collection);
+    assert.deepEqual(at('sourceRef'), [null, 'provenance'], collection);
+    assert.deepEqual(at('span.start'), [null, 'provenance'], collection);
+    for (const field of ['class', 'verifierVersion', 'rule', 'checks.actor', 'checks.polarity']) assert.deepEqual(at(field), [null, 'verification state'], `${collection} ${field}`);
+  }
 });
 
 test('the generator reaches deep paths on every source, and an unregistered key is caught', async (t) => {

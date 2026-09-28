@@ -20,6 +20,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { accessScopeContains, validateAccess, intersectAccessScope, accessDiagnostics, reconcileAccessLedger } from './access.js';
 import { createAccessLifecycle } from './internal/access-lifecycle.js';
 import { assertCreationInput } from './internal/creation-id.js';
+import { attemptOutcome } from './internal/outcome.js';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
 // docs/api-reference.md) and are frozen so a consumer cannot mutate validation
@@ -2612,16 +2613,6 @@ export function createShadowGraph(options = {}) {
     }, boundary, referencedSignals(boundary, decisions));
   }
 
-  // A declared classification wins; the legacy text heuristic is the fallback for
-  // records written before `resultClass` existed, so no stored attempt changes
-  // meaning. The two are distinguishable by whether `resultClass` is present:
-  // an inferred classification is a guess about prose and is never presented as
-  // a verified failure.
-  function attemptFailed(attempt) {
-    if (attempt.resultClass !== undefined) return attempt.resultClass === 'failed';
-    return /fail|regression|error/i.test(attempt.result);
-  }
-
   // Evaluates `attempts[].reusableWhen`, the field that has been normalised and
   // persisted since schema 4 with nothing ever reading it.
   //
@@ -2638,6 +2629,9 @@ export function createShadowGraph(options = {}) {
     const reusable = []; const diagnostics = [];
     for (const record of records.values()) {
       if (record.kind !== 'attempt' || !inScope(record)) continue;
+      // An attempt whose outcome is undetermined (PR-24) is not a failure that
+      // may be reconsidered: it is in no collection and is only counted.
+      if (attemptOutcome(record) === 'undetermined') continue;
       // Every stored condition counts, including the legacy free-text form.
       // Filtering those out made an ALL decision over a SUBSET: an attempt with
       // one unprovable prose condition and one satisfied structured condition
@@ -3386,7 +3380,14 @@ export function createShadowGraph(options = {}) {
     };
     const activeDecisions = collect([...records.values()].filter((x) => x.kind === 'decision' && inScope(x) && CURRENT_DECISION_STATUSES.includes(x.status)).map(clone));
     const staleAssumptions = collect([...facts.values()].filter((x) => inScope(x) && x.status !== 'active').map(clone));
-    const failedAttemptsToAvoid = collect([...records.values()].filter((x) => x.kind === 'attempt' && inScope(x) && attemptFailed(x)).map(clone));
+    // Only a failure is collected (PR-24). An attempt whose outcome is
+    // undetermined -- captured, with no declared class -- is in no collection,
+    // is never implied to have succeeded, and is counted on this one.
+    const attemptsInScope = [...records.values()].filter((x) => x.kind === 'attempt' && inScope(x));
+    const failedAttemptsToAvoid = {
+      ...collect(attemptsInScope.filter((x) => attemptOutcome(x) === 'failed').map(clone)),
+      undetermined: attemptsInScope.filter((x) => attemptOutcome(x) === 'undetermined').length
+    };
     const evaluated = evaluateForRead({ changedFacts: input.changedFacts ?? [], facts: input.facts ?? {} }, boundary, { persistSignals });
     const openReviews = collect(evaluated.due);
     // Conditions that could not be settled travel as their own collection, so
@@ -3417,7 +3418,7 @@ export function createShadowGraph(options = {}) {
         complete: Object.values(groups).every((group) => !group.hasMore),
         limitSource: limit === undefined ? 'default' : 'caller',
         losslessItems: true,
-        collections: Object.fromEntries(Object.entries(groups).map(([name, group]) => [name, { returned: group.returned, total: group.total, hasMore: group.hasMore, omitted: group.total - group.returned }]))
+        collections: Object.fromEntries(Object.entries(groups).map(([name, group]) => [name, { returned: group.returned, total: group.total, hasMore: group.hasMore, omitted: group.total - group.returned, ...(group.undetermined === undefined ? {} : { undetermined: group.undetermined }) }]))
       }, referencedSignals(boundary, openReviews.items))
     };
   }

@@ -72,6 +72,8 @@ Two further collections arrived on 2026-09-13, both additive and both bound by t
 }
 ```
 
+The failed collection's entry (`failedAttempts`, and `failedAttemptsToAvoid` in `reviewContext()`) also carries `undetermined`: the attempts in scope whose outcome is undetermined -- captured, with no `resultClass` -- which no collection holds (plan v1.4.4 PR-24).
+
 `complete` is `true` only for a resolved project when **no** collection has more and no referenced historical signal detail is withheld. Per-collection totals mean truncation is attributable to a specific collection rather than hidden in an aggregate.
 
 ## 5. Journal reads

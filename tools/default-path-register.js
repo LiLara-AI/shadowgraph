@@ -142,6 +142,15 @@ export const REGISTER = Object.freeze([
   m('http:body', 'interface'),
   m('cli:stdout', 'interface'),
 
+  // --- claims (plan v1.4.4 §14, P3), before the fields every record shares ---
+  // A claim's words are what its source says; the rest is how the claim
+  // verifier related them to it (its checks.actor is a check, not an actor).
+  c('**.claims[].text', 'extracted statement'),
+  c('**.claims[].readings[]', 'extracted statement'),
+  m('**.claims[].sourceRef', 'provenance'),
+  m('**.claims[].span.**', 'provenance'),
+  m('**.claims.**', 'verification state'),
+
   // --- fields with the same meaning in every stored record ------------------
   m('**.verificationStatus', 'verification state'),
   m('**.legacyVerificationStatus', 'verification state'),
@@ -234,6 +243,9 @@ export const REGISTER = Object.freeze([
   // PR-23: the cause, attributed apart from the attempt; its sourceClass is
   // provenance through the shared entry above.
   entry('failedAttempts[].causalClaim.**', 'inferred explanation', 'provenance'),
+  // PR-24: what capture recorded of the attempt's outcome, and where it came from.
+  m('failedAttempts[].outcomeEvidence.**', 'evidence'),
+  m('failedAttempts[].captureRef', 'provenance'),
   c('failedAttempts[].environment', 'observed experience'),
   c('failedAttempts[].relatedTo.**', 'relationship'),
   c('failedAttempts[].reusableWhen.**', 'historical fact'),

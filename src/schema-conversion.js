@@ -154,7 +154,7 @@ export function downgradeToSchema6(snapshot, { now = () => new Date().toISOStrin
   const excludedIds = new Set();
   const byId = new Map();
   const convert = (entity) => {
-    if (entity.kind === 'attempt' && (entity.captureRef !== undefined || entity.outcomeEvidence !== undefined) && entity.resultClass == null) {
+    if (entity.kind === 'attempt' && (entity.captureRef != null || entity.outcomeEvidence != null) && entity.resultClass == null) {
       excludedIds.add(entity.id);
       report.excluded.push({ collection: 'records', id: entity.id, kind: 'attempt', reason: 'captured with no result class: a schema-6 reader would classify it from its prose' });
       return null;

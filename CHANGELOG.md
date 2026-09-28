@@ -2,6 +2,7 @@
 
 ## Unreleased — scope coverage
 
+- Whether an attempt failed has three answers: failed, not failed and undetermined. A captured attempt (one with a `captureRef` or `outcomeEvidence`, which only capture writes) with no `resultClass` is undetermined: it is in no `context()` collection and is counted as `undetermined` on the failed collection's completeness entry. Every other attempt classifies as before, and `resultClass` keeps its three literals.
 - Every attempt carries a `causalClaim`: `recorded` (its reason, attributed `agent_claimed` apart from the attempt's own `sourceClass`), `not_recorded`, `unknown`, or `legacy_freetext` for a reason stored by an earlier build, shown but never stored, so earlier builds can still restore the store. `reason` is unchanged. A classed `causalClaim` must name its `verifierVersion`.
 - Import and restore refuse a stored claim that is `unsupported`, names no `verifierVersion`, or lacks what its class needs: its text and `sourceRef`, a `rule` if entailed, `readings` if ambiguous, a well-formed `span`.
 - Stores are written at schema 7. Every decision, attempt, memory and fact carries an internal `erasureToken`, which no public result returns; `migrate` backfills it for older records, and `downgrade {"toSchemaVersion": 6}` forks a schema-6 copy. A store this build has saved needs a build that reads schema 7; to go further back, fork a copy with `downgrade`.
