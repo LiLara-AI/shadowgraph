@@ -251,7 +251,17 @@ function ranks(list) {
 }
 
 export function hybridSearch(snapshot, query = '', options = {}) {
-  const records = [...(snapshot.records ?? []), ...(snapshot.facts ?? [])].filter((record) => visible(record, options));
+  // A legacy fact may be stored with no kind. What the caller hands over as a
+  // fact is matched, and gated by validity, as the fact it is, and returned as
+  // it was stored.
+  const stored = new Map();
+  const facts = (snapshot.facts ?? []).map((fact) => {
+    if (fact.kind != null) return fact;
+    const ranked = { ...fact, kind: 'fact' };
+    stored.set(ranked, fact);
+    return ranked;
+  });
+  const records = [...(snapshot.records ?? []), ...facts].filter((record) => visible(record, options));
   const byId = new Map(records.map((record) => [record.id, record]));
   const lexical = lexicalRanking(records, query);
   const semantic = semanticRanking(records, options.queryEmbedding);
@@ -283,7 +293,7 @@ export function hybridSearch(snapshot, query = '', options = {}) {
         reasons.push(`${name} rank ${rank}`);
       }
     }
-    return { record, score, ranks: hitRanks, scores: rawScores, reasons };
+    return { record: stored.get(record) ?? record, score, ranks: hitRanks, scores: rawScores, reasons };
   }).filter((item) => item.record).sort((left, right) => right.score - left.score || String(left.record.id).localeCompare(String(right.record.id)));
 
   return {

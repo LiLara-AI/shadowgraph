@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { tokenFree } from '../tools/token-free.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
+import { hybridSearch } from '../src/hybrid-search.js';
 import { seedGraph, measureCoverage } from '../scripts/context-size.mjs';
 import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
@@ -68,6 +69,28 @@ test('ranking over live entities did not change what recall returns', () => {
   // A returned record is a full record, not a projection.
   const stored = privilegedSnapshot(graph).records.find((item) => item.id === result.items[0].record.id);
   assert.deepEqual(result.items[0].record, tokenFree(stored), 'items are full fidelity');
+});
+
+// Found by PR-26: an import keeps a legacy fact with no kind, and ranking read
+// it as no kind at all -- never matched by its text, never gated by validity.
+test('a legacy fact stored with no kind is ranked and gated as a fact, and returned as stored', () => {
+  const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
+  graph.importData({ facts: [
+    { id: 'legacy-current', key: 'region', value: 'eu', project: 'alpha', status: 'active' },
+    { id: 'legacy-expired', key: 'region', value: 'us', project: 'alpha', status: 'expired', validTo: '2025-01-01T00:00:00.000Z' }
+  ] });
+  const current = graph.recall('region', { project: 'alpha' });
+  assert.deepEqual(current.items.map((item) => item.record.id), ['legacy-current']);
+  assert.ok(current.items[0].ranks.lexical >= 1);
+  assert.equal(Object.hasOwn(current.items[0].record, 'kind'), false, 'returned as it was stored');
+  const then = graph.recall('region', { project: 'alpha', asOf: '2024-06-01T00:00:00.000Z' });
+  assert.deepEqual(then.items.map((item) => item.record.id).sort(), ['legacy-current', 'legacy-expired']);
+  // Import refuses a kind of null, but the ranking engine reads it as no kind
+  // too, and hands the record back as it was given.
+  const given = { id: 'null-kind', kind: null, key: 'zone', value: 'b', project: 'alpha', status: 'active' };
+  const ranked = hybridSearch({ facts: [given] }, 'zone', { project: 'alpha', currentAt: '2026-03-01T00:00:00.000Z' });
+  assert.equal(ranked.items.length, 1);
+  assert.equal(ranked.items[0].record, given);
 });
 
 test('recall still refuses to cross a project boundary', () => {
