@@ -70,6 +70,20 @@ const CLAIM_CLASSES = Object.freeze(['quoted', 'entailed', 'ambiguous', 'unsuppo
 const CAUSAL_STATES = Object.freeze(['recorded', 'unknown', 'not_recorded', 'legacy_freetext']);
 const OUTCOME_EVIDENCE_STATES = Object.freeze(['observed', 'absent', 'not_applicable']);
 const isPlainObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+const named = (value) => typeof value === 'string' && value.trim() !== '';
+
+// Plan v1.4.4 §9.4 (PR-23, VAR-08): an attempt's cause, attributed apart from
+// the observation it explains (PC-04). A reason recorded now is the caller's
+// own claim, agent_claimed whatever the attempt's sourceClass says; its
+// statement is the reason itself, kept verbatim and not copied. A reason an
+// earlier build stored is legacy free text, never classed and never evidenced:
+// derived on the way out (publicValue) and never stored. No reason, or a blank
+// one, is not recorded. Only the extractor records a cause as unknown.
+function causalClaimFor(reason, { legacy = false } = {}) {
+  const given = typeof reason === 'string' ? reason.trim() !== '' : reason != null;
+  if (!given) return { state: 'not_recorded' };
+  return legacy ? { state: 'legacy_freetext' } : { state: 'recorded', sourceClass: 'agent_claimed', evidence: [] };
+}
 
 // The entity erasureToken of schema 7: a non-empty string, carried only by a
 // decision, attempt, memory or fact that names its kind and id, so every public
@@ -89,7 +103,6 @@ function claimModelIssue(entity) {
     for (const [index, claim] of entity.claims.entries()) {
       if (!isPlainObject(claim) || !CLAIM_CLASSES.includes(claim.class)) return `claims[${index}].class must be one of ${CLAIM_CLASSES.join(', ')}`;
       if (claim.class === 'unsupported') return `claims[${index}] is unsupported, which a stored record never carries`;
-      const named = (value) => typeof value === 'string' && value.trim() !== '';
       if (!named(claim.verifierVersion)) return `claims[${index}] carries no verifierVersion: a claim's class comes from the claim verifier`;
       if (!named(claim.text) || !named(claim.sourceRef)) return `claims[${index}] names no text or sourceRef`;
       if (claim.class === 'entailed' && !named(claim.rule)) return `claims[${index}] is entailed and names no rule`;
@@ -101,6 +114,7 @@ function claimModelIssue(entity) {
     const cause = entity.causalClaim;
     if (!isPlainObject(cause) || !CAUSAL_STATES.includes(cause.state)) return `causalClaim.state must be one of ${CAUSAL_STATES.join(', ')}`;
     if (cause.class !== undefined && (!CLAIM_CLASSES.includes(cause.class) || cause.class === 'unsupported')) return 'causalClaim.class must be quoted, entailed or ambiguous';
+    if (cause.class !== undefined && !named(cause.verifierVersion)) return 'causalClaim carries a class but no verifierVersion: a class comes from the claim verifier';
     if (cause.state === 'legacy_freetext') {
       if (['quoted', 'entailed'].includes(cause.class)) return 'legacy free-text cause is never quoted or entailed';
       if (cause.evidence !== undefined && (!Array.isArray(cause.evidence) || cause.evidence.length > 0)) return 'legacy free-text cause carries no evidence';
@@ -269,16 +283,30 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-// Plan rev6 §3.2 (DP-1): an entity's erasureToken is internal. Every public
-// result -- a read, a write's echo, a journal entry's payload -- is returned
-// without it, and only the privileged snapshot carries it. This build writes no
-// token; it is the floor for the builds that do (plan v1.4.4 §19.4). Copies are
-// made only along a path that holds a token, so stored state is never touched.
-function withoutErasureTokens(value) {
+// A stored record carries the fields of its kind; a summary that only names
+// one ({ id, kind, ... }) does not. A legacy fact or relation may carry no kind.
+const RECORD_FIELDS = new Map([['decision', ['title', 'chosen', 'goal']], ['attempt', ['solution', 'result', 'reason']], ['memory', ['text', 'key']], ['fact', ['key', 'value']]]);
+const isRecord = (value) => typeof value.id === 'string' && (value.kind === undefined || (RECORD_FIELDS.get(value.kind) ?? []).some((field) => Object.hasOwn(value, field)));
+// Where a public result holds a caller's own value, or an entry as it was
+// written: a journal payload, or a retry value (an idempotency entry's value).
+const AS_STORED_KEYS = new Set(['payload', 'value', 'expected', 'observed']);
+
+// Every public result -- a read, a write's echo, a journal entry's payload --
+// passes through here; only the privileged snapshot does not.
+// - Plan rev6 §3.2 (DP-1): an entity's erasureToken is internal and is removed.
+// - PR-23: an attempt stored before causes were has no causalClaim, and none is
+//   stored for it: an older build replays its journal entry, which has none,
+//   and must find the live record equal to it. Its cause is derived here, as
+//   legacy free text, on the record itself only: never inside another record,
+//   whose content is its writer's, a journal payload, which is shown as it was
+//   written, or a caller's value.
+// Copies are made only along a path that changes, so stored state is never
+// touched.
+function publicValue(value, derive = true) {
   if (Array.isArray(value)) {
     let copy = null;
     value.forEach((item, index) => {
-      const next = withoutErasureTokens(item);
+      const next = publicValue(item, derive);
       if (next !== item) (copy ??= [...value])[index] = next;
     });
     return copy ?? value;
@@ -289,8 +317,12 @@ function withoutErasureTokens(value) {
     const { erasureToken, ...rest } = value;
     copy = rest;
   }
+  const record = isRecord(value);
+  if (derive && record && value.kind === 'attempt' && value.causalClaim === undefined && !isFutureEntity(value)) {
+    copy = { ...(copy ?? value), causalClaim: causalClaimFor(value.reason, { legacy: true }) };
+  }
   for (const [key, item] of Object.entries(copy ?? value)) {
-    const next = withoutErasureTokens(item);
+    const next = publicValue(item, derive && !record && !AS_STORED_KEYS.has(key));
     if (next !== item) (copy ??= { ...value })[key] = next;
   }
   return copy ?? value;
@@ -299,7 +331,7 @@ function withoutErasureTokens(value) {
 function tokenFreeApi(api) {
   return Object.fromEntries(Object.entries(api).map(([name, member]) => [name, typeof member !== 'function' ? member : (...args) => {
     const result = member(...args);
-    return result && typeof result.then === 'function' ? result.then(withoutErasureTokens) : withoutErasureTokens(result);
+    return result && typeof result.then === 'function' ? result.then((value) => publicValue(value)) : publicValue(result);
   }]));
 }
 
@@ -626,9 +658,11 @@ function idempotencySemanticEntity(value) {
   if (value.kind === 'attempt') {
     const semantic = clone(value);
     // Storage version and attribution are assigned by migration, not by the
-    // write a retry repeats.
+    // write a retry repeats; the cause follows from the reason (PR-23), and a
+    // public result shows one for an attempt that stores none.
     delete semantic.schemaVersion;
     delete semantic.attribution;
+    delete semantic.causalClaim;
     return canonical(semantic);
   }
   return canonical(common);
@@ -1301,7 +1335,7 @@ export function createShadowGraph(options = {}) {
     }
     validateTemporalFields(input, ['createdAt']);
     const owner = writeOwner(input);
-    const attempt = { id: allocateEntityId('attempt'), kind: 'attempt', schemaVersion: SCHEMA_VERSION, erasureToken: allocateErasureToken(), ...owner, ...provenanceFields(input), solution: input.solution, result: input.result, environment: input.environment ?? '', ...(input.resultClass === undefined ? {} : { resultClass: input.resultClass }), reason: input.reason ?? '', reusableWhen: normalizeRules(input.reusableWhen ?? [], { strict: true }), relatedTo: input.relatedTo ?? [], createdAt: input.createdAt ?? now() };
+    const attempt = { id: allocateEntityId('attempt'), kind: 'attempt', schemaVersion: SCHEMA_VERSION, erasureToken: allocateErasureToken(), ...owner, ...provenanceFields(input), solution: input.solution, result: input.result, environment: input.environment ?? '', ...(input.resultClass === undefined ? {} : { resultClass: input.resultClass }), reason: input.reason ?? '', causalClaim: causalClaimFor(input.reason), reusableWhen: normalizeRules(input.reusableWhen ?? [], { strict: true }), relatedTo: input.relatedTo ?? [], createdAt: input.createdAt ?? now() };
     clone(attempt);
     assertJournalCapacity(1);
     records.set(attempt.id, attempt);
@@ -2767,7 +2801,7 @@ export function createShadowGraph(options = {}) {
     // every other read (scopedView): with no project and no origin it holds
     // nothing, and it never names an id outside the scope (P1 reconciliation
     // F-16). The caller's rules never see an erasureToken.
-    const data = withoutErasureTokens(snapshot());
+    const data = publicValue(snapshot());
     const view = scopedView(boundary);
     const chosen = (items) => new Set(items.map((item) => item.id));
     const [recordIds, factIds, relationIds] = [view.records, view.facts, view.relations].map(chosen);
@@ -3681,6 +3715,9 @@ export function createShadowGraph(options = {}) {
         const existingRecord = records.get(record.id);
         if (existingRecord && (existingRecord.kind !== record.kind || existingRecord.project !== record.project)) throw new Error(`Existing entity id ${record.id} cannot change kind or project`);
         keepErasureToken(existingRecord, record);
+        // PR-23: a legacy attempt's cause is shown, not stored, so one merged
+        // back from a public result keeps none.
+        if (journalless && existingRecord?.kind === 'attempt' && existingRecord.causalClaim === undefined && !isFutureEntity(record) && JSON.stringify(record.causalClaim) === JSON.stringify(causalClaimFor(record.reason, { legacy: true }))) delete record.causalClaim;
         if (existingRecord?.kind === 'memory' && memoryScopeKey(existingRecord) !== memoryScopeKey(record)) throw new Error(`Existing memory id ${record.id} cannot change scope, type, or key`);
         if (facts.has(record.id) || relations.has(record.id) || (existingAlternativeOwners.has(record.id) && existingAlternativeOwners.get(record.id) !== record.id)) throw new Error(`Entity id already exists: ${record.id}`);
         for (const alternative of record.alternatives ?? []) {

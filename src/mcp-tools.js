@@ -200,7 +200,8 @@ const attemptRecordSchema = entityRecordSchema('A stored attempt and its result.
   solution: stringOrNull('What was tried.'),
   result: stringOrNull('What happened.'),
   resultClass: stringOrNull('Declared classification: failed, succeeded, or inconclusive. Absent means only the legacy wording heuristic classified this attempt.'),
-  reason: stringOrNull('Why it turned out that way.'),
+  reason: stringOrNull('Why it turned out that way, verbatim as recorded.'),
+  causalClaim: { type: 'object', description: 'The cause, attributed apart from the attempt: state recorded (the reason, agent_claimed), unknown, not_recorded, or legacy_freetext (a reason stored before causes were, never classed or evidenced).' },
   environment: stringOrNull('Where it was tried.'),
   reusableWhen: { type: 'array', description: 'Conditions recorded for reusing the attempt. All must hold, and none may be unresolved.' },
   relatedTo: { type: 'array', description: 'Identifiers of related entities.' }

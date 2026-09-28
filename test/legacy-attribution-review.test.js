@@ -1,7 +1,7 @@
 import { historicalIds } from '../tools/historical-ids.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { tokenFree } from '../tools/token-free.js';
+import { publicForm } from '../tools/token-free.js';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { NODE_SQLITE_NOT_APPLICABLE_REASON } from '../src/runtime-capabilities.js';
@@ -60,8 +60,9 @@ function legacyPayload() {
     if (!entity || typeof entity !== 'object') return;
     delete entity.attribution;
     delete entity.originId;
-    // Schema 5 predates erasure tokens (schema 7).
+    // Schema 5 predates erasure tokens and attempt causes (schema 7).
     delete entity.erasureToken;
+    delete entity.causalClaim;
     if (entity.schemaVersion >= 6) entity.schemaVersion = 5;
   };
   for (const entity of [...payload.records, ...payload.facts]) strip(entity);
@@ -170,7 +171,7 @@ test('each entry names the record, its kind and its legacy state, carries the ca
     assert.deepEqual(Object.keys(item).sort(), ['assignedProject', 'attribution', 'entity', 'id', 'kind', 'migrated']);
     assert.equal(item.assignedProject, null, `${item.id}: no project is inferred`);
     assert.equal(item.kind, stored.get(item.id).kind);
-    assert.deepEqual(item.entity, tokenFree(stored.get(item.id)), `${item.id}: the canonical record, unsummarised`);
+    assert.deepEqual(item.entity, publicForm(stored.get(item.id)), `${item.id}: the canonical record, unsummarised`);
   }
   // Detached: editing what the view returned changes nothing stored.
   view.items[0].entity.title = 'edited by the caller';

@@ -231,6 +231,9 @@ export const REGISTER = Object.freeze([
   c('failedAttempts[].result', 'observed experience'),
   c('failedAttempts[].resultClass', 'observed experience'),
   c('failedAttempts[].reason', 'observed experience'),
+  // PR-23: the cause, attributed apart from the attempt; its sourceClass is
+  // provenance through the shared entry above.
+  entry('failedAttempts[].causalClaim.**', 'inferred explanation', 'provenance'),
   c('failedAttempts[].environment', 'observed experience'),
   c('failedAttempts[].relatedTo.**', 'relationship'),
   c('failedAttempts[].reusableWhen.**', 'historical fact'),

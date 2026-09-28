@@ -266,7 +266,8 @@ test('repetition cannot upgrade: running the verifier changes no confidence, and
 // a caller declares is dropped, or the request refused, and never stored.
 const DECLARED = { claims: [{ text: 'we fixed it', class: 'quoted', sourceRef: 'capture:c1', verifierVersion: CLAIM_VERIFIER_VERSION }], causalClaim: { statement: 'x', state: 'recorded', class: 'quoted' }, outcomeEvidence: { state: 'observed' }, captureRef: 'capture:c1' };
 const V7_FIELDS = Object.keys(DECLARED);
-const holdsClaims = (payload) => [...payload.records, ...payload.facts].some((entity) => V7_FIELDS.some((field) => Object.hasOwn(entity, field)));
+// An attempt's own causalClaim is the kernel's, derived from its reason (PR-23).
+const holdsClaims = (payload) => [...payload.records, ...payload.facts].some((entity) => V7_FIELDS.some((field) => Object.hasOwn(entity, field) && !(field === 'causalClaim' && entity.kind === 'attempt')));
 
 test('a caller cannot store a claim: the API, CLI, HTTP and MCP never store one, and facts and memories stay unverified', async (t) => {
   const graph = createShadowGraph({ now });
@@ -276,6 +277,7 @@ test('a caller cannot store a claim: the API, CLI, HTTP and MCP never store one,
   graph.addFact({ project: 'alpha', key: 'k', value: 1, ...DECLARED });
   const stored = privilegedSnapshot(graph);
   assert.equal(holdsClaims(stored), false, 'API');
+  assert.deepEqual(stored.records.find((record) => record.kind === 'attempt').causalClaim, { state: 'not_recorded' }, 'the declared cause is not the stored one');
   assert.ok([...stored.records.filter((record) => record.kind === 'memory'), ...stored.facts].every((entity) => entity.verificationStatus === 'unverified'));
 
   const directory = await scratchDirectory(t, 'shadowgraph-claims-');

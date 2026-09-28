@@ -56,7 +56,8 @@ function seeded() {
   return graph;
 }
 
-// A store a schema-6 build wrote: schema 6 throughout and no token anywhere.
+// A store a schema-6 build wrote: schema 6 throughout, and no token or
+// attempt cause anywhere.
 function asSchema6(snapshot) {
   const payload = structuredClone(snapshot);
   payload.schemaVersion = 6;
@@ -64,6 +65,7 @@ function asSchema6(snapshot) {
     if (!item || typeof item !== 'object') return;
     if (item.schemaVersion === 7) item.schemaVersion = 6;
     delete item.erasureToken;
+    delete item.causalClaim;
   };
   for (const item of [...payload.records, ...payload.facts, ...payload.relations]) lower(item);
   for (const item of payload.idempotency) lower(item.value);
@@ -395,7 +397,7 @@ function v7Fixture() {
   const payload = { ...privilegedSnapshot(graph), futureCollection: FUTURE };
   const [claimed, captured] = payload.records.filter((record) => record.kind === 'attempt');
   const copies = (id) => [...payload.records, ...payload.idempotency.map((item) => item.value), ...payload.journal.map((entry) => entry.payload)].filter((entity) => entity?.id === id);
-  for (const entity of copies(claimed.id)) Object.assign(entity, { claims: [{ text: 'the lock timed out', class: 'quoted', sourceRef: 'capture:c1', verifierVersion: 'claim-verifier-v1' }], causalClaim: { statement: 'the lock timed out', state: 'recorded', class: 'quoted' }, outcomeEvidence: { state: 'observed', source: 'exit_status', exitStatus: 1 } });
+  for (const entity of copies(claimed.id)) Object.assign(entity, { claims: [{ text: 'the lock timed out', class: 'quoted', sourceRef: 'capture:c1', verifierVersion: 'claim-verifier-v1' }], causalClaim: { statement: 'the lock timed out', state: 'recorded', class: 'quoted', verifierVersion: 'claim-verifier-v1' }, outcomeEvidence: { state: 'observed', source: 'exit_status', exitStatus: 1 } });
   for (const entity of copies(captured.id)) Object.assign(entity, { captureRef: 'capture:c2', outcomeEvidence: { state: 'absent' } });
   return { payload, claimed, captured };
 }

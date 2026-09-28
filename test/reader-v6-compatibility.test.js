@@ -57,8 +57,9 @@ function asSchema5(payload) {
     if (!entity || typeof entity !== 'object') return;
     delete entity.attribution;
     delete entity.originId;
-    // Schema 5 predates erasure tokens (schema 7).
+    // Schema 5 predates erasure tokens and attempt causes (schema 7).
     delete entity.erasureToken;
+    delete entity.causalClaim;
     if (entity.schemaVersion >= 6) entity.schemaVersion = 5;
   };
   for (const entity of [...v5.records, ...v5.facts, ...v5.relations]) strip(entity);

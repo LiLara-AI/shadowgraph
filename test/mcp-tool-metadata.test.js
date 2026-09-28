@@ -524,6 +524,9 @@ const WIRE_BUDGETS = {
   // clear a budget. Measured with `npm run size:mcp` on 2026-09-28,
   // bare/annotated/structured: full 56294/59888/269148, verifier full
   // 57442/61141/273695, compact 36221/37810/181156. Roughly 2% headroom.
+  // PR-23 documents an attempt's causalClaim in its output schema. Measured on
+  // 2026-09-28: full 56406/60000/271088, verifier full 57554/61253/275635,
+  // compact 36333/37922/183096; every ceiling unchanged.
   'withoutVerifier.full': { bare: 57_400, annotated: 61_100, structured: 274_400 },
   'withoutVerifier.compact': { bare: 37_000, annotated: 38_600, structured: 184_600 },
   'withVerifier.full': { bare: 58_600, annotated: 62_400, structured: 279_000 },

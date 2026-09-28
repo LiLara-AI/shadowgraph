@@ -43,7 +43,7 @@ const V7_ATTEMPT_FIELDS = Object.freeze({
     { text: 'the lock timed out before the migration completed', class: 'entailed', rule: 'temporal-precedence-v1', sourceRef: 'capture:c1', checks: {}, verifierVersion: 'verifier-v1' },
     { text: 'the job stopped', class: 'ambiguous', readings: ['stopped by the user', 'stopped by a crash'], sourceRef: 'capture:c1', verifierVersion: 'verifier-v1' }
   ],
-  causalClaim: { statement: 'the lock timed out', class: 'entailed', sourceClass: 'tool_observed', evidence: [{ sourceRef: 'capture:c1' }], state: 'recorded' },
+  causalClaim: { statement: 'the lock timed out', class: 'entailed', sourceClass: 'tool_observed', evidence: [{ sourceRef: 'capture:c1' }], state: 'recorded', verifierVersion: 'verifier-v1' },
   captureRef: 'capture:c1',
   outcomeEvidence: { state: 'observed', source: 'exit_status', exitStatus: 1 },
   erasureToken: 'tok_attempt_1'
@@ -252,8 +252,8 @@ test('malformed claim data is refused at import and at restore', () => {
     ['claims that are not a list', { claims: { text: 'x', class: 'quoted' } }],
     ['an unknown causal state', { causalClaim: { statement: 'x', state: 'maybe' } }],
     ['an unsupported causal class', { causalClaim: { statement: 'x', class: 'unsupported', state: 'recorded' } }],
-    ['legacy free text marked quoted', { causalClaim: { statement: 'x', class: 'quoted', state: 'legacy_freetext' } }],
-    ['legacy free text marked entailed', { causalClaim: { statement: 'x', class: 'entailed', state: 'legacy_freetext' } }],
+    ['legacy free text marked quoted', { causalClaim: { statement: 'x', class: 'quoted', state: 'legacy_freetext', verifierVersion: 'verifier-v1' } }, null, /never quoted or entailed/],
+    ['legacy free text marked entailed', { causalClaim: { statement: 'x', class: 'entailed', state: 'legacy_freetext', verifierVersion: 'verifier-v1' } }, null, /never quoted or entailed/],
     ['legacy free text with evidence', { causalClaim: { statement: 'x', state: 'legacy_freetext', evidence: [{ sourceRef: 'capture:c1' }] } }],
     ['an unknown outcome evidence state', { outcomeEvidence: { state: 'inferred' } }],
     ['absent outcome evidence with a result class', { outcomeEvidence: { state: 'absent' } }],
@@ -262,11 +262,11 @@ test('malformed claim data is refused at import and at restore', () => {
     ['observed outcome evidence with a null result class', { outcomeEvidence: { state: 'observed', exitStatus: 0 } }, (entity) => { entity.resultClass = null; }],
     ['observed outcome evidence with an unknown result class', { outcomeEvidence: { state: 'observed', exitStatus: 0 } }, (entity) => { entity.resultClass = 'crashed'; }]
   ];
-  for (const [label, override, adjust] of cases) {
+  for (const [label, override, adjust, reason = /claim model/] of cases) {
     const { payload } = v7Store({ ...structuredClone(V7_ATTEMPT_FIELDS), ...override });
     if (adjust) for (const entity of attemptCopies(payload)) adjust(entity);
-    assert.throws(() => createShadowGraph({ now }).importData(structuredClone(payload)), /claim model/, `import: ${label}`);
-    assert.throws(() => validateRestorePayload(structuredClone(payload), { now }), /claim model/, `restore: ${label}`);
+    assert.throws(() => createShadowGraph({ now }).importData(structuredClone(payload)), reason, `import: ${label}`);
+    assert.throws(() => validateRestorePayload(structuredClone(payload), { now }), reason, `restore: ${label}`);
   }
   const legacyFreeText = v7Store({ causalClaim: { statement: 'kept verbatim', state: 'legacy_freetext' } });
   assert.doesNotThrow(() => createShadowGraph({ now }).importData(legacyFreeText.payload), 'legacy free text with no class and no evidence is valid');
