@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { tokenFree } from '../tools/token-free.js';
 import { spawn } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
 import { once } from 'node:events';
@@ -281,7 +282,7 @@ test('MCP JSON persists a committed expiration before returning the legacy verif
   const rebuiltFact = rebuilt.projection.facts.find((item) => item.id === fact.id);
   assert.equal(rebuiltFact.status, 'expired');
   assert.equal(rebuiltFact.verificationStatus, 'expired');
-  assert.deepEqual(rebuiltFact, durable.facts[0]);
+  assert.deepEqual(rebuiltFact, tokenFree(durable.facts[0]));
   const recall = toolPayload(await rpc.call(toolRequest(8, 'shadowgraph_recall', {
     project: fact.project,
     query: 'release ready'
@@ -357,7 +358,7 @@ test('MCP SQLite persists a committed expiration with JSON-equivalent restart an
   const rebuilt = toolPayload(await rpc.call(toolRequest(26, 'shadowgraph_rebuild', { project: fact.project })));
   assert.equal(rebuilt.rebuildable, true);
   const rebuiltFact = rebuilt.projection.facts.find((item) => item.id === fact.id);
-  assert.deepEqual(rebuiltFact, durable.facts[0]);
+  assert.deepEqual(rebuiltFact, tokenFree(durable.facts[0]));
   assert.equal(rebuiltFact.status, 'expired');
   assert.equal(rebuiltFact.verificationStatus, 'expired');
   const recall = toolPayload(await rpc.call(toolRequest(27, 'shadowgraph_recall', {

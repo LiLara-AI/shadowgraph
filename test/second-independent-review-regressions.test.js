@@ -2,6 +2,7 @@ import { historicalIds } from '../tools/historical-ids.js';
 const fixtureIds = {};
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { tokenFree } from '../tools/token-free.js';
 import { spawn } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
 import { once } from 'node:events';
@@ -197,6 +198,8 @@ function legacyVerifiedIdempotencyPayload(schemaVersion, suffix = String(schemaV
     delete fact.verification;
     delete fact.verificationUntrustedReason;
     delete fact.legacyVerificationStatus;
+    // Schemas 1-5 predate erasure tokens (schema 7).
+    delete fact.erasureToken;
   };
   markLegacyVerified(payload.facts[0]);
   markLegacyVerified(payload.idempotency[0].value);
@@ -808,7 +811,7 @@ test('RRV-03: valid signed facts return the final verified entity on retry when 
   assert.equal(canonical.verificationStatus, 'verified');
 
   const retryInput = { project: 'rrv03', key: 'ignored', value: false, idempotencyKey: 'valid-signed-retry' };
-  assert.deepEqual(graph.addFact(retryInput), canonical, 'same-process retry must reflect verification');
+  assert.deepEqual(graph.addFact(retryInput), tokenFree(canonical), 'same-process retry must reflect verification');
   assert.deepEqual(privilegedSnapshot(graph).idempotency[0].value, canonical);
   const report = graph.rebuild({ project: 'rrv03' });
   assert.equal(report.rebuildable, true);
@@ -817,6 +820,6 @@ test('RRV-03: valid signed facts return the final verified entity on retry when 
 
   const restarted = createShadowGraph({ verifier: fixture.verifier, now: () => FIXED_NOW });
   restarted.importData(privilegedSnapshot(graph));
-  assert.deepEqual(restarted.addFact(retryInput), privilegedSnapshot(restarted).facts[0]);
+  assert.deepEqual(restarted.addFact(retryInput), tokenFree(privilegedSnapshot(restarted).facts[0]));
   assert.equal(restarted.addFact(retryInput).verificationStatus, 'verified');
 });

@@ -16,7 +16,7 @@ import { evaluateRule, isSupportedOperator, isSupportedUnit, ruleOperandIssue } 
 import { privilegedSnapshot, privilegedValidate, registerPrivileged } from './internal/snapshot.js';
 import { extraCollections, refusePublicExport, NATIVE_STORE_KEYS, PUBLIC_EXPORT_KIND, REDACTION_EXPORT_KIND } from './internal/collections.js';
 import { isLegacyOwned, resolveScope, sameOrigin, usableOriginId } from './scope.js';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { accessScopeContains, validateAccess, intersectAccessScope, accessDiagnostics, reconcileAccessLedger } from './access.js';
 import { createAccessLifecycle } from './internal/access-lifecycle.js';
 import { assertCreationInput } from './internal/creation-id.js';
@@ -26,11 +26,10 @@ import { assertCreationInput } from './internal/creation-id.js';
 // behaviour at a distance.
 //
 // SCHEMA_VERSION is what this build WRITES; SUPPORTED_SCHEMA_VERSIONS is what it
-// reads. The reader runs one schema ahead of the writer (plan v1.4.4 §9.2): it
-// was widened to 7 (PR-20) before any build writes 7, so this build is the floor
-// every later P3 build can fall back to. Entities and journal entries share the
-// one readable bound.
-export const SCHEMA_VERSION = 6;
+// reads. The reader is widened before the writer (plan v1.4.4 §9.2): PR-20 read 7
+// while writing 6 and is the floor for every store this build saves; PR-21
+// writes 7. Entities and journal entries share the one readable bound.
+export const SCHEMA_VERSION = 7;
 export const SUPPORTED_SCHEMA_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7]);
 const READABLE_SCHEMA_VERSION = READABLE_JOURNAL_SCHEMA_VERSION;
 const GLOBAL_ENTITY_NAMESPACE_SCHEMA_VERSION = 4;
@@ -1037,6 +1036,39 @@ export function createShadowGraph(options = {}) {
     return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   }
 
+  // Plan rev6 §3.2: the random, content-free handle a purge tombstone names an
+  // entity by. Never derived from the entity, and never shared by two.
+  function allocateErasureToken() {
+    for (;;) {
+      const token = randomUUID();
+      if (![...records.values(), ...facts.values()].some((entity) => entity.erasureToken === token)) return token;
+    }
+  }
+
+  // An entity's retry values carry its token too; nothing else in them changes.
+  function tokenRetryValues(entity) {
+    for (const [key, value] of idempotency) {
+      if (value?.id === entity.id && value.erasureToken !== entity.erasureToken) idempotency.set(key, { ...value, erasureToken: entity.erasureToken });
+    }
+  }
+
+  // Plan rev6 §3.2: the first write to a tokenless decision, attempt, memory or
+  // fact gives it its token, on that write's own journal entry. Only a write
+  // does: a load, read, import or restore never reaches here. A fact that names
+  // no kind cannot carry one, and an entity of a newer writer is not this
+  // build's to change.
+  function withFirstWriteToken(input) {
+    if (!ATTRIBUTED_ENTITY_KINDS.includes(input.entityKind) || !isPlainObject(input.payload)) return input;
+    const live = (input.entityKind === 'fact' ? facts : records).get(input.entityId);
+    if (!live || !ATTRIBUTED_ENTITY_KINDS.includes(live.kind) || isNewerThanWriter(live)) return input;
+    if (live.erasureToken === undefined) {
+      touchMutableObject(live);
+      live.erasureToken = allocateErasureToken();
+      tokenRetryValues(live);
+    }
+    return input.payload.erasureToken === live.erasureToken ? input : { ...input, payload: { ...input.payload, erasureToken: live.erasureToken } };
+  }
+
   // Legacy breadcrumb trail. Kept verbatim for backward compatibility; the journal
   // is the rebuildable record.
   function event(type, payload) {
@@ -1097,7 +1129,7 @@ export function createShadowGraph(options = {}) {
   // `at` cannot be, because now() is injectable and millisecond ties are normal.
   function appendJournal(input) {
     assertJournalCapacity(1);
-    const entry = prebuildJournalEntry(input, journalSeq + 1);
+    const entry = prebuildJournalEntry(withFirstWriteToken(input), journalSeq + 1);
     journalSeq = entry.seq;
     if (journalEpoch === null) journalEpoch = entry.seq;
     journal.push(entry);
@@ -1231,7 +1263,7 @@ export function createShadowGraph(options = {}) {
     const evidence = (input.evidence ?? []).map((item) => normalizeEvidence(item, now));
     const reservedIds = new Set();
     const record = {
-      id: allocateEntityId('decision', reservedIds), kind: 'decision', schemaVersion: SCHEMA_VERSION,
+      id: allocateEntityId('decision', reservedIds), kind: 'decision', schemaVersion: SCHEMA_VERSION, erasureToken: allocateErasureToken(),
       ...owner, title: input.title, goal: input.goal ?? '', chosen: input.chosen,
       // G2: provenance travels with the decision. Plain JSON values only.
       ...provenanceFields(input),
@@ -1259,7 +1291,7 @@ export function createShadowGraph(options = {}) {
     }
     validateTemporalFields(input, ['createdAt']);
     const owner = writeOwner(input);
-    const attempt = { id: allocateEntityId('attempt'), kind: 'attempt', schemaVersion: SCHEMA_VERSION, ...owner, ...provenanceFields(input), solution: input.solution, result: input.result, environment: input.environment ?? '', ...(input.resultClass === undefined ? {} : { resultClass: input.resultClass }), reason: input.reason ?? '', reusableWhen: normalizeRules(input.reusableWhen ?? [], { strict: true }), relatedTo: input.relatedTo ?? [], createdAt: input.createdAt ?? now() };
+    const attempt = { id: allocateEntityId('attempt'), kind: 'attempt', schemaVersion: SCHEMA_VERSION, erasureToken: allocateErasureToken(), ...owner, ...provenanceFields(input), solution: input.solution, result: input.result, environment: input.environment ?? '', ...(input.resultClass === undefined ? {} : { resultClass: input.resultClass }), reason: input.reason ?? '', reusableWhen: normalizeRules(input.reusableWhen ?? [], { strict: true }), relatedTo: input.relatedTo ?? [], createdAt: input.createdAt ?? now() };
     clone(attempt);
     assertJournalCapacity(1);
     records.set(attempt.id, attempt);
@@ -1319,7 +1351,7 @@ export function createShadowGraph(options = {}) {
     }
     const provenance = provenanceFields(input);
     const memory = {
-      id: allocateEntityId('memory'), kind: 'memory', schemaVersion: SCHEMA_VERSION,
+      id: allocateEntityId('memory'), kind: 'memory', schemaVersion: SCHEMA_VERSION, erasureToken: allocateErasureToken(),
       ...owner, scope, memoryType: input.memoryType, key: input.key, text: input.text,
       version: (latest?.version ?? 0) + 1,
       metadata, tags, embedding, ...provenance, verificationStatus: 'unverified', status: 'active',
@@ -1535,7 +1567,7 @@ export function createShadowGraph(options = {}) {
       throw new Error('Facts for one scope must be recorded in non-decreasing validFrom order');
     }
     const fact = {
-      id: allocateEntityId('fact'), kind: 'fact', schemaVersion: SCHEMA_VERSION,
+      id: allocateEntityId('fact'), kind: 'fact', schemaVersion: SCHEMA_VERSION, erasureToken: allocateErasureToken(),
       ...owner, key: input.key, value: input.value,
       source: provenance.sourceClass, ...provenance, confidence, verificationStatus,
       status: 'active', expiresAt: input.expiresAt ?? null, observedAt,
@@ -1605,6 +1637,48 @@ export function createShadowGraph(options = {}) {
     return { migrated: batch.length, attributions: counts, remaining, complete: remaining === 0, highWaterMark: batch.at(-1)?.id ?? null };
   }
 
+  // Plan rev6 §3.2: the only token backfill, run by migrate. Bounded, resumable
+  // and idempotent: each tokenless decision, attempt, memory or fact gets one
+  // entity.token_assigned entry that adds the token and changes nothing else,
+  // and its retry values carry it too. A fact that names no kind cannot carry a
+  // token; it is reported, and no kind is inferred for it.
+  function backfillErasureTokens(input = {}) {
+    const limit = input.limit ?? Number.MAX_SAFE_INTEGER;
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('Token backfill limit must be a positive integer');
+    const tokenless = [...records.values(), ...facts.values()]
+      .filter((entity) => entity.erasureToken === undefined && !isNewerThanWriter(entity))
+      .sort(attributionOrder);
+    // A reader replays an assignment onto the entity's last journal snapshot,
+    // which load normalisation may since have reshaped; the entry carries that
+    // snapshot with the token added, never the live form. An entity the journal
+    // cannot replay gets its token on its next write instead, and is reported.
+    const replayed = rebuildProjection(journal, { journalEpoch }).projection;
+    const priorOf = new Map([...replayed.records, ...replayed.facts].map((entity) => [entity.id, entity]));
+    // A record the attribution migration has not reached gets its token on its
+    // attribution entry; one whose snapshot an entry of this schema cannot
+    // carry gets it on its next write.
+    const skipReason = (entity) => {
+      if (!ATTRIBUTED_ENTITY_KINDS.includes(entity.kind)) return 'fact_without_kind';
+      if (entity.attribution === undefined) return 'not_attributed';
+      const prior = priorOf.get(entity.id);
+      if (!prior || prior.erasureToken !== undefined) return 'not_replayable';
+      return prior.kind === 'fact' && factValidityPolicyIssue(prior, { required: true }) ? 'not_replayable' : null;
+    };
+    const pending = tokenless.filter((entity) => !skipReason(entity));
+    const skipped = tokenless.filter(skipReason).map((entity) => ({ id: entity.id, reason: skipReason(entity) }));
+    const batch = pending.slice(0, limit);
+    assertJournalCapacity(batch.length);
+    for (const entity of batch) {
+      touchMutableObject(entity);
+      entity.erasureToken = allocateErasureToken();
+      tokenRetryValues(entity);
+      const prior = priorOf.get(entity.id);
+      appendJournal({ type: 'entity.token_assigned', entityKind: entity.kind, entityId: entity.id, project: prior.project ?? null, payload: { ...clone(prior), erasureToken: entity.erasureToken } });
+    }
+    const remaining = pending.length - batch.length;
+    return { assigned: batch.length, remaining, complete: remaining === 0, highWaterMark: batch.at(-1)?.id ?? null, skipped };
+  }
+
   // The attribution the migration gives an entity written before schema 6,
   // decided only from what is stored and the recorded absence of a project.
   function migrationMapping(entity) {
@@ -1641,6 +1715,7 @@ export function createShadowGraph(options = {}) {
     let retries = new Map(candidate.idempotency.map((item) => [item.key, item.value]));
     for (const previous of changed) {
       const next = { ...clone(previous), schemaVersion: SCHEMA_VERSION, project: input.targetProject, attribution: 'project' };
+      if (next.erasureToken === undefined && ATTRIBUTED_ENTITY_KINDS.includes(next.kind)) next.erasureToken = allocateErasureToken();
       const collection = next.kind === 'fact' ? candidate.facts : candidate.records;
       collection[collection.findIndex((entity) => entity.id === next.id)] = next;
       retries = reattributeIdempotency(retries, next);
@@ -1740,10 +1815,10 @@ export function createShadowGraph(options = {}) {
             invalidatedAt: trustedValidationInstant
           }
         };
-        const entry = prebuildJournalEntry({
+        const entry = prebuildJournalEntry(withFirstWriteToken({
           type: 'fact.expired', entityKind: 'fact', entityId: current.id,
           project: current.project, at: trustedValidationInstant, payload: expired
-        }, journalSeq + 1);
+        }), journalSeq + 1);
         touchMutableObject(current);
         Object.assign(current, expired);
         journalSeq = entry.seq;
@@ -1761,11 +1836,11 @@ export function createShadowGraph(options = {}) {
       }
       throw new Error('Fact is already verified by a different attestation');
     }
-    const entry = prebuildJournalEntry({
+    const entry = prebuildJournalEntry(withFirstWriteToken({
       type: 'fact.verified', entityKind: 'fact', entityId: current.id,
       project: current.project, at: trustedValidationInstant, payload: candidate,
       provenance: { actor: next.verifierIdentity, client: 'local-evidence-verifier', sessionId: null }
-    }, journalSeq + 1);
+    }), journalSeq + 1);
     touchMutableObject(current);
     Object.assign(current, candidate);
     journalSeq = entry.seq;
@@ -3579,9 +3654,23 @@ export function createShadowGraph(options = {}) {
       assertUniqueEntityIds(importedRecords, importedAlternatives, importedFacts, importedRelations);
       const existingAlternativeOwners = new Map();
       for (const record of records.values()) for (const alternative of record.alternatives ?? []) existingAlternativeOwners.set(alternative.id, record.id);
+      // Plan rev6 §3.2: the erasureToken is internal, so a merged entity that
+      // names none -- one built from a public result -- keeps the one it has. A
+      // merge never changes or drops a token.
+      const journalless = !(Array.isArray(source.journal) && source.journal.length);
+      const liveTokenHolders = new Map([...records.values(), ...facts.values()].filter((entity) => entity.erasureToken !== undefined).map((entity) => [entity.erasureToken, entity.id]));
+      const keepErasureToken = (existing, item) => {
+        if (existing?.erasureToken !== undefined && item.erasureToken !== existing.erasureToken) {
+          if (item.erasureToken !== undefined || !journalless) throw new Error(`Existing entity id ${item.id} cannot change or drop its erasureToken`);
+          item.erasureToken = existing.erasureToken;
+        }
+        const holder = liveTokenHolders.get(item.erasureToken);
+        if (item.erasureToken !== undefined && holder !== undefined && holder !== item.id) throw new Error(`${item.id} would share an erasureToken with ${holder}`);
+      };
       for (const record of importedRecords) {
         const existingRecord = records.get(record.id);
         if (existingRecord && (existingRecord.kind !== record.kind || existingRecord.project !== record.project)) throw new Error(`Existing entity id ${record.id} cannot change kind or project`);
+        keepErasureToken(existingRecord, record);
         if (existingRecord?.kind === 'memory' && memoryScopeKey(existingRecord) !== memoryScopeKey(record)) throw new Error(`Existing memory id ${record.id} cannot change scope, type, or key`);
         if (facts.has(record.id) || relations.has(record.id) || (existingAlternativeOwners.has(record.id) && existingAlternativeOwners.get(record.id) !== record.id)) throw new Error(`Entity id already exists: ${record.id}`);
         for (const alternative of record.alternatives ?? []) {
@@ -3593,6 +3682,7 @@ export function createShadowGraph(options = {}) {
         if (records.has(fact.id) || relations.has(fact.id) || existingAlternativeOwners.has(fact.id)) throw new Error(`Entity id already exists: ${fact.id}`);
         const existingFact = facts.get(fact.id);
         if (existingFact && existingFact.project !== fact.project) throw new Error(`Existing entity id ${fact.id} cannot change kind or project`);
+        keepErasureToken(existingFact, fact);
       }
       for (const relation of importedRelations) {
         if (records.has(relation.id) || facts.has(relation.id) || existingAlternativeOwners.has(relation.id)) throw new Error(`Entity id already exists: ${relation.id}`);
@@ -3655,6 +3745,8 @@ export function createShadowGraph(options = {}) {
         const value = item.value;
         const entity = value?.kind === 'fact' ? finalFacts.get(value.id) : finalRecords.get(value?.id);
         if (typeof item.key !== 'string' || !value || typeof value !== 'object' || typeof value.id !== 'string' || !entity) throw new Error('Idempotency entry must reference an existing entity');
+        // A retry value built from a public result omits the erasure token, and so carries its entity's.
+        if (value.erasureToken === undefined && entity.erasureToken !== undefined && !(Array.isArray(source.journal) && source.journal.length)) value.erasureToken = entity.erasureToken;
         // The value is checked in the migrated form its entity has, as the
         // semantic check below always was. A legacy entity stored with no
         // project is filed under "default" by migration; so is a retry value
@@ -4108,6 +4200,7 @@ export function createShadowGraph(options = {}) {
     memoryHistory: auditedRead('memoryHistory', memoryHistory),
     addFact: transactional('addFact', addFact),
     migrateAttribution: transactional('migrateAttribution', migrateAttribution),
+    backfillErasureTokens: transactional('backfillErasureTokens', backfillErasureTokens),
     attribute: transactional('attribute', attribute, { mode: 'snapshot' }),
     legacyAttributionReview,
     verifyFact: transactional('verifyFact', verifyFact),

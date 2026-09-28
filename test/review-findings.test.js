@@ -9,6 +9,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { tokenFree } from '../tools/token-free.js';
 import { join } from 'node:path';
 import { NODE_SQLITE_NOT_APPLICABLE_REASON } from '../src/runtime-capabilities.js';
 import { createShadowGraph, rebuildProjection, SUPPORTED_SCHEMA_VERSIONS } from '../src/shadowgraph.js';
@@ -351,7 +352,7 @@ describe('P1-8 — confidence is a summed fold, clamped once', () => {
     const live = privilegedSnapshot(graph).records;
     const rebuilt = graph.rebuild({ project: 'default' });
     assert.equal(rebuilt.rebuildable, true);
-    assert.equal(normalize(live), normalize(rebuilt.projection.records), 'confidence is identical after replay');
+    assert.equal(normalize(tokenFree(live)), normalize(rebuilt.projection.records), 'confidence is identical after replay');
   });
 });
 

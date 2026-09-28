@@ -30,7 +30,7 @@ function mixed() {
   graph.addFact({ project: 'p', key: 'lagProfile', value: ['spike'], validFrom: '2025-12-01T00:00:00.000Z' });
   const snapshot = privilegedSnapshot(graph);
   const lag = snapshot.facts.find((fact) => fact.key === 'lagProfile');
-  snapshot.facts.push({ ...lag, id: 'fact:contested', value: ['calm'] });
+  snapshot.facts.push({ ...lag, id: 'fact:contested', value: ['calm'], erasureToken: 'tok_contested' });
   return snapshot;
 }
 // A condition that cannot be settled, and nothing else.

@@ -71,13 +71,30 @@ export async function writePreservationCopy({ store, file, storageType = 'json',
 // interrupted run leaves a store the current build reads, and running this
 // again continues from the entities still unattributed.
 export async function migrateStore({ graph, store, file, storageType = 'json', batchSize = 500, preservationCopy }) {
+  const tokened = () => { const snapshot = privilegedSnapshot(graph); return [...snapshot.records, ...snapshot.facts].filter((entity) => entity.erasureToken !== undefined).length; };
   validateRestorePayload(privilegedSnapshot(graph));
+  const tokenedBefore = tokened();
   const preservation = await writePreservationCopy({ store, file, storageType, destination: preservationCopy });
   const batches = [];
   for (;;) {
     const batch = graph.migrateAttribution({ limit: batchSize });
     if (batch.migrated) graph.setRevision(await store.save(privilegedSnapshot(graph)));
     batches.push(batch);
+    if (batch.complete) break;
+  }
+  // Then the erasure-token backfill (plan rev6 §3.2): each batch is restore-
+  // validated before it is saved, so a batch a reader would refuse never lands.
+  // ponytail: whole-store validation per batch costs O(n^2 / batchSize); a
+  // large store takes a larger batchSize.
+  const tokenBatches = [];
+  for (;;) {
+    const batch = graph.backfillErasureTokens({ limit: batchSize });
+    if (batch.assigned) {
+      const snapshot = privilegedSnapshot(graph);
+      validateRestorePayload(snapshot);
+      graph.setRevision(await store.save(snapshot));
+    }
+    tokenBatches.push(batch);
     if (batch.complete) break;
   }
   validateRestorePayload(privilegedSnapshot(graph));
@@ -89,7 +106,115 @@ export async function migrateStore({ graph, store, file, storageType = 'json', b
     attributions,
     batches: batches.filter((batch) => batch.migrated).length,
     highWaterMark: batches.findLast((batch) => batch.highWaterMark)?.highWaterMark ?? null,
+    // Every token this run gave: on the attribution migration's own entries,
+    // and by the backfill.
+    tokens: {
+      assigned: tokened() - tokenedBefore,
+      backfilled: tokenBatches.reduce((total, batch) => total + batch.assigned, 0),
+      batches: tokenBatches.filter((batch) => batch.assigned).length,
+      highWaterMark: tokenBatches.findLast((batch) => batch.highWaterMark)?.highWaterMark ?? null,
+      skipped: tokenBatches.at(-1).skipped
+    },
     complete: true
+  };
+}
+
+function dropReferencing(report, collection, items, refersToExcluded, describe) {
+  return items.filter((item) => {
+    if (!refersToExcluded(item)) return true;
+    report.excluded.push({ collection, ...describe(item), reason: 'refers to an excluded entity' });
+    return false;
+  });
+}
+
+const SCHEMA_7_FIELDS = ['claims', 'causalClaim', 'captureRef', 'outcomeEvidence', 'erasureToken'];
+
+// A schema-6 fork takes this build's own schema-7 snapshot, and nothing newer.
+function assertSchema7Source(source) {
+  if (source.schemaVersion !== 7) throw new Error(`A downgrade to schema 6 converts a schema-7 snapshot; this one is schema ${source.schemaVersion}`);
+  const newer = labelled(source).find((item) => Number.isInteger(item?.schemaVersion) && item.schemaVersion > 7);
+  if (newer) throw new Error(`A downgrade converts schema-7 data at most; this store holds schema-${newer.schemaVersion} data a newer build wrote`);
+}
+
+// A schema-6 rendering of a schema-7 snapshot (§19.3.2 steps 3-4; plan v1.4.4
+// PR-21). Pure. What schema 6 cannot represent is left out and named in the
+// report -- it is not deleted; it stays in the preservation copy:
+//   - the claim-evidence fields and the internal erasureToken, per entity;
+//   - an attempt captured with no result class, which a schema-6 reader would
+//     classify from its prose, and whatever refers to it;
+//   - the journal history, which schema-6 readers cannot replay once it holds
+//     schema-7 entries -- the copy starts from one schema-6 baseline instead.
+// Every other collection is carried: each schema-6 reader preserves them. The
+// authority collections among them are the same grants a backup already
+// holds; the report says they were carried.
+export function downgradeToSchema6(snapshot, { now = () => new Date().toISOString() } = {}) {
+  assertSchema7Source(snapshot);
+  const source = structuredClone(snapshot);
+  const report = { fromSchemaVersion: 7, toSchemaVersion: 6, removedFields: [], excluded: [], carriedCollections: [], journal: null };
+  const excludedIds = new Set();
+  const byId = new Map();
+  const convert = (entity) => {
+    if (entity.kind === 'attempt' && (entity.captureRef !== undefined || entity.outcomeEvidence !== undefined) && entity.resultClass == null) {
+      excludedIds.add(entity.id);
+      report.excluded.push({ collection: 'records', id: entity.id, kind: 'attempt', reason: 'captured with no result class: a schema-6 reader would classify it from its prose' });
+      return null;
+    }
+    const fields = SCHEMA_7_FIELDS.filter((field) => Object.hasOwn(entity, field));
+    for (const field of fields) delete entity[field];
+    if (entity.schemaVersion === 7) entity.schemaVersion = 6;
+    if (fields.length) report.removedFields.push({ id: entity.id, kind: entity.kind, fields });
+    byId.set(entity.id, entity);
+    return entity;
+  };
+  const records = (source.records ?? []).map(convert).filter(Boolean);
+  const facts = (source.facts ?? []).map(convert).filter(Boolean);
+  const drop = (...args) => dropReferencing(report, ...args);
+  const relations = drop('relations', source.relations ?? [], (item) => excludedIds.has(item.from) || excludedIds.has(item.to), (item) => ({ id: item.id }))
+    .map((item) => (item.schemaVersion === 7 ? { ...item, schemaVersion: 6 } : item));
+  const reviewSignals = drop('reviewSignals', source.reviewSignals ?? [], (item) => excludedIds.has(item.decisionId), (item) => ({ id: item.id }));
+  const idempotency = drop('idempotency', source.idempotency ?? [], (item) => excludedIds.has(item.value?.id), (item) => ({ key: item.key }))
+    .map((item) => ({ key: item.key, value: structuredClone(byId.get(item.value?.id) ?? item.value) }));
+  const events = drop('events', source.events ?? [], (item) => [item.recordId, item.factId, item.relationId].some((id) => excludedIds.has(id)), (item) => ({ id: item.id }));
+  const journal = source.journal ?? [];
+  const byType = {};
+  for (const entry of journal) byType[entry?.type ?? 'unknown'] = (byType[entry?.type ?? 'unknown'] ?? 0) + 1;
+  const seq = (Number.isSafeInteger(source.journalSeq) ? source.journalSeq : 0) + 1;
+  report.journal = { replacedEntries: journal.length, byType, baselineSeq: seq };
+  const extras = extraCollections(source);
+  report.carriedCollections = extras.map(([key]) => key);
+  return {
+    report,
+    payload: {
+      schemaVersion: 6,
+      revision: source.revision ?? 0,
+      records, facts, relations, reviewSignals, idempotency, events,
+      journal: [{
+        id: `jentry_downgrade_${seq}`, seq, type: 'projection.baseline', at: now(), project: null,
+        entityKind: null, entityId: null, schemaVersion: 6, derivedFrom: 'downgrade_from_schema_7',
+        payload: { records: structuredClone(records), facts: structuredClone(facts), relations: structuredClone(relations), idempotency: structuredClone(idempotency) },
+        provenance: { actor: null, client: null, sessionId: null }
+      }],
+      journalSeq: seq,
+      journalEpoch: seq,
+      ...Object.fromEntries(extras)
+    }
+  };
+}
+
+// 7 to 6, and on to 5 through 6, with one report.
+function downgradeTo(snapshot, toSchemaVersion, options) {
+  const six = downgradeToSchema6(snapshot, options);
+  if (toSchemaVersion === 6) return six;
+  const five = downgradeToSchema5(six.payload, options);
+  const removedFields = six.report.removedFields.map((item) => ({ ...item, fields: [...item.fields] }));
+  for (const item of five.report.removedFields) {
+    const held = removedFields.find((entry) => entry.id === item.id);
+    if (held) held.fields.push(...item.fields);
+    else removedFields.push(item);
+  }
+  return {
+    payload: five.payload,
+    report: { ...five.report, fromSchemaVersion: 7, removedFields, excluded: [...six.report.excluded, ...five.report.excluded], journal: { ...six.report.journal, baselineSeq: five.report.journal.baselineSeq } }
   };
 }
 
@@ -107,9 +232,11 @@ export async function migrateStore({ graph, store, file, storageType = 'json', b
 // This build converts only what it writes. Data a newer writer produced
 // (schema 7, read since plan v1.4.4 PR-20) is refused, never relabelled as 5;
 // so is an erasure token, which only schema 7 assigns, whatever it sits on.
+const labelled = (source) => [...(source.records ?? []), ...(source.facts ?? []), ...(source.relations ?? []),
+  ...(source.idempotency ?? []).map((item) => item?.value), ...(source.journal ?? []).flatMap((entry) => [entry, entry?.payload])];
+
 function assertSchema6Source(source) {
-  const items = [...(source.records ?? []), ...(source.facts ?? []), ...(source.relations ?? []),
-    ...(source.idempotency ?? []).map((item) => item?.value), ...(source.journal ?? []).flatMap((entry) => [entry, entry?.payload])];
+  const items = labelled(source);
   const newer = items.find((item) => Number.isInteger(item?.schemaVersion) && item.schemaVersion > 6);
   if (newer) throw new Error(`A downgrade to schema 5 converts schema-6 data only; this store holds schema-${newer.schemaVersion} data a newer build wrote`);
   if (items.some((item) => item?.erasureToken !== undefined)) throw new Error('A downgrade to schema 5 converts schema-6 data only; this store holds erasure tokens a newer build assigned');
@@ -154,11 +281,7 @@ export function downgradeToSchema5(snapshot, { now = () => new Date().toISOStrin
   };
   const records = (source.records ?? []).map(convert).filter(Boolean);
   const facts = (source.facts ?? []).map(convert).filter(Boolean);
-  const drop = (collection, items, refersToExcluded, describe) => items.filter((item) => {
-    if (!refersToExcluded(item)) return true;
-    report.excluded.push({ collection, ...describe(item), reason: 'refers to an excluded entity' });
-    return false;
-  });
+  const drop = (...args) => dropReferencing(report, ...args);
   const relations = drop('relations', source.relations ?? [], (item) => excludedIds.has(item.from) || excludedIds.has(item.to), (item) => ({ id: item.id }))
     .map((item) => (item.schemaVersion === 6 ? { ...item, schemaVersion: 5 } : item));
   const reviewSignals = drop('reviewSignals', source.reviewSignals ?? [], (item) => excludedIds.has(item.decisionId), (item) => ({ id: item.id }));
@@ -192,10 +315,11 @@ export function downgradeToSchema5(snapshot, { now = () => new Date().toISOStrin
 // §19.3.2 end to end: preservation copy first and recorded in the report
 // before any conversion runs; the downgraded store as a separate new file;
 // the current store left untouched.
-export async function downgradeStore({ graph, store, file, storageType = 'json', output, preservationCopy, now }) {
+export async function downgradeStore({ graph, store, file, storageType = 'json', output, preservationCopy, toSchemaVersion = 5, now }) {
   if (!output) throw new Error('A downgrade needs an output path');
   if (!preservationCopy) throw new Error('A preservation copy needs a destination path');
-  assertSchema6Source(privilegedSnapshot(graph));
+  if (![5, 6].includes(toSchemaVersion)) throw new Error('A downgrade targets schema 6 or schema 5');
+  assertSchema7Source(privilegedSnapshot(graph));
   const reportPath = `${output}.report.json`;
   // Four files with four jobs, told apart before anything is written: the
   // report must never land on the preservation copy it vouches for (§19.3.2
@@ -222,7 +346,7 @@ export async function downgradeStore({ graph, store, file, storageType = 'json',
   const preservation = await writePreservationCopy({ store, file, storageType, destination: preservationCopy });
   await writeFile(reportPath, `${JSON.stringify({ status: 'converting', preservationCopy: preservation }, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
   if (await exists(output)) throw new Error(`Refusing to overwrite an existing file with a downgrade: ${output}`);
-  const { payload, report } = downgradeToSchema5(privilegedSnapshot(graph), { now });
+  const { payload, report } = downgradeTo(privilegedSnapshot(graph), toSchemaVersion, { now });
   validateRestorePayload(payload);
   if (storageType === 'sqlite') {
     const target = await createStorage({ type: 'sqlite', file: output });

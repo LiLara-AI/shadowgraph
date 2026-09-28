@@ -11,6 +11,7 @@ import { createSqliteStore } from '../src/sqlite-storage.js';
 import { backupFile, restoreFile } from '../src/backup.js';
 import { privilegedRebuild, privilegedSnapshot, privilegedValidate } from '../src/internal/snapshot.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { tokenFree } from '../tools/token-free.js';
 
 // P1A correction IR-01 (F-22; plan v1.4.4 WS-11 mapping iii): a legacy entity
 // stored with no project must still be recognisable as legacy_unattributed
@@ -50,7 +51,9 @@ function legacyPayload({ defaults = 3 } = {}) {
     if (!entity || typeof entity !== 'object') return;
     delete entity.attribution;
     delete entity.originId;
-    if (entity.schemaVersion === 6) entity.schemaVersion = 5;
+    // Schema 5 predates erasure tokens (schema 7).
+    delete entity.erasureToken;
+    if (entity.schemaVersion >= 6) entity.schemaVersion = 5;
   };
   for (const entity of [...payload.records, ...payload.facts, ...payload.relations]) strip(entity);
   for (const entry of payload.journal) { entry.schemaVersion = 5; strip(entry.payload); }
@@ -111,8 +114,10 @@ function uninterrupted(defaults = 3) {
   return privilegedSnapshot(graph);
 }
 
-const canonicalEntities = (snapshot) => [...snapshot.records, ...snapshot.facts].sort((left, right) => left.id.localeCompare(right.id));
-const attributionLog = (snapshot) => attributed(snapshot).map((entry) => ({ entityId: entry.entityId, project: entry.project, payload: entry.payload }));
+// Each run gives the entities it migrates their own random erasure tokens
+// (plan rev6 §3.2), so runs are compared without them.
+const canonicalEntities = (snapshot) => tokenFree([...snapshot.records, ...snapshot.facts].sort((left, right) => left.id.localeCompare(right.id)));
+const attributionLog = (snapshot) => tokenFree(attributed(snapshot).map((entry) => ({ entityId: entry.entityId, project: entry.project, payload: entry.payload })));
 
 function assertMatchesUninterrupted(graph, snapshot, reference, defaults, label) {
   assert.deepEqual(owners(snapshot), expectedOwners(defaults), `${label}: three distinct mappings, none collapsed`);
@@ -120,6 +125,7 @@ function assertMatchesUninterrupted(graph, snapshot, reference, defaults, label)
   assert.deepEqual(attributionLog(snapshot), attributionLog(reference), `${label}: the same attribution journal as an uninterrupted run`);
   const ids = attributed(snapshot).map((entry) => entry.entityId);
   assert.equal(ids.length, new Set(ids).size, `${label}: no entity attributed twice`);
+  for (const entry of attributed(snapshot)) assert.equal(typeof entry.payload.erasureToken, 'string', `${label}: ${entry.entityId} is tokened by its migration`);
   for (const entry of attributed(snapshot)) {
     const previous = PROJECTLESS.includes(entry.entityId) ? null : entry.entityId === 'decision-alpha' ? 'alpha' : 'default';
     assert.equal(entry.payload.attributionChange.previousProject, previous, `${label}: ${entry.entityId} audit records what was stored`);

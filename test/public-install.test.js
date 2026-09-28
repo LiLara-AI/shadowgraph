@@ -47,7 +47,7 @@ test('CLI setup initializes a clean store and doctor reports actionable health',
     next: 'Run `shadowgraph doctor`, then `shadowgraph remember <JSON>`.'
   });
   const payload = JSON.parse(await readFile(file, 'utf8'));
-  assert.equal(payload.schemaVersion, 6, 'a new store is written at the schema-6 writer version');
+  assert.equal(payload.schemaVersion, 7, 'a new store is written at the schema-7 writer version');
   assert.equal(payload.revision, 1);
 
   const doctor = JSON.parse((await runCli(['doctor'], env)).stdout);

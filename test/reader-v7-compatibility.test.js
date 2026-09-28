@@ -9,6 +9,7 @@
 // schema 6.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { tokenFree } from '../tools/token-free.js';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { readdir, readFile, writeFile } from 'node:fs/promises';
@@ -20,7 +21,7 @@ import { JOURNAL_SCHEMA_VERSION, READABLE_JOURNAL_SCHEMA_VERSION, REPLAYABLE_ENT
 import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { restoreFile } from '../src/backup.js';
-import { downgradeStore, downgradeToSchema5 } from '../src/schema-conversion.js';
+import { downgradeStore, downgradeToSchema5, downgradeToSchema6 } from '../src/schema-conversion.js';
 import { validateRestorePayload } from '../src/restore-validation.js';
 import { privilegedIssueAccess, privilegedRebuild, privilegedSnapshot, privilegedValidate } from '../src/internal/snapshot.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
@@ -77,16 +78,17 @@ function v7Store(fields = V7_ATTEMPT_FIELDS) {
 }
 const attemptCopies = (payload) => [...payload.records, ...payload.idempotency.map((item) => item.value), ...payload.journal.map((entry) => entry.payload)].filter((entity) => entity?.kind === 'attempt');
 
-test('the reader reads schema 7 while the writer still writes 6', () => {
-  assert.equal(SCHEMA_VERSION, 6);
+// PR-20 read schema 7 while it wrote 6; PR-21 raised the writer to meet it.
+test('the reader reads schema 7, which the writer now writes', () => {
+  assert.equal(SCHEMA_VERSION, 7);
   assert.deepEqual(SUPPORTED_SCHEMA_VERSIONS, [1, 2, 3, 4, 5, 6, 7]);
-  assert.equal(JOURNAL_SCHEMA_VERSION, 6);
+  assert.equal(JOURNAL_SCHEMA_VERSION, 7);
   assert.equal(READABLE_JOURNAL_SCHEMA_VERSION, 7);
   assert.ok(REPLAYABLE_ENTRY_TYPES.includes('entity.token_assigned'));
   const snapshot = privilegedSnapshot(seeded());
-  assert.equal(snapshot.schemaVersion, 6);
-  assert.deepEqual([...new Set([...snapshot.records, ...snapshot.facts, ...snapshot.journal].map((item) => item.schemaVersion))], [6]);
-  assert.equal([...snapshot.records, ...snapshot.facts].some((entity) => Object.hasOwn(entity, 'erasureToken')), false, 'this build writes no token');
+  assert.equal(snapshot.schemaVersion, 7);
+  assert.deepEqual([...new Set([...snapshot.records, ...snapshot.facts, ...snapshot.journal].map((item) => item.schemaVersion))], [7]);
+  assert.equal([...snapshot.records, ...snapshot.facts].every((entity) => typeof entity.erasureToken === 'string'), true, 'every entity it writes carries a token');
 });
 
 test('a schema-7 store loads, validates, rebuilds and restores, and keeps every v7 field', () => {
@@ -375,7 +377,7 @@ test('no public read or write result returns an entity erasureToken; the privile
 // Plan rev6 §3.2: one new replayable type. It may only add a token to an entity
 // that has none, and must change nothing else.
 function withTokenAssignment(mutate = () => {}) {
-  const payload = structuredClone(privilegedSnapshot(seeded()));
+  const payload = tokenFree(privilegedSnapshot(seeded()));
   const decision = payload.records.find((record) => record.kind === 'decision' && record.project === 'alpha');
   const entry = {
     id: 'jentry_token_1', seq: payload.journalSeq + 1, type: 'entity.token_assigned', at: NOW, project: decision.project,
@@ -416,7 +418,7 @@ test('an entity.token_assigned entry must carry a decision, attempt, memory or f
 // attempt compares its whole entity, token included, so a backfilled attempt
 // that has a retry key must still load, rebuild and restore.
 test('entity.token_assigned on an attempt with a retry key moves its retry value and keeps rebuild parity', () => {
-  const payload = structuredClone(privilegedSnapshot(seeded()));
+  const payload = tokenFree(privilegedSnapshot(seeded()));
   const attempt = payload.records.find((record) => record.kind === 'attempt');
   const retry = payload.idempotency.find((item) => item.value.id === attempt.id);
   assert.ok(retry, 'the seeded attempt has a retry key');
@@ -458,54 +460,67 @@ test('entity.token_assigned is not replayed when it changes anything else, re-to
   }
 });
 
-// Readable is not writable: this build's writers restamp what they write with
-// schema 6, so they leave an entity a newer writer produced exactly as it is.
-test('a schema-7 entity is read but never attributed, reviewed or migrated as legacy by the schema-6 writer', () => {
+// Readable is not writable until the writer catches up. The writer bound moved
+// to 7 with PR-21: a schema-7 entity is attributed, reviewed and migrated like
+// any other, keeping its v7 fields and its token; a schema-8 entity is not.
+test('the writer bound follows the writer: schema 7 is attributed, reviewed and migrated; schema 8 is not', () => {
   const { payload } = v7Store();
   const beta = payload.records.find((record) => record.kind === 'decision' && record.project === 'beta');
   const legacy = { ...structuredClone(beta), id: 'decision_v7_default', project: 'default', erasureToken: 'tok_v7_default' };
   delete legacy.attribution;
-  payload.records.push(legacy);
+  payload.records.push(legacy, { ...structuredClone(beta), id: 'decision_v8', title: 'Future', schemaVersion: 8, erasureToken: 'tok_v8' });
   const graph = createShadowGraph({ now });
   graph.importData(payload);
-  const before = privilegedSnapshot(graph);
-  assert.throws(() => graph.attribute({ ids: [beta.id], targetProject: 'alpha', reason: 'x' }), /future schema this build does not write/);
-  assert.deepEqual(privilegedSnapshot(graph), before, 'a refused attribution writes nothing');
-  assert.equal(graph.legacyAttributionReview({ limit: 1000 }).items.some((item) => item.id === legacy.id), false, 'the review does not list it');
+  graph.attribute({ ids: [beta.id], targetProject: 'alpha', reason: 'x' });
+  const moved = privilegedSnapshot(graph).records.find((record) => record.id === beta.id);
+  assert.deepEqual({ project: moved.project, schemaVersion: moved.schemaVersion, erasureToken: moved.erasureToken }, { project: 'alpha', schemaVersion: 7, erasureToken: beta.erasureToken });
+  assert.equal(graph.legacyAttributionReview({ limit: 1000 }).items.some((item) => item.id === legacy.id), true, 'the review lists it');
   graph.migrateAttribution();
-  const after = privilegedSnapshot(graph).records.find((record) => record.id === legacy.id);
-  assert.equal(bytes(after), bytes(before.records.find((record) => record.id === legacy.id)), 'the migration does not touch it');
+  const migrated = privilegedSnapshot(graph).records.find((record) => record.id === legacy.id);
+  assert.deepEqual({ attribution: migrated.attribution, erasureToken: migrated.erasureToken }, { attribution: 'legacy_ambiguous', erasureToken: 'tok_v7_default' });
+  const before = privilegedSnapshot(graph);
+  assert.throws(() => graph.attribute({ ids: ['decision_v8'], targetProject: 'alpha', reason: 'x' }), /future schema this build does not write/);
+  assert.deepEqual(privilegedSnapshot(graph), before, 'a refused attribution writes nothing');
 });
 
-// §19.3.2: the schema-5 downgrade converts schema-6 data only. A store holding
-// what a newer writer produced is refused before any file is written.
-test('the schema-5 downgrade refuses a store holding schema-7 data and writes nothing', async (t) => {
+// §19.3.2: the schema-5 step converts schema-6 data only, so schema-7 data and
+// tokens reach it only through the schema-6 step. A store holding what a newer
+// writer than this one produced is refused before any file is written.
+test('the schema-5 step refuses schema-7 data and tokens; a store newer than the writer is refused before any file is written', async (t) => {
   const { payload } = v7Store();
   const graph = createShadowGraph({ now });
   graph.importData(structuredClone(payload));
   assert.throws(() => downgradeToSchema5(privilegedSnapshot(graph), { now }), /schema-6 data only; this store holds schema-7 data/);
   // A schema-7 journal entry alone, or a token alone on a schema-6 entity, is enough.
-  const journalOnly = privilegedSnapshot(seeded());
+  const six = () => downgradeToSchema6(privilegedSnapshot(seeded()), { now }).payload;
+  const journalOnly = six();
   journalOnly.journal.at(-1).schemaVersion = 7;
   assert.throws(() => downgradeToSchema5(journalOnly, { now }), /schema-6 data only; this store holds schema-7 data/);
-  const tokenOnly = privilegedSnapshot(seeded());
+  const tokenOnly = six();
   tokenOnly.records[0].erasureToken = 'tok_backfilled';
   assert.throws(() => downgradeToSchema5(tokenOnly, { now }), /schema-6 data only; this store holds erasure tokens/);
-  assert.doesNotThrow(() => downgradeToSchema5(privilegedSnapshot(seeded()), { now }), 'a schema-6 store still downgrades');
+  assert.doesNotThrow(() => downgradeToSchema5(six(), { now }), 'a schema-6 store still downgrades');
+  const future = structuredClone(payload);
+  future.records.push({ ...structuredClone(future.records[0]), id: 'decision_v8', schemaVersion: 8, erasureToken: 'tok_v8' });
+  const futureGraph = createShadowGraph({ now });
+  futureGraph.importData(structuredClone(future));
   const directory = await scratchDirectory(t, 'shadowgraph-v7-downgrade-');
   const file = join(directory, 'data.json');
-  await writeFile(file, JSON.stringify(payload, null, 2));
+  await writeFile(file, JSON.stringify(future, null, 2));
   const output = join(directory, 'downgraded.json');
   const preservationCopy = join(directory, 'preserved.json');
-  await assert.rejects(downgradeStore({ graph, store: createJsonFileStore(file), file, output, preservationCopy, now }), /schema-6 data only/);
+  await assert.rejects(downgradeStore({ graph: futureGraph, store: createJsonFileStore(file), file, output, preservationCopy, now }), /schema-8 data a newer build wrote/);
   for (const path of [output, preservationCopy, `${output}.report.json`]) assert.equal(existsSync(path), false, path);
 });
 
-// Reader first: nothing in this build writes the new type.
-test('no source module writes entity.token_assigned yet', async () => {
+// Reader first: PR-20 read the type before any module wrote it; PR-21's
+// backfill is its one writer.
+test('the token backfill is the one writer of entity.token_assigned', async () => {
   const emitters = [];
   for (const name of await readdir(src)) {
-    if (name.endsWith('.js') && /type:\s*'entity\.token_assigned'/.test(await readFile(join(src, name), 'utf8'))) emitters.push(name);
+    if (!name.endsWith('.js')) continue;
+    const matches = (await readFile(join(src, name), 'utf8')).match(/type:\s*'entity\.token_assigned'/g);
+    if (matches) emitters.push([name, matches.length]);
   }
-  assert.deepEqual(emitters, []);
+  assert.deepEqual(emitters, [['shadowgraph.js', 1]]);
 });

@@ -46,7 +46,7 @@ function graphWithObjectEvidence() {
   seed.addFact({ project: 'p', key: 'lagProfile', value: ['spike'], validFrom: '2026-01-02T00:00:00.000Z' });
   const snapshot = privilegedSnapshot(seed);
   const original = snapshot.facts[0];
-  snapshot.facts = [...snapshot.facts, { ...original, id: 'fact:contested', value: ['spike', 'extra'] }];
+  snapshot.facts = [...snapshot.facts, { ...original, id: 'fact:contested', value: ['spike', 'extra'], erasureToken: 'tok_contested' }];
   const graph = createShadowGraph();
   graph.importData(snapshot);
   return { graph, decision };
@@ -393,7 +393,7 @@ test('an expired candidate drops out of conflicting evidence rather than contest
   const snapshot = privilegedSnapshot(seed);
   const original = snapshot.facts[0];
   snapshot.facts = [...snapshot.facts, {
-    ...original, id: 'fact:expiring', value: 600,
+    ...original, id: 'fact:expiring', value: 600, erasureToken: 'tok_expiring',
     expiresAt: '2026-01-01T00:00:00.000Z',
     validityPolicy: { declaredExpiresAt: '2026-01-01T00:00:00.000Z', declaredValidTo: null, effectiveExpirationBoundary: '2026-01-01T00:00:00.000Z' }
   }];

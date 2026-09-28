@@ -52,7 +52,7 @@ function scenarioGraph() {
   const snapshot = privilegedSnapshot(graph);
   // Two equally applicable facts that disagree, as review-safety-regressions builds them.
   const lag = snapshot.facts.find((fact) => fact.key === 'lagProfile');
-  snapshot.facts.push({ ...lag, id: 'fact:contested', value: ['calm'] });
+  snapshot.facts.push({ ...lag, id: 'fact:contested', value: ['calm'], erasureToken: 'tok_contested' });
   const store = createShadowGraph({ now: () => NOW });
   store.importData(snapshot);
   store.maintain({ project: 'p' });

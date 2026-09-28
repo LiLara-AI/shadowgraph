@@ -9,7 +9,7 @@
 import { effectiveFactExpirationBoundary, factValidityPolicyIssue, isValidIsoInstant } from './fact-validity.js';
 import { isLegacyOwned } from './scope.js';
 
-export const JOURNAL_SCHEMA_VERSION = 6;
+export const JOURNAL_SCHEMA_VERSION = 7;
 // The highest entry schema this reader interprets. The reader is widened and
 // shipped before the writer is raised (plan v1.4.4 §9.2), so it may run ahead of
 // JOURNAL_SCHEMA_VERSION but never behind it.

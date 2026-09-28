@@ -136,7 +136,7 @@ test('a downgrade that fails after the preservation copy leaves the copy intact 
   const output = join(directory, 'missing-directory', 'old.json');
   await assert.rejects(() => downgradeStore({ graph, store, file, output, preservationCopy, now }));
   const copy = JSON.parse(await readFile(preservationCopy, 'utf8'));
-  assert.equal(copy.schemaVersion, 6, 'the preservation copy is a complete current-format store');
+  assert.equal(copy.schemaVersion, 7, 'the preservation copy is a complete current-format store');
   assert.equal(sha256(await readFile(file)), live);
   assert.deepEqual((await readdir(directory)).filter((name) => name.endsWith('.report.json')), [], 'no report claims a finished conversion');
 });

@@ -9,6 +9,7 @@
 // interaction, so a batch is never used as a negotiation sequence.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { tokenFree } from '../tools/token-free.js';
 import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -194,7 +195,7 @@ test('a batch of notifications alone writes nothing, yet every member still runs
   assert.equal(recorded.title, 'Batch member');
   assert.equal(recorded.chosen, 'execute');
   const persisted = JSON.parse(await readFile(rpc.file, 'utf8'));
-  assert.deepEqual(persisted.records.find(({ id }) => id === recorded.id), recorded);
+  assert.deepEqual(tokenFree(persisted.records.find(({ id }) => id === recorded.id)), recorded);
 });
 
 test('a message sent in the same chunk as a batch cannot overtake its members', async (t) => {
@@ -332,7 +333,7 @@ test('batch members are handled in order even when one of them is asynchronous',
   assert.equal(hits.length, 1);
   assert.equal(hits[0].record.id, recorded.id);
   const persisted = JSON.parse(await readFile(rpc.file, 'utf8'));
-  assert.deepEqual(persisted.records.find(({ id }) => id === recorded.id), hits[0].record);
+  assert.deepEqual(tokenFree(persisted.records.find(({ id }) => id === recorded.id)), hits[0].record);
 });
 
 test('a modern per-request member keeps its own contract inside a batch', async (t) => {

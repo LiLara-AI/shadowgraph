@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { tokenFree } from '../tools/token-free.js';
 import { createShadowGraph, SCHEMA_VERSION } from '../src/shadowgraph.js';
 import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
@@ -58,6 +59,6 @@ test('the public export is a scoped read, not the privileged snapshot', () => {
   const graph = populated();
   assert.deepEqual(graph.exportData().records, [], 'no project, no origin: nothing');
   assert.notEqual(JSON.stringify(graph.exportData({ project: 'alpha' })), JSON.stringify(privilegedSnapshot(graph)));
-  assert.deepEqual(graph.exportData({ project: 'alpha' }).records, privilegedSnapshot(graph).records);
+  assert.deepEqual(graph.exportData({ project: 'alpha' }).records, tokenFree(privilegedSnapshot(graph).records));
   assert.deepEqual(graph.exportData({ project: 'beta' }).records, []);
 });

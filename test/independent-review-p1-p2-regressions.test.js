@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { tokenFree } from '../tools/token-free.js';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { readFile } from 'node:fs/promises';
@@ -190,7 +191,7 @@ test('P1-4 independent review: real MCP maintain rejection rolls live graph back
   assert.deepEqual(bytesAfterRejection, beforeBytes, 'rejected MCP call must not alter durable bytes');
 
   const liveJournal = JSON.parse(journalResponse.result.content[0].text);
-  assert.deepEqual(liveJournal.items, before.journal, 'rejected MCP call must not alter the live journal');
+  assert.deepEqual(liveJournal.items, tokenFree(before.journal), 'rejected MCP call must not alter the live journal');
   assert.equal(Object.hasOwn(liveJournal.completeness, 'journalSeq'), false);
   assert.equal(liveJournal.items.at(-1).seq, before.journalSeq, 'the complete scoped fixture retains its last canonical sequence');
   assert.deepEqual(JSON.parse(signalsResponse.result.content[0].text).items, before.reviewSignals);

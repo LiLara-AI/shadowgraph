@@ -93,7 +93,7 @@ test('a pass resting on facts that disagree is reported as contested', () => {
   // A second, equally applicable observation of the same key that disagrees.
   const snapshot = privilegedSnapshot(graph);
   const original = snapshot.facts[0];
-  snapshot.facts = [...snapshot.facts, { ...original, id: 'fact:contested', value: '900ms' }];
+  snapshot.facts = [...snapshot.facts, { ...original, id: 'fact:contested', value: '900ms', erasureToken: 'tok_contested' }];
   const contested = createShadowGraph();
   contested.importData(snapshot);
 

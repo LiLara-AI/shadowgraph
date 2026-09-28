@@ -244,7 +244,7 @@ test('a verdict resting on facts that disagree is reported apart, and withholds 
   // Imported rather than written, because a second write of the same key
   // supersedes the first instead of contesting it.
   const snapshot = privilegedSnapshot(seed);
-  snapshot.facts = [...snapshot.facts, { ...snapshot.facts[0], id: 'fact:contested', value: '900ms' }];
+  snapshot.facts = [...snapshot.facts, { ...snapshot.facts[0], id: 'fact:contested', value: '900ms', erasureToken: 'tok_contested' }];
   const graph = createShadowGraph();
   graph.importData(snapshot);
 
@@ -270,7 +270,7 @@ test('a contested false condition is contested, not a grounded negative', () => 
   decisionWith(seed, { key: 'replicaLagMs', operator: 'greater_than', value: 500, unit: 'ms' });
   seed.addFact({ project: 'p', key: 'replicaLagMs', value: '20ms', sourceClass: 'measured', validFrom: '2026-03-01T00:00:00Z' });
   const snapshot = privilegedSnapshot(seed);
-  snapshot.facts = [...snapshot.facts, { ...snapshot.facts[0], id: 'fact:contested', value: '30ms' }];
+  snapshot.facts = [...snapshot.facts, { ...snapshot.facts[0], id: 'fact:contested', value: '30ms', erasureToken: 'tok_contested' }];
   const graph = createShadowGraph();
   graph.importData(snapshot);
 

@@ -254,7 +254,7 @@ async function runOneShot() {
       const preservationCopy = value.preservationCopy ?? `${file}.preservation-${Date.now()}${storageType === 'sqlite' ? '.db' : '.json'}`;
       result = command === 'migrate'
         ? await migrateStore({ graph, store, file, storageType, batchSize: value.batchSize, preservationCopy })
-        : await downgradeStore({ graph, store, file, storageType, output: value.output, preservationCopy });
+        : await downgradeStore({ graph, store, file, storageType, output: value.output, preservationCopy, toSchemaVersion: value.toSchemaVersion });
     }
     else if (command === 'decision') { result = graph.addDecision(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'attempt') { result = graph.addAttempt(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }

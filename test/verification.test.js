@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { tokenFree } from '../tools/token-free.js';
 import { generateKeyPairSync } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { writeFile } from 'node:fs/promises';
@@ -163,7 +164,7 @@ test('U-1: signed verification survives export/import, journal rebuild, and JSON
   assert.equal(rebuilt.rebuildable, true);
   const fromJournal = createShadowGraph({ verifier });
   fromJournal.importData({ ...rebuilt.projection, schemaVersion: privilegedSnapshot(graph).schemaVersion });
-  assert.deepEqual(privilegedSnapshot(fromJournal).facts.find((item) => item.id === fact.id), original);
+  assert.deepEqual(privilegedSnapshot(fromJournal).facts.find((item) => item.id === fact.id), tokenFree(original));
 
   const store = createJsonFileStore(join(directory, 'data.json'));
   await store.save(privilegedSnapshot(graph));

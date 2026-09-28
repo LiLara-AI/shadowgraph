@@ -8,7 +8,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { privilegedRebuild, privilegedSnapshot, privilegedValidate } from '../src/internal/snapshot.js';
-import { downgradeToSchema5 } from '../src/schema-conversion.js';
+import { downgradeToSchema5, downgradeToSchema6 } from '../src/schema-conversion.js';
 import { validateRestorePayload } from '../src/restore-validation.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
@@ -51,7 +51,9 @@ function legacyPayload({ projectlessRetry = false } = {}) {
     if (!entity || typeof entity !== 'object') return;
     delete entity.attribution;
     delete entity.originId;
-    if (entity.schemaVersion === 6) entity.schemaVersion = 5;
+    // Schema 5 predates erasure tokens (schema 7).
+    delete entity.erasureToken;
+    if (entity.schemaVersion >= 6) entity.schemaVersion = 5;
   };
   for (const entity of [...payload.records, ...payload.facts, ...payload.relations]) strip(entity);
   for (const item of payload.idempotency) strip(item.value);
@@ -232,7 +234,7 @@ test('a downgrade leaves out, and names, the real "default" memories and facts t
   const fact = graph.addFact({ project: 'default', key: 'same-key', value: 'real default' });
   const attempt = graph.addAttempt({ project: 'default', solution: 'Real default', result: 'r', idempotencyKey: 'retry-attempt-legacy' });
   const untwinned = graph.remember({ project: 'default', memoryType: 'note', key: 'only-real-default', text: 'No legacy twin' }).memory;
-  const { payload, report } = downgradeToSchema5(privilegedSnapshot(graph), { now });
+  const { payload, report } = downgradeToSchema5(downgradeToSchema6(privilegedSnapshot(graph), { now }).payload, { now });
   assert.deepEqual(report.excluded.filter((item) => item.project === 'default').map((item) => item.id).sort(), [memory.id, fact.id].sort());
   const kept = new Set([...payload.records, ...payload.facts].map((item) => item.id));
   for (const id of ['memory-legacy', 'fact-legacy', 'memory-alpha', 'fact-alpha', attempt.id, untwinned.id]) assert.ok(kept.has(id), id);

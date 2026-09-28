@@ -1,6 +1,7 @@
 const fixtureIds = {};
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { tokenFree } from '../tools/token-free.js';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { readFile, readdir, writeFile } from 'node:fs/promises';
@@ -506,7 +507,7 @@ for (const backend of ['json', 'sqlite']) {
     assert.equal(live.revision, 3);
     assert.equal(durable.revision, 3);
     assert.deepEqual(live, durable);
-    assert.deepEqual(exported.records, durable.records);
+    assert.deepEqual(exported.records, tokenFree(durable.records));
     assert.deepEqual(semanticSnapshot(durable), semanticSnapshot(scenario.sourcePayload));
 
     const writeResponse = await fetch(`${base}/decisions`, {
@@ -561,7 +562,7 @@ for (const backend of ['json', 'sqlite']) {
     assert.equal(Object.hasOwn(live, 'revision'), false, 'redaction is a scoped read, not a global revision cursor');
     assert.equal(durable.revision, 3);
     // Every record, fact and relation of the restored store is ds-p1-004's.
-    for (const collection of ['records', 'facts', 'relations']) assert.deepEqual(live[collection], durable[collection], collection);
+    for (const collection of ['records', 'facts', 'relations']) assert.deepEqual(live[collection], tokenFree(durable[collection]), collection);
     assert.deepEqual(semanticSnapshot(durable), semanticSnapshot(scenario.sourcePayload));
 
     const written = await rpc.call({

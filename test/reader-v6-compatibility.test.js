@@ -57,7 +57,9 @@ function asSchema5(payload) {
     if (!entity || typeof entity !== 'object') return;
     delete entity.attribution;
     delete entity.originId;
-    if (entity.schemaVersion === 6) entity.schemaVersion = 5;
+    // Schema 5 predates erasure tokens (schema 7).
+    delete entity.erasureToken;
+    if (entity.schemaVersion >= 6) entity.schemaVersion = 5;
   };
   for (const entity of [...v5.records, ...v5.facts, ...v5.relations]) strip(entity);
   for (const item of v5.idempotency) strip(item.value);
@@ -114,16 +116,16 @@ function v6Store(options) {
 }
 
 test('the writer writes only what the reader already reads, on every versioned axis', () => {
-  // PR-20 widened the reader to 7 while the writer still writes 6.
-  assert.equal(SCHEMA_VERSION, 6);
+  // PR-20 widened the reader to 7 before PR-21 raised the writer to it.
+  assert.equal(SCHEMA_VERSION, 7);
   assert.deepEqual(SUPPORTED_SCHEMA_VERSIONS, [1, 2, 3, 4, 5, 6, 7]);
-  assert.equal(JOURNAL_SCHEMA_VERSION, 6);
+  assert.equal(JOURNAL_SCHEMA_VERSION, 7);
   assert.equal(READABLE_JOURNAL_SCHEMA_VERSION, 7);
   assert.ok(JOURNAL_SCHEMA_VERSION <= READABLE_JOURNAL_SCHEMA_VERSION && SUPPORTED_SCHEMA_VERSIONS.includes(SCHEMA_VERSION));
   const graph = seeded();
   const snapshot = privilegedSnapshot(graph);
-  assert.equal(snapshot.schemaVersion, 6);
-  assert.deepEqual([...new Set([...snapshot.records, ...snapshot.facts, ...snapshot.journal].map((item) => item.schemaVersion))], [6]);
+  assert.equal(snapshot.schemaVersion, 7);
+  assert.deepEqual([...new Set([...snapshot.records, ...snapshot.facts, ...snapshot.journal].map((item) => item.schemaVersion))], [7]);
   assert.equal([...snapshot.records, ...snapshot.facts].every((entity) => entity.attribution === 'project'), true);
 });
 
@@ -164,7 +166,10 @@ test('an unattributed entity never shares an owner with a project or with anothe
   const base = privilegedSnapshot(seeded());
   const fact = base.facts[0];
   const memory = base.records.find((record) => record.kind === 'memory' && record.project === 'alpha');
-  const owned = (entity, id, owner) => ({ ...structuredClone(entity), id, schemaVersion: 6, ...owner });
+  const owned = (entity, id, owner) => {
+    const { erasureToken, ...copy } = structuredClone(entity);
+    return { ...copy, id, schemaVersion: 6, ...owner };
+  };
   graph.importData({
     schemaVersion: 6,
     facts: [

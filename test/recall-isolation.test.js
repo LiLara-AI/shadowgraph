@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { tokenFree } from '../tools/token-free.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { seedGraph, measureCoverage } from '../scripts/context-size.mjs';
 import { privilegedSnapshot } from '../src/internal/snapshot.js';
@@ -66,7 +67,7 @@ test('ranking over live entities did not change what recall returns', () => {
   assert.equal(result.ranking.strategy, 'weighted_rrf');
   // A returned record is a full record, not a projection.
   const stored = privilegedSnapshot(graph).records.find((item) => item.id === result.items[0].record.id);
-  assert.deepEqual(result.items[0].record, stored, 'items are full fidelity');
+  assert.deepEqual(result.items[0].record, tokenFree(stored), 'items are full fidelity');
 });
 
 test('recall still refuses to cross a project boundary', () => {

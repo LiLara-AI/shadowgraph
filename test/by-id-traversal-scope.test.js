@@ -35,7 +35,9 @@ function legacyPayload() {
     if (!entity || typeof entity !== 'object') return;
     delete entity.attribution;
     delete entity.originId;
-    if (entity.schemaVersion === 6) entity.schemaVersion = 5;
+    // Schema 5 predates erasure tokens (schema 7).
+    delete entity.erasureToken;
+    if (entity.schemaVersion >= 6) entity.schemaVersion = 5;
   };
   for (const entity of payload.records) strip(entity);
   for (const entry of payload.journal) { entry.schemaVersion = 5; strip(entry.payload); }

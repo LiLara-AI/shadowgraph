@@ -2,6 +2,7 @@
 
 ## Unreleased — scope coverage
 
+- Stores are written at schema 7. Every decision, attempt, memory and fact carries an internal `erasureToken`, which no public result returns; `migrate` backfills it for older records, and `downgrade {"toSchemaVersion": 6}` forks a schema-6 copy. A store this build has saved needs a build that reads schema 7; to go further back, fork a copy with `downgrade`.
 - Breaking: the default read `context()` (MCP `shadowgraph_context`, the `shadowgraph://context` resource, CLI `context`, HTTP `POST /context`) names its collections for what they hold. `failedAttemptsToAvoid` is `failedAttempts`, `openReviews` is `firedConditions`, and an entry's `alternativesToReconsider` is `affectedAlternatives`; the `completeness.collections` keys follow. The generated `suggestedQuestions` is replaced by `belowConfidenceThreshold`, one `{ decisionId, title, status, confidence, threshold }` per decision whose recorded confidence is below 0.5, whatever its status. Every record is kept. `reviewContext()` (`shadowgraph_review_context`, `review-context`, `POST /review-context`) keeps the original keys, including `suggestedQuestions`. The MCP server instructions and prompt now state what ShadowGraph holds rather than when to call it.
 - Breaking: `context()` is a read and persists no review signal; `reviewContext()` evaluates and persists, as `context()` used to. The read carries a declared `notice` naming the replacement.
 

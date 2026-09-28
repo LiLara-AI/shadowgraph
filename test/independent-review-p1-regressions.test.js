@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { tokenFree } from '../tools/token-free.js';
 import { generateKeyPairSync } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -166,14 +167,14 @@ async function assertMcpRestorePreflightIsAtomic(t, backend) {
     jsonrpc: '2.0', id: 3, method: 'tools/call',
     params: { name: 'shadowgraph_search', arguments: { project: 'live', query: 'KEEP ORIGINAL', limit: 10 } }
   }));
-  assert.deepEqual(live, originalSemantic.records, 'live projection must remain the original state');
+  assert.deepEqual(live, tokenFree(originalSemantic.records), 'live projection must remain the original state');
 
   await rpc.stop();
   const reopenedStore = backend === 'sqlite' ? await createSqliteStore(destination) : createJsonFileStore(destination);
   try {
     const reopened = await reopenedStore.load();
     assert.deepEqual(reopened, originalSemantic, 'fresh reopen must preserve the original semantic state');
-    assert.deepEqual(live, reopened.records, 'live and freshly reopened durable projections must match');
+    assert.deepEqual(live, tokenFree(reopened.records), 'live and freshly reopened durable projections must match');
   } finally {
     reopenedStore.close();
   }

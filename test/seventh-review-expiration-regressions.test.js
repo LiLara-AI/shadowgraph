@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { tokenFree } from '../tools/token-free.js';
 import { generateKeyPairSync } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -292,7 +293,7 @@ test('DS-P1-005 seventh review: expired attestation survives import, rebuild, ve
   assert.equal(report.projection.facts.find((fact) => fact.id === fixture.fact.id).status, 'expired');
   const rebuilt = createShadowGraph({ verifier: fixture.verifier });
   rebuilt.importData(report.projection);
-  assert.deepEqual(factById(rebuilt, fixture.fact.id), terminal);
+  assert.deepEqual(factById(rebuilt, fixture.fact.id), tokenFree(terminal));
 
   const jsonFile = join(fixture.directory, 'restart.json');
   const jsonStore = createJsonFileStore(jsonFile);

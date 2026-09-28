@@ -12,7 +12,7 @@ import { createShadowGraphServer } from '../src/server.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { validateRestorePayload } from '../src/restore-validation.js';
-import { downgradeStore, downgradeToSchema5 } from '../src/schema-conversion.js';
+import { downgradeStore, downgradeToSchema5, downgradeToSchema6 } from '../src/schema-conversion.js';
 import { privilegedRebuild, privilegedSnapshot, privilegedValidate } from '../src/internal/snapshot.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
@@ -42,21 +42,22 @@ const WRITES = {
 };
 const recordOf = (method, result) => (method === 'remember' ? result.memory : method === 'applyMemoryPlan' ? result.results[0].memory : result);
 
-test('the writer writes schema 6 and says whose each record is', () => {
-  assert.equal(SCHEMA_VERSION, 6);
+// Attribution arrived with schema 6; PR-21 raised the writer to 7 around it.
+test('the writer says whose each record is', () => {
+  assert.equal(SCHEMA_VERSION, 7);
   const graph = createShadowGraph({ now });
   for (const [method, input] of Object.entries(WRITES)) {
     const record = recordOf(method, graph[method]({ ...input, project: 'alpha' }));
-    assert.deepEqual({ schemaVersion: record.schemaVersion, project: record.project, attribution: record.attribution, originId: record.originId }, { schemaVersion: 6, project: 'alpha', attribution: 'project', originId: undefined }, method);
+    assert.deepEqual({ schemaVersion: record.schemaVersion, project: record.project, attribution: record.attribution, originId: record.originId }, { schemaVersion: 7, project: 'alpha', attribution: 'project', originId: undefined }, method);
   }
   // "default" is an ordinary project name (OD-1): a new write to it is a real project.
   assert.equal(graph.addDecision({ project: 'default', title: 'Explicit', chosen: 'x' }).attribution, 'project');
   // An origin given alongside a project is kept as provenance.
   assert.equal(graph.addDecision({ project: 'alpha', originId: 'origin_a', title: 'With origin', chosen: 'x' }).originId, 'origin_a');
   const snapshot = privilegedSnapshot(graph);
-  assert.equal(snapshot.schemaVersion, 6);
-  assert.deepEqual([...new Set(snapshot.journal.map((entry) => entry.schemaVersion))], [6]);
-  assert.equal(graph.stats().schemaVersion, 6);
+  assert.equal(snapshot.schemaVersion, 7);
+  assert.deepEqual([...new Set(snapshot.journal.map((entry) => entry.schemaVersion))], [7]);
+  assert.equal(graph.stats().schemaVersion, 7);
   assert.equal(graph.validate().valid, true);
 });
 
@@ -148,7 +149,9 @@ function legacyStore() {
     if (!entity || typeof entity !== 'object') return;
     delete entity.attribution;
     delete entity.originId;
-    if (entity.schemaVersion === 6) entity.schemaVersion = 5;
+    // Schema 5 predates erasure tokens (schema 7).
+    delete entity.erasureToken;
+    if (entity.schemaVersion >= 6) entity.schemaVersion = 5;
   };
   for (const entity of [...payload.records, ...payload.facts, ...payload.relations]) strip(entity);
   for (const item of payload.idempotency) strip(item.value);
@@ -185,7 +188,8 @@ test('the attribution migration maps legacy records by OD-1, journals each chang
   assert.deepEqual(result.attributions, { project: 2, legacy_ambiguous: 5, legacy_unattributed: 1 });
   const after = privilegedSnapshot(graph);
   assert.deepEqual(owners(after), EXPECTED, 'no project is rewritten or inferred; "default" becomes legacy_ambiguous');
-  assert.deepEqual([...new Set([...after.records, ...after.facts].map((entity) => entity.schemaVersion))], [6]);
+  // The migration writes at the writer's schema, 7 since PR-21.
+  assert.deepEqual([...new Set([...after.records, ...after.facts].map((entity) => entity.schemaVersion))], [7]);
   const entries = after.journal.filter((entry) => entry.type === 'entity.attributed');
   assert.equal(entries.length, 8);
   assert.ok(entries.every((entry) => entry.payload.attributionChange.reason === 'migration' && entry.payload.attributionChange.previousAttribution === null));
@@ -290,7 +294,7 @@ test('the CLI migrates in batches after writing a verified preservation copy, an
   assert.equal(report.preservationCopy.sha256, sha256(await readFile(copy)));
   assert.equal(sha256(await readFile(copy)), sha256(original), 'the copy is the pre-migration store, byte for byte');
   const migrated = JSON.parse(await readFile(file, 'utf8'));
-  assert.equal(migrated.schemaVersion, 6);
+  assert.equal(migrated.schemaVersion, 7);
   assert.deepEqual(owners(migrated), EXPECTED);
   const rerun = runCli(['migrate', JSON.stringify({ preservationCopy: join(directory, 'preserved-2.json') })], file);
   assert.equal(rerun.status, 0, rerun.stderr);
@@ -312,14 +316,16 @@ function currentStore() {
 
 test('downgradeToSchema5 keeps what schema 5 can hold and names everything it cannot', () => {
   const { payload, captured, attempt, beta } = currentStore();
-  const { payload: v5, report } = downgradeToSchema5(payload, { now });
+  // The schema-6 step replaces the history; the schema-5 step then starts from its one baseline.
+  const six = downgradeToSchema6(payload, { now });
+  const { payload: v5, report } = downgradeToSchema5(six.payload, { now });
   assert.equal(v5.schemaVersion, 5);
   assert.equal([...v5.records, ...v5.facts].some((entity) => Object.hasOwn(entity, 'attribution') || Object.hasOwn(entity, 'originId') || entity.schemaVersion === 6), false);
   assert.deepEqual(report.excluded.filter((item) => item.collection === 'records').map((item) => item.id).sort(), [attempt.id, captured.id].sort());
   assert.ok(report.excluded.some((item) => item.collection === 'relations'));
   assert.deepEqual(report.excludedCollections, ['futureCollection']);
   assert.ok(report.removedFields.some((item) => item.id === beta.id && item.fields.includes('originId')));
-  assert.equal(report.journal.replacedEntries, payload.journal.length);
+  assert.equal(six.report.journal.replacedEntries, payload.journal.length);
   assert.equal(v5.journal.length, 1);
   assert.equal(v5.journal[0].type, 'projection.baseline');
   assert.doesNotThrow(() => validateRestorePayload(v5, { now }));

@@ -47,7 +47,9 @@ function legacyPayload() {
     if (!entity || typeof entity !== 'object') return;
     delete entity.attribution;
     delete entity.originId;
-    if (entity.schemaVersion === 6) entity.schemaVersion = 5;
+    // Schema 5 predates erasure tokens (schema 7).
+    delete entity.erasureToken;
+    if (entity.schemaVersion >= 6) entity.schemaVersion = 5;
   };
   for (const entity of payload.records) strip(entity);
   for (const entry of payload.journal) { entry.schemaVersion = 5; strip(entry.payload); }
@@ -220,7 +222,7 @@ test('stats counts only what the scope owns', () => {
   const graph = fixture();
   const zero = { total: 0, decisions: 0, attempts: 0, facts: 0, relations: 0, reviewSignals: 0, events: 0, journal: 0 };
   const { schemaVersion, completeness, ...unresolved } = graph.stats();
-  assert.equal(schemaVersion, 6);
+  assert.equal(schemaVersion, 7);
   assert.deepEqual(unresolved, zero);
   const counts = (scope) => { const { schemaVersion: version, completeness, ...rest } = graph.stats(scope); return rest; };
   const journalOf = (scope) => graph.getJournal({ ...scope, limit: 1000 }).page.total;
