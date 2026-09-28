@@ -290,6 +290,11 @@ acknowledge one, and the only path to an id was `shadowgraph_maintain` — which
 and expires facts, making it a maintenance write rather than a listing route. Listing reuses
 `shadowgraph_context`; no tool was invented.
 
+Since plan v1.4.4 PR-16 (15 compact tools), `shadowgraph_context` is the default-path read: it
+reports the id of a signal that already exists and persists none. The evaluate-and-persist
+behaviour it used to have — raising a signal, and so producing the id the acknowledgement tool
+needs — is `shadowgraph_review_context`.
+
 **Durability, stated precisely.** An acknowledgement survives a normal **process restart**, because
 review signals are part of the persisted payload. It is **not** reconstructed by `rebuild()`:
 signals are not journalled, so a projection rebuilt from the journal alone does not carry

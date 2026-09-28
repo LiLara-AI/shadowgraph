@@ -212,14 +212,14 @@ Markdown `pull` writes `sourceClass: tool_observed` and `client: markdown-sync`.
 
 HTTP accepts caller-supplied vectors but does not make network calls to an embedding provider.
 
-CLI, HTTP, MCP tools, and the MCP context resource persist review signals created by `context()`. HTTP and MCP mutators reload the last readable durable snapshot after an ordinary save failure (or restore the pre-mutation snapshot when storage is unreadable), so an unpersisted mutation cannot remain live and be committed by a later request.
+CLI, HTTP and MCP persist review signals created by `reviewContext()` (`review-context`, `POST /review-context`, `shadowgraph_review_context`); `context()` and the MCP context resource are reads and persist nothing. HTTP and MCP mutators reload the last readable durable snapshot after an ordinary save failure (or restore the pre-mutation snapshot when storage is unreadable), so an unpersisted mutation cannot remain live and be committed by a later request.
 
 ### MCP
 
 - `shadowgraph_remember`
 - `shadowgraph_recall`
 
-Compact mode includes both workflows and remains exactly 14 tools. The server negotiates MCP `2024-11-05`, `2025-03-26`, `2025-06-18`, or `2025-11-25` through `initialize`, answering `2025-11-25` for any other request, and serves modern `2026-07-28` through per-request metadata and `server/discover`.
+Compact mode includes both workflows and remains exactly 15 tools. The server negotiates MCP `2024-11-05`, `2025-03-26`, `2025-06-18`, or `2025-11-25` through `initialize`, answering `2025-11-25` for any other request, and serves modern `2026-07-28` through per-request metadata and `server/discover`.
 
 ## Persistence and purge
 
@@ -244,7 +244,7 @@ Logical and hard project purge cover memory records, current-memory indexes, ide
 - Unicode Markdown push/pull and conflict refusal;
 - logical purge non-resurrection;
 - JSON/SQLite restart parity, journal rebuild, and journal-bearing schema-3 restore migration;
-- CLI, HTTP, full MCP, and compact MCP workflows, context-signal persistence, and ordinary-save rollback.
+- CLI, HTTP, full MCP, and compact MCP workflows, context as a read, review-context signal persistence, and ordinary-save rollback.
 
 ### Not measured
 

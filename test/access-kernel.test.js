@@ -53,7 +53,7 @@ test('an origin-only grant read remains project-unresolved and describes the act
   assert.match(result.completeness.limitation.detail, /explicit wider/i);
 });
 
-for (const method of ['search', 'retrieve', 'recall', 'context', 'review', 'reconsider', 'exportData', 'redact', 'stats', 'getJournal', 'rebuild', 'validate', 'getReviewSignals']) {
+for (const method of ['search', 'retrieve', 'recall', 'context', 'reviewContext', 'review', 'reconsider', 'exportData', 'redact', 'stats', 'getJournal', 'rebuild', 'validate', 'getReviewSignals']) {
   test(`grant current-state lookup reaches ${method} while preserving foreign canonical state`, () => {
     const { graph, ids } = fixture(); const grant = issue(graph);
     const options = { project: 'alpha', accessId: grant.accessId, surface: 'cli', limit: 100 };
@@ -61,7 +61,7 @@ for (const method of ['search', 'retrieve', 'recall', 'context', 'review', 'reco
     const call = () => ['search', 'retrieve', 'recall'].includes(method) ? graph[method]('comparison', options) : graph[method](options);
     const result = call();
     assert.equal(result.completeness.scope.grant.accessId, grant.accessId);
-    if (['search', 'retrieve', 'recall', 'context', 'exportData'].includes(method)) assert.match(JSON.stringify(result), /beta/);
+    if (['search', 'retrieve', 'recall', 'context', 'reviewContext', 'exportData'].includes(method)) assert.match(JSON.stringify(result), /beta/);
     assert.doesNotMatch(JSON.stringify(result), /gamma comparison/);
     const after = privilegedSnapshot(graph);
     for (const key of ['records', 'facts', 'relations']) assert.deepEqual(after[key], before[key], key);
@@ -180,10 +180,19 @@ for (const mode of ['logical', 'hard']) test(`purge ${mode} retains authority wi
 });
 
 test('wider fact evaluation cannot persist an own decision signal from foreign evidence', () => {
-  for (const method of ['review', 'reconsider', 'context', 'maintain']) {
+  // The rule lives on an alternative with a supported operator, so it can fire:
+  // own evidence persists a signal through the persisting context operation.
+  const latencyGraph = (factProject) => {
     const graph = createShadowGraph({ now: () => NOW });
-    graph.addDecision({ project: 'alpha', title: 'check latency', chosen: 'x', reopenWhen: [{ key: 'latency', operator: 'gt', value: 10 }] });
-    graph.addFact({ project: 'beta', key: 'latency', value: 30, observedAt: NOW });
+    graph.addDecision({ project: 'alpha', title: 'check latency', chosen: 'x', alternatives: [{ label: 'y', reasonRejected: 'slow', reopenWhen: [{ key: 'latency', operator: 'greater_than', value: 10 }] }] });
+    graph.addFact({ project: factProject, key: 'latency', value: 30, observedAt: NOW });
+    return graph;
+  };
+  const control = latencyGraph('alpha');
+  control.reviewContext({ project: 'alpha' });
+  assert.equal(privilegedSnapshot(control).reviewSignals.length, 1, 'the fixture raises a signal from own evidence');
+  for (const method of ['review', 'reconsider', 'context', 'reviewContext', 'maintain']) {
+    const graph = latencyGraph('beta');
     const grant = issue(graph);
     graph[method]({ project: 'alpha', accessId: grant.accessId });
     assert.deepEqual(privilegedSnapshot(graph).reviewSignals, [], method);

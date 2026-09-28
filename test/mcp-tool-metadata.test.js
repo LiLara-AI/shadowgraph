@@ -32,6 +32,7 @@ const FULL_TOOL_NAMES = [
   'shadowgraph_review',
   'shadowgraph_search',
   'shadowgraph_context',
+  'shadowgraph_review_context',
   'shadowgraph_remember',
   'shadowgraph_recall',
   'shadowgraph_record_fact',
@@ -67,6 +68,9 @@ const COMPACT_EXPECTED = [
   'shadowgraph_review',
   'shadowgraph_search',
   'shadowgraph_context',
+  // Plan v1.4.4 PR-16: shadowgraph_context became the default-path read, and the
+  // evaluate-and-persist behaviour a compact client relied on moved here.
+  'shadowgraph_review_context',
   'shadowgraph_remember',
   'shadowgraph_recall',
   'shadowgraph_record_fact',
@@ -88,7 +92,6 @@ const PERSISTING_EXPECTED = [
   'shadowgraph_backup',
   'shadowgraph_bind',
   'shadowgraph_confidence_evidence',
-  'shadowgraph_context',
   'shadowgraph_discard_access',
   'shadowgraph_link',
   'shadowgraph_maintain',
@@ -101,6 +104,7 @@ const PERSISTING_EXPECTED = [
   'shadowgraph_remember',
   'shadowgraph_request_wider_access',
   'shadowgraph_review',
+  'shadowgraph_review_context',
   'shadowgraph_revoke_grant',
   'shadowgraph_supersede',
   'shadowgraph_update_status',
@@ -122,6 +126,7 @@ const ANNOTATIONS_EXPECTED = {
   shadowgraph_review: [false, false, false, false],
   shadowgraph_search: [false, false, false, false],
   shadowgraph_context: [false, false, false, false],
+  shadowgraph_review_context: [false, false, false, false],
   shadowgraph_remember: [false, false, false, false],
   shadowgraph_recall: [false, false, false, false],
   shadowgraph_record_fact: [false, false, false, false],
@@ -161,7 +166,8 @@ const ROUTING_EXPECTED = {
   shadowgraph_search: ['shadowgraph_retrieve', 'shadowgraph_recall', 'shadowgraph_context', 'shadowgraph_traverse'],
   shadowgraph_retrieve: ['shadowgraph_search', 'shadowgraph_recall', 'shadowgraph_traverse', 'shadowgraph_context'],
   shadowgraph_recall: ['shadowgraph_search', 'shadowgraph_retrieve', 'shadowgraph_remember'],
-  shadowgraph_context: ['shadowgraph_search', 'shadowgraph_retrieve', 'shadowgraph_recall', 'shadowgraph_review'],
+  shadowgraph_context: ['shadowgraph_search', 'shadowgraph_retrieve', 'shadowgraph_recall', 'shadowgraph_review_context'],
+  shadowgraph_review_context: ['shadowgraph_context', 'shadowgraph_review'],
   shadowgraph_traverse: ['shadowgraph_search', 'shadowgraph_recall', 'shadowgraph_retrieve'],
   shadowgraph_review: ['shadowgraph_review_signals', 'shadowgraph_ack_review', 'shadowgraph_maintain'],
   shadowgraph_reconsider: ['shadowgraph_review', 'shadowgraph_ack_review'],
@@ -201,6 +207,7 @@ const INPUT_CONSTRAINTS_EXPECTED = {
   shadowgraph_review: { required: null, enums: {} },
   shadowgraph_search: { required: null, enums: { kind: ['decision', 'attempt'] } },
   shadowgraph_context: { required: null, enums: {} },
+  shadowgraph_review_context: { required: null, enums: {} },
   shadowgraph_remember: { required: null, enums: {} },
   shadowgraph_recall: { required: null, enums: {} },
   shadowgraph_record_fact: { required: ['key'], enums: { verificationStatus: ['unverified', 'contradicted'] } },
@@ -299,25 +306,25 @@ function walkNodes(node, visit, path = 'schema', depth = 0) {
 
 test('the catalog advertises exactly the documented full, compact, and verifier inventories', () => {
   assert.deepEqual(fullCatalog.map((entry) => entry.name), FULL_TOOL_NAMES);
-  assert.equal(fullCatalog.length, 33);
+  assert.equal(fullCatalog.length, 34);
   assert.deepEqual(verifierCatalog.map((entry) => entry.name), [...FULL_TOOL_NAMES, 'shadowgraph_verify_fact']);
-  assert.equal(verifierCatalog.length, 34);
+  assert.equal(verifierCatalog.length, 35);
 
   const compact = selectTools(fullCatalog, { compact: true });
   assert.deepEqual(compact.map((entry) => entry.name), COMPACT_EXPECTED);
-  assert.equal(compact.length, 14);
+  assert.equal(compact.length, 15);
   assert.deepEqual([...COMPACT_TOOL_NAMES], COMPACT_EXPECTED);
 
   // The optional verification tool is a full-mode capability only.
   const compactWithVerifier = selectTools(verifierCatalog, { compact: true });
   assert.deepEqual(compactWithVerifier.map((entry) => entry.name), COMPACT_EXPECTED);
 
-  assert.equal(new Set(verifierCatalog.map((entry) => entry.name)).size, 34);
+  assert.equal(new Set(verifierCatalog.map((entry) => entry.name)).size, 35);
   for (const entry of verifierCatalog) assert.match(entry.name, /^shadowgraph_[a-z_]+$/u);
 });
 
 test('every tool carries the four behavioural annotations its handler actually justifies', () => {
-  assert.equal(Object.keys(ANNOTATIONS_EXPECTED).length, 34);
+  assert.equal(Object.keys(ANNOTATIONS_EXPECTED).length, 35);
   for (const entry of verifierCatalog) {
     const expected = ANNOTATIONS_EXPECTED[entry.name];
     assert.ok(expected, `${entry.name} has no expected annotation row`);
@@ -335,7 +342,7 @@ test('persistence is declared for ordinary writes and conditional grant audit wr
   const persisting = verifierCatalog.filter((entry) => entry.persists).map((entry) => entry.name).sort();
   assert.deepEqual(persisting, PERSISTING_EXPECTED);
   assert.equal(persisting.length, 22);
-  const grantReads = ['shadowgraph_context', 'shadowgraph_journal', 'shadowgraph_maintain', 'shadowgraph_rebuild', 'shadowgraph_recall', 'shadowgraph_reconsider', 'shadowgraph_redact', 'shadowgraph_repair_plan', 'shadowgraph_retrieve', 'shadowgraph_review', 'shadowgraph_review_signals', 'shadowgraph_search', 'shadowgraph_traverse', 'shadowgraph_validate'];
+  const grantReads = ['shadowgraph_context', 'shadowgraph_journal', 'shadowgraph_maintain', 'shadowgraph_rebuild', 'shadowgraph_recall', 'shadowgraph_reconsider', 'shadowgraph_redact', 'shadowgraph_repair_plan', 'shadowgraph_retrieve', 'shadowgraph_review', 'shadowgraph_review_context', 'shadowgraph_review_signals', 'shadowgraph_search', 'shadowgraph_traverse', 'shadowgraph_validate'];
   assert.deepEqual(verifierCatalog.filter((entry) => entry.persistsWithAccess).map((entry) => entry.name).sort(), grantReads);
   for (const entry of verifierCatalog) {
     // shadowgraph_restore writes, but its storage backend commits the
@@ -387,9 +394,16 @@ const DESCRIPTION_CAP = 350;
 // description, itself under the per-description cap. `full` (8,861) and
 // `verifier` (9,210) both grew by the same 346 and still sit under their
 // existing budgets, so neither was moved.
+//
+// Raised again on 2026-09-28 for plan v1.4.4 PR-16, which split the default-path
+// read (shadowgraph_context) from explicit evaluate-and-persist
+// (shadowgraph_review_context, the 34th full and 15th compact tool). Measured with
+// `npm run size:mcp`: full 9,267, verifier 9,616, compact 4,186 characters. The
+// growth is the new tool's own description plus context's rewritten effects text;
+// compact still sits under its existing budget, so it was not moved.
 const DESCRIPTION_TOTALS = {
-  full: 9100,
-  verifier: 9400,
+  full: 9500,
+  verifier: 9850,
   compact: 4750
 };
 // A tool whose result a caller could destroy something with has to say so in
@@ -503,10 +517,17 @@ const WIRE_BUDGETS = {
   // contracts. Measured bare/annotated/structured: full 54921/58409/239685,
   // verifier full 56069/59662/244232, compact 34848/36331/151693.
   // Retain ~2% headroom where needed; compact structured ceiling is unchanged.
-  'withoutVerifier.full': { bare: 56_100, annotated: 59_600, structured: 244_500 },
-  'withoutVerifier.compact': { bare: 35_600, annotated: 37_100, structured: 152_100 },
-  'withVerifier.full': { bare: 57_200, annotated: 60_900, structured: 249_200 },
-  'withVerifier.compact': { bare: 35_600, annotated: 37_100, structured: 152_100 }
+  // PR-16 (plan v1.4.4 §13.2): shadowgraph_context became the default-path read
+  // and shadowgraph_review_context carries evaluate-and-persist with the same
+  // working set, so that output schema is now advertised twice -- this catalog
+  // forbids $ref, so it cannot be shared on the wire, and it is not shrunk to
+  // clear a budget. Measured with `npm run size:mcp` on 2026-09-28,
+  // bare/annotated/structured: full 56294/59888/269148, verifier full
+  // 57442/61141/273695, compact 36221/37810/181156. Roughly 2% headroom.
+  'withoutVerifier.full': { bare: 57_400, annotated: 61_100, structured: 274_400 },
+  'withoutVerifier.compact': { bare: 37_000, annotated: 38_600, structured: 184_600 },
+  'withVerifier.full': { bare: 58_600, annotated: 62_400, structured: 279_000 },
+  'withVerifier.compact': { bare: 37_000, annotated: 38_600, structured: 184_600 }
 };
 
 test('the advertised tool list stays within its wire-size budget, at every tier', () => {
@@ -529,7 +550,7 @@ test('the advertised tool list stays within its wire-size budget, at every tier'
 
 test('overlapping tools route to their siblings by name, and every named sibling exists', () => {
   const known = new Set(verifierCatalog.map((entry) => entry.name));
-  assert.equal(Object.keys(ROUTING_EXPECTED).length, 34);
+  assert.equal(Object.keys(ROUTING_EXPECTED).length, 35);
   for (const entry of verifierCatalog) {
     const siblings = ROUTING_EXPECTED[entry.name];
     assert.ok(siblings, `${entry.name} has no expected routing row`);
@@ -562,7 +583,7 @@ test('every input property, at every nesting level, carries a meaningful descrip
 });
 
 test('input schemas keep the constraints they had before descriptions were written', () => {
-  assert.equal(Object.keys(INPUT_CONSTRAINTS_EXPECTED).length, 34);
+  assert.equal(Object.keys(INPUT_CONSTRAINTS_EXPECTED).length, 35);
   for (const entry of verifierCatalog) {
     const expected = INPUT_CONSTRAINTS_EXPECTED[entry.name];
     assert.ok(expected, `${entry.name} has no expected constraint row`);
@@ -589,7 +610,7 @@ test('output schemas are declared for every tool, including the two scope-covera
     // The description carries the return shape when no schema can.
     assert.match(byName.get(name).description, /items, completeness/u);
   }
-  assert.equal(verifierCatalog.filter((entry) => entry.outputSchema).length, 34);
+  assert.equal(verifierCatalog.filter((entry) => entry.outputSchema).length, 35);
 });
 
 test('every output schema is portable: object-rooted, single-typed, and free of references', () => {

@@ -80,7 +80,7 @@ function graphWithLegacySignal({ withConditions = true, lag = 1200 } = {}) {
   return graph;
 }
 
-const openReview = (graph) => graph.context({ project: 'p' }).openReviews[0];
+const openReview = (graph) => graph.reviewContext({ project: 'p' }).openReviews[0];
 
 // ---------------------------------------------------------------------------
 // HIGH 1 -- a legacy acknowledgement must never be widened to cover conditions
@@ -217,13 +217,13 @@ function graphWithObjectRuleMetadata() {
   return graph;
 }
 
-const objectOperatorCondition = (graph) => graph.context({ project: 'p' }).conditionDiagnostics
+const objectOperatorCondition = (graph) => graph.reviewContext({ project: 'p' }).conditionDiagnostics
   .flatMap((item) => item.conditions)
   .find((item) => item.operator && typeof item.operator === 'object');
 
 test('object-valued operator and unit from a lenient import are detached', () => {
   const graph = graphWithObjectRuleMetadata();
-  graph.context({ project: 'p' });
+  graph.reviewContext({ project: 'p' });
   const before = JSON.stringify(privilegedSnapshot(graph));
 
   const condition = objectOperatorCondition(graph);
@@ -247,7 +247,7 @@ test('a detached detail keeps a key whose value is undefined', () => {
     project: 'p', title: 't', chosen: 'c',
     alternatives: [{ label: 'alt', reasonRejected: 'r', reopenWhen: [{ key: 'absent', operator: 'gte', value: 1 }] }]
   });
-  const condition = graph.context({ project: 'p' }).conditionDiagnostics[0].conditions[0];
+  const condition = graph.reviewContext({ project: 'p' }).conditionDiagnostics[0].conditions[0];
   assert.ok('observed' in condition, 'the key survives detachment so "no evidence" stays reportable');
   assert.equal(condition.observed, undefined);
 });
@@ -263,10 +263,10 @@ test('an object-valued attempt rule from a lenient import is detached', () => {
   const graph = createShadowGraph();
   graph.importData(snapshot);
   graph.addFact({ project: 'p', key: 'lag', value: [600] });
-  graph.context({ project: 'p' });
+  graph.reviewContext({ project: 'p' });
   const before = JSON.stringify(privilegedSnapshot(graph));
 
-  const condition = graph.context({ project: 'p' }).conditionDiagnostics
+  const condition = graph.reviewContext({ project: 'p' }).conditionDiagnostics
     .filter((item) => item.attemptId).flatMap((item) => item.conditions)[0];
   assert.ok(condition, 'the attempt condition is reported');
   condition.operator.name.push('tampered');
@@ -281,7 +281,7 @@ test('a tampered detail leaves the journal and a rebuild untouched', async (t) =
   const directory = await scratchDirectory(t, 'detach-rebuild-');
   const store = createJsonFileStore(join(directory, 'graph.json'));
   const graph = graphWithObjectRuleMetadata();
-  graph.context({ project: 'p' });
+  graph.reviewContext({ project: 'p' });
   const journalBefore = JSON.stringify(privilegedSnapshot(graph).journal);
 
   const condition = objectOperatorCondition(graph);

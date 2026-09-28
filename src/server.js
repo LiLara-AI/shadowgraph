@@ -22,12 +22,12 @@ const NUMBER_PARAMS = ['minConfidence'];
 const BOOLEAN_PARAMS = ['requireFullHistory', 'hard'];
 const RESTORE_BLOCKED_MUTATIONS = new Set([
   '/facts', '/memories', '/outcomes', '/status', '/relationships', '/supersede', '/decisions', '/attempts',
-  '/context', '/review', '/reconsider', '/maintain', '/review-signals/ack', '/confidence-evidence', '/projects', '/restore'
+  '/context', '/review-context', '/review', '/reconsider', '/maintain', '/review-signals/ack', '/confidence-evidence', '/projects', '/restore'
 ]);
 const UNCONFIRMED_RECOVERY_CODES = new Set(['json_restore_recovery_unconfirmed', 'sqlite_restore_recovery_unconfirmed']);
 const ACCESS_LIFECYCLE_PATHS = new Set(['/access-requests', '/access-grants/revoke', '/access-grants/discard']);
 const UNAVAILABLE_ISSUANCE_PATHS = new Set(['/access-grants', '/access-grants/issue', '/access-delegations', '/import']);
-const ACCESS_READ_ROUTES = new Set(['GET /stats', 'GET /records', 'GET /search', 'POST /context', 'POST /recall', 'POST /traverse', 'POST /redact', 'GET /journal', 'POST /rebuild', 'POST /review', 'POST /reconsider', 'POST /maintain', 'GET /review-signals', 'POST /retrieve', 'GET /validate', 'POST /repair-plan']);
+const ACCESS_READ_ROUTES = new Set(['GET /stats', 'GET /records', 'GET /search', 'POST /context', 'POST /review-context', 'POST /recall', 'POST /traverse', 'POST /redact', 'GET /journal', 'POST /rebuild', 'POST /review', 'POST /reconsider', 'POST /maintain', 'GET /review-signals', 'POST /retrieve', 'GET /validate', 'POST /repair-plan']);
 
 function parseLoopbackAuthority(authority) {
   if (typeof authority !== 'string') return null;
@@ -163,7 +163,10 @@ export async function createShadowGraphServer(options = {}) {
     if (method === 'GET' && path === '/stats') return graph.stats(body ?? {});
     if (method === 'GET' && path === '/records') return graph.exportData(body ?? {});
     if (method === 'GET' && path === '/search') return graph.search(body?.q ?? body?.query ?? '', body ?? {});
-    if (method === 'POST' && path === '/context') return commit(() => graph.context(body ?? {}));
+    // The default-path read commits nothing (plan v1.4.4 §13.2); it stays
+    // restore-blocked. Evaluate-and-persist moved to POST /review-context.
+    if (method === 'POST' && path === '/context') return graph.context(body ?? {});
+    if (method === 'POST' && path === '/review-context') return commit(() => graph.reviewContext(body ?? {}));
     if (method === 'POST' && path === '/memories') return commit(() => Array.isArray(body?.operations) ? graph.applyMemoryPlan(body) : graph.remember(body));
     if (method === 'POST' && path === '/recall') return graph.recall(body?.query ?? '', body ?? {});
     if (method === 'POST' && path === '/facts') return commit(() => graph.addFact(body));

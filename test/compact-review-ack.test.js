@@ -87,7 +87,7 @@ test('compact can list a review, acknowledge it, keep that across restart, and s
   t.after(() => first.stop());
   const listed = await first.send('tools/list', {});
   const names = listed.result.tools.map((tool) => tool.name);
-  assert.equal(names.length, 14);
+  assert.equal(names.length, 15);
   assert.ok(names.includes('shadowgraph_context'), 'listing route');
   assert.ok(names.includes('shadowgraph_ack_review'), 'acknowledgement route');
 
@@ -95,8 +95,9 @@ test('compact can list a review, acknowledge it, keep that across restart, and s
   await first.call('shadowgraph_record_decision', regionDecision);
   await first.call('shadowgraph_record_fact', { project: 'p', key: 'replicaLagMs', value: '900ms', sourceClass: 'measured' });
 
-  // --- list: context carries the identifier the ack tool needs ------------
-  const view = await first.call('shadowgraph_context', { project: 'p' });
+  // --- mint with review_context, which persists the signal and carries the id the
+  // ack tool needs; context (a read since plan v1.4.4 PR-16) then lists it -------
+  const view = await first.call('shadowgraph_review_context', { project: 'p' });
   assert.equal(view.openReviews.length, 1);
   const [review] = view.openReviews;
   assert.ok(review.reviewSignalId, 'the id is reachable from the compact listing route');
@@ -120,7 +121,7 @@ test('compact can list a review, acknowledge it, keep that across restart, and s
 
   // --- a genuinely new applicable breach is NOT suppressed ----------------
   await second.call('shadowgraph_record_fact', { project: 'p', key: 'region', value: 'eu-west', sourceClass: 'human' });
-  const afterNewBreach = await second.call('shadowgraph_context', { project: 'p' });
+  const afterNewBreach = await second.call('shadowgraph_review_context', { project: 'p' });
   const fresh = afterNewBreach.openReviews.filter((item) => item.reviewSignalStatus === 'open');
   assert.equal(fresh.length, 1, 'the new breach raises its own open signal');
   assert.notEqual(fresh[0].reviewSignalId, review.reviewSignalId, 'and it is a different signal, not the acknowledged one reopened');
@@ -165,7 +166,7 @@ test('acknowledging one breach does not mute a broader breach on the same decisi
   });
   await mcp.call('shadowgraph_record_fact', { project: 'p', key: 'replicaLagMs', value: '900ms', sourceClass: 'measured' });
 
-  const narrow = (await mcp.call('shadowgraph_context', { project: 'p' })).openReviews[0];
+  const narrow = (await mcp.call('shadowgraph_review_context', { project: 'p' })).openReviews[0];
   assert.equal(narrow.reason, 'replicaLagMs');
   await assertAckRefused(mcp, narrow.reviewSignalId);
   const acknowledged = await mcp.call('shadowgraph_ack_review', { project: 'p', id: narrow.reviewSignalId });
@@ -175,7 +176,7 @@ test('acknowledging one breach does not mute a broader breach on the same decisi
   const reopened = client(file);
   t.after(() => reopened.stop());
   await reopened.call('shadowgraph_record_fact', { project: 'p', key: 'region', value: 'eu-west', sourceClass: 'human' });
-  const broadened = (await reopened.call('shadowgraph_context', { project: 'p' })).openReviews.filter((item) => item.reviewSignalStatus === 'open');
+  const broadened = (await reopened.call('shadowgraph_review_context', { project: 'p' })).openReviews.filter((item) => item.reviewSignalStatus === 'open');
   assert.equal(broadened.length, 1);
   assert.equal(broadened[0].reason, 'replicaLagMs, region', 'the reason broadened');
   assert.notEqual(broadened[0].reviewSignalId, narrow.reviewSignalId);

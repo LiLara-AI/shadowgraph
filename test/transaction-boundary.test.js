@@ -208,14 +208,14 @@ const CLOCK_MUTATOR_CASES = [
     }
   },
   {
-    name: 'context nested review mutation',
+    name: 'reviewContext nested review mutation',
     build() {
       const { graph, clock } = graphWithClock();
       graph.addDecision(decisionInput('transaction-context', {
         alternatives: [{ label: 'B', reopenWhen: ['changed'] }]
       }));
       clock.arm();
-      return { graph, clock, invoke: () => graph.context({ project: 'transaction', changedFacts: ['changed'] }) };
+      return { graph, clock, invoke: () => graph.reviewContext({ project: 'transaction', changedFacts: ['changed'] }) };
     }
   },
   {

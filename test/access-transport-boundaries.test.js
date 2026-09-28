@@ -101,6 +101,10 @@ test('PR12 CLI strips caller binding on writes and uses only its confirmed works
 test('PR12 grantId is recognized as a grant-bearing transport reference', () => {
   assert.equal(hasAccessReference({ grantId: 'example' }), true);
   assert.equal(hasAccessReference({ grantId: null }), true);
+  // Any presented readProvenance is an access request to the kernel (PR-16 review).
+  assert.equal(hasAccessReference({ readProvenance: {} }), true);
+  assert.equal(hasAccessReference({ readProvenance: null }), true);
+  assert.equal(hasAccessReference({ project: 'app' }), false);
 });
 
 test('PR12 documented CLI grant request and access discard aliases retain the same confirmation gate', { skip: process.platform === 'win32' ? 'Real PTY coverage runs on Ubuntu WSL; Python pty is unavailable on Windows' : false }, async (t) => {

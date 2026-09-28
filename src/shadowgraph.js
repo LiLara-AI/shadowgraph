@@ -629,6 +629,18 @@ function scopedItems(items, boundary, signals = []) {
   return scopedResult({ items, completeness: { returned: items.length, total: items.length, omitted: 0, complete: true, losslessItems: true } }, boundary, signals);
 }
 
+// The pointer from the default-path read to the operation that took over its
+// old evaluate-and-persist behaviour (plan v1.4.4 §13.2). It is declared,
+// non-canonical interface metadata, names the replacement, and names no
+// release: when it is withdrawn is a release decision.
+function contextNotice() {
+  return {
+    code: 'context_does_not_persist',
+    detail: 'context is a read and persists no review signal. reviewContext evaluates and persists: MCP shadowgraph_review_context, CLI review-context, HTTP POST /review-context.',
+    replacement: { kernel: 'reviewContext', mcp: 'shadowgraph_review_context', cli: 'review-context', http: 'POST /review-context' }
+  };
+}
+
 export function createShadowGraph(options = {}) {
   const now = options.now ?? (() => new Date().toISOString());
   const verifier = options.verifier ?? null;
@@ -3128,15 +3140,21 @@ export function createShadowGraph(options = {}) {
   // attempts and the review signals it may raise -- lies inside one read
   // boundary; a context with no project selected evaluates nothing and
   // reports no project.
+  //
+  // context() is the default-path read (plan v1.4.4 §13.1-13.2, PC-25): the
+  // working set is evaluated without persisting any review signal, so reading
+  // it changes no canonical truth. Signals already persisted are still
+  // reported. The notice is declared interface metadata, not memory: it tells
+  // a caller that relied on the old implicit persist where that moved.
   function context(input = {}) {
-    return buildContext(input, { persistSignals: true });
+    return { ...buildContext(input, { persistSignals: false }), notice: contextNotice() };
   }
 
-  // The default-path read (plan v1.4.4 §13.1, PC-25): the same working set as
-  // context(), evaluated without persisting any review signal, so reading it
-  // changes no canonical truth. Signals already persisted are still reported.
-  function readContext(input = {}) {
-    return buildContext(input, { persistSignals: false });
+  // Explicit evaluation (§13.2): the evaluate-and-persist working set that
+  // context() used to return, review-named because it may raise and store
+  // review signals.
+  function reviewContext(input = {}) {
+    return buildContext(input, { persistSignals: true });
   }
 
   function buildContext(input, { persistSignals }) {
@@ -4008,7 +4026,7 @@ export function createShadowGraph(options = {}) {
     validate: auditedRead('validate', validate),
     repairPlan: auditedRead('repairPlan', repairPlan),
     context: auditedRead('context', context),
-    readContext: auditedRead('readContext', readContext),
+    reviewContext: auditedRead('reviewContext', reviewContext),
     exportData: auditedRead('exportData', exportData),
     importData: transactional('importData', importData),
     getJournal: auditedRead('getJournal', getJournal),

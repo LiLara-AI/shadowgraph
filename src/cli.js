@@ -152,7 +152,8 @@ async function runOneShot() {
     const readCommands = {
       stats: (value) => graph.stats(value), list: (value) => graph.exportData(value), search: (value) => graph.search(value.query ?? '', value),
       retrieve: (value) => graph.retrieve(value.query ?? '', value), recall: (value) => graph.recall(value.query ?? '', value),
-      context: (value) => graph.context(value), review: (value) => graph.review(value), reconsider: (value) => graph.reconsider(value),
+      context: (value) => graph.context(value), 'review-context': (value) => graph.reviewContext(value),
+      review: (value) => graph.review(value), reconsider: (value) => graph.reconsider(value),
       maintain: (value) => graph.maintain(value), traverse: (value) => graph.traverse(value), redact: (value) => graph.redact(value),
       journal: (value) => graph.getJournal(value), rebuild: (value) => graph.rebuild(value), signals: (value) => graph.getReviewSignals(value),
       validate: (value) => graph.validate(value), 'repair-plan': (value) => graph.repairPlan(value)
@@ -163,7 +164,9 @@ async function runOneShot() {
       // Existing owner-scope evaluation writes remain unchanged. Ordinary reads
       // do not gain a save merely because grant-bearing calls are audited.
       const result = readCommands[command](prepared(value));
-      if (['context', 'review', 'reconsider', 'maintain'].includes(command)) await store.save(privilegedSnapshot(graph));
+      // context is the default-path read and saves nothing (plan v1.4.4 §13.2);
+      // review-context carries the evaluate-and-persist behaviour it used to have.
+      if (['review-context', 'review', 'reconsider', 'maintain'].includes(command)) await store.save(privilegedSnapshot(graph));
       return result;
     }
 
@@ -206,7 +209,6 @@ async function runOneShot() {
     if (command === 'stats') result = graph.stats();
     else if (command === 'list') result = graph.exportData(parse(input || '{}'));
     else if (command === 'search') { const query = parse(input || '{}'); result = graph.search(query.query ?? '', query); }
-    else if (command === 'context') { result = graph.context(parse(input || '{}')); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'remember') { const value = prepared(parse(input)); result = Array.isArray(value.operations) ? graph.applyMemoryPlan(value) : graph.remember(value); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'recall') { const value = parse(input || '{}'); result = graph.recall(value.query ?? '', value); }
     else if (command === 'markdown-sync') {
@@ -257,7 +259,7 @@ async function runOneShot() {
     else if (command === 'decision') { result = graph.addDecision(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'attempt') { result = graph.addAttempt(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
     else {
-      throw new Error('Usage: shadowgraph <setup|doctor|serve|mcp|stats|list|search|retrieve|recall|remember|markdown-sync|context|review|reconsider|maintain|signals|ack|validate|repair-plan|backup|restore|migrate|downgrade|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge|request-access|issue-access|delegate-access|revoke-access|discard-access|access-status|bind|attribute> [JSON/path] (restore <path> [--memory-only]). Writes require project or originId (or confirmed workspace binding). Creation IDs are generated: omit id, retain returned IDs, and use idempotencyKey for retries. Reference IDs remain supported.');
+      throw new Error('Usage: shadowgraph <setup|doctor|serve|mcp|stats|list|search|retrieve|recall|remember|markdown-sync|context|review-context|review|reconsider|maintain|signals|ack|validate|repair-plan|backup|restore|migrate|downgrade|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge|request-access|issue-access|delegate-access|revoke-access|discard-access|access-status|bind|attribute> [JSON/path] (restore <path> [--memory-only]). Writes require project or originId (or confirmed workspace binding). Creation IDs are generated: omit id, retain returned IDs, and use idempotencyKey for retries. Reference IDs remain supported.');
     }
     return result;
   } finally {

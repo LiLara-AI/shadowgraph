@@ -306,7 +306,7 @@ const reviewDueSchema = {
     alternativesToReconsider: stringList('Labels of the alternatives to look at again; all of them when the trigger was not alternative-specific.'),
     violatedConditions: { type: 'array', items: evaluatedConditionSchema, description: 'The conditions that actually fired, each naming its operator, expected and observed value, and the fact it was computed from.' },
     reviewSignalId: { type: 'string', description: 'Pass this to shadowgraph_ack_review to acknowledge this review.' },
-    reviewSignalStatus: { type: 'string', enum: ['open', 'acknowledged', 'unpersisted'], description: 'Whether this review was acknowledged or remains unpersisted after wider evaluation. Entries are recomputed from current evidence; an acknowledged one still appears.' }
+    reviewSignalStatus: { type: 'string', enum: ['open', 'acknowledged', 'unpersisted'], description: 'Whether this review is open or acknowledged, or unpersisted: no stored signal, because context is a read or the evaluation was wider. Entries are recomputed from current evidence; an acknowledged one still appears.' }
   }
 };
 const conditionDiagnosticSchema = {
@@ -702,11 +702,12 @@ const readProvenanceSchema = { type: 'object', description: 'Original read bound
   surfaces: { type: 'array', items: { type: 'string', enum: ['cli', 'mcp', 'http'] }, description: 'Original permitted surfaces; reuse can only narrow them.' },
   expiresAt: { type: 'string', description: 'Original effective expiry; reuse cannot extend it.' }
 } };
-const GRANT_READ_TOOLS = new Set(['shadowgraph_review', 'shadowgraph_search', 'shadowgraph_context', 'shadowgraph_recall', 'shadowgraph_traverse', 'shadowgraph_redact', 'shadowgraph_maintain', 'shadowgraph_retrieve', 'shadowgraph_validate', 'shadowgraph_journal', 'shadowgraph_rebuild', 'shadowgraph_review_signals', 'shadowgraph_repair_plan', 'shadowgraph_reconsider']);
+const GRANT_READ_TOOLS = new Set(['shadowgraph_review', 'shadowgraph_search', 'shadowgraph_context', 'shadowgraph_review_context', 'shadowgraph_recall', 'shadowgraph_traverse', 'shadowgraph_redact', 'shadowgraph_maintain', 'shadowgraph_retrieve', 'shadowgraph_validate', 'shadowgraph_journal', 'shadowgraph_rebuild', 'shadowgraph_review_signals', 'shadowgraph_repair_plan', 'shadowgraph_reconsider']);
 const ACCESS_DESCRIPTIONS = {
   shadowgraph_review: { does: 'Evaluate reopen rules and list due decisions.', route: 'shadowgraph_review_signals reads signals; shadowgraph_ack_review closes one; shadowgraph_maintain ages first.', effects: 'Persists deduped own-scope signals and a revision; grant use also audits.' },
   shadowgraph_search: { does: 'Match all query terms in declared content fields.', route: 'shadowgraph_retrieve adds neighbours; shadowgraph_recall ranks memory; shadowgraph_context builds context; shadowgraph_traverse walks IDs.' },
-  shadowgraph_context: { does: 'Build scoped decisions, assumptions, attempts and reviews.', route: 'shadowgraph_search and shadowgraph_retrieve find records; shadowgraph_recall ranks memory; shadowgraph_review evaluates rules.', effects: 'Evaluates and persists own-scope signals plus a revision; grants audit reads.' },
+  shadowgraph_context: { does: 'Build scoped decisions, assumptions, attempts and reviews.', route: 'shadowgraph_search and shadowgraph_retrieve find records; shadowgraph_recall ranks memory; shadowgraph_review_context evaluates and persists.', effects: 'Reads without persisting any signal; grants audit reads.' },
+  shadowgraph_review_context: { does: 'Evaluate scoped reopen rules and persist own-scope signals.', route: 'shadowgraph_context reads the same working set without persisting; shadowgraph_review evaluates rules only.', effects: 'Evaluates and persists own-scope signals plus a revision; grants audit reads.' },
   shadowgraph_recall: { does: 'Rank scoped memory by lexical, vector, graph and temporal signals.', route: 'shadowgraph_search matches content; shadowgraph_retrieve adds neighbours; shadowgraph_remember writes.' },
   shadowgraph_maintain: { does: 'Age own-scope decisions and facts, then evaluate reopen rules.', route: 'shadowgraph_review evaluates; shadowgraph_validate reports; shadowgraph_update_status cannot set stale.', effects: 'Clock-dependent writes commit a revision even on repeats; grants audit reads.' },
   shadowgraph_retrieve: { does: 'Match content and include authorized graph neighbours.', route: 'shadowgraph_search matches only; shadowgraph_recall ranks memory; shadowgraph_traverse walks IDs; shadowgraph_context builds context.' },
@@ -721,12 +722,72 @@ function compose({ does, route, effects, returns }) {
 // ---------------------------------------------------------------------------
 // The catalog
 // ---------------------------------------------------------------------------
-// `compact` marks the 14 everyday workflow tools advertised when
+// `compact` marks the 15 everyday workflow tools advertised when
 // SHADOWGRAPH_MCP_COMPACT=1. `persists` marks the tools whose successful call is
 // followed by a durable save in src/mcp.js; shadowgraph_restore is deliberately
 // false because the storage backend commits the replacement itself.
 // `openWorldWhenEmbedding` marks the two tools whose reach depends on whether an
 // embedding endpoint was configured.
+// The working set shared by shadowgraph_context (the default-path read) and
+// shadowgraph_review_context (explicit evaluate-and-persist), plan v1.4.4 §13.2.
+// The read also carries the declared notice naming the replacement.
+const contextInputSchema = {
+  type: 'object',
+  properties: {
+    project: projectProperty,
+    limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'Maximum items per collection, 1-1000, applied to each collection independently. Omit for the default of 50.' },
+    changedFacts: changedFactsProperty,
+    facts: factsOverrideProperty
+  }
+};
+const contextOutputSchema = (withNotice) => ({
+  type: 'object',
+  description: 'The working set for one project.',
+  required: ['project', 'activeDecisions', 'staleAssumptions', 'failedAttemptsToAvoid', 'openReviews', 'suggestedQuestions', 'completeness', ...(withNotice ? ['notice'] : [])],
+  properties: {
+    project: stringOrNull('The resolved project, or null when unresolved.'),
+    activeDecisions: { type: 'array', items: decisionRecordSchema, description: 'Decisions in a current, actionable state: proposed, planned, in_progress, executed, validated, or reconsidered.' },
+    staleAssumptions: { type: 'array', items: factRecordSchema, description: 'Facts that are no longer active, such as superseded or expired ones, which earlier decisions may still rest on.' },
+    failedAttemptsToAvoid: { type: 'array', items: attemptRecordSchema, description: 'Attempts whose result mentions failure, regression, or error.' },
+    openReviews: { type: 'array', items: reviewDueSchema, description: 'Decisions currently due for reconsideration.' },
+    suggestedQuestions: stringList('Questions for the low-confidence decisions in this project.'),
+    conditionDiagnostics: { type: 'array', items: conditionDiagnosticSchema, description: 'Conditions that could not be settled, or that rest on facts which disagree. Neither a breach nor a confirmed-safe decision.' },
+    reusableAttempts: { type: 'array', items: reusableAttemptSchema, description: 'Attempts whose reusableWhen conditions all hold now. Worth reconsidering, not authorised to retry.' },
+    completeness: {
+      type: 'object',
+      description: 'Per-collection completeness. context returns several named collections, so one page object cannot describe it.',
+      required: ['scope', 'complete', 'limitSource', 'losslessItems', 'collections'],
+      properties: {
+        ...readCoverageSchema.properties,
+        limitSource: { type: 'string', enum: ['caller', 'default'], description: 'Whose choice bounded the collections.' },
+        collections: {
+          type: 'object',
+          description: 'One entry per returned collection.',
+          required: ['activeDecisions', 'staleAssumptions', 'failedAttemptsToAvoid', 'openReviews', 'suggestedQuestions'],
+          properties: {
+            activeDecisions: collectionCompletenessSchema('Counts for activeDecisions.'),
+            staleAssumptions: collectionCompletenessSchema('Counts for staleAssumptions.'),
+            failedAttemptsToAvoid: collectionCompletenessSchema('Counts for failedAttemptsToAvoid.'),
+            openReviews: collectionCompletenessSchema('Counts for openReviews.'),
+            suggestedQuestions: collectionCompletenessSchema('Counts for suggestedQuestions.'),
+            conditionDiagnostics: collectionCompletenessSchema('Counts for conditionDiagnostics.'),
+            reusableAttempts: collectionCompletenessSchema('Counts for reusableAttempts.')
+          }
+        }
+      }
+    },
+    ...(withNotice ? { notice: {
+      type: 'object',
+      description: 'Declared interface metadata, not memory: context is a read, and reviewContext (shadowgraph_review_context) evaluates and persists.',
+      required: ['code', 'detail', 'replacement'],
+      properties: {
+        code: { type: 'string', enum: ['context_does_not_persist'], description: 'Stable notice code.' },
+        detail: { type: 'string', description: 'Where the old evaluate-and-persist behaviour moved.' },
+        replacement: { type: 'object', description: 'The replacement operation on each surface.', properties: { kernel: { type: 'string', description: 'Kernel method to call.' }, mcp: { type: 'string', description: 'MCP tool to call.' }, cli: { type: 'string', description: 'CLI verb to run.' }, http: { type: 'string', description: 'HTTP route to call.' } } }
+      }
+    } } : {})
+  }
+});
 const CATALOG = [
   {
     name: 'shadowgraph_record_decision',
@@ -847,60 +908,28 @@ const CATALOG = [
   {
     name: 'shadowgraph_context',
     compact: true,
+    persists: false,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    describe: {
+      does: "Build one project's working set before a consequential task: decisions, stale assumptions, failed attempts, open reviews.",
+      route: 'shadowgraph_search or shadowgraph_retrieve look one thing up, shadowgraph_recall reads scoped memory, shadowgraph_review_context evaluates and persists review signals.',
+      effects: 'A read: it evaluates reopen rules without persisting any signal or committing a revision.'
+    },
+    inputSchema: contextInputSchema,
+    outputSchema: contextOutputSchema(true)
+  },
+  {
+    name: 'shadowgraph_review_context',
+    compact: true,
     persists: true,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     describe: {
-      does: "Build one project's working set before a consequential task: decisions, stale assumptions, failed attempts, open reviews.",
-      route: 'shadowgraph_search or shadowgraph_retrieve look one thing up, shadowgraph_recall reads scoped memory, shadowgraph_review only evaluates.',
+      does: "Evaluate one project's reopen rules, persist the review signals they raise, and return the working set.",
+      route: 'shadowgraph_context reads the same working set without persisting; shadowgraph_review evaluates rules only.',
       effects: 'Not a read: it evaluates reopen rules, can persist signals, and commits a revision.'
     },
-    inputSchema: {
-      type: 'object',
-      properties: {
-        project: projectProperty,
-        limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'Maximum items per collection, 1-1000, applied to each collection independently. Omit for the default of 50.' },
-        changedFacts: changedFactsProperty,
-        facts: factsOverrideProperty
-      }
-    },
-    outputSchema: {
-      type: 'object',
-      description: 'The working set for one project.',
-      required: ['project', 'activeDecisions', 'staleAssumptions', 'failedAttemptsToAvoid', 'openReviews', 'suggestedQuestions', 'completeness'],
-      properties: {
-        project: stringOrNull('The resolved project, or null when unresolved.'),
-        activeDecisions: { type: 'array', items: decisionRecordSchema, description: 'Decisions in a current, actionable state: proposed, planned, in_progress, executed, validated, or reconsidered.' },
-        staleAssumptions: { type: 'array', items: factRecordSchema, description: 'Facts that are no longer active, such as superseded or expired ones, which earlier decisions may still rest on.' },
-        failedAttemptsToAvoid: { type: 'array', items: attemptRecordSchema, description: 'Attempts whose result mentions failure, regression, or error.' },
-        openReviews: { type: 'array', items: reviewDueSchema, description: 'Decisions currently due for reconsideration.' },
-        suggestedQuestions: stringList('Questions for the low-confidence decisions in this project.'),
-        conditionDiagnostics: { type: 'array', items: conditionDiagnosticSchema, description: 'Conditions that could not be settled, or that rest on facts which disagree. Neither a breach nor a confirmed-safe decision.' },
-        reusableAttempts: { type: 'array', items: reusableAttemptSchema, description: 'Attempts whose reusableWhen conditions all hold now. Worth reconsidering, not authorised to retry.' },
-        completeness: {
-          type: 'object',
-          description: 'Per-collection completeness. context returns several named collections, so one page object cannot describe it.',
-          required: ['scope', 'complete', 'limitSource', 'losslessItems', 'collections'],
-          properties: {
-            ...readCoverageSchema.properties,
-            limitSource: { type: 'string', enum: ['caller', 'default'], description: 'Whose choice bounded the collections.' },
-            collections: {
-              type: 'object',
-              description: 'One entry per returned collection.',
-              required: ['activeDecisions', 'staleAssumptions', 'failedAttemptsToAvoid', 'openReviews', 'suggestedQuestions'],
-              properties: {
-                activeDecisions: collectionCompletenessSchema('Counts for activeDecisions.'),
-                staleAssumptions: collectionCompletenessSchema('Counts for staleAssumptions.'),
-                failedAttemptsToAvoid: collectionCompletenessSchema('Counts for failedAttemptsToAvoid.'),
-                openReviews: collectionCompletenessSchema('Counts for openReviews.'),
-                suggestedQuestions: collectionCompletenessSchema('Counts for suggestedQuestions.'),
-                conditionDiagnostics: collectionCompletenessSchema('Counts for conditionDiagnostics.'),
-                reusableAttempts: collectionCompletenessSchema('Counts for reusableAttempts.')
-              }
-            }
-          }
-        }
-      }
-    }
+    inputSchema: contextInputSchema,
+    outputSchema: contextOutputSchema(false)
   },
   {
     name: 'shadowgraph_remember',

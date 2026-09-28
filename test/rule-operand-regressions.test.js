@@ -85,7 +85,7 @@ function graphWithStoredRule(rule, factValue) {
 test('an imported rule with no operand raises no review and is visible as a diagnostic', () => {
   const graph = graphWithStoredRule({ key: 'lag', operator: 'not_equals' }, 500);
 
-  const view = graph.context({ project: 'p' });
+  const view = graph.reviewContext({ project: 'p' });
   assert.equal(view.openReviews.length, 0, 'a rule that states no operand is not a breach');
   assert.equal(graph.getReviewSignals({ project: 'p' }).items.length, 0, 'and raises no signal');
 
@@ -97,7 +97,7 @@ test('an imported rule with no operand raises no review and is visible as a diag
 
 test('the stored rule is never rewritten by evaluating it', () => {
   const graph = graphWithStoredRule({ key: 'lag', operator: 'not_equals' }, 500);
-  graph.context({ project: 'p' });
+  graph.reviewContext({ project: 'p' });
   graph.maintain({ project: 'p' });
   const stored = privilegedSnapshot(graph).records[0].alternatives[0].reopenWhen[0];
   assert.deepEqual(stored, { key: 'lag', operator: 'not_equals' }, 'no operand was synthesised');
@@ -146,7 +146,7 @@ function graphWithLegacySignal({ rule, historical, factValue }) {
   return graph;
 }
 
-const reviewStatus = (graph) => graph.context({ project: 'p' }).openReviews[0]?.reviewSignalStatus ?? 'none';
+const reviewStatus = (graph) => graph.reviewContext({ project: 'p' }).openReviews[0]?.reviewSignalStatus ?? 'none';
 const legacyOf = (graph) => graph.getReviewSignals({ project: 'p' }).items.find((item) => item.id === 'review:legacy');
 
 test('a historical condition missing its expected operand is not reconstructable', () => {
@@ -185,9 +185,9 @@ test('a rule with no operand cannot inherit a legacy acknowledgement', () => {
     factValue: 500
   });
 
-  assert.equal(graph.context({ project: 'p' }).openReviews.length, 0, 'a rule stating no operand is not a breach at all');
+  assert.equal(graph.reviewContext({ project: 'p' }).openReviews.length, 0, 'a rule stating no operand is not a breach at all');
   assert.equal(reviewStatus(graph), 'none');
-  const condition = graph.context({ project: 'p' }).conditionDiagnostics.flatMap((item) => item.conditions)[0];
+  const condition = graph.reviewContext({ project: 'p' }).conditionDiagnostics.flatMap((item) => item.conditions)[0];
   assert.equal(condition.verdict, 'unknown', 'it is reported as unevaluable');
   assert.equal(legacyOf(graph).status, 'acknowledged', 'and the legacy signal is untouched');
   assert.equal(legacyOf(graph).coverage, undefined);
@@ -198,7 +198,7 @@ test('an operandless rule does not poison export or context', () => {
   // Writing `value: undefined` during import used to make every later clone()
   // of the record throw, taking exportData() and context() down with it.
   assert.doesNotThrow(() => graph.exportData({ project: 'p' }));
-  assert.doesNotThrow(() => graph.context({ project: 'p' }));
+  assert.doesNotThrow(() => graph.reviewContext({ project: 'p' }));
   assert.deepEqual(
     privilegedSnapshot(graph).records[0].alternatives[0].reopenWhen[0],
     { key: 'lag', operator: 'not_equals' },
@@ -275,7 +275,7 @@ test('an exact complete historical condition still preserves the acknowledgement
     factValue: 600
   });
   assert.equal(reviewStatus(graph), 'acknowledged');
-  assert.equal(graph.context({ project: 'p' }).openReviews[0].reviewSignalId, 'review:legacy');
+  assert.equal(graph.reviewContext({ project: 'p' }).openReviews[0].reviewSignalId, 'review:legacy');
 });
 
 test('a falsy historical operand is a real operand and still reconstructs', () => {
@@ -292,7 +292,7 @@ test('a falsy historical operand is a real operand and still reconstructs', () =
       factValue: fact
     });
     assert.equal(reviewStatus(graph), 'acknowledged', `expected: ${JSON.stringify(operand)} must reconstruct`);
-    assert.equal(graph.context({ project: 'p' }).openReviews[0].reviewSignalId, 'review:legacy');
+    assert.equal(graph.reviewContext({ project: 'p' }).openReviews[0].reviewSignalId, 'review:legacy');
   }
 });
 
@@ -375,7 +375,7 @@ test('the compact list and acknowledge path settles the uncovered breach', () =>
     historical: { operator: 'gte' },
     factValue: 600
   });
-  const listed = graph.context({ project: 'p' }).openReviews[0];
+  const listed = graph.reviewContext({ project: 'p' }).openReviews[0];
   assert.equal(listed.reviewSignalStatus, 'open');
   assert.notEqual(listed.reviewSignalId, 'review:legacy');
 

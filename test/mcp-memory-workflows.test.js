@@ -67,7 +67,7 @@ test('MCP exposes simple remember/recall workflows and uses an explicit local em
   const names = listed.result.tools.map((tool) => tool.name);
   assert.equal(names.includes('shadowgraph_remember'), true);
   assert.equal(names.includes('shadowgraph_recall'), true);
-  assert.equal(names.length, 14);
+  assert.equal(names.length, 15);
   assert.equal(Object.hasOwn(listed.result.tools.find((tool) => tool.name === 'shadowgraph_recall'), 'annotations'), false);
 
   const remembered = await rpc.call({
@@ -145,7 +145,9 @@ test('MCP rolls live memory back when ordinary persistence fails', async (t) => 
   assert.deepEqual(keys, ['baseline']);
 });
 
-test('MCP context persists review signals that it creates', async (t) => {
+// Plan v1.4.4 PR-16 (§13.2): shadowgraph_context and the shadowgraph://context
+// resource are the default-path read; shadowgraph_review_context persists.
+test('MCP context and its resource are reads, and review_context persists the signals it creates', async (t) => {
   const directory = await scratchDirectory(t, 'shadowgraph-mcp-context-');
   const file = join(directory, 'data.json');
   const seed = createShadowGraph({ now: () => '2026-08-27T00:00:00.000Z' });
@@ -165,6 +167,14 @@ test('MCP context persists review signals that it creates', async (t) => {
   });
   const payload = JSON.parse(response.result.content[0].text);
   assert.equal(payload.openReviews.length, 1);
+  assert.equal(payload.notice.replacement.mcp, 'shadowgraph_review_context');
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).reviewSignals.length, 0, 'the read persists nothing');
+  const evaluated = await rpc.call({
+    jsonrpc: '2.0', id: 4, method: 'tools/call', params: {
+      name: 'shadowgraph_review_context', arguments: { project: 'app' }
+    }
+  });
+  assert.equal(JSON.parse(evaluated.result.content[0].text).openReviews.length, 1);
   const durable = JSON.parse(await readFile(file, 'utf8'));
   assert.equal(durable.reviewSignals.length, 1);
   assert.equal(durable.reviewSignals[0].decisionId, due.id);

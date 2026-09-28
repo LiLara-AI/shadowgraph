@@ -185,6 +185,29 @@ for (const modern of [false, true]) test(`PR13 F29 MCP ${modern ? 'modern' : 'le
   const unknown = await call.resource(); assert.equal(unknown.project, null); assert.deepEqual(unknown.activeDecisions, []);
 });
 
+// Plan v1.4.4 PR-16: under a confirmed binding the resource is the default-path
+// read. A due decision with no stored signal is reported, and nothing is saved.
+test('PR16 bound MCP context resource reports a due decision and saves nothing', async t => {
+  const directory = await scratchDirectory(t, 'pr16-resource-');
+  const file = join(directory, 'store.json');
+  const seed = createShadowGraph();
+  seed.addDecision({ project: 'alpha', title: 'unsignalled', chosen: 'A', reviewAfter: '2020-01-01T00:00:00.000Z' });
+  const store = await createStorage({ type: 'json', file });
+  await store.save(privilegedSnapshot(seed));
+  store.close();
+  await mkdir(join(directory, '.shadowgraph'));
+  await writeFile(join(directory, '.shadowgraph', 'project-binding.json'), JSON.stringify({ version: 1, type: 'worktree', path: resolve(directory), project: 'alpha', confirmed: true }));
+  const call = await connect(t, { directory, file, backend: 'json' }, 'mcp');
+  const before = await readFile(file);
+  const view = await call.resource();
+  assert.equal(view.project, 'alpha');
+  assert.equal(view.openReviews.length, 1);
+  assert.equal(view.openReviews[0].reviewSignalStatus, 'unpersisted');
+  assert.equal(view.notice.replacement.mcp, 'shadowgraph_review_context');
+  await call.resource();
+  assert.deepEqual(await readFile(file), before, 'the resource read saves nothing');
+});
+
 test('PR13 F28 existing context schema accepts unresolved project identity', () => {
   const schema = buildToolCatalog().find(tool => tool.name === 'shadowgraph_context').outputSchema;
   assert.ok(schema.properties.project.anyOf.some(branch => branch.type === 'null'));

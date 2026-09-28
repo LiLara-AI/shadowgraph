@@ -59,11 +59,11 @@ This is the disclosed local filesystem trust boundary, not enterprise identity.
 The kernel carries one boundary through ranking, lookup, traversal, expansion,
 context, review, public diagnostics, export and redaction. A wider read never
 widens canonical mutation ownership. Existing own-scope evaluation effects remain:
-`context`, `review`, `reconsider` and `maintain` can create their existing own-scope
-signals. A wider evaluation is read-only, including when foreign evidence would
-otherwise produce a new signal about an own decision. Maintenance changes only
-own records and facts. The later default-context evaluation/persistence split is
-not implemented by this access contract.
+`reviewContext`, `review`, `reconsider` and `maintain` can create their existing
+own-scope signals; `context` is a read and creates none (plan v1.4.4 PR-16). A
+wider evaluation is read-only, including when foreign evidence would otherwise
+produce a new signal about an own decision. Maintenance changes only own records
+and facts.
 
 Results identify a successfully rechecked grant in `completeness.scope.grant` as
 `{accessId, expiresAt, surface}`. Otherwise it is null. Origin-only requests remain

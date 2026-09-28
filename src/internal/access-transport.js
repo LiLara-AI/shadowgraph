@@ -9,7 +9,9 @@ import { isCommittedRejection } from '../shadowgraph.js';
 
 const execute = promisify(execFile);
 
-export const hasAccessReference = (input) => Boolean(input && (Object.hasOwn(input, 'accessId') || Object.hasOwn(input, 'grantId') || input.readProvenance?.accessId));
+// Matches the kernel's requestedAccess: any presented readProvenance is an
+// access request, and its refusal is audited under the same fenced save.
+export const hasAccessReference = (input) => Boolean(input && (Object.hasOwn(input, 'accessId') || Object.hasOwn(input, 'grantId') || input.readProvenance !== undefined));
 
 export async function discoverWorkspace(cwd = process.cwd()) {
   const work = resolve(cwd);

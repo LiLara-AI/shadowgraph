@@ -53,28 +53,33 @@ function graphWithObjectEvidence() {
 }
 
 test('mutating a returned violatedConditions value cannot reach canonical state', () => {
-  const { graph } = graphWithObjectEvidence();
-  // Snapshot AFTER the first read: context() raises the review signal as a
-  // documented side effect, and this test is about mutation, not that.
-  graph.context({ project: 'p' });
-  const before = JSON.stringify(privilegedSnapshot(graph));
+  // Both the read and the persisting operation; reviewContext also stores the
+  // signal the returned value must not alias.
+  for (const method of ['context', 'reviewContext']) {
+    const { graph } = graphWithObjectEvidence();
+    // Snapshot AFTER the first call: reviewContext() raises the review signal as
+    // a documented side effect, and this test is about mutation, not that.
+    graph[method]({ project: 'p' });
+    const before = JSON.stringify(privilegedSnapshot(graph));
+    if (method === 'reviewContext') assert.equal(privilegedSnapshot(graph).reviewSignals.length, 1, 'the signal is stored');
 
-  const breach = graph.context({ project: 'p' }).openReviews
-    .flatMap((item) => item.violatedConditions ?? [])
-    .find((item) => Array.isArray(item.observed));
-  assert.ok(breach, 'a breach carrying an array value is reported');
-  const observed = JSON.parse(JSON.stringify(breach.observed));
+    const breach = graph[method]({ project: 'p' }).openReviews
+      .flatMap((item) => item.violatedConditions ?? [])
+      .find((item) => Array.isArray(item.observed));
+    assert.ok(breach, 'a breach carrying an array value is reported');
+    const observed = JSON.parse(JSON.stringify(breach.observed));
 
-  breach.observed.push('tampered');
-  if (breach.evidence) breach.evidence.value = { tampered: true };
-  for (const reference of breach.conflictingEvidence ?? []) reference.value = { tampered: true };
+    breach.observed.push('tampered');
+    if (breach.evidence) breach.evidence.value = { tampered: true };
+    for (const reference of breach.conflictingEvidence ?? []) reference.value = { tampered: true };
 
-  assert.equal(JSON.stringify(privilegedSnapshot(graph)), before, 'no canonical state moved');
-  const again = graph.context({ project: 'p' }).openReviews
-    .flatMap((item) => item.violatedConditions ?? [])
-    .find((item) => Array.isArray(item.observed));
-  assert.deepEqual(again.observed, observed, 'a later response is unaffected');
-  assert.equal(again.expected, 'spike', 'the stored rule is unaffected');
+    assert.equal(JSON.stringify(privilegedSnapshot(graph)), before, `${method}: no canonical state moved`);
+    const again = graph[method]({ project: 'p' }).openReviews
+      .flatMap((item) => item.violatedConditions ?? [])
+      .find((item) => Array.isArray(item.observed));
+    assert.deepEqual(again.observed, observed, 'a later response is unaffected');
+    assert.equal(again.expected, 'spike', 'the stored rule is unaffected');
+  }
 });
 
 test('mutating a returned conditionDiagnostics value cannot reach canonical state', () => {
@@ -220,13 +225,13 @@ test('a second threshold on the same key does not inherit the first acknowledgem
   const decision = twoThresholdDecision(graph);
 
   graph.addFact({ project: 'p', key: 'lag', value: 600 });
-  const first = graph.context({ project: 'p' }).openReviews[0];
+  const first = graph.reviewContext({ project: 'p' }).openReviews[0];
   assert.equal(first.reviewSignalStatus, 'open');
   graph.acknowledgeReview(first.reviewSignalId, { project: 'p' });
-  assert.equal(graph.context({ project: 'p' }).openReviews[0].reviewSignalStatus, 'acknowledged', 'an unchanged breach stays acknowledged');
+  assert.equal(graph.reviewContext({ project: 'p' }).openReviews[0].reviewSignalStatus, 'acknowledged', 'an unchanged breach stays acknowledged');
 
   graph.addFact({ project: 'p', key: 'lag', value: 1200 });
-  const broadened = graph.context({ project: 'p' }).openReviews.find((item) => item.decisionId === decision.id);
+  const broadened = graph.reviewContext({ project: 'p' }).openReviews.find((item) => item.decisionId === decision.id);
   assert.equal(broadened.reviewSignalStatus, 'open', 'the newly breached alternative is not covered by the old acknowledgement');
   assert.equal(
     graph.getReviewSignals({ project: 'p', status: 'open' }).items.length, 1,
@@ -238,13 +243,13 @@ test('narrowing back to the acknowledged breach set restores the acknowledgement
   const graph = createShadowGraph();
   twoThresholdDecision(graph);
   graph.addFact({ project: 'p', key: 'lag', value: 600 });
-  graph.acknowledgeReview(graph.context({ project: 'p' }).openReviews[0].reviewSignalId, { project: 'p' });
+  graph.acknowledgeReview(graph.reviewContext({ project: 'p' }).openReviews[0].reviewSignalId, { project: 'p' });
   graph.addFact({ project: 'p', key: 'lag', value: 1200 });
-  assert.equal(graph.context({ project: 'p' }).openReviews[0].reviewSignalStatus, 'open');
+  assert.equal(graph.reviewContext({ project: 'p' }).openReviews[0].reviewSignalStatus, 'open');
 
   graph.addFact({ project: 'p', key: 'lag', value: 600 });
   assert.equal(
-    graph.context({ project: 'p' }).openReviews[0].reviewSignalStatus, 'acknowledged',
+    graph.reviewContext({ project: 'p' }).openReviews[0].reviewSignalStatus, 'acknowledged',
     'the original coverage is unchanged and stays acknowledged'
   );
 });
@@ -255,15 +260,15 @@ test('an acknowledgement survives a restart', async (t) => {
   const graph = createShadowGraph();
   twoThresholdDecision(graph);
   graph.addFact({ project: 'p', key: 'lag', value: 600 });
-  graph.acknowledgeReview(graph.context({ project: 'p' }).openReviews[0].reviewSignalId, { project: 'p' });
+  graph.acknowledgeReview(graph.reviewContext({ project: 'p' }).openReviews[0].reviewSignalId, { project: 'p' });
   await store.save(privilegedSnapshot(graph));
 
   const restored = createShadowGraph();
   restored.importData(await store.load());
-  assert.equal(restored.context({ project: 'p' }).openReviews[0].reviewSignalStatus, 'acknowledged');
+  assert.equal(restored.reviewContext({ project: 'p' }).openReviews[0].reviewSignalStatus, 'acknowledged');
 
   restored.addFact({ project: 'p', key: 'lag', value: 1200 });
-  assert.equal(restored.context({ project: 'p' }).openReviews[0].reviewSignalStatus, 'open', 'a broader breach is still open after a restart');
+  assert.equal(restored.reviewContext({ project: 'p' }).openReviews[0].reviewSignalStatus, 'open', 'a broader breach is still open after a restart');
 });
 
 test('acknowledgement coverage behaves identically on JSON and SQLite', async (t) => {
@@ -279,7 +284,7 @@ test('acknowledgement coverage behaves identically on JSON and SQLite', async (t
   const source = createShadowGraph({ now: () => '2026-02-01T00:00:00.000Z' });
   twoThresholdDecision(source);
   source.addFact({ project: 'p', key: 'lag', value: 600 });
-  source.acknowledgeReview(source.context({ project: 'p' }).openReviews[0].reviewSignalId, { project: 'p' });
+  source.acknowledgeReview(source.reviewContext({ project: 'p' }).openReviews[0].reviewSignalId, { project: 'p' });
   const snapshot = privilegedSnapshot(source);
 
   const snapshots = {};
@@ -296,10 +301,10 @@ test('acknowledgement coverage behaves identically on JSON and SQLite', async (t
 
       const restarted = createShadowGraph({ now: () => '2026-02-02T00:00:00.000Z' });
       restarted.importData(durable);
-      assert.equal(restarted.context({ project: 'p' }).openReviews[0].reviewSignalStatus, 'acknowledged', `${backend}: the acknowledgement survives`);
+      assert.equal(restarted.reviewContext({ project: 'p' }).openReviews[0].reviewSignalStatus, 'acknowledged', `${backend}: the acknowledgement survives`);
 
       const broad = restarted.addFact({ project: 'p', key: 'lag', value: 1200 });
-      assert.equal(restarted.context({ project: 'p' }).openReviews[0].reviewSignalStatus, 'open', `${backend}: the broadened breach is open`);
+      assert.equal(restarted.reviewContext({ project: 'p' }).openReviews[0].reviewSignalStatus, 'open', `${backend}: the broadened breach is open`);
 
       // Both backends import the same generated identities. Normalize only
       // the new fact and signal IDs each backend generated independently. Coverage now sorts on identical

@@ -97,7 +97,8 @@ restore retains its separate backend commit.
 ## MCP catalog accounting
 
 PR12 adds five full-mode tools (33 normally, 34 with the optional verifier).
-Compact mode remains 14 tools. Required grant inputs, the `grantId` alias,
+Compact mode remains 14 tools. Plan v1.4.4 PR-16 later adds the compact
+`shadowgraph_review_context`: 34 full, 35 with the verifier, 15 compact. Required grant inputs, the `grantId` alias,
 effective-grant output fields and bounded provenance schemas increase wire
 bytes. Descriptions were shortened while retaining routing and effect claims;
 existing description ceilings remain unchanged (350 per tool; 9,100 full,

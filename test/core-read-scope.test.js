@@ -201,7 +201,7 @@ test('recall ranks the graph only through records inside the boundary', () => {
 
 test('context evaluates and records reviews only for the selected project', () => {
   const graph = fixture();
-  const alpha = graph.context({ project: 'alpha' });
+  const alpha = graph.reviewContext({ project: 'alpha' });
   assert.deepEqual(alpha.openReviews.map((item) => item.decisionId), [fixtureIds['alpha-overdue']]);
   assert.deepEqual(ids(alpha.staleAssumptions), [fixtureIds['alpha-fact-old']]);
   assert.deepEqual(ids(alpha.failedAttemptsToAvoid), [fixtureIds['alpha-attempt']]);

@@ -265,6 +265,7 @@ async function callUnqueued(name, args, tier, accessManaged = false) {
   else if (name === 'shadowgraph_reconsider') value = graph.reconsider(args ?? {});
   else if (name === 'shadowgraph_search') value = graph.search(args?.query ?? '', args ?? {});
   else if (name === 'shadowgraph_context') value = graph.context(args ?? {});
+  else if (name === 'shadowgraph_review_context') value = graph.reviewContext(args ?? {});
   else if (name === 'shadowgraph_remember') {
     const prepared = withRuntimeSession(await addConfiguredEmbeddings(args ?? {}));
     value = Array.isArray(prepared.operations) ? graph.applyMemoryPlan(prepared) : graph.remember(prepared);
@@ -692,17 +693,9 @@ async function handleMessage(request, emit, batchFailure = null) {
         // makes the latch closed rather than merely early. callUnqueued does the
         // same for tools/call.
         if (persistenceUnavailable) throw unavailableError();
-        const before = privilegedSnapshot(graph);
-        let value;
-        try { value = graph.context(accessContext(graph, {}, 'mcp', workspace)); }
-        catch (error) { graph.replaceData(before); throw error; }
-        try { await persist(); }
-        catch (error) {
-          try { graph.replaceData(await store.load()); }
-          catch { graph.replaceData(before); }
-          throw error;
-        }
-        return value;
+        // The context resource is the default-path read (plan v1.4.4 §13.2): it
+        // changes no canonical truth, so nothing is persisted after it.
+        return graph.context(accessContext(graph, {}, 'mcp', workspace));
       });
       respond(eraResult(modern, { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(context) }] }, 'private'));
     } else if (request.method === 'prompts/list') respond(eraResult(modern, { prompts: promptList }, 'public'));

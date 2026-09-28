@@ -52,7 +52,7 @@ Never promote an agent assertion to a verified fact merely because it is repeate
 - Treat SQLite restore as process-level rollback safety only: it does not guarantee crash consistency, filesystem durability, or coordination with external writers.
 - Validate backups and restored files before replacing live data.
 - Keep schema-4 record, fact, relation, and nested alternative IDs globally unique, and reject new relations whose endpoints do not exist.
-- Serialize HTTP mutation with persistence, reject graph-mutating routes such as `/context` while restore owns persistence, persist review signals created by context paths, and reload durable state after ordinary save or conflict failures.
+- Serialize HTTP mutation with persistence, reject graph-mutating routes such as `/review-context` (and `/context`) while restore owns persistence, persist review signals created by `review-context` paths, and reload durable state after ordinary save or conflict failures.
 - Test process concurrency and stale-writer rejection.
 
 ## Access control and network safety

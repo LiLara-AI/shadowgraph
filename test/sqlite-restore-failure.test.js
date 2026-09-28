@@ -953,9 +953,16 @@ test('HTTP rejects a concurrent mutation before graph state changes during resto
     const contextResponse = await fetch(`${base}/context`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'default' })
     });
-    assert.equal(contextResponse.status, 400, 'context can create review signals and must be blocked during restore');
+    assert.equal(contextResponse.status, 400, 'context stays blocked during restore');
     assert.match((await contextResponse.json()).error, /restore is in progress/);
-    assert.equal(privilegedSnapshot(app.graph).reviewSignals.length, 0, 'blocked context must not create an in-memory-only review signal');
+    // Plan v1.4.4 PR-16: review-context carries evaluate-and-persist, so it is
+    // the route that could otherwise leave an in-memory-only review signal.
+    const reviewContextResponse = await fetch(`${base}/review-context`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'default' })
+    });
+    assert.equal(reviewContextResponse.status, 400, 'review-context can create review signals and must be blocked during restore');
+    assert.match((await reviewContextResponse.json()).error, /restore is in progress/);
+    assert.equal(privilegedSnapshot(app.graph).reviewSignals.length, 0, 'blocked review-context must not create an in-memory-only review signal');
     releaseStat();
     const restoreResponse = await restoreResponsePromise;
     assert.equal(restoreResponse.status, 200);

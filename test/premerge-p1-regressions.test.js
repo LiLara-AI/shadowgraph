@@ -957,14 +957,14 @@ const ZERO_JOURNAL_MUTATOR_CASES = [
     }
   },
   {
-    name: 'context signal creation',
+    name: 'reviewContext signal creation',
     build() {
       const graph = atomicGraph();
       graph.addDecision({
         project: 'matrix', title: 'Context', chosen: 'A',
         alternatives: [{ label: 'B', reopenWhen: ['changed'] }]
       });
-      return { graph, invoke: () => graph.context({ project: 'matrix', changedFacts: ['changed'] }) };
+      return { graph, invoke: () => graph.reviewContext({ project: 'matrix', changedFacts: ['changed'] }) };
     }
   },
   {
