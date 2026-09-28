@@ -114,10 +114,11 @@ function v6Store(options) {
 }
 
 test('the writer writes only what the reader already reads, on every versioned axis', () => {
+  // PR-20 widened the reader to 7 while the writer still writes 6.
   assert.equal(SCHEMA_VERSION, 6);
-  assert.deepEqual(SUPPORTED_SCHEMA_VERSIONS, [1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(SUPPORTED_SCHEMA_VERSIONS, [1, 2, 3, 4, 5, 6, 7]);
   assert.equal(JOURNAL_SCHEMA_VERSION, 6);
-  assert.equal(READABLE_JOURNAL_SCHEMA_VERSION, 6);
+  assert.equal(READABLE_JOURNAL_SCHEMA_VERSION, 7);
   assert.ok(JOURNAL_SCHEMA_VERSION <= READABLE_JOURNAL_SCHEMA_VERSION && SUPPORTED_SCHEMA_VERSIONS.includes(SCHEMA_VERSION));
   const graph = seeded();
   const snapshot = privilegedSnapshot(graph);
@@ -144,15 +145,16 @@ test('a schema-6 store loads, validates, rebuilds and restores without being dow
   assert.doesNotThrow(() => validateRestorePayload(payload, { now }));
 });
 
-test('a schema-7 envelope is refused; a schema-7 entity loads but its store cannot be restored (F-14)', () => {
-  assert.throws(() => createShadowGraph().importData({ schemaVersion: 7, records: [] }), (error) => error.code === 'unsupported_schema_version');
+// The first schema this build cannot read is 8 since PR-20 widened the reader.
+test('a schema-8 envelope is refused; a schema-8 entity loads but its store cannot be restored (F-14)', () => {
+  assert.throws(() => createShadowGraph().importData({ schemaVersion: 8, records: [] }), (error) => error.code === 'unsupported_schema_version');
   const payload = v6Store();
   const future = payload.records.find((record) => record.kind === 'attempt');
-  future.schemaVersion = 7;
-  for (const entry of payload.journal) if (entry.entityId === future.id) entry.payload.schemaVersion = 7;
+  future.schemaVersion = 8;
+  for (const entry of payload.journal) if (entry.entityId === future.id) entry.payload.schemaVersion = 8;
   const graph = createShadowGraph({ now });
   graph.importData(payload);
-  assert.equal(privilegedSnapshot(graph).records.find((record) => record.id === future.id).schemaVersion, 7, 'preserved verbatim, never downgraded');
+  assert.equal(privilegedSnapshot(graph).records.find((record) => record.id === future.id).schemaVersion, 8, 'preserved verbatim, never downgraded');
   assert.ok(privilegedValidate(graph).issues.some((issue) => issue.code === 'unsupported_record_schema_version' && issue.severity === 'unsupported'));
   assert.throws(() => validateRestorePayload(payload, { now }), /Refusing to restore data: .*unsupported_record_schema_version/);
 });
@@ -444,9 +446,11 @@ test('a memory-only restore strips the authority collections and restores every 
 });
 
 test('entity.attributed vocabulary supports migration and explicit owner attribution writers', async () => {
-  assert.equal(REPLAYABLE_ENTRY_TYPES.length, 20);
-  assert.equal(JOURNAL_ENTRY_TYPES.length, 21);
-  assert.equal(REPLAYABLE_ENTRY_TYPES.at(-1), 'entity.attributed');
+  // PR-20 added the reader for entity.token_assigned after it.
+  assert.equal(REPLAYABLE_ENTRY_TYPES.length, 21);
+  assert.equal(JOURNAL_ENTRY_TYPES.length, 22);
+  assert.equal(REPLAYABLE_ENTRY_TYPES.at(-2), 'entity.attributed');
+  assert.equal(REPLAYABLE_ENTRY_TYPES.at(-1), 'entity.token_assigned');
   assert.deepEqual([...JOURNAL_ENTRY_TYPES], [...REPLAYABLE_ENTRY_TYPES, 'legacy_metadata_event']);
   const emitters = [];
   for (const name of await readdir(join(root, 'src'))) {

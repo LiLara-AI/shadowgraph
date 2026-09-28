@@ -162,7 +162,7 @@ test('attribution refuses ambiguous selectors, missing/future material, collisio
     { originId: 'absent', targetProject: 'gamma', reason: 'x' }, { ids: [fixtureIds.a], targetProject: 'beta', reason: 'x' },
     { ids: [fixtureIds.a], targetProject: 'gamma', reason: '' }, { ids: [fixtureIds.a], targetProject: 'gamma', reason: 'x', grant: { accessId: 'forged' } }
   ]) { const before = privilegedSnapshot(graph); assert.throws(() => graph.attribute(input)); assert.deepEqual(privilegedSnapshot(graph), before); }
-  const future = privilegedSnapshot(graph); future.facts.find((item) => item.id === fixtureIds.a).schemaVersion = 7;
+  const future = privilegedSnapshot(graph); future.facts.find((item) => item.id === fixtureIds.a).schemaVersion = 8;
   const futureGraph = graphOf(future), saved = privilegedSnapshot(futureGraph);
   assert.throws(() => futureGraph.attribute({ ids: [fixtureIds.a], targetProject: 'gamma', reason: 'x' }), /future|unsupported/i); assert.deepEqual(privilegedSnapshot(futureGraph), saved);
   const exhausted = privilegedSnapshot(graph); exhausted.journalSeq = Number.MAX_SAFE_INTEGER;

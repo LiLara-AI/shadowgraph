@@ -8,7 +8,7 @@
 //   search-contract.md      — content fields vs filters
 //   confidence-contract.md  — evidence-weighted bounded confidence
 
-import { assertHardPurgeGapLedgers, assertJournalBaselinePlacement, assertJournalEntrySequence, assertUniqueJournalSequences, rebuildProjection, journalGaps, duplicateSequences, journalBaselinePlacementIssues, journalEntryPostconditionIssue, journalEntrySequenceIssue, journalFactLifecycleIssues, replayedEntity, reattributeIdempotency, schema5PurgeArtifactIssue, ATTRIBUTED_ENTITY_KINDS, JOURNAL_ENTRY_TYPES, JOURNAL_TYPE_ENTITY_KIND, REPLAYABLE_ENTRY_TYPES } from './journal.js';
+import { assertHardPurgeGapLedgers, assertJournalBaselinePlacement, assertJournalEntrySequence, assertUniqueJournalSequences, rebuildProjection, journalGaps, duplicateSequences, journalBaselinePlacementIssues, journalEntryPostconditionIssue, journalEntrySequenceIssue, journalFactLifecycleIssues, replayedEntity, reattributeIdempotency, schema5PurgeArtifactIssue, ATTRIBUTED_ENTITY_KINDS, JOURNAL_ENTRY_TYPES, JOURNAL_TYPE_ENTITY_KIND, READABLE_JOURNAL_SCHEMA_VERSION, REPLAYABLE_ENTRY_TYPES } from './journal.js';
 import { createConfidence, applyContribution, setOutcomeContribution, computeConfidence, summarizeBasis, CONFIDENCE_POLICY } from './confidence.js';
 import { hybridSearch, foldText } from './hybrid-search.js';
 import { effectiveFactExpirationBoundary, factValidityPolicyIssue, isValidIsoInstant } from './fact-validity.js';
@@ -26,11 +26,13 @@ import { assertCreationInput } from './internal/creation-id.js';
 // behaviour at a distance.
 //
 // SCHEMA_VERSION is what this build WRITES; SUPPORTED_SCHEMA_VERSIONS is what it
-// reads. The reader was widened to 6 and shipped before this writer (plan
-// v1.4.4 §9.2), so the build before this one loads everything this one writes.
+// reads. The reader runs one schema ahead of the writer (plan v1.4.4 §9.2): it
+// was widened to 7 (PR-20) before any build writes 7, so this build is the floor
+// every later P3 build can fall back to. Entities and journal entries share the
+// one readable bound.
 export const SCHEMA_VERSION = 6;
-export const SUPPORTED_SCHEMA_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6]);
-const READABLE_SCHEMA_VERSION = 6;
+export const SUPPORTED_SCHEMA_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7]);
+const READABLE_SCHEMA_VERSION = READABLE_JOURNAL_SCHEMA_VERSION;
 const GLOBAL_ENTITY_NAMESPACE_SCHEMA_VERSION = 4;
 // The last schema whose entities carry no attribution. Import keeps a legacy
 // entity at this version rather than stamping it 6 without saying whose it is;
@@ -52,6 +54,55 @@ function attributionIssue(entity) {
   }
   if (['project', 'legacy_ambiguous'].includes(entity.attribution) && (typeof entity.project !== 'string' || !entity.project.trim())) {
     return `a ${entity.attribution} entity requires a project`;
+  }
+  return null;
+}
+
+// The claim-evidence model of schema 7 (plan v1.4.4 §9.4, §14). Only its closed
+// vocabularies and cross-field rules are checked; every other field -- text,
+// sourceRef, span, checks, verifierVersion, rule, readings, captureRef, and any
+// field a later build adds -- is carried verbatim. A stored record never carries
+// an unsupported claim: that stays in a capture item's extraction output.
+const CLAIM_CLASSES = Object.freeze(['quoted', 'entailed', 'ambiguous', 'unsupported']);
+const CAUSAL_STATES = Object.freeze(['recorded', 'unknown', 'not_recorded', 'legacy_freetext']);
+const OUTCOME_EVIDENCE_STATES = Object.freeze(['observed', 'absent', 'not_applicable']);
+const isPlainObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+// The entity erasureToken of schema 7: a non-empty string, carried only by a
+// decision, attempt, memory or fact that names its kind and id, so every public
+// result can be stripped of it by what the entity says it is.
+function erasureTokenIssue(entity) {
+  if (entity.erasureToken === undefined) return null;
+  if (typeof entity.erasureToken !== 'string' || !entity.erasureToken) return 'erasureToken must be a non-empty string';
+  if (!ATTRIBUTED_ENTITY_KINDS.includes(entity.kind) || typeof entity.id !== 'string' || !entity.id) return 'erasureToken is carried only by a decision, attempt, memory or fact that names its kind and id';
+  return null;
+}
+
+function claimModelIssue(entity) {
+  const tokenIssue = erasureTokenIssue(entity);
+  if (tokenIssue) return tokenIssue;
+  if (entity.claims !== undefined) {
+    if (!Array.isArray(entity.claims)) return 'claims must be a list';
+    for (const [index, claim] of entity.claims.entries()) {
+      if (!isPlainObject(claim) || !CLAIM_CLASSES.includes(claim.class)) return `claims[${index}].class must be one of ${CLAIM_CLASSES.join(', ')}`;
+      if (claim.class === 'unsupported') return `claims[${index}] is unsupported, which a stored record never carries`;
+    }
+  }
+  if (entity.causalClaim !== undefined) {
+    const cause = entity.causalClaim;
+    if (!isPlainObject(cause) || !CAUSAL_STATES.includes(cause.state)) return `causalClaim.state must be one of ${CAUSAL_STATES.join(', ')}`;
+    if (cause.class !== undefined && (!CLAIM_CLASSES.includes(cause.class) || cause.class === 'unsupported')) return 'causalClaim.class must be quoted, entailed or ambiguous';
+    if (cause.state === 'legacy_freetext') {
+      if (['quoted', 'entailed'].includes(cause.class)) return 'legacy free-text cause is never quoted or entailed';
+      if (cause.evidence !== undefined && (!Array.isArray(cause.evidence) || cause.evidence.length > 0)) return 'legacy free-text cause carries no evidence';
+    }
+  }
+  if (entity.outcomeEvidence !== undefined) {
+    const outcome = entity.outcomeEvidence;
+    if (!isPlainObject(outcome) || !OUTCOME_EVIDENCE_STATES.includes(outcome.state)) return `outcomeEvidence.state must be one of ${OUTCOME_EVIDENCE_STATES.join(', ')}`;
+    // A null resultClass declares no class, as it does everywhere else.
+    if (outcome.state === 'observed' && !ATTEMPT_RESULT_CLASSES.includes(entity.resultClass)) return `observed outcome evidence requires a resultClass of ${ATTEMPT_RESULT_CLASSES.join(', ')}`;
+    if (outcome.state !== 'observed' && entity.resultClass != null) return `${outcome.state} outcome evidence means resultClass is omitted`;
   }
   return null;
 }
@@ -80,6 +131,12 @@ function ownedByProject(entity, project) {
 // reported by validate() as unsupported, and given no meaning here.
 function isFutureEntity(entity) {
   return Number.isInteger(entity?.schemaVersion) && entity.schemaVersion > READABLE_SCHEMA_VERSION;
+}
+
+// Read, but written by a newer writer than this one: a writer here that restamps
+// an entity never touches it, so nothing it carries is relabelled or lost.
+function isNewerThanWriter(entity) {
+  return Number.isInteger(entity?.schemaVersion) && entity.schemaVersion > SCHEMA_VERSION;
 }
 
 // The order the attribution migration takes entities in, and the legacy
@@ -201,6 +258,40 @@ function assertFiniteJsonNumbers(value, seen = new WeakSet()) {
 function clone(value) {
   assertFiniteJsonNumbers(value);
   return JSON.parse(JSON.stringify(value));
+}
+
+// Plan rev6 §3.2 (DP-1): an entity's erasureToken is internal. Every public
+// result -- a read, a write's echo, a journal entry's payload -- is returned
+// without it, and only the privileged snapshot carries it. This build writes no
+// token; it is the floor for the builds that do (plan v1.4.4 §19.4). Copies are
+// made only along a path that holds a token, so stored state is never touched.
+function withoutErasureTokens(value) {
+  if (Array.isArray(value)) {
+    let copy = null;
+    value.forEach((item, index) => {
+      const next = withoutErasureTokens(item);
+      if (next !== item) (copy ??= [...value])[index] = next;
+    });
+    return copy ?? value;
+  }
+  if (!value || typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype) return value;
+  let copy = null;
+  if (Object.hasOwn(value, 'erasureToken') && (typeof value.kind === 'string' || Object.hasOwn(value, 'id'))) {
+    const { erasureToken, ...rest } = value;
+    copy = rest;
+  }
+  for (const [key, item] of Object.entries(copy ?? value)) {
+    const next = withoutErasureTokens(item);
+    if (next !== item) (copy ??= { ...value })[key] = next;
+  }
+  return copy ?? value;
+}
+
+function tokenFreeApi(api) {
+  return Object.fromEntries(Object.entries(api).map(([name, member]) => [name, typeof member !== 'function' ? member : (...args) => {
+    const result = member(...args);
+    return result && typeof result.then === 'function' ? result.then(withoutErasureTokens) : withoutErasureTokens(result);
+  }]));
 }
 
 // Detach one value on its way into a response. clone() is the established JSON
@@ -983,7 +1074,7 @@ export function createShadowGraph(options = {}) {
     };
     const expectedKind = JOURNAL_TYPE_ENTITY_KIND[entry.type];
     if (expectedKind && entry.entityKind !== expectedKind) throw new Error(`${entry.type} requires entityKind ${expectedKind}`);
-    if (entry.type === 'entity.attributed' && !ATTRIBUTED_ENTITY_KINDS.includes(entry.entityKind)) throw new Error(`entity.attributed requires entityKind ${ATTRIBUTED_ENTITY_KINDS.join(', ')}`);
+    if (['entity.attributed', 'entity.token_assigned'].includes(entry.type) && !ATTRIBUTED_ENTITY_KINDS.includes(entry.entityKind)) throw new Error(`${entry.type} requires entityKind ${ATTRIBUTED_ENTITY_KINDS.join(', ')}`);
     if (entry.payload?.id !== undefined && entry.entityId !== entry.payload.id) throw new Error(`${entry.type} entityId must match payload.id`);
     if (entry.payload?.project !== undefined && entry.project !== entry.payload.project) throw new Error(`${entry.type} project must match payload.project`);
     if (entry.payload?.kind !== undefined && entry.entityKind !== entry.payload.kind) throw new Error(`${entry.type} entityKind must match payload.kind`);
@@ -1494,7 +1585,7 @@ export function createShadowGraph(options = {}) {
     const limit = input.limit ?? Number.MAX_SAFE_INTEGER;
     if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('Attribution migration limit must be a positive integer');
     const pending = [...records.values(), ...facts.values()]
-      .filter((entity) => entity.attribution === undefined && !(Number.isInteger(entity.schemaVersion) && entity.schemaVersion > SCHEMA_VERSION))
+      .filter((entity) => entity.attribution === undefined && !isNewerThanWriter(entity))
       .sort(attributionOrder);
     const batch = pending.slice(0, limit);
     assertJournalCapacity(batch.length);
@@ -1543,7 +1634,7 @@ export function createShadowGraph(options = {}) {
       return entity;
     }) : [...records.values(), ...facts.values()].filter((entity) => entity.attribution === 'unattributed' && entity.originId === input.originId);
     if (!selected.length) throw new Error('Attribution origin has no unattributed material');
-    if (selected.some(isFutureEntity)) throw new Error('Attribution cannot change an unsupported future entity');
+    if (selected.some(isNewerThanWriter)) throw new Error('Attribution cannot change an entity of a future schema this build does not write');
     const changed = selected.filter((entity) => !ownedByProject(entity, input.targetProject));
     assertJournalCapacity(changed.length);
     const candidate = snapshot();
@@ -1588,13 +1679,13 @@ export function createShadowGraph(options = {}) {
   // not a project: no read scope reaches these records, and it reaches nothing
   // else. A record the migration has not reached yet is shown with the
   // attribution the migration's own mapping gives it. An entity from a newer
-  // schema is never listed: the migration skips it and validate() reports it
-  // unsupported, so its legacy meaning is not this build's to give. Each entry
+  // writer's schema is never listed: the migration skips it and attribution
+  // refuses it, so its legacy meaning is not this build's to give. Each entry
   // carries the canonical record, and no project is inferred. It writes
   // nothing; reassignment is a separate, explicit action.
   function legacyAttributionReview(options = {}) {
     const items = [...records.values(), ...facts.values()]
-      .filter((entity) => !isFutureEntity(entity) && isLegacyOwned(entity))
+      .filter((entity) => !isNewerThanWriter(entity) && isLegacyOwned(entity))
       .sort(attributionOrder)
       .map((entity) => ({
         id: entity.id,
@@ -2590,8 +2681,8 @@ export function createShadowGraph(options = {}) {
     // What the output holds is chosen by the request's boundary, exactly as for
     // every other read (scopedView): with no project and no origin it holds
     // nothing, and it never names an id outside the scope (P1 reconciliation
-    // F-16).
-    const data = snapshot();
+    // F-16). The caller's rules never see an erasureToken.
+    const data = withoutErasureTokens(snapshot());
     const view = scopedView(boundary);
     const chosen = (items) => new Set(items.map((item) => item.id));
     const [recordIds, factIds, relationIds] = [view.records, view.facts, view.relations].map(chosen);
@@ -4002,7 +4093,7 @@ export function createShadowGraph(options = {}) {
     return scopedResult({ schemaVersion: SCHEMA_VERSION, total: view.records.length, decisions: view.records.filter((x) => x.kind === 'decision').length, attempts: view.records.filter((x) => x.kind === 'attempt').length, facts: view.facts.length, relations: view.relations.length, reviewSignals: view.reviewSignals.length, events: view.events.length, journal: view.journal.length }, boundary, view.reviewSignals);
   }
 
-  return registerPrivileged({
+  return registerPrivileged(tokenFreeApi({
     // Only direct public mutation entry points receive a transaction boundary.
     // Internal composition (applyMemoryPlan -> remember, supersedeDecision ->
     // link, maintain/context -> review, replaceData -> importData) stays inside
@@ -4050,7 +4141,7 @@ export function createShadowGraph(options = {}) {
     issueAccess: transactional('issueAccess', authority.issue),
     revokeAccess: transactional('revokeAccess', authority.revoke),
     discardAccess: transactional('discardAccess', authority.discard)
-  }, { snapshot, validate: integrity, rebuild: replay,
+  }), { snapshot, validate: integrity, rebuild: replay,
     issueAccess: transactional('ownerIssueAccess', authority.issueOwner), inspectAccess: authority.inspect,
     accessRefusal: transactional('accessRefusal', authority.transportRefusal),
     bindProject: transactional('bindProject', bindProject), resolveProjectBinding });
@@ -4361,6 +4452,8 @@ function validateImportShape(source) {
   for (const [index, item] of array('records').entries()) {
     if (!item || typeof item !== 'object' || !['decision', 'attempt', 'memory'].includes(item.kind)) throw new Error(`records[${index}] is malformed`);
     if (typeof item.id !== 'string' || !item.id) throw new Error(`records[${index}].id must be a non-empty string`);
+    const recordClaimIssue = isFutureEntity(item) ? null : claimModelIssue(item);
+    if (recordClaimIssue) throw new Error(`records[${index}] violates the claim model: ${recordClaimIssue}`);
     if (Number.isInteger(source.schemaVersion) && source.schemaVersion >= GLOBAL_ENTITY_NAMESPACE_SCHEMA_VERSION) {
       try { normalizeProject(item.project); }
       catch { throw new Error(`records[${index}].project must be a non-empty string`); }
@@ -4395,6 +4488,8 @@ function validateImportShape(source) {
   for (const [index, fact] of array('facts').entries()) {
     if (!fact || typeof fact !== 'object' || (fact.id !== undefined && typeof fact.id !== 'string') || typeof fact.key !== 'string' || (fact.kind !== undefined && fact.kind !== 'fact')) throw new Error(`facts[${index}] is malformed`);
     if (Number.isInteger(source.schemaVersion) && source.schemaVersion >= GLOBAL_ENTITY_NAMESPACE_SCHEMA_VERSION && !fact.id) throw new Error(`facts[${index}].id must be a non-empty string`);
+    const factClaimIssue = isFutureEntity(fact) ? null : claimModelIssue(fact);
+    if (factClaimIssue) throw new Error(`facts[${index}] violates the claim model: ${factClaimIssue}`);
     if (Number.isInteger(source.schemaVersion) && source.schemaVersion >= GLOBAL_ENTITY_NAMESPACE_SCHEMA_VERSION) {
       try { normalizeProject(fact.project); }
       catch { throw new Error(`facts[${index}].project must be a non-empty string`); }
@@ -4437,6 +4532,8 @@ function validateImportShape(source) {
   for (const [index, relation] of array('relations').entries()) {
     if (!relation || typeof relation !== 'object' || typeof relation.from !== 'string' || typeof relation.to !== 'string' || typeof relation.relation !== 'string') throw new Error(`relations[${index}] is malformed`);
     if (typeof relation.id !== 'string' || !relation.id) throw new Error(`relations[${index}].id must be a non-empty string`);
+    const relationTokenIssue = isFutureEntity(relation) ? null : erasureTokenIssue(relation);
+    if (relationTokenIssue) throw new Error(`relations[${index}] violates the claim model: ${relationTokenIssue}`);
     validateTemporalFields(relation, ['recordedAt', 'createdAt', 'validFrom', 'validTo']);
     if (relation.temporal !== undefined) {
       if (!relation.temporal || typeof relation.temporal !== 'object' || Array.isArray(relation.temporal)) throw new Error(`relations[${index}].temporal must be an object`);
@@ -4464,7 +4561,14 @@ function validateImportShape(source) {
     if (purgeArtifactIssue) throw new Error(`journal[${index}] has noncanonical schema 5 purge artifact: ${purgeArtifactIssue}`);
     const expectedEntityKind = JOURNAL_TYPE_ENTITY_KIND[entry.type];
     if (expectedEntityKind && entry.entityKind != null && entry.entityKind !== expectedEntityKind) throw new Error(`journal[${index}] type ${entry.type} requires entityKind ${expectedEntityKind}`);
-    if (entry.type === 'entity.attributed' && entry.entityKind != null && !ATTRIBUTED_ENTITY_KINDS.includes(entry.entityKind)) throw new Error(`journal[${index}] type entity.attributed requires entityKind ${ATTRIBUTED_ENTITY_KINDS.join(', ')}`);
+    if ((entry.type === 'entity.attributed' || (entry.type === 'entity.token_assigned' && !isFutureEntity(entry))) && entry.entityKind != null && !ATTRIBUTED_ENTITY_KINDS.includes(entry.entityKind)) throw new Error(`journal[${index}] type ${entry.type} requires entityKind ${ATTRIBUTED_ENTITY_KINDS.join(', ')}`);
+    const entryClaimIssue = isPlainObject(entry.payload) && entry.type !== 'projection.baseline' && !isFutureEntity(entry) && !isFutureEntity(entry.payload) ? claimModelIssue(entry.payload) : null;
+    if (entryClaimIssue) throw new Error(`journal[${index}] payload violates the claim model: ${entryClaimIssue}`);
+    if (entry.type === 'projection.baseline' && !isFutureEntity(entry)) {
+      const baselineEntities = [...(entry.payload?.records ?? []), ...(entry.payload?.facts ?? []), ...(entry.payload?.relations ?? []), ...(entry.payload?.idempotency ?? []).map((item) => item?.value)];
+      const baselineIssue = baselineEntities.filter((entity) => isPlainObject(entity) && !isFutureEntity(entity)).map(claimModelIssue).find(Boolean);
+      if (baselineIssue) throw new Error(`journal[${index}] projection.baseline payload violates the claim model: ${baselineIssue}`);
+    }
     if (source.schemaVersion >= 3) {
       if (typeof entry.id !== 'string' || !entry.id) throw new Error(`journal[${index}].id must be a non-empty string`);
       if (journalIds.has(entry.id)) throw new Error(`Duplicate journal id ${entry.id}`);
@@ -4510,6 +4614,16 @@ function validateImportShape(source) {
     if (!item || typeof item !== 'object' || Array.isArray(item) || typeof item.key !== 'string' || !item.key || !item.value || typeof item.value !== 'object' || Array.isArray(item.value)) throw new Error(`idempotency[${index}] is malformed`);
     if (idempotencyKeys.has(item.key)) throw new Error(`Duplicate idempotency key ${item.key}`);
     idempotencyKeys.add(item.key);
+    const valueClaimIssue = isFutureEntity(item.value) ? null : claimModelIssue(item.value);
+    if (valueClaimIssue) throw new Error(`idempotency[${index}].value violates the claim model: ${valueClaimIssue}`);
+  }
+  // A purge tombstone names exactly one entity by its token.
+  const tokenHolders = new Map();
+  for (const entity of [...array('records'), ...array('facts')]) {
+    if (isFutureEntity(entity) || entity.erasureToken === undefined) continue;
+    const holder = tokenHolders.get(entity.erasureToken);
+    if (holder !== undefined && holder !== entity.id) throw new Error(`${holder} and ${entity.id} share an erasureToken`);
+    tokenHolders.set(entity.erasureToken, entity.id);
   }
   const eventIds = new Set();
   for (const [index, eventItem] of array('events').entries()) {

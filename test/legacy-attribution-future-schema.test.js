@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { NODE_SQLITE_NOT_APPLICABLE_REASON } from '../src/runtime-capabilities.js';
-import { createShadowGraph, SCHEMA_VERSION } from '../src/shadowgraph.js';
+import { createShadowGraph, SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { privilegedSnapshot, privilegedValidate } from '../src/internal/snapshot.js';
@@ -19,7 +19,8 @@ import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const NOW = '2026-01-01T00:00:00.000Z';
 const now = () => NOW;
-const FUTURE = SCHEMA_VERSION + 1;
+// The first schema this build cannot read: the reader runs ahead of the writer.
+const FUTURE = Math.max(...SUPPORTED_SCHEMA_VERSIONS) + 1;
 
 async function sqliteOrSkip(t) {
   try { await import('node:sqlite'); return true; }

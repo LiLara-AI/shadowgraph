@@ -2,6 +2,7 @@
 // No event replay, clock cache, memory mutation, or lineage freshness inference.
 import { isLegacyOwned } from './scope.js';
 import { isValidIsoInstant } from './fact-validity.js';
+import { READABLE_JOURNAL_SCHEMA_VERSION as READABLE_SCHEMA_VERSION } from './journal.js';
 
 export const ACCESS_SURFACES = Object.freeze(['cli', 'http', 'mcp']);
 export const ACCESS_STATES = Object.freeze(['requested', 'active', 'expired', 'exhausted', 'suspended', 'discarded', 'revoked']);
@@ -42,7 +43,7 @@ export function intersectAccessScope(left, right) {
   } catch { return empty; }
 }
 export function accessScopeContains(scope, entity) {
-  if (!entity || (Number.isInteger(entity.schemaVersion) && entity.schemaVersion > 6)) return false;
+  if (!entity || (Number.isInteger(entity.schemaVersion) && entity.schemaVersion > READABLE_SCHEMA_VERSION)) return false;
   if (entity.attribution === 'unattributed') return text(entity.originId) && (scope.originIds ?? []).includes(entity.originId);
   if (isLegacyOwned(entity)) {
     const kind = entity.attribution ?? (entity.project == null ? 'legacy_unattributed' : 'legacy_ambiguous');

@@ -104,7 +104,19 @@ export async function migrateStore({ graph, store, file, storageType = 'json', b
 //   - the journal history, which schema-5 readers cannot replay once it holds
 //     schema-6 entries -- the copy starts from one schema-5 baseline instead;
 //   - collections a schema-5 reader does not know.
+// This build converts only what it writes. Data a newer writer produced
+// (schema 7, read since plan v1.4.4 PR-20) is refused, never relabelled as 5;
+// so is an erasure token, which only schema 7 assigns, whatever it sits on.
+function assertSchema6Source(source) {
+  const items = [...(source.records ?? []), ...(source.facts ?? []), ...(source.relations ?? []),
+    ...(source.idempotency ?? []).map((item) => item?.value), ...(source.journal ?? []).flatMap((entry) => [entry, entry?.payload])];
+  const newer = items.find((item) => Number.isInteger(item?.schemaVersion) && item.schemaVersion > 6);
+  if (newer) throw new Error(`A downgrade to schema 5 converts schema-6 data only; this store holds schema-${newer.schemaVersion} data a newer build wrote`);
+  if (items.some((item) => item?.erasureToken !== undefined)) throw new Error('A downgrade to schema 5 converts schema-6 data only; this store holds erasure tokens a newer build assigned');
+}
+
 export function downgradeToSchema5(snapshot, { now = () => new Date().toISOString() } = {}) {
+  assertSchema6Source(snapshot);
   const source = structuredClone(snapshot);
   const report = { fromSchemaVersion: source.schemaVersion, toSchemaVersion: 5, removedFields: [], excluded: [], excludedCollections: [], journal: null };
   const excludedIds = new Set();
@@ -183,6 +195,7 @@ export function downgradeToSchema5(snapshot, { now = () => new Date().toISOStrin
 export async function downgradeStore({ graph, store, file, storageType = 'json', output, preservationCopy, now }) {
   if (!output) throw new Error('A downgrade needs an output path');
   if (!preservationCopy) throw new Error('A preservation copy needs a destination path');
+  assertSchema6Source(privilegedSnapshot(graph));
   const reportPath = `${output}.report.json`;
   // Four files with four jobs, told apart before anything is written: the
   // report must never land on the preservation copy it vouches for (§19.3.2

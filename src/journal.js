@@ -13,7 +13,7 @@ export const JOURNAL_SCHEMA_VERSION = 6;
 // The highest entry schema this reader interprets. The reader is widened and
 // shipped before the writer is raised (plan v1.4.4 §9.2), so it may run ahead of
 // JOURNAL_SCHEMA_VERSION but never behind it.
-export const READABLE_JOURNAL_SCHEMA_VERSION = 6;
+export const READABLE_JOURNAL_SCHEMA_VERSION = 7;
 // Schema 5 introduced canonical purge artifacts; every readable schema from it
 // on follows the same rules.
 function canonicalPurgeSchema(version) {
@@ -112,7 +112,8 @@ export const REPLAYABLE_ENTRY_TYPES = Object.freeze([
   'confidence.changed',
   'relation.created',
   'project.purged',
-  'entity.attributed'
+  'entity.attributed',
+  'entity.token_assigned'
 ]);
 
 // `entity.attributed` records a change to which project or origin an entity
@@ -124,6 +125,28 @@ export const REPLAYABLE_ENTRY_TYPES = Object.freeze([
 // entity kinds. The attribution migration writes it with reason `migration`;
 // a user's re-attribution arrives with the grant lifecycle.
 export const ATTRIBUTED_ENTITY_KINDS = Object.freeze(['decision', 'attempt', 'memory', 'fact']);
+
+// `entity.token_assigned` (plan v1.4.4 PR-20; plan rev6 §3.2) gives a tokenless
+// entity its random, content-free erasureToken, the handle a purge tombstone
+// names it by. Its payload is the complete post-change entity. It is replayed
+// only when the entity it names has been recorded, has no token yet, and the
+// payload is that entity with the token added and nothing else changed; any
+// other entry of the type is refused, never replayed.
+const stable = (value) => JSON.stringify(value, (key, item) => (item && typeof item === 'object' && !Array.isArray(item)
+  ? Object.fromEntries(Object.keys(item).sort().map((name) => [name, item[name]]))
+  : item));
+export function tokenAssignmentIssue(prior, next) {
+  if (!prior) return 'it names no entity the journal has recorded';
+  if (prior.erasureToken !== undefined) return 'the entity already has an erasureToken';
+  if (typeof next?.erasureToken !== 'string' || !next.erasureToken) return 'it carries no erasureToken';
+  const { erasureToken, ...rest } = next;
+  return stable(rest) === stable(prior) ? null : 'it changes more than the erasureToken';
+}
+// A replayed token assignment moves the entity's retry values with it, as
+// attribution does; their keys do not depend on the token.
+export function retokenIdempotency(entries, entity) {
+  for (const [key, value] of entries) if (value?.id === entity.id) entries.set(key, entity);
+}
 export const ATTRIBUTION_CHANGE_REASONS = Object.freeze(['migration', 'user']);
 
 // The entity an entry's payload contributes to a projection.
@@ -291,6 +314,15 @@ function attributionEntryIssue(entry) {
 export function journalEntryPostconditionIssue(entry) {
   if (!entry || entry.redacted === true || entry.payload === null) return null;
   if (entry.type === 'entity.attributed') return attributionEntryIssue(entry);
+  if (entry.type === 'entity.token_assigned') {
+    // A future entry of the type is carried, never judged.
+    if (Number.isInteger(entry.schemaVersion) && entry.schemaVersion > READABLE_JOURNAL_SCHEMA_VERSION) return null;
+    const payload = entry.payload;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return 'entity.token_assigned requires an entity payload';
+    if (!ATTRIBUTED_ENTITY_KINDS.includes(payload.kind)) return `entity.token_assigned cannot carry a ${payload.kind ?? 'kind-less'} entity`;
+    if (entry.entityKind != null && entry.entityKind !== payload.kind) return 'entity.token_assigned entityKind must match payload.kind';
+    return null;
+  }
   if (!['fact.verified', 'fact.expired', 'fact.superseded'].includes(entry.type)) return null;
   const fact = entry.payload;
   if (!fact || typeof fact !== 'object' || Array.isArray(fact) || fact.kind !== 'fact') return `${entry.type} requires a fact payload`;
@@ -599,6 +631,7 @@ export function journalBaselinePlacementIssues(entries = [], options = {}) {
         currentIdempotency.clear();
         for (const [key, value] of next) currentIdempotency.set(key, value);
       }
+      if (entry.type === 'entity.token_assigned') retokenIdempotency(currentIdempotency, replayedEntity(entry));
       if (entry.idempotencyKey) currentIdempotency.set(entry.idempotencyKey, replayedEntity(entry));
     }
     priorReplayableEntries += 1;
@@ -772,7 +805,7 @@ export function rebuildProjection(entries = [], options = {}) {
     }
     const expectedEntityKind = JOURNAL_TYPE_ENTITY_KIND[entry.type];
     if ((expectedEntityKind && entry.entityKind != null && KIND_TO_COLLECTION[entry.entityKind] && entry.entityKind !== expectedEntityKind)
-      || (entry.type === 'entity.attributed' && entry.entityKind != null && !ATTRIBUTED_ENTITY_KINDS.includes(entry.entityKind))) {
+      || (['entity.attributed', 'entity.token_assigned'].includes(entry.type) && entry.entityKind != null && !ATTRIBUTED_ENTITY_KINDS.includes(entry.entityKind))) {
       skipped.push({ seq: entry.seq, type: entry.type, why: 'type_entity_kind_mismatch' });
       continue;
     }
@@ -889,12 +922,20 @@ export function rebuildProjection(entries = [], options = {}) {
     // no ordering-sensitive merge is required and a corrupt entry damages one
     // entity rather than poisoning the chain.
     const entity = replayedEntity(entry);
+    if (entry.type === 'entity.token_assigned') {
+      const issue = tokenAssignmentIssue(entities.get(entry.entityId)?.entity, entity);
+      if (issue) {
+        skipped.push({ seq: entry.seq, type: entry.type, why: 'invalid_token_assignment', entityId: entry.entityId, detail: issue });
+        continue;
+      }
+    }
     entities.set(entry.entityId, { collection, entity, project: entry.project ?? entity?.project ?? null });
     if (entry.type === 'entity.attributed') {
       const next = reattributeIdempotency(idempotency, entity);
       idempotency.clear();
       for (const [key, value] of next) idempotency.set(key, value);
     }
+    if (entry.type === 'entity.token_assigned') retokenIdempotency(idempotency, entity);
     if (entry.idempotencyKey) idempotency.set(normalizeIdempotencyKey(entry.idempotencyKey, entity), entity);
     applied += 1;
   }
@@ -926,7 +967,7 @@ export function rebuildProjection(entries = [], options = {}) {
     ? { ...fact, verificationStatus: 'unverified', verificationUntrustedReason: 'journal_lifecycle_invalid' }
     : fact);
 
-  const unsupported = skipped.filter((item) => ['unsupported_schema_version', 'unknown_entry_type', 'missing_payload', 'unmappable_entity', 'type_entity_kind_mismatch', 'type_payload_postcondition_mismatch', 'fact_lifecycle_violation', INVALID_BASELINE_PLACEMENT_CODE, INVALID_JOURNAL_SEQUENCE_CODE, DUPLICATE_JOURNAL_SEQUENCE_CODE, 'marked_non_replayable', NONCANONICAL_SCHEMA5_PURGE_ARTIFACT_CODE, 'dangling_relation'].includes(item.why));
+  const unsupported = skipped.filter((item) => ['unsupported_schema_version', 'unknown_entry_type', 'missing_payload', 'unmappable_entity', 'type_entity_kind_mismatch', 'type_payload_postcondition_mismatch', 'fact_lifecycle_violation', 'invalid_token_assignment', INVALID_BASELINE_PLACEMENT_CODE, INVALID_JOURNAL_SEQUENCE_CODE, DUPLICATE_JOURNAL_SEQUENCE_CODE, 'marked_non_replayable', NONCANONICAL_SCHEMA5_PURGE_ARTIFACT_CODE, 'dangling_relation'].includes(item.why));
   const crossesEpoch = legacy.length > 0 && (journalEpoch === null || journalEpoch > 0);
 
   let rebuildable = true;
