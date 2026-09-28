@@ -22,6 +22,7 @@ import { createFactAttestation } from '../src/verification.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { privilegedIssueAccess, privilegedSnapshot } from '../src/internal/snapshot.js';
+import { CONTEXT_DELIVERY_BUDGET } from '../src/mcp-tools.js';
 
 const STRUCTURED_PROTOCOL = '2025-11-25';
 const PROJECT = 'effects';
@@ -518,4 +519,57 @@ test('the verification tool reads a caller-selected path, inside the configured 
   assert.equal(tools.length, 35);
   const verifyTool = tools.find((tool) => tool.name === 'shadowgraph_verify_fact');
   assert.deepEqual(verifyTool.annotations, deriveAnnotations(verified), 'verify_fact annotations must equal the observed behaviour');
+});
+
+// Plan v1.4.4 PR-17 (§13.1, §13.3; AC-059 clauses 2-3): repeated own-scope and
+// grant-bearing context deliveries, observed on the wire against the declared
+// budget. Own scope moves nothing; a grant commits one revision per delivery and
+// folds every use into one audit aggregate per grant, surface, outcome and UTC day.
+test('shadowgraph_context repeats within the declared delivery budget on the wire', async (t) => {
+  const rpc = await startMcp(t);
+  await rpc.initialize();
+  await rpc.ok('shadowgraph_record_decision', { project: PROJECT, title: 'Due', chosen: 'A', reviewAfter: at(-60) });
+  // The granted project holds a record, so each grant-bearing delivery widens.
+  await rpc.ok('shadowgraph_record_decision', { project: 'other', title: 'Wider', chosen: 'B' });
+  const DELIVERIES = 3;
+  // Values, not the key order a reload rebuilds; every event but the access
+  // audit is canonical.
+  const sorted = (key, item) => (item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.keys(item).sort().map((name) => [name, item[name]])) : item);
+  const audit = new Set(['access.used', 'access.refused', 'access.audit_overflow']);
+  const canonical = (durable) => JSON.stringify([
+    ...['records', 'facts', 'relations', 'reviewSignals', 'idempotency', 'journal', 'journalSeq'].map((key) => durable[key]),
+    (durable.events ?? []).filter((event) => !audit.has(event.type))
+  ], sorted);
+
+  let before = await snapshot(rpc);
+  for (let index = 0; index < DELIVERIES; index += 1) await rpc.ok('shadowgraph_context', { project: PROJECT });
+  let after = await snapshot(rpc);
+  let seen = effects(before, after);
+  const own = CONTEXT_DELIVERY_BUDGET.ownScope;
+  assert.equal(seen.revisionDelta, own.revisions * DELIVERIES, 'own-scope deliveries commit no revision');
+  assert.equal(seen.journalDelta, own.journalEntries * DELIVERIES);
+  assert.equal(seen.storeChanged, false, 'repeated and replayed own-scope deliveries leave the store byte-identical');
+  assert.deepEqual(seen.newFiles, []);
+
+  const owner = createShadowGraph({ now: () => T0 });
+  owner.importData(await readStore(rpc.file));
+  const issued = privilegedIssueAccess(owner, { type: 'grant', scope: { projects: ['other'] }, surfaces: ['mcp'], expiresAt: '2099-01-01T00:00:00.000Z', reason: 'synthetic budget fixture' });
+  await createJsonFileStore(rpc.file).save(privilegedSnapshot(owner));
+
+  // A minute apart, so one aggregate per call cannot pass for one per UTC day.
+  before = await snapshot(rpc);
+  for (let index = 0; index < DELIVERIES; index += 1) {
+    await rpc.setClock(at(index + 1));
+    await rpc.ok('shadowgraph_context', { project: PROJECT, accessId: issued.entry.accessId });
+  }
+  after = await snapshot(rpc);
+  seen = effects(before, after);
+  const grant = CONTEXT_DELIVERY_BUDGET.grant;
+  assert.equal(seen.revisionDelta, grant.revisions * DELIVERIES, 'each grant-bearing delivery commits at most one revision');
+  assert.equal(seen.journalDelta, grant.journalEntries * DELIVERIES);
+  assert.deepEqual(seen.removed, []);
+  assert.equal(canonical(after.durable), canonical(before.durable), 'canonical values are unchanged');
+  const used = after.durable.events.filter((event) => event.type === 'access.used' && event.accessId === issued.entry.accessId);
+  assert.equal(used.length, grant.newAuditAggregatesPerKeyDay, 'one aggregate per grant, surface, outcome and UTC day');
+  assert.equal(used[0].count, DELIVERIES);
 });

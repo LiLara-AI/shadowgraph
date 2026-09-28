@@ -9,8 +9,11 @@ import { isCommittedRejection } from '../shadowgraph.js';
 
 const execute = promisify(execFile);
 
-// Matches the kernel's requestedAccess: any presented readProvenance is an
-// access request, and its refusal is audited under the same fenced save.
+// Routes every request the kernel treats as an access request through the
+// fenced save, so its audit commits with it: any presented readProvenance or
+// access id. A present accessId or grantId key routes even when null, which the
+// kernel reads as own scope; that delivery commits a revision and no audit, and
+// is declared under the grant tier of CONTEXT_DELIVERY_BUDGET.
 export const hasAccessReference = (input) => Boolean(input && (Object.hasOwn(input, 'accessId') || Object.hasOwn(input, 'grantId') || input.readProvenance !== undefined));
 
 export async function discoverWorkspace(cwd = process.cwd()) {

@@ -706,7 +706,7 @@ const GRANT_READ_TOOLS = new Set(['shadowgraph_review', 'shadowgraph_search', 's
 const ACCESS_DESCRIPTIONS = {
   shadowgraph_review: { does: 'Evaluate reopen rules and list due decisions.', route: 'shadowgraph_review_signals reads signals; shadowgraph_ack_review closes one; shadowgraph_maintain ages first.', effects: 'Persists deduped own-scope signals and a revision; grant use also audits.' },
   shadowgraph_search: { does: 'Match all query terms in declared content fields.', route: 'shadowgraph_retrieve adds neighbours; shadowgraph_recall ranks memory; shadowgraph_context builds context; shadowgraph_traverse walks IDs.' },
-  shadowgraph_context: { does: 'Build scoped decisions, assumptions, attempts and reviews.', route: 'shadowgraph_search and shadowgraph_retrieve find records; shadowgraph_recall ranks memory; shadowgraph_review_context evaluates and persists.', effects: 'Reads without persisting any signal; grants audit reads.' },
+  shadowgraph_context: { does: 'Build scoped decisions, assumptions, attempts and reviews.', route: 'shadowgraph_search and shadowgraph_retrieve find records; shadowgraph_recall ranks memory; shadowgraph_review_context evaluates and persists.', effects: 'Writes no canonical state; with an access key, one revision and at most one audit aggregate per grant, surface, outcome and UTC day.' },
   shadowgraph_review_context: { does: 'Evaluate scoped reopen rules and persist own-scope signals.', route: 'shadowgraph_context reads the same working set without persisting; shadowgraph_review evaluates rules only.', effects: 'Evaluates and persists own-scope signals plus a revision; grants audit reads.' },
   shadowgraph_recall: { does: 'Rank scoped memory by lexical, vector, graph and temporal signals.', route: 'shadowgraph_search matches content; shadowgraph_retrieve adds neighbours; shadowgraph_remember writes.' },
   shadowgraph_maintain: { does: 'Age own-scope decisions and facts, then evaluate reopen rules.', route: 'shadowgraph_review evaluates; shadowgraph_validate reports; shadowgraph_update_status cannot set stale.', effects: 'Clock-dependent writes commit a revision even on repeats; grants audit reads.' },
@@ -722,6 +722,20 @@ function compose({ does, route, effects, returns }) {
 // ---------------------------------------------------------------------------
 // The catalog
 // ---------------------------------------------------------------------------
+// Plan v1.4.4 §13.1/§13.3 (PC-25, AC-059): the declared write budget of one
+// default-path context delivery, frozen before it was measured. An own-scope
+// delivery presents no access key and is a read. A grant-bearing one writes only
+// the §10.9.7 access audit: at most one aggregate per (accessId, surface,
+// outcome, UTC day), updated in place, committed by one save that rewrites the
+// whole store, so its I/O is O(store) and is declared apart from growth. A
+// request presenting an access key with a null value takes the same fenced path
+// and is held to the grant tier. scripts/context-size.mjs --check measures
+// against this; exceeding it fails the phase, and it never raises the budget.
+export const CONTEXT_DELIVERY_BUDGET = Object.freeze({
+  ownScope: Object.freeze({ canonicalWrites: 0, journalEntries: 0, revisions: 0, saves: 0, bytesWritten: 0, addedMs: 0 }),
+  grant: Object.freeze({ canonicalWrites: 0, journalEntries: 0, revisions: 1, saves: 1, rewrite: 'whole_store', newAuditAggregatesPerKeyDay: 1, growthBytes: 4096, addedMs: 250 })
+});
+
 // `compact` marks the 15 everyday workflow tools advertised when
 // SHADOWGRAPH_MCP_COMPACT=1. `persists` marks the tools whose successful call is
 // followed by a durable save in src/mcp.js; shadowgraph_restore is deliberately

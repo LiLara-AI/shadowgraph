@@ -17,19 +17,25 @@
 //   node scripts/context-size.mjs                print the table
 //   node scripts/context-size.mjs --json         print the same data as JSON
 //   node scripts/context-size.mjs --diff FILE    compare against saved JSON
-import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+//   node scripts/context-size.mjs --check        measure writes per delivery against
+//                                                the declared budget; exit 1 when over
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createShadowGraph } from '../src/shadowgraph.js';
-import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { CONTEXT_DELIVERY_BUDGET } from '../src/mcp-tools.js';
+import { createJsonFileStore } from '../src/storage.js';
+import { createShadowGraphServer } from '../src/server.js';
+import { privilegedIssueAccess, privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const bytes = (value) => Buffer.byteLength(JSON.stringify(value), 'utf8');
 const PROJECT = 'bench';
 
 // A deterministic corpus. Sizes are fixed so two runs are comparable; the shapes
 // mirror what the product actually stores rather than a synthetic blob.
-export function seedGraph({ decisions = 40, attempts = 30, facts = 60 } = {}) {
-  const graph = createShadowGraph();
+export function seedGraph({ decisions = 40, attempts = 30, facts = 60, now } = {}) {
+  const graph = createShadowGraph(now ? { now } : undefined);
   const expected = { violatedKeys: [], reusableAttemptIds: [], decisionIds: [] };
 
   for (let index = 0; index < decisions; index += 1) {
@@ -164,6 +170,154 @@ export function measure(options = {}) {
   };
 }
 
+// Declared operational writes per delivery (plan v1.4.4 §13.3), measured on the
+// HTTP transport over a real JSON store in a temporary directory, so a transport
+// that saved after an own-scope read would be counted. The clock advances one
+// minute per delivery, so one audit aggregate per call cannot pass for one per
+// UTC day, and the grant phase ends on the next UTC day. The own-scope phase
+// ends with a replay at the same instant. A request that presents an access key
+// with a null value is routed through the fenced access operation by every
+// transport, so it is measured apart and held to the grant tier. Revisions and
+// the journal are read back from the store itself.
+const DAY_ONE = Date.parse('2026-01-01T00:00:00.000Z');
+const MINUTE = 60_000, DAY = 86_400_000;
+const ACCESS_AUDIT_TYPES = new Set(['access.used', 'access.refused', 'access.audit_overflow']);
+const mean = (items) => (items.length ? items.reduce((sum, item) => sum + item, 0) / items.length : 0);
+const round = (value) => Number(value.toFixed(4));
+// Canonical truth is the stored values, every non-audit event included. An
+// import rebuilds objects in its own key order, so a reload and save may reorder
+// keys without changing a value; that is compared away here, and nothing else.
+const values = (value) => JSON.stringify(value, (key, item) => (item && typeof item === 'object' && !Array.isArray(item)
+  ? Object.fromEntries(Object.keys(item).sort().map((name) => [name, item[name]]))
+  : item));
+function partition(stored) {
+  const { revision = 0, events = [], ...rest } = stored;
+  return {
+    canonical: { ...rest, events: events.filter((event) => !ACCESS_AUDIT_TYPES.has(event.type)) },
+    audit: events.filter((event) => ACCESS_AUDIT_TYPES.has(event.type)),
+    revision
+  };
+}
+
+export async function measureWrites({ deliveries = 5, ...options } = {}) {
+  let clock = DAY_ONE;
+  const now = () => new Date(clock).toISOString();
+  const { graph } = seedGraph({ ...options, now });
+  // The granted project holds a record, so every grant-bearing delivery is a
+  // wider read and commits its audit aggregate.
+  graph.addDecision({ project: 'elsewhere', title: 'Serve the wider tier from the regional cache', chosen: 'regional-cache' });
+  const grant = privilegedIssueAccess(graph, {
+    type: 'grant', scope: { projects: ['elsewhere'] }, surfaces: ['http'],
+    expiresAt: '2099-01-01T00:00:00.000Z', reason: 'context-size write budget'
+  }).entry;
+  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-context-size-'));
+  let app;
+  try {
+    const file = join(directory, 'store.json');
+    const store = createJsonFileStore(file);
+    await store.save(privilegedSnapshot(graph));
+    const storeBytes = (await stat(file)).size;
+    let saves = [];
+    const measuredStore = {
+      load: () => store.load(),
+      async save(data) {
+        const sizeBefore = (await stat(file)).size;
+        const started = performance.now();
+        const revision = await store.save(data);
+        const ms = performance.now() - started;
+        const size = (await stat(file)).size;
+        saves.push({ ms, bytesWritten: size, growthBytes: size - sizeBefore });
+        return revision;
+      },
+      close() {}
+    };
+    app = await createShadowGraphServer({ store: measuredStore, now, cwd: directory, apiToken: '' });
+    await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve));
+    const url = `http://127.0.0.1:${app.server.address().port}/context`;
+    async function deliver(body) {
+      const first = saves.length, started = performance.now();
+      const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      const text = await response.text();
+      if (!response.ok) throw new Error(`POST /context answered ${response.status}: ${text}`);
+      return { text, ms: performance.now() - started, saves: saves.slice(first) };
+    }
+    async function phase(instants, body) {
+      saves = [];
+      const before = await readFile(file, 'utf8');
+      const delivered = [];
+      for (const instant of instants) { clock = instant; delivered.push(await deliver(body)); }
+      const after = await readFile(file, 'utf8');
+      const [was, is] = [partition(JSON.parse(before)), partition(JSON.parse(after))];
+      const canonicalChanged = [...new Set([...Object.keys(was.canonical), ...Object.keys(is.canonical)])]
+        .filter((key) => values(was.canonical[key]) !== values(is.canonical[key]));
+      const used = is.audit.filter((event) => event.type === 'access.used' && event.accessId === grant.accessId);
+      const perDay = new Map();
+      for (const event of used) perDay.set(event.window, (perDay.get(event.window) ?? 0) + 1);
+      return {
+        deliveries: instants.length,
+        saves: saves.length,
+        maxSavesPerDelivery: Math.max(0, ...delivered.map((item) => item.saves.length)),
+        bytesWritten: saves.reduce((sum, save) => sum + save.bytesWritten, 0),
+        revisionDelta: is.revision - was.revision,
+        journalDelta: (is.canonical.journalSeq ?? 0) - (was.canonical.journalSeq ?? 0),
+        canonicalWrites: canonicalChanged.length,
+        changedKeys: [...canonicalChanged, ...(values(was.audit) !== values(is.audit) ? ['accessAudit'] : []), ...(is.revision !== was.revision ? ['revision'] : [])].sort(),
+        storeChanged: before !== after,
+        growthBytes: Buffer.byteLength(after) - Buffer.byteLength(before),
+        maxGrowthBytes: Math.max(0, ...saves.map((save) => save.growthBytes)),
+        deliveryMsMean: round(mean(delivered.map((item) => item.ms))),
+        deliveryMsMax: round(Math.max(...delivered.map((item) => item.ms))),
+        saveMsMax: round(Math.max(0, ...delivered.map((item) => item.saves.reduce((sum, save) => sum + save.ms, 0)))),
+        accessUsed: { aggregates: used.length, count: used.reduce((sum, event) => sum + event.count, 0), days: perDay.size, maxPerDay: Math.max(0, ...perDay.values()) },
+        delivered
+      };
+    }
+    const minutes = (from, count) => Array.from({ length: count }, (_, index) => DAY_ONE + (from + index) * MINUTE);
+    const ownInstants = minutes(0, deliveries);
+    const own = await phase([...ownInstants, ownInstants.at(-1)], { project: PROJECT });
+    const granted = await phase([...minutes(deliveries, deliveries), DAY_ONE + DAY], { project: PROJECT, accessId: grant.accessId });
+    const nullReference = await phase(minutes(2 * deliveries, deliveries).map((instant) => instant + DAY), { project: PROJECT, accessId: null });
+    // Wall-clock added per delivery: an own-scope delivery adds the time of any
+    // save it makes (none, when it is a read); a fenced delivery adds whatever it
+    // takes beyond the mean own-scope read on the same transport: the reload,
+    // the snapshot and the whole-store save.
+    const added = (tier) => round(Math.max(0, ...tier.delivered.map((item) => item.ms - own.deliveryMsMean)));
+    const [lastRead, replay] = own.delivered.slice(-2);
+    const strip = ({ delivered, ...rest }) => rest;
+    return {
+      storeBytes,
+      ownScope: { ...strip(own), addedMsMax: own.saveMsMax, replayIdentical: !own.storeChanged && lastRead.text === replay.text },
+      grant: { ...strip(granted), addedMsMax: added(granted), rewrite: 'whole_store' },
+      nullReference: { ...strip(nullReference), addedMsMax: added(nullReference), rewrite: 'whole_store' }
+    };
+  } finally {
+    if (app) await new Promise((resolve) => app.server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+// Every §13.3 category against the frozen budget. A null access key takes the
+// fenced path, so it answers to the grant tier. Returns the violations; an empty
+// list is the only passing result, and nothing here adjusts the budget.
+export function checkWriteBudget(report, budget = CONTEXT_DELIVERY_BUDGET) {
+  const violations = [];
+  const over = (label, value, limit) => { if (value > limit) violations.push(`${label}: measured ${value}, declared ${limit}`); };
+  for (const [tier, declaredTier] of [['ownScope', 'ownScope'], ['grant', 'grant'], ['nullReference', 'grant']]) {
+    const measured = report[tier], declared = budget[declaredTier];
+    over(`${tier}.canonicalWrites`, measured.canonicalWrites, declared.canonicalWrites);
+    over(`${tier}.journalEntries per delivery`, measured.journalDelta / measured.deliveries, declared.journalEntries);
+    over(`${tier}.revisions per delivery`, measured.revisionDelta / measured.deliveries, declared.revisions);
+    over(`${tier}.saves per delivery`, measured.maxSavesPerDelivery, declared.saves);
+    over(`${tier}.addedMs per delivery`, measured.addedMsMax, declared.addedMs);
+  }
+  over('ownScope.bytesWritten', report.ownScope.bytesWritten, budget.ownScope.bytesWritten);
+  for (const tier of ['grant', 'nullReference']) {
+    over(`${tier}.growthBytes per delivery`, report[tier].maxGrowthBytes, budget.grant.growthBytes);
+    over(`${tier}.audit aggregates per key and UTC day`, report[tier].accessUsed.maxPerDay, budget.grant.newAuditAggregatesPerKeyDay);
+  }
+  return violations;
+}
+
 function formatReport(report, baseline) {
   const lines = [];
   const delta = (path, value) => {
@@ -195,6 +349,12 @@ function formatReport(report, baseline) {
 const invokedDirectly = process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
 if (invokedDirectly) {
   const args = process.argv.slice(2);
+  if (args.includes('--check')) {
+    const writes = await measureWrites();
+    const violations = checkWriteBudget(writes);
+    process.stdout.write(`${JSON.stringify({ budget: CONTEXT_DELIVERY_BUDGET, writes, violations }, null, 2)}\n`);
+    process.exit(violations.length ? 1 : 0);
+  }
   const report = measure();
   if (args.includes('--json')) {
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
