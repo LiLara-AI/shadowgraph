@@ -4321,9 +4321,14 @@ function provenanceFields(input) {
   };
 }
 
-function normalizeEvidence(item, clock = () => new Date().toISOString()) {
+// A stored item keeps the raw label it was recorded with. Re-deriving it from
+// the already-resolved sourceClass dropped it on every load, so the next save
+// removed it. A caller recording evidence still cannot set it directly.
+function normalizeEvidence(item, clock = () => new Date().toISOString(), { stored = false } = {}) {
   const base = typeof item === 'string' ? { source: item } : (item ?? {});
-  const { sourceClass, sourceRaw } = normalizeSourceClass(base.sourceClass ?? base.type ?? base.source);
+  const derived = normalizeSourceClass(base.sourceClass ?? base.type ?? base.source);
+  const sourceClass = derived.sourceClass;
+  const sourceRaw = stored && typeof base.sourceRaw === 'string' ? base.sourceRaw : derived.sourceRaw;
   return {
     source: base.source ?? 'unknown', type: base.type ?? 'unknown',
     sourceClass, ...(sourceRaw ? { sourceRaw } : {}),
@@ -4578,7 +4583,7 @@ function migrateRecordFields(item) {
       status: migratedDecisionStatus,
       migration: { ...(source.migration ?? {}), legacyDecisionStatus }
     } : {}),
-    evidence: (source.evidence ?? []).map((entry) => normalizeEvidence(entry)),
+    evidence: (source.evidence ?? []).map((entry) => normalizeEvidence(entry, undefined, { stored: true })),
     alternatives: (source.alternatives ?? []).map((a, index) => ({ ...a, id: a.id ?? `alternative_${source.id}_${index}`, reopenWhen: normalizeRules(a.reopenWhen ?? []) }))
   };
 }
