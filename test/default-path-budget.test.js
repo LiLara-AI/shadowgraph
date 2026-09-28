@@ -114,7 +114,7 @@ test('an own-scope CLI context takes no fence: it completes while the store lock
   const token = await holdLock(file);
   const read = runCli(file, directory, 'context', { project: 'app' });
   assert.equal(read.status, 0, read.stderr);
-  assert.equal(JSON.parse(read.stdout).openReviews.length, 1);
+  assert.equal(JSON.parse(read.stdout).firedConditions.length, 1);
   assert.deepEqual(await readFile(file), before, 'the read saved nothing');
   assert.equal(await readFile(`${file}.lock`, 'utf8'), token, 'the held lock is untouched');
   // Control: the persisting verb needs the fence, so the same held lock stops it.
@@ -136,7 +136,7 @@ test('an own-scope HTTP context takes no fence: it answers while the store lock 
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'app' })
   });
   assert.equal(response.status, 200);
-  assert.equal((await response.json()).openReviews.length, 1);
+  assert.equal((await response.json()).firedConditions.length, 1);
   assert.deepEqual(await readFile(file), before, 'the read saved nothing');
   assert.equal(await readFile(`${file}.lock`, 'utf8'), token, 'the held lock is untouched');
 });

@@ -151,6 +151,9 @@ export const DECISION_TRANSITIONS = Object.freeze({
   archived: Object.freeze([])
 });
 const CURRENT_DECISION_STATUSES = Object.freeze(['proposed', 'planned', 'in_progress', 'executed', 'validated', 'reconsidered']);
+// The stated policy threshold: a decision whose recorded confidence is below it
+// is reported as such by the default read (PC-01(b)).
+const LOW_CONFIDENCE_THRESHOLD = 0.5;
 
 export const OUTCOME_STATUSES = Object.freeze(['successful', 'mixed', 'failed', 'unknown']);
 // Deliberately NOT called an outcome. `outcome` here is a decision-only,
@@ -3146,18 +3149,23 @@ export function createShadowGraph(options = {}) {
   // it changes no canonical truth. Signals already persisted are still
   // reported. The notice is declared interface metadata, not memory: it tells
   // a caller that relied on the old implicit persist where that moved.
+  //
+  // It names each collection for what it holds (§13.4, E03): failedAttempts,
+  // firedConditions with affectedAlternatives, and belowConfidenceThreshold,
+  // the fact the generated suggestedQuestions was built from. Every record is
+  // kept.
   function context(input = {}) {
-    return { ...buildContext(input, { persistSignals: false }), notice: contextNotice() };
+    return { ...buildContext(input, { persistSignals: false, factual: true }), notice: contextNotice() };
   }
 
   // Explicit evaluation (§13.2): the evaluate-and-persist working set that
-  // context() used to return, review-named because it may raise and store
-  // review signals.
+  // context() used to return, in its original shape, review-named because it
+  // may raise and store review signals.
   function reviewContext(input = {}) {
-    return buildContext(input, { persistSignals: true });
+    return buildContext(input, { persistSignals: true, factual: false });
   }
 
-  function buildContext(input, { persistSignals }) {
+  function buildContext(input, { persistSignals, factual }) {
     const boundary = readBoundary(input);
     const project = boundary.scope.project;
     const inScope = boundary.visible;
@@ -3177,17 +3185,23 @@ export function createShadowGraph(options = {}) {
     const reuse = evaluateAttemptReuse(inScope, now(), input.facts ?? {});
     const reusableAttempts = collect(reuse.reusable);
     const conditionDiagnostics = collect([...evaluated.diagnostics, ...reuse.diagnostics]);
-    const suggestedQuestions = collect([...records.values()].filter((x) => x.kind === 'decision' && inScope(x) && (x.confidence?.current ?? 0) < 0.5).map((x) => `What evidence could change the decision: ${x.title}?`));
-    const groups = { activeDecisions, staleAssumptions, failedAttemptsToAvoid, openReviews, suggestedQuestions, conditionDiagnostics, reusableAttempts };
+    // A decision of any status whose recorded confidence is below the policy
+    // threshold. The review-named shape turns each into a generated question.
+    // Values are copies, as recorded: a legacy writer may have left no status,
+    // one this build does not recognise, or a confidence that is not a number.
+    const lowConfidence = [...records.values()].filter((x) => x.kind === 'decision' && inScope(x) && (x.confidence?.current ?? 0) < LOW_CONFIDENCE_THRESHOLD);
+    const belowThreshold = collect(factual
+      ? lowConfidence.map((x) => ({ decisionId: x.id, title: clone(x.title ?? null), status: clone(x.status ?? null), confidence: clone(x.confidence?.current ?? null), threshold: LOW_CONFIDENCE_THRESHOLD }))
+      : lowConfidence.map((x) => `What evidence could change the decision: ${x.title}?`));
+    const fired = factual
+      ? { ...openReviews, items: openReviews.items.map((entry) => Object.fromEntries(Object.entries(entry).map(([key, value]) => [key === 'alternativesToReconsider' ? 'affectedAlternatives' : key, value]))) }
+      : openReviews;
+    const groups = factual
+      ? { activeDecisions, staleAssumptions, failedAttempts: failedAttemptsToAvoid, firedConditions: fired, belowConfidenceThreshold: belowThreshold, conditionDiagnostics, reusableAttempts }
+      : { activeDecisions, staleAssumptions, failedAttemptsToAvoid, openReviews, suggestedQuestions: belowThreshold, conditionDiagnostics, reusableAttempts };
     return {
       project,
-      activeDecisions: activeDecisions.items,
-      staleAssumptions: staleAssumptions.items,
-      failedAttemptsToAvoid: failedAttemptsToAvoid.items,
-      openReviews: openReviews.items,
-      suggestedQuestions: suggestedQuestions.items,
-      conditionDiagnostics: conditionDiagnostics.items,
-      reusableAttempts: reusableAttempts.items,
+      ...Object.fromEntries(Object.entries(groups).map(([name, group]) => [name, group.items])),
       completeness: scopeCompleteness(boundary.scope, {
         scope: { project },
         complete: Object.values(groups).every((group) => !group.hasMore),

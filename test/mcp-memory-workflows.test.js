@@ -166,7 +166,7 @@ test('MCP context and its resource are reads, and review_context persists the si
     }
   });
   const payload = JSON.parse(response.result.content[0].text);
-  assert.equal(payload.openReviews.length, 1);
+  assert.equal(payload.firedConditions.length, 1);
   assert.equal(payload.notice.replacement.mcp, 'shadowgraph_review_context');
   assert.equal(JSON.parse(await readFile(file, 'utf8')).reviewSignals.length, 0, 'the read persists nothing');
   const evaluated = await rpc.call({
@@ -203,7 +203,7 @@ test('MCP context resource reads no project and creates no review signal', async
   });
   const payload = JSON.parse(response.result.contents[0].text);
   assert.equal(payload.project, null);
-  assert.deepEqual([payload.activeDecisions, payload.openReviews], [[], []]);
+  assert.deepEqual([payload.activeDecisions, payload.firedConditions], [[], []]);
   const durable = JSON.parse(await readFile(file, 'utf8'));
   assert.equal(durable.reviewSignals.length, 0);
 });

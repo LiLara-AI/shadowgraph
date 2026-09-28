@@ -35,7 +35,7 @@ test('PR-15: repeated default-path reads leave canonical truth byte-equal', () =
     first ??= result;
     assert.equal(canonical(graph), before, `read ${i + 1} changed canonical state`);
   }
-  assert.equal(first.openReviews.length, 3, 'all three due decisions are reported');
+  assert.equal(first.firedConditions.length, 3, 'all three due decisions are reported');
   assert.equal(privilegedSnapshot(graph).reviewSignals.length, 0, 'no review signal was minted by reading');
 });
 
@@ -47,13 +47,13 @@ test('PR-16: reviewContext() evaluates and persists, as context() used to', () =
 
 test('PR-15: the read reports existing signals without duplicating them', () => {
   const graph = fixture();
-  const unpersisted = graph.context({ project: 'alpha' }).openReviews;
+  const unpersisted = graph.context({ project: 'alpha' }).firedConditions;
   assert.ok(unpersisted.every(item => item.reviewSignalStatus === 'unpersisted' && item.reviewSignalId === undefined));
   graph.review({ project: 'alpha' });
   const minted = privilegedSnapshot(graph).reviewSignals.length;
   assert.equal(minted, 3);
   const before = canonical(graph);
-  const persisted = graph.context({ project: 'alpha' }).openReviews;
+  const persisted = graph.context({ project: 'alpha' }).firedConditions;
   assert.ok(persisted.every(item => typeof item.reviewSignalId === 'string' && item.reviewSignalStatus === 'open'));
   assert.equal(canonical(graph), before);
   assert.equal(privilegedSnapshot(graph).reviewSignals.length, minted);
@@ -81,5 +81,14 @@ test('PR-16: the read returns the same working set as reviewContext(), without p
   const evaluated = graph.reviewContext({ project: 'alpha' });
   assert.deepEqual(read.notice.replacement, { kernel: 'reviewContext', mcp: 'shadowgraph_review_context', cli: 'review-context', http: 'POST /review-context' });
   assert.equal(evaluated.notice, undefined);
-  assert.deepEqual(withoutSignalFields(read), withoutSignalFields(evaluated));
+  // Since PR-19 the read names its collections for what they hold (E03); the
+  // records are the same, and the generated questions give way to the fact.
+  const { belowConfidenceThreshold, ...factual } = withoutSignalFields(read);
+  const { suggestedQuestions, failedAttemptsToAvoid, openReviews, completeness, ...rest } = withoutSignalFields(evaluated);
+  const { failedAttempts, firedConditions, completeness: readCompleteness, ...readRest } = factual;
+  assert.deepEqual(readRest, rest);
+  assert.deepEqual(failedAttempts, failedAttemptsToAvoid);
+  assert.deepEqual(firedConditions, openReviews.map((entry) => Object.fromEntries(Object.entries(entry).map(([key, value]) => [key === 'alternativesToReconsider' ? 'affectedAlternatives' : key, value]))));
+  assert.equal(belowConfidenceThreshold.length, suggestedQuestions.length);
+  assert.equal(readCompleteness.complete, completeness.complete);
 });

@@ -3,11 +3,11 @@
 // default discovery/context path -- nested fields, schema descriptions,
 // collection names, transport wrappers, and the MCP server instructions and
 // prompts -- carries a class on the content axis, the metadata axis, or both.
-// Only recommendation/advice leaves the default channel; PR-19 rewords or
-// removes what is classified so here. A fact inside an advice-classed text
-// survives the rewording: the prompt's disclosure that nothing can be marked
-// verified without a configured verifier, the instructions' description of the
-// server, and the below-threshold confidence behind suggestedQuestions.
+// Only recommendation/advice leaves the default channel, and since PR-19 none
+// is on it: the advisory names and descriptions are reworded, and the generated
+// suggestedQuestions gave way to belowConfidenceThreshold, the fact it was
+// generated from. The vocabulary keeps the advice class so a regression is
+// classified, and caught, rather than passed.
 //
 // Paths: `a.b` for object keys, `a[]` for array items, `a#description` for a
 // schema description, and a `transport:` prefix for wrapper members. Patterns:
@@ -40,15 +40,19 @@ export const METADATA_CLASSES = Object.freeze(['evidence', 'completeness', 'prov
 export const VARIANCE_METADATA_CLASSES = Object.freeze(['interface']);
 export const ADVICE = 'recommendation/advice';
 
-// Key names whose plain-English function is an instruction (E03 §2). The data
-// under them is classified on its own; the name itself is advice.
-export const ADVISORY_NAMES = Object.freeze(['failedAttemptsToAvoid', 'alternativesToReconsider', 'openReviews', 'suggestedQuestions']);
+// Key names whose plain-English function is an instruction (E03 §2). PR-19
+// renamed or removed every one, so none remains on the default path, and the
+// retired names must not return to it. The review-named reviewContext keeps
+// them, being explicitly invoked.
+export const ADVISORY_NAMES = Object.freeze([]);
+export const RETIRED_NAMES = Object.freeze(['failedAttemptsToAvoid', 'alternativesToReconsider', 'openReviews', 'suggestedQuestions']);
 
 // Tripwires for ShadowGraph-generated prose that is not classified as advice,
 // and for key names. Recorded caller text is quoted history and is not read.
 export const ADVICE_LEXICON = Object.freeze([
   /\bshould\b/i, /\bworth\b/i, /\brecommend/i, /\bto avoid\b/i, /\blook at again\b/i, /\bdue for\b/i,
-  /\bto reconsider\b/i, /\bactionable\b/i, /^pass this\b/i, /\bbefore (?:a )?consequential\b/i, /\bbefore continuing\b/i
+  /\bto reconsider\b/i, /\bactionable\b/i, /^pass this\b/i, /\bbefore (?:a )?consequential\b/i, /\bbefore continuing\b/i,
+  /\bbefore, during\b/i, /(?:^|[.;]\s+)(?:use|call|review|record|treat|pass)\s/i
 ]);
 export const ADVICE_NAME_WORDS = Object.freeze(['should', 'worth', 'recommend', 'recommended', 'avoid', 'suggest', 'suggested', 'reconsider']);
 
@@ -68,7 +72,7 @@ const conditionValues = (base) => [
   c(`${base}[].evidence.value.**`, 'historical fact'),
   c(`${base}[].conflictingEvidence[].value.**`, 'historical fact')
 ];
-// A condition evaluated against facts: reopenWhen on openReviews and
+// A condition evaluated against facts: reopenWhen on firedConditions and
 // conditionDiagnostics, reusableWhen on reusableAttempts.
 const conditionEntries = (base, verdict) => [
   m(base, 'evidence'),
@@ -86,31 +90,14 @@ const conditionEntries = (base, verdict) => [
 ];
 
 export const REGISTER = Object.freeze([
-  // --- advice: E03 §2, and what the register and PR-18 review surfaced ------
-  c('suggestedQuestions', ADVICE),
-  c('suggestedQuestions[]', ADVICE, G),
-  c('suggestedQuestions#description', ADVICE, G),
-  c('activeDecisions#description', ADVICE, G),
-  c('openReviews#description', ADVICE, G),
-  c('openReviews[]#description', ADVICE, G),
-  c('openReviews[].decisionId#description', ADVICE, G),
-  c('openReviews[].alternativesToReconsider#description', ADVICE, G),
-  c('openReviews[].reviewSignalId#description', ADVICE, G),
-  c('reusableAttempts#description', ADVICE, G),
-  c('reusableAttempts[]#description', ADVICE, G),
-  c('failedAttemptsToAvoid[].reusableWhen#description', ADVICE, G),
-  c('discover:instructions', ADVICE, G),
-  c('prompt-list:prompts[].description', ADVICE, G),
-  c('prompt:messages[].content.text', ADVICE, G),
-
   // --- every other description is prose about the interface ------------------
   c('**#description', 'current state', G),
 
   // --- caller values, before any rule for shared record fields --------------
   c('staleAssumptions[].value.**', 'historical fact'),
   c('activeDecisions[].alternatives[].reopenWhen[].value.**', 'historical fact'),
-  c('failedAttemptsToAvoid[].reusableWhen[].value.**', 'historical fact'),
-  ...conditionValues('openReviews[].violatedConditions'),
+  c('failedAttempts[].reusableWhen[].value.**', 'historical fact'),
+  ...conditionValues('firedConditions[].violatedConditions'),
   ...conditionValues('conditionDiagnostics[].conditions'),
   ...conditionValues('reusableAttempts[].satisfiedConditions'),
 
@@ -131,6 +118,7 @@ export const REGISTER = Object.freeze([
   m('initialize:protocolVersion', 'interface'),
   m('initialize:capabilities.**', 'interface'),
   m('initialize:serverInfo.**', 'interface'),
+  c('discover:instructions', 'current state', G),
   m('discover:supportedVersions.**', 'interface'),
   m('discover:capabilities.**', 'interface'),
   // The 2026-07-28 result members each method adds around its payload.
@@ -143,12 +131,14 @@ export const REGISTER = Object.freeze([
   ...modernWrapper('prompt:', ['resultType', '_meta.**']),
   m('prompt-list:prompts', 'interface'),
   m('prompt-list:prompts[].name', 'interface'),
+  c('prompt-list:prompts[].description', 'current state', G),
   m('prompt-list:prompts[].arguments.**', 'interface'),
   c('prompt:description', 'current state', G),
   m('prompt:messages', 'interface'),
   m('prompt:messages[].role', 'interface'),
   m('prompt:messages[].content', 'interface'),
   m('prompt:messages[].content.type', 'interface'),
+  c('prompt:messages[].content.text', 'current state', G),
   m('http:body', 'interface'),
   m('cli:stdout', 'interface'),
 
@@ -232,29 +222,37 @@ export const REGISTER = Object.freeze([
   c('staleAssumptions[].temporal.**', 'historical fact'),
   passThrough('staleAssumptions'),
 
-  // --- failedAttemptsToAvoid: recorded failed attempts (advisory name) ------
-  c('failedAttemptsToAvoid', 'observed experience'),
-  m('failedAttemptsToAvoid[].id', 'provenance'),
-  m('failedAttemptsToAvoid[].kind', 'provenance'),
-  m('failedAttemptsToAvoid[].project', 'scope'),
-  c('failedAttemptsToAvoid[].solution', 'observed experience'),
-  c('failedAttemptsToAvoid[].result', 'observed experience'),
-  c('failedAttemptsToAvoid[].resultClass', 'observed experience'),
-  c('failedAttemptsToAvoid[].reason', 'observed experience'),
-  c('failedAttemptsToAvoid[].environment', 'observed experience'),
-  c('failedAttemptsToAvoid[].relatedTo.**', 'relationship'),
-  c('failedAttemptsToAvoid[].reusableWhen.**', 'historical fact'),
-  passThrough('failedAttemptsToAvoid'),
+  // --- failedAttempts: recorded failed attempts ----------------------------
+  c('failedAttempts', 'observed experience'),
+  m('failedAttempts[].id', 'provenance'),
+  m('failedAttempts[].kind', 'provenance'),
+  m('failedAttempts[].project', 'scope'),
+  c('failedAttempts[].solution', 'observed experience'),
+  c('failedAttempts[].result', 'observed experience'),
+  c('failedAttempts[].resultClass', 'observed experience'),
+  c('failedAttempts[].reason', 'observed experience'),
+  c('failedAttempts[].environment', 'observed experience'),
+  c('failedAttempts[].relatedTo.**', 'relationship'),
+  c('failedAttempts[].reusableWhen.**', 'historical fact'),
+  passThrough('failedAttempts'),
 
-  // --- openReviews: recorded review conditions that fired (advisory name) ---
-  c('openReviews', 'changed condition'),
-  c('openReviews[].decisionId', 'relationship'),
-  c('openReviews[].title', 'historical fact'),
-  c('openReviews[].reason', 'changed condition', G),
-  c('openReviews[].alternativesToReconsider.**', 'historical fact'),
-  m('openReviews[].reviewSignalId', 'provenance'),
-  c('openReviews[].reviewSignalStatus', 'current state'),
-  ...conditionEntries('openReviews[].violatedConditions', 'changed condition'),
+  // --- firedConditions: recorded review conditions that fired --------------
+  c('firedConditions', 'changed condition'),
+  c('firedConditions[].decisionId', 'relationship'),
+  c('firedConditions[].title', 'historical fact'),
+  c('firedConditions[].reason', 'changed condition', G),
+  c('firedConditions[].affectedAlternatives.**', 'historical fact'),
+  m('firedConditions[].reviewSignalId', 'provenance'),
+  c('firedConditions[].reviewSignalStatus', 'current state'),
+  ...conditionEntries('firedConditions[].violatedConditions', 'changed condition'),
+
+  // --- belowConfidenceThreshold: recorded confidence under the policy -----
+  entry('belowConfidenceThreshold', 'current state', 'evidence'),
+  c('belowConfidenceThreshold[].decisionId', 'relationship'),
+  c('belowConfidenceThreshold[].title', 'historical fact'),
+  c('belowConfidenceThreshold[].status', 'current state'),
+  m('belowConfidenceThreshold[].confidence', 'evidence'),
+  m('belowConfidenceThreshold[].threshold', 'evidence'),
 
   // --- conditionDiagnostics: conditions that could not be settled -----------
   entry('conditionDiagnostics', 'current state', 'evidence'),

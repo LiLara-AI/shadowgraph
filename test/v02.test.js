@@ -13,9 +13,9 @@ test('v0.2 creates explainable search results and context', () => {
   assert.deepEqual(search.items[0].matched, ['title']);
   const context = graph.context({ project: 'app', facts: { deployment: 'local' } });
   assert.equal(context.activeDecisions.length, 1);
-  assert.equal(context.failedAttemptsToAvoid.length, 1);
-  assert.equal(context.openReviews.length, 1);
-  assert.equal(context.openReviews[0].alternativesToReconsider[0], 'SQLite');
+  assert.equal(context.failedAttempts.length, 1);
+  assert.equal(context.firedConditions.length, 1);
+  assert.equal(context.firedConditions[0].affectedAlternatives[0], 'SQLite');
 });
 
 test('outcomes update confidence and produce review signals', () => {

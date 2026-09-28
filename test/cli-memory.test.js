@@ -48,7 +48,7 @@ test('CLI context is a read, and review-context persists the review signals it c
   });
   const before = await readFile(file);
   const context = await cli(file, 'context', { project: 'app' });
-  assert.equal(context.openReviews.length, 1);
+  assert.equal(context.firedConditions.length, 1);
   assert.equal(context.notice.replacement.cli, 'review-context');
   assert.deepEqual(await readFile(file), before, 'context leaves the store bytes unchanged');
   const evaluated = await cli(file, 'review-context', { project: 'app' });

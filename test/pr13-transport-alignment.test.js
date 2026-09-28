@@ -201,8 +201,8 @@ test('PR16 bound MCP context resource reports a due decision and saves nothing',
   const before = await readFile(file);
   const view = await call.resource();
   assert.equal(view.project, 'alpha');
-  assert.equal(view.openReviews.length, 1);
-  assert.equal(view.openReviews[0].reviewSignalStatus, 'unpersisted');
+  assert.equal(view.firedConditions.length, 1);
+  assert.equal(view.firedConditions[0].reviewSignalStatus, 'unpersisted');
   assert.equal(view.notice.replacement.mcp, 'shadowgraph_review_context');
   await call.resource();
   assert.deepEqual(await readFile(file), before, 'the resource read saves nothing');

@@ -23,7 +23,7 @@ import { createShadowGraphServer } from '../src/server.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { privilegedIssueAccess, privilegedSnapshot } from '../src/internal/snapshot.js';
 import {
-  ADVICE, ADVICE_LEXICON, ADVISORY_NAMES, CONTENT_CLASSES, METADATA_CLASSES, REGISTER, VARIANCE_METADATA_CLASSES,
+  ADVICE, ADVICE_LEXICON, CONTENT_CLASSES, METADATA_CLASSES, REGISTER, RETIRED_NAMES, VARIANCE_METADATA_CLASSES,
   adviceWordsInNames, advisoryNamesIn, classificationTable, classify, isProse, mergePaths, schemaPaths, valuePaths
 } from '../tools/default-path-register.js';
 
@@ -198,12 +198,12 @@ test('the register uses only the AC-060 labels and the recorded interface varian
 test('the generator reaches deep paths on every source, and an unregistered key is caught', async (t) => {
   const { paths: found, views } = await paths(t);
   for (const path of [
-    'openReviews[].violatedConditions[].evidence.factId', 'completeness.scope.grant.accessId',
+    'firedConditions[].violatedConditions[].evidence.factId', 'firedConditions[].affectedAlternatives[]', 'completeness.scope.grant.accessId',
     'conditionDiagnostics[].conditions[].conflictingEvidence[].factId', 'readProvenance.scope.projects[]',
     'reusableAttempts[].satisfiedConditions[].evidence.value', 'activeDecisions[].alternatives[].reopenWhen[].operator',
     'activeDecisions[].confidence.history[].reason', 'staleAssumptions[].validityPolicy.effectiveExpirationBoundary',
     'staleAssumptions[].legacyVerificationStatus', 'staleAssumptions[].verificationUntrustedReason', 'activeDecisions[].rationale',
-    'suggestedQuestions[]', 'openReviews#description', 'notice.replacement.mcp',
+    'belowConfidenceThreshold[].threshold', 'firedConditions#description', 'notice.replacement.mcp',
     'tool:description', 'tool:inputSchema.project#description', 'mcp:content[].text', 'mcp:structuredContent',
     'resource:contents[].uri', 'resource-list:resources[].description', 'discover:instructions',
     'prompt-list:prompts[].description', 'prompt:messages[].content.text', 'http:body', 'cli:stdout'
@@ -242,37 +242,47 @@ test('only imported records reach a pass-through entry', async (t) => {
   assert.deepEqual(invented, [], 'a field this build writes on import fell through to a pass-through entry');
 });
 
-// PC-01(a) and AC-026: advice on the default channel. This is E03's inventory,
-// plus what the register and its review surfaced. PR-19 rewords or removes all
-// of it, keeping any fact inside it, and this test then expects none.
-test('advice on the default channel is exactly the inventory PR-19 removes', async (t) => {
+// The advisory text PR-18 pinned and PR-19 retired, verbatim. None of it may
+// come back to the default path, whatever class it would be given.
+const RETIRED_ADVICE_TEXTS = Object.freeze([
+  'Decisions currently due for reconsideration.',
+  'One decision whose rejected alternatives are due for reconsideration.',
+  'The decision to reconsider.',
+  'Labels of the alternatives to look at again',
+  'Pass this to shadowgraph_ack_review to acknowledge this review.',
+  'Questions for the low-confidence decisions in this project.',
+  'Worth reconsidering, not authorised to retry.',
+  'It may be worth reconsidering',
+  'Conditions under which the attempt is worth repeating.',
+  'Decisions in a current, actionable state',
+  'Use context/retrieve before consequential work',
+  'Use ShadowGraph before, during, and after consequential work.',
+  'Before consequential work call context and retrieve.',
+  'Review open signals before continuing.',
+  'never present a stored claim as confirmed',
+  'What evidence could change the decision:'
+]);
+
+// PC-01(a) and AC-026: no advice on the default channel. PR-18 pinned the
+// inventory; PR-19 reworded or removed every item, keeping the facts inside it.
+// The register no longer classifies anything as advice, so the guards are the
+// retired texts, the retired names and the wording tripwires.
+test('nothing on the default channel is advice, and no retired name returns', async (t) => {
   const { paths: found } = await paths(t);
-  const advice = [...found.keys()].filter((path) => classify(path)?.content === ADVICE).sort();
-  assert.deepEqual(advice, [
-    'activeDecisions#description',
-    'failedAttemptsToAvoid[].reusableWhen#description',
-    'discover:instructions',
-    'openReviews#description',
-    'openReviews[]#description',
-    'openReviews[].alternativesToReconsider#description',
-    'openReviews[].decisionId#description',
-    'openReviews[].reviewSignalId#description',
-    'prompt-list:prompts[].description',
-    'prompt:messages[].content.text',
-    'reusableAttempts#description',
-    'reusableAttempts[]#description',
-    'suggestedQuestions',
-    'suggestedQuestions#description',
-    'suggestedQuestions[]'
-  ].sort());
-  const names = new Set([...found.keys()].flatMap(advisoryNamesIn));
-  assert.deepEqual([...names].sort(), [...ADVISORY_NAMES].sort());
+  const advice = [...found.keys()].filter((path) => classify(path)?.content === ADVICE);
+  assert.deepEqual(advice, []);
+  assert.deepEqual([...new Set([...found.keys()].flatMap(advisoryNamesIn))], []);
+  const retired = [...found.keys()].filter((path) => RETIRED_NAMES.some((name) => path.replace(/^[a-z-]+:/, '').split(/[.#[\]]/).includes(name)));
+  assert.deepEqual(retired, [], 'a retired advisory name is back on the default path');
+  const prose = [...found].filter(([path]) => path.includes('#description') || classify(path)?.generated).flatMap(([, { prose: samples }]) => [...samples]);
+  assert.deepEqual(prose.filter((text) => RETIRED_NAMES.some((name) => text.includes(name))), [], 'default-path prose names a retired key');
+  const everyString = [...found.values()].flatMap(({ prose: samples }) => [...samples]);
+  assert.deepEqual(everyString.filter((text) => RETIRED_ADVICE_TEXTS.some((retired) => text.includes(retired))), [], 'retired advice is back on the default path');
 });
 
-test('no key name reads as an instruction except the advisory names PR-19 renames', async (t) => {
+test('no key name reads as an instruction', async (t) => {
   const { paths: found } = await paths(t);
-  const flagged = new Set([...found.keys()].flatMap(adviceWordsInNames));
-  assert.deepEqual([...flagged].filter((name) => !ADVISORY_NAMES.includes(name)), []);
+  assert.deepEqual([...new Set([...found.keys()].flatMap(adviceWordsInNames))], []);
 });
 
 test('generated prose outside the advice class carries no advice wording', async (t) => {

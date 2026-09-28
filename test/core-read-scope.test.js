@@ -85,8 +85,8 @@ const ids = (items) => items.map((item) => item.record?.id ?? item.id).sort();
 const contextIds = (context) => ({
   activeDecisions: ids(context.activeDecisions),
   staleAssumptions: ids(context.staleAssumptions),
-  failedAttemptsToAvoid: ids(context.failedAttemptsToAvoid),
-  openReviews: context.openReviews.map((item) => item.decisionId).sort()
+  failedAttempts: ids(context.failedAttempts),
+  firedConditions: context.firedConditions.map((item) => item.decisionId).sort()
 });
 
 // What each boundary may see, per path. The legacy "default" and projectless
@@ -153,8 +153,8 @@ test('a read with no project returns nothing on every core path: no other projec
     assert.deepEqual(graph.recall('MEMORY-MARKER', options).items, [], 'recall');
     assert.deepEqual(graph.recall('', options).items, [], 'recall, empty query');
     const context = graph.context(options);
-    assert.deepEqual(contextIds(context), { activeDecisions: [], staleAssumptions: [], failedAttemptsToAvoid: [], openReviews: [] }, 'context');
-    assert.deepEqual([context.suggestedQuestions, context.conditionDiagnostics, context.reusableAttempts], [[], [], []]);
+    assert.deepEqual(contextIds(context), { activeDecisions: [], staleAssumptions: [], failedAttempts: [], firedConditions: [] }, 'context');
+    assert.deepEqual([context.belowConfidenceThreshold, context.conditionDiagnostics, context.reusableAttempts], [[], [], []]);
   }
   assert.equal(graph.context().activeDecisions.length, 0, 'context() with no argument');
   // Nothing was evaluated, so nothing was written.

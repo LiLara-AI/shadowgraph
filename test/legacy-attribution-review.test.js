@@ -241,7 +241,7 @@ test('the legacy states are not projects, origins or request states, and ordinar
   ].map((item) => item.record.id);
   const contextIds = (options) => {
     const context = graph.context(options);
-    return [...context.activeDecisions, ...context.staleAssumptions, ...context.failedAttemptsToAvoid, ...context.reusableAttempts].map((item) => item.id ?? item.attemptId);
+    return [...context.activeDecisions, ...context.staleAssumptions, ...context.failedAttempts, ...context.reusableAttempts].map((item) => item.id ?? item.attemptId);
   };
   for (const migrate of [false, true]) {
     if (migrate) graph.migrateAttribution();

@@ -55,7 +55,7 @@ When no limit is supplied, the default applies and `completeness.limitSource` re
 
 ## 4. `context()` is shaped differently, and why
 
-`context()` returns several named collections rather than one list, so a single `page` cannot describe it. Its collections stay **at their original keys** (`activeDecisions`, `staleAssumptions`, `failedAttemptsToAvoid`, `openReviews`, `suggestedQuestions`) as plain arrays — preserving backward compatibility for existing callers — and it adds:
+`context()` returns several named collections rather than one list, so a single `page` cannot describe it. Its collections are plain arrays: `activeDecisions`, `staleAssumptions`, `failedAttempts`, `firedConditions` and `belowConfidenceThreshold`. Plan v1.4.4 PR-19 renamed the collections whose names carried advice (`failedAttemptsToAvoid`, and `openReviews`, whose entries' `alternativesToReconsider` is now `affectedAlternatives`) and replaced the generated `suggestedQuestions` with `belowConfidenceThreshold`, the fact each question was generated from. The explicitly invoked `reviewContext()` keeps the original keys. It adds:
 
 Two further collections arrived on 2026-09-13, both additive and both bound by this same contract: `conditionDiagnostics` (conditions that could not be settled, or that rest on facts which disagree) and `reusableAttempts` (attempts whose `reusableWhen` conditions all hold). Each declares its own counts under `collections`, and each participates in the top-level `complete`, so neither can truncate silently. See `docs/contracts/review-conditions-contract.md`.
 
@@ -80,7 +80,7 @@ Two further collections arrived on 2026-09-13, both additive and both bound by t
 
 ## 6. Backward compatibility
 
-`context()` keeps its original keys (additive change). `search()` and `retrieve()` changed from bare array to envelope — a **breaking** shape change, recorded in `CHANGELOG.md` with migration guidance (`result.items`). MCP tool descriptions carry the envelope contract inline so a model reading the schema learns it without extra docs.
+`context()` renamed its advisory collections and replaced `suggestedQuestions` in plan v1.4.4 PR-19, a **breaking** change recorded in `CHANGELOG.md`; `reviewContext()` keeps the original keys. `search()` and `retrieve()` changed from bare array to envelope — a **breaking** shape change, recorded in `CHANGELOG.md` with migration guidance (`result.items`). MCP tool descriptions carry the envelope contract inline so a model reading the schema learns it without extra docs.
 
 ## 7. Tested boundaries
 

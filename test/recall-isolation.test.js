@@ -90,7 +90,7 @@ test('the coverage measurement counts grounded evidence, not returned items', ()
 
   // A context stripped of its evidence must score worse, or the metric is
   // measuring nothing.
-  const blinded = { ...view, openReviews: view.openReviews.map((item) => ({ ...item, violatedConditions: [] })) };
+  const blinded = { ...view, firedConditions: view.firedConditions.map((item) => ({ ...item, violatedConditions: [] })) };
   const blindedCoverage = measureCoverage(blinded, expected);
   assert.equal(blindedCoverage.breachesReported, 0);
   assert.equal(blindedCoverage.breachRecall, 0);

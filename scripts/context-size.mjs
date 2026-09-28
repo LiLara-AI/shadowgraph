@@ -96,7 +96,7 @@ function time(run, iterations = 5) {
 // records but omits the fact a breach was computed from has not delivered the
 // thing the caller needed, and a count would score it perfect.
 export function measureCoverage(view, expected) {
-  const violated = view.openReviews.flatMap((item) => item.violatedConditions ?? []);
+  const violated = view.firedConditions.flatMap((item) => item.violatedConditions ?? []);
   const violatedKeys = new Set(violated.map((item) => item.key));
   const withEvidence = violated.filter((item) => item.evidence?.factId).length;
   const reusableIds = new Set(view.reusableAttempts.map((item) => item.attemptId));
@@ -142,8 +142,9 @@ export function measure(options = {}) {
     contextBytes: {
       total: bytes(view),
       activeDecisions: bytes(view.activeDecisions),
-      failedAttemptsToAvoid: bytes(view.failedAttemptsToAvoid),
-      openReviews: bytes(view.openReviews),
+      failedAttempts: bytes(view.failedAttempts),
+      firedConditions: bytes(view.firedConditions),
+      belowConfidenceThreshold: bytes(view.belowConfidenceThreshold),
       conditionDiagnostics: bytes(view.conditionDiagnostics),
       reusableAttempts: bytes(view.reusableAttempts),
       staleAssumptions: bytes(view.staleAssumptions),

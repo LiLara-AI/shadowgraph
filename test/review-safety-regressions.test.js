@@ -63,7 +63,8 @@ test('mutating a returned violatedConditions value cannot reach canonical state'
     const before = JSON.stringify(privilegedSnapshot(graph));
     if (method === 'reviewContext') assert.equal(privilegedSnapshot(graph).reviewSignals.length, 1, 'the signal is stored');
 
-    const breach = graph[method]({ project: 'p' }).openReviews
+    const fired = method === 'context' ? 'firedConditions' : 'openReviews';
+    const breach = graph[method]({ project: 'p' })[fired]
       .flatMap((item) => item.violatedConditions ?? [])
       .find((item) => Array.isArray(item.observed));
     assert.ok(breach, 'a breach carrying an array value is reported');
@@ -74,7 +75,7 @@ test('mutating a returned violatedConditions value cannot reach canonical state'
     for (const reference of breach.conflictingEvidence ?? []) reference.value = { tampered: true };
 
     assert.equal(JSON.stringify(privilegedSnapshot(graph)), before, `${method}: no canonical state moved`);
-    const again = graph[method]({ project: 'p' }).openReviews
+    const again = graph[method]({ project: 'p' })[fired]
       .flatMap((item) => item.violatedConditions ?? [])
       .find((item) => Array.isArray(item.observed));
     assert.deepEqual(again.observed, observed, 'a later response is unaffected');
@@ -156,13 +157,13 @@ test('a tampered response leaves the persisted rebuild identical', async (t) => 
   graph.addFact({ project: 'p', key: 'shape', value: ['n', 'm'] });
 
   // Tamper BEFORE the snapshot, so a leak would be carried into what is saved.
-  const breach = graph.context({ project: 'p' }).openReviews[0].violatedConditions[0];
+  const breach = graph.context({ project: 'p' }).firedConditions[0].violatedConditions[0];
   breach.observed.push('tampered');
   await store.save(privilegedSnapshot(graph));
 
   const restored = createShadowGraph();
   restored.importData(await store.load());
-  const rebuilt = restored.context({ project: 'p' }).openReviews[0].violatedConditions[0];
+  const rebuilt = restored.context({ project: 'p' }).firedConditions[0].violatedConditions[0];
   assert.deepEqual(rebuilt.observed, ['n', 'm'], 'rebuild restores nothing, because nothing changed');
 });
 

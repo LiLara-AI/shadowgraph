@@ -7,7 +7,7 @@ import { scratchDirectory } from '../tools/scratch-directory.js';
 import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const failedIds = (graph, project = 'p') =>
-  graph.context({ project }).failedAttemptsToAvoid.map((item) => item.id);
+  graph.context({ project }).failedAttempts.map((item) => item.id);
 
 test('an explicit result class decides, and the wording heuristic only fills the gap', () => {
   const graph = createShadowGraph();
@@ -29,7 +29,7 @@ test('a declared class is distinguishable from an inferred one', () => {
   graph.addAttempt({ project: 'p', solution: 'a', result: 'error while linking' });
   graph.addAttempt({ project: 'p', solution: 'b', result: 'quietly wrong', resultClass: 'failed' });
 
-  const attempts = graph.context({ project: 'p' }).failedAttemptsToAvoid;
+  const attempts = graph.context({ project: 'p' }).failedAttempts;
   const inferred = attempts.find((item) => item.solution === 'a');
   const declared = attempts.find((item) => item.solution === 'b');
   assert.equal(inferred.resultClass, undefined, 'an inferred classification is never written back as if declared');

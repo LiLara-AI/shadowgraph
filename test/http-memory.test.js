@@ -86,7 +86,7 @@ test('HTTP context is a read, and review-context persists the review signals it 
 
   const response = await post(base, '/context', { project: 'app' });
   assert.equal(response.status, 200);
-  assert.equal(response.body.openReviews.length, 1);
+  assert.equal(response.body.firedConditions.length, 1);
   assert.equal(response.body.notice.replacement.http, 'POST /review-context');
   assert.equal(saves, 0, 'the default-path read commits nothing');
   assert.equal(durable.reviewSignals.length, 0);

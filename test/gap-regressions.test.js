@@ -774,7 +774,7 @@ describe('G3 (S2) — FIXED: the documented lifecycle is usable and canonical', 
     assert.deepEqual(maintenance.staleDecisionIds, [due.id]);
     assert.equal(graph.search('', { project: 'app', status: 'stale' }).page.total, 1);
     assert.equal(graph.context({ project: 'app' }).activeDecisions.length, 0);
-    assert.equal(graph.context({ project: 'app' }).openReviews.length, 1);
+    assert.equal(graph.context({ project: 'app' }).firedConditions.length, 1);
 
     const archived = graph.addDecision({ project: 'app', title: 'Archive me', chosen: 'A' });
     graph.updateDecisionStatus(archived.id, 'archived', { project: 'app' });

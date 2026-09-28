@@ -117,7 +117,7 @@ observation time.
 **Returned details are detached (changed 2026-09-14).** **Every field** of a caller-visible detail
 is a copy, not a reference into the stored rule or the stored fact — `expected`, `observed`,
 `evidence` and `conflictingEvidence`, and equally `key`, `operator`, `unit`, the `title` and
-`alternativesToReconsider` on a due entry, and `solution` on a reusable attempt. A caller holding a
+`alternativesToReconsider` on a due entry (`affectedAlternatives` in `context()`), and `solution` on a reusable attempt. A caller holding a
 returned condition — through `violatedConditions`, `conditionDiagnostics`,
 `reusableAttempts[].satisfiedConditions`, or `maintain().due` / `.diagnostics` — may mutate it
 freely: records, facts, relations, review signals and the journal are unaffected, later responses
@@ -187,7 +187,7 @@ both fixed by omitting the field instead:
 
 ## 8. Acknowledging a review (changed 2026-09-14)
 
-Entries in `review()`, `maintain().due` and `context().openReviews` carry two additive fields:
+Entries in `review()`, `maintain().due` and `context().firedConditions` (`reviewContext().openReviews`) carry two additive fields:
 
 | Field | Meaning |
 | --- | --- |
@@ -227,7 +227,7 @@ The invariant is that **an acknowledgement covers exactly the breach set it ackn
 
 - the same conditions still breached → still `acknowledged`;
 - an additional, previously unacknowledged condition breaching → a **separate** signal, `open` and
-  visible in `context().openReviews` and `getReviewSignals({ status: 'open' })`;
+  visible in `context().firedConditions` and `getReviewSignals({ status: 'open' })`;
 - the breach set narrowing back to the acknowledged one → that signal, still `acknowledged`.
 
 `coverage` is persisted on the signal and travels through export, import and restart. It is
@@ -333,7 +333,7 @@ conditions are all structured and satisfied are unaffected. As everywhere else i
 the recorded failure stands either way.
 
 A reported attempt **may be reconsidered**. It is not authorisation to retry, and the recorded
-failure is untouched: a reusable attempt still appears in `failedAttemptsToAvoid`, and its stored
+failure is untouched: a reusable attempt still appears in `failedAttempts`, and its stored
 `result` and `resultClass` are unchanged.
 
 ### Attempt result classification

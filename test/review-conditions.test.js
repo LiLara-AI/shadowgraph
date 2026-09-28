@@ -26,7 +26,7 @@ test('a condition with no recorded evidence is visible as unresolved, not a sile
   const decision = decisionWithThreshold(graph, { key: 'replicaLagMs', operator: 'greater_than', value: 500 });
 
   const view = graph.context({ project: 'p' });
-  assert.equal(view.openReviews.length, 0, 'no evidence is not a breach');
+  assert.equal(view.firedConditions.length, 0, 'no evidence is not a breach');
   assert.equal(graph.getReviewSignals({ project: 'p' }).items.length, 0, 'and raises no review signal');
 
   const conditions = conditionsFor(graph, decision.id);
@@ -42,7 +42,7 @@ test('an unreadable observation is unresolved rather than a confident no-review'
   // Number('900ms') is NaN, and NaN > 500 is false. Before, this read as "fine".
   graph.addFact({ project: 'p', key: 'replicaLagMs', value: '900ms', sourceClass: 'measured' });
 
-  assert.equal(graph.context({ project: 'p' }).openReviews.length, 0);
+  assert.equal(graph.context({ project: 'p' }).firedConditions.length, 0);
   const conditions = conditionsFor(graph, decision.id);
   assert.equal(conditions.length, 1);
   assert.equal(conditions[0].verdict, 'unknown');
@@ -57,10 +57,10 @@ test('a declared unit makes the same observation decidable and reports the breac
   const fact = graph.addFact({ project: 'p', key: 'replicaLagMs', value: '900ms', sourceClass: 'measured' });
 
   const view = graph.context({ project: 'p' });
-  assert.equal(view.openReviews.length, 1);
-  const [open] = view.openReviews;
+  assert.equal(view.firedConditions.length, 1);
+  const [open] = view.firedConditions;
   assert.equal(open.decisionId, decision.id);
-  assert.deepEqual(open.alternativesToReconsider, ['primary-only']);
+  assert.deepEqual(open.affectedAlternatives, ['primary-only']);
 
   assert.equal(open.violatedConditions.length, 1);
   const violated = open.violatedConditions[0];
@@ -81,7 +81,7 @@ test('an irrelevant change stays negative and raises nothing', () => {
   graph.addFact({ project: 'p', key: 'officeWifiSsid', value: 'guest', sourceClass: 'human' });
 
   const view = graph.context({ project: 'p' });
-  assert.equal(view.openReviews.length, 0);
+  assert.equal(view.firedConditions.length, 0);
   assert.equal(conditionsFor(graph, decision.id).length, 0, 'a settled false needs no diagnostic');
 });
 
@@ -210,6 +210,6 @@ test('a declared unit survives persistence and restart', async (t) => {
   assert.equal(rule.unit, 'ms', 'the unit was not dropped on the way to storage');
 
   const view = reopened.context({ project: 'p' });
-  assert.equal(view.openReviews.length, 1, 'and the condition still evaluates after restart');
-  assert.equal(view.openReviews[0].violatedConditions[0].unit, 'ms');
+  assert.equal(view.firedConditions.length, 1, 'and the condition still evaluates after restart');
+  assert.equal(view.firedConditions[0].violatedConditions[0].unit, 'ms');
 });

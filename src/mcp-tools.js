@@ -202,7 +202,7 @@ const attemptRecordSchema = entityRecordSchema('A stored attempt and its result.
   resultClass: stringOrNull('Declared classification: failed, succeeded, or inconclusive. Absent means only the legacy wording heuristic classified this attempt.'),
   reason: stringOrNull('Why it turned out that way.'),
   environment: stringOrNull('Where it was tried.'),
-  reusableWhen: { type: 'array', description: 'Conditions under which the attempt is worth repeating. All must hold, and none may be unresolved.' },
+  reusableWhen: { type: 'array', description: 'Conditions recorded for reusing the attempt. All must hold, and none may be unresolved.' },
   relatedTo: { type: 'array', description: 'Identifiers of related entities.' }
 });
 const factRecordSchema = entityRecordSchema('A stored fact with its provenance claim and validity window.', {
@@ -742,9 +742,9 @@ export const CONTEXT_DELIVERY_BUDGET = Object.freeze({
 // false because the storage backend commits the replacement itself.
 // `openWorldWhenEmbedding` marks the two tools whose reach depends on whether an
 // embedding endpoint was configured.
-// The working set shared by shadowgraph_context (the default-path read) and
-// shadowgraph_review_context (explicit evaluate-and-persist), plan v1.4.4 §13.2.
-// The read also carries the declared notice naming the replacement.
+// shadowgraph_context (the default-path read) and shadowgraph_review_context
+// (explicit evaluate-and-persist, plan v1.4.4 §13.2) take the same input. The
+// review-named tool returns the working set in its original shape.
 const contextInputSchema = {
   type: 'object',
   properties: {
@@ -754,10 +754,10 @@ const contextInputSchema = {
     facts: factsOverrideProperty
   }
 };
-const contextOutputSchema = (withNotice) => ({
+const reviewContextOutputSchema = {
   type: 'object',
   description: 'The working set for one project.',
-  required: ['project', 'activeDecisions', 'staleAssumptions', 'failedAttemptsToAvoid', 'openReviews', 'suggestedQuestions', 'completeness', ...(withNotice ? ['notice'] : [])],
+  required: ['project', 'activeDecisions', 'staleAssumptions', 'failedAttemptsToAvoid', 'openReviews', 'suggestedQuestions', 'completeness'],
   properties: {
     project: stringOrNull('The resolved project, or null when unresolved.'),
     activeDecisions: { type: 'array', items: decisionRecordSchema, description: 'Decisions in a current, actionable state: proposed, planned, in_progress, executed, validated, or reconsidered.' },
@@ -789,8 +789,78 @@ const contextOutputSchema = (withNotice) => ({
           }
         }
       }
+    }
+  }
+};
+// One entry of the default read's firedConditions: the review-named entry with
+// alternativesToReconsider named affectedAlternatives, and descriptions that
+// state what fired rather than what to do about it.
+const firedConditionSchema = {
+  type: 'object',
+  description: 'One decision whose recorded reopen conditions, review date or failed outcome fired.',
+  required: ['decisionId', 'reason', 'affectedAlternatives'],
+  properties: {
+    ...Object.fromEntries(Object.entries(reviewDueSchema.properties).map(([name, value]) => (name === 'alternativesToReconsider'
+      ? ['affectedAlternatives', stringList('Labels of the recorded alternatives the fired conditions belong to; all of them when the trigger was not alternative-specific.')]
+      : [name, value]))),
+    decisionId: { type: 'string', description: 'The decision whose conditions fired.' },
+    reviewSignalId: { type: 'string', description: 'The stored review signal for this decision; shadowgraph_ack_review takes this id.' }
+  }
+};
+const belowConfidenceThresholdSchema = {
+  type: 'object',
+  description: 'One decision whose recorded confidence is below the policy threshold.',
+  required: ['decisionId', 'status', 'confidence', 'threshold'],
+  properties: {
+    decisionId: { type: 'string', description: 'The decision.' },
+    title: stringOrNull('Decision title, when the stored decision has one.'),
+    status: { ...storedValueSchema, description: 'Its lifecycle status as recorded, whatever it is; null when none is recorded.' },
+    confidence: { ...storedValueSchema, description: 'Recorded current confidence, normally 0-1; null when none is recorded, which counts as below.' },
+    threshold: { type: 'number', description: 'The policy threshold the confidence is below.' }
+  }
+};
+// The default read (plan v1.4.4 §13.4, E03): the same records as the review-named
+// shape, under names and descriptions that state what they hold, with the
+// declared notice. suggestedQuestions gives way to belowConfidenceThreshold, the
+// fact each question was generated from.
+const contextOutputSchema = {
+  type: 'object',
+  description: 'The working set for one project.',
+  required: ['project', 'activeDecisions', 'staleAssumptions', 'failedAttempts', 'firedConditions', 'belowConfidenceThreshold', 'completeness', 'notice'],
+  properties: {
+    project: reviewContextOutputSchema.properties.project,
+    activeDecisions: { ...reviewContextOutputSchema.properties.activeDecisions, description: 'Decisions whose lifecycle status is current: proposed, planned, in_progress, executed, validated, or reconsidered.' },
+    staleAssumptions: reviewContextOutputSchema.properties.staleAssumptions,
+    failedAttempts: reviewContextOutputSchema.properties.failedAttemptsToAvoid,
+    firedConditions: { type: 'array', items: firedConditionSchema, description: 'Decisions whose recorded review conditions fired, with the conditions and the facts they were computed from.' },
+    belowConfidenceThreshold: { type: 'array', items: belowConfidenceThresholdSchema, description: 'Decisions of any status whose recorded confidence is below the policy threshold.' },
+    conditionDiagnostics: reviewContextOutputSchema.properties.conditionDiagnostics,
+    reusableAttempts: {
+      type: 'array',
+      items: { ...reusableAttemptSchema, description: 'An attempt whose reusableWhen conditions ALL hold now, with none unresolved. The recorded failure still stands, and this is not authorisation to retry.' },
+      description: 'Attempts whose reusableWhen conditions all hold now. The recorded failure still stands, and this is not authorisation to retry.'
     },
-    ...(withNotice ? { notice: {
+    completeness: {
+      ...reviewContextOutputSchema.properties.completeness,
+      properties: {
+        ...reviewContextOutputSchema.properties.completeness.properties,
+        collections: {
+          type: 'object',
+          description: 'One entry per returned collection.',
+          required: ['activeDecisions', 'staleAssumptions', 'failedAttempts', 'firedConditions', 'belowConfidenceThreshold'],
+          properties: {
+            activeDecisions: collectionCompletenessSchema('Counts for activeDecisions.'),
+            staleAssumptions: collectionCompletenessSchema('Counts for staleAssumptions.'),
+            failedAttempts: collectionCompletenessSchema('Counts for failedAttempts.'),
+            firedConditions: collectionCompletenessSchema('Counts for firedConditions.'),
+            belowConfidenceThreshold: collectionCompletenessSchema('Counts for belowConfidenceThreshold.'),
+            conditionDiagnostics: collectionCompletenessSchema('Counts for conditionDiagnostics.'),
+            reusableAttempts: collectionCompletenessSchema('Counts for reusableAttempts.')
+          }
+        }
+      }
+    },
+    notice: {
       type: 'object',
       description: 'Declared interface metadata, not memory: context is a read, and reviewContext (shadowgraph_review_context) evaluates and persists.',
       required: ['code', 'detail', 'replacement'],
@@ -799,9 +869,9 @@ const contextOutputSchema = (withNotice) => ({
         detail: { type: 'string', description: 'Where the old evaluate-and-persist behaviour moved.' },
         replacement: { type: 'object', description: 'The replacement operation on each surface.', properties: { kernel: { type: 'string', description: 'Kernel method to call.' }, mcp: { type: 'string', description: 'MCP tool to call.' }, cli: { type: 'string', description: 'CLI verb to run.' }, http: { type: 'string', description: 'HTTP route to call.' } } }
       }
-    } } : {})
+    }
   }
-});
+};
 const CATALOG = [
   {
     name: 'shadowgraph_record_decision',
@@ -862,7 +932,7 @@ const CATALOG = [
       required: ['solution', 'result'],
       properties: {
         solution: { type: 'string', description: 'What was tried. Required, non-empty, and searchable content.' },
-        result: { type: 'string', description: 'What happened. Required, non-empty, and searchable content. With no resultClass, wording such as failed, error, or regression is what makes the attempt surface in shadowgraph_context as one to avoid.' },
+        result: { type: 'string', description: 'What happened. Required, non-empty, and searchable content. With no resultClass, wording such as failed, error, or regression is what places the attempt in shadowgraph_context failedAttempts.' },
         resultClass: { type: 'string', enum: ['failed', 'succeeded', 'inconclusive'], description: 'Classify the result instead of leaving it to the wording heuristic. Set it when the result text does not say failed, error, or regression, or when it does but the attempt did not fail.' },
         project: writeProjectProperty,
         originId: originIdProperty,
@@ -925,12 +995,12 @@ const CATALOG = [
     persists: false,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     describe: {
-      does: "Build one project's working set before a consequential task: decisions, stale assumptions, failed attempts, open reviews.",
+      does: "Read one project's working set: current decisions, stale facts, failed attempts, fired review conditions.",
       route: 'shadowgraph_search or shadowgraph_retrieve look one thing up, shadowgraph_recall reads scoped memory, shadowgraph_review_context evaluates and persists review signals.',
       effects: 'A read: it evaluates reopen rules without persisting any signal or committing a revision.'
     },
     inputSchema: contextInputSchema,
-    outputSchema: contextOutputSchema(true)
+    outputSchema: contextOutputSchema
   },
   {
     name: 'shadowgraph_review_context',
@@ -943,7 +1013,7 @@ const CATALOG = [
       effects: 'Not a read: it evaluates reopen rules, can persist signals, and commits a revision.'
     },
     inputSchema: contextInputSchema,
-    outputSchema: contextOutputSchema(false)
+    outputSchema: reviewContextOutputSchema
   },
   {
     name: 'shadowgraph_remember',

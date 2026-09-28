@@ -771,7 +771,7 @@ test('output schemas accept data imported from an older storage schema', () => {
   assert.deepEqual(searched.items.map((item) => item.record.id), ['legacy-attempt-1', 'legacy-decision-1'], 'the core reads do read the legacy records');
   assert.equal(retrieved.items.some((item) => item.record.id === 'legacy-fact-1' && item.matchedBy === 'graph'), true);
   assert.equal(recalled.items.length, 3);
-  assert.deepEqual([context.activeDecisions.length, context.failedAttemptsToAvoid.length], [1, 1]);
+  assert.deepEqual([context.activeDecisions.length, context.failedAttempts.length], [1, 1]);
   const traversed = owned.traverse({ id: 'legacy-decision-1', ...read });
   assert.deepEqual(traversed.nodes.map((node) => node.id), ['legacy-decision-1', 'legacy-fact-1'], 'traverse reads the legacy records too');
 
@@ -802,6 +802,24 @@ test('output schemas accept data imported from an older storage schema', () => {
   const [fact] = privilegedSnapshot(graph).facts;
   assert.equal(fact.verificationStatus, 'unverified');
   assert.equal(fact.legacyVerificationStatus, 'verified');
+});
+
+// Plan v1.4.4 PR-19: belowConfidenceThreshold reports a decision of any status,
+// so it carries what a legacy or lenient writer stored -- no status, a status
+// this build does not recognise, a non-numeric confidence -- as a copy.
+test('the default read accepts below-threshold decisions a legacy writer left', () => {
+  const graph = createShadowGraph({ now: () => '2026-01-01T00:00:00.000Z' });
+  graph.importData({ records: [
+    { id: 'no-status', kind: 'decision', project: 'legacy-app', title: 'No status', chosen: 'a', confidence: 0.1 },
+    { id: 'null-status', kind: 'decision', project: 'legacy-app', title: 'Null status', chosen: 'a', status: null, confidence: 0.1 },
+    { id: 'odd-status', kind: 'decision', project: 'legacy-app', title: 'Odd status', chosen: 'a', status: { v: 'x' }, confidence: 0.1 },
+    { id: 'text-confidence', kind: 'decision', project: 'legacy-app', title: 'Text confidence', chosen: 'a', status: 'proposed', confidence: { current: '0.3' } }
+  ] });
+  const view = graph.context({ project: 'legacy-app' });
+  assert.deepEqual(view.belowConfidenceThreshold.map((item) => item.decisionId).sort(), ['no-status', 'null-status', 'odd-status', 'text-confidence']);
+  assertValid(byName.get('shadowgraph_context').outputSchema, JSON.parse(JSON.stringify(view)), 'shadowgraph_context over lenient legacy data');
+  view.belowConfidenceThreshold.find((item) => item.decisionId === 'odd-status').status.v = 'changed';
+  assert.deepEqual(privilegedSnapshot(graph).records.find((record) => record.id === 'odd-status').status, { v: 'x' }, 'a returned value is a copy');
 });
 
 test('the subset validator this file relies on actually rejects bad data', () => {

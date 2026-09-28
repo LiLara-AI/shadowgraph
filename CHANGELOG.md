@@ -2,6 +2,9 @@
 
 ## Unreleased — scope coverage
 
+- Breaking: the default read `context()` (MCP `shadowgraph_context`, the `shadowgraph://context` resource, CLI `context`, HTTP `POST /context`) names its collections for what they hold. `failedAttemptsToAvoid` is `failedAttempts`, `openReviews` is `firedConditions`, and an entry's `alternativesToReconsider` is `affectedAlternatives`; the `completeness.collections` keys follow. The generated `suggestedQuestions` is replaced by `belowConfidenceThreshold`, one `{ decisionId, title, status, confidence, threshold }` per decision whose recorded confidence is below 0.5, whatever its status. Every record is kept. `reviewContext()` (`shadowgraph_review_context`, `review-context`, `POST /review-context`) keeps the original keys, including `suggestedQuestions`. The MCP server instructions and prompt now state what ShadowGraph holds rather than when to call it.
+- Breaking: `context()` is a read and persists no review signal; `reviewContext()` evaluates and persists, as `context()` used to. The read carries a declared `notice` naming the replacement.
+
 - Normal read results declare the resolved request boundary and limitations. Unresolved project requests are incomplete even with an exact origin; known candidate counts do not promise total semantic recall.
 - Breaking: `review()` and `getReviewSignals()` return `{ items, completeness }`. Migrate array operations to `result.items`; their MCP results now have object output schemas.
 - Own historical signals with hidden evidence expose bounded identity/lifecycle projections and partial coverage. Stored evidence and acknowledgement behavior are preserved.

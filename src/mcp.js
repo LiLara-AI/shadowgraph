@@ -593,10 +593,13 @@ function eraResult(modern, result, cacheScope) {
 }
 
 const resourceList = [{ uri: 'shadowgraph://context', name: 'ShadowGraph context', description: 'Current project context and open review signals.', mimeType: 'application/json' }];
-const promptList = [{ name: 'shadowgraph_consequential_task', description: 'Use ShadowGraph before, during, and after consequential work.', arguments: [] }];
+const promptList = [{ name: 'shadowgraph_consequential_task', description: 'What ShadowGraph records and returns about decisions, facts, attempts and outcomes.', arguments: [] }];
+// Plan v1.4.4 PR-19 (PC-01(a), AC-026): the prompt states what ShadowGraph holds
+// and returns; it gives no instruction about the work.
+const PROMPT_FACTS = "context returns one project's current decisions, stale facts, failed attempts, fired review conditions and conditions that could not be settled; retrieve returns the records matching a content query with their one-hop graph neighbours. ShadowGraph records decisions, assumptions, evidence, alternatives, attempts, facts and outcomes. A review signal stays open until it is acknowledged. agent_claimed and unverified facts are claims, not confirmations.";
 const promptText = verifier
-  ? 'Before consequential work call context and retrieve. Record decisions, assumptions, evidence, alternatives, failed attempts, facts, and outcomes. Review open signals before continuing. Treat agent_claimed and unverified facts as hypotheses. Only the separately configured signed local-evidence verifier can mark an active fact verified.'
-  : 'Before consequential work call context and retrieve. Record decisions, assumptions, evidence, alternatives, failed attempts, facts, and outcomes. Review open signals before continuing. Treat agent_claimed and unverified facts as hypotheses: without a separately configured verifier, nothing in ShadowGraph can be marked verified, so never present a stored claim as confirmed.';
+  ? `${PROMPT_FACTS} Only the separately configured signed local-evidence verifier can mark an active fact verified.`
+  : `${PROMPT_FACTS} Without a separately configured verifier nothing in ShadowGraph can be marked verified, so a stored claim is never a confirmation.`;
 
 // Handles one already-parsed JSON-RPC message. `emit` receives the response
 // object exactly once for a request and never for a notification, so a single
@@ -674,7 +677,7 @@ async function handleMessage(request, emit, batchFailure = null) {
       respond(modernResult({
         supportedVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
         capabilities: SERVER_CAPABILITIES,
-        instructions: 'Local-first explainable decision and scoped temporal memory. Use context/retrieve before consequential work and record outcomes afterward.'
+        instructions: "Local-first explainable decision and scoped temporal memory. context returns one project's recorded decisions, stale facts, failed attempts and fired review conditions; retrieve returns the records matching a content query with their one-hop graph neighbours; record_outcome stores what happened."
       }, 'public'));
     } else if (request.method === 'tools/list') respond(eraResult(modern, { tools: toolLists[modern ? METADATA_TIER.STRUCTURED : legacyTier] }, 'public'));
     else if (request.method === 'resources/list') respond(eraResult(modern, { resources: resourceList }, 'public'));
@@ -704,7 +707,7 @@ async function handleMessage(request, emit, batchFailure = null) {
       const promptName = request.params?.name;
       if (typeof promptName !== 'string' || !promptName) throw rpcError(-32602, 'Invalid params: name is required');
       if (!PROMPT_NAMES.has(promptName)) throw rpcError(-32602, 'Unknown prompt');
-      respond(eraResult(modern, { description: 'ShadowGraph operating policy', messages: [{ role: 'user', content: { type: 'text', text: promptText } }] }));
+      respond(eraResult(modern, { description: 'What ShadowGraph records and returns', messages: [{ role: 'user', content: { type: 'text', text: promptText } }] }));
     } else if (request.method === 'tools/call') {
       if (request.params === undefined) throw rpcError(-32602, 'Invalid params: params is required for tools/call');
       if (typeof request.params.name !== 'string' || !request.params.name) throw rpcError(-32602, 'Invalid params: name is required for tools/call');

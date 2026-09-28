@@ -115,7 +115,7 @@ test('compact can list a review, acknowledge it, keep that across restart, and s
   const second = client(file);
   t.after(() => second.stop());
   const afterRestart = await second.call('shadowgraph_context', { project: 'p' });
-  const sameReview = afterRestart.openReviews.find((item) => item.reviewSignalId === review.reviewSignalId);
+  const sameReview = afterRestart.firedConditions.find((item) => item.reviewSignalId === review.reviewSignalId);
   assert.ok(sameReview, 'the same signal is still identified after restart');
   assert.equal(sameReview.reviewSignalStatus, 'acknowledged', 'the acknowledgement persisted across a restart');
 
@@ -139,7 +139,7 @@ test('compact can list a review, acknowledge it, keep that across restart, and s
   const third = client(file);
   t.after(() => third.stop());
   const settled = await third.call('shadowgraph_context', { project: 'p' });
-  assert.equal(settled.openReviews.filter((item) => item.reviewSignalStatus === 'open').length, 0, 'nothing is left unacknowledged');
+  assert.equal(settled.firedConditions.filter((item) => item.reviewSignalStatus === 'open').length, 0, 'nothing is left unacknowledged');
 });
 
 test('acknowledging one breach does not mute a broader breach on the same decision', async (t) => {
