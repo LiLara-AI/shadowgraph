@@ -93,13 +93,18 @@ function preconditionsOf(record) {
   return { count: decisive.length, decisive };
 }
 
+// A record the line renders as a fact: a fact, a legacy fact stored with no
+// kind, or an entity of a kind this build does not know. Its status,
+// verification and validity are decisive whatever kind it was stored with.
+const asFact = (record) => record.kind !== 'decision' && record.kind !== 'attempt' && record.kind !== 'memory';
+
 // The window in which a fact or memory applies. A fact's end is the kernel's
 // effective expiration boundary: the earliest of its declared expiry and
 // validity ends.
 function applicabilityOf(record) {
-  if (record.kind !== 'fact' && record.kind !== 'memory') return null;
+  if (record.kind !== 'memory' && !asFact(record)) return null;
   const validFrom = record.temporal?.validFrom ?? record.validFrom ?? null;
-  const validTo = record.kind === 'fact' ? effectiveFactExpirationBoundary(record) ?? record.temporal?.validTo ?? record.validTo ?? record.expiresAt ?? null : record.temporal?.validTo ?? null;
+  const validTo = asFact(record) ? effectiveFactExpirationBoundary(record) ?? record.temporal?.validTo ?? record.validTo ?? record.expiresAt ?? null : record.temporal?.validTo ?? null;
   return validFrom == null && validTo == null ? null : { validFrom, validTo };
 }
 const recordedAtOf = (record) => record.createdAt ?? record.temporal?.recordedAt ?? record.observedAt;
@@ -186,10 +191,10 @@ export function t1Parts(record) {
     const memoryScope = memoryScopeOf(record);
     if (memoryScope) add('memoryScope', `for ${show(memoryScope)}`);
   } else {
-    add('key', `Fact ${show(record.key)}`);
+    add('key', record.kind == null || record.kind === 'fact' ? `Fact ${show(record.key)}` : `Entity of kind ${show(record.kind)}, key ${show(record.key)}`);
     add('value', `value ${show(record.value)}`);
   }
-  if (record.kind === 'memory' || record.kind === 'fact') {
+  if (record.kind === 'memory' || asFact(record)) {
     add('status', `status ${record.status == null ? 'not recorded' : vocab(record.status)}`);
     add('verification', `verification ${record.verificationStatus == null ? 'not recorded' : vocab(record.verificationStatus)}`);
     const window = applicabilityOf(record);
@@ -238,7 +243,7 @@ export function t1Line(record, { asOf = null, scope = {}, derivedAt = new Date()
   // record (§3.1).
   const settled = claimClass !== 'not_classified' && span.every(({ text }) => listOf(shown.claims).some((claim) => VERIFIED_CLASSES.has(claim?.class) && sameText(claim.text, text)));
   return {
-    recordId: shown.id, kind: shown.kind,
+    recordId: shown.id, kind: shown.kind ?? null,
     line: kept.join('; '),
     claimClass,
     polarity: { negated: span.length > 0, span },

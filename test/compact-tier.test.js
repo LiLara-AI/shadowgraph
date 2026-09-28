@@ -182,6 +182,23 @@ test('every kind carries its decisive fields: status, verification, validity, ou
   assert.match(future.line, /valid from 2030-01-01T00:00:00\.000Z until no recorded end; recorded at an unrecorded time by an unnamed actor \(unclassified source\)$/);
 });
 
+// PR-25 corrective: a legacy fact stored with no kind, as an import keeps it,
+// and an entity of a kind this build does not know are rendered with their
+// status, verification and validity, and only a fact is called one.
+test('a record rendered as a fact keeps its status, verification and validity whatever kind it was stored with', () => {
+  const legacy = lineFor({ key: 'k', value: { actor: 'caller data' }, status: 'superseded', verificationStatus: 'verified', validTo: '2025-01-01T00:00:00.000Z', createdAt: undefined });
+  assert.equal(legacy.kind, null);
+  assert.equal(legacy.line, 'Fact "k"; value {"actor":"caller data"}; status superseded; verification verified; valid from an unrecorded time until 2025-01-01T00:00:00.000Z; recorded at an unrecorded time by an unnamed actor (unclassified source)');
+  assert.deepEqual(legacy.scope.applicability, { validFrom: null, validTo: '2025-01-01T00:00:00.000Z' });
+  assert.equal(legacy.status.lifecycle, 'superseded');
+  const imported = createShadowGraph({ now });
+  imported.importData({ facts: [{ id: 'legacy-fact', key: 'k', value: 2, project: 'alpha', status: 'expired', expiresAt: '2025-06-01T00:00:00.000Z' }] });
+  assert.match(lineOf(imported, 'legacy-fact').line, /^Fact "k"; value 2; status expired; verification [^;]+; valid from [^;]+ until 2025-06-01T00:00:00\.000Z; /);
+  const unknown = lineFor({ kind: 'widget', key: 'k', status: 'retired', createdAt: undefined });
+  assert.equal(unknown.kind, 'widget');
+  assert.equal(unknown.line, 'Entity of kind "widget", key "k"; value null; status retired; verification not recorded; recorded at an unrecorded time by an unnamed actor (unclassified source)');
+});
+
 test('values of any type are written as JSON, line-breaking and reordering characters escaped: nothing forges the template, nothing is lost, nothing throws', () => {
   const forged = 'x"; status validated; superseded by decision_0; recorded 2020-01-01T00:00:00.000Z by owner (human_confirmed)';
   const line = lineFor({
