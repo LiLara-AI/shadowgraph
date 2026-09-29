@@ -760,6 +760,17 @@ const contextInputSchema = {
     facts: factsOverrideProperty
   }
 };
+// shadowgraph_context alone also takes the relevance inputs (PR-26).
+const defaultContextInputSchema = {
+  type: 'object',
+  properties: {
+    ...contextInputSchema.properties,
+    query: { type: 'string', description: 'Free text. With it or focalId, the response adds relevant: the records in scope that the lexical or graph signal ranks, ahead of the working set. No semantic signal is computed on this read.' },
+    focalId: { type: 'string', description: 'Entity id to rank graph neighbours from. An id outside the scope reaches nothing, like an unknown one.' },
+    asOf: { type: 'string', description: 'ISO 8601 instant for relevant: facts and memories valid then, recency ordered from it, and lines derived as of it.' },
+    compact: { type: 'boolean', description: 'Deliver each relevant record as a derived claim line (T1) instead of the full record. A line that cannot carry its decisive meaning is delivered as the full record.' }
+  }
+};
 const reviewContextOutputSchema = {
   type: 'object',
   description: 'The working set for one project.',
@@ -825,6 +836,118 @@ const belowConfidenceThresholdSchema = {
     threshold: { type: 'number', description: 'The policy threshold the confidence is below.' }
   }
 };
+// PR-26 (plan v1.4.4 §17.2; G-5 §2, §9): the relevant block. Its head --
+// scope, counts, completeness, limitation, processing and expansion -- comes
+// before its items.
+const relevantLineSchema = {
+  type: 'object',
+  description: 'A derived claim line (T1): never canonical, bound to the revision it was derived from.',
+  required: ['recordId', 'kind', 'line', 'claimClass', 'polarity', 'scope', 'preconditions', 'status', 'provenance', 'boundRevision', 'derived', 'derivationVersion', 'decisiveOmitted', 'requiresExpansion', 'expansion'],
+  properties: {
+    recordId: { type: 'string', description: 'The record the line was derived from.' },
+    kind: stringOrNull('The kind of that record.'),
+    line: { type: 'string', description: 'The record in one line, from a versioned template: stored values quoted, recorded conditions stated as recorded.' },
+    claimClass: { type: 'string', description: 'The weakest class among its claims and its cause: quoted, entailed, ambiguous, unsupported, legacy_freetext, or not_classified.' },
+    polarity: { type: 'object', description: 'Whether decisive text negates, with the negating text verbatim.' },
+    scope: { type: 'object', description: 'Project, memory scope, environment and applicability window.' },
+    preconditions: { type: 'object', description: 'Recorded reopen and reuse conditions and assumptions, verbatim.' },
+    status: { type: 'object', description: 'Lifecycle, supersession and verification state.' },
+    outcome: { type: 'object', description: 'Attempts only: result class, outcome-evidence state and cause state.' },
+    provenance: { type: 'object', description: 'Source class and capture reference.' },
+    boundRevision: { type: 'object', description: 'The record id and the SHA-256 digest of what the line was derived from.' },
+    derived: { type: 'boolean', description: 'Always true: a line is never canonical.' },
+    derivationVersion: { type: 'string', description: 'Version of the template.' },
+    decisiveOmitted: stringList('Decisive parts the line could not carry; empty on a delivered line.'),
+    requiresExpansion: { type: 'boolean', description: 'True when a negation is not settled by a verified claim stating it.' },
+    expansion: { type: 'object', description: 'Handle for the full record: operation, record id, digest, as-of, derivation version, scope and derivation time.' }
+  }
+};
+const relevantItemSchema = {
+  type: 'object',
+  description: 'One relevant record, as its line (T1) or in full (T2), with the ranks that selected it.',
+  required: ['tier', 'score', 'ranks'],
+  properties: {
+    tier: { type: 'string', enum: ['T1', 'T2'], description: 'T1 carries line, T2 carries record.' },
+    line: relevantLineSchema,
+    record: storedRecordSchema,
+    score: numberOrNull('Fused rank score; null for a working-set record delivered by the fallback.'),
+    ranks: { anyOf: [signalRankSchema, { type: 'null' }], description: 'Position in each signal list; null for a working-set record delivered by the fallback.' }
+  }
+};
+const signalAvailabilitySchema = (description) => ({
+  type: 'object', description, required: ['available', 'matched'],
+  properties: { available: { type: 'boolean', description: 'Whether the signal ran.' }, matched: integerCount('Records it ranked.') }
+});
+const relevantSchema = {
+  type: 'object',
+  description: 'Present with query or focalId: records in scope ranked on the records themselves, head first.',
+  required: ['scope', 'relevance', 'fallback', 'byKind', 'total', 'returned', 'omitted', 'hasMore', 'complete', 'limitSource', 'limitation', 'lines', 'processing', 'expansion', 'items'],
+  properties: {
+    scope: readScopeSchema,
+    relevance: {
+      type: 'object', description: 'Whether any signal established relevance, and which signals ran.', required: ['established', 'signals'],
+      properties: {
+        established: { type: 'boolean', description: 'True when the lexical, semantic or graph signal ranked a record. Recency orders records; it never selects one.' },
+        signals: {
+          type: 'object', description: 'Availability of each signal.', required: ['lexical', 'semantic', 'graph', 'temporal'],
+          properties: {
+            lexical: signalAvailabilitySchema('Term matching over the records.'),
+            semantic: signalAvailabilitySchema('Meaning; never available on this read.'),
+            graph: signalAvailabilitySchema('Distance from focalId.'),
+            temporal: signalAvailabilitySchema('Recency from asOf.')
+          }
+        }
+      }
+    },
+    fallback: {
+      type: 'object', description: 'Whether fuller delivery replaced relevance or a line.', required: ['used', 'reason'],
+      properties: {
+        used: { type: 'boolean', description: 'True when the working set or a full record was delivered instead.' },
+        reason: { anyOf: [{ type: 'string', enum: ['relevance_not_established', 'decisive_meaning_omitted'] }, { type: 'null' }], description: 'relevance_not_established: no signal ranked a record, so the working set is delivered. decisive_meaning_omitted: a line could not carry its decisive meaning, so that record is delivered in full.' }
+      }
+    },
+    byKind: {
+      type: 'object', description: 'Candidates by kind.', required: ['decision', 'attempt', 'memory', 'fact'],
+      properties: { decision: integerCount('Candidate decisions.'), attempt: integerCount('Candidate attempts.'), memory: integerCount('Candidate memories.'), fact: integerCount('Candidate facts.') }
+    },
+    total: integerCount('Candidates in total.'),
+    returned: integerCount('Items in this response.'),
+    omitted: integerCount('total minus returned.'),
+    hasMore: { type: 'boolean', description: 'True when limit left candidates out.' },
+    complete: { type: 'boolean', description: 'All counted candidates returned, relevance established and the scope resolved; not semantic recall.' },
+    limitSource: { type: 'string', enum: ['caller', 'default'], description: 'Whose choice bounded the items.' },
+    limitation: readCoverageSchema.properties.limitation,
+    lines: {
+      type: 'array', description: 'One entry per delivered line, in item order.',
+      items: {
+        type: 'object', description: 'A delivered line.', required: ['recordId', 'claimClass', 'requiresExpansion'],
+        properties: {
+          recordId: { type: 'string', description: 'The record the line was derived from.' },
+          claimClass: { type: 'string', description: 'The claim class of that line.' },
+          requiresExpansion: { type: 'boolean', description: 'Whether that line requires expansion.' }
+        }
+      }
+    },
+    processing: {
+      type: 'object', description: 'Extraction state: no extraction runs in this build.', required: ['pending', 'failed', 'blocked', 'oldestPendingAt', 'extractionAvailable'],
+      properties: {
+        pending: integerCount('Items awaiting extraction.'),
+        failed: integerCount('Items whose extraction failed.'),
+        blocked: integerCount('Items whose extraction is blocked.'),
+        oldestPendingAt: stringOrNull('When the oldest pending item arrived.'),
+        extractionAvailable: { type: 'boolean', description: 'Whether extraction runs.' }
+      }
+    },
+    expansion: {
+      type: 'object', description: 'The operation a line handle names.', required: ['operation', 'available'],
+      properties: {
+        operation: { type: 'string', description: 'Operation name.' },
+        available: { type: 'boolean', description: 'False: this build has no expansion operation yet; the full record comes from the T2 items or a read by id.' }
+      }
+    },
+    items: { type: 'array', items: relevantItemSchema, description: 'Ranked records, best first; the working set when fallback reason is relevance_not_established.' }
+  }
+};
 // The default read (plan v1.4.4 §13.4, E03): the same records as the review-named
 // shape, under names and descriptions that state what they hold, with the
 // declared notice. suggestedQuestions gives way to belowConfidenceThreshold, the
@@ -835,6 +958,7 @@ const contextOutputSchema = {
   required: ['project', 'activeDecisions', 'staleAssumptions', 'failedAttempts', 'firedConditions', 'belowConfidenceThreshold', 'completeness', 'notice'],
   properties: {
     project: reviewContextOutputSchema.properties.project,
+    relevant: relevantSchema,
     activeDecisions: { ...reviewContextOutputSchema.properties.activeDecisions, description: 'Decisions whose lifecycle status is current: proposed, planned, in_progress, executed, validated, or reconsidered.' },
     staleAssumptions: reviewContextOutputSchema.properties.staleAssumptions,
     failedAttempts: reviewContextOutputSchema.properties.failedAttemptsToAvoid,
@@ -1001,11 +1125,11 @@ const CATALOG = [
     persists: false,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     describe: {
-      does: "Read one project's working set: current decisions, stale facts, failed attempts, fired review conditions.",
+      does: "Read one project's working set: current decisions, stale facts, failed attempts, fired review conditions; with a query, the relevant history first.",
       route: 'shadowgraph_search or shadowgraph_retrieve look one thing up, shadowgraph_recall reads scoped memory, shadowgraph_review_context evaluates and persists review signals.',
       effects: 'A read: it evaluates reopen rules without persisting any signal or committing a revision.'
     },
-    inputSchema: contextInputSchema,
+    inputSchema: defaultContextInputSchema,
     outputSchema: contextOutputSchema
   },
   {

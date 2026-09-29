@@ -23,7 +23,7 @@ import {
 } from '../src/mcp-tools.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { measureAll } from '../scripts/mcp-wire-size.mjs';
-import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { privilegedIssueAccess, privilegedSnapshot } from '../src/internal/snapshot.js';
 
 // --- expected inventory ----------------------------------------------------
 const FULL_TOOL_NAMES = [
@@ -530,10 +530,16 @@ const WIRE_BUDGETS = {
   // result-class descriptions and counts undetermined attempts: full
   // 56406/60000/271688, verifier full 57554/61253/276235, compact
   // 36333/37922/183696; every ceiling unchanged.
-  'withoutVerifier.full': { bare: 57_400, annotated: 61_100, structured: 274_400 },
-  'withoutVerifier.compact': { bare: 37_000, annotated: 38_600, structured: 184_600 },
-  'withVerifier.full': { bare: 58_600, annotated: 62_400, structured: 279_000 },
-  'withVerifier.compact': { bare: 37_000, annotated: 38_600, structured: 184_600 }
+  // PR-26 (plan v1.4.4 §17.2) adds shadowgraph_context's relevance inputs
+  // (query, focalId, asOf, compact) and its relevant block: head, T1 line and
+  // T2 record schemas. Measured on 2026-09-29: full 57152/60746/283848,
+  // verifier full 58300/61999/288395, compact 37079/38668/195856. The ceilings
+  // this planned addition exceeds are re-set with ~2% headroom (recorded
+  // variance, PR-12/13/16 precedent); the four it leaves inside are unchanged.
+  'withoutVerifier.full': { bare: 57_400, annotated: 61_100, structured: 288_600 },
+  'withoutVerifier.compact': { bare: 37_800, annotated: 39_400, structured: 198_900 },
+  'withVerifier.full': { bare: 58_600, annotated: 62_400, structured: 293_300 },
+  'withVerifier.compact': { bare: 37_800, annotated: 39_400, structured: 198_900 }
 };
 
 test('the advertised tool list stays within its wire-size budget, at every tier', () => {
@@ -808,6 +814,49 @@ test('output schemas accept data imported from an older storage schema', () => {
   const [fact] = privilegedSnapshot(graph).facts;
   assert.equal(fact.verificationStatus, 'unverified');
   assert.equal(fact.legacyVerificationStatus, 'verified');
+});
+
+// Plan v1.4.4 PR-26: only the default read advertises the relevance inputs, and
+// every shape its relevant block takes -- lines and full records of every kind,
+// a kind-less legacy fact, a page, the fallback, a grant, no project -- matches
+// the advertised output schema.
+test('the default read advertises relevance, and every shape of its relevant block matches its schema', () => {
+  const tool = byName.get('shadowgraph_context');
+  assert.deepEqual(['query', 'focalId', 'asOf', 'compact'].map((name) => tool.inputSchema.properties[name]?.type), ['string', 'string', 'string', 'boolean']);
+  assert.equal(byName.get('shadowgraph_review_context').inputSchema.properties.query, undefined);
+  const relevantSchema = tool.outputSchema.properties.relevant;
+  assert.deepEqual(relevantSchema.required, ['scope', 'relevance', 'fallback', 'byKind', 'total', 'returned', 'omitted', 'hasMore', 'complete', 'limitSource', 'limitation', 'lines', 'processing', 'expansion', 'items']);
+  assert.deepEqual(relevantSchema.properties.byKind.required, ['decision', 'attempt', 'memory', 'fact']);
+  assert.deepEqual(relevantSchema.properties.lines.items.required, ['recordId', 'claimClass', 'requiresExpansion']);
+  for (const field of ['polarity', 'scope', 'preconditions', 'status', 'provenance', 'boundRevision', 'decisiveOmitted', 'requiresExpansion', 'expansion']) {
+    assert.ok(relevantSchema.properties.items.items.properties.line.required.includes(field), `a line always carries ${field}`);
+  }
+  const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
+  graph.importData({ facts: [{ id: 'legacy-fact', key: 'region', value: 'eu', project: 'alpha', status: 'superseded', validTo: '2025-01-01T00:00:00.000Z' }] });
+  graph.addDecision({ project: 'alpha', title: 'region rollout', chosen: 'eu first', alternatives: [{ label: 'us first', reasonRejected: 'latency' }] });
+  graph.addDecision({ project: 'alpha', title: `region sizing ${'budget '.repeat(80)}`, chosen: 'fixed' });
+  graph.addFact({ project: 'alpha', key: 'region_count', value: 3 });
+  graph.remember({ project: 'alpha', memoryType: 'note', key: 'region note', text: 'regions are never cheap' });
+  graph.addAttempt({ project: 'alpha', solution: 'region failover drill', result: 'failed: dns', resultClass: 'failed', reason: 'ttl too long' });
+  graph.addDecision({ project: 'beta', title: 'region beta', chosen: 'b' });
+  const grant = privilegedIssueAccess(graph, { type: 'grant', scope: { projects: ['beta'] }, surfaces: ['cli'], expiresAt: '2099-01-01T00:00:00.000Z', reason: 'schema fixture' }).entry;
+  const reads = [
+    { project: 'alpha', query: 'region' },
+    { project: 'alpha', query: 'region', compact: true },
+    { project: 'alpha', query: 'region', compact: true, asOf: '2024-06-01T00:00:00.000Z' },
+    { project: 'alpha', query: 'region', compact: true, limit: 1 },
+    { project: 'alpha', query: 'zebra', compact: true },
+    { project: 'alpha', accessId: grant.accessId, query: 'region', compact: true },
+    { query: 'region' },
+    { project: 'alpha', focalId: 'missing' }
+  ];
+  const shapes = new Set();
+  for (const [index, input] of reads.entries()) {
+    const value = JSON.parse(JSON.stringify(graph.context(input)));
+    assertValid(tool.outputSchema, value, `shadowgraph_context relevance read ${index}`);
+    for (const item of value.relevant.items) shapes.add(`${item.tier}:${String(item.tier === 'T1' ? item.line.kind : item.record.kind)}`);
+  }
+  for (const shape of ['T1:decision', 'T1:attempt', 'T1:memory', 'T1:fact', 'T1:null', 'T2:decision', 'T2:attempt']) assert.ok(shapes.has(shape), `no relevance read delivered ${shape}`);
 });
 
 // Plan v1.4.4 PR-19: belowConfidenceThreshold reports a decision of any status,

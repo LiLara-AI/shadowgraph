@@ -398,3 +398,29 @@ recoveries on every non-hook read that runs the fallback.
 
 **A8. Not in PR-25.** The §9 fallback and the default-path `relevant` block (PR-26), §7-§8 expansion (PR-27), and
 the §6 runtime miss ledger (PR-28) arrive in their own change-sets, each adding its entry here.
+
+**A9. Discovery and the §9 fallback on the default read (PR-26). Variance in mechanism.** `context({ query })`
+establishes relevance on T0 only: the hybrid engine ranks the full canonical records inside the read boundary,
+and a T1 line is only the form a ranked record is delivered in (`compact: true`). A line never takes part in
+discovery, so no compact representation is ever the sole discovery path (§1, PC-08(a)). §9's triggers map as
+follows:
+- no T1 lines exist, or every candidate line is stale: cannot arise, since a line is derived for every delivered
+  record on the read (A5);
+- T1 yields no candidate while T0 has candidates: T1 has no candidate set of its own. The T0 analogue -- no
+  lexical, semantic or graph signal ranks any record -- runs the fallback: the working set is delivered in full
+  (T2), declared `fallback: { used: true, reason: 'relevance_not_established' }` with `complete: false`, never
+  as an empty result (G5-8's fallback half; recording the recovery as a runtime miss is PR-28, A7);
+- a candidate line carries `decisiveOmitted` for an element the query touches: any line with a non-empty
+  `decisiveOmitted` is replaced by its full record (T2), declared `reason: 'decisive_meaning_omitted'`. This is
+  a superset of the condition; whether the query touches the omitted element is not decided.
+
+The head's `lines` declares the claim class of each delivered line, and whether it requires expansion, in item
+order (§17.2), so a truncated payload still carries them. A line whose negation is not settled asks for
+expansion (A3); until PR-27 the full record is reached by the same read without `compact` or by a read by id.
+Ranking walks, and lines render, only what the read may reach, another memory scope's memory never among it.
+
+Recency alone never establishes relevance, since it orders every candidate when `asOf` is set. The semantic
+signal has no query vector on this path, because no request text is sent to an embedding endpoint, and the head
+names it unavailable. A T2 record is the canonical record, so the embedding (a derived index) is left out, as it
+is from the digest (A1). Until PR-27 the head declares `expansion: { operation: 'shadowgraph_expand', available:
+false }`.

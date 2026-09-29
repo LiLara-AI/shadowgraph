@@ -200,7 +200,15 @@ function partition(stored) {
   };
 }
 
-export async function measureWrites({ deliveries = 5, ...options } = {}) {
+// What a delivery's relevant block established, and in which tiers, so a
+// measurement names the read it measured (PR-26); null without one.
+const relevantSummary = (text) => {
+  const { relevant } = JSON.parse(text);
+  return relevant ? { established: relevant.relevance.established, tiers: [...new Set(relevant.items.map((item) => item.tier))] } : null;
+};
+
+// `request` adds fields to every delivery's body, such as a relevance query (PR-26).
+export async function measureWrites({ deliveries = 5, request = {}, ...options } = {}) {
   let clock = DAY_ONE;
   const now = () => new Date(clock).toISOString();
   const { graph } = seedGraph({ ...options, now });
@@ -275,9 +283,9 @@ export async function measureWrites({ deliveries = 5, ...options } = {}) {
     }
     const minutes = (from, count) => Array.from({ length: count }, (_, index) => DAY_ONE + (from + index) * MINUTE);
     const ownInstants = minutes(0, deliveries);
-    const own = await phase([...ownInstants, ownInstants.at(-1)], { project: PROJECT });
-    const granted = await phase([...minutes(deliveries, deliveries), DAY_ONE + DAY], { project: PROJECT, accessId: grant.accessId });
-    const nullReference = await phase(minutes(2 * deliveries, deliveries).map((instant) => instant + DAY), { project: PROJECT, accessId: null });
+    const own = await phase([...ownInstants, ownInstants.at(-1)], { ...request, project: PROJECT });
+    const granted = await phase([...minutes(deliveries, deliveries), DAY_ONE + DAY], { ...request, project: PROJECT, accessId: grant.accessId });
+    const nullReference = await phase(minutes(2 * deliveries, deliveries).map((instant) => instant + DAY), { ...request, project: PROJECT, accessId: null });
     // Wall-clock added per delivery: an own-scope delivery adds the time of any
     // save it makes (none, when it is a read); a fenced delivery adds whatever it
     // takes beyond the mean own-scope read on the same transport: the reload,
@@ -287,7 +295,7 @@ export async function measureWrites({ deliveries = 5, ...options } = {}) {
     const strip = ({ delivered, ...rest }) => rest;
     return {
       storeBytes,
-      ownScope: { ...strip(own), addedMsMax: own.saveMsMax, replayIdentical: !own.storeChanged && lastRead.text === replay.text },
+      ownScope: { ...strip(own), addedMsMax: own.saveMsMax, replayIdentical: !own.storeChanged && lastRead.text === replay.text, relevant: relevantSummary(lastRead.text) },
       grant: { ...strip(granted), addedMsMax: added(granted), rewrite: 'whole_store' },
       nullReference: { ...strip(nullReference), addedMsMax: added(nullReference), rewrite: 'whole_store' }
     };

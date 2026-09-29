@@ -21,6 +21,7 @@ import { accessScopeContains, validateAccess, intersectAccessScope, accessDiagno
 import { createAccessLifecycle } from './internal/access-lifecycle.js';
 import { assertCreationInput } from './internal/creation-id.js';
 import { attemptOutcome } from './internal/outcome.js';
+import { t1Line } from './compact-tier.js';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
 // docs/api-reference.md) and are frozen so a consumer cannot mutate validation
@@ -886,7 +887,11 @@ export function createShadowGraph(options = {}) {
             const ids = new Set();
             const visit = value => {
               if (!value || typeof value !== 'object') return;
-              for (const id of [value.id, value.decisionId]) if (typeof id === 'string' && rawEntity(id) && boundary.visible(rawEntity(id))) ids.add(id);
+              // A T1 line (PR-26) names its record as recordId and carries a
+              // decision's alternatives whole, so it counts as the record does.
+              const lined = value.derived === true && typeof value.recordId === 'string' ? rawEntity(value.recordId) : undefined;
+              const carried = lined ? [value.recordId, ...(lined.kind === 'decision' && Array.isArray(lined.alternatives) ? lined.alternatives.map((alternative) => alternative?.id) : [])] : [];
+              for (const id of [value.id, value.decisionId, ...carried]) if (typeof id === 'string' && rawEntity(id) && boundary.visible(rawEntity(id))) ids.add(id);
               for (const item of Object.values(value)) if (typeof item === 'object') visit(item);
             };
             visit(result);
@@ -3301,6 +3306,26 @@ export function createShadowGraph(options = {}) {
     return scopedPage(sorted, options, boundary, { query: String(query), filters: appliedFilters(options) }, { includesGraphNeighbours: true, contentFields: [...CONTENT_SEARCH_FIELDS] });
   }
 
+  // Whether an id resolves inside the read boundary and, when it is a memory,
+  // in the memory scope read: another scope's memory never rides along, in a
+  // walk as in a traversal (docs/unified-memory.md).
+  const scopedReach = (boundary, memoryScope) => (entityId) => {
+    const found = entity(entityId, boundary);
+    return found !== undefined && (found.kind !== 'memory' || sameMemoryScopeValues(found.scope, memoryScope));
+  };
+
+  // What ranking may read: the entities inside the read boundary and the
+  // relations joining two of them that the memory scope may reach. recall()
+  // and the default read's relevance rank this one view.
+  function rankingView(boundary, memoryScope) {
+    const reach = scopedReach(boundary, memoryScope);
+    return {
+      records: [...records.values()].filter(boundary.visible),
+      facts: [...facts.values()].filter(boundary.visible),
+      relations: [...relations.values()].filter((relation) => reach(relation.from) && reach(relation.to))
+    };
+  }
+
   function recall(query = '', options = {}) {
     validateTemporalFields(options, ['asOf', 'currentAt']);
     const boundary = readBoundary(options);
@@ -3320,12 +3345,7 @@ export function createShadowGraph(options = {}) {
     // walks only relations between such entities: it cannot pass through
     // another project, and a focus outside the boundary reaches nothing, just
     // as one that does not exist.
-    const rankingView = {
-      records: [...records.values()].filter(boundary.visible),
-      facts: [...facts.values()].filter(boundary.visible),
-      relations: [...relations.values()].filter((relation) => boundary.reaches(relation.from) && boundary.reaches(relation.to))
-    };
-    const result = hybridSearch(rankingView, query, recallOptions);
+    const result = hybridSearch(rankingView(boundary, recallOptions.scope), query, recallOptions);
     const envelope = scopedPage(
       result.items,
       recallOptions,
@@ -3358,6 +3378,9 @@ export function createShadowGraph(options = {}) {
   // firedConditions with affectedAlternatives, and belowConfidenceThreshold,
   // the fact the generated suggestedQuestions was built from. Every record is
   // kept.
+  //
+  // With a query or a focalId it also returns `relevant`, ahead of the working
+  // set (PR-26; relevanceBlock()).
   function context(input = {}) {
     return { ...buildContext(input, { persistSignals: false, factual: true }), notice: contextNotice() };
   }
@@ -3370,6 +3393,8 @@ export function createShadowGraph(options = {}) {
   }
 
   function buildContext(input, { persistSignals, factual }) {
+    const relevance = factual && (input.query != null || input.focalId != null);
+    if (relevance) validateRelevanceInput(input);
     const boundary = readBoundary(input);
     const project = boundary.scope.project;
     const inScope = boundary.visible;
@@ -3378,14 +3403,17 @@ export function createShadowGraph(options = {}) {
       const page = resolvePage({ limit, offset: 0 }, items.length);
       return { items: items.slice(0, page.limit), total: items.length, returned: Math.min(page.limit, items.length), hasMore: page.limit < items.length };
     };
-    const activeDecisions = collect([...records.values()].filter((x) => x.kind === 'decision' && inScope(x) && CURRENT_DECISION_STATUSES.includes(x.status)).map(clone));
-    const staleAssumptions = collect([...facts.values()].filter((x) => inScope(x) && x.status !== 'active').map(clone));
+    const current = [...records.values()].filter((x) => x.kind === 'decision' && inScope(x) && CURRENT_DECISION_STATUSES.includes(x.status));
+    const stale = [...facts.values()].filter((x) => inScope(x) && x.status !== 'active');
+    const activeDecisions = collect(current.map(clone));
+    const staleAssumptions = collect(stale.map(clone));
     // Only a failure is collected (PR-24). An attempt whose outcome is
     // undetermined -- captured, with no declared class -- is in no collection,
     // is never implied to have succeeded, and is counted on this one.
     const attemptsInScope = [...records.values()].filter((x) => x.kind === 'attempt' && inScope(x));
+    const failed = attemptsInScope.filter((x) => attemptOutcome(x) === 'failed');
     const failedAttemptsToAvoid = {
-      ...collect(attemptsInScope.filter((x) => attemptOutcome(x) === 'failed').map(clone)),
+      ...collect(failed.map(clone)),
       undetermined: attemptsInScope.filter((x) => attemptOutcome(x) === 'undetermined').length
     };
     const evaluated = evaluateForRead({ changedFacts: input.changedFacts ?? [], facts: input.facts ?? {} }, boundary, { persistSignals });
@@ -3410,8 +3438,10 @@ export function createShadowGraph(options = {}) {
     const groups = factual
       ? { activeDecisions, staleAssumptions, failedAttempts: failedAttemptsToAvoid, firedConditions: fired, belowConfidenceThreshold: belowThreshold, conditionDiagnostics, reusableAttempts }
       : { activeDecisions, staleAssumptions, failedAttemptsToAvoid, openReviews, suggestedQuestions: belowThreshold, conditionDiagnostics, reusableAttempts };
+    const workingSet = [...current, ...failed, ...reuse.reusable.map((entry) => records.get(entry.attemptId)), ...stale];
     return {
       project,
+      ...(relevance ? { relevant: relevanceBlock(input, boundary, workingSet) } : {}),
       ...Object.fromEntries(Object.entries(groups).map(([name, group]) => [name, group.items])),
       completeness: scopeCompleteness(boundary.scope, {
         scope: { project },
@@ -3421,6 +3451,63 @@ export function createShadowGraph(options = {}) {
         collections: Object.fromEntries(Object.entries(groups).map(([name, group]) => [name, { returned: group.returned, total: group.total, hasMore: group.hasMore, omitted: group.total - group.returned, ...(group.undetermined === undefined ? {} : { undetermined: group.undetermined }) }]))
       }, referencedSignals(boundary, openReviews.items))
     };
+  }
+
+  // PR-26 (plan v1.4.4 §17; G-5 §9; AC-063): relevance on the default read.
+  // Every record inside the read boundary -- memories of the project-wide scope
+  // only, as every read without a memory scope -- is ranked on the canonical
+  // record itself (T0) by the hybrid engine, over the view recall() ranks; a
+  // T1 line is only the form a ranked record is delivered in. A record is relevant when the
+  // lexical, semantic or graph signal ranked it -- recency orders, it never
+  // selects -- and no reusableWhen, reviewAfter or status gates it (§17.4). The
+  // semantic signal has no query vector here: no request text is sent to an
+  // embedding endpoint on the default path. When no signal establishes
+  // relevance, the working set is delivered in full rather than nothing (§9);
+  // so is any record whose line cannot carry its decisive meaning. A full
+  // record (T2) is the canonical record: the embedding, a derived index, is left
+  // out, as it is from a line's digest. The head precedes the items (§17.2).
+  function relevanceBlock(input, boundary, workingSet) {
+    const asOf = input.asOf ?? null;
+    const memoryScope = normalizeMemoryScope();
+    const ranked = hybridSearch(rankingView(boundary, memoryScope), input.query ?? '', {
+      project: boundary.scope.grant ? null : boundary.scope.project, focalId: input.focalId, asOf, currentAt: asOf ? null : now()
+    });
+    const hits = ranked.items.filter(({ ranks }) => ranks.lexical !== null || ranks.semantic !== null || ranks.graph !== null);
+    const established = hits.length > 0;
+    const candidates = established ? hits : [...new Map(workingSet.map((record) => [record.id, { record, score: null, ranks: null }])).values()];
+    const page = resolvePage({ limit: input.limit, offset: 0 }, candidates.length);
+    const lineContext = { asOf, scope: { project: boundary.scope.project, grantId: boundary.scope.grant?.accessId ?? null }, derivedAt: now(), visible: scopedReach(boundary, memoryScope) };
+    let shortened = false;
+    const items = candidates.slice(0, page.limit).map(({ record, score, ranks }) => {
+      const { embedding, ...shown } = publicValue(clone(record));
+      const line = established && input.compact === true ? t1Line(shown, lineContext) : null;
+      if (line?.decisiveOmitted.length) shortened = true;
+      return line && !line.decisiveOmitted.length ? { tier: 'T1', line, score, ranks } : { tier: 'T2', record: shown, score, ranks };
+    });
+    const byKind = { decision: 0, attempt: 0, memory: 0, fact: 0 };
+    // A legacy fact may be stored with no kind; it is still a fact.
+    for (const { record } of candidates) {
+      const kind = facts.get(record.id) === record ? 'fact' : record.kind ?? 'unknown';
+      byKind[kind] = (byKind[kind] ?? 0) + 1;
+    }
+    const hasMore = page.limit < candidates.length;
+    const head = scopeCompleteness(boundary.scope, {
+      scope: {},
+      relevance: { established, signals: Object.fromEntries(Object.entries(ranked.signals).map(([name, signal]) => [name, { available: signal.available, matched: signal.matched }])) },
+      fallback: { used: !established || shortened, reason: !established ? 'relevance_not_established' : shortened ? 'decisive_meaning_omitted' : null },
+      byKind, total: candidates.length, returned: items.length, omitted: candidates.length - items.length, hasMore,
+      complete: established && !hasMore,
+      limitSource: input.limit === undefined ? 'default' : 'caller',
+      limitation: established
+        ? { code: 'semantic_unavailable', detail: 'Relevance rests on the lexical and graph signals over the records themselves, with recency only ordering them. The semantic signal is unavailable on this path, so the counts cover what those signals found, not every record related in meaning alone.' }
+        : { code: 'relevance_not_established', detail: 'No lexical, semantic or graph signal found a relevant record, so the working set is delivered in full instead of nothing. The semantic signal is unavailable on this path.' },
+      // The claim class of each delivered line, in item order, where a
+      // truncated payload still carries it (§17.2).
+      lines: items.filter(({ tier }) => tier === 'T1').map(({ line }) => ({ recordId: line.recordId, claimClass: line.claimClass, requiresExpansion: line.requiresExpansion })),
+      processing: { pending: 0, failed: 0, blocked: 0, oldestPendingAt: null, extractionAvailable: false },
+      expansion: { operation: 'shadowgraph_expand', available: false }
+    });
+    return { ...head, items };
   }
 
   function nativeCollections() {
@@ -4459,6 +4546,12 @@ function validateTemporalFields(input, names) {
     if (value !== undefined && value !== null && typeof value !== 'string') throw new Error(`${name} must be a string or null`);
     if (typeof value === 'string' && !isValidTimestamp(value)) throw new Error(`${name} must be a valid timestamp`);
   }
+}
+
+function validateRelevanceInput(input) {
+  for (const name of ['query', 'focalId']) if (input[name] != null && typeof input[name] !== 'string') throw new Error(`${name} must be a string`);
+  if (input.compact !== undefined && typeof input.compact !== 'boolean') throw new Error('compact must be a boolean');
+  validateTemporalFields(input, ['asOf']);
 }
 
 function validateReviewInput(input) {

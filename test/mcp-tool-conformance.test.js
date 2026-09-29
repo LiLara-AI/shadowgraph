@@ -311,6 +311,11 @@ test('every advertised output schema accepts the result its own tool really retu
   await callTool('shadowgraph_recall', { project, scope: { userId: 'alice' }, query: 'hotels', preferRecent: true, limit: 5 });
   await callTool('shadowgraph_search', { project, query: 'rollout' });
   await callTool('shadowgraph_context', { project });
+  // PR-26: the relevant block as lines, as full records, and as the declared fallback.
+  const lines = await callTool('shadowgraph_context', { project, query: 'rollout', compact: true });
+  assert.equal(lines.relevant.items[0].tier, 'T1');
+  assert.equal((await callTool('shadowgraph_context', { project, query: 'rollout' })).relevant.items[0].tier, 'T2');
+  assert.equal((await callTool('shadowgraph_context', { project, query: 'zebra' })).relevant.fallback.used, true);
   await callTool('shadowgraph_review_context', { project });
   await callTool('shadowgraph_link', { project, from: decisionA.id, to: decisionB.id, relation: 'informs' });
   await callTool('shadowgraph_traverse', { project, id: decisionA.id, depth: 2, direction: 'both' });

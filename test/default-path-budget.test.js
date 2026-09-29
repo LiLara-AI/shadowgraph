@@ -52,6 +52,7 @@ test('repeated and replayed deliveries on the HTTP transport stay within the dec
   assert.deepEqual(checkWriteBudget(report), []);
 
   const own = report.ownScope;
+  assert.equal(own.relevant, null, 'a plain delivery carries no relevant block');
   assert.equal(own.deliveries, 4, 'three reads a minute apart and a replay');
   assert.equal(own.saves, 0);
   assert.equal(own.bytesWritten, 0);
@@ -76,6 +77,19 @@ test('repeated and replayed deliveries on the HTTP transport stay within the dec
   assert.equal(nullReference.maxSavesPerDelivery, 1, 'a null access key takes the fenced path');
   assert.equal(nullReference.canonicalWrites, 0);
   assert.deepEqual(nullReference.changedKeys, ['revision'], 'and commits a revision with no audit');
+});
+
+// PR-26: a relevance read -- ranked, delivered as lines -- is the same
+// default-path read, inside the same frozen budget.
+test('a relevance read stays within the declared budget and writes nothing in its own scope', async () => {
+  const report = await measureWrites({ deliveries: 2, request: { query: 'cache region deploy', compact: true } });
+  assert.deepEqual(checkWriteBudget(report), []);
+  const own = report.ownScope;
+  assert.deepEqual(own.relevant, { established: true, tiers: ['T1'] }, 'the measured delivery is a relevance read, delivered as lines');
+  assert.deepEqual([own.saves, own.bytesWritten, own.revisionDelta, own.journalDelta, own.storeChanged], [0, 0, 0, 0, false]);
+  assert.equal(own.replayIdentical, true, 'the same relevance read at the same instant returns the same bytes');
+  assert.equal(report.grant.canonicalWrites, 0);
+  assert.deepEqual(report.grant.changedKeys, ['accessAudit', 'revision'], 'a granted relevance read changes only the declared audit');
 });
 
 test('the budget check fails each category it measures rather than adjusting', async () => {

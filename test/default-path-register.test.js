@@ -71,6 +71,11 @@ function scenarioGraph() {
   store.maintain({ project: 'p' });
   store.addDecision({ project: 'partial', title: 'region', chosen: 'us', alternatives: [{ label: 'eu', reopenWhen: [{ key: 'region', operator: 'equals', value: 'eu' }] }] });
   store.addDecision({ project: 'bare', title: 'plain', chosen: 'x' });
+  // PR-26: a project-wide memory and a recorded success rank as relevant history.
+  store.remember({ project: 'p', memoryType: 'procedure', key: 'cache warmup', text: 'warm the cache before a deploy', tags: ['ops'], metadata: { owner: 'platform' } });
+  store.addAttempt({ project: 'p', solution: 'cache prefill', result: 'hit rate 0.97', resultClass: 'succeeded' });
+  // A decision whose line cannot carry its title within the ceiling.
+  store.addDecision({ project: 'p', title: `cache sizing ${'budget '.repeat(80)}`, chosen: 'fixed' });
   store.addDecision({ project: 'q', title: 'wider', chosen: 'y' });
   const grant = privilegedIssueAccess(store, { type: 'grant', scope: { projects: ['q'] }, surfaces: ['cli', 'http', 'mcp'], expiresAt: '2099-01-01T00:00:00.000Z', reason: 'register fixture' }).entry;
   return { graph: store, grant };
@@ -103,7 +108,13 @@ function scenarioViews({ graph, grant }) {
     bare: graph.context({ project: 'bare' }),
     grant: graph.context({ project: 'p', accessId: grant.accessId }),
     unresolved: graph.context({}),
-    legacy: legacyGraph().context({ project: 'legacy' })
+    // PR-26: the relevant block, as full records, as lines, as the working-set
+    // fallback, under a grant, and over a store a legacy writer left.
+    relevant: graph.context({ project: 'p', query: 'cache deploy backfill lag latency quota' }),
+    relevantCompact: graph.context({ project: 'p', query: 'cache deploy backfill lag latency quota', compact: true, asOf: NOW }),
+    fallback: graph.context({ project: 'p', query: 'zebra' }),
+    grantRelevant: graph.context({ project: 'p', accessId: grant.accessId, query: 'wider', compact: true }),
+    legacy: legacyGraph().context({ project: 'legacy', query: 'zebra' })
   };
 }
 
@@ -154,6 +165,7 @@ async function enumerate(t) {
   maps.push(valuePaths(listed, 'tool:', 'mcp tools/list'), valuePaths({ outputSchema: null }, 'tool:', 'mcp tools/list'));
   maps.push(schemaPaths(inputSchema, 'tool:inputSchema.', 'mcp tools/list'));
   const { structuredContent, ...wrapper } = await rpc('tools/call', { name: 'shadowgraph_context', arguments: { project: 'p' } });
+  maps.push(valuePaths((await rpc('tools/call', { name: 'shadowgraph_context', arguments: { project: 'p', query: 'cache deploy', compact: true } })).structuredContent, '', 'mcp tools/call'));
   maps.push(valuePaths(wrapper, 'mcp:', 'mcp tools/call'), valuePaths({ structuredContent: null }, 'mcp:', 'mcp tools/call'));
   maps.push(valuePaths(structuredContent, '', 'mcp tools/call'));
   // The same calls under 2026-07-28, whose results add their own members.
@@ -187,11 +199,21 @@ async function enumerate(t) {
   const response = await fetch(`http://127.0.0.1:${app.server.address().port}/context`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'p' }) });
   const body = await response.json();
   maps.push(valuePaths({ body: null }, 'http:', 'http'), valuePaths(body, '', 'http'));
+  // PR-26: HTTP passes the relevance inputs through.
+  const relevantBody = await (await fetch(`http://127.0.0.1:${app.server.address().port}/context`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'p', query: 'cache deploy', compact: true }) })).json();
+  assert.equal(relevantBody.relevant.items[0].tier, 'T1');
+  maps.push(valuePaths(relevantBody, '', 'http'));
 
   const cli = spawnSync(process.execPath, [cliPath, 'context', JSON.stringify({ project: 'p' })], { cwd: directory, encoding: 'utf8', env: { ...process.env, SHADOWGRAPH_FILE: file, SHADOWGRAPH_STORAGE: 'json' } });
   assert.equal(cli.status, 0, cli.stderr);
   const stdout = JSON.parse(cli.stdout);
   maps.push(valuePaths({ stdout: null }, 'cli:', 'cli'), valuePaths(stdout, '', 'cli'));
+  // PR-26: so does the CLI.
+  const relevantCli = spawnSync(process.execPath, [cliPath, 'context', JSON.stringify({ project: 'p', query: 'cache deploy', compact: true })], { cwd: directory, encoding: 'utf8', env: { ...process.env, SHADOWGRAPH_FILE: file, SHADOWGRAPH_STORAGE: 'json' } });
+  assert.equal(relevantCli.status, 0, relevantCli.stderr);
+  const relevantStdout = JSON.parse(relevantCli.stdout);
+  assert.equal(relevantStdout.relevant.items[0].tier, 'T1');
+  maps.push(valuePaths(relevantStdout, '', 'cli'));
 
   return { paths: mergePaths(...maps), views, wrapper, structuredContent, resource, resourcePayload, body, stdout };
 }
@@ -232,7 +254,9 @@ test('the generator reaches deep paths on every source, and an unregistered key 
     'belowConfidenceThreshold[].threshold', 'firedConditions#description', 'notice.replacement.mcp',
     'tool:description', 'tool:inputSchema.project#description', 'mcp:content[].text', 'mcp:structuredContent',
     'resource:contents[].uri', 'resource-list:resources[].description', 'discover:instructions',
-    'prompt-list:prompts[].description', 'prompt:messages[].content.text', 'http:body', 'cli:stdout'
+    'prompt-list:prompts[].description', 'prompt:messages[].content.text', 'http:body', 'cli:stdout',
+    'relevant.limitation.detail', 'relevant.items[].line.expansion.scope.grantId', 'relevant.items[].line.polarity.span[].text',
+    'relevant.items[].record.text', 'relevant.items[].record.metadata.owner', 'relevant.items[].record.rationale', 'relevant.scope.grant.accessId'
   ]) assert.ok(found.has(path), `the generator missed ${path}`);
   const planted = valuePaths({ ...views.mixed, zzUnregistered: { nested: 1 } }, '', 'planted');
   const unclassified = [...planted.keys()].filter((path) => classify(path) === null);
@@ -264,7 +288,9 @@ test('only imported records reach a pass-through entry', async (t) => {
   // Import and migration also write fields; a pass-through key must be one the
   // imported store itself carried.
   const imported = new Set([...LEGACY_IMPORT.records, ...LEGACY_IMPORT.facts].flatMap(Object.keys));
-  const invented = [...new Set(passed.map(([path]) => path.split('.')[1].replace(/\[\]$/, '')))].filter((key) => !imported.has(key));
+  // The key is the segment after the pass-through entry's own prefix.
+  const keyOf = (path) => path.slice(classify(path).pattern.length - '.*.**'.length + 1).split(/[.[]/)[0];
+  const invented = [...new Set(passed.map(([path]) => keyOf(path)))].filter((key) => !imported.has(key));
   assert.deepEqual(invented, [], 'a field this build writes on import fell through to a pass-through entry');
 });
 
