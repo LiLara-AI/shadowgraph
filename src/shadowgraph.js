@@ -2280,6 +2280,10 @@ export function createShadowGraph(options = {}) {
     const prepared = validateReviewInput(context);
     const changed = new Set(prepared.changedFacts); const due = []; const diagnostics = []; const explained = [];
     const reviewAt = prepared.asOf ?? now();
+    // The stored facts the request can see, and the facts known with the
+    // caller's on top, are the same for every decision it reviews: they are
+    // built once, on the first decision, not once each.
+    let stored, knownFacts;
     for (const record of records.values()) {
       if (record.kind !== 'decision') continue;
       if (onlyDecisionId !== undefined && record.id !== onlyDecisionId) continue;
@@ -2306,8 +2310,8 @@ export function createShadowGraph(options = {}) {
       // matching `changedFacts` only: that list is an ephemeral "these just
       // changed" signal, whereas facts are durable state, so feeding state into it
       // would make every decision due forever.
-      const stored = storedFactValues(visible, reviewAt);
-      const knownFacts = { ...stored.values, ...prepared.facts };
+      stored ??= storedFactValues(visible, reviewAt);
+      knownFacts ??= { ...stored.values, ...prepared.facts };
       for (const alternative of record.alternatives) for (const rule of alternative.reopenWhen) {
         if (typeof rule === 'string') {
           if (changed.has(rule)) {
