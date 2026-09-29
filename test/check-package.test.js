@@ -10,6 +10,8 @@ import { scratchDirectory } from '../tools/scratch-directory.js';
 const exec = promisify(execFile);
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const checkerSource = join(projectRoot, 'scripts', 'check-package.mjs');
+// The checker's one local dependency: the credential detector it shares with host delivery.
+const detectorSource = join(projectRoot, 'src', 'internal', 'credential-literal.js');
 const requiredFixtureFiles = [
   'README.md',
   'SECURITY.md',
@@ -96,6 +98,9 @@ async function packageFixture(t, auditText) {
     if (relativePath === 'scripts/check-package.mjs') await copyFile(checkerSource, path);
     else await writeFile(path, `harmless fixture for ${relativePath}\n`, 'utf8');
   }
+  const detector = join(root, 'src', 'internal', 'credential-literal.js');
+  await mkdir(dirname(detector), { recursive: true });
+  await copyFile(detectorSource, detector);
   const auditPath = join(root, 'docs', 'package-text-audit.md');
   await writeFile(auditPath, auditText, 'utf8');
   return root;
@@ -267,4 +272,35 @@ test('check-package npm fallback safely packs metacharacter paths without DEP019
   // response: surface the upstream reason cleanly rather than crashing, hanging, or
   // leaking a path. Any OTHER failure still fails this test.
   assert.match(output, /npm pack command failed: [^\n]*URI malformed/u);
+});
+
+test('the credential detector decodes percent escapes as decodeURIComponent does, without waiting on its errors', async () => {
+  const { decodePercentEscapesLenient } = await import('../src/internal/credential-literal.js');
+  // The oracle: a run decoded whole when decodeURIComponent accepts it, else each escape that it accepts alone.
+  const oracle = (value) => value.replace(/(?:%[0-9A-Fa-f]{2})+/gu, (run) => {
+    try {
+      return decodeURIComponent(run);
+    } catch {
+      return run.replace(/%[0-9A-Fa-f]{2}/gu, (escape) => {
+        try {
+          return decodeURIComponent(escape);
+        } catch {
+          return escape;
+        }
+      });
+    }
+  });
+  const hex = (byte) => `%${byte.toString(16).padStart(2, '0')}`;
+  const seconds = [0x00, 0x41, 0x7f, 0x80, 0x8f, 0x90, 0x9f, 0xa0, 0xbf, 0xc0, 0xff];
+  for (let first = 0; first < 256; first += 1) {
+    for (const second of seconds) {
+      for (const tail of ['', '%80', '%bf', '%80%80', '%BF%bf', '%80%41', '%c3%a9']) {
+        const value = `a${hex(first)}${hex(second)}${tail}z`;
+        assert.equal(decodePercentEscapesLenient(value), oracle(value), value);
+      }
+    }
+  }
+  const started = Date.now();
+  decodePercentEscapesLenient('%C3'.repeat(100_000));
+  assert.ok(Date.now() - started < 500, `${Date.now() - started} ms`);
 });

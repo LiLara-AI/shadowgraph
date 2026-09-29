@@ -16,11 +16,12 @@ const execute = promisify(execFile);
 // is declared under the grant tier of CONTEXT_DELIVERY_BUDGET.
 export const hasAccessReference = (input) => Boolean(input && (Object.hasOwn(input, 'accessId') || Object.hasOwn(input, 'grantId') || input.readProvenance !== undefined));
 
-export async function discoverWorkspace(cwd = process.cwd()) {
+// A caller on a deadline (host delivery) bounds each git call; 0 waits.
+export async function discoverWorkspace(cwd = process.cwd(), { timeout = 0 } = {}) {
   const work = resolve(cwd);
   try {
-    const { stdout: root } = await execute('git', ['rev-parse', '--show-toplevel'], { cwd: work });
-    const { stdout: common } = await execute('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: work });
+    const { stdout: root } = await execute('git', ['rev-parse', '--show-toplevel'], { cwd: work, timeout });
+    const { stdout: common } = await execute('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: work, timeout });
     return { worktreeRoot: resolve(root.trim()), commonDir: resolve(common.trim()) };
   } catch { return { worktreeRoot: work, commonDir: null }; }
 }

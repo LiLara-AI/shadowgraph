@@ -46,7 +46,7 @@ const canonical = (value) => {
 // separators, bidirectional controls), so those are escaped too. The kernel's
 // own vocabulary (statuses, classes, identifiers, instants) is written bare
 // when it has its expected form, and as JSON when it does not.
-const show = (value) => JSON.stringify(value === undefined ? null : value)
+export const show = (value) => JSON.stringify(value === undefined ? null : value)
   .replace(/[\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/gu, (character) => `\\u${character.codePointAt(0).toString(16).padStart(4, '0')}`);
 const vocab = (value) => (typeof value === 'string' && /^[a-z][a-z0-9_]*$/.test(value) ? value : show(value));
 const ident = (value) => (typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_:.-]*$/.test(value) ? value : show(value));

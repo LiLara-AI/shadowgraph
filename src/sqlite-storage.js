@@ -22,6 +22,35 @@ const EXTRA_TABLE = 'CREATE TABLE IF NOT EXISTS shadowgraph_extra (collection TE
 
 const EMPTY = { schemaVersion: SCHEMA_VERSION, revision: 0, records: [], facts: [], relations: [], reviewSignals: [], idempotency: [], events: [], journal: [], journalSeq: 0, journalEpoch: null };
 
+// The store's payload as its tables hold it. Reads only: it needs an open
+// handle and writes nothing, so a read-only handle serves (delivery, PR-30).
+// A missing table is an error, as the live store always has every table; a
+// reader that cannot prepare the schema first (delivery) asks for `tolerant`,
+// and a table an older build never made then reads as empty.
+export function exportSqlitePayload(database, { tolerant = false } = {}) {
+  const exists = (name) => database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
+  const has = (name) => !tolerant || exists(name);
+  const rows = (name, query) => (has(name) ? database.prepare(query).all() : []);
+  const meta = has('shadowgraph_meta');
+  const readMeta = (key, fallback = '0') => (meta ? database.prepare('SELECT value FROM shadowgraph_meta WHERE key = ?').get(key)?.value : undefined) ?? fallback;
+  const epoch = readMeta('journalEpoch', '');
+  const result = { schemaVersion: Number(readMeta('schemaVersion', String(SCHEMA_VERSION))), revision: Number(readMeta('revision', '0')), records: [], facts: [], relations: [], reviewSignals: [], idempotency: [], events: [], journal: [], journalSeq: Number(readMeta('journalSeq', '0')), journalEpoch: epoch === '' ? null : Number(epoch) };
+  for (const row of rows('shadowgraph_entities', 'SELECT kind, payload FROM shadowgraph_entities ORDER BY rowid')) { const item = JSON.parse(row.payload); (item.kind === 'fact' ? result.facts : result.records).push(item); }
+  for (const row of rows('shadowgraph_relations', 'SELECT payload FROM shadowgraph_relations ORDER BY rowid')) result.relations.push(JSON.parse(row.payload));
+  for (const row of rows('shadowgraph_reviews', 'SELECT payload FROM shadowgraph_reviews ORDER BY rowid')) result.reviewSignals.push(JSON.parse(row.payload));
+  for (const row of rows('shadowgraph_idempotency', 'SELECT key, payload FROM shadowgraph_idempotency ORDER BY rowid')) result.idempotency.push({ key: row.key, value: JSON.parse(row.payload) });
+  for (const row of rows('shadowgraph_events', 'SELECT payload FROM shadowgraph_events ORDER BY rowid')) result.events.push(JSON.parse(row.payload));
+  // Ordered by seq, not rowid: seq is the journal's contract ordering key.
+  for (const row of rows('shadowgraph_journal', 'SELECT payload FROM shadowgraph_journal ORDER BY seq, rowid')) result.journal.push(JSON.parse(row.payload));
+  // A snapshot written by an older build has no carrier table at all. A row
+  // named after a native key is never allowed to overwrite real data; it is
+  // ignored here and removed by the next save.
+  for (const row of exists('shadowgraph_extra') ? database.prepare('SELECT collection, payload FROM shadowgraph_extra ORDER BY rowid').all() : []) {
+    if (isExtraCollectionKey(row.collection)) result[row.collection] = JSON.parse(row.payload);
+  }
+  return result;
+}
+
 export async function createSqliteStore(filePath, options = {}) {
   let DatabaseSync;
   try { ({ DatabaseSync } = await import('node:sqlite')); }
@@ -65,28 +94,6 @@ export async function createSqliteStore(filePath, options = {}) {
 
   let restoring = false;
   let permanentlyClosed = false;
-
-  function exportFrom(database) {
-    const readMeta = (key, fallback = '0') => database.prepare('SELECT value FROM shadowgraph_meta WHERE key = ?').get(key)?.value ?? fallback;
-    const epoch = readMeta('journalEpoch', '');
-    const result = { schemaVersion: Number(readMeta('schemaVersion', String(SCHEMA_VERSION))), revision: Number(readMeta('revision', '0')), records: [], facts: [], relations: [], reviewSignals: [], idempotency: [], events: [], journal: [], journalSeq: Number(readMeta('journalSeq', '0')), journalEpoch: epoch === '' ? null : Number(epoch) };
-    for (const row of database.prepare('SELECT kind, payload FROM shadowgraph_entities ORDER BY rowid').all()) { const item = JSON.parse(row.payload); (item.kind === 'fact' ? result.facts : result.records).push(item); }
-    for (const row of database.prepare('SELECT payload FROM shadowgraph_relations ORDER BY rowid').all()) result.relations.push(JSON.parse(row.payload));
-    for (const row of database.prepare('SELECT payload FROM shadowgraph_reviews ORDER BY rowid').all()) result.reviewSignals.push(JSON.parse(row.payload));
-    for (const row of database.prepare('SELECT key, payload FROM shadowgraph_idempotency ORDER BY rowid').all()) result.idempotency.push({ key: row.key, value: JSON.parse(row.payload) });
-    for (const row of database.prepare('SELECT payload FROM shadowgraph_events ORDER BY rowid').all()) result.events.push(JSON.parse(row.payload));
-    // Ordered by seq, not rowid: seq is the journal's contract ordering key.
-    for (const row of database.prepare('SELECT payload FROM shadowgraph_journal ORDER BY seq, rowid').all()) result.journal.push(JSON.parse(row.payload));
-    // A snapshot written by an older build has no carrier table at all. A row
-    // named after a native key is never allowed to overwrite real data; it is
-    // ignored here and removed by the next save.
-    if (database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'shadowgraph_extra'").get()) {
-      for (const row of database.prepare('SELECT collection, payload FROM shadowgraph_extra ORDER BY rowid').all()) {
-        if (isExtraCollectionKey(row.collection)) result[row.collection] = JSON.parse(row.payload);
-      }
-    }
-    return result;
-  }
 
   function replaceRelational(database, data) {
     database.exec(`${EXTRA_TABLE} DELETE FROM shadowgraph_entities; DELETE FROM shadowgraph_relations; DELETE FROM shadowgraph_reviews; DELETE FROM shadowgraph_idempotency; DELETE FROM shadowgraph_events; DELETE FROM shadowgraph_journal; DELETE FROM shadowgraph_meta; DELETE FROM shadowgraph_extra;`);
@@ -178,7 +185,7 @@ export async function createSqliteStore(filePath, options = {}) {
   }
 
   function assertCommittedPayload(database, payload) {
-    if (payloadIdentity(exportFrom(database)) !== payloadIdentity(persistedPayload(payload))) {
+    if (payloadIdentity(exportSqlitePayload(database)) !== payloadIdentity(persistedPayload(payload))) {
       throw new Error('committed SQLite payload does not match the requested save');
     }
   }
@@ -226,7 +233,7 @@ export async function createSqliteStore(filePath, options = {}) {
     let handle;
     try {
       handle = opener(path, openOptions);
-      const payload = exportFrom(handle);
+      const payload = exportSqlitePayload(handle);
       return { handle, payload };
     } catch (error) {
       try { closeChecked(handle, 'read-failure'); } catch { /* preserve original failure */ }
@@ -332,7 +339,7 @@ export async function createSqliteStore(filePath, options = {}) {
         let database;
         try {
           database = openLiveDatabase('load');
-          return exportFrom(database);
+          return exportSqlitePayload(database);
         } finally {
           closeChecked(database, 'load');
         }
@@ -348,7 +355,7 @@ export async function createSqliteStore(filePath, options = {}) {
         let database;
         try {
           database = openLiveDatabase('save');
-          const current = exportFrom(database);
+          const current = exportSqlitePayload(database);
           assertRevision(current, data?.expectedRevision ?? data?.revision);
           const payload = nextRevision(Array.isArray(data) ? { ...EMPTY, records: data } : { ...data, revision: current.revision, expectedRevision: undefined });
           const destructive = removesPersistedRows(current, payload);
@@ -442,7 +449,7 @@ export async function createSqliteStore(filePath, options = {}) {
           const info = await restoreFs.stat(destination);
           if (!info.isFile()) throw new Error('Recovery destination is not a regular SQLite file');
           inspection = openDatabase(destination, { readOnly: true });
-          const inspectedPayload = exportFrom(inspection);
+          const inspectedPayload = exportSqlitePayload(inspection);
           if (payloadIdentity(inspectedPayload) !== payloadIdentity(oldPayload)) throw new Error('Recovered payload does not match the rollback snapshot');
         } finally {
           closeQuietly(inspection, 'recovery-inspection');
@@ -450,7 +457,7 @@ export async function createSqliteStore(filePath, options = {}) {
         try {
           candidate = openDatabase(destination);
           prepareDatabase(candidate, 'recovery');
-          const payload = exportFrom(candidate);
+          const payload = exportSqlitePayload(candidate);
           if (payloadIdentity(payload) !== payloadIdentity(oldPayload)) throw new Error('Recovered payload does not match the rollback snapshot after prepare');
           liveClosed = false;
         } finally {
@@ -460,7 +467,7 @@ export async function createSqliteStore(filePath, options = {}) {
 
       try {
         db = openLiveDatabase('restore');
-        const destinationPayload = exportFrom(db);
+        const destinationPayload = exportSqlitePayload(db);
         const info = await restoreFs.stat(sourcePath);
         if (!info.isFile()) throw new Error('Restore source must be a regular SQLite file');
 
@@ -478,7 +485,7 @@ export async function createSqliteStore(filePath, options = {}) {
             { readOnly: true },
             immutableSource ? openImmutableDatabase : openDatabase
           ).handle;
-          const sourcePayload = exportFrom(sourceHandle);
+          const sourcePayload = exportSqlitePayload(sourceHandle);
           await validateSnapshot(sourcePayload);
           currentRevision(sourcePayload, 'Restore source');
           if (samePath(sourcePath, destination)) return { source, destination: reportedDestination, unchanged: true };
@@ -493,7 +500,7 @@ export async function createSqliteStore(filePath, options = {}) {
 
         try {
           stagedHandle = openDatabase(stagedPath);
-          const stagedPayload = exportFrom(stagedHandle);
+          const stagedPayload = exportSqlitePayload(stagedHandle);
           const validatedStagedPayload = await validateSnapshot(stagedPayload);
           const normalizedStagedPayload = restoreOptions.memoryOnly === true ? validatedStagedPayload : mergeAuthorityRestore(validatedStagedPayload, destinationPayload, { now: restoreNow });
           validateRestorePayload(normalizedStagedPayload);
@@ -528,7 +535,7 @@ export async function createSqliteStore(filePath, options = {}) {
           // hook a second time at the staged path. The custom validator already
           // inspected the source/staged snapshot and runs again on the installed
           // replacement, where a failure is covered by verified rollback.
-          validateRestorePayload(exportFrom(stagedHandle));
+          validateRestorePayload(exportSqlitePayload(stagedHandle));
         } finally {
           closeChecked(stagedHandle, 'staged');
           stagedHandle = undefined;
@@ -563,7 +570,7 @@ export async function createSqliteStore(filePath, options = {}) {
 
         replacementHandle = openDatabase(destination);
         prepareDatabase(replacementHandle, 'replacement');
-        const replacementPayload = exportFrom(replacementHandle);
+        const replacementPayload = exportSqlitePayload(replacementHandle);
         await validateSnapshot(replacementPayload);
         if (restoreOptions.afterReplace) await restoreOptions.afterReplace(replacementPayload);
 
@@ -604,7 +611,7 @@ export async function createSqliteStore(filePath, options = {}) {
               await restoreFs.copyFile(rollbackPath, recoveryPath);
               try {
                 ({ handle: recoveryHandle } = openReadable(recoveryPath, { readOnly: true }));
-                const recoveryPayload = exportFrom(recoveryHandle);
+                const recoveryPayload = exportSqlitePayload(recoveryHandle);
                 if (payloadIdentity(recoveryPayload) !== payloadIdentity(oldPayload)) throw new Error('Recovery copy does not match the rollback snapshot');
               } finally {
                 closeChecked(recoveryHandle, 'recovery-copy');

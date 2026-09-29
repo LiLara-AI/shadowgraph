@@ -61,6 +61,19 @@ async function startHttp() {
   });
 }
 
+// Host delivery (PR-30, plan v1.4.4 §18.4) has its own exit path: it never
+// reaches the generic error below, never writes to stderr, never sets an exit
+// code, and opens no store for writing. A reader that has gone away (EPIPE) is
+// not an error of the hook's.
+async function deliverFromHook() {
+  try {
+    process.removeAllListeners('warning');
+    for (const stream of [process.stdout, process.stdin]) stream.on('error', () => {});
+    const { readHookInput, runDeliver } = await import('./delivery.js');
+    await runDeliver({ args: rest, readInput: () => readHookInput(), file, storage: storageType, write: (text) => process.stdout.write(text) });
+  } catch {}
+}
+
 async function runOneShot() {
   assertStorageType();
   const initializedBeforeOpen = await exists(file);
@@ -259,7 +272,7 @@ async function runOneShot() {
     else if (command === 'decision') { result = graph.addDecision(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'attempt') { result = graph.addAttempt(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
     else {
-      throw new Error('Usage: shadowgraph <setup|doctor|serve|mcp|stats|list|search|retrieve|recall|remember|markdown-sync|context|review-context|review|reconsider|maintain|signals|ack|validate|repair-plan|backup|restore|migrate|downgrade|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge|request-access|issue-access|delegate-access|revoke-access|discard-access|access-status|bind|attribute> [JSON/path] (restore <path> [--memory-only]). Writes require project or originId (or confirmed workspace binding). Creation IDs are generated: omit id, retain returned IDs, and use idempotencyKey for retries. Reference IDs remain supported.');
+      throw new Error('Usage: shadowgraph <setup|doctor|serve|mcp|stats|list|search|retrieve|recall|remember|markdown-sync|context|review-context|deliver|review|reconsider|maintain|signals|ack|validate|repair-plan|backup|restore|migrate|downgrade|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge|request-access|issue-access|delegate-access|revoke-access|discard-access|access-status|bind|attribute> [JSON/path] (restore <path> [--memory-only]). Writes require project or originId (or confirmed workspace binding). Creation IDs are generated: omit id, retain returned IDs, and use idempotencyKey for retries. Reference IDs remain supported.');
     }
     return result;
   } finally {
@@ -270,6 +283,7 @@ async function runOneShot() {
 try {
   if (command === 'mcp') await startMcp();
   else if (command === 'serve') await startHttp();
+  else if (command === 'deliver') await deliverFromHook();
   else {
     const result = await runOneShot();
     if (result !== null && result !== undefined) console.log(JSON.stringify(result, null, 2));
