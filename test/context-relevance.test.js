@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { privilegedSnapshot, privilegedIssueAccess } from '../src/internal/snapshot.js';
+import { RUNTIME_MISSES } from '../src/internal/miss-ledger.js';
 import { historicalRelation } from '../tools/historical-relation.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
@@ -277,14 +278,19 @@ test('a delivered record is a copy', () => {
   assert.deepEqual([read().title, read().alternatives[0].label], ['message queue', 'kafka cluster']);
 });
 
-test('PC-25: relevance reads write nothing; a refused grant adds only its declared audit, as it does without a query', () => {
+// PR-28: a read the fallback answers adds its declared runtime misses and
+// nothing else; the ledger is operational data, not canonical truth.
+test('PC-25: relevance reads write no canonical state; a fallback adds only its runtime misses, a refused grant only its audit', () => {
   const { graph } = fixture();
   const before = JSON.stringify(privilegedSnapshot(graph));
   for (let index = 0; index < 5; index += 1) graph.context({ project: 'alpha', query: 'deploy backfill', compact: true, asOf: NOW });
+  assert.equal(JSON.stringify(privilegedSnapshot(graph)), before, 'an established relevance read writes nothing at all');
   graph.context({ project: 'alpha', query: 'zebra' });
-  assert.equal(JSON.stringify(privilegedSnapshot(graph)), before);
+  const { [RUNTIME_MISSES]: misses, ...rest } = privilegedSnapshot(graph);
+  assert.equal(JSON.stringify(rest), before, 'a fallback read adds only its runtime misses');
+  assert.ok(misses.length > 0);
   const canonical = () => {
-    const { events, ...rest } = privilegedSnapshot(graph);
+    const { events, [RUNTIME_MISSES]: ignored, ...rest } = privilegedSnapshot(graph);
     return JSON.stringify({ ...rest, events: events.filter((event) => !event.type.startsWith('access.')) });
   };
   const settled = canonical();

@@ -171,6 +171,11 @@ function vectorValues(value) {
   return values;
 }
 
+function carriesVector(value) {
+  const values = Array.isArray(value) ? value : value?.values;
+  return Array.isArray(values) && values.length > 0;
+}
+
 function embeddingDescriptor(value) {
   const values = vectorValues(value);
   if (!values) return null;
@@ -300,7 +305,9 @@ export function hybridSearch(snapshot, query = '', options = {}) {
     items,
     signals: {
       lexical: { available: lexical.terms.length > 0, matched: lexical.list.length, terms: lexical.terms },
-      semantic: { available: semantic.available, matched: semantic.list.length, reason: semantic.reason },
+      // How many candidates carry a stored vector, query vector or not (EVG-10);
+      // presence only, so no vector is read on a path that does not rank by one.
+      semantic: { available: semantic.available, matched: semantic.list.length, indexed: records.filter((record) => carriesVector(record.embedding)).length, reason: semantic.reason },
       graph: { available: graph.available, matched: graph.list.length, reason: graph.reason },
       temporal: { available: temporal.available, matched: temporal.list.length, reason: temporal.reason, asOf: options.asOf ?? null }
     },

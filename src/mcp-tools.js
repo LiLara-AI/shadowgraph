@@ -536,7 +536,16 @@ const recallSignalsSchema = {
         terms: stringList('The query terms that were used.')
       }
     },
-    semantic: signalStateSchema('Cosine vector matching. available is false when no compatible query vector or provider existed; the result is then lexical, graph, and temporal only.'),
+    semantic: {
+      ...signalStateSchema('Cosine vector matching. available is false when no compatible query vector or provider existed; the result is then lexical, graph, and temporal only.'),
+      required: ['available', 'matched', 'indexed', 'reason'],
+      properties: {
+        available: { type: 'boolean', description: 'Whether this signal could contribute at all.' },
+        matched: integerCount('Candidates this signal contributed.'),
+        indexed: integerCount('Candidates carrying a stored vector, with or without a query vector.'),
+        reason: stringOrNull('Why the signal was unavailable, when it was.')
+      }
+    },
     graph: signalStateSchema('Graph-distance ranking from focalId.'),
     temporal: {
       ...signalStateSchema('Recency ranking from asOf or preferRecent.'),
@@ -712,7 +721,7 @@ const GRANT_READ_TOOLS = new Set(['shadowgraph_review', 'shadowgraph_search', 's
 const ACCESS_DESCRIPTIONS = {
   shadowgraph_review: { does: 'Evaluate reopen rules and list due decisions.', route: 'shadowgraph_review_signals reads signals; shadowgraph_ack_review closes one; shadowgraph_maintain ages first.', effects: 'Persists deduped own-scope signals and a revision; grant use also audits.' },
   shadowgraph_search: { does: 'Match all query terms in declared content fields.', route: 'shadowgraph_retrieve adds neighbours; shadowgraph_recall ranks memory; shadowgraph_context builds context; shadowgraph_traverse walks IDs.' },
-  shadowgraph_context: { does: 'Build scoped decisions, assumptions, attempts, reviews; a query adds relevant history.', route: 'shadowgraph_search, shadowgraph_retrieve find records; shadowgraph_recall ranks memory; shadowgraph_review_context persists.', effects: 'Writes no canonical state; with an access key, one revision and at most one audit aggregate per grant, surface, outcome and UTC day.' },
+  shadowgraph_context: { does: 'Scoped decisions, facts, attempts, reviews; a query adds relevant history.', route: 'shadowgraph_search, shadowgraph_retrieve find; shadowgraph_recall ranks memory; shadowgraph_review_context persists.', effects: 'No canonical write; fallback misses await the next save; an access key adds a revision and at most one audit aggregate per grant, surface, outcome, UTC day.' },
   shadowgraph_review_context: { does: 'Evaluate scoped reopen rules and persist own-scope signals.', route: 'shadowgraph_context reads the same working set without persisting; shadowgraph_review evaluates rules only.', effects: 'Evaluates and persists own-scope signals plus a revision; grants audit reads.' },
   shadowgraph_recall: { does: 'Rank scoped memory by lexical, vector, graph and temporal signals.', route: 'shadowgraph_search matches content; shadowgraph_retrieve adds neighbours; shadowgraph_remember writes.' },
   shadowgraph_maintain: { does: 'Age own-scope decisions and facts, then evaluate reopen rules.', route: 'shadowgraph_review evaluates; shadowgraph_validate reports; shadowgraph_update_status cannot set stale.', effects: 'Clock-dependent writes commit a revision even on repeats; grants audit reads.' },
@@ -736,8 +745,12 @@ function compose({ does, route, effects, returns }) {
 // outcome, UTC day), updated in place, committed by one save that rewrites the
 // whole store, so its I/O is O(store) and is declared apart from growth. A
 // request presenting an access key with a null value takes the same fenced path
-// and is held to the grant tier. scripts/context-size.mjs --check measures
-// against this; exceeding it fails the phase, and it never raises the budget.
+// and is held to the grant tier. A delivery the fallback answers also records
+// runtime misses (PR-28): an own-scope one keeps them in memory, saving nothing,
+// until the process's next save writes them; a fenced one writes them in its one
+// save, inside the same growth ceiling. scripts/context-size.mjs --check
+// measures against this; exceeding it fails the phase, and it never raises the
+// budget.
 export const CONTEXT_DELIVERY_BUDGET = Object.freeze({
   ownScope: Object.freeze({ canonicalWrites: 0, journalEntries: 0, revisions: 0, saves: 0, bytesWritten: 0, addedMs: 0 }),
   grant: Object.freeze({ canonicalWrites: 0, journalEntries: 0, revisions: 1, saves: 1, rewrite: 'whole_store', newAuditAggregatesPerKeyDay: 1, growthBytes: 4096, addedMs: 250 })

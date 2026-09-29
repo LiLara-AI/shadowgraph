@@ -322,20 +322,22 @@ test('the store-level downgrade names the ledger once, counts it, and keeps it i
   assert.deepEqual(ledgerOf(JSON.parse(await readFile(preservationCopy, 'utf8'))), LEDGER);
 });
 
-test('nothing writes an entry yet: reads, the relevance fallback and expansion leave no ledger', () => {
+// PR-28 writes entries: only a read the fallback answers does.
+test('only a fallback read writes an entry: an established read, recall and expansion leave none', () => {
   const graph = createShadowGraph({ now });
-  graph.addDecision({ project: 'alpha', title: 'alpha queue', chosen: 'outbox' });
-  graph.context({ project: 'alpha', query: 'zebra', compact: true });
+  const decision = graph.addDecision({ project: 'alpha', title: 'alpha queue', chosen: 'outbox' });
   graph.context({ project: 'alpha', query: 'queue', compact: true });
   graph.recall('zebra', { project: 'alpha' });
   graph.expand({ recordId: 'decision:missing', digest: digest('d'), project: 'alpha' });
   assert.equal(Object.hasOwn(privilegedSnapshot(graph), RUNTIME_MISSES), false);
+  graph.context({ project: 'alpha', query: 'zebra', compact: true });
+  assert.deepEqual(ledgerOf(privilegedSnapshot(graph)).map((entry) => entry.recordId), [decision.id]);
 });
 
-// The reader floor lands alone: only the modules that read, purge or convert the
-// ledger, or declare the purge's count of it, name it, and the kernel only ever
-// keeps what a purge leaves.
-test('only the reader, purge, conversion and the purge schema name the ledger', async () => {
+// Only the modules that read, write, purge or convert the ledger, or declare the
+// purge's count of it, name it; the kernel sets it only to what a purge leaves
+// and to what a fallback read recorded (PR-28).
+test('only the reader, writer, purge, conversion and the purge schema name the ledger', async () => {
   const { readdir } = await import('node:fs/promises');
   const files = [];
   const walk = async (directory) => {
@@ -353,5 +355,5 @@ test('only the reader, purge, conversion and the purge schema name the ledger', 
   }
   assert.deepEqual(naming.sort(), ['internal/miss-ledger.js', 'mcp-tools.js', 'schema-conversion.js', 'shadowgraph.js', 'sqlite-storage.js']);
   const kernel = await readFile(new URL('../src/shadowgraph.js', import.meta.url), 'utf8');
-  assert.deepEqual(kernel.match(/extras\.set\(RUNTIME_MISSES, [^)]*\)/g), ['extras.set(RUNTIME_MISSES, kept)']);
+  assert.deepEqual(kernel.match(/extras\.set\(RUNTIME_MISSES, [^)]*\)/g), ['extras.set(RUNTIME_MISSES, kept)', 'extras.set(RUNTIME_MISSES, recorded)']);
 });

@@ -34,14 +34,14 @@ const PROJECT = 'bench';
 
 // A deterministic corpus. Sizes are fixed so two runs are comparable; the shapes
 // mirror what the product actually stores rather than a synthetic blob.
-export function seedGraph({ decisions = 40, attempts = 30, facts = 60, now } = {}) {
+export function seedGraph({ decisions = 40, attempts = 30, facts = 60, now, project = PROJECT } = {}) {
   const graph = createShadowGraph(now ? { now } : undefined);
   const expected = { violatedKeys: [], reusableAttemptIds: [], decisionIds: [] };
 
   for (let index = 0; index < decisions; index += 1) {
     const key = `latencyMs${index}`;
     const decision = graph.addDecision({
-      project: PROJECT,
+      project: project,
       title: `Serve tier ${index} from the regional cache`,
       goal: `Keep tier ${index} reads under the agreed ceiling`,
       chosen: `regional-cache-${index}`,
@@ -56,30 +56,30 @@ export function seedGraph({ decisions = 40, attempts = 30, facts = 60, now } = {
     expected.decisionIds.push(decision.id);
     // Every third decision has a breach, so coverage has something real to find.
     if (index % 3 === 0) {
-      graph.addFact({ project: PROJECT, key, value: '450ms', sourceClass: 'measured' });
+      graph.addFact({ project: project, key, value: '450ms', sourceClass: 'measured' });
       expected.violatedKeys.push(key);
     } else {
-      graph.addFact({ project: PROJECT, key, value: '20ms', sourceClass: 'measured' });
+      graph.addFact({ project: project, key, value: '20ms', sourceClass: 'measured' });
     }
   }
 
   for (let index = 0; index < attempts; index += 1) {
     const key = `quotaPerMin${index}`;
     const attempt = graph.addAttempt({
-      project: PROJECT,
+      project: project,
       solution: `bulk backfill pass ${index}`,
       result: `failed: the upstream quota rejected batch ${index}`,
       resultClass: 'failed',
       reusableWhen: [{ key, operator: 'gte', value: 600 }]
     });
     if (index % 5 === 0) {
-      graph.addFact({ project: PROJECT, key, value: 1200, sourceClass: 'measured' });
+      graph.addFact({ project: project, key, value: 1200, sourceClass: 'measured' });
       expected.reusableAttemptIds.push(attempt.id);
     }
   }
 
   for (let index = 0; index < facts; index += 1) {
-    graph.addFact({ project: PROJECT, key: `unrelated${index}`, value: `value ${index}`, sourceClass: 'human' });
+    graph.addFact({ project: project, key: `unrelated${index}`, value: `value ${index}`, sourceClass: 'human' });
   }
 
   return { graph, expected };
@@ -191,11 +191,14 @@ const round = (value) => Number(value.toFixed(4));
 const values = (value) => JSON.stringify(value, (key, item) => (item && typeof item === 'object' && !Array.isArray(item)
   ? Object.fromEntries(Object.keys(item).sort().map((name) => [name, item[name]]))
   : item));
+// The runtime miss ledger is declared operational data too (PR-28), measured
+// apart from canonical truth like the access audit.
 function partition(stored) {
-  const { revision = 0, events = [], ...rest } = stored;
+  const { revision = 0, events = [], runtimeMisses = [], ...rest } = stored;
   return {
     canonical: { ...rest, events: events.filter((event) => !ACCESS_AUDIT_TYPES.has(event.type)) },
     audit: events.filter((event) => ACCESS_AUDIT_TYPES.has(event.type)),
+    misses: runtimeMisses,
     revision
   };
 }
@@ -208,10 +211,10 @@ const relevantSummary = (text) => {
 };
 
 // `request` adds fields to every delivery's body, such as a relevance query (PR-26).
-export async function measureWrites({ deliveries = 5, request = {}, ...options } = {}) {
+export async function measureWrites({ deliveries = 5, request = {}, project = PROJECT, ...options } = {}) {
   let clock = DAY_ONE;
   const now = () => new Date(clock).toISOString();
-  const { graph } = seedGraph({ ...options, now });
+  const { graph } = seedGraph({ ...options, now, project });
   // The granted project holds a record, so every grant-bearing delivery is a
   // wider read and commits its audit aggregate.
   graph.addDecision({ project: 'elsewhere', title: 'Serve the wider tier from the regional cache', chosen: 'regional-cache' });
@@ -270,7 +273,8 @@ export async function measureWrites({ deliveries = 5, request = {}, ...options }
         revisionDelta: is.revision - was.revision,
         journalDelta: (is.canonical.journalSeq ?? 0) - (was.canonical.journalSeq ?? 0),
         canonicalWrites: canonicalChanged.length,
-        changedKeys: [...canonicalChanged, ...(values(was.audit) !== values(is.audit) ? ['accessAudit'] : []), ...(is.revision !== was.revision ? ['revision'] : [])].sort(),
+        changedKeys: [...canonicalChanged, ...(values(was.audit) !== values(is.audit) ? ['accessAudit'] : []), ...(values(was.misses) !== values(is.misses) ? ['runtimeMisses'] : []), ...(is.revision !== was.revision ? ['revision'] : [])].sort(),
+        runtimeMissesAdded: is.misses.length - was.misses.length,
         storeChanged: before !== after,
         growthBytes: Buffer.byteLength(after) - Buffer.byteLength(before),
         maxGrowthBytes: Math.max(0, ...saves.map((save) => save.growthBytes)),
@@ -283,9 +287,9 @@ export async function measureWrites({ deliveries = 5, request = {}, ...options }
     }
     const minutes = (from, count) => Array.from({ length: count }, (_, index) => DAY_ONE + (from + index) * MINUTE);
     const ownInstants = minutes(0, deliveries);
-    const own = await phase([...ownInstants, ownInstants.at(-1)], { ...request, project: PROJECT });
-    const granted = await phase([...minutes(deliveries, deliveries), DAY_ONE + DAY], { ...request, project: PROJECT, accessId: grant.accessId });
-    const nullReference = await phase(minutes(2 * deliveries, deliveries).map((instant) => instant + DAY), { ...request, project: PROJECT, accessId: null });
+    const own = await phase([...ownInstants, ownInstants.at(-1)], { ...request, project });
+    const granted = await phase([...minutes(deliveries, deliveries), DAY_ONE + DAY], { ...request, project, accessId: grant.accessId });
+    const nullReference = await phase(minutes(2 * deliveries, deliveries).map((instant) => instant + DAY), { ...request, project, accessId: null });
     // Wall-clock added per delivery: an own-scope delivery adds the time of any
     // save it makes (none, when it is a read); a fenced delivery adds whatever it
     // takes beyond the mean own-scope read on the same transport: the reload,
@@ -360,8 +364,10 @@ if (invokedDirectly) {
   const args = process.argv.slice(2);
   if (args.includes('--check')) {
     const writes = await measureWrites();
-    const violations = checkWriteBudget(writes);
-    process.stdout.write(`${JSON.stringify({ budget: CONTEXT_DELIVERY_BUDGET, writes, violations }, null, 2)}\n`);
+    // A delivery the fallback answers is measured too: it records runtime misses (PR-28).
+    const fallbackWrites = await measureWrites({ request: { query: 'zebra crossing', compact: true } });
+    const violations = [...checkWriteBudget(writes), ...checkWriteBudget(fallbackWrites).map((violation) => `fallback ${violation}`)];
+    process.stdout.write(`${JSON.stringify({ budget: CONTEXT_DELIVERY_BUDGET, writes, fallbackWrites, violations }, null, 2)}\n`);
     process.exit(violations.length ? 1 : 0);
   }
   const report = measure();

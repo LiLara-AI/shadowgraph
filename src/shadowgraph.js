@@ -21,7 +21,7 @@ import { accessScopeContains, validateAccess, intersectAccessScope, accessDiagno
 import { createAccessLifecycle } from './internal/access-lifecycle.js';
 import { assertCreationInput } from './internal/creation-id.js';
 import { attemptOutcome } from './internal/outcome.js';
-import { RUNTIME_MISSES, missReachedBy, runtimeMissLedgerIssue } from './internal/miss-ledger.js';
+import { RUNTIME_MISSES, missReachedBy, runtimeMissLedgerIssue, withFallbackMisses } from './internal/miss-ledger.js';
 import { T1_DERIVATION_VERSION, t1Digest, t1Inputs, t1Line } from './compact-tier.js';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
@@ -2861,9 +2861,9 @@ export function createShadowGraph(options = {}) {
     const removedEvents = new Set(events.filter(referencesRemoved));
     // The runtime miss ledger's entries recorded in the project, or naming an
     // entity it removes, go with it (PR-28a).
+    const misses = Array.isArray(extras.get(RUNTIME_MISSES)) ? extras.get(RUNTIME_MISSES) : [];
     const removedEntityIds = new Set([...ids, ...relationIds]);
     const reachesMiss = (entry) => missReachedBy(entry, project, removedEntityIds);
-    const misses = Array.isArray(extras.get(RUNTIME_MISSES)) ? extras.get(RUNTIME_MISSES) : [];
     return { ids, relationIds, removedEvents, referencesRemoved, reachesMiss, summary: { project, records: recordsForProject.length, facts: factsForProject.length, relations: relationIds.size, events: removedEvents.size, journal: journal.filter(referencesRemoved).length, runtimeMisses: misses.filter(reachesMiss).length } };
   }
 
@@ -3466,6 +3466,25 @@ export function createShadowGraph(options = {}) {
     };
   }
 
+  // Whether text names a stored entity's id: the whole text, a word of it, or
+  // a piece of a word, compared without regard to case or Unicode form. The ids
+  // are gathered once, so the cost is linear in the store and the text.
+  function namesEntity(text) {
+    const fold = (value) => String(value).normalize('NFC').toLowerCase();
+    const ids = new Set([...facts.keys(), ...relations.keys()].map(fold));
+    for (const record of records.values()) {
+      ids.add(fold(record.id));
+      for (const alternative of Array.isArray(record.alternatives) ? record.alternatives : []) if (typeof alternative?.id === 'string') ids.add(fold(alternative.id));
+    }
+    const folded = fold(text);
+    const tokens = folded.split(/\s+/);
+    const candidates = new Set([
+      folded.trim(), ...tokens, ...tokens.map((token) => token.replace(/^[^\p{L}\p{N}_]+|[^\p{L}\p{N}_]+$/gu, '')),
+      ...folded.split(/[^\p{L}\p{N}_:-]+/u), ...folded.split(/[^\p{L}\p{N}_]+/u)
+    ]);
+    return [...candidates].some((candidate) => candidate && ids.has(candidate));
+  }
+
   // PR-26 (plan v1.4.4 §17; G-5 §9; AC-063): relevance on the default read.
   // Every record inside the read boundary -- memories of the project-wide scope
   // only, as every read without a memory scope -- is ranked on the canonical
@@ -3520,6 +3539,17 @@ export function createShadowGraph(options = {}) {
       processing: { pending: 0, failed: 0, blocked: 0, oldestPendingAt: null, extractionAvailable: false },
       expansion: { operation: 'shadowgraph_expand', available: true }
     });
+    // §9, §6.2(a): what the fallback delivered, no signal having ranked it, is a
+    // runtime miss (PR-28). It is kept in memory: this read saves nothing
+    // (PR-17's budget), and the process's next save writes it. A read without
+    // query text -- none, or blank -- records none, its only query being a focal
+    // entity id; nor does one whose query names a stored entity's id, whose
+    // digest would outlive that entity's purge.
+    if (!established && typeof input.query === 'string' && input.query.trim() !== '' && !namesEntity(input.query)) {
+      const ledger = Array.isArray(extras.get(RUNTIME_MISSES)) ? extras.get(RUNTIME_MISSES) : [];
+      const recorded = withFallbackMisses(ledger, { query: input.query, scope: boundary.scope, signals: head.relevance.signals, recordIds: items.map(({ record }) => record.id), at: now() });
+      if (recorded !== ledger) extras.set(RUNTIME_MISSES, recorded);
+    }
     return { ...head, items };
   }
 

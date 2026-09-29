@@ -16,6 +16,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createShadowGraphServer } from '../src/server.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { RUNTIME_MISSES_PER_READ } from '../src/internal/miss-ledger.js';
 
 const cliPath = fileURLToPath(new URL('../src/cli.js', import.meta.url));
 const runCli = (file, cwd, command, value) => spawnSync(process.execPath, [cliPath, command, JSON.stringify(value)], {
@@ -90,6 +91,44 @@ test('a relevance read stays within the declared budget and writes nothing in it
   assert.equal(own.replayIdentical, true, 'the same relevance read at the same instant returns the same bytes');
   assert.equal(report.grant.canonicalWrites, 0);
   assert.deepEqual(report.grant.changedKeys, ['accessAudit', 'revision'], 'a granted relevance read changes only the declared audit');
+});
+
+// PR-28: a read the fallback answers records runtime misses. In its own scope
+// it still writes nothing -- the misses wait in memory for the next save -- and
+// a granted one carries them in the save it already makes, inside the same
+// frozen budget. The ledger is declared operational data, not canonical truth.
+test('a fallback read records runtime misses inside the same frozen budget', async () => {
+  const report = await measureWrites({ deliveries: 2, request: { query: 'zebra crossing', compact: true } });
+  assert.deepEqual(checkWriteBudget(report), []);
+  const own = report.ownScope;
+  assert.deepEqual(own.relevant, { established: false, tiers: ['T2'] }, 'the measured delivery is answered by the fallback');
+  assert.deepEqual([own.saves, own.bytesWritten, own.revisionDelta, own.journalDelta, own.storeChanged, own.runtimeMissesAdded], [0, 0, 0, 0, false, 0]);
+  assert.equal(own.replayIdentical, true);
+  assert.equal(report.grant.canonicalWrites, 0);
+  assert.deepEqual(report.grant.changedKeys, ['accessAudit', 'revision', 'runtimeMisses'], 'a granted fallback read changes only the declared audit and the ledger');
+  assert.equal(report.grant.runtimeMissesAdded, RUNTIME_MISSES_PER_READ * report.grant.deliveries, 'a bounded number per delivery, each repeat going on to what it has not recorded');
+});
+
+// An entry carries the project and origin verbatim, so the writer bounds its
+// bytes and records one per read: a long or escaped name or origin, which the
+// audit aggregate carries too, still leaves a granted delivery inside the ceiling.
+test('a fallback read by a long or escaped project name or origin stays inside the same growth ceiling', async () => {
+  const control = String.fromCharCode(1);
+  const cases = [
+    ['a 300-character project', { project: 'p'.repeat(300) }],
+    ['a 300-character Arabic project', { project: 'مشروع'.repeat(60) }],
+    ['a long origin', { originId: `origin_${'o'.repeat(700)}` }],
+    ['escaped quotes in both labels', { project: '"'.repeat(128), originId: '"'.repeat(128) }],
+    ['a recorded entry beside escaped labels', { project: '"'.repeat(128), originId: '"'.repeat(60) }],
+    ['escaped labels with an entry at the bound', { project: '"'.repeat(128), originId: '"'.repeat(78) }],
+    ['control characters in both labels', { project: control.repeat(128), originId: control.repeat(128) }],
+    ['control characters with an entry near the bound', { project: control.repeat(128), originId: control.repeat(60) }]
+  ];
+  for (const [label, { project, originId }] of cases) {
+    const report = await measureWrites({ deliveries: 1, ...(project ? { project } : {}), request: { query: 'zebra crossing', compact: true, ...(originId ? { originId } : {}) } });
+    assert.deepEqual(checkWriteBudget(report), [], label);
+    assert.equal(report.grant.canonicalWrites, 0, label);
+  }
 });
 
 test('the budget check fails each category it measures rather than adjusting', async () => {

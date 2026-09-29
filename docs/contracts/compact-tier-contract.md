@@ -497,3 +497,51 @@ floor and lands alone; nothing writes an entry until PR-28.
   schema 6 or 5 leaves it out, names it in `excludedCollections` and reports only how many entries it held in
   `excludedEntryCounts`; the entries stay in the preservation copy. The schema-7 builds below this floor (PR-20
   to PR-27) are unreleased; once entries exist, a rollback goes no further back than this floor.
+
+**A12. The runtime miss ledger's writer and the evaluation's ledger (§6.2-§6.5, §9, §11, G5-8, G5-9, EVG-10;
+PR-28). Variance in mechanism, recorded as plan revision 6 requires (VAR-10).**
+- Runtime (§6.2(a), §9): a `context()` read with query text that the fallback answers
+  (`relevance_not_established`) records a record it delivered, no signal having ranked it, as a runtime miss:
+  `evidence: 'fallback_recovery'`, `tier: 'T0'` (relevance is ranked on the records, A9), `stage: 'not_ranked'`,
+  `rank: null`, `boundRevision: null` (a record delivered in full has no derived revision), `signals` as the head
+  reports them, `reason: 'relevance_not_established'`, the read's scope with its origin, and a SHA-256 digest of the
+  exact query text. A read without query text (a focal read, or a blank query) records none, and so does one whose
+  query names a stored entity's id -- the whole query, a word of it or a piece of a word, compared without regard to
+  case or Unicode form -- since that digest would outlive the entity's purge. A record delivered in full because its line omits decisive meaning is
+  not recorded: the ranking surfaced it, and §9 records what the fallback surfaced that the ranking did not. The
+  kernel records on any such read; the hook path (P5) will persist none (A7).
+- Bounds (§6.4's count cap, settled here by measurement as §11 leaves it to P4): one entry per read, in delivery
+  order, each record once per query, scope and record, so a repeated read goes on to the records not yet recorded;
+  no entry over 1 KB serialized, so one a very long project name or origin would make is not recorded; at most 100
+  in the ledger, past which the newest 75 stay. Measured: an entry is about 0.65 KB serialized and 1 KB in a
+  pretty-printed JSON store (at most about 1.4 KB), so the ledger stays under about 140 KB stored, and a granted
+  fallback read, its audit aggregate included, grew the store by under 2 KB on the reference corpus. One bounded
+  entry beside the largest audit aggregate (two 128-character labels, escaped) stays inside PR-17's 4096-byte
+  ceiling; the budget tests measure long, multibyte, quoted and control-character names and origins, and
+  `scripts/context-size.mjs --check` measures a fallback delivery too. These bound how much of §9's recording one
+  read does; they change no [CONTRACT] text.
+- Persistence (§6.4; plan §13.1-§13.3): the context tool declares the write (its effects). PR-17's frozen per-delivery
+  budget is unchanged and met: an own-scope delivery saves nothing and keeps the entry in memory; a fenced one (a
+  grant, or a null access key) writes it in its one save. Entries kept in memory are written by the process's next
+  save, whatever operation makes it, which then carries at most the ledger's stated bound (100 entries of at most
+  1 KB serialized); that operation's own metadata does not repeat the declaration. A process that ends or reloads
+  its store first (a one-shot CLI read, a fenced reload, a conflict or failure rollback) keeps none: the evaluation,
+  not this ledger, is the authoritative record of misses (PC-08(b), AC-019). On SQLite an eviction (26 entries at a
+  time) makes the save that carries it a scrubbing one (`secure_delete`, `VACUUM`), a cost not measured by the JSON
+  budget. `scripts/context-size.mjs` measures the ledger apart from canonical truth, as it does the access audit.
+- Evaluation (§6.2, §6.5, G5-9; plan §17.3): `scripts/retrieval-eval.mjs` runs the default read (`context`, compact
+  lines) beside search, retrieve and recall, and counts a relevant record reached only by expanding a delivered line
+  as `expanded`. `missLedger` holds one entry per relevant record ranked below the scored depth
+  (`ranked_not_delivered`, `ranked_below_depth`, with its rank) or not returned (`not_ranked`, `no_signal_match`,
+  naming the unavailable signals), with the signals the engine reported (null for search and retrieve, which report
+  none), and, for the default read, one `fallback_recovery` entry per relevant record only its fallback delivered,
+  since no signal ranked it; the report says how many cases the fallback answered, whose passes it scores unchanged.
+  Two fidelity cases check, on this path, the phrases the PR-25 fixtures G5-1 (negation) and G5-3 (scope qualifier)
+  check on the derivation: a phrase lost from a delivered line is a `delivered_line_without_decisive_meaning` miss, a
+  record only the fallback delivered a `fallback_recovery`, and a record not delivered at all a `not_ranked` one.
+  Cases, splits and scoring are unchanged, and the earlier engines' per-case results are pinned by hash.
+- EVG-10: `hybridSearch` reports `semantic.indexed`, the candidates carrying a stored vector (presence only), with or
+  without a query vector; the evaluation's `evg10` block reads whether an endpoint is configured (presence only: the
+  evaluation calls none) and the engines' own reports. The verdict is `semantic_not_populated`: vectors are stored
+  only on memory records, and the default read sends no query to an embedding endpoint, so on that path the
+  semantic signal is never populated.
