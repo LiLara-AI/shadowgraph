@@ -130,7 +130,7 @@ test('plan §17.2: the head declares scope, counts, completeness, limitation, pr
   assert.deepEqual(relevant.byKind, { decision: 0, attempt: 1, memory: 1, fact: 0 });
   assert.deepEqual([relevant.total, relevant.returned, relevant.omitted, relevant.hasMore, relevant.complete, relevant.limitSource], [2, 2, 0, false, true, 'default']);
   assert.deepEqual(relevant.processing, { pending: 0, failed: 0, blocked: 0, oldestPendingAt: null, extractionAvailable: false });
-  assert.deepEqual(relevant.expansion, { operation: 'shadowgraph_expand', available: false });
+  assert.deepEqual(relevant.expansion, { operation: 'shadowgraph_expand', available: true });
   // Each delivered line carries its own claim class and bound revision.
   for (const item of relevant.items) {
     assert.equal(item.tier, 'T1');

@@ -422,5 +422,44 @@ Ranking walks, and lines render, only what the read may reach, another memory sc
 Recency alone never establishes relevance, since it orders every candidate when `asOf` is set. The semantic
 signal has no query vector on this path, because no request text is sent to an embedding endpoint, and the head
 names it unavailable. A T2 record is the canonical record, so the embedding (a derived index) is left out, as it
-is from the digest (A1). Until PR-27 the head declares `expansion: { operation: 'shadowgraph_expand', available:
-false }`.
+is from the digest (A1). The head declares `expansion: { operation: 'shadowgraph_expand', available: true }`
+(false until PR-27 built the operation, A10).
+
+**A10. Expansion (§7-§8; PR-27). Variance in mechanism.** `expand(input)` (MCP `shadowgraph_expand`) takes the
+handle's fields flat, as every grant-capable read takes its scope, null fields left out: `scope.project` as
+`project`, `scope.grantId` as `grantId`, and `scope.originId` as `originId` -- the handle carries the origin when
+the read resolved no project, so an origin-scoped read's line expands from its own handle. The record is resolved
+only through the read's boundary with the grant re-checked at use, and derived again exactly as a line is (the
+public record without its embedding, the handle's as-of instant, the project-wide memory scope's reach), so for
+an unchanged boundary the digest comparison is exact.
+- §7.2: an equal digest serves the record as `current`; a different one, or a handle of another derivation
+  version, serves the current record as `revision_changed` with `boundRevision` and `currentRevision`, and
+  `complete: false`. The digest covers the links the read reaches (A1), so a grant revoked or narrowed since the
+  line also answers `revision_changed`: the safe direction, never the old line served as current. Point-in-time
+  expansion to the older revision stays with AC-016 / WS-24.
+- §8: the logically purged row is decided by the canonical `project.purged` marker, since a purge removes the
+  record in both modes: the first purge of the read's own project recorded after the handle's `derivedAt` --
+  the one that removed the record -- answers `purged` when it was logical and `unavailable` when it was hard; no
+  such marker, or no `derivedAt`, answers `unavailable`. A later logical purge scrubs the earlier logical markers
+  of its project to skeletons, which still count as logical; a later hard purge removes them, so a logical purge
+  followed by a hard one answers `unavailable`. A purge narrows every grant so that it no longer covers
+  the purged project, so a granted project's purge answers `unavailable`: fail closed. The answer depends on the
+  scope and the instant, never on the id, so an id outside the scope and an unknown id are answered alike byte
+  for byte (G5-7). No stored record carries redacted fields before P6, so none is named yet. Once the MCP
+  server has marked its storage unavailable (the degraded latch), `shadowgraph_expand` answers a well-formed
+  handle `status: 'unavailable'` with `limitation: { code: 'expansion_unavailable', reason: 'store_unavailable'
+  }` and no content, instead of the failure every other tool returns, so the host's work is not blocked
+  (PC-15); a grant-bearing expansion that cannot load the store before the latch fails closed, as every grant
+  read does.
+- AC-031 and AC-032 (plan §17.3, bounded conflict investigation): the investigation is structural -- facts of the
+  same key in the record's project, and supersession links (a memory's single link and a decision's list alike)
+  -- ordered current rivals first (not superseded, then the most recent), and each counterpart fetched in full
+  counts against `maxExpansions` (default 5, at most 50). It lists at least the budget and never fewer than ten
+  counterparts, each with its line, so neither position is lost; the rest are counted in `omitted`. Past the
+  budget the response is not complete. A supersession link that names a record outside the read, or none at all,
+  is counted alike in `unreachableLinks` and makes the response not complete. A contradiction stated only in free
+  text is not detected, and `investigation.limitation` says so.
+- G5-10: an own-scope expansion reads no clock, ranks nothing, calls no model and writes nothing; lines in the
+  investigation carry the handle's `derivedAt`, so the same handle over the same store gives the same bytes. A
+  grant-bearing expansion is re-checked against the clock and records its audit, as every grant read does. The
+  ledger lookup and a purge-then-restore fixture arrive with PR-37.

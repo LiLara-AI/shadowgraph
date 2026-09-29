@@ -236,8 +236,28 @@ async function addConfiguredEmbeddings(args = {}) {
     : args;
 }
 
+// G-5 §8: an expansion answers a store it cannot read with an explicit
+// limitation -- no content, and no failure that blocks the host's work.
+function storeUnavailableExpansion(args) {
+  const recordId = args.recordId;
+  return {
+    recordId, status: 'unavailable', revisionChanged: null, boundRevision: { recordId, digest: args.digest }, currentRevision: null, record: null, investigation: null,
+    completeness: {
+      scope: { project: typeof args.project === 'string' ? args.project : null, requestState: typeof args.project === 'string' ? 'project_selected' : 'project_unresolved', originPresented: typeof args.originId === 'string' && args.originId !== '', grant: null },
+      complete: false,
+      limitation: { code: 'expansion_unavailable', reason: 'store_unavailable', recordId, detail: 'Persistent storage is unavailable until the server restarts, so no record can be served now.' }
+    }
+  };
+}
+
 async function callUnqueued(name, args, tier, accessManaged = false) {
-  if (persistenceUnavailable) throw unavailableError();
+  if (persistenceUnavailable) {
+    // Only a well-formed handle is answered; anything else fails as every tool does.
+    const handle = args && typeof args === 'object' && !Array.isArray(args) && typeof args.recordId === 'string' && args.recordId !== '' && typeof args.digest === 'string' && args.digest !== ''
+      && (args.maxExpansions === undefined || (Number.isInteger(args.maxExpansions) && args.maxExpansions >= 0 && args.maxExpansions <= 50));
+    if (name === 'shadowgraph_expand' && handle) return toolResult(toolsByName.get(name), storeUnavailableExpansion(args), tier);
+    throw unavailableError();
+  }
   const tool = toolsByName.get(name);
   if (name === 'shadowgraph_bind') return toolResult(tool, await bindWorkspaceProject(graph, store, workspace, { ...args, surface: 'mcp' }), tier);
   if (!accessManaged && (tool?.accessLifecycle || (tool?.persistsWithAccess && hasAccessReference(args)))) {
@@ -288,6 +308,7 @@ async function callUnqueued(name, args, tier, accessManaged = false) {
   else if (name === 'shadowgraph_update_status') value = graph.updateDecisionStatus(args?.decisionId, args?.status, args);
   else if (name === 'shadowgraph_link') value = graph.link(args);
   else if (name === 'shadowgraph_traverse') value = graph.traverse(args ?? {});
+  else if (name === 'shadowgraph_expand') value = graph.expand(args ?? {});
   else if (name === 'shadowgraph_supersede') value = graph.supersedeDecision(args ?? {});
   else if (name === 'shadowgraph_redact') value = graph.redact(args ?? {});
   else if (name === 'shadowgraph_purge') value = graph.purgeProject(args?.project, { mode: args?.mode });

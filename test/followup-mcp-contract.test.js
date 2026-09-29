@@ -652,9 +652,25 @@ test('unconfirmed restore and its degraded latch use distinct finite numeric ser
   assert.deepEqual(blockedResource.error.data, { recoveryCode: 'json_restore_recovery_unconfirmed' });
   assert.deepEqual(collectPrivateErrorKeys(blockedResource), []);
 
+  // G-5 §8: an expansion answers the unreadable store with an explicit limitation, never content.
+  const expansion = await rpc.call({
+    jsonrpc: '2.0', id: 'degraded-expand', method: 'tools/call',
+    params: { name: 'shadowgraph_expand', arguments: { recordId: 'decision:any', digest: 'bound', project: 'followup' } }
+  });
+  assert.equal(expansion.error, undefined, expansion.error?.message);
+  const expanded = JSON.parse(expansion.result.content[0].text);
+  assert.deepEqual([expanded.status, expanded.record, expanded.completeness.complete, expanded.completeness.limitation.reason], ['unavailable', null, false, 'store_unavailable']);
+  assert.equal(JSON.stringify(expansion).includes(privateSentinel), false);
+  // A malformed handle is not answered: it fails as every tool does in this state.
+  const malformed = await rpc.call({
+    jsonrpc: '2.0', id: 'degraded-expand-malformed', method: 'tools/call',
+    params: { name: 'shadowgraph_expand', arguments: { recordId: '', digest: 'bound', project: 'followup' } }
+  });
+  assert.equal(malformed.error?.code, -32001);
+
   const diagnostics = await rpc.call({ jsonrpc: '2.0', id: 'degraded-diagnostics', method: 'tools/list' });
   assert.equal(diagnostics.error, undefined, diagnostics.error?.message);
-  assert.equal(diagnostics.result.tools.length, 34, 'non-stateful protocol diagnostics remain available');
+  assert.equal(diagnostics.result.tools.length, 35, 'non-stateful protocol diagnostics remain available');
   assert.notEqual(restore.error.code, blockedTool.error.code, 'initial restore failure and fail-closed latch remain distinguishable');
 });
 

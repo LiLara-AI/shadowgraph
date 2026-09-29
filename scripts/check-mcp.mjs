@@ -9,8 +9,8 @@ const INSPECTOR_VERSION = '2.4.0';
 // npx remains a bounded fallback for a source checkout without those tools.
 const INSPECTOR_TIMEOUT_MS = 300_000;
 const expected = [
-  { name: 'Full', count: 34, env: [] },
-  { name: 'Compact', count: 15, env: ['SHADOWGRAPH_MCP_COMPACT=1'] }
+  { name: 'Full', count: 35, env: [] },
+  { name: 'Compact', count: 16, env: ['SHADOWGRAPH_MCP_COMPACT=1'] }
 ];
 // Every tool now has an object envelope and output schema.
 const outputSchemaOmitted = new Set();

@@ -708,15 +708,16 @@ const readProvenanceSchema = { type: 'object', description: 'Original read bound
   surfaces: { type: 'array', items: { type: 'string', enum: ['cli', 'mcp', 'http'] }, description: 'Original permitted surfaces; reuse can only narrow them.' },
   expiresAt: { type: 'string', description: 'Original effective expiry; reuse cannot extend it.' }
 } };
-const GRANT_READ_TOOLS = new Set(['shadowgraph_review', 'shadowgraph_search', 'shadowgraph_context', 'shadowgraph_review_context', 'shadowgraph_recall', 'shadowgraph_traverse', 'shadowgraph_redact', 'shadowgraph_maintain', 'shadowgraph_retrieve', 'shadowgraph_validate', 'shadowgraph_journal', 'shadowgraph_rebuild', 'shadowgraph_review_signals', 'shadowgraph_repair_plan', 'shadowgraph_reconsider']);
+const GRANT_READ_TOOLS = new Set(['shadowgraph_review', 'shadowgraph_search', 'shadowgraph_context', 'shadowgraph_review_context', 'shadowgraph_recall', 'shadowgraph_traverse', 'shadowgraph_expand', 'shadowgraph_redact', 'shadowgraph_maintain', 'shadowgraph_retrieve', 'shadowgraph_validate', 'shadowgraph_journal', 'shadowgraph_rebuild', 'shadowgraph_review_signals', 'shadowgraph_repair_plan', 'shadowgraph_reconsider']);
 const ACCESS_DESCRIPTIONS = {
   shadowgraph_review: { does: 'Evaluate reopen rules and list due decisions.', route: 'shadowgraph_review_signals reads signals; shadowgraph_ack_review closes one; shadowgraph_maintain ages first.', effects: 'Persists deduped own-scope signals and a revision; grant use also audits.' },
   shadowgraph_search: { does: 'Match all query terms in declared content fields.', route: 'shadowgraph_retrieve adds neighbours; shadowgraph_recall ranks memory; shadowgraph_context builds context; shadowgraph_traverse walks IDs.' },
-  shadowgraph_context: { does: 'Build scoped decisions, assumptions, attempts and reviews.', route: 'shadowgraph_search and shadowgraph_retrieve find records; shadowgraph_recall ranks memory; shadowgraph_review_context evaluates and persists.', effects: 'Writes no canonical state; with an access key, one revision and at most one audit aggregate per grant, surface, outcome and UTC day.' },
+  shadowgraph_context: { does: 'Build scoped decisions, assumptions, attempts, reviews; a query adds relevant history.', route: 'shadowgraph_search, shadowgraph_retrieve find records; shadowgraph_recall ranks memory; shadowgraph_review_context persists.', effects: 'Writes no canonical state; with an access key, one revision and at most one audit aggregate per grant, surface, outcome and UTC day.' },
   shadowgraph_review_context: { does: 'Evaluate scoped reopen rules and persist own-scope signals.', route: 'shadowgraph_context reads the same working set without persisting; shadowgraph_review evaluates rules only.', effects: 'Evaluates and persists own-scope signals plus a revision; grants audit reads.' },
   shadowgraph_recall: { does: 'Rank scoped memory by lexical, vector, graph and temporal signals.', route: 'shadowgraph_search matches content; shadowgraph_retrieve adds neighbours; shadowgraph_remember writes.' },
   shadowgraph_maintain: { does: 'Age own-scope decisions and facts, then evaluate reopen rules.', route: 'shadowgraph_review evaluates; shadowgraph_validate reports; shadowgraph_update_status cannot set stale.', effects: 'Clock-dependent writes commit a revision even on repeats; grants audit reads.' },
   shadowgraph_retrieve: { does: 'Match content and include authorized graph neighbours.', route: 'shadowgraph_search matches only; shadowgraph_recall ranks memory; shadowgraph_traverse walks IDs; shadowgraph_context builds context.' },
+  shadowgraph_expand: { does: "Expand a claim line to its full record: the handle's fields, nulls left out, its scope's project, grantId and originId at top level. Out of scope reads as unknown; a changed record is served as current.", route: 'shadowgraph_context delivers lines and handles; shadowgraph_traverse walks IDs.' },
   shadowgraph_validate: { does: 'Report integrity diagnostics by severity.', route: 'shadowgraph_repair_plan proposes fixes; shadowgraph_rebuild checks journal replay.' },
   shadowgraph_reconsider: { does: 'Reconsider scoped decisions with grounded conditions and three-state verdicts.', route: 'shadowgraph_review lists due decisions; shadowgraph_ack_review closes signals.', effects: 'Persists deduped own-scope signals; grants audit reads.' }
 };
@@ -942,12 +943,77 @@ const relevantSchema = {
       type: 'object', description: 'The operation a line handle names.', required: ['operation', 'available'],
       properties: {
         operation: { type: 'string', description: 'Operation name.' },
-        available: { type: 'boolean', description: 'False: this build has no expansion operation yet; the full record comes from the T2 items or a read by id.' }
+        available: { type: 'boolean', description: 'True: shadowgraph_expand serves the full record behind a line.' }
       }
     },
     items: { type: 'array', items: relevantItemSchema, description: 'Ranked records, best first; the working set when fallback reason is relevance_not_established.' }
   }
 };
+// PR-27 (G-5 §7-§8; AC-018, AC-031, AC-032): what an expansion returns.
+const revisionProperties = {
+  recordId: { type: 'string', description: 'The record the revision belongs to.' },
+  digest: { type: 'string', description: 'SHA-256 of what a line of this revision is derived from.' }
+};
+const investigationSchema = {
+  type: 'object', description: 'Structural counterparts of the record, investigated within the budget.', required: ['budget', 'total', 'omitted', 'unreachableLinks', 'pairs', 'limitation'],
+  properties: {
+    budget: {
+      type: 'object', description: 'The expansion budget and what it covered.', required: ['maxExpansions', 'used', 'outcome'],
+      properties: {
+        maxExpansions: integerCount('Counterparts that could be fetched in full.'),
+        used: integerCount('Counterparts fetched in full.'),
+        outcome: { type: 'string', enum: ['within_budget', 'exhausted'], description: 'exhausted: some counterparts were not fetched in full.' }
+      }
+    },
+    total: integerCount('Counterparts inside the read.'),
+    omitted: integerCount('Counterparts beyond the listed positions: at least the budget, and never fewer than ten.'),
+    unreachableLinks: integerCount('Supersession links naming a record outside the read, or none at all.'),
+    pairs: {
+      type: 'array', description: 'One entry per listed counterpart, current rivals first, both positions always present.',
+      items: {
+        type: 'object', description: 'A counterpart and how it relates to the record.', required: ['recordId', 'relation', 'state', 'basis', 'position'],
+        properties: {
+          recordId: { type: 'string', description: 'The counterpart record.' },
+          relation: { type: 'string', enum: ['same_key', 'supersedes', 'superseded_by'], description: 'A fact of the same key in the same project, or a supersession link.' },
+          state: { type: 'string', enum: ['resolved', 'unresolved', 'uninvestigated'], description: 'resolved: a basis settles it. unresolved: investigated, nothing settles it. uninvestigated: past the budget.' },
+          basis: { type: 'array', items: { type: 'string', enum: ['explicit_supersession', 'different_times', 'same_value'] }, description: 'What settles the pair, from the records themselves.' },
+          position: relevantLineSchema,
+          record: { ...storedRecordSchema, description: 'The counterpart in full, when it was fetched within the budget.' }
+        }
+      }
+    },
+    limitation: readCoverageSchema.properties.limitation
+  }
+};
+const expandOutputSchema = {
+  type: 'object',
+  description: 'The full record behind a line, checked against the revision the line came from, or an explicit limitation.',
+  required: ['recordId', 'status', 'revisionChanged', 'boundRevision', 'currentRevision', 'record', 'investigation', 'completeness'],
+  properties: {
+    recordId: { type: 'string', description: 'The record the line named.' },
+    status: { type: 'string', enum: ['current', 'revision_changed', 'purged', 'unavailable'], description: "current: the line came from this revision. revision_changed: the record changed since, and this is the current record. purged: the first purge of the read's own project after the line was logical. unavailable: no record with this id is served in the scope." },
+    revisionChanged: { anyOf: [{ type: 'boolean' }, { type: 'null' }], description: 'Whether the record changed after the line was derived; null when no record is served.' },
+    boundRevision: { type: 'object', description: 'The revision the line was derived from.', required: ['recordId', 'digest'], properties: revisionProperties },
+    currentRevision: { anyOf: [{ type: 'object', required: ['recordId', 'digest'], properties: revisionProperties }, { type: 'null' }], description: 'The live revision; null when no record is served.' },
+    record: { anyOf: [storedRecordSchema, { type: 'null' }], description: 'The current full record, or null. Never a summary and never the old revision.' },
+    investigation: { anyOf: [investigationSchema, { type: 'null' }], description: 'Counterparts investigated within the budget; null when no record is served.' },
+    completeness: {
+      ...readCoverageSchema,
+      properties: {
+        ...readCoverageSchema.properties,
+        limitation: {
+          ...readCoverageSchema.properties.limitation,
+          properties: {
+            ...readCoverageSchema.properties.limitation.properties,
+            reason: { type: 'string', enum: ['purged', 'unavailable', 'store_unavailable'], description: 'Why no record is served, on expansion_unavailable.' },
+            recordId: { type: 'string', description: 'The record the limitation is about.' }
+          }
+        }
+      }
+    }
+  }
+};
+
 // The default read (plan v1.4.4 §13.4, E03): the same records as the review-named
 // shape, under names and descriptions that state what they hold, with the
 // declared notice. suggestedQuestions gives way to belowConfidenceThreshold, the
@@ -1421,6 +1487,31 @@ const CATALOG = [
         relations: { type: 'array', items: storedRelationSchema, description: 'Relationships traversed. Named relations, not "edges".' }
       }
     }
+  },
+  {
+    name: 'shadowgraph_expand',
+    compact: true,
+    persists: false,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    describe: {
+      does: 'Expand one claim line from shadowgraph_context to the full record it was derived from, inside the line\'s scope.',
+      route: 'shadowgraph_context delivers the lines and their handles; shadowgraph_traverse walks relationships.',
+      effects: 'Reads only. An id outside the scope answers as an unknown one; a changed record is served as the current one, never as the old revision.'
+    },
+    inputSchema: {
+      type: 'object',
+      required: ['recordId', 'digest'],
+      properties: {
+        recordId: { type: 'string', description: "The line's expansion.recordId." },
+        digest: { type: 'string', description: "The line's expansion.digest: the revision the line was derived from." },
+        asOf: { type: 'string', description: "The line's expansion.asOf, when it has one." },
+        derivationVersion: { type: 'string', description: "The line's expansion.derivationVersion." },
+        derivedAt: { type: 'string', description: "The line's expansion.derivedAt. A logical purge of the read's own project recorded after it answers purged." },
+        maxExpansions: { type: 'integer', minimum: 0, maximum: 50, description: 'How many structural counterparts to fetch in full, 0-50. Defaults to 5; the rest are marked uninvestigated, with their lines.' },
+        project: projectProperty
+      }
+    },
+    outputSchema: expandOutputSchema
   },
   {
     name: 'shadowgraph_supersede',

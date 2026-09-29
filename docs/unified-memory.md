@@ -219,7 +219,7 @@ CLI, HTTP and MCP persist review signals created by `reviewContext()` (`review-c
 - `shadowgraph_remember`
 - `shadowgraph_recall`
 
-Compact mode includes both workflows and remains exactly 15 tools. The server negotiates MCP `2024-11-05`, `2025-03-26`, `2025-06-18`, or `2025-11-25` through `initialize`, answering `2025-11-25` for any other request, and serves modern `2026-07-28` through per-request metadata and `server/discover`.
+Compact mode includes both workflows and remains exactly 16 tools. The server negotiates MCP `2024-11-05`, `2025-03-26`, `2025-06-18`, or `2025-11-25` through `initialize`, answering `2025-11-25` for any other request, and serves modern `2026-07-28` through per-request metadata and `server/discover`.
 
 ## Persistence and purge
 

@@ -224,7 +224,7 @@ test('every advertised output schema accepts the result its own tool really retu
   const rpc = await startMcp(t);
   await rpc.initialize('2025-06-18');
   const listed = await rpc.listTools({});
-  assert.equal(listed.tools.length, 34);
+  assert.equal(listed.tools.length, 35);
 
   const schemas = new Map();
   for (const tool of listed.tools) {
@@ -237,7 +237,7 @@ test('every advertised output schema accepts the result its own tool really retu
     assert.equal(tool.outputSchema.type, 'object');
     schemas.set(tool.name, tool.outputSchema);
   }
-  assert.equal(schemas.size, 34);
+  assert.equal(schemas.size, 35);
 
   const exercised = new Set();
   const callTool = conformingCaller(rpc, schemas, exercised);
@@ -316,6 +316,16 @@ test('every advertised output schema accepts the result its own tool really retu
   assert.equal(lines.relevant.items[0].tier, 'T1');
   assert.equal((await callTool('shadowgraph_context', { project, query: 'rollout' })).relevant.items[0].tier, 'T2');
   assert.equal((await callTool('shadowgraph_context', { project, query: 'zebra' })).relevant.fallback.used, true);
+  // PR-27: a line's handle expands to its record; an unknown id is an explicit limitation.
+  const { operation, scope, ...handle } = lines.relevant.items[0].line.expansion;
+  const expansion = Object.fromEntries(Object.entries({ ...handle, project: scope.project }).filter(([, value]) => value !== null));
+  assert.equal((await callTool('shadowgraph_expand', expansion)).status, 'current');
+  assert.equal((await callTool('shadowgraph_expand', { ...expansion, recordId: 'decision:missing' })).status, 'unavailable');
+  // Every handle field and the budget pass through the transport.
+  const unbudgeted = await callTool('shadowgraph_expand', { ...expansion, maxExpansions: 0 });
+  assert.equal(unbudgeted.investigation.budget.maxExpansions, 0);
+  assert.equal((await callTool('shadowgraph_expand', { ...expansion, derivationVersion: 't1-line-v0' })).status, 'revision_changed');
+  assert.equal((await callTool('shadowgraph_expand', { ...expansion, asOf: '2020-01-01T00:00:00.000Z' })).status, 'revision_changed');
   await callTool('shadowgraph_review_context', { project });
   await callTool('shadowgraph_link', { project, from: decisionA.id, to: decisionB.id, relation: 'informs' });
   await callTool('shadowgraph_traverse', { project, id: decisionA.id, depth: 2, direction: 'both' });
@@ -382,7 +392,7 @@ test('the verifier build advertises and satisfies the verification tool contract
   const rpc = await startMcp(t, { SHADOWGRAPH_VERIFIER_CONFIG: configPath });
   await rpc.initialize('2025-11-25');
   const listed = await rpc.listTools({});
-  assert.equal(listed.tools.length, 35);
+  assert.equal(listed.tools.length, 36);
   const verifyTool = listed.tools.find((tool) => tool.name === 'shadowgraph_verify_fact');
   assert.ok(verifyTool, 'the verification tool must be advertised when a verifier is configured');
   assert.deepEqual(verifyTool.annotations, { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true });
@@ -429,7 +439,7 @@ test('initialize negotiates a revision, and the wire shape follows the one it RE
     const wire = WIRE_BY_NEGOTIATED[negotiated];
     assert.ok(wire, `no expectation recorded for negotiated revision ${negotiated}`);
     const listed = await rpc.listTools({});
-    assert.equal(listed.tools.length, 34, `requested ${requested}`);
+    assert.equal(listed.tools.length, 35, `requested ${requested}`);
     const validateTool = listed.tools.find((tool) => tool.name === 'shadowgraph_validate');
     assert.deepEqual(Object.keys(validateTool), wire.toolKeys, `negotiated ${negotiated} tool members`);
     // The review envelope now participates in the same negotiated schema tier.
@@ -502,7 +512,7 @@ test('a later initialize renegotiates, in both directions', async (t) => {
 });
 
 test('a session that never initializes keeps the pre-2025 wire shape, in full and compact mode', async (t) => {
-  for (const [mode, expectedCount] of [['0', 34], ['1', 15]]) {
+  for (const [mode, expectedCount] of [['0', 35], ['1', 16]]) {
     const rpc = await startMcp(t, { SHADOWGRAPH_MCP_COMPACT: mode });
     const listed = await rpc.listTools({});
     assert.equal(listed.tools.length, expectedCount, `compact=${mode}`);
@@ -517,7 +527,7 @@ test('a session that never initializes keeps the pre-2025 wire shape, in full an
 test('modern requests receive the full metadata regardless of any handshake', async (t) => {
   const rpc = await startMcp(t);
   const listed = await rpc.call('tools/list', modernParams());
-  assert.equal(listed.result.tools.length, 34);
+  assert.equal(listed.result.tools.length, 35);
   assert.equal(listed.result.resultType, 'complete');
   const validateTool = listed.result.tools.find((tool) => tool.name === 'shadowgraph_validate');
   assert.deepEqual(Object.keys(validateTool), ['name', 'description', 'inputSchema', 'annotations', 'outputSchema']);

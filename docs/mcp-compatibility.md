@@ -34,20 +34,21 @@ Modern complete results include `resultType: 'complete'` and server identity met
 
 | Mode | Verifier | Advertised tools |
 | --- | --- | ---: |
-| Full | not configured | 33 |
-| Full | configured | 34 (`shadowgraph_verify_fact` is added) |
-| Compact | either | 14 |
+| Full | not configured | 35 |
+| Full | configured | 36 (`shadowgraph_verify_fact` is added) |
+| Compact | either | 16 |
 
 `SHADOWGRAPH_MCP_COMPACT=1` must be passed to the server process, not merely assumed from the Inspector launch shell. The automated gate uses Inspector's server environment option and verifies the returned list count.
 
 ### Tool inventory
 
-The **15 compact tools** are the everyday agent workflow. They are also present in full mode:
+The **16 compact tools** are the everyday agent workflow. They are also present in full mode:
 
 | Tool | Purpose |
 | --- | --- |
 | `shadowgraph_context` | Read the working set for a project before a consequential task; persists nothing |
 | `shadowgraph_review_context` | The same working set, evaluated and persisted: raises the review signals it finds due |
+| `shadowgraph_expand` | Expand a claim line from `shadowgraph_context` to the full record it was derived from, checked against that revision, or an explicit limitation |
 | `shadowgraph_remember` | Store scoped memory (`preference`, `profile`, `goal`, `instruction`, `procedure`, `episode`, `note`) |
 | `shadowgraph_recall` | Hybrid lexical/vector/graph/temporal recall of scoped memory |
 | `shadowgraph_record_decision` | Record a decision with assumptions, evidence, and rejected alternatives |
@@ -62,7 +63,7 @@ The **15 compact tools** are the everyday agent workflow. They are also present 
 | `shadowgraph_validate` | Report graph diagnostics by severity |
 | `shadowgraph_maintain` | Stale decisions past `reviewAfter`, expire facts, then review |
 
-**Full mode adds these 19**, for 34 total:
+**Full mode adds these 19**, for 35 total:
 
 | Tool | Purpose |
 | --- | --- |
@@ -86,10 +87,10 @@ The **15 compact tools** are the everyday agent workflow. They are also present 
 | `shadowgraph_bind` | Explicitly select worktree or shared-repository mapping, project and reason; back up and activate its local file |
 | `shadowgraph_attribute` | Reattribute explicit IDs or an exact origin to a named project with a reason |
 
-A 35th tool, `shadowgraph_verify_fact`, appears in full mode **only** when
+A 36th tool, `shadowgraph_verify_fact`, appears in full mode **only** when
 `SHADOWGRAPH_VERIFIER_CONFIG` names a local trust configuration. The caller supplies just `factId`
 and an evidence path inside the configured root — never verifier identity, key, signature, method,
-or target status. Compact mode stays at exactly 15 regardless.
+or target status. Compact mode stays at exactly 16 regardless.
 
 PR12 read tools accept `accessId` or `grantId`; they recheck current authority and
 commit bounded audit before delivery. Neither MCP nor HTTP exposes issuance.
@@ -152,7 +153,7 @@ costs memory in proportion to its results.
 
 **Compatibility guarantee.** For a session negotiated at `2024-11-05`, the top-level member set of
 every tool object remains (`name`, `description`, `inputSchema`). Tool names and
-the current 33/14/34 counts are identical across protocol tiers. The serialized
+the current 35/16/36 counts are identical across protocol tiers. The serialized
 text result (`content[0].text`, the tool's return value as
 `JSON.stringify(value, null, 2)`) is identical in every tier: `structuredContent`
 is an addition beside it, never a replacement. Tool
@@ -190,6 +191,7 @@ endpoint configured, so the two "only with an embedder" cells are covered by the
 | `shadowgraph_retrieve` | no | no | no | no |
 | `shadowgraph_recall` | no | no | no | only with an embedder |
 | `shadowgraph_traverse` | no | no | no | no |
+| `shadowgraph_expand` | no | no | no | no |
 | `shadowgraph_validate` | no | no | no | no |
 | `shadowgraph_journal` | no | no | no | no |
 | `shadowgraph_rebuild` | no | no | no | no |
@@ -249,7 +251,7 @@ Six of these are worth stating plainly, because a reader would otherwise guess w
 
 ### Output schemas and scope-coverage envelopes
 
-All 34 full-mode tools (35 with a verifier, 15 in compact mode) declare an object-rooted output schema. In structured protocol tiers their structuredContent matches the serialized text. Review and signal-history results now use `{ items, completeness }`, a deliberate breaking shape change; array consumers use `result.items`. Older protocol tiers still receive the same envelope in text.
+All 35 full-mode tools (36 with a verifier, 16 in compact mode) declare an object-rooted output schema. In structured protocol tiers their structuredContent matches the serialized text. Review and signal-history results now use `{ items, completeness }`, a deliberate breaking shape change; array consumers use `result.items`. Older protocol tiers still receive the same envelope in text.
 
 The journal and rebuild schemas omit global envelope counters; redaction describes a marked scoped view rather than a complete store. The context schema permits unresolved project:null. Input-scoping limitations remain open.
 
@@ -342,10 +344,10 @@ Detail that used to sit in a description, kept here because it is worth having s
 
 ### Glama inspection profile
 
-Glama inspects this server in **full mode**, advertising all 34 tools. Compact mode is not used for
+Glama inspects this server in **full mode**, advertising all 35 tools. Compact mode is not used for
 inspection: the published `glama.json` schema accepts only `maintainers`, so there is no supported
 way to declare the compact environment variable or to disclose in the generated configuration that
-the listing was produced from a reduced surface. Advertising 15 tools while the server offers 34
+the listing was produced from a reduced surface. Advertising 16 tools while the server offers 35
 would understate what the server does, so the tool-count penalty is accepted instead.
 
 Glama's generated container does not talk to this server directly. It runs `mcp-proxy@6.4.3` in front
@@ -364,7 +366,7 @@ over streamable HTTP, and asserts the recording and the HTTP replies against eac
   `protocolVersion: "2025-11-25"`;
 - this server negotiates `2025-11-25` with it, asserted by equality, so a silent fall-back to an
   older revision fails the gate instead of quietly hiding metadata from Glama;
-- the `tools/list` the scanner receives over HTTP is exactly 33 tools, each with four boolean
+- the `tools/list` the scanner receives over HTTP is exactly 35 tools, each with four boolean
   annotations, and an object-rooted `outputSchema` on every tool;
 - that list is deep-equal to the one the server wrote to stdio, so the proxy forwarded it without
   dropping or rewriting a member. The comparison is deep rather than byte-for-byte because the
@@ -376,7 +378,7 @@ with the scanner over HTTP; that value is a property of the proxy's SDK, not of 
 
 Measured on 2026-09-03, on the 27-tool surface of that date: `requested=2025-11-25
 negotiated=2025-11-25 http=2025-11-25 tools=27 annotated=27 outputSchemas=25 forwarded=deep-equal`.
-The gate now asserts 33 tools and 33 output schemas; the reading above is left as it was taken.
+The gate now asserts 35 tools and 35 output schemas; the reading above is left as it was taken.
 
 **Residual risk.** Only the pinned proxy is under test. Glama's own scanner client, the revision it
 declares to the proxy, and how it renders what it receives are not reproduced here. The proxy version
@@ -409,8 +411,8 @@ tooling install, the scripts fall back to the same exact versions through `npx`.
 
 - Inspector exits non-zero;
 - Inspector writes any strict schema finding to stderr;
-- Full mode is not exactly 34 tools without a verifier;
-- Compact mode is not exactly 15 tools;
+- Full mode is not exactly 35 tools without a verifier;
+- Compact mode is not exactly 16 tools;
 - any advertised tool is missing one of the four boolean annotations;
 - any tool is missing an object-rooted `outputSchema`.
 
@@ -426,7 +428,7 @@ fails when:
 - the proxy sends anything other than exactly one `initialize`, or requests a revision other than
   `2025-11-25`;
 - this server negotiates anything other than `2025-11-25` with it;
-- the `tools/list` received over HTTP is not exactly 34 tools with the annotation and output-schema
+- the `tools/list` received over HTTP is not exactly 35 tools with the annotation and output-schema
   coverage above;
 - that list is not deep-equal to the one the server wrote to stdio.
 
@@ -434,8 +436,8 @@ The CI matrix installs the locked gate clients and runs both gates on Node 24 on
 Windows. `test/check-glama-proxy.test.js` covers the gate's own recorder, event-stream parser, and
 assertions offline, including that each assertion rejects the failure it exists to catch;
 `test/mcp-gate-tooling.test.js` binds the scripts and CI workflow to the exact tooling lock.
-Unit/integration tests separately prove the configured-verifier full count is 35 and compact
-remains 15.
+Unit/integration tests separately prove the configured-verifier full count is 36 and compact
+remains 16.
 
 ## 6. Primary sources consulted
 
@@ -475,3 +477,8 @@ PR13 metadata wire measurements (bare / annotated / structured bytes): full
 where necessary; the compact structured ceiling is unchanged. These changes
 cover explicit scope inputs and truthful creation/restore contracts, not
 benchmark campaign or audit-operation performance thresholds.
+
+Plan v1.4.4 PR-26 and PR-27 wire measurements (bare / annotated / structured bytes, 2026-09-29), after the
+default read's relevance block and `shadowgraph_expand`: full 58,789 / 62,489 / 298,375; full with verifier
+59,937 / 63,742 / 302,922; compact 38,716 / 40,411 / 210,383. The ceilings these planned additions exceed are
+re-set with about 2% headroom, recorded in `test/mcp-tool-metadata.test.js`.

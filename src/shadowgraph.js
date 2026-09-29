@@ -21,7 +21,7 @@ import { accessScopeContains, validateAccess, intersectAccessScope, accessDiagno
 import { createAccessLifecycle } from './internal/access-lifecycle.js';
 import { assertCreationInput } from './internal/creation-id.js';
 import { attemptOutcome } from './internal/outcome.js';
-import { t1Line } from './compact-tier.js';
+import { T1_DERIVATION_VERSION, t1Digest, t1Inputs, t1Line } from './compact-tier.js';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
 // docs/api-reference.md) and are frozen so a consumer cannot mutate validation
@@ -3476,10 +3476,10 @@ export function createShadowGraph(options = {}) {
     const established = hits.length > 0;
     const candidates = established ? hits : [...new Map(workingSet.map((record) => [record.id, { record, score: null, ranks: null }])).values()];
     const page = resolvePage({ limit: input.limit, offset: 0 }, candidates.length);
-    const lineContext = { asOf, scope: { project: boundary.scope.project, grantId: boundary.scope.grant?.accessId ?? null }, derivedAt: now(), visible: scopedReach(boundary, memoryScope) };
+    const lineContext = { asOf, scope: lineScope(boundary), derivedAt: now(), visible: scopedReach(boundary, memoryScope) };
     let shortened = false;
     const items = candidates.slice(0, page.limit).map(({ record, score, ranks }) => {
-      const { embedding, ...shown } = publicValue(clone(record));
+      const shown = canonicalRecord(record);
       const line = established && input.compact === true ? t1Line(shown, lineContext) : null;
       if (line?.decisiveOmitted.length) shortened = true;
       return line && !line.decisiveOmitted.length ? { tier: 'T1', line, score, ranks } : { tier: 'T2', record: shown, score, ranks };
@@ -3505,9 +3505,156 @@ export function createShadowGraph(options = {}) {
       // truncated payload still carries it (§17.2).
       lines: items.filter(({ tier }) => tier === 'T1').map(({ line }) => ({ recordId: line.recordId, claimClass: line.claimClass, requiresExpansion: line.requiresExpansion })),
       processing: { pending: 0, failed: 0, blocked: 0, oldestPendingAt: null, extractionAvailable: false },
-      expansion: { operation: 'shadowgraph_expand', available: false }
+      expansion: { operation: 'shadowgraph_expand', available: true }
     });
     return { ...head, items };
+  }
+
+  // A full record (T2) as a read delivers it: the public record, the embedding
+  // (a derived index) left out.
+  function canonicalRecord(record) {
+    const { embedding, ...shown } = publicValue(clone(record));
+    return shown;
+  }
+
+  // PR-27 (plan v1.4.4 §17.3; G-5 §7-§8; AC-018): a line's handle expanded to
+  // the full record inside the boundary of the read that produced the line --
+  // its project and grant, the grant re-checked now. The live record is
+  // derived exactly as a line is (the public record, the handle's as-of
+  // instant, the project-wide memory scope's reach), so an equal digest means
+  // the line came from this very revision, and a different one serves the
+  // current record, saying so, never as the revision the line came from. A
+  // record the boundary does not reach -- absent, purged, another project's or
+  // another memory scope's, an alternative -- answers alike: `purged` when the
+  // first purge of the read's project recorded after the line was derived was
+  // logical, `unavailable` otherwise. The id decides nothing, so no
+  // existence leaks (§8, plan §10.5). No ranking, no model call, no clock: the
+  // same handle over the same store gives the same bytes.
+  function expand(input = {}) {
+    validateExpandInput(input);
+    const boundary = readBoundary(input);
+    const reach = scopedReach(boundary, normalizeMemoryScope());
+    const { recordId } = input;
+    const boundRevision = { recordId, digest: input.digest };
+    const stored = records.get(recordId) ?? facts.get(recordId);
+    if (!stored || !reach(recordId)) {
+      const reason = purgedSince(boundary, input.derivedAt) ? 'purged' : 'unavailable';
+      return {
+        recordId, status: reason, revisionChanged: null, boundRevision, currentRevision: null, record: null, investigation: null,
+        completeness: scopeCompleteness(boundary.scope, { scope: {}, complete: false, limitation: { code: 'expansion_unavailable', reason, recordId, detail: reason === 'purged'
+          ? 'A logical purge of this read\'s project was recorded after the line was derived. No record with this id is served, and nothing stands in for one.'
+          : 'No record with this id is inside the scope of this read.' } })
+      };
+    }
+    const lineContext = { asOf: input.asOf ?? null, scope: lineScope(boundary), derivedAt: input.derivedAt ?? null, visible: reach };
+    const record = canonicalRecord(stored);
+    const digest = t1Digest(t1Inputs(record, lineContext));
+    const current = (input.derivationVersion ?? T1_DERIVATION_VERSION) === T1_DERIVATION_VERSION && input.digest === digest;
+    const investigation = investigate(stored, lineContext, input.maxExpansions ?? DEFAULT_EXPANSIONS, reach);
+    const exhausted = investigation.budget.outcome === 'exhausted';
+    const limitation = !current
+      ? { code: 'revision_changed', detail: 'The record, or what this read reaches of its links, changed after the line was derived. This is the current record, not the revision the line came from.' }
+      : exhausted ? { code: 'investigation_budget_exhausted', detail: 'The expansion budget ran out before every counterpart was fetched in full. Each listed counterpart not fetched is marked uninvestigated, with its line; the rest are counted as omitted.' }
+      : investigation.unreachableLinks ? { code: 'links_unavailable', detail: 'Supersession links of this record name records this read cannot reach, or that do not exist; they are counted in investigation.unreachableLinks.' }
+      : null;
+    return {
+      recordId, status: current ? 'current' : 'revision_changed', revisionChanged: !current, boundRevision, currentRevision: { recordId, digest },
+      record, investigation,
+      completeness: scopeCompleteness(boundary.scope, { scope: {}, complete: limitation === null, ...(limitation ? { limitation } : {}) })
+    };
+  }
+
+  // The handle scope a line carries: the read's project and grant, and its
+  // origin when no project was resolved, so an origin-scoped read's line can be
+  // expanded from its own handle.
+  function lineScope(boundary) {
+    return {
+      project: boundary.scope.project, grantId: boundary.scope.grant?.accessId ?? null,
+      ...(boundary.scope.project == null && boundary.scope.originId != null ? { originId: boundary.scope.originId } : {})
+    };
+  }
+
+  // Whether the purge that removed a record behind a line was logical: the
+  // first canonical project.purged marker of the read's project recorded after
+  // the line was derived (G-5 §8); a hard purge answers unavailable. A later
+  // logical purge scrubs the earlier logical markers of its project to
+  // skeletons, so the first marker counts as logical unless it is recorded
+  // hard. A purge narrows every grant so that it no longer covers the purged
+  // project, so a granted project's purge is never covered: it answers
+  // unavailable, closed.
+  function purgedSince(boundary, instant) {
+    const { project } = boundary.scope;
+    if (!project || !isValidIsoInstant(instant)) return false;
+    const first = journal.find((entry) => entry.type === 'project.purged' && entry.project === project && compareInstants(entry.at, instant) > 0);
+    return first !== undefined && first.payload?.mode !== 'hard';
+  }
+
+  // AC-031/AC-032: the structural counterparts of an expanded record -- facts
+  // of the same key in its project, the records its supersession links name --
+  // each investigated within the budget: resolved on a stated basis,
+  // investigated and unresolved, or, past the budget, not investigated. Both
+  // positions are always delivered: the counterpart's line, and its full record
+  // once investigated. A contradiction stated only in free text is not
+  // detected, and the result says so.
+  function investigate(stored, lineContext, maxExpansions, reach) {
+    const { counterparts, unreachableLinks } = counterpartsOf(stored, reach);
+    // Positions are bounded too: at least the budget, and never fewer than
+    // MIN_POSITIONS; the rest are counted as omitted.
+    const listed = counterparts.slice(0, Math.max(maxExpansions, MIN_POSITIONS));
+    let used = 0;
+    const pairs = listed.map(({ record, relation }) => {
+      const shown = canonicalRecord(record);
+      const position = t1Line(shown, lineContext);
+      if (used >= maxExpansions) return { recordId: record.id, relation, state: 'uninvestigated', basis: [], position };
+      used += 1;
+      const basis = basisOf(stored, record);
+      return { recordId: record.id, relation, state: basis.length ? 'resolved' : 'unresolved', basis, position, record: shown };
+    });
+    return {
+      budget: { maxExpansions, used, outcome: used < counterparts.length ? 'exhausted' : 'within_budget' },
+      total: counterparts.length, omitted: counterparts.length - listed.length, unreachableLinks,
+      pairs,
+      limitation: { code: 'structural_only', detail: 'Counterparts are found by structure alone: facts of the same key and supersession links. A contradiction stated only in free text is not detected.' }
+    };
+  }
+
+  // The counterparts inside the read's reach, current rivals first (not
+  // superseded, then the most recent), and the number of supersession links
+  // that name a record outside the reach or none at all, counted alike.
+  function counterpartsOf(stored, reach) {
+    const found = [];
+    const unreachable = new Set();
+    const push = (record, relation) => { if (record !== stored && !found.some((item) => item.record === record)) found.push({ record, relation }); };
+    if (facts.get(stored.id) === stored) {
+      for (const fact of facts.values()) if (fact.key === stored.key && fact.project === stored.project && reach(fact.id)) push(fact, 'same_key');
+    }
+    for (const [ids, relation] of [[linkIds(stored.supersedes), 'supersedes'], [linkIds(stored.supersededBy), 'superseded_by']]) {
+      for (const id of ids) {
+        const record = records.get(id) ?? facts.get(id);
+        if (record && reach(id)) push(record, relation);
+        else if (id !== stored.id) unreachable.add(id);
+      }
+    }
+    const recency = (record) => instantMs(record.temporal?.validFrom ?? record.validFrom ?? record.createdAt) ?? Number.NEGATIVE_INFINITY;
+    const superseded = (record) => (record.supersededBy == null ? 0 : 1);
+    found.sort((a, b) => superseded(a.record) - superseded(b.record) || recency(b.record) - recency(a.record) || String(a.record.id).localeCompare(String(b.record.id)));
+    return { counterparts: found, unreachableLinks: unreachable.size };
+  }
+
+  // What resolves an apparent conflict between two records, from their own
+  // fields: an explicit supersession, validity windows that do not overlap,
+  // or, for facts, the same value.
+  function basisOf(left, right) {
+    const basis = [];
+    const links = (from, to) => linkIds(from.supersededBy).includes(to.id) || linkIds(from.supersedes).includes(to.id);
+    if (links(left, right) || links(right, left)) basis.push('explicit_supersession');
+    if (facts.get(left.id) === left && facts.get(right.id) === right) {
+      const [a, b] = [validityWindow(left), validityWindow(right)];
+      const before = (earlier, later) => earlier.to !== null && later.from !== null && compareInstants(earlier.to, later.from) <= 0;
+      if (before(a, b) || before(b, a)) basis.push('different_times');
+      if (JSON.stringify(canonical(left.value)) === JSON.stringify(canonical(right.value))) basis.push('same_value');
+    }
+    return basis;
   }
 
   function nativeCollections() {
@@ -4345,6 +4492,7 @@ export function createShadowGraph(options = {}) {
     supersedeDecision: transactional('supersedeDecision', supersedeDecision),
     link: transactional('link', link),
     traverse: auditedRead('traverse', traverse),
+    expand: auditedRead('expand', expand),
     redact: auditedRead('redact', redact),
     projectSummary,
     purgeProject: transactional('purgeProject', purgeProject, { mode: 'snapshot' }),
@@ -4546,6 +4694,32 @@ function validateTemporalFields(input, names) {
     if (value !== undefined && value !== null && typeof value !== 'string') throw new Error(`${name} must be a string or null`);
     if (typeof value === 'string' && !isValidTimestamp(value)) throw new Error(`${name} must be a valid timestamp`);
   }
+}
+
+// The expansion budget (AC-032): counterparts fetched in full per expansion,
+// and the fewest counterpart positions an expansion lists.
+const DEFAULT_EXPANSIONS = 5;
+const MAX_EXPANSIONS = 50;
+const MIN_POSITIONS = 10;
+// A link field as a list of ids: a memory stores one id, a decision a list.
+const linkIds = (value) => (Array.isArray(value) ? value : value == null ? [] : [value]).filter((id) => typeof id === 'string');
+
+function validateExpandInput(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('expand input must be an object');
+  for (const name of ['recordId', 'digest']) if (typeof input[name] !== 'string' || !input[name]) throw new Error(`${name} must be a non-empty string`);
+  if (input.derivationVersion !== undefined && typeof input.derivationVersion !== 'string') throw new Error('derivationVersion must be a string');
+  if (input.maxExpansions !== undefined && !(Number.isInteger(input.maxExpansions) && input.maxExpansions >= 0 && input.maxExpansions <= MAX_EXPANSIONS)) {
+    throw new Error(`maxExpansions must be an integer from 0 to ${MAX_EXPANSIONS}`);
+  }
+  validateTemporalFields(input, ['asOf', 'derivedAt']);
+}
+
+// A fact's validity window: from its declared start (or observation) to the
+// kernel's effective expiration boundary; either end may be unknown.
+function validityWindow(fact) {
+  const from = fact.temporal?.validFrom ?? fact.validFrom ?? fact.observedAt ?? null;
+  const to = effectiveFactExpirationBoundary(fact) ?? null;
+  return { from: isValidIsoInstant(from) ? from : null, to: isValidIsoInstant(to) ? to : null };
 }
 
 function validateRelevanceInput(input) {

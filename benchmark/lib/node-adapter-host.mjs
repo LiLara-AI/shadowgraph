@@ -37,6 +37,8 @@ export const FULL_TOOL_NAMES = Object.freeze([
   'shadowgraph_update_status',
   'shadowgraph_link',
   'shadowgraph_traverse',
+  // PR-27 expansion inventory only; no scenario or scoring change.
+  'shadowgraph_expand',
   'shadowgraph_supersede',
   'shadowgraph_redact',
   'shadowgraph_purge',
@@ -71,6 +73,8 @@ export const COMPACT_TOOL_NAMES = Object.freeze([
   'shadowgraph_recall',
   'shadowgraph_record_fact',
   'shadowgraph_record_outcome',
+  // PR-27 expansion inventory only; no scenario or scoring change.
+  'shadowgraph_expand',
   'shadowgraph_maintain',
   'shadowgraph_retrieve',
   'shadowgraph_validate',

@@ -297,6 +297,7 @@ test('every advertised tool annotation matches the effects the server actually h
     ['shadowgraph_retrieve', { project: PROJECT, query: 'store' }],
     ['shadowgraph_recall', { project: PROJECT, query: 'store' }],
     ['shadowgraph_traverse', { project: PROJECT, id: decision.firstResult.id }],
+    ['shadowgraph_expand', { project: PROJECT, recordId: decision.firstResult.id, digest: 'effects-probe' }],
     ['shadowgraph_validate', {}],
     ['shadowgraph_journal', { project: PROJECT, limit: 5 }],
     ['shadowgraph_rebuild', { project: PROJECT }],
@@ -408,7 +409,7 @@ test('every advertised tool annotation matches the effects the server actually h
 
   // --- the assertion this file exists for ---------------------------------
   const tools = await rpc.listTools();
-  assert.equal(tools.length, 34);
+  assert.equal(tools.length, 35);
   const missing = tools.map((tool) => tool.name).filter((name) => !observed.has(name));
   assert.deepEqual(missing.sort(), [], `these advertised tools were never observed: ${missing.join(', ')}`);
 
@@ -433,6 +434,7 @@ test('every advertised tool annotation matches the effects the server actually h
     'shadowgraph_confidence_evidence',
     'shadowgraph_context',
     'shadowgraph_discard_access',
+    'shadowgraph_expand',
     'shadowgraph_journal',
     'shadowgraph_link',
     'shadowgraph_maintain',
@@ -516,7 +518,7 @@ test('the verification tool reads a caller-selected path, inside the configured 
   verified.external = { read: true, overwrite: false };
 
   const tools = await rpc.listTools();
-  assert.equal(tools.length, 35);
+  assert.equal(tools.length, 36);
   const verifyTool = tools.find((tool) => tool.name === 'shadowgraph_verify_fact');
   assert.deepEqual(verifyTool.annotations, deriveAnnotations(verified), 'verify_fact annotations must equal the observed behaviour');
 });

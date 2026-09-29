@@ -240,7 +240,7 @@ is defense in depth for a local deployment, not a public-internet security model
 shadowgraph mcp
 ```
 
-Compact mode is recommended: it advertises 15 workflow tools while the full graph, memories, facts,
+Compact mode is recommended: it advertises 16 workflow tools while the full graph, memories, facts,
 alternatives, and outcomes stay stored at full fidelity. Compact mode is a tool-advertisement
 choice, not lossy storage.
 
@@ -255,15 +255,15 @@ serialized results it always had. A request for a revision this server does not 
 answered with `2025-11-25`, the latest it does. See the
 [MCP compatibility guide](docs/mcp-compatibility.md) for the full table.
 
-The 15 compact tools are `shadowgraph_context`, `shadowgraph_review_context`, `shadowgraph_remember`, `shadowgraph_recall`,
+The 16 compact tools are `shadowgraph_context`, `shadowgraph_review_context`, `shadowgraph_expand`, `shadowgraph_remember`, `shadowgraph_recall`,
 `shadowgraph_record_decision`, `shadowgraph_record_attempt`, `shadowgraph_record_fact`,
 `shadowgraph_record_outcome`, `shadowgraph_retrieve`, `shadowgraph_search`, `shadowgraph_review`,
 `shadowgraph_validate`, `shadowgraph_maintain`, `shadowgraph_ack_review` — so a compact client can
 clear a review it can already see, instead of accumulating signals with no way to acknowledge
 them — and `shadowgraph_reconsider`, which reads the same evaluation as a verdict: review
 recommended, unchanged, or a human should look. `shadowgraph_context` is a read that persists
-nothing; `shadowgraph_review_context` persists the review signals it finds due. Full mode
-advertises 34 — see the
+nothing; `shadowgraph_review_context` persists the review signals it finds due, and
+`shadowgraph_expand` expands a claim line to its full record. Full mode advertises 35 — see the
 [MCP compatibility guide](docs/mcp-compatibility.md) for the complete inventory, every protocol
 revision, and verified client behaviour.
 

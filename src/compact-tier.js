@@ -261,7 +261,7 @@ export function t1Line(record, { asOf = null, scope = {}, derivedAt = new Date()
     derived: true, derivationVersion: T1_DERIVATION_VERSION,
     decisiveOmitted,
     requiresExpansion: decisiveOmitted.length > 0 || (span.length > 0 && !settled),
-    expansion: { operation: 'shadowgraph_expand', recordId: shown.id, digest, asOf: inputs.asOf, derivationVersion: T1_DERIVATION_VERSION, scope: { project: scope.project ?? null, grantId: scope.grantId ?? null }, derivedAt }
+    expansion: { operation: 'shadowgraph_expand', recordId: shown.id, digest, asOf: inputs.asOf, derivationVersion: T1_DERIVATION_VERSION, scope: { project: scope.project ?? null, grantId: scope.grantId ?? null, ...(scope.originId != null ? { originId: scope.originId } : {}) }, derivedAt }
   };
 }
 
