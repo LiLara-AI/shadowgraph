@@ -545,3 +545,37 @@ PR-28). Variance in mechanism, recorded as plan revision 6 requires (VAR-10).**
   evaluation calls none) and the engines' own reports. The verdict is `semantic_not_populated`: vectors are stored
   only on memory records, and the default read sends no query to an embedding endpoint, so on that path the
   semantic signal is never populated.
+
+**A13. Temporal evidence on the relevance path (plan v1.4.4 §17.5; AC-016, AC-029, AC-030, AC-032; PR-29). Variance
+in mechanism.** Presentation only: nothing is written, and no status changes.
+- Each delivered item, a line or a full record, carries `temporalEvidence`: `recordedAt` (the recording time, read as
+  the as-of selection reads it, a legacy fact's top-level times included); `eventTime`, `known` with the time only
+  when a stored event time (a fact's `validFrom` or `observedAt`, a memory's `validFrom`) differs from the recording
+  time, and `unknown` otherwise, since a write fills an event time it was not given from the recording time and
+  decisions and attempts store none; and `currentState`, `null` for an attempt (an event, not a state), otherwise
+  `state`, `basis` (`explicit_supersession`, `validity_window`, `recording_order_only`, or `null` when nothing
+  temporal decides), `evidence` (at most ten ids of the records that decide it, as far as the read may reach them,
+  from links named on either side, the earlier versions and then the later, each in id order) and `evidenceOmitted`. The head's `temporal` gives the `asOf` and counts the items
+  whose event time is unknown and those whose state rests on the recording order only.
+- The state is taken at the read's instant, `asOf` or now. A fact or memory: when only the recording order tells it
+  from a version a same-key write linked it to -- their event times unknown or equal, and no end the earlier
+  version's writer declared by the later one's start (an expiry at or before it, or a validity end strictly before
+  it, since a same-key write closes a window exactly there and migration records a legacy fact's closed window as
+  declared) -- the conflict is `unresolved` on either side, naming every
+  linked version; a successor with a later known event time, or after a declared end, makes it `historical` once
+  it has begun; otherwise its own window decides, `historical` once it ended (an expiry or a closed window, or an
+  `expired` or `invalidated` status when no end is stored), `current` inside it, and `not_yet_valid` before it
+  began, or `undetermined` there when its start is only its recording time, whatever event time was observed; a
+  successor of another kind, a link only an import stores, is an explicit supersession, making it `historical`, or
+  `undetermined` as of an instant. A decision: an explicit supersession
+  decides, naming both sides; otherwise only a superseded, abandoned or archived decision is historical, so a due
+  review, a failure or a reconsideration ends nothing (AC-030); in an as-of read its state is `undetermined`, since it
+  stores no event time to place it at that instant.
+- Expansion agrees: a same-key pair that only the recording order tells apart, linked or not, as in a chain of
+  versions, is no longer resolved by the supersession a write stored or by the window it closed; the investigation
+  leaves it `unresolved` with both positions (PC-12, AC-032). A pair with distinct stored event times, or an end
+  declared by the next version's start, stays resolved.
+- Variance: the earlier position of a recording-order pair is named, and served in full by expansion of the later
+  line, rather than added to the items, which would change what the read delivers; a record delivered in full has no
+  line to expand and is reached by its id. The working set's collections keep their shape; their records already
+  carry `status` and `supersededBy`.

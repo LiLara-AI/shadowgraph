@@ -876,16 +876,41 @@ const relevantLineSchema = {
     expansion: { type: 'object', description: 'Handle for the full record: operation, record id, digest, as-of, derivation version, scope and derivation time.' }
   }
 };
+const temporalEvidenceSchema = {
+  type: 'object',
+  description: 'What the stored times and supersession support: when it was recorded, when it held, whether it holds now.',
+  required: ['recordedAt', 'eventTime', 'currentState'],
+  properties: {
+    recordedAt: stringOrNull('When it was recorded.'),
+    eventTime: {
+      type: 'object', description: 'When it held, if stored apart from the recording time.', required: ['at', 'state'],
+      properties: { at: stringOrNull('The event time, when known.'), state: { type: 'string', enum: ['known', 'unknown'], description: 'unknown: no event time stored apart from the recording time.' } }
+    },
+    currentState: {
+      anyOf: [{
+        type: 'object', description: 'Whether it holds at the read instant, and on what basis.', required: ['state', 'basis', 'evidence', 'evidenceOmitted'],
+        properties: {
+          state: { type: 'string', enum: ['current', 'historical', 'not_yet_valid', 'unresolved', 'undetermined'], description: 'unresolved: only the recording order sets it apart from another version. undetermined: no event time places it at the read instant.' },
+          basis: { anyOf: [{ type: 'string', enum: ['explicit_supersession', 'validity_window', 'recording_order_only'] }, { type: 'null' }], description: 'What decides it; null when nothing temporal does.' },
+          evidence: stringList('The records that decide it, at most 10.'),
+          evidenceOmitted: integerCount('Deciding records not named.')
+        }
+      }, { type: 'null' }],
+      description: 'null for an attempt, an event.'
+    }
+  }
+};
 const relevantItemSchema = {
   type: 'object',
   description: 'One relevant record, as its line (T1) or in full (T2), with the ranks that selected it.',
-  required: ['tier', 'score', 'ranks'],
+  required: ['tier', 'score', 'ranks', 'temporalEvidence'],
   properties: {
     tier: { type: 'string', enum: ['T1', 'T2'], description: 'T1 carries line, T2 carries record.' },
     line: relevantLineSchema,
     record: storedRecordSchema,
     score: numberOrNull('Fused rank score; null for a working-set record delivered by the fallback.'),
-    ranks: { anyOf: [signalRankSchema, { type: 'null' }], description: 'Position in each signal list; null for a working-set record delivered by the fallback.' }
+    ranks: { anyOf: [signalRankSchema, { type: 'null' }], description: 'Position in each signal list; null for a working-set record delivered by the fallback.' },
+    temporalEvidence: temporalEvidenceSchema
   }
 };
 const signalAvailabilitySchema = (description) => ({
@@ -895,7 +920,7 @@ const signalAvailabilitySchema = (description) => ({
 const relevantSchema = {
   type: 'object',
   description: 'Present with query or focalId: records in scope ranked on the records themselves, head first.',
-  required: ['scope', 'relevance', 'fallback', 'byKind', 'total', 'returned', 'omitted', 'hasMore', 'complete', 'limitSource', 'limitation', 'lines', 'processing', 'expansion', 'items'],
+  required: ['scope', 'relevance', 'fallback', 'byKind', 'total', 'returned', 'omitted', 'hasMore', 'complete', 'limitSource', 'limitation', 'temporal', 'lines', 'processing', 'expansion', 'items'],
   properties: {
     scope: readScopeSchema,
     relevance: {
@@ -931,6 +956,10 @@ const relevantSchema = {
     complete: { type: 'boolean', description: 'All counted candidates returned, relevance established and the scope resolved; not semantic recall.' },
     limitSource: { type: 'string', enum: ['caller', 'default'], description: 'Whose choice bounded the items.' },
     limitation: readCoverageSchema.properties.limitation,
+    temporal: {
+      type: 'object', description: 'The as-of instant, and how many items have no stored event time or rest on the recording order only.', required: ['asOf', 'eventTimeUnknown', 'recordingOrderOnly'],
+      properties: { asOf: stringOrNull('The asOf given, or null.'), eventTimeUnknown: integerCount('Items whose event time is unknown.'), recordingOrderOnly: integerCount('Items whose state rests on the recording order only.') }
+    },
     lines: {
       type: 'array', description: 'One entry per delivered line, in item order.',
       items: {

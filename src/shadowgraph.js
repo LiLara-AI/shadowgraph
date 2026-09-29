@@ -22,6 +22,7 @@ import { createAccessLifecycle } from './internal/access-lifecycle.js';
 import { assertCreationInput } from './internal/creation-id.js';
 import { attemptOutcome } from './internal/outcome.js';
 import { RUNTIME_MISSES, missReachedBy, runtimeMissLedgerIssue, withFallbackMisses } from './internal/miss-ledger.js';
+import { supersessionOrder, temporalEvidence, versionTimes } from './internal/temporal-evidence.js';
 import { T1_DERIVATION_VERSION, t1Digest, t1Inputs, t1Line } from './compact-tier.js';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
@@ -3501,20 +3502,52 @@ export function createShadowGraph(options = {}) {
   function relevanceBlock(input, boundary, workingSet) {
     const asOf = input.asOf ?? null;
     const memoryScope = normalizeMemoryScope();
+    const currentAt = asOf ? null : now();
     const ranked = hybridSearch(rankingView(boundary, memoryScope), input.query ?? '', {
-      project: boundary.scope.grant ? null : boundary.scope.project, focalId: input.focalId, asOf, currentAt: asOf ? null : now()
+      project: boundary.scope.grant ? null : boundary.scope.project, focalId: input.focalId, asOf, currentAt
     });
     const hits = ranked.items.filter(({ ranks }) => ranks.lexical !== null || ranks.semantic !== null || ranks.graph !== null);
     const established = hits.length > 0;
     const candidates = established ? hits : [...new Map(workingSet.map((record) => [record.id, { record, score: null, ranks: null }])).values()];
     const page = resolvePage({ limit: input.limit, offset: 0 }, candidates.length);
     const lineContext = { asOf, scope: lineScope(boundary), derivedAt: now(), visible: scopedReach(boundary, memoryScope) };
+    // §17.5 (PR-29): each delivered record's temporal evidence at the read's
+    // instant, from the supersession links, named on either side, that the read
+    // may reach. Links are gathered for the delivered records only.
+    const reach = lineContext.visible;
+    const delivered = candidates.slice(0, page.limit).map(({ record }) => record);
+    const onPage = new Set(delivered.map((record) => record.id));
+    const linked = { successors: new Map(), predecessors: new Map() };
+    const link = (side, id, other) => {
+      if (!onPage.has(id) || other.id === id || !reach(other.id)) return;
+      const found = linked[side].get(id);
+      if (found) found.add(other);
+      else linked[side].set(id, new Set([other]));
+    };
+    // In id order, so the evidence named under its cap does not depend on how
+    // the store was loaded.
+    const linksOf = (side, id) => [...(linked[side].get(id) ?? [])].sort((left, right) => String(left.id).localeCompare(String(right.id)));
+    const entityOf = (id) => records.get(id) ?? facts.get(id);
+    for (const entity of [...records.values(), ...facts.values()]) {
+      for (const id of linkIds(entity.supersededBy)) link('predecessors', id, entity);
+      for (const id of linkIds(entity.supersedes)) link('successors', id, entity);
+    }
+    for (const record of delivered) {
+      for (const id of linkIds(record.supersededBy)) if (entityOf(id)) link('successors', record.id, entityOf(id));
+      for (const id of linkIds(record.supersedes)) if (entityOf(id)) link('predecessors', record.id, entityOf(id));
+    }
+    const evidenceOf = (record) => temporalEvidence(record, {
+      kind: facts.get(record.id) === record ? 'fact' : record.kind,
+      successors: linksOf('successors', record.id), predecessors: linksOf('predecessors', record.id),
+      at: asOf ?? currentAt, asOf
+    });
     let shortened = false;
     const items = candidates.slice(0, page.limit).map(({ record, score, ranks }) => {
       const shown = canonicalRecord(record);
       const line = established && input.compact === true ? t1Line(shown, lineContext) : null;
       if (line?.decisiveOmitted.length) shortened = true;
-      return line && !line.decisiveOmitted.length ? { tier: 'T1', line, score, ranks } : { tier: 'T2', record: shown, score, ranks };
+      const evidence = evidenceOf(record);
+      return line && !line.decisiveOmitted.length ? { tier: 'T1', line, score, ranks, temporalEvidence: evidence } : { tier: 'T2', record: shown, score, ranks, temporalEvidence: evidence };
     });
     const byKind = { decision: 0, attempt: 0, memory: 0, fact: 0 };
     // A legacy fact may be stored with no kind; it is still a fact.
@@ -3533,6 +3566,13 @@ export function createShadowGraph(options = {}) {
       limitation: established
         ? { code: 'semantic_unavailable', detail: 'Relevance rests on the lexical and graph signals over the records themselves, with recency only ordering them. The semantic signal is unavailable on this path, so the counts cover what those signals found, not every record related in meaning alone.' }
         : { code: 'relevance_not_established', detail: 'No lexical, semantic or graph signal found a relevant record, so the working set is delivered in full instead of nothing. The semantic signal is unavailable on this path.' },
+      // How many delivered records have no stored event time, so no as-of
+      // placement beyond their recording (§17.5).
+      temporal: {
+        asOf,
+        eventTimeUnknown: items.filter((item) => item.temporalEvidence.eventTime.state === 'unknown').length,
+        recordingOrderOnly: items.filter((item) => item.temporalEvidence.currentState?.basis === 'recording_order_only').length
+      },
       // The claim class of each delivered line, in item order, where a
       // truncated payload still carries it (§17.2).
       lines: items.filter(({ tier }) => tier === 'T1').map(({ line }) => ({ recordId: line.recordId, claimClass: line.claimClass, requiresExpansion: line.requiresExpansion })),
@@ -3687,14 +3727,27 @@ export function createShadowGraph(options = {}) {
   // What resolves an apparent conflict between two records, from their own
   // fields: an explicit supersession, validity windows that do not overlap,
   // or, for facts, the same value.
+  //
+  // A same-key write supersedes the earlier fact or memory and closes its window
+  // at the new one's start. When only the recording order tells two versions
+  // apart -- their event times unknown or equal, and no end the earlier one's
+  // writer declared by the later one's start -- neither that supersession nor
+  // that closed window decides anything, linked or not (§17.5, PR-29).
   function basisOf(left, right) {
     const basis = [];
     const links = (from, to) => linkIds(from.supersededBy).includes(to.id) || linkIds(from.supersedes).includes(to.id);
-    if (links(left, right) || links(right, left)) basis.push('explicit_supersession');
+    const kindOf = (record) => (facts.get(record.id) === record ? 'fact' : record.kind);
+    const kind = kindOf(left);
+    const linked = links(left, right) || links(right, left);
+    const startOf = (record) => instantMs(versionTimes(record, kind).validFrom) ?? Number.NEGATIVE_INFINITY;
+    const leftFirst = linked ? linkIds(left.supersededBy).includes(right.id) || linkIds(right.supersedes).includes(left.id) : startOf(left) <= startOf(right);
+    const [earlier, later] = leftFirst ? [left, right] : [right, left];
+    const byRecordingOrder = kind === kindOf(right) && ['fact', 'memory'].includes(kind) && supersessionOrder(earlier, later, kind) === 'recording_order_only';
+    if (linked && !byRecordingOrder) basis.push('explicit_supersession');
     if (facts.get(left.id) === left && facts.get(right.id) === right) {
       const [a, b] = [validityWindow(left), validityWindow(right)];
       const before = (earlier, later) => earlier.to !== null && later.from !== null && compareInstants(earlier.to, later.from) <= 0;
-      if (before(a, b) || before(b, a)) basis.push('different_times');
+      if (!byRecordingOrder && (before(a, b) || before(b, a))) basis.push('different_times');
       if (JSON.stringify(canonical(left.value)) === JSON.stringify(canonical(right.value))) basis.push('same_value');
     }
     return basis;

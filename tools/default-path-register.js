@@ -302,6 +302,7 @@ export const REGISTER = Object.freeze([
   m('relevant.limitSource', 'completeness'),
   entry('relevant.limitation.detail', 'current state', 'completeness', G),
   m('relevant.limitation.**', 'completeness'),
+  m('relevant.temporal.**', 'completeness'),
   m('relevant.lines[].recordId', 'provenance'),
   m('relevant.lines[].requiresExpansion', 'completeness'),
   m('relevant.lines.**', 'verification state'),
@@ -311,6 +312,14 @@ export const REGISTER = Object.freeze([
   m('relevant.items[].tier', 'provenance'),
   m('relevant.items[].score', 'evidence'),
   m('relevant.items[].ranks.**', 'evidence'),
+  // Temporal evidence (PR-29): derived from stored times and supersession.
+  m('relevant.items[].temporalEvidence.recordedAt', 'provenance'),
+  c('relevant.items[].temporalEvidence.eventTime.**', 'historical fact'),
+  m('relevant.items[].temporalEvidence.currentState.basis', 'evidence'),
+  m('relevant.items[].temporalEvidence.currentState.evidence.**', 'evidence'),
+  m('relevant.items[].temporalEvidence.currentState.evidenceOmitted', 'completeness'),
+  c('relevant.items[].temporalEvidence.currentState.**', 'current state'),
+  c('relevant.items[].temporalEvidence', 'current state'),
   // A T1 line: derived, never canonical. Its text quotes the record in a
   // template, so, being mixed, it is not marked generated (the compact-tier
   // suite holds the template to attributable, non-imperative wording).

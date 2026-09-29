@@ -128,7 +128,8 @@ test('AC-031: same-key facts resolve by explicit supersession and different time
   const { graph, tick } = fixture();
   const older = graph.addFact({ project: 'alpha', key: 'latency', value: '5ms', validFrom: '2025-01-01T00:00:00.000Z' });
   tick(LATER);
-  const newer = graph.addFact({ project: 'alpha', key: 'latency', value: '30ms', validFrom: '2026-03-02T00:00:00.000Z' });
+  // An event time apart from the recording time (PR-29: one equal to it is unknown).
+  const newer = graph.addFact({ project: 'alpha', key: 'latency', value: '30ms', validFrom: '2026-02-15T00:00:00.000Z' });
   const line = graph.context({ project: 'alpha', query: 'latency', compact: true }).relevant.items.find((item) => item.line.recordId === newer.id).line;
   const { investigation } = graph.expand(handleInput(line.expansion));
   assert.deepEqual(investigation.budget, { maxExpansions: 5, used: 1, outcome: 'within_budget' });
@@ -301,13 +302,22 @@ test('the superseded side names its replacement; position lines carry the reques
   assert.deepEqual(granted.investigation.pairs[0].position.expansion.scope, { project: 'alpha', grantId: grant.accessId });
 });
 
-test('a memory names the memory it superseded as a counterpart', () => {
+// PR-29 (§17.5 row 3): versions a same-key write separated only by the
+// recording order are not resolved by it; with distinct event times they are,
+// and so is a legacy fact whose declared end precedes the next one's start.
+test('a memory names the memory it superseded as a counterpart, resolved only by distinct event times', () => {
   const graph = createShadowGraph({ now: () => NOW });
   const older = graph.remember({ project: 'alpha', memoryType: 'note', key: 'fridays', text: 'deploy on fridays is fine' }).memory;
   const newer = graph.remember({ project: 'alpha', memoryType: 'note', key: 'fridays', text: 'deploys wait until monday' }).memory;
   const line = graph.context({ project: 'alpha', query: 'monday', compact: true }).relevant.items.find((item) => item.line.recordId === newer.id).line;
   const [pair] = graph.expand(handleInput(line)).investigation.pairs;
-  assert.deepEqual([pair.recordId, pair.relation, pair.state, pair.basis], [older.id, 'supersedes', 'resolved', ['explicit_supersession']]);
+  assert.deepEqual([pair.recordId, pair.relation, pair.state, pair.basis], [older.id, 'supersedes', 'unresolved', []]);
+  const dated = createShadowGraph({ now: () => NOW });
+  const before = dated.remember({ project: 'alpha', memoryType: 'note', key: 'fridays', text: 'deploy on fridays is fine', validFrom: '2025-01-01T00:00:00.000Z' }).memory;
+  const after = dated.remember({ project: 'alpha', memoryType: 'note', key: 'fridays', text: 'deploys wait until monday', validFrom: '2025-06-01T00:00:00.000Z' }).memory;
+  const datedLine = dated.context({ project: 'alpha', query: 'monday', compact: true }).relevant.items.find((item) => item.line.recordId === after.id).line;
+  const [datedPair] = dated.expand(handleInput(datedLine)).investigation.pairs;
+  assert.deepEqual([datedPair.recordId, datedPair.state, datedPair.basis], [before.id, 'resolved', ['explicit_supersession']]);
 });
 
 test('each basis from the records themselves: the same value in any key order, and windows that overlap', () => {

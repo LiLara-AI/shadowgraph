@@ -553,6 +553,10 @@ const WIRE_BUDGETS = {
   // Measured on 2026-09-29: full 58789/62489/298375, verifier full
   // 59937/63742/302922, compact 38716/40411/210383. Every tier grew past its
   // ceiling, and each is re-set with ~2% headroom (recorded variance).
+  // PR-28 adds semantic.indexed to the recall signals and PR-29 the relevant
+  // block's temporal evidence. Measured on 2026-09-29: full 58793/62493/301024,
+  // verifier full 59941/63746/305571, compact 38720/40415/212682; every ceiling
+  // unchanged.
   'withoutVerifier.full': { bare: 59_900, annotated: 63_700, structured: 303_600 },
   'withoutVerifier.compact': { bare: 39_500, annotated: 41_200, structured: 213_900 },
   'withVerifier.full': { bare: 61_100, annotated: 65_000, structured: 308_300 },
@@ -842,7 +846,10 @@ test('the default read advertises relevance, and every shape of its relevant blo
   assert.deepEqual(['query', 'focalId', 'asOf', 'compact'].map((name) => tool.inputSchema.properties[name]?.type), ['string', 'string', 'string', 'boolean']);
   assert.equal(byName.get('shadowgraph_review_context').inputSchema.properties.query, undefined);
   const relevantSchema = tool.outputSchema.properties.relevant;
-  assert.deepEqual(relevantSchema.required, ['scope', 'relevance', 'fallback', 'byKind', 'total', 'returned', 'omitted', 'hasMore', 'complete', 'limitSource', 'limitation', 'lines', 'processing', 'expansion', 'items']);
+  assert.deepEqual(relevantSchema.required, ['scope', 'relevance', 'fallback', 'byKind', 'total', 'returned', 'omitted', 'hasMore', 'complete', 'limitSource', 'limitation', 'temporal', 'lines', 'processing', 'expansion', 'items']);
+  // PR-29: every item carries its temporal evidence.
+  assert.deepEqual(relevantSchema.properties.items.items.properties.temporalEvidence.required, ['recordedAt', 'eventTime', 'currentState']);
+  assert.ok(relevantSchema.properties.items.items.required.includes('temporalEvidence'));
   assert.deepEqual(relevantSchema.properties.byKind.required, ['decision', 'attempt', 'memory', 'fact']);
   assert.deepEqual(relevantSchema.properties.lines.items.required, ['recordId', 'claimClass', 'requiresExpansion']);
   for (const field of ['polarity', 'scope', 'preconditions', 'status', 'provenance', 'boundRevision', 'decisiveOmitted', 'requiresExpansion', 'expansion']) {
@@ -899,8 +906,9 @@ test('every shape of an expansion matches its advertised schema', () => {
     { id: 'fact-eu', kind: 'fact', project: 'alpha', key: 'region', value: 'eu', status: 'active', validFrom: '2025-01-01T00:00:00.000Z' },
     { id: 'fact-us', kind: 'fact', project: 'alpha', key: 'region', value: 'us', status: 'active', validFrom: '2025-01-01T00:00:00.000Z' }
   ] });
-  graph.addFact({ project: 'alpha', key: 'latency', value: '5ms' });
-  graph.addFact({ project: 'alpha', key: 'latency', value: '30ms' });
+  // Distinct stored event times resolve the pair (PR-29: without them only the recording order would).
+  graph.addFact({ project: 'alpha', key: 'latency', value: '5ms', validFrom: '2025-01-01T00:00:00.000Z' });
+  graph.addFact({ project: 'alpha', key: 'latency', value: '30ms', validFrom: '2025-06-01T00:00:00.000Z' });
   const decision = graph.addDecision({ project: 'alpha', title: 'region rollout', chosen: 'eu first' });
   graph.addDecision({ project: 'beta', title: 'region beta', chosen: 'b' });
   const grant = privilegedIssueAccess(graph, { type: 'grant', scope: { projects: ['beta'] }, surfaces: ['cli'], expiresAt: '2099-01-01T00:00:00.000Z', reason: 'schema fixture' }).entry;

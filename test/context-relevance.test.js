@@ -114,7 +114,7 @@ test('plan §17.2: the head declares scope, counts, completeness, limitation, pr
   const result = graph.context({ project: 'alpha', query: 'deploy', compact: true });
   assert.deepEqual(Object.keys(result).slice(0, 2), ['project', 'relevant']);
   const { relevant } = result;
-  assert.deepEqual(Object.keys(relevant), ['scope', 'relevance', 'fallback', 'byKind', 'total', 'returned', 'omitted', 'hasMore', 'complete', 'limitSource', 'limitation', 'lines', 'processing', 'expansion', 'items']);
+  assert.deepEqual(Object.keys(relevant), ['scope', 'relevance', 'fallback', 'byKind', 'total', 'returned', 'omitted', 'hasMore', 'complete', 'limitSource', 'limitation', 'temporal', 'lines', 'processing', 'expansion', 'items']);
   // The claim class of each delivered line, in item order, where truncation still leaves it.
   assert.deepEqual(relevant.lines, relevant.items.map(({ line }) => ({ recordId: line.recordId, claimClass: line.claimClass, requiresExpansion: line.requiresExpansion })));
   assert.equal(relevant.lines.length, 2);
