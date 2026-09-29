@@ -463,3 +463,37 @@ an unchanged boundary the digest comparison is exact.
   investigation carry the handle's `derivedAt`, so the same handle over the same store gives the same bytes. A
   grant-bearing expansion is re-checked against the clock and records its audit, as every grant read does. The
   ledger lookup and a purge-then-restore fixture arrive with PR-37.
+
+**A11. The runtime miss ledger's reader (§6.3-§6.4; PR-28a). Variance in mechanism and shape, recorded as plan
+revision 6 requires (VAR-10, VAR-19).** The ledger is the top-level store collection `runtimeMisses`: derived
+operational data, not canonical, not journalled and not rebuilt from the journal. This change-set is its reader
+floor and lands alone; nothing writes an entry until PR-28.
+- The entry shape is frozen (`src/internal/miss-ledger.js`): exactly `missId` (a minted `miss_` id), `at`, `source`,
+  `evidence`, `scope` (exactly `project`, `originId`, `requestState`), `queryDigest` (a lower-case SHA-256 hex
+  digest, never the query text), `recordId`, `boundRevision` (null or `{ recordId, digest }` of that same record),
+  `tier` (`T0` or `T1`), `stage` (§6.3's three), `rank` (null exactly when the stage is `not_ranked`, a positive
+  integer otherwise), `signals` (the four signals, each exactly `{ available, matched }`, an unavailable signal
+  matching nothing) and `reason` (a trace code: a lower-case letter, then at most 63 lower-case letters, digits or
+  underscores). A selected request names its project and an unresolved one names none, as `resolveScope` makes
+  them; an origin is null or a non-blank id. An unknown field is refused, the query is a digest and the id and the
+  reason are codes, so none of them can carry text. The record, project and origin fields are the store's own
+  identifiers as the writer records them; the reader neither checks them against the store nor bounds their
+  length, because record ids and project names are arbitrary strings (untrimmed, as `resolveScope` keeps them).
+  Import, replace, load and restore refuse a malformed ledger with `runtime_miss_ledger_malformed`, naming
+  positions, never values.
+- Departures from the §6.3 [ENGINEERING] shape: `scope` also records `originId`; `source` is `runtime` only and
+  `evidence` is `fallback_recovery` or `explicit_correction` only, because evaluation misses stay in the
+  evaluation's own report; `reason` is a code the writer maps from the retrieval trace, never the trace's text;
+  `boundRevision` is null when the path saw no revision of the record.
+- Every store path carries it (JSON and SQLite, backup and restore, memory-only restore included: it is memory,
+  not authority); no public read returns it. The count cap §6.4 asks for is the writer's (PR-28, measured in P4);
+  the reader refuses no ledger for its length.
+- A project's purge removes, in both modes, every entry recorded in the project and every entry naming a record,
+  alternative, fact or relation the purge removes, whatever scope recorded it (a grant-widened read ranks across
+  projects, and a record an unresolved read named may later be attributed to one), and counts them
+  (`runtimeMisses` in the purge preview and result); the last entries take the collection with them. A SQLite
+  save that removes an entry is destructive, so the purge is scrubbed with `secure_delete` and `VACUUM`.
+- A build below this floor would carry the ledger as an unknown collection and never purge it, so conversion to
+  schema 6 or 5 leaves it out, names it in `excludedCollections` and reports only how many entries it held in
+  `excludedEntryCounts`; the entries stay in the preservation copy. The schema-7 builds below this floor (PR-20
+  to PR-27) are unreleased; once entries exist, a rollback goes no further back than this floor.

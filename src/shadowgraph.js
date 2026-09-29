@@ -21,6 +21,7 @@ import { accessScopeContains, validateAccess, intersectAccessScope, accessDiagno
 import { createAccessLifecycle } from './internal/access-lifecycle.js';
 import { assertCreationInput } from './internal/creation-id.js';
 import { attemptOutcome } from './internal/outcome.js';
+import { RUNTIME_MISSES, missReachedBy, runtimeMissLedgerIssue } from './internal/miss-ledger.js';
 import { T1_DERIVATION_VERSION, t1Digest, t1Inputs, t1Line } from './compact-tier.js';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
@@ -2858,7 +2859,12 @@ export function createShadowGraph(options = {}) {
       return item.payload ? ownedByProject(item.payload, project) : item.project === project && project !== 'default';
     };
     const removedEvents = new Set(events.filter(referencesRemoved));
-    return { ids, relationIds, removedEvents, referencesRemoved, summary: { project, records: recordsForProject.length, facts: factsForProject.length, relations: relationIds.size, events: removedEvents.size, journal: journal.filter(referencesRemoved).length } };
+    // The runtime miss ledger's entries recorded in the project, or naming an
+    // entity it removes, go with it (PR-28a).
+    const removedEntityIds = new Set([...ids, ...relationIds]);
+    const reachesMiss = (entry) => missReachedBy(entry, project, removedEntityIds);
+    const misses = Array.isArray(extras.get(RUNTIME_MISSES)) ? extras.get(RUNTIME_MISSES) : [];
+    return { ids, relationIds, removedEvents, referencesRemoved, reachesMiss, summary: { project, records: recordsForProject.length, facts: factsForProject.length, relations: relationIds.size, events: removedEvents.size, journal: journal.filter(referencesRemoved).length, runtimeMisses: misses.filter(reachesMiss).length } };
   }
 
   function projectSummary(project) {
@@ -2873,7 +2879,7 @@ export function createShadowGraph(options = {}) {
   function purgeProject(project, purgeOptions = {}) {
     const mode = purgeOptions.mode ?? (purgeOptions.hard === true ? 'hard' : 'logical');
     if (!['logical', 'hard'].includes(mode)) throw new Error('Purge mode must be logical or hard');
-    const { summary, ids: removed, relationIds: removedRelationIds, removedEvents: eventsToRemove, referencesRemoved } = projectPurgeSelection(project);
+    const { summary, ids: removed, relationIds: removedRelationIds, removedEvents: eventsToRemove, referencesRemoved, reachesMiss } = projectPurgeSelection(project);
     const idempotencyKeysToRemove = [...idempotency]
       .filter(([, value]) => removed.has(value?.id))
       .map(([key]) => key);
@@ -2938,6 +2944,13 @@ export function createShadowGraph(options = {}) {
     journalSeq = purgeEntry.seq;
     journalEpoch = stagedJournalEpoch;
     authority.purge(project);
+    // In both modes the miss-ledger entries the purge reaches are removed, and
+    // the last entries take the collection with them (PR-28a).
+    if (summary.runtimeMisses) {
+      const kept = extras.get(RUNTIME_MISSES).filter((entry) => !reachesMiss(entry));
+      if (kept.length) extras.set(RUNTIME_MISSES, kept);
+      else extras.delete(RUNTIME_MISSES);
+    }
 
     return {
       ...summary,
@@ -4857,6 +4870,16 @@ function validateImportShape(source) {
   if (source.journalSeq !== undefined && (!Number.isSafeInteger(source.journalSeq) || source.journalSeq < 0)) throw new Error('journalSeq must be a non-negative safe integer');
   if (source.journalEpoch !== undefined && source.journalEpoch !== null && (!Number.isSafeInteger(source.journalEpoch) || source.journalEpoch <= 0)) throw new Error('journalEpoch must be a positive safe integer or null');
   if (array(STORED_WITHOUT_PROJECT).some((id) => typeof id !== 'string' || !id)) throw new Error(`${STORED_WITHOUT_PROJECT} must be an array of entity ids`);
+  // PR-28a: the runtime miss ledger's shape is frozen; import and restore
+  // refuse anything else.
+  if (source[RUNTIME_MISSES] !== undefined) {
+    const issue = runtimeMissLedgerIssue(source[RUNTIME_MISSES]);
+    if (issue) {
+      const error = new Error(`The runtime miss ledger is malformed (runtime_miss_ledger_malformed): ${issue}`);
+      error.code = 'runtime_miss_ledger_malformed';
+      throw error;
+    }
+  }
   for (const [index, item] of array('records').entries()) {
     if (!item || typeof item !== 'object' || !['decision', 'attempt', 'memory'].includes(item.kind)) throw new Error(`records[${index}] is malformed`);
     if (typeof item.id !== 'string' || !item.id) throw new Error(`records[${index}].id must be a non-empty string`);

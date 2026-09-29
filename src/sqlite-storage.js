@@ -11,6 +11,7 @@ import { mergeAuthorityRestore } from './authority-restore.js';
 import { NODE_SQLITE_NOT_APPLICABLE_REASON } from './runtime-capabilities.js';
 import { SCHEMA_VERSION } from './shadowgraph.js';
 import { extraCollections, isExtraCollectionKey, refusePublicExport } from './internal/collections.js';
+import { RUNTIME_MISSES } from './internal/miss-ledger.js';
 
 // One generic carrier for every top-level collection this build does not
 // handle natively (plan v1.4.4 §10.9.8): one row per collection, the whole
@@ -137,12 +138,21 @@ export async function createSqliteStore(filePath, options = {}) {
     ['journal', 'id']
   ];
 
+  // The entries of a keyed extra collection are rows too: a save that removes
+  // one is destructive, so a purge's removal is scrubbed (PR-28a).
+  const keyedExtraCollections = [[RUNTIME_MISSES, 'missId']];
+  const entriesOf = (payload, collection) => (Array.isArray(payload?.[collection]) ? payload[collection] : []);
+
   function removesPersistedRows(current, next) {
     const nextExtras = new Set(extraCollections(next).map(([collection]) => collection));
     return extraCollections(current).some(([collection]) => !nextExtras.has(collection))
       || persistedCollections.some(([collection, key]) => {
         const nextKeys = new Set((next[collection] ?? []).map((item) => item?.[key]));
         return (current[collection] ?? []).some((item) => !nextKeys.has(item?.[key]));
+      })
+      || keyedExtraCollections.some(([collection, key]) => {
+        const nextKeys = new Set(entriesOf(next, collection).map((item) => item?.[key]));
+        return entriesOf(current, collection).some((item) => !nextKeys.has(item?.[key]));
       });
   }
 

@@ -14,6 +14,19 @@ import { backupFile } from './backup.js';
 import { createStorage } from './storage.js';
 import { validateRestorePayload } from './restore-validation.js';
 import { extraCollections } from './internal/collections.js';
+import { RUNTIME_MISSES } from './internal/miss-ledger.js';
+
+// Collections whose reader floor is above every downgrade target: a build below
+// it would carry their entries but never purge them, so conversion leaves them
+// out and reports only how many entries each held (PR-28a).
+const BELOW_FLOOR_COLLECTIONS = Object.freeze([RUNTIME_MISSES]);
+function excludeBelowFloor(source, report) {
+  for (const collection of BELOW_FLOOR_COLLECTIONS) {
+    if (source[collection] === undefined) continue;
+    if (!report.excludedCollections.includes(collection)) report.excludedCollections.push(collection);
+    report.excludedEntryCounts[collection] = Array.isArray(source[collection]) ? source[collection].length : 0;
+  }
+}
 import { privilegedSnapshot } from './internal/snapshot.js';
 
 const sha256 = async (path) => createHash('sha256').update(await readFile(path)).digest('hex');
@@ -144,13 +157,15 @@ function assertSchema7Source(source) {
 //     classify from its prose, and whatever refers to it;
 //   - the journal history, which schema-6 readers cannot replay once it holds
 //     schema-7 entries -- the copy starts from one schema-6 baseline instead.
-// Every other collection is carried: each schema-6 reader preserves them. The
+// Every other collection is carried, each schema-6 reader preserving them,
+// except those whose reader floor is above schema 6 (BELOW_FLOOR_COLLECTIONS):
+// they are left out and counted. The
 // authority collections among them are the same grants a backup already
 // holds; the report says they were carried.
 export function downgradeToSchema6(snapshot, { now = () => new Date().toISOString() } = {}) {
   assertSchema7Source(snapshot);
   const source = structuredClone(snapshot);
-  const report = { fromSchemaVersion: 7, toSchemaVersion: 6, removedFields: [], excluded: [], carriedCollections: [], journal: null };
+  const report = { fromSchemaVersion: 7, toSchemaVersion: 6, removedFields: [], excluded: [], carriedCollections: [], excludedCollections: [], excludedEntryCounts: {}, journal: null };
   const excludedIds = new Set();
   const byId = new Map();
   const convert = (entity) => {
@@ -180,8 +195,9 @@ export function downgradeToSchema6(snapshot, { now = () => new Date().toISOStrin
   for (const entry of journal) byType[entry?.type ?? 'unknown'] = (byType[entry?.type ?? 'unknown'] ?? 0) + 1;
   const seq = (Number.isSafeInteger(source.journalSeq) ? source.journalSeq : 0) + 1;
   report.journal = { replacedEntries: journal.length, byType, baselineSeq: seq };
-  const extras = extraCollections(source);
+  const extras = extraCollections(source).filter(([key]) => !BELOW_FLOOR_COLLECTIONS.includes(key));
   report.carriedCollections = extras.map(([key]) => key);
+  excludeBelowFloor(source, report);
   return {
     report,
     payload: {
@@ -214,7 +230,12 @@ function downgradeTo(snapshot, toSchemaVersion, options) {
   }
   return {
     payload: five.payload,
-    report: { ...five.report, fromSchemaVersion: 7, removedFields, excluded: [...six.report.excluded, ...five.report.excluded], journal: { ...six.report.journal, baselineSeq: five.report.journal.baselineSeq } }
+    report: {
+      ...five.report, fromSchemaVersion: 7, removedFields, excluded: [...six.report.excluded, ...five.report.excluded],
+      excludedCollections: [...new Set([...six.report.excludedCollections, ...five.report.excludedCollections])],
+      excludedEntryCounts: { ...six.report.excludedEntryCounts, ...five.report.excludedEntryCounts },
+      journal: { ...six.report.journal, baselineSeq: five.report.journal.baselineSeq }
+    }
   };
 }
 
@@ -245,7 +266,7 @@ function assertSchema6Source(source) {
 export function downgradeToSchema5(snapshot, { now = () => new Date().toISOString() } = {}) {
   assertSchema6Source(snapshot);
   const source = structuredClone(snapshot);
-  const report = { fromSchemaVersion: source.schemaVersion, toSchemaVersion: 5, removedFields: [], excluded: [], excludedCollections: [], journal: null };
+  const report = { fromSchemaVersion: source.schemaVersion, toSchemaVersion: 5, removedFields: [], excluded: [], excludedCollections: [], excludedEntryCounts: {}, journal: null };
   const excludedIds = new Set();
   const byId = new Map();
   // Schema 5 has a single "default". A memory or fact that the real project
@@ -294,6 +315,7 @@ export function downgradeToSchema5(snapshot, { now = () => new Date().toISOStrin
   const seq = (Number.isSafeInteger(source.journalSeq) ? source.journalSeq : 0) + 1;
   report.journal = { replacedEntries: journal.length, byType, baselineSeq: seq };
   report.excludedCollections = extraCollections(source).map(([key]) => key);
+  excludeBelowFloor(source, report);
   return {
     report,
     payload: {

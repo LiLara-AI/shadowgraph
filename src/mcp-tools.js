@@ -1582,7 +1582,7 @@ const CATALOG = [
     outputSchema: {
       type: 'object',
       description: 'What the purge removed.',
-      required: ['project', 'records', 'facts', 'relations', 'events', 'journal', 'removed', 'mode', 'journalEntriesRedacted', 'journalEntriesRemoved', 'removedJournalSequences', 'idempotencyRemoved', 'journalEntryId'],
+      required: ['project', 'records', 'facts', 'relations', 'events', 'journal', 'runtimeMisses', 'removed', 'mode', 'journalEntriesRedacted', 'journalEntriesRemoved', 'removedJournalSequences', 'idempotencyRemoved', 'journalEntryId'],
       properties: {
         project: { type: 'string', description: 'The project that was purged.' },
         records: integerCount('Decisions, attempts, and memories that were present.'),
@@ -1590,6 +1590,7 @@ const CATALOG = [
         relations: integerCount('Relationships that were present.'),
         events: integerCount('Compatibility events that were present.'),
         journal: integerCount('Journal entries that were present for the project.'),
+        runtimeMisses: integerCount('Runtime miss-ledger entries recorded in the project or naming its entities, removed with it.'),
         removed: integerCount('Entities removed from live state, including alternatives.'),
         mode: { type: 'string', enum: ['logical', 'hard'], description: 'The mode that was applied.' },
         journalEntriesRedacted: integerCount('Entries reduced to an audit skeleton by a logical purge.'),
@@ -1790,14 +1791,15 @@ const CATALOG = [
     outputSchema: {
       type: 'object',
       description: 'What a purge of this project would remove.',
-      required: ['project', 'records', 'facts', 'relations', 'events', 'journal'],
+      required: ['project', 'records', 'facts', 'relations', 'events', 'journal', 'runtimeMisses'],
       properties: {
         project: { type: 'string', description: 'The project that was previewed.' },
         records: integerCount('Decisions, attempts, and memories in the project.'),
         facts: integerCount('Facts in the project.'),
         relations: integerCount('Relationships touching the project.'),
         events: integerCount('Compatibility events for the project.'),
-        journal: integerCount('Journal entries recorded for the project.')
+        journal: integerCount('Journal entries recorded for the project.'),
+        runtimeMisses: integerCount('Runtime miss-ledger entries recorded in the project or naming its entities, which a purge removes.')
       }
     }
   },
