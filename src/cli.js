@@ -15,6 +15,7 @@ import { privilegedSnapshot } from './internal/snapshot.js';
 import * as privileged from './internal/snapshot.js';
 import { accessContext, bindWorkspaceProject, currentAccessOperation, discoverWorkspace, hasAccessReference } from './internal/access-transport.js';
 import { confirmOwnerAction, ownerAnswer } from './internal/owner-confirmation.js';
+import { changeHookSettings, defaultSettingsPath } from './host-hooks.js';
 
 const [requestedCommand, ...arguments_] = process.argv.slice(2);
 let command = ({ grant: 'issue-access', delegate: 'delegate-access' })[requestedCommand] ?? requestedCommand;
@@ -72,6 +73,16 @@ async function deliverFromHook() {
     const { readHookInput, runDeliver } = await import('./delivery.js');
     await runDeliver({ args: rest, readInput: () => readHookInput(), file, storage: storageType, write: (text) => process.stdout.write(text) });
   } catch {}
+}
+
+// The Claude Code hook block (plan rev6 PR-31) is written into one settings
+// file, the user's by default, and opens no store; the owner confirms every
+// change at a terminal, a scratch file apart (src/host-hooks.js).
+async function changeHooks() {
+  const at = rest.indexOf('--settings');
+  const named = at >= 0 ? rest[at + 1] : undefined;
+  if (rest.length !== (at >= 0 ? 2 : 0) || (at >= 0 && (!named || named.startsWith('-')))) throw new Error(`Usage: shadowgraph ${command} [--settings <path>]`);
+  return changeHookSettings(named ?? defaultSettingsPath(), command === 'install-hooks' ? 'install' : 'uninstall');
 }
 
 async function runOneShot() {
@@ -272,7 +283,7 @@ async function runOneShot() {
     else if (command === 'decision') { result = graph.addDecision(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'attempt') { result = graph.addAttempt(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
     else {
-      throw new Error('Usage: shadowgraph <setup|doctor|serve|mcp|stats|list|search|retrieve|recall|remember|markdown-sync|context|review-context|deliver|review|reconsider|maintain|signals|ack|validate|repair-plan|backup|restore|migrate|downgrade|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge|request-access|issue-access|delegate-access|revoke-access|discard-access|access-status|bind|attribute> [JSON/path] (restore <path> [--memory-only]). Writes require project or originId (or confirmed workspace binding). Creation IDs are generated: omit id, retain returned IDs, and use idempotencyKey for retries. Reference IDs remain supported.');
+      throw new Error('Usage: shadowgraph <setup|doctor|serve|mcp|stats|list|search|retrieve|recall|remember|markdown-sync|context|review-context|deliver|install-hooks|uninstall-hooks|review|reconsider|maintain|signals|ack|validate|repair-plan|backup|restore|migrate|downgrade|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge|request-access|issue-access|delegate-access|revoke-access|discard-access|access-status|bind|attribute> [JSON/path] (restore <path> [--memory-only]; install-hooks and uninstall-hooks [--settings <path>]). Writes require project or originId (or confirmed workspace binding). Creation IDs are generated: omit id, retain returned IDs, and use idempotencyKey for retries. Reference IDs remain supported.');
     }
     return result;
   } finally {
@@ -284,6 +295,7 @@ try {
   if (command === 'mcp') await startMcp();
   else if (command === 'serve') await startHttp();
   else if (command === 'deliver') await deliverFromHook();
+  else if (command === 'install-hooks' || command === 'uninstall-hooks') console.log(JSON.stringify(await changeHooks(), null, 2));
   else {
     const result = await runOneShot();
     if (result !== null && result !== undefined) console.log(JSON.stringify(result, null, 2));

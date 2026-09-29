@@ -52,6 +52,17 @@ Or copy `claude-code.mcp.json` to a project `.mcp.json`:
 
 Restart Claude Code after changing the configuration.
 
+### Claude Code hooks: memory at the moment it matters
+
+`claude-code.hooks.json` is the hook block that lets Claude Code receive relevant memory without a memory command: at `SessionStart` and `UserPromptSubmit` it runs `shadowgraph deliver --hook`, a read that never blocks or steers the host. Add or remove it with:
+
+```bash
+shadowgraph install-hooks
+shadowgraph uninstall-hooks
+```
+
+Both change `~/.claude/settings.json` (or the file `--settings` names, followed through any link to the file itself) only after you type `confirm` at a terminal; only a scratch file under the system's temporary directory is changed without asking. They keep every other setting and hook, and leave exactly one ShadowGraph generation. Run them with no Claude Code session open, since a session may rewrite its settings meanwhile (if the file changes while you decide, nothing is written). **Installing is not activating**: the installed hooks read nothing and print nothing until delivery is activated. Remove the hooks before uninstalling ShadowGraph, since each hook otherwise runs a command that no longer exists. A running Claude Code session keeps the hooks it started with until it is restarted.
+
 ## Cursor
 
 Copy `cursor.mcp.json` to project `.cursor/mcp.json` or user `~/.cursor/mcp.json`:

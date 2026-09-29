@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { access, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -147,6 +147,17 @@ try {
   const doctor = JSON.parse((await runNpm(['exec', '--', 'shadowgraph', 'doctor'], { cwd: appDirectory, env: cliEnv })).stdout);
   assert.equal(doctor.ok, true);
 
+  // The installed package's hook block, added to and removed from a settings
+  // file that is not the host's, leaves the file as it was.
+  const hookSettings = join(appDirectory, 'hook-settings-fixture.json');
+  const settingsBefore = `${JSON.stringify({ model: 'opus' }, null, 2)}\n`;
+  await writeFile(hookSettings, settingsBefore);
+  const hooked = JSON.parse((await runInstalledCli(installedCli, ['install-hooks', '--settings', hookSettings], { cwd: appDirectory, env: cliEnv })).stdout);
+  assert.deepEqual([hooked.changed, hooked.events], [true, ['SessionStart', 'UserPromptSubmit']]);
+  const unhooked = JSON.parse((await runInstalledCli(installedCli, ['uninstall-hooks', '--settings', hookSettings], { cwd: appDirectory, env: cliEnv })).stdout);
+  assert.deepEqual([unhooked.changed, unhooked.removed], [true, 2]);
+  assert.equal(await readFile(hookSettings, 'utf8'), settingsBefore);
+
   const memoryInput = {
     project: 'beta-demo',
     scope: { userId: 'alice' },
@@ -239,6 +250,7 @@ try {
     cleanDirectoryContainedSpaces: /\s/.test(appDirectory),
     installedPackage: true,
     cliSetupDoctor: true,
+    hooksInstallUninstall: true,
     cliRememberRestartRecall: true,
     changedFactReviewAfterRestart: true,
     mcpFullTools: fullList.result.tools.length,
