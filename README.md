@@ -214,13 +214,17 @@ Everything is a local file. The HTTP server binds to `127.0.0.1` and rejects non
 origins. There is no cloud service, no account, no telemetry, and no analytics — ShadowGraph makes
 no outbound network request unless you explicitly configure one.
 
-The two opt-ins that can send data off the machine are both off by default:
+The opt-ins that can send data off the machine are all off by default:
 
 - **Embeddings.** No endpoint is configured. A localhost OpenAI-compatible server works once
   configured; a remote endpoint additionally requires `SHADOWGRAPH_ALLOW_REMOTE_EMBEDDINGS=1`,
   because that means memory and query text leave your machine.
 - **Markdown export.** `markdown-sync` writes plaintext copies you control. ShadowGraph cannot find
   or delete those copies later — see [Storage, backup, and deletion](#storage-backup-and-deletion).
+- **Host delivery.** Inert unless you install the hooks and activate delivery for one store. Once
+  active, the records it delivers (credential-shaped values redacted first) become part of Claude
+  Code's session transcript and of what the model receives, like any context; ShadowGraph cannot
+  remove them from the transcript. See [the integrations guide](integrations/README.md).
 
 For shared local use, set a Bearer token:
 
@@ -330,7 +334,8 @@ shadowgraph recall '{"project":"my-app","query":"development environment"}'
 `remember` · `markdown-sync` · `context` · `review` · `maintain` · `signals` · `ack` · `validate` ·
 `repair-plan` · `backup` · `restore` · `decision` · `attempt` · `fact` · `outcome` · `status` ·
 `link` · `traverse` · `redact` · `supersede` · `purge-preview` · `purge` · `journal` · `rebuild` ·
-`confidence-evidence`
+`confidence-evidence` · `review-context` · `deliver` · `install-hooks` · `uninstall-hooks` ·
+`activate` · `deactivate`
 
 Full argument shapes are in the [API reference](docs/api-reference.md).
 </details>

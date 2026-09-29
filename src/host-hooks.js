@@ -1,10 +1,12 @@
-import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { homedir, tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
+import { createHash } from 'node:crypto';
+import { readdir, readFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { join, relative, sep } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import { gunzipSync } from 'node:zlib';
 import { confirmOwnerAction } from './internal/owner-confirmation.js';
+import { canonicalPath, isScratchFile, readText, writeJsonAtomically } from './internal/owner-files.js';
+import { tarEntries } from './internal/tar.js';
 
 // The Claude Code hook block (plan §18.1, §18.5): command handlers at
 // SessionStart and UserPromptSubmit only, running `shadowgraph deliver --hook`,
@@ -58,40 +60,42 @@ export function withShadowGraphHooks(settings, template) {
 
 export const defaultSettingsPath = () => join(homedir(), '.claude', 'settings.json');
 
-// The file a path reaches, whatever name reaches it: a short (8.3) name, a
-// junction or a link resolves to the file's own path, through its nearest
-// existing parent when the file does not exist yet. Checks and writes use it,
-// so a link stays a link and its target is what changes.
-async function canonicalPath(path) {
-  const missing = [];
-  for (let at = resolve(path); ; at = dirname(at)) {
-    try {
-      return join(await realpath(at), ...missing.reverse());
-    } catch (error) {
-      if (error.code !== 'ENOENT' || dirname(at) === at) throw error;
-      missing.push(basename(at));
-    }
-  }
+// A pinned runtime (programme plan revision 6 §5): a directory holding a gate
+// commit's packed build, `runtime.json` naming its commit, tree and tarball
+// digest, and the tarball itself. Checked again here: the tarball against its
+// digest, and every file the hook runs against the tarball, byte for byte,
+// with none missing and none added. Its path names ShadowGraph, so the handler
+// that runs it is recognised as ShadowGraph's.
+export async function pinnedRuntime(directory) {
+  const path = await canonicalPath(directory);
+  const refused = () => new Error(`runtime_not_verified (${path})`);
+  let manifest;
+  try { manifest = JSON.parse(await readFile(join(path, 'runtime.json'), 'utf8')); } catch { throw new Error(`runtime_not_found (${path})`); }
+  const tarball = await readFile(join(path, 'package.tgz'));
+  const digest = createHash('sha256').update(tarball).digest('hex');
+  if (!/shadowgraph/iu.test(path) || !/^[0-9a-f]{40}$/u.test(manifest?.commit ?? '') || !/^[0-9a-f]{40}$/u.test(manifest?.tree ?? '') || manifest.tarballSha256 !== digest) throw refused();
+  const packed = new Map();
+  try {
+    for (const { name, type, body } of tarEntries(gunzipSync(tarball))) if (type === '0') packed.set(name.split('/').slice(1).join('/'), body);
+  } catch { throw refused(); }
+  const present = (await readdir(path, { recursive: true, withFileTypes: true }))
+    .filter((entry) => !entry.isDirectory())
+    .map((entry) => relative(path, join(entry.parentPath ?? entry.path, entry.name)).split(sep).join('/'))
+    .filter((name) => name !== 'package.tgz' && name !== 'runtime.json');
+  if (present.length !== packed.size || present.some((name) => !packed.has(name))) throw refused();
+  for (const [name, body] of packed) if (!(await readFile(join(path, name))).equals(body)) throw refused();
+  return { path, commit: manifest.commit, tree: manifest.tree, tarballSha256: digest };
 }
 
-// Every change asks the owner to type `confirm` at a terminal, except for a
-// scratch file: one under the system's temporary directory, in no `.claude`
-// directory, and under no name Claude Code reads. This guards host settings
-// against an accidental change; a process that can write the file itself is
-// not stopped.
-async function isScratchFile(path) {
-  const temporary = await realpath(tmpdir()).catch(() => null);
-  if (temporary === null) return false;
-  const inside = relative(temporary, path);
-  return inside !== '' && !inside.startsWith('..') && !isAbsolute(inside)
-    && !path.split(/[\\/]/u).some((segment) => segment.toLowerCase() === '.claude')
-    && !/^(?:\.claude|(?:managed-)?settings(?:\.[^.]+)?|hooks)\.json$/iu.test(basename(path));
+// The command a hook runs for a pinned runtime: this Node binary and the
+// runtime's own CLI, with forward slashes, which both shells a host may use
+// read the same way. A path either shell could expand (a quote, `$`, a
+// backquote, `%`, `!` or a control character) is refused.
+export function runtimeHookCommand(runtime, node = process.execPath) {
+  const paths = [node, join(runtime, 'src', 'cli.js')].map((path) => path.replaceAll('\\', '/'));
+  if (paths.some((path) => /["$`%!\p{Cc}]/u.test(path))) throw new Error(`runtime_path_unsafe_in_a_command (${paths.join(', ')})`);
+  return `"${paths[0]}" "${paths[1]}" deliver --hook`;
 }
-
-const readText = (path) => readFile(path, 'utf8').catch((error) => {
-  if (error.code === 'ENOENT') return null;
-  throw error;
-});
 
 async function readSettings(path) {
   const text = await readText(path);
@@ -103,36 +107,22 @@ async function readSettings(path) {
   return { text, settings };
 }
 
-// A temporary file renamed over the settings, with the file's permission bits
-// where the platform keeps them (a new file's are the owner's only). A rename
-// the host briefly blocks on Windows is tried a few times; a failed write
-// leaves no temporary copy behind.
-async function writeSettings(path, settings) {
-  await mkdir(dirname(path), { recursive: true });
-  const mode = await stat(path).then((found) => found.mode & 0o777, () => 0o600);
-  const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
+// The commands of the ShadowGraph handlers a settings file holds (read only;
+// an absent or unreadable file holds none).
+export async function installedCommands(path) {
   try {
-    await writeFile(temporary, `${JSON.stringify(settings, null, 2)}\n`, { mode, flag: 'wx' });
-    for (let attempt = 1; ; attempt += 1) {
-      try {
-        await rename(temporary, path);
-        return;
-      } catch (error) {
-        if (attempt >= 5 || !['EPERM', 'EACCES', 'EBUSY'].includes(error.code)) throw error;
-        await delay(50 * attempt);
-      }
-    }
-  } catch (error) {
-    await rm(temporary, { force: true });
-    throw error;
+    return Object.values(handlersByEvent((await readSettings(await canonicalPath(path))).settings)).flat().map((handler) => handler.command);
+  } catch {
+    return [];
   }
 }
 
 // Install or uninstall ShadowGraph's hooks in one settings file. Nothing is
-// written when nothing would change; otherwise the owner is asked (see
-// isScratchFile), and the file must still hold what was read.
-// `afterConfirmation` is a test seam only.
-export async function changeHookSettings(requested, action, { afterConfirmation } = {}) {
+// written when nothing would change; otherwise the owner is asked unless the
+// file is a scratch file (src/internal/owner-files.js), and the file must
+// still hold what was read. `command` replaces the template's, for a pinned
+// runtime. `afterConfirmation` is a test seam only.
+export async function changeHookSettings(requested, action, { command, afterConfirmation } = {}) {
   const path = await canonicalPath(requested);
   const { text, settings } = await readSettings(path);
   let next;
@@ -144,6 +134,7 @@ export async function changeHookSettings(requested, action, { afterConfirmation 
     result = { settings: path, changed: true, removed };
   } else {
     const template = JSON.parse(await readFile(HOOK_TEMPLATE_URL, 'utf8'));
+    if (command !== undefined) for (const groups of Object.values(template.hooks)) for (const group of groups) for (const handler of group.hooks) handler.command = command;
     next = withShadowGraphHooks(settings ?? {}, template);
     const changed = settings === null || !isDeepStrictEqual(handlersByEvent(settings), handlersByEvent(next));
     result = { settings: path, changed, events: Object.keys(template.hooks), note: 'Installed hooks deliver nothing until delivery is activated.' };
@@ -153,6 +144,6 @@ export async function changeHookSettings(requested, action, { afterConfirmation 
   if (!(await isScratchFile(path)) && !await confirmOwnerAction(title, { settings: path, action })) throw new Error(`hook_settings_require_owner_confirmation (${path})`);
   await afterConfirmation?.();
   if (await readText(path) !== text) throw new Error('settings_changed_while_confirming');
-  await writeSettings(path, next);
+  await writeJsonAtomically(path, next);
   return result;
 }

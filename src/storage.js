@@ -1,4 +1,5 @@
-import { readFile, rename, writeFile } from 'node:fs/promises';
+import { readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import { dirname, join } from 'node:path';
 import { nextRevision, assertRevision, createDestinationFence } from './revision-store.js';
 import { SCHEMA_VERSION } from './shadowgraph.js';
@@ -8,6 +9,24 @@ import { refusePublicExport } from './internal/collections.js';
 // atomic temp-write + rename. See journal-contract.md §atomicity: state and
 // journal can never diverge because they are never written separately.
 const empty = () => ({ schemaVersion: SCHEMA_VERSION, revision: 0, records: [], facts: [], relations: [], reviewSignals: [], idempotency: [], events: [], journal: [], journalSeq: 0, journalEpoch: null });
+
+// On Windows a process reading the store (host delivery reads it at every
+// prompt) can briefly block the rename that commits a save. It is tried a few
+// more times; if it still fails, the temporary file is removed and the save
+// fails as before (FND-P5-01). `move` is a test seam.
+async function commitFile(temporaryPath, filePath, move = rename) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await move(temporaryPath, filePath);
+    } catch (error) {
+      if (attempt >= 5 || !['EPERM', 'EACCES', 'EBUSY'].includes(error.code)) {
+        await rm(temporaryPath, { force: true });
+        throw error;
+      }
+      await delay(20 * attempt);
+    }
+  }
+}
 
 export function createJsonFileStore(filePath, options = {}) {
   let saveQueue = Promise.resolve();
@@ -28,7 +47,7 @@ export function createJsonFileStore(filePath, options = {}) {
           const temporaryPath = join(dirname(filePath), `.${filePath.split(/[\\/]/).pop()}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`);
           await writeFile(temporaryPath, JSON.stringify(payload, null, 2) + '\n', 'utf8');
           options.saveFault?.('beforeCommit', context);
-          await rename(temporaryPath, filePath);
+          await commitFile(temporaryPath, filePath, options.rename);
           options.saveFault?.('afterCommit', context);
           return payload.revision;
       }));

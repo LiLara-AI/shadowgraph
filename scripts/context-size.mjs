@@ -17,9 +17,14 @@
 //   node scripts/context-size.mjs                print the table
 //   node scripts/context-size.mjs --json         print the same data as JSON
 //   node scripts/context-size.mjs --diff FILE    compare against saved JSON
+//   node scripts/context-size.mjs --deliver [--runs N] [--records N]
+//                                                matched per-delivery latency of the hook;
+//                                                --records sets the corpus's approximate
+//                                                size, the report gives the exact count
 //   node scripts/context-size.mjs --check        measure writes per delivery against
 //                                                the declared budget; exit 1 when over
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,7 +32,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { CONTEXT_DELIVERY_BUDGET } from '../src/mcp-tools.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { createShadowGraphServer } from '../src/server.js';
-import { privilegedIssueAccess, privilegedSnapshot } from '../src/internal/snapshot.js';
+import { privilegedBindProject, privilegedIssueAccess, privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const bytes = (value) => Buffer.byteLength(JSON.stringify(value), 'utf8');
 const PROJECT = 'bench';
@@ -359,9 +364,78 @@ function formatReport(report, baseline) {
   return lines.join('\n');
 }
 
+// Matched per-delivery latency (plan §18.4; AG-1 condition 5): the hook path,
+// `shadowgraph deliver --hook` with a scratch activation record pinning a
+// seeded store, at each hook event, against a matched no-op process
+// (`node -e 0`) spawned the same way and interleaved with it. Wall-clock
+// milliseconds from spawn to exit; nothing here measures the host.
+// Delivered means a payload holding at least one record, not merely a line.
+export const holdsRecord = (stdout) => stdout.length > 0 && JSON.parse(stdout).hookSpecificOutput.additionalContext.includes('\nitem: ');
+
+export async function measureDeliveryLatency({ runs = 20, records = 130 } = {}) {
+  const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-deliver-latency-'));
+  try {
+    const cwd = join(directory, 'work');
+    await mkdir(join(cwd, '.shadowgraph'), { recursive: true });
+    await writeFile(join(cwd, '.shadowgraph', 'project-binding.json'), JSON.stringify({ version: 1, type: 'worktree', path: resolve(cwd), project: PROJECT, confirmed: true }));
+    const scale = Math.max(1, Math.round(records / 130));
+    const { graph } = seedGraph({ decisions: 40 * scale, attempts: 30 * scale, facts: 60 * scale });
+    privilegedBindProject(graph, { type: 'worktree', path: resolve(cwd), project: PROJECT, reason: 'latency measurement' });
+    const store = join(directory, 'store.json');
+    await createJsonFileStore(store).save(privilegedSnapshot(graph));
+    const home = join(directory, 'shadowgraph-home');
+    await mkdir(home);
+    await writeFile(join(home, 'activation.json'), JSON.stringify({ capabilities: { delivery: { state: 'active', store: { file: store, storage: 'json' } } } }));
+    const cli = fileURLToPath(new URL('../src/cli.js', import.meta.url));
+    const env = { ...process.env, SHADOWGRAPH_HOME: home, SHADOWGRAPH_FILE: '' };
+    const timed = (args, stdin) => new Promise((settle) => {
+      const started = process.hrtime.bigint();
+      const child = spawn(process.execPath, args, { cwd, env, stdio: ['pipe', 'pipe', 'ignore'] });
+      let stdout = '';
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.stdin.end(stdin);
+      child.on('close', () => settle({ ms: Number(process.hrtime.bigint() - started) / 1e6, delivered: holdsRecord(stdout) }));
+    });
+    const samples = { noop: [], sessionStart: [], userPromptSubmit: [] };
+    let delivered = 0;
+    for (let run = 0; run < runs; run += 1) {
+      samples.noop.push((await timed(['-e', '0'], '')).ms);
+      for (const [key, event] of [['sessionStart', { hook_event_name: 'SessionStart' }], ['userPromptSubmit', { hook_event_name: 'UserPromptSubmit', prompt: 'serve tier 7 from the regional cache' }]]) {
+        const sample = await timed([cli, 'deliver', '--hook'], JSON.stringify(event));
+        samples[key].push(sample.ms);
+        if (sample.delivered) delivered += 1;
+      }
+    }
+    const summary = (values) => {
+      const sorted = [...values].sort((a, b) => a - b);
+      const at = (fraction) => Math.round(sorted[Math.min(sorted.length - 1, Math.ceil(fraction * sorted.length) - 1)]);
+      return { p50: at(0.5), p95: at(0.95), max: Math.round(sorted.at(-1)) };
+    };
+    const noop = summary(samples.noop);
+    const [sessionStart, userPromptSubmit] = [summary(samples.sessionStart), summary(samples.userPromptSubmit)];
+    const exported = graph.exportData({ project: PROJECT });
+    return {
+      runs, records: exported.records.length + exported.facts.length,
+      noop, sessionStart, userPromptSubmit,
+      addedP50: { sessionStart: sessionStart.p50 - noop.p50, userPromptSubmit: userPromptSubmit.p50 - noop.p50 },
+      delivered: `${delivered} of ${runs * 2}`
+    };
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
 const invokedDirectly = process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
 if (invokedDirectly) {
   const args = process.argv.slice(2);
+  if (args.includes('--deliver')) {
+    const option = (name, fallback) => {
+      const value = Number(args[args.indexOf(name) + 1]);
+      return args.includes(name) && Number.isInteger(value) && value > 0 ? value : fallback;
+    };
+    process.stdout.write(`${JSON.stringify(await measureDeliveryLatency({ runs: option('--runs', 20), records: option('--records', 130) }), null, 2)}\n`);
+    process.exit(0);
+  }
   if (args.includes('--check')) {
     const writes = await measureWrites();
     // A delivery the fallback answers is measured too: it records runtime misses (PR-28).

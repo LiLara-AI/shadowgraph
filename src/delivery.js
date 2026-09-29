@@ -398,19 +398,35 @@ export async function readStoreForDelivery({ file, storage, afterRead }) {
 }
 
 // The per-user activation record (plan §26; programme plan revision 6 §5):
-// `<SHADOWGRAPH_HOME, or ~/.shadowgraph>/activation.json`. Only its reader lives
-// here; PR-32 writes it. Anything but an absolute root and a regular file
-// saying delivery is active leaves the hook path inert.
-export async function deliveryActive(env = process.env) {
+// `<SHADOWGRAPH_HOME, or ~/.shadowgraph>/activation.json`, written by
+// `shadowgraph activate` (src/activation.js). A relative root is never trusted.
+export function activationFile(env = process.env) {
+  const root = env.SHADOWGRAPH_HOME || join(homedir(), '.shadowgraph');
+  return isAbsolute(root) ? join(root, 'activation.json') : null;
+}
+
+// The delivery capability, when the record is a regular file saying delivery
+// is active and naming the store it pins by absolute path; otherwise null,
+// which leaves the hook path inert.
+export async function activeDelivery(env = process.env) {
   try {
-    const root = env.SHADOWGRAPH_HOME || join(homedir(), '.shadowgraph');
-    if (!isAbsolute(root)) return false;
-    const file = join(root, 'activation.json');
-    if (!(await lstat(file)).isFile()) return false;
-    return JSON.parse(await readFile(file, 'utf8'))?.capabilities?.delivery?.state === 'active';
+    const file = activationFile(env);
+    if (!file || !(await lstat(file)).isFile()) return null;
+    const delivery = JSON.parse(await readFile(file, 'utf8'))?.capabilities?.delivery;
+    const pinned = delivery?.state === 'active' && typeof delivery.store?.file === 'string' && isAbsolute(delivery.store.file) && ['json', 'sqlite'].includes(delivery.store.storage);
+    return pinned ? delivery : null;
   } catch {
-    return false;
+    return null;
   }
+}
+
+// The hook's deadline, below the template's 10-second hook timeout (§18.4):
+// past it the hook prints nothing and exits 0. SHADOWGRAPH_DELIVERY_DEADLINE_MS
+// can only shorten it.
+export const DELIVERY_DEADLINE_MS = 5000;
+export function deliveryDeadlineMs(env = process.env) {
+  const requested = Number(env.SHADOWGRAPH_DELIVERY_DEADLINE_MS);
+  return requested > 0 ? Math.min(requested, DELIVERY_DEADLINE_MS) : DELIVERY_DEADLINE_MS;
 }
 
 // The hook's input: one JSON object, a leading byte-order mark allowed. Reading
@@ -488,14 +504,22 @@ const NOT_ASSESSED = { code: 'relevance_not_assessed', detail: `No prompt has be
 // ranks the prompt and delivers only what is relevant; otherwise it delivers
 // nothing, the state having been said at the session's start (§18.4: degraded
 // status is data, not a repeated alert; PC-09: no history dump).
-export async function runDeliver({ args = [], readInput = () => '', file, storage = 'json', env = process.env, write }) {
+//
+// With `--hook` the capability must be active, and the store it pins is the
+// one read, whatever SHADOWGRAPH_FILE or the workspace holds; a workspace
+// binding then selects a project only when that store has recorded it too, so
+// files a cloned repository ships choose nothing (FND-P5-07). Nothing is
+// printed once the deadline has passed.
+export async function runDeliver({ args = [], readInput = () => '', file, storage = 'json', env = process.env, deadline = Infinity, write }) {
   let trigger = null, emitted = false;
   const emit = (text) => {
+    if (Date.now() >= deadline) return;
     emitted = true;
     write(`${JSON.stringify({ hookSpecificOutput: { hookEventName: trigger, additionalContext: text } })}\n`);
   };
   try {
-    if (args.includes('--hook') && !(await deliveryActive(env))) return;
+    const pinned = args.includes('--hook') ? await activeDelivery(env) : null;
+    if (args.includes('--hook') && !pinned) return;
     let event;
     try { event = JSON.parse(unmarked(await readInput())); } catch { return; }
     if (!SERVED_EVENTS.has(event?.hook_event_name)) return;
@@ -503,7 +527,7 @@ export async function runDeliver({ args = [], readInput = () => '', file, storag
     const session = trigger === 'SessionStart';
     const prompt = session ? '' : typeof event.prompt === 'string' ? event.prompt : '';
     if (!session && !prompt.trim()) return;
-    const read = await readStoreForDelivery({ file, storage });
+    const read = await readStoreForDelivery(pinned ? pinned.store : { file, storage });
     const unavailable = read.unavailable ?? (read.payload?.schemaVersion > SCHEMA_VERSION ? 'newer_schema' : null);
     if (unavailable) return session ? emit(unavailablePayload(trigger, unavailable)) : undefined;
     const graph = createShadowGraph();
@@ -512,7 +536,7 @@ export async function runDeliver({ args = [], readInput = () => '', file, storag
     const workspace = await discoverWorkspace(process.cwd(), { timeout: GIT_TIMEOUT_MS });
     // At SessionStart the whole working set, up to the largest page, is read,
     // so the order below chooses among all of it.
-    const input = accessContext(graph, { query: prompt, compact: true, ...(session ? { limit: MAX_PAGE_LIMIT } : {}) }, 'cli', workspace);
+    const input = accessContext(graph, { query: prompt, compact: true, ...(session ? { limit: MAX_PAGE_LIMIT } : {}) }, 'cli', workspace, { confirmedByStore: Boolean(pinned) });
     const relevant = graph.context(input).relevant;
     const unresolved = relevant.scope.requestState !== 'project_selected';
     if (!session && (unresolved || !relevant.relevance.established)) return;
@@ -525,7 +549,10 @@ export async function runDeliver({ args = [], readInput = () => '', file, storag
       limitation: unresolved ? PROJECT_UNRESOLVED : session ? NOT_ASSESSED : relevant.limitation ?? null,
       relevance: session ? 'not_assessed' : 'established',
       total: relevant.total, hasMore: relevant.hasMore, limitSource: relevant.limitSource, byKind: relevant.byKind,
-      temporal: { eventTimeUnknown: relevant.temporal.eventTimeUnknown, recordingOrderOnly: relevant.temporal.recordingOrderOnly }
+      temporal: { eventTimeUnknown: relevant.temporal.eventTimeUnknown, recordingOrderOnly: relevant.temporal.recordingOrderOnly },
+      // The host version recorded at activation; one other than the verified
+      // version is said to be unverified (§18.1, F-23).
+      ...(pinned?.host ? { host: pinned.host } : {})
     };
     const items = relevant.items.map((item) => itemOf(item, records)).filter(Boolean);
     emit(assemblePayload({ head, items: session ? sessionOrder(items) : items }).text);

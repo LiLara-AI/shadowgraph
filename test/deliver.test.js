@@ -247,11 +247,11 @@ test('a missing, corrupt, newer or unservable store is unavailable at SessionSta
   const graph = createShadowGraph();
   graph.addDecision({ project: 'app', title: 'cache policy', chosen: 'redis' });
   const snapshot = privilegedSnapshot(graph);
-  let deep = [];
-  for (let depth = 0; depth < 3000; depth += 1) deep = [deep];
-  snapshot.records[0].nested = deep;
+  // Nested deeper than any stack the read runs on, delivery's worker thread included; written as text, since
+  // building it in memory would overflow this test's own stack.
+  snapshot.records[0].nested = 'DEEP-PLACEHOLDER';
   const unservable = join(storeDir, 'unservable.json');
-  await writeFile(unservable, JSON.stringify(snapshot));
+  await writeFile(unservable, JSON.stringify(snapshot).replace('"DEEP-PLACEHOLDER"', `${'['.repeat(200_000)}${']'.repeat(200_000)}`));
   const result = parsed(await run([], { cwd, stdin: hook('SessionStart'), env: { SHADOWGRAPH_FILE: unservable } }));
   assert.deepEqual([result.head.store, result.head.complete], ['unavailable', false]);
   // A prompt says nothing about an unavailable store: the session start did.
@@ -360,23 +360,26 @@ test('--hook is inert, reading no input, unless the per-user activation record s
   // Inert even with its input left open: it returns without reading it.
   const held = await run(['--hook'], { cwd, stdin: '', env, keepOpen: true });
   silent(held);
-  assert.ok(held.ms < 10_000, `${held.ms} ms`);
+  assert.ok(held.ms < 2500, `${held.ms} ms: it returned before the input wait of 3 000 ms`);
   await mkdir(record);
   silent(await run(['--hook'], { cwd, stdin, env }));
   await rm(record, { recursive: true });
-  for (const content of ['{broken', { capabilities: { delivery: { state: 'deactivated' } } }, { capabilities: { capture: { state: 'active' } } }, { capability: 'delivery', state: 'active' }]) {
+  // Active means a record that pins the store the hook reads, by absolute path (PR-32).
+  const active = JSON.stringify({ capabilities: { delivery: { state: 'active', store: { file: resolve(file), storage: 'json' } } } });
+  for (const content of ['{broken', { capabilities: { delivery: { state: 'deactivated' } } }, { capabilities: { capture: { state: 'active' } } }, { capability: 'delivery', state: 'active' },
+    { capabilities: { delivery: { state: 'active' } } }, { capabilities: { delivery: { state: 'active', store: { file: 'data.json', storage: 'json' } } } }, { capabilities: { delivery: { state: 'active', store: { file: resolve(file), storage: 'yaml' } } } }]) {
     await writeFile(record, typeof content === 'string' ? content : JSON.stringify(content));
     silent(await run(['--hook'], { cwd, stdin, env }));
   }
-  await writeFile(record, JSON.stringify({ capabilities: { delivery: { state: 'active' } } }));
+  await writeFile(record, active);
   assert.equal(parsed(await run(['--hook'], { cwd, stdin, env })).head.store, 'available');
   // Without SHADOWGRAPH_HOME the record lives under the user's home; a relative root is never trusted.
   await mkdir(join(home, '.shadowgraph'));
-  await writeFile(join(home, '.shadowgraph', 'activation.json'), JSON.stringify({ capabilities: { delivery: { state: 'active' } } }));
+  await writeFile(join(home, '.shadowgraph', 'activation.json'), active);
   const { SHADOWGRAPH_HOME: ignored, ...homeOnly } = env;
   assert.equal(parsed(await run(['--hook'], { cwd, stdin, env: homeOnly })).head.store, 'available');
   await mkdir(join(cwd, 'rel-home'));
-  await writeFile(join(cwd, 'rel-home', 'activation.json'), JSON.stringify({ capabilities: { delivery: { state: 'active' } } }));
+  await writeFile(join(cwd, 'rel-home', 'activation.json'), active);
   silent(await run(['--hook'], { cwd, stdin, env: { ...homeOnly, SHADOWGRAPH_HOME: 'rel-home' } }));
   assert.equal(parsed(await run(['--hook'], { cwd, stdin: String.fromCharCode(0xfeff) + stdin, env })).head.store, 'available', 'a byte-order mark is allowed');
   // Without --hook the command is an explicit local read and runs regardless.
@@ -523,14 +526,16 @@ test('the hook input is read until it parses, up to a size limit, and for a shor
 
 test('--hook reads no input at all unless delivery is active', async (t) => {
   const { root } = await workspace(t);
-  const read = () => { throw new Error('input read'); };
+  // Counted, not thrown: a reader that throws would be swallowed like any unreadable input.
+  let reads = 0;
+  const read = () => { reads += 1; return JSON.stringify({ hook_event_name: 'SessionStart' }); };
   const written = [];
   const inactive = join(root, 'sg-home');
   await mkdir(inactive);
   for (const env of [{ SHADOWGRAPH_HOME: inactive }, { SHADOWGRAPH_HOME: 'relative-home' }]) {
     await runDeliver({ args: ['--hook'], readInput: read, env, write: (text) => written.push(text) });
   }
-  assert.deepEqual(written, []);
+  assert.deepEqual([reads, written], [0, []]);
 });
 
 test('redaction holds for quoted names, any space, rule values on lines, config shapes and split keys; prose stays', async (t) => {

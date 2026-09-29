@@ -1,0 +1,123 @@
+{
+  "host": "claude-code",
+  "verifiedVersion": "2.1.270",
+  "versionPolicy": "The delivery evidence is bound to this host and version. Another host or version is unverified until its own receipt. The version is read at activation and recorded there; the delivered head reports it as verified or unverified, and a host that updates after activation stays recorded as it was until the next activation.",
+  "handler": {
+    "type": "command",
+    "command": "shadowgraph deliver --hook",
+    "events": [
+      "SessionStart",
+      "UserPromptSubmit"
+    ]
+  },
+  "sameTurnGap": "Delivery reaches the model at a session's start and at each prompt. Nothing reaches it within a turn: what is recorded during a turn is available from the next prompt or session on. The only demonstrated same-turn mechanism is a blocking hook, which is never adopted.",
+  "stages": [
+    "sourceCapture",
+    "extractionReadiness",
+    "storedExperience",
+    "modelVisibleDelivery",
+    "pendingUnprocessed",
+    "correctedExperience",
+    "replayProtection"
+  ],
+  "triggers": [
+    {
+      "trigger": "SessionStart",
+      "status": "covered",
+      "evidence": "V-2: a command handler's stdout reached the model at a session's start on the verified version",
+      "stages": {
+        "sourceCapture": "not integrated until capture (P6)",
+        "extractionReadiness": "not integrated until extraction (P7)",
+        "storedExperience": "hand-recorded records only, until extraction (P7)",
+        "modelVisibleDelivery": "at the session's start: the working set as data, head first, within 8 000 bytes",
+        "pendingUnprocessed": "not integrated until capture (P6); the payload states capture and extraction are not active",
+        "correctedExperience": "at the next session start or prompt after the correction is recorded, when the corrected record is among what the delivery selects and fits",
+        "replayProtection": "not applicable until capture (P6); delivery itself writes nothing"
+      }
+    },
+    {
+      "trigger": "SessionStart (source resume or clear)",
+      "status": "unverified",
+      "evidence": "the same handler runs, but no receipt shows its output reaching the model on a resumed or cleared session; re-verified at the activation gate",
+      "stages": {
+        "sourceCapture": "not integrated until capture (P6)",
+        "extractionReadiness": "not integrated until extraction (P7)",
+        "storedExperience": "hand-recorded records only, until extraction (P7)",
+        "modelVisibleDelivery": "unverified on a resumed or cleared session",
+        "pendingUnprocessed": "not integrated until capture (P6)",
+        "correctedExperience": "as SessionStart, if delivery on a resumed or cleared session is verified",
+        "replayProtection": "not applicable until capture (P6); delivery itself writes nothing"
+      }
+    },
+    {
+      "trigger": "SessionStart (source compact)",
+      "status": "unverified",
+      "evidence": "the same handler runs, but no receipt shows its output reaching the model after compaction; re-verified at the activation gate",
+      "stages": {
+        "sourceCapture": "not integrated until capture (P6)",
+        "extractionReadiness": "not integrated until extraction (P7)",
+        "storedExperience": "hand-recorded records only, until extraction (P7)",
+        "modelVisibleDelivery": "unverified after compaction",
+        "pendingUnprocessed": "not integrated until capture (P6)",
+        "correctedExperience": "as SessionStart, if delivery after compaction is verified",
+        "replayProtection": "not applicable until capture (P6); delivery itself writes nothing"
+      }
+    },
+    {
+      "trigger": "UserPromptSubmit",
+      "status": "covered",
+      "evidence": "V-3: a command handler's stdout reached the model on the verified version",
+      "stages": {
+        "sourceCapture": "not integrated until capture (P6)",
+        "extractionReadiness": "not integrated until extraction (P7)",
+        "storedExperience": "hand-recorded records only, until extraction (P7)",
+        "modelVisibleDelivery": "before the model answers the prompt: only records relevant to it, otherwise nothing",
+        "pendingUnprocessed": "not integrated until capture (P6); the payload states capture and extraction are not active",
+        "correctedExperience": "at the next prompt after the correction is recorded, when the corrected record is among what the delivery selects and fits",
+        "replayProtection": "not applicable until capture (P6); delivery itself writes nothing"
+      }
+    },
+    {
+      "trigger": "tool result within a turn",
+      "status": "uncovered",
+      "evidence": "N-7: a non-blocking PostToolUse context's visibility is not verified; the blocking alternative is forbidden",
+      "stages": {
+        "sourceCapture": "not integrated until capture (P6)",
+        "extractionReadiness": "not integrated until extraction (P7)",
+        "storedExperience": "not before extraction commits (P7)",
+        "modelVisibleDelivery": "declared gap: available at the next prompt, not within the turn",
+        "pendingUnprocessed": "not integrated until capture (P6)",
+        "correctedExperience": "at the next prompt, when the corrected record is among what the delivery selects and fits",
+        "replayProtection": "not applicable: nothing is delivered"
+      }
+    },
+    {
+      "trigger": "proposal within a turn",
+      "status": "uncovered",
+      "evidence": "no hook delivers memory between the model's steps without blocking; declared gap",
+      "stages": {
+        "sourceCapture": "not integrated until capture (P6)",
+        "extractionReadiness": "not integrated until extraction (P7)",
+        "storedExperience": "not before extraction commits (P7)",
+        "modelVisibleDelivery": "declared gap: available at the next prompt, not within the turn",
+        "pendingUnprocessed": "not integrated until capture (P6)",
+        "correctedExperience": "at the next prompt, when the corrected record is among what the delivery selects and fits",
+        "replayProtection": "not applicable: nothing is delivered"
+      }
+    },
+    {
+      "trigger": "contradiction within a turn",
+      "status": "uncovered",
+      "evidence": "a contradiction found mid-turn cannot be delivered without blocking; declared gap",
+      "stages": {
+        "sourceCapture": "not integrated until capture (P6)",
+        "extractionReadiness": "not integrated until extraction (P7)",
+        "storedExperience": "not before extraction commits (P7)",
+        "modelVisibleDelivery": "declared gap: available at the next prompt, not within the turn",
+        "pendingUnprocessed": "not integrated until capture (P6)",
+        "correctedExperience": "at the next prompt, when the corrected record is among what the delivery selects and fits",
+        "replayProtection": "not applicable: nothing is delivered"
+      }
+    }
+  ]
+}

@@ -220,6 +220,7 @@ test('check-integrations refuses a hook template with another event, type or com
   const root = await scratchDirectory(t, 'shadowgraph-hooks-');
   await cp('scripts/check-integrations.mjs', join(root, 'scripts', 'check-integrations.mjs'));
   await cp('integrations', join(root, 'integrations'), { recursive: true });
+  await cp('src', join(root, 'src'), { recursive: true });
   await cp('package.json', join(root, 'package.json'));
   const check = () => new Promise((settle) => {
     const child = spawn(process.execPath, [join(root, 'scripts', 'check-integrations.mjs')], { stdio: 'ignore' });

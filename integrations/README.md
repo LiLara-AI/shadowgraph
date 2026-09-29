@@ -61,7 +61,19 @@ shadowgraph install-hooks
 shadowgraph uninstall-hooks
 ```
 
-Both change `~/.claude/settings.json` (or the file `--settings` names, followed through any link to the file itself) only after you type `confirm` at a terminal; only a scratch file under the system's temporary directory is changed without asking. They keep every other setting and hook, and leave exactly one ShadowGraph generation. Run them with no Claude Code session open, since a session may rewrite its settings meanwhile (if the file changes while you decide, nothing is written). **Installing is not activating**: the installed hooks read nothing and print nothing until delivery is activated. Remove the hooks before uninstalling ShadowGraph, since each hook otherwise runs a command that no longer exists. A running Claude Code session keeps the hooks it started with until it is restarted.
+Both change `~/.claude/settings.json` (or the file `--settings` names, followed through any link to the file itself) only after you type `confirm` at a terminal; only a scratch file under the system's temporary directory is changed without asking. They keep every other setting and hook, and leave exactly one ShadowGraph generation. Run them with no Claude Code session open, since a session may rewrite its settings meanwhile (if the file changes while you decide, nothing is written). **Installing is not activating**: the installed hooks read nothing and print nothing until delivery is activated. A running Claude Code session keeps the hooks it started with until it is restarted.
+
+Activation is a separate, logged step after its gate, naming the one store the hook will read:
+
+```bash
+shadowgraph activate delivery --evidence <gate-receipt> --store /absolute/path/to/data.json
+```
+
+Only a project whose worktree binding that store has also recorded (`shadowgraph bind`, worktree type) is delivered, so a repository's own `.shadowgraph` files never choose what reaches the model. The hook reads that one store only: memory recorded in any other store, such as the project-local `.shadowgraph/data.json` the MCP server uses when `SHADOWGRAPH_FILE` is not set, is not delivered. So point the MCP server and `shadowgraph bind` at the same store (the same absolute `SHADOWGRAPH_FILE`) before activating. To turn delivery off, **deactivate first, then uninstall**: `shadowgraph deactivate delivery` silences every hook at once, including those running sessions still hold, and `shadowgraph uninstall-hooks` then removes the block. Run `deactivate` with the `SHADOWGRAPH_HOME` Claude Code's hooks see (by default none, so `~/.shadowgraph`), and check the record path it prints. Remove the hooks before uninstalling ShadowGraph, since each hook otherwise runs a command that no longer exists.
+
+For a fixed build rather than whatever `shadowgraph` is on the path, `node scripts/install-runtime.mjs` installs a commit's packed build under `~/.shadowgraph/runtime/<commit>/`, and `install-hooks --runtime <directory>` and `activate delivery --runtime <directory>` name it.
+
+`claude-code.coverage.json` states, for Claude Code 2.1.270 (the version the delivery evidence was taken on), where each of the seven stages of experience lands at each trigger: delivery is covered at a new session's start and at each prompt, unverified at a start after resume, clear or compaction, and not available within a turn, which is a declared gap.
 
 ## Cursor
 
@@ -129,7 +141,8 @@ Restart Hermes after registration. Hermes exposes discovered tools with its `mcp
 
 ## What was verified
 
-- `scripts/check-integrations.mjs` validates every JSON template and the required Codex TOML/Hermes YAML launch fields.
+- `scripts/check-integrations.mjs` validates every JSON template and the required Codex TOML/Hermes YAML launch fields, the Claude Code hook block (events, handler type, command, timeout, keys, and a delivery deadline below the timeout), and the coverage manifest (host and exact version, the same-turn gap, all seven stages per trigger, an uncovered trigger).
+- The hook lifecycle -- install, activate, deliver, deactivate, uninstall -- runs in the test suite against scratch settings with the home directory redirected, and the clean-install smoke adds and removes the hooks with the installed binary. The host itself is exercised only at the activation gate.
 - `scripts/smoke-package.mjs` builds a real tarball, installs it into a new directory whose path contains spaces, launches `shadowgraph mcp` only from that installed package, verifies 35 full and 16 compact tools, and performs MCP remember/restart/recall.
 - `npm run check:mcp` runs pinned official Inspector strict checks in both modes, then the pinned Glama `mcp-proxy@6.4.3` gate.
 - Product config shapes and commands follow the current official Claude Code, Cursor, Codex, and Hermes MCP documentation. A host application still needs to be installed locally to measure its own discovery UI and lifecycle.

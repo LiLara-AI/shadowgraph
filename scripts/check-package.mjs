@@ -64,6 +64,7 @@ const requiredFiles = [
   'benchmark/preregistration-amendment-006.sha256',
   'benchmark/acceptance/definition.json',
   'benchmark/acceptance/scenarios.json',
+  'integrations/claude-code.coverage.json',
   'integrations/claude-code.hooks.json',
   'integrations/claude-code.mcp.json',
   'integrations/codex.mcp.toml',

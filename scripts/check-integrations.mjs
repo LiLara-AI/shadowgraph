@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DELIVERY_DEADLINE_MS } from '../src/delivery.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const integrations = join(root, 'integrations');
@@ -36,7 +37,26 @@ for (const [event, groups] of Object.entries(hookTemplate.hooks)) {
   assert.equal(handler.type, 'command', `${event} handler is a command`);
   assert.equal(handler.command, 'shadowgraph deliver --hook', `${event} handler runs the delivery verb`);
   assert.ok(Number.isInteger(handler.timeout) && handler.timeout > 0, `${event} handler has a timeout`);
+  assert.ok(DELIVERY_DEADLINE_MS < handler.timeout * 1000, `${event}: the delivery deadline stays below the hook timeout`);
 }
+
+// The coverage manifest (plan §18.3; AC-061, AC-064): the host and its exact
+// version, the same-turn gap declared, every trigger placing all seven stages,
+// the hook's events covered, and at least one trigger uncovered.
+const coverage = JSON.parse(await readFile(join(integrations, 'claude-code.coverage.json'), 'utf8'));
+const STAGES = ['sourceCapture', 'extractionReadiness', 'storedExperience', 'modelVisibleDelivery', 'pendingUnprocessed', 'correctedExperience', 'replayProtection'];
+assert.equal(coverage.host, 'claude-code', 'the coverage manifest names its host');
+assert.match(coverage.verifiedVersion ?? '', /^\d+\.\d+\.\d+$/u, 'the coverage manifest names the exact verified version');
+assert.ok(typeof coverage.sameTurnGap === 'string' && coverage.sameTurnGap.trim(), 'the coverage manifest declares the same-turn gap');
+assert.deepEqual(coverage.stages, STAGES, 'the coverage manifest lists the seven stages');
+assert.ok(Array.isArray(coverage.triggers) && coverage.triggers.length > 0, 'the coverage manifest has triggers');
+for (const row of coverage.triggers) {
+  assert.ok(['covered', 'unverified', 'uncovered'].includes(row.status), `${row.trigger}: a known status`);
+  assert.deepEqual(Object.keys(row.stages ?? {}).sort(), [...STAGES].sort(), `${row.trigger}: every stage placed`);
+  assert.ok(Object.values(row.stages).every((place) => typeof place === 'string' && place.trim()), `${row.trigger}: every stage described`);
+}
+for (const event of Object.keys(hookTemplate.hooks)) assert.equal(coverage.triggers.find((row) => row.trigger === event)?.status, 'covered', `${event} is covered`);
+assert.ok(coverage.triggers.some((row) => row.status === 'uncovered'), 'at least one trigger is declared uncovered');
 
 const codex = await readFile(join(integrations, 'codex.mcp.toml'), 'utf8');
 for (const expected of [
@@ -56,4 +76,4 @@ for (const expected of [
   '      SHADOWGRAPH_MCP_COMPACT: "1"'
 ]) assert.ok(hermes.includes(expected), `Hermes YAML is missing ${expected}`);
 
-console.log('integration templates valid: Claude Code=stdio JSON and SessionStart/UserPromptSubmit command hooks, Cursor=stdio JSON, Codex=config.toml, Hermes=config.yaml; compact recommended, full mode preserved');
+console.log('integration templates valid: Claude Code=stdio JSON, SessionStart/UserPromptSubmit command hooks and the coverage manifest, Cursor=stdio JSON, Codex=config.toml, Hermes=config.yaml; compact recommended, full mode preserved');

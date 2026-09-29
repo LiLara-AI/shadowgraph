@@ -6,7 +6,7 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
@@ -154,6 +154,16 @@ try {
   await writeFile(hookSettings, settingsBefore);
   const hooked = JSON.parse((await runInstalledCli(installedCli, ['install-hooks', '--settings', hookSettings], { cwd: appDirectory, env: cliEnv })).stdout);
   assert.deepEqual([hooked.changed, hooked.events], [true, ['SessionStart', 'UserPromptSubmit']]);
+  // Then the delivery lifecycle with the installed binary: activate for the
+  // smoke's store, deliver, deactivate (a scratch activation record).
+  const lifecycleEnv = { ...cliEnv, SHADOWGRAPH_HOME: join(appDirectory, 'shadowgraph-home') };
+  const deliver = () => execFileSync(process.execPath, [installedCli, 'deliver', '--hook'], { cwd: appDirectory, env: lifecycleEnv, input: JSON.stringify({ hook_event_name: 'SessionStart' }), encoding: 'utf8' });
+  assert.equal(deliver(), '', 'inert before activation');
+  const activated = JSON.parse((await runInstalledCli(installedCli, ['activate', 'delivery', '--evidence', 'clean-install-smoke', '--store', dataFile, '--host-version', '0.0.0', '--settings', hookSettings], { cwd: appDirectory, env: lifecycleEnv })).stdout);
+  assert.deepEqual([activated.state, activated.record.capabilities.delivery.hooksInstalled], ['active', true]);
+  assert.equal(JSON.parse(deliver()).hookSpecificOutput.hookEventName, 'SessionStart');
+  assert.equal(JSON.parse((await runInstalledCli(installedCli, ['deactivate', 'delivery'], { cwd: appDirectory, env: lifecycleEnv })).stdout).state, 'deactivated');
+  assert.equal(deliver(), '', 'inert after deactivation');
   const unhooked = JSON.parse((await runInstalledCli(installedCli, ['uninstall-hooks', '--settings', hookSettings], { cwd: appDirectory, env: cliEnv })).stdout);
   assert.deepEqual([unhooked.changed, unhooked.removed], [true, 2]);
   assert.equal(await readFile(hookSettings, 'utf8'), settingsBefore);
@@ -251,6 +261,7 @@ try {
     installedPackage: true,
     cliSetupDoctor: true,
     hooksInstallUninstall: true,
+    deliveryLifecycle: true,
     cliRememberRestartRecall: true,
     changedFactReviewAfterRestart: true,
     mcpFullTools: fullList.result.tools.length,

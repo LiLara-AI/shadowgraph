@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { dirname, resolve } from 'node:path';
-import { constants, readFileSync } from 'node:fs';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { constants, readFileSync, realpathSync } from 'node:fs';
 import { copyFile, mkdir, rename, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import * as privileged from './snapshot.js';
@@ -16,13 +16,24 @@ const execute = promisify(execFile);
 // is declared under the grant tier of CONTEXT_DELIVERY_BUDGET.
 export const hasAccessReference = (input) => Boolean(input && (Object.hasOwn(input, 'accessId') || Object.hasOwn(input, 'grantId') || input.readProvenance !== undefined));
 
-// A caller on a deadline (host delivery) bounds each git call; 0 waits.
+// git ends each answer with one newline; only that is removed, so a name that
+// itself ends in whitespace keeps it and is never taken for another.
+const gitAnswer = (text) => text.replace(process.platform === 'win32' ? /\r?\n$/u : /\n$/u, '');
+
+// A caller on a deadline (host delivery) bounds each git call; 0 waits. A
+// directory outside the work tree git names -- a `core.worktree` elsewhere, or
+// a real path that does not lie in it -- is marked `outsideWorkTree`.
 export async function discoverWorkspace(cwd = process.cwd(), { timeout = 0 } = {}) {
   const work = resolve(cwd);
   try {
-    const { stdout: root } = await execute('git', ['rev-parse', '--show-toplevel'], { cwd: work, timeout });
+    // The first line is the answer; the rest is the path, which may itself hold a newline.
+    const { stdout } = await execute('git', ['rev-parse', '--is-inside-work-tree', '--show-toplevel'], { cwd: work, timeout });
+    const inside = stdout.slice(0, stdout.indexOf('\n')).trim();
+    const root = resolve(gitAnswer(stdout.slice(stdout.indexOf('\n') + 1)));
     const { stdout: common } = await execute('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: work, timeout });
-    return { worktreeRoot: resolve(root.trim()), commonDir: resolve(common.trim()) };
+    const step = relative(root, realpathSync.native(work));
+    const within = step !== '..' && !step.startsWith(`..${sep}`) && !isAbsolute(step);
+    return { worktreeRoot: root, commonDir: resolve(gitAnswer(common)), ...(inside === 'true' && within ? {} : { outsideWorkTree: true }) };
   } catch { return { worktreeRoot: work, commonDir: null }; }
 }
 
@@ -32,8 +43,8 @@ export function projectBindingFile(workspace, type) {
   throw new Error('Binding requires an explicit worktree or available shared_repository mapping');
 }
 
-function resolveFileBinding(workspace) {
-  for (const type of ['worktree', 'shared_repository']) {
+function resolveFileBinding(workspace, types = ['worktree', 'shared_repository']) {
+  for (const type of types) {
     if (type === 'shared_repository' && !workspace.commonDir) continue;
     try {
       const binding = JSON.parse(readFileSync(projectBindingFile(workspace, type), 'utf8'));
@@ -66,10 +77,18 @@ export async function bindWorkspaceProject(graph, store, workspace, input) {
   return { ...binding, bindingFile, backupFile };
 }
 
-export function accessContext(graph, args, surface, workspace) {
+// `confirmedByStore` (host delivery's hook path, PR-32): only a worktree binding
+// counts, and only when the store has recorded the same one, so files a cloned
+// repository ships choose nothing (FND-P5-07). A shared-repository binding is
+// not honoured there: a `.git` file placed in any directory can name another
+// repository's common directory. Nor is a directory outside the work tree git
+// names, since a shipped `.git` can set `core.worktree` to the owner's.
+export function accessContext(graph, args, surface, workspace, { confirmedByStore = false } = {}) {
   if (!args || typeof args !== 'object' || Array.isArray(args)) return args;
   const { binding: ignoredBinding, surface: ignoredSurface, ...input } = args;
-  const binding = resolveFileBinding(workspace);
+  const found = confirmedByStore && workspace.outsideWorkTree ? null : resolveFileBinding(workspace, confirmedByStore ? ['worktree'] : undefined);
+  const confirmed = !confirmedByStore || privileged.privilegedResolveProjectBinding(graph, { worktreeRoot: workspace.worktreeRoot, commonDir: null })?.project === found?.project;
+  const binding = found && confirmed ? found : null;
   return { ...input, ...(binding ? { binding } : {}), surface };
 }
 

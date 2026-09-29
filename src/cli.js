@@ -15,7 +15,14 @@ import { privilegedSnapshot } from './internal/snapshot.js';
 import * as privileged from './internal/snapshot.js';
 import { accessContext, bindWorkspaceProject, currentAccessOperation, discoverWorkspace, hasAccessReference } from './internal/access-transport.js';
 import { confirmOwnerAction, ownerAnswer } from './internal/owner-confirmation.js';
-import { changeHookSettings, defaultSettingsPath } from './host-hooks.js';
+import { changeHookSettings, defaultSettingsPath, pinnedRuntime, runtimeHookCommand } from './host-hooks.js';
+import { activateDelivery, deactivateDelivery } from './activation.js';
+
+// On Windows a program is otherwise looked for in the working directory before
+// the path, so a `git.exe` a repository ships would run when a hook reads its
+// workspace (PR-32 review). Set before anything, a worker thread included, is
+// started.
+if (process.platform === 'win32') process.env.NoDefaultCurrentDirectoryInExePath = '1';
 
 const [requestedCommand, ...arguments_] = process.argv.slice(2);
 let command = ({ grant: 'issue-access', delegate: 'delegate-access' })[requestedCommand] ?? requestedCommand;
@@ -65,24 +72,69 @@ async function startHttp() {
 // Host delivery (PR-30, plan v1.4.4 §18.4) has its own exit path: it never
 // reaches the generic error below, never writes to stderr, never sets an exit
 // code, and opens no store for writing. A reader that has gone away (EPIPE) is
-// not an error of the hook's.
+// not an error of the hook's. The deadline (PR-32, §18.4) is kept here, on a
+// thread that stays free: the work runs in a worker (src/delivery-worker.js),
+// and at the deadline the process exits 0 unless the one line has been
+// written. With --hook and delivery not active, no input is read.
 async function deliverFromHook() {
   try {
     process.removeAllListeners('warning');
     for (const stream of [process.stdout, process.stdin]) stream.on('error', () => {});
-    const { readHookInput, runDeliver } = await import('./delivery.js');
-    await runDeliver({ args: rest, readInput: () => readHookInput(), file, storage: storageType, write: (text) => process.stdout.write(text) });
+    const { activeDelivery, deliveryDeadlineMs, readHookInput } = await import('./delivery.js');
+    const deadlineMs = deliveryDeadlineMs();
+    const deadline = Date.now() + deadlineMs;
+    const backstop = setTimeout(() => process.exit(0), deadlineMs);
+    backstop.unref();
+    if (rest.includes('--hook') && !(await activeDelivery())) return;
+    const input = await readHookInput();
+    const { Worker } = await import('node:worker_threads');
+    const worker = new Worker(new URL('./delivery-worker.js', import.meta.url), { workerData: { args: rest, input, file, storage: storageType, deadline }, stdout: true, stderr: true });
+    // The one line is the whole answer: once written, the worker is stopped,
+    // so nothing it might leave running can hold the process.
+    worker.on('message', (text) => {
+      if (Date.now() >= deadline) return;
+      clearTimeout(backstop);
+      process.stdout.write(text);
+      void worker.terminate();
+    });
+    worker.on('error', () => {});
+    await new Promise((settle) => worker.once('exit', settle));
   } catch {}
+}
+
+// `activate delivery` and `deactivate delivery` (plan §26): the per-user
+// activation record, opening no store. Only delivery exists in this build.
+async function changeActivation() {
+  const [capability, ...flags] = rest;
+  const usage = command === 'activate'
+    ? 'Usage: shadowgraph activate delivery --evidence <ref> --store <path> [--storage json|sqlite] [--host-version <version>] [--settings <path>] [--runtime <directory>]'
+    : 'Usage: shadowgraph deactivate delivery';
+  if (capability !== 'delivery') throw new Error(usage);
+  if (command === 'deactivate') return deactivateDelivery(flagsOf(flags, {}, usage));
+  return activateDelivery(flagsOf(flags, { '--evidence': 'evidence', '--store': 'store', '--storage': 'storage', '--host-version': 'hostVersion', '--settings': 'settings', '--runtime': 'runtime' }, usage));
 }
 
 // The Claude Code hook block (plan rev6 PR-31) is written into one settings
 // file, the user's by default, and opens no store; the owner confirms every
 // change at a terminal, a scratch file apart (src/host-hooks.js).
 async function changeHooks() {
-  const at = rest.indexOf('--settings');
-  const named = at >= 0 ? rest[at + 1] : undefined;
-  if (rest.length !== (at >= 0 ? 2 : 0) || (at >= 0 && (!named || named.startsWith('-')))) throw new Error(`Usage: shadowgraph ${command} [--settings <path>]`);
-  return changeHookSettings(named ?? defaultSettingsPath(), command === 'install-hooks' ? 'install' : 'uninstall');
+  const install = command === 'install-hooks';
+  const options = flagsOf(rest, { '--settings': 'settings', ...(install ? { '--runtime': 'runtime' } : {}) },
+    `Usage: shadowgraph ${command} [--settings <path>]${install ? ' [--runtime <directory>]' : ''}`);
+  const runtime = options.runtime ? await pinnedRuntime(options.runtime) : null;
+  return changeHookSettings(options.settings ?? defaultSettingsPath(), install ? 'install' : 'uninstall', runtime ? { command: runtimeHookCommand(runtime.path) } : {});
+}
+
+// `--name value` pairs, each named once, no value a flag.
+function flagsOf(list, names, usage) {
+  const options = {};
+  for (let at = 0; at < list.length; at += 2) {
+    const name = names[list[at]];
+    const value = list[at + 1];
+    if (!name || !value || value.startsWith('-') || Object.hasOwn(options, name)) throw new Error(usage);
+    options[name] = value;
+  }
+  return options;
 }
 
 async function runOneShot() {
@@ -283,7 +335,7 @@ async function runOneShot() {
     else if (command === 'decision') { result = graph.addDecision(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'attempt') { result = graph.addAttempt(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
     else {
-      throw new Error('Usage: shadowgraph <setup|doctor|serve|mcp|stats|list|search|retrieve|recall|remember|markdown-sync|context|review-context|deliver|install-hooks|uninstall-hooks|review|reconsider|maintain|signals|ack|validate|repair-plan|backup|restore|migrate|downgrade|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge|request-access|issue-access|delegate-access|revoke-access|discard-access|access-status|bind|attribute> [JSON/path] (restore <path> [--memory-only]; install-hooks and uninstall-hooks [--settings <path>]). Writes require project or originId (or confirmed workspace binding). Creation IDs are generated: omit id, retain returned IDs, and use idempotencyKey for retries. Reference IDs remain supported.');
+      throw new Error('Usage: shadowgraph <setup|doctor|serve|mcp|stats|list|search|retrieve|recall|remember|markdown-sync|context|review-context|deliver|install-hooks|uninstall-hooks|activate|deactivate|review|reconsider|maintain|signals|ack|validate|repair-plan|backup|restore|migrate|downgrade|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge|request-access|issue-access|delegate-access|revoke-access|discard-access|access-status|bind|attribute> [JSON/path] (restore <path> [--memory-only]; install-hooks and uninstall-hooks [--settings <path>]; activate delivery --evidence <ref> --store <path> [--runtime <directory>]; deactivate delivery). Writes require project or originId (or confirmed workspace binding). Creation IDs are generated: omit id, retain returned IDs, and use idempotencyKey for retries. Reference IDs remain supported.');
     }
     return result;
   } finally {
@@ -296,6 +348,7 @@ try {
   else if (command === 'serve') await startHttp();
   else if (command === 'deliver') await deliverFromHook();
   else if (command === 'install-hooks' || command === 'uninstall-hooks') console.log(JSON.stringify(await changeHooks(), null, 2));
+  else if (command === 'activate' || command === 'deactivate') console.log(JSON.stringify(await changeActivation(), null, 2));
   else {
     const result = await runOneShot();
     if (result !== null && result !== undefined) console.log(JSON.stringify(result, null, 2));
