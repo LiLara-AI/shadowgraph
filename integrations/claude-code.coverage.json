@@ -38,7 +38,7 @@
     {
       "trigger": "SessionStart (source resume or clear)",
       "status": "unverified",
-      "evidence": "the same handler runs, but no receipt shows its output reaching the model on a resumed or cleared session; re-verified at the activation gate",
+      "evidence": "the same handler runs, but no receipt shows its output reaching the model on a resumed or cleared session; the activation gate's receipts cover new sessions only, so this needs a receipt of its own",
       "stages": {
         "sourceCapture": "not integrated until capture (P6)",
         "extractionReadiness": "not integrated until extraction (P7)",
@@ -52,7 +52,7 @@
     {
       "trigger": "SessionStart (source compact)",
       "status": "unverified",
-      "evidence": "the same handler runs, but no receipt shows its output reaching the model after compaction; re-verified at the activation gate",
+      "evidence": "the same handler runs, but no receipt shows its output reaching the model after compaction; the activation gate's receipts cover new sessions only, so this needs a receipt of its own",
       "stages": {
         "sourceCapture": "not integrated until capture (P6)",
         "extractionReadiness": "not integrated until extraction (P7)",
