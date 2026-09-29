@@ -165,6 +165,37 @@ test('the strongest match comes first', () => {
   assert.ok(items[0].score > items[1].score);
 });
 
+test('PR-26 corrective: a word as common as "the", shared with a record, establishes no relevance; a content word does', () => {
+  const graph = createShadowGraph({ now: () => NOW });
+  const record = graph.addDecision({ project: 'alpha', title: 'zephyr turbine calibration', chosen: "use the team's blue procedure for it; we cannot run it locally and must also pay per request, e.g. since costs change without a free tier" });
+  for (const query of ['is the build green today?', 'what about the?', 'the', 'is it for us?', 'I cannot find it', 'it must also be per spec, e.g. since yesterday', 'without breaking anything', "what's that?"]) {
+    const { relevant } = graph.context({ project: 'alpha', query });
+    assert.deepEqual([relevant.relevance.established, relevant.fallback.reason], [false, 'relevance_not_established'], query);
+  }
+  // A query of function words only has no content word to rank by, and the head says so.
+  assert.deepEqual(graph.context({ project: 'alpha', query: 'what about the?' }).relevant.relevance.signals.lexical, { available: false, matched: 0 });
+  const { relevant } = graph.context({ project: 'alpha', query: 'what did we decide about the turbine?' });
+  assert.equal(relevant.relevance.established, true);
+  assert.deepEqual(relevant.relevance.signals.lexical, { available: true, matched: 1 });
+  assert.deepEqual(relevant.items.map(idOf), [record.id]);
+  // Search is unchanged: recall still ranks by every term the query shares.
+  assert.deepEqual(graph.recall('the', { project: 'alpha' }).items.map(idOf), [record.id]);
+  // The rule holds record by record: another record that shares only "the" stays out, even when one matches.
+  const noise = graph.addDecision({ project: 'alpha', title: 'cache warmup', chosen: 'run the job nightly' });
+  assert.deepEqual(graph.context({ project: 'alpha', query: 'what did we decide about the turbine?' }).relevant.items.map(idOf), [record.id], noise.id);
+});
+
+test('PR-26 corrective: every term still orders the hits, so a negation or a single letter still decides which comes first', () => {
+  const graph = createShadowGraph({ now: () => NOW });
+  // Each rival is the shorter record, so ranking by content words alone would put it first on score.
+  const retry = graph.addDecision({ project: 'alpha', title: 'retry webhooks', chosen: 'backoff' });
+  const never = graph.addDecision({ project: 'alpha', title: 'do not retry webhooks, ever', chosen: 'drop them' });
+  assert.deepEqual(graph.context({ project: 'alpha', query: 'we do not retry webhooks, right?' }).relevant.items.map(idOf), [never.id, retry.id]);
+  const a = graph.addDecision({ project: 'beta', title: 'option a', chosen: 'fully managed database service' });
+  const b = graph.addDecision({ project: 'beta', title: 'option b', chosen: 'database' });
+  assert.deepEqual(graph.context({ project: 'beta', query: 'why did we pick option a' }).relevant.items.map(idOf), [a.id, b.id]);
+});
+
 test('PC-13(a): ranking stays inside the read boundary, and an out-of-scope focalId reads as a nonexistent one', () => {
   const { graph, success, failure, twin } = fixture();
   const { relevant } = graph.context({ project: 'alpha', query: 'blue-green deploy' });

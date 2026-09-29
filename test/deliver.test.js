@@ -346,6 +346,14 @@ test('negative control: a prompt nothing matches delivers nothing', async (t) =>
   t.diagnostic(`negative-control payload: ${bytes(result.stdout)} bytes`);
 });
 
+test('negative control: a prompt that shares only common words with a record delivers nothing; a content word delivers it', async (t) => {
+  const { cwd, file } = await workspace(t);
+  await seed(file, (graph) => graph.addDecision({ project: 'app', title: 'cache policy', chosen: 'use the redis cluster for it' }));
+  silent(await run([], { cwd, stdin: hook('UserPromptSubmit', 'is the build green today? what is it for?'), env: { SHADOWGRAPH_FILE: file } }));
+  const matched = await run([], { cwd, stdin: hook('UserPromptSubmit', 'what about the redis cluster?'), env: { SHADOWGRAPH_FILE: file } });
+  assert.ok(matched.stdout.includes('cache policy'), matched.stdout);
+});
+
 test('--hook is inert, reading no input, unless the per-user activation record says delivery is active', async (t) => {
   const { cwd, file, root } = await workspace(t);
   await seed(file, (graph) => graph.addDecision({ project: 'app', title: 'cache policy', chosen: 'redis' }));

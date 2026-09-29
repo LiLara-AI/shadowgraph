@@ -198,13 +198,17 @@ test('the default read is evaluated, and its misses are recorded with the signal
   const report = runEvaluation({ split: 'dev' });
   assert.deepEqual(Object.keys(report.engines), ['search', 'retrieve', 'recall', 'context']);
   for (const engine of Object.values(report.engines)) assert.deepEqual(Object.keys(engine.relevantOutcomes), ['delivered', 'ranked', 'expanded', 'missed']);
-  const misses = report.missLedger.filter((entry) => entry.engine === 'context' && entry.evidence === 'grounded_case' && entry.stage === 'not_ranked');
-  assert.ok(misses.length > 0, 'the default read misses at least one grounded relevant record');
+  // A relevant record no signal ranked is recorded either way: as a grounded miss, or -- when no content word
+  // establishes relevance, so the fallback delivered it (PR-26 corrective) -- as a fallback recovery.
+  const unranked = report.missLedger.filter((entry) => entry.engine === 'context' && entry.stage === 'not_ranked' && ['grounded_case', 'fallback_recovery'].includes(entry.evidence));
+  assert.ok(unranked.length > 0, 'the default read records at least one grounded relevant record no signal ranked');
+  // "local storage without cloud" shares no content word with any record, so the fallback delivers its relevant record.
+  assert.deepEqual(report.missLedger.filter((entry) => entry.engine === 'context' && entry.case === 'xlang-ar-en').map((entry) => entry.evidence), ['fallback_recovery']);
   const { graph, ids } = buildGraph();
   const stored = new Set(privilegedSnapshot(graph).records.map((record) => record.id));
-  for (const miss of misses) {
+  for (const miss of unranked) {
     assert.equal(stored.has(ids.get(miss.record)), true, `${miss.case}: the record it missed is in the store`);
-    assert.equal(miss.reason, 'no_signal_match');
+    assert.equal(miss.reason, miss.evidence === 'grounded_case' ? 'no_signal_match' : 'relevance_not_established', miss.case);
     assert.equal(miss.signals.semantic.available, false);
     assert.ok(miss.unavailableSignals.includes('semantic'), `${miss.case} names the unavailable semantic signal`);
   }

@@ -3496,7 +3496,11 @@ export function createShadowGraph(options = {}) {
   // record itself (T0) by the hybrid engine, over the view recall() ranks; a
   // T1 line is only the form a ranked record is delivered in. A record is relevant when the
   // lexical, semantic or graph signal ranked it -- recency orders, it never
-  // selects -- and no reusableWhen, reviewAfter or status gates it (§17.4). The
+  // selects; a lexical rank counts only for a record that shares a content word
+  // with the query, so one that shares nothing but "the" or "is" is not relevant
+  // to it, while every term still orders the hits (PR-26 corrective); the head's
+  // lexical signal counts content words -- and no reusableWhen, reviewAfter or
+  // status gates it (§17.4). The
   // semantic signal has no query vector here: no request text is sent to an
   // embedding endpoint on the default path. When no signal establishes
   // relevance, the working set is delivered in full rather than nothing (§9);
@@ -3510,7 +3514,9 @@ export function createShadowGraph(options = {}) {
     const ranked = hybridSearch(rankingView(boundary, memoryScope), input.query ?? '', {
       project: boundary.scope.grant ? null : boundary.scope.project, focalId: input.focalId, asOf, currentAt
     });
-    const hits = ranked.items.filter(({ ranks }) => ranks.lexical !== null || ranks.semantic !== null || ranks.graph !== null);
+    const content = ranked.lexicalContent;
+    const hits = ranked.items.filter(({ record, ranks }) => (ranks.lexical !== null && content.matched.has(record.id)) || ranks.semantic !== null || ranks.graph !== null);
+    const signals = { ...ranked.signals, lexical: { available: content.terms.length > 0, matched: content.matched.size } };
     const established = hits.length > 0;
     const candidates = established ? hits : [...new Map(workingSet.map((record) => [record.id, { record, score: null, ranks: null }])).values()];
     const page = resolvePage({ limit: input.limit, offset: 0 }, candidates.length);
@@ -3562,7 +3568,7 @@ export function createShadowGraph(options = {}) {
     const hasMore = page.limit < candidates.length;
     const head = scopeCompleteness(boundary.scope, {
       scope: {},
-      relevance: { established, signals: Object.fromEntries(Object.entries(ranked.signals).map(([name, signal]) => [name, { available: signal.available, matched: signal.matched }])) },
+      relevance: { established, signals: Object.fromEntries(Object.entries(signals).map(([name, signal]) => [name, { available: signal.available, matched: signal.matched }])) },
       fallback: { used: !established || shortened, reason: !established ? 'relevance_not_established' : shortened ? 'decisive_meaning_omitted' : null },
       byKind, total: candidates.length, returned: items.length, omitted: candidates.length - items.length, hasMore,
       complete: established && !hasMore,

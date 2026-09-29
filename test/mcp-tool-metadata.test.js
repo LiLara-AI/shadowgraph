@@ -556,7 +556,9 @@ const WIRE_BUDGETS = {
   // PR-28 adds semantic.indexed to the recall signals and PR-29 the relevant
   // block's temporal evidence. Measured on 2026-09-29: full 58793/62493/301024,
   // verifier full 59941/63746/305571, compact 38720/40415/212682; every ceiling
-  // unchanged.
+  // unchanged. The PR-26 corrective rewords the relevant head's lexical signal
+  // (content words). Measured on 2026-09-30: full 58793/62493/301123, verifier
+  // full 59941/63746/305670, compact 38720/40415/212781; every ceiling unchanged.
   'withoutVerifier.full': { bare: 59_900, annotated: 63_700, structured: 303_600 },
   'withoutVerifier.compact': { bare: 39_500, annotated: 41_200, structured: 213_900 },
   'withVerifier.full': { bare: 61_100, annotated: 65_000, structured: 308_300 },

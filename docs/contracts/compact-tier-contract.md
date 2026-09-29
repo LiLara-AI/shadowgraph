@@ -419,7 +419,16 @@ order (§17.2), so a truncated payload still carries them. A line whose negation
 expansion (A3); until PR-27 the full record is reached by the same read without `compact` or by a read by id.
 Ranking walks, and lines render, only what the read may reach, another memory scope's memory never among it.
 
-Recency alone never establishes relevance, since it orders every candidate when `asOf` is set. The semantic
+Recency alone never establishes relevance, since it orders every candidate when `asOf` is set. Nor does a common
+word (PR-26 corrective): on this read a lexical match counts only through a content word, a fixed list of English
+function words ("the", "is", "what", "must", "without" and the like) establishing nothing, though every term still
+orders the records found. A record that shares nothing else with the query is not relevant to it, a query of function
+words only reports the lexical signal unavailable, and at a prompt host delivery delivers nothing for it; on other
+reads such a query runs the fallback and records its runtime misses. `recall()` is unchanged. Residuals, declared: a
+name, keyword, month or acronym that folds to a function word ("IT", "US", "May", "None", "Less") is dropped with
+it; another language's function words (Arabic
+"في", Spanish "el") still establish relevance on their own; and one shared content word, even a generic verb such as
+"use", still does. The semantic
 signal has no query vector on this path, because no request text is sent to an embedding endpoint, and the head
 names it unavailable. A T2 record is the canonical record, so the embedding (a derived index) is left out, as it
 is from the digest (A1). The head declares `expansion: { operation: 'shadowgraph_expand', available: true }`

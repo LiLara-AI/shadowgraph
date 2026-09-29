@@ -930,7 +930,7 @@ const relevantSchema = {
         signals: {
           type: 'object', description: 'Availability of each signal.', required: ['lexical', 'semantic', 'graph', 'temporal'],
           properties: {
-            lexical: signalAvailabilitySchema('Term matching over the records.'),
+            lexical: signalAvailabilitySchema('Content-word matching: available when the query has a content word; matched counts records sharing one. Item ranks use every term.'),
             semantic: signalAvailabilitySchema('Meaning; never available on this read.'),
             graph: signalAvailabilitySchema('Distance from focalId.'),
             temporal: signalAvailabilitySchema('Recency from asOf.')
