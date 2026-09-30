@@ -8,6 +8,7 @@
 
 import { effectiveFactExpirationBoundary, factValidityPolicyIssue, isValidIsoInstant } from './fact-validity.js';
 import { isLegacyOwned } from './scope.js';
+import { CAPTURE_ENTRY_TYPES, captureEntryIssue, captureItemIssue } from './internal/capture.js';
 
 export const JOURNAL_SCHEMA_VERSION = 7;
 // The highest entry schema this reader interprets. The reader is widened and
@@ -90,8 +91,9 @@ const PURGE_MARKER_PAYLOAD_FIELDS = new Set([
   'project', 'mode', 'removed', 'removedJournalSequences'
 ]);
 
-// Entry types that carry a replayable payload. Every one of these is produced by
-// real code in src/shadowgraph.js — no aspirational types are listed here.
+// Entry types that carry a replayable payload. Each is produced by real code in
+// src/shadowgraph.js, or read first and written later (plan v1.4.4 §9.2): the
+// four capture types are read here (PR-33) before any writer emits them.
 export const REPLAYABLE_ENTRY_TYPES = Object.freeze([
   'projection.baseline',
   'decision.recorded',
@@ -113,7 +115,11 @@ export const REPLAYABLE_ENTRY_TYPES = Object.freeze([
   'relation.created',
   'project.purged',
   'entity.attributed',
-  'entity.token_assigned'
+  'entity.token_assigned',
+  'capture.recorded',
+  'capture.state_changed',
+  'extraction.completed',
+  'extraction.failed'
 ]);
 
 // `entity.attributed` records a change to which project or origin an entity
@@ -125,6 +131,10 @@ export const REPLAYABLE_ENTRY_TYPES = Object.freeze([
 // entity kinds. The attribution migration writes it with reason `migration`;
 // a user's re-attribution arrives with the grant lifecycle.
 export const ATTRIBUTED_ENTITY_KINDS = Object.freeze(['decision', 'attempt', 'memory', 'fact']);
+// The kinds an entity.attributed entry may carry: a capture item's attribution
+// is read (PR-33) before anything attributes one. Tokens stay with the four.
+export const ATTRIBUTION_ENTRY_KINDS = Object.freeze([...ATTRIBUTED_ENTITY_KINDS, 'capture']);
+const futureOf = (value) => Number.isInteger(value?.schemaVersion) && value.schemaVersion > READABLE_JOURNAL_SCHEMA_VERSION;
 
 // `entity.token_assigned` (plan v1.4.4 PR-20; plan rev6 §3.2) gives a tokenless
 // entity its random, content-free erasureToken, the handle a purge tombstone
@@ -203,7 +213,9 @@ export const JOURNAL_TYPE_ENTITY_KIND = Object.freeze({
   'relation.created': 'relation',
   'memory.recorded': 'memory', 'memory.indexed': 'memory',
   'memory.superseded': 'memory', 'memory.invalidated': 'memory',
-  'project.purged': 'project'
+  'project.purged': 'project',
+  'capture.recorded': 'capture', 'capture.state_changed': 'capture',
+  'extraction.completed': 'capture', 'extraction.failed': 'capture'
 });
 
 const KIND_TO_COLLECTION = Object.freeze({
@@ -211,7 +223,9 @@ const KIND_TO_COLLECTION = Object.freeze({
   attempt: 'records',
   memory: 'records',
   fact: 'facts',
-  relation: 'relations'
+  relation: 'relations',
+  // A capture item folds as a record, and the kernel keeps it off every read.
+  capture: 'records'
 });
 
 /**
@@ -252,8 +266,10 @@ export function schema5PurgeArtifactIssue(entry, sourceSchemaVersion = undefined
     if (forbidden) return `redacted purge skeleton contains forbidden identity field ${forbidden}`;
     if (entry.entityId !== null || entry.payload !== null) return 'redacted purge skeleton must erase entityId and payload';
     if (!canonicalNullProvenance(entry.provenance)) return 'redacted purge skeleton must erase provenance identity';
+    // A deleted capture leaves its own reason, on its own entries only (PR-33
+    // reads it; the deletion that writes it arrives later).
     const allowedReasons = canonicalPurgeSchema(entrySchemaVersion)
-      ? ['project_purged']
+      ? ['project_purged', ...(CAPTURE_ENTRY_TYPES.includes(entry.type) ? ['capture_deleted'] : [])]
       : ['project_purged', 'legacy_project_purged'];
     if (!allowedReasons.includes(entry.redactedReason)) return 'redacted purge skeleton has a noncanonical redactedReason';
     return null;
@@ -298,8 +314,12 @@ export function schema5PurgeArtifactIssue(entry, sourceSchemaVersion = undefined
 function attributionEntryIssue(entry) {
   const payload = entry.payload;
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return 'entity.attributed requires an entity payload';
-  if (!ATTRIBUTED_ENTITY_KINDS.includes(payload.kind)) return `entity.attributed cannot carry a ${payload.kind ?? 'kind-less'} entity`;
+  if (!ATTRIBUTION_ENTRY_KINDS.includes(payload.kind)) return `entity.attributed cannot carry a ${payload.kind ?? 'kind-less'} entity`;
   if (entry.entityKind != null && entry.entityKind !== payload.kind) return 'entity.attributed entityKind must match payload.kind';
+  if (payload.kind === 'capture' && !futureOf(payload)) {
+    const issue = captureItemIssue(replayedEntity(entry));
+    if (issue) return `entity.attributed carries no well-formed capture item: ${issue}`;
+  }
   const change = payload.attributionChange;
   if (!change || typeof change !== 'object' || Array.isArray(change) || !ATTRIBUTION_CHANGE_REASONS.includes(change.reason)) {
     return 'entity.attributed requires an attributionChange whose reason is migration or user';
@@ -313,7 +333,15 @@ function attributionEntryIssue(entry) {
 
 export function journalEntryPostconditionIssue(entry) {
   if (!entry || entry.redacted === true || entry.payload === null) return null;
-  if (entry.type === 'entity.attributed') return attributionEntryIssue(entry);
+  // A future entry of the type is carried, never judged (FND-P3-03).
+  if (entry.type === 'entity.attributed') return futureOf(entry) ? null : attributionEntryIssue(entry);
+  if (CAPTURE_ENTRY_TYPES.includes(entry.type)) {
+    // A future entry or item of the type is carried, never judged.
+    if (futureOf(entry)) return null;
+    const payload = entry.payload;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || payload.kind !== 'capture') return `${entry.type} requires a capture item payload`;
+    return futureOf(payload) ? null : captureEntryIssue(entry.type, payload);
+  }
   if (entry.type === 'entity.token_assigned') {
     // A future entry of the type is carried, never judged.
     if (Number.isInteger(entry.schemaVersion) && entry.schemaVersion > READABLE_JOURNAL_SCHEMA_VERSION) return null;
@@ -805,7 +833,8 @@ export function rebuildProjection(entries = [], options = {}) {
     }
     const expectedEntityKind = JOURNAL_TYPE_ENTITY_KIND[entry.type];
     if ((expectedEntityKind && entry.entityKind != null && KIND_TO_COLLECTION[entry.entityKind] && entry.entityKind !== expectedEntityKind)
-      || (['entity.attributed', 'entity.token_assigned'].includes(entry.type) && entry.entityKind != null && !ATTRIBUTED_ENTITY_KINDS.includes(entry.entityKind))) {
+      || (entry.type === 'entity.attributed' && entry.entityKind != null && !ATTRIBUTION_ENTRY_KINDS.includes(entry.entityKind))
+      || (entry.type === 'entity.token_assigned' && entry.entityKind != null && !ATTRIBUTED_ENTITY_KINDS.includes(entry.entityKind))) {
       skipped.push({ seq: entry.seq, type: entry.type, why: 'type_entity_kind_mismatch' });
       continue;
     }

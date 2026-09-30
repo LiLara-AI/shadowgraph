@@ -8,7 +8,7 @@
 //   search-contract.md      — content fields vs filters
 //   confidence-contract.md  — evidence-weighted bounded confidence
 
-import { assertHardPurgeGapLedgers, assertJournalBaselinePlacement, assertJournalEntrySequence, assertUniqueJournalSequences, rebuildProjection, journalGaps, duplicateSequences, journalBaselinePlacementIssues, journalEntryPostconditionIssue, journalEntrySequenceIssue, journalFactLifecycleIssues, replayedEntity, reattributeIdempotency, schema5PurgeArtifactIssue, ATTRIBUTED_ENTITY_KINDS, JOURNAL_ENTRY_TYPES, JOURNAL_TYPE_ENTITY_KIND, READABLE_JOURNAL_SCHEMA_VERSION, REPLAYABLE_ENTRY_TYPES } from './journal.js';
+import { assertHardPurgeGapLedgers, assertJournalBaselinePlacement, assertJournalEntrySequence, assertUniqueJournalSequences, rebuildProjection, journalGaps, duplicateSequences, journalBaselinePlacementIssues, journalEntryPostconditionIssue, journalEntrySequenceIssue, journalFactLifecycleIssues, replayedEntity, reattributeIdempotency, schema5PurgeArtifactIssue, ATTRIBUTED_ENTITY_KINDS, ATTRIBUTION_ENTRY_KINDS, JOURNAL_ENTRY_TYPES, JOURNAL_TYPE_ENTITY_KIND, READABLE_JOURNAL_SCHEMA_VERSION, REPLAYABLE_ENTRY_TYPES } from './journal.js';
 import { createConfidence, applyContribution, setOutcomeContribution, computeConfidence, summarizeBasis, CONFIDENCE_POLICY } from './confidence.js';
 import { hybridSearch, foldText } from './hybrid-search.js';
 import { effectiveFactExpirationBoundary, factValidityPolicyIssue, isValidIsoInstant } from './fact-validity.js';
@@ -24,6 +24,7 @@ import { attemptOutcome } from './internal/outcome.js';
 import { RUNTIME_MISSES, missReachedBy, runtimeMissLedgerIssue, withFallbackMisses } from './internal/miss-ledger.js';
 import { supersessionOrder, temporalEvidence, versionTimes } from './internal/temporal-evidence.js';
 import { T1_DERIVATION_VERSION, t1Digest, t1Inputs, t1Line } from './compact-tier.js';
+import { CAPTURE_COLLECTIONS, CAPTURE_CONTENT, CAPTURE_ENTRY_TYPES, CAPTURE_IMPORT_TYPE, CAPTURE_KIND, captureCollectionIssue, captureEntryReachedBy, captureItemIssue } from './internal/capture.js';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
 // docs/api-reference.md) and are frozen so a consumer cannot mutate validation
@@ -97,6 +98,20 @@ function erasureTokenIssue(entity) {
   if (typeof entity.erasureToken !== 'string' || !entity.erasureToken) return 'erasureToken must be a non-empty string';
   if (!ATTRIBUTED_ENTITY_KINDS.includes(entity.kind) || typeof entity.id !== 'string' || !entity.id) return 'erasureToken is carried only by a decision, attempt, memory or fact that names its kind and id';
   return null;
+}
+
+function captureCollectionError(issue) {
+  const error = new Error(`A capture collection is malformed (capture_collection_malformed): ${issue}`);
+  error.code = 'capture_collection_malformed';
+  return error;
+}
+
+// A capture item is no claim-bearing record: its own frozen shape governs it
+// wherever it is stored (PR-33).
+function storedEntityIssue(entity) {
+  if (entity?.kind !== CAPTURE_KIND) return claimModelIssue(entity);
+  const issue = captureItemIssue(entity);
+  return issue && `it is not a well-formed capture item (${issue})`;
 }
 
 function claimModelIssue(entity) {
@@ -832,6 +847,10 @@ export function createShadowGraph(options = {}) {
   }
 
   const records = new TransactionMap();
+  // Capture items (PR-33): stored in `records[]`, held apart here so no read of
+  // records ever meets one. Only persistence, import, purge and id allocation
+  // look in this map.
+  const captures = new TransactionMap();
   const currentMemories = new TransactionMap();
   const facts = new TransactionMap();
   const currentFacts = new TransactionMap();
@@ -940,6 +959,7 @@ export function createShadowGraph(options = {}) {
   function captureMutableState() {
     return structuredClone({
       records: [...records],
+      captures: [...captures],
       currentMemories: [...currentMemories],
       facts: [...facts],
       currentFacts: [...currentFacts],
@@ -962,6 +982,7 @@ export function createShadowGraph(options = {}) {
       for (const [key, value] of entries) target.set(key, value);
     };
     restoreMap(records, snapshot.records);
+    restoreMap(captures, snapshot.captures);
     restoreMap(currentMemories, snapshot.currentMemories);
     restoreMap(facts, snapshot.facts);
     restoreMap(currentFacts, snapshot.currentFacts);
@@ -1074,7 +1095,7 @@ export function createShadowGraph(options = {}) {
     // internally; neither a collided candidate nor occupancy leaves this API.
     for (let attempt = 0; attempt < 128; attempt += 1) {
       const candidate = id(prefix);
-      if (records.has(candidate) || facts.has(candidate) || relations.has(candidate) || reserved.has(candidate)) continue;
+      if (records.has(candidate) || captures.has(candidate) || facts.has(candidate) || relations.has(candidate) || reserved.has(candidate)) continue;
       if ([...records.values()].some((record) => (record.alternatives ?? []).some((alternative) => alternative.id === candidate))) continue;
       reserved.add(candidate);
       return candidate;
@@ -1093,7 +1114,7 @@ export function createShadowGraph(options = {}) {
   function allocateErasureToken() {
     for (;;) {
       const token = randomUUID();
-      if (![...records.values(), ...facts.values()].some((entity) => entity.erasureToken === token)) return token;
+      if (![...records.values(), ...captures.values(), ...facts.values()].some((entity) => entity.erasureToken === token)) return token;
     }
   }
 
@@ -1294,7 +1315,7 @@ export function createShadowGraph(options = {}) {
   }
 
   function canonicalIdempotencyValue(value) {
-    const current = value?.kind === 'fact' ? facts.get(value.id) : records.get(value?.id);
+    const current = value?.kind === 'fact' ? facts.get(value.id) : value?.kind === CAPTURE_KIND ? captures.get(value.id) : records.get(value?.id);
     if (!current) throw new Error('Idempotency entry must reference an existing entity');
     if (!idempotencySemanticallyMatches(value, current)) {
       throw new Error(`Idempotency entry semantic mismatch with canonical entity ${value.id}`);
@@ -1759,6 +1780,22 @@ export function createShadowGraph(options = {}) {
       if (!entity) throw new Error(`Attribution entity not found: ${entityId}`);
       return entity;
     }) : [...records.values(), ...facts.values()].filter((entity) => entity.attribution === 'unattributed' && entity.originId === input.originId);
+    // PR-33: this build reads capture and never attributes it. An origin that
+    // holds a capture, or a record a capture names anywhere (as one it
+    // produced, in a receipt or a superseded result), stays where it is: moved
+    // apart, a purge of one owner would leave the other naming what it removed.
+    const namedByCapture = new Set();
+    const collect = (value) => {
+      if (typeof value === 'string') namedByCapture.add(value);
+      else if (value && typeof value === 'object') for (const item of Object.values(value)) collect(item);
+    };
+    for (const { id: ownId, ...item } of captures.values()) collect(item);
+    const capturesName = (entity) => namedByCapture.has(entity.id) || (entity.alternatives ?? []).some((alternative) => namedByCapture.has(alternative?.id));
+    if ((origin && [...captures.values()].some((item) => item.attribution === 'unattributed' && item.originId === input.originId)) || selected.some(capturesName)) {
+      const error = new Error('Attribution of capture material is not supported by this build: the origin holds a capture item, or a capture names a selected record');
+      error.code = 'attribution_capture_unsupported';
+      throw error;
+    }
     if (!selected.length) throw new Error('Attribution origin has no unattributed material');
     if (selected.some(isNewerThanWriter)) throw new Error('Attribution cannot change an entity of a future schema this build does not write');
     const changed = selected.filter((entity) => !ownedByProject(entity, input.targetProject));
@@ -2846,10 +2883,12 @@ export function createShadowGraph(options = {}) {
   function projectPurgeSelection(project) {
     if (typeof project !== 'string' || !project.trim()) throw new Error('A project name is required');
     const recordsForProject = [...records.values()].filter((item) => ownedByProject(item, project));
+    const capturesForProject = [...captures.values()].filter((item) => ownedByProject(item, project));
     const factsForProject = [...facts.values()].filter((item) => ownedByProject(item, project));
     const ids = new Set(recordsForProject.map((item) => item.id));
     for (const record of recordsForProject) for (const alternative of record.alternatives ?? []) ids.add(alternative.id);
     for (const fact of factsForProject) ids.add(fact.id);
+    for (const item of capturesForProject) ids.add(item.id);
     const relationIds = new Set([...relations.values()].filter((item) => ids.has(item.from) || ids.has(item.to)).map((item) => item.id));
     const referencesRemoved = (item) => {
       const entityId = item.entityId ?? item.recordId ?? item.factId;
@@ -2857,7 +2896,7 @@ export function createShadowGraph(options = {}) {
       if (relationId) return relationIds.has(relationId) || (!relations.has(relationId) && item.project === project && project !== 'default');
       if (entityId) {
         if (ids.has(entityId)) return true;
-        if (rawEntity(entityId)) return false;
+        if (rawEntity(entityId) || captures.has(entityId)) return false;
       }
       if (item.type === 'project.purged') return item.project === project;
       // An unreferenced legacy "default" breadcrumb cannot establish ownership.
@@ -2869,7 +2908,11 @@ export function createShadowGraph(options = {}) {
     const misses = Array.isArray(extras.get(RUNTIME_MISSES)) ? extras.get(RUNTIME_MISSES) : [];
     const removedEntityIds = new Set([...ids, ...relationIds]);
     const reachesMiss = (entry) => missReachedBy(entry, project, removedEntityIds);
-    return { ids, relationIds, removedEvents, referencesRemoved, reachesMiss, summary: { project, records: recordsForProject.length, facts: factsForProject.length, relations: relationIds.size, events: removedEvents.size, journal: journal.filter(referencesRemoved).length, runtimeMisses: misses.filter(reachesMiss).length } };
+    // Capture's own collections: the entries the project owns, and the content
+    // a capture it removes names (PR-33).
+    const removedContentRefs = new Set(capturesForProject.map((item) => item.contentRef).filter(Boolean));
+    const reachesCaptureEntry = (entry) => captureEntryReachedBy(entry, project, removedContentRefs);
+    return { ids, relationIds, removedEvents, referencesRemoved, reachesMiss, reachesCaptureEntry, summary: { project, records: recordsForProject.length, facts: factsForProject.length, relations: relationIds.size, events: removedEvents.size, journal: journal.filter(referencesRemoved).length, runtimeMisses: misses.filter(reachesMiss).length } };
   }
 
   function projectSummary(project) {
@@ -2884,7 +2927,7 @@ export function createShadowGraph(options = {}) {
   function purgeProject(project, purgeOptions = {}) {
     const mode = purgeOptions.mode ?? (purgeOptions.hard === true ? 'hard' : 'logical');
     if (!['logical', 'hard'].includes(mode)) throw new Error('Purge mode must be logical or hard');
-    const { summary, ids: removed, relationIds: removedRelationIds, removedEvents: eventsToRemove, referencesRemoved, reachesMiss } = projectPurgeSelection(project);
+    const { summary, ids: removed, relationIds: removedRelationIds, removedEvents: eventsToRemove, referencesRemoved, reachesMiss, reachesCaptureEntry } = projectPurgeSelection(project);
     const idempotencyKeysToRemove = [...idempotency]
       .filter(([, value]) => removed.has(value?.id))
       .map(([key]) => key);
@@ -2914,7 +2957,8 @@ export function createShadowGraph(options = {}) {
         if (item.type === 'project.purged' && item.project === project && item.payload?.mode === 'hard') continue;
         if (referencesRemoved(item)) {
           if (item.payload !== null || item.redacted !== true) journalEntriesRedacted += 1;
-          scrubLogicalPurgeSkeleton(item);
+          // A deleted capture's skeleton keeps saying so.
+          scrubLogicalPurgeSkeleton(item, item.redacted === true && item.redactedReason === 'capture_deleted' ? 'capture_deleted' : undefined);
         }
       }
     }
@@ -2937,7 +2981,7 @@ export function createShadowGraph(options = {}) {
       sourceSchemaVersion: SCHEMA_VERSION
     });
 
-    for (const recordId of removed) records.delete(recordId);
+    for (const recordId of removed) { records.delete(recordId); captures.delete(recordId); }
     for (const [scopeKey, memory] of currentMemories) if (removed.has(memory.id)) currentMemories.delete(scopeKey);
     for (const factId of removed) facts.delete(factId);
     for (const relationId of removedRelationIds) relations.delete(relationId);
@@ -2955,6 +2999,14 @@ export function createShadowGraph(options = {}) {
       const kept = extras.get(RUNTIME_MISSES).filter((entry) => !reachesMiss(entry));
       if (kept.length) extras.set(RUNTIME_MISSES, kept);
       else extras.delete(RUNTIME_MISSES);
+    }
+    // So do capture's collections, in both modes (PR-33).
+    for (const name of CAPTURE_COLLECTIONS) {
+      const entries = extras.get(name) ?? [];
+      const kept = entries.filter((entry) => !reachesCaptureEntry(entry));
+      if (kept.length === entries.length) continue;
+      if (kept.length) extras.set(name, kept);
+      else extras.delete(name);
     }
 
     return {
@@ -3044,7 +3096,7 @@ export function createShadowGraph(options = {}) {
     // P2-14: live records/facts written by a NEWER build. They are preserved
     // verbatim (never downgraded) and reported so a caller knows this build
     // cannot fully interpret them.
-    for (const record of records.values()) {
+    for (const record of [...records.values(), ...captures.values()]) {
       if (Number.isInteger(record.schemaVersion) && record.schemaVersion > READABLE_SCHEMA_VERSION) push('unsupported', 'unsupported_record_schema_version', { recordId: record.id, schemaVersion: record.schemaVersion });
     }
     for (const fact of facts.values()) {
@@ -3207,9 +3259,11 @@ export function createShadowGraph(options = {}) {
       return entities.every((id) => ids.has(id)) && relationsNamed.every((id) => relationIds.has(id));
     };
     const entryVisible = (entry) => {
-      // A baseline holds the whole store at one point in time.
-      if (entry?.type === 'projection.baseline') return false;
+      // A baseline holds the whole store at one point in time. A capture entry,
+      // even a skeleton, is never stored experience (PC-14, PC-16(b); PR-33).
+      if (entry?.type === 'projection.baseline' || CAPTURE_ENTRY_TYPES.includes(entry?.type) || entry?.entityKind === CAPTURE_KIND) return false;
       const payload = replayedEntity(entry);
+      if (payload?.kind === CAPTURE_KIND) return false;
       if (entry.type === 'relation.created' && payload) return ids.has(payload.from) && ids.has(payload.to);
       if (payload && typeof payload === 'object' && ATTRIBUTED_ENTITY_KINDS.includes(payload.kind)) return boundary.visible(payload);
       if (entry.entityId !== null && entry.entityId !== undefined) return ids.has(entry.entityId);
@@ -3476,7 +3530,7 @@ export function createShadowGraph(options = {}) {
   // are gathered once, so the cost is linear in the store and the text.
   function namesEntity(text) {
     const fold = (value) => String(value).normalize('NFC').toLowerCase();
-    const ids = new Set([...facts.keys(), ...relations.keys()].map(fold));
+    const ids = new Set([...facts.keys(), ...relations.keys(), ...captures.keys()].map(fold));
     for (const record of records.values()) {
       ids.add(fold(record.id));
       for (const alternative of Array.isArray(record.alternatives) ? record.alternatives : []) if (typeof alternative?.id === 'string') ids.add(fold(alternative.id));
@@ -3766,7 +3820,7 @@ export function createShadowGraph(options = {}) {
   function nativeCollections() {
     return {
       schemaVersion: SCHEMA_VERSION, revision,
-      records: [...records.values()].map(clone), facts: [...facts.values()].map(clone),
+      records: [...records.values(), ...captures.values()].map(clone), facts: [...facts.values()].map(clone),
       relations: [...relations.values()].map(clone), reviewSignals: [...reviewSignals.values()].map(clone),
       idempotency: [...idempotency.entries()].map(([key, value]) => ({ key, value: clone(canonicalIdempotencyValue(value)) })),
       events: clone(events), journal: clone(journal), journalSeq, journalEpoch
@@ -3845,7 +3899,7 @@ export function createShadowGraph(options = {}) {
     // The staged snapshot is already migrated and validated, so this import cannot
     // fail. Only now is the live state discarded.
     const staged = privilegedSnapshot(staging);
-    records.clear(); currentMemories.clear(); facts.clear(); currentFacts.clear(); relations.clear(); reviewSignals.clear(); idempotency.clear(); extras.clear(); projectlessLegacy.clear();
+    records.clear(); captures.clear(); currentMemories.clear(); facts.clear(); currentFacts.clear(); relations.clear(); reviewSignals.clear(); idempotency.clear(); extras.clear(); projectlessLegacy.clear();
     events.length = 0; journal.length = 0; revision = 0; journalSeq = 0; journalEpoch = null;
     return importData(staged);
   }
@@ -3879,7 +3933,8 @@ export function createShadowGraph(options = {}) {
     // Preflight every migration and clone before changing any live collection.
     // Direct import is intentionally merge-oriented, but a malformed entity must
     // never leave a partially merged graph behind.
-    const importedRecords = (source.records ?? []).map((item) => migrateRecord(item));
+    // A capture item has no legacy form to migrate from: it is kept as it came.
+    const importedRecords = (source.records ?? []).map((item) => (item.kind === CAPTURE_KIND ? clone(item) : migrateRecord(item)));
     const importedFacts = (source.facts ?? []).map((fact, index, allFacts) => {
       const factId = fact.id ?? legacyFactId(fact, index, allFacts);
       return migrateFact({ ...fact, id: factId });
@@ -3914,6 +3969,21 @@ export function createShadowGraph(options = {}) {
     const importedIdempotency = (source.idempotency ?? []).map((item) => ({ key: importIdempotencyKey(item.key, item.value), value: clone(item.value) }));
     const importedEvents = (source.events ?? []).map((item) => clone(item));
     const importedExtras = extraCollections(source).filter(([key]) => key !== STORED_WITHOUT_PROJECT).map(([key, value]) => [key, clone(value)]);
+    // Capture's collections merge by key, as records do: an import never
+    // drops another capture's raw text or session (PR-33).
+    for (const extra of importedExtras) {
+      const [key, value] = extra;
+      if (!CAPTURE_COLLECTIONS.includes(key)) continue;
+      const keyName = key === CAPTURE_CONTENT ? 'contentRef' : 'id';
+      const held = new Map((extras.get(key) ?? []).map((item) => [item[keyName], item]));
+      const owner = (item) => JSON.stringify([item?.attribution, item?.project, item?.originId, key === CAPTURE_CONTENT ? null : item?.sessionId]);
+      const moved = value.findIndex((item) => held.has(item?.[keyName]) && owner(held.get(item[keyName])) !== owner(item));
+      if (moved !== -1) throw captureCollectionError(`${key} entry ${moved} would change the owner of an entry the store holds`);
+      const incoming = new Set(value.map((item) => item[keyName]));
+      extra[1] = [...(extras.get(key) ?? []).filter((item) => !incoming.has(item[keyName])), ...value];
+      const issue = captureCollectionIssue(key, extra[1]);
+      if (issue) throw captureCollectionError(issue);
+    }
     let pendingMigrationBaseline = null;
     let pendingJournalEntries = [];
     let pendingJournalSequence = null;
@@ -3966,8 +4036,9 @@ export function createShadowGraph(options = {}) {
       // Schemas 1–3 had collection-local ids. Schema 4 has one global entity
       // namespace, so ambiguous legacy collisions receive stable migrated ids
       // rather than silently overwriting one another or becoming backend-specific.
-      const used = new Set();
+      const used = new Set(importedRecords.filter((record) => record.kind === CAPTURE_KIND).map((record) => record.id));
       for (const [index, record] of importedRecords.entries()) {
+        if (record.kind === CAPTURE_KIND) continue;
         if (used.has(record.id)) {
           const previousId = record.id;
           record.id = legacyCollisionId(record.kind, record, index, used);
@@ -4026,6 +4097,7 @@ export function createShadowGraph(options = {}) {
           if (endpoints.length) relation.migration = { ...(relation.migration ?? {}), ambiguousLegacyEndpoints: endpoints };
         }
         for (const record of importedRecords) {
+          if (record.kind === CAPTURE_KIND) continue;
           const fields = ['supersedes', 'supersededBy', 'relatedTo', 'failedAttempts'].filter((field) => {
             const value = record[field];
             return Array.isArray(value) ? value.some((item) => ambiguousLegacyIds.has(item)) : ambiguousLegacyIds.has(value);
@@ -4043,7 +4115,7 @@ export function createShadowGraph(options = {}) {
       // names none -- one built from a public result -- keeps the one it has. A
       // merge never changes or drops a token.
       const journalless = !(Array.isArray(source.journal) && source.journal.length);
-      const liveTokenHolders = new Map([...records.values(), ...facts.values()].filter((entity) => entity.erasureToken !== undefined).map((entity) => [entity.erasureToken, entity.id]));
+      const liveTokenHolders = new Map([...records.values(), ...captures.values(), ...facts.values()].filter((entity) => entity.erasureToken !== undefined).map((entity) => [entity.erasureToken, entity.id]));
       const keepErasureToken = (existing, item) => {
         if (existing?.erasureToken !== undefined && item.erasureToken !== existing.erasureToken) {
           if (item.erasureToken !== undefined || !journalless) throw new Error(`Existing entity id ${item.id} cannot change or drop its erasureToken`);
@@ -4053,7 +4125,7 @@ export function createShadowGraph(options = {}) {
         if (item.erasureToken !== undefined && holder !== undefined && holder !== item.id) throw new Error(`${item.id} would share an erasureToken with ${holder}`);
       };
       for (const record of importedRecords) {
-        const existingRecord = records.get(record.id);
+        const existingRecord = records.get(record.id) ?? captures.get(record.id);
         if (existingRecord && (existingRecord.kind !== record.kind || existingRecord.project !== record.project)) throw new Error(`Existing entity id ${record.id} cannot change kind or project`);
         keepErasureToken(existingRecord, record);
         // PR-23: a legacy attempt's cause is shown, not stored, so one merged
@@ -4063,20 +4135,24 @@ export function createShadowGraph(options = {}) {
         if (facts.has(record.id) || relations.has(record.id) || (existingAlternativeOwners.has(record.id) && existingAlternativeOwners.get(record.id) !== record.id)) throw new Error(`Entity id already exists: ${record.id}`);
         for (const alternative of record.alternatives ?? []) {
           const existingOwner = existingAlternativeOwners.get(alternative.id);
-          if (records.has(alternative.id) || facts.has(alternative.id) || relations.has(alternative.id) || (existingOwner && existingOwner !== record.id)) throw new Error(`Entity id already exists: ${alternative.id}`);
+          if (records.has(alternative.id) || captures.has(alternative.id) || facts.has(alternative.id) || relations.has(alternative.id) || (existingOwner && existingOwner !== record.id)) throw new Error(`Entity id already exists: ${alternative.id}`);
         }
       }
+      const importedCaptureIds = new Set(importedRecords.filter((record) => record.kind === CAPTURE_KIND).map((record) => record.id));
       for (const fact of importedFacts) {
-        if (records.has(fact.id) || relations.has(fact.id) || existingAlternativeOwners.has(fact.id)) throw new Error(`Entity id already exists: ${fact.id}`);
+        if (records.has(fact.id) || captures.has(fact.id) || relations.has(fact.id) || existingAlternativeOwners.has(fact.id)) throw new Error(`Entity id already exists: ${fact.id}`);
         const existingFact = facts.get(fact.id);
         if (existingFact && existingFact.project !== fact.project) throw new Error(`Existing entity id ${fact.id} cannot change kind or project`);
         keepErasureToken(existingFact, fact);
       }
       for (const relation of importedRelations) {
-        if (records.has(relation.id) || facts.has(relation.id) || existingAlternativeOwners.has(relation.id)) throw new Error(`Entity id already exists: ${relation.id}`);
+        if (records.has(relation.id) || captures.has(relation.id) || facts.has(relation.id) || existingAlternativeOwners.has(relation.id)) throw new Error(`Entity id already exists: ${relation.id}`);
+        if ([relation.from, relation.to].some((endpoint) => captures.has(endpoint) || importedCaptureIds.has(endpoint))) throw new Error('Relation endpoints must exist before import, and a capture item is never one');
         const existingRelation = relations.get(relation.id);
         if (existingRelation && (existingRelation.project !== relation.project || existingRelation.from !== relation.from || existingRelation.to !== relation.to || existingRelation.relation !== relation.relation)) throw new Error(`Existing relation id ${relation.id} cannot change identity`);
       }
+      // Nor may a relation the store holds come to name one.
+      for (const relation of relations.values()) if (importedCaptureIds.has(relation.from) || importedCaptureIds.has(relation.to)) throw new Error('Relation endpoints must exist before import, and a capture item is never one');
       const availableEntityIds = new Set([...records.keys(), ...facts.keys()]);
       const overwrittenRecordIds = new Set(importedRecords.map((record) => record.id));
       for (const [alternativeId, ownerId] of existingAlternativeOwners) if (!overwrittenRecordIds.has(ownerId)) availableEntityIds.add(alternativeId);
@@ -4110,7 +4186,7 @@ export function createShadowGraph(options = {}) {
       });
       const liveEventIds = new Set(events.map((item) => item.id));
       for (const eventItem of importedEvents) if (liveEventIds.has(eventItem.id)) throw new Error(`Event id already exists: ${eventItem.id}`);
-      const finalRecords = new Map(records);
+      const finalRecords = new Map([...records, ...captures]);
       const finalFacts = new Map(facts);
       for (const record of importedRecords) finalRecords.set(record.id, record);
       for (const fact of importedFacts) finalFacts.set(fact.id, fact);
@@ -4154,7 +4230,7 @@ export function createShadowGraph(options = {}) {
     }
     if (!(Array.isArray(source.journal) && source.journal.length) && (importedRecords.length || importedFacts.length || importedRelations.length || importedIdempotency.length)) {
       const sameSnapshot = (left, right) => JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
-      const finalRecords = new Map(records);
+      const finalRecords = new Map([...records, ...captures]);
       const finalFacts = new Map(facts);
       const finalRelations = new Map(relations);
       for (const item of importedRecords) finalRecords.set(item.id, item);
@@ -4177,7 +4253,7 @@ export function createShadowGraph(options = {}) {
 
       const changedEntities = [];
       for (const item of importedRecords) {
-        const previous = records.get(item.id);
+        const previous = records.get(item.id) ?? captures.get(item.id);
         if (!previous || !sameSnapshot(previous, item)) changedEntities.push({ item, previous });
       }
       for (const item of importedFacts) {
@@ -4242,13 +4318,15 @@ export function createShadowGraph(options = {}) {
         if (item.kind === 'decision') return 'decision.recorded';
         if (item.kind === 'attempt') return 'attempt.recorded';
         if (item.kind === 'relation') return 'relation.created';
+        // An item of a newer schema is carried under a plain state change.
+        if (item.kind === CAPTURE_KIND) return Object.hasOwn(CAPTURE_IMPORT_TYPE, item.state) ? CAPTURE_IMPORT_TYPE[item.state] : CAPTURE_IMPORT_TYPE.processing;
         throw new Error(`Cannot journal imported entity kind ${item.kind}`);
       };
       const originalEntity = (item) => item.kind === 'fact'
         ? facts.get(item.id)
         : item.kind === 'relation'
           ? relations.get(item.id)
-          : records.get(item.id);
+          : records.get(item.id) ?? captures.get(item.id);
       const prebuildSnapshot = (item, idempotencyKey) => prebuilt.push(prebuildJournalEntry({
         type: snapshotType(item, originalEntity(item)),
         entityKind: item.kind,
@@ -4349,7 +4427,7 @@ export function createShadowGraph(options = {}) {
       }
     }
     revision = Number.isInteger(source.revision) ? Math.max(revision, source.revision) : revision;
-    for (const item of importedRecords) records.set(item.id, item);
+    for (const item of importedRecords) (item.kind === CAPTURE_KIND ? captures : records).set(item.id, item);
     currentMemories.clear();
     const memoryScopeCandidates = new Map();
     for (const item of records.values()) {
@@ -4526,7 +4604,7 @@ export function createShadowGraph(options = {}) {
   function rebuild(options = {}) {
     const boundary = readBoundary(options);
     const report = replay(options);
-    const recordsInScope = report.projection.records.filter(boundary.visible);
+    const recordsInScope = report.projection.records.filter((item) => item.kind !== CAPTURE_KIND && boundary.visible(item));
     const factsInScope = report.projection.facts.filter(boundary.visible);
     const ids = new Set([...recordsInScope, ...factsInScope].map((item) => item.id));
     // A diagnostic is listed unless it names something outside the scope: an
@@ -4973,9 +5051,26 @@ function validateImportShape(source) {
       throw error;
     }
   }
+  // PR-33: so do capture's own collections.
+  for (const name of CAPTURE_COLLECTIONS) {
+    if (source[name] === undefined) continue;
+    const issue = captureCollectionIssue(name, source[name]);
+    if (issue) throw captureCollectionError(issue);
+  }
   for (const [index, item] of array('records').entries()) {
-    if (!item || typeof item !== 'object' || !['decision', 'attempt', 'memory'].includes(item.kind)) throw new Error(`records[${index}] is malformed`);
+    if (!item || typeof item !== 'object' || !['decision', 'attempt', 'memory', CAPTURE_KIND].includes(item.kind)) throw new Error(`records[${index}] is malformed`);
     if (typeof item.id !== 'string' || !item.id) throw new Error(`records[${index}].id must be a non-empty string`);
+    if (item.kind === CAPTURE_KIND) {
+      // A store that carries capture says its schema. A legacy one may be the
+      // fold of an older store (replay() imports at its lowest entity
+      // version); its migrations never rename a capture, and no relation may
+      // name one.
+      if (!Number.isInteger(source.schemaVersion)) throw new Error(`records[${index}] is a capture item, which only a store that declares its schemaVersion carries`);
+      if (item.project !== null && (typeof item.project !== 'string' || !item.project.trim())) throw new Error(`records[${index}].project must be a non-empty string or null`);
+      const captureIssue = isFutureEntity(item) ? null : captureItemIssue(item);
+      if (captureIssue) throw new Error(`records[${index}] is not a well-formed capture item: ${captureIssue}`);
+      continue;
+    }
     const recordClaimIssue = isFutureEntity(item) ? null : claimModelIssue(item);
     if (recordClaimIssue) throw new Error(`records[${index}] violates the claim model: ${recordClaimIssue}`);
     if (Number.isInteger(source.schemaVersion) && source.schemaVersion >= GLOBAL_ENTITY_NAMESPACE_SCHEMA_VERSION) {
@@ -5085,12 +5180,15 @@ function validateImportShape(source) {
     if (purgeArtifactIssue) throw new Error(`journal[${index}] has noncanonical schema 5 purge artifact: ${purgeArtifactIssue}`);
     const expectedEntityKind = JOURNAL_TYPE_ENTITY_KIND[entry.type];
     if (expectedEntityKind && entry.entityKind != null && entry.entityKind !== expectedEntityKind) throw new Error(`journal[${index}] type ${entry.type} requires entityKind ${expectedEntityKind}`);
-    if ((entry.type === 'entity.attributed' || (entry.type === 'entity.token_assigned' && !isFutureEntity(entry))) && entry.entityKind != null && !ATTRIBUTED_ENTITY_KINDS.includes(entry.entityKind)) throw new Error(`journal[${index}] type ${entry.type} requires entityKind ${ATTRIBUTED_ENTITY_KINDS.join(', ')}`);
-    const entryClaimIssue = isPlainObject(entry.payload) && entry.type !== 'projection.baseline' && !isFutureEntity(entry) && !isFutureEntity(entry.payload) ? claimModelIssue(entry.payload) : null;
+    // A future entry of either type is carried, never judged (FND-P3-03). A
+    // capture's attribution is read as any entity's is (PR-33).
+    const attributableKinds = entry.type === 'entity.attributed' ? ATTRIBUTION_ENTRY_KINDS : ATTRIBUTED_ENTITY_KINDS;
+    if (['entity.attributed', 'entity.token_assigned'].includes(entry.type) && !isFutureEntity(entry) && entry.entityKind != null && !attributableKinds.includes(entry.entityKind)) throw new Error(`journal[${index}] type ${entry.type} requires entityKind ${attributableKinds.join(', ')}`);
+    const entryClaimIssue = isPlainObject(entry.payload) && entry.type !== 'projection.baseline' && entry.payload.kind !== CAPTURE_KIND && !isFutureEntity(entry) && !isFutureEntity(entry.payload) ? claimModelIssue(entry.payload) : null;
     if (entryClaimIssue) throw new Error(`journal[${index}] payload violates the claim model: ${entryClaimIssue}`);
     if (entry.type === 'projection.baseline' && !isFutureEntity(entry)) {
       const baselineEntities = [...(entry.payload?.records ?? []), ...(entry.payload?.facts ?? []), ...(entry.payload?.relations ?? []), ...(entry.payload?.idempotency ?? []).map((item) => item?.value)];
-      const baselineIssue = baselineEntities.filter((entity) => isPlainObject(entity) && !isFutureEntity(entity)).map(claimModelIssue).find(Boolean);
+      const baselineIssue = baselineEntities.filter((entity) => isPlainObject(entity) && !isFutureEntity(entity)).map(storedEntityIssue).find(Boolean);
       if (baselineIssue) throw new Error(`journal[${index}] projection.baseline payload violates the claim model: ${baselineIssue}`);
     }
     if (source.schemaVersion >= 3) {
@@ -5138,7 +5236,7 @@ function validateImportShape(source) {
     if (!item || typeof item !== 'object' || Array.isArray(item) || typeof item.key !== 'string' || !item.key || !item.value || typeof item.value !== 'object' || Array.isArray(item.value)) throw new Error(`idempotency[${index}] is malformed`);
     if (idempotencyKeys.has(item.key)) throw new Error(`Duplicate idempotency key ${item.key}`);
     idempotencyKeys.add(item.key);
-    const valueClaimIssue = isFutureEntity(item.value) ? null : claimModelIssue(item.value);
+    const valueClaimIssue = isFutureEntity(item.value) ? null : storedEntityIssue(item.value);
     if (valueClaimIssue) throw new Error(`idempotency[${index}].value violates the claim model: ${valueClaimIssue}`);
   }
   // A purge tombstone names exactly one entity by its token.

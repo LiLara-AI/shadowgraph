@@ -12,6 +12,7 @@ import { NODE_SQLITE_NOT_APPLICABLE_REASON } from './runtime-capabilities.js';
 import { SCHEMA_VERSION } from './shadowgraph.js';
 import { extraCollections, isExtraCollectionKey, refusePublicExport } from './internal/collections.js';
 import { RUNTIME_MISSES } from './internal/miss-ledger.js';
+import { CAPTURE_CONTENT, CAPTURE_SESSIONS } from './internal/capture.js';
 
 // One generic carrier for every top-level collection this build does not
 // handle natively (plan v1.4.4 §10.9.8): one row per collection, the whole
@@ -146,8 +147,8 @@ export async function createSqliteStore(filePath, options = {}) {
   ];
 
   // The entries of a keyed extra collection are rows too: a save that removes
-  // one is destructive, so a purge's removal is scrubbed (PR-28a).
-  const keyedExtraCollections = [[RUNTIME_MISSES, 'missId']];
+  // one is destructive, so a purge's removal is scrubbed (PR-28a, PR-33).
+  const keyedExtraCollections = [[RUNTIME_MISSES, 'missId'], [CAPTURE_CONTENT, 'contentRef'], [CAPTURE_SESSIONS, 'id']];
   const entriesOf = (payload, collection) => (Array.isArray(payload?.[collection]) ? payload[collection] : []);
 
   function removesPersistedRows(current, next) {

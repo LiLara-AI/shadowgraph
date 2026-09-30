@@ -15,11 +15,12 @@ import { createStorage } from './storage.js';
 import { validateRestorePayload } from './restore-validation.js';
 import { extraCollections } from './internal/collections.js';
 import { RUNTIME_MISSES } from './internal/miss-ledger.js';
+import { CAPTURE_COLLECTIONS, CAPTURE_KIND } from './internal/capture.js';
 
 // Collections whose reader floor is above every downgrade target: a build below
 // it would carry their entries but never purge them, so conversion leaves them
 // out and reports only how many entries each held (PR-28a).
-const BELOW_FLOOR_COLLECTIONS = Object.freeze([RUNTIME_MISSES]);
+const BELOW_FLOOR_COLLECTIONS = Object.freeze([RUNTIME_MISSES, ...CAPTURE_COLLECTIONS]);
 function excludeBelowFloor(source, report) {
   for (const collection of BELOW_FLOOR_COLLECTIONS) {
     if (source[collection] === undefined) continue;
@@ -169,6 +170,13 @@ export function downgradeToSchema6(snapshot, { now = () => new Date().toISOStrin
   const excludedIds = new Set();
   const byId = new Map();
   const convert = (entity) => {
+    // Capture's reader floor (PR-33) is above every schema-6 build, which would
+    // refuse the store, or carry the item and never purge it.
+    if (entity.kind === CAPTURE_KIND) {
+      excludedIds.add(entity.id);
+      report.excluded.push({ collection: 'records', id: entity.id, kind: CAPTURE_KIND, reason: 'a capture item: no schema-6 build reads the capture kind' });
+      return null;
+    }
     if (entity.kind === 'attempt' && (entity.captureRef != null || entity.outcomeEvidence != null) && entity.resultClass == null) {
       excludedIds.add(entity.id);
       report.excluded.push({ collection: 'records', id: entity.id, kind: 'attempt', reason: 'captured with no result class: a schema-6 reader would classify it from its prose' });
