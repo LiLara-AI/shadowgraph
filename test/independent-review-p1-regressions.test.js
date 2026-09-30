@@ -496,7 +496,11 @@ test('P1-3 independent review: invalid verified journal payload makes core and c
   invalidEntry.payload.value = 'tampered-journal-only';
   const rawJournal = structuredClone(payload.journal);
 
-  const graph = createShadowGraph({ verifier: fixture.verifier });
+  // The live fact is genuinely verified only inside its attestation's window,
+  // which ends at the fixture's expiresAt (2026-09-30). Both graphs run at the
+  // fixture's own instant: on the wall clock the premise lapsed on that date.
+  const fixtureNow = '2026-08-27T12:00:00.000Z';
+  const graph = createShadowGraph({ verifier: fixture.verifier, now: () => fixtureNow });
   graph.importData(payload);
   assert.equal(privilegedSnapshot(graph).facts[0].verificationStatus, 'verified', 'live fact remains genuinely verified');
   const coreReport = graph.rebuild({ project: 'validity' });
@@ -508,7 +512,9 @@ test('P1-3 independent review: invalid verified journal payload makes core and c
 
   const file = join(directory, 'invalid-journal.json');
   await writeFile(file, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
-  const rpc = startMcp(file, { SHADOWGRAPH_VERIFIER_CONFIG: fixture.verifierConfig });
+  const clockFile = join(directory, 'clock.txt');
+  await writeFile(clockFile, fixtureNow, 'utf8');
+  const rpc = startMcp(file, { SHADOWGRAPH_VERIFIER_CONFIG: fixture.verifierConfig, NODE_ENV: 'test', SHADOWGRAPH_TEST_CLOCK_FILE: clockFile });
   t.after(async () => { await rpc.stop(); });
   await rpc.call({ jsonrpc: '2.0', id: 10, method: 'tools/list' });
   const response = await rpc.call({
