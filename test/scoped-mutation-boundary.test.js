@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createShadowGraphServer } from '../src/server.js';
 import { createStorage } from '../src/storage.js';
-import { privilegedSnapshot, privilegedValidate } from '../src/internal/snapshot.js';
+import { privilegedRecordCapture, privilegedSnapshot, privilegedValidate } from '../src/internal/snapshot.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
 // Labels below refer to IDs returned by ordinary creation, never supplied IDs.
@@ -296,6 +296,18 @@ test('PR-11 historical signal reads expose only owner identity and lifecycle wit
   assert.equal(JSON.stringify(privilegedSnapshot(graph)), before, 'coverage adds no writes or historical reassessment');
   assert.deepEqual(graph.getReviewSignals({ project: 'alpha' }).items, []);
   assert.equal(graph.getReviewSignals({ project: 'alpha' }).completeness.complete, true, 'no other owner omission notice');
+});
+
+// Capture state anywhere in the store puts a capture block on every scoped
+// read (M-9, PR-36b); it never makes a partial signal read complete.
+test('PR-36b capture state never masks the partial coverage of historical signals', () => {
+  const graph = labelMatchedHistory();
+  const limits = { maxStoreBytes: 2 ** 40, maxQueueDepth: 2 ** 30, maxItemBytes: 2 ** 40, maxItemsPerSession: 2 ** 30 };
+  privilegedRecordCapture(graph, { project: 'alpha', originId: 'origin_a', text: 'captured', admission: { limits, storeBytes: 0 }, source: { event: 'UserPromptSubmit', sessionId: 'session-1' } });
+  for (const [owner, decisionId] of DECISIONS) {
+    const { completeness } = graph.getReviewSignals({ ...owner, status: 'open' });
+    assert.deepEqual([completeness.complete, completeness.losslessItems, completeness.limitation.code, completeness.capture.pending], [false, false, 'scoped_coverage', 0], decisionId);
+  }
 });
 
 test('PR-11 all-in-scope signal reads remain full and status filtering does not inherit omitted detail', () => {

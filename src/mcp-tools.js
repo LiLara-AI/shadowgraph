@@ -420,13 +420,45 @@ const readScopeSchema = {
     } }], description: 'Rechecked effective grant, or null when none is usable.' }
   }
 };
+const captureLimitedSchema = {
+  type: 'array', description: 'Store limits refusing new material now; none removed.',
+  items: { type: 'object', required: ['limit', 'ceiling', 'since'], properties: {
+    limit: { type: 'string', enum: ['maxQueueDepth', 'maxStoreBytes'], description: 'The limit reached.' },
+    ceiling: integerCount('The limit value.'),
+    since: { type: 'string', description: 'When refusal began.' }
+  } }
+};
+const captureGapsSchema = {
+  type: 'array', description: 'What capture refused: bounded, never named.',
+  items: { type: 'object', required: ['reason', 'from', 'to'], properties: {
+    reason: { type: 'string', enum: ['maxQueueDepth', 'maxStoreBytes', 'maxItemsPerSession', 'session_in_another_project'], description: 'Why it was refused.' },
+    from: { type: 'string', description: 'When refusal began.' },
+    to: stringOrNull('When it ended, if known.'),
+    sessions: integerCount('Sessions at their limit.')
+  } }
+};
+const captureStatusSchema = {
+  type: 'object', description: 'When the store holds capture state: this scope\'s captured items not yet understood.',
+  required: ['pending', 'processing', 'failed', 'blocked', 'oldestPendingAt', 'extractionAvailable', 'limited', 'gaps'],
+  properties: {
+    pending: integerCount('Items waiting.'),
+    processing: integerCount('Items claimed.'),
+    failed: integerCount('Items failed.'),
+    blocked: integerCount('Items blocked.'),
+    oldestPendingAt: stringOrNull('Oldest pending capture.'),
+    extractionAvailable: { type: 'boolean', description: 'Whether extraction runs.' },
+    limited: captureLimitedSchema,
+    gaps: captureGapsSchema
+  }
+};
 const readCoverageSchema = {
   type: 'object', description: 'Request coverage and any withheld detail.', required: ['scope', 'complete'],
   properties: {
     scope: readScopeSchema,
-    complete: { type: 'boolean', description: 'Coverage of known candidates in this request, false when project_unresolved or detail is withheld; not total semantic recall.' },
+    complete: { type: 'boolean', description: 'Coverage of known candidates in this request, false when project_unresolved, detail is withheld or capture is pending; not total semantic recall.' },
     losslessItems: { type: 'boolean', description: 'False when returned items have withheld or transformed detail.' },
-    limitation: { type: 'object', description: 'Limits of this view.', required: ['code', 'detail'], properties: { code: { type: 'string', description: 'Stable limitation code.' }, detail: { type: 'string', description: 'What this view cannot establish.' } } }
+    limitation: { type: 'object', description: 'Limits of this view.', required: ['code', 'detail'], properties: { code: { type: 'string', description: 'Stable limitation code.' }, detail: { type: 'string', description: 'What this view cannot establish.' } } },
+    capture: captureStatusSchema
   }
 };
 function completenessSchema(extraProperties = {}, extraRequired = []) {
@@ -972,15 +1004,19 @@ const relevantSchema = {
       }
     },
     processing: {
-      type: 'object', description: 'Extraction state: no extraction runs in this build.', required: ['pending', 'failed', 'blocked', 'oldestPendingAt', 'extractionAvailable'],
+      type: 'object', description: 'Captured material in this scope not yet understood, as the completeness capture block states it; no extraction runs in this build.', required: ['pending', 'failed', 'blocked', 'oldestPendingAt', 'extractionAvailable'],
       properties: {
         pending: integerCount('Items awaiting extraction.'),
+        processing: integerCount('Items an extraction has claimed; present when the store holds capture state.'),
         failed: integerCount('Items whose extraction failed.'),
         blocked: integerCount('Items whose extraction is blocked.'),
         oldestPendingAt: stringOrNull('When the oldest pending item arrived.'),
-        extractionAvailable: { type: 'boolean', description: 'Whether extraction runs.' }
+        extractionAvailable: { type: 'boolean', description: 'Whether extraction runs.' },
+        limited: captureLimitedSchema,
+        gaps: captureGapsSchema
       }
     },
+    capture: captureStatusSchema,
     expansion: {
       type: 'object', description: 'The operation a line handle names.', required: ['operation', 'available'],
       properties: {

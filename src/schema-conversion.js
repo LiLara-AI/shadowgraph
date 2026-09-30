@@ -15,7 +15,7 @@ import { createStorage } from './storage.js';
 import { validateRestorePayload } from './restore-validation.js';
 import { extraCollections } from './internal/collections.js';
 import { RUNTIME_MISSES } from './internal/miss-ledger.js';
-import { CAPTURE_COLLECTIONS, CAPTURE_KIND } from './internal/capture.js';
+import { CAPTURE_COLLECTIONS, CAPTURE_KIND, CAPTURE_LIMIT_EVENT, CAPTURE_REFUSED_EVENT } from './internal/capture.js';
 
 // Collections whose reader floor is above every downgrade target: a build below
 // it would carry their entries but never purge them, so conversion leaves them
@@ -197,7 +197,8 @@ export function downgradeToSchema6(snapshot, { now = () => new Date().toISOStrin
   const reviewSignals = drop('reviewSignals', source.reviewSignals ?? [], (item) => excludedIds.has(item.decisionId), (item) => ({ id: item.id }));
   const idempotency = drop('idempotency', source.idempotency ?? [], (item) => excludedIds.has(item.value?.id), (item) => ({ key: item.key }))
     .map((item) => ({ key: item.key, value: structuredClone(byId.get(item.value?.id) ?? item.value) }));
-  const events = drop('events', source.events ?? [], (item) => [item.recordId, item.factId, item.relationId].some((id) => excludedIds.has(id)), (item) => ({ id: item.id }));
+  // Capture's own entries (PR-36b) belong to the capture a copy leaves out.
+  const events = drop('events', source.events ?? [], (item) => [item.recordId, item.factId, item.relationId].some((id) => excludedIds.has(id)) || item.type === CAPTURE_LIMIT_EVENT || item.type === CAPTURE_REFUSED_EVENT, (item) => ({ id: item.id }));
   const journal = source.journal ?? [];
   const byType = {};
   for (const entry of journal) byType[entry?.type ?? 'unknown'] = (byType[entry?.type ?? 'unknown'] ?? 0) + 1;
@@ -316,7 +317,8 @@ export function downgradeToSchema5(snapshot, { now = () => new Date().toISOStrin
   const reviewSignals = drop('reviewSignals', source.reviewSignals ?? [], (item) => excludedIds.has(item.decisionId), (item) => ({ id: item.id }));
   const idempotency = drop('idempotency', source.idempotency ?? [], (item) => excludedIds.has(item.value?.id), (item) => ({ key: item.key }))
     .map((item) => ({ key: item.key, value: structuredClone(byId.get(item.value?.id) ?? item.value) }));
-  const events = drop('events', source.events ?? [], (item) => [item.recordId, item.factId, item.relationId].some((id) => excludedIds.has(id)), (item) => ({ id: item.id }));
+  // Capture's own entries (PR-36b) belong to the capture a copy leaves out.
+  const events = drop('events', source.events ?? [], (item) => [item.recordId, item.factId, item.relationId].some((id) => excludedIds.has(id)) || item.type === CAPTURE_LIMIT_EVENT || item.type === CAPTURE_REFUSED_EVENT, (item) => ({ id: item.id }));
   const journal = source.journal ?? [];
   const byType = {};
   for (const entry of journal) byType[entry?.type ?? 'unknown'] = (byType[entry?.type ?? 'unknown'] ?? 0) + 1;

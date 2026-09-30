@@ -28,12 +28,42 @@ const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 const STATES = ['pending', 'processing', 'extracted', 'failed', 'blocked'];
 const LEASE = { leaseId: 'lease-1', ownerId: 'worker-1', ownerBootId: 'boot-1', leaseExpiresAt: '2026-01-01T00:05:00.000Z' };
 
+// Admission (PR-36b) is every capture's: limits no test here reaches.
+const ADMISSION = Object.freeze({ limits: { maxStoreBytes: 2 ** 40, maxQueueDepth: 2 ** 30, maxItemBytes: 2 ** 40, maxItemsPerSession: 2 ** 30 }, storeBytes: 0 });
 const record = (graph, overrides = {}) => privilegedRecordCapture(graph, {
-  project: 'alpha', originId: 'origin-a', text: 'the prompt text',
+  project: 'alpha', originId: 'origin-a', text: 'the prompt text', admission: ADMISSION,
   ...overrides,
   source: { event: 'UserPromptSubmit', sessionId: 'session-1', role: 'user', ...(overrides.source ?? {}) }
 });
 const move = (graph, id, to, fields = {}) => privilegedTransitionCapture(graph, { id, to, ...fields });
+// A capture-bearing store's reads differ from its capture-free twin's in one
+// declared way (M-9, PR-36b): each scoped completeness carries the scope's
+// capture block, is incomplete while captured items wait in that scope, and
+// says so -- and what capture refused -- in its limitation; a relevance head's
+// processing is the block too. So the twin's answer with that declaration
+// applied must be the answer, exactly.
+function withDeclaration(value, block) {
+  if (Array.isArray(value)) return value.map((entry) => withDeclaration(entry, block));
+  if (value === null || typeof value !== 'object') return value;
+  const copy = Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, withDeclaration(entry, block)]));
+  if (copy.scope?.requestState === undefined) return copy;
+  const backlog = block.pending + block.processing + block.failed + block.blocked;
+  const said = [
+    ...(backlog ? [`${backlog} captured ${backlog === 1 ? 'item is' : 'items are'} not yet understood in this scope: captured is not stored experience.`] : []),
+    ...(block.limited.length ? [`Capture is at a limit (${block.limited.map((entry) => entry.limit).join(', ')}): new material is refused, and nothing accepted is removed.`] : []),
+    ...(block.gaps.length ? [`Capture refused material (${[...new Set(block.gaps.map((entry) => entry.reason))].join(', ')}); what it refused is not here.`] : [])
+  ];
+  const result = { ...copy, capture: block, complete: copy.complete === true && backlog === 0 };
+  if (said.length) {
+    result.limitation = copy.limitation
+      ? { ...copy.limitation, detail: [copy.limitation.detail, ...said].filter(Boolean).join(' ') }
+      : { code: backlog ? 'capture_pending' : block.limited.length ? 'capture_limited' : 'capture_gap', detail: said.join(' ') };
+  }
+  if (Object.hasOwn(copy, 'processing')) result.processing = block;
+  return result;
+}
+// A scope's capture block: its counts, the oldest pending at NOW, nothing refused.
+const captureBlock = (counts = {}) => ({ pending: 0, processing: 0, failed: 0, blocked: 0, ...counts, oldestPendingAt: counts.pending ? NOW : null, extractionAvailable: false, limited: [], gaps: [] });
 const capturesOf = (snapshot) => byId(snapshot.records.filter((item) => item.kind === 'capture'));
 const entriesOf = (snapshot, id) => snapshot.journal.filter((entry) => entry.entityId === id);
 
@@ -131,10 +161,14 @@ test('a re-delivered host event is one item: the second call is a no-op', () => 
 
 // A session's owner is fixed at its first capture, so a binding change
 // mid-session never splits it (brief-amendments-PR33 §4).
-test('a session keeps the owner of its first capture', () => {
+test('a session keeps the owner of its first capture, and another project\'s capture in it is refused', () => {
   const graph = createShadowGraph({ now });
   record(graph, { project: 'alpha' });
-  const later = record(graph, { project: 'beta' });
+  const before = bytes(privilegedSnapshot(graph));
+  assert.deepEqual(record(graph, { project: 'beta' }), { refused: { reason: 'session_in_another_project' }, changed: true }, 'never filed under the first project (PR-36b)');
+  const after = privilegedSnapshot(graph);
+  assert.equal(bytes({ ...after, events: after.events.filter((entry) => entry.type !== 'capture.refused') }), before, 'a refusal allocates nothing: its one write is the gap it declares to beta (D-6)');
+  const later = record(graph, { project: 'alpha' });
   assert.equal(later.project, 'alpha');
   assert.equal(later.occurrenceSeq, 2);
   const elsewhere = record(graph, { project: 'beta', source: { sessionId: 'session-2' } });
@@ -155,7 +189,8 @@ test('a session whose record is gone keeps the owner and the count its captures 
   const snapshot = privilegedSnapshot(graph);
   const orphaned = createShadowGraph({ now });
   orphaned.importData({ ...structuredClone(snapshot), captureSessions: undefined });
-  const next = record(orphaned, { project: 'beta' });
+  assert.deepEqual(record(orphaned, { project: 'beta' }), { refused: { reason: 'session_in_another_project' }, changed: true }, 'its captures still name its owner');
+  const next = record(orphaned, { project: 'alpha' });
   assert.deepEqual([next.project, next.occurrenceSeq], ['alpha', 3]);
 });
 
@@ -358,6 +393,8 @@ test('no public read shows what the writer records', () => {
   const leak = new RegExp([...ids, 'capture\\.recorded', 'capture\\.state_changed', 'extraction\\.completed', 'extraction\\.failed', 'the prompt text', 'content_'].join('|'));
   const answer = (read) => { try { return { value: read() }; } catch (error) { return { error: error.message }; } };
   for (const scope of [{ project: 'alpha' }, { originId: 'origin-b' }, {}]) {
+    // What the store declares (M-9, PR-36b): the scope's own captures not yet understood, never another's.
+    const block = captureBlock(scope.project === 'alpha' ? { pending: 1, processing: 1, failed: 1, blocked: 1 } : scope.originId ? { pending: 1 } : {});
     for (const [name, read] of [
       ['search', (g) => g.search('', scope)], ['retrieve', (g) => g.retrieve('prompt', scope)], ['recall', (g) => g.recall('prompt', scope)],
       ['context', (g) => g.context(scope)], ['exportData', (g) => g.exportData(scope)], ['redact', (g) => g.redact(scope)],
@@ -365,8 +402,9 @@ test('no public read shows what the writer records', () => {
     ]) {
       const seen = answer(() => read(graph));
       assert.doesNotMatch(JSON.stringify(seen), leak, `${name} ${JSON.stringify(scope)}`);
-      if (name !== 'getJournal' && name !== 'rebuild') assert.deepEqual(seen, answer(() => read(twin)), `${name} ${JSON.stringify(scope)}`);
+      if (name !== 'getJournal' && name !== 'rebuild') assert.deepEqual(seen, withDeclaration(answer(() => read(twin)), block), `${name} ${JSON.stringify(scope)}`);
     }
+    assert.deepEqual(graph.search('', scope).completeness.capture, block, JSON.stringify(scope));
   }
 });
 

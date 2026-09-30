@@ -97,6 +97,55 @@ function sourceIssue(source) {
   return null;
 }
 
+// What an item observed of its event besides its material (PR-36b; AC-009,
+// AC-012): the host and its version, the tool, the working directory, and a
+// command's outcome -- observed from an exit status the host reported, or
+// absent -- each null when the host gave none, never inferred from another
+// field. An item without it predates it and is read as it always was.
+// A field a later build adds is carried, never refused. The outcome's source
+// names where its evidence came from: a name, or the event, tool call and tool
+// it is scoped to.
+export const OBSERVATION_FIELDS = Object.freeze(['host', 'hostVersion', 'toolName', 'cwd', 'outcome']);
+export function captureObservationIssue(observation) {
+  if (!isObject(observation) || !OBSERVATION_FIELDS.every((key) => Object.hasOwn(observation, key))) return `observation names ${OBSERVATION_FIELDS.join(', ')}`;
+  for (const key of ['host', 'hostVersion', 'toolName', 'cwd']) if (!nullOr(named)(observation[key])) return `observation.${key} is null or a non-empty string`;
+  const outcome = observation.outcome;
+  if (outcome === null) return null;
+  const evidence = outcome?.outcomeEvidence;
+  const source = evidence?.source;
+  if (!isObject(outcome) || !isObject(evidence) || !(named(source) || (isObject(source) && ['event', 'toolCallId', 'toolName'].every((key) => named(source[key]))))) return 'observation.outcome is null or an outcome with its evidence and source: a name, or the event, tool call and tool it came from';
+  if (evidence.state === 'observed') return Number.isSafeInteger(evidence.exitStatus) && outcome.resultClass === (evidence.exitStatus === 0 ? 'succeeded' : 'failed') ? null : 'an observed outcome names its exit status and the class it gives';
+  if (evidence.state === 'absent') return outcome.resultClass === undefined && evidence.exitStatus === undefined ? null : 'an absent outcome has no class and no exit status';
+  return 'observation.outcome.outcomeEvidence.state is observed or absent';
+}
+
+// Capture's entries in the events carrier (PR-36b): a store limit's
+// capture_limited episode, one per limit, naming no project, session or
+// content; and the first refusal of a project's material because another
+// project owned its session, labelled with that project alone.
+export const CAPTURE_LIMIT_EVENT = 'capture.limited';
+export const CAPTURE_REFUSED_EVENT = 'capture.refused';
+export const OTHER_OWNER = 'session_in_another_project';
+const STORE_LIMITS = Object.freeze(['maxQueueDepth', 'maxStoreBytes']);
+const positive = (value) => Number.isSafeInteger(value) && value > 0;
+const period = (value) => isObject(value) && isValidIsoInstant(value.from) && isValidIsoInstant(value.to);
+// An episode's start (open) or last period (closed), with how often it began.
+const episodeIssue = (episode) => (nullOr(isValidIsoInstant)(episode.since) && nullOr(period)(episode.lastPeriod) && count(episode.periods) ? null : 'holds its start, last period and count');
+
+// What is wrong with one of capture's events-carrier entries, or null; any
+// other entry is not capture's to judge.
+export function captureEventIssue(event) {
+  if (event.type === CAPTURE_LIMIT_EVENT) {
+    if (!STORE_LIMITS.includes(event.limit) || !positive(event.ceiling)) return 'is a capture limit entry naming a store limit and its ceiling';
+    const issue = episodeIssue(event);
+    return issue ? `is a capture limit entry that ${issue}` : null;
+  }
+  if (event.type === CAPTURE_REFUSED_EVENT) {
+    return named(event.project) && event.reason === OTHER_OWNER && isValidIsoInstant(event.since) ? null : 'is a capture refusal entry naming its project, reason and start';
+  }
+  return null;
+}
+
 // A lease names its owner and expiry; anything a later worker adds is carried.
 const leased = (lease) => isObject(lease)
   && ['leaseId', 'ownerId', 'ownerBootId'].every((key) => named(lease[key])) && isValidIsoInstant(lease.leaseExpiresAt);
@@ -134,6 +183,7 @@ export function captureItemIssue(item) {
   if (!isValidIsoInstant(item.createdAt) || !isValidIsoInstant(item.updatedAt)) return 'createdAt and updatedAt are ISO 8601 instants';
   if (item.state === 'failed' && item.lastError === null) return 'a failed item says why in lastError';
   if (item.state === 'blocked' && item.blockedReason === null) return 'a blocked item says why in blockedReason';
+  if (item.observation !== undefined) return captureObservationIssue(item.observation);
   return null;
 }
 
@@ -161,6 +211,7 @@ export function captureCollectionIssue(name, value) {
     if (owner) return `${name} entry ${index}: ${owner}`;
     if (name === CAPTURE_SESSIONS) {
       if (!named(entry.sessionId)) return `${name} entry ${index} names its sessionId`;
+      if (entry.limited !== undefined && (!isObject(entry.limited) || entry.limited.limit !== 'maxItemsPerSession' || !positive(entry.limited.ceiling) || episodeIssue(entry.limited))) return `${name} entry ${index} holds a session limit naming maxItemsPerSession, its ceiling, start, last period and count`;
       const session = JSON.stringify([entry.originId, entry.sessionId]);
       if (sessions.has(session)) return `${name} entry ${index} repeats an earlier origin session`;
       sessions.add(session);

@@ -559,10 +559,20 @@ const WIRE_BUDGETS = {
   // unchanged. The PR-26 corrective rewords the relevant head's lexical signal
   // (content words). Measured on 2026-09-30: full 58793/62493/301123, verifier
   // full 59941/63746/305670, compact 38720/40415/212781; every ceiling unchanged.
-  'withoutVerifier.full': { bare: 59_900, annotated: 63_700, structured: 303_600 },
-  'withoutVerifier.compact': { bare: 39_500, annotated: 41_200, structured: 213_900 },
-  'withVerifier.full': { bare: 61_100, annotated: 65_000, structured: 308_300 },
-  'withVerifier.compact': { bare: 39_500, annotated: 41_200, structured: 213_900 }
+  // PR-36b (plan v1.4.4 §24.1, M-9) declares the capture status every
+  // completeness-bearing read carries: an optional capture block in the read
+  // coverage schema, inlined at every read's output schema since this catalog
+  // forbids $ref, and the relevance head's processing fields. Its wording was
+  // cut to the shortest meaningful first; the structure is the guarantee and is
+  // not shrunk. Measured on 2026-09-30, with the declared gaps: full
+  // 58793/62493/322851, verifier full 59941/63746/327398, compact
+  // 38720/40415/227653. The four structured ceilings (three values) are re-set
+  // with ~2% headroom (recorded variance, PR-12/13/16/26/27 precedent); the
+  // eight bare and annotated ceilings are unchanged.
+  'withoutVerifier.full': { bare: 59_900, annotated: 63_700, structured: 329_400 },
+  'withoutVerifier.compact': { bare: 39_500, annotated: 41_200, structured: 232_300 },
+  'withVerifier.full': { bare: 61_100, annotated: 65_000, structured: 334_000 },
+  'withVerifier.compact': { bare: 39_500, annotated: 41_200, structured: 232_300 }
 };
 
 test('the advertised tool list stays within its wire-size budget, at every tier', () => {

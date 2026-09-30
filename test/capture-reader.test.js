@@ -28,6 +28,34 @@ const now = () => NOW;
 const root = fileURLToPath(new URL('..', import.meta.url));
 const bytes = (value) => JSON.stringify(value);
 const byId = (items) => [...items].sort((left, right) => String(left.id).localeCompare(String(right.id)));
+// A capture-bearing store's reads differ from its capture-free twin's in one
+// declared way (M-9, PR-36b): each scoped completeness carries the scope's
+// capture block, is incomplete while captured items wait in that scope, and
+// says so -- and what capture refused -- in its limitation; a relevance head's
+// processing is the block too. So the twin's answer with that declaration
+// applied must be the answer, exactly.
+function withDeclaration(value, block) {
+  if (Array.isArray(value)) return value.map((entry) => withDeclaration(entry, block));
+  if (value === null || typeof value !== 'object') return value;
+  const copy = Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, withDeclaration(entry, block)]));
+  if (copy.scope?.requestState === undefined) return copy;
+  const backlog = block.pending + block.processing + block.failed + block.blocked;
+  const said = [
+    ...(backlog ? [`${backlog} captured ${backlog === 1 ? 'item is' : 'items are'} not yet understood in this scope: captured is not stored experience.`] : []),
+    ...(block.limited.length ? [`Capture is at a limit (${block.limited.map((entry) => entry.limit).join(', ')}): new material is refused, and nothing accepted is removed.`] : []),
+    ...(block.gaps.length ? [`Capture refused material (${[...new Set(block.gaps.map((entry) => entry.reason))].join(', ')}); what it refused is not here.`] : [])
+  ];
+  const result = { ...copy, capture: block, complete: copy.complete === true && backlog === 0 };
+  if (said.length) {
+    result.limitation = copy.limitation
+      ? { ...copy.limitation, detail: [copy.limitation.detail, ...said].filter(Boolean).join(' ') }
+      : { code: backlog ? 'capture_pending' : block.limited.length ? 'capture_limited' : 'capture_gap', detail: said.join(' ') };
+  }
+  if (Object.hasOwn(copy, 'processing')) result.processing = block;
+  return result;
+}
+// A scope's capture block: its counts, the oldest pending at NOW, nothing refused.
+const captureBlock = (counts = {}) => ({ pending: 0, processing: 0, failed: 0, blocked: 0, ...counts, oldestPendingAt: counts.pending ? NOW : null, extractionAvailable: false, limited: [], gaps: [] });
 const CAPTURE_TYPES = ['capture.recorded', 'capture.state_changed', 'extraction.completed', 'extraction.failed'];
 const STATES = ['pending', 'processing', 'extracted', 'failed', 'blocked'];
 // The raw text a capture holds: it must never reach a public read, and a purge
@@ -371,14 +399,17 @@ test('no public read shows a capture item, entry or collection', () => {
   // A refusal is an answer too, and must be the same one.
   const answer = (read) => { try { return { value: read() }; } catch (error) { return { error: error.message }; } };
   for (const scope of scopes) {
+    // The declaration counts the scope's own captures not yet understood, never another's (M-9).
+    const block = captureBlock({ alpha: { pending: 1, processing: 1, failed: 1, blocked: 1 }, beta: { pending: 1 }, 'origin-b': { pending: 1 } }[scope.project ?? scope.originId]);
     for (const [name, read] of reads) {
       const label = `${name} ${JSON.stringify(scope)}`;
       const seen = answer(() => read(graph, scope));
       assert.doesNotMatch(JSON.stringify(seen), LEAK, label);
-      assert.deepEqual(seen, answer(() => read(twin, scope)), `${label}: answers as the store without capture does`);
+      assert.deepEqual(seen, withDeclaration(answer(() => read(twin, scope)), block), `${label}: answers as the store without capture does, with the scope's capture declared`);
     }
     // A capture id is an id nothing holds: the answer names only what was asked.
-    for (const id of CAPTURE_IDS) assert.deepEqual(answer(() => graph.traverse({ ...scope, id })), answer(() => twin.traverse({ ...scope, id })), `traverse ${id}`);
+    for (const id of CAPTURE_IDS) assert.deepEqual(answer(() => graph.traverse({ ...scope, id })), withDeclaration(answer(() => twin.traverse({ ...scope, id })), block), `traverse ${id}`);
+    assert.equal(twin.search('', scope).completeness.capture, undefined, 'a store without capture declares nothing');
   }
 });
 
@@ -822,6 +853,7 @@ test('by-id reads and writes treat a capture id as unknown', () => {
   const graph = loaded(payload);
   const twin = loaded(withoutCapture(payload));
   const answer = (read) => { try { return { value: read() }; } catch (error) { return { error: error.message }; } };
+  const alpha = captureBlock({ pending: 1, processing: 1, failed: 1, blocked: 1 });
   for (const id of CAPTURE_IDS) {
     for (const [name, call] of [
       ['expand', (g) => g.expand({ recordId: id, project: 'alpha', digest: 'x' })],
@@ -830,7 +862,7 @@ test('by-id reads and writes treat a capture id as unknown', () => {
       ['link', (g) => g.link({ from: decisionId, to: id, relation: 'related_to', project: 'alpha' })],
       ['status', (g) => g.updateDecisionStatus(id, 'validated', { project: 'alpha' })],
       ['outcome', (g) => g.setOutcome(id, 'successful', { project: 'alpha' })]
-    ]) assert.deepEqual(answer(() => call(graph)), answer(() => call(twin)), `${name} ${id}`);
+    ]) assert.deepEqual(answer(() => call(graph)), withDeclaration(answer(() => call(twin)), alpha), `${name} ${id}`);
   }
   for (const [name, call] of [
     ['review', (g) => g.review({ project: 'alpha' })],
@@ -840,7 +872,7 @@ test('by-id reads and writes treat a capture id as unknown', () => {
   ]) {
     const seen = answer(() => call(graph));
     assert.doesNotMatch(JSON.stringify(seen), LEAK, name);
-    assert.deepEqual(seen, answer(() => call(twin)), name);
+    assert.deepEqual(seen, withDeclaration(answer(() => call(twin)), alpha), name);
   }
 });
 
@@ -1015,7 +1047,7 @@ test('a store holding pre-schema-5 material and a capture rebuilds and restores 
     assert.equal(rebuilt.rebuildable, true, `${label}: ${rebuilt.reason} ${JSON.stringify(rebuilt.skipped)}`);
     assert.deepEqual(byId(rebuilt.projection.records), byId(privilegedSnapshot(store).records), label);
     assert.doesNotThrow(() => validateRestorePayload(structuredClone(privilegedSnapshot(store)), { now }), label);
-    assert.deepEqual(store.rebuild({ project: 'alpha' }), twin.rebuild({ project: 'alpha' }), `${label}: the public rebuild answers as the twin`);
+    assert.deepEqual(store.rebuild({ project: 'alpha' }), withDeclaration(twin.rebuild({ project: 'alpha' }), captureBlock({ pending: 1 })), `${label}: the public rebuild answers as the twin, with its capture declared`);
   }
 });
 

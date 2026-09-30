@@ -307,6 +307,8 @@ export const REGISTER = Object.freeze([
   m('relevant.lines[].requiresExpansion', 'completeness'),
   m('relevant.lines.**', 'verification state'),
   m('relevant.processing.**', 'completeness'),
+  // PR-36b: the scope's capture status, the same block every scoped completeness carries (M-9).
+  m('relevant.capture.**', 'completeness'),
   m('relevant.expansion.**', 'interface'),
   c('relevant.items', 'historical fact'),
   m('relevant.items[].tier', 'provenance'),

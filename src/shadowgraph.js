@@ -25,7 +25,7 @@ import { RUNTIME_MISSES, missReachedBy, runtimeMissLedgerIssue, withFallbackMiss
 import { supersessionOrder, temporalEvidence, versionTimes } from './internal/temporal-evidence.js';
 import { T1_DERIVATION_VERSION, t1Digest, t1Inputs, t1Line } from './compact-tier.js';
 import { SELF_SIGNALS, stripDeliveredBlocks } from './internal/capture-source.js';
-import { CAPTURE_COLLECTIONS, CAPTURE_CONTENT, CAPTURE_ENTRY_TYPES, CAPTURE_EVENT_IDENTITY, CAPTURE_IMPORT_TYPE, CAPTURE_KIND, CAPTURE_SESSIONS, CAPTURE_TRANSITIONS, captureCollectionIssue, captureEntryReachedBy, captureItemIssue } from './internal/capture.js';
+import { CAPTURE_COLLECTIONS, CAPTURE_CONTENT, CAPTURE_ENTRY_TYPES, CAPTURE_EVENT_IDENTITY, CAPTURE_IMPORT_TYPE, CAPTURE_KIND, CAPTURE_SESSIONS, CAPTURE_TRANSITIONS, captureCollectionIssue, captureEntryReachedBy, captureEventIssue, captureItemIssue, captureObservationIssue, CAPTURE_LIMIT_EVENT, CAPTURE_REFUSED_EVENT, OTHER_OWNER } from './internal/capture.js';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
 // docs/api-reference.md) and are frozen so a consumer cannot mutate validation
@@ -77,6 +77,13 @@ const CAUSAL_STATES = Object.freeze(['recorded', 'unknown', 'not_recorded', 'leg
 const OUTCOME_EVIDENCE_STATES = Object.freeze(['observed', 'absent', 'not_applicable']);
 const isPlainObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 const named = (value) => typeof value === 'string' && value.trim() !== '';
+// Capture's admission limits (§22.6.1; the values are the activation's), and
+// the states an item holds until it is understood (§24.1).
+const ADMISSION_LIMITS = Object.freeze(['maxStoreBytes', 'maxQueueDepth', 'maxItemBytes', 'maxItemsPerSession']);
+// What one capture adds to the store besides its material, estimated for the
+// store-bytes limit: the item, its journal entry and its retry value.
+const CAPTURE_ITEM_ALLOWANCE = 6 * 1024;
+const UNEXTRACTED_STATES = Object.freeze(['pending', 'processing', 'failed', 'blocked']);
 
 // Plan v1.4.4 §9.4 (PR-23, VAR-08): an attempt's cause, attributed apart from
 // the observation it explains (PC-04). A reason recorded now is the caller's
@@ -761,8 +768,15 @@ function paginate(items, options, scope, extra = {}) {
 // Completeness is relative to this request's known candidates, never a claim
 // of total semantic recall. An exact origin can read its unattributed records
 // while the project is still unresolved. A grant augments only the read set.
+// When the store holds capture state, the scope's capture status comes with it
+// (plan v1.4.4 §24.1, M-9). Captured material this scope has not yet had
+// understood means the view is not complete. Capture refusing material -- at a
+// store limit now, or in a gap it declares -- is said too, without making the
+// view incomplete: what was refused was never a candidate any read can find.
 function scopeCompleteness(scope, current = { complete: true }, signals = []) {
   const partial = signals.some((signal) => signal.limitation?.code === 'scoped_coverage');
+  const capture = scope.capture ?? null;
+  const backlog = capture ? UNEXTRACTED_STATES.reduce((sum, state) => sum + capture[state], 0) : 0;
   const details = [current.limitation?.detail];
   if (scope.state === 'project_unresolved') details.push(scope.grant
     ? 'No project was resolved. The explicit wider grant augmented any permitted origin-owned content; project identity remains unresolved.'
@@ -771,12 +785,17 @@ function scopeCompleteness(scope, current = { complete: true }, signals = []) {
     : 'No project was resolved. Only unattributed content belonging to the presented origin was searched.');
   if (partial) details.push('Some own signals have historical detail outside this scope. Only their identity and lifecycle are shown.');
   if (scope.grantLimitation) details.push(`Wider access was refused (${scope.grantLimitation}); permitted own-scope access is retained.`);
+  const scoped = details.length > 1;
+  if (backlog) details.push(`${backlog} captured ${backlog === 1 ? 'item is' : 'items are'} not yet understood in this scope: captured is not stored experience.`);
+  if (capture?.limited.length) details.push(`Capture is at a limit (${capture.limited.map((entry) => entry.limit).join(', ')}): new material is refused, and nothing accepted is removed.`);
+  if (capture?.gaps.length) details.push(`Capture refused material (${[...new Set(capture.gaps.map((entry) => entry.reason))].join(', ')}); what it refused is not here.`);
   return {
     ...current,
     scope: { ...current.scope, project: scope.project, requestState: scope.state, originPresented: scope.originId !== null, grant: scope.grant ?? null },
-    complete: current.complete === true && scope.state === 'project_selected' && !partial && !scope.grantLimitation,
+    complete: current.complete === true && scope.state === 'project_selected' && !partial && !scope.grantLimitation && !backlog,
+    ...(capture ? { capture: { ...capture, limited: capture.limited.map((entry) => ({ ...entry })), gaps: capture.gaps.map((entry) => ({ ...entry })) } } : {}),
     ...(partial ? { losslessItems: false } : {}),
-    ...(details.some(Boolean) ? { limitation: { ...current.limitation, code: current.limitation?.code ?? 'scoped_coverage', detail: details.filter(Boolean).join(' ') } } : {})
+    ...(details.some(Boolean) ? { limitation: { ...current.limitation, code: current.limitation?.code ?? (scoped ? 'scoped_coverage' : backlog ? 'capture_pending' : capture?.limited.length ? 'capture_limited' : 'capture_gap'), detail: details.filter(Boolean).join(' ') } } : {})
   };
 }
 
@@ -916,6 +935,18 @@ export function createShadowGraph(options = {}) {
   // The identity key is a digest of the origin, session, event and that
   // identifier or ordinal: never content. The raw text goes into
   // captureContent under a random key, never into the journal.
+  //
+  // Admission (plan v1.4.4 §22.6.1, M-11; PR-36b) is checked here, inside the
+  // write: the caller passes the limits and the store's bytes on disk, and the
+  // item's bytes, the session's items, the queue (items not yet extracted) and
+  // the store are measured against them. A crossing writes no item: it returns
+  // the refusal, and only the first refusal of a store or session limit writes
+  // anything -- the start of its capture_limited episode; an accepted item ends
+  // the episodes it shows no longer bind. Nothing accepted is ever evicted, and
+  // no limit is raised here. A session one project owns never takes another
+  // project's capture: that is refused, not filed under the first project.
+  // An item identified only by its ordinal whose material repeats the session's
+  // previous item of the same event is marked possibleDuplicateOf it (F-11a).
   function recordCapture(input = {}) {
     if (!isPlainObject(input)) throw new Error('A capture needs an input object');
     const originId = usableOriginId(input.originId);
@@ -925,7 +956,16 @@ export function createShadowGraph(options = {}) {
     if (!named(source.sessionId)) throw new Error('A capture source names its sessionId');
     if (input.text !== undefined && typeof input.text !== 'string') throw new Error('A capture text is a string');
     if (input.observedAt !== undefined && !isValidIsoInstant(input.observedAt)) throw new Error('A capture observedAt is an ISO 8601 instant');
-    const { sessions, session, held, owner } = captureSession(originId, source.sessionId, input.project);
+    const admission = input.admission;
+    if (!isPlainObject(admission) || !isPlainObject(admission.limits) || !ADMISSION_LIMITS.every((name) => Number.isSafeInteger(admission.limits[name]) && admission.limits[name] > 0) || !Number.isSafeInteger(admission.storeBytes) || admission.storeBytes < 0) {
+      throw new Error(`A capture names its admission: the limits ${ADMISSION_LIMITS.join(', ')}, each a positive integer, and the store's bytes`);
+    }
+    const observationIssue = input.observation === undefined ? null : captureObservationIssue(input.observation);
+    if (observationIssue) throw new Error(`A capture ${observationIssue}`);
+    // A project named as null is no project named, as it is when left out.
+    const project = input.project ?? undefined;
+    if (project !== undefined && (typeof project !== 'string' || !project.trim())) throw new Error('A capture names its project as a non-empty string, or none');
+    const { sessions, session, held, owner, ownedBy } = captureSession(originId, source.sessionId, project);
     const observed = {
       event: source.event, sessionId: source.sessionId, role: source.role ?? null,
       hostEventId: source.hostEventId ?? null, toolCallId: source.toolCallId ?? null, turnIndex: source.turnIndex ?? null
@@ -941,20 +981,26 @@ export function createShadowGraph(options = {}) {
       throw new Error('Capture refused: its occurrence is already held');
     }
     const at = now();
+    if (ownedBy?.attribution === 'project' && project !== undefined && project !== ownedBy.project) return refuseOtherOwner(project, at);
     // ShadowGraph's own delivered blocks never become raw material; each one
     // removed is counted as a tool-target self-event (§16.4; PR-35).
     const stripped = input.text === undefined ? { text: undefined, removed: 0 } : stripDeliveredBlocks(input.text);
     const text = stripped.text;
+    const crossing = admissionCrossing(admission, text, originId, observed.sessionId, [input.observation ?? null, observed]);
+    if (crossing) return refuseAdmission(crossing, session, sessions, at);
+    const contentHash = text === undefined ? null : createHash('sha256').update(text).digest('hex');
     const item = {
       id: allocateEntityId(CAPTURE_KIND), kind: CAPTURE_KIND, schemaVersion: SCHEMA_VERSION,
       project: owner.project, attribution: owner.attribution, originId,
       state: 'pending', source: observed, observedAt: input.observedAt ?? at, occurrenceSeq,
       sourceIdentity: input.sourceIdentity ?? 'unattributed_observer',
       contentRef: text === undefined ? null : `content_${randomUUID()}`,
-      contentHash: text === undefined ? null : createHash('sha256').update(text).digest('hex'),
+      contentHash,
       lease: null, attempts: 0, lastError: null, blockedReason: null, producedRecordIds: [], receipts: [],
-      erasureToken: allocateErasureToken(), cancelRequested: false, supersededResults: [], possibleDuplicateOf: null,
-      expiresAt: null, createdAt: at, updatedAt: at
+      erasureToken: allocateErasureToken(), cancelRequested: false, supersededResults: [],
+      possibleDuplicateOf: hostIdentity === null ? previousRepeat(originId, observed, contentHash) : null,
+      expiresAt: null, createdAt: at, updatedAt: at,
+      ...(input.observation === undefined ? {} : { observation: clone(input.observation) })
     };
     const issue = captureItemIssue(item);
     if (issue) throw new Error(`Capture refused: ${issue}`);
@@ -962,6 +1008,9 @@ export function createShadowGraph(options = {}) {
     captures.set(item.id, item);
     const next = { ...(session ?? newCaptureSession(originId, observed.sessionId, owner)), project: owner.project, attribution: owner.attribution, occurrenceSeqHighWater: occurrenceSeq };
     if (stripped.removed) next.selfEvents = countSelfEvent(next.selfEvents, 'S-1', observed.event, stripped.removed);
+    // An accepted item shows the store's limits and this session's no longer bind.
+    if (next.limited?.since) next.limited = { ...next.limited, since: null, lastPeriod: { from: next.limited.since, to: at } };
+    endStoreLimits(at);
     extras.set(CAPTURE_SESSIONS, session ? sessions.map((entry) => (entry === session ? next : entry)) : [...sessions, next]);
     if (item.contentRef) extras.set(CAPTURE_CONTENT, [...(extras.get(CAPTURE_CONTENT) ?? []), { contentRef: item.contentRef, project: owner.project, attribution: owner.attribution, originId, text }]);
     appendJournal({ type: 'capture.recorded', entityKind: CAPTURE_KIND, entityId: item.id, project: item.project, payload: item, idempotencyKey: slot });
@@ -988,7 +1037,139 @@ export function createShadowGraph(options = {}) {
     }
     const owned = session && (session.occurrenceSeqHighWater > 0 || earlier) ? session : null;
     const resolved = owned ?? earlier ?? writeOwner({ project, originId });
-    return { sessions, session, held, owner: { project: resolved.project, attribution: resolved.attribution, originId } };
+    return { sessions, session, held, owner: { project: resolved.project, attribution: resolved.attribution, originId }, ownedBy: owned ?? earlier };
+  }
+
+  // The first admission limit an item crosses, or null (§22.6.1): its own
+  // bytes (a transient refusal, never an episode), then its session's items
+  // (every item the session holds), the queue of items not yet extracted, and
+  // the store's bytes on disk with the item's own stored size estimated -- its
+  // escaped material once, what it describes (its observation and source) three
+  // times, as the item, its journal entry and its retry value each hold it, and
+  // a fixed allowance for the rest.
+  function admissionCrossing({ limits, storeBytes }, text, originId, sessionId, described) {
+    const bytes = text === undefined ? 0 : Buffer.byteLength(text);
+    if (bytes > limits.maxItemBytes) return { limit: 'maxItemBytes', ceiling: limits.maxItemBytes, scope: 'item' };
+    let sessionItems = 0;
+    let queued = 0;
+    for (const item of captures.values()) {
+      if (item.state !== 'extracted') queued += 1;
+      if (item.originId === originId && item.source?.sessionId === sessionId) sessionItems += 1;
+    }
+    if (sessionItems >= limits.maxItemsPerSession) return { limit: 'maxItemsPerSession', ceiling: limits.maxItemsPerSession, scope: 'session' };
+    if (queued >= limits.maxQueueDepth) return { limit: 'maxQueueDepth', ceiling: limits.maxQueueDepth, scope: 'store' };
+    const stored = (text === undefined ? 0 : Buffer.byteLength(JSON.stringify(text))) + 3 * Buffer.byteLength(JSON.stringify(described)) + CAPTURE_ITEM_ALLOWANCE;
+    if (storeBytes + stored > limits.maxStoreBytes) return { limit: 'maxStoreBytes', ceiling: limits.maxStoreBytes, scope: 'store' };
+    return null;
+  }
+
+  // A refused capture. The first refusal of a store limit opens its episode in
+  // the events carrier (one entry per limit, updated in place, holding no
+  // project, session or content), and of the session limit on the session's
+  // record; a refusal while the episode is open writes nothing. `changed` says
+  // whether anything was written, so a caller saves only then.
+  function refuseAdmission(crossing, session, sessions, at) {
+    const refused = { limit: crossing.limit, ceiling: crossing.ceiling };
+    if (crossing.scope === 'store') {
+      const index = events.findIndex((entry) => entry?.type === CAPTURE_LIMIT_EVENT && entry.limit === crossing.limit);
+      const held = index === -1 ? null : events[index];
+      if (held?.since) return { refused, changed: false };
+      replaceEvent(index, { id: held?.id ?? id('capture_limit'), type: CAPTURE_LIMIT_EVENT, at, limit: crossing.limit, ceiling: crossing.ceiling, since: at, lastPeriod: held?.lastPeriod ?? null, periods: (held?.periods ?? 0) + 1 });
+      return { refused, changed: true };
+    }
+    if (crossing.scope === 'session' && session && !session.limited?.since) {
+      const limited = { limit: crossing.limit, ceiling: crossing.ceiling, since: at, lastPeriod: session.limited?.lastPeriod ?? null, periods: (session.limited?.periods ?? 0) + 1 };
+      extras.set(CAPTURE_SESSIONS, sessions.map((entry) => (entry === session ? { ...entry, limited } : entry)));
+      return { refused, changed: true };
+    }
+    return { refused, changed: false };
+  }
+
+  // A capture refused because another project owns its session (D-6). The
+  // first such refusal for a project leaves one entry in the events carrier,
+  // labelled with that project -- so its reads declare the gap and a purge of
+  // it takes the entry along -- naming no session, other project or material.
+  function refuseOtherOwner(project, at) {
+    const held = events.some((entry) => entry?.type === CAPTURE_REFUSED_EVENT && entry.project === project && entry.reason === OTHER_OWNER);
+    if (!held) events.push({ id: id('capture_refused'), type: CAPTURE_REFUSED_EVENT, at, project, reason: OTHER_OWNER, since: at });
+    return { refused: { reason: OTHER_OWNER }, changed: !held };
+  }
+
+  // Ends every open store-limit episode, keeping the period it covered.
+  function endStoreLimits(at) {
+    events.forEach((entry, index) => {
+      if (entry?.type === CAPTURE_LIMIT_EVENT && entry.since) replaceEvent(index, { ...entry, at, since: null, lastPeriod: { from: entry.since, to: at } });
+    });
+  }
+
+  // One events-carrier entry replaced in place, or appended; undone with the
+  // write that made it.
+  function replaceEvent(index, value) {
+    if (index === -1) {
+      events.push(value);
+      return;
+    }
+    const previous = events[index];
+    if (transactionContext?.mode === 'undo') transactionContext.undo.push(() => { events[index] = previous; });
+    events[index] = value;
+  }
+
+  // The session's latest item of the same event, when its material is the
+  // same -- none, for an event that carries none, repeats none.
+  function previousRepeat(originId, observed, contentHash) {
+    let latest = null;
+    for (const item of captures.values()) {
+      if (item.originId === originId && item.source?.sessionId === observed.sessionId && item.source?.event === observed.event && (latest === null || item.occurrenceSeq > latest.occurrenceSeq)) latest = item;
+    }
+    return latest !== null && latest.contentHash === contentHash ? latest.id : null;
+  }
+
+  // What capture holds for one read's scope (plan v1.4.4 §24.1, M-9; PR-36b),
+  // or null when the store holds no capture state at all, so a store without
+  // capture reads exactly as it did. The counts are over the captures the
+  // scope owns -- its project's, or with no project its origin's unattributed
+  // ones -- never another project's; an item of a later schema is carried and
+  // never counted. `limited` is the store limits refusing material as far as
+  // the store knows (the queue checked against its items now, the store's
+  // bytes until an item is accepted or a purge runs, the next capture checking
+  // afresh): limit, ceiling and
+  // start only. `gaps` declares what capture refused, bounded: each store
+  // limit's last closed period, the scope's sessions that reached their limit
+  // (counted, never named, from the earliest refusal each records), and material refused because another project owned
+  // its session. Nothing is extracted in this build.
+  function captureStatus(scope) {
+    const sessions = extras.get(CAPTURE_SESSIONS) ?? [];
+    const entries = events.filter((entry) => entry?.type === CAPTURE_LIMIT_EVENT || entry?.type === CAPTURE_REFUSED_EVENT);
+    if (captures.size === 0 && sessions.length === 0 && entries.length === 0) return null;
+    const owns = (entry) => (scope.state === 'project_selected' ? entry.attribution === 'project' && entry.project === scope.project : entry.attribution === 'unattributed' && sameOrigin(entry.originId, scope.originId));
+    const status = { pending: 0, processing: 0, failed: 0, blocked: 0, oldestPendingAt: null, extractionAvailable: false, limited: [], gaps: [] };
+    let queued = 0;
+    for (const item of captures.values()) {
+      if (item.state !== 'extracted') queued += 1;
+      if (item.schemaVersion > SCHEMA_VERSION || !UNEXTRACTED_STATES.includes(item.state) || !owns(item)) continue;
+      status[item.state] += 1;
+      if (item.state === 'pending' && (status.oldestPendingAt === null || compareInstants(item.createdAt, status.oldestPendingAt) < 0)) status.oldestPendingAt = item.createdAt;
+    }
+    // One entry per store limit, however many a merge left behind.
+    for (const limit of ['maxQueueDepth', 'maxStoreBytes']) {
+      const held = entries.filter((entry) => entry.type === CAPTURE_LIMIT_EVENT && entry.limit === limit);
+      const open = held.filter((entry) => entry.since).sort((left, right) => compareInstants(left.since, right.since))[0];
+      const binding = open && (limit !== 'maxQueueDepth' || queued >= open.ceiling);
+      if (binding) status.limited.push({ limit, ceiling: open.ceiling, since: open.since });
+      else if (open) status.gaps.push({ reason: limit, from: open.since, to: null });
+      const closed = held.filter((entry) => entry.lastPeriod).sort((left, right) => compareInstants(right.lastPeriod.to, left.lastPeriod.to))[0];
+      if (closed) status.gaps.push({ reason: limit, from: closed.lastPeriod.from, to: closed.lastPeriod.to });
+    }
+    const limitedSessions = sessions.filter((session) => owns(session) && (session.limited?.since || session.limited?.lastPeriod));
+    if (limitedSessions.length) {
+      const starts = limitedSessions.map((session) => session.limited.lastPeriod?.from ?? session.limited.since).sort(compareInstants);
+      const ends = limitedSessions.map((session) => (session.limited.since ? null : session.limited.lastPeriod.to));
+      status.gaps.push({ reason: 'maxItemsPerSession', sessions: limitedSessions.length, from: starts[0], to: ends.includes(null) ? null : ends.sort(compareInstants).at(-1) });
+    }
+    for (const entry of entries) {
+      if (entry.type === CAPTURE_REFUSED_EVENT && scope.state === 'project_selected' && entry.project === scope.project) status.gaps.push({ reason: entry.reason, from: entry.since, to: null });
+    }
+    return status;
   }
 
   function newCaptureSession(originId, sessionId, owner) {
@@ -3053,6 +3234,9 @@ export function createShadowGraph(options = {}) {
         if (rawEntity(entityId) || captures.has(entityId)) return false;
       }
       if (item.type === 'project.purged') return item.project === project;
+      // Capture's refusal entry names its project and nothing else, and only
+      // this build writes it: it is never a legacy breadcrumb (PR-36b).
+      if (item.type === CAPTURE_REFUSED_EVENT) return item.project === project;
       // An unreferenced legacy "default" breadcrumb cannot establish ownership.
       return item.payload ? ownedByProject(item.payload, project) : item.project === project && project !== 'default';
     };
@@ -3162,6 +3346,9 @@ export function createShadowGraph(options = {}) {
       if (kept.length) extras.set(name, kept);
       else extras.delete(name);
     }
+    // The store is smaller: its limit episodes end, and the next capture checks
+    // them afresh.
+    endStoreLimits(now());
 
     return {
       ...summary,
@@ -3350,6 +3537,9 @@ export function createShadowGraph(options = {}) {
     const inherited = options.readProvenance;
     const request = inherited === undefined ? options : inherited?.version === 1 && inherited.request && typeof inherited.request === 'object' ? inherited.request : {};
     const scope = { ...resolveScope({ project: request.project, originId: request.originId, binding: inherited === undefined ? options.binding : undefined }) };
+    // The scope's capture status (M-9), read once for this read and never
+    // spread into an answer: completeness carries it where it applies.
+    Object.defineProperty(scope, 'capture', { value: captureStatus(scope), enumerable: false });
     const baseVisible = (item) => {
       if (!item) return false;
       if (scope.state === 'project_selected') return ownerKey(item, (project) => project) === scope.project;
@@ -3407,6 +3597,8 @@ export function createShadowGraph(options = {}) {
       && !(item.project === 'default' && !(schemaVersion > PRE_ATTRIBUTION_SCHEMA_VERSION));
     const named = (item, keys) => keys.map((key) => item[key]).filter((value) => value !== undefined && value !== null);
     const eventVisible = (event) => {
+      // Capture's own entries are declared by the capture status, never listed.
+      if (event?.type === CAPTURE_LIMIT_EVENT || event?.type === CAPTURE_REFUSED_EVENT) return false;
       const entities = named(event, ['recordId', 'factId', 'replacementId']);
       const relationsNamed = named(event, ['relationId']);
       if (!entities.length && !relationsNamed.length) return labelled(event);
@@ -3794,7 +3986,9 @@ export function createShadowGraph(options = {}) {
       // The claim class of each delivered line, in item order, where a
       // truncated payload still carries it (§17.2).
       lines: items.filter(({ tier }) => tier === 'T1').map(({ line }) => ({ recordId: line.recordId, claimClass: line.claimClass, requiresExpansion: line.requiresExpansion })),
-      processing: { pending: 0, failed: 0, blocked: 0, oldestPendingAt: null, extractionAvailable: false },
+      // What capture holds for this scope, from the same status the
+      // completeness funnel declares (M-9); as it always was without capture.
+      processing: boundary.scope.capture ? { ...boundary.scope.capture, limited: boundary.scope.capture.limited.map((entry) => ({ ...entry })), gaps: boundary.scope.capture.gaps.map((entry) => ({ ...entry })) } : { pending: 0, failed: 0, blocked: 0, oldestPendingAt: null, extractionAvailable: false },
       expansion: { operation: 'shadowgraph_expand', available: true }
     });
     // §9, §6.2(a): what the fallback delivered, no signal having ranked it, is a
@@ -5406,6 +5600,8 @@ function validateImportShape(source) {
   const eventIds = new Set();
   for (const [index, eventItem] of array('events').entries()) {
     if (!eventItem || typeof eventItem !== 'object' || Array.isArray(eventItem) || typeof eventItem.id !== 'string' || typeof eventItem.type !== 'string') throw new Error(`events[${index}] is malformed`);
+    const captureIssue = captureEventIssue(eventItem);
+    if (captureIssue) throw new Error(`events[${index}] ${captureIssue}`);
     if (eventIds.has(eventItem.id)) throw new Error(`Duplicate event id ${eventItem.id}`);
     eventIds.add(eventItem.id);
   }

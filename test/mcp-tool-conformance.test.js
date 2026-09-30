@@ -14,6 +14,8 @@ import { EventEmitter } from 'node:events';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createShadowGraph } from '../src/shadowgraph.js';
+import { privilegedRecordCapture, privilegedSnapshot } from '../src/internal/snapshot.js';
 import { createFactAttestation } from '../src/verification.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
@@ -367,6 +369,48 @@ test('every advertised output schema accepts the result its own tool really retu
   const advertised = listed.tools.map((tool) => tool.name);
   const missing = advertised.filter((name) => !exercised.has(name));
   assert.deepEqual(missing.sort(), [], `these advertised tools were never exercised: ${missing.join(', ')}`);
+});
+
+// The capture status (M-9, PR-36b) rides on every scoped completeness of a
+// capture-bearing store, so each tool carrying one must still meet its own
+// advertised output schema: items waiting, a store limit binding now, and a
+// gap of every kind.
+test('the capture status of a capture-bearing store meets every advertised output schema', async (t) => {
+  const seed = await scratchDirectory(t, 'shadowgraph-conformance-capture-');
+  const file = join(seed, 'data.json');
+  const project = 'conformance';
+  const graph = createShadowGraph();
+  const decision = graph.addDecision({ project, title: 'Adopt redis cache', chosen: 'redis' });
+  graph.link({ from: decision.id, to: graph.addDecision({ project, title: 'Adopt sqs queue', chosen: 'sqs' }).id, relation: 'related_to', project });
+  const WIDE = { maxStoreBytes: 2 ** 40, maxQueueDepth: 2 ** 30, maxItemBytes: 2 ** 40, maxItemsPerSession: 2 ** 30 };
+  let texts = 0;
+  const capture = (fields = {}, limits = {}) => privilegedRecordCapture(graph, {
+    project, originId: 'origin-a', text: `material ${texts += 1}`, admission: { limits: { ...WIDE, ...limits }, storeBytes: 0 }, ...fields,
+    source: { event: 'UserPromptSubmit', sessionId: 's-1', ...fields.source }
+  });
+  capture();
+  capture();
+  capture({}, { maxItemsPerSession: 2 });
+  capture({ source: { sessionId: 's-2' } }, { maxStoreBytes: 1 });
+  capture({ source: { sessionId: 's-2' } });
+  capture({ project: 'elsewhere', source: { sessionId: 's-3' } });
+  capture({ source: { sessionId: 's-3' } });
+  capture({ source: { sessionId: 's-4' } }, { maxQueueDepth: 4 });
+  await writeFile(file, JSON.stringify(privilegedSnapshot(graph)));
+  const rpc = await startMcp(t, { SHADOWGRAPH_FILE: file });
+  await rpc.initialize('2025-06-18');
+  const schemas = new Map((await rpc.listTools({})).tools.map((tool) => [tool.name, tool.outputSchema]));
+  const callTool = conformingCaller(rpc, schemas, new Set());
+  const searched = await callTool('shadowgraph_search', { project, query: '' });
+  assert.deepEqual([searched.completeness.capture.pending, searched.completeness.capture.limited.map((entry) => entry.limit), searched.completeness.capture.gaps.map((entry) => entry.reason)],
+    [3, ['maxQueueDepth'], ['maxStoreBytes', 'maxItemsPerSession', 'session_in_another_project']], 'the seed declares every kind');
+  for (const [name, args] of [
+    ['shadowgraph_retrieve', { project, query: 'redis' }], ['shadowgraph_recall', { project, query: 'redis' }],
+    ['shadowgraph_context', { project }], ['shadowgraph_context', { project, query: 'redis' }], ['shadowgraph_context', { project, query: 'redis', compact: true }],
+    ['shadowgraph_review', { project }], ['shadowgraph_review_signals', { project }], ['shadowgraph_reconsider', { project }], ['shadowgraph_maintain', { project }],
+    ['shadowgraph_traverse', { project, id: decision.id }], ['shadowgraph_journal', { project }], ['shadowgraph_rebuild', { project }], ['shadowgraph_validate', { project }],
+    ['shadowgraph_redact', { project }], ['shadowgraph_review_context', { project }], ['shadowgraph_repair_plan', { project }]
+  ]) assert.match(JSON.stringify(await callTool(name, args)), /"capture":\{"pending":3,/u, `${name} ${JSON.stringify(args)} carries the block`);
 });
 
 test('a legacy tool-execution failure stays a protocol error and carries no structured content', async (t) => {

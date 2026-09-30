@@ -45,6 +45,8 @@ const CONTEXT = artefacts(RUNTIME);
 // pointed at it).
 const DEV_CONTEXT = artefacts(DEV_REPO);
 const CAPTURED = { selfEvent: false, sourceIdentity: 'unattributed_observer' };
+// Admission (PR-36b) is every capture's: limits no test here reaches.
+const ADMISSION = Object.freeze({ limits: { maxStoreBytes: 2 ** 40, maxQueueDepth: 2 ** 30, maxItemBytes: 2 ** 40, maxItemsPerSession: 2 ** 30 }, storeBytes: 0 });
 const tool = (toolName, toolInput, extra = {}) => ({ event: 'PostToolUse', sessionId: 'session-1', cwd: at('work', 'app'), toolName, toolInput, ...extra });
 const bash = (command, extra) => tool('Bash', { command }, extra);
 const ps = (command, extra) => tool('PowerShell', { command }, extra);
@@ -249,7 +251,7 @@ test('the classifier takes what it is given: nothing malformed throws, and every
 test('a self-event only counts, and the count stays one record however many arrive', () => {
   const graph = createShadowGraph({ now });
   graph.addDecision({ project: 'alpha', title: 'Cache', chosen: 'redis' });
-  privilegedRecordCapture(graph, { project: 'alpha', originId: 'origin-a', text: 'a prompt', source: { event: 'UserPromptSubmit', sessionId: 'session-1' } });
+  privilegedRecordCapture(graph, { admission: ADMISSION, project: 'alpha', originId: 'origin-a', text: 'a prompt', source: { event: 'UserPromptSubmit', sessionId: 'session-1' } });
   const before = privilegedSnapshot(graph);
   const counted = privilegedRecordSelfEvent(graph, { project: 'alpha', originId: 'origin-a', signal: 'S-1', source: { event: 'PostToolUse', sessionId: 'session-1' } });
   assert.deepEqual(counted, { 'S-1': { PostToolUse: 1 } });
@@ -272,12 +274,12 @@ test('a self-event only counts, and the count stays one record however many arri
   // the owner of its first capture, and a purge of that project reaches it
   // (review MIN-8).
   privilegedRecordSelfEvent(graph, { project: 'beta', originId: 'origin-a', signal: 'S-1', source: { event: 'PostToolUse', sessionId: 'session-2' } });
-  const later = privilegedRecordCapture(graph, { project: 'gamma', originId: 'origin-a', text: 'x', source: { event: 'UserPromptSubmit', sessionId: 'session-2' } });
+  const later = privilegedRecordCapture(graph, { admission: ADMISSION, project: 'gamma', originId: 'origin-a', text: 'x', source: { event: 'UserPromptSubmit', sessionId: 'session-2' } });
   assert.deepEqual([later.project, later.occurrenceSeq], ['gamma', 1]);
   const reowned = privilegedSnapshot(graph).captureSessions.find((session) => session.sessionId === 'session-2');
   assert.deepEqual([reowned.project, reowned.selfEvents], ['gamma', { 'S-1': { PostToolUse: 1 } }]);
-  const next = privilegedRecordCapture(graph, { project: 'beta', originId: 'origin-a', text: 'y', source: { event: 'UserPromptSubmit', sessionId: 'session-2' } });
-  assert.deepEqual([next.project, next.occurrenceSeq], ['gamma', 2], 'once it has a capture, the session keeps its owner');
+  const next = privilegedRecordCapture(graph, { admission: ADMISSION, project: 'beta', originId: 'origin-a', text: 'y', source: { event: 'UserPromptSubmit', sessionId: 'session-2' } });
+  assert.deepEqual(next, { refused: { reason: 'session_in_another_project' }, changed: true }, 'once it has a capture, the session is its owner\'s: another project\'s capture is refused, never filed under it (PR-36b)');
   assert.doesNotThrow(() => validateRestorePayload(structuredClone(privilegedSnapshot(graph)), { now }));
   graph.purgeProject('gamma');
   const purged = privilegedSnapshot(graph);
@@ -346,7 +348,7 @@ test('a delivered ShadowGraph block is removed from captured text before it is s
   ]) assert.deepEqual(stripDeliveredBlocks(text), { text, removed: 0 }, label);
   // Through the writer: every block removed is counted, and none is stored.
   const graph = createShadowGraph({ now });
-  const item = privilegedRecordCapture(graph, { project: 'alpha', originId: 'origin-a', text: `The assistant said.\n${block}\nThen it went on.\n${wide}`, source: { event: 'Stop', sessionId: 'session-1', turnIndex: 1 } });
+  const item = privilegedRecordCapture(graph, { admission: ADMISSION, project: 'alpha', originId: 'origin-a', text: `The assistant said.\n${block}\nThen it went on.\n${wide}`, source: { event: 'Stop', sessionId: 'session-1', turnIndex: 1 } });
   const snapshot = privilegedSnapshot(graph);
   assert.equal(snapshot.captureContent[0].text, 'The assistant said.\n\nThen it went on.\n');
   assert.equal(JSON.stringify(snapshot).includes(DELIVERY_FRAME), false, 'no delivered text is stored anywhere');

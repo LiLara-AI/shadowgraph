@@ -11,6 +11,7 @@ import { lstat, readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { activeCapture } from './capture-hook.js';
 import { createShadowGraph, MAX_PAGE_LIMIT, SCHEMA_VERSION } from './shadowgraph.js';
 import { show, t1Line } from './compact-tier.js';
 import { accessContext, discoverWorkspace } from './internal/access-transport.js';
@@ -19,6 +20,10 @@ import { DELIVERY_CAP_BYTES, DELIVERY_FRAME, deliveryEndLine } from './internal/
 
 export { DELIVERY_CAP_BYTES, DELIVERY_FRAME };
 const PROCESSING = 'processing: {"capture":"not_active","extraction":"not_active"}';
+// With capture active, or capture state in the store, the line says so and
+// carries the scope's capture status (plan v1.4.4 §24.1, M-9; PR-36b); without
+// either it is the constant it always was.
+const processingLine = (processing, redact = redactValue) => (processing === undefined ? PROCESSING : `processing: ${show(redact(processing))}`);
 const SERVED_EVENTS = new Set(['SessionStart', 'UserPromptSubmit']);
 const HOOK_INPUT_LIMIT_BYTES = 1024 * 1024;
 const HOOK_INPUT_WAIT_MS = 3000;
@@ -280,7 +285,7 @@ function framed(lines) {
 // escaped, so no delivered text can start a line of its own (AC-043). Items
 // are taken in order while they fit; one that does not is left out whole and
 // the next is tried, and the head counts every one left out (§23 F-4).
-export function assemblePayload({ head, items, capBytes = DELIVERY_CAP_BYTES, redact = redactValue }) {
+export function assemblePayload({ head, items, capBytes = DELIVERY_CAP_BYTES, redact = redactValue, processing }) {
   const total = head.total ?? items.length;
   let withheld = 0;
   let examined = 0;
@@ -288,7 +293,7 @@ export function assemblePayload({ head, items, capBytes = DELIVERY_CAP_BYTES, re
     const delivered = kept.length;
     const shown = { ...head, complete: head.complete === true && delivered === items.length && withheld === 0, delivered, omitted: total - delivered, omittedForSize: examined - delivered - withheld, withheld, notExamined: items.length - examined };
     return framed([
-      DELIVERY_FRAME, `head: ${show(redact(shown))}`, PROCESSING, ...kept,
+      DELIVERY_FRAME, `head: ${show(redact(shown))}`, processingLine(processing, redact), ...kept,
       `expansion: ${show({ operation: 'shadowgraph_expand', notDelivered: total - delivered, fullRead: 'shadowgraph_context' })}`
     ]);
   };
@@ -322,7 +327,7 @@ export function assemblePayload({ head, items, capBytes = DELIVERY_CAP_BYTES, re
     kept.length = 0;
     text = render(kept);
   }
-  const reduced = (code, detail) => framed([DELIVERY_FRAME, `head: ${show({ trigger: head.trigger, store: head.store, complete: false, limitation: { code, detail }, total, delivered: 0, omitted: total })}`, PROCESSING]);
+  const reduced = (code, detail) => framed([DELIVERY_FRAME, `head: ${show({ trigger: head.trigger, store: head.store, complete: false, limitation: { code, detail }, total, delivered: 0, omitted: total })}`, processingLine(processing, redact)]);
   if (!passes(text)) text = reduced('head_withheld', 'The head held something the credential check flags, so it is shortened and no record is delivered.');
   else if (bytes(text) > capBytes) {
     kept.length = 0;
@@ -344,9 +349,9 @@ const UNAVAILABLE_DETAIL = {
   unsupported_storage: 'The configured storage type is not supported. Nothing was read.'
 };
 
-function unavailablePayload(trigger, reason) {
+function unavailablePayload(trigger, reason, processing) {
   const head = { trigger, store: 'unavailable', reason, complete: false, limitation: { code: 'memory_unavailable', detail: UNAVAILABLE_DETAIL[reason] } };
-  return framed([DELIVERY_FRAME, `head: ${show(head)}`, PROCESSING]);
+  return framed([DELIVERY_FRAME, `head: ${show(head)}`, processingLine(processing)]);
 }
 
 async function present(path) {
@@ -509,7 +514,7 @@ const NOT_ASSESSED = { code: 'relevance_not_assessed', detail: `No prompt has be
 // files a cloned repository ships choose nothing (FND-P5-07). Nothing is
 // printed once the deadline has passed.
 export async function runDeliver({ args = [], readInput = () => '', file, storage = 'json', env = process.env, deadline = Infinity, write }) {
-  let trigger = null, emitted = false;
+  let trigger = null, emitted = false, quiet;
   const emit = (text) => {
     if (Date.now() >= deadline) return;
     emitted = true;
@@ -518,6 +523,12 @@ export async function runDeliver({ args = [], readInput = () => '', file, storag
   try {
     const pinned = args.includes('--hook') ? await activeDelivery(env) : null;
     if (args.includes('--hook') && !pinned) return;
+    // Whether capture is on comes from the activation record, not the store,
+    // and only on the hook path, for the store it pins: capture is said to be
+    // active only when it writes the store delivered here.
+    const capture = pinned ? await activeCapture(env) : null;
+    const capturing = Boolean(capture) && capture.store.file === pinned.store.file && capture.store.storage === pinned.store.storage;
+    quiet = capturing ? { capture: 'active', extraction: 'not_active' } : undefined;
     let event;
     try { event = JSON.parse(unmarked(await readInput())); } catch { return; }
     if (!SERVED_EVENTS.has(event?.hook_event_name)) return;
@@ -527,10 +538,10 @@ export async function runDeliver({ args = [], readInput = () => '', file, storag
     if (!session && !prompt.trim()) return;
     const read = await readStoreForDelivery(pinned ? pinned.store : { file, storage });
     const unavailable = read.unavailable ?? (read.payload?.schemaVersion > SCHEMA_VERSION ? 'newer_schema' : null);
-    if (unavailable) return session ? emit(unavailablePayload(trigger, unavailable)) : undefined;
+    if (unavailable) return session ? emit(unavailablePayload(trigger, unavailable, quiet)) : undefined;
     const graph = createShadowGraph();
     try { graph.importData(read.payload); }
-    catch { return session ? emit(unavailablePayload(trigger, 'unreadable')) : undefined; }
+    catch { return session ? emit(unavailablePayload(trigger, 'unreadable', quiet)) : undefined; }
     const workspace = await discoverWorkspace(process.cwd(), { timeout: GIT_TIMEOUT_MS });
     // At SessionStart the whole working set, up to the largest page, is read,
     // so the order below chooses among all of it.
@@ -553,10 +564,17 @@ export async function runDeliver({ args = [], readInput = () => '', file, storag
       ...(pinned?.host ? { host: pinned.host } : {})
     };
     const items = relevant.items.map((item) => itemOf(item, records)).filter(Boolean);
-    emit(assemblePayload({ head, items: session ? sessionOrder(items) : items }).text);
+    // The status in brief, bounded whatever the store holds: counts, and the
+    // names of the limits and gaps the reads declare.
+    const status = relevant.capture;
+    const processing = capturing || status ? {
+      capture: capturing ? 'active' : 'not_active', extraction: 'not_active',
+      ...(status ? { pending: status.pending, processing: status.processing, failed: status.failed, blocked: status.blocked, oldestPendingAt: status.oldestPendingAt, extractionAvailable: status.extractionAvailable, limited: status.limited.map((entry) => entry.limit), gaps: [...new Set(status.gaps.map((entry) => entry.reason))] } : {})
+    } : undefined;
+    emit(assemblePayload({ head, items: session ? sessionOrder(items) : items, processing }).text);
   } catch {
     // Degraded, never blocking: nothing on stderr and no exit code (§18.4). A
     // session start that failed after the read still says memory is unavailable.
-    try { if (trigger === 'SessionStart' && !emitted) emit(unavailablePayload(trigger, 'unreadable')); } catch {}
+    try { if (trigger === 'SessionStart' && !emitted) emit(unavailablePayload(trigger, 'unreadable', quiet)); } catch {}
   }
 }
