@@ -88,7 +88,7 @@ test('the hook is inert before activation, delivers once delivery is active, and
 
 test('activation needs evidence and an existing store, and writes nothing otherwise; a corrupt record leaves the hook inert', async (t) => {
   const { home, cwd, store, record } = await setup(t);
-  for (const args of [['activate', 'delivery', '--store', store], ['activate', 'delivery', '--evidence', 'x'], ['activate', 'delivery', '--evidence', 'x', '--store', join(home, 'missing.json')], ['activate', 'capture', '--evidence', 'x', '--store', store], ['activate', 'delivery', '--evidence', 'x', '--store', store, '--unknown', 'y']]) {
+  for (const args of [['activate', 'delivery', '--store', store], ['activate', 'delivery', '--evidence', 'x'], ['activate', 'delivery', '--evidence', 'x', '--store', join(home, 'missing.json')], ['activate', 'capture', '--store', store], ['activate', 'delivery', '--evidence', 'x', '--store', store, '--unknown', 'y']]) {
     const result = await run([...args, '--host-version', VERIFIED], { home });
     assert.equal(result.code, 1, args.join(' '));
     assert.equal(existsSync(record), false, args.join(' '));

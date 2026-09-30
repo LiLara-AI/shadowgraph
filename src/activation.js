@@ -4,16 +4,18 @@
 // step of any rollback. The record is `<SHADOWGRAPH_HOME or ~/.shadowgraph>/
 // activation.json`, in exactly the shape delivery reads (src/delivery.js), with
 // an append-only history. It holds configuration and evidence references,
-// never memory. Only `delivery` exists before capture (P6) and extraction (P7).
+// never memory. `delivery` and `capture` exist; extraction arrives in P7.
 import { execFile } from 'node:child_process';
 import { lstat, readFile, rename } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { promisify } from 'node:util';
+import { CAPTURE_LIMITS, storeRepository } from './capture-hook.js';
 import { activationFile, DELIVERY_CAP_BYTES, DELIVERY_DEADLINE_MS, readStoreForDelivery } from './delivery.js';
 import { defaultSettingsPath, HOOK_TEMPLATE_URL, installedCommands, pinnedRuntime, runtimeHookCommand } from './host-hooks.js';
 import { confirmOwnerAction } from './internal/owner-confirmation.js';
 import { credentialLiteralIn } from './internal/credential-literal.js';
 import { canonicalPath, isScratchFile, readText, writeJsonAtomically } from './internal/owner-files.js';
+import { mintOriginId, usableOriginId } from './scope.js';
 
 export const COVERAGE_MANIFEST_URL = new URL('../integrations/claude-code.coverage.json', import.meta.url);
 const RECORD_VERSION = 1;
@@ -57,14 +59,10 @@ async function workingTree(path) {
   }
 }
 
-// `activate delivery`: the gate's evidence reference and the store the hook
-// reads are required; the store must be readable as the kind declared. The
-// reference is a pointer, so one the credential check flags is refused. With
-// a pinned runtime, hooks already installed must run it. Outside a scratch
-// location the owner confirms the exact configuration at a terminal, and the
-// record must still hold what was read when they answered.
-// `afterConfirmation` is a test seam only.
-export async function activateDelivery({ env = process.env, evidence, store, storage = 'json', hostVersion, settings = defaultSettingsPath(), runtime, surface = 'cli', afterConfirmation } = {}) {
+// What every activation checks first: the gate's evidence reference (a
+// pointer, so one the credential check flags is refused), the host version
+// when given, and a store that exists and reads as the kind declared.
+async function checkedActivation({ evidence, store, storage, hostVersion }) {
   if (typeof evidence !== 'string' || !evidence.trim()) throw new Error('activation_requires_evidence');
   if (credentialLiteralIn(evidence) || credentialLiteralIn(`evidence=${evidence}`)) throw new Error('activation_evidence_holds_a_credential');
   if (hostVersion !== undefined && !/^(?:\d+\.\d+\.\d+|unknown)$/u.test(hostVersion)) throw new Error('activation_host_version_malformed');
@@ -74,6 +72,16 @@ export async function activateDelivery({ env = process.env, evidence, store, sto
   if (!(await lstat(storeFile).catch(() => null))?.isFile()) throw new Error(`activation_store_not_found (${storeFile})`);
   const read = await readStoreForDelivery({ file: storeFile, storage });
   if (read.unavailable && read.unavailable !== 'busy') throw new Error(`activation_store_unreadable (${read.unavailable}: ${storeFile})`);
+  return storeFile;
+}
+
+// `activate delivery`: the gate's evidence reference and the store the hook
+// reads are required. With a pinned runtime, hooks already installed must run
+// it. Outside a scratch location the owner confirms the exact configuration at
+// a terminal, and the record must still hold what was read when they answered.
+// `afterConfirmation` is a test seam only.
+export async function activateDelivery({ env = process.env, evidence, store, storage = 'json', hostVersion, settings = defaultSettingsPath(), runtime, surface = 'cli', afterConfirmation } = {}) {
+  const storeFile = await checkedActivation({ evidence, store, storage, hostVersion });
   const { path, text, record } = await recordAt(env);
   const { verifiedVersion } = JSON.parse(await readFile(COVERAGE_MANIFEST_URL, 'utf8'));
   const template = JSON.parse(await readFile(HOOK_TEMPLATE_URL, 'utf8'));
@@ -84,6 +92,7 @@ export async function activateDelivery({ env = process.env, evidence, store, sto
   // revision 6 §5); none when the hooks run an installed binary.
   const pinned = runtime ? await pinnedRuntime(runtime) : null;
   if (pinned && commands.some((command) => command !== runtimeHookCommand(pinned.path))) throw new Error(`activation_hooks_run_another_runtime (${settingsFile})`);
+  sharedWith(record?.capabilities?.capture, 'capture', storeFile, storage, pinned);
   const at = new Date().toISOString();
   const delivery = {
     state: 'active', changedAt: at, evidence,
@@ -107,12 +116,101 @@ export async function activateDelivery({ env = process.env, evidence, store, sto
   return { capability: 'delivery', state: 'active', file: path, record: next, ...warning };
 }
 
-// `deactivate delivery`: never asks, since it only turns delivery off, and
-// always leaves a record saying so; the history keeps the entry. With nothing
-// active nothing is written. A record whose content is unreadable is kept
-// beside the new one, renamed, never deleted; one the system cannot read for
-// now (another process holding it) fails the command and stays as it is.
-export async function deactivateDelivery({ env = process.env, surface = 'cli' } = {}) {
+// The projects a flag names: comma-separated, each once.
+function projectList(value, flag) {
+  const names = value.split(',').map((name) => name.trim());
+  if (names.some((name) => !name) || new Set(names).size !== names.length) throw new Error(`activation_projects_malformed (${flag})`);
+  return names;
+}
+
+// `activate capture` (OD-3): the owner's one explicit enablement. Capture then
+// covers every project unless `exclude` narrows it or `only` names the ones it
+// covers; reads are never affected. The store must be private: a store inside
+// a git repository or working tree is refused, with no flag, variable or key
+// that permits it (§21.3, VAR-14). Its origin is minted once and kept by every
+// later activation, so the captures of one installation share it. The frozen
+// admission limits are recorded here, and the history keeps each activation's
+// coverage and limits, so an earlier value is never lost (§22.6.1). As for
+// delivery, the owner confirms at a terminal outside a scratch location.
+// Capture stays inert until AG-2 approves it on the real host.
+export async function activateCapture({ env = process.env, evidence, store, storage = 'json', only, exclude, hostVersion, settings = defaultSettingsPath(), runtime, surface = 'cli', afterConfirmation } = {}) {
+  if (only !== undefined && exclude !== undefined) throw new Error('activation_coverage_only_or_exclude');
+  const coverage = only !== undefined ? { projects: 'only', include: projectList(only, '--only') } : { projects: 'all', exclude: exclude === undefined ? [] : projectList(exclude, '--exclude') };
+  const storeFile = await checkedActivation({ evidence, store, storage, hostVersion });
+  const repository = await storeRepository(storeFile) ?? await gitRepository(storeFile);
+  if (repository) throw new Error(`capture_store_inside_repository (${storeFile} lies in ${repository}; plan section 21.3 and source-of-truth section 7: private material is never written inside a repository, even temporarily, and nothing permits it)`);
+  const { path, text, record } = await recordAt(env);
+  const version = hostVersion ?? await claudeVersion();
+  const pinned = runtime ? await pinnedRuntime(runtime) : null;
+  sharedWith(record?.capabilities?.delivery, 'delivery', storeFile, storage, pinned);
+  // The origin: the capability's own, else the latest one the history kept.
+  const history = Array.isArray(record?.history) ? record.history : [];
+  const kept = [record?.capabilities?.capture?.originId, ...history.filter((entry) => entry?.capability === 'capture').map((entry) => entry.originId).reverse()];
+  const at = new Date().toISOString();
+  const capture = {
+    state: 'active', changedAt: at, evidence,
+    store: { file: storeFile, storage },
+    originId: kept.map(usableOriginId).find(Boolean) ?? mintOriginId(),
+    coverage, limits: { ...CAPTURE_LIMITS },
+    // No host version is verified for capture until AG-2 records one.
+    host: { name: 'claude-code', version, verifiedVersion: null, verified: false },
+    settings: await canonicalPath(settings), runtime: pinned, surface
+  };
+  const note = { note: 'Capture records what you and the assistant do in every covered project into this private store. Reads are unaffected.' };
+  if (!(await isScratchFile(path)) && !await confirmOwnerAction('Activate capture', { record: path, ...note, ...capture })) throw new Error(`activation_requires_owner_confirmation (${path})`);
+  await afterConfirmation?.();
+  if (await readText(path) !== text) throw new Error('activation_record_changed_while_confirming');
+  const next = {
+    version: RECORD_VERSION,
+    capabilities: { ...(record?.capabilities ?? {}), capture },
+    history: [...history, { at, capability: 'capture', state: 'active', evidence, surface, hostVersion: version, store: storeFile, originId: capture.originId, coverage, limits: capture.limits, runtimeCommit: pinned?.commit ?? null }]
+  };
+  await writeJsonAtomically(path, next);
+  return { capability: 'capture', state: 'active', file: path, record: next };
+}
+
+// Delivery and capture work on one private store (plan §21.4, row 1: the
+// automated store holds records and capture items alike), so what is captured
+// is what delivery reads and declares. While both are active they name the
+// same store and the same runtime, so one runtime serves both hooks. A re-pin
+// therefore turns capture off first, re-activates delivery on the new runtime,
+// then activates capture on it again. (That the pinned runtime can read a
+// store holding capture, FND-P6-06, is checked with the capture hooks, PR-36b.)
+function sharedWith(other, name, storeFile, storage, pinned) {
+  if (other?.state !== 'active') return;
+  if (other.store?.file !== storeFile || other.store?.storage !== storage) throw new Error(`activation_store_differs_from_${name} (${name} is active for ${other.store?.file}; one store serves both)`);
+  if ((other.runtime?.path ?? null) !== (pinned?.path ?? null) || (other.runtime?.commit ?? null) !== (pinned?.commit ?? null)) throw new Error(`activation_runtime_differs_from_${name} (${name} runs ${other.runtime?.commit ?? 'an installed binary'}; one runtime serves both: to re-pin, deactivate capture, re-activate delivery on the new runtime, then activate capture on it)`);
+}
+
+// The git repository a path lies in by git's own answer (a bounded call):
+// asked with every GIT_* variable removed, and again with the invoking
+// environment's GIT_DIR or GIT_WORK_TREE when either is set, since either can
+// make a directory a working tree. Any answer but "not a git repository" -- a
+// timeout, git missing, an ownership refusal -- refuses too: the check fails
+// closed.
+async function gitRepository(path) {
+  const plain = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^GIT_/iu.test(name)));
+  const placed = process.env.GIT_DIR || process.env.GIT_WORK_TREE ? [process.env] : [];
+  for (const env of [plain, ...placed]) {
+    try {
+      return (await run('git', ['rev-parse', '--absolute-git-dir'], { cwd: dirname(path), timeout: 3000, windowsHide: true, env: { ...env, LC_ALL: 'C' } })).stdout.trim() || dirname(path);
+    } catch (error) {
+      if (!/not a git repository/iu.test(String(error.stderr ?? ''))) return `a repository git could not rule out (${String(error.stderr || error.code || error.message).trim()})`;
+    }
+  }
+  return null;
+}
+
+// `deactivate delivery` and `deactivate capture`: never ask, since they only
+// turn a capability off, and always leave a record saying so; the history
+// keeps the entry. With nothing active nothing is written. A record whose
+// content is unreadable is kept beside the new one, renamed, never deleted;
+// one the system cannot read for now (another process holding it) fails the
+// command and stays as it is.
+export const deactivateDelivery = (options) => deactivate('delivery', options);
+export const deactivateCapture = (options) => deactivate('capture', options);
+
+async function deactivate(capability, { env = process.env, surface = 'cli' } = {}) {
   let path, record, keptAside = null;
   try {
     ({ path, record } = await recordAt(env));
@@ -123,13 +221,13 @@ export async function deactivateDelivery({ env = process.env, surface = 'cli' } 
     await rename(path, keptAside);
     record = { history: [] };
   }
-  if (!keptAside && record?.capabilities?.delivery?.state !== 'active') return { capability: 'delivery', state: 'deactivated', changed: false, file: path };
+  if (!keptAside && record?.capabilities?.[capability]?.state !== 'active') return { capability, state: 'deactivated', changed: false, file: path };
   const at = new Date().toISOString();
   const next = {
     version: RECORD_VERSION,
-    capabilities: { ...(record.capabilities ?? {}), delivery: { ...(record.capabilities?.delivery ?? {}), state: 'deactivated', changedAt: at } },
-    history: [...(Array.isArray(record.history) ? record.history : []), { at, capability: 'delivery', state: 'deactivated', surface, ...(keptAside ? { replacedUnreadableRecord: keptAside } : {}) }]
+    capabilities: { ...(record.capabilities ?? {}), [capability]: { ...(record.capabilities?.[capability] ?? {}), state: 'deactivated', changedAt: at } },
+    history: [...(Array.isArray(record.history) ? record.history : []), { at, capability, state: 'deactivated', surface, ...(keptAside ? { replacedUnreadableRecord: keptAside } : {}) }]
   };
   await writeJsonAtomically(path, next);
-  return { capability: 'delivery', state: 'deactivated', changed: true, file: path, record: next, ...(keptAside ? { keptAside } : {}) };
+  return { capability, state: 'deactivated', changed: true, file: path, record: next, ...(keptAside ? { keptAside } : {}) };
 }

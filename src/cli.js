@@ -16,7 +16,7 @@ import * as privileged from './internal/snapshot.js';
 import { accessContext, bindWorkspaceProject, currentAccessOperation, discoverWorkspace, hasAccessReference } from './internal/access-transport.js';
 import { confirmOwnerAction, ownerAnswer } from './internal/owner-confirmation.js';
 import { changeHookSettings, defaultSettingsPath, pinnedRuntime, runtimeHookCommand } from './host-hooks.js';
-import { activateDelivery, deactivateDelivery } from './activation.js';
+import { activateCapture, activateDelivery, deactivateCapture, deactivateDelivery } from './activation.js';
 
 // On Windows a program is otherwise looked for in the working directory before
 // the path, so a `git.exe` a repository ships would run when a hook reads its
@@ -102,16 +102,19 @@ async function deliverFromHook() {
   } catch {}
 }
 
-// `activate delivery` and `deactivate delivery` (plan §26): the per-user
-// activation record, opening no store. Only delivery exists in this build.
+// `activate` and `deactivate` for delivery and capture (plan §26; OD-3): the
+// per-user activation record, opening no store for writing.
 async function changeActivation() {
   const [capability, ...flags] = rest;
   const usage = command === 'activate'
-    ? 'Usage: shadowgraph activate delivery --evidence <ref> --store <path> [--storage json|sqlite] [--host-version <version>] [--settings <path>] [--runtime <directory>]'
-    : 'Usage: shadowgraph deactivate delivery';
-  if (capability !== 'delivery') throw new Error(usage);
-  if (command === 'deactivate') return deactivateDelivery(flagsOf(flags, {}, usage));
-  return activateDelivery(flagsOf(flags, { '--evidence': 'evidence', '--store': 'store', '--storage': 'storage', '--host-version': 'hostVersion', '--settings': 'settings', '--runtime': 'runtime' }, usage));
+    ? 'Usage: shadowgraph activate delivery --evidence <ref> --store <path> [--storage json|sqlite] [--host-version <version>] [--settings <path>] [--runtime <directory>]\n'
+      + '       shadowgraph activate capture --evidence <ref> --store <path> [--storage json|sqlite] [--only <project,...> | --exclude <project,...>] [--host-version <version>] [--settings <path>] [--runtime <directory>]'
+    : 'Usage: shadowgraph deactivate delivery|capture';
+  if (capability !== 'delivery' && capability !== 'capture') throw new Error(usage);
+  if (command === 'deactivate') return (capability === 'delivery' ? deactivateDelivery : deactivateCapture)(flagsOf(flags, {}, usage));
+  const names = { '--evidence': 'evidence', '--store': 'store', '--storage': 'storage', '--host-version': 'hostVersion', '--settings': 'settings', '--runtime': 'runtime' };
+  if (capability === 'delivery') return activateDelivery(flagsOf(flags, names, usage));
+  return activateCapture(flagsOf(flags, { ...names, '--only': 'only', '--exclude': 'exclude' }, usage));
 }
 
 // The Claude Code hook block (plan rev6 PR-31) is written into one settings
