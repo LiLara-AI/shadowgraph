@@ -71,3 +71,7 @@ export function privilegedTransitionCapture(graph, input) {
 export function privilegedRecordSelfEvent(graph, input) {
   return primitive(graph, 'recordSelfEvent', 'privilegedRecordSelfEvent')(input);
 }
+// The transcript cursor (PR-36): the capture hook is its one caller.
+export function privilegedRecordTranscript(graph, input) {
+  return primitive(graph, 'recordTranscript', 'privilegedRecordTranscript')(input);
+}

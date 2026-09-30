@@ -358,7 +358,7 @@ test('RT-12 activation records its own kind\'s handlers and the default server; 
   const installed = await cli(['install-hooks', '--capture', '--settings', hooksFile, '--runtime', able]);
   assert.equal(installed.code, 0, installed.stderr);
   const handlers = Object.values(JSON.parse(await readFile(hooksFile, 'utf8')).hooks).flat().flatMap((group) => group.hooks);
-  assert.equal(handlers.length, 4);
+  assert.equal(handlers.length, 6, 'the four events with material and the transcript cursor\'s two flush triggers (PR-36)');
   for (const handler of handlers) {
     assert.equal(shadowGraphHookKind(handler), 'capture');
     assert.equal(handler.command, runtimeHookCommand(realpathSync.native(able), process.execPath, 'capture'));
@@ -408,7 +408,7 @@ test('RT-16 check-integrations refuses a capture template with async, a matcher,
   for (const variant of [
     { hooks: { ...template.hooks, Stop: [{ hooks: [{ ...handler, async: true }] }] } },
     { hooks: { ...template.hooks, Stop: [{ matcher: '*', hooks: [handler] }] } },
-    { hooks: { ...template.hooks, PreCompact: template.hooks.Stop } },
+    { hooks: { ...template.hooks, SubagentStop: template.hooks.Stop } },
     { hooks: { ...template.hooks, Stop: [{ hooks: [{ ...handler, timeout: 8 }] }] } }
   ]) {
     await writeFile(join(root, 'integrations', 'claude-code.capture-hooks.json'), `${JSON.stringify(variant, null, 2)}\n`);
@@ -485,7 +485,9 @@ test('RT-18 in a git work tree the shared binding is an artefact, and outsideWor
 test('RT-19 the coverage manifest declares each never-captured case and each declaration the plan requires', () => {
   const { capture: block } = JSON.parse(readFileSync('integrations/claude-code.coverage.json', 'utf8'));
   const has = (list, pattern, label) => assert.ok(block[list].some((line) => pattern.test(line)), `${list}: ${label}`);
-  for (const [pattern, label] of [[/not resolved/u, 'an unresolved project'], [/coverage leaves out/u, 'an uncovered project'], [/1 MiB/u, 'a payload over 1 MiB'], [/PreCompact/u, 'PreCompact'], [/SessionEnd/u, 'SessionEnd'], [/Stop with no final message/u, 'a content-less Stop'], [/own traffic/u, 'self-events'], [/maxItemBytes/u, 'an item over maxItemBytes'], [/reasoning/u, 'hidden reasoning'], [/SQLite/u, 'a SQLite store']]) has('neverCaptured', pattern, label);
-  for (const [pattern, label] of [[/session_in_another_project/u, 'D-6'], [/possibleDuplicateOf/u, 'the duplicate marker'], [/not yet reconstructed/u, 'gaps'], [/capture_limited/u, 'the steady state'], [/exit_code[^.]*hypothetical/u, 'exit_code'], [/latency/u, 'latency'], [/Turning capture off/u, 'deactivation'], [/FND-P6-11/u, 'permissions'], [/redact/u, 'no redaction until PR-37'], [/lock/u, 'lock contention']]) has('declarations', pattern, label);
+  // PreCompact, SessionEnd and a content-less Stop are no longer never captured: the transcript cursor reads at them
+  // (PR-36), and what it never reads is listed instead.
+  for (const [pattern, label] of [[/not resolved/u, 'an unresolved project'], [/coverage leaves out/u, 'an uncovered project'], [/1 MiB/u, 'a payload over 1 MiB'], [/before the session's first capture/u, 'transcript before the anchor'], [/before capture was last activated/u, 'transcript while capture was off'], [/subagents' own transcript files/u, 'subagent transcripts'], [/worker's \(S-3\)/u, 'ShadowGraph\'s own sessions'], [/regular file/u, 'a transcript that is not a regular .jsonl file'], [/own traffic/u, 'self-events'], [/maxItemBytes/u, 'an item over maxItemBytes'], [/reasoning/u, 'hidden reasoning'], [/SQLite/u, 'a SQLite store']]) has('neverCaptured', pattern, label);
+  for (const [pattern, label] of [[/session_in_another_project/u, 'D-6'], [/possibleDuplicateOf/u, 'the duplicate marker'], [/tool_calls_not_captured/u, 'gaps reconstructed for tool calls only'], [/capture_limited/u, 'the steady state'], [/exit_code[^.]*hypothetical/u, 'exit_code'], [/latency/u, 'latency'], [/Turning capture off/u, 'deactivation'], [/FND-P6-11/u, 'permissions'], [/redact/u, 'no redaction until PR-37'], [/lock/u, 'lock contention'], [/hypothesis[^.]*transcript_unrecognised/u, 'the transcript shape'], [/session_left_project/u, 'a session leaving its project'], [/transcript_reanchored[^.]*transcript_rewritten/u, 'anchoring'], [/compact/u, 'compaction'], [/pauses it/u, 'hooks reinstalled'], [/recorded twice/u, 'rule 2\'s limit'], [/merge import/u, 'merged cursors'], [/falls behind/u, 'a session the reads fall behind'], [/Subagent entries/u, 'sidechain entries'], [/never the place/u, 'the time a session left its project'], [/never read \(transcript_unrecognised\)/u, 'a malformed cursor'], [/rollback pin/u, 'an earlier build under-declares']]) has('declarations', pattern, label);
   assert.match(block.hostFields, /AG-2/u);
 });

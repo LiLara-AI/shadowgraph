@@ -22,6 +22,19 @@ import { downgradeToSchema5, downgradeToSchema6 } from '../src/schema-conversion
 import { validateRestorePayload } from '../src/restore-validation.js';
 import { privilegedRebuild, privilegedSnapshot, privilegedValidate } from '../src/internal/snapshot.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { TRANSCRIPT_GAP_REASONS } from '../src/internal/transcript.js';
+// The capture status's gaps as the limitation states them: what capture refused, then what the transcript cursor did
+// not read (PR-36).
+const refusedAndUnread = (gaps) => {
+  const reasons = [...new Set(gaps.map((entry) => entry.reason))];
+  const unread = reasons.filter((reason) => TRANSCRIPT_GAP_REASONS.includes(reason));
+  const refused = reasons.filter((reason) => !unread.includes(reason));
+  return [
+    ...(refused.length ? [`Capture refused material (${refused.join(', ')}); what it refused is not here.`] : []),
+    ...(unread.length ? [`Capture did not read part of a session's transcript (${unread.join(', ')}); what it did not read is not here.`] : [])
+  ];
+};
+
 
 const NOW = '2026-01-01T00:00:00.000Z';
 const now = () => NOW;
@@ -43,7 +56,7 @@ function withDeclaration(value, block) {
   const said = [
     ...(backlog ? [`${backlog} captured ${backlog === 1 ? 'item is' : 'items are'} not yet understood in this scope: captured is not stored experience.`] : []),
     ...(block.limited.length ? [`Capture is at a limit (${block.limited.map((entry) => entry.limit).join(', ')}): new material is refused, and nothing accepted is removed.`] : []),
-    ...(block.gaps.length ? [`Capture refused material (${[...new Set(block.gaps.map((entry) => entry.reason))].join(', ')}); what it refused is not here.`] : [])
+    ...refusedAndUnread(block.gaps)
   ];
   const result = { ...copy, capture: block, complete: copy.complete === true && backlog === 0 };
   if (said.length) {

@@ -46,14 +46,17 @@ export const CAPTURE_TRANSITIONS = Object.freeze({
 // The source contract (plan §12.1): the events capture covers, and what
 // identifies one occurrence of each where the host supplies it. Without it an
 // occurrence is identified by its ordinal. A SessionEnd is one per session. An
-// event not listed is not captured.
+// event not listed is not captured. `Transcript` is no host event: it labels
+// the assistant text the transcript cursor reads (§12.2; PR-36), identified by
+// its transcript entry's uuid, so it is never taken for a Stop or SessionEnd.
 export const CAPTURE_EVENT_IDENTITY = Object.freeze({
   UserPromptSubmit: 'hostEventId',
   PostToolUse: 'toolCallId',
   PostToolUseFailure: 'toolCallId',
   Stop: 'turnIndex',
   PreCompact: null,
-  SessionEnd: 'session'
+  SessionEnd: 'session',
+  Transcript: 'hostEventId'
 });
 // The entry a journal-less import writes for an item, by the state it is in.
 export const CAPTURE_IMPORT_TYPE = Object.freeze({

@@ -5,7 +5,9 @@
 // covers (all of them unless the owner narrows it) and its frozen admission
 // limits. Reads are never affected. `capture --hook` then records each
 // event's immediate material into that store (runCapture), silently.
-import { lstat, readdir, readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
+import { lstat, readdir, readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { activationFile } from './delivery.js';
@@ -15,7 +17,8 @@ import { accessContext, discoverWorkspace, projectBindingFile } from './internal
 import { captureArtefacts, classifyCaptureSource, soleProgram } from './internal/capture-source.js';
 import { outcomeFromExitStatus } from './internal/outcome.js';
 import { canonicalPath } from './internal/owner-files.js';
-import { privilegedRecordCapture, privilegedRecordSelfEvent, privilegedSnapshot } from './internal/snapshot.js';
+import { privilegedRecordCapture, privilegedRecordSelfEvent, privilegedRecordTranscript, privilegedSnapshot } from './internal/snapshot.js';
+import { TRANSCRIPT_TRIGGERS } from './internal/transcript.js';
 import { usableOriginId } from './scope.js';
 
 // Conservative admission limits, frozen until measured figures replace them
@@ -79,11 +82,12 @@ export async function activeCapture(env = process.env) {
   }
 }
 
-// The events whose immediate material the hook captures (plan §12.1; PR-36c):
-// a prompt, a tool call's result or failure, and the assistant's final reply
-// at a stop. PreCompact and SessionEnd carry none: they are flush triggers
-// for the transcript cursor (PR-36), and until then are not captured.
-export const CAPTURED_EVENTS = Object.freeze(['UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure', 'Stop']);
+// The events the hook takes (plan §12.1; PR-36c, PR-36): a prompt, a tool
+// call's result or failure and the assistant's final reply at a stop, as
+// immediate material; and a stop, the host's compaction and the session's end
+// as the transcript cursor's triggers. PreCompact and SessionEnd carry no
+// material of their own.
+export const CAPTURED_EVENTS = Object.freeze(['UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure', 'Stop', 'PreCompact', 'SessionEnd']);
 
 // The hook's own deadline, below the template's 10-second timeout (PR-36
 // design review D-1); SHADOWGRAPH_CAPTURE_DEADLINE_MS can only shorten it. A
@@ -143,14 +147,19 @@ export function toolOutcome({ event, toolCallId, toolName, toolInput, toolRespon
 
 // A host event as capture takes it (plan §12.1; the host's documented fields,
 // confirmed at AG-2), or null when it carries nothing to capture: its session,
-// working directory, the material, and what identifies it. No field is
-// inferred from another; an absent one is null.
+// working directory, the material, what identifies it, and its transcript's
+// path when that is an absolute path to a .jsonl file. No field is inferred
+// from another; an absent one is null. PreCompact, SessionEnd and a Stop with
+// no final message carry no material of their own: they come back without
+// text, as the transcript cursor's triggers (PR-36).
 export function observedEvent(payload) {
   if (!isObject(payload) || !CAPTURED_EVENTS.includes(payload.hook_event_name) || !named(payload.session_id)) return null;
   const event = payload.hook_event_name;
-  const base = { event, sessionId: payload.session_id, cwd: named(payload.cwd) ? payload.cwd : null, role: null, hostEventId: null, toolCallId: null, toolName: null, toolInput: null, prompt: null, outcome: null };
+  const transcriptPath = named(payload.transcript_path) && isAbsolute(payload.transcript_path) && payload.transcript_path.toLowerCase().endsWith('.jsonl') ? payload.transcript_path : null;
+  const base = { event, sessionId: payload.session_id, cwd: named(payload.cwd) ? payload.cwd : null, role: null, hostEventId: null, toolCallId: null, toolName: null, toolInput: null, prompt: null, outcome: null, transcriptPath };
   if (event === 'UserPromptSubmit') return named(payload.prompt) ? { ...base, role: 'user', hostEventId: named(payload.message_id) ? payload.message_id : null, prompt: payload.prompt, text: payload.prompt } : null;
-  if (event === 'Stop') return named(payload.last_assistant_message) ? { ...base, role: 'assistant', text: payload.last_assistant_message } : null;
+  if (event === 'Stop') return named(payload.last_assistant_message) ? { ...base, role: 'assistant', text: payload.last_assistant_message } : base;
+  if (event === 'PreCompact' || event === 'SessionEnd') return base;
   if (!named(payload.tool_name)) return null;
   const tool = { ...base, toolName: payload.tool_name, toolInput: payload.tool_input ?? null, toolCallId: named(payload.tool_use_id) ? payload.tool_use_id : null };
   return {
@@ -178,16 +187,60 @@ export const admissionLimits = (limits) => Object.fromEntries(Object.entries(CAP
 
 const covered = (coverage, project) => (coverage.projects === 'all' ? !coverage.exclude.includes(project) : coverage.include.includes(project));
 
-// One capture (plan §12.1; PR-36c): the event's material written into the
-// private store the capture record names, under one hold of its fence with no
-// revision retries (design review D-2), or nothing at all. Nothing is written
-// for a store inside a repository (§21.3), for a project not resolved from a
-// worktree binding the store itself recorded (D-5) or not covered (OD-3), for
-// a refusal that changes nothing, or when too little time is left to finish
-// the commit (D-3). A ShadowGraph self-event is counted and nothing else. A
-// host re-delivery of an item already held writes nothing. `post` tells the
-// thread keeping the deadline when the store is entered and left. Resolves to
-// what happened, for tests; `now` is a test seam.
+// The session's transcript, opened once for reading (PR-36 design §11): null
+// when it cannot be read -- no path, an unreadable one, or anything but a
+// regular file, which is never opened -- and { ref, missing: true } when it
+// does not exist yet. `ref` is the digest of its canonical path (its folder's
+// real path and its name, lower-cased on Windows), the same whether or not
+// the file exists; no path is stored.
+export async function openTranscript(path) {
+  if (!named(path)) return null;
+  let ref;
+  try {
+    const canonical = join(await canonicalPath(dirname(path)), basename(path));
+    ref = createHash('sha256').update(process.platform === 'win32' ? canonical.toLowerCase() : canonical).digest('hex');
+  } catch { return null; }
+  try {
+    if (!(await stat(path)).isFile()) return null;
+  } catch (error) {
+    return error?.code === 'ENOENT' ? { ref, missing: true } : null;
+  }
+  let fd;
+  try {
+    // Non-blocking where the platform has it, so a FIFO swapped in after the
+    // check cannot hold the hook until its deadline.
+    fd = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+    if (!fstatSync(fd).isFile()) throw new Error('not a regular file');
+  } catch (error) {
+    if (fd !== undefined) closeSync(fd);
+    return error?.code === 'ENOENT' ? { ref, missing: true } : null;
+  }
+  return {
+    ref,
+    size: () => fstatSync(fd).size,
+    // Only at a named offset: readSync takes a null or negative position as
+    // "where the file's own position is".
+    read: (start, length) => {
+      if (!Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(length) || length <= 0) return Buffer.alloc(0);
+      const bytes = Buffer.alloc(length);
+      return bytes.subarray(0, readSync(fd, bytes, 0, length, start));
+    },
+    close: () => closeSync(fd)
+  };
+}
+
+// One capture (plan §12.1, §12.2; PR-36c, PR-36): the event's material, and
+// what the transcript cursor reads, written into the private store the
+// capture record names, under one hold of its fence with no revision retries
+// (design review D-2), or nothing at all. Nothing is written for a store
+// inside a repository (§21.3), for a project not resolved from a worktree
+// binding the store itself recorded (D-5) or not covered (OD-3) -- except that
+// a session's transcript stops being read once an event comes from there --
+// for a refusal that changes nothing, or when too little time is left to
+// finish the commit (D-3). A ShadowGraph self-event is counted and nothing
+// else. A host re-delivery of an item already held writes nothing new. `post`
+// tells the thread keeping the deadline when the store is entered and left.
+// Resolves to what happened, for tests; `now` is a test seam.
 export async function runCapture({ capture, input, deadline, record = null, home = homedir(), cwd = process.cwd(), post = () => {}, now = Date.now }) {
   let event;
   try { event = observedEvent(JSON.parse(input.charCodeAt(0) === 0xfeff ? input.slice(1) : input)); } catch { return 'unreadable'; }
@@ -195,9 +248,15 @@ export async function runCapture({ capture, input, deadline, record = null, home
   const file = capture.store.file;
   if (await storeRepository(file)) return 'store_inside_repository';
   const workspace = await discoverWorkspace(cwd, { timeout: Math.max(1, Math.min(GIT_TIMEOUT_MS, deadline - now())) });
-  const lockTimeoutMs = deadline - now() - COMMIT_MARGIN_MS;
-  if (lockTimeoutMs <= 0) return 'out_of_time';
   const markerFiles = [projectBindingFile(workspace, 'worktree'), ...(workspace.commonDir ? [projectBindingFile(workspace, 'shared_repository')] : [])];
+  // Opened before the store's lock is taken, so the lock is never held while
+  // the file is found, and after anything else here that can throw.
+  const transcript = await openTranscript(event.transcriptPath);
+  const lockTimeoutMs = deadline - now() - COMMIT_MARGIN_MS;
+  if (lockTimeoutMs <= 0) {
+    transcript?.close?.();
+    return 'out_of_time';
+  }
   let outcome = 'written';
   const skip = (why) => { outcome = why; return null; };
   let store;
@@ -206,6 +265,12 @@ export async function runCapture({ capture, input, deadline, record = null, home
     store = await createStorage({ type: capture.store.storage, file, lockTimeoutMs, staleLockMs: CAPTURE_STALE_LOCK_MS });
     await store.update(async (current) => {
       const entered = now();
+      // The commit's cost is estimated from the work before the transcript is
+      // read, which does not make the store slower to write; the read stops
+      // while a commit still fits, with one more margin for its last line (D-3).
+      let basis = null;
+      const commitCost = () => Math.max(COMMIT_MARGIN_MS, 2 * (basis ?? now() - entered));
+      const mayContinue = () => now() + commitCost() + COMMIT_MARGIN_MS <= deadline;
       if (!isObject(current) || current.schemaVersion > SCHEMA_VERSION) return skip('newer_schema');
       // Measured under the fence, so a burst of writers cannot each see the
       // store below its ceiling (PR-36b amendment).
@@ -213,36 +278,69 @@ export async function runCapture({ capture, input, deadline, record = null, home
       const held = new Set((current.records ?? []).filter((record) => record?.kind === 'capture').map((record) => record.id));
       const graph = createShadowGraph({ now: () => new Date(now()).toISOString() });
       graph.importData(current);
-      const project = accessContext(graph, {}, 'cli', workspace, { confirmedByStore: true }).binding?.project ?? null;
-      if (project === null) return skip('project_unresolved');
-      if (!covered(capture.coverage, project)) return skip('not_covered');
-      const classified = classifyCaptureSource(
-        { event: event.event, sessionId: event.sessionId, cwd: event.cwd, toolName: event.toolName, toolInput: event.toolInput, prompt: event.prompt },
-        { ...captureArtefacts({ storeFile: file, runtimeDirectory: capture.runtime?.path ?? null, activationFile: record, markerFiles }), home, mcpServerNames: capture.mcpServerNames ?? ['shadowgraph'], correlationTokens: [], workerSessionIds: [] }
-      );
-      const source = { event: event.event, sessionId: event.sessionId };
-      if (classified.selfEvent) {
-        privilegedRecordSelfEvent(graph, { project, originId: capture.originId, signal: classified.signal, source });
-        outcome = 'self_event';
+      const bound = accessContext(graph, {}, 'cli', workspace, { confirmedByStore: true }).binding?.project ?? null;
+      const project = bound !== null && covered(capture.coverage, bound) ? bound : null;
+      const context = { ...captureArtefacts({ storeFile: file, runtimeDirectory: capture.runtime?.path ?? null, activationFile: record, markerFiles }), home, mcpServerNames: capture.mcpServerNames ?? ['shadowgraph'], correlationTokens: [], workerSessionIds: [] };
+      // The transcript cursor's step; a throw is undone by its own transaction
+      // and never costs the event's own item.
+      const cursor = (step) => {
+        basis ??= now() - entered;
+        try {
+          return privilegedRecordTranscript(graph, {
+            originId: capture.originId, sessionId: event.sessionId, project, activatedAt: capture.changedAt,
+            trigger: null, triggerItemId: null, transcript: null, mayContinue,
+            observation: { host: 'claude-code', hostVersion: null, toolName: null, cwd: null, outcome: null },
+            admission: { limits: admissionLimits(capture.limits), storeBytes },
+            isSelfTool: (toolName, toolInput) => classifyCaptureSource({ event: 'PostToolUse', sessionId: event.sessionId, cwd: event.cwd, toolName, toolInput, prompt: null }, context).selfEvent,
+            ...step
+          });
+        } catch { return null; }
+      };
+      let changed = false;
+      if (project === null) {
+        changed = Boolean(cursor({})?.changed);
+        if (!changed) return skip(bound === null ? 'project_unresolved' : 'not_covered');
+        outcome = 'transcript_stopped';
       } else {
-        const result = privilegedRecordCapture(graph, {
-          project, originId: capture.originId, text: event.text, sourceIdentity: classified.sourceIdentity,
-          source: { ...source, role: event.role, hostEventId: event.hostEventId, toolCallId: event.toolCallId },
-          observation: { host: 'claude-code', hostVersion: null, toolName: event.toolName, cwd: event.cwd, outcome: event.outcome },
-          admission: { limits: admissionLimits(capture.limits), storeBytes }
-        });
-        if (result.refused) {
-          if (!result.changed) return skip('refused');
-          outcome = 'refused';
-        // A host re-delivery returns the item the store already held.
-        } else if (held.has(result.id)) return skip('already_held');
+        const classified = classifyCaptureSource({ event: event.event, sessionId: event.sessionId, cwd: event.cwd, toolName: event.toolName, toolInput: event.toolInput, prompt: event.prompt }, context);
+        const source = { event: event.event, sessionId: event.sessionId };
+        if (classified.selfEvent) {
+          privilegedRecordSelfEvent(graph, { project, originId: capture.originId, signal: classified.signal, source });
+          cursor({ selfEvent: true });
+          changed = true;
+          outcome = 'self_event';
+        } else {
+          let item = null;
+          if (event.text === undefined) outcome = 'nothing_new';
+          else {
+            const result = privilegedRecordCapture(graph, {
+              project, originId: capture.originId, text: event.text, sourceIdentity: classified.sourceIdentity,
+              source: { ...source, role: event.role, hostEventId: event.hostEventId, toolCallId: event.toolCallId },
+              observation: { host: 'claude-code', hostVersion: null, toolName: event.toolName, cwd: event.cwd, outcome: event.outcome },
+              admission: { limits: admissionLimits(capture.limits), storeBytes }
+            });
+            if (result.refused) {
+              changed = result.changed;
+              outcome = 'refused';
+            // A host re-delivery returns the item the store already held.
+            } else if (held.has(result.id)) outcome = 'already_held';
+            else [item, changed] = [result, true];
+          }
+          const read = cursor({ trigger: TRANSCRIPT_TRIGGERS.includes(event.event) ? event.event : null, triggerItemId: item?.id ?? null, transcript });
+          if (read?.changed) {
+            changed = true;
+            if (outcome === 'nothing_new' || outcome === 'already_held') outcome = 'transcript';
+          }
+          if (!changed) return skip(outcome);
+        }
       }
-      if (now() + Math.max(COMMIT_MARGIN_MS, 2 * (now() - entered)) > deadline) return skip('out_of_time');
+      if (now() + commitCost() > deadline) return skip('out_of_time');
       return privilegedSnapshot(graph);
     });
     return outcome;
   } finally {
     store?.close?.();
+    transcript?.close?.();
     post('leave');
   }
 }

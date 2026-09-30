@@ -59,15 +59,16 @@ for (const row of coverage.triggers) {
 for (const event of Object.keys(hookTemplate.hooks)) assert.equal(coverage.triggers.find((row) => row.trigger === event)?.status, 'covered', `${event} is covered`);
 assert.ok(coverage.triggers.some((row) => row.status === 'uncovered'), 'at least one trigger is declared uncovered');
 
-// The capture hook block (plan §12.1; PR-36 design review D-1): synchronous
+// The capture hook block (plan §12.1, §12.2; PR-36 design review D-1): synchronous
 // command handlers -- no async key, so a capture's output never reaches the
 // model and no event is deduplicated away -- at the four events with
-// immediate material, each running the inert-until-activated capture verb
-// with a timeout its deadline and hard cap stay below.
+// immediate material and the two that only trigger the transcript cursor
+// (PR-36), each running the inert-until-activated capture verb with a timeout
+// its deadline and hard cap stay below.
 const captureTemplate = JSON.parse(await readFile(join(integrations, 'claude-code.capture-hooks.json'), 'utf8'));
-const CAPTURED = ['UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure', 'Stop'];
+const CAPTURED = ['UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure', 'Stop', 'PreCompact', 'SessionEnd'];
 assert.deepEqual(Object.keys(captureTemplate), ['hooks'], 'claude-code.capture-hooks.json holds only a hooks block');
-assert.deepEqual(Object.keys(captureTemplate.hooks), CAPTURED, 'capture hooks at the four events with immediate material');
+assert.deepEqual(Object.keys(captureTemplate.hooks), CAPTURED, 'capture hooks at the four events with immediate material and the cursor\'s two flush triggers');
 for (const [event, groups] of Object.entries(captureTemplate.hooks)) {
   assert.ok(Array.isArray(groups) && groups.length === 1, `${event} holds one capture group`);
   assert.deepEqual(Object.keys(groups[0]), ['hooks'], `${event} capture group has no matcher or other key`);
@@ -80,12 +81,14 @@ for (const [event, groups] of Object.entries(captureTemplate.hooks)) {
 }
 assert.ok(manifest.files.includes('integrations/claude-code.capture-hooks.json'), 'the package ships the capture hook template: a pinned runtime\'s capture capability');
 
-// What capture covers (plan §12.2.2): per event its material, identity and
-// whether that identity is exact; what is never captured; and what is declared.
+// What capture covers (plan §12.2.2): per event -- and for the assistant text
+// the transcript cursor reads, labelled Transcript -- its material, identity
+// and whether that identity is exact; what is never captured; and what is
+// declared.
 const captured = coverage.capture;
 assert.deepEqual(captured?.handler, { type: 'command', command: 'shadowgraph capture --hook', events: CAPTURED, synchronous: true }, 'the manifest names the capture handler');
 assert.ok(typeof captured.hostFields === 'string' && captured.hostFields.trim(), 'the manifest says how the host fields are known');
-assert.deepEqual(captured.events.map((row) => row.event), CAPTURED, 'the manifest describes each captured event');
+assert.deepEqual(captured.events.map((row) => row.event), [...CAPTURED, 'Transcript'], 'the manifest describes each captured event and the transcript\'s text');
 for (const row of captured.events) {
   assert.deepEqual(Object.keys(row).sort(), ['event', 'exact', 'identity', 'material', 'observation'], `${row.event}: capture row keys`);
   assert.equal(typeof row.exact, 'boolean', `${row.event}: whether its identity is exact`);

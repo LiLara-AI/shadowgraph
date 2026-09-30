@@ -18,6 +18,19 @@ import { createSqliteStore } from '../src/sqlite-storage.js';
 import { validateRestorePayload } from '../src/restore-validation.js';
 import { privilegedRebuild, privilegedRecordCapture, privilegedSnapshot, privilegedTransitionCapture, privilegedValidate } from '../src/internal/snapshot.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { TRANSCRIPT_GAP_REASONS } from '../src/internal/transcript.js';
+// The capture status's gaps as the limitation states them: what capture refused, then what the transcript cursor did
+// not read (PR-36).
+const refusedAndUnread = (gaps) => {
+  const reasons = [...new Set(gaps.map((entry) => entry.reason))];
+  const unread = reasons.filter((reason) => TRANSCRIPT_GAP_REASONS.includes(reason));
+  const refused = reasons.filter((reason) => !unread.includes(reason));
+  return [
+    ...(refused.length ? [`Capture refused material (${refused.join(', ')}); what it refused is not here.`] : []),
+    ...(unread.length ? [`Capture did not read part of a session's transcript (${unread.join(', ')}); what it did not read is not here.`] : [])
+  ];
+};
+
 
 const NOW = '2026-01-01T00:00:00.000Z';
 const now = () => NOW;
@@ -51,7 +64,7 @@ function withDeclaration(value, block) {
   const said = [
     ...(backlog ? [`${backlog} captured ${backlog === 1 ? 'item is' : 'items are'} not yet understood in this scope: captured is not stored experience.`] : []),
     ...(block.limited.length ? [`Capture is at a limit (${block.limited.map((entry) => entry.limit).join(', ')}): new material is refused, and nothing accepted is removed.`] : []),
-    ...(block.gaps.length ? [`Capture refused material (${[...new Set(block.gaps.map((entry) => entry.reason))].join(', ')}); what it refused is not here.`] : [])
+    ...refusedAndUnread(block.gaps)
   ];
   const result = { ...copy, capture: block, complete: copy.complete === true && backlog === 0 };
   if (said.length) {
@@ -417,8 +430,9 @@ test('the kernel emits capture types in two places only', async () => {
   assert.equal(lines.filter((line) => /CAPTURE_TRANSITIONS/.test(line)).length, 2, 'the import and transitionCapture');
   const edges = await readFile(join(root, 'src', 'internal', 'capture.js'), 'utf8');
   for (const type of ['capture.state_changed', 'extraction.completed', 'extraction.failed']) assert.match(edges, new RegExp(`type: '${type.replace('.', '\\.')}'`), type);
-  // Nor does anything call the self-event counter (PR-35) or the classifier, but the capture hook (PR-36c).
-  const callers = { recordCapture: [], transitionCapture: [], recordSelfEvent: [], classifyCaptureSource: [] };
+  // Nor does anything call the self-event counter (PR-35) or the classifier, but the capture hook (PR-36c), nor the
+  // transcript cursor, but the capture hook through its privileged wrapper (PR-36).
+  const callers = { recordCapture: [], transitionCapture: [], recordSelfEvent: [], classifyCaptureSource: [], recordTranscript: [], privilegedRecordTranscript: [] };
   for (const directory of ['src', 'scripts', 'bin', 'integrations']) {
     let names = [];
     try { names = (await readdir(join(root, directory), { recursive: true })).filter((name) => /\.(?:m?js|cjs|py)$/.test(name)); } catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -431,7 +445,10 @@ test('the kernel emits capture types in two places only', async () => {
   for (const verb of Object.keys(callers)) callers[verb].sort();
   // The capture hook reaches the writer only through the privileged wrappers,
   // whose importers test/privileged-snapshot.test.js allows by name.
-  assert.deepEqual(callers, { recordCapture: wrappers, transitionCapture: wrappers, recordSelfEvent: wrappers, classifyCaptureSource: ['src/capture-hook.js', 'src/internal/capture-source.js'] }, 'only the kernel and its privileged wrappers name the writer, and only the capture hook classifies an event');
+  assert.deepEqual(callers, {
+    recordCapture: wrappers, transitionCapture: wrappers, recordSelfEvent: wrappers, classifyCaptureSource: ['src/capture-hook.js', 'src/internal/capture-source.js'],
+    recordTranscript: wrappers, privilegedRecordTranscript: ['src/capture-hook.js', 'src/internal/snapshot.js']
+  }, 'only the kernel and its privileged wrappers name the writer, and only the capture hook classifies an event or reads a transcript');
 });
 
 // Review round (briefs/PR34-review.md).

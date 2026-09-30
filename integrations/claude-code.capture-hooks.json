@@ -27,6 +27,20 @@
           { "type": "command", "command": "shadowgraph capture --hook", "timeout": 10 }
         ]
       }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          { "type": "command", "command": "shadowgraph capture --hook", "timeout": 10 }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "shadowgraph capture --hook", "timeout": 10 }
+        ]
+      }
     ]
   }
 }

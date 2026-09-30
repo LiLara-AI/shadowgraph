@@ -248,7 +248,7 @@ test('the delivery and capture kinds install and uninstall independently, and th
   assert.match(runtimeHookCommand('C:/x/shadowgraph/runtime/abc', 'C:/n/node.exe', 'capture'), / capture --hook$/u);
   assert.throws(() => runtimeHookCommand('C:/x/shadowgraph/runtime/abc', 'C:/n/node.exe', 'extract'), /hook_kind_unknown/u);
   const both = withShadowGraphHooks(withShadowGraphHooks(unrelated(), template), captureTemplate, 'capture');
-  assert.deepEqual(kinds(both), ['capture', 'capture', 'capture', 'capture', 'deliver', 'deliver']);
+  assert.deepEqual(kinds(both), ['capture', 'capture', 'capture', 'capture', 'capture', 'capture', 'deliver', 'deliver']);
   assert.deepEqual(kinds(withShadowGraphHooks(both, template)), kinds(both), 'a delivery reinstall keeps capture\'s handlers (they run in parallel: their order carries nothing)');
   assert.deepEqual(withoutShadowGraphHooks(both, 'capture'), withShadowGraphHooks(unrelated(), template));
   assert.deepEqual(withoutShadowGraphHooks(both), unrelated());
@@ -261,11 +261,11 @@ test('the delivery and capture kinds install and uninstall independently, and th
   assert.equal((await run(['install-hooks', '--settings', settings], home)).code, 0);
   const captured = await run(['install-hooks', '--capture', '--settings', settings], home);
   assert.equal(captured.code, 0, captured.stderr);
-  assert.deepEqual([JSON.parse(captured.stdout).kind, JSON.parse(captured.stdout).events], ['capture', ['UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure', 'Stop']]);
-  assert.deepEqual(kinds(JSON.parse(await readFile(settings, 'utf8'))), ['capture', 'capture', 'capture', 'capture', 'deliver', 'deliver']);
-  assert.deepEqual(JSON.parse((await run(['uninstall-hooks', '--capture', '--settings', settings], home)).stdout).removed, 4);
+  assert.deepEqual([JSON.parse(captured.stdout).kind, JSON.parse(captured.stdout).events], ['capture', ['UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure', 'Stop', 'PreCompact', 'SessionEnd']]);
+  assert.deepEqual(kinds(JSON.parse(await readFile(settings, 'utf8'))), ['capture', 'capture', 'capture', 'capture', 'capture', 'capture', 'deliver', 'deliver']);
+  assert.deepEqual(JSON.parse((await run(['uninstall-hooks', '--capture', '--settings', settings], home)).stdout).removed, 6);
   assert.deepEqual(kinds(JSON.parse(await readFile(settings, 'utf8'))), ['deliver', 'deliver'], 'uninstalling capture leaves delivery');
   assert.equal((await run(['install-hooks', '--capture', '--settings', settings], home)).code, 0);
-  assert.deepEqual(JSON.parse((await run(['uninstall-hooks', '--settings', settings], home)).stdout).removed, 6, 'uninstall removes both kinds');
+  assert.deepEqual(JSON.parse((await run(['uninstall-hooks', '--settings', settings], home)).stdout).removed, 8, 'uninstall removes both kinds');
   assert.equal(await readFile(settings, 'utf8'), formatted(unrelated()));
 });

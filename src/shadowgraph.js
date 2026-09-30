@@ -26,6 +26,7 @@ import { supersessionOrder, temporalEvidence, versionTimes } from './internal/te
 import { T1_DERIVATION_VERSION, t1Digest, t1Inputs, t1Line } from './compact-tier.js';
 import { SELF_SIGNALS, stripDeliveredBlocks } from './internal/capture-source.js';
 import { CAPTURE_COLLECTIONS, CAPTURE_CONTENT, CAPTURE_ENTRY_TYPES, CAPTURE_EVENT_IDENTITY, CAPTURE_IMPORT_TYPE, CAPTURE_KIND, CAPTURE_SESSIONS, CAPTURE_TRANSITIONS, captureCollectionIssue, captureEntryReachedBy, captureEventIssue, captureItemIssue, captureObservationIssue, CAPTURE_LIMIT_EVENT, CAPTURE_REFUSED_EVENT, OTHER_OWNER } from './internal/capture.js';
+import { TRANSCRIPT_ANCHOR_BYTES, TRANSCRIPT_GAP_REASONS, TRANSCRIPT_TRIGGERS, cursorBlock, cursorShape, digest, lastLineEnd, matchKey, transcriptEntry, transcriptLines } from './internal/transcript.js';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
 // docs/api-reference.md) and are frozen so a consumer cannot mutate validation
@@ -84,6 +85,8 @@ const ADMISSION_LIMITS = Object.freeze(['maxStoreBytes', 'maxQueueDepth', 'maxIt
 // store-bytes limit: the item, its journal entry and its retry value.
 const CAPTURE_ITEM_ALLOWANCE = 6 * 1024;
 const UNEXTRACTED_STATES = Object.freeze(['pending', 'processing', 'failed', 'blocked']);
+// A session keeps its newest transcript gaps and counts the rest.
+const TRANSCRIPT_GAPS_KEPT = 8;
 
 // Plan v1.4.4 §9.4 (PR-23, VAR-08): an attempt's cause, attributed apart from
 // the observation it explains (PC-04). A reason recorded now is the caller's
@@ -788,7 +791,10 @@ function scopeCompleteness(scope, current = { complete: true }, signals = []) {
   const scoped = details.length > 1;
   if (backlog) details.push(`${backlog} captured ${backlog === 1 ? 'item is' : 'items are'} not yet understood in this scope: captured is not stored experience.`);
   if (capture?.limited.length) details.push(`Capture is at a limit (${capture.limited.map((entry) => entry.limit).join(', ')}): new material is refused, and nothing accepted is removed.`);
-  if (capture?.gaps.length) details.push(`Capture refused material (${[...new Set(capture.gaps.map((entry) => entry.reason))].join(', ')}); what it refused is not here.`);
+  const refused = [...new Set((capture?.gaps ?? []).map((entry) => entry.reason).filter((reason) => !TRANSCRIPT_GAP_REASONS.includes(reason)))];
+  const unread = [...new Set((capture?.gaps ?? []).map((entry) => entry.reason).filter((reason) => TRANSCRIPT_GAP_REASONS.includes(reason)))];
+  if (refused.length) details.push(`Capture refused material (${refused.join(', ')}); what it refused is not here.`);
+  if (unread.length) details.push(`Capture did not read part of a session's transcript (${unread.join(', ')}); what it did not read is not here.`);
   return {
     ...current,
     scope: { ...current.scope, project: scope.project, requestState: scope.state, originPresented: scope.originId !== null, grant: scope.grant ?? null },
@@ -998,7 +1004,7 @@ export function createShadowGraph(options = {}) {
       contentHash,
       lease: null, attempts: 0, lastError: null, blockedReason: null, producedRecordIds: [], receipts: [],
       erasureToken: allocateErasureToken(), cancelRequested: false, supersededResults: [],
-      possibleDuplicateOf: hostIdentity === null ? previousRepeat(originId, observed, contentHash) : null,
+      possibleDuplicateOf: hostIdentity === null ? previousRepeat(originId, observed, contentHash) : observed.event === 'Transcript' ? assistantRepeat(originId, observed.sessionId, contentHash) : null,
       expiresAt: null, createdAt: at, updatedAt: at,
       ...(input.observation === undefined ? {} : { observation: clone(input.observation) })
     };
@@ -1022,8 +1028,9 @@ export function createShadowGraph(options = {}) {
   // it already has (a session whose record is gone keeps its owner), else the
   // write's. A record that holds only self-event counters has no owner yet, so
   // ShadowGraph's own traffic never decides whose work follows: the session's
-  // first capture gives it one. Its count is past the record's mark and every
-  // ordinal a live capture of the session holds.
+  // first capture, or its transcript cursor (PR-36), gives it one. Its count
+  // is past the record's mark and every ordinal a live capture of the session
+  // holds.
   function captureSession(originId, sessionId, project) {
     const sessions = extras.get(CAPTURE_SESSIONS) ?? [];
     const session = sessions.find((entry) => entry.originId === originId && entry.sessionId === sessionId);
@@ -1035,7 +1042,7 @@ export function createShadowGraph(options = {}) {
       held = Math.max(held, item.occurrenceSeq);
       earlier ??= item;
     }
-    const owned = session && (session.occurrenceSeqHighWater > 0 || earlier) ? session : null;
+    const owned = session && (session.occurrenceSeqHighWater > 0 || earlier || isPlainObject(session.cursor)) ? session : null;
     const resolved = owned ?? earlier ?? writeOwner({ project, originId });
     return { sessions, session, held, owner: { project: resolved.project, attribution: resolved.attribution, originId }, ownedBy: owned ?? earlier };
   }
@@ -1058,10 +1065,10 @@ export function createShadowGraph(options = {}) {
     }
     if (sessionItems >= limits.maxItemsPerSession) return { limit: 'maxItemsPerSession', ceiling: limits.maxItemsPerSession, scope: 'session' };
     if (queued >= limits.maxQueueDepth) return { limit: 'maxQueueDepth', ceiling: limits.maxQueueDepth, scope: 'store' };
-    const stored = (text === undefined ? 0 : Buffer.byteLength(JSON.stringify(text))) + 3 * Buffer.byteLength(JSON.stringify(described)) + CAPTURE_ITEM_ALLOWANCE;
-    if (storeBytes + stored > limits.maxStoreBytes) return { limit: 'maxStoreBytes', ceiling: limits.maxStoreBytes, scope: 'store' };
+    if (storeBytes + storedEstimate(text, described) > limits.maxStoreBytes) return { limit: 'maxStoreBytes', ceiling: limits.maxStoreBytes, scope: 'store' };
     return null;
   }
+  const storedEstimate = (text, described) => (text === undefined ? 0 : Buffer.byteLength(JSON.stringify(text))) + 3 * Buffer.byteLength(JSON.stringify(described)) + CAPTURE_ITEM_ALLOWANCE;
 
   // A refused capture. The first refusal of a store limit opens its episode in
   // the events carrier (one entry per limit, updated in place, holding no
@@ -1124,6 +1131,18 @@ export function createShadowGraph(options = {}) {
     return latest !== null && latest.contentHash === contentHash ? latest.id : null;
   }
 
+  // The newest assistant item of the session -- a Stop's final message or
+  // transcript text -- holding the same material (PR-36 rule 3; §12.2.1 row 5):
+  // what a transcript item repeats, marked and never removed.
+  function assistantRepeat(originId, sessionId, contentHash) {
+    if (contentHash === null) return null;
+    let latest = null;
+    for (const item of captures.values()) {
+      if (item.originId === originId && item.source?.sessionId === sessionId && ['Stop', 'Transcript'].includes(item.source?.event) && item.contentHash === contentHash && (latest === null || item.occurrenceSeq > latest.occurrenceSeq)) latest = item;
+    }
+    return latest?.id ?? null;
+  }
+
   // What capture holds for one read's scope (plan v1.4.4 §24.1, M-9; PR-36b),
   // or null when the store holds no capture state at all, so a store without
   // capture reads exactly as it did. The counts are over the captures the
@@ -1169,6 +1188,25 @@ export function createShadowGraph(options = {}) {
     for (const entry of entries) {
       if (entry.type === CAPTURE_REFUSED_EVENT && scope.state === 'project_selected' && entry.project === scope.project) status.gaps.push({ reason: entry.reason, from: entry.since, to: null });
     }
+    // What the transcript cursor did not read (PR-36): the scope's sessions
+    // whose transcript stopped being read, and the periods their records keep,
+    // each reason counted by session and never named.
+    const periods = new Map();
+    for (const session of sessions) {
+      if (!owns(session)) continue;
+      const stopped = isPlainObject(session.cursor?.blocked) ? [{ reason: session.cursor.blocked.reason, from: session.cursor.blocked.at, to: null }] : [];
+      for (const gap of [...stopped, ...(Array.isArray(session.gaps) ? session.gaps : [])]) {
+        if (!TRANSCRIPT_GAP_REASONS.includes(gap?.reason) || !isValidIsoInstant(gap.from) || !(gap.to === null || isValidIsoInstant(gap.to))) continue;
+        const period = periods.get(gap.reason) ?? { sessions: new Set(), from: [], to: [] };
+        period.sessions.add(session);
+        period.from.push(gap.from);
+        period.to.push(gap.to);
+        periods.set(gap.reason, period);
+      }
+    }
+    for (const [reason, period] of [...periods].sort(([left], [right]) => TRANSCRIPT_GAP_REASONS.indexOf(left) - TRANSCRIPT_GAP_REASONS.indexOf(right))) {
+      status.gaps.push({ reason, sessions: period.sessions.size, from: period.from.sort(compareInstants)[0], to: period.to.includes(null) ? null : period.to.sort(compareInstants).at(-1) });
+    }
     return status;
   }
 
@@ -1202,6 +1240,320 @@ export function createShadowGraph(options = {}) {
     const next = { ...base, selfEvents: countSelfEvent(base.selfEvents, input.signal, source.event) };
     extras.set(CAPTURE_SESSIONS, session ? sessions.map((entry) => (entry === session ? next : entry)) : [...sessions, next]);
     return clone(next.selfEvents);
+  }
+
+  // The transcript cursor (plan v1.4.4 §12.2, §12.2.1, §22.7; PR-36 design
+  // revision 2): the assistant text no hook delivers, read from the session's
+  // transcript through a durable per-session cursor on its captureSessions
+  // record. Privileged: the capture hook is its one caller, inside the same
+  // hold of the store's fence as the event's own item, passing the transcript
+  // as synchronous callbacks it may block on.
+  //
+  // It reads nothing from before the cursor was anchored -- at the session's
+  // first capture, at each re-activation of capture, at each new generation of
+  // the file -- so nothing outside the owner's enablement is ever read (OD-3).
+  // It reads only while the event's project, the session's owner and the
+  // project the cursor was made for agree; an event from anywhere else stops
+  // it for good (session_left_project), so no project's text is filed under
+  // another's (D-6). ShadowGraph's own sessions -- a correlation-marked prompt,
+  // a worker's -- are never read (§16). An unrecognised line blocks the
+  // session's transcript reading (§12.2). Only Stop, PreCompact and SessionEnd
+  // read; any other event only anchors and checks the project.
+  //
+  // Text is reconciled (§8): an entry whose uuid an item holds is skipped; a
+  // run of assistant text, or one entry, matching a Stop's final message
+  // recorded in this hold or the previous read is that Stop's copy and is
+  // skipped; anything else is a new Transcript item, marked
+  // possibleDuplicateOf the newest assistant item of the same material. A
+  // tool call the transcript shows but no capture holds is an unknown period
+  // (§22.7). Everything it writes is on the session record, and the items go
+  // through recordCapture's own admission, ordinal, journal and identity.
+  function recordTranscript(input = {}) {
+    if (!isPlainObject(input)) throw new Error('A transcript read needs an input object');
+    const originId = usableOriginId(input.originId);
+    if (originId === null || originId !== input.originId) throw new Error('A transcript read names the originId that observed it');
+    const sessionId = input.sessionId;
+    if (!named(sessionId)) throw new Error('A transcript read names its sessionId');
+    if (input.project !== null && !named(input.project)) throw new Error('A transcript read names its project, or null when none is resolved and covered');
+    if (!isValidIsoInstant(input.activatedAt)) throw new Error('A transcript read names the capture activation it runs under');
+    if (input.trigger !== null && !TRANSCRIPT_TRIGGERS.includes(input.trigger)) throw new Error(`A transcript read is triggered by ${TRANSCRIPT_TRIGGERS.join(', ')}, or by nothing`);
+    const file = input.transcript ?? null;
+    if (file !== null && !(isPlainObject(file) && named(file.ref) && (file.missing === true || (typeof file.size === 'function' && typeof file.read === 'function')))) throw new Error('A transcript is null, { ref, missing: true } or { ref, size, read }');
+    if (input.trigger !== null && !isPlainObject(input.admission)) throw new Error('A transcript read that reads names its admission');
+    const mayContinue = typeof input.mayContinue === 'function' ? () => Boolean(input.mayContinue()) : () => true;
+    const result = { changed: false, anchored: false, reanchored: false, bumped: false, blocked: null, read: 0, ingested: 0, reconciled: 0, refused: 0, gaps: [] };
+
+    const sessions = extras.get(CAPTURE_SESSIONS) ?? [];
+    const session = sessions.find((entry) => entry.originId === originId && entry.sessionId === sessionId);
+    // ShadowGraph's own sessions -- a worker's (S-3), or one whose prompt
+    // carried its correlation mark (S-2) -- are never read, and nothing is
+    // written for them; an S-2 mark in a tool's input marks that call, not the
+    // user's session (§16).
+    const counted = (signal, event) => Object.entries(isPlainObject(session?.selfEvents?.[signal]) ? session.selfEvents[signal] : {}).some(([name, count]) => (event === undefined || name === event) && count > 0);
+    if (counted('S-3') || counted('S-2', 'UserPromptSubmit')) return result;
+    const at = now();
+    const cursor = isPlainObject(session?.cursor) ? session.cursor : null;
+    const { held, ownedBy } = captureSession(originId, sessionId, input.project ?? undefined);
+    let gaps = Array.isArray(session?.gaps) ? session.gaps : [];
+    let gapsDropped = Number.isSafeInteger(session?.gapsDropped) ? session.gapsDropped : 0;
+    const addGap = (reason, from = cursor.advancedAt) => {
+      const gap = { reason, from, to: at, generation: cursor.transcriptGeneration };
+      result.gaps.push(gap);
+      gaps = [...gaps, gap];
+      if (gaps.length > TRANSCRIPT_GAPS_KEPT) { gapsDropped += gaps.length - TRANSCRIPT_GAPS_KEPT; gaps = gaps.slice(-TRANSCRIPT_GAPS_KEPT); }
+    };
+    // A cursor makes its session record its project's own (captureSession): a
+    // record it is created on takes the cursor's project, so a later capture
+    // from elsewhere is refused (D-6) and a purge of that project removes it.
+    const write = (next) => {
+      const current = extras.get(CAPTURE_SESSIONS) ?? [];
+      const index = current.findIndex((entry) => entry.originId === originId && entry.sessionId === sessionId);
+      const owner = cursor ? {} : { project: input.project, attribution: 'project' };
+      const record = { ...(index === -1 ? newCaptureSession(originId, sessionId, { project: input.project, attribution: 'project' }) : current[index]), ...owner, cursor: next, gaps, gapsDropped };
+      extras.set(CAPTURE_SESSIONS, index === -1 ? [...current, record] : current.map((entry, at) => (at === index ? record : entry)));
+      result.changed = true;
+      return result;
+    };
+
+    // A cursor a merge or a hand edit left malformed is never read: its
+    // position could point anywhere, before the anchor included (C-1).
+    if (cursor && !cursorBlock(cursor.blocked) && !cursorShape(cursor)) {
+      result.blocked = 'transcript_unrecognised';
+      return write({ ...cursor, blocked: { reason: 'transcript_unrecognised', detail: 'cursor_malformed', at } });
+    }
+    const agrees = input.project !== null && (!ownedBy || ownedBy.project === input.project) && (!cursor || cursor.project === input.project);
+    if (cursor && !cursor.blocked && !agrees) {
+      result.blocked = 'session_left_project';
+      return write({ ...cursor, blocked: { reason: 'session_left_project', at } });
+    }
+    // A self-event only checks the project.
+    if (input.selfEvent === true || !agrees || cursor?.blocked || file === null) return result;
+
+    // The file, read only through these: a callback that throws is a read
+    // that returned nothing, and whatever needed it does not happen.
+    let failed = false;
+    const read = (start, length) => {
+      if (!Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(length) || length <= 0) return Buffer.alloc(0);
+      try {
+        const bytes = file.read(start, length);
+        if (Buffer.isBuffer(bytes)) return bytes;
+      } catch { /* treated as a failed read */ }
+      failed = true;
+      return Buffer.alloc(0);
+    };
+    let size = 0;
+    if (!file.missing) {
+      try { size = file.size(); } catch { return result; }
+      if (!Number.isSafeInteger(size) || size < 0) return result;
+    }
+    // The anchor: a digest of the bytes just before a position (never the
+    // bytes), so a file rewritten under the cursor is found even before it
+    // has read anything -- at an anchoring those bytes are from before it,
+    // and only their digest is kept (contract review R-1). Null when they
+    // cannot be read.
+    const anchorAt = (position) => {
+      const from = Math.max(0, position - TRANSCRIPT_ANCHOR_BYTES);
+      const bytes = read(from, position - from);
+      return failed ? null : digest(bytes);
+    };
+    const lineEnd = () => {
+      const end = size === 0 ? 0 : lastLineEnd({ read, size, mayContinue });
+      return failed ? null : end;
+    };
+    const anchored = (end, generation, gap) => {
+      const anchor = anchorAt(end);
+      if (anchor === null) return result;
+      if (gap) addGap(gap);
+      return write({
+        transcriptRef: file.ref, transcriptGeneration: generation, base: end, position: end, anchor, skipping: false,
+        project: input.project, activatedAt: input.activatedAt, advancedAt: at, lastIngestedOccurrence: cursor?.lastIngestedOccurrence ?? null,
+        stopMark: held, blocked: null, ends: (cursor?.ends ?? 0) + (input.trigger === 'SessionEnd' ? 1 : 0), oversized: cursor?.oversized ?? 0
+      });
+    };
+    if (!cursor) {
+      const end = lineEnd();
+      if (end !== null) anchored(end, 1, null);
+      result.anchored = result.changed;
+      return result;
+    }
+    // A file gone after the cursor was made changes nothing: whatever appears
+    // there next is anchored where it is found, never read from its start,
+    // since it may carry history from before the session's first capture (C-2).
+    if (file.missing) return result;
+    if (cursor.activatedAt !== input.activatedAt) {
+      const end = lineEnd();
+      if (end !== null) anchored(end, cursor.transcriptGeneration + 1, 'transcript_reanchored');
+      result.reanchored = result.changed;
+      return result;
+    }
+    const intact = (() => {
+      if (file.ref !== cursor.transcriptRef || size < cursor.position) return false;
+      // An anchor a failed read could not take proves nothing: a new generation.
+      if (cursor.anchor === null) return false;
+      const anchor = anchorAt(cursor.position);
+      return anchor === null ? null : anchor === cursor.anchor;
+    })();
+    if (intact === null) return result;
+    if (!intact) {
+      const end = lineEnd();
+      if (end !== null) anchored(end, cursor.transcriptGeneration + 1, 'transcript_rewritten');
+      result.bumped = result.changed;
+      return result;
+    }
+    if (input.trigger === null) return result;
+
+    const sessionItems = [...captures.values()].filter((item) => item.originId === originId && item.source?.sessionId === sessionId);
+    const ingestedUuids = new Set(sessionItems.filter((item) => item.source.event === 'Transcript').map((item) => item.source.hostEventId));
+    const heldCalls = new Set(sessionItems.filter((item) => ['PostToolUse', 'PostToolUseFailure'].includes(item.source.event)).map((item) => item.source.toolCallId));
+    const texts = new Map((extras.get(CAPTURE_CONTENT) ?? []).map((entry) => [entry.contentRef, entry.text]));
+    const stopItems = sessionItems.filter((item) => item.source.event === 'Stop');
+    const stops = stopItems.filter((item) => texts.has(item.contentRef)).map((item) => ({ seq: item.occurrenceSeq, key: matchKey(texts.get(item.contentRef)) })).sort((left, right) => left.seq - right.seq);
+    const priorStop = stopItems.filter((item) => item.id !== input.triggerItemId).reduce((top, item) => Math.max(top, item.occurrenceSeq), 0);
+    let stopMark = cursor.stopMark;
+    // The store's bytes as measured before this hold, plus the event's own
+    // item accepted in it (M-11), plus each item this read adds.
+    const trigger = input.triggerItemId ? captures.get(input.triggerItemId) : undefined;
+    let storeBytes = input.admission?.storeBytes + (trigger ? storedEstimate(texts.get(trigger.contentRef), [trigger.observation ?? null, trigger.source]) : 0);
+    const itemLimit = input.admission?.limits?.maxItemBytes ?? Infinity;
+    let lastIngested = cursor.lastIngestedOccurrence;
+    // Rule 2: the oldest Stop still reconcilable with this material; a
+    // reconciled Stop retires every Stop before it. A key is computed only
+    // while some Stop could take it.
+    const reconcile = (keyOf) => {
+      if (!stops.some((candidate) => candidate.seq > stopMark)) return false;
+      const key = keyOf();
+      const stop = stops.find((candidate) => candidate.seq > stopMark && candidate.key === key);
+      if (!stop) return false;
+      stopMark = stop.seq;
+      result.reconciled += 1;
+      return true;
+    };
+    // Rules 1 and 3.
+    const ingest = (entry) => {
+      if (ingestedUuids.has(entry.uuid)) return;
+      const recorded = recordCapture({
+        originId, project: input.project, text: entry.text, observation: input.observation,
+        source: { event: 'Transcript', sessionId, role: 'assistant', hostEventId: entry.uuid },
+        admission: { limits: input.admission?.limits, storeBytes }
+      });
+      if (recorded.refused) {
+        result.refused += 1;
+        if (recorded.changed) result.changed = true;
+        return;
+      }
+      ingestedUuids.add(entry.uuid);
+      storeBytes += storedEstimate(entry.text, [recorded.observation ?? null, recorded.source]);
+      lastIngested = recorded.occurrenceSeq;
+      result.ingested += 1;
+    };
+    // A run: consecutive assistant text, judged whole first and then entry by
+    // entry. A user entry, a tool call, an unparsed line or text too long to
+    // be an item ends it. A run holding an entry already ingested was judged
+    // in part before, so it is judged entry by entry. Time is checked before
+    // each item is recorded: when it runs short, the rest of the run is left
+    // for the next read and the position goes back to its first entry (C-3).
+    let run = [];
+    let cut = null;
+    const keyOf = (entry) => () => (entry.key ??= matchKey(entry.stripped));
+    const runKey = () => matchKey(run.map((entry) => entry.stripped).join('\n\n'));
+    const closeRun = () => {
+      const whole = run.length > 1 && run.every((entry) => !ingestedUuids.has(entry.uuid)) && reconcile(runKey);
+      if (!whole) {
+        for (const entry of run) {
+          if (!ingestedUuids.has(entry.uuid) && reconcile(keyOf(entry))) continue;
+          if (!ingestedUuids.has(entry.uuid) && !mayContinue()) {
+            cut = entry.start;
+            break;
+          }
+          ingest(entry);
+        }
+      }
+      run = [];
+      return cut === null;
+    };
+
+    const lines = transcriptLines({ read, size, position: cursor.position, skipping: cursor.skipping, mayContinue });
+    let position = cursor.position;
+    let skipping = cursor.skipping;
+    let oversized = cursor.oversized;
+    let blocked = null;
+    const toolUses = [];
+    const toolResults = new Set();
+    for (const line of lines) {
+      // Only a line still to be judged costs time; an unparsed one is consumed.
+      if (line.text !== undefined && !mayContinue()) break;
+      if (line.skipping) {
+        if (closeRun()) [position, skipping] = [line.end, true];
+        break;
+      }
+      if (line.oversized) {
+        if (!closeRun()) break;
+        oversized += 1;
+        addGap('transcript_line_oversized');
+        [position, skipping] = [line.end, false];
+        continue;
+      }
+      if (line.text.trim()) {
+        const facts = transcriptEntry(line.text);
+        if (facts.drift) {
+          blocked = { reason: 'transcript_unrecognised', detail: facts.drift, at };
+          break;
+        }
+        // Text is measured as a Stop's is, after ShadowGraph's own delivered
+        // blocks are removed; text more than twice what an item holds is not
+        // even stripped (declared: a Stop's final message quoting that much
+        // of them is recorded again, marked possibleDuplicateOf).
+        const stripped = facts.text === null || Buffer.byteLength(facts.text) > 2 * itemLimit ? null : stripDeliveredBlocks(facts.text).text;
+        const tooLong = facts.text !== null && (stripped === null || Buffer.byteLength(stripped) > itemLimit);
+        if ((facts.type === 'user' || facts.toolUses.length || tooLong) && !closeRun()) break;
+        if (facts.type === 'assistant' && facts.text !== null) {
+          const entry = { start: line.start, uuid: facts.uuid, text: facts.text, stripped, key: null };
+          // Text beside a tool call is never a turn's final message, nor is
+          // text no item can hold (a Stop's would have been refused too).
+          if (facts.toolUses.length || tooLong) ingest(entry);
+          else run.push(entry);
+        }
+        toolUses.push(...facts.toolUses);
+        for (const id of facts.toolResults) toolResults.add(id);
+      }
+      [position, skipping] = [line.end, false];
+    }
+    // A run at the end of the window may still be growing -- the host's lag,
+    // or a read its budget or time cut short -- and so may be a Stop's final
+    // message half-written: at a Stop, or with no time left, while a Stop is
+    // still reconcilable, it is held and judged by the next read, unless a
+    // Stop already takes it, the session is blocked, or it began the window
+    // (judged, so a run that fills every window cannot hold the cursor for
+    // ever). With no Stop to wait for, a part judged now loses nothing. It is
+    // held from its first entry not yet ingested, so the next read can still
+    // match what remains whole.
+    const eligible = (key) => stops.some((stop) => stop.seq > stopMark && (key === undefined || stop.key === key));
+    const holdAt = (run.find((entry) => !ingestedUuids.has(entry.uuid)) ?? run[0])?.start;
+    const growing = cut === null && run.length > 0 && !blocked && holdAt > cursor.position && (input.trigger === 'Stop' || !mayContinue())
+      && eligible() && !eligible(runKey()) && !run.some((entry) => eligible(keyOf(entry)()));
+    if (growing) {
+      [position, skipping] = [holdAt, false];
+      run = [];
+    } else if (cut === null) closeRun();
+    if (cut !== null) [position, skipping] = [cut, false];
+
+    const missing = toolUses.filter((use) => {
+      if (!toolResults.has(use.id) || heldCalls.has(use.id)) return false;
+      try { return !input.isSelfTool?.(use.name, use.input); } catch { return true; }
+    });
+    if (missing.length) addGap('tool_calls_not_captured');
+    let ends = Number.isSafeInteger(cursor.ends) ? cursor.ends : 0;
+    if (input.trigger === 'SessionEnd') {
+      ends += 1;
+      if (!blocked && (position < size || skipping)) addGap('transcript_incomplete_at_end');
+    }
+    if (blocked) result.blocked = blocked.reason;
+    stopMark = Math.max(stopMark, priorStop);
+    const next = { ...cursor, position, skipping, oversized, stopMark, ends, blocked, lastIngestedOccurrence: lastIngested };
+    result.read = position - cursor.position;
+    if (JSON.stringify(next) === JSON.stringify(cursor) && !result.gaps.length && !result.changed) return result;
+    failed = false;
+    return write({ ...next, anchor: anchorAt(position), advancedAt: at });
   }
 
   // One §12.5 edge (CAPTURE_TRANSITIONS): what it needs, and the one type it
@@ -5054,7 +5406,7 @@ export function createShadowGraph(options = {}) {
     accessRefusal: transactional('accessRefusal', authority.transportRefusal),
     bindProject: transactional('bindProject', bindProject), resolveProjectBinding,
     recordCapture: transactional('recordCapture', recordCapture), transitionCapture: transactional('transitionCapture', transitionCapture),
-    recordSelfEvent: transactional('recordSelfEvent', recordSelfEvent) });
+    recordSelfEvent: transactional('recordSelfEvent', recordSelfEvent), recordTranscript: transactional('recordTranscript', recordTranscript) });
 }
 
 // `strict` is for caller writes, where a typo should fail loudly instead of

@@ -96,7 +96,7 @@
       "status": "uncovered",
       "evidence": "no hook delivers memory between the model's steps without blocking; declared gap",
       "stages": {
-        "sourceCapture": "not captured as it happens: no hook delivers the assistant's text within a turn; its final message is captured at Stop, and the rest awaits the transcript cursor (PR-36)",
+        "sourceCapture": "not captured as it happens: no hook delivers the assistant's text within a turn; when capture is active (AG-2), its final message is captured at Stop and the rest is read from the session's transcript at the turn's end, before compaction and at the session's end",
         "extractionReadiness": "not integrated until extraction (P7)",
         "storedExperience": "not before extraction commits (P7)",
         "modelVisibleDelivery": "declared gap: available at the next prompt, not within the turn",
@@ -110,7 +110,7 @@
       "status": "uncovered",
       "evidence": "a contradiction found mid-turn cannot be delivered without blocking; declared gap",
       "stages": {
-        "sourceCapture": "not captured as it happens: no hook delivers the assistant's text within a turn; its final message is captured at Stop, and the rest awaits the transcript cursor (PR-36)",
+        "sourceCapture": "not captured as it happens: no hook delivers the assistant's text within a turn; when capture is active (AG-2), its final message is captured at Stop and the rest is read from the session's transcript at the turn's end, before compaction and at the session's end",
         "extractionReadiness": "not integrated until extraction (P7)",
         "storedExperience": "not before extraction commits (P7)",
         "modelVisibleDelivery": "declared gap: available at the next prompt, not within the turn",
@@ -129,11 +129,13 @@
         "UserPromptSubmit",
         "PostToolUse",
         "PostToolUseFailure",
-        "Stop"
+        "Stop",
+        "PreCompact",
+        "SessionEnd"
       ],
       "synchronous": true
     },
-    "hostFields": "from the host's hooks reference (read 2026-09-30), not yet from the installed host: AG-2 confirms each field on the verified version before capture is activated",
+    "hostFields": "from the host's hooks reference (read 2026-09-30), not yet from the installed host: AG-2 confirms each field on the verified version before capture is activated. The transcript's entry format is not documented at all (the host says it is internal and changes between versions): the cursor reads it as a hypothesis AG-2 confirms, and stops reading a session at the first line it does not recognise",
     "events": [
       {
         "event": "UserPromptSubmit",
@@ -158,38 +160,76 @@
       },
       {
         "event": "Stop",
-        "material": "last_assistant_message",
+        "material": "last_assistant_message; the turn's other assistant text, and all of it when the Stop carries no final message, arrives through the transcript cursor, which reads at every Stop",
         "identity": "the session's occurrence ordinal: the host documents no turn number",
         "exact": false,
         "observation": "role assistant; stop_reason is not recorded; a Stop whose final message repeats the session's previous Stop is marked possibleDuplicateOf"
+      },
+      {
+        "event": "PreCompact",
+        "material": "none of its own: it triggers the transcript cursor's read before the host compacts",
+        "identity": "none: it records no item",
+        "exact": true,
+        "observation": "compaction_trigger is not recorded"
+      },
+      {
+        "event": "SessionEnd",
+        "material": "none of its own: the transcript cursor's last read, best effort within the host's SessionEnd budget",
+        "identity": "none: it records no item; the session's record counts its ends",
+        "exact": true,
+        "observation": "reason is not recorded"
+      },
+      {
+        "event": "Transcript",
+        "material": "the assistant's text blocks read from the session's transcript (transcript_path) by the cursor at Stop, PreCompact and SessionEnd, from where the session was first captured onwards; never a thinking block, a tool call or result, a user entry or any other entry (each tool call's name and input are read only to tell ShadowGraph's own calls apart, and never stored)",
+        "identity": "the transcript entry's uuid, exact while the host keeps each entry's uuid unique and stable (a hypothesis AG-2 confirms); a Stop's final message found in the transcript by the Stop's own read or the next (one entry, or a run of entries, compared with its whitespace folded) is that Stop's copy and is not recorded again",
+        "exact": true,
+        "observation": "role assistant; no working directory, tool or outcome, since none is read from an entry"
       }
     ],
     "neverCaptured": [
       "the model's hidden reasoning, which no hook delivers",
-      "anything the host does not deliver to these four hooks: other events, and the assistant's text before its final message",
+      "anything the host neither delivers to these hooks nor writes to the session's transcript as assistant text: other events, user entries other than the prompt, and subagents' own transcript files",
       "other applications, and anything outside Claude Code",
       "activity in a project not resolved from a worktree binding the store itself recorded (from the directory the hook runs in), or in a project the coverage leaves out",
       "a hook payload over 1 MiB, or one that has not arrived within 3 seconds, which is never read",
-      "an event missing what it is captured by: a prompt that is blank, a Stop with no final message, a tool call with no tool name, or any event with no session id",
-      "PreCompact and SessionEnd, and a Stop with no final message: they carry no immediate material and are flush triggers for the transcript cursor (PR-36), which is not yet built",
+      "an event missing what it is captured by: a prompt that is blank, a tool call with no tool name, or any event with no session id",
+      "transcript content from before the session's first capture, from before capture was last activated, from a generation of the file the cursor did not read (a rewrite or another file is read from where it was found, never re-scanned), or from a session whose transcript stopped being read",
       "ShadowGraph's own traffic (signals S-1, S-2, S-3), which is counted per session as self-events instead",
-      "an item over maxItemBytes, a transient refusal that no view declares",
+      "an item over maxItemBytes, a transient refusal that no view declares (a transcript entry is measured, as a prompt or a Stop is, after ShadowGraph's own delivered blocks are removed, except that one over twice maxItemBytes is refused without stripping)",
       "anything, when the store lies inside a git repository or working tree, when the store cannot be read, or when its lock cannot be taken in time",
-      "anything into a SQLite store: delivery reports a SQLite store busy while a capture writes it, so capture writes a JSON store only"
+      "anything into a SQLite store: delivery reports a SQLite store busy while a capture writes it, so capture writes a JSON store only",
+      "the transcript of a session that is ShadowGraph's own: a worker's (S-3), or one whose prompt carried its correlation mark (S-2)",
+      "a transcript path that is not an absolute path to a .jsonl file, or that is not a regular file"
     ],
     "declarations": [
       "A session one project owns refuses another project's capture (session_in_another_project), and the refused project's reads declare the gap.",
-      "possibleDuplicateOf marks an item identified only by its ordinal that repeats the session's previous item of the same event, including a prompt or tool result without a host identifier; it removes nothing, and extraction must never treat it as a reason to skip.",
-      "Gaps are not yet reconstructed with their bounds from the transcript: that is the transcript cursor's (PR-36).",
+      "possibleDuplicateOf marks an item identified only by its ordinal that repeats the session's previous item of the same event, including a prompt or tool result without a host identifier; a Transcript item, although its uuid identifies it, is marked possibleDuplicateOf the newest Stop or Transcript item of its session holding the same material; it removes nothing, and extraction must never treat it as a reason to skip.",
+      "The transcript cursor reconstructs a gap as a period with its bounds (plan section 22.7) only for tool calls: a call the transcript shows, used and answered within one read, that no capture holds and that is not ShadowGraph's own is counted in tool_calls_not_captured, whatever the cause (a failed store, a denied or interrupted call, an admission refusal, a payload over 1 MiB). A prompt lost to a failed store is not reconstructed: message_id has no documented relation to a transcript entry. A lost Stop loses nothing, since the cursor reads its turn.",
       "Before extraction exists (AG-3) the queue only grows, so capture_limited is the expected steady state once it fills.",
       "tool_response.exit_code is taken from the host's documented fields and is hypothetical until AG-2 confirms it on the installed host; a non-zero status is never observed, since it is not a failure by itself (grep, diff, robocopy and wrappers use it for other results).",
-      "Every event at the four hooks, in every directory, runs a synchronous hook and adds its latency, bounded by a 5 000 ms deadline (8 000 ms for a write already inside the store); it is measured and declared at AG-2.",
+      "Every event at the six hooks, in every directory, runs a synchronous hook and adds its latency, bounded by a 5 000 ms deadline (8 000 ms for a write already inside the store); the cursor reads under the store's lock, at most 4 MiB of new lines (and one line of up to 8 MiB) at a time, and records nothing more once too little time is left. SessionEnd runs within the host's SessionEnd budget, which the template's 10-second timeout raises. It is measured and declared at AG-2.",
       "A capture that cannot take the store's lock in time, or has too little time left to commit, writes nothing and is not counted; burst loss is measured at AG-2.",
       "Captured prompts and tool data are stored as they were given, not redacted, until redaction at capture lands (PR-37).",
       "A capture refused because the store lies inside a repository writes nothing and tells no one until PR-37 makes it visible.",
       "Turning capture off does not end a store limit already declared; the next capture or a purge checks it again.",
       "The store is written with the process's default file permissions until owner-only permissions land (FND-P6-11, PR-37).",
-      "uninstall-hooks from a build before the capture hook (such as the runtime pinned at AG-1) does not recognise capture handlers and leaves them installed; roll back from a runtime that can capture."
+      "uninstall-hooks from a build before the capture hook (such as the runtime pinned at AG-1) does not recognise capture handlers and leaves them installed; roll back from a runtime that can capture.",
+      "The transcript's shape is a hypothesis: the first line it does not recognise stops the session's transcript for good (transcript_unrecognised); the session's hook material is still captured.",
+      "A session whose event comes from another project, or from a directory no covered binding resolves, stops being read for good (session_left_project), so no project's text is filed under another's.",
+      "The cursor is anchored where the session was first captured, and again at each re-activation of capture (transcript_reanchored) and at each rewrite or new file (transcript_rewritten): what was written between the last read and the anchor is not read. If the host rewrites the file when it compacts, the text written between a compaction and the next read is lost each time; AG-2 records what compaction does.",
+      "Uninstalling the capture hooks without deactivating capture pauses it: the transcript written meanwhile is read once they are reinstalled.",
+      "A Stop's final message is reconciled with its transcript copy only by the Stop's own read and the next. If the host's last_assistant_message differs from the entries' text by more than whitespace, the final message is recorded twice, the second marked possibleDuplicateOf the first; AG-2 checks one scratch turn.",
+      "A line over 8 MiB is skipped unread and declared (transcript_line_oversized); a session end that leaves lines unread, or a partial last line, is declared (transcript_incomplete_at_end); a SessionEnd that never runs, or is cut short, declares nothing.",
+      "Reading, and so the reconstruction of gaps, happens only at Stop, PreCompact and SessionEnd.",
+      "A merge import replaces a session's record, and with it its cursor: a cursor merged backwards re-reads what it had read (the entry uuid keeps that exact, but a gap can repeat); one merged forwards skips what it had not read, with no gap.",
+      "Each session keeps its newest 8 transcript gaps and counts the rest.",
+      "A session that writes more to its transcript between two reads than a read takes falls behind: a Stop's final message found later than the Stop's own read and the next is recorded again (marked possibleDuplicateOf), a tool call whose use and result fall in different reads is not checked, and a session end with lines left unread declares transcript_incomplete_at_end; AG-2 measures how far behind a real session falls.",
+      "Subagent entries the host may write into the main transcript file would be read as the session's own assistant text; AG-2 checks whether it does.",
+      "session_left_project starts when the session's event came from another project or an uncovered directory: the owning project's views show that time, never the place.",
+      "A transcript missing at the session's first capture, or with no complete line yet, is anchored at its start; a transcript that goes missing later changes nothing until a file is there again, which is then checked like any rewrite. A cursor whose fields are not the shape this build writes (a merge or a hand edit) is never read (transcript_unrecognised).",
+      "A build from PR-33 to PR-36c carries a session's cursor and gaps unread and declares no transcript gap: a rollback pin to one under-declares what the transcript cursor did not read.",
+      "A cursor keeps a SHA-256 digest of the 64 bytes before its position (at an anchoring, bytes from before the session's first capture or a re-activation), never the bytes: a rewrite is found when the file's path, its length or those 64 bytes change, and one that keeps all three is read on as new."
     ]
   }
 }

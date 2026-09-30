@@ -15,7 +15,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createShadowGraph } from '../src/shadowgraph.js';
-import { privilegedRecordCapture, privilegedSnapshot } from '../src/internal/snapshot.js';
+import { privilegedRecordCapture, privilegedRecordTranscript, privilegedSnapshot } from '../src/internal/snapshot.js';
 import { createFactAttestation } from '../src/verification.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
@@ -396,6 +396,11 @@ test('the capture status of a capture-bearing store meets every advertised outpu
   capture({ project: 'elsewhere', source: { sessionId: 's-3' } });
   capture({ source: { sessionId: 's-3' } });
   capture({ source: { sessionId: 's-4' } }, { maxQueueDepth: 4 });
+  // The transcript cursor's reasons (PR-36): a rewritten transcript, then the session leaving its project.
+  const cursor = (fields) => privilegedRecordTranscript(graph, { originId: 'origin-a', sessionId: 's-1', project, activatedAt: '2026-01-01T00:00:00.000Z', trigger: null, triggerItemId: null, admission: { limits: WIDE, storeBytes: 0 }, ...fields });
+  cursor({ transcript: { ref: 'r-1', missing: true } });
+  cursor({ transcript: { ref: 'r-2', size: () => 0, read: () => Buffer.alloc(0) } });
+  cursor({ project: 'elsewhere', transcript: null });
   await writeFile(file, JSON.stringify(privilegedSnapshot(graph)));
   const rpc = await startMcp(t, { SHADOWGRAPH_FILE: file });
   await rpc.initialize('2025-06-18');
@@ -403,7 +408,7 @@ test('the capture status of a capture-bearing store meets every advertised outpu
   const callTool = conformingCaller(rpc, schemas, new Set());
   const searched = await callTool('shadowgraph_search', { project, query: '' });
   assert.deepEqual([searched.completeness.capture.pending, searched.completeness.capture.limited.map((entry) => entry.limit), searched.completeness.capture.gaps.map((entry) => entry.reason)],
-    [3, ['maxQueueDepth'], ['maxStoreBytes', 'maxItemsPerSession', 'session_in_another_project']], 'the seed declares every kind');
+    [3, ['maxQueueDepth'], ['maxStoreBytes', 'maxItemsPerSession', 'session_in_another_project', 'session_left_project', 'transcript_rewritten']], 'the seed declares every kind');
   for (const [name, args] of [
     ['shadowgraph_retrieve', { project, query: 'redis' }], ['shadowgraph_recall', { project, query: 'redis' }],
     ['shadowgraph_context', { project }], ['shadowgraph_context', { project, query: 'redis' }], ['shadowgraph_context', { project, query: 'redis', compact: true }],

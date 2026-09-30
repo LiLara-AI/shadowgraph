@@ -211,13 +211,21 @@ test('an outcome is observed only as a single shell command\'s own success, scop
 
 test('each event maps the host\'s documented fields and infers none', () => {
   assert.deepEqual(observedEvent({ hook_event_name: 'Stop', session_id: 's', last_assistant_message: 'Done.', stop_reason: 'end_turn' }), {
-    event: 'Stop', sessionId: 's', cwd: null, role: 'assistant', hostEventId: null, toolCallId: null, toolName: null, toolInput: null, prompt: null, outcome: null, text: 'Done.'
+    event: 'Stop', sessionId: 's', cwd: null, role: 'assistant', hostEventId: null, toolCallId: null, toolName: null, toolInput: null, prompt: null, outcome: null, transcriptPath: null, text: 'Done.'
   });
   assert.equal(observedEvent({ hook_event_name: 'UserPromptSubmit', session_id: 's', prompt: 'x', message_id: 7 }).hostEventId, null, 'an identifier that is not a string is absent');
   const failure = observedEvent({ hook_event_name: 'PostToolUseFailure', session_id: 's', tool_name: 'Bash', tool_input: { command: 'false' }, tool_use_id: 't', error: 'Command failed' });
   assert.deepEqual([failure.text, failure.outcome], ['tool: Bash\ninput.command:\nfalse\nerror:\nCommand failed', { outcomeEvidence: { state: 'absent', source: { event: 'PostToolUseFailure', toolCallId: 't', toolName: 'Bash' } } }]);
   // An event capture does not take is nothing, whatever fields it carries; so is one without a session.
-  for (const event of ['PreCompact', 'SessionEnd', 'SessionStart', 'Notification']) assert.equal(observedEvent({ hook_event_name: event, session_id: 's', tool_name: 'Bash', tool_input: { command: 'ls' }, tool_use_id: 't', prompt: 'x' }), null, event);
+  for (const event of ['SessionStart', 'Notification', 'SubagentStop']) assert.equal(observedEvent({ hook_event_name: event, session_id: 's', tool_name: 'Bash', tool_input: { command: 'ls' }, tool_use_id: 't', prompt: 'x' }), null, event);
+  // PreCompact, SessionEnd and a Stop with no final message carry no material: the transcript cursor's triggers
+  // (PR-36), taking only the transcript's path, and only an absolute one to a .jsonl file.
+  const transcript = resolve('session.jsonl');
+  for (const event of ['PreCompact', 'SessionEnd', 'Stop']) {
+    const flush = observedEvent({ hook_event_name: event, session_id: 's', transcript_path: transcript, tool_name: 'Bash', tool_input: { command: 'ls' }, tool_use_id: 't', prompt: 'x' });
+    assert.deepEqual(flush, { event, sessionId: 's', cwd: null, role: null, hostEventId: null, toolCallId: null, toolName: null, toolInput: null, prompt: null, outcome: null, transcriptPath: transcript }, event);
+  }
+  for (const path of ['session.jsonl', resolve('session.json'), '', 7]) assert.equal(observedEvent({ hook_event_name: 'SessionEnd', session_id: 's', transcript_path: path }).transcriptPath, null, String(path));
   for (const sessionId of [undefined, '', '  ', 7]) assert.equal(observedEvent({ hook_event_name: 'UserPromptSubmit', session_id: sessionId, prompt: 'x' }), null, String(sessionId));
 });
 

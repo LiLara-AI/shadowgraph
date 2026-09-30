@@ -8,6 +8,7 @@
 // function of the server's configuration, which keeps every claim testable
 // in-process and keeps the wire output deterministic.
 import { SOURCE_CLASSES, DECISION_STATUSES, OUTCOME_STATUSES, CONTENT_SEARCH_FIELDS, MEMORY_TYPES } from './shadowgraph.js';
+import { TRANSCRIPT_GAP_REASONS } from './internal/transcript.js';
 
 // ---------------------------------------------------------------------------
 // Protocol negotiation and capability tiers
@@ -429,12 +430,12 @@ const captureLimitedSchema = {
   } }
 };
 const captureGapsSchema = {
-  type: 'array', description: 'What capture refused: bounded, never named.',
+  type: 'array', description: 'What capture refused or did not read: bounded, never named.',
   items: { type: 'object', required: ['reason', 'from', 'to'], properties: {
-    reason: { type: 'string', enum: ['maxQueueDepth', 'maxStoreBytes', 'maxItemsPerSession', 'session_in_another_project'], description: 'Why it was refused.' },
-    from: { type: 'string', description: 'When refusal began.' },
+    reason: { type: 'string', enum: ['maxQueueDepth', 'maxStoreBytes', 'maxItemsPerSession', 'session_in_another_project', ...TRANSCRIPT_GAP_REASONS], description: 'Why it was refused or not read.' },
+    from: { type: 'string', description: 'When the refusal, or the period not read, began.' },
     to: stringOrNull('When it ended, if known.'),
-    sessions: integerCount('Sessions at their limit.')
+    sessions: integerCount('Sessions it covers: at their limit, or with this part of their transcript not read.')
   } }
 };
 const captureStatusSchema = {
