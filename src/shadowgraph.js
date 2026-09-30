@@ -24,7 +24,7 @@ import { attemptOutcome } from './internal/outcome.js';
 import { RUNTIME_MISSES, missReachedBy, runtimeMissLedgerIssue, withFallbackMisses } from './internal/miss-ledger.js';
 import { supersessionOrder, temporalEvidence, versionTimes } from './internal/temporal-evidence.js';
 import { T1_DERIVATION_VERSION, t1Digest, t1Inputs, t1Line } from './compact-tier.js';
-import { CAPTURE_COLLECTIONS, CAPTURE_CONTENT, CAPTURE_ENTRY_TYPES, CAPTURE_IMPORT_TYPE, CAPTURE_KIND, captureCollectionIssue, captureEntryReachedBy, captureItemIssue } from './internal/capture.js';
+import { CAPTURE_COLLECTIONS, CAPTURE_CONTENT, CAPTURE_ENTRY_TYPES, CAPTURE_EVENT_IDENTITY, CAPTURE_IMPORT_TYPE, CAPTURE_KIND, CAPTURE_SESSIONS, CAPTURE_TRANSITIONS, captureCollectionIssue, captureEntryReachedBy, captureItemIssue } from './internal/capture.js';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
 // docs/api-reference.md) and are frozen so a consumer cannot mutate validation
@@ -674,6 +674,12 @@ function idempotencySemanticEntity(value) {
       recordedAt: value.temporal?.recordedAt ?? value.createdAt ?? null
     }
   });
+  // A capture's retry value names one occurrence: what it observed never
+  // changes, whatever state the item has since reached (PR-34).
+  if (value.kind === 'capture') return canonical({
+    ...common, originId: value.originId ?? null, source: value.source ?? null,
+    observedAt: value.observedAt ?? null, occurrenceSeq: value.occurrenceSeq ?? null
+  });
   if (value.kind === 'attempt') {
     const semantic = clone(value);
     // Storage version and attribution are assigned by migration, not by the
@@ -891,6 +897,107 @@ export function createShadowGraph(options = {}) {
     const found = entries.find(item => item.confirmed === true && item.type === 'worktree' && item.path === worktreeRoot)
       ?? entries.find(item => item.confirmed === true && item.type === 'shared_repository' && item.path === commonDir);
     return found ? { project: found.project, confirmed: true } : null;
+  }
+
+  // The capture writer (plan v1.4.4 PR-34, §12; the shape PR-33 froze). It is
+  // privileged: nothing registered calls it yet -- no verb, hook or worker --
+  // and nothing it writes is shown on a public read.
+  //
+  // A capture belongs to the origin that observed it and to its session's
+  // owner, fixed at the session's first capture so a binding change never
+  // splits a session. Its ordinal is the session's next, allocated inside this
+  // write -- past both the session record's mark and every ordinal a live
+  // capture of the session holds, so a stale or damaged record can never hand
+  // one out twice -- and a write that never lands allocates nothing. Identity
+  // follows the source contract (CAPTURE_EVENT_IDENTITY): the host identifier
+  // the event's row names makes a re-delivery the same occurrence, a SessionEnd
+  // is one per session, and otherwise every call is a new occurrence (F-11b).
+  // The identity key is a digest of the origin, session, event and that
+  // identifier or ordinal: never content. The raw text goes into
+  // captureContent under a random key, never into the journal.
+  function recordCapture(input = {}) {
+    if (!isPlainObject(input)) throw new Error('A capture needs an input object');
+    const originId = usableOriginId(input.originId);
+    if (originId === null || originId !== input.originId) throw new Error('A capture names the originId that observed it');
+    const source = input.source;
+    if (!isPlainObject(source) || !Object.hasOwn(CAPTURE_EVENT_IDENTITY, source.event)) throw new Error(`A capture source names an event the source contract covers: ${Object.keys(CAPTURE_EVENT_IDENTITY).join(', ')}`);
+    if (!named(source.sessionId)) throw new Error('A capture source names its sessionId');
+    if (input.text !== undefined && typeof input.text !== 'string') throw new Error('A capture text is a string');
+    if (input.observedAt !== undefined && !isValidIsoInstant(input.observedAt)) throw new Error('A capture observedAt is an ISO 8601 instant');
+    const sessions = extras.get(CAPTURE_SESSIONS) ?? [];
+    const session = sessions.find((entry) => entry.originId === originId && entry.sessionId === source.sessionId);
+    // ponytail: a scan of every capture per write; an index by session if capture volume grows.
+    let held = Number.isSafeInteger(session?.occurrenceSeqHighWater) && session.occurrenceSeqHighWater > 0 ? session.occurrenceSeqHighWater : 0;
+    let earlier = null;
+    for (const item of captures.values()) {
+      if (item.originId !== originId || item.source?.sessionId !== source.sessionId || !Number.isSafeInteger(item.occurrenceSeq)) continue;
+      held = Math.max(held, item.occurrenceSeq);
+      earlier ??= item;
+    }
+    // A session whose record is gone still keeps the owner its captures have.
+    const resolved = session ?? earlier ?? writeOwner({ project: input.project, originId });
+    const owner = { project: resolved.project, attribution: resolved.attribution, originId };
+    const observed = {
+      event: source.event, sessionId: source.sessionId, role: source.role ?? null,
+      hostEventId: source.hostEventId ?? null, toolCallId: source.toolCallId ?? null, turnIndex: source.turnIndex ?? null
+    };
+    const identifiedBy = CAPTURE_EVENT_IDENTITY[observed.event];
+    const hostIdentity = identifiedBy === 'session' ? ['session']
+      : identifiedBy !== null && observed[identifiedBy] !== null ? [identifiedBy, observed[identifiedBy]] : null;
+    const occurrenceSeq = held + 1;
+    const identityKey = createHash('sha256').update(JSON.stringify([originId, observed.sessionId, observed.event, ...(hostIdentity ?? ['occurrence', occurrenceSeq])])).digest('hex');
+    const slot = retrySlot({ ...owner, idempotencyKey: identityKey }, CAPTURE_KIND, owner);
+    if (idempotency.has(slot)) {
+      if (hostIdentity) return clone(canonicalIdempotencyValue(idempotency.get(slot)));
+      throw new Error('Capture refused: its occurrence is already held');
+    }
+    const at = now();
+    const text = input.text;
+    const item = {
+      id: allocateEntityId(CAPTURE_KIND), kind: CAPTURE_KIND, schemaVersion: SCHEMA_VERSION,
+      project: owner.project, attribution: owner.attribution, originId,
+      state: 'pending', source: observed, observedAt: input.observedAt ?? at, occurrenceSeq,
+      sourceIdentity: input.sourceIdentity ?? 'unattributed_observer',
+      contentRef: text === undefined ? null : `content_${randomUUID()}`,
+      contentHash: text === undefined ? null : createHash('sha256').update(text).digest('hex'),
+      lease: null, attempts: 0, lastError: null, blockedReason: null, producedRecordIds: [], receipts: [],
+      erasureToken: allocateErasureToken(), cancelRequested: false, supersededResults: [], possibleDuplicateOf: null,
+      expiresAt: null, createdAt: at, updatedAt: at
+    };
+    const issue = captureItemIssue(item);
+    if (issue) throw new Error(`Capture refused: ${issue}`);
+    assertJournalCapacity(1);
+    captures.set(item.id, item);
+    const next = { ...(session ?? { id: `capsession_${randomUUID()}`, originId, sessionId: observed.sessionId, project: owner.project, attribution: owner.attribution }), occurrenceSeqHighWater: occurrenceSeq };
+    extras.set(CAPTURE_SESSIONS, session ? sessions.map((entry) => (entry === session ? next : entry)) : [...sessions, next]);
+    if (item.contentRef) extras.set(CAPTURE_CONTENT, [...(extras.get(CAPTURE_CONTENT) ?? []), { contentRef: item.contentRef, project: owner.project, attribution: owner.attribution, originId, text }]);
+    appendJournal({ type: 'capture.recorded', entityKind: CAPTURE_KIND, entityId: item.id, project: item.project, payload: item, idempotencyKey: slot });
+    idempotency.set(slot, clone(item));
+    return clone(item);
+  }
+
+  // One §12.5 edge (CAPTURE_TRANSITIONS): what it needs, and the one type it
+  // journals. Anything else -- another edge, a missing field, 'excluded' -- is
+  // refused before anything changes.
+  function transitionCapture(input = {}) {
+    const item = captures.get(input?.id);
+    if (!item) throw new Error(`Capture item not found: ${input?.id}`);
+    if (isNewerThanWriter(item)) throw new Error('A capture item of a future schema is not moved by this build');
+    const move = `${item.state}->${input.to}`;
+    const edge = Object.hasOwn(CAPTURE_TRANSITIONS, move) ? CAPTURE_TRANSITIONS[move] : null;
+    if (!edge) throw new Error(`Illegal capture transition ${move}`);
+    const next = { ...clone(item), state: input.to, updatedAt: now() };
+    if (edge.requires) {
+      if (input[edge.requires] == null) throw new Error(`The capture transition ${move} requires ${edge.requires}`);
+      next[edge.requires] = clone(input[edge.requires]);
+    }
+    if (edge.releases) { next.lease = null; next.attempts += 1; }
+    const issue = captureItemIssue(next);
+    if (issue) throw new Error(`Capture transition refused: ${issue}`);
+    assertJournalCapacity(1);
+    captures.set(item.id, next);
+    appendJournal({ type: edge.type, entityKind: CAPTURE_KIND, entityId: item.id, project: next.project, payload: next });
+    return clone(next);
   }
 
   // One aggregate per public delivery, even when it composes multiple reads.
@@ -1293,7 +1400,7 @@ export function createShadowGraph(options = {}) {
   }
 
   function idempotencyHolder(value) {
-    return (value?.kind === 'fact' ? facts.get(value.id) : records.get(value?.id)) ?? value;
+    return (value?.kind === 'fact' ? facts.get(value.id) : value?.kind === CAPTURE_KIND ? captures.get(value.id) : records.get(value?.id)) ?? value;
   }
 
   // Where a write's retry is stored and looked up. A key another owner already
@@ -4704,7 +4811,8 @@ export function createShadowGraph(options = {}) {
   }), { snapshot, validate: integrity, rebuild: replay,
     issueAccess: transactional('ownerIssueAccess', authority.issueOwner), inspectAccess: authority.inspect,
     accessRefusal: transactional('accessRefusal', authority.transportRefusal),
-    bindProject: transactional('bindProject', bindProject), resolveProjectBinding });
+    bindProject: transactional('bindProject', bindProject), resolveProjectBinding,
+    recordCapture: transactional('recordCapture', recordCapture), transitionCapture: transactional('transitionCapture', transitionCapture) });
 }
 
 // `strict` is for caller writes, where a typo should fail loudly instead of

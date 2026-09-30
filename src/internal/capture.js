@@ -34,6 +34,27 @@ export const CAPTURE_ENTRY_STATES = Object.freeze({
   'extraction.failed': Object.freeze(['pending', 'failed', 'blocked'])
 });
 export const CAPTURE_ENTRY_TYPES = Object.freeze(Object.keys(CAPTURE_ENTRY_STATES));
+// The writer's moves (plan §12.5; PR-34): each edge, what it needs, whether it
+// releases the lease and counts an attempt, and the one type it journals.
+export const CAPTURE_TRANSITIONS = Object.freeze({
+  'pending->processing': Object.freeze({ type: 'capture.state_changed', requires: 'lease' }),
+  'processing->extracted': Object.freeze({ type: 'extraction.completed', requires: 'producedRecordIds', releases: true }),
+  'processing->failed': Object.freeze({ type: 'extraction.failed', requires: 'lastError', releases: true }),
+  'failed->pending': Object.freeze({ type: 'capture.state_changed' }),
+  'failed->blocked': Object.freeze({ type: 'capture.state_changed', requires: 'blockedReason' })
+});
+// The source contract (plan §12.1): the events capture covers, and what
+// identifies one occurrence of each where the host supplies it. Without it an
+// occurrence is identified by its ordinal. A SessionEnd is one per session. An
+// event not listed is not captured.
+export const CAPTURE_EVENT_IDENTITY = Object.freeze({
+  UserPromptSubmit: 'hostEventId',
+  PostToolUse: 'toolCallId',
+  PostToolUseFailure: 'toolCallId',
+  Stop: 'turnIndex',
+  PreCompact: null,
+  SessionEnd: 'session'
+});
 // The entry a journal-less import writes for an item, by the state it is in.
 export const CAPTURE_IMPORT_TYPE = Object.freeze({
   pending: 'capture.recorded', processing: 'capture.state_changed', extracted: 'extraction.completed',

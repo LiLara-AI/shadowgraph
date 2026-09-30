@@ -57,3 +57,12 @@ export function privilegedBindProject(graph, input) {
 export function privilegedResolveProjectBinding(graph, input) {
   return primitive(graph, 'resolveProjectBinding', 'privilegedResolveProjectBinding')(input);
 }
+
+// The capture writer (PR-34). Nothing in the product calls it yet: the verb
+// and hook that will are PR-36's, and capture stays inert until AG-2.
+export function privilegedRecordCapture(graph, input) {
+  return primitive(graph, 'recordCapture', 'privilegedRecordCapture')(input);
+}
+export function privilegedTransitionCapture(graph, input) {
+  return primitive(graph, 'transitionCapture', 'privilegedTransitionCapture')(input);
+}

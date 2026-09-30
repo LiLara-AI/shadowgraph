@@ -613,11 +613,12 @@ test('attribution refuses an origin that holds a capture, and a record a capture
   assert.doesNotThrow(() => validateRestorePayload(structuredClone(privilegedSnapshot(graph)), { now }));
 });
 
-// Nothing on this build writes a capture item. The four types are named only
-// where they are read (src/internal/capture.js, src/journal.js), and the only
+// The four types are named only where they are read (src/internal/capture.js,
+// src/journal.js) and by the writer (PR-34: recordCapture names the recording;
+// every move's type comes from capture.js). Apart from the writer, the only
 // code that journals one is import's journal-less normalisation of an item it
 // was given (snapshotType). The scan covers src/ and scripts/.
-test('no production code emits a capture journal type', async () => {
+test('no production code emits a capture journal type outside the writer', async () => {
   const files = [];
   const walk = async (directory) => {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -636,9 +637,10 @@ test('no production code emits a capture journal type', async () => {
     if (/['"`](?:capture\.recorded|capture\.state_changed|extraction\.completed|extraction\.failed)['"`]/.test(text)) naming.push(name);
     if (/CAPTURE_(?:IMPORT_TYPE|ENTRY_STATES|ENTRY_TYPES)\b/.test(text)) usingTypes.push(name);
   }
-  assert.deepEqual(naming.sort(), ['src/internal/capture.js', 'src/journal.js']);
+  assert.deepEqual(naming.sort(), ['src/internal/capture.js', 'src/journal.js', 'src/shadowgraph.js']);
   assert.deepEqual(usingTypes.sort(), ['src/internal/capture.js', 'src/journal.js', 'src/shadowgraph.js']);
   const kernel = await readFile(join(root, 'src', 'shadowgraph.js'), 'utf8');
+  assert.deepEqual(kernel.match(/['"`](?:capture\.recorded|capture\.state_changed|extraction\.completed|extraction\.failed)['"`]/g), ["'capture.recorded'"], 'the writer names only the recording');
   // The kernel reads the types to hide their entries, and picks one only for
   // an imported item's journal-less snapshot.
   // Line endings follow the checkout (CRLF on a Windows clone).
