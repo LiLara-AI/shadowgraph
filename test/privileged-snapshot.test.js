@@ -20,7 +20,7 @@ const NOW = '2026-01-01T00:00:00.000Z';
 // `list` verb, GET /records and markdown push -- are deliberately absent.
 const SNAPSHOT_IMPORTERS = [
   'src/shadowgraph.js', 'src/cli.js', 'src/server.js', 'src/mcp.js', 'src/markdown-workspace.js', 'src/restore-validation.js',
-  'src/schema-conversion.js',
+  'src/schema-conversion.js', 'src/capture-hook.js',
   'src/internal/access-transport.js',
   'scripts/bench-journal.mjs', 'scripts/context-size.mjs'
 ];

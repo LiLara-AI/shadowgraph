@@ -1,6 +1,6 @@
 // The pinned runtime (programme plan revision 6 §5): scripts/install-runtime.mjs installs a commit's packed build
-// under a scratch ShadowGraph home, and the hook command and the activation record name it. HOME, USERPROFILE and
-// SHADOWGRAPH_HOME point into the scratch directory for every run.
+// under a scratch ShadowGraph home, and the hook command and the activation record name it. HOME, USERPROFILE,
+// SHADOWGRAPH_HOME, LOCALAPPDATA, APPDATA and npm's cache point into the scratch directory for every run.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
@@ -17,7 +17,7 @@ const git = (...args) => execFileSync('git', args, { encoding: 'utf8' }).trim();
 
 function run(file, args, { home, stdin = '', env = {} }) {
   return new Promise((settle) => {
-    const child = spawn(process.execPath, [file, ...args], { cwd: home, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, HOME: home, USERPROFILE: home, SHADOWGRAPH_HOME: join(home, 'shadowgraph-home'), SHADOWGRAPH_FILE: '', ...env } });
+    const child = spawn(process.execPath, [file, ...args], { cwd: home, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, HOME: home, USERPROFILE: home, SHADOWGRAPH_HOME: join(home, 'shadowgraph-home'), SHADOWGRAPH_FILE: '', LOCALAPPDATA: join(home, 'local'), APPDATA: join(home, 'roaming'), npm_config_cache: join(home, 'npm-cache'), ...env } });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk) => { stdout += chunk; });
@@ -60,7 +60,9 @@ test('the pinned runtime is the commit\'s packed build, named by commit, tree an
   await writeFile(store, '{}');
   const activated = await cli(home, ['activate', 'delivery', '--evidence', 'receipt-test', '--store', store, '--host-version', '0.0.0', '--settings', settings, '--runtime', result.path]);
   assert.equal(activated.code, 0, activated.stderr);
-  assert.deepEqual(JSON.parse(activated.stdout).record.capabilities.delivery.runtime, { path: result.path, commit: result.commit, tree: result.tree, tarballSha256: result.tarballSha256 });
+  // Whether it can capture is whether its build ships the capture hook template (FND-P6-10).
+  const shipsCapture = (() => { try { git('cat-file', '-e', `${result.commit}:integrations/claude-code.capture-hooks.json`); return true; } catch { return false; } })();
+  assert.deepEqual(JSON.parse(activated.stdout).record.capabilities.delivery.runtime, { path: result.path, commit: result.commit, tree: result.tree, tarballSha256: result.tarballSha256, captures: shipsCapture });
   assert.deepEqual(JSON.parse((await cli(home, ['uninstall-hooks', '--settings', settings])).stdout).removed, 2);
   // With hooks that run another command, activation naming the runtime is refused.
   assert.equal((await cli(home, ['install-hooks', '--settings', settings])).code, 0);

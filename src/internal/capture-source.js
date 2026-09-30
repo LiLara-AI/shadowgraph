@@ -371,6 +371,22 @@ function targetsShadowGraph(event, context) {
   return simpleCommands(input.command, shell).some((words) => runsShadowGraph(words, known, shell) || words.some((word) => isArtefact(word.text, known, word.quote)));
 }
 
+// The program a Bash or PowerShell command runs when the command is exactly
+// one simple command -- no pipeline, list, subshell or substitution -- named as
+// the platform finds it; otherwise null. Capture uses it to judge whether an
+// exit status is that program's own outcome (PR-36c, design review D-13).
+export function soleProgram(command, toolName) {
+  const shell = Object.hasOwn(SHELLS, toolName) ? SHELLS[toolName] : null;
+  if (shell === null || typeof command !== 'string') return null;
+  const commands = simpleCommands(command, shell).filter((words) => words.length > 0);
+  if (commands.length !== 1) return null;
+  // The first word past assignments and `env`: the program the shell runs.
+  const words = commands[0].map((word) => word.text);
+  let index = 0;
+  while (index < words.length && (/^[A-Za-z_]\w*=/.test(words[index]) || programName(words[index]) === 'env')) index += 1;
+  return index < words.length && !words[index].includes('\n') ? programName(words[index]) : null;
+}
+
 // Whether ShadowGraph produced this event, and by which signal; otherwise how
 // it is captured. `event` is { event, sessionId, cwd, toolName, toolInput,
 // prompt }; `context` is captureArtefacts() plus home, correlationTokens and

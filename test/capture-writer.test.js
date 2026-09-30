@@ -417,7 +417,7 @@ test('the kernel emits capture types in two places only', async () => {
   assert.equal(lines.filter((line) => /CAPTURE_TRANSITIONS/.test(line)).length, 2, 'the import and transitionCapture');
   const edges = await readFile(join(root, 'src', 'internal', 'capture.js'), 'utf8');
   for (const type of ['capture.state_changed', 'extraction.completed', 'extraction.failed']) assert.match(edges, new RegExp(`type: '${type.replace('.', '\\.')}'`), type);
-  // Nor does anything call the self-event counter (PR-35) or the classifier.
+  // Nor does anything call the self-event counter (PR-35) or the classifier, but the capture hook (PR-36c).
   const callers = { recordCapture: [], transitionCapture: [], recordSelfEvent: [], classifyCaptureSource: [] };
   for (const directory of ['src', 'scripts', 'bin', 'integrations']) {
     let names = [];
@@ -429,7 +429,9 @@ test('the kernel emits capture types in two places only', async () => {
   }
   const wrappers = ['src/internal/snapshot.js', 'src/shadowgraph.js'];
   for (const verb of Object.keys(callers)) callers[verb].sort();
-  assert.deepEqual(callers, { recordCapture: wrappers, transitionCapture: wrappers, recordSelfEvent: wrappers, classifyCaptureSource: ['src/internal/capture-source.js'] }, 'only the kernel and its privileged wrappers name the writer: nothing calls it');
+  // The capture hook reaches the writer only through the privileged wrappers,
+  // whose importers test/privileged-snapshot.test.js allows by name.
+  assert.deepEqual(callers, { recordCapture: wrappers, transitionCapture: wrappers, recordSelfEvent: wrappers, classifyCaptureSource: ['src/capture-hook.js', 'src/internal/capture-source.js'] }, 'only the kernel and its privileged wrappers name the writer, and only the capture hook classifies an event');
 });
 
 // Review round (briefs/PR34-review.md).

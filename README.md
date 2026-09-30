@@ -334,7 +334,7 @@ shadowgraph recall '{"project":"my-app","query":"development environment"}'
 `remember` · `markdown-sync` · `context` · `review` · `maintain` · `signals` · `ack` · `validate` ·
 `repair-plan` · `backup` · `restore` · `decision` · `attempt` · `fact` · `outcome` · `status` ·
 `link` · `traverse` · `redact` · `supersede` · `purge-preview` · `purge` · `journal` · `rebuild` ·
-`confidence-evidence` · `review-context` · `deliver` · `install-hooks` · `uninstall-hooks` ·
+`confidence-evidence` · `review-context` · `deliver` · `capture` · `install-hooks` · `uninstall-hooks` ·
 `activate` · `deactivate`
 
 Full argument shapes are in the [API reference](docs/api-reference.md).

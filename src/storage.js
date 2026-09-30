@@ -31,6 +31,23 @@ async function commitFile(temporaryPath, filePath, move = rename) {
 export function createJsonFileStore(filePath, options = {}) {
   let saveQueue = Promise.resolve();
   const fence = createDestinationFence(filePath, options);
+  // One step inside the fence, after this handle's earlier ones.
+  const fenced = (step) => {
+    const operation = saveQueue.then(() => fence.run(step));
+    saveQueue = operation.catch(() => {});
+    return operation;
+  };
+  // Writes `input` as the payload after `current`: a temporary file, renamed.
+  async function commit(current, input) {
+    const payload = nextRevision(Array.isArray(input) ? { ...empty(), records: input } : { ...input, revision: current.revision ?? 0, expectedRevision: undefined });
+    const context = { current, payload, destructive: false };
+    const temporaryPath = join(dirname(filePath), `.${filePath.split(/[\\/]/).pop()}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`);
+    await writeFile(temporaryPath, JSON.stringify(payload, null, 2) + '\n', 'utf8');
+    options.saveFault?.('beforeCommit', context);
+    await commitFile(temporaryPath, filePath, options.rename);
+    options.saveFault?.('afterCommit', context);
+    return payload.revision;
+  }
   return {
     async load() {
       try { return JSON.parse(await readFile(filePath, 'utf8')); }
@@ -38,21 +55,24 @@ export function createJsonFileStore(filePath, options = {}) {
     },
     async save(data) {
       refusePublicExport(data);
-      const input = data;
-      const operation = saveQueue.then(() => fence.run(async () => {
-          const current = await this.load();
-          assertRevision(current, input?.expectedRevision ?? (input?.revision === undefined ? undefined : input.revision));
-          const payload = nextRevision(Array.isArray(input) ? { ...empty(), records: input } : { ...input, revision: current.revision ?? 0, expectedRevision: undefined });
-          const context = { current, payload, destructive: false };
-          const temporaryPath = join(dirname(filePath), `.${filePath.split(/[\\/]/).pop()}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`);
-          await writeFile(temporaryPath, JSON.stringify(payload, null, 2) + '\n', 'utf8');
-          options.saveFault?.('beforeCommit', context);
-          await commitFile(temporaryPath, filePath, options.rename);
-          options.saveFault?.('afterCommit', context);
-          return payload.revision;
-      }));
-      saveQueue = operation.catch(() => {});
-      return operation;
+      return fenced(async () => {
+        const current = await this.load();
+        assertRevision(current, data?.expectedRevision ?? (data?.revision === undefined ? undefined : data.revision));
+        return commit(current, data);
+      });
+    },
+    // Load, change and write under one hold of the fence, so no revision can
+    // conflict (automatic capture, PR-36c; PR-36 design review D-2): `change`
+    // gets the stored payload and returns the next one, or null (or nothing)
+    // to write nothing. Resolves to the new revision, or null.
+    async update(change) {
+      return fenced(async () => {
+        const current = await this.load();
+        const next = await change(current);
+        if (next === null || next === undefined) return null;
+        refusePublicExport(next);
+        return commit(current, next);
+      });
     },
     close() {}
   };

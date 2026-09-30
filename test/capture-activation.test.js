@@ -4,13 +4,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync, symlinkSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { gzipSync } from 'node:zlib';
 import { createShadowGraph } from '../src/shadowgraph.js';
-import { createJsonFileStore } from '../src/storage.js';
-import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { createJsonFileStore, createStorage } from '../src/storage.js';
+import { privilegedRecordCapture, privilegedSnapshot } from '../src/internal/snapshot.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { runtimeHookCommand } from '../src/host-hooks.js';
 import { activeCapture, CAPTURE_LIMITS, coverageIssue, limitsIssue, storeRepository } from '../src/capture-hook.js';
 
 const CLI = resolve('src/cli.js');
@@ -190,6 +193,20 @@ test('activation needs evidence, an existing readable store and one coverage for
     assert.equal(existsSync(record), false, args.join(' '));
   }
   assert.equal((await run(['activate', 'extraction', '--evidence', 'x', '--store', store], home)).code, 1, 'no other capability yet');
+  // A SQLite store is refused: delivery would report it busy at every captured prompt (review C-3).
+  try {
+    await import('node:sqlite');
+    const sqlite = join(home, 'stores', 'memory.db');
+    const created = await createStorage({ type: 'sqlite', file: sqlite });
+    await created.save(privilegedSnapshot(createShadowGraph()));
+    created.close();
+    const refusedSqlite = await run(['activate', 'capture', '--evidence', 'x', '--store', sqlite, '--storage', 'sqlite', '--host-version', VERIFIED], home);
+    assert.equal(refusedSqlite.code, 1);
+    assert.match(refusedSqlite.stderr, /capture_store_sqlite_unsupported/u);
+    assert.equal(existsSync(record), false);
+  } catch (error) {
+    if (error.code !== 'ERR_UNKNOWN_BUILTIN_MODULE') throw error;
+  }
   // Outside a scratch location the owner confirms at a terminal; a run without one is refused and writes nothing.
   const owned = join(home, '.shadowgraph');
   const refused = await run(['activate', 'capture', '--evidence', 'x', '--store', store, '--host-version', VERIFIED], home, { SHADOWGRAPH_HOME: owned });
@@ -214,7 +231,8 @@ test('a capture record that is not active or not well formed leaves capture iner
     ['an empty only', { ...valid, coverage: { projects: 'only', include: [] } }],
     ['a repeated exclusion', { ...valid, coverage: { projects: 'all', exclude: ['a', 'a'] } }],
     ['a missing limit', { ...valid, limits: { ...CAPTURE_LIMITS, maxQueueDepth: undefined } }],
-    ['a zero limit', { ...valid, limits: { ...CAPTURE_LIMITS, maxItemBytes: 0 } }]
+    ['a zero limit', { ...valid, limits: { ...CAPTURE_LIMITS, maxItemBytes: 0 } }],
+    ['a malformed server list', { ...valid, mcpServerNames: ['shadowgraph', 'shadowgraph'] }]
   ]) {
     await write(capture);
     assert.equal(await activeCapture(env), null, label);
@@ -225,4 +243,87 @@ test('a capture record that is not active or not well formed leaves capture iner
   assert.equal(coverageIssue({ projects: 'only', include: ['app'] }), null);
   assert.equal(limitsIssue(CAPTURE_LIMITS), null);
   assert.deepEqual(Object.keys(CAPTURE_LIMITS), ['maxStoreBytes', 'maxQueueDepth', 'maxItemBytes', 'maxItemsPerSession']);
+});
+
+// A verified runtime written here: a gzipped ustar archive of `package/<name>` entries, the files beside it, and the
+// manifest naming its digest (src/host-hooks.js pinnedRuntime checks all three).
+async function syntheticRuntime(directory, files) {
+  const blocks = [];
+  for (const [name, text] of Object.entries(files)) {
+    const body = Buffer.from(text);
+    const header = Buffer.alloc(512);
+    header.write(`package/${name}`, 0);
+    header.write(`${body.length.toString(8).padStart(11, '0')}\0`, 124);
+    header.write('0', 156);
+    header.write('ustar\0', 257);
+    blocks.push(header, body, Buffer.alloc((512 - (body.length % 512)) % 512));
+    await mkdir(join(directory, name, '..'), { recursive: true });
+    await writeFile(join(directory, name), body);
+  }
+  const tarball = gzipSync(Buffer.concat([...blocks, Buffer.alloc(1024)]));
+  await writeFile(join(directory, 'package.tgz'), tarball);
+  await writeFile(join(directory, 'runtime.json'), JSON.stringify({ commit: 'a'.repeat(40), tree: 'b'.repeat(40), tarballSha256: createHash('sha256').update(tarball).digest('hex') }));
+  return directory;
+}
+
+test('a pinned runtime must be able to capture, and every installed handler must run it with its own verb (FND-P6-10)', async (t) => {
+  const { home, store } = await setup(t);
+  const settings = join(home, 'settings-fixture.json');
+  // A real runtime of a build before the capture verb, PR-36a's, where the history holds that commit; a checkout
+  // without it (a shallow CI clone) uses a verified runtime written here without the capture template instead. npm's
+  // cache and logs go to the scratch directory, never the user's.
+  const PR36A = '0534b0734dce293f21ed31c214a9e2010721bc97';
+  let held = true;
+  try { execFileSync('git', ['cat-file', '-e', `${PR36A}^{commit}`], { stdio: 'ignore' }); } catch { held = false; }
+  let old;
+  if (held) {
+    const installed = await new Promise((settle) => {
+      const child = spawn(process.execPath, [resolve('scripts/install-runtime.mjs'), '--commit', PR36A], { cwd: home, env: { ...process.env, HOME: home, USERPROFILE: home, SHADOWGRAPH_HOME: join(home, 'sg-home'), LOCALAPPDATA: join(home, 'local'), APPDATA: join(home, 'roaming'), npm_config_cache: join(home, 'npm-cache') } });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+      child.on('close', (code) => settle({ code, stdout, stderr }));
+    });
+    assert.equal(installed.code, 0, installed.stderr);
+    old = JSON.parse(installed.stdout);
+  } else {
+    t.diagnostic(`${PR36A} is not in this checkout's history: a synthetic runtime without the capture template stands in`);
+    old = { path: await syntheticRuntime(join(home, 'shadowgraph-runtime', 'unable'), { 'src/cli.js': '// synthetic' }), commit: 'a'.repeat(40) };
+  }
+  assert.equal(old.captures ?? false, false);
+  const refused = await activate(home, store, '--runtime', old.path);
+  assert.equal(refused.code, 1);
+  assert.match(refused.stderr, /activation_runtime_cannot_capture/u);
+  assert.match((await run(['install-hooks', '--capture', '--settings', settings, '--runtime', old.path], home)).stderr, /runtime_cannot_capture/u);
+  // Delivery on such a runtime may read a store holding no capture, and is refused one that holds it.
+  const deliverOld = () => run(['activate', 'delivery', '--evidence', 'ag2-receipt', '--store', store, '--host-version', VERIFIED, '--settings', settings, '--runtime', old.path], home);
+  assert.equal((await deliverOld()).code, 0);
+  const kept = createJsonFileStore(store);
+  const graph = createShadowGraph();
+  graph.importData(await kept.load());
+  privilegedRecordCapture(graph, { project: 'alpha', originId: 'origin_x', text: 'captured', admission: { limits: { ...CAPTURE_LIMITS }, storeBytes: 0 }, source: { event: 'UserPromptSubmit', sessionId: 'session-1' } });
+  await kept.save(privilegedSnapshot(graph));
+  assert.match((await deliverOld()).stderr, /activation_runtime_cannot_read_capture/u);
+  assert.equal((await run(['deactivate', 'delivery'], home)).code, 0);
+  // A runtime that ships the capture hook template can.
+  const template = readFileSync('integrations/claude-code.capture-hooks.json', 'utf8');
+  const able = await syntheticRuntime(join(home, 'shadowgraph-runtime', 'able'), { 'src/cli.js': '// synthetic', 'integrations/claude-code.capture-hooks.json': template });
+  const accepted = await activate(home, store, '--runtime', able, '--mcp-servers', 'memory,shadowgraph');
+  assert.equal(accepted.code, 0, accepted.stderr);
+  const capture = JSON.parse(accepted.stdout).record.capabilities.capture;
+  assert.deepEqual([capture.runtime.captures, capture.mcpServerNames, capture.hooksInstalled], [true, ['memory', 'shadowgraph'], false]);
+  assert.match((await activate(home, store, '--mcp-servers', 'memory,memory')).stderr, /activation_projects_malformed \(--mcp-servers\)/u);
+  // Installed handlers of either kind that run another runtime are refused; both kinds running it are accepted.
+  const ours = (runtime, kind) => ({ hooks: [{ type: 'command', command: runtimeHookCommand(runtime, process.execPath, kind), timeout: 10 }] });
+  await writeFile(settings, JSON.stringify({ hooks: { SessionStart: [ours(able, 'deliver')], Stop: [ours(old.path, 'capture')] } }));
+  assert.match((await activate(home, store, '--runtime', able)).stderr, /activation_hooks_run_another_runtime/u);
+  await writeFile(settings, JSON.stringify({ hooks: { SessionStart: [ours(able, 'deliver')], Stop: [ours(able, 'capture')] } }));
+  const both = await activate(home, store, '--runtime', able);
+  assert.equal(both.code, 0, both.stderr);
+  assert.equal(JSON.parse(both.stdout).record.capabilities.capture.hooksInstalled, true);
+  // Delivery on the same runtime accepts capture's handlers beside its own.
+  const delivery = await run(['activate', 'delivery', '--evidence', 'ag2-receipt', '--store', store, '--host-version', VERIFIED, '--settings', settings, '--runtime', able], home);
+  assert.equal(delivery.code, 0, delivery.stderr);
+  assert.equal(JSON.parse(delivery.stdout).record.capabilities.delivery.hooksInstalled, true);
 });

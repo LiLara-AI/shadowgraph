@@ -73,7 +73,9 @@ Only a project whose worktree binding that store has also recorded (`shadowgraph
 
 For a fixed build rather than whatever `shadowgraph` is on the path, `node scripts/install-runtime.mjs` installs a commit's packed build under `~/.shadowgraph/runtime/<commit>/`, and `install-hooks --runtime <directory>` and `activate delivery --runtime <directory>` name it.
 
-`claude-code.coverage.json` states, for Claude Code 2.1.270 (the version the delivery evidence was taken on), where each of the seven stages of experience lands at each trigger: delivery is covered at a new session's start and at each prompt, unverified at a start after resume, clear or compaction, and not available within a turn, which is a declared gap.
+`claude-code.capture-hooks.json` is the capture hook block (`shadowgraph install-hooks --capture`, removed with `uninstall-hooks --capture`): at `UserPromptSubmit`, `PostToolUse`, `PostToolUseFailure` and `Stop` it runs `shadowgraph capture --hook`, synchronously, which records each event's material into the private store only after the owner runs `shadowgraph activate capture` for that same store, and stays silent. Capture, too, covers only projects whose worktree binding that store recorded, and writes a JSON store only. To turn it off, `shadowgraph deactivate capture` first, then `uninstall-hooks --capture`.
+
+`claude-code.coverage.json` states, for Claude Code 2.1.270 (the version the delivery evidence was taken on), where each of the seven stages of experience lands at each trigger: delivery is covered at a new session's start and at each prompt, unverified at a start after resume, clear or compaction, and not available within a turn, which is a declared gap. Its `capture` block says what capture records at each event, how each item is identified, and what it never captures.
 
 ## Cursor
 

@@ -3,6 +3,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DELIVERY_DEADLINE_MS } from '../src/delivery.js';
+import { CAPTURE_DEADLINE_MS, CAPTURE_HARD_CAP_MS } from '../src/capture-hook.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const integrations = join(root, 'integrations');
@@ -58,6 +59,39 @@ for (const row of coverage.triggers) {
 for (const event of Object.keys(hookTemplate.hooks)) assert.equal(coverage.triggers.find((row) => row.trigger === event)?.status, 'covered', `${event} is covered`);
 assert.ok(coverage.triggers.some((row) => row.status === 'uncovered'), 'at least one trigger is declared uncovered');
 
+// The capture hook block (plan §12.1; PR-36 design review D-1): synchronous
+// command handlers -- no async key, so a capture's output never reaches the
+// model and no event is deduplicated away -- at the four events with
+// immediate material, each running the inert-until-activated capture verb
+// with a timeout its deadline and hard cap stay below.
+const captureTemplate = JSON.parse(await readFile(join(integrations, 'claude-code.capture-hooks.json'), 'utf8'));
+const CAPTURED = ['UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure', 'Stop'];
+assert.deepEqual(Object.keys(captureTemplate), ['hooks'], 'claude-code.capture-hooks.json holds only a hooks block');
+assert.deepEqual(Object.keys(captureTemplate.hooks), CAPTURED, 'capture hooks at the four events with immediate material');
+for (const [event, groups] of Object.entries(captureTemplate.hooks)) {
+  assert.ok(Array.isArray(groups) && groups.length === 1, `${event} holds one capture group`);
+  assert.deepEqual(Object.keys(groups[0]), ['hooks'], `${event} capture group has no matcher or other key`);
+  assert.ok(Array.isArray(groups[0].hooks) && groups[0].hooks.length === 1, `${event} holds one capture handler`);
+  const [handler] = groups[0].hooks;
+  assert.deepEqual(Object.keys(handler).sort(), ['command', 'timeout', 'type'], `${event} capture handler keys (no async)`);
+  assert.equal(handler.type, 'command', `${event} capture handler is a command`);
+  assert.equal(handler.command, 'shadowgraph capture --hook', `${event} capture handler runs the capture verb`);
+  assert.ok(Number.isInteger(handler.timeout) && CAPTURE_DEADLINE_MS < CAPTURE_HARD_CAP_MS && CAPTURE_HARD_CAP_MS < handler.timeout * 1000, `${event}: the capture deadline and hard cap stay below the hook timeout`);
+}
+assert.ok(manifest.files.includes('integrations/claude-code.capture-hooks.json'), 'the package ships the capture hook template: a pinned runtime\'s capture capability');
+
+// What capture covers (plan §12.2.2): per event its material, identity and
+// whether that identity is exact; what is never captured; and what is declared.
+const captured = coverage.capture;
+assert.deepEqual(captured?.handler, { type: 'command', command: 'shadowgraph capture --hook', events: CAPTURED, synchronous: true }, 'the manifest names the capture handler');
+assert.ok(typeof captured.hostFields === 'string' && captured.hostFields.trim(), 'the manifest says how the host fields are known');
+assert.deepEqual(captured.events.map((row) => row.event), CAPTURED, 'the manifest describes each captured event');
+for (const row of captured.events) {
+  assert.deepEqual(Object.keys(row).sort(), ['event', 'exact', 'identity', 'material', 'observation'], `${row.event}: capture row keys`);
+  assert.equal(typeof row.exact, 'boolean', `${row.event}: whether its identity is exact`);
+}
+for (const list of ['neverCaptured', 'declarations']) assert.ok(Array.isArray(captured[list]) && captured[list].length > 0 && captured[list].every((line) => typeof line === 'string' && line.trim()), `the manifest lists ${list}`);
+
 const codex = await readFile(join(integrations, 'codex.mcp.toml'), 'utf8');
 for (const expected of [
   '[mcp_servers.shadowgraph]',
@@ -76,4 +110,4 @@ for (const expected of [
   '      SHADOWGRAPH_MCP_COMPACT: "1"'
 ]) assert.ok(hermes.includes(expected), `Hermes YAML is missing ${expected}`);
 
-console.log('integration templates valid: Claude Code=stdio JSON, SessionStart/UserPromptSubmit command hooks and the coverage manifest, Cursor=stdio JSON, Codex=config.toml, Hermes=config.yaml; compact recommended, full mode preserved');
+console.log('integration templates valid: Claude Code=stdio JSON, SessionStart/UserPromptSubmit command hooks, the capture hooks and the coverage manifest, Cursor=stdio JSON, Codex=config.toml, Hermes=config.yaml; compact recommended, full mode preserved');

@@ -282,6 +282,34 @@ export async function createSqliteStore(filePath, options = {}) {
     return { retainedArtifacts, unknownArtifacts };
   }
 
+  // Writes `data` as the payload after `current` on an open handle, inside the
+  // fence: one transaction, securely compacted when it removes rows.
+  function writeOver(database, current, data) {
+    const payload = nextRevision(Array.isArray(data) ? { ...EMPTY, records: data } : { ...data, revision: current.revision, expectedRevision: undefined });
+    const destructive = removesPersistedRows(current, payload);
+    const context = { current, payload, destructive };
+    if (destructive) {
+      // Changing journal mode and checkpointing are forbidden inside an
+      // active transaction. The destination fence and operation-scoped
+      // handles ensure no other ShadowGraph connection is open here.
+      database.exec('PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode = DELETE; PRAGMA secure_delete = ON');
+    }
+    database.exec('BEGIN IMMEDIATE');
+    let committed = false;
+    try {
+      replaceRelational(database, payload);
+      saveFault('beforeCommit', context);
+      database.exec('COMMIT');
+      committed = true;
+      if (destructive) securelyCompactCommittedSave(database, payload, context);
+      else saveFault('afterCommit', context);
+      return payload.revision;
+    } catch (error) {
+      if (!committed) database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   function openLiveDatabase(stage) {
     if (permanentlyClosed) throw new Error('SQLite storage is closed');
     let candidate;
@@ -358,31 +386,32 @@ export async function createSqliteStore(filePath, options = {}) {
           database = openLiveDatabase('save');
           const current = exportSqlitePayload(database);
           assertRevision(current, data?.expectedRevision ?? data?.revision);
-          const payload = nextRevision(Array.isArray(data) ? { ...EMPTY, records: data } : { ...data, revision: current.revision, expectedRevision: undefined });
-          const destructive = removesPersistedRows(current, payload);
-          const context = { current, payload, destructive };
-          if (destructive) {
-            // Changing journal mode and checkpointing are forbidden inside an
-            // active transaction. The destination fence and operation-scoped
-            // handles ensure no other ShadowGraph connection is open here.
-            database.exec('PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode = DELETE; PRAGMA secure_delete = ON');
-          }
-          database.exec('BEGIN IMMEDIATE');
-          let committed = false;
-          try {
-            replaceRelational(database, payload);
-            saveFault('beforeCommit', context);
-            database.exec('COMMIT');
-            committed = true;
-            if (destructive) securelyCompactCommittedSave(database, payload, context);
-            else saveFault('afterCommit', context);
-            return payload.revision;
-          } catch (error) {
-            if (!committed) database.exec('ROLLBACK');
-            throw error;
-          }
+          return writeOver(database, current, data);
         } finally {
           closeChecked(database, 'save');
+        }
+      });
+    },
+
+    // Load, change and write under one hold of the fence, so no revision can
+    // conflict (automatic capture, PR-36c; PR-36 design review D-2): `change`
+    // gets the stored payload and returns the next one, or null (or nothing)
+    // to write nothing. Resolves to the new revision, or null.
+    async update(change) {
+      if (restoring) throw new Error('SQLite restore is in progress');
+      if (permanentlyClosed) throw new Error('SQLite storage is closed');
+      return fence.run(async () => {
+        if (restoring) throw new Error('SQLite restore is in progress');
+        let database;
+        try {
+          database = openLiveDatabase('update');
+          const current = exportSqlitePayload(database);
+          const next = await change(current);
+          if (next === null || next === undefined) return null;
+          refusePublicExport(next);
+          return writeOver(database, current, next);
+        } finally {
+          closeChecked(database, 'update');
         }
       });
     },

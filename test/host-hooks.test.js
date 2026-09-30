@@ -7,7 +7,7 @@ import { existsSync, lstatSync, readFileSync, realpathSync, statSync, symlinkSyn
 import { cp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { scratchDirectory } from '../tools/scratch-directory.js';
-import { changeHookSettings, isShadowGraphHandler, withoutShadowGraphHooks, withShadowGraphHooks } from '../src/host-hooks.js';
+import { changeHookSettings, isShadowGraphHandler, runtimeHookCommand, shadowGraphHookKind, withoutShadowGraphHooks, withShadowGraphHooks } from '../src/host-hooks.js';
 
 const CLI = resolve('src/cli.js');
 const template = JSON.parse(readFileSync('integrations/claude-code.hooks.json', 'utf8'));
@@ -209,7 +209,7 @@ test('the verbs take only --settings <path>, and a flag without its path touches
   for (const args of [['install-hooks', '--settings'], ['install-hooks', 'extra'], ['install-hooks', 'extra', '--settings'], ['install-hooks', '--settings', '--settings'], ['uninstall-hooks', '--settings', join(home, 'a.json'), 'extra']]) {
     const result = await run(args, home);
     assert.equal(result.code, 1, args.join(' '));
-    assert.match(result.stderr, /Usage: shadowgraph (?:un)?install-hooks \[--settings <path>\]/u);
+    assert.match(result.stderr, /Usage: shadowgraph (?:un)?install-hooks \[--capture\] \[--settings <path>\]/u);
   }
   assert.equal(existsSync(join(home, '.claude')), false);
   assert.equal(existsSync(join(home, 'a.json')), false);
@@ -239,4 +239,33 @@ test('check-integrations refuses a hook template with another event, type or com
     await writeFile(join(root, 'integrations', 'claude-code.hooks.json'), formatted(variant));
     assert.notEqual(await check(), 0, JSON.stringify(variant));
   }
+});
+
+test('the delivery and capture kinds install and uninstall independently, and the recogniser knows both', async (t) => {
+  const captureTemplate = JSON.parse(readFileSync('integrations/claude-code.capture-hooks.json', 'utf8'));
+  const kinds = (settings) => Object.values(settings.hooks ?? {}).flat().flatMap((group) => group.hooks ?? []).map(shadowGraphHookKind).filter(Boolean).sort();
+  assert.deepEqual(['shadowgraph deliver --hook', '"C:/n/node.exe" "C:/x/shadowgraph/runtime/abc/src/cli.js" capture --hook', 'echo capture --hook', 'shadowgraph capture'].map((command) => shadowGraphHookKind({ type: 'command', command })), ['deliver', 'capture', null, null]);
+  assert.match(runtimeHookCommand('C:/x/shadowgraph/runtime/abc', 'C:/n/node.exe', 'capture'), / capture --hook$/u);
+  assert.throws(() => runtimeHookCommand('C:/x/shadowgraph/runtime/abc', 'C:/n/node.exe', 'extract'), /hook_kind_unknown/u);
+  const both = withShadowGraphHooks(withShadowGraphHooks(unrelated(), template), captureTemplate, 'capture');
+  assert.deepEqual(kinds(both), ['capture', 'capture', 'capture', 'capture', 'deliver', 'deliver']);
+  assert.deepEqual(kinds(withShadowGraphHooks(both, template)), kinds(both), 'a delivery reinstall keeps capture\'s handlers (they run in parallel: their order carries nothing)');
+  assert.deepEqual(withoutShadowGraphHooks(both, 'capture'), withShadowGraphHooks(unrelated(), template));
+  assert.deepEqual(withoutShadowGraphHooks(both), unrelated());
+  // Synchronous command handlers only, with a timeout, and no async key (design review D-1).
+  for (const [event, groups] of Object.entries(captureTemplate.hooks)) assert.deepEqual(groups, [{ hooks: [{ type: 'command', command: 'shadowgraph capture --hook', timeout: 10 }] }], event);
+  // Through the verbs on a scratch settings file.
+  const home = await scratchDirectory(t, 'shadowgraph-hooks-');
+  const settings = join(home, 'host-hooks-fixture.json');
+  await writeFile(settings, formatted(unrelated()));
+  assert.equal((await run(['install-hooks', '--settings', settings], home)).code, 0);
+  const captured = await run(['install-hooks', '--capture', '--settings', settings], home);
+  assert.equal(captured.code, 0, captured.stderr);
+  assert.deepEqual([JSON.parse(captured.stdout).kind, JSON.parse(captured.stdout).events], ['capture', ['UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure', 'Stop']]);
+  assert.deepEqual(kinds(JSON.parse(await readFile(settings, 'utf8'))), ['capture', 'capture', 'capture', 'capture', 'deliver', 'deliver']);
+  assert.deepEqual(JSON.parse((await run(['uninstall-hooks', '--capture', '--settings', settings], home)).stdout).removed, 4);
+  assert.deepEqual(kinds(JSON.parse(await readFile(settings, 'utf8'))), ['deliver', 'deliver'], 'uninstalling capture leaves delivery');
+  assert.equal((await run(['install-hooks', '--capture', '--settings', settings], home)).code, 0);
+  assert.deepEqual(JSON.parse((await run(['uninstall-hooks', '--settings', settings], home)).stdout).removed, 6, 'uninstall removes both kinds');
+  assert.equal(await readFile(settings, 'utf8'), formatted(unrelated()));
 });

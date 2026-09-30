@@ -11,7 +11,7 @@ import { dirname } from 'node:path';
 import { promisify } from 'node:util';
 import { CAPTURE_LIMITS, storeRepository } from './capture-hook.js';
 import { activationFile, DELIVERY_CAP_BYTES, DELIVERY_DEADLINE_MS, readStoreForDelivery } from './delivery.js';
-import { defaultSettingsPath, HOOK_TEMPLATE_URL, installedCommands, pinnedRuntime, runtimeHookCommand } from './host-hooks.js';
+import { defaultSettingsPath, HOOK_TEMPLATE_URL, installedHandlers, pinnedRuntime, runtimeHookCommand } from './host-hooks.js';
 import { confirmOwnerAction } from './internal/owner-confirmation.js';
 import { credentialLiteralIn } from './internal/credential-literal.js';
 import { canonicalPath, isScratchFile, readText, writeJsonAtomically } from './internal/owner-files.js';
@@ -59,9 +59,22 @@ async function workingTree(path) {
   }
 }
 
+// The pinned runtime the hooks run, checked again here (programme plan
+// revision 6 §5); none when the hooks run an installed binary. Every installed
+// ShadowGraph handler, of either kind, must run it with its own kind's verb, so
+// one runtime serves both hooks (PR-36 design review D-24).
+async function hooksRunning(settingsFile, runtime) {
+  const handlers = await installedHandlers(settingsFile);
+  const pinned = runtime ? await pinnedRuntime(runtime) : null;
+  if (pinned && handlers.some(({ kind, command }) => command !== runtimeHookCommand(pinned.path, undefined, kind))) throw new Error(`activation_hooks_run_another_runtime (${settingsFile})`);
+  return { handlers, pinned };
+}
+
 // What every activation checks first: the gate's evidence reference (a
 // pointer, so one the credential check flags is refused), the host version
-// when given, and a store that exists and reads as the kind declared.
+// when given, and a store that exists and reads as the kind declared. It
+// returns the store's path, and what it read (none when another process
+// holds the store).
 async function checkedActivation({ evidence, store, storage, hostVersion }) {
   if (typeof evidence !== 'string' || !evidence.trim()) throw new Error('activation_requires_evidence');
   if (credentialLiteralIn(evidence) || credentialLiteralIn(`evidence=${evidence}`)) throw new Error('activation_evidence_holds_a_credential');
@@ -72,8 +85,14 @@ async function checkedActivation({ evidence, store, storage, hostVersion }) {
   if (!(await lstat(storeFile).catch(() => null))?.isFile()) throw new Error(`activation_store_not_found (${storeFile})`);
   const read = await readStoreForDelivery({ file: storeFile, storage });
   if (read.unavailable && read.unavailable !== 'busy') throw new Error(`activation_store_unreadable (${read.unavailable}: ${storeFile})`);
-  return storeFile;
+  return { storeFile, payload: read.payload ?? null };
 }
+
+// Whether a store holds capture state -- an item, a session record or
+// captured content -- or may (a store another process held when read).
+const holdsCapture = (payload) => payload === null
+  || (Array.isArray(payload.records) && payload.records.some((record) => record?.kind === 'capture'))
+  || ['captureSessions', 'captureContent'].some((name) => Array.isArray(payload[name]) && payload[name].length > 0);
 
 // `activate delivery`: the gate's evidence reference and the store the hook
 // reads are required. With a pinned runtime, hooks already installed must run
@@ -81,17 +100,16 @@ async function checkedActivation({ evidence, store, storage, hostVersion }) {
 // a terminal, and the record must still hold what was read when they answered.
 // `afterConfirmation` is a test seam only.
 export async function activateDelivery({ env = process.env, evidence, store, storage = 'json', hostVersion, settings = defaultSettingsPath(), runtime, surface = 'cli', afterConfirmation } = {}) {
-  const storeFile = await checkedActivation({ evidence, store, storage, hostVersion });
+  const { storeFile, payload } = await checkedActivation({ evidence, store, storage, hostVersion });
   const { path, text, record } = await recordAt(env);
   const { verifiedVersion } = JSON.parse(await readFile(COVERAGE_MANIFEST_URL, 'utf8'));
   const template = JSON.parse(await readFile(HOOK_TEMPLATE_URL, 'utf8'));
   const version = hostVersion ?? await claudeVersion();
   const settingsFile = await canonicalPath(settings);
-  const commands = await installedCommands(settingsFile);
-  // The pinned runtime the hooks run, checked again here (programme plan
-  // revision 6 §5); none when the hooks run an installed binary.
-  const pinned = runtime ? await pinnedRuntime(runtime) : null;
-  if (pinned && commands.some((command) => command !== runtimeHookCommand(pinned.path))) throw new Error(`activation_hooks_run_another_runtime (${settingsFile})`);
+  const { handlers, pinned } = await hooksRunning(settingsFile, runtime);
+  // A build before the capture reader refuses a store holding capture, so it
+  // would deliver nothing from it (FND-P6-06, FND-P6-10).
+  if (pinned && !pinned.captures && holdsCapture(payload)) throw new Error(`activation_runtime_cannot_read_capture (${pinned.path} is ${pinned.commit}, a build that cannot read the capture ${storeFile} holds or may hold; install a later runtime)`);
   sharedWith(record?.capabilities?.capture, 'capture', storeFile, storage, pinned);
   const at = new Date().toISOString();
   const delivery = {
@@ -99,7 +117,7 @@ export async function activateDelivery({ env = process.env, evidence, store, sto
     store: { file: storeFile, storage },
     host: { name: 'claude-code', version, verifiedVersion, verified: version === verifiedVersion },
     deadlineMs: DELIVERY_DEADLINE_MS, capBytes: DELIVERY_CAP_BYTES, hookTimeoutSeconds: template.hooks.SessionStart[0].hooks[0].timeout,
-    settings: settingsFile, hooksInstalled: commands.length > 0, runtime: pinned, surface
+    settings: settingsFile, hooksInstalled: handlers.some(({ kind }) => kind === 'deliver'), runtime: pinned, surface
   };
   // The owner sees the warning before confirming, as well as after.
   const tree = await workingTree(storeFile);
@@ -131,17 +149,26 @@ function projectList(value, flag) {
 // later activation, so the captures of one installation share it. The frozen
 // admission limits are recorded here, and the history keeps each activation's
 // coverage and limits, so an earlier value is never lost (§22.6.1). As for
-// delivery, the owner confirms at a terminal outside a scratch location.
-// Capture stays inert until AG-2 approves it on the real host.
-export async function activateCapture({ env = process.env, evidence, store, storage = 'json', only, exclude, hostVersion, settings = defaultSettingsPath(), runtime, surface = 'cli', afterConfirmation } = {}) {
+// delivery, the owner confirms at a terminal outside a scratch location. A
+// pinned runtime must be able to capture (FND-P6-10), and every installed
+// handler must run it. `mcpServers` names the MCP servers ShadowGraph is
+// registered as, so its own tool calls are recognised (PR-35 S-1; default
+// `shadowgraph`). Capture stays inert until AG-2 approves it on the real host.
+export async function activateCapture({ env = process.env, evidence, store, storage = 'json', only, exclude, mcpServers, hostVersion, settings = defaultSettingsPath(), runtime, surface = 'cli', afterConfirmation } = {}) {
   if (only !== undefined && exclude !== undefined) throw new Error('activation_coverage_only_or_exclude');
   const coverage = only !== undefined ? { projects: 'only', include: projectList(only, '--only') } : { projects: 'all', exclude: exclude === undefined ? [] : projectList(exclude, '--exclude') };
-  const storeFile = await checkedActivation({ evidence, store, storage, hostVersion });
+  const mcpServerNames = mcpServers === undefined ? ['shadowgraph'] : projectList(mcpServers, '--mcp-servers');
+  const { storeFile } = await checkedActivation({ evidence, store, storage, hostVersion });
+  // Delivery reports a SQLite store busy while a capture writes it, so a
+  // shared SQLite store would lose the delivery at every captured prompt.
+  if (storage !== 'json') throw new Error(`capture_store_sqlite_unsupported (${storeFile}: capture writes a JSON store only, since delivery would report a SQLite store busy at every captured prompt)`);
   const repository = await storeRepository(storeFile) ?? await gitRepository(storeFile);
   if (repository) throw new Error(`capture_store_inside_repository (${storeFile} lies in ${repository}; plan section 21.3 and source-of-truth section 7: private material is never written inside a repository, even temporarily, and nothing permits it)`);
   const { path, text, record } = await recordAt(env);
   const version = hostVersion ?? await claudeVersion();
-  const pinned = runtime ? await pinnedRuntime(runtime) : null;
+  const settingsFile = await canonicalPath(settings);
+  const { handlers, pinned } = await hooksRunning(settingsFile, runtime);
+  if (pinned && !pinned.captures) throw new Error(`activation_runtime_cannot_capture (${pinned.path} is ${pinned.commit}, a build without the capture verb and reader; install a later runtime)`);
   sharedWith(record?.capabilities?.delivery, 'delivery', storeFile, storage, pinned);
   // The origin: the capability's own, else the latest one the history kept.
   const history = Array.isArray(record?.history) ? record.history : [];
@@ -151,10 +178,10 @@ export async function activateCapture({ env = process.env, evidence, store, stor
     state: 'active', changedAt: at, evidence,
     store: { file: storeFile, storage },
     originId: kept.map(usableOriginId).find(Boolean) ?? mintOriginId(),
-    coverage, limits: { ...CAPTURE_LIMITS },
+    coverage, limits: { ...CAPTURE_LIMITS }, mcpServerNames,
     // No host version is verified for capture until AG-2 records one.
     host: { name: 'claude-code', version, verifiedVersion: null, verified: false },
-    settings: await canonicalPath(settings), runtime: pinned, surface
+    settings: settingsFile, hooksInstalled: handlers.some(({ kind }) => kind === 'capture'), runtime: pinned, surface
   };
   const note = { note: 'Capture records what you and the assistant do in every covered project into this private store. Reads are unaffected.' };
   if (!(await isScratchFile(path)) && !await confirmOwnerAction('Activate capture', { record: path, ...note, ...capture })) throw new Error(`activation_requires_owner_confirmation (${path})`);

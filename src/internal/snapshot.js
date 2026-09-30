@@ -58,8 +58,9 @@ export function privilegedResolveProjectBinding(graph, input) {
   return primitive(graph, 'resolveProjectBinding', 'privilegedResolveProjectBinding')(input);
 }
 
-// The capture writer (PR-34). Nothing in the product calls it yet: the verb
-// and hook that will are PR-36's, and capture stays inert until AG-2.
+// The capture writer (PR-34). The capture hook (src/capture-hook.js, PR-36c)
+// is its one caller, and it stays inert until capture is activated (AG-2);
+// only extraction (P7) will move an item.
 export function privilegedRecordCapture(graph, input) {
   return primitive(graph, 'recordCapture', 'privilegedRecordCapture')(input);
 }

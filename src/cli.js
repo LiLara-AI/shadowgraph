@@ -102,30 +102,64 @@ async function deliverFromHook() {
   } catch {}
 }
 
+// Automatic capture (PR-36c, plan §12.1): `capture --hook` only -- without
+// `--hook` it is a usage error, and no variable selects its store, which only
+// the capture record names. Silent on every path like delivery: nothing on
+// stdout or stderr and no exit code. Inert, reading no input, unless the
+// record says capture is active. The work runs in a worker
+// (src/capture-worker.js) under the deadline this thread keeps; once the
+// worker is inside the store it may finish, up to a hard cap below the hook
+// timeout (superviseCapture in src/capture-hook.js).
+async function captureFromHook() {
+  if (rest.length !== 1 || rest[0] !== '--hook') throw new Error('Usage: shadowgraph capture --hook (run by the capture hook; it writes only the private store the capture activation names)');
+  try {
+    process.removeAllListeners('warning');
+    for (const stream of [process.stdout, process.stderr, process.stdin]) stream.on('error', () => {});
+    const { activeCapture, captureDeadlineMs, superviseCapture, CAPTURE_HARD_CAP_MS } = await import('./capture-hook.js');
+    const started = Date.now();
+    const deadline = started + captureDeadlineMs();
+    const backstop = setTimeout(() => process.exit(0), deadline - started);
+    backstop.unref();
+    const capture = await activeCapture();
+    if (!capture) return;
+    const { activationFile, readHookInput } = await import('./delivery.js');
+    const input = await readHookInput();
+    const { Worker } = await import('node:worker_threads');
+    const worker = new Worker(new URL('./capture-worker.js', import.meta.url), { workerData: { capture, input, deadline, record: activationFile() }, stdout: true, stderr: true });
+    clearTimeout(backstop);
+    await superviseCapture(worker, { deadline, hardCap: started + CAPTURE_HARD_CAP_MS });
+  } catch {}
+}
+
 // `activate` and `deactivate` for delivery and capture (plan §26; OD-3): the
 // per-user activation record, opening no store for writing.
 async function changeActivation() {
   const [capability, ...flags] = rest;
   const usage = command === 'activate'
     ? 'Usage: shadowgraph activate delivery --evidence <ref> --store <path> [--storage json|sqlite] [--host-version <version>] [--settings <path>] [--runtime <directory>]\n'
-      + '       shadowgraph activate capture --evidence <ref> --store <path> [--storage json|sqlite] [--only <project,...> | --exclude <project,...>] [--host-version <version>] [--settings <path>] [--runtime <directory>]'
+      + '       shadowgraph activate capture --evidence <ref> --store <path> [--storage json] [--only <project,...> | --exclude <project,...>] [--mcp-servers <name,...>] [--host-version <version>] [--settings <path>] [--runtime <directory>]'
     : 'Usage: shadowgraph deactivate delivery|capture';
   if (capability !== 'delivery' && capability !== 'capture') throw new Error(usage);
   if (command === 'deactivate') return (capability === 'delivery' ? deactivateDelivery : deactivateCapture)(flagsOf(flags, {}, usage));
   const names = { '--evidence': 'evidence', '--store': 'store', '--storage': 'storage', '--host-version': 'hostVersion', '--settings': 'settings', '--runtime': 'runtime' };
   if (capability === 'delivery') return activateDelivery(flagsOf(flags, names, usage));
-  return activateCapture(flagsOf(flags, { ...names, '--only': 'only', '--exclude': 'exclude' }, usage));
+  return activateCapture(flagsOf(flags, { ...names, '--only': 'only', '--exclude': 'exclude', '--mcp-servers': 'mcpServers' }, usage));
 }
 
-// The Claude Code hook block (plan rev6 PR-31) is written into one settings
-// file, the user's by default, and opens no store; the owner confirms every
-// change at a terminal, a scratch file apart (src/host-hooks.js).
+// The Claude Code hook blocks (plan rev6 PR-31; PR-36c) are written into one
+// settings file, the user's by default, and open no store; the owner confirms
+// every change at a terminal, a scratch file apart (src/host-hooks.js).
+// `install-hooks` installs delivery's and `--capture` capture's, each
+// replacing only its own kind; `uninstall-hooks` removes both, or with
+// `--capture` capture's only.
 async function changeHooks() {
   const install = command === 'install-hooks';
-  const options = flagsOf(rest, { '--settings': 'settings', ...(install ? { '--runtime': 'runtime' } : {}) },
-    `Usage: shadowgraph ${command} [--settings <path>]${install ? ' [--runtime <directory>]' : ''}`);
+  const kind = rest.includes('--capture') ? 'capture' : undefined;
+  const options = flagsOf(rest.filter((argument) => argument !== '--capture'), { '--settings': 'settings', ...(install ? { '--runtime': 'runtime' } : {}) },
+    `Usage: shadowgraph ${command} [--capture] [--settings <path>]${install ? ' [--runtime <directory>]' : ''}`);
   const runtime = options.runtime ? await pinnedRuntime(options.runtime) : null;
-  return changeHookSettings(options.settings ?? defaultSettingsPath(), install ? 'install' : 'uninstall', runtime ? { command: runtimeHookCommand(runtime.path) } : {});
+  if (install && kind === 'capture' && runtime && !runtime.captures) throw new Error(`runtime_cannot_capture (${runtime.path} is ${runtime.commit}, a build without the capture verb)`);
+  return changeHookSettings(options.settings ?? defaultSettingsPath(), install ? 'install' : 'uninstall', { kind, ...(runtime ? { command: runtimeHookCommand(runtime.path, undefined, kind ?? 'deliver') } : {}) });
 }
 
 // `--name value` pairs, each named once, no value a flag.
@@ -338,7 +372,7 @@ async function runOneShot() {
     else if (command === 'decision') { result = graph.addDecision(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'attempt') { result = graph.addAttempt(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
     else {
-      throw new Error('Usage: shadowgraph <setup|doctor|serve|mcp|stats|list|search|retrieve|recall|remember|markdown-sync|context|review-context|deliver|install-hooks|uninstall-hooks|activate|deactivate|review|reconsider|maintain|signals|ack|validate|repair-plan|backup|restore|migrate|downgrade|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge|request-access|issue-access|delegate-access|revoke-access|discard-access|access-status|bind|attribute> [JSON/path] (restore <path> [--memory-only]; install-hooks and uninstall-hooks [--settings <path>]; activate delivery --evidence <ref> --store <path> [--runtime <directory>]; deactivate delivery). Writes require project or originId (or confirmed workspace binding). Creation IDs are generated: omit id, retain returned IDs, and use idempotencyKey for retries. Reference IDs remain supported.');
+      throw new Error('Usage: shadowgraph <setup|doctor|serve|mcp|stats|list|search|retrieve|recall|remember|markdown-sync|context|review-context|deliver|capture|install-hooks|uninstall-hooks|activate|deactivate|review|reconsider|maintain|signals|ack|validate|repair-plan|backup|restore|migrate|downgrade|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge|request-access|issue-access|delegate-access|revoke-access|discard-access|access-status|bind|attribute> [JSON/path] (restore <path> [--memory-only]; install-hooks and uninstall-hooks [--capture] [--settings <path>]; activate delivery|capture --evidence <ref> --store <path> [--runtime <directory>]; deactivate delivery|capture; capture --hook). Writes require project or originId (or confirmed workspace binding). Creation IDs are generated: omit id, retain returned IDs, and use idempotencyKey for retries. Reference IDs remain supported.');
     }
     return result;
   } finally {
@@ -350,6 +384,7 @@ try {
   if (command === 'mcp') await startMcp();
   else if (command === 'serve') await startHttp();
   else if (command === 'deliver') await deliverFromHook();
+  else if (command === 'capture') await captureFromHook();
   else if (command === 'install-hooks' || command === 'uninstall-hooks') console.log(JSON.stringify(await changeHooks(), null, 2));
   else if (command === 'activate' || command === 'deactivate') console.log(JSON.stringify(await changeActivation(), null, 2));
   else {
