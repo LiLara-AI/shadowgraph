@@ -24,6 +24,7 @@ import { attemptOutcome } from './internal/outcome.js';
 import { RUNTIME_MISSES, missReachedBy, runtimeMissLedgerIssue, withFallbackMisses } from './internal/miss-ledger.js';
 import { supersessionOrder, temporalEvidence, versionTimes } from './internal/temporal-evidence.js';
 import { T1_DERIVATION_VERSION, t1Digest, t1Inputs, t1Line } from './compact-tier.js';
+import { SELF_SIGNALS, stripDeliveredBlocks } from './internal/capture-source.js';
 import { CAPTURE_COLLECTIONS, CAPTURE_CONTENT, CAPTURE_ENTRY_TYPES, CAPTURE_EVENT_IDENTITY, CAPTURE_IMPORT_TYPE, CAPTURE_KIND, CAPTURE_SESSIONS, CAPTURE_TRANSITIONS, captureCollectionIssue, captureEntryReachedBy, captureItemIssue } from './internal/capture.js';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
@@ -924,19 +925,7 @@ export function createShadowGraph(options = {}) {
     if (!named(source.sessionId)) throw new Error('A capture source names its sessionId');
     if (input.text !== undefined && typeof input.text !== 'string') throw new Error('A capture text is a string');
     if (input.observedAt !== undefined && !isValidIsoInstant(input.observedAt)) throw new Error('A capture observedAt is an ISO 8601 instant');
-    const sessions = extras.get(CAPTURE_SESSIONS) ?? [];
-    const session = sessions.find((entry) => entry.originId === originId && entry.sessionId === source.sessionId);
-    // ponytail: a scan of every capture per write; an index by session if capture volume grows.
-    let held = Number.isSafeInteger(session?.occurrenceSeqHighWater) && session.occurrenceSeqHighWater > 0 ? session.occurrenceSeqHighWater : 0;
-    let earlier = null;
-    for (const item of captures.values()) {
-      if (item.originId !== originId || item.source?.sessionId !== source.sessionId || !Number.isSafeInteger(item.occurrenceSeq)) continue;
-      held = Math.max(held, item.occurrenceSeq);
-      earlier ??= item;
-    }
-    // A session whose record is gone still keeps the owner its captures have.
-    const resolved = session ?? earlier ?? writeOwner({ project: input.project, originId });
-    const owner = { project: resolved.project, attribution: resolved.attribution, originId };
+    const { sessions, session, held, owner } = captureSession(originId, source.sessionId, input.project);
     const observed = {
       event: source.event, sessionId: source.sessionId, role: source.role ?? null,
       hostEventId: source.hostEventId ?? null, toolCallId: source.toolCallId ?? null, turnIndex: source.turnIndex ?? null
@@ -952,7 +941,10 @@ export function createShadowGraph(options = {}) {
       throw new Error('Capture refused: its occurrence is already held');
     }
     const at = now();
-    const text = input.text;
+    // ShadowGraph's own delivered blocks never become raw material; each one
+    // removed is counted as a tool-target self-event (§16.4; PR-35).
+    const stripped = input.text === undefined ? { text: undefined, removed: 0 } : stripDeliveredBlocks(input.text);
+    const text = stripped.text;
     const item = {
       id: allocateEntityId(CAPTURE_KIND), kind: CAPTURE_KIND, schemaVersion: SCHEMA_VERSION,
       project: owner.project, attribution: owner.attribution, originId,
@@ -968,12 +960,67 @@ export function createShadowGraph(options = {}) {
     if (issue) throw new Error(`Capture refused: ${issue}`);
     assertJournalCapacity(1);
     captures.set(item.id, item);
-    const next = { ...(session ?? { id: `capsession_${randomUUID()}`, originId, sessionId: observed.sessionId, project: owner.project, attribution: owner.attribution }), occurrenceSeqHighWater: occurrenceSeq };
+    const next = { ...(session ?? newCaptureSession(originId, observed.sessionId, owner)), project: owner.project, attribution: owner.attribution, occurrenceSeqHighWater: occurrenceSeq };
+    if (stripped.removed) next.selfEvents = countSelfEvent(next.selfEvents, 'S-1', observed.event, stripped.removed);
     extras.set(CAPTURE_SESSIONS, session ? sessions.map((entry) => (entry === session ? next : entry)) : [...sessions, next]);
     if (item.contentRef) extras.set(CAPTURE_CONTENT, [...(extras.get(CAPTURE_CONTENT) ?? []), { contentRef: item.contentRef, project: owner.project, attribution: owner.attribution, originId, text }]);
     appendJournal({ type: 'capture.recorded', entityKind: CAPTURE_KIND, entityId: item.id, project: item.project, payload: item, idempotencyKey: slot });
     idempotency.set(slot, clone(item));
     return clone(item);
+  }
+
+  // A capture session and its owner: its record's, else that of the captures
+  // it already has (a session whose record is gone keeps its owner), else the
+  // write's. A record that holds only self-event counters has no owner yet, so
+  // ShadowGraph's own traffic never decides whose work follows: the session's
+  // first capture gives it one. Its count is past the record's mark and every
+  // ordinal a live capture of the session holds.
+  function captureSession(originId, sessionId, project) {
+    const sessions = extras.get(CAPTURE_SESSIONS) ?? [];
+    const session = sessions.find((entry) => entry.originId === originId && entry.sessionId === sessionId);
+    // ponytail: a scan of every capture per write; an index by session if capture volume grows.
+    let held = Number.isSafeInteger(session?.occurrenceSeqHighWater) && session.occurrenceSeqHighWater > 0 ? session.occurrenceSeqHighWater : 0;
+    let earlier = null;
+    for (const item of captures.values()) {
+      if (item.originId !== originId || item.source?.sessionId !== sessionId || !Number.isSafeInteger(item.occurrenceSeq)) continue;
+      held = Math.max(held, item.occurrenceSeq);
+      earlier ??= item;
+    }
+    const owned = session && (session.occurrenceSeqHighWater > 0 || earlier) ? session : null;
+    const resolved = owned ?? earlier ?? writeOwner({ project, originId });
+    return { sessions, session, held, owner: { project: resolved.project, attribution: resolved.attribution, originId } };
+  }
+
+  function newCaptureSession(originId, sessionId, owner) {
+    return { id: `capsession_${randomUUID()}`, originId, sessionId, project: owner.project, attribution: owner.attribution };
+  }
+
+  // A session's self-event counters (§16.3): one count per signal and event,
+  // a fixed set however many arrive.
+  function countSelfEvent(counters, signal, event, by = 1) {
+    const held = isPlainObject(counters) ? counters : {};
+    const bySignal = isPlainObject(held[signal]) ? held[signal] : {};
+    const count = Number.isSafeInteger(bySignal[event]) && bySignal[event] >= 0 ? bySignal[event] : 0;
+    return { ...held, [signal]: { ...bySignal, [event]: count + by } };
+  }
+
+  // A ShadowGraph self-event (PR-35; §16.3, AC-065): counted on its session,
+  // and nothing else -- no capture item, record, journal entry or retry key,
+  // and no ordinal. A session it opens is owned for now by the write's owner,
+  // until its first capture.
+  function recordSelfEvent(input = {}) {
+    if (!isPlainObject(input)) throw new Error('A self-event needs an input object');
+    const originId = usableOriginId(input.originId);
+    if (originId === null || originId !== input.originId) throw new Error('A self-event names the originId that observed it');
+    if (!SELF_SIGNALS.includes(input.signal)) throw new Error(`A self-event names its signal: ${SELF_SIGNALS.join(', ')}`);
+    const source = input.source;
+    if (!isPlainObject(source) || !Object.hasOwn(CAPTURE_EVENT_IDENTITY, source.event)) throw new Error(`A self-event names an event the source contract covers: ${Object.keys(CAPTURE_EVENT_IDENTITY).join(', ')}`);
+    if (!named(source.sessionId)) throw new Error('A self-event names its sessionId');
+    const { sessions, session, held, owner } = captureSession(originId, source.sessionId, input.project);
+    const base = session ?? { ...newCaptureSession(originId, source.sessionId, owner), occurrenceSeqHighWater: held };
+    const next = { ...base, selfEvents: countSelfEvent(base.selfEvents, input.signal, source.event) };
+    extras.set(CAPTURE_SESSIONS, session ? sessions.map((entry) => (entry === session ? next : entry)) : [...sessions, next]);
+    return clone(next.selfEvents);
   }
 
   // One §12.5 edge (CAPTURE_TRANSITIONS): what it needs, and the one type it
@@ -4812,7 +4859,8 @@ export function createShadowGraph(options = {}) {
     issueAccess: transactional('ownerIssueAccess', authority.issueOwner), inspectAccess: authority.inspect,
     accessRefusal: transactional('accessRefusal', authority.transportRefusal),
     bindProject: transactional('bindProject', bindProject), resolveProjectBinding,
-    recordCapture: transactional('recordCapture', recordCapture), transitionCapture: transactional('transitionCapture', transitionCapture) });
+    recordCapture: transactional('recordCapture', recordCapture), transitionCapture: transactional('transitionCapture', transitionCapture),
+    recordSelfEvent: transactional('recordSelfEvent', recordSelfEvent) });
 }
 
 // `strict` is for caller writes, where a typo should fail loudly instead of

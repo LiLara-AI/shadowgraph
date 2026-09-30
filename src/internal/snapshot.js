@@ -66,3 +66,7 @@ export function privilegedRecordCapture(graph, input) {
 export function privilegedTransitionCapture(graph, input) {
   return primitive(graph, 'transitionCapture', 'privilegedTransitionCapture')(input);
 }
+// A ShadowGraph self-event (PR-35): counted on its session, never recorded.
+export function privilegedRecordSelfEvent(graph, input) {
+  return primitive(graph, 'recordSelfEvent', 'privilegedRecordSelfEvent')(input);
+}

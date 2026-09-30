@@ -379,13 +379,19 @@ test('the kernel emits capture types in two places only', async () => {
   assert.equal(lines.filter((line) => /CAPTURE_TRANSITIONS/.test(line)).length, 2, 'the import and transitionCapture');
   const edges = await readFile(join(root, 'src', 'internal', 'capture.js'), 'utf8');
   for (const type of ['capture.state_changed', 'extraction.completed', 'extraction.failed']) assert.match(edges, new RegExp(`type: '${type.replace('.', '\\.')}'`), type);
-  const callers = [];
+  // Nor does anything call the self-event counter (PR-35) or the classifier.
+  const callers = { recordCapture: [], transitionCapture: [], recordSelfEvent: [], classifyCaptureSource: [] };
   for (const directory of ['src', 'scripts', 'bin', 'integrations']) {
     let names = [];
     try { names = (await readdir(join(root, directory), { recursive: true })).filter((name) => /\.(?:m?js|cjs|py)$/.test(name)); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-    for (const name of names) if (/privilegedRecordCapture|privilegedTransitionCapture|recordCapture|transitionCapture/.test(await readFile(join(root, directory, name), 'utf8'))) callers.push(`${directory}/${name.replaceAll('\\', '/')}`);
+    for (const name of names) {
+      const source = await readFile(join(root, directory, name), 'utf8');
+      for (const verb of Object.keys(callers)) if (source.includes(verb)) callers[verb].push(`${directory}/${name.replaceAll('\\', '/')}`);
+    }
   }
-  assert.deepEqual(callers.sort(), ['src/internal/snapshot.js', 'src/shadowgraph.js'], 'only the kernel and its privileged wrappers name the writer: nothing calls it');
+  const wrappers = ['src/internal/snapshot.js', 'src/shadowgraph.js'];
+  for (const verb of Object.keys(callers)) callers[verb].sort();
+  assert.deepEqual(callers, { recordCapture: wrappers, transitionCapture: wrappers, recordSelfEvent: wrappers, classifyCaptureSource: ['src/internal/capture-source.js'] }, 'only the kernel and its privileged wrappers name the writer: nothing calls it');
 });
 
 // Review round (briefs/PR34-review.md).
