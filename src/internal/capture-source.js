@@ -36,7 +36,11 @@ const RUNTIME_ENTRY_POINTS = Object.freeze([['src', 'cli.js'], ['src', 'mcp.js']
 const RUNNERS = new Set(['npx', 'bunx', 'pnpx']);
 const PACKAGE_MANAGERS = new Set(['npm', 'pnpm', 'yarn', 'bun']);
 const EXEC_VERBS = new Set(['exec', 'dlx', 'x']);
-const STORE_SIDE_FILES = Object.freeze(['.lock', '-wal', '-shm', '-journal']);
+// The fence's lock, SQLite's side files, and the deletion records and restore
+// lock beside the store (PR-37c design scope item 9). The one list that names
+// the lock without fenceLockPath (check R3-7): it is synchronous, and the
+// store path it is given is the activation record's, canonical already.
+const STORE_SIDE_FILES = Object.freeze(['.lock', '-wal', '-shm', '-journal', '.control.json', '.restore.lock']);
 const PATH_FIELDS = Object.freeze(['file_path', 'path', 'notebook_path']);
 const SHELLS = Object.freeze({ Bash: 'bash', PowerShell: 'powershell' });
 const WIN32 = process.platform === 'win32';
@@ -53,8 +57,8 @@ const programName = (word) => {
 const texts = (value) => (Array.isArray(value) ? value.filter((item) => typeof item === 'string') : []);
 
 // The artefacts S-1 matches, from what the runtime resolved: its store (with
-// its lock, SQLite and restore side files), its installed runtime's entry
-// points, its activation record and the marker files it reads.
+// its locks, SQLite side files and deletion records), its installed runtime's
+// entry points, its activation record and the marker files it reads.
 export function captureArtefacts({ storeFile, runtimeDirectory, activationFile, markerFiles = [] } = {}) {
   const files = [];
   if (storeFile) files.push(storeFile, ...STORE_SIDE_FILES.map((suffix) => `${storeFile}${suffix}`));

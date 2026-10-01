@@ -87,3 +87,15 @@ export function privilegedRecordSelfEvent(graph, input) {
 export function privilegedRecordTranscript(graph, input) {
   return primitive(graph, 'recordTranscript', 'privilegedRecordTranscript')(input);
 }
+// A restore's post-step and `quarantine purge` (PR-37c design §6.4): the
+// restore wrapper and the quarantine verbs are its callers. It is never on the
+// graph's public API.
+export function privilegedReapplyDeletion(graph, plan, options) {
+  return primitive(graph, 'reapplyDeletion', 'privilegedReapplyDeletion')(plan, options);
+}
+// What is quarantined, by identity (PR-37c design §9.2): the owner's
+// `quarantine` verbs (src/internal/quarantine.js) are its one caller, and no
+// agent surface reaches it.
+export function privilegedQuarantined(graph) {
+  return primitive(graph, 'quarantined', 'privilegedQuarantined')();
+}

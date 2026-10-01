@@ -15,6 +15,7 @@ import { privilegedSnapshot } from './internal/snapshot.js';
 import * as privileged from './internal/snapshot.js';
 import { accessContext, bindWorkspaceProject, currentAccessOperation, discoverWorkspace, hasAccessReference } from './internal/access-transport.js';
 import { confirmOwnerAction, ownerAnswer } from './internal/owner-confirmation.js';
+import { applyQuarantine, quarantineSelection } from './internal/quarantine.js';
 import { changeHookSettings, defaultSettingsPath, pinnedRuntime, runtimeHookCommand } from './host-hooks.js';
 import { activateCapture, activateDelivery, deactivateCapture, deactivateDelivery } from './activation.js';
 
@@ -262,6 +263,22 @@ async function runOneShot() {
       return result;
     }
 
+    // `quarantine list|release|purge` (PR-37c design §9.1): the owner's only
+    // way to see, release or purge what a restore withheld as possibly
+    // purged. Without a terminal it refuses before the selection is read, so
+    // nothing is resolved or written and the refusal is one code whatever the
+    // selection names (review finding 8). At a terminal the selection is
+    // resolved first, so the owner confirms the exact items; without the
+    // typed confirm nothing more is written. No MCP tool or HTTP route
+    // reaches it.
+    if (command === 'quarantine') {
+      if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) throw new Error('quarantine_requires_owner_confirmation');
+      const [verb, ...value] = rest;
+      const selection = await quarantineSelection(store, verb, parse(value.join(' ') || '{}'));
+      if (!await confirmOwnerAction(`Confirm quarantine ${verb}`, selection)) throw new Error('quarantine_requires_owner_confirmation');
+      return verb === 'list' || !selection.ids.length ? selection : await applyQuarantine(store, verb, selection.ids);
+    }
+
     const readCommands = {
       stats: (value) => graph.stats(value), list: (value) => graph.exportData(value), search: (value) => graph.search(value.query ?? '', value),
       retrieve: (value) => graph.retrieve(value.query ?? '', value), recall: (value) => graph.recall(value.query ?? '', value),
@@ -372,7 +389,7 @@ async function runOneShot() {
     else if (command === 'decision') { result = graph.addDecision(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'attempt') { result = graph.addAttempt(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
     else {
-      throw new Error('Usage: shadowgraph <setup|doctor|serve|mcp|stats|list|search|retrieve|recall|remember|markdown-sync|context|review-context|deliver|capture|install-hooks|uninstall-hooks|activate|deactivate|review|reconsider|maintain|signals|ack|validate|repair-plan|backup|restore|migrate|downgrade|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge|request-access|issue-access|delegate-access|revoke-access|discard-access|access-status|bind|attribute> [JSON/path] (restore <path> [--memory-only]; install-hooks and uninstall-hooks [--capture] [--settings <path>]; activate delivery|capture --evidence <ref> --store <path> [--runtime <directory>]; deactivate delivery|capture; capture --hook). Writes require project or originId (or confirmed workspace binding). Creation IDs are generated: omit id, retain returned IDs, and use idempotencyKey for retries. Reference IDs remain supported.');
+      throw new Error('Usage: shadowgraph <setup|doctor|serve|mcp|stats|list|search|retrieve|recall|remember|markdown-sync|context|review-context|deliver|capture|install-hooks|uninstall-hooks|activate|deactivate|review|reconsider|maintain|signals|ack|validate|repair-plan|backup|restore|migrate|downgrade|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge|quarantine|request-access|issue-access|delegate-access|revoke-access|discard-access|access-status|bind|attribute> [JSON/path] (restore <path> [--memory-only]; quarantine list|release|purge [JSON]; install-hooks and uninstall-hooks [--capture] [--settings <path>]; activate delivery|capture --evidence <ref> --store <path> [--runtime <directory>]; deactivate delivery|capture; capture --hook). Writes require project or originId (or confirmed workspace binding). Creation IDs are generated: omit id, retain returned IDs, and use idempotencyKey for retries. Reference IDs remain supported.');
     }
     return result;
   } finally {

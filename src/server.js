@@ -207,6 +207,7 @@ export async function createShadowGraphServer(options = {}) {
               const value = await store.restore(body?.source, {
                 memoryOnly: body?.memoryOnly === true,
                 validate: restoreValidator,
+                verifier: options.verifier,
                 afterReplace(payload) { graph.replaceData(payload); activated = true; }
               });
               if (!activated) graph.replaceData(await store.load());
@@ -215,6 +216,7 @@ export async function createShadowGraphServer(options = {}) {
             const destination = options.file ?? process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json';
             return await restoreFile(body?.source, destination, {
               memoryOnly: body?.memoryOnly === true,
+              verifier: options.verifier,
               storage: options.storage ?? process.env.SHADOWGRAPH_STORAGE,
               validate: restoreValidator,
               restoreFs: options.restoreFs,

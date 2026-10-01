@@ -14,7 +14,7 @@ import fsModule from 'node:fs';
 import { existsSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { userInfo } from 'node:os';
-import { dirname, join, relative, isAbsolute } from 'node:path';
+import { basename, dirname, join, relative, isAbsolute } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { createShadowGraph } from '../src/shadowgraph.js';
@@ -182,7 +182,8 @@ function withoutWithheld(source, { tokens, projects }) {
   const contentRefs = new Set(source.records.filter((item) => ids.has(item.id)).map((item) => item.contentRef).filter(Boolean));
   if (payload.runtimeMisses) payload.runtimeMisses = payload.runtimeMisses.filter((item) => !ids.has(item.recordId) && !predates(item.scope?.project, item.at));
   if (payload.captureContent) payload.captureContent = payload.captureContent.filter((item) => !contentRefs.has(item.contentRef));
-  if (payload.captureSessions) payload.captureSessions = payload.captureSessions.filter((item) => !(item.attribution === 'project' && predates(item.project)));
+  // A session opened after a project's tombstone is not withheld (PR-37c design §1.3, R9); one with no time is.
+  if (payload.captureSessions) payload.captureSessions = payload.captureSessions.filter((item) => !(item.attribution === 'project' && predates(item.project, item.startedAt)));
   return { payload, hiddenSeqs, ids, relationIds };
 }
 
@@ -220,6 +221,16 @@ function reads(graph, scope, ids, hiddenSeqs = new Set()) {
     reviewContext: answer(() => graph.reviewContext({ ...scope, query: 'decision' })),
     maintain: answer(() => graph.maintain(scope))
   };
+}
+
+// A read with its quarantine disclosure (PR-37c design §9.3) taken out: the
+// count and the sentence that names it.
+const QUARANTINE_SENTENCE = / \d+ items? of this scope (?:is|are) withheld as possibly purged; only the owner can release or purge them\./gu;
+function undisclosed(value) {
+  if (typeof value === 'string') return value.replace(QUARANTINE_SENTENCE, '');
+  if (Array.isArray(value)) return value.map(undisclosed);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'quarantined').map(([key, item]) => [key, undisclosed(item)]));
+  return value;
 }
 
 // A read's value, or its refusal: a refusal must be the same refusal.
@@ -321,7 +332,9 @@ for (const [backend, options] of BACKENDS) {
       const contents = withheldContents(f, tokens);
       for (const scope of SCOPES) {
         const actual = reads(viewed, scope, f.ids);
-        assert.deepEqual(actual, reads(reference, scope, f.ids, expected.hiddenSeqs), `${JSON.stringify(scope)}`);
+        // Quarantine is also disclosed by count (PR-37c design §9.3), which S′, holding no ledger, cannot show.
+        assert.deepEqual(name === 'quarantine' ? undisclosed(actual) : actual, reads(reference, scope, f.ids, expected.hiddenSeqs), `${JSON.stringify(scope)}`);
+        if (name === 'quarantine' && scope.project === 'p') assert.match(JSON.stringify(actual), /"quarantined":2/u, 'the quarantine is counted');
         const text = JSON.stringify(actual);
         // A read given an id echoes it back as for an unknown one; the rest name none.
         const { expand, memoryHistoryById, ...unprompted } = actual;
@@ -355,7 +368,7 @@ for (const [backend, options] of BACKENDS) {
     assert.equal(privilegedLiveSnapshot(plain).records.some((item) => item.id === f.ids.hidden), true);
   });
 
-  test(`PR-37a files ${backend}: loads, saves, updates, purges, backups, refused restores and downgrades never write the ledger or the registry`, options, async (t) => {
+  test(`PR-37a files ${backend}: loads, saves, updates, purges, backups and downgrades never write the ledger or the registry; a restore writes exactly one lifted tombstone (PR-37c design §13.4)`, options, async (t) => {
     const f = fixture();
     const state = await storeOf(t, backend, f.payload, VIEWS.item(f).ledger);
     const env = { SHADOWGRAPH_HOME: join(state.dir, 'home') };
@@ -376,9 +389,19 @@ for (const [backend, options] of BACKENDS) {
     const extension = backend === 'sqlite' ? 'db' : 'json';
     const backup = join(state.dir, `backup.${extension}`);
     await backupFile(state.file, backup, { store, env });
-    await assert.rejects(backend === 'sqlite' ? store.restore(backup) : restoreFile(backup, state.file, { env }), { code: PURGE_AWARE_RESTORE_UNSUPPORTED });
-    await downgradeStore({ graph, store, file: state.file, storageType: backend, output: join(state.dir, `down.${extension}`), preservationCopy: join(state.dir, `kept.${extension}`), toSchemaVersion: 6, now });
     assert.deepEqual(await Promise.all(files.map(fileHash)), before);
+    // The restore lifts D's own purge marker of q, and writes nothing else to either (PR-37c design §4.4).
+    const ledgerBefore = JSON.parse(await readFile(files[0], 'utf8'));
+    if (backend === 'sqlite') await store.restore(backup);
+    else await restoreFile(backup, state.file, { env });
+    const ledgerAfter = JSON.parse(await readFile(files[0], 'utf8'));
+    assert.deepEqual(ledgerAfter, { ...ledgerBefore, tombstones: [...ledgerBefore.tombstones, ledgerAfter.tombstones.at(-1)] });
+    assert.deepEqual([ledgerAfter.tombstones.length, ledgerAfter.tombstones.at(-1).purgedProject, ledgerAfter.tombstones.at(-1).tokens], [ledgerBefore.tombstones.length + 1, 'q', null]);
+    assert.equal(await fileHash(files[1]), before[1], 'the registry is never written');
+    const restored = await Promise.all(files.map(fileHash));
+    graph.replaceData(await store.load());
+    await downgradeStore({ graph, store, file: state.file, storageType: backend, output: join(state.dir, `down.${extension}`), preservationCopy: join(state.dir, `kept.${extension}`), toSchemaVersion: 6, now });
+    assert.deepEqual(await Promise.all(files.map(fileHash)), restored);
   });
 }
 
@@ -524,7 +547,10 @@ for (const mode of ['logical', 'hard']) test(`PR-37a purge ${mode}: a purge reac
 
 test('PR-37a capture: a session W holds is never minted again or written to, and capture keeps clear of what W holds', async (t) => {
   const f = fixture();
-  const state = await storeOf(t, 'json', f.payload, VIEWS.project(f).ledger);
+  // A session opened before its project's tombstone is one the tombstone holds (PR-37c design §1.3, R9).
+  const opened = structuredClone(f.payload);
+  opened.captureSessions[0].startedAt = BEFORE;
+  const state = await storeOf(t, 'json', opened, VIEWS.project(f).ledger);
   const graph = await graphOf(state);
   const before = privilegedSnapshot(graph);
   const source = { event: 'UserPromptSubmit', sessionId: 'session-1', role: 'user' };
@@ -579,6 +605,9 @@ const TRIGGERS = {
   'D ledger unreadable': ({ destination }) => writeFile(`${destination.file}.control.json`, '{'),
   'B sidecar with knowledge': ({ source }) => writeFile(`${source.file}.control.json`, JSON.stringify({ version: 1, tombstones: [] })),
   'B sidecar newer': ({ source }) => writeFile(`${source.file}.control.json`, JSON.stringify({ version: 2 })),
+  // A sidecar never carries a record (C3): a non-empty pending list refuses, an empty one does not (M60; review
+  // finding 11, X-sidecar-pending).
+  'B sidecar pending': ({ source }) => writeFile(`${source.file}.control.json`, JSON.stringify({ version: 1, pending: [{ kind: 'purge' }] })),
   'registry tombstone': ({ env }) => writeFile(registryFile(env), JSON.stringify({ version: 1, tombstones: [tombstone({ tokens: ['anything'] })] })),
   'registry unreadable': ({ env }) => writeFile(registryFile(env), 'nope'),
   'registry root relative': async ({ env }) => { env.SHADOWGRAPH_HOME = 'relative-home'; },
@@ -600,14 +629,66 @@ const NON_TRIGGERS = {
   'no knowledge anywhere': async () => {}
 };
 
+// PR-37c design §13.4: knowledge itself no longer refuses (§5.2). These triggers
+// stay refusals, with the same code; the rest proceed, each with what it does.
+const REFUSING = ['D ledger pending', 'D ledger unreadable', 'B sidecar newer', 'B sidecar pending', 'registry unreadable', 'registry root relative', 'D transcript cursor'];
+const PROCEEDING = {
+  // A tokens:null tombstone with no recorded move-in: every B candidate not live in D is quarantined.
+  'D ledger tombstone': async ({ result, destination, source }) => {
+    assert.deepEqual([result.deletionKnowledge, result.reapplied.quarantined], ['present', 0]);
+    const restored = await load(destination);
+    const quarantine = new Set(JSON.parse(await readFile(ledgerPath(destination.file), 'utf8')).quarantine.map((entry) => entry.token));
+    const own = [...restored.records, ...restored.facts].filter((entity) => (source.stored.records.some((item) => item.id === entity.id) || source.stored.facts.some((item) => item.id === entity.id)));
+    assert.ok(own.length > 0);
+    for (const entity of own) assert.equal(quarantine.has(entity.erasureToken), true, entity.id);
+    const graph = createShadowGraph({ now });
+    graph.importData(restored);
+    const live = new Set([...privilegedLiveSnapshot(graph).records, ...privilegedLiveSnapshot(graph).facts].map((item) => item.id));
+    assert.deepEqual(own.filter((entity) => live.has(entity.id)).map((entity) => entity.id), []);
+  },
+  'D ledger quarantine': async ({ result, ledgerBefore, destination }) => {
+    assert.equal(result.deletionKnowledge, 'present');
+    assert.equal(await fileHash(ledgerPath(destination.file)), ledgerBefore, 'nothing written');
+  },
+  'B sidecar with knowledge': async ({ result, destination }) => {
+    assert.equal(result.deletionKnowledge, 'none', 'an empty tombstone list');
+    assert.equal(existsSync(ledgerPath(destination.file)), false);
+  },
+  'registry tombstone': async ({ result, destination }) => {
+    assert.equal(result.deletionKnowledge, 'none', 'a token B lacks');
+    assert.equal(existsSync(ledgerPath(destination.file)), false);
+  },
+  // Lifted; B's q material quarantined, its p material visible.
+  'D purge marker': async ({ result, destination, source }) => {
+    assert.equal(result.deletionKnowledge, 'present');
+    const ledger = JSON.parse(await readFile(ledgerPath(destination.file), 'utf8'));
+    assert.deepEqual(ledger.tombstones.map((item) => [item.purgedProject, item.mode, item.tokens, item.moveIn]), [['q', 'logical', null, 'none']]);
+    const graph = createShadowGraph({ now });
+    graph.importData(await load(destination));
+    const live = new Set(privilegedLiveSnapshot(graph).records.map((item) => item.id));
+    for (const item of source.stored.records) assert.equal(live.has(item.id), item.project !== 'q', `${item.project} ${item.kind}`);
+  }
+};
+
 for (const [backend, options] of BACKENDS) {
-  for (const [name, setup] of Object.entries(TRIGGERS)) test(`PR-37a restore ${backend} refuses: ${name}; memory-only too; D and its ledger unchanged`, options, async (t) => {
+  for (const name of REFUSING) test(`PR-37a restore ${backend} refuses: ${name}; memory-only too; D and its ledger unchanged`, options, async (t) => {
+    const setup = TRIGGERS[name];
     const { destination, restore } = await restoreCase(t, backend, setup);
     const ledger = `${destination.file}.control.json`;
     const before = [await content(destination), await fileHash(ledger)];
     for (const memoryOnly of [false, true]) {
       await assert.rejects(restore(memoryOnly), (error) => error.code === PURGE_AWARE_RESTORE_UNSUPPORTED && !error.message.includes(destination.dir));
       assert.deepEqual([await content(destination), await fileHash(ledger)], before);
+    }
+  });
+  for (const [name, check] of Object.entries(PROCEEDING)) test(`PR-37c restore ${backend} proceeds: ${name}; memory-only too (PR-37c design §13.4)`, options, async (t) => {
+    for (const memoryOnly of [false, true]) {
+      const { destination, source, env, restore } = await restoreCase(t, backend, TRIGGERS[name]);
+      const registryBefore = await fileHash(registryFile(env));
+      const ledgerBefore = await fileHash(ledgerPath(destination.file));
+      const result = await restore(memoryOnly);
+      await check({ result, destination, source, ledgerBefore });
+      assert.equal(await fileHash(registryFile(env)), registryBefore, 'the registry is never written');
     }
   });
   for (const [name, setup] of Object.entries(NON_TRIGGERS)) test(`PR-37a restore ${backend} proceeds: ${name}; D's ledger and the registry are never written`, options, async (t) => {
@@ -632,7 +713,7 @@ test('PR-37a restore: a cursor-bearing backup restores into a cursor-free store 
 async function call(t, surface, state, source) {
   const env = { ...process.env, SHADOWGRAPH_FILE: state.file, SHADOWGRAPH_STORAGE: state.backend, SHADOWGRAPH_API_TOKEN: '', SHADOWGRAPH_EMBEDDING_URL: '', SHADOWGRAPH_VERIFIER_CONFIG: '' };
   if (surface === 'cli') {
-    try { await execute(process.execPath, [cliPath, 'restore', source], { cwd: state.dir, env }); return { ok: true, text: '' }; }
+    try { return { ok: true, text: (await execute(process.execPath, [cliPath, 'restore', source], { cwd: state.dir, env })).stdout }; }
     catch (error) { return { ok: false, text: `${error.stderr}` }; }
   }
   if (surface === 'http') {
@@ -663,16 +744,23 @@ async function call(t, surface, state, source) {
 }
 
 for (const [backend, options] of BACKENDS) for (const surface of ['cli', 'http', 'mcp']) {
-  test(`PR-37a restore ${backend}/${surface}: the refusal crosses the boundary as its code, naming no path, and D is unchanged`, options, async (t) => {
+  // PR-37c design §13.4: knowledge proceeds and says so on every surface; a
+  // refusal still crosses the boundary as its code, naming no path.
+  test(`PR-37a restore ${backend}/${surface}: a restore that knowledge reaches succeeds with deletionKnowledge present; a refusal crosses the boundary as its code, naming no path, and D is unchanged`, options, async (t) => {
     const f = fixture();
     const destination = await storeOf(t, backend, f.payload, { version: 1, tombstones: [tombstone({ kind: 'project', purgedProject: 'z', tokens: null })] });
     const source = await storeOf(t, backend, fixture().payload);
-    const before = await content(destination);
     const result = await call(t, surface, destination, source.file);
-    assert.equal(result.ok, false, result.text);
-    assert.match(result.text, /purge_aware_restore_unsupported_at_this_build/);
-    assert.equal(result.text.includes(destination.dir), false);
-    assert.equal(await content(destination), before);
+    assert.equal(result.ok, true, result.text);
+    assert.match(result.text, /deletionKnowledge\\?"\s*:\s*\\?"present/);
+    const refused = await storeOf(t, backend, f.payload);
+    const newer = await storeOf(t, backend, fixture().payload, { version: 2 });
+    const before = await content(refused);
+    const refusal = await call(t, surface, refused, newer.file);
+    assert.equal(refusal.ok, false, refusal.text);
+    assert.match(refusal.text, /purge_aware_restore_unsupported_at_this_build/);
+    assert.equal(refusal.text.includes(refused.dir), false);
+    assert.equal(await content(refused), before);
   });
 }
 
@@ -758,7 +846,7 @@ test('PR-37a preservation copy: the copy carries the ledger, hashed with it', as
   assert.equal(copy.controlLedger.path, join(state.dir, 'kept.json.control.json'));
 });
 
-for (const [backend, options] of BACKENDS) test(`PR-37a below floor ${backend}: a downgrade leaves W out, counts it without ids, keeps the preservation copy's ledger, and refuses a stale output ledger`, options, async (t) => {
+for (const [backend, options] of BACKENDS) test(`PR-37a below floor ${backend}: a downgrade leaves W out, counts it without ids, keeps the preservation copy's ledger, gives its output only the tokensStripped flag, and refuses a stale output ledger`, options, async (t) => {
   const f = fixture();
   const state = await storeOf(t, backend, f.payload, VIEWS.item(f).ledger);
   const store = await createStorage({ type: backend, file: state.file });
@@ -774,14 +862,15 @@ for (const [backend, options] of BACKENDS) test(`PR-37a below floor ${backend}: 
   for (const id of [f.ids.hidden, f.ids.memory, f.ids.fact, f.ids.capture]) assert.equal(JSON.stringify(result).includes(id), false);
   assert.ok(result.withheldEntryCounts.records >= 2);
   assert.ok(result.withheldEntryCounts.journal >= 2);
-  assert.equal(existsSync(`${output}.control.json`), false);
+  // Its output gets a ledger of exactly the tokensStripped flag (PR-37c design §4.7, §13.4).
+  assert.deepEqual(Object.keys(JSON.parse(await readFile(`${output}.control.json`, 'utf8'))).sort(), ['tokensStripped', 'version']);
   assert.ok(existsSync(join(state.dir, `kept.${extension}.control.json`)));
   const stale = join(state.dir, `again.${extension}`);
   await writeFile(`${stale}.control.json`, '{"version":1}');
   await assert.rejects(downgradeStore({ graph, store, file: state.file, storageType: backend, output: stale, preservationCopy: join(state.dir, `kept2.${extension}`), toSchemaVersion: 6, now }), { code: 'backup_control_ledger_stale' });
 });
 
-test('PR-37a restore.reapplied: a hand-built post-step store restore-validates with rebuild parity; malformed shapes are refused; nothing in src writes one', async () => {
+test('PR-37a restore.reapplied: a hand-built post-step store restore-validates with rebuild parity; malformed shapes are refused; shadowgraph.js is its one writer (PR-37c design §13.4)', async () => {
   const f = fixture();
   const reapplied = (payload, mode, fields = {}) => {
     const seq = ++payload.journalSeq;
@@ -814,9 +903,9 @@ test('PR-37a restore.reapplied: a hand-built post-step store restore-validates w
   const src = fileURLToPath(new URL('../src/', import.meta.url));
   const emitters = [];
   for (const name of (await readdir(src, { recursive: true })).filter((item) => item.endsWith('.js'))) {
-    if (name !== 'journal.js' && (await readFile(join(src, name), 'utf8')).includes('restore.reapplied')) emitters.push(name);
+    if (name !== 'journal.js' && /type:\s*'restore\.reapplied'/.test(await readFile(join(src, name), 'utf8'))) emitters.push(name);
   }
-  assert.deepEqual(emitters, []);
+  assert.deepEqual(emitters, ['shadowgraph.js']);
 });
 
 test('PR-37a codes: every deletion refusal is a public MCP code, and nothing in src names a generation counter', async () => {
@@ -966,21 +1055,24 @@ for (const [backend, options] of BACKENDS) test(`K-1/C-1 ${backend}: a backup ne
   }
 });
 
+// PR-37c design §13.4: the hard-linked name still refuses; the names that find
+// the sidecar now proceed and merge it.
 for (const [backend, options] of BACKENDS) test(`C-2 ${backend}: a backup reached through another name keeps its sidecar, or the restore refuses`, options, async (t) => {
   const f = fixture();
   const destination = await storeOf(t, backend, f.payload);
   const source = await storeOf(t, backend, fixture().payload, { version: 1, quarantine: [{ token: f.tokens.memory }] });
   const linked = join(source.dir, `latest.${backend === 'sqlite' ? 'db' : 'json'}`);
   await link(source.file, linked);
+  const restore = (name) => (backend === 'json'
+    ? restoreFile(name, destination.file)
+    : (async () => { const store = await createStorage({ type: 'sqlite', file: destination.file }); try { return await store.restore(name); } finally { store.close(); } })());
   const before = await content(destination);
-  const names = [linked, ...(process.platform === 'win32' ? [namespaced(source.file), shortName(source.file)] : [])].filter(Boolean);
-  for (const name of names) {
-    const attempt = backend === 'json'
-      ? restoreFile(name, destination.file)
-      : (async () => { const store = await createStorage({ type: 'sqlite', file: destination.file }); try { return await store.restore(name); } finally { store.close(); } })();
-    await assert.rejects(attempt, { code: PURGE_AWARE_RESTORE_UNSUPPORTED }, name);
-  }
+  await assert.rejects(restore(linked), { code: PURGE_AWARE_RESTORE_UNSUPPORTED }, linked);
   assert.equal(await content(destination), before);
+  for (const name of (process.platform === 'win32' ? [namespaced(source.file), shortName(source.file)] : []).filter(Boolean)) {
+    assert.equal((await restore(name)).deletionKnowledge, 'present', name);
+    assert.deepEqual(JSON.parse(await readFile(ledgerPath(destination.file), 'utf8')).quarantine, [{ token: f.tokens.memory }], name);
+  }
 });
 
 for (const [backend, options] of BACKENDS) test(`C-5 ${backend}: a backup onto the store's own path leaves its ledger as it is`, options, async (t) => {
@@ -1008,12 +1100,17 @@ test('C-9: a restore into a destination that cannot be read refuses; a fresh des
   assert.ok((await load({ file: fresh, backend: 'json' })).records.length);
 });
 
-test('K-6/T-24: a restore of a store onto itself is refused where deletion records apply', async (t) => {
+// PR-37c design §13.4, §3.5 (V-5): a same-path restore is unchanged, says
+// whether knowledge reaches it, and writes nothing.
+test('K-6/T-24: a restore of a store onto itself is unchanged where deletion records apply, says so, and writes nothing', async (t) => {
   const f = fixture();
   const state = await storeOf(t, 'json', f.payload, VIEWS.item(f).ledger);
-  const before = await fileHash(state.file);
-  await assert.rejects(restoreFile(state.file, state.file), { code: PURGE_AWARE_RESTORE_UNSUPPORTED });
-  assert.equal(await fileHash(state.file), before);
+  const before = [await fileHash(state.file), await fileHash(ledgerPath(state.file))];
+  const inode = (await stat(ledgerPath(state.file), { bigint: true })).ino;
+  const result = await restoreFile(state.file, state.file);
+  assert.deepEqual([result.unchanged, result.deletionKnowledge], [true, 'present']);
+  assert.deepEqual([await fileHash(state.file), await fileHash(ledgerPath(state.file))], before);
+  assert.equal((await stat(ledgerPath(state.file), { bigint: true })).ino, inode, 'never rewritten, not even put back');
 });
 
 test('C-4: a memory written into a scope whose latest version W holds takes the version a graph with no view would give', async (t) => {
@@ -1273,7 +1370,9 @@ for (const [backend, options] of BACKENDS) for (const viewName of ['project', 'i
   }
 });
 
-for (const surface of ['cli', 'http', 'mcp']) test(`T-17 ${surface}: a registry tombstone and a purge marker refuse the restore, memory-only too`, async (t) => {
+// PR-37c design §13.4: the registry tombstone (a token B lacks) proceeds with
+// none; the marker proceeds and is lifted.
+for (const surface of ['cli', 'http', 'mcp']) test(`T-17 ${surface}: a registry tombstone naming a token B lacks and a purge marker no longer refuse the restore, memory-only too`, async (t) => {
   for (const trigger of ['registry', 'marker']) for (const memoryOnly of [false, true]) {
     const f = fixture();
     const destination = await storeOf(t, 'json', f.payload);
@@ -1286,7 +1385,7 @@ for (const surface of ['cli', 'http', 'mcp']) test(`T-17 ${surface}: a registry 
     let text;
     if (surface === 'cli') {
       const env = { ...process.env, SHADOWGRAPH_HOME: home, SHADOWGRAPH_FILE: destination.file, SHADOWGRAPH_STORAGE: 'json', SHADOWGRAPH_API_TOKEN: '' };
-      try { await execute(process.execPath, [cliPath, 'restore', source.file, ...(memoryOnly ? ['--memory-only'] : [])], { cwd: destination.dir, env }); text = 'ok'; }
+      try { text = (await execute(process.execPath, [cliPath, 'restore', source.file, ...(memoryOnly ? ['--memory-only'] : [])], { cwd: destination.dir, env })).stdout; }
       catch (error) { text = `${error.stderr}`; }
     } else if (surface === 'http') {
       const saved = process.env.SHADOWGRAPH_HOME;
@@ -1300,8 +1399,11 @@ for (const surface of ['cli', 'http', 'mcp']) test(`T-17 ${surface}: a registry 
     } else {
       [text] = await mcpCalls(t, destination, [['shadowgraph_restore', { source: source.file, memoryOnly }]], { SHADOWGRAPH_HOME: home });
     }
-    assert.match(text, /purge_aware_restore_unsupported_at_this_build/, `${trigger} memoryOnly=${memoryOnly}: ${text.slice(0, 200)}`);
-    assert.equal(await content(destination), before);
+    const label = `${trigger} memoryOnly=${memoryOnly}: ${text.slice(0, 200)}`;
+    assert.match(text, trigger === 'registry' ? /deletionKnowledge\\?"\s*:\s*\\?"none/ : /deletionKnowledge\\?"\s*:\s*\\?"present/, label);
+    assert.notEqual(await content(destination), before, label);
+    if (trigger === 'registry') assert.equal(existsSync(ledgerPath(destination.file)), false, label);
+    else assert.deepEqual(JSON.parse(await readFile(ledgerPath(destination.file), 'utf8')).tombstones.map((item) => [item.purgedProject, item.tokens]), [['q', null]], label);
   }
 });
 
@@ -1337,12 +1439,12 @@ for (const [backend, options] of BACKENDS) test(`C-2 ${backend}: a backup restor
   const short = shortName(source.file);
   if (!short) { t.skip('the volume keeps no 8.3 names'); return; }
   assert.equal((await stat(source.file)).nlink, 1, 'no other hard link');
-  const before = await content(destination);
+  // PR-37c design §13.4: it proceeds, and merges the sidecar.
   const attempt = backend === 'json'
     ? restoreFile(short, destination.file)
     : (async () => { const store = await createStorage({ type: 'sqlite', file: destination.file }); try { return await store.restore(short); } finally { store.close(); } })();
-  await assert.rejects(attempt, { code: PURGE_AWARE_RESTORE_UNSUPPORTED });
-  assert.equal(await content(destination), before);
+  assert.equal((await attempt).deletionKnowledge, 'present');
+  assert.deepEqual(JSON.parse(await readFile(ledgerPath(destination.file), 'utf8')).quarantine, [{ token: f.tokens.memory }]);
 });
 
 test('C-2: a destination reached through another hard link, with its ledger beside the other name, refuses', async (t) => {
@@ -1449,18 +1551,26 @@ test('R2-P3: a SQLite restore through ./storage into a destination not there yet
   assert.ok((await load({ file: fresh, backend: 'sqlite' })).records.length);
 });
 
-for (const [backend, options] of BACKENDS) test(`R2-P5 ${backend}: a restore into another spelling of a ledger-bearing destination refuses`, { ...WINDOWS, ...options }, async (t) => {
+// PR-37c design §13.4: it proceeds through the destination's one ledger. A spelling whose final component is the 8.3
+// name of the store file itself refuses before any write (PR-37c review finding 1, design §3.1): the primitive would
+// leave the file under that name, away from its ledger.
+for (const [backend, options] of BACKENDS) test(`R2-P5 ${backend}: a restore into another spelling of a ledger-bearing destination proceeds through its one ledger, and through the 8.3 name of the store file itself refuses`, { ...WINDOWS, ...options }, async (t) => {
   const f = fixture();
   const destination = await storeOf(t, backend, f.payload, VIEWS.item(f).ledger);
   const source = await storeOf(t, backend, fixture().payload);
-  const before = await content(destination);
-  for (const name of [namespaced(destination.file), shortName(destination.file)].filter(Boolean)) {
+  const ledger = await readFile(ledgerPath(destination.file));
+  // A case variant of the file's own name is the same name on win32 (re-review N-4): it proceeds.
+  const caseVariant = join(dirname(destination.file), basename(destination.file).toUpperCase());
+  for (const name of [namespaced(destination.file), caseVariant, shortName(destination.file)].filter(Boolean)) {
     const attempt = backend === 'json'
       ? restoreFile(source.file, name)
       : (async () => { const store = await createStorage({ type: 'sqlite', file: name }); try { return await store.restore(source.file); } finally { store.close(); } })();
-    await assert.rejects(attempt, { code: PURGE_AWARE_RESTORE_UNSUPPORTED }, name);
+    const fileAlias = basename(name).toLowerCase() !== basename(destination.file).toLowerCase();
+    if (fileAlias) await assert.rejects(attempt, { code: PURGE_AWARE_RESTORE_UNSUPPORTED }, name);
+    else assert.equal((await attempt).deletionKnowledge, 'present', name);
+    assert.deepEqual(await readFile(ledgerPath(destination.file)), ledger, `${name}: nothing to add`);
+    assert.deepEqual((await readdir(destination.dir)).filter((item) => item.toLowerCase().endsWith('.control.json')), [`store.${backend === 'sqlite' ? 'db' : 'json'}.control.json`], name);
   }
-  assert.equal(await content(destination), before);
 });
 
 for (const [backend, options] of BACKENDS) test(`R2-P6 ${backend}: a store loaded, or delivered, through its 8.3 name honours its ledger`, { ...WINDOWS, ...options }, async (t) => {
@@ -1487,18 +1597,18 @@ test('R2-P7: through a directory junction the ledger is honoured, and the regist
   await assert.rejects(backupFile(state.file, join(junction, 'home', 'deletion-registry.json'), { env }), { code: 'deletion_file_destination_refused' });
 });
 
-for (const [backend, options] of BACKENDS) test(`R2-P8 ${backend}: a source spelled another way, with no other hard link, has its sidecar found and refuses`, { ...WINDOWS, ...options }, async (t) => {
+// PR-37c design §13.4: it proceeds, and merges the sidecar it found.
+for (const [backend, options] of BACKENDS) test(`R2-P8 ${backend}: a source spelled another way, with no other hard link, has its sidecar found and merged`, { ...WINDOWS, ...options }, async (t) => {
   const f = fixture();
   const destination = await storeOf(t, backend, f.payload);
   const source = await storeOf(t, backend, fixture().payload, { version: 1, quarantine: [{ token: f.tokens.memory }] });
-  const before = await content(destination);
   for (const name of [namespaced(source.file), shortName(source.file)].filter(Boolean)) {
     const attempt = backend === 'json'
       ? restoreFile(name, destination.file)
       : (async () => { const store = await createStorage({ type: 'sqlite', file: destination.file }); try { return await store.restore(name); } finally { store.close(); } })();
-    await assert.rejects(attempt, { code: PURGE_AWARE_RESTORE_UNSUPPORTED }, name);
+    assert.equal((await attempt).deletionKnowledge, 'present', name);
+    assert.deepEqual(JSON.parse(await readFile(ledgerPath(destination.file), 'utf8')).quarantine, [{ token: f.tokens.memory }], name);
   }
-  assert.equal(await content(destination), before);
 });
 
 test('R2-P9: a ledger name not there yet, spelled in another case, is refused as a destination', async (t) => {
@@ -1570,11 +1680,12 @@ for (const [backend, options] of BACKENDS) test(`R2-T5 ${backend}: a source whos
   else assert.equal((await load({ file: destination, backend })).records.length, 0);
 });
 
-test('R2-T6: a readable destination that deletion records reach is told so, not sent to a fresh path', async (t) => {
+// PR-37c design §13.4: it proceeds, and says knowledge reached it.
+test('R2-T6: a readable destination that deletion records reach is restored, never sent to a fresh path', async (t) => {
   const f = fixture();
   const destination = await storeOf(t, 'json', f.payload, VIEWS.item(f).ledger);
   const source = await storeOf(t, 'json', fixture().payload);
-  await assert.rejects(restoreFile(source.file, destination.file), (error) => error.code === PURGE_AWARE_RESTORE_UNSUPPORTED && /later ShadowGraph build/.test(error.message) && !/fresh path/.test(error.message));
+  assert.equal((await restoreFile(source.file, destination.file)).deletionKnowledge, 'present');
 });
 
 test('R2-T3: whether this volume keeps the 8.3 names the 8.3 cases need', { ...WINDOWS }, (t) => {

@@ -121,7 +121,8 @@ test('a capture is recorded pending, its text outside the journal under a random
   assert.deepEqual(capturesOf(snapshot), [item]);
   assert.deepEqual(snapshot.captureContent, [{ contentRef: item.contentRef, project: 'alpha', attribution: 'project', originId: 'origin-a', text: 'the prompt text' }]);
   assert.equal(snapshot.captureSessions.length, 1);
-  assert.deepEqual({ ...snapshot.captureSessions[0], id: undefined }, { id: undefined, originId: 'origin-a', sessionId: 'session-1', project: 'alpha', attribution: 'project', occurrenceSeqHighWater: 1 });
+  // A session records when it was opened (PR-37c design §1.3, R9).
+  assert.deepEqual({ ...snapshot.captureSessions[0], id: undefined }, { id: undefined, originId: 'origin-a', sessionId: 'session-1', project: 'alpha', attribution: 'project', startedAt: NOW, occurrenceSeqHighWater: 1 });
   const [entry] = entriesOf(snapshot, item.id);
   assert.equal(entry.type, 'capture.recorded');
   assert.deepEqual(entry.payload, item);

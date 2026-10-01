@@ -13,7 +13,9 @@ jobs:
   test:
     name: ${{ matrix.os }} / Node ${{ matrix.node-version }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # The full suite runs about 17 minutes locally, the T-10 file alone about
+    # 6 (PR-37c review finding 14): 45 leaves margin for the slower legs.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -21,6 +23,10 @@ jobs:
         node-version: [20, 22, 24]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The whole history: the rollback-floor tests load 210f009 from it,
+          # and skip when it is missing (PR-37c review finding 12).
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}

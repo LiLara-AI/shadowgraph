@@ -459,7 +459,8 @@ const readCoverageSchema = {
     complete: { type: 'boolean', description: 'Coverage of known candidates in this request, false when project_unresolved, detail is withheld or capture is pending; not total semantic recall.' },
     losslessItems: { type: 'boolean', description: 'False when returned items have withheld or transformed detail.' },
     limitation: { type: 'object', description: 'Limits of this view.', required: ['code', 'detail'], properties: { code: { type: 'string', description: 'Stable limitation code.' }, detail: { type: 'string', description: 'What this view cannot establish.' } } },
-    capture: captureStatusSchema
+    capture: captureStatusSchema,
+    quarantined: integerCount('Items withheld as possibly purged.')
   }
 };
 function completenessSchema(extraProperties = {}, extraRequired = []) {
@@ -1970,7 +1971,7 @@ const CATALOG = [
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     describe: {
       does: 'Restore memory from a JSON or SQLite backup, preserving historical IDs.',
-      route: 'Use shadowgraph_backup first; recovers shadowgraph_purge deletions. memoryOnly excludes authority.',
+      route: 'Use shadowgraph_backup first. Material shadowgraph_purge deleted stays out where deletion records reach it. memoryOnly excludes authority.',
       effects: 'Replaces memory and journal, advances revision, and can only narrow destination authority. Recovery failures may require restart.'
     },
     inputSchema: {
@@ -1984,10 +1985,16 @@ const CATALOG = [
     outputSchema: {
       type: 'object',
       description: 'What was restored from where. Fields beyond source and destination depend on the storage backend and on whether cleanup was confirmed.',
-      required: ['source', 'destination'],
+      required: ['source', 'destination', 'deletionKnowledge'],
       properties: {
         source: { type: 'string', description: 'Path the backup was read from.' },
         destination: { type: 'string', description: 'Path of the store that was replaced.' },
+        deletionKnowledge: { type: 'string', enum: ['present', 'none'], description: 'Whether deletion records reach this restore.' },
+        reapplied: {
+          type: 'object', description: 'What deletion records made the restore remove or quarantine: counts only.', required: ['removed', 'quarantined', 'skeletons', 'spliced'],
+          properties: { removed: integerCount('Items removed.'), quarantined: integerCount('Items quarantined by a new token.'), skeletons: integerCount('Journal entries left as skeletons.'), spliced: integerCount('Journal entries spliced out.') }
+        },
+        completion: { type: 'string', enum: ['pending'], description: 'The restore committed but its deletion step did not finish; the next write completes it.' },
         records: { type: 'integer', description: 'Records installed. JSON restores only.' },
         unchanged: { type: 'boolean', description: 'True when source and destination were the same path and nothing was replaced.' },
         retainedArtifacts: stringList('Rollback or recovery files still present after the restore.'),

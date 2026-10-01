@@ -20,6 +20,7 @@ import { redactText, redactValue } from '../src/internal/redaction.js';
 import { privilegedBindProject, privilegedRecordCapture, privilegedRecordTranscript, privilegedSnapshot } from '../src/internal/snapshot.js';
 import { DELIVERY_FRAME, deliveryEndLine } from '../src/internal/delivery-marker.js';
 import { mintOriginId } from '../src/scope.js';
+import { fenceLockPath } from '../src/revision-store.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const CLI = resolve('src/cli.js');
@@ -320,7 +321,9 @@ test('PR-37b FND-P6-11: every capture commit, its lock and the store\'s director
   const temporary = created.filter((entry) => entry.call === 'writeFile' && entry.path.endsWith('.tmp') && dirname(entry.path) === dirname(s.file));
   assert.ok(temporary.length >= 1, JSON.stringify(created));
   assert.deepEqual(modes(temporary), [0o600], 'the capture commit');
-  assert.deepEqual(modes(created.filter((entry) => entry.call === 'open' && entry.path === `${s.file}.lock`)), [0o600], 'the lock');
+  // The fence names its lock beside the store's canonical path (PR-37c design §3.1, check R3-2).
+  const lock = await fenceLockPath(s.file);
+  assert.deepEqual(modes(created.filter((entry) => entry.call === 'open' && entry.path === lock)), [0o600], 'the lock');
   assert.deepEqual(modes(created.filter((entry) => entry.call === 'mkdir' && entry.path === dirname(s.file))), [0o700], 'the store\'s directory, when made');
   created.length = 0;
   // The capture made the store owner-only; a manual store made readable again keeps that mode on a manual save.

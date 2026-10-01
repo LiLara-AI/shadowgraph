@@ -326,9 +326,10 @@ async function callUnqueued(name, args, tier, accessManaged = false) {
   else if (name === 'shadowgraph_restore') {
     if (args?.memoryOnly !== undefined && typeof args.memoryOnly !== 'boolean') throw new Error('memoryOnly must be a boolean');
     value = store.restore
-      ? await store.restore(args?.source, { memoryOnly: args?.memoryOnly === true, validate: restoreValidator, afterReplace: (payload) => graph.replaceData(payload) })
+      ? await store.restore(args?.source, { memoryOnly: args?.memoryOnly === true, validate: restoreValidator, verifier: verifier ?? undefined, afterReplace: (payload) => graph.replaceData(payload) })
       : await (await import('./backup.js')).restoreFile(args?.source, file, {
         memoryOnly: args?.memoryOnly === true,
+        verifier: verifier ?? undefined,
         storage: process.env.SHADOWGRAPH_STORAGE,
         validate: restoreValidator,
         restoreFs: injectedRestoreFs,

@@ -16,7 +16,8 @@ import { createShadowGraph, MAX_PAGE_LIMIT, SCHEMA_VERSION } from './shadowgraph
 import { show, t1Line } from './compact-tier.js';
 import { accessContext, discoverWorkspace } from './internal/access-transport.js';
 import { DELIVERY_CAP_BYTES, DELIVERY_FRAME, deliveryEndLine } from './internal/delivery-marker.js';
-import { attachDeletionView, DELETION_PENDING_UNSUPPORTED } from './internal/deletion-knowledge.js';
+import { attachDeletionView, DELETION_PENDING_UNSUPPORTED, DELETION_VIEW, readUnfenced } from './internal/deletion-knowledge.js';
+import { fenceLockPath } from './revision-store.js';
 import { flaggedText, jsonLiterals, redactText, redactValue } from './internal/redaction.js';
 
 export { DELIVERY_CAP_BYTES, DELIVERY_FRAME, redactText, redactValue };
@@ -136,24 +137,37 @@ async function present(path) {
 }
 
 // Another process at the store: a journal beside the database, or the store's
-// own destination fence held.
-const inUse = async (file) => (await present(`${file}-wal`)) || (await present(`${file}-journal`)) || (await present(`${file}.lock`));
+// own destination fence held. The fence's lock is looked for by its one name,
+// beside the store's canonical path, so a read through an alias of the store
+// sees a fence held through any spelling (PR-37c design §3.1); SQLite keeps its
+// journals beside the name it was given.
+const inUse = async (file, lock) => (await present(`${file}-wal`)) || (await present(`${file}-journal`)) || (await present(lock));
 const fingerprint = async (file) => { const { size, mtimeMs } = await stat(file); return `${size}:${mtimeMs}`; };
 
 // The store as it is. JSON is read whole; SQLite is opened immutable and
 // read-only, so no schema, pragma, sidecar or lock is created. A SQLite store
 // another process has open -- a journal or the fence present before or after
 // the read, or the file changed while it was read -- is busy rather than read.
-// `afterRead` lets a test act between the read and the check that follows it.
-export async function readStoreForDelivery({ file, storage, afterRead }) {
+// `afterRead` lets a test act between the read and the check that follows it;
+// `afterPayloadRead`, between the payload read and the ledger read.
+export async function readStoreForDelivery({ file, storage, afterRead, afterPayloadRead }) {
   if (!['json', 'sqlite'].includes(storage)) return { unavailable: 'unsupported_storage' };
   try {
     if (!(await present(file))) return { unavailable: 'not_initialized' };
     // The payload, then the deletion records beside it, which the graph
     // honours; records it cannot honour leave memory unavailable (PR-37a). The
-    // per-user registry is never read here.
-    if (storage === 'json') return { payload: await attachDeletionView(JSON.parse(await readFile(file, 'utf8')), file) };
-    if (await inUse(file)) return { unavailable: 'busy' };
+    // per-user registry is never read here. No fence is held, so the ledger
+    // read is bracketed by the payload's identity, and a read that keeps
+    // losing that race is busy (PR-37c design §8.1, §8.5).
+    if (storage === 'json') {
+      const payload = await readUnfenced(file, async () => {
+        const text = await readFile(file, 'utf8');
+        return { text, payload: JSON.parse(text) };
+      }, { afterPayloadRead });
+      return payload === null ? { unavailable: 'busy' } : { payload };
+    }
+    const lock = await fenceLockPath(file);
+    if (await inUse(file, lock)) return { unavailable: 'busy' };
     let DatabaseSync, exportSqlitePayload;
     try { ({ DatabaseSync } = await import('node:sqlite')); ({ exportSqlitePayload } = await import('./sqlite-storage.js')); }
     catch { return { unavailable: 'sqlite_unavailable' }; }
@@ -169,11 +183,22 @@ export async function readStoreForDelivery({ file, storage, afterRead }) {
     } finally {
       database?.close();
     }
+    await afterPayloadRead?.();
+    // The ledger is read before the check below, which is this branch's
+    // bracket: a commit after the fingerprint was taken changes the file or
+    // leaves a journal or the fence's lock, so a view pairing this payload
+    // with a later ledger is never served, and a view error stands only when
+    // the check passes (PR-37c design §8.5, re-review NF-6 (c)).
+    let viewed = null;
+    if (legacy !== undefined || payload !== null) {
+      try { viewed = { value: await attachDeletionView(legacy === undefined ? payload : JSON.parse(legacy), file) }; }
+      catch (error) { viewed = { error }; }
+    }
     await afterRead?.();
-    if ((await inUse(file)) || (await fingerprint(file)) !== before) return { unavailable: 'busy' };
-    if (legacy !== undefined) return { payload: await attachDeletionView(JSON.parse(legacy), file) };
-    if (payload === null) return { unavailable: (await stat(file)).size === 0 ? 'not_initialized' : 'unreadable' };
-    return { payload: await attachDeletionView(payload, file) };
+    if ((await inUse(file, lock)) || (await fingerprint(file)) !== before) return { unavailable: 'busy' };
+    if (viewed === null) return { unavailable: (await stat(file)).size === 0 ? 'not_initialized' : 'unreadable' };
+    if (viewed.error) throw viewed.error;
+    return { payload: viewed.value };
   } catch (error) {
     // A pending deletion record is named, for the capture line (PR-37b).
     return { unavailable: 'unreadable', ...(error?.code === DELETION_PENDING_UNSUPPORTED ? { pending: true } : {}) };
@@ -330,6 +355,9 @@ export async function runDeliver({ args = [], readInput = () => '', file, storag
     };
     if (unavailable === 'newer_schema') cannotLoad('newer_schema');
     else if (unavailable === 'unreadable') cannotLoad(read.pending ? 'deletion_pending' : 'store_unreadable');
+    // A restore record the read could serve still stops the hook writing, so
+    // the line says so while memory is served (PR-37c design §8.5).
+    else if (!unavailable && read.payload?.[DELETION_VIEW]?.pending) cannotLoad('deletion_pending');
     if (unavailable) return session ? emit(unavailablePayload(trigger, unavailable, quiet)) : undefined;
     const graph = createShadowGraph();
     try { graph.importData(read.payload); }
@@ -351,6 +379,10 @@ export async function runDeliver({ args = [], readInput = () => '', file, storag
     const head = {
       trigger, store: 'available', scope: relevant.scope, complete: relevant.complete,
       limitation: unresolved ? PROJECT_UNRESOLVED : session ? NOT_ASSESSED : relevant.limitation ?? null,
+      // What deletion records withhold from this scope as possibly purged,
+      // counted as every read counts it (PR-37c design §9.3): the session
+      // start's own limitation leaves the read's detail out, never the count.
+      ...(relevant.quarantined ? { quarantined: relevant.quarantined } : {}),
       relevance: session ? 'not_assessed' : 'established',
       total: relevant.total, hasMore: relevant.hasMore, limitSource: relevant.limitSource, byKind: relevant.byKind,
       temporal: { eventTimeUnknown: relevant.temporal.eventTimeUnknown, recordingOrderOnly: relevant.temporal.recordingOrderOnly },

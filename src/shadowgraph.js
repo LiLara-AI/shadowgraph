@@ -778,6 +778,10 @@ function paginate(items, options, scope, extra = {}) {
 // understood means the view is not complete. Capture refusing material -- at a
 // store limit now, or in a gap it declares -- is said too, without making the
 // view incomplete: what was refused was never a candidate any read can find.
+// What deletion records withhold as possibly purged, and a restore that has
+// not finished, make it incomplete and are said (PR-37c design §9.3): the
+// quarantined count is exact, and the pending note covers what the restore
+// has not yet settled, in every state of its record.
 function scopeCompleteness(scope, current = { complete: true }, signals = []) {
   const partial = signals.some((signal) => signal.limitation?.code === 'scoped_coverage');
   const capture = scope.capture ?? null;
@@ -797,13 +801,17 @@ function scopeCompleteness(scope, current = { complete: true }, signals = []) {
   const unread = [...new Set((capture?.gaps ?? []).map((entry) => entry.reason).filter((reason) => TRANSCRIPT_GAP_REASONS.includes(reason)))];
   if (refused.length) details.push(`Capture refused material (${refused.join(', ')}); what it refused is not here.`);
   if (unread.length) details.push(`Capture did not read part of a session's transcript (${unread.join(', ')}); what it did not read is not here.`);
+  const quarantined = scope.quarantined ?? 0;
+  if (quarantined) details.push(`${quarantined} ${quarantined === 1 ? 'item of this scope is' : 'items of this scope are'} withheld as possibly purged; only the owner can release or purge them.`);
+  if (scope.restorePending) details.push('A restore has not finished; material it may remove or quarantine is withheld until the next write completes it.');
   return {
     ...current,
     scope: { ...current.scope, project: scope.project, requestState: scope.state, originPresented: scope.originId !== null, grant: scope.grant ?? null },
-    complete: current.complete === true && scope.state === 'project_selected' && !partial && !scope.grantLimitation && !backlog,
+    complete: current.complete === true && scope.state === 'project_selected' && !partial && !scope.grantLimitation && !backlog && !quarantined && !scope.restorePending,
     ...(capture ? { capture: { ...capture, limited: capture.limited.map((entry) => ({ ...entry })), gaps: capture.gaps.map((entry) => ({ ...entry })) } } : {}),
+    ...(quarantined ? { quarantined } : {}),
     ...(partial ? { losslessItems: false } : {}),
-    ...(details.some(Boolean) ? { limitation: { ...current.limitation, code: current.limitation?.code ?? (scoped ? 'scoped_coverage' : backlog ? 'capture_pending' : capture?.limited.length ? 'capture_limited' : 'capture_gap'), detail: details.filter(Boolean).join(' ') } } : {})
+    ...(details.some(Boolean) ? { limitation: { ...current.limitation, code: current.limitation?.code ?? (scoped ? 'scoped_coverage' : backlog ? 'capture_pending' : capture?.limited.length ? 'capture_limited' : refused.length || unread.length || !(quarantined || scope.restorePending) ? 'capture_gap' : quarantined ? 'quarantine_withheld' : 'restore_pending'), detail: details.filter(Boolean).join(' ') } } : {})
   };
 }
 
@@ -1239,8 +1247,10 @@ export function createShadowGraph(options = {}) {
     return status;
   }
 
+  // A session records when it was opened, so a project tombstone withholds
+  // only the sessions opened before it (PR-37c design §1.3, R9).
   function newCaptureSession(originId, sessionId, owner) {
-    return { id: `capsession_${randomUUID()}`, originId, sessionId, project: owner.project, attribution: owner.attribution };
+    return { id: `capsession_${randomUUID()}`, originId, sessionId, project: owner.project, attribution: owner.attribution, startedAt: now() };
   }
 
   // A session's self-event counters (§16.3): one count per signal and event,
@@ -1723,6 +1733,26 @@ export function createShadowGraph(options = {}) {
     return deletion.get('held')?.collections.captures?.items.map(([, item]) => item) ?? [];
   }
 
+  // What is quarantined (PR-37c design §9): the held entities whose token a
+  // quarantine entry names and no tombstone does. They are withheld as
+  // possibly purged, counted on every read of their scope, and only the owner
+  // releases or purges them.
+  function quarantinedEntities() {
+    const quarantine = deletion.get('view')?.quarantine;
+    if (!quarantine?.size) return [];
+    const held = deletion.get('held')?.collections ?? {};
+    return ['records', 'captures', 'facts'].flatMap((name) => held[name]?.items.map(([, item]) => item) ?? []).filter((entity) => quarantine.has(entity.erasureToken));
+  }
+
+  // The owner's view of it, by identity only (`shadowgraph quarantine list`,
+  // V-7): no content field and no token.
+  function quarantined() {
+    return quarantinedEntities().map((entity) => ({
+      id: entity.id, kind: entity.kind, project: entity.project, attribution: entity.attribution,
+      ...(entity.attribution === 'unattributed' ? { originId: entity.originId } : {}), createdAt: entity.createdAt
+    }));
+  }
+
   function sessionWithheld(originId, sessionId) {
     return deletion.get('held')?.sessions.has(sessionKey(originId, sessionId)) ?? false;
   }
@@ -1771,11 +1801,13 @@ export function createShadowGraph(options = {}) {
   // W taken out of the live graph (design §2.2, §2.3, §11 R-3, R-10, §12 C5).
   function hold() {
     const view = deletion.get('view');
-    if (!view || (!view.tokens.size && !view.projects.length) || deletion.has('held')) return;
-    const tokened = (entity) => entity?.erasureToken !== undefined && view.tokens.has(entity.erasureToken);
-    const heldRecords = [...records.values()].filter(tokened);
-    const heldCaptures = [...captures.values()].filter(tokened);
-    const heldFacts = [...facts.values()].filter(tokened);
+    if (!view || (!view.tokens.size && !view.projects.length && !view.ids?.size) || deletion.has('held')) return;
+    // By its token, or by its id when a committed restore waits for its
+    // post-step and the entity has no token yet (PR-37c design §1.4, §8.1).
+    const withheldEntity = (entity) => (entity?.erasureToken !== undefined && view.tokens.has(entity.erasureToken)) || Boolean(view.ids?.has(entity?.id));
+    const heldRecords = [...records.values()].filter(withheldEntity);
+    const heldCaptures = [...captures.values()].filter(withheldEntity);
+    const heldFacts = [...facts.values()].filter(withheldEntity);
     const ids = new Set();
     for (const entity of [...heldRecords, ...heldCaptures, ...heldFacts]) {
       ids.add(entity.id);
@@ -1798,7 +1830,9 @@ export function createShadowGraph(options = {}) {
     const heldMisses = extra(RUNTIME_MISSES).filter((entry) => ids.has(entry?.recordId) || predates(entry?.scope?.project, entry?.at));
     const contentRefs = new Set(heldCaptures.map((item) => item.contentRef).filter(Boolean));
     const heldContent = extra(CAPTURE_CONTENT).filter((entry) => contentRefs.has(entry?.contentRef));
-    const heldSessions = extra(CAPTURE_SESSIONS).filter((session) => session?.attribution === 'project' && predates(session.project));
+    // A session opened after the tombstone captures; one with no valid start
+    // predates it, which fails closed (PR-37c design §1.3, R9).
+    const heldSessions = extra(CAPTURE_SESSIONS).filter((session) => session?.attribution === 'project' && predates(session.project, session.startedAt));
     if (![heldRecords, heldCaptures, heldFacts, heldEvents, heldMisses, heldSessions].some((list) => list.length)) return;
     // W's journal entries become logical skeletons and the baseline is
     // rewritten without W, as a logical purge leaves them; the originals are
@@ -1841,7 +1875,7 @@ export function createShadowGraph(options = {}) {
     take(CAPTURE_SESSIONS, extra(CAPTURE_SESSIONS), byId, heldSessions);
     const held = {
       ids, relationIds, collections, journal: originals,
-      tokens: new Set([...heldRecords, ...heldCaptures, ...heldFacts].map((entity) => entity.erasureToken)),
+      tokens: new Set([...heldRecords, ...heldCaptures, ...heldFacts].map((entity) => entity.erasureToken).filter((token) => token !== undefined)),
       entities: new Map([...heldRecords, ...heldFacts].map((entity) => [entity.id, entity])),
       retryKeys: new Set(heldRetries.map((item) => item.key)),
       memoryScopes: new Set(heldRecords.filter((item) => item.kind === 'memory' && item.status === 'active').map(memoryScopeKey)),
@@ -2688,18 +2722,8 @@ export function createShadowGraph(options = {}) {
     // which load normalisation may since have reshaped; the entry carries that
     // snapshot with the token added, never the live form. An entity the journal
     // cannot replay gets its token on its next write instead, and is reported.
-    const replayed = rebuildProjection(journal, { journalEpoch }).projection;
-    const priorOf = new Map([...replayed.records, ...replayed.facts].map((entity) => [entity.id, entity]));
-    // A record the attribution migration has not reached gets its token on its
-    // attribution entry; one whose snapshot an entry of this schema cannot
-    // carry gets it on its next write.
-    const skipReason = (entity) => {
-      if (!ATTRIBUTED_ENTITY_KINDS.includes(entity.kind)) return 'fact_without_kind';
-      if (entity.attribution === undefined) return 'not_attributed';
-      const prior = priorOf.get(entity.id);
-      if (!prior || prior.erasureToken !== undefined) return 'not_replayable';
-      return prior.kind === 'fact' && factValidityPolicyIssue(prior, { required: true }) ? 'not_replayable' : null;
-    };
+    const priorOf = replayedEntities();
+    const skipReason = (entity) => tokenSkipReason(entity, priorOf);
     const pending = tokenless.filter((entity) => !skipReason(entity));
     const skipped = tokenless.filter(skipReason).map((entity) => ({ id: entity.id, reason: skipReason(entity) }));
     const batch = pending.slice(0, limit);
@@ -2708,11 +2732,37 @@ export function createShadowGraph(options = {}) {
       touchMutableObject(entity);
       entity.erasureToken = allocateErasureToken();
       tokenRetryValues(entity);
-      const prior = priorOf.get(entity.id);
-      appendJournal({ type: 'entity.token_assigned', entityKind: entity.kind, entityId: entity.id, project: prior.project ?? null, payload: { ...clone(prior), erasureToken: entity.erasureToken } });
+      appendJournal(tokenAssignment(entity, priorOf));
     }
     const remaining = pending.length - batch.length;
     return { assigned: batch.length, remaining, complete: remaining === 0, highWaterMark: batch.at(-1)?.id ?? null, skipped };
+  }
+
+  // Each entity's last journal snapshot, by id: what an assignment carries.
+  function replayedEntities() {
+    const replayed = rebuildProjection(journal, { journalEpoch }).projection;
+    return new Map([...replayed.records, ...replayed.facts].map((entity) => [entity.id, entity]));
+  }
+
+  // Why a tokenless entity cannot take a token by assignment, or null: the
+  // eligibility the backfill and a restore's quarantine share (PR-37c design
+  // §4.6, §6.4). A record the attribution migration has not reached gets its
+  // token on its attribution entry; one whose snapshot an entry of this schema
+  // cannot carry gets it on its next write.
+  function tokenSkipReason(entity, priorOf) {
+    if (!ATTRIBUTED_ENTITY_KINDS.includes(entity.kind)) return 'fact_without_kind';
+    if (entity.attribution === undefined) return 'not_attributed';
+    const prior = priorOf.get(entity.id);
+    if (!prior || prior.erasureToken !== undefined) return 'not_replayable';
+    return prior.kind === 'fact' && factValidityPolicyIssue(prior, { required: true }) ? 'not_replayable' : null;
+  }
+
+  // The entry that gives an entity the token it now holds: its replayed
+  // snapshot with the token added, and nothing else changed. The one writer of
+  // the type in this build.
+  function tokenAssignment(entity, priorOf) {
+    const prior = priorOf.get(entity.id);
+    return { type: 'entity.token_assigned', entityKind: entity.kind, entityId: entity.id, project: prior.project ?? null, payload: { ...clone(prior), erasureToken: entity.erasureToken } };
   }
 
   // The attribution the migration gives an entity written before schema 6,
@@ -4010,6 +4060,133 @@ export function createShadowGraph(options = {}) {
     };
   }
 
+  // A restore's post-step, and `quarantine purge` (PR-37c design §6.4), on a
+  // graph that holds what the store holds. Each `plan.remove` entity goes with
+  // its decision's alternatives and what names it -- relations, review
+  // signals, retry values, events, misses, a capture's content -- its journal
+  // entries becoming skeletons under `logical` and spliced under `hard`, hard
+  // winning where an entry names both, and baselines losing it. Each tokenless
+  // `plan.quarantine` entity takes a token by one entity.token_assigned entry:
+  // the one given (an overlap's), the one `tokens` holds at its place (a
+  // resolution assigns what ledger step 1 recorded, §8.4), or a new one; a
+  // tokened one changes nothing here, its token joining the ledger's
+  // quarantine instead. A capture left naming a removed one as its possible
+  // duplicate names none, history included (V-12). Everything is staged and
+  // checked before anything changes, as purgeLive does, and a candidate that
+  // cannot take a token stops it first, with its counts by cause (§4.6). It
+  // never purges authority and never appends project.purged (rev6:397); with
+  // `journal` it appends restore.reapplied, the logical entry first, with C4's
+  // four counts only.
+  function reapplyDeletion(plan, { journal: reapplied = true, tokens = [] } = {}) {
+    // A held W is put back and held again from what is left, as a purge
+    // reaches it (`shadowgraph quarantine purge`, on a viewed graph).
+    if (deletion.has('held')) {
+      unhold();
+      try { return reapplyDeletion(plan, { journal: reapplied, tokens }); } finally { hold(); }
+    }
+    const entityOf = (entityId) => records.get(entityId) ?? captures.get(entityId) ?? facts.get(entityId);
+    const modes = new Map();
+    for (const { id: entityId, mode } of plan.remove ?? []) {
+      const entity = entityOf(entityId);
+      if (!entity) continue;
+      for (const member of [entity.id, ...(entity.alternatives ?? []).map(byId)]) {
+        if (modes.get(member) !== 'hard') modes.set(member, mode === 'logical' ? 'logical' : 'hard');
+      }
+    }
+    const removed = new Set(modes.keys());
+    const relationModes = new Map();
+    for (const relation of relations.values()) {
+      const ends = [relation.from, relation.to].filter((end) => removed.has(end));
+      if (ends.length) relationModes.set(relation.id, ends.some((end) => modes.get(end) === 'hard') ? 'hard' : 'logical');
+    }
+    const removedRelationIds = new Set(relationModes.keys());
+    const removedCaptures = [...removed].map((entityId) => captures.get(entityId)).filter(Boolean);
+    const removedCaptureIds = new Set(removedCaptures.map(byId));
+    const contentRefs = new Set(removedCaptures.map((item) => item.contentRef).filter(Boolean));
+    const priorOf = replayedEntities();
+    const assigning = (plan.quarantine ?? []).map((entry) => ({ ...entry, entity: entityOf(entry.id) }))
+      .filter(({ entity }) => entity !== undefined && entity.erasureToken === undefined);
+    const untokenable = {};
+    for (const { entity } of assigning) {
+      const reason = isNewerThanWriter(entity) ? 'not_replayable' : tokenSkipReason(entity, priorOf);
+      if (reason) untokenable[reason] = (untokenable[reason] ?? 0) + 1;
+    }
+    if (Object.keys(untokenable).length) throw Object.assign(new Error('An item to withhold cannot take an erasure token'), { untokenable });
+
+    // The entries naming a removed entity or relation, by hold()'s predicate.
+    const entryMode = (entry) => {
+      if (typeof entry?.id !== 'string' || entry.type === 'projection.baseline') return null;
+      const found = [entry.entityId, replayedEntity(entry)?.id].flatMap((named) => [modes.get(named), relationModes.get(named)]);
+      if (entry.type === 'relation.created') found.push(modes.get(entry.payload?.from), modes.get(entry.payload?.to));
+      return found.includes('hard') ? 'hard' : found.includes('logical') ? 'logical' : null;
+    };
+    const stagedJournal = clone(journal);
+    const spliced = [];
+    let skeletons = 0;
+    for (let index = stagedJournal.length - 1; index >= 0; index -= 1) {
+      const entry = stagedJournal[index];
+      const mode = entryMode(entry);
+      if (mode === 'hard') {
+        spliced.push(entry.seq);
+        stagedJournal.splice(index, 1);
+      } else if (mode === 'logical') {
+        if (entry.payload !== null || entry.redacted !== true) skeletons += 1;
+        // A deleted capture's skeleton keeps saying so.
+        scrubLogicalPurgeSkeleton(entry, entry.redacted === true && entry.redactedReason === 'capture_deleted' ? 'capture_deleted' : undefined);
+      }
+    }
+    for (const entry of stagedJournal) {
+      rewriteBaselineForProjectPurge(entry, null, removed, removedRelationIds);
+      for (const item of entry?.type === 'projection.baseline' ? entry.payload?.records ?? [] : [entry?.payload]) {
+        if (removedCaptureIds.has(item?.possibleDuplicateOf)) item.possibleDuplicateOf = null;
+      }
+    }
+    let sequence = journalSeq;
+    const assigned = assigning.map(({ token }, index) => token ?? tokens[index] ?? allocateErasureToken());
+    const appended = assigning.map(({ entity }, index) => prebuildJournalEntry(tokenAssignment({ ...entity, erasureToken: assigned[index] }, priorOf), ++sequence));
+    const logical = [...modes.values()].filter((mode) => mode === 'logical').length;
+    const hard = removed.size - logical;
+    const marker = (payload) => prebuildJournalEntry({ type: 'restore.reapplied', payload }, ++sequence);
+    if (reapplied && (logical || assigning.length)) appended.push(marker({ mode: 'logical', removedJournalSequences: [], removed: logical, quarantined: assigning.length, skeletons }));
+    if (reapplied && (hard || spliced.length)) {
+      appended.push(marker({ mode: 'hard', removedJournalSequences: [...new Set(spliced.filter(Number.isSafeInteger))].sort((left, right) => left - right), removed: hard, spliced: spliced.length }));
+    }
+    const nextJournal = [...stagedJournal, ...appended];
+    const nextEpoch = journalEpoch ?? appended[0]?.seq ?? null;
+    assertJournalBaselinePlacement(nextJournal, { journalEpoch: nextEpoch, sourceSchemaVersion: SCHEMA_VERSION });
+    assertHardPurgeGapLedgers(nextJournal, { journalEpoch: nextEpoch, sourceSchemaVersion: SCHEMA_VERSION });
+
+    for (const entityId of removed) { records.delete(entityId); captures.delete(entityId); facts.delete(entityId); }
+    for (const relationId of removedRelationIds) relations.delete(relationId);
+    for (const [key, signal] of reviewSignals) if (removed.has(signal.decisionId)) reviewSignals.delete(key);
+    for (const [key, value] of [...idempotency]) if (removed.has(value?.id)) idempotency.delete(key);
+    filterInPlace(events, (item) => !(['recordId', 'factId', 'replacementId'].some((key) => removed.has(item?.[key])) || removedRelationIds.has(item?.relationId)));
+    const removedEntityIds = new Set([...removed, ...removedRelationIds]);
+    const prune = (name, keep) => {
+      const entries = extras.get(name);
+      if (!Array.isArray(entries)) return;
+      const kept = entries.filter(keep);
+      if (kept.length === entries.length) return;
+      if (kept.length) extras.set(name, kept);
+      else extras.delete(name);
+    };
+    prune(RUNTIME_MISSES, (entry) => !removedEntityIds.has(entry?.recordId));
+    prune(CAPTURE_CONTENT, (entry) => !contentRefs.has(entry?.contentRef));
+    journal.splice(0, journal.length, ...nextJournal);
+    journalSeq = sequence;
+    journalEpoch = nextEpoch;
+    assigning.forEach(({ entity }, index) => {
+      touchMutableObject(entity);
+      entity.erasureToken = assigned[index];
+      tokenRetryValues(entity);
+    });
+    for (const item of captures.values()) if (removedCaptureIds.has(item.possibleDuplicateOf)) item.possibleDuplicateOf = null;
+    for (const [key, value] of idempotency) if (removedCaptureIds.has(value?.possibleDuplicateOf)) idempotency.set(key, { ...value, possibleDuplicateOf: null });
+    recomputeCurrentMemories();
+    recomputeCurrentFacts();
+    return { counts: { removed: removed.size, quarantined: assigning.length, skeletons, spliced: spliced.length }, assignedTokens: assigned, payload: snapshot() };
+  }
+
   // Diagnostics distinguish three different problems (see api-reference.md):
   //   error       — genuinely invalid data that code produced wrongly
   //   legacy      — older data that is readable but pre-dates a contract
@@ -4193,6 +4370,13 @@ export function createShadowGraph(options = {}) {
       if (scope.state === 'project_selected') return ownerKey(item, (project) => project) === scope.project;
       return item.attribution === 'unattributed' && sameOrigin(item.originId, scope.originId);
     };
+    // What deletion records withhold from this scope, disclosed the same way
+    // (PR-37c design §9.3): the quarantined items the scope itself owns,
+    // counted by identity, never across scopes nor through a grant's wider
+    // read; and whether a restore waits for its post-step, which holds what it
+    // will remove or quarantine before the count can see it.
+    Object.defineProperty(scope, 'quarantined', { value: quarantinedEntities().filter(baseVisible).length, enumerable: false });
+    Object.defineProperty(scope, 'restorePending', { value: deletion.get('view')?.pending === true, enumerable: false });
     const accessId = inherited === undefined ? options.accessId ?? options.grantId : inherited?.accessId;
     const requestedAccess = accessId !== undefined && accessId !== null || inherited !== undefined;
     const surface = options.surface ?? 'cli';
@@ -4725,12 +4909,21 @@ export function createShadowGraph(options = {}) {
   // skeletons, so the first marker counts as logical unless it is recorded
   // hard. A purge narrows every grant so that it no longer covers the purged
   // project, so a granted project's purge is never covered: it answers
-  // unavailable, closed.
+  // unavailable, closed. The store's ledger is asked too (PR-37c design §11):
+  // a restore of a pre-purge backup wipes the marker from the journal and
+  // lifts it into a project tombstone that keeps its instant and mode. The
+  // earliest of either after the line decides; a tombstone counts as logical
+  // only when it says so, and on a tie anything not logical wins, closed.
   function purgedSince(boundary, instant) {
     const { project } = boundary.scope;
     if (!project || !isValidIsoInstant(instant)) return false;
-    const first = journal.find((entry) => entry.type === 'project.purged' && entry.project === project && compareInstants(entry.at, instant) > 0);
-    return first !== undefined && first.payload?.mode !== 'hard';
+    const later = [
+      ...journal.filter((entry) => entry.type === 'project.purged' && entry.project === project).map((entry) => ({ at: entry.at, logical: entry.payload?.mode !== 'hard' })),
+      ...(deletion.get('view')?.projects ?? []).filter((tombstone) => tombstone.project === project).map((tombstone) => ({ at: tombstone.at, logical: tombstone.mode === 'logical' }))
+    ].filter((entry) => isValidIsoInstant(entry.at) && compareInstants(entry.at, instant) > 0);
+    if (!later.length) return false;
+    const earliest = later.reduce((first, entry) => (compareInstants(entry.at, first) < 0 ? entry.at : first), later[0].at);
+    return later.every((entry) => entry.logical || compareInstants(entry.at, earliest) !== 0);
   }
 
   // AC-031/AC-032: the structural counterparts of an expanded record -- facts
@@ -5756,7 +5949,8 @@ export function createShadowGraph(options = {}) {
     accessRefusal: transactional('accessRefusal', authority.transportRefusal),
     bindProject: transactional('bindProject', bindProject), resolveProjectBinding,
     recordCapture: transactional('recordCapture', recordCapture), transitionCapture: transactional('transitionCapture', transitionCapture),
-    recordSelfEvent: transactional('recordSelfEvent', recordSelfEvent), recordTranscript: transactional('recordTranscript', recordTranscript) });
+    recordSelfEvent: transactional('recordSelfEvent', recordSelfEvent), recordTranscript: transactional('recordTranscript', recordTranscript),
+    reapplyDeletion: transactional('reapplyDeletion', reapplyDeletion, { mode: 'snapshot' }), quarantined });
 }
 
 // `strict` is for caller writes, where a typo should fail loudly instead of

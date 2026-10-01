@@ -97,6 +97,10 @@ const PURGE_MARKER_PAYLOAD_FIELDS = new Set([
 const RESTORE_REAPPLIED_COUNTS = Object.freeze(['removed', 'quarantined', 'skeletons', 'spliced']);
 // The entry types whose hard mode explains missing journal sequences.
 export const HARD_GAP_EVIDENCE_TYPES = Object.freeze(['project.purged', 'restore.reapplied']);
+// The entry types that record an entity's creation: a token one of them
+// carries was the entity's from its start, which a restore's token proof
+// relies on (PR-37c design §6.2). Named here, where the capture types are read.
+export const CREATION_ENTRY_TYPES = Object.freeze(['decision.recorded', 'attempt.recorded', 'memory.recorded', 'fact.observed', 'capture.recorded']);
 
 // Entry types that carry a replayable payload. Each is produced by real code in
 // src/shadowgraph.js, or read first and written later (plan v1.4.4 §9.2): the

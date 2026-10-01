@@ -2,7 +2,6 @@ import { historicalIds } from '../tools/historical-ids.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { readFile } from 'node:fs/promises';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { privilegedSnapshot, privilegedValidate, privilegedRebuild } from '../src/internal/snapshot.js';
 import { validateRestorePayload } from '../src/restore-validation.js';
@@ -44,22 +43,16 @@ async function persistRestore(t, backend, graph, { purged = false } = {}) {
   parity(loaded);
   const backup = join(dir, backend === 'json' ? 'backup.json' : 'backup.db');
   await backupFile(path, backup, { store });
-  let target = store;
+  const target = store;
   if (backend === 'json') {
-    // PR-37a (design R-1): a restore into a store whose journal holds a purge
-    // marker is refused and leaves it as it was; the same backup restores over
-    // an existing store that holds none. The raw SQLite store's restore stays
-    // the primitive.
+    // PR-37c (design §13.4): a restore into a store whose journal holds a
+    // purge marker lifts it into the store's ledger. B's head is the store's,
+    // and B's journal holds the marker, so nothing B holds is removed or
+    // quarantined. The raw SQLite store's restore stays the primitive.
     assert.equal(privilegedSnapshot(graph).journal.some((entry) => entry.type === 'project.purged'), purged);
-    if (purged) {
-      const held = await readFile(path);
-      await assert.rejects(restoreFile(backup, path), { code: 'purge_aware_restore_unsupported_at_this_build' });
-      assert.deepEqual(await readFile(path), held);
-      const other = join(dir, 'other.json');
-      await createJsonFileStore(other).save([]);
-      await restoreFile(backup, other);
-      target = createJsonFileStore(other);
-    } else await restoreFile(backup, path);
+    const result = await restoreFile(backup, path);
+    assert.equal(result.deletionKnowledge, purged ? 'present' : 'none');
+    if (purged) assert.deepEqual(result.reapplied, { removed: 0, quarantined: 0, skeletons: 0, spliced: 0 });
   }
   else await store.restore(backup);
   const restored = graphOf(await target.load());

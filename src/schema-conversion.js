@@ -29,7 +29,9 @@ function excludeBelowFloor(source, report) {
   }
 }
 import { privilegedLiveSnapshot, privilegedSnapshot, privilegedWithheldCounts } from './internal/snapshot.js';
-import { BACKUP_CONTROL_LEDGER_STALE, deletionError, ledgerPath, refuseDeletionFileDestination } from './internal/deletion-knowledge.js';
+import { BACKUP_CONTROL_LEDGER_STALE, deletionError, ledgerPath, readLedger, refuseDeletionFileDestination, writeLedger } from './internal/deletion-knowledge.js';
+import { createDestinationFence } from './revision-store.js';
+import { isValidIsoInstant } from './fact-validity.js';
 
 const sha256 = async (path) => createHash('sha256').update(await readFile(path)).digest('hex');
 const samePath = (left, right) => (process.platform === 'win32' ? resolve(left).toLowerCase() === resolve(right).toLowerCase() : resolve(left) === resolve(right));
@@ -348,10 +350,21 @@ export function downgradeToSchema5(snapshot, { now = () => new Date().toISOStrin
   };
 }
 
+// The ledger an interrupted downgrade leaves beside its output: exactly its
+// version and a valid tokensStripped flag (PR-37c design §4.7).
+async function flagOnly(path) {
+  let value;
+  try { value = JSON.parse(await readFile(path, 'utf8')); } catch { return false; }
+  const flag = value?.tokensStripped;
+  return Object.keys(value ?? {}).sort().join() === 'tokensStripped,version' && value.version === 1
+    && flag !== null && typeof flag === 'object' && Object.keys(flag).join() === 'at' && isValidIsoInstant(flag.at);
+}
+
 // §19.3.2 end to end: preservation copy first and recorded in the report
 // before any conversion runs; the downgraded store as a separate new file;
-// the current store left untouched.
-export async function downgradeStore({ graph, store, file, storageType = 'json', output, preservationCopy, toSchemaVersion = 5, now }) {
+// the current store left untouched. `fault(stage)` is a test seam, called
+// with 'afterTokensStripped' between the flag and the output.
+export async function downgradeStore({ graph, store, file, storageType = 'json', output, preservationCopy, toSchemaVersion = 5, now, fault }) {
   if (!output) throw new Error('A downgrade needs an output path');
   if (!preservationCopy) throw new Error('A preservation copy needs a destination path');
   if (![5, 6].includes(toSchemaVersion)) throw new Error('A downgrade targets schema 6 or schema 5');
@@ -379,13 +392,28 @@ export async function downgradeStore({ graph, store, file, storageType = 'json',
   }
   if (await exists(output)) throw new Error(`Refusing to overwrite an existing file with a downgrade: ${output}`);
   if (await exists(reportPath)) throw new Error(`Refusing to overwrite an existing report: ${reportPath}`);
-  // The output is below the deletion-knowledge floor and gets no deletion
-  // records: none may already sit beside it, and it never lands on one (PR-37a).
+  // The output is below the deletion-knowledge floor, which ignores a ledger,
+  // and gets one holding only the tokensStripped flag, which a re-upgrade
+  // carries: its tokens are gone, so a pre-downgrade backup's creation entries
+  // must never prove the tokens a re-upgrade gives (PR-37c design §4.7; R5 L1
+  // VS5). It never lands on a deletion record file, and no other ledger may
+  // already sit beside it; the flag-only ledger an interrupted downgrade left
+  // is the one a re-run accepts.
   const target = await refuseDeletionFileDestination(output);
-  if (await exists(ledgerPath(output)) || await exists(ledgerPath(target))) throw deletionError(BACKUP_CONTROL_LEDGER_STALE, 'Refusing the downgrade: a deletion record file already sits beside its output');
+  for (const path of [ledgerPath(output), ledgerPath(target)]) {
+    if (await exists(path) && !(await flagOnly(path))) throw deletionError(BACKUP_CONTROL_LEDGER_STALE, 'Refusing the downgrade: a deletion record file already sits beside its output');
+  }
   const preservation = await writePreservationCopy({ store, file, storageType, destination: preservationCopy });
   await writeFile(reportPath, `${JSON.stringify({ status: 'converting', preservationCopy: preservation }, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
   if (await exists(output)) throw new Error(`Refusing to overwrite an existing file with a downgrade: ${output}`);
+  // The flag lands before the output, which fails safe, under the output's
+  // fence, released before a SQLite output's own save takes it. It is set only
+  // when absent: a re-run keeps the flag its first run wrote and writes
+  // nothing to the ledger (check R3-3).
+  await createDestinationFence(output).run(async () => {
+    if ((await readLedger(output))?.tokensStripped === undefined) await writeLedger(output, (ledger) => { ledger.tokensStripped = { at: now?.() ?? new Date().toISOString() }; });
+  });
+  await fault?.('afterTokensStripped');
   // What deletion records withhold is left out of the live form it converts,
   // and counted, never named: a build below the floor would serve it (PR-37a).
   const { payload, report } = downgradeTo(privilegedLiveSnapshot(graph), toSchemaVersion, { now });

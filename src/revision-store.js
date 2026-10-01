@@ -1,6 +1,9 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { mkdir, open, readFile, stat, unlink, utimes } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
+// deletion-knowledge.js imports nothing from here, so there is no import
+// cycle (PR-37c design §3.1, check R3-4).
+import { canonicalPath } from './internal/deletion-knowledge.js';
 
 const heldDestinationFences = new AsyncLocalStorage();
 
@@ -69,9 +72,23 @@ const LOCK_CONTENTION_CODES = new Set(
   process.platform === 'win32' ? ['EEXIST', 'EPERM', 'EACCES', 'EBUSY'] : ['EEXIST']
 );
 
+// The one name of a store fence's lock file (PR-37c design §3.1, re-review
+// NF-1): beside the store's canonical path, links followed, so every spelling
+// of one store -- its 8.3 name, a link to it, a folder alias -- takes one
+// fence, and a writer through another spelling can never commit inside a
+// restore's hold. Every fence and every check of a fence's lock file uses it;
+// the capture side-file list is the one allowed exception, its store path
+// being canonical already (check R3-7). A hard link keeps its own name.
+export async function fenceLockPath(file) {
+  return `${await canonicalPath(file)}.lock`;
+}
+
+// A held lock path as the re-entry guard keys it: folded on win32, where a
+// store not there yet keeps the case of the names it was given (check R3-4).
+const heldKey = (lockPath) => (process.platform === 'win32' ? lockPath.toLowerCase() : lockPath);
+
 export function createDestinationFence(filePath, options = {}) {
   const destination = resolve(filePath);
-  const lockPath = `${destination}.lock`;
   const lockTimeoutMs = options.lockTimeoutMs ?? 5000;
   const staleLockMs = options.staleLockMs ?? 30000;
   const pollIntervalMs = options.lockPollIntervalMs ?? 25;
@@ -86,7 +103,7 @@ export function createDestinationFence(filePath, options = {}) {
     catch (error) { return error.code === 'EPERM'; }
   }
 
-  async function acquire(onWait) {
+  async function acquire(lockPath, onWait) {
     const started = Date.now();
     const token = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
     let waitingReported = false;
@@ -139,16 +156,34 @@ export function createDestinationFence(filePath, options = {}) {
   }
 
   return {
-    destination,
-    lockPath,
+    // The lock path is derived at every run, never cached (check R3-4):
+    // canonicalPath falls back when realpath fails, and a value cached from
+    // such a run would split the fence for the life of a long-lived store. A
+    // run that misses costs that one operation.
     async run(operation, runOptions = {}) {
+      const lockPath = await fenceLockPath(destination);
+      const key = heldKey(lockPath);
       const inherited = heldDestinationFences.getStore();
-      if (inherited?.has(lockPath)) throw new DestinationFenceReentryError(lockPath);
-      const release = await acquire(runOptions.onWait);
+      if (inherited?.has(key)) throw new DestinationFenceReentryError(lockPath);
+      const release = await acquire(lockPath, runOptions.onWait);
       const held = new Set(inherited ?? []);
-      held.add(lockPath);
+      held.add(key);
       try { return await heldDestinationFences.run(held, operation); }
       finally { await release(); }
+    }
+  };
+}
+
+// The restore lock (PR-37c design §3.1): a fence on `<canonical store>.restore`,
+// so its lock file is `<canonical store>.restore.lock` however the store is
+// spelled. The store's path is made canonical first, at every run: the
+// `.restore` name never exists, so a fence on it alone would keep a short or
+// linked final name. It is taken before the store fence, never while holding
+// it (§3.2), with the store fence's timeouts, stale reclaim and re-entry rule.
+export function restoreLock(file, options = {}) {
+  return {
+    async run(operation, runOptions) {
+      return createDestinationFence(`${await canonicalPath(file)}.restore`, options).run(operation, runOptions);
     }
   };
 }

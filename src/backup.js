@@ -1,49 +1,63 @@
 import { copyFile, mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
-import { createDestinationFence, currentRevision, nextRevisionAfter } from './revision-store.js';
+import { createDestinationFence, currentRevision, nextRevisionAfter, restoreLock } from './revision-store.js';
 import { guardAuthorityRestore, validateRestorePayload, validateRestoreSnapshot } from './restore-validation.js';
 import { mergeAuthorityRestore } from './authority-restore.js';
-import { backupSidecar, deletionRestoreHook, refuseDeletionFileDestination, writeSidecar } from './internal/deletion-knowledge.js';
+import { createJsonFileStore } from './storage.js';
+import { backupSidecar, refuseDeletionFileDestination, storeIo, writeSidecar } from './internal/deletion-knowledge.js';
+import { activation, asRestoreRefusal, completeRestore, resolvePendingRestore, restoreContext, restoreHook, settleAfterFailure } from './internal/restore-wrapper.js';
 
 // A backup carries the store's deletion records beside it (PR-37a): the
 // payload is read, then the records; their copy lands first, then the payload.
 // Both go to the destination's final path, which is never a deletion record
-// file however it is spelled.
+// file however it is spelled. It waits on the restore lock and completes any
+// record a restore left first, so it never carries one (PR-37c design §3.4);
+// a SQLite store's own backup does both itself.
 export async function backupFile(source, destination, options = {}) {
   const target = await refuseDeletionFileDestination(destination, options.env);
   await mkdir(dirname(target), { recursive: true });
   if (options.store?.backup) return options.store.backup(destination);
-  const temporary = join(dirname(target), `.${target.split(/[\\/]/).pop()}.${process.pid}.${Date.now()}.tmp`);
-  try {
-    await copyFile(source, temporary);
-    await writeSidecar(target, await backupSidecar(source, target, options.env));
-    await rename(temporary, target);
-    return { source, destination };
-  }
-  finally { await unlink(temporary).catch(() => {}); }
+  return restoreLock(source, options).run(async () => {
+    await resolvePendingRestore(storeIo(createJsonFileStore(source, options)));
+    const temporary = join(dirname(target), `.${target.split(/[\\/]/).pop()}.${process.pid}.${Date.now()}.tmp`);
+    try {
+      await copyFile(source, temporary);
+      await writeSidecar(target, await backupSidecar(source, target, options.env));
+      await rename(temporary, target);
+      return { source, destination };
+    }
+    finally { await unlink(temporary).catch(() => {}); }
+  });
 }
 
-// The restore refuses what needs deletion semantics this build lacks
-// (PR-37a), through the validate hook the unchanged primitive calls inside the
-// fence before any write. A destination that is not there holds nothing; one
-// that is there but cannot be read refuses.
+// The JSON restore entry (PR-37c design §3.3): the restore wrapper around the
+// unchanged primitive, under the restore lock and then one hold of the store
+// fence, which covers step 0, the pre-step in the validate hook, the primitive
+// and the post-step against every writer, however it spells the store's path
+// (§3.1). `verifier` is the wrapper's own option, which the primitive ignores.
 export async function restoreFile(source, destination, options = {}) {
-  const fence = createDestinationFence(destination, options);
-  const validate = deletionRestoreHook({
-    source, destination, env: options.env, validate: options.validate,
-    readDestination: async () => {
-      try { return JSON.parse(await readFile(destination, 'utf8')); }
-      catch (error) { if (error.code === 'ENOENT') return null; throw error; }
-    }
-  });
-  // The unchanged primitive creates its files through `restoreFs`: they take
-  // the destination's mode, or owner-only for a new one (FND-P6-11; PR-37b).
-  return fence.run(async () => {
+  const io = storeIo(createJsonFileStore(destination, options));
+  return restoreLock(destination, options).run(() => createDestinationFence(destination, options).run(async () => {
+    await asRestoreRefusal(resolvePendingRestore(io, { held: true, verifier: options.verifier }));
+    const ctx = restoreContext({
+      source, destination, env: options.env, verifier: options.verifier,
+      instant: options.now ?? new Date().toISOString(), read: () => io.run(({ read }) => read(), { held: true })
+    });
+    // The unchanged primitive creates its files through `restoreFs`: they take
+    // the destination's mode, or owner-only for a new one (FND-P6-11; PR-37b).
     const mode = await stat(destination).then((info) => info.mode & 0o777, () => 0o600);
     const create = options.restoreFs?.writeFile ?? writeFile;
     const restoreFs = { ...options.restoreFs, writeFile: (path, data, encoding) => create(path, data, { encoding, mode }) };
-    return restoreJsonFileFenced(source, destination, { ...options, validate, restoreFs });
-  });
+    let result;
+    try { result = await restoreJsonFileFenced(source, destination, { ...options, validate: restoreHook(ctx, options.validate), afterReplace: activation(ctx, options.afterReplace), restoreFs }); }
+    catch (error) {
+      await settleAfterFailure(io, ctx, { held: true });
+      throw error;
+    }
+    return completeRestore(io, ctx, result, options.afterReplace, {
+      held: true, load: () => io.run(({ load }) => load(), { held: true }), restoreFault: options.restoreFault
+    });
+  }));
 }
 
 async function restoreJsonFileFenced(source, destination, options) {
@@ -195,3 +209,7 @@ async function restoreJsonFileFenced(source, destination, options) {
     }
   }
 }
+
+// The JSON primitive alone, for the primitive-only runs of the pr12 suites
+// (PR-37c design §13.1). backup.js is not in package exports.
+export { restoreJsonFileFenced as restoreJsonPrimitive };

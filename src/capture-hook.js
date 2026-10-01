@@ -195,7 +195,9 @@ export function observedEvent(payload) {
 // The store's bytes on disk (design review D-2, D-3): the file, its SQLite side
 // files, and any save's temporary file beside it, which a writer killed
 // mid-save may have left.
-export async function storeFootprint(file) {
+export async function storeFootprint(given) {
+  // The file a save writes, which a link names (re-review N-3).
+  const file = await canonicalPath(given).catch(() => given);
   const size = async (path) => (await lstat(path).catch(() => null))?.size ?? 0;
   let total = await size(file);
   for (const suffix of STORE_SIDE_FILES) total += await size(`${file}${suffix}`);
