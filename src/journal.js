@@ -46,7 +46,7 @@ export function isLegacyUnnumberedMetadataEntry(entry, options = {}) {
   // A current envelope can legitimately retain pre-journal breadcrumbs verbatim;
   // the entry's own old/absent schema plus its metadata-only shape is the proof.
   if (!entryIsLegacy && !entryIsUnversioned) return false;
-  if (!REPLAYABLE_ENTRY_TYPES.includes(entry.type) || ['projection.baseline', 'project.purged'].includes(entry.type)) return false;
+  if (!REPLAYABLE_ENTRY_TYPES.includes(entry.type) || ['projection.baseline', ...HARD_GAP_EVIDENCE_TYPES].includes(entry.type)) return false;
 
   return !Object.hasOwn(entry, 'payload')
     && !Object.hasOwn(entry, 'entityKind')
@@ -90,10 +90,18 @@ const PURGE_MARKER_FIELDS = new Set([
 const PURGE_MARKER_PAYLOAD_FIELDS = new Set([
   'project', 'mode', 'removed', 'removedJournalSequences'
 ]);
+// What a restore that re-applied deletion knowledge (PR-37's post-step) may
+// record: its mode, the journal sequences a hard re-application spliced out,
+// and a closed set of counts. Nothing else, so no id or content can ride in a
+// member name (plan rev6 section 3.8 item 1).
+const RESTORE_REAPPLIED_COUNTS = Object.freeze(['removed', 'quarantined', 'skeletons', 'spliced']);
+// The entry types whose hard mode explains missing journal sequences.
+export const HARD_GAP_EVIDENCE_TYPES = Object.freeze(['project.purged', 'restore.reapplied']);
 
 // Entry types that carry a replayable payload. Each is produced by real code in
 // src/shadowgraph.js, or read first and written later (plan v1.4.4 §9.2): the
-// four capture types are read here (PR-33) before any writer emits them.
+// four capture types are read here (PR-33), and `restore.reapplied` (PR-37a),
+// before any writer emits them.
 export const REPLAYABLE_ENTRY_TYPES = Object.freeze([
   'projection.baseline',
   'decision.recorded',
@@ -114,6 +122,7 @@ export const REPLAYABLE_ENTRY_TYPES = Object.freeze([
   'confidence.changed',
   'relation.created',
   'project.purged',
+  'restore.reapplied',
   'entity.attributed',
   'entity.token_assigned',
   'capture.recorded',
@@ -275,6 +284,7 @@ export function schema5PurgeArtifactIssue(entry, sourceSchemaVersion = undefined
     return null;
   }
 
+  if (entry.type === 'restore.reapplied') return restoreReappliedIssue(entry, canonicalNullProvenance, nonEmptyString);
   if (entry.type !== 'project.purged') return null;
   const forbidden = Object.keys(entry).find((name) => !PURGE_MARKER_FIELDS.has(name));
   if (forbidden) return `purge marker contains forbidden identity field ${forbidden}`;
@@ -308,6 +318,37 @@ export function schema5PurgeArtifactIssue(entry, sourceSchemaVersion = undefined
   if (entry.payload.mode === 'hard' && entry.payload.removedJournalSequences.some((sequence) => sequence >= entry.seq)) {
     return 'hard purge marker removedJournalSequences must be strictly earlier than marker sequence';
   }
+  return null;
+}
+
+// A `restore.reapplied` entry (plan rev6 section 3.8; PR-37a reads it, PR-37's
+// restore post-step writes it): content-free, naming no project or entity,
+// with the marker envelope, its mode, the sequences a hard re-application
+// spliced out -- positive, strictly increasing, earlier than the entry, and
+// none for a logical one -- and only the closed set of counts.
+function restoreReappliedIssue(entry, canonicalNullProvenance, nonEmptyString) {
+  const forbidden = Object.keys(entry).find((name) => !PURGE_MARKER_FIELDS.has(name));
+  if (forbidden) return `restore.reapplied contains forbidden field ${forbidden}`;
+  if (!nonEmptyString(entry.id)) return 'restore.reapplied id must be a non-empty string';
+  if (!Number.isSafeInteger(entry.seq) || entry.seq <= 0) return 'restore.reapplied seq must be a positive safe integer';
+  if (entry.entityKind !== null || entry.entityId !== null || entry.project !== null) return 'restore.reapplied names no entity kind, entity or project';
+  if (!canonicalNullProvenance(entry.provenance)) return 'restore.reapplied must erase provenance identity';
+  const payload = entry.payload;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return 'restore.reapplied payload must be an object';
+  const forbiddenPayload = Object.keys(payload).find((name) => !['mode', 'removedJournalSequences', ...RESTORE_REAPPLIED_COUNTS].includes(name));
+  if (forbiddenPayload) return `restore.reapplied contains forbidden payload field ${forbiddenPayload}`;
+  if (!['logical', 'hard'].includes(payload.mode)) return 'restore.reapplied mode must be exactly logical or hard';
+  for (const name of RESTORE_REAPPLIED_COUNTS) {
+    if (Object.hasOwn(payload, name) && (!Number.isSafeInteger(payload[name]) || payload[name] < 0)) return `restore.reapplied ${name} must be a non-negative safe integer`;
+  }
+  const sequences = payload.removedJournalSequences;
+  if (!Array.isArray(sequences)) return 'restore.reapplied removedJournalSequences must be present and be an array';
+  for (const [index, sequence] of sequences.entries()) {
+    if (!Number.isSafeInteger(sequence) || sequence <= 0) return 'restore.reapplied removedJournalSequences must contain positive safe integers';
+    if (index > 0 && sequence <= sequences[index - 1]) return 'restore.reapplied removedJournalSequences must be strictly increasing and unique';
+  }
+  if (payload.mode === 'logical' && sequences.length) return 'logical restore.reapplied must use an empty removedJournalSequences array';
+  if (sequences.some((sequence) => sequence >= entry.seq)) return 'restore.reapplied removedJournalSequences must be strictly earlier than its sequence';
   return null;
 }
 
@@ -719,7 +760,7 @@ function hardPurgeMarkerRelationshipIssues(entries = [], options = {}) {
       const currentSchemaArtifact = canonicalPurgeSchema(sourceSchemaVersion)
         || canonicalPurgeSchema(marker?.schemaVersion);
       if (!currentSchemaArtifact
-        || marker?.type !== 'project.purged'
+        || !HARD_GAP_EVIDENCE_TYPES.includes(marker?.type)
         || marker?.payload?.mode !== 'hard'
         || !Number.isSafeInteger(marker.seq)
         || marker.seq <= report.firstUnexplained
@@ -913,6 +954,12 @@ export function rebuildProjection(entries = [], options = {}) {
       applied += 1;
       continue;
     }
+    // What a restore re-applied is already in the entries around it: the
+    // skeletons and splices it left. The entry itself changes nothing.
+    if (entry.type === 'restore.reapplied' && entry.redacted !== true && entry.payload !== null) {
+      applied += 1;
+      continue;
+    }
     if (entry.redacted === true || entry.payload === null) {
       // Tombstoned entry: the content is gone by design. Remove the entity so a
       // rebuild after a logical purge does not resurrect purged data.
@@ -1102,7 +1149,7 @@ export function hardPurgeGapLedgerReport(entries = [], options = {}) {
   const claims = [];
   const claimedInRange = new Map();
   const hardMarkers = all
-    .filter((entry) => entry?.type === 'project.purged'
+    .filter((entry) => HARD_GAP_EVIDENCE_TYPES.includes(entry?.type)
       && entry?.payload?.mode === 'hard'
       && schema5PurgeArtifactIssue(entry, sourceSchemaVersion) === null)
     .sort((left, right) => (left.seq ?? 0) - (right.seq ?? 0));

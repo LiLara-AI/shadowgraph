@@ -452,10 +452,10 @@ test('a memory-only restore strips the authority collections and restores every 
 });
 
 test('entity.attributed vocabulary supports migration and explicit owner attribution writers', async () => {
-  // PR-20 added the reader for entity.token_assigned after it, and PR-33 the
-  // four capture types after that.
-  assert.equal(REPLAYABLE_ENTRY_TYPES.length, 25);
-  assert.equal(JOURNAL_ENTRY_TYPES.length, 26);
+  // PR-20 added the reader for entity.token_assigned after it, PR-33 the four
+  // capture types after that, and PR-37a restore.reapplied after project.purged.
+  assert.equal(REPLAYABLE_ENTRY_TYPES.length, 26);
+  assert.equal(JOURNAL_ENTRY_TYPES.length, 27);
   assert.equal(REPLAYABLE_ENTRY_TYPES.at(-6), 'entity.attributed');
   assert.equal(REPLAYABLE_ENTRY_TYPES.at(-5), 'entity.token_assigned');
   assert.deepEqual(REPLAYABLE_ENTRY_TYPES.slice(-4), ['capture.recorded', 'capture.state_changed', 'extraction.completed', 'extraction.failed']);

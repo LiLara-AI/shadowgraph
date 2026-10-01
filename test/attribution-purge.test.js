@@ -2,6 +2,7 @@ import { historicalIds } from '../tools/historical-ids.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { privilegedSnapshot, privilegedValidate, privilegedRebuild } from '../src/internal/snapshot.js';
 import { validateRestorePayload } from '../src/restore-validation.js';
@@ -30,7 +31,7 @@ function parity(graph) {
   return live;
 }
 function graphOf(payload) { const graph = createShadowGraph({ now }); graph.importData(payload); return graph; }
-async function persistRestore(t, backend, graph) {
+async function persistRestore(t, backend, graph, { purged = false } = {}) {
   const dir = await scratchDirectory(t, 'attribution-purge-');
   const path = join(dir, backend === 'json' ? 'store.json' : 'store.db');
   const open = () => backend === 'json' ? createJsonFileStore(path) : createSqliteStore(path);
@@ -43,9 +44,25 @@ async function persistRestore(t, backend, graph) {
   parity(loaded);
   const backup = join(dir, backend === 'json' ? 'backup.json' : 'backup.db');
   await backupFile(path, backup, { store });
-  if (backend === 'json') await restoreFile(backup, path);
+  let target = store;
+  if (backend === 'json') {
+    // PR-37a (design R-1): a restore into a store whose journal holds a purge
+    // marker is refused and leaves it as it was; the same backup restores over
+    // an existing store that holds none. The raw SQLite store's restore stays
+    // the primitive.
+    assert.equal(privilegedSnapshot(graph).journal.some((entry) => entry.type === 'project.purged'), purged);
+    if (purged) {
+      const held = await readFile(path);
+      await assert.rejects(restoreFile(backup, path), { code: 'purge_aware_restore_unsupported_at_this_build' });
+      assert.deepEqual(await readFile(path), held);
+      const other = join(dir, 'other.json');
+      await createJsonFileStore(other).save([]);
+      await restoreFile(backup, other);
+      target = createJsonFileStore(other);
+    } else await restoreFile(backup, path);
+  }
   else await store.restore(backup);
-  const restored = graphOf(await store.load());
+  const restored = graphOf(await target.load());
   parity(restored);
   const expected = privilegedSnapshot(loaded), actual = privilegedSnapshot(restored);
   for (const name of ['records', 'facts', 'relations', 'idempotency', 'events', 'journal']) assert.deepEqual(actual[name], expected[name], `${backend} restore ${name}`);
@@ -97,7 +114,7 @@ for (const backend of ['json', 'sqlite']) for (const mode of ['logical', 'hard']
     graph.purgeProject('alpha', { mode });
     assert.deepEqual(ids(privilegedSnapshot(graph).relations), [fixtureIds.relation]);
     parity(graph);
-    const restored = await persistRestore(t, backend, graph);
+    const restored = await persistRestore(t, backend, graph, { purged: true });
     restored.purgeProject('beta', { mode });
     assert.deepEqual(privilegedSnapshot(restored).relations, []); parity(restored);
   });
@@ -112,7 +129,7 @@ for (const backend of ['json', 'sqlite']) for (const mode of ['logical', 'hard']
       assert.deepEqual(ordered(after[collection]), ordered(before[collection].filter(keep)), collection);
     }
     for (const event of before.events.filter((event) => (event.recordId ?? event.factId ?? event.relationId ?? '').match(/(legacy|missing)$/))) assert.ok(after.events.some((item) => item.id === event.id));
-    await persistRestore(t, backend, graph);
+    await persistRestore(t, backend, graph, { purged: true });
   });
 }
 

@@ -28,7 +28,8 @@ function excludeBelowFloor(source, report) {
     report.excludedEntryCounts[collection] = Array.isArray(source[collection]) ? source[collection].length : 0;
   }
 }
-import { privilegedSnapshot } from './internal/snapshot.js';
+import { privilegedLiveSnapshot, privilegedSnapshot, privilegedWithheldCounts } from './internal/snapshot.js';
+import { BACKUP_CONTROL_LEDGER_STALE, deletionError, ledgerPath, refuseDeletionFileDestination } from './internal/deletion-knowledge.js';
 
 const sha256 = async (path) => createHash('sha256').update(await readFile(path)).digest('hex');
 const samePath = (left, right) => (process.platform === 'win32' ? resolve(left).toLowerCase() === resolve(right).toLowerCase() : resolve(left) === resolve(right));
@@ -64,6 +65,8 @@ export async function writePreservationCopy({ store, file, storageType = 'json',
   if (await exists(destination)) throw new Error(`Refusing to overwrite an existing file with a preservation copy: ${destination}`);
   await backupFile(file, destination, { store });
   const hash = await sha256(destination);
+  // The deletion records the copy carries, hashed with it (PR-37a).
+  const ledger = await exists(ledgerPath(destination)) ? { path: ledgerPath(destination), sha256: await sha256(ledgerPath(destination)) } : null;
   const scratch = join(dirname(resolve(destination)), `.preservation-check.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`);
   try {
     await copyFile(destination, scratch);
@@ -77,7 +80,8 @@ export async function writePreservationCopy({ store, file, storageType = 'json',
     for (const path of [scratch, `${scratch}-wal`, `${scratch}-shm`, `${scratch}-journal`]) await unlink(path).catch(() => {});
   }
   if (await sha256(destination) !== hash) throw new Error('Preservation copy changed while it was being verified');
-  return { path: destination, sha256: hash, verified: true };
+  if (ledger && await sha256(ledger.path) !== ledger.sha256) throw new Error('Preservation copy changed while it was being verified');
+  return { path: destination, sha256: hash, verified: true, ...(ledger ? { controlLedger: ledger } : {}) };
 }
 
 // The resumable attribution migration, persisted batch by batch. Restore
@@ -375,10 +379,18 @@ export async function downgradeStore({ graph, store, file, storageType = 'json',
   }
   if (await exists(output)) throw new Error(`Refusing to overwrite an existing file with a downgrade: ${output}`);
   if (await exists(reportPath)) throw new Error(`Refusing to overwrite an existing report: ${reportPath}`);
+  // The output is below the deletion-knowledge floor and gets no deletion
+  // records: none may already sit beside it, and it never lands on one (PR-37a).
+  const target = await refuseDeletionFileDestination(output);
+  if (await exists(ledgerPath(output)) || await exists(ledgerPath(target))) throw deletionError(BACKUP_CONTROL_LEDGER_STALE, 'Refusing the downgrade: a deletion record file already sits beside its output');
   const preservation = await writePreservationCopy({ store, file, storageType, destination: preservationCopy });
   await writeFile(reportPath, `${JSON.stringify({ status: 'converting', preservationCopy: preservation }, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
   if (await exists(output)) throw new Error(`Refusing to overwrite an existing file with a downgrade: ${output}`);
-  const { payload, report } = downgradeTo(privilegedSnapshot(graph), toSchemaVersion, { now });
+  // What deletion records withhold is left out of the live form it converts,
+  // and counted, never named: a build below the floor would serve it (PR-37a).
+  const { payload, report } = downgradeTo(privilegedLiveSnapshot(graph), toSchemaVersion, { now });
+  const withheld = privilegedWithheldCounts(graph);
+  if (Object.keys(withheld).length) report.withheldEntryCounts = withheld;
   validateRestorePayload(payload);
   if (storageType === 'sqlite') {
     const target = await createStorage({ type: 'sqlite', file: output });
@@ -390,7 +402,7 @@ export async function downgradeStore({ graph, store, file, storageType = 'json',
   }
   validateRestorePayload(await loadThrough(storageType, output));
   if (await sha256(preservation.path) !== preservation.sha256) throw new Error('The preservation copy no longer matches the hash it was verified with');
-  const result = { status: 'complete', preservationCopy: preservation, output, outputSha256: await sha256(output), ...report, note: 'Everything listed as removed or excluded is intact in the preservation copy; nothing was deleted, and the current-format store was not changed.' };
+  const result = { status: 'complete', preservationCopy: preservation, output, outputSha256: await sha256(output), ...report, note: 'Everything listed as removed, excluded or withheld is intact in the preservation copy; nothing was deleted, and the current-format store was not changed.' };
   await writeFile(reportPath, `${JSON.stringify(result, null, 2)}\n`, 'utf8');
   return { ...result, report: reportPath };
 }

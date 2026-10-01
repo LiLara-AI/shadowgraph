@@ -305,10 +305,11 @@ export async function runCapture({ capture, input, deadline, record = null, home
         const classified = classifyCaptureSource({ event: event.event, sessionId: event.sessionId, cwd: event.cwd, toolName: event.toolName, toolInput: event.toolInput, prompt: event.prompt }, context);
         const source = { event: event.event, sessionId: event.sessionId };
         if (classified.selfEvent) {
-          privilegedRecordSelfEvent(graph, { project, originId: capture.originId, signal: classified.signal, source });
-          cursor({ selfEvent: true });
-          changed = true;
+          // A session deletion records withhold is never written to (PR-37a).
+          const counted = privilegedRecordSelfEvent(graph, { project, originId: capture.originId, signal: classified.signal, source });
+          changed = Boolean(cursor({ selfEvent: true })?.changed) || !counted?.refused;
           outcome = 'self_event';
+          if (!changed) return skip(outcome);
         } else {
           let item = null;
           if (event.text === undefined) outcome = 'nothing_new';

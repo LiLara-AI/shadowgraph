@@ -11,6 +11,7 @@ import { loadLocalEvidenceVerifier } from './verification.js';
 import { BATCH_PROTOCOL_VERSIONS, LEGACY_PROTOCOL_VERSIONS, METADATA_TIER, buildToolCatalog, metadataTierForProtocolVersion, negotiateLegacyProtocolVersion, projectTool, selectTools, toolResult } from './mcp-tools.js';
 import { privilegedAccessRefusal, privilegedSnapshot } from './internal/snapshot.js';
 import { accessContext, bindWorkspaceProject, currentAccessOperation, discoverWorkspace, hasAccessReference } from './internal/access-transport.js';
+import { DELETION_CODES } from './internal/deletion-knowledge.js';
 
 const file = process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json';
 const injectedRestoreFaultStages = process.env.NODE_ENV === 'test'
@@ -459,7 +460,10 @@ const PUBLIC_DOMAIN_CODES = new Set([
   'storage_lock_timeout',
   'unexplained_journal_gap',
   'unrelated_hard_purge_ledger_sequence',
-  'unsupported_schema_version'
+  'unsupported_schema_version',
+  // The deletion-knowledge refusals (PR-37a): codes only, never a path,
+  // project or token.
+  ...DELETION_CODES
 ]);
 const PUBLIC_DOMAIN_MESSAGES = new Set([
   'A caller cannot set fact verificationStatus to verified',

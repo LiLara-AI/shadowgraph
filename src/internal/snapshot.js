@@ -32,6 +32,18 @@ export function privilegedSnapshot(graph) {
   return primitive(graph, 'snapshot', 'privilegedSnapshot')();
 }
 
+// The live form (PR-37a): the store as the graph holds it with what deletion
+// records withhold set apart -- the input to redaction's lookup, the Markdown
+// pull and downgrade, never to a save. The snapshot above puts it back.
+export function privilegedLiveSnapshot(graph) {
+  return primitive(graph, 'liveSnapshot', 'privilegedLiveSnapshot')();
+}
+
+// How much deletion records withhold, by collection: counts, never ids.
+export function privilegedWithheldCounts(graph) {
+  return primitive(graph, 'withheldCounts', 'privilegedWithheldCounts')();
+}
+
 export function privilegedValidate(graph) {
   return primitive(graph, 'validate', 'privilegedValidate')();
 }

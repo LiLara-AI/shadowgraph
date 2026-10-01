@@ -180,8 +180,9 @@ const capturesOf = (snapshot) => byId(snapshot.records.filter((item) => item.kin
 const LEAK = new RegExp([...CAPTURE_IDS, ...CAPTURE_TYPES.map((type) => type.replace('.', '\\.')), 'tok_cap_', 'content_cap_', SENTINEL].join('|'));
 
 test('the reader adds exactly the four capture journal types, after every earlier one', () => {
-  assert.equal(REPLAYABLE_ENTRY_TYPES.length, 25);
-  assert.equal(JOURNAL_ENTRY_TYPES.length, 26);
+  // 26 and 27 since PR-37a added restore.reapplied, after project.purged.
+  assert.equal(REPLAYABLE_ENTRY_TYPES.length, 26);
+  assert.equal(JOURNAL_ENTRY_TYPES.length, 27);
   assert.deepEqual(REPLAYABLE_ENTRY_TYPES.slice(-4), CAPTURE_TYPES);
   for (const type of CAPTURE_TYPES) assert.equal(JOURNAL_TYPE_ENTITY_KIND[type], 'capture', type);
 });

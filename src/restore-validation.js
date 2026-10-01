@@ -25,6 +25,9 @@ export function createRestoreValidator(options = {}) {
 // still uses this helper to strip both collections before installation.
 export const AUTHORITY_COLLECTIONS = Object.freeze(['access', 'accessRevocations']);
 export const AUTHORITY_RESTORE_UNSUPPORTED = 'authority_restore_unsupported_at_this_build';
+// Beside it, the refusal of a restore that deletion records apply to
+// (PR-37a): a presence check, as the authority guard is.
+export { PURGE_AWARE_RESTORE_UNSUPPORTED } from './internal/deletion-knowledge.js';
 
 export function guardAuthorityRestore(payload, { memoryOnly = false } = {}) {
   const present = payload && typeof payload === 'object' ? AUTHORITY_COLLECTIONS.filter((key) => Object.hasOwn(payload, key)) : [];

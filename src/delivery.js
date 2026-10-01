@@ -17,6 +17,7 @@ import { show, t1Line } from './compact-tier.js';
 import { accessContext, discoverWorkspace } from './internal/access-transport.js';
 import { credentialLiteralIn, isCredentialName as checkerCredentialName, urlContainsCredential } from './internal/credential-literal.js';
 import { DELIVERY_CAP_BYTES, DELIVERY_FRAME, deliveryEndLine } from './internal/delivery-marker.js';
+import { attachDeletionView } from './internal/deletion-knowledge.js';
 
 export { DELIVERY_CAP_BYTES, DELIVERY_FRAME };
 const PROCESSING = 'processing: {"capture":"not_active","extraction":"not_active"}';
@@ -373,7 +374,10 @@ export async function readStoreForDelivery({ file, storage, afterRead }) {
   if (!['json', 'sqlite'].includes(storage)) return { unavailable: 'unsupported_storage' };
   try {
     if (!(await present(file))) return { unavailable: 'not_initialized' };
-    if (storage === 'json') return { payload: JSON.parse(await readFile(file, 'utf8')) };
+    // The payload, then the deletion records beside it, which the graph
+    // honours; records it cannot honour leave memory unavailable (PR-37a). The
+    // per-user registry is never read here.
+    if (storage === 'json') return { payload: await attachDeletionView(JSON.parse(await readFile(file, 'utf8')), file) };
     if (await inUse(file)) return { unavailable: 'busy' };
     let DatabaseSync, exportSqlitePayload;
     try { ({ DatabaseSync } = await import('node:sqlite')); ({ exportSqlitePayload } = await import('./sqlite-storage.js')); }
@@ -392,9 +396,9 @@ export async function readStoreForDelivery({ file, storage, afterRead }) {
     }
     await afterRead?.();
     if ((await inUse(file)) || (await fingerprint(file)) !== before) return { unavailable: 'busy' };
-    if (legacy !== undefined) return { payload: JSON.parse(legacy) };
+    if (legacy !== undefined) return { payload: await attachDeletionView(JSON.parse(legacy), file) };
     if (payload === null) return { unavailable: (await stat(file)).size === 0 ? 'not_initialized' : 'unreadable' };
-    return { payload };
+    return { payload: await attachDeletionView(payload, file) };
   } catch {
     return { unavailable: 'unreadable' };
   }

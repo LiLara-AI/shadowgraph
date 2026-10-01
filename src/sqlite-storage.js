@@ -13,6 +13,7 @@ import { SCHEMA_VERSION } from './shadowgraph.js';
 import { extraCollections, isExtraCollectionKey, refusePublicExport } from './internal/collections.js';
 import { RUNTIME_MISSES } from './internal/miss-ledger.js';
 import { CAPTURE_CONTENT, CAPTURE_SESSIONS } from './internal/capture.js';
+import { attachDeletionView, backupSidecar, refuseDeletionFileDestination, writeSidecar } from './internal/deletion-knowledge.js';
 
 // One generic carrier for every top-level collection this build does not
 // handle natively (plan v1.4.4 §10.9.8): one row per collection, the whole
@@ -368,7 +369,8 @@ export async function createSqliteStore(filePath, options = {}) {
         let database;
         try {
           database = openLiveDatabase('load');
-          return exportSqlitePayload(database);
+          // The payload, then the deletion records beside it (PR-37a).
+          return await attachDeletionView(exportSqlitePayload(database), filePath, { registry: true, env: options.env });
         } finally {
           closeChecked(database, 'load');
         }
@@ -384,7 +386,7 @@ export async function createSqliteStore(filePath, options = {}) {
         let database;
         try {
           database = openLiveDatabase('save');
-          const current = exportSqlitePayload(database);
+          const current = await attachDeletionView(exportSqlitePayload(database), filePath, { env: options.env });
           assertRevision(current, data?.expectedRevision ?? data?.revision);
           return writeOver(database, current, data);
         } finally {
@@ -405,7 +407,7 @@ export async function createSqliteStore(filePath, options = {}) {
         let database;
         try {
           database = openLiveDatabase('update');
-          const current = exportSqlitePayload(database);
+          const current = await attachDeletionView(exportSqlitePayload(database), filePath, { env: options.env });
           const next = await change(current);
           if (next === null || next === undefined) return null;
           refusePublicExport(next);
@@ -719,15 +721,21 @@ export async function createSqliteStore(filePath, options = {}) {
       return fence.run(async () => {
         if (restoring) throw new Error('SQLite restore is in progress');
         if (permanentlyClosed) throw new Error('SQLite storage is closed');
-        await mkdir(dirname(destination), { recursive: true });
-        const temporary = join(dirname(destination), `.${basename(destination)}.${process.pid}.${Date.now()}.tmp`);
+        // The destination's final path, never a deletion record file however
+        // it is spelled (PR-37a).
+        const target = await refuseDeletionFileDestination(destination, options.env);
+        await mkdir(dirname(target), { recursive: true });
+        const temporary = join(dirname(target), `.${basename(target)}.${process.pid}.${Date.now()}.tmp`);
         let database;
         try {
           database = openLiveDatabase('backup');
           database.exec(`VACUUM INTO '${quoteSqlPath(temporary)}'`);
           closeChecked(database, 'backup');
           database = undefined;
-          await rename(temporary, destination);
+          // The payload is read, then the deletion records; their copy lands
+          // first, then the payload it describes (PR-37a, R-8).
+          await writeSidecar(target, await backupSidecar(filePath, target, options.env));
+          await rename(temporary, target);
           return { source: filePath, destination };
         } finally {
           closeChecked(database, 'backup');

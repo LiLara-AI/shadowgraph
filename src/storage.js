@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { nextRevision, assertRevision, createDestinationFence } from './revision-store.js';
 import { SCHEMA_VERSION } from './shadowgraph.js';
 import { refusePublicExport } from './internal/collections.js';
+import { attachDeletionView, deletionRestoreHook } from './internal/deletion-knowledge.js';
 
 // Journal lives INSIDE the same payload as the state and is written by the same
 // atomic temp-write + rename. See journal-contract.md §atomicity: state and
@@ -49,9 +50,13 @@ export function createJsonFileStore(filePath, options = {}) {
     return payload.revision;
   }
   return {
+    // The payload, then the deletion records beside it (PR-37a): a pending or
+    // unreadable record refuses the load, and so every save and update too.
     async load() {
-      try { return JSON.parse(await readFile(filePath, 'utf8')); }
-      catch (error) { if (error.code === 'ENOENT') return empty(); throw new Error('ShadowGraph storage is invalid or unreadable'); }
+      let payload;
+      try { payload = JSON.parse(await readFile(filePath, 'utf8')); }
+      catch (error) { if (error.code !== 'ENOENT') throw new Error('ShadowGraph storage is invalid or unreadable'); payload = empty(); }
+      return attachDeletionView(payload, filePath, { registry: true, env: options.env });
     },
     async save(data) {
       refusePublicExport(data);
@@ -80,16 +85,34 @@ export function createJsonFileStore(filePath, options = {}) {
 
 export async function createStorage(options = {}) {
   if ((options.type ?? process.env.SHADOWGRAPH_STORAGE ?? 'json') === 'sqlite') {
-    const { createSqliteStore } = await import('./sqlite-storage.js');
-    return createSqliteStore(options.file, {
+    const { createSqliteStore, exportSqlitePayload } = await import('./sqlite-storage.js');
+    const store = await createSqliteStore(options.file, {
       restoreValidator: options.restoreValidator,
       restoreFault: options.restoreFault,
       restoreFs: options.restoreFs,
       saveFault: options.saveFault,
       lockTimeoutMs: options.lockTimeoutMs,
       staleLockMs: options.staleLockMs,
-      lockPollIntervalMs: options.lockPollIntervalMs
+      lockPollIntervalMs: options.lockPollIntervalMs,
+      env: options.env
     });
+    // The `./storage` restore refuses what needs deletion semantics this build
+    // lacks (PR-37a), through the validate hook the unchanged primitive calls
+    // inside its fence; the raw store's restore stays the primitive.
+    const restore = store.restore;
+    const readDestination = async () => {
+      const { DatabaseSync } = await import('node:sqlite');
+      const database = new DatabaseSync(options.file, { readOnly: true });
+      try { return exportSqlitePayload(database, { tolerant: true }); } finally { database.close(); }
+    };
+    store.restore = (source, restoreOptions = {}) => restore(source, {
+      ...restoreOptions,
+      validate: deletionRestoreHook({
+        source, destination: options.file, readDestination, env: options.env,
+        validate: restoreOptions.validate === options.restoreValidator ? undefined : restoreOptions.validate
+      })
+    });
+    return store;
   }
   return createJsonFileStore(options.file, options);
 }

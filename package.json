@@ -89,7 +89,7 @@
     "shadowgraph": "./src/cli.js"
   },
   "scripts": {
-    "test": "node --test --test-concurrency=1",
+    "test": "node --test --test-concurrency=1 --import ./test/helpers/isolated-home.mjs",
     "start": "node src/server.js",
     "serve": "node src/cli.js serve",
     "setup": "node src/cli.js setup",

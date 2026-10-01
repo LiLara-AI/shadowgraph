@@ -3,18 +3,40 @@ import { dirname, join, resolve } from 'node:path';
 import { createDestinationFence, currentRevision, nextRevisionAfter } from './revision-store.js';
 import { guardAuthorityRestore, validateRestorePayload, validateRestoreSnapshot } from './restore-validation.js';
 import { mergeAuthorityRestore } from './authority-restore.js';
+import { backupSidecar, deletionRestoreHook, refuseDeletionFileDestination, writeSidecar } from './internal/deletion-knowledge.js';
 
+// A backup carries the store's deletion records beside it (PR-37a): the
+// payload is read, then the records; their copy lands first, then the payload.
+// Both go to the destination's final path, which is never a deletion record
+// file however it is spelled.
 export async function backupFile(source, destination, options = {}) {
-  await mkdir(dirname(destination), { recursive: true });
+  const target = await refuseDeletionFileDestination(destination, options.env);
+  await mkdir(dirname(target), { recursive: true });
   if (options.store?.backup) return options.store.backup(destination);
-  const temporary = join(dirname(destination), `.${destination.split(/[\\/]/).pop()}.${process.pid}.${Date.now()}.tmp`);
-  try { await copyFile(source, temporary); await rename(temporary, destination); return { source, destination }; }
+  const temporary = join(dirname(target), `.${target.split(/[\\/]/).pop()}.${process.pid}.${Date.now()}.tmp`);
+  try {
+    await copyFile(source, temporary);
+    await writeSidecar(target, await backupSidecar(source, target, options.env));
+    await rename(temporary, target);
+    return { source, destination };
+  }
   finally { await unlink(temporary).catch(() => {}); }
 }
 
+// The restore refuses what needs deletion semantics this build lacks
+// (PR-37a), through the validate hook the unchanged primitive calls inside the
+// fence before any write. A destination that is not there holds nothing; one
+// that is there but cannot be read refuses.
 export async function restoreFile(source, destination, options = {}) {
   const fence = createDestinationFence(destination, options);
-  return fence.run(() => restoreJsonFileFenced(source, destination, options));
+  const validate = deletionRestoreHook({
+    source, destination, env: options.env, validate: options.validate,
+    readDestination: async () => {
+      try { return JSON.parse(await readFile(destination, 'utf8')); }
+      catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    }
+  });
+  return fence.run(() => restoreJsonFileFenced(source, destination, { ...options, validate }));
 }
 
 async function restoreJsonFileFenced(source, destination, options) {

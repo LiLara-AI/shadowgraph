@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
-import { privilegedSnapshot } from './internal/snapshot.js';
+import { privilegedLiveSnapshot, privilegedSnapshot } from './internal/snapshot.js';
 import { isLegacyOwned, resolveScope } from './scope.js';
 
 const STATE_FILE = '.shadowgraph-sync.json';
@@ -205,7 +205,8 @@ async function push({ graph, directory, state, project, dryRun }) {
 
 async function pull({ graph, directory, state, project, dryRun }) {
   const paths = await markdownFiles(directory);
-  const snapshot = privilegedSnapshot(graph);
+  // The live form (PR-37a): a file never matches what deletion records withhold.
+  const snapshot = privilegedLiveSnapshot(graph);
   const allMemoriesById = new Map(snapshot.records.filter((record) => record.kind === 'memory').map((memory) => [memory.id, memory]));
   // A file names its project and is matched only to a memory that project
   // owns -- never to legacy "default" data or an origin's memory (P1 finding

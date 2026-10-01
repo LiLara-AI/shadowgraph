@@ -8,7 +8,7 @@
 //   search-contract.md      — content fields vs filters
 //   confidence-contract.md  — evidence-weighted bounded confidence
 
-import { assertHardPurgeGapLedgers, assertJournalBaselinePlacement, assertJournalEntrySequence, assertUniqueJournalSequences, rebuildProjection, journalGaps, duplicateSequences, journalBaselinePlacementIssues, journalEntryPostconditionIssue, journalEntrySequenceIssue, journalFactLifecycleIssues, replayedEntity, reattributeIdempotency, schema5PurgeArtifactIssue, ATTRIBUTED_ENTITY_KINDS, ATTRIBUTION_ENTRY_KINDS, JOURNAL_ENTRY_TYPES, JOURNAL_TYPE_ENTITY_KIND, READABLE_JOURNAL_SCHEMA_VERSION, REPLAYABLE_ENTRY_TYPES } from './journal.js';
+import { HARD_GAP_EVIDENCE_TYPES, assertHardPurgeGapLedgers, assertJournalBaselinePlacement, assertJournalEntrySequence, assertUniqueJournalSequences, rebuildProjection, journalGaps, duplicateSequences, journalBaselinePlacementIssues, journalEntryPostconditionIssue, journalEntrySequenceIssue, journalFactLifecycleIssues, replayedEntity, reattributeIdempotency, schema5PurgeArtifactIssue, ATTRIBUTED_ENTITY_KINDS, ATTRIBUTION_ENTRY_KINDS, JOURNAL_ENTRY_TYPES, JOURNAL_TYPE_ENTITY_KIND, READABLE_JOURNAL_SCHEMA_VERSION, REPLAYABLE_ENTRY_TYPES } from './journal.js';
 import { createConfidence, applyContribution, setOutcomeContribution, computeConfidence, summarizeBasis, CONFIDENCE_POLICY } from './confidence.js';
 import { hybridSearch, foldText } from './hybrid-search.js';
 import { effectiveFactExpirationBoundary, factValidityPolicyIssue, isValidIsoInstant } from './fact-validity.js';
@@ -27,6 +27,7 @@ import { T1_DERIVATION_VERSION, t1Digest, t1Inputs, t1Line } from './compact-tie
 import { SELF_SIGNALS, stripDeliveredBlocks } from './internal/capture-source.js';
 import { CAPTURE_COLLECTIONS, CAPTURE_CONTENT, CAPTURE_ENTRY_TYPES, CAPTURE_EVENT_IDENTITY, CAPTURE_IMPORT_TYPE, CAPTURE_KIND, CAPTURE_SESSIONS, CAPTURE_TRANSITIONS, captureCollectionIssue, captureEntryReachedBy, captureEventIssue, captureItemIssue, captureObservationIssue, CAPTURE_LIMIT_EVENT, CAPTURE_REFUSED_EVENT, OTHER_OWNER } from './internal/capture.js';
 import { TRANSCRIPT_ANCHOR_BYTES, TRANSCRIPT_GAP_REASONS, TRANSCRIPT_TRIGGERS, cursorBlock, cursorShape, digest, lastLineEnd, matchKey, transcriptEntry, transcriptLines } from './internal/transcript.js';
+import { DELETION_VIEW, IDEMPOTENCY_KEY_WITHHELD, PURGE_AWARE_RESTORE_UNSUPPORTED, SCOPE_KEY_WITHHELD, SESSION_WITHHELD, deletionError } from './internal/deletion-knowledge.js';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
 // docs/api-reference.md) and are frozen so a consumer cannot mutate validation
@@ -895,6 +896,11 @@ export function createShadowGraph(options = {}) {
   // through import and the privileged snapshot (axis A-5). They are never
   // interpreted, and never part of a public read.
   const extras = new TransactionMap();
+  // Deletion knowledge (PR-37a; design §2, §11, §12): the store control
+  // ledger's view a load hands the import, under 'view', and the withheld set W
+  // it names, under 'held'. Values here are replaced whole, never changed in
+  // place, so a transaction can undo them.
+  const deletion = new TransactionMap();
   let readOperation = null;
   const authority = createAccessLifecycle({
     now,
@@ -971,7 +977,9 @@ export function createShadowGraph(options = {}) {
     // A project named as null is no project named, as it is when left out.
     const project = input.project ?? undefined;
     if (project !== undefined && (typeof project !== 'string' || !project.trim())) throw new Error('A capture names its project as a non-empty string, or none');
-    const { sessions, session, held, owner, ownedBy } = captureSession(originId, source.sessionId, project);
+    const { sessions, session, held, owner, ownedBy, withheld } = captureSession(originId, source.sessionId, project);
+    // A session W holds is never minted again, nor written to (design §12 C1).
+    if (withheld) return { refused: { reason: SESSION_WITHHELD }, changed: false };
     const observed = {
       event: source.event, sessionId: source.sessionId, role: source.role ?? null,
       hostEventId: source.hostEventId ?? null, toolCallId: source.toolCallId ?? null, turnIndex: source.turnIndex ?? null
@@ -981,7 +989,9 @@ export function createShadowGraph(options = {}) {
       : identifiedBy !== null && observed[identifiedBy] !== null ? [identifiedBy, observed[identifiedBy]] : null;
     const occurrenceSeq = held + 1;
     const identityKey = createHash('sha256').update(JSON.stringify([originId, observed.sessionId, observed.event, ...(hostIdentity ?? ['occurrence', occurrenceSeq])])).digest('hex');
-    const slot = retrySlot({ ...owner, idempotencyKey: identityKey }, CAPTURE_KIND, owner);
+    let slot;
+    try { slot = retrySlot({ ...owner, idempotencyKey: identityKey }, CAPTURE_KIND, owner); }
+    catch (error) { if (error.code === IDEMPOTENCY_KEY_WITHHELD) return { refused: { reason: IDEMPOTENCY_KEY_WITHHELD }, changed: false }; throw error; }
     if (idempotency.has(slot)) {
       if (hostIdentity) return clone(canonicalIdempotencyValue(idempotency.get(slot)));
       throw new Error('Capture refused: its occurrence is already held');
@@ -1042,9 +1052,11 @@ export function createShadowGraph(options = {}) {
       held = Math.max(held, item.occurrenceSeq);
       earlier ??= item;
     }
+    // A capture W holds keeps its ordinal (PR-37a).
+    for (const item of withheldCaptures()) if (item.originId === originId && item.source?.sessionId === sessionId && Number.isSafeInteger(item.occurrenceSeq)) held = Math.max(held, item.occurrenceSeq);
     const owned = session && (session.occurrenceSeqHighWater > 0 || earlier || isPlainObject(session.cursor)) ? session : null;
     const resolved = owned ?? earlier ?? writeOwner({ project, originId });
-    return { sessions, session, held, owner: { project: resolved.project, attribution: resolved.attribution, originId }, ownedBy: owned ?? earlier };
+    return { sessions, session, held, owner: { project: resolved.project, attribution: resolved.attribution, originId }, ownedBy: owned ?? earlier, withheld: sessionWithheld(originId, sessionId) };
   }
 
   // The first admission limit an item crosses, or null (§22.6.1): its own
@@ -1235,7 +1247,8 @@ export function createShadowGraph(options = {}) {
     const source = input.source;
     if (!isPlainObject(source) || !Object.hasOwn(CAPTURE_EVENT_IDENTITY, source.event)) throw new Error(`A self-event names an event the source contract covers: ${Object.keys(CAPTURE_EVENT_IDENTITY).join(', ')}`);
     if (!named(source.sessionId)) throw new Error('A self-event names its sessionId');
-    const { sessions, session, held, owner } = captureSession(originId, source.sessionId, input.project);
+    const { sessions, session, held, owner, withheld } = captureSession(originId, source.sessionId, input.project);
+    if (withheld) return { refused: { reason: SESSION_WITHHELD }, changed: false };
     const base = session ?? { ...newCaptureSession(originId, source.sessionId, owner), occurrenceSeqHighWater: held };
     const next = { ...base, selfEvents: countSelfEvent(base.selfEvents, input.signal, source.event) };
     extras.set(CAPTURE_SESSIONS, session ? sessions.map((entry) => (entry === session ? next : entry)) : [...sessions, next]);
@@ -1289,6 +1302,7 @@ export function createShadowGraph(options = {}) {
     // carried its correlation mark (S-2) -- are never read, and nothing is
     // written for them; an S-2 mark in a tool's input marks that call, not the
     // user's session (§16).
+    if (sessionWithheld(originId, sessionId)) return { ...result, withheld: SESSION_WITHHELD };
     const counted = (signal, event) => Object.entries(isPlainObject(session?.selfEvents?.[signal]) ? session.selfEvents[signal] : {}).some(([name, count]) => (event === undefined || name === event) && count > 0);
     if (counted('S-3') || counted('S-2', 'UserPromptSubmit')) return result;
     const at = now();
@@ -1402,10 +1416,12 @@ export function createShadowGraph(options = {}) {
     }
     if (input.trigger === null) return result;
 
-    const sessionItems = [...captures.values()].filter((item) => item.originId === originId && item.source?.sessionId === sessionId);
+    // W's captures count as held, so what they hold is never captured again
+    // (PR-37a); nothing here names one.
+    const sessionItems = [...captures.values(), ...withheldCaptures()].filter((item) => item.originId === originId && item.source?.sessionId === sessionId);
     const ingestedUuids = new Set(sessionItems.filter((item) => item.source.event === 'Transcript').map((item) => item.source.hostEventId));
     const heldCalls = new Set(sessionItems.filter((item) => ['PostToolUse', 'PostToolUseFailure'].includes(item.source.event)).map((item) => item.source.toolCallId));
-    const texts = new Map((extras.get(CAPTURE_CONTENT) ?? []).map((entry) => [entry.contentRef, entry.text]));
+    const texts = new Map([...(extras.get(CAPTURE_CONTENT) ?? []), ...(deletion.get('held')?.collections[CAPTURE_CONTENT]?.items.map(([, entry]) => entry) ?? [])].map((entry) => [entry.contentRef, entry.text]));
     const stopItems = sessionItems.filter((item) => item.source.event === 'Stop');
     const stops = stopItems.filter((item) => texts.has(item.contentRef)).map((item) => ({ seq: item.occurrenceSeq, key: matchKey(texts.get(item.contentRef)) })).sort((left, right) => left.seq - right.seq);
     const priorStop = stopItems.filter((item) => item.id !== input.triggerItemId).reduce((top, item) => Math.max(top, item.occurrenceSeq), 0);
@@ -1634,6 +1650,226 @@ export function createShadowGraph(options = {}) {
   function isStoredWithoutProject(entity) {
     return projectlessLegacy.has(entity.id) && entity.attribution === undefined && (entity.project ?? 'default') === 'default';
   }
+  // ---- Deletion knowledge (PR-37a; design §2, §11, §12) -------------------
+  //
+  // W is the installed view's withheld set: the entities whose erasure token
+  // a tombstone or quarantine entry names, their relations, review signals,
+  // retry entries, events, runtime-miss entries, capture content and journal
+  // entries, and a tombstoned project's own entries that name no entity and
+  // predate its tombstone. W is held apart from every live map, as capture
+  // items are from records, so no read, write, search, traversal or count
+  // meets it. Its journal entries are logical skeletons in the live journal
+  // and the live baseline is rewritten without it, so the live graph is exactly
+  // what a logical purge of W would leave. Only the persistence snapshot puts W
+  // back, in place: the store never changes.
+  const byId = (item) => item?.id;
+  const WITHHELD_EXTRAS = { [RUNTIME_MISSES]: (item) => item?.missId, [CAPTURE_CONTENT]: (item) => item?.contentRef, [CAPTURE_SESSIONS]: byId };
+  const sessionKey = (originId, sessionId) => JSON.stringify([originId, sessionId]);
+
+  function withheldId(entityId) {
+    const held = deletion.get('held');
+    return Boolean(held && (held.ids.has(entityId) || held.relationIds.has(entityId)));
+  }
+
+  // A new token is never one a tombstone, quarantine entry or W already names.
+  function withheldToken(token) {
+    return Boolean(deletion.get('held')?.tokens.has(token) || deletion.get('view')?.tokens.has(token));
+  }
+
+  // The original of a live journal entry W replaced: its skeleton, or the
+  // baseline rewritten without W, sits at the original's id and sequence.
+  function heldOriginal(held, entry) {
+    const original = held?.journal.get(entry?.id);
+    return original !== undefined && original.seq === entry.seq ? original : undefined;
+  }
+
+  function withheldRecords() {
+    return deletion.get('held')?.collections.records?.items.map(([, item]) => item) ?? [];
+  }
+
+  function withheldCaptures() {
+    return deletion.get('held')?.collections.captures?.items.map(([, item]) => item) ?? [];
+  }
+
+  function sessionWithheld(originId, sessionId) {
+    return deletion.get('held')?.sessions.has(sessionKey(originId, sessionId)) ?? false;
+  }
+
+  // A write never duplicates a key or scope W holds (design §11 R-3): the next
+  // save would hold both.
+  function refuseWithheldRetry(key) {
+    if (deletion.get('held')?.retryKeys.has(key)) throw deletionError(IDEMPOTENCY_KEY_WITHHELD, 'Refusing the write: its idempotency key is held by deletion records this build honours');
+  }
+
+  function refuseWithheldScope(held) {
+    if (held) throw deletionError(SCOPE_KEY_WITHHELD, 'Refusing the write: its memory or fact scope is held by deletion records this build honours');
+  }
+
+  // Replaces an array's contents, undoably inside an ordinary write.
+  function replaceContents(target, items) {
+    const previous = [...target];
+    if (transactionContext?.mode === 'undo') transactionContext.undo.push(() => { target.length = 0; Array.prototype.push.apply(target, previous); });
+    target.length = 0;
+    Array.prototype.push.apply(target, items);
+  }
+
+  function holdsData() {
+    return Boolean(records.size || captures.size || facts.size || relations.size || reviewSignals.size || idempotency.size || events.length || journal.length || extras.size || deletion.has('held'));
+  }
+
+  // Whether a merge into this graph needs deletion semantics this build lacks
+  // (design §11 R-6): the installed view or the incoming one has knowledge; a
+  // registry tombstone applies to the incoming payload; the graph's journal
+  // holds a purge marker; or the merge would replace a transcript cursor the
+  // graph holds (K-2).
+  function mergeNeedsDeletionSemantics(data) {
+    const incoming = data?.[DELETION_VIEW];
+    if (deletion.get('view')?.knowledge || incoming?.knowledge || incoming?.registryApplies) return true;
+    if (journal.some((entry) => entry?.type === 'project.purged')) return true;
+    const cursors = new Set((extras.get(CAPTURE_SESSIONS) ?? []).filter((session) => isPlainObject(session?.cursor)).map(byId));
+    return Array.isArray(data?.captureSessions) && data.captureSessions.some((session) => cursors.has(session?.id));
+  }
+
+  // The data with a view attached, for a staging graph's import.
+  function withView(data, view) {
+    if (!view || data === null || typeof data !== 'object') return data;
+    return Object.defineProperty(Array.isArray(data) ? { records: data } : { ...data }, DELETION_VIEW, { value: view });
+  }
+
+  // W taken out of the live graph (design §2.2, §2.3, §11 R-3, R-10, §12 C5).
+  function hold() {
+    const view = deletion.get('view');
+    if (!view || (!view.tokens.size && !view.projects.length) || deletion.has('held')) return;
+    const tokened = (entity) => entity?.erasureToken !== undefined && view.tokens.has(entity.erasureToken);
+    const heldRecords = [...records.values()].filter(tokened);
+    const heldCaptures = [...captures.values()].filter(tokened);
+    const heldFacts = [...facts.values()].filter(tokened);
+    const ids = new Set();
+    for (const entity of [...heldRecords, ...heldCaptures, ...heldFacts]) {
+      ids.add(entity.id);
+      for (const alternative of entity.alternatives ?? []) ids.add(alternative.id);
+    }
+    const heldRelations = [...relations.values()].filter((relation) => ids.has(relation.from) || ids.has(relation.to));
+    const relationIds = new Set(heldRelations.map(byId));
+    // Item 8: a project tombstone withholds the project's own entries that name
+    // no entity and predate it, whether or not it names tokens; one with no
+    // valid instant predates it. Access and authority entries never are.
+    const predates = (project, at) => typeof project === 'string'
+      && view.projects.some((tombstone) => tombstone.project === project && !(isValidIsoInstant(at) && compareInstants(at, tombstone.at) >= 0));
+    const entityKeys = ['recordId', 'factId', 'replacementId'];
+    const namesNothing = (item) => ![...entityKeys, 'relationId'].some((key) => item?.[key] !== undefined && item?.[key] !== null);
+    const heldEvents = events.filter((item) => entityKeys.some((key) => ids.has(item?.[key])) || relationIds.has(item?.relationId)
+      || (namesNothing(item) && !String(item?.type).startsWith('access.') && predates(item?.project, item?.at)));
+    const heldSignals = [...reviewSignals.values()].filter((signal) => ids.has(signal.decisionId));
+    const heldRetries = [...idempotency.entries()].filter(([, value]) => ids.has(value?.id)).map(([key, value]) => ({ key, value: canonicalIdempotencyValue(value) }));
+    const extra = (name) => (Array.isArray(extras.get(name)) ? extras.get(name) : []);
+    const heldMisses = extra(RUNTIME_MISSES).filter((entry) => ids.has(entry?.recordId) || predates(entry?.scope?.project, entry?.at));
+    const contentRefs = new Set(heldCaptures.map((item) => item.contentRef).filter(Boolean));
+    const heldContent = extra(CAPTURE_CONTENT).filter((entry) => contentRefs.has(entry?.contentRef));
+    const heldSessions = extra(CAPTURE_SESSIONS).filter((session) => session?.attribution === 'project' && predates(session.project));
+    if (![heldRecords, heldCaptures, heldFacts, heldEvents, heldMisses, heldSessions].some((list) => list.length)) return;
+    // W's journal entries become logical skeletons and the baseline is
+    // rewritten without W, as a logical purge leaves them; the originals are
+    // kept by id for the persistence snapshot.
+    const originals = new Map();
+    const entryHeld = (entry) => {
+      const payload = replayedEntity(entry);
+      return ids.has(entry.entityId) || relationIds.has(entry.entityId) || ids.has(payload?.id) || relationIds.has(payload?.id)
+        || (entry.type === 'relation.created' && (ids.has(entry.payload?.from) || ids.has(entry.payload?.to)));
+    };
+    const liveJournal = journal.map((entry) => {
+      if (typeof entry?.id !== 'string') return entry;
+      if (entry.type === 'projection.baseline') {
+        const rewritten = clone(entry);
+        if (!rewriteBaselineForProjectPurge(rewritten, null, ids, relationIds)) return entry;
+        originals.set(entry.id, entry);
+        return rewritten;
+      }
+      if (!entryHeld(entry)) return entry;
+      originals.set(entry.id, entry);
+      return scrubLogicalPurgeSkeleton(clone(entry), entry.redacted === true && entry.redactedReason === 'capture_deleted' ? 'capture_deleted' : undefined);
+    });
+    // Each held item keeps its place: its index among what the collection held
+    // at this moment.
+    const collections = {};
+    const take = (name, live, keyOf, heldItems) => {
+      if (!heldItems.length) return;
+      const order = new Map(live.map((item, index) => [keyOf(item), index]));
+      collections[name] = { order, items: heldItems.map((item) => [order.get(keyOf(item)), item]) };
+    };
+    take('records', [...records.values()], byId, heldRecords);
+    take('captures', [...captures.values()], byId, heldCaptures);
+    take('facts', [...facts.values()], byId, heldFacts);
+    take('relations', [...relations.values()], byId, heldRelations);
+    take('reviewSignals', [...reviewSignals.values()], byId, heldSignals);
+    take('idempotency', [...idempotency.keys()].map((key) => ({ key })), (item) => item.key, heldRetries);
+    take('events', events, byId, heldEvents);
+    take(RUNTIME_MISSES, extra(RUNTIME_MISSES), WITHHELD_EXTRAS[RUNTIME_MISSES], heldMisses);
+    take(CAPTURE_CONTENT, extra(CAPTURE_CONTENT), WITHHELD_EXTRAS[CAPTURE_CONTENT], heldContent);
+    take(CAPTURE_SESSIONS, extra(CAPTURE_SESSIONS), byId, heldSessions);
+    const held = {
+      ids, relationIds, collections, journal: originals,
+      tokens: new Set([...heldRecords, ...heldCaptures, ...heldFacts].map((entity) => entity.erasureToken)),
+      entities: new Map([...heldRecords, ...heldFacts].map((entity) => [entity.id, entity])),
+      retryKeys: new Set(heldRetries.map((item) => item.key)),
+      memoryScopes: new Set(heldRecords.filter((item) => item.kind === 'memory' && item.status === 'active').map(memoryScopeKey)),
+      factScopes: new Set(heldFacts.filter((fact) => fact.status === 'active').map((fact) => JSON.stringify([ownerKey(fact, (project) => project ?? 'default'), fact.key]))),
+      sessions: new Set(heldSessions.map((session) => sessionKey(session.originId, session.sessionId)))
+    };
+    for (const item of heldRecords) records.delete(item.id);
+    for (const item of heldCaptures) captures.delete(item.id);
+    for (const item of heldFacts) facts.delete(item.id);
+    for (const item of heldRelations) relations.delete(item.id);
+    for (const [key, signal] of reviewSignals) if (ids.has(signal.decisionId)) reviewSignals.delete(key);
+    for (const { key } of heldRetries) idempotency.delete(key);
+    const heldEventSet = new Set(heldEvents);
+    replaceContents(events, events.filter((item) => !heldEventSet.has(item)));
+    replaceContents(journal, liveJournal);
+    for (const [name, heldItems] of [[RUNTIME_MISSES, heldMisses], [CAPTURE_CONTENT, heldContent], [CAPTURE_SESSIONS, heldSessions]]) {
+      const heldSet = new Set(heldItems);
+      if (heldItems.length) extras.set(name, extra(name).filter((entry) => !heldSet.has(entry)));
+    }
+    deletion.set('held', held);
+    recomputeCurrentMemories();
+    recomputeCurrentFacts();
+  }
+
+  // W put back in place: the graph is then the store exactly as it is, with
+  // no view applied. A purge reaches W this way.
+  function unhold() {
+    if (!deletion.has('held')) return;
+    const whole = snapshot();
+    clearLive();
+    importPayload(whole);
+  }
+
+  // W re-emitted in place (design §2.3): each held item goes back before the
+  // first live item that came after it when it was held, and before anything
+  // written since, so the live order is kept exactly.
+  function reemit(live, keyOf, held) {
+    if (!held) return live;
+    const out = [];
+    let next = 0;
+    const flush = (limit) => { while (next < held.items.length && held.items[next][0] < limit) out.push(held.items[next++][1]); };
+    for (const item of live) {
+      flush(held.order.get(keyOf(item)) ?? Infinity);
+      out.push(item);
+    }
+    flush(Infinity);
+    return out;
+  }
+
+  // How much W holds, by collection: counts only, never an id (downgrade
+  // reports these; design §6).
+  function withheldCounts() {
+    const held = deletion.get('held');
+    if (!held) return {};
+    const counts = Object.fromEntries(Object.entries(held.collections).map(([name, { items }]) => [name, items.length]));
+    const skeletons = [...held.journal.values()].filter((entry) => entry.type !== 'projection.baseline').length;
+    if (skeletons) counts.journal = skeletons;
+    return counts;
+  }
+
   let revision = Number.isInteger(options.revision) ? options.revision : 0;
   let journalSeq = 0;
   let journalEpoch = null;
@@ -1656,6 +1892,7 @@ export function createShadowGraph(options = {}) {
       reviewSignals: [...reviewSignals],
       idempotency: [...idempotency],
       extras: [...extras],
+      deletion: [...deletion],
       projectlessLegacy: [...projectlessLegacy],
       revision,
       journalSeq,
@@ -1677,6 +1914,7 @@ export function createShadowGraph(options = {}) {
     restoreMap(reviewSignals, snapshot.reviewSignals);
     restoreMap(idempotency, snapshot.idempotency);
     restoreMap(extras, snapshot.extras);
+    restoreMap(deletion, snapshot.deletion);
     restoreMap(projectlessLegacy, snapshot.projectlessLegacy);
     events.length = 0;
     for (const item of snapshot.events) events.push(item);
@@ -1782,7 +2020,7 @@ export function createShadowGraph(options = {}) {
     // internally; neither a collided candidate nor occupancy leaves this API.
     for (let attempt = 0; attempt < 128; attempt += 1) {
       const candidate = id(prefix);
-      if (records.has(candidate) || captures.has(candidate) || facts.has(candidate) || relations.has(candidate) || reserved.has(candidate)) continue;
+      if (records.has(candidate) || captures.has(candidate) || facts.has(candidate) || relations.has(candidate) || reserved.has(candidate) || withheldId(candidate)) continue;
       if ([...records.values()].some((record) => (record.alternatives ?? []).some((alternative) => alternative.id === candidate))) continue;
       reserved.add(candidate);
       return candidate;
@@ -1801,7 +2039,7 @@ export function createShadowGraph(options = {}) {
   function allocateErasureToken() {
     for (;;) {
       const token = randomUUID();
-      if (![...records.values(), ...captures.values(), ...facts.values()].some((entity) => entity.erasureToken === token)) return token;
+      if (!withheldToken(token) && ![...records.values(), ...captures.values(), ...facts.values()].some((entity) => entity.erasureToken === token)) return token;
     }
   }
 
@@ -1989,9 +2227,11 @@ export function createShadowGraph(options = {}) {
   // beside it rather than matched to it or written over it.
   function retrySlot(input, action, owner = writeOwner(input)) {
     const key = scopedIdempotencyKey(input, action, owner);
+    refuseWithheldRetry(key);
     const held = idempotency.get(key);
     if (!held || sameOwnerKey(idempotencyHolder(held), owner)) return key;
     const beside = `${key}${BESIDE_ANOTHER_OWNER}`;
+    refuseWithheldRetry(beside);
     const alsoHeld = idempotency.get(beside);
     if (alsoHeld && !sameOwnerKey(idempotencyHolder(alsoHeld), owner)) throw new Error('Idempotency key is already held by other owners');
     return beside;
@@ -2079,6 +2319,7 @@ export function createShadowGraph(options = {}) {
     const metadata = clone(input.metadata ?? {});
     const embedding = normalizeEmbedding(input.embedding);
     const scopeKey = memoryScopeKey({ ...owner, scope, memoryType: input.memoryType, key: input.key });
+    refuseWithheldScope(deletion.get('held')?.memoryScopes.has(scopeKey));
     const previous = currentMemories.get(scopeKey);
     const latest = [...records.values()]
       .filter((record) => record.kind === 'memory' && memoryScopeKey(record) === scopeKey)
@@ -2113,7 +2354,9 @@ export function createShadowGraph(options = {}) {
     const memory = {
       id: allocateEntityId('memory'), kind: 'memory', schemaVersion: SCHEMA_VERSION, erasureToken: allocateErasureToken(),
       ...owner, scope, memoryType: input.memoryType, key: input.key, text: input.text,
-      version: (latest?.version ?? 0) + 1,
+      // Versions count past W's too, as they would with no view (review C-4);
+      // nothing else here looks at W (re-review R2-2).
+      version: Math.max(latest?.version ?? 0, ...withheldRecords().filter((record) => record.kind === 'memory' && memoryScopeKey(record) === scopeKey).map((record) => record.version ?? 1)) + 1,
       metadata, tags, embedding, ...provenance, verificationStatus: 'unverified', status: 'active',
       temporal: { validFrom, validTo, recordedAt, invalidatedAt: null },
       createdAt: input.createdAt ?? recordedAt, updatedAt: recordedAt,
@@ -2321,6 +2564,7 @@ export function createShadowGraph(options = {}) {
     // learns what is wrong with the fact before learning it has no owner.
     const owner = writeOwner(input);
     const factScope = JSON.stringify([ownerKey(owner, (project) => project), input.key]);
+    refuseWithheldScope(deletion.get('held')?.factScopes.has(factScope));
     const previous = currentFacts.get(factScope);
     const existing = idempotent(input, 'fact'); if (existing) return existing;
     if (previous?.temporal?.validFrom && compareInstants(validFrom, previous.temporal.validFrom) < 0) {
@@ -3530,7 +3774,7 @@ export function createShadowGraph(options = {}) {
     // every other read (scopedView): with no project and no origin it holds
     // nothing, and it never names an id outside the scope (P1 reconciliation
     // F-16). The caller's rules never see an erasureToken.
-    const data = publicValue(snapshot());
+    const data = publicValue(liveSnapshot());
     const view = scopedView(boundary);
     const chosen = (items) => new Set(items.map((item) => item.id));
     const [recordIds, factIds, relationIds] = [view.records, view.facts, view.relations].map(chosen);
@@ -3614,7 +3858,27 @@ export function createShadowGraph(options = {}) {
   // that a purge happened survives. `hard` physically removes journal entries,
   // which creates a seq gap — declared by validate(), never hidden. This is why
   // the journal is documented as append-ORIENTED, never append-only.
+  // A purge reaches W too (PC-14; design §11 R-10): W is put back, the purge
+  // runs on the store as it would with no view, and W is held again from what
+  // is left. Its result and its marker count what it removed from live memory
+  // (review K-2, C-6); only a hard purge's journal positions, which its marker
+  // must name for the store's gaps to be explained, include W's (declared).
   function purgeProject(project, purgeOptions = {}) {
+    if (!deletion.has('held')) return purgeLive(project, purgeOptions);
+    const live = projectPurgeSelection(project);
+    const idempotencyRemoved = [...idempotency.values()].filter((value) => live.ids.has(value?.id)).length;
+    // What a logical purge of the live graph alone redacts: W's entries are
+    // skeletons there already.
+    const journalEntriesRedacted = journal.filter((item) => !(item.type === 'project.purged' && item.project === project && item.payload?.mode === 'hard')
+      && live.referencesRemoved(item) && (item.payload !== null || item.redacted !== true)).length;
+    unhold();
+    const result = purgeLive(project, purgeOptions);
+    journal.find((entry) => entry.id === result.journalEntryId).payload.removed = live.ids.size;
+    hold();
+    return { ...result, ...live.summary, removed: live.ids.size, idempotencyRemoved, ...(result.mode === 'logical' ? { journalEntriesRedacted } : {}) };
+  }
+
+  function purgeLive(project, purgeOptions = {}) {
     const mode = purgeOptions.mode ?? (purgeOptions.hard === true ? 'hard' : 'logical');
     if (!['logical', 'hard'].includes(mode)) throw new Error('Purge mode must be logical or hard');
     const { summary, ids: removed, relationIds: removedRelationIds, removedEvents: eventsToRemove, referencesRemoved, reachesMiss, reachesCaptureEntry } = projectPurgeSelection(project);
@@ -3957,6 +4221,7 @@ export function createShadowGraph(options = {}) {
       return entities.every((id) => ids.has(id)) && relationsNamed.every((id) => relationIds.has(id));
     };
     const entryVisible = (entry) => {
+      if (heldOriginal(deletion.get('held'), entry)) return false;
       // A baseline holds the whole store at one point in time. A capture entry,
       // even a skeleton, is never stored experience (PC-14, PC-16(b); PR-33).
       if (entry?.type === 'projection.baseline' || CAPTURE_ENTRY_TYPES.includes(entry?.type) || entry?.entityKind === CAPTURE_KIND) return false;
@@ -4517,13 +4782,14 @@ export function createShadowGraph(options = {}) {
     return basis;
   }
 
-  function nativeCollections() {
+  function nativeCollections(held = null) {
+    const back = (name, live, keyOf = byId) => reemit(live, keyOf, held?.collections[name]);
     return {
       schemaVersion: SCHEMA_VERSION, revision,
-      records: [...records.values(), ...captures.values()].map(clone), facts: [...facts.values()].map(clone),
-      relations: [...relations.values()].map(clone), reviewSignals: [...reviewSignals.values()].map(clone),
-      idempotency: [...idempotency.entries()].map(([key, value]) => ({ key, value: clone(canonicalIdempotencyValue(value)) })),
-      events: clone(events), journal: clone(journal), journalSeq, journalEpoch
+      records: [...back('records', [...records.values()]), ...back('captures', [...captures.values()])].map(clone), facts: back('facts', [...facts.values()]).map(clone),
+      relations: back('relations', [...relations.values()]).map(clone), reviewSignals: back('reviewSignals', [...reviewSignals.values()]).map(clone),
+      idempotency: back('idempotency', [...idempotency.entries()].map(([key, value]) => ({ key, value: canonicalIdempotencyValue(value) })), (item) => item.key).map(({ key, value }) => ({ key, value: clone(value) })),
+      events: clone(back('events', events)), journal: clone(held ? journal.map((entry) => heldOriginal(held, entry) ?? entry) : journal), journalSeq, journalEpoch
     };
   }
 
@@ -4532,15 +4798,31 @@ export function createShadowGraph(options = {}) {
   // every top-level collection this build does not understand. It is the
   // persistence primitive, reachable only through src/internal/snapshot.js, and
   // it is not a read of the memory product.
+  //
+  // With deletion knowledge (PR-37a, design §11 R-2) it is the persistence
+  // form: W is put back in place, so the store a graph saves is exactly the
+  // store it would save with no view. The live form beside it is what the
+  // graph holds with W apart; redaction, the Markdown pull lookup and
+  // downgrade read that one.
   function snapshot() {
+    return storeSnapshot(deletion.get('held') ?? null);
+  }
+
+  function liveSnapshot() {
+    return storeSnapshot(null);
+  }
+
+  function storeSnapshot(held) {
     const pending = [...projectlessLegacy.keys()].filter((id) => {
-      const entity = records.get(id) ?? facts.get(id);
+      const entity = records.get(id) ?? facts.get(id) ?? held?.entities.get(id);
       return entity !== undefined && isStoredWithoutProject(entity);
     }).sort();
+    const extra = (key, value) => (held?.collections[key] ? reemit(value, WITHHELD_EXTRAS[key], held.collections[key]) : value);
     return {
-      ...nativeCollections(),
+      ...nativeCollections(held),
       ...(pending.length ? { [STORED_WITHOUT_PROJECT]: pending } : {}),
-      ...Object.fromEntries([...extras].map(([key, value]) => [key, clone(value)]))
+      ...Object.fromEntries([...extras].map(([key, value]) => [key, clone(extra(key, value))])),
+      ...Object.fromEntries(Object.keys(WITHHELD_EXTRAS).filter((key) => held?.collections[key] && !extras.has(key)).map((key) => [key, clone(extra(key, []))]))
     };
   }
 
@@ -4579,9 +4861,12 @@ export function createShadowGraph(options = {}) {
   // failed replace leaves the current state exactly as it was.
   function replaceData(data = []) {
     const staging = createShadowGraph({ now, verifier });
+    // The view the data brings, or else the one installed (PR-37a, R-4):
+    // a reload brings a fresh one, and a rollback keeps the current one.
+    const view = data?.[DELETION_VIEW] ?? deletion.get('view');
     // Any parse/migration failure throws HERE, before a single live map is cleared.
     try {
-      staging.importData(data);
+      staging.importData(withView(data, view));
     } catch (cause) {
       const error = new Error(`Refusing to replace data: ${cause.message}`);
       if (cause.code !== undefined) error.code = cause.code;
@@ -4599,12 +4884,37 @@ export function createShadowGraph(options = {}) {
     // The staged snapshot is already migrated and validated, so this import cannot
     // fail. Only now is the live state discarded.
     const staged = privilegedSnapshot(staging);
-    records.clear(); captures.clear(); currentMemories.clear(); facts.clear(); currentFacts.clear(); relations.clear(); reviewSignals.clear(); idempotency.clear(); extras.clear(); projectlessLegacy.clear();
-    events.length = 0; journal.length = 0; revision = 0; journalSeq = 0; journalEpoch = null;
-    return importData(staged);
+    clearLive();
+    return importWithView(staged, view);
   }
 
+  function clearLive() {
+    records.clear(); captures.clear(); currentMemories.clear(); facts.clear(); currentFacts.clear(); relations.clear(); reviewSignals.clear(); idempotency.clear(); extras.clear(); projectlessLegacy.clear();
+    deletion.delete('held');
+    events.length = 0; journal.length = 0; revision = 0; journalSeq = 0; journalEpoch = null;
+  }
+
+  // A public import (design §4, §11 R-6). Into a graph that holds anything --
+  // W included -- it is a merge, and a merge that deletion knowledge applies
+  // to is refused: this build cannot merge it. A load into an empty graph, and
+  // replaceData's own import, are not merges.
   function importData(data = []) {
+    if (holdsData() && mergeNeedsDeletionSemantics(data)) {
+      throw deletionError(PURGE_AWARE_RESTORE_UNSUPPORTED, 'Refusing to import: deletion records apply to this merge, and this build cannot honour them in a merge; a later ShadowGraph build is needed');
+    }
+    return importWithView(data, data?.[DELETION_VIEW]);
+  }
+
+  // The import, then W held apart under the view: the one installed, or the
+  // one the data brings (design §2.1).
+  function importWithView(data, view) {
+    if (view) deletion.set('view', view);
+    const imported = importPayload(data);
+    hold();
+    return imported;
+  }
+
+  function importPayload(data = []) {
     const source = Array.isArray(data) ? { records: data } : data;
     if (source === null || typeof source !== 'object') throw new Error('Import data must be an object or an array of records');
     refusePublicExport(source);
@@ -5128,47 +5438,9 @@ export function createShadowGraph(options = {}) {
     }
     revision = Number.isInteger(source.revision) ? Math.max(revision, source.revision) : revision;
     for (const item of importedRecords) (item.kind === CAPTURE_KIND ? captures : records).set(item.id, item);
-    currentMemories.clear();
-    const memoryScopeCandidates = new Map();
-    for (const item of records.values()) {
-      if (item.kind !== 'memory' || item.status !== 'active') continue;
-      const scope = memoryScopeKey(item);
-      if (!memoryScopeCandidates.has(scope)) memoryScopeCandidates.set(scope, []);
-      memoryScopeCandidates.get(scope).push(item);
-    }
-    for (const [scope, candidates] of memoryScopeCandidates) {
-      const winner = [...candidates].sort((left, right) => {
-        const byVersion = (right.version ?? 1) - (left.version ?? 1);
-        if (byVersion !== 0) return byVersion;
-        const byValidFrom = compareInstants(right.temporal?.validFrom, left.temporal?.validFrom);
-        if (byValidFrom !== 0) return byValidFrom;
-        const byRecordedAt = compareInstants(right.temporal?.recordedAt, left.temporal?.recordedAt);
-        return byRecordedAt !== 0 ? byRecordedAt : String(right.id).localeCompare(String(left.id));
-      })[0];
-      currentMemories.set(scope, winner);
-    }
+    recomputeCurrentMemories();
     for (const fact of importedFacts) facts.set(fact.id, fact);
-    currentFacts.clear();
-    // P2-15: two ACTIVE facts can share a (project, key) scope in imported data.
-    // Picking whichever arrived last made the winner depend on array order, so the
-    // same file reordered produced a different current fact — and therefore
-    // different reconsideration results. Recency is now a stable rule:
-    // latest `observedAt`, and `id` as the tie-break so it is total. Ambiguity is
-    // still reported by validate() rather than hidden.
-    const scopeCandidates = new Map();
-    for (const fact of facts.values()) {
-      if (fact.status !== 'active') continue;
-      const scope = JSON.stringify([ownerKey(fact, (project) => project ?? 'default'), fact.key]);
-      if (!scopeCandidates.has(scope)) scopeCandidates.set(scope, []);
-      scopeCandidates.get(scope).push(fact);
-    }
-    for (const [scope, candidates] of scopeCandidates) {
-      const winner = [...candidates].sort((left, right) => {
-        const byObserved = compareInstants(right.observedAt, left.observedAt);
-        return byObserved !== 0 ? byObserved : String(right.id ?? '').localeCompare(String(left.id ?? ''));
-      })[0];
-      currentFacts.set(scope, winner);
-    }
+    recomputeCurrentFacts();
     for (const relation of importedRelations) relations.set(relation.id, relation);
     for (const signal of importedSignals) reviewSignals.set(reviewSignalKey(signal.decisionId, signal.reason, signal.coverage), signal);
     for (const item of pendingIdempotencyUpdates) idempotency.set(item.key, item.value);
@@ -5211,6 +5483,52 @@ export function createShadowGraph(options = {}) {
       if (journalEpoch === null) journalEpoch = pendingJournalEpoch;
     }
     return records.size + facts.size + relations.size;
+  }
+
+  function recomputeCurrentMemories() {
+    currentMemories.clear();
+    const memoryScopeCandidates = new Map();
+    for (const item of records.values()) {
+      if (item.kind !== 'memory' || item.status !== 'active') continue;
+      const scope = memoryScopeKey(item);
+      if (!memoryScopeCandidates.has(scope)) memoryScopeCandidates.set(scope, []);
+      memoryScopeCandidates.get(scope).push(item);
+    }
+    for (const [scope, candidates] of memoryScopeCandidates) {
+      const winner = [...candidates].sort((left, right) => {
+        const byVersion = (right.version ?? 1) - (left.version ?? 1);
+        if (byVersion !== 0) return byVersion;
+        const byValidFrom = compareInstants(right.temporal?.validFrom, left.temporal?.validFrom);
+        if (byValidFrom !== 0) return byValidFrom;
+        const byRecordedAt = compareInstants(right.temporal?.recordedAt, left.temporal?.recordedAt);
+        return byRecordedAt !== 0 ? byRecordedAt : String(right.id).localeCompare(String(left.id));
+      })[0];
+      currentMemories.set(scope, winner);
+    }
+  }
+
+  function recomputeCurrentFacts() {
+    currentFacts.clear();
+    // P2-15: two ACTIVE facts can share a (project, key) scope in imported data.
+    // Picking whichever arrived last made the winner depend on array order, so the
+    // same file reordered produced a different current fact — and therefore
+    // different reconsideration results. Recency is now a stable rule:
+    // latest `observedAt`, and `id` as the tie-break so it is total. Ambiguity is
+    // still reported by validate() rather than hidden.
+    const scopeCandidates = new Map();
+    for (const fact of facts.values()) {
+      if (fact.status !== 'active') continue;
+      const scope = JSON.stringify([ownerKey(fact, (project) => project ?? 'default'), fact.key]);
+      if (!scopeCandidates.has(scope)) scopeCandidates.set(scope, []);
+      scopeCandidates.get(scope).push(fact);
+    }
+    for (const [scope, candidates] of scopeCandidates) {
+      const winner = [...candidates].sort((left, right) => {
+        const byObserved = compareInstants(right.observedAt, left.observedAt);
+        return byObserved !== 0 ? byObserved : String(right.id ?? '').localeCompare(String(left.id ?? ''));
+      })[0];
+      currentFacts.set(scope, winner);
+    }
   }
 
   // The journal entries of the request's scope (P1 reconciliation F-09, F-16):
@@ -5401,7 +5719,7 @@ export function createShadowGraph(options = {}) {
     issueAccess: transactional('issueAccess', authority.issue),
     revokeAccess: transactional('revokeAccess', authority.revoke),
     discardAccess: transactional('discardAccess', authority.discard)
-  }), { snapshot, validate: integrity, rebuild: replay,
+  }), { snapshot, liveSnapshot, withheldCounts, validate: integrity, rebuild: replay,
     issueAccess: transactional('ownerIssueAccess', authority.issueOwner), inspectAccess: authority.inspect,
     accessRefusal: transactional('accessRefusal', authority.transportRefusal),
     bindProject: transactional('bindProject', bindProject), resolveProjectBinding,
@@ -5917,7 +6235,7 @@ function validateImportShape(source) {
     journalEpoch: source.journalEpoch,
     sourceSchemaVersion: source.schemaVersion
   });
-  const hardPurgeMarkers = array('journal').filter((entry) => entry?.type === 'project.purged' && entry?.payload?.mode === 'hard');
+  const hardPurgeMarkers = array('journal').filter((entry) => HARD_GAP_EVIDENCE_TYPES.includes(entry?.type) && entry?.payload?.mode === 'hard');
   if (hardPurgeMarkers.length && hardPurgeMarkers.every((entry) => Object.hasOwn(entry.payload, 'removedJournalSequences'))) {
     assertHardPurgeGapLedgers(array('journal'), {
       journalEpoch: source.journalEpoch,
