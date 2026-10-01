@@ -300,7 +300,8 @@ for (const [backend, options] of BACKENDS) {
       await assert.rejects(attempt(), { code: 'deletion_pending_unsupported_at_this_build' });
     }
     assert.deepEqual(await readFile(state.file), before);
-    assert.deepEqual(await readStoreForDelivery({ file: state.file, storage: backend }), { unavailable: 'unreadable' });
+    // Memory unavailable; the pending record is named for the capture line (PR-37b).
+    assert.deepEqual(await readStoreForDelivery({ file: state.file, storage: backend }), { unavailable: 'unreadable', pending: true });
   });
 
   for (const [name, view] of Object.entries(VIEWS)) for (const shape of ['journal', 'baseline']) {

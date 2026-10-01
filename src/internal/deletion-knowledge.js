@@ -335,7 +335,7 @@ export async function writeSidecar(destination, bytes) {
   const target = ledgerPath(await canonicalPath(destination, { followLink: false }));
   const temporary = join(dirname(target), `.${basename(target)}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`);
   try {
-    const handle = await open(temporary, 'wx');
+    const handle = await open(temporary, 'wx', 0o600);
     try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
     await rename(temporary, target);
   } finally {

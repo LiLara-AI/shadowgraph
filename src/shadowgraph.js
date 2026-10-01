@@ -27,6 +27,7 @@ import { T1_DERIVATION_VERSION, t1Digest, t1Inputs, t1Line } from './compact-tie
 import { SELF_SIGNALS, stripDeliveredBlocks } from './internal/capture-source.js';
 import { CAPTURE_COLLECTIONS, CAPTURE_CONTENT, CAPTURE_ENTRY_TYPES, CAPTURE_EVENT_IDENTITY, CAPTURE_IMPORT_TYPE, CAPTURE_KIND, CAPTURE_SESSIONS, CAPTURE_TRANSITIONS, captureCollectionIssue, captureEntryReachedBy, captureEventIssue, captureItemIssue, captureObservationIssue, CAPTURE_LIMIT_EVENT, CAPTURE_REFUSED_EVENT, OTHER_OWNER } from './internal/capture.js';
 import { TRANSCRIPT_ANCHOR_BYTES, TRANSCRIPT_GAP_REASONS, TRANSCRIPT_TRIGGERS, cursorBlock, cursorShape, digest, lastLineEnd, matchKey, transcriptEntry, transcriptLines } from './internal/transcript.js';
+import { CREDENTIAL_WITHHELD, captureWithheld, redactText, redactValue, withholdFlagged } from './internal/redaction.js';
 import { DELETION_VIEW, IDEMPOTENCY_KEY_WITHHELD, PURGE_AWARE_RESTORE_UNSUPPORTED, SCOPE_KEY_WITHHELD, SESSION_WITHHELD, deletionError } from './internal/deletion-knowledge.js';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
@@ -959,7 +960,7 @@ export function createShadowGraph(options = {}) {
   // project's capture: that is refused, not filed under the first project.
   // An item identified only by its ordinal whose material repeats the session's
   // previous item of the same event is marked possibleDuplicateOf it (F-11a).
-  function recordCapture(input = {}) {
+  function recordCapture(input = {}, { keyBlock = null, withhold = false } = {}) {
     if (!isPlainObject(input)) throw new Error('A capture needs an input object');
     const originId = usableOriginId(input.originId);
     if (originId === null || originId !== input.originId) throw new Error('A capture names the originId that observed it');
@@ -1001,22 +1002,36 @@ export function createShadowGraph(options = {}) {
     // ShadowGraph's own delivered blocks never become raw material; each one
     // removed is counted as a tool-target self-event (§16.4; PR-35).
     const stripped = input.text === undefined ? { text: undefined, removed: 0 } : stripDeliveredBlocks(input.text);
-    const text = stripped.text;
-    const crossing = admissionCrossing(admission, text, originId, observed.sessionId, [input.observation ?? null, observed]);
+    // Redaction at capture, before the write (§21.2 M-2; PR-37b): after the
+    // blocks are stripped, whose closing lines are matched by their bytes, and
+    // before anything is measured, hashed or kept. Text more than twice what an
+    // item may hold is refused unredacted, as the transcript read does. What
+    // the checker still flags is withheld: the item is kept, blocked, with no
+    // content. The transcript read carries a private key's state across the
+    // entries it records (revision 2 R6), and withholds every entry of a run
+    // whose joined text the checker flags (review F1).
+    if (stripped.text !== undefined && Buffer.byteLength(stripped.text) > 2 * admission.limits.maxItemBytes) {
+      return refuseAdmission({ limit: 'maxItemBytes', ceiling: admission.limits.maxItemBytes, scope: 'item' }, session, sessions, at);
+    }
+    const redacted = stripped.text === undefined ? undefined : keyBlock ? redactValue(stripped.text, keyBlock) : redactText(stripped.text);
+    const withheldText = redacted !== undefined && (withhold || captureWithheld(redacted));
+    const text = withheldText ? undefined : redacted;
+    const observation = input.observation === undefined ? undefined : withholdFlagged(redactValue(input.observation));
+    const crossing = admissionCrossing(admission, text, originId, observed.sessionId, [observation ?? null, observed]);
     if (crossing) return refuseAdmission(crossing, session, sessions, at);
     const contentHash = text === undefined ? null : createHash('sha256').update(text).digest('hex');
     const item = {
       id: allocateEntityId(CAPTURE_KIND), kind: CAPTURE_KIND, schemaVersion: SCHEMA_VERSION,
       project: owner.project, attribution: owner.attribution, originId,
-      state: 'pending', source: observed, observedAt: input.observedAt ?? at, occurrenceSeq,
+      state: withheldText ? 'blocked' : 'pending', source: observed, observedAt: input.observedAt ?? at, occurrenceSeq,
       sourceIdentity: input.sourceIdentity ?? 'unattributed_observer',
       contentRef: text === undefined ? null : `content_${randomUUID()}`,
       contentHash,
-      lease: null, attempts: 0, lastError: null, blockedReason: null, producedRecordIds: [], receipts: [],
+      lease: null, attempts: 0, lastError: null, blockedReason: withheldText ? CREDENTIAL_WITHHELD : null, producedRecordIds: [], receipts: [],
       erasureToken: allocateErasureToken(), cancelRequested: false, supersededResults: [],
-      possibleDuplicateOf: hostIdentity === null ? previousRepeat(originId, observed, contentHash) : observed.event === 'Transcript' ? assistantRepeat(originId, observed.sessionId, contentHash) : null,
+      possibleDuplicateOf: withheldText ? null : hostIdentity === null ? previousRepeat(originId, observed, contentHash) : observed.event === 'Transcript' ? assistantRepeat(originId, observed.sessionId, contentHash) : null,
       expiresAt: null, createdAt: at, updatedAt: at,
-      ...(input.observation === undefined ? {} : { observation: clone(input.observation) })
+      ...(observation === undefined ? {} : { observation })
     };
     const issue = captureItemIssue(item);
     if (issue) throw new Error(`Capture refused: ${issue}`);
@@ -1140,7 +1155,9 @@ export function createShadowGraph(options = {}) {
     for (const item of captures.values()) {
       if (item.originId === originId && item.source?.sessionId === observed.sessionId && item.source?.event === observed.event && (latest === null || item.occurrenceSeq > latest.occurrenceSeq)) latest = item;
     }
-    return latest !== null && latest.contentHash === contentHash ? latest.id : null;
+    // Withheld material is no repeat of anything, whatever it held (PR-37b
+    // R14): both hashes are null, and the texts were different.
+    return latest !== null && latest.blockedReason !== CREDENTIAL_WITHHELD && latest.contentHash === contentHash ? latest.id : null;
   }
 
   // The newest assistant item of the session -- a Stop's final message or
@@ -1424,6 +1441,10 @@ export function createShadowGraph(options = {}) {
     const texts = new Map([...(extras.get(CAPTURE_CONTENT) ?? []), ...(deletion.get('held')?.collections[CAPTURE_CONTENT]?.items.map(([, entry]) => entry) ?? [])].map((entry) => [entry.contentRef, entry.text]));
     const stopItems = sessionItems.filter((item) => item.source.event === 'Stop');
     const stops = stopItems.filter((item) => texts.has(item.contentRef)).map((item) => ({ seq: item.occurrenceSeq, key: matchKey(texts.get(item.contentRef)) })).sort((left, right) => left.seq - right.seq);
+    // A Stop withheld for a credential has no text to match its copy, which
+    // may still be arriving: a trailing run waits for it as for any Stop, so
+    // the run is judged whole (PR-37b re-review NF-3).
+    const withheldStops = stopItems.filter((item) => item.blockedReason === CREDENTIAL_WITHHELD).map((item) => item.occurrenceSeq);
     const priorStop = stopItems.filter((item) => item.id !== input.triggerItemId).reduce((top, item) => Math.max(top, item.occurrenceSeq), 0);
     let stopMark = cursor.stopMark;
     // The store's bytes as measured before this hold, plus the event's own
@@ -1444,14 +1465,16 @@ export function createShadowGraph(options = {}) {
       result.reconciled += 1;
       return true;
     };
-    // Rules 1 and 3.
-    const ingest = (entry) => {
+    // Rules 1 and 3. A private key split across the entries recorded is
+    // redacted whole (PR-37b R6).
+    const keyBlock = { open: false };
+    const ingest = (entry, withhold = false) => {
       if (ingestedUuids.has(entry.uuid)) return;
       const recorded = recordCapture({
         originId, project: input.project, text: entry.text, observation: input.observation,
         source: { event: 'Transcript', sessionId, role: 'assistant', hostEventId: entry.uuid },
         admission: { limits: input.admission?.limits, storeBytes }
-      });
+      }, { keyBlock, withhold });
       if (recorded.refused) {
         result.refused += 1;
         if (recorded.changed) result.changed = true;
@@ -1470,18 +1493,25 @@ export function createShadowGraph(options = {}) {
     // for the next read and the position goes back to its first entry (C-3).
     let run = [];
     let cut = null;
-    const keyOf = (entry) => () => (entry.key ??= matchKey(entry.stripped));
-    const runKey = () => matchKey(run.map((entry) => entry.stripped).join('\n\n'));
+    const keyOf = (entry) => () => (entry.key ??= matchKey(redactText(entry.stripped)));
+    // The run's text, joined as a Stop's final message is and redacted once.
+    const runText = () => (run.redacted ??= redactText(run.map((entry) => entry.stripped).join('\n\n')));
+    const runKey = () => matchKey(runText());
     const closeRun = () => {
       const whole = run.length > 1 && run.every((entry) => !ingestedUuids.has(entry.uuid)) && reconcile(runKey);
       if (!whole) {
+        // A credential the checker finds only across the run's entries is
+        // withheld in each of them, as its Stop's would be (PR-37b).
+        const withhold = run.length > 1 && captureWithheld(runText());
         for (const entry of run) {
           if (!ingestedUuids.has(entry.uuid) && reconcile(keyOf(entry))) continue;
           if (!ingestedUuids.has(entry.uuid) && !mayContinue()) {
-            cut = entry.start;
+            // A run being withheld is read again from its start, so the rest
+            // is judged with the part already recorded (re-review NF-3).
+            cut = withhold ? run[0].start : entry.start;
             break;
           }
-          ingest(entry);
+          ingest(entry, withhold);
         }
       }
       run = [];
@@ -1516,11 +1546,12 @@ export function createShadowGraph(options = {}) {
           break;
         }
         // Text is measured as a Stop's is, after ShadowGraph's own delivered
-        // blocks are removed; text more than twice what an item holds is not
-        // even stripped (declared: a Stop's final message quoting that much
-        // of them is recorded again, marked possibleDuplicateOf).
+        // blocks are removed and the rest redacted; text more than twice what
+        // an item holds is not even stripped (declared: a Stop's final message
+        // quoting that much of them is recorded again, marked
+        // possibleDuplicateOf).
         const stripped = facts.text === null || Buffer.byteLength(facts.text) > 2 * itemLimit ? null : stripDeliveredBlocks(facts.text).text;
-        const tooLong = facts.text !== null && (stripped === null || Buffer.byteLength(stripped) > itemLimit);
+        const tooLong = facts.text !== null && (stripped === null || Buffer.byteLength(redactText(stripped)) > itemLimit);
         if ((facts.type === 'user' || facts.toolUses.length || tooLong) && !closeRun()) break;
         if (facts.type === 'assistant' && facts.text !== null) {
           const entry = { start: line.start, uuid: facts.uuid, text: facts.text, stripped, key: null };
@@ -1543,7 +1574,8 @@ export function createShadowGraph(options = {}) {
     // ever). With no Stop to wait for, a part judged now loses nothing. It is
     // held from its first entry not yet ingested, so the next read can still
     // match what remains whole.
-    const eligible = (key) => stops.some((stop) => stop.seq > stopMark && (key === undefined || stop.key === key));
+    const eligible = (key) => stops.some((stop) => stop.seq > stopMark && (key === undefined || stop.key === key))
+      || (key === undefined && withheldStops.some((seq) => seq > stopMark));
     const holdAt = (run.find((entry) => !ingestedUuids.has(entry.uuid)) ?? run[0])?.start;
     const growing = cut === null && run.length > 0 && !blocked && holdAt > cursor.position && (input.trigger === 'Stop' || !mayContinue())
       && eligible() && !eligible(runKey()) && !run.some((entry) => eligible(keyOf(entry)()));

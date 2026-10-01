@@ -36,7 +36,14 @@ export async function restoreFile(source, destination, options = {}) {
       catch (error) { if (error.code === 'ENOENT') return null; throw error; }
     }
   });
-  return fence.run(() => restoreJsonFileFenced(source, destination, { ...options, validate }));
+  // The unchanged primitive creates its files through `restoreFs`: they take
+  // the destination's mode, or owner-only for a new one (FND-P6-11; PR-37b).
+  return fence.run(async () => {
+    const mode = await stat(destination).then((info) => info.mode & 0o777, () => 0o600);
+    const create = options.restoreFs?.writeFile ?? writeFile;
+    const restoreFs = { ...options.restoreFs, writeFile: (path, data, encoding) => create(path, data, { encoding, mode }) };
+    return restoreJsonFileFenced(source, destination, { ...options, validate, restoreFs });
+  });
 }
 
 async function restoreJsonFileFenced(source, destination, options) {

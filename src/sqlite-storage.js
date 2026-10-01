@@ -2,7 +2,7 @@
 //
 // node:sqlite is a RELEASE CANDIDATE (Node stability 1.2), not stable, so the
 // import is guarded and JSON remains a fully supported fallback.
-import { copyFile, mkdir, rename, stat, unlink } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, rename, stat, unlink } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { nextRevision, assertRevision, createDestinationFence, currentRevision, nextRevisionAfter } from './revision-store.js';
@@ -735,6 +735,8 @@ export async function createSqliteStore(filePath, options = {}) {
           // The payload is read, then the deletion records; their copy lands
           // first, then the payload it describes (PR-37a, R-8).
           await writeSidecar(target, await backupSidecar(filePath, target, options.env));
+          // A backup copy is owner-only (FND-P6-11; PR-37b).
+          await chmod(temporary, 0o600);
           await rename(temporary, target);
           return { source: filePath, destination };
         } finally {

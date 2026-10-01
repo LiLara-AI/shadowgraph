@@ -890,3 +890,10 @@ test('assemblePayload: items past the examination limit are counted apart from t
   const shown = JSON.parse(result.text.split('\n')[1].slice(6));
   assert.deepEqual([shown.delivered, shown.withheld, shown.omittedForSize, shown.notExamined, shown.omitted, shown.complete], [0, 200, 0, 50, 250, false]);
 });
+
+test('the redactor delivery shares with capture removes cookie pairs, key data and auth flags, and keeps prose about cookies (PR-37b)', () => {
+  assert.equal(redactText('Favourite cookie: chocolate chip'), 'Favourite cookie: chocolate chip');
+  assert.equal(redactText('Cookie: theme=dark; session=abc123'), 'Cookie: [REDACTED]');
+  assert.equal(redactText('client-key-data: QUJDREVGR0g='), '[REDACTED]');
+  assert.equal(redactText('http --auth me:abc123 https://x'), 'http --auth [REDACTED] https://x');
+});

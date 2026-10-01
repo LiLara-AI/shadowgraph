@@ -17,6 +17,7 @@ import { accessContext, discoverWorkspace, projectBindingFile } from './internal
 import { captureArtefacts, classifyCaptureSource, soleProgram } from './internal/capture-source.js';
 import { outcomeFromExitStatus } from './internal/outcome.js';
 import { canonicalPath } from './internal/owner-files.js';
+import { KEYED_NAMES, KEYED_VALUES, REDACTED, isCredentialName } from './internal/redaction.js';
 import { privilegedRecordCapture, privilegedRecordSelfEvent, privilegedRecordTranscript, privilegedSnapshot } from './internal/snapshot.js';
 import { TRANSCRIPT_TRIGGERS } from './internal/transcript.js';
 import { usableOriginId } from './scope.js';
@@ -109,6 +110,14 @@ const GIT_TIMEOUT_MS = 3000;
 const STORE_SIDE_FILES = Object.freeze(['-wal', '-shm', '-journal']);
 const named = (value) => typeof value === 'string' && value.trim() !== '';
 
+// A key or argument naming a credential, by the redactor's names or the short
+// ones a tool's input uses, with an argument's leading dashes ignored (PR-37b
+// review F4, re-review NF-4).
+const SHORT_CREDENTIAL_KEYS = new Set(['pass', 'pw', 'auth', 'cookie', 'cookies', 'set-cookie']);
+const credentialKey = (name) => isCredentialName(name) || SHORT_CREDENTIAL_KEYS.has(String(name).toLowerCase().replace(/^-+/u, ''));
+// The value after a user flag that carries a password (`-u user:pass`).
+const USER_FLAG = /^(?:-u|--user)$/u;
+
 // A tool call as text (design review D-12): its name, then every leaf of its
 // input, its response and a failure's error, labelled by path. A string keeps
 // its own line breaks, so a delivered block inside one is found and stripped
@@ -117,11 +126,25 @@ const named = (value) => typeof value === 'string' && value.trim() !== '';
 export function renderToolMaterial({ toolName, toolInput, toolResponse, error }) {
   const lines = [`tool: ${toolName}`];
   const pending = [['error', error], ['response', toolResponse], ['input', toolInput]].filter(([, value]) => value !== undefined);
+  // What a credential names is rendered as one redacted line, whatever it
+  // holds (PR-37b R1): the value of a key named for one, the value field of a
+  // pair keyed by one, and an array element after one (a header pair, an
+  // argument vector's `--password <value>`). An array of one-line strings is
+  // one line, as a command is, so the redactor's flag rules apply to it.
+  const hides = (item) => item !== null && item !== undefined;
+  const follows = (array, index) => index > 0 && typeof array[index - 1] === 'string'
+    && (credentialKey(array[index - 1]) || (USER_FLAG.test(array[index - 1]) && typeof array[index] === 'string' && array[index].includes(':')));
   while (pending.length) {
-    const [path, value] = pending.pop();
-    if (typeof value === 'string') lines.push(`${path}:`, value);
-    else if (isObject(value) || (Array.isArray(value) && value.length)) {
-      const entries = Array.isArray(value) ? value.map((item, index) => [`${path}[${index}]`, item]) : Object.entries(value).map(([key, item]) => [`${path}.${key}`, item]);
+    const [path, value, hidden] = pending.pop();
+    if (hidden) lines.push(`${path}: ${REDACTED}`);
+    else if (typeof value === 'string') lines.push(`${path}:`, value);
+    else if (Array.isArray(value) && value.length && value.every((item) => typeof item === 'string' && !/[\r\n]/u.test(item))) {
+      lines.push(`${path}: ${value.map((item, index) => (follows(value, index) ? REDACTED : item)).join(' ')}`);
+    } else if (isObject(value) || (Array.isArray(value) && value.length)) {
+      const keyed = !Array.isArray(value) && KEYED_NAMES.some((name) => typeof value[name] === 'string' && isCredentialName(value[name]));
+      const entries = Array.isArray(value)
+        ? value.map((item, index) => [`${path}[${index}]`, item, follows(value, index) && hides(item)])
+        : Object.entries(value).map(([key, item]) => [`${path}.${key}`, item, hides(item) && (credentialKey(key) || (keyed && KEYED_VALUES.has(key)))]);
       if (!entries.length) lines.push(`${path}: {}`);
       for (let at = entries.length - 1; at >= 0; at -= 1) pending.push(entries[at]);
     } else lines.push(`${path}: ${JSON.stringify(value)}`);
@@ -262,7 +285,8 @@ export async function runCapture({ capture, input, deadline, record = null, home
   let store;
   post('enter');
   try {
-    store = await createStorage({ type: capture.store.storage, file, lockTimeoutMs, staleLockMs: CAPTURE_STALE_LOCK_MS });
+    // Owner-only, whatever mode the store had (FND-P6-11; PR-37b R3).
+    store = await createStorage({ type: capture.store.storage, file, lockTimeoutMs, staleLockMs: CAPTURE_STALE_LOCK_MS, mode: 0o600 });
     await store.update(async (current) => {
       const entered = now();
       // The commit's cost is estimated from the work before the transcript is

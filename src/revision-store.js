@@ -90,10 +90,11 @@ export function createDestinationFence(filePath, options = {}) {
     const started = Date.now();
     const token = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
     let waitingReported = false;
-    await mkdir(dirname(destination), { recursive: true });
+    // A directory it makes, and the lock, are owner-only (FND-P6-11; PR-37b).
+    await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
     while (true) {
       try {
-        const handle = await open(lockPath, 'wx');
+        const handle = await open(lockPath, 'wx', 0o600);
         try { await handle.writeFile(token, 'utf8'); }
         catch (error) { await handle.close().catch(() => {}); await unlink(lockPath).catch(() => {}); throw error; }
         const heartbeatMs = Math.max(10, Math.min(1000, Math.floor(staleLockMs / 3)));

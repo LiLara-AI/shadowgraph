@@ -1,4 +1,4 @@
-import { readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { dirname, join } from 'node:path';
 import { nextRevision, assertRevision, createDestinationFence } from './revision-store.js';
@@ -43,7 +43,10 @@ export function createJsonFileStore(filePath, options = {}) {
     const payload = nextRevision(Array.isArray(input) ? { ...empty(), records: input } : { ...input, revision: current.revision ?? 0, expectedRevision: undefined });
     const context = { current, payload, destructive: false };
     const temporaryPath = join(dirname(filePath), `.${filePath.split(/[\\/]/).pop()}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`);
-    await writeFile(temporaryPath, JSON.stringify(payload, null, 2) + '\n', 'utf8');
+    // The store keeps its mode, or is owner-only when new; a capture store is
+    // owner-only whatever it was (FND-P6-11; PR-37b).
+    const mode = options.mode ?? await stat(filePath).then((info) => info.mode & 0o777, () => 0o600);
+    await writeFile(temporaryPath, JSON.stringify(payload, null, 2) + '\n', { encoding: 'utf8', mode });
     options.saveFault?.('beforeCommit', context);
     await commitFile(temporaryPath, filePath, options.rename);
     options.saveFault?.('afterCommit', context);

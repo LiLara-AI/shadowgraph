@@ -451,14 +451,15 @@ test('the delivery head says capture is on only for the store it delivers, on th
   assert.doesNotMatch(await deliver(), /s-\d|origin-a|aaaa/u, 'counts and names of limits: no session, origin or material');
   await activate({ delivery, capture: { ...active, state: 'deactivated' } });
   assert.equal((await processing()).capture, 'not_active', 'off, while the store still holds capture state');
-  // A store delivery cannot read, or cannot load, still says capture is on.
+  // A store delivery cannot read, or cannot load, is one capture cannot write: capture is unavailable, and says why
+  // (PR-37b, superseding the PR-36b line that said it was on).
   await activate({ delivery, capture: active });
   const malformed = privilegedSnapshot(graph);
   malformed.events.find((entry) => entry.type === 'capture.limited').limit = 'maxItemBytes';
   await writeFile(file, JSON.stringify(malformed));
-  assert.equal(await deliver(), 'processing: {"capture":"active","extraction":"not_active"}');
+  assert.equal(await deliver(), 'processing: {"capture":"unavailable","reason":"store_unreadable","extraction":"not_active"}');
   await writeFile(file, '{not json');
-  assert.equal(await deliver(), 'processing: {"capture":"active","extraction":"not_active"}');
+  assert.equal(await deliver(), 'processing: {"capture":"unavailable","reason":"store_unreadable","extraction":"not_active"}');
 });
 
 test('the delivery processing line carries a bound project\'s pending count, and its head is not complete', async (t) => {
