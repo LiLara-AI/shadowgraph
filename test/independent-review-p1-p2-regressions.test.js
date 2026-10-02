@@ -4,7 +4,7 @@ import { tokenFree } from '../tools/token-free.js';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { restoreFile } from '../src/backup.js';
 import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
@@ -260,8 +260,11 @@ function purgeFixture() {
   return { graph, kept, decision: historical(decision), fact: historical(fact), memory: historical(memory), relation: historical(relation) };
 }
 
+// A home beside each store: a purged snapshot saved here writes its tombstone and
+// registry entry, which no other subtest may merge (PR-37d design §9.3).
+const homeOf = (file) => ({ SHADOWGRAPH_HOME: join(dirname(file), 'home') });
 async function createStore(backend, file) {
-  return backend === 'sqlite' ? createSqliteStore(file) : createJsonFileStore(file);
+  return backend === 'sqlite' ? createSqliteStore(file, { env: homeOf(file) }) : createJsonFileStore(file, { env: homeOf(file) });
 }
 
 async function assertPurgeErasureAcrossBackend(t, backend, mode) {
@@ -341,7 +344,7 @@ async function assertPurgeErasureAcrossBackend(t, backend, mode) {
     await destinationStore.restore(sourcePath);
   } else {
     destinationStore.close();
-    await restoreFile(sourcePath, destinationPath);
+    await restoreFile(sourcePath, destinationPath, { env: homeOf(destinationPath) });
     destinationStore = await createStore(backend, destinationPath);
   }
   const restored = await destinationStore.load();

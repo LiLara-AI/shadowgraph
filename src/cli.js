@@ -290,7 +290,7 @@ async function runOneShot() {
     };
     if (readCommands[command]) {
       const value = parse(input || '{}');
-      if (hasAccessReference(value)) return await currentAccessOperation(graph, store, () => readCommands[command](prepared(value)));
+      if (hasAccessReference(value)) return await currentAccessOperation(graph, store, () => readCommands[command](prepared(value)), { read: true });
       // Existing owner-scope evaluation writes remain unchanged. Ordinary reads
       // do not gain a save merely because grant-bearing calls are audited.
       const result = readCommands[command](prepared(value));

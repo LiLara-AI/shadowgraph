@@ -93,6 +93,12 @@ export function privilegedRecordTranscript(graph, input) {
 export function privilegedReapplyDeletion(graph, plan, options) {
   return primitive(graph, 'reapplyDeletion', 'privilegedReapplyDeletion')(plan, options);
 }
+// The completion of a pending purge (PR-37d design §2.5, §4.3): the purge
+// re-run with the record's marker id and instant, which no public purge can
+// force. The restore wrapper's resolver is its one caller.
+export function privilegedCompletePurge(graph, project, options) {
+  return primitive(graph, 'completePurge', 'privilegedCompletePurge')(project, options);
+}
 // What is quarantined, by identity (PR-37c design §9.2): the owner's
 // `quarantine` verbs (src/internal/quarantine.js) are its one caller, and no
 // agent surface reaches it.

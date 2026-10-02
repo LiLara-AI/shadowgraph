@@ -8,7 +8,7 @@
 //   search-contract.md      — content fields vs filters
 //   confidence-contract.md  — evidence-weighted bounded confidence
 
-import { HARD_GAP_EVIDENCE_TYPES, assertHardPurgeGapLedgers, assertJournalBaselinePlacement, assertJournalEntrySequence, assertUniqueJournalSequences, rebuildProjection, journalGaps, duplicateSequences, journalBaselinePlacementIssues, journalEntryPostconditionIssue, journalEntrySequenceIssue, journalFactLifecycleIssues, replayedEntity, reattributeIdempotency, schema5PurgeArtifactIssue, ATTRIBUTED_ENTITY_KINDS, ATTRIBUTION_ENTRY_KINDS, JOURNAL_ENTRY_TYPES, JOURNAL_TYPE_ENTITY_KIND, READABLE_JOURNAL_SCHEMA_VERSION, REPLAYABLE_ENTRY_TYPES } from './journal.js';
+import { CREATION_ENTRY_TYPES, HARD_GAP_EVIDENCE_TYPES, assertHardPurgeGapLedgers, assertJournalBaselinePlacement, assertJournalEntrySequence, assertUniqueJournalSequences, rebuildProjection, journalGaps, duplicateSequences, journalBaselinePlacementIssues, journalEntryPostconditionIssue, journalEntrySequenceIssue, journalFactLifecycleIssues, replayedEntity, reattributeIdempotency, schema5PurgeArtifactIssue, ATTRIBUTED_ENTITY_KINDS, ATTRIBUTION_ENTRY_KINDS, JOURNAL_ENTRY_TYPES, JOURNAL_TYPE_ENTITY_KIND, READABLE_JOURNAL_SCHEMA_VERSION, REPLAYABLE_ENTRY_TYPES } from './journal.js';
 import { createConfidence, applyContribution, setOutcomeContribution, computeConfidence, summarizeBasis, CONFIDENCE_POLICY } from './confidence.js';
 import { hybridSearch, foldText } from './hybrid-search.js';
 import { effectiveFactExpirationBoundary, factValidityPolicyIssue, isValidIsoInstant } from './fact-validity.js';
@@ -28,7 +28,7 @@ import { SELF_SIGNALS, stripDeliveredBlocks } from './internal/capture-source.js
 import { CAPTURE_COLLECTIONS, CAPTURE_CONTENT, CAPTURE_ENTRY_TYPES, CAPTURE_EVENT_IDENTITY, CAPTURE_IMPORT_TYPE, CAPTURE_KIND, CAPTURE_SESSIONS, CAPTURE_TRANSITIONS, captureCollectionIssue, captureEntryReachedBy, captureEventIssue, captureItemIssue, captureObservationIssue, CAPTURE_LIMIT_EVENT, CAPTURE_REFUSED_EVENT, OTHER_OWNER } from './internal/capture.js';
 import { TRANSCRIPT_ANCHOR_BYTES, TRANSCRIPT_GAP_REASONS, TRANSCRIPT_TRIGGERS, cursorBlock, cursorShape, digest, lastLineEnd, matchKey, transcriptEntry, transcriptLines } from './internal/transcript.js';
 import { CREDENTIAL_WITHHELD, captureWithheld, redactText, redactValue, withholdFlagged } from './internal/redaction.js';
-import { DELETION_VIEW, IDEMPOTENCY_KEY_WITHHELD, PURGE_AWARE_RESTORE_UNSUPPORTED, SCOPE_KEY_WITHHELD, SESSION_WITHHELD, deletionError } from './internal/deletion-knowledge.js';
+import { DELETION_INTENT, DELETION_VIEW, IDEMPOTENCY_KEY_WITHHELD, PURGE_AWARE_RESTORE_UNSUPPORTED, PURGE_BACKUPS_STATEMENT, SCOPE_KEY_WITHHELD, SESSION_WITHHELD, deletionError, journalHead } from './internal/deletion-knowledge.js';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
 // docs/api-reference.md) and are frozen so a consumer cannot mutate validation
@@ -180,6 +180,39 @@ function ownerKey(entity, projectOf) {
 
 function ownedByProject(entity, project) {
   return entity?.project === project && entity?.attribution !== 'unattributed' && !isLegacyOwned(entity);
+}
+
+// What a purge's commit point writes (PR-37d design §1, §2.1): the ledger
+// tombstone, the registry's lineage anchors and the marker's identity, built
+// from values purgeLive already holds, after staging validation and before the
+// first mutation. It reads nothing but its arguments and does no I/O.
+// `journal` and `epoch` are the unspliced journal and its epoch, before the
+// marker; `entities` the records, captures and facts the purge removes, W's
+// included; `absorbed` the intents of the earlier markers a hard re-purge
+// splices (§2.4), whose tokens and move-in it takes over.
+const MOVE_IN_ORDER = ['none', 'some', 'unknown'];
+function purgeIntent({ project, mode, marker, entities, journal, epoch, absorbed }) {
+  const tokens = new Set(absorbed.flatMap((intent) => intent.tombstone.tokens));
+  for (const entity of entities) if (typeof entity.erasureToken === 'string' && entity.erasureToken) tokens.add(entity.erasureToken);
+  // §1.3, per removed entity (V-4): its naming entries, by hold()'s predicate.
+  // None of a creation type: its history before some point is not here.
+  // Otherwise an attribution into the project among them: it moved in.
+  const naming = new Map(entities.map((entity) => [entity.id, []]));
+  for (const entry of journal) for (const id of new Set([entry?.entityId, replayedEntity(entry)?.id])) naming.get(id)?.push(entry);
+  const histories = [...naming.values()];
+  let moveIn = 'none';
+  if (histories.some((entries) => !entries.some((entry) => CREATION_ENTRY_TYPES.includes(entry.type)))) moveIn = 'unknown';
+  else if (histories.some((entries) => entries.some((entry) => entry.type === 'entity.attributed' && entry.project === project))) moveIn = 'some';
+  for (const intent of absorbed) if (MOVE_IN_ORDER.indexOf(intent.tombstone.moveIn) > MOVE_IN_ORDER.indexOf(moveIn)) moveIn = intent.tombstone.moveIn;
+  // §1.4: the epoch entry (the marker itself when the journal was empty; null
+  // when a hard purge spliced it, filled at the commit point), the head before
+  // the marker, and the marker.
+  const epochEntryId = epoch === null ? marker.id : journal.find((entry) => entry?.seq === epoch)?.id ?? null;
+  return {
+    tombstone: { kind: 'project', purgedProject: project, mode, at: marker.at, seq: marker.seq, tokens: [...tokens].sort(), moveIn },
+    lineage: { epochEntryId, headEntryId: journalHead({ journal }), markerEntryId: marker.id },
+    marker: { id: marker.id, at: marker.at, seq: marker.seq }
+  };
 }
 
 // An entity written by a newer build than this one reads: kept as it arrived,
@@ -1803,8 +1836,12 @@ export function createShadowGraph(options = {}) {
     const view = deletion.get('view');
     if (!view || (!view.tokens.size && !view.projects.length && !view.ids?.size) || deletion.has('held')) return;
     // By its token, or by its id when a committed restore waits for its
-    // post-step and the entity has no token yet (PR-37c design §1.4, §8.1).
-    const withheldEntity = (entity) => (entity?.erasureToken !== undefined && view.tokens.has(entity.erasureToken)) || Boolean(view.ids?.has(entity?.id));
+    // post-step and the entity has no token yet (PR-37c design §1.4, §8.1); or
+    // whole, tokenless included, when a purge of its project waits for the
+    // next write: exactly what the purge's selection removes (PR-37d design
+    // §4.1).
+    const withheldEntity = (entity) => (entity?.erasureToken !== undefined && view.tokens.has(entity.erasureToken)) || Boolean(view.ids?.has(entity?.id))
+      || (view.purging?.has(entity?.project) === true && ownedByProject(entity, entity.project));
     const heldRecords = [...records.values()].filter(withheldEntity);
     const heldCaptures = [...captures.values()].filter(withheldEntity);
     const heldFacts = [...facts.values()].filter(withheldEntity);
@@ -3928,7 +3965,15 @@ export function createShadowGraph(options = {}) {
     // a capture it removes names (PR-33).
     const removedContentRefs = new Set(capturesForProject.map((item) => item.contentRef).filter(Boolean));
     const reachesCaptureEntry = (entry) => captureEntryReachedBy(entry, project, removedContentRefs);
-    return { ids, relationIds, removedEvents, referencesRemoved, reachesMiss, reachesCaptureEntry, summary: { project, records: recordsForProject.length, facts: factsForProject.length, relations: relationIds.size, events: removedEvents.size, journal: journal.filter(referencesRemoved).length, runtimeMisses: misses.filter(reachesMiss).length } };
+    // Capture's counts, of live memory as every other count is (PR-37d design
+    // §6.1, FND-P6-02); and apart from them the project's records, captures and
+    // facts deletion records hold out of it, which a purge removes too (R5 L1
+    // VS1): counts only, never in the marker.
+    const reached = (name) => (Array.isArray(extras.get(name)) ? extras.get(name) : []).filter(reachesCaptureEntry).length;
+    const held = deletion.get('held')?.collections ?? {};
+    const withheld = ['records', 'captures', 'facts'].flatMap((name) => held[name]?.items ?? []).filter(([, item]) => ownedByProject(item, project)).length;
+    // `entities`: what a purge's tombstone names by token (PR-37d design §1.2).
+    return { ids, relationIds, removedEvents, referencesRemoved, reachesMiss, reachesCaptureEntry, entities: [...recordsForProject, ...capturesForProject, ...factsForProject], summary: { project, records: recordsForProject.length, facts: factsForProject.length, relations: relationIds.size, events: removedEvents.size, journal: journal.filter(referencesRemoved).length, runtimeMisses: misses.filter(reachesMiss).length, captures: capturesForProject.length, captureContent: reached(CAPTURE_CONTENT), captureSessions: reached(CAPTURE_SESSIONS), withheld } };
   }
 
   function projectSummary(project) {
@@ -3963,7 +4008,7 @@ export function createShadowGraph(options = {}) {
   function purgeLive(project, purgeOptions = {}) {
     const mode = purgeOptions.mode ?? (purgeOptions.hard === true ? 'hard' : 'logical');
     if (!['logical', 'hard'].includes(mode)) throw new Error('Purge mode must be logical or hard');
-    const { summary, ids: removed, relationIds: removedRelationIds, removedEvents: eventsToRemove, referencesRemoved, reachesMiss, reachesCaptureEntry } = projectPurgeSelection(project);
+    const { summary, ids: removed, relationIds: removedRelationIds, removedEvents: eventsToRemove, referencesRemoved, reachesMiss, reachesCaptureEntry, entities } = projectPurgeSelection(project);
     const idempotencyKeysToRemove = [...idempotency]
       .filter(([, value]) => removed.has(value?.id))
       .map(([key]) => key);
@@ -3974,6 +4019,8 @@ export function createShadowGraph(options = {}) {
     const stagedJournal = clone(journal);
     let journalEntriesRedacted = 0;
     let journalEntriesRemoved = 0;
+    // The earlier markers of the project a hard purge splices (PR-37d §2.4).
+    const splicedMarkers = new Set();
     const removedJournalSequences = mode === 'hard'
       ? stagedJournal
         .filter((item) => item.type === 'project.purged' && item.project === project && item.payload?.mode === 'hard')
@@ -3984,6 +4031,7 @@ export function createShadowGraph(options = {}) {
         const item = stagedJournal[index];
         if (referencesRemoved(item)) {
           if (Number.isInteger(item.seq)) removedJournalSequences.push(item.seq);
+          if (item.type === 'project.purged') splicedMarkers.add(item.id);
           stagedJournal.splice(index, 1);
           journalEntriesRemoved += 1;
         }
@@ -4000,8 +4048,10 @@ export function createShadowGraph(options = {}) {
     }
     for (const item of stagedJournal) rewriteBaselineForProjectPurge(item, project, removed, removedRelationIds);
     const uniqueRemovedJournalSequences = [...new Set(removedJournalSequences)].sort((left, right) => left - right);
+    // Only the completion of a pending purge forces the marker's id and instant
+    // (PR-37d design §2.5): the public registration never passes one.
     const purgeEntry = prebuildJournalEntry({
-      type: 'project.purged', entityKind: 'project', entityId: null, project,
+      type: 'project.purged', entityKind: 'project', entityId: null, project, id: purgeOptions.marker?.id, at: purgeOptions.marker?.at,
       payload: { project, mode, removed: removed.size, removedJournalSequences: uniqueRemovedJournalSequences }
     }, journalSeq + 1);
     stagedJournal.push(purgeEntry);
@@ -4016,6 +4066,11 @@ export function createShadowGraph(options = {}) {
       journalEpoch: stagedJournalEpoch,
       sourceSchemaVersion: SCHEMA_VERSION
     });
+    // The intent, from the journal and epoch before the marker (PR-37d design
+    // §2.1); an earlier intent whose marker this purge splices is absorbed.
+    const intents = deletion.get('intents') ?? [];
+    const absorbed = intents.filter((item) => splicedMarkers.has(item.marker.id));
+    const intent = purgeIntent({ project, mode, marker: purgeEntry, entities, journal, epoch: journalEpoch, absorbed });
 
     for (const recordId of removed) { records.delete(recordId); captures.delete(recordId); }
     for (const [scopeKey, memory] of currentMemories) if (removed.has(memory.id)) currentMemories.delete(scopeKey);
@@ -4028,6 +4083,7 @@ export function createShadowGraph(options = {}) {
     journal.splice(0, journal.length, ...stagedJournal);
     journalSeq = purgeEntry.seq;
     journalEpoch = stagedJournalEpoch;
+    deletion.set('intents', [...intents.filter((item) => !absorbed.includes(item)), intent]);
     authority.purge(project);
     // In both modes the miss-ledger entries the purge reaches are removed, and
     // the last entries take the collection with them (PR-28a).
@@ -4056,7 +4112,9 @@ export function createShadowGraph(options = {}) {
       journalEntriesRemoved,
       removedJournalSequences: uniqueRemovedJournalSequences,
       idempotencyRemoved: idempotencyKeysToRemove.length,
-      journalEntryId: purgeEntry.id
+      journalEntryId: purgeEntry.id,
+      // Every purge says so, one that removes nothing included (PR-37d design §6.2).
+      backups: PURGE_BACKUPS_STATEMENT
     };
   }
 
@@ -4374,9 +4432,11 @@ export function createShadowGraph(options = {}) {
     // (PR-37c design §9.3): the quarantined items the scope itself owns,
     // counted by identity, never across scopes nor through a grant's wider
     // read; and whether a restore waits for its post-step, which holds what it
-    // will remove or quarantine before the count can see it.
+    // will remove or quarantine before the count can see it. A waiting purge
+    // makes no read incomplete: what it holds is what it will remove (PR-37d
+    // design §4.1, V-5).
     Object.defineProperty(scope, 'quarantined', { value: quarantinedEntities().filter(baseVisible).length, enumerable: false });
-    Object.defineProperty(scope, 'restorePending', { value: deletion.get('view')?.pending === true, enumerable: false });
+    Object.defineProperty(scope, 'restorePending', { value: deletion.get('view')?.pending === true && !deletion.get('view').purging, enumerable: false });
     const accessId = inherited === undefined ? options.accessId ?? options.grantId : inherited?.accessId;
     const requestedAccess = accessId !== undefined && accessId !== null || inherited !== undefined;
     const surface = options.surface ?? 'cli';
@@ -5029,8 +5089,13 @@ export function createShadowGraph(options = {}) {
   // store it would save with no view. The live form beside it is what the
   // graph holds with W apart; redaction, the Markdown pull lookup and
   // downgrade read that one.
+  //
+  // It carries the graph's purge intents to a store's commit point, under a
+  // non-enumerable symbol (PR-37d design §2.2); the live form never does.
   function snapshot() {
-    return storeSnapshot(deletion.get('held') ?? null);
+    const payload = storeSnapshot(deletion.get('held') ?? null);
+    const intents = deletion.get('intents');
+    return intents?.length ? Object.defineProperty(payload, DELETION_INTENT, { value: structuredClone(intents) }) : payload;
   }
 
   function liveSnapshot() {
@@ -5109,10 +5174,17 @@ export function createShadowGraph(options = {}) {
     // The staged snapshot is already migrated and validated, so this import cannot
     // fail. Only now is the live state discarded.
     const staged = privilegedSnapshot(staging);
+    // The purge intents the data carries, or none (PR-37d design §2.2): a
+    // rollback to a privileged snapshot puts back exactly the ones it had, and
+    // a reload, whose payload carries none, drops them.
+    const intents = data?.[DELETION_INTENT];
     clearLive();
+    if (intents?.length) deletion.set('intents', structuredClone(intents));
+    else deletion.delete('intents');
     return importWithView(staged, view);
   }
 
+  // The purge intents stay: unhold() clears through here (PR-37d design §2.2).
   function clearLive() {
     records.clear(); captures.clear(); currentMemories.clear(); facts.clear(); currentFacts.clear(); relations.clear(); reviewSignals.clear(); idempotency.clear(); extras.clear(); projectlessLegacy.clear();
     deletion.delete('held');
@@ -5922,7 +5994,8 @@ export function createShadowGraph(options = {}) {
     expand: auditedRead('expand', expand),
     redact: auditedRead('redact', redact),
     projectSummary,
-    purgeProject: transactional('purgeProject', purgeProject, { mode: 'snapshot' }),
+    // No caller forces a marker (PR-37d design §2.5): only the mode reaches it.
+    purgeProject: transactional('purgeProject', (project, options) => purgeProject(project, { mode: options?.mode, hard: options?.hard }), { mode: 'snapshot' }),
     review: auditedRead('review', review),
     reconsider: auditedRead('reconsider', reconsider),
     maintain: auditedRead('maintain', maintain),
@@ -5950,7 +6023,8 @@ export function createShadowGraph(options = {}) {
     bindProject: transactional('bindProject', bindProject), resolveProjectBinding,
     recordCapture: transactional('recordCapture', recordCapture), transitionCapture: transactional('transitionCapture', transitionCapture),
     recordSelfEvent: transactional('recordSelfEvent', recordSelfEvent), recordTranscript: transactional('recordTranscript', recordTranscript),
-    reapplyDeletion: transactional('reapplyDeletion', reapplyDeletion, { mode: 'snapshot' }), quarantined });
+    reapplyDeletion: transactional('reapplyDeletion', reapplyDeletion, { mode: 'snapshot' }), quarantined,
+    completePurge: transactional('completePurge', (project, options) => purgeProject(project, { mode: options.mode, marker: options.marker }), { mode: 'snapshot' }) });
 }
 
 // `strict` is for caller writes, where a typo should fail loudly instead of

@@ -4,9 +4,10 @@
 //   S-1 tool target: a call to its MCP server; a run of its binary or of its
 //       installed runtime's entry points (the program a command runs, never a
 //       read, edit or `cd` of files beside them); a touch of its store with
-//       its lock, SQLite and restore side files, of its activation record or
-//       of its marker files. Only a tool's path fields and the words of a Bash
-//       or PowerShell command, read by that shell's own quoting rules, are
+//       its lock, SQLite and restore side files, of its activation record, of
+//       its marker files, or of the deletion registry and its lock. Only a
+//       tool's path fields and the words of a Bash or PowerShell command,
+//       read by that shell's own quoting rules, are
 //       looked at -- never a file or folder merely named "shadowgraph", and
 //       never quoted prose, a here-document, a here-string or a comment;
 //   S-2 a correlation mark that ShadowGraph minted into its own invocation,
@@ -58,10 +59,13 @@ const texts = (value) => (Array.isArray(value) ? value.filter((item) => typeof i
 
 // The artefacts S-1 matches, from what the runtime resolved: its store (with
 // its locks, SQLite side files and deletion records), its installed runtime's
-// entry points, its activation record and the marker files it reads.
-export function captureArtefacts({ storeFile, runtimeDirectory, activationFile, markerFiles = [] } = {}) {
+// entry points, its activation record, the marker files it reads, and the
+// per-user deletion registry with its lock (PR-37d design §7.3). The registry
+// path given is canonical already, so its lock is the one fenceLockPath names.
+export function captureArtefacts({ storeFile, runtimeDirectory, activationFile, markerFiles = [], registryFile } = {}) {
   const files = [];
   if (storeFile) files.push(storeFile, ...STORE_SIDE_FILES.map((suffix) => `${storeFile}${suffix}`));
+  if (registryFile) files.push(registryFile, `${registryFile}.lock`);
   if (activationFile) files.push(activationFile);
   files.push(...markerFiles);
   return {

@@ -16,7 +16,8 @@ import { createStorage } from './storage.js';
 import { accessContext, discoverWorkspace, projectBindingFile } from './internal/access-transport.js';
 import { captureArtefacts, classifyCaptureSource, soleProgram } from './internal/capture-source.js';
 import { outcomeFromExitStatus } from './internal/outcome.js';
-import { canonicalPath } from './internal/owner-files.js';
+import { canonicalPath as fencePath, registryFile } from './internal/deletion-knowledge.js';
+import { canonicalPath, repositoryOf as storeRepository } from './internal/owner-files.js';
 import { KEYED_NAMES, KEYED_VALUES, REDACTED, isCredentialName } from './internal/redaction.js';
 import { privilegedRecordCapture, privilegedRecordSelfEvent, privilegedRecordTranscript, privilegedSnapshot } from './internal/snapshot.js';
 import { TRANSCRIPT_TRIGGERS } from './internal/transcript.js';
@@ -46,22 +47,9 @@ export function coverageIssue(coverage) {
 // What is wrong with a capture record's limits, or null.
 export const limitsIssue = (limits) => (isObject(limits) && Object.keys(CAPTURE_LIMITS).every((name) => Number.isSafeInteger(limits[name]) && limits[name] > 0) ? null : `limits name ${Object.keys(CAPTURE_LIMITS).join(', ')}, each a positive integer`);
 
-// The git repository a store path lies in, or null (§21.3, VAR-14): any
-// directory above it holding a `.git` entry (a repository, or a worktree's
-// pointer file), or a `.git` directory itself, walked from the path as the
-// file system resolves it now, so a link or junction placed since activation
-// is followed. No subprocess, so the hook can ask it on every event. A working
-// tree whose git directory lies elsewhere (`core.worktree`, as dotfiles set-ups
-// use) leaves no trace on this path and is not detected: a declared limit.
-export async function storeRepository(file) {
-  for (let directory = dirname(await canonicalPath(file)); ; directory = dirname(directory)) {
-    if (basename(directory) === '.git') return directory;
-    // Only an entry that is not there is absent; any other answer (access
-    // denied, a path too long) counts as one, so the check fails closed.
-    if (await lstat(join(directory, '.git')).then(() => true, (error) => !['ENOENT', 'ENOTDIR'].includes(error.code))) return directory;
-    if (dirname(directory) === directory) return null;
-  }
-}
+// The walk lives in owner-files.js, which the deletion registry's location
+// check shares (PR-37d design §7.2, V-7); it keeps its name here.
+export { storeRepository };
 
 // The active capture record, or null: inert unless the record says capture is
 // active for an absolute JSON store, with its origin, coverage and limits well
@@ -265,8 +253,8 @@ export async function openTranscript(path) {
 // finish the commit (D-3). A ShadowGraph self-event is counted and nothing
 // else. A host re-delivery of an item already held writes nothing new. `post`
 // tells the thread keeping the deadline when the store is entered and left.
-// Resolves to what happened, for tests; `now` is a test seam.
-export async function runCapture({ capture, input, deadline, record = null, home = homedir(), cwd = process.cwd(), post = () => {}, now = Date.now }) {
+// Resolves to what happened, for tests; `now` and `registry` are test seams.
+export async function runCapture({ capture, input, deadline, record = null, registry = registryFile(), home = homedir(), cwd = process.cwd(), post = () => {}, now = Date.now }) {
   let event;
   try { event = observedEvent(JSON.parse(input.charCodeAt(0) === 0xfeff ? input.slice(1) : input)); } catch { return 'unreadable'; }
   if (event === null) return 'not_captured';
@@ -274,6 +262,8 @@ export async function runCapture({ capture, input, deadline, record = null, home
   if (await storeRepository(file)) return 'store_inside_repository';
   const workspace = await discoverWorkspace(cwd, { timeout: Math.max(1, Math.min(GIT_TIMEOUT_MS, deadline - now())) });
   const markerFiles = [projectBindingFile(workspace, 'worktree'), ...(workspace.commonDir ? [projectBindingFile(workspace, 'shared_repository')] : [])];
+  // Canonical as the registry lock's fence names it (PR-37d design §7.3).
+  const registryCanonical = registry && await fencePath(registry);
   // Opened before the store's lock is taken, so the lock is never held while
   // the file is found, and after anything else here that can throw.
   const transcript = await openTranscript(event.transcriptPath);
@@ -306,7 +296,7 @@ export async function runCapture({ capture, input, deadline, record = null, home
       graph.importData(current);
       const bound = accessContext(graph, {}, 'cli', workspace, { confirmedByStore: true }).binding?.project ?? null;
       const project = bound !== null && covered(capture.coverage, bound) ? bound : null;
-      const context = { ...captureArtefacts({ storeFile: file, runtimeDirectory: capture.runtime?.path ?? null, activationFile: record, markerFiles }), home, mcpServerNames: capture.mcpServerNames ?? ['shadowgraph'], correlationTokens: [], workerSessionIds: [] };
+      const context = { ...captureArtefacts({ storeFile: file, runtimeDirectory: capture.runtime?.path ?? null, activationFile: record, markerFiles, registryFile: registryCanonical }), home, mcpServerNames: capture.mcpServerNames ?? ['shadowgraph'], correlationTokens: [], workerSessionIds: [] };
       // The transcript cursor's step; a throw is undone by its own transaction
       // and never costs the event's own item.
       const cursor = (step) => {

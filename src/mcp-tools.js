@@ -9,6 +9,7 @@
 // in-process and keeps the wire output deterministic.
 import { SOURCE_CLASSES, DECISION_STATUSES, OUTCOME_STATUSES, CONTENT_SEARCH_FIELDS, MEMORY_TYPES } from './shadowgraph.js';
 import { TRANSCRIPT_GAP_REASONS } from './internal/transcript.js';
+import { PURGE_BACKUPS_STATEMENT } from './internal/deletion-knowledge.js';
 
 // ---------------------------------------------------------------------------
 // Protocol negotiation and capability tiers
@@ -1649,7 +1650,7 @@ const CATALOG = [
     describe: {
       does: "Delete one project's decisions, attempts, memories, facts, relationships, events, and retry keys.",
       route: 'Run shadowgraph_purge_preview first; shadowgraph_redact shares without deleting, shadowgraph_backup keeps a copy.',
-      effects: 'Irreversible without a backup. logical keeps an auditable journal skeleton; hard also drops entries, leaving a declared gap.'
+      effects: 'Earlier backups still hold it; a restore here keeps it out. logical keeps a journal skeleton; hard drops entries, leaving a declared gap.'
     },
     inputSchema: {
       type: 'object',
@@ -1662,7 +1663,7 @@ const CATALOG = [
     outputSchema: {
       type: 'object',
       description: 'What the purge removed.',
-      required: ['project', 'records', 'facts', 'relations', 'events', 'journal', 'runtimeMisses', 'removed', 'mode', 'journalEntriesRedacted', 'journalEntriesRemoved', 'removedJournalSequences', 'idempotencyRemoved', 'journalEntryId'],
+      required: ['project', 'records', 'facts', 'relations', 'events', 'journal', 'runtimeMisses', 'captures', 'captureContent', 'captureSessions', 'withheld', 'removed', 'mode', 'journalEntriesRedacted', 'journalEntriesRemoved', 'removedJournalSequences', 'idempotencyRemoved', 'journalEntryId', 'backups'],
       properties: {
         project: { type: 'string', description: 'The project that was purged.' },
         records: integerCount('Decisions, attempts, and memories that were present.'),
@@ -1671,13 +1672,18 @@ const CATALOG = [
         events: integerCount('Compatibility events that were present.'),
         journal: integerCount('Journal entries that were present for the project.'),
         runtimeMisses: integerCount('Runtime miss-ledger entries recorded in the project or naming its entities, removed with it.'),
+        captures: integerCount('Capture items that were present, removed with the project.'),
+        captureContent: integerCount('Captured texts those items named, removed with them.'),
+        captureSessions: integerCount('Capture session records the project owned, removed with it.'),
+        withheld: integerCount('Items of the project withheld by deletion records, also removed; counted apart.'),
         removed: integerCount('Entities removed from live state, including alternatives.'),
         mode: { type: 'string', enum: ['logical', 'hard'], description: 'The mode that was applied.' },
         journalEntriesRedacted: integerCount('Entries reduced to an audit skeleton by a logical purge.'),
         journalEntriesRemoved: integerCount('Entries physically deleted by a hard purge.'),
         removedJournalSequences: { type: 'array', items: { type: 'integer' }, description: 'Sequence numbers a hard purge removed, declared so the resulting gap is explained rather than hidden.' },
         idempotencyRemoved: integerCount('Retry keys removed with the project.'),
-        journalEntryId: { type: 'string', description: 'Id of the project.purged entry that records this purge.' }
+        journalEntryId: { type: 'string', description: 'Id of the project.purged entry that records this purge.' },
+        backups: { type: 'string', enum: [PURGE_BACKUPS_STATEMENT], description: 'Always present: backups made before the purge still hold the material; a restore keeps it out only where deletion records reach it.' }
       }
     }
   },
@@ -1871,7 +1877,7 @@ const CATALOG = [
     outputSchema: {
       type: 'object',
       description: 'What a purge of this project would remove.',
-      required: ['project', 'records', 'facts', 'relations', 'events', 'journal', 'runtimeMisses'],
+      required: ['project', 'records', 'facts', 'relations', 'events', 'journal', 'runtimeMisses', 'captures', 'captureContent', 'captureSessions', 'withheld'],
       properties: {
         project: { type: 'string', description: 'The project that was previewed.' },
         records: integerCount('Decisions, attempts, and memories in the project.'),
@@ -1879,7 +1885,11 @@ const CATALOG = [
         relations: integerCount('Relationships touching the project.'),
         events: integerCount('Compatibility events for the project.'),
         journal: integerCount('Journal entries recorded for the project.'),
-        runtimeMisses: integerCount('Runtime miss-ledger entries recorded in the project or naming its entities, which a purge removes.')
+        runtimeMisses: integerCount('Runtime miss-ledger entries recorded in the project or naming its entities, which a purge removes.'),
+        captures: integerCount('Capture items in the project.'),
+        captureContent: integerCount('Captured texts those items name, which a purge removes.'),
+        captureSessions: integerCount('Capture session records the project owns, which a purge removes.'),
+        withheld: integerCount('Items of the project withheld by deletion records, which a purge also removes.')
       }
     }
   },

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { backupFile, restoreFile } from '../src/backup.js';
 import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
 import { createShadowGraphServer } from '../src/server.js';
@@ -271,8 +271,11 @@ test('RRV-06: logical purge retains only non-identifying audit skeleton fields a
   assertRrv06SecretsAbsent(privilegedRebuild(graph), 'logical purge rebuild');
 });
 
+// A home beside each store: a purged snapshot saved here writes its tombstone and
+// registry entry, which no other subtest may merge (PR-37d design §9.3).
+const homeOf = (path) => ({ SHADOWGRAPH_HOME: join(dirname(path), 'home') });
 async function createStore(backend, path) {
-  return backend === 'sqlite' ? createSqliteStore(path) : createJsonFileStore(path);
+  return backend === 'sqlite' ? createSqliteStore(path, { env: homeOf(path) }) : createJsonFileStore(path, { env: homeOf(path) });
 }
 
 async function assertPayloadAcrossRestartBackupRestore(t, payload, assertSafe, label) {
@@ -287,7 +290,7 @@ async function assertPayloadAcrossRestartBackupRestore(t, payload, assertSafe, l
       let liveStore = await createStore(backend, livePath);
       await liveStore.save(payload);
       assertSafe(await readFile(livePath), `${label} ${backend} live bytes`);
-      await backupFile(livePath, backupPath, { store: liveStore });
+      await backupFile(livePath, backupPath, { store: liveStore, env: homeOf(livePath) });
       liveStore.close();
       assertSafe(await readFile(backupPath), `${label} ${backend} backup bytes`);
 
@@ -305,7 +308,7 @@ async function assertPayloadAcrossRestartBackupRestore(t, payload, assertSafe, l
         await destinationStore.restore(backupPath);
       } else {
         destinationStore.close();
-        await restoreFile(backupPath, destinationPath);
+        await restoreFile(backupPath, destinationPath, { env: homeOf(destinationPath) });
         destinationStore = await createStore(backend, destinationPath);
       }
       const restored = await destinationStore.load();

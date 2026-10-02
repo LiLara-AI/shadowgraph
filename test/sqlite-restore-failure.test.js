@@ -45,15 +45,19 @@ async function artifacts(directory) {
   return (await readdir(directory)).filter((name) => artifactPattern.test(name)).sort();
 }
 
+// The pair's stores take a home of its own: a hard-purged snapshot saved here
+// writes its tombstone and registry entry, which no other pair, and no run of
+// this file without the preload, may merge (PR-37d design §7.4, §9.3).
 async function createPair(t, prefix, options = {}) {
   const directory = await scratchDirectory(t, prefix);
   const livePath = join(directory, 'live.db');
   const sourcePath = join(directory, 'source.db');
+  const env = { SHADOWGRAPH_HOME: join(directory, 'home') };
   let live;
   let source;
   try {
-    live = await createSqliteStore(livePath, options.liveOptions);
-    source = await createSqliteStore(sourcePath, options.sourceOptions);
+    live = await createSqliteStore(livePath, { env, ...options.liveOptions });
+    source = await createSqliteStore(sourcePath, { env, ...options.sourceOptions });
   } catch (error) {
     closeQuietly(live);
     closeQuietly(source);
@@ -803,7 +807,7 @@ test('CLI SQLite restore refuses a domain-invalid snapshot and preserves old sta
   const result = await new Promise((resolveChild, rejectChild) => {
     const child = spawn(process.execPath, ['src/cli.js', 'restore', pair.sourcePath], {
       cwd: process.cwd(),
-      env: { ...process.env, SHADOWGRAPH_STORAGE: 'sqlite', SHADOWGRAPH_FILE: pair.livePath }
+      env: { ...process.env, SHADOWGRAPH_HOME: join(pair.directory, 'home'), SHADOWGRAPH_STORAGE: 'sqlite', SHADOWGRAPH_FILE: pair.livePath }
     });
     let stdout = '';
     let stderr = '';

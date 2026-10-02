@@ -14,7 +14,7 @@ import { extraCollections, isExtraCollectionKey, refusePublicExport } from './in
 import { RUNTIME_MISSES } from './internal/miss-ledger.js';
 import { CAPTURE_CONTENT, CAPTURE_SESSIONS } from './internal/capture.js';
 import { DELETION_VIEW, attachDeletionView, backupSidecar, journalHead, refuseAbsentWithRecord, refuseDeletionFileDestination, registerStoreIo, writeSidecar } from './internal/deletion-knowledge.js';
-import { RestorePendingError, resolvePendingRestore, saveResolving } from './internal/restore-wrapper.js';
+import { RestorePendingError, purgeRecorded, recordPurges, resolvePendingRestore, saveResolving } from './internal/restore-wrapper.js';
 
 // One generic carrier for every top-level collection this build does not
 // handle natively (plan v1.4.4 §10.9.8): one row per collection, the whole
@@ -312,6 +312,26 @@ export async function createSqliteStore(filePath, options = {}) {
     }
   }
 
+  // Every payload write of this store goes through here, the purge commit
+  // point (PR-37d design §3.1, §3.4): no store at a deletion record file's
+  // name (step 0), then the deletion records of a purge the payload carries
+  // (steps 1-7), before BEGIN (V-2); then writeOver, unchanged and synchronous,
+  // so its transaction spans no await; then the purge's record cleared (step
+  // 12). Its callers await it: each closes the connection in a `finally`.
+  async function commitPayload(database, current, data, { hook = false } = {}) {
+    await refuseDeletionFileDestination(filePath, options.env);
+    const context = () => ({ current, payload: data, destructive: removesPersistedRows(current, data) });
+    const clear = await recordPurges(filePath, { current, data, env: options.env, lock: options, hook, fault: (stage) => saveFault(stage, context()) });
+    try {
+      const revision = writeOver(database, current, data);
+      if (clear) {
+        await saveFault('beforeRecordCleared', context());
+        await clear();
+      }
+      return revision;
+    } catch (error) { throw clear ? purgeRecorded(error) : error; }
+  }
+
   function openLiveDatabase(stage) {
     if (permanentlyClosed) throw new Error('SQLite storage is closed');
     let candidate;
@@ -334,7 +354,10 @@ export async function createSqliteStore(filePath, options = {}) {
   // open that can make the file first refuses an absent store with a pending
   // restore record (PR-37c design §3.3, re-review NF-5), in a store object
   // already open too; the restore primitive's own open is the declared
-  // exception (d37a F18).
+  // exception (d37a F18). A store at a deletion record file's name is refused
+  // first, before its fence, which would be the registry's own lock file
+  // (PR-37d design §3.3 step 0, V-17).
+  await refuseDeletionFileDestination(filePath, options.env);
   await fence.run(async () => {
     let database;
     try {
@@ -365,10 +388,12 @@ export async function createSqliteStore(filePath, options = {}) {
   // now, on a store the binding check found present, and writes only over the
   // revision and head `read` gave. It refuses while the primitive runs, as a
   // save does, but for the wrapper's own read inside the primitive's hold
-  // (`held`).
+  // (`held`). `lock`: the fence options a purge completion's registry lock
+  // takes too (PR-37d design §3.7).
   const io = {
     file: filePath,
     env: options.env,
+    lock: options,
     run(step, { held = false } = {}) {
       let last;
       const tools = {
@@ -379,7 +404,7 @@ export async function createSqliteStore(filePath, options = {}) {
             database = openLiveDatabase('restore-completion');
             const current = exportSqlitePayload(database);
             if (!last || current.revision !== last.revision || journalHead(current) !== journalHead(last)) throw new Error('The store changed under a restore record');
-            return writeOver(database, current, next);
+            return await commitPayload(database, current, next);
           } finally { closeChecked(database, 'restore-completion'); }
         }
       };
@@ -440,8 +465,10 @@ export async function createSqliteStore(filePath, options = {}) {
 
     // A save never commits over a restore record: it completes the record
     // first, under the restore lock, and is tried once more (PR-37c design
-    // §8.3). A record this build cannot serve refuses it.
-    async save(data) {
+    // §8.3). A record this build cannot serve refuses it. `pending: 'read'`: a
+    // read's audit save, which refuses any record instead (PR-37d review
+    // finding 2).
+    async save(data, { pending = 'suppress' } = {}) {
       refusePublicExport(data);
       if (restoring) throw new Error('SQLite restore is in progress');
       if (permanentlyClosed) throw new Error('SQLite storage is closed');
@@ -451,10 +478,10 @@ export async function createSqliteStore(filePath, options = {}) {
         try {
           await refuseAbsentWithRecord(filePath);
           database = openLiveDatabase('save');
-          const current = await attachDeletionView(exportSqlitePayload(database), filePath, { env: options.env });
+          const current = await attachDeletionView(exportSqlitePayload(database), filePath, { env: options.env, pending });
           if (current[DELETION_VIEW]?.pending) throw new RestorePendingError();
           assertRevision(current, data?.expectedRevision ?? data?.revision);
-          return writeOver(database, current, data);
+          return await commitPayload(database, current, data);
         } finally {
           closeChecked(database, 'save');
         }
@@ -480,7 +507,7 @@ export async function createSqliteStore(filePath, options = {}) {
           const next = await change(current);
           if (next === null || next === undefined) return null;
           refusePublicExport(next);
-          return writeOver(database, current, next);
+          return await commitPayload(database, current, next, { hook: true });
         } finally {
           closeChecked(database, 'update');
         }

@@ -133,11 +133,13 @@ async function folderAlias(t, file) {
 
 const storeName = (backend) => (backend === 'sqlite' ? 'livestore.db' : 'livestore.json');
 
+// Saved as a copy: a payload that purged models a purge by a build before PR-37d, whose marker alone reaches the
+// store, which is what these tests lift (PR-37d design §2.2, §9.3).
 async function storeOf(t, backend, payload, prefix = 'restore-wrapper-') {
   const dir = await scratchDirectory(t, prefix);
   const file = join(dir, storeName(backend));
   const store = await createStorage({ type: backend, file });
-  try { await store.save(payload); } finally { store.close?.(); }
+  try { await store.save(structuredClone(payload)); } finally { store.close?.(); }
   return { dir, file, backend };
 }
 
@@ -640,7 +642,8 @@ for (const [backend, options] of BACKENDS) test(`PR-37c NF-1 ${backend}: a purge
     await writeFile(script, PURGER);
     const checked = join(state.dir, 'checked');
     const go = join(state.dir, 'go');
-    const child = spawn(process.execPath, [script, srcRoot, backend, spelling, checked, go], { stdio: ['ignore', 'pipe', 'pipe'] });
+    // X's purge writes its registry entry into a home of this test's own (PR-37d design §9.3).
+    const child = spawn(process.execPath, [script, srcRoot, backend, spelling, checked, go], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, SHADOWGRAPH_HOME: join(state.dir, 'home') } });
     let stderr = '';
     child.stderr.on('data', (chunk) => { stderr += chunk; });
     const exited = once(child, 'exit');
@@ -1298,6 +1301,10 @@ for (const [backend, options] of BACKENDS) test(`PR-37c rev6:426 window ${backen
   const b = backup();
   const state = await storeOf(t, backend, purgedStore('logical'));
   const source = await storeOf(t, backend, b.payload);
+  // The server's purge writes the registry: a home of this test's own, for the server's life (PR-37d design §9.3).
+  const saved = process.env.SHADOWGRAPH_HOME;
+  process.env.SHADOWGRAPH_HOME = join(state.dir, 'home');
+  t.after(() => { process.env.SHADOWGRAPH_HOME = saved; });
   const pause = pauseOnce('postStepLedgerWritten');
   // A SQLite server is built over a store that carries the seam (server.js passes one through for JSON only).
   const store = backend === 'sqlite' ? await createStorage({ type: 'sqlite', file: state.file, restoreFault: pause.seam }) : undefined;
@@ -2001,7 +2008,9 @@ for (const [backend, options] of BACKENDS) test(`PR-37c rev6:416 end to end ${ba
   await downgradeStore({ graph: loaded, store, file: state.file, storageType: backend, output, preservationCopy: at('kept'), toSchemaVersion: 6, now: () => NOW });
   // The output re-upgraded: the backfill gives every entity a new token, which the flag beside it disowns.
   const down = { dir: state.dir, file: output, backend };
-  const downStore = await openStore(t, down);
+  // Its hard purge writes p's tombstone beside it and its registry entry into a home of its own (PR-37d design §9.3).
+  const downStore = await createStorage({ type: backend, file: output, env: { SHADOWGRAPH_HOME: join(state.dir, 'home') } });
+  t.after(() => downStore.close?.());
   const upgraded = createShadowGraph({ now: () => NOW });
   upgraded.importData(await downStore.load());
   await migrateStore({ graph: upgraded, store: downStore, file: output, storageType: backend, preservationCopy: at('kept-up') });
@@ -2076,6 +2085,8 @@ for (const [backend, options] of BACKENDS) test(`PR-37c quarantine verbs ${backe
   // Purge.
   const prior = await stored(state);
   const { tombstones } = await ledgerOf(state);
+  const registryHash = async () => (existsSync(knowledge.registryFile()) ? sha256(await readFile(knowledge.registryFile())) : null);
+  const registryBefore = await registryHash();
   await quarantine.applyQuarantine(store, 'purge', [b.ids.memory], { now: () => NOW });
   const after = await stored(state);
   assert.equal(JSON.stringify(after).includes(b.ids.memory), false, 'removed physically, every reference with it');
@@ -2085,7 +2096,7 @@ for (const [backend, options] of BACKENDS) test(`PR-37c quarantine verbs ${backe
   const ledger = await ledgerOf(state);
   assert.equal(quarantineTokens(ledger).has(b.tokens.memory), true, 'its entry is kept');
   assert.deepEqual(ledger.tombstones, tombstones, 'no tombstone');
-  assert.equal(existsSync(knowledge.registryFile()), false, 'no registry entry');
+  assert.equal(await registryHash(), registryBefore, 'no registry entry');
   assert.deepEqual((await quarantine.quarantineSelection(store, 'list', {})).entries.map((entry) => entry.id), [b.ids.legacy]);
   // A later restore of a backup holding it: hidden again (rev6:417).
   await restoring(state, source, { now: LATEST });
@@ -2170,19 +2181,25 @@ for (const [backend, options] of BACKENDS) test(`PR-37c R5 L1 VS1 ${backend}: a 
   for (const surface of ['cli', 'mcp', 'http']) for (const mode of ['logical', 'hard']) {
     const label = `${surface} ${mode}`;
     const { state, b } = await quarantinedStore(t, backend);
-    const env = { ...process.env, SHADOWGRAPH_FILE: state.file, SHADOWGRAPH_STORAGE: backend, SHADOWGRAPH_API_TOKEN: '' };
+    // Each surface's purge writes the registry into a home of this test's own (PR-37d design §9.3).
+    const home = join(state.dir, 'home');
+    const env = { ...process.env, SHADOWGRAPH_HOME: home, SHADOWGRAPH_FILE: state.file, SHADOWGRAPH_STORAGE: backend, SHADOWGRAPH_API_TOKEN: '' };
     if (surface === 'cli') await execute(process.execPath, [cliPath, 'purge', JSON.stringify({ project: 'p', mode })], { cwd: state.dir, env });
     else if (surface === 'mcp') {
-      const [text] = await mcpCalls(t, state, [['shadowgraph_purge', { project: 'p', mode }]]);
+      const [text] = await mcpCalls(t, state, [['shadowgraph_purge', { project: 'p', mode }]], { SHADOWGRAPH_HOME: home });
       assert.equal(JSON.parse(text).result?.isError, undefined, text);
     } else {
-      const app = await createShadowGraphServer({ file: state.file, storage: backend, cwd: state.dir, apiToken: '' });
-      app.server.listen(0, '127.0.0.1');
-      await once(app.server, 'listening');
+      const saved = process.env.SHADOWGRAPH_HOME;
+      process.env.SHADOWGRAPH_HOME = home;
       try {
-        const response = await fetch(`http://127.0.0.1:${app.server.address().port}/projects`, { method: 'DELETE', body: JSON.stringify({ project: 'p', mode }) });
-        assert.equal(response.status, 200, await response.text());
-      } finally { await new Promise((done) => app.server.close(done)); }
+        const app = await createShadowGraphServer({ file: state.file, storage: backend, cwd: state.dir, apiToken: '' });
+        app.server.listen(0, '127.0.0.1');
+        await once(app.server, 'listening');
+        try {
+          const response = await fetch(`http://127.0.0.1:${app.server.address().port}/projects`, { method: 'DELETE', body: JSON.stringify({ project: 'p', mode }) });
+          assert.equal(response.status, 200, await response.text());
+        } finally { await new Promise((done) => app.server.close(done)); }
+      } finally { process.env.SHADOWGRAPH_HOME = saved; }
     }
     const after = await stored(state);
     for (const id of [b.ids.hidden, b.ids.memory, b.ids.legacy]) assert.equal(JSON.stringify(after).includes(id), false, `${label}: ${id}`);

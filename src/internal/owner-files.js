@@ -3,7 +3,7 @@
 // reaches; a change to one outside a scratch location needs the owner at a
 // terminal (the callers ask); every write is a temporary file and a rename.
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -21,6 +21,25 @@ export async function canonicalPath(path) {
       if (error.code !== 'ENOENT' || dirname(at) === at) throw error;
       missing.push(basename(at));
     }
+  }
+}
+
+// The git repository a path lies in, or null (§21.3, VAR-14): any directory
+// above it holding a `.git` entry (a repository, or a worktree's pointer file),
+// or a `.git` directory itself, walked from the path as the file system
+// resolves it now, so a link or junction placed since activation is followed.
+// No subprocess, so the hook can ask it on every event. A working tree whose
+// git directory lies elsewhere (`core.worktree`, as dotfiles set-ups use)
+// leaves no trace on this path and is not detected: a declared limit. The
+// capture hook's store and the deletion registry's folder are checked with it
+// (PR-37d design §7.2, V-7).
+export async function repositoryOf(file) {
+  for (let directory = dirname(await canonicalPath(file)); ; directory = dirname(directory)) {
+    if (basename(directory) === '.git') return directory;
+    // Only an entry that is not there is absent; any other answer (access
+    // denied, a path too long) counts as one, so the check fails closed.
+    if (await lstat(join(directory, '.git')).then(() => true, (error) => !['ENOENT', 'ENOTDIR'].includes(error.code))) return directory;
+    if (dirname(directory) === directory) return null;
   }
 }
 

@@ -52,11 +52,14 @@ function countsOf(entries) {
 // fence through the store's own I/O, in which any restore record is resolved
 // first (§8.4), the payload read and its view built -- fenced, so no bracket
 // -- and a graph imported with it. `store.load` and `store.save` are never
-// called inside: both take the fence, which cannot be re-entered.
-async function underLocks(store, now, act) {
+// called inside: both take the fence, which cannot be re-entered. A purge
+// record is completed only by a verb that writes (`complete`): a listing, or a
+// selection whose confirmation may yet be declined, leaves it as it is, and
+// its view holds the purged project whole (PR-37d design §4.2, V-19).
+async function underLocks(store, now, act, { complete }) {
   const io = storeIo(store);
   return restoreLock(io.file).run(() => io.run(async (tools) => {
-    await resolvePendingRestore(io, { held: true });
+    await resolvePendingRestore(io, { held: true, purges: complete });
     const payload = await tools.read();
     const graph = createShadowGraph(typeof now === 'function' ? { now } : {});
     if (payload !== null) graph.importData(await attachDeletionView(payload, io.file, { env: io.env }));
@@ -85,7 +88,7 @@ export async function quarantineSelection(store, subcommand, selection) {
     }
     const entries = selection.ids ? selected(graph, [...new Set(selection.ids)]) : all.filter((entry) => entry.project === selection.project);
     return { subcommand, ids: entries.map((entry) => entry.id), counts: countsOf(entries) };
-  });
+  }, { complete: false });
 }
 
 // `release` or `purge` of the ids the owner confirmed (§9.2), each checked
@@ -129,5 +132,5 @@ export async function applyQuarantine(store, subcommand, ids, { now } = {}) {
     const tokens = new Set(items.map(({ id }) => tokenOf.get(id)));
     await writeLedger(io.file, (next) => { next.quarantine = next.quarantine.filter((entry) => !tokens.has(entry.token)); }, { env: io.env });
     return { subcommand, ids: items.map(({ id }) => id) };
-  });
+  }, { complete: true });
 }

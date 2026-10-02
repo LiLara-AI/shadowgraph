@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { homedir, tmpdir, userInfo } from 'node:os';
+import { isAbsolute, join, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createShadowGraph } from '../src/shadowgraph.js';
@@ -143,7 +143,20 @@ test('generated allocation retries collisions, reserves alternatives, and has a 
   assert.deepEqual(snap(g), before);
 });
 
-const envFor = (file, backend, compact = false) => ({ ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^SHADOWGRAPH_|^NODE_OPTIONS$/i.test(key))), SHADOWGRAPH_FILE: file, SHADOWGRAPH_STORAGE: backend, SHADOWGRAPH_MCP_COMPACT: compact ? '1' : '0' });
+const envFor = (file, backend, compact = false) => ({ ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^SHADOWGRAPH_|^NODE_OPTIONS$/i.test(key))), SHADOWGRAPH_FILE: file, SHADOWGRAPH_STORAGE: backend, SHADOWGRAPH_MCP_COMPACT: compact ? '1' : '0', SHADOWGRAPH_HOME: process.env.SHADOWGRAPH_HOME });
+
+// Its children resolve the deletion registry in this file's own home, never under an account home's ShadowGraph root,
+// where a child given no SHADOWGRAPH_HOME falls back to (PR-37d review finding 3).
+test("envFor gives its children this file's own SHADOWGRAPH_HOME, outside every account home's ShadowGraph root", () => {
+  const home = envFor(join(tmpdir(), 'store.json'), 'json').SHADOWGRAPH_HOME;
+  assert.ok(typeof home === 'string' && isAbsolute(home), String(home));
+  assert.equal(home, process.env.SHADOWGRAPH_HOME);
+  const folded = path => (process.platform === 'win32' ? path.toLowerCase() : path);
+  for (const account of [homedir(), userInfo().homedir]) {
+    const inside = relative(folded(join(account, '.shadowgraph')), folded(home));
+    assert.ok(inside.startsWith('..') || isAbsolute(inside), `${home} lies under ${account}'s ShadowGraph root`);
+  }
+});
 
 test('memory plan envelope and DELETE/NOOP IDs are unsupported, never target references', () => {
   for (const occupied of [true, false]) {

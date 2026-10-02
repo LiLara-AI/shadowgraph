@@ -105,7 +105,9 @@ async function storeOf(t, backend, payload, ledger) {
   const dir = await scratchDirectory(t, 'deletion-knowledge-');
   const file = join(dir, backend === 'sqlite' ? 'store.db' : 'store.json');
   const store = await createStorage({ type: backend, file });
-  await store.save(payload);
+  // A copy: a payload carrying a purge models one by a build before PR-37d,
+  // whose marker alone reaches the store (PR-37d design §2.2, §9.3).
+  await store.save(structuredClone(payload));
   const stored = await store.load();
   store.close?.();
   if (ledger !== undefined) await writeFile(`${file}.control.json`, typeof ledger === 'string' ? ledger : JSON.stringify(ledger));
@@ -332,6 +334,12 @@ for (const [backend, options] of BACKENDS) {
       const contents = withheldContents(f, tokens);
       for (const scope of SCOPES) {
         const actual = reads(viewed, scope, f.ids);
+        // The preview counts W apart, as `withheld`, which S′, holding no W, cannot show (PR-37d design §6.1, R5 L1
+        // VS1); every W entity is p's.
+        if (actual.projectSummary) {
+          assert.equal(actual.projectSummary.withheld, scope.project === 'p' ? tokens.length : 0, 'the preview counts W apart');
+          actual.projectSummary.withheld = 0;
+        }
         // Quarantine is also disclosed by count (PR-37c design §9.3), which S′, holding no ledger, cannot show.
         assert.deepEqual(name === 'quarantine' ? undisclosed(actual) : actual, reads(reference, scope, f.ids, expected.hiddenSeqs), `${JSON.stringify(scope)}`);
         if (name === 'quarantine' && scope.project === 'p') assert.match(JSON.stringify(actual), /"quarantined":2/u, 'the quarantine is counted');
@@ -368,7 +376,7 @@ for (const [backend, options] of BACKENDS) {
     assert.equal(privilegedLiveSnapshot(plain).records.some((item) => item.id === f.ids.hidden), true);
   });
 
-  test(`PR-37a files ${backend}: loads, saves, updates, purges, backups and downgrades never write the ledger or the registry; a restore writes exactly one lifted tombstone (PR-37c design §13.4)`, options, async (t) => {
+  test(`PR-37a files ${backend}: loads, saves, updates, backups and downgrades never write the ledger or the registry; a purge writes exactly its tombstone and its registry entry, and a restore then lifts nothing (PR-37c design §13.4; PR-37d design §9.3)`, options, async (t) => {
     const f = fixture();
     const state = await storeOf(t, backend, f.payload, VIEWS.item(f).ledger);
     const env = { SHADOWGRAPH_HOME: join(state.dir, 'home') };
@@ -384,20 +392,28 @@ for (const [backend, options] of BACKENDS) {
     graph.setRevision(await store.save(privilegedSnapshot(graph)));
     await store.update((current) => current);
     graph.replaceData(await store.load());
+    assert.deepEqual(await Promise.all(files.map(fileHash)), before);
+    // The purge writes q's tombstone beside the store and its entry in the registry, and nothing else: no pending
+    // member is left, and every other member of both is kept (PR-37d design §3.4, §3.6).
+    const [ledgerBefore, registryBefore] = await Promise.all(files.map(async (path) => JSON.parse(await readFile(path, 'utf8'))));
     graph.purgeProject('q', { mode: 'hard' });
     graph.setRevision(await store.save(privilegedSnapshot(graph)));
+    const [ledgerPurged, registryPurged] = await Promise.all(files.map(async (path) => JSON.parse(await readFile(path, 'utf8'))));
+    const tombstone = ledgerPurged.tombstones.at(-1);
+    assert.deepEqual(ledgerPurged, { ...ledgerBefore, tombstones: [...ledgerBefore.tombstones, tombstone] });
+    assert.deepEqual([tombstone.purgedProject, tombstone.mode, Array.isArray(tombstone.tokens)], ['q', 'hard', true]);
+    const { lineage, ...entry } = registryPurged.tombstones.at(-1);
+    assert.deepEqual(registryPurged, { ...registryBefore, tombstones: [...registryBefore.tombstones, { ...entry, lineage }] });
+    assert.deepEqual(entry, tombstone, 'the registry entry is the tombstone with its lineage');
+    const purged = await Promise.all(files.map(fileHash));
     const extension = backend === 'sqlite' ? 'db' : 'json';
     const backup = join(state.dir, `backup.${extension}`);
     await backupFile(state.file, backup, { store, env });
-    assert.deepEqual(await Promise.all(files.map(fileHash)), before);
-    // The restore lifts D's own purge marker of q, and writes nothing else to either (PR-37c design §4.4).
-    const ledgerBefore = JSON.parse(await readFile(files[0], 'utf8'));
+    assert.deepEqual(await Promise.all(files.map(fileHash)), purged);
+    // q's marker is recorded by its tombstone, so the restore lifts nothing and writes neither (PR-37d design §1.1).
     if (backend === 'sqlite') await store.restore(backup);
     else await restoreFile(backup, state.file, { env });
-    const ledgerAfter = JSON.parse(await readFile(files[0], 'utf8'));
-    assert.deepEqual(ledgerAfter, { ...ledgerBefore, tombstones: [...ledgerBefore.tombstones, ledgerAfter.tombstones.at(-1)] });
-    assert.deepEqual([ledgerAfter.tombstones.length, ledgerAfter.tombstones.at(-1).purgedProject, ledgerAfter.tombstones.at(-1).tokens], [ledgerBefore.tombstones.length + 1, 'q', null]);
-    assert.equal(await fileHash(files[1]), before[1], 'the registry is never written');
+    assert.deepEqual(await Promise.all(files.map(fileHash)), purged, 'nothing lifted');
     const restored = await Promise.all(files.map(fileHash));
     graph.replaceData(await store.load());
     await downgradeStore({ graph, store, file: state.file, storageType: backend, output: join(state.dir, `down.${extension}`), preservationCopy: join(state.dir, `kept.${extension}`), toSchemaVersion: 6, now });
@@ -533,6 +549,8 @@ for (const mode of ['logical', 'hard']) test(`PR-37a purge ${mode}: a purge reac
   use('plain'); const reference = plain.purgeProject('p', { mode });
   assert.equal(result.records, before.records);
   assert.ok(result.removed < reference.removed);
+  // W -- p's decision, memory, fact and capture -- is counted apart, by the preview too (PR-37d design §6.1).
+  assert.deepEqual([before.withheld, result.withheld, reference.withheld], [4, 4, 0]);
   const persisted = privilegedSnapshot(viewed);
   const marker = (snapshot) => snapshot.journal.find((entry) => entry.type === 'project.purged');
   assert.equal(marker(persisted).payload.removed, result.removed, 'the marker counts live memory');
@@ -593,9 +611,11 @@ async function restoreCase(t, backend, setup) {
   return { f, destination, source, env, restore };
 }
 
+// Saved as a copy: its purge callers model a purge by a build before PR-37d,
+// whose marker PR-37c lifts (PR-37d design §9.3).
 async function rewrite({ file, backend }, change) {
   const store = await createStorage({ type: backend, file });
-  try { await store.save(change(await store.load())); } finally { store.close?.(); }
+  try { await store.save(structuredClone(change(await store.load()))); } finally { store.close?.(); }
 }
 
 const TRIGGERS = {

@@ -437,6 +437,8 @@ for (const mode of ['logical', 'hard']) {
     const result = graph.purgeProject('alpha', { mode });
     assert.equal(result.removed, 1 + ALPHA_CAPTURE_IDS.length, 'removed counts the decision and the capture items');
     assert.equal(result.records, 1, 'records counts decisions, attempts and memories only');
+    // The capture items, their content and the project's session, and nothing withheld (PR-37d design §6.1).
+    assert.deepEqual([result.captures, result.captureContent, result.captureSessions, result.withheld], [ALPHA_CAPTURE_IDS.length, ALPHA_CAPTURE_IDS.length, 1, 0]);
     const after = privilegedSnapshot(graph);
     assert.deepEqual(capturesOf(after).map((item) => item.id), ['cap_beta', 'cap_origin']);
     assert.deepEqual(after.idempotency.filter((item) => item.value.kind === 'capture').map((item) => item.value.id).sort(), ['cap_beta', 'cap_origin']);

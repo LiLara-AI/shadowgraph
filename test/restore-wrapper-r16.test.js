@@ -125,8 +125,9 @@ test('PR-37c T-10 copies: every specifier left in the pr12 copies is absolute, s
 
 // ---------------------------------------------------------------------------
 // T-10 at the verb level (§13.2; rev6:414-415). Every case of pr12's table, through every restore entry, in
-// configurations (a) no knowledge, (b) unrelated knowledge in D's ledger and (b, lifted) a real purge of an unrelated
-// project in D's journal, and (c) an unrelated registry, each with memoryOnly false and true. No surface takes a
+// configurations (a) no knowledge, (b) unrelated knowledge in D's ledger, (b, lifted) a real purge of an unrelated
+// project in D's journal, (b, purged) real logical and hard purges of an unrelated project saved through D's store
+// (PR-37d design §9.2 D21), and (c) an unrelated registry, each with memoryOnly false and true. No surface takes a
 // clock, so each run is compared with a twin: the same pair built again and restored through the primitive at the
 // instant of the surface's one access.restored event.
 // ---------------------------------------------------------------------------
@@ -137,7 +138,7 @@ const UNRELATED = Object.freeze([
   { kind: 'project', purgedProject: 'zeta', mode: 'hard', at: '2026-09-20T00:00:00.000Z', seq: 99, tokens: ['token-zeta-hard'], moveIn: 'none' }
 ]);
 const itemTombstone = (tokens) => ({ kind: 'item', mode: 'logical', at: '2026-09-20T00:00:00.000Z', tokens, moveIn: 'none' });
-const CONFIGURATIONS = ['a', 'b', 'b lifted', 'c'];
+const CONFIGURATIONS = ['a', 'b', 'b lifted', 'b purged', 'c'];
 const SURFACES = { json: ['restoreFile', 'cli', 'mcp', 'http'], sqlite: ['./storage', 'cli', 'mcp', 'http'] };
 
 // D with a real logical purge of a project B does not hold: the pre-step lifts its marker with move-in `none`.
@@ -148,6 +149,26 @@ function withUnrelatedPurge(destination) {
   graph.purgeProject('zeta', { mode: 'logical' });
   const purged = privilegedSnapshot(graph);
   return { ...structuredClone(destination), journal: purged.journal, journalSeq: purged.journalSeq };
+}
+
+// D21's "b purged" (PR-37d design §9.2): D carries a real logical, then a real hard, purge of a project B does not
+// hold, each saved through D's store with the pair's own home (re-review note b), so their tombstones are D's ledger
+// and their entries the pair's registry. Both are asserted to carry move-in `none` before the table runs (review
+// finding 15).
+async function purgedUnrelated(backend, target, env) {
+  for (const mode of ['logical', 'hard']) {
+    const store = await createStorage({ type: backend, file: target, env });
+    try {
+      const graph = createShadowGraph({ now: () => NOW });
+      graph.importData(await store.load());
+      graph.addDecision({ project: 'zeta', title: `unrelated ${mode}`, chosen: 'z' });
+      graph.purgeProject('zeta', { mode });
+      await store.save(privilegedSnapshot(graph));
+    } finally { store.close?.(); }
+  }
+  const { tombstones } = JSON.parse(await readFile(ledgerPath(target), 'utf8'));
+  assert.deepEqual(tombstones.map((tombstone) => [tombstone.purgedProject, tombstone.mode, tombstone.moveIn]), [['zeta', 'logical', 'none'], ['zeta', 'hard', 'none']], 'D\'s real tombstones carry move-in none');
+  assert.equal(JSON.parse(await readFile(registryFile(env), 'utf8')).tombstones.length, 2, 'their entries are in the pair\'s own registry');
 }
 
 // pr12's pair, as persistedPair builds it (pr12-authority-restore:168-188), from one fixture's payloads, in its own
@@ -171,7 +192,8 @@ async function pairOf(t, backend, built, configuration, registry) {
     await backupFile(source, saved, { env });
     await writeFile(target, JSON.stringify(d));
   }
-  if (configuration.startsWith('b')) await writeFile(ledgerPath(target), JSON.stringify({ version: 1, tombstones: UNRELATED }));
+  if (configuration === 'b purged') await purgedUnrelated(backend, target, env);
+  else if (configuration.startsWith('b')) await writeFile(ledgerPath(target), JSON.stringify({ version: 1, tombstones: UNRELATED }));
   if (configuration === 'c') await writeFile(registryFile(env), JSON.stringify({ version: 1, tombstones: [itemTombstone(['token-absent'])] }));
   if (registry) await writeFile(registryFile(env), JSON.stringify({ version: 1, tombstones: registry(backup) }));
   const marker = (d.journal ?? []).find((entry) => entry.type === 'project.purged') ?? null;
@@ -323,10 +345,11 @@ async function matchesTwin(t, backend, fixture, configuration, memoryOnly, surfa
   const twin = await twinOf(t, backend, built, configuration, memoryOnly, restored[0]?.at);
   assert.deepEqual(after, twin.payload, `${label}: the stored payload is the primitive's`);
   for (const type of ['entity.token_assigned', 'restore.reapplied']) assert.equal(counted(after, type), counted(pair.backup, type), `${label}: no ${type}`);
-  // Knowledge on disk: none made in (a) and (c), D's own unchanged in (b), the lifted marker its one addition.
+  // Knowledge on disk: none made in (a) and (c), D's own unchanged in (b) and (b, purged), the lifted marker its one
+  // addition in (b, lifted).
   const ledgerAfter = await readLedger(pair);
   if (configuration === 'a' || configuration === 'c') assert.equal(ledgerAfter, null, `${label}: no ledger`);
-  else if (configuration === 'b') assert.equal(ledgerAfter, ledgerBefore, `${label}: D's ledger byte-equal`);
+  else if (configuration === 'b' || configuration === 'b purged') assert.equal(ledgerAfter, ledgerBefore, `${label}: D's ledger byte-equal`);
   else {
     const [before, now] = [JSON.parse(ledgerBefore), JSON.parse(ledgerAfter)];
     assert.deepEqual(now.tombstones.slice(0, -1), before.tombstones, label);
@@ -405,7 +428,7 @@ for (const [backend, options] of BACKENDS) test(`PR-37c T-10 ${backend}: a no-kn
 // ledger behind while reporting `none`.
 // ---------------------------------------------------------------------------
 
-async function reappliedCopy(t, backend, mode) {
+async function reappliedCopy(t, backend, mode, { lifted = false } = {}) {
   const dir = await scratchDirectory(t, 'restore-wrapper-r16-copy-');
   const env = { ...process.env, SHADOWGRAPH_HOME: join(dir, 'home') };
   await mkdir(env.SHADOWGRAPH_HOME);
@@ -429,7 +452,8 @@ async function reappliedCopy(t, backend, mode) {
     const purging = createShadowGraph({ now: () => NOW });
     purging.importData(await s.load());
     purging.purgeProject('alpha', { mode });
-    await s.save(privilegedSnapshot(purging));
+    // With `lifted`, a copy: the purge of a build before PR-37d, whose marker the restore below lifts.
+    await s.save(lifted ? structuredClone(privilegedSnapshot(purging)) : privilegedSnapshot(purging));
     if (backend === 'json') await restoreFile(ancestor, store, { env });
     else await s.restore(ancestor);
     await backupFile(store, copy, { env, store: backend === 'sqlite' ? s : undefined });
@@ -455,10 +479,10 @@ async function copyPair(t, made) {
 }
 
 for (const [backend, options] of BACKENDS) test(`PR-37c T-10 review 2 ${backend}: a ledger-less copy of a re-applied store restoring an ancestor backup, logical and hard, is the primitive alone through every restore entry -- the twin's bytes, no ledger, no knowledge reported (X-t10-gate)`, options, async (t) => {
-  for (const mode of ['logical', 'hard']) {
-    const made = await reappliedCopy(t, backend, mode);
+  for (const mode of ['logical', 'hard']) for (const lifted of [false, true]) {
+    const made = await reappliedCopy(t, backend, mode, { lifted });
     for (const surface of SURFACES[backend]) {
-      const label = `${mode} ${surface}`;
+      const label = `${mode}${lifted ? ' lifted' : ''} ${surface}`;
       const pair = await copyPair(t, made);
       const known = new Set((await stored(pair)).events.map((event) => event.id));
       const run = await restoreThrough(surface, pair, false);

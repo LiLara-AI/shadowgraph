@@ -12,24 +12,29 @@
 //   activation  the caller gets the post-step's payload, never raw B (§7);
 //   post-step   the ledger, then the payload, then the record cleared (§6.6).
 //
+// It also holds a purge's commit point (PR-37d design §3), which each store's
+// one payload chokepoint runs: the ledger tombstone and the purge-pending
+// record, then the registry entry under the registry lock, before the payload.
+//
 // A primitive error is settled before the restore lock is released (§12.1); a
 // post-step that fails after the primitive committed leaves its record for the
 // next write to complete (§12.3). Loads, delivery and hooks never resolve a
 // record (§8.5); restores, backups, saves and the quarantine verbs do.
 //
 // INTERNAL: package.json "exports" does not map this file.
-import { lstat } from 'node:fs/promises';
-import { basename, resolve } from 'node:path';
+import { lstat, readFile, stat } from 'node:fs/promises';
+import { basename, dirname, resolve } from 'node:path';
 import { createShadowGraph } from '../shadowgraph.js';
 import { HARD_GAP_EVIDENCE_TYPES } from '../journal.js';
 import { isValidIsoInstant } from '../fact-validity.js';
-import { currentRevision, nextRevisionAfter, restoreLock } from '../revision-store.js';
+import { createDestinationFence, currentRevision, fenceLockPath, nextRevisionAfter, restoreLock } from '../revision-store.js';
 import { requiresLegacyPurgeMigration, validateRestorePayload } from '../restore-validation.js';
-import { privilegedReapplyDeletion } from './snapshot.js';
+import { repositoryOf } from './owner-files.js';
+import { privilegedCompletePurge, privilegedReapplyDeletion, privilegedSnapshot } from './snapshot.js';
 import {
-  CONTROL_LEDGER_MALFORMED, CONTROL_LEDGER_NEWER_VERSION, DELETION_PENDING_UNSUPPORTED, PURGE_AWARE_RESTORE_UNSUPPORTED, attachLedgerView, canonical, canonicalPath, classifyRestore, deletionError,
-  journalHead, ledgerSnapshot, linkCount, markerMatches, mergeAppliesTo, mergedTombstones, pendingUnsupported, readLedger,
-  readRegistry, restoreBinding, restoreLedgerBytes, restoreRecordValid, restoreUnresolvable, unlinkLedgerIfRecordOnly, writeLedger
+  CONTROL_LEDGER_MALFORMED, CONTROL_LEDGER_NEWER_VERSION, DELETION_FILE_DESTINATION_REFUSED, DELETION_INTENT, DELETION_PENDING_UNSUPPORTED, PURGE_AWARE_RESTORE_UNSUPPORTED, attachLedgerView, canonical,
+  canonicalPath, classifyRestore, deletionError, journalHead, ledgerSnapshot, linkCount, markerMatches, mergeAppliesTo, mergedTombstones, pendingUnsupported, purgeRecordValid, readLedger,
+  readRegistry, recordedBy, refusedWrite, registryFile, restoreBinding, restoreLedgerBytes, restoreRecordValid, restoreUnresolvable, unlinkLedgerIfRecordOnly, writeLedger, writeRegistry
 } from './deletion-knowledge.js';
 
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -429,12 +434,16 @@ async function discard(file, env, prior) {
 // only -- steps 1 to 5 of §6.6, the payload committed only over D in the state
 // the record binds -- and in `post` cleared. Any other state, or a record this
 // build does not write, is kept and refuses. `computed` is the live wrapper's
-// post-step, from its activation; `restoreFault` its awaited seams. Resolves
-// to whether the payload was written, or null when there is no record.
-async function resolveRecord({ read, commit }, file, env, { verifier, instant, computed, restoreFault } = {}) {
+// post-step, from its activation; `restoreFault` its awaited seams. A purge
+// record is completed instead (PR-37d design §4.3), unless `purges` is false,
+// the quarantine selection's, which then reads and writes nothing (§4.2,
+// V-19). Resolves to whether the payload was written, or null when there is no
+// record, or none this resolver completes.
+async function resolveRecord({ read, commit }, file, env, { verifier, instant, computed, restoreFault, purges = true, lock } = {}) {
   const ledger = await readLedger(file);
   if (!ledger?.pending.length) return null;
   const [record] = ledger.pending;
+  if (ledger.pending.length === 1 && purgeRecordValid(record, ledger.tombstones)) return purges ? completePurges({ read, commit }, file, env, ledger, record, { verifier, lock }) : null;
   if (ledger.pending.length > 1 || !restoreRecordValid(record, ledger.tombstones)) throw pendingUnsupported();
   let current;
   try { current = await read(); } catch { throw restoreUnresolvable(); }
@@ -454,14 +463,18 @@ async function resolveRecord({ read, commit }, file, env, { verifier, instant, c
 // Resolution (§8.4), by a restore's step 0, a backup, a save or a quarantine
 // verb, with the restore lock held: with its own verifier, when its entry has
 // one, and its own clock, neither of which a record persists (re-review NF-6
-// (f)). `held`: the caller already holds the store fence.
-export async function resolvePendingRestore(io, { held = false, verifier } = {}) {
-  await io.run((store) => resolveRecord(store, io.file, io.env, { verifier, instant: new Date().toISOString() }), { held });
+// (f)). `held`: the caller already holds the store fence. `purges`: whether a
+// purge record is completed, false only for the quarantine selection (PR-37d
+// design §4.2); the registry lock takes the store's own lock options (§3.7).
+export async function resolvePendingRestore(io, { held = false, verifier, purges = true } = {}) {
+  await io.run((store) => resolveRecord(store, io.file, io.env, { verifier, instant: new Date().toISOString(), purges, lock: io.lock }), { held });
 }
 
 // Step 0's refusal carries the restore code, as every refusal by a restore
 // entry does (§5.1); the resolver's own code is kept as the cause (review
-// finding 19).
+// finding 19). A purge completion's own refusal -- a hard link, an unusable or
+// in-repository registry root, a registry lock timeout -- crosses as itself,
+// so it names its remedy (PR-37d design §3.3, §4.5).
 export async function asRestoreRefusal(step) {
   try { return await step; }
   catch (error) {
@@ -550,4 +563,199 @@ export async function saveResolving(io, options, attempt) {
       throw error;
     }
   });
+}
+
+// ---------------------------------------------------------------------------
+// The purge commit point (PR-37d design §3).
+// ---------------------------------------------------------------------------
+
+const MOVE_IN_ORDER = ['none', 'some', 'unknown'];
+const riskier = (left, right) => (MOVE_IN_ORDER.indexOf(right) > MOVE_IN_ORDER.indexOf(left) ? right : left);
+const PURGE_RECORDED = 'The purge is recorded and completes at the next write to this store.';
+// The refusals before any write (§3.3) name their remedy, never a path (F16).
+const UNUSABLE_ROOT = 'Refusing to purge: the deletion registry\'s folder cannot be used; set SHADOWGRAPH_HOME to an absolute private folder outside every repository';
+function purgeRefusal(code, message, cause) {
+  const error = deletionError(code, message);
+  if (cause) error.cause = cause;
+  return error;
+}
+
+// A failure after the ledger write that leaves the record says so (§3.4,
+// review finding 14): the same error, its code unchanged, one sentence added.
+export function purgeRecorded(error) {
+  if (error !== null && typeof error === 'object' && typeof error.message === 'string' && !error.message.endsWith(PURGE_RECORDED)) {
+    try { error.message = `${error.message} ${PURGE_RECORDED}`; } catch { /* left as it is */ }
+  }
+  return error;
+}
+
+// §3.3, step 1: the refusals that need no lock, before it is asked for, so a
+// home that is a file or lies inside a repository is never made or touched
+// (V-16, V-13). Resolves to the registry's path.
+async function registryUsable(file, env) {
+  if ((await linkCount(file)) > 1) throw purgeRefusal(DELETION_FILE_DESTINATION_REFUSED, 'Refusing to purge: the store has another hard link, through which its deletion records would not be found; remove the other link');
+  const registry = registryFile(env);
+  if (!registry || await stat(dirname(registry)).then((info) => !info.isDirectory(), (error) => error.code !== 'ENOENT')) throw purgeRefusal(DELETION_FILE_DESTINATION_REFUSED, UNUSABLE_ROOT);
+  if (await repositoryOf(registry).catch(() => true)) throw purgeRefusal(DELETION_FILE_DESTINATION_REFUSED, 'Refusing to purge: the deletion registry would be written inside a working tree; set SHADOWGRAPH_HOME to a private folder outside every repository');
+  // A file at the registry lock's name that holds no lock token -- a store an
+  // earlier build saved there -- refuses, since the fence removes a stale lock
+  // (re-review new finding 3). An empty one is a lock being taken.
+  const atLock = await readFile(await fenceLockPath(registry), 'utf8').catch(() => null);
+  if (atLock !== null && !/^(?:\d+:\d+:[a-z0-9]*)?$/u.test(atLock)) throw purgeRefusal(DELETION_FILE_DESTINATION_REFUSED, 'Refusing to purge: a file that is not the deletion registry\'s lock lies at its lock\'s name in the ShadowGraph home; move it elsewhere');
+  await readRegistry(env);
+  return registry;
+}
+
+// Steps 2 and 7: `step` under the registry lock, innermost (§3.7), with the
+// store's lock options. Only the lock's own acquisition errors are
+// translated, since they name its path; one from `step` stands (§3.3).
+async function underRegistryLock(registry, lock, step) {
+  let entered = false;
+  try {
+    return await createDestinationFence(registry, lock).run(() => {
+      entered = true;
+      return step();
+    });
+  } catch (error) {
+    if (entered) throw error;
+    if (error?.code === 'storage_lock_timeout') throw purgeRefusal('storage_lock_timeout', 'Refusing to purge: another ShadowGraph process holds the deletion registry; try again', error);
+    throw purgeRefusal(DELETION_FILE_DESTINATION_REFUSED, UNUSABLE_ROOT, error);
+  }
+}
+
+// Step 6: the registry forms the registry `known` does not already hold.
+async function appendRegistry(forms, known, env, move) {
+  const present = new Set((known?.tombstones ?? []).map(canonical));
+  const missing = forms.filter((form) => !present.has(canonical(form)) && present.add(canonical(form)));
+  if (missing.length) await writeRegistry((next) => { next.tombstones = [...(next.tombstones ?? []), ...missing]; }, { env, rename: move });
+}
+
+// §1.4: a `null` epoch anchor (a hard purge spliced the epoch entry) is taken
+// from the first registry entry of this lineage that names one: its marker or
+// head is an entry of the stored journal. Null when none does (declared).
+function epochOf(registry, current) {
+  const ids = new Set(journalOf(current).map((entry) => entry.id).filter(named));
+  const anchored = (registry?.tombstones ?? []).find(({ lineage }) => isObject(lineage) && named(lineage.epochEntryId) && (ids.has(lineage.markerEntryId) || ids.has(lineage.headEntryId)));
+  return anchored?.lineage.epochEntryId ?? null;
+}
+
+// The deletion records of the purges a payload write commits (§3.2-§3.8),
+// inside the store fence and before the payload's temporary file. `current` is
+// the stored payload the write goes over, `data` what it saves; `lock` the
+// store's fence options, which the registry lock takes too. Resolves to null
+// when no intent is fresh -- the write is then exactly as before -- or to the
+// clear the caller runs after its payload commit (step 12).
+export async function recordPurges(file, { current, data, env = process.env, lock = {}, hook = false, fault, rename: move } = {}) {
+  // §3.2 items 1-2: an intent whose marker the stored journal holds was
+  // committed already.
+  const stored = new Set(journalOf(current).map((entry) => entry.id));
+  const fresh = (data?.[DELETION_INTENT] ?? []).filter((intent) => !stored.has(intent.marker.id));
+  if (!fresh.length) return null;
+  // Item 3: no hook path ever writes the ledger or the registry (rev6:202-204).
+  if (hook) throw refusedWrite('deletion records from the capture hook');
+  // Item 4: intents and journal travel in one snapshot (declared equivalent).
+  const written = new Map(journalOf(data).map((entry) => [entry.id, entry]));
+  if (fresh.some((intent) => !written.has(intent.marker.id))) throw refusedWrite('a purge whose marker the payload does not hold');
+  // §3.3, step 1.
+  const registry = await registryUsable(file, env);
+  const ledger = await readLedger(file);
+  // Item 5 (re-review N1): every earlier marker the commit splices away that no
+  // tombstone records is recorded by one lifted form keyed on the splicing
+  // hard purge's own marker K1, its move-in the riskiest of theirs.
+  const spliced = markersOf(current).filter((marker) => !written.has(marker.id) && !(ledger?.tombstones ?? []).some((tombstone) => markerMatches(tombstone, marker)));
+  let lifted = null;
+  if (spliced.length) {
+    const splicing = fresh.find((intent) => intent.tombstone.mode === 'hard');
+    if (!splicing) throw refusedWrite('a purge marker spliced by no hard purge');
+    const k1 = written.get(splicing.marker.id);
+    lifted = { ...liftMarker(k1, data, null, k1.at), moveIn: spliced.map((marker) => liftMarker(marker, current, null, k1.at).moveIn).reduce(riskier, 'none') };
+  }
+  const record = { kind: 'purge', purges: fresh.map(({ tombstone, marker }) => ({ project: tombstone.purgedProject, mode: tombstone.mode, marker })) };
+  const ours = (purge) => fresh.some((intent) => intent.marker.id === purge?.marker?.id) || stored.has(purge?.marker?.id);
+  let recorded = false;
+  try {
+    // Step 2: the registry lock.
+    await underRegistryLock(registry, lock, async () => {
+      // Step 3: validated again under the lock; a null epoch filled (§1.4)
+      // from the registry, or else from this commit's earlier entries, which
+      // are this store's lineage whatever the stored journal holds (review
+      // finding 6, re-review new finding 2).
+      const known = await readRegistry(env);
+      const forms = fresh.reduce((made, { tombstone, lineage }) => [...made, { ...tombstone, lineage: { ...lineage, epochEntryId: lineage.epochEntryId ?? epochOf(known, current) ?? made.map((form) => form.lineage.epochEntryId).find(named) ?? null } }], []);
+      // Step 4: the lifted form, then each tombstone, each unless already
+      // present, and the record, which only a purge record of this commit or
+      // of a committed marker may stand beside (§3.5).
+      await writeLedger(file, (next) => {
+        const kept = new Set((next.tombstones ?? []).map(canonical));
+        for (const tombstone of [lifted, ...fresh.map((intent) => intent.tombstone)].filter(Boolean)) {
+          if (kept.has(canonical(tombstone))) continue;
+          kept.add(canonical(tombstone));
+          next.tombstones = [...(next.tombstones ?? []), tombstone];
+        }
+        if ((next.pending ?? []).some((existing) => existing?.kind !== 'purge' || !Array.isArray(existing.purges) || !existing.purges.every(ours))) throw refusedWrite('a pending record this purge did not write');
+        next.pending = [record];
+      }, { env, rename: move });
+      recorded = true;
+      await fault?.('deletionLedgerWritten');
+      // Step 6: the registry entries not already there.
+      await appendRegistry(forms, known, env, move);
+    });
+  } catch (error) { throw recorded ? purgeRecorded(error) : error; }
+  // Step 12: the record goes when it is still exactly this one (F14).
+  return () => writeLedger(file, (next) => {
+    if (next.pending?.length === 1 && canonical(next.pending[0]) === canonical(record)) delete next.pending;
+  }, { env, rename: move });
+}
+
+// ---------------------------------------------------------------------------
+// The completion of a purge record (PR-37d design §4.3).
+// ---------------------------------------------------------------------------
+
+// A purge record taken to its end by a resolver that writes, under the restore
+// lock and the store fence (§4.2), from the stored payload `read` gives (V-1):
+// - none, or nothing in it -- every collection empty, capture sessions
+//   included (review finding 1) -- (an absent store, or one made again empty
+//   while the record waited, §4.4): nothing is re-run; under the registry lock the
+//   registry gets the record's own tombstones, never a lifted form, with
+//   lineage { null, null, K }, unless they landed already, and the record goes
+//   (V-12);
+// - every marker already stored (the commit happened, step 12 did not): the
+//   record goes, and the store is not written;
+// - otherwise the purge is re-run with the record's marker id and instant on a
+//   staging graph that holds W as the interrupted graph did -- every tombstone
+//   keyed on the record's markers left out, so they do not count as W -- and
+//   committed through the commit point, which writes only what is not already
+//   canonically present and clears the record.
+// An unreadable store keeps the record and refuses. Resolves to whether the
+// payload was written.
+async function completePurges({ read, commit }, file, env, ledger, record, { verifier, lock } = {}) {
+  let current;
+  try { current = await read(); } catch { throw pendingUnsupported(); }
+  const clear = () => writeLedger(file, clearRecord, { env });
+  if (current === null || Object.values(current).every((value) => !Array.isArray(value) || !value.length)) {
+    const registry = await registryUsable(file, env);
+    const forms = record.purges.map((purge) => ({
+      ...ledger.tombstones.find((tombstone) => recordedBy(purge, [tombstone])),
+      lineage: { epochEntryId: null, headEntryId: null, markerEntryId: purge.marker.id }
+    }));
+    await underRegistryLock(registry, lock, async () => {
+      const known = await readRegistry(env);
+      const landed = new Set((known?.tombstones ?? []).map(({ lineage, ...tombstone }) => canonical(tombstone)));
+      await appendRegistry(forms.filter(({ lineage, ...tombstone }) => !landed.has(canonical(tombstone))), known, env);
+    });
+    await clear();
+    return false;
+  }
+  const stored = new Set(journalOf(current).map((entry) => entry.id));
+  const open = record.purges.filter((purge) => !stored.has(purge.marker.id));
+  if (!open.length) {
+    await clear();
+    return false;
+  }
+  const keyedOn = (tombstone) => record.purges.some((purge) => markerMatches(tombstone, { ...purge.marker, project: purge.project }));
+  const staging = createShadowGraph({ verifier, now: () => open[0].marker.at });
+  staging.importData(attachLedgerView(structuredClone(current), { tombstones: ledger.tombstones.filter((tombstone) => !keyedOn(tombstone)), quarantine: ledger.quarantine }));
+  for (const purge of open) privilegedCompletePurge(staging, purge.project, { mode: purge.mode, marker: purge.marker });
+  await commit(privilegedSnapshot(staging));
+  return true;
 }

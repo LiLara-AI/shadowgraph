@@ -356,6 +356,7 @@ test('every advertised output schema accepts the result its own tool really retu
   assert.equal(restored.source, destination);
   const purged = await callTool('shadowgraph_purge', { project, mode: 'logical' });
   assert.equal(purged.mode, 'logical');
+  assert.equal(purged.backups, 'Earlier backups still contain the purged material.');
   const proposal = await callTool('shadowgraph_request_wider_access', { scope: { projects: ['other'] }, surfaces: ['mcp'], expiresAt: '2099-01-01T00:00:00.000Z', reason: 'synthetic schema conformance' });
   await callTool('shadowgraph_revoke_grant', { accessId: proposal.accessId });
   const discarded = await callTool('shadowgraph_request_wider_access', { scope: { projects: ['other'] }, surfaces: ['mcp'], expiresAt: '2099-01-01T00:00:00.000Z', reason: 'synthetic discard conformance' });

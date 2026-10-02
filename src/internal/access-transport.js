@@ -95,7 +95,9 @@ export function accessContext(graph, args, surface, workspace, { confirmedByStor
 // The save's existing destination fence and expected revision are the commit
 // boundary. A conflict requires a fresh lookup and complete re-evaluation; no
 // result produced against a stale permission is returned to the caller.
-export async function currentAccessOperation(graph, store, operation) {
+// `read`: a read verb's audit, whose save refuses while a deletion or restore
+// record waits, as no read completes one (rev6:365; PR-37d review finding 2).
+export async function currentAccessOperation(graph, store, operation, { read = false } = {}) {
   for (let attempt = 0; ; attempt += 1) {
     graph.replaceData(await store.load());
     const before = privileged.privilegedSnapshot(graph);
@@ -108,7 +110,7 @@ export async function currentAccessOperation(graph, store, operation) {
         if (!isCommittedRejection(error)) throw error;
         rejection = error;
       }
-      graph.setRevision(await store.save(privileged.privilegedSnapshot(graph)));
+      graph.setRevision(await store.save(privileged.privilegedSnapshot(graph), read ? { pending: 'read' } : undefined));
       if (rejection) throw rejection;
       return result;
     } catch (error) {

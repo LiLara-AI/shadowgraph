@@ -144,7 +144,7 @@ export async function createShadowGraphServer(options = {}) {
     const accessOperation = (method === 'POST' && ACCESS_LIFECYCLE_PATHS.has(path)) || unavailableIssuance
       || (ACCESS_READ_ROUTES.has(`${method} ${path}`) && hasAccessReference(body));
     if (accessOperation && restoreInProgress) throw new Error('SQLite restore is in progress; access audit write rejected before mutation');
-    if (accessOperation && !accessManaged) return queuePersistence(() => currentAccessOperation(graph, store, () => handle(path, method, body, true)));
+    if (accessOperation && !accessManaged) return queuePersistence(() => currentAccessOperation(graph, store, () => handle(path, method, body, true), { read: ACCESS_READ_ROUTES.has(`${method} ${path}`) }));
     if (body && typeof body === 'object' && !Array.isArray(body)) {
       const { binding: ignoredBinding, surface: ignoredSurface, ...input } = body;
       body = accessContext(graph, input, 'http', workspace);

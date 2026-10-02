@@ -569,9 +569,17 @@ const WIRE_BUDGETS = {
   // 38720/40415/227653. The four structured ceilings (three values) are re-set
   // with ~2% headroom (recorded variance, PR-12/13/16/26/27 precedent); the
   // eight bare and annotated ceilings are unchanged.
-  'withoutVerifier.full': { bare: 59_900, annotated: 63_700, structured: 329_400 },
+  // PR-37d (design §6.3, V-10) adds the purge's and the preview's capture
+  // counts and withheld count, and the purge's backups statement, to their
+  // output schemas (full and verifier only: neither tool is compact), and
+  // rewords the purge's effects. Measured with `npm run size:mcp` on
+  // 2026-10-02: full 58846/62546/329996, verifier full 59994/63799/334543,
+  // compact 38720/40415/230998. The two full structured ceilings are re-set
+  // with ~2% headroom (recorded variance, PR-12/13/16/26/27/36b precedent);
+  // every other ceiling is unchanged.
+  'withoutVerifier.full': { bare: 59_900, annotated: 63_700, structured: 336_600 },
   'withoutVerifier.compact': { bare: 39_500, annotated: 41_200, structured: 232_300 },
-  'withVerifier.full': { bare: 61_100, annotated: 65_000, structured: 334_000 },
+  'withVerifier.full': { bare: 61_100, annotated: 65_000, structured: 341_200 },
   'withVerifier.compact': { bare: 39_500, annotated: 41_200, structured: 232_300 }
 };
 

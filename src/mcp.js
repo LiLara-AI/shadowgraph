@@ -262,7 +262,7 @@ async function callUnqueued(name, args, tier, accessManaged = false) {
   const tool = toolsByName.get(name);
   if (name === 'shadowgraph_bind') return toolResult(tool, await bindWorkspaceProject(graph, store, workspace, { ...args, surface: 'mcp' }), tier);
   if (!accessManaged && (tool?.accessLifecycle || (tool?.persistsWithAccess && hasAccessReference(args)))) {
-    return currentAccessOperation(graph, store, () => callUnqueued(name, args, tier, true));
+    return currentAccessOperation(graph, store, () => callUnqueued(name, args, tier, true), { read: !tool?.accessLifecycle });
   }
   if (args && typeof args === 'object' && !Array.isArray(args)) {
     const { binding: ignoredBinding, surface: ignoredSurface, ...input } = args;

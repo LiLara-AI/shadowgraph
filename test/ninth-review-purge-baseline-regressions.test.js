@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { backupFile, restoreFile } from '../src/backup.js';
 import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
 import { createShadowGraphServer } from '../src/server.js';
@@ -295,8 +295,11 @@ test('DS-P1-007 ninth review: schemas 1-4 and a journal-bearing merge cannot res
   assert.deepEqual(privilegedRebuild(destination).projection.records.map((item) => item.id).sort(), [host.id, kept.id].sort());
 });
 
+// A home beside each store: a purged snapshot saved here writes its tombstone and
+// registry entry, which no other subtest may merge (PR-37d design §9.3).
+const homeOf = (path) => ({ SHADOWGRAPH_HOME: join(dirname(path), 'home') });
 async function createStore(backend, path) {
-  return backend === 'sqlite' ? createSqliteStore(path) : createJsonFileStore(path);
+  return backend === 'sqlite' ? createSqliteStore(path, { env: homeOf(path) }) : createJsonFileStore(path, { env: homeOf(path) });
 }
 
 function runCli(file, source) {
@@ -616,7 +619,7 @@ async function assertBaselineAcrossPersistence(t, payload, label, expectedRecord
       let liveStore = await createStore(backend, live);
       await liveStore.save(payload);
       await assertDurableBytes(live, `${label} ${backend} live bytes`);
-      await backupFile(live, backup, { store: liveStore });
+      await backupFile(live, backup, { store: liveStore, env: homeOf(live) });
       liveStore.close();
       await assertDurableBytes(backup, `${label} ${backend} backup bytes`);
 
@@ -634,7 +637,7 @@ async function assertBaselineAcrossPersistence(t, payload, label, expectedRecord
         await destinationStore.restore(backup);
       } else {
         destinationStore.close();
-        await restoreFile(backup, destination);
+        await restoreFile(backup, destination, { env: homeOf(destination) });
         destinationStore = await createStore(backend, destination);
       }
       const restored = await destinationStore.load();

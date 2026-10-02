@@ -48,6 +48,9 @@ async function startMcp(t, extraEnv = {}) {
       SHADOWGRAPH_MCP_COMPACT: '0',
       NODE_ENV: 'test',
       SHADOWGRAPH_TEST_CLOCK_FILE: clockFile,
+      // The per-user home inside the observed tree, so the deletion registry a
+      // purge writes there is seen (PR-37d design §9.2 D30).
+      SHADOWGRAPH_HOME: join(directory, 'home'),
       ...extraEnv
     },
     stdio: ['pipe', 'pipe', 'inherit']
@@ -181,8 +184,10 @@ function effects(before, after) {
     storeChanged: before.serialized !== after.serialized,
     newFiles: after.files.filter((name) => !before.files.includes(name)),
     // A new file outside the store directory is a write into the open world,
-    // observed rather than declared by the scenario.
-    newFilesOutsideStore: after.files.filter((name) => !before.files.includes(name) && !name.startsWith('store/')),
+    // observed rather than declared by the scenario. The configured home is
+    // not: its deletion registry lies in the per-user root, at a path no caller
+    // chooses (PR-37d design §9.2 D30).
+    newFilesOutsideStore: after.files.filter((name) => !before.files.includes(name) && !name.startsWith('store/') && !name.startsWith('home/')),
     removed,
     changedExisting,
     // An entity that already existed was rewritten with nothing appended to the
@@ -406,6 +411,10 @@ test('every advertised tool annotation matches the effects the server actually h
   const purged = await observe('shadowgraph_purge', { project: PROJECT, mode: 'logical' });
   assert.ok(purged.first.removed.length > 0, 'a purge removes stored entities');
   assert.equal(purged.repeat.journalDelta, 1, 'a second purge still records that it happened');
+  // Its deletion records: the store's ledger and the per-user registry, and no
+  // lock left in either folder (PR-37d design §9.2 D30).
+  assert.deepEqual(purged.first.newFiles, ['home/deletion-registry.json', 'store/data.json.control.json']);
+  assert.deepEqual((await listFiles(rpc.directory)).filter((name) => name.endsWith('.lock')), []);
 
   // --- the assertion this file exists for ---------------------------------
   const tools = await rpc.listTools();

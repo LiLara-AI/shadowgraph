@@ -5,8 +5,9 @@
 // what was purged.
 //
 // The ledger is written only through writeLedger (PR-37c design §2), which
-// carries every member it does not change as a value, and the registry never
-// (PR-37d writes it). Only what this build acts on is validated, and a file
+// carries every member it does not change as a value, and the registry only
+// through writeRegistry (PR-37d design §3.8), by a purge's commit point. Only
+// what this build acts on is validated, and a file
 // that fails is refused, never read as "no knowledge"; a backup copies the
 // ledger as bytes.
 //
@@ -25,6 +26,12 @@ import { CREATION_ENTRY_TYPES, replayedEntity } from '../journal.js';
 // (declared, F18).
 export const DELETION_VIEW = Symbol('shadowgraph.deletionView');
 
+// The other way (PR-37d design §2.2): the purge intents a graph's persistence
+// snapshot carries to a store's commit point, non-enumerable, so the
+// snapshot's bytes and keys are unchanged and a spread or a structured clone
+// of it carries none. The commit point reads it, and nothing else does.
+export const DELETION_INTENT = Symbol('shadowgraph.deletionIntent');
+
 export const CONTROL_LEDGER_MALFORMED = 'control_ledger_malformed';
 export const CONTROL_LEDGER_NEWER_VERSION = 'control_ledger_newer_version';
 export const DELETION_PENDING_UNSUPPORTED = 'deletion_pending_unsupported_at_this_build';
@@ -38,6 +45,11 @@ export const DELETION_CODES = Object.freeze([
   CONTROL_LEDGER_MALFORMED, CONTROL_LEDGER_NEWER_VERSION, DELETION_PENDING_UNSUPPORTED, PURGE_AWARE_RESTORE_UNSUPPORTED,
   DELETION_FILE_DESTINATION_REFUSED, BACKUP_CONTROL_LEDGER_STALE, SCOPE_KEY_WITHHELD, IDEMPOTENCY_KEY_WITHHELD, SESSION_WITHHELD
 ]);
+
+// What every purge result says of the copies it cannot reach (PR-37d design
+// §6.2; rev6:401, verbatim): a constant, since ShadowGraph cannot know of every
+// backup. Corner 1's purge-time disclosure.
+export const PURGE_BACKUPS_STATEMENT = 'Earlier backups still contain the purged material.';
 
 // The newest ledger and registry format this build reads. A later build adds
 // members; it never raises this (carried obligation for PR-39 and PR-43).
@@ -53,9 +65,12 @@ export function deletionError(code, message) {
 }
 const malformed = (what) => deletionError(CONTROL_LEDGER_MALFORMED, `The deletion records are malformed or unreadable: ${what}`);
 export const pendingUnsupported = () => deletionError(DELETION_PENDING_UNSUPPORTED, 'The store has a deletion this build cannot complete; a later ShadowGraph build is needed to open or copy it');
+// A read's audit save never completes a record (rev6:365; PR-37d review
+// finding 2), so it refuses while one waits.
+const recordWaits = () => deletionError(DELETION_PENDING_UNSUPPORTED, 'A deletion or restore on this store completes at its next write, and a read never completes one; write to the store first, then read again');
 // A restore record the store is in no state of (PR-37c design §8.4).
 export const restoreUnresolvable = () => deletionError(DELETION_PENDING_UNSUPPORTED, 'A pending restore cannot be resolved: the store is not in a state the record describes; put back one of the restore\'s retained files, or restore a backup into a fresh path');
-const refusedWrite = (what) => deletionError(CONTROL_LEDGER_MALFORMED, `Refusing to write the deletion records: ${what}`);
+export const refusedWrite = (what) => deletionError(CONTROL_LEDGER_MALFORMED, `Refusing to write the deletion records: ${what}`);
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const named = (value) => typeof value === 'string' && value.length > 0;
 
@@ -158,6 +173,29 @@ export function restoreRecordValid(record, ledgerTombstones) {
   return Array.isArray(inputs.postdated)
     && inputs.postdated.every((index, at) => Number.isSafeInteger(index) && index >= 0 && index < bound && (at === 0 || index > inputs.postdated[at - 1]));
 }
+
+// Whether a ledger holds the tombstone that records one purge of a
+// purge-pending record (PR-37d design §3.5): a project tombstone of its
+// project, at its marker's seq and instant, naming tokens. The lifted form
+// keyed on the same marker (§3.2 item 5) names none, so it is never taken for
+// the purge's own (re-review N1, P61).
+export const recordedBy = (purge, tombstones) => tombstones.some((tombstone) => isObject(tombstone) && tombstone.kind === 'project'
+  && tombstone.purgedProject === purge.project && tombstone.seq === purge.marker.seq && tombstone.at === purge.marker.at && Array.isArray(tombstone.tokens));
+
+// The purge-pending record this build writes, validated strictly (PR-37d
+// design §3.5): exactly its members, one element per purge naming its project,
+// mode and marker, distinct markers, each recorded by its tombstone in the same
+// ledger, since the two are written in one write.
+const markerValid = (marker) => within(marker, ['id', 'at', 'seq']) && named(marker.id) && isValidIsoInstant(marker.at) && Number.isSafeInteger(marker.seq) && marker.seq > 0;
+export function purgeRecordValid(record, ledgerTombstones) {
+  if (!within(record, ['kind', 'purges']) || record.kind !== 'purge' || !Array.isArray(record.purges) || !record.purges.length) return false;
+  if (!record.purges.every((purge) => within(purge, ['project', 'mode', 'marker']) && named(purge.project) && ['logical', 'hard'].includes(purge.mode) && markerValid(purge.marker))) return false;
+  if (new Set(record.purges.map((purge) => purge.marker.id)).size !== record.purges.length) return false;
+  return record.purges.every((purge) => recordedBy(purge, ledgerTombstones));
+}
+
+// A record of either kind this build writes and resolves (PR-37d design §3.5).
+export const pendingRecordValid = (record, ledgerTombstones) => restoreRecordValid(record, ledgerTombstones) || purgeRecordValid(record, ledgerTombstones);
 
 async function readKnowledge(file, { ledger }) {
   let text;
@@ -358,14 +396,20 @@ export function classifyRestore(payload, { tombstones = [], quarantine = [], tok
 }
 
 // The view a ledger gives a payload (PR-37c design §8.1). With no record it
-// is the ledger's. A restore record in the `pre` or `post` state gives the
-// ledger's own view; in the `committed` state, the merged knowledge's, plus
-// what the post-step will remove or quarantine, held by token or, with none,
-// by id. Any other record, a second one, or `pending: 'refuse'` throws.
+// is the ledger's. A purge record gives the ledger's own view, which holds its
+// tombstone, and the projects it purges, held whole (PR-37d design §4.1). A
+// restore record in the `pre` or `post` state gives the ledger's own view; in
+// the `committed` state, the merged knowledge's, plus what the post-step will
+// remove or quarantine, held by token or, with none, by id. Any other record,
+// a second one, or `pending: 'refuse'` throws; `pending: 'read'`, a read's
+// audit save, throws on any record, saying a write completes one it can serve.
 function viewFor(payload, ledger, { pending, absent }) {
   if (!ledger?.pending.length) return viewOf(ledger);
   const [record] = ledger.pending;
-  if (pending === 'refuse' || ledger.pending.length > 1 || !restoreRecordValid(record, ledger.tombstones)) throw pendingUnsupported();
+  if (pending === 'refuse' || ledger.pending.length > 1) throw pendingUnsupported();
+  if (pending === 'read') throw purgeRecordValid(record, ledger.tombstones) || restoreRecordValid(record, ledger.tombstones) ? recordWaits() : pendingUnsupported();
+  if (purgeRecordValid(record, ledger.tombstones)) return { ...viewOf(ledger), pending: true, purging: new Set(record.purges.map((purge) => purge.project)) };
+  if (!restoreRecordValid(record, ledger.tombstones)) throw pendingUnsupported();
   const state = restoreBinding(record, payload, { absent });
   if (state === 'unknown') throw restoreUnresolvable();
   if (state !== 'committed') return { ...viewOf(ledger), pending: true };
@@ -437,11 +481,13 @@ export async function readUnfenced(file, read, { afterPayloadRead, ...options } 
 // An absent SQLite store is never made again while a restore record waits
 // (PR-37c design §3.3, re-review NF-5): an empty store made there could bind
 // as the record's `pre` state and be discarded. Run inside the store fence,
-// before every open that creates the file, outside the restore primitive.
+// before every open that creates the file, outside the restore primitive. A
+// purge record binds no state, and the next write completes it over the store
+// made again (PR-37d design §4.4, V-12).
 export async function refuseAbsentWithRecord(file) {
   try { await stat(file); return; } catch (error) { if (error.code !== 'ENOENT') return; }
   const ledger = await readLedger(file);
-  if (!ledger?.pending.length) return;
+  if (!ledger?.pending.length || (ledger.pending.length === 1 && purgeRecordValid(ledger.pending[0], ledger.tombstones))) return;
   throw ledger.pending.length === 1 && restoreRecordValid(ledger.pending[0], ledger.tombstones) ? restoreUnresolvable() : pendingUnsupported();
 }
 
@@ -558,22 +604,24 @@ export function storeIo(store) {
 
 // No copy ever lands on a ledger or the registry (R-8), by what the
 // destination names, not how it is spelled (review K-1, C-1): its final name
-// is not a ledger's, it is not the registry's file, and, where neither is
-// there yet, it is not the registry's name in the registry's folder. Names
-// are compared without case on every platform, as a volume may fold case
-// where the platform does not (re-review R2-T3). Resolves to the
-// destination's final path, which the copy is written to.
+// is not a ledger's, it is not the registry's file or its lock's, which the
+// fence removes once stale (PR-37d review finding 8), and, where neither is
+// there yet, it is not either name in the registry's folder. Names are
+// compared without case on every platform, as a volume may fold case where
+// the platform does not (re-review R2-T3). Resolves to the destination's
+// final path, which the copy is written to.
 export async function refuseDeletionFileDestination(destination, env = process.env) {
   const target = await canonicalPath(destination, { followLink: false });
   const registry = registryFile(env);
   const name = basename(target).toLowerCase();
   let refused = name.endsWith(CONTROL_SUFFIX);
-  if (!refused && registry) {
-    const [file, record] = await Promise.all([identity(target), identity(registry)]);
+  for (const guarded of registry ? [registry, `${registry}.lock`] : []) {
+    if (refused) break;
+    const [file, record] = await Promise.all([identity(target), identity(guarded)]);
     if (file && record) refused = file.id === record.id;
-    else if (!file && name === basename(registry)) {
-      const [folder, home] = await Promise.all([identity(dirname(target)), identity(dirname(registry))]);
-      refused = folder && home ? folder.id === home.id : folded(dirname(target)) === folded(await canonicalPath(dirname(registry)));
+    else if (!file && name === basename(guarded)) {
+      const [folder, home] = await Promise.all([identity(dirname(target)), identity(dirname(guarded))]);
+      refused = folder && home ? folder.id === home.id : folded(dirname(target)) === folded(await canonicalPath(dirname(guarded)));
     }
   }
   if (refused) throw deletionError(DELETION_FILE_DESTINATION_REFUSED, 'Refusing to write a copy over a deletion record file');
@@ -702,7 +750,37 @@ export async function writeLedger(file, change, { env = process.env, rename: mov
   for (const name of Object.keys(original)) if (!KEPT_AS_WRITTEN.has(name) && canonical(original[name]) !== canonical(next[name])) throw refusedWrite(`${name} would change`);
   const written = `${JSON.stringify(next, null, 2)}\n`;
   const parsed = parseKnowledge(written, { ledger: true });
-  if (parsed.pending.length > 1 || parsed.pending.some((record) => !restoreRecordValid(record, parsed.tombstones))) throw refusedWrite('a pending record this build does not write');
+  if (parsed.pending.length > 1 || parsed.pending.some((record) => !pendingRecordValid(record, parsed.tombstones))) throw refusedWrite('a pending record this build does not write');
+  await replaceFile(target, written, 0o600, move);
+  return { path: target, text: written };
+}
+
+// Writes the per-user deletion registry (PR-37d design §3.8), at its
+// canonical path, links followed. Its caller holds the registry lock; this
+// never takes it. `change` appends to the parsed registry, and the writer
+// never repairs: anything malformed, newer or unreadable throws, as does a
+// change that drops, edits or moves an entry, changes the version or any
+// other member, unknown ones included, or appends an entry without its
+// lineage anchors. Nothing is written then. Owner-only, synced, renamed with
+// the bounded retry, as the ledger is.
+export async function writeRegistry(change, { env = process.env, rename: move } = {}) {
+  const file = registryFile(env);
+  if (!file) throw malformed('registry root');
+  const target = await canonicalPath(file);
+  let text = null;
+  try { text = await readFile(target, 'utf8'); }
+  catch (error) { if (error.code !== 'ENOENT') throw malformed('unreadable'); }
+  const original = text === null ? { version: KNOWLEDGE_VERSION } : (parseKnowledge(text, { ledger: false }), JSON.parse(text));
+  const next = structuredClone(original);
+  change(next);
+  const before = original.tombstones ?? [];
+  if (!Array.isArray(next.tombstones ?? []) || before.some((tombstone, index) => canonical(tombstone) !== canonical(next.tombstones[index]))) throw refusedWrite('a tombstone would be dropped, changed or moved');
+  if (next.version !== original.version) throw refusedWrite('the version would change');
+  for (const name of new Set([...Object.keys(original), ...Object.keys(next)])) if (name !== 'tombstones' && canonical(original[name]) !== canonical(next[name])) throw refusedWrite(`${name} would change`);
+  const anchored = (entry) => within(entry?.lineage, LINEAGE_IDS) && LINEAGE_IDS.every((name) => entry.lineage[name] === null || named(entry.lineage[name]));
+  if (!(next.tombstones ?? []).slice(before.length).every(anchored)) throw refusedWrite('a registry entry without its lineage');
+  const written = `${JSON.stringify(next, null, 2)}\n`;
+  parseKnowledge(written, { ledger: false });
   await replaceFile(target, written, 0o600, move);
   return { path: target, text: written };
 }
