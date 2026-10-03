@@ -18,6 +18,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { isValidIsoInstant } from '../fact-validity.js';
 import { CREATION_ENTRY_TYPES, replayedEntity } from '../journal.js';
+import { hasCaptureRetentionState, retentionOverridesIssue } from './capture-retention.js';
 
 // The view a load attaches to the payload it returns. A symbol is never
 // serialised, so the payload's bytes are unchanged. A caller holding a loaded
@@ -117,8 +118,10 @@ function parseKnowledge(text, { ledger }) {
   const quarantine = ledger ? list('quarantine') : [];
   quarantine.forEach((entry, index) => { if (!isObject(entry) || !named(entry.token)) throw malformed(`quarantine[${index}].token`); });
   const pending = ledger ? list('pending') : [];
+  const retentionIssue = ledger ? retentionOverridesIssue(value.retentionOverrides) : null;
+  if (retentionIssue) throw malformed(retentionIssue);
   // Downgrade's flag disables the token proof (PR-37c design §1.1, §6.2).
-  return { tombstones, quarantine, pending, tokensStripped: value.tokensStripped, members: Object.keys(value) };
+  return { tombstones, quarantine, pending, retentionOverrides: ledger ? value.retentionOverrides ?? [] : [], tokensStripped: value.tokensStripped, members: Object.keys(value) };
 }
 
 // A value as text with its object keys sorted at every depth: the equality the
@@ -290,6 +293,7 @@ function viewOf(ledger) {
   return {
     tokens,
     quarantine,
+    retentionOverrides: ledger?.retentionOverrides ?? [],
     // Project tombstones bound the project's non-entity entries that predate
     // them, whether or not they name tokens (design §12 C5).
     projects: (ledger?.tombstones ?? []).filter((tombstone) => tombstone.kind === 'project' && named(tombstone.purgedProject)).map((tombstone) => ({ project: tombstone.purgedProject, at: tombstone.at, mode: tombstone.mode ?? null })),
@@ -307,7 +311,7 @@ function viewOf(ledger) {
 // activation hands its caller, the ledger as it will stand once the post-step
 // has run (PR-37c design §7).
 export function attachLedgerView(payload, ledger) {
-  const view = viewOf({ tombstones: ledger?.tombstones ?? [], quarantine: ledger?.quarantine ?? [] });
+  const view = viewOf({ tombstones: ledger?.tombstones ?? [], quarantine: ledger?.quarantine ?? [], retentionOverrides: ledger?.retentionOverrides ?? [] });
   return Object.defineProperty(payload, DELETION_VIEW, { value: view, enumerable: false, configurable: true });
 }
 
@@ -410,6 +414,7 @@ function viewFor(payload, ledger, { pending, absent }) {
   if (pending === 'read') throw purgeRecordValid(record, ledger.tombstones) || restoreRecordValid(record, ledger.tombstones) ? recordWaits() : pendingUnsupported();
   if (purgeRecordValid(record, ledger.tombstones)) return { ...viewOf(ledger), pending: true, purging: new Set(record.purges.map((purge) => purge.project)) };
   if (!restoreRecordValid(record, ledger.tombstones)) throw pendingUnsupported();
+  if (ledger.retentionOverrides.length || hasCaptureRetentionState(payload)) throw pendingUnsupported();
   const state = restoreBinding(record, payload, { absent });
   if (state === 'unknown') throw restoreUnresolvable();
   if (state !== 'committed') return { ...viewOf(ledger), pending: true };

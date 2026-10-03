@@ -336,7 +336,7 @@ test('PR-37c writer: unknown members, the version, every tombstone and tokensStr
   const item = { kind: 'item', tokens: ['a'], at: TOMBSTONE_AT, mode: 'logical', laterField: { b: 2, a: 1 } };
   const original = {
     version: 1, laterBuildState: { nested: [1, { b: 2, a: 1 }] }, tombstones: [item, LIFTED],
-    quarantine: [{ token: 'q1', at: NOW, reason: 'carried' }], tokensStripped: { at: BEFORE }, retentionOverrides: [{ anything: true }]
+    quarantine: [{ token: 'q1', at: NOW, reason: 'carried' }], tokensStripped: { at: BEFORE }, futureRetentionControls: [{ anything: true }]
   };
   await writeLedgerFile(state, original);
   const origin = { kind: 'origin', purgedOrigin: 'o', tokens: ['b'], at: NOW };
@@ -356,7 +356,7 @@ test('PR-37c writer: unknown members, the version, every tombstone and tokensStr
     ['edits a tombstone', (value) => { value.tombstones[0].laterField.a = 3; }],
     ['raises the version', (value) => { value.version = 2; }],
     ['drops an unknown member', (value) => { delete value.laterBuildState; }],
-    ['edits an unknown member', (value) => { value.retentionOverrides.push({ more: true }); }],
+    ['edits an unknown member', (value) => { value.futureRetentionControls.push({ more: true }); }],
     ['writes a lifted tombstone with no project', (value) => { value.tombstones.push({ ...LIFTED, purgedProject: '' }); }],
     ['writes a record of another kind', (value) => { value.pending = [{ kind: 'purge' }]; }],
     ['writes a record with a member this build does not write', (value) => { value.pending = [{ ...valid, later: true }]; }],
@@ -1401,20 +1401,25 @@ for (const [backend, options] of BACKENDS) test(`PR-37c descent ${backend}: no g
   assert.deepEqual([viaDescent.reapplied.removed, viaDescent.reapplied.quarantined], [0, 1], 'no newer marker: quarantine (M13)');
 });
 
-for (const [backend, options] of BACKENDS) test(`PR-37c rev6:428 ${backend}: D's retention overrides stay as they are whatever B's sidecar carries, and a fresh D never adopts B's (M31)`, options, async (t) => {
+for (const [backend, options] of BACKENDS) test(`retention reader rev6:428 ${backend}: nonempty overrides refuse restore until the lifecycle writer can merge stricter, with no change`, options, async (t) => {
   const b = backup();
   const overrides = [{ project: 'p', days: 30 }];
   for (const carried of [[{ project: 'p', days: 365 }], [{ project: 'p', days: 7 }], undefined]) {
     const state = await storeOf(t, backend, purgedStore('logical'));
     await writeLedgerFile(state, { version: 1, retentionOverrides: overrides });
-    await restoring(state, await backupOf(t, backend, b.payload, { version: 1, ...(carried ? { retentionOverrides: carried } : {}) }));
-    const ledger = await ledgerOf(state);
-    assert.equal(ledger.tombstones.length, 1, 'the restore wrote');
-    assert.deepEqual(ledger.retentionOverrides, overrides, JSON.stringify(carried));
+    const before = await hashes(state);
+    await assert.rejects(restoring(state, await backupOf(t, backend, b.payload, { version: 1, ...(carried ? { retentionOverrides: carried } : {}) })), { code: 'purge_aware_restore_unsupported_at_this_build' });
+    assert.deepEqual(await hashes(state), before, 'reader does not partially adopt or change a policy');
   }
   const fresh = await freshOf(t, backend);
-  await restoring(fresh, await backupOf(t, backend, b.payload, { version: 1, tombstones: [itemTombstone([b.tokens.hidden])], retentionOverrides: [{ project: 'p', days: 365 }] }));
-  assert.equal(Object.hasOwn(await ledgerOf(fresh), 'retentionOverrides'), false);
+  // SQLite construction materializes its empty store, before restore is
+  // invoked. Baseline that existing constructor effect separately.
+  if (backend === 'sqlite') (await createStorage({ type: backend, file: fresh.file })).close();
+  const before = [existsSync(fresh.file), existsSync(knowledge.ledgerPath(fresh.file))];
+  const empty = backend === 'sqlite' ? await hashes(fresh) : null;
+  await assert.rejects(restoring(fresh, await backupOf(t, backend, b.payload, { version: 1, tombstones: [itemTombstone([b.tokens.hidden])], retentionOverrides: [{ project: 'p', days: 365 }] })), { code: 'purge_aware_restore_unsupported_at_this_build' });
+  assert.deepEqual([existsSync(fresh.file), existsSync(knowledge.ledgerPath(fresh.file))], before, 'refusal creates neither a payload nor a ledger');
+  if (empty) assert.deepEqual(await hashes(fresh), empty, 'constructed empty SQLite store remains unchanged');
 });
 
 for (const [backend, options] of BACKENDS) test(`PR-37c rev6:429 write half ${backend}: a record a crash left is completed by the next CLI write, which then conflicts once, and the write after it succeeds (M25)`, options, async (t) => {
@@ -1452,7 +1457,7 @@ test('PR-37c binding json: a restore into a fresh path that rolls back leaves it
 
 for (const [backend, options] of BACKENDS) test(`PR-37c rolled back ${backend}: a fault, or a caller activation that throws, rolls back and discards the record, D's ledger byte- and mode-equal, absent included (M18, M22, M30)`, options, async (t) => {
   const b = backup();
-  const prior = '{"version":1,"retentionOverrides":[{"project":"p","days":30}]}';
+  const prior = '{"version":1,"futureRetentionControls":[{"project":"p","days":30}]}';
   const cases = [
     ['fault', {}, { restoreFault: (stage) => { if (stage === 'afterReplacementRename') throw new Error('injected'); } }],
     ['caller activation', { afterReplace: () => { throw new Error('the caller refuses'); } }, {}]

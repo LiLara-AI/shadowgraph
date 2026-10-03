@@ -28,6 +28,7 @@ import { SELF_SIGNALS, stripDeliveredBlocks } from './internal/capture-source.js
 import { CAPTURE_COLLECTIONS, CAPTURE_CONTENT, CAPTURE_ENTRY_TYPES, CAPTURE_EVENT_IDENTITY, CAPTURE_IMPORT_TYPE, CAPTURE_KIND, CAPTURE_SESSIONS, CAPTURE_TRANSITIONS, captureCollectionIssue, captureEntryReachedBy, captureEventIssue, captureItemIssue, captureObservationIssue, CAPTURE_LIMIT_EVENT, CAPTURE_REFUSED_EVENT, OTHER_OWNER } from './internal/capture.js';
 import { TRANSCRIPT_ANCHOR_BYTES, TRANSCRIPT_GAP_REASONS, TRANSCRIPT_TRIGGERS, cursorBlock, cursorShape, digest, lastLineEnd, matchKey, transcriptEntry, transcriptLines } from './internal/transcript.js';
 import { CREDENTIAL_WITHHELD, captureWithheld, redactText, redactValue, withholdFlagged } from './internal/redaction.js';
+import { RAW_EXPIRED, captureRawExpired, effectiveCaptureExpiry, hasCaptureRetentionState } from './internal/capture-retention.js';
 import { DELETION_INTENT, DELETION_VIEW, IDEMPOTENCY_KEY_WITHHELD, PURGE_AWARE_RESTORE_UNSUPPORTED, PURGE_BACKUPS_STATEMENT, SCOPE_KEY_WITHHELD, SESSION_WITHHELD, deletionError, journalHead } from './internal/deletion-knowledge.js';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
@@ -830,10 +831,12 @@ function scopeCompleteness(scope, current = { complete: true }, signals = []) {
   const scoped = details.length > 1;
   if (backlog) details.push(`${backlog} captured ${backlog === 1 ? 'item is' : 'items are'} not yet understood in this scope: captured is not stored experience.`);
   if (capture?.limited.length) details.push(`Capture is at a limit (${capture.limited.map((entry) => entry.limit).join(', ')}): new material is refused, and nothing accepted is removed.`);
-  const refused = [...new Set((capture?.gaps ?? []).map((entry) => entry.reason).filter((reason) => !TRANSCRIPT_GAP_REASONS.includes(reason)))];
+  const refused = [...new Set((capture?.gaps ?? []).map((entry) => entry.reason).filter((reason) => reason !== RAW_EXPIRED && !TRANSCRIPT_GAP_REASONS.includes(reason)))];
   const unread = [...new Set((capture?.gaps ?? []).map((entry) => entry.reason).filter((reason) => TRANSCRIPT_GAP_REASONS.includes(reason)))];
   if (refused.length) details.push(`Capture refused material (${refused.join(', ')}); what it refused is not here.`);
   if (unread.length) details.push(`Capture did not read part of a session's transcript (${unread.join(', ')}); what it did not read is not here.`);
+  if (capture?.gaps.some((entry) => entry.reason === RAW_EXPIRED)) details.push('Capture raw has reached its retention deadline and is unavailable for re-extraction.');
+  if (capture?.gaps.some((entry) => entry.reason === RAW_EXPIRED && entry.sessions > 0)) details.push('Transcript capture remains blocked for affected sessions because expired Stop material cannot safely reconcile delayed transcript copies; direct hook capture can continue.');
   const quarantined = scope.quarantined ?? 0;
   if (quarantined) details.push(`${quarantined} ${quarantined === 1 ? 'item of this scope is' : 'items of this scope are'} withheld as possibly purged; only the owner can release or purge them.`);
   if (scope.restorePending) details.push('A restore has not finished; material it may remove or quarantine is withheld until the next write completes it.');
@@ -1001,6 +1004,9 @@ export function createShadowGraph(options = {}) {
   // project's capture: that is refused, not filed under the first project.
   // An item identified only by its ordinal whose material repeats the session's
   // previous item of the same event is marked possibleDuplicateOf it (F-11a).
+  const retentionPolicy = () => deletion.get('view')?.retentionOverrides ?? [];
+  const rawExpired = (item, at = now()) => captureRawExpired(item, retentionPolicy(), at);
+
   function recordCapture(input = {}, { keyBlock = null, withhold = false } = {}) {
     if (!isPlainObject(input)) throw new Error('A capture needs an input object');
     const originId = usableOriginId(input.originId);
@@ -1070,7 +1076,7 @@ export function createShadowGraph(options = {}) {
       contentHash,
       lease: null, attempts: 0, lastError: null, blockedReason: withheldText ? CREDENTIAL_WITHHELD : null, producedRecordIds: [], receipts: [],
       erasureToken: allocateErasureToken(), cancelRequested: false, supersededResults: [],
-      possibleDuplicateOf: withheldText ? null : hostIdentity === null ? previousRepeat(originId, observed, contentHash) : observed.event === 'Transcript' ? assistantRepeat(originId, observed.sessionId, contentHash) : null,
+      possibleDuplicateOf: withheldText ? null : hostIdentity === null ? previousRepeat(originId, observed, contentHash, at) : observed.event === 'Transcript' ? assistantRepeat(originId, observed.sessionId, contentHash, at) : null,
       expiresAt: null, createdAt: at, updatedAt: at,
       ...(observation === undefined ? {} : { observation })
     };
@@ -1191,24 +1197,24 @@ export function createShadowGraph(options = {}) {
 
   // The session's latest item of the same event, when its material is the
   // same -- none, for an event that carries none, repeats none.
-  function previousRepeat(originId, observed, contentHash) {
+  function previousRepeat(originId, observed, contentHash, at) {
     let latest = null;
     for (const item of captures.values()) {
       if (item.originId === originId && item.source?.sessionId === observed.sessionId && item.source?.event === observed.event && (latest === null || item.occurrenceSeq > latest.occurrenceSeq)) latest = item;
     }
     // Withheld material is no repeat of anything, whatever it held (PR-37b
     // R14): both hashes are null, and the texts were different.
-    return latest !== null && latest.blockedReason !== CREDENTIAL_WITHHELD && latest.contentHash === contentHash ? latest.id : null;
+    return latest !== null && !rawExpired(latest, at) && latest.blockedReason !== CREDENTIAL_WITHHELD && latest.contentHash === contentHash ? latest.id : null;
   }
 
   // The newest assistant item of the session -- a Stop's final message or
   // transcript text -- holding the same material (PR-36 rule 3; §12.2.1 row 5):
   // what a transcript item repeats, marked and never removed.
-  function assistantRepeat(originId, sessionId, contentHash) {
+  function assistantRepeat(originId, sessionId, contentHash, at) {
     if (contentHash === null) return null;
     let latest = null;
     for (const item of captures.values()) {
-      if (item.originId === originId && item.source?.sessionId === sessionId && ['Stop', 'Transcript'].includes(item.source?.event) && item.contentHash === contentHash && (latest === null || item.occurrenceSeq > latest.occurrenceSeq)) latest = item;
+      if (item.originId === originId && item.source?.sessionId === sessionId && ['Stop', 'Transcript'].includes(item.source?.event) && !rawExpired(item, at) && item.contentHash === contentHash && (latest === null || item.occurrenceSeq > latest.occurrenceSeq)) latest = item;
     }
     return latest?.id ?? null;
   }
@@ -1232,10 +1238,18 @@ export function createShadowGraph(options = {}) {
     if (captures.size === 0 && sessions.length === 0 && entries.length === 0) return null;
     const owns = (entry) => (scope.state === 'project_selected' ? entry.attribution === 'project' && entry.project === scope.project : entry.attribution === 'unattributed' && sameOrigin(entry.originId, scope.originId));
     const status = { pending: 0, processing: 0, failed: 0, blocked: 0, oldestPendingAt: null, extractionAvailable: false, limited: [], gaps: [] };
+    const at = now();
+    let expiredFrom = null;
     let queued = 0;
     for (const item of captures.values()) {
       if (item.state !== 'extracted') queued += 1;
       if (item.schemaVersion > SCHEMA_VERSION || !UNEXTRACTED_STATES.includes(item.state) || !owns(item)) continue;
+      if (rawExpired(item, at)) {
+        status.blocked += 1;
+        const expiry = effectiveCaptureExpiry(item, retentionPolicy());
+        if (expiredFrom === null || compareInstants(expiry, expiredFrom) < 0) expiredFrom = expiry;
+        continue;
+      }
       status[item.state] += 1;
       if (item.state === 'pending' && (status.oldestPendingAt === null || compareInstants(item.createdAt, status.oldestPendingAt) < 0)) status.oldestPendingAt = item.createdAt;
     }
@@ -1249,6 +1263,7 @@ export function createShadowGraph(options = {}) {
       const closed = held.filter((entry) => entry.lastPeriod).sort((left, right) => compareInstants(right.lastPeriod.to, left.lastPeriod.to))[0];
       if (closed) status.gaps.push({ reason: limit, from: closed.lastPeriod.from, to: closed.lastPeriod.to });
     }
+    if (expiredFrom !== null) status.gaps.push({ reason: RAW_EXPIRED, from: expiredFrom, to: null });
     const limitedSessions = sessions.filter((session) => owns(session) && (session.limited?.since || session.limited?.lastPeriod));
     if (limitedSessions.length) {
       const starts = limitedSessions.map((session) => session.limited.lastPeriod?.from ?? session.limited.since).sort(compareInstants);
@@ -1262,11 +1277,12 @@ export function createShadowGraph(options = {}) {
     // whose transcript stopped being read, and the periods their records keep,
     // each reason counted by session and never named.
     const periods = new Map();
+    const sessionGapReasons = [...TRANSCRIPT_GAP_REASONS, RAW_EXPIRED];
     for (const session of sessions) {
       if (!owns(session)) continue;
       const stopped = isPlainObject(session.cursor?.blocked) ? [{ reason: session.cursor.blocked.reason, from: session.cursor.blocked.at, to: null }] : [];
       for (const gap of [...stopped, ...(Array.isArray(session.gaps) ? session.gaps : [])]) {
-        if (!TRANSCRIPT_GAP_REASONS.includes(gap?.reason) || !isValidIsoInstant(gap.from) || !(gap.to === null || isValidIsoInstant(gap.to))) continue;
+        if (!sessionGapReasons.includes(gap?.reason) || !isValidIsoInstant(gap.from) || !(gap.to === null || isValidIsoInstant(gap.to))) continue;
         const period = periods.get(gap.reason) ?? { sessions: new Set(), from: [], to: [] };
         period.sessions.add(session);
         period.from.push(gap.from);
@@ -1274,7 +1290,7 @@ export function createShadowGraph(options = {}) {
         periods.set(gap.reason, period);
       }
     }
-    for (const [reason, period] of [...periods].sort(([left], [right]) => TRANSCRIPT_GAP_REASONS.indexOf(left) - TRANSCRIPT_GAP_REASONS.indexOf(right))) {
+    for (const [reason, period] of [...periods].sort(([left], [right]) => sessionGapReasons.indexOf(left) - sessionGapReasons.indexOf(right))) {
       status.gaps.push({ reason, sessions: period.sessions.size, from: period.from.sort(compareInstants)[0], to: period.to.includes(null) ? null : period.to.sort(compareInstants).at(-1) });
     }
     return status;
@@ -1403,6 +1419,16 @@ export function createShadowGraph(options = {}) {
     // A self-event only checks the project.
     if (input.selfEvent === true || !agrees || cursor?.blocked || file === null) return result;
 
+    // A Stop's transcript copy can arrive after any current EOF or stopMark.
+    // Once its raw expires there is no safe text reconciliation, including for
+    // withheld Stops. Persist the session refusal before reading any bytes;
+    // direct hook capture remains available, but this cursor never resumes.
+    const sessionItems = [...captures.values(), ...withheldCaptures()].filter((item) => item.originId === originId && item.source?.sessionId === sessionId);
+    if (sessionItems.some((item) => item.source.event === 'Stop' && rawExpired(item, at))) {
+      result.blocked = RAW_EXPIRED;
+      return write({ ...cursor, blocked: { reason: RAW_EXPIRED, at } });
+    }
+
     // The file, read only through these: a callback that throws is a read
     // that returned nothing, and whatever needed it does not happen.
     let failed = false;
@@ -1478,16 +1504,16 @@ export function createShadowGraph(options = {}) {
 
     // W's captures count as held, so what they hold is never captured again
     // (PR-37a); nothing here names one.
-    const sessionItems = [...captures.values(), ...withheldCaptures()].filter((item) => item.originId === originId && item.source?.sessionId === sessionId);
     const ingestedUuids = new Set(sessionItems.filter((item) => item.source.event === 'Transcript').map((item) => item.source.hostEventId));
     const heldCalls = new Set(sessionItems.filter((item) => ['PostToolUse', 'PostToolUseFailure'].includes(item.source.event)).map((item) => item.source.toolCallId));
-    const texts = new Map([...(extras.get(CAPTURE_CONTENT) ?? []), ...(deletion.get('held')?.collections[CAPTURE_CONTENT]?.items.map(([, entry]) => entry) ?? [])].map((entry) => [entry.contentRef, entry.text]));
+    const usableRefs = new Set(sessionItems.filter((item) => !rawExpired(item, at)).map((item) => item.contentRef));
+    const texts = new Map([...(extras.get(CAPTURE_CONTENT) ?? []), ...(deletion.get('held')?.collections[CAPTURE_CONTENT]?.items.map(([, entry]) => entry) ?? [])].filter((entry) => usableRefs.has(entry.contentRef)).map((entry) => [entry.contentRef, entry.text]));
     const stopItems = sessionItems.filter((item) => item.source.event === 'Stop');
     const stops = stopItems.filter((item) => texts.has(item.contentRef)).map((item) => ({ seq: item.occurrenceSeq, key: matchKey(texts.get(item.contentRef)) })).sort((left, right) => left.seq - right.seq);
     // A Stop withheld for a credential has no text to match its copy, which
     // may still be arriving: a trailing run waits for it as for any Stop, so
     // the run is judged whole (PR-37b re-review NF-3).
-    const withheldStops = stopItems.filter((item) => item.blockedReason === CREDENTIAL_WITHHELD).map((item) => item.occurrenceSeq);
+    const withheldStops = stopItems.filter((item) => item.blockedReason === CREDENTIAL_WITHHELD && !rawExpired(item, at)).map((item) => item.occurrenceSeq);
     const priorStop = stopItems.filter((item) => item.id !== input.triggerItemId).reduce((top, item) => Math.max(top, item.occurrenceSeq), 0);
     let stopMark = cursor.stopMark;
     // The store's bytes as measured before this hold, plus the event's own
@@ -1654,6 +1680,7 @@ export function createShadowGraph(options = {}) {
     const item = captures.get(input?.id);
     if (!item) throw new Error(`Capture item not found: ${input?.id}`);
     if (isNewerThanWriter(item)) throw new Error('A capture item of a future schema is not moved by this build');
+    if (rawExpired(item)) throw Object.assign(new Error('Capture raw is expired and cannot be used for re-extraction'), { code: 'capture_raw_expired' });
     const move = `${item.state}->${input.to}`;
     const edge = Object.hasOwn(CAPTURE_TRANSITIONS, move) ? CAPTURE_TRANSITIONS[move] : null;
     if (!edge) throw new Error(`Illegal capture transition ${move}`);
@@ -1819,6 +1846,7 @@ export function createShadowGraph(options = {}) {
   // graph holds (K-2).
   function mergeNeedsDeletionSemantics(data) {
     const incoming = data?.[DELETION_VIEW];
+    if (retentionPolicy().length || incoming?.retentionOverrides?.length || hasCaptureRetentionState(data) || hasCaptureRetentionState({ records: [...captures.values(), ...withheldCaptures()] })) return true;
     if (deletion.get('view')?.knowledge || incoming?.knowledge || incoming?.registryApplies) return true;
     if (journal.some((entry) => entry?.type === 'project.purged')) return true;
     const cursors = new Set((extras.get(CAPTURE_SESSIONS) ?? []).filter((session) => isPlainObject(session?.cursor)).map(byId));
@@ -5196,7 +5224,7 @@ export function createShadowGraph(options = {}) {
   // to is refused: this build cannot merge it. A load into an empty graph, and
   // replaceData's own import, are not merges.
   function importData(data = []) {
-    if (holdsData() && mergeNeedsDeletionSemantics(data)) {
+    if ((holdsData() || retentionPolicy().length) && mergeNeedsDeletionSemantics(data)) {
       throw deletionError(PURGE_AWARE_RESTORE_UNSUPPORTED, 'Refusing to import: deletion records apply to this merge, and this build cannot honour them in a merge; a later ShadowGraph build is needed');
     }
     return importWithView(data, data?.[DELETION_VIEW]);

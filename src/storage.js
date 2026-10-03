@@ -4,7 +4,7 @@ import { nextRevision, assertRevision, createDestinationFence, restoreLock } fro
 import { SCHEMA_VERSION } from './shadowgraph.js';
 import { refusePublicExport } from './internal/collections.js';
 import { DELETION_FILE_DESTINATION_REFUSED, DELETION_INTENT, DELETION_VIEW, attachDeletionView, canonicalPath, commitFile, deletionError, readUnfenced, refuseDeletionFileDestination, registerStoreIo, storeIo } from './internal/deletion-knowledge.js';
-import { RestorePendingError, activation, asRestoreRefusal, completeRestore, freshPurgeIntents, purgeRecorded, recordPurges, resolvePendingRestore, restoreContext, restoreHook, saveResolving, settleAfterFailure } from './internal/restore-wrapper.js';
+import { RestorePendingError, activation, asRestoreRefusal, completeRestore, freshPurgeIntents, purgeRecorded, recordPurges, resolvePendingRestore, restoreContext, restoreHook, retentionRestoreGuard, saveResolving, settleAfterFailure } from './internal/restore-wrapper.js';
 
 // Journal lives INSIDE the same payload as the state and is written by the same
 // atomic temp-write + rename. See journal-contract.md §atomicity: state and
@@ -212,7 +212,7 @@ export async function createStorage(options = {}) {
     const restore = store.restore;
     const io = storeIo(store);
     store.restore = (source, restoreOptions = {}) => restoreLock(options.file, options).run(async () => {
-      await asRestoreRefusal(resolvePendingRestore(io, { verifier: restoreOptions.verifier }));
+      await asRestoreRefusal(resolvePendingRestore(io, { verifier: restoreOptions.verifier, beforeResolve: retentionRestoreGuard(source, options.file, 'sqlite') }));
       const ctx = restoreContext({
         source, destination: options.file, env: options.env, verifier: restoreOptions.verifier, backend: 'sqlite',
         instant: restoreOptions.now ?? new Date().toISOString(), read: () => io.run(({ read }) => read(), { held: true })

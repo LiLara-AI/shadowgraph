@@ -254,7 +254,7 @@ for (const [backend, options] of BACKENDS) {
     const ledger = { version: 1, tombstones: [
       tombstone({ kind: 'project', purgedProject: 'z', tokens: null }), tombstone({ kind: 'origin', purgedOrigin: 'o', mode: 'hard', tokens: [] }),
       tombstone({ kind: 'mystery', mode: 'unheard', moveIn: 'perhaps', tokens: [f.tokens.hidden] })
-    ], quarantine: [{ token: f.tokens.fact }], retentionOverrides: [{ anything: true }], laterBuildState: { carried: 4 } };
+    ], quarantine: [{ token: f.tokens.fact }], futureRetentionControls: [{ anything: true }], laterBuildState: { carried: 4 } };
     const state = await storeOf(t, backend, f.payload, ledger);
     const graph = await graphOf(state);
     const live = privilegedLiveSnapshot(graph);
@@ -639,7 +639,7 @@ const TRIGGERS = {
   })
 };
 const NON_TRIGGERS = {
-  'D ledger with retention overrides and later members only': ({ destination }) => writeFile(`${destination.file}.control.json`, JSON.stringify({ version: 1, retentionOverrides: [{ days: 30 }], laterBuildState: { carried: true } })),
+  'D ledger with opaque future controls and later members only': ({ destination }) => writeFile(`${destination.file}.control.json`, JSON.stringify({ version: 1, futureRetentionControls: [{ days: 30 }], laterBuildState: { carried: true } })),
   'B sidecar with its version only': ({ source }) => writeFile(`${source.file}.control.json`, JSON.stringify({ version: 1 })),
   'registry tombstone B disproves': async ({ env, source }) => {
     const payload = await load(source);

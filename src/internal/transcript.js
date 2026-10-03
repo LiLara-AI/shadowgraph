@@ -42,7 +42,7 @@ const count = (value) => Number.isSafeInteger(value) && value >= 0;
 export const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
 // Why a session's transcript stopped being read for good, and when.
-const BLOCK_REASONS = Object.freeze(['transcript_unrecognised', 'session_left_project']);
+const BLOCK_REASONS = Object.freeze(['transcript_unrecognised', 'session_left_project', 'raw_expired']);
 export const cursorBlock = (blocked) => isObject(blocked) && BLOCK_REASONS.includes(blocked.reason) && isValidIsoInstant(blocked.at);
 // Whether a cursor has the shape this build writes (PR-36 design §4). One a
 // merge or a hand edit left otherwise is never read: its position could point

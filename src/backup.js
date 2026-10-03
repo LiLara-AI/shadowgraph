@@ -5,7 +5,7 @@ import { guardAuthorityRestore, validateRestorePayload, validateRestoreSnapshot 
 import { mergeAuthorityRestore } from './authority-restore.js';
 import { createJsonFileStore } from './storage.js';
 import { backupSidecar, refuseDeletionFileDestination, storeIo, writeSidecar } from './internal/deletion-knowledge.js';
-import { activation, asRestoreRefusal, completeRestore, resolvePendingRestore, restoreContext, restoreHook, settleAfterFailure } from './internal/restore-wrapper.js';
+import { activation, asRestoreRefusal, completeRestore, resolvePendingRestore, restoreContext, restoreHook, retentionRestoreGuard, settleAfterFailure } from './internal/restore-wrapper.js';
 
 // A backup carries the store's deletion records beside it (PR-37a): the
 // payload is read, then the records; their copy lands first, then the payload.
@@ -38,7 +38,7 @@ export async function backupFile(source, destination, options = {}) {
 export async function restoreFile(source, destination, options = {}) {
   const io = storeIo(createJsonFileStore(destination, options));
   return restoreLock(destination, options).run(() => createDestinationFence(destination, options).run(async () => {
-    await asRestoreRefusal(resolvePendingRestore(io, { held: true, verifier: options.verifier }));
+    await asRestoreRefusal(resolvePendingRestore(io, { held: true, verifier: options.verifier, beforeResolve: retentionRestoreGuard(source, destination) }));
     const ctx = restoreContext({
       source, destination, env: options.env, verifier: options.verifier,
       instant: options.now ?? new Date().toISOString(), read: () => io.run(({ read }) => read(), { held: true })

@@ -17,6 +17,7 @@ import { mintOriginId } from '../src/scope.js';
 import { privilegedBindProject, privilegedRecordCapture, privilegedRecordSelfEvent, privilegedRecordTranscript, privilegedSnapshot, privilegedValidate } from '../src/internal/snapshot.js';
 import { TRANSCRIPT_GAP_REASONS, TRANSCRIPT_LINE_BYTES, lastLineEnd, transcriptEntry, transcriptLines } from '../src/internal/transcript.js';
 import { DELIVERY_FRAME, deliveryEndLine } from '../src/internal/delivery-marker.js';
+import { attachLedgerView } from '../src/internal/deletion-knowledge.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const ACTIVATED = '2026-01-01T00:00:00.000Z';
@@ -65,6 +66,49 @@ function kernel() {
   const transcribed = () => items('Transcript').map(textOf);
   return { graph, step, read, hook, stop, snapshot, session, items, textOf, transcribed };
 }
+
+for (const withheld of [false, true]) for (const arrival of ['complete', 'partial', 'delayed', 'retired']) test(`retention reader: expired Stop permanently blocks transcript reconciliation (${withheld ? 'quarantined' : 'live'}, ${arrival})`, () => {
+  const k = kernel();
+  const file = transcript();
+  k.hook('UserPromptSubmit', { text: 'start', source: { hostEventId: 'prompt' } });
+  k.step(file);
+  const stop = k.stop('Repeated material.');
+  const payload = k.snapshot();
+  const expire = (value) => {
+    if (value === null || typeof value !== 'object') return;
+    if (value.kind === 'capture' && value.id === stop.id) value.expiresAt = '2026-01-31T00:00:00.000Z';
+    for (const child of Object.values(value)) expire(child);
+  };
+  expire(payload);
+  if (arrival === 'retired') payload.captureSessions[0].cursor.stopMark = stop.occurrenceSeq;
+  k.graph.replaceData(withheld ? attachLedgerView(payload, { quarantine: [{ token: stop.erasureToken }] }) : payload);
+  const delayed = say('a1', 'Repeated material.');
+  file.append(ask('u1', 'new turn'));
+  if (arrival === 'complete' || arrival === 'retired') file.append(delayed);
+  if (arrival === 'partial') file.append(delayed.slice(0, -1));
+  const reads = file.reads;
+  const result = k.read(file);
+  assert.deepEqual([result.ingested, result.reconciled, result.blocked], [0, 0, 'raw_expired']);
+  assert.equal(k.session().cursor.blocked.reason, 'raw_expired');
+  assert.equal(file.reads, reads, 'refusal consumes no transcript bytes');
+  assert.equal(k.items('Transcript').length, 0, 'expired raw cannot return under a fresh transcript id');
+  const completeness = k.graph.search('', { project: 'alpha' }).completeness;
+  const gap = completeness.capture.gaps.find((entry) => entry.reason === 'raw_expired' && entry.sessions === 1);
+  assert.deepEqual(gap, { reason: 'raw_expired', sessions: 1, from: k.session().cursor.blocked.at, to: null }, 'session refusal is disclosed without held item identity');
+  assert.match(JSON.stringify(completeness), /Transcript capture remains blocked/);
+  assert.equal(k.graph.search('', { project: 'beta' }).completeness.capture.gaps.some((entry) => entry.reason === 'raw_expired'), false);
+  if (arrival === 'partial') file.append('\n');
+  if (arrival === 'delayed') file.append(delayed);
+  file.append(`${ask('u2', 'another turn')}${say('a2', 'Repeated material.')}`);
+  k.graph.replaceData(k.snapshot());
+  const fresh = k.read(file);
+  assert.equal(fresh.ingested, 0, 'delayed bytes cannot escape a persisted refusal');
+  assert.equal(file.reads, reads);
+  assert.equal(k.items('Transcript').length, 0);
+  const direct = k.stop('Fresh direct hook material.');
+  assert.equal(k.textOf(direct), 'Fresh direct hook material.', 'direct hook capture remains available');
+  if (!withheld) assert.equal(k.textOf(stop), 'Repeated material.', 'reader preserves persistence bytes for the later lifecycle sweep');
+});
 
 test('the reader recognises its hypothesis and nothing more, and fails closed on anything else', () => {
   assert.deepEqual(transcriptEntry(say('a1', 'one', '  ', 'two').trim()), { type: 'assistant', uuid: 'a1', text: 'one\n\ntwo', toolUses: [], toolResults: [] }, 'text blocks joined by a blank line; a blank block is no text');

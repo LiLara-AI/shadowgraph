@@ -24,12 +24,14 @@
 // INTERNAL: package.json "exports" does not map this file.
 import { lstat, readFile, stat } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { createShadowGraph } from '../shadowgraph.js';
 import { HARD_GAP_EVIDENCE_TYPES } from '../journal.js';
 import { isValidIsoInstant } from '../fact-validity.js';
 import { createDestinationFence, currentRevision, fenceLockPath, nextRevisionAfter, restoreLock } from '../revision-store.js';
 import { requiresLegacyPurgeMigration, validateRestorePayload } from '../restore-validation.js';
 import { repositoryOf } from './owner-files.js';
+import { hasCaptureRetentionState } from './capture-retention.js';
 import { privilegedCompletePurge, privilegedReapplyDeletion, privilegedSnapshot } from './snapshot.js';
 import {
   CONTROL_LEDGER_MALFORMED, CONTROL_LEDGER_NEWER_VERSION, DELETION_FILE_DESTINATION_REFUSED, DELETION_INTENT, DELETION_PENDING_UNSUPPORTED, PURGE_AWARE_RESTORE_UNSUPPORTED, attachLedgerView, canonical,
@@ -66,6 +68,47 @@ function refusal(message, cause) {
 const UNREADABLE_DESTINATION = 'the destination cannot be read, so deletion records it may hold cannot be ruled out; restore into a fresh path instead';
 const UNREADABLE_KNOWLEDGE = 'the deletion records that reach it cannot be read, or were written by a newer ShadowGraph build; a later ShadowGraph build is needed';
 const PENDING_DELETION = 'the store has a deletion this build cannot complete';
+const RETENTION_UNSUPPORTED = 'capture retention requires a later lifecycle build to reconcile it safely; this reader does not restore it';
+
+// A pending operation must not be completed as a side effect of refusing an
+// unsupported retention-bearing restore. This guard runs inside the resolver's
+// destination fence. The normal pre-step checks again before the primitive.
+export function retentionRestoreGuard(source, destination, backend = 'json') {
+  return async ({ read }) => {
+    const mine = await readLedger(destination);
+    if (!mine?.pending.length) return;
+    const carried = await readLedger(source);
+    if (mine.retentionOverrides.length) throw pendingUnsupported();
+    if (carried?.retentionOverrides.length) throw refusal(RETENTION_UNSUPPORTED);
+    let d;
+    try { d = await read(); } catch (error) { throw refusal(UNREADABLE_DESTINATION, error); }
+    if (hasCaptureRetentionState(d)) throw pendingUnsupported();
+    let b;
+    try {
+      if (backend === 'sqlite') {
+        const { DatabaseSync } = await import('node:sqlite');
+        const { exportSqlitePayload } = await import('../sqlite-storage.js');
+        // Immutable reads cannot see committed WAL pages. Opening normally can
+        // create sidecars, so require an already checkpointed source here.
+        const checkpointed = async () => {
+          for (const suffix of ['-wal', '-journal', '-shm']) {
+            const present = await lstat(`${source}${suffix}`).then(() => true, (error) => { if (error.code === 'ENOENT') return false; throw error; });
+            if (present) throw refusal('a pending operation requires a checkpointed SQLite restore source; use a standalone backup snapshot');
+          }
+        };
+        await checkpointed();
+        const db = new DatabaseSync(new URL(`${pathToFileURL(resolve(source)).href}?immutable=1`), { readOnly: true });
+        try { b = exportSqlitePayload(db, { tolerant: true }); }
+        finally { db.close(); }
+        await checkpointed();
+      } else b = JSON.parse(await readFile(source, 'utf8'));
+    } catch (error) {
+      if (error?.code === PURGE_AWARE_RESTORE_UNSUPPORTED) throw error;
+      throw refusal('the source cannot be checked for retention before completing the pending operation', error);
+    }
+    if (hasCaptureRetentionState(b)) throw refusal(RETENTION_UNSUPPORTED);
+  };
+}
 
 // A destination named through an alias of its file's own name -- a symbolic
 // link to the file, or its 8.3 name on win32 -- refuses where deletion records
@@ -293,6 +336,7 @@ async function preStep(ctx, given) {
   // carries one (C3), an empty list being none (review finding 15).
   if (mine.ledger?.pending.length) throw refusal(PENDING_DELETION);
   if (carried.ledger?.pending.length) throw refusal('the backup\'s deletion records hold a pending record, which a backup never carries');
+  if (mine.ledger?.retentionOverrides.length || carried.ledger?.retentionOverrides.length || hasCaptureRetentionState(d) || hasCaptureRetentionState(b)) throw refusal(RETENTION_UNSUPPORTED);
   if (!carried.ledger && (await linkCount(ctx.source)) > 1) throw refusal('the backup has another hard link and no deletion records beside its name, so records beside the other name cannot be ruled out');
   if (holdsCursor(d)) throw refusal('the destination holds a transcript cursor, which a restore cannot carry yet; a later ShadowGraph build is needed');
   const knowledge = mergeKnowledge({ d, b, mine: mine.ledger, carried: carried.ledger, registry, instant: ctx.instant });
@@ -445,8 +489,10 @@ async function resolveRecord({ read, commit, checkPurge }, file, env, { verifier
   const [record] = ledger.pending;
   if (ledger.pending.length === 1 && purgeRecordValid(record, ledger.tombstones)) return purges ? completePurges({ read, commit, checkPurge }, file, env, ledger, record, { verifier, lock }) : null;
   if (ledger.pending.length > 1 || !restoreRecordValid(record, ledger.tombstones)) throw pendingUnsupported();
+  if (ledger.retentionOverrides.length) throw pendingUnsupported();
   let current;
   try { current = await read(); } catch { throw restoreUnresolvable(); }
+  if (hasCaptureRetentionState(current)) throw pendingUnsupported();
   const state = restoreBinding(record, current, { absent: current === null });
   if (state === 'unknown') throw restoreUnresolvable();
   if (state === 'pre') { await discard(file, env); return false; }
@@ -471,7 +517,7 @@ export async function resolvePendingRestore(io, { held = false, verifier, purges
     // A destructive save can require a backend-specific refusal before even
     // settling a restore record. Recheck under the fence after waiting for
     // the restore lock; the first save attempt no longer holds that fence.
-    await beforeResolve?.();
+    await beforeResolve?.(store);
     return resolveRecord(store, io.file, io.env, { verifier, instant: new Date().toISOString(), purges, lock: io.lock });
   }, { held });
 }

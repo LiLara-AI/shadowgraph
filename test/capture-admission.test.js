@@ -468,7 +468,10 @@ test('the delivery processing line carries a bound project\'s pending count, and
   await mkdir(join(cwd, '.shadowgraph'), { recursive: true });
   await writeFile(join(cwd, '.shadowgraph', 'project-binding.json'), JSON.stringify({ version: 1, type: 'worktree', path: resolve(cwd), project: 'alpha', confirmed: true }));
   const file = join(root, 'store.json');
-  const graph = createShadowGraph({ now });
+  // This child CLI uses the real clock. Its pending fixture must be fresh,
+  // rather than already past OD-2's window before delivery starts.
+  const fixtureNow = new Date().toISOString();
+  const graph = createShadowGraph({ now: () => fixtureNow });
   graph.addDecision({ project: 'alpha', title: 'Cache', chosen: 'redis' });
   capture(graph);
   capture(graph, { source: { sessionId: 'session-2' } });
