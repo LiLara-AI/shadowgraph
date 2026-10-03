@@ -951,6 +951,14 @@ test('PR-37a isolation: no test resolves the deletion registry under the real ho
 
 for (const [backend, options] of BACKENDS) test(`PR-37a registry at load ${backend}: a registry tombstone that applies is noted for the merge refusal only, and an unreadable registry never fails a load`, options, async (t) => {
   const f = fixture();
+  // Model PR-37a's retention-neutral shape. A newly stamped deadline now
+  // independently refuses merge, which this registry-only case does not test.
+  const legacy = (value) => {
+    if (!value || typeof value !== 'object') return;
+    if (value.kind === 'capture') value.expiresAt = null;
+    for (const child of Object.values(value)) legacy(child);
+  };
+  legacy(f.payload);
   const state = await storeOf(t, backend, f.payload);
   const env = { SHADOWGRAPH_HOME: join(state.dir, 'home') };
   await mkdir(env.SHADOWGRAPH_HOME, { recursive: true });

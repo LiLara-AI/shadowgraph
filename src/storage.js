@@ -192,6 +192,7 @@ export function createJsonFileStore(filePath, options = {}) {
 
 export async function createStorage(options = {}) {
   if ((options.type ?? process.env.SHADOWGRAPH_STORAGE ?? 'json') === 'sqlite') {
+    const freshlyCreated = await stat(options.file).then(() => false, (error) => { if (error.code === 'ENOENT') return true; throw error; });
     const { createSqliteStore } = await import('./sqlite-storage.js');
     const store = await createSqliteStore(options.file, {
       restoreValidator: options.restoreValidator,
@@ -214,7 +215,7 @@ export async function createStorage(options = {}) {
     store.restore = (source, restoreOptions = {}) => restoreLock(options.file, options).run(async () => {
       await asRestoreRefusal(resolvePendingRestore(io, { verifier: restoreOptions.verifier, beforeResolve: retentionRestoreGuard(source, options.file, 'sqlite') }));
       const ctx = restoreContext({
-        source, destination: options.file, env: options.env, verifier: restoreOptions.verifier, backend: 'sqlite',
+        source, destination: options.file, env: options.env, verifier: restoreOptions.verifier, backend: 'sqlite', freshlyCreated,
         instant: restoreOptions.now ?? new Date().toISOString(), read: () => io.run(({ read }) => read(), { held: true })
       });
       const callerValidate = restoreOptions.validate === options.restoreValidator ? undefined : restoreOptions.validate;

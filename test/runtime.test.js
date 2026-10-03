@@ -62,7 +62,9 @@ test('the pinned runtime is the commit\'s packed build, named by commit, tree an
   assert.equal(activated.code, 0, activated.stderr);
   // Whether it can capture is whether its build ships the capture hook template (FND-P6-10).
   const shipsCapture = (() => { try { git('cat-file', '-e', `${result.commit}:integrations/claude-code.capture-hooks.json`); return true; } catch { return false; } })();
-  assert.deepEqual(JSON.parse(activated.stdout).record.capabilities.delivery.runtime, { path: result.path, commit: result.commit, tree: result.tree, tarballSha256: result.tarballSha256, captures: shipsCapture });
+  const retentionReader = existsSync(join(result.path, 'src', 'internal', 'capture-retention.js'));
+  const captureLifecycle = retentionReader && existsSync(join(result.path, 'src', 'capture-lifecycle-capability.json'));
+  assert.deepEqual(JSON.parse(activated.stdout).record.capabilities.delivery.runtime, { path: result.path, commit: result.commit, tree: result.tree, tarballSha256: result.tarballSha256, captures: shipsCapture, retentionReader, captureLifecycle });
   assert.deepEqual(JSON.parse((await cli(home, ['uninstall-hooks', '--settings', settings])).stdout).removed, 2);
   // With hooks that run another command, activation naming the runtime is refused.
   assert.equal((await cli(home, ['install-hooks', '--settings', settings])).code, 0);

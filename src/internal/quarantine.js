@@ -11,7 +11,7 @@ import { createShadowGraph } from '../shadowgraph.js';
 import { isValidIsoInstant } from '../fact-validity.js';
 import { restoreLock } from '../revision-store.js';
 import { privilegedQuarantined, privilegedReapplyDeletion, privilegedSnapshot } from './snapshot.js';
-import { attachDeletionView, readLedger, storeIo, writeLedger } from './deletion-knowledge.js';
+import { attachDeletionView, pendingUnsupported, readLedger, storeIo, writeLedger } from './deletion-knowledge.js';
 import { resolvePendingRestore } from './restore-wrapper.js';
 
 const SUBCOMMANDS = ['list', 'release', 'purge'];
@@ -53,13 +53,14 @@ function countsOf(entries) {
 // first (§8.4), the payload read and its view built -- fenced, so no bracket
 // -- and a graph imported with it. `store.load` and `store.save` are never
 // called inside: both take the fence, which cannot be re-entered. A purge
-// record is completed only by a verb that writes (`complete`): a listing, or a
-// selection whose confirmation may yet be declined, leaves it as it is, and
-// its view holds the purged project whole (PR-37d design §4.2, V-19).
+// record is completed only by a confirmed verb that writes (`complete`).
+// Listing and pre-confirmation selection refuse every pending record without
+// resolving even a restore's pre-state (FND-P6-20).
 async function underLocks(store, now, act, { complete }) {
   const io = storeIo(store);
   return restoreLock(io.file).run(() => io.run(async (tools) => {
-    await resolvePendingRestore(io, { held: true, purges: complete });
+    if (complete) await resolvePendingRestore(io, { held: true, purges: true });
+    else if ((await readLedger(io.file))?.pending.length) throw pendingUnsupported();
     const payload = await tools.read();
     const graph = createShadowGraph(typeof now === 'function' ? { now } : {});
     if (payload !== null) graph.importData(await attachDeletionView(payload, io.file, { env: io.env }));

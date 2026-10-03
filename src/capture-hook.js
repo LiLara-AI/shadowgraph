@@ -19,7 +19,7 @@ import { outcomeFromExitStatus } from './internal/outcome.js';
 import { canonicalPath as fencePath, registryFile } from './internal/deletion-knowledge.js';
 import { canonicalPath, repositoryOf as storeRepository } from './internal/owner-files.js';
 import { KEYED_NAMES, KEYED_VALUES, REDACTED, isCredentialName } from './internal/redaction.js';
-import { privilegedRecordCapture, privilegedRecordSelfEvent, privilegedRecordTranscript, privilegedSnapshot } from './internal/snapshot.js';
+import { privilegedExpireCapture, privilegedRecordCapture, privilegedRecordSelfEvent, privilegedRecordTranscript, privilegedSnapshot } from './internal/snapshot.js';
 import { TRANSCRIPT_TRIGGERS } from './internal/transcript.js';
 import { usableOriginId } from './scope.js';
 
@@ -254,7 +254,7 @@ export async function openTranscript(path) {
 // else. A host re-delivery of an item already held writes nothing new. `post`
 // tells the thread keeping the deadline when the store is entered and left.
 // Resolves to what happened, for tests; `now` and `registry` are test seams.
-export async function runCapture({ capture, input, deadline, record = null, registry = registryFile(), home = homedir(), cwd = process.cwd(), post = () => {}, now = Date.now }) {
+export async function runCapture({ capture, input, deadline, record = null, registry = registryFile(), home = homedir(), cwd = process.cwd(), post = () => {}, now = Date.now, env = process.env }) {
   let event;
   try { event = observedEvent(JSON.parse(input.charCodeAt(0) === 0xfeff ? input.slice(1) : input)); } catch { return 'unreadable'; }
   if (event === null) return 'not_captured';
@@ -278,7 +278,7 @@ export async function runCapture({ capture, input, deadline, record = null, regi
   post('enter');
   try {
     // Owner-only, whatever mode the store had (FND-P6-11; PR-37b R3).
-    store = await createStorage({ type: capture.store.storage, file, lockTimeoutMs, staleLockMs: CAPTURE_STALE_LOCK_MS, mode: 0o600 });
+    store = await createStorage({ type: capture.store.storage, file, lockTimeoutMs, staleLockMs: CAPTURE_STALE_LOCK_MS, mode: 0o600, env });
     await store.update(async (current) => {
       const entered = now();
       // The commit's cost is estimated from the work before the transcript is
@@ -294,6 +294,7 @@ export async function runCapture({ capture, input, deadline, record = null, regi
       const held = new Set((current.records ?? []).filter((record) => record?.kind === 'capture').map((record) => record.id));
       const graph = createShadowGraph({ now: () => new Date(now()).toISOString() });
       graph.importData(current);
+      let changed = privilegedExpireCapture(graph, { mayContinue }).changed;
       const bound = accessContext(graph, {}, 'cli', workspace, { confirmedByStore: true }).binding?.project ?? null;
       const project = bound !== null && covered(capture.coverage, bound) ? bound : null;
       const context = { ...captureArtefacts({ storeFile: file, runtimeDirectory: capture.runtime?.path ?? null, activationFile: record, markerFiles, registryFile: registryCanonical }), home, mcpServerNames: capture.mcpServerNames ?? ['shadowgraph'], correlationTokens: [], workerSessionIds: [] };
@@ -312,9 +313,8 @@ export async function runCapture({ capture, input, deadline, record = null, regi
           });
         } catch { return null; }
       };
-      let changed = false;
       if (project === null) {
-        changed = Boolean(cursor({})?.changed);
+        changed = Boolean(cursor({})?.changed) || changed;
         if (!changed) return skip(bound === null ? 'project_unresolved' : 'not_covered');
         outcome = 'transcript_stopped';
       } else {
@@ -323,7 +323,7 @@ export async function runCapture({ capture, input, deadline, record = null, regi
         if (classified.selfEvent) {
           // A session deletion records withhold is never written to (PR-37a).
           const counted = privilegedRecordSelfEvent(graph, { project, originId: capture.originId, signal: classified.signal, source });
-          changed = Boolean(cursor({ selfEvent: true })?.changed) || !counted?.refused;
+          changed = Boolean(cursor({ selfEvent: true })?.changed) || !counted?.refused || changed;
           outcome = 'self_event';
           if (!changed) return skip(outcome);
         } else {
@@ -337,7 +337,7 @@ export async function runCapture({ capture, input, deadline, record = null, regi
               admission: { limits: admissionLimits(capture.limits), storeBytes }
             });
             if (result.refused) {
-              changed = result.changed;
+              changed = result.changed || changed;
               outcome = 'refused';
             // A host re-delivery returns the item the store already held.
             } else if (held.has(result.id)) outcome = 'already_held';
@@ -360,6 +360,59 @@ export async function runCapture({ capture, input, deadline, record = null, regi
     transcript?.close?.();
     post('leave');
   }
+}
+
+// Shared by the CLI lifecycle verbs. The exact activation store is the only
+// destination, active or deactivated; environment/manual-store overrides do
+// not participate. Callers retain the record bytes for confirmation races.
+export async function captureStoreForLifecycle(env = process.env) {
+  const refused = (code) => { throw Object.assign(new Error(`Capture cleanup refused (${code})`), { code }); };
+  const record = activationFile(env);
+  if (!record || !(await lstat(record).catch(() => null))?.isFile()) refused('capture_cleanup_record_unavailable');
+  let capture, recordText;
+  try { recordText = await readFile(record, 'utf8'); capture = JSON.parse(recordText)?.capabilities?.capture; }
+  catch { refused('capture_cleanup_record_unavailable'); }
+  const file = capture?.store?.file;
+  const type = capture?.store?.storage;
+  if (!['active', 'deactivated'].includes(capture?.state) || typeof file !== 'string' || !isAbsolute(file) || !['json', 'sqlite'].includes(type)) refused('capture_cleanup_store_unavailable');
+  const repository = await storeRepository(file);
+  if (repository) throw Object.assign(new Error(`Capture lifecycle refused: ${file} lies in ${repository}; plan section 21.3 prohibits private capture inside a repository (store_inside_repository)`), { code: 'store_inside_repository' });
+  // In particular, opening SQLite must not create a new empty store merely
+  // to discover that the activated one no longer exists.
+  if (!(await stat(file).catch(() => null))?.isFile()) refused('capture_cleanup_store_unavailable');
+  return { file, type, record, recordText };
+}
+
+// Explicit expiry and post-deactivation cleanup have the hook's write
+// boundary: update refuses pending purge/restore before the callback, and
+// its commit cannot write deletion knowledge.
+export async function expireCaptureStore({ env = process.env, now = Date.now, timeoutMs = CAPTURE_DEADLINE_MS, deadline = now() + timeoutMs, endLimits = false } = {}) {
+  const deferred = () => ({ status: 'deferred', reason: 'out_of_time', changed: false, expired: 0, keptCited: 0, sessionsRemoved: 0 });
+  const refused = (code) => { throw Object.assign(new Error(`Capture cleanup refused (${code})`), { code }); };
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || !Number.isFinite(deadline)) refused('capture_cleanup_invalid_deadline');
+  if (now() + COMMIT_MARGIN_MS >= deadline) return deferred();
+  const { file, type } = await captureStoreForLifecycle(env);
+  const lockTimeoutMs = deadline - now() - COMMIT_MARGIN_MS;
+  if (lockTimeoutMs <= 0) return deferred();
+  let store;
+  let result = deferred();
+  try {
+    store = await createStorage({ type, file, env, lockTimeoutMs, staleLockMs: CAPTURE_STALE_LOCK_MS, mode: 0o600 });
+    await store.update((current) => {
+      const entered = now();
+      const commitCost = () => Math.max(COMMIT_MARGIN_MS, 2 * (now() - entered));
+      const mayContinue = () => now() + commitCost() + COMMIT_MARGIN_MS <= deadline;
+      if (!mayContinue()) return null;
+      if (!isObject(current) || current.schemaVersion > SCHEMA_VERSION) refused('capture_cleanup_newer_schema');
+      const graph = createShadowGraph({ now: () => new Date(now()).toISOString() });
+      graph.importData(current);
+      const swept = privilegedExpireCapture(graph, { mayContinue, endLimits });
+      if (now() + commitCost() >= deadline) return null;
+      result = { status: swept.more ? 'partial' : 'complete', ...swept };
+      return swept.changed ? privilegedSnapshot(graph) : null;
+    });
+    return result;
+  } finally { store?.close?.(); }
 }
 
 // The deadline, kept on a thread the capture work never blocks (design review

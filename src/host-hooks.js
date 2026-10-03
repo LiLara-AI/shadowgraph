@@ -81,9 +81,10 @@ export const defaultSettingsPath = () => join(homedir(), '.claude', 'settings.js
 // digest, and the tarball itself. Checked again here: the tarball against its
 // digest, and every file the hook runs against the tarball, byte for byte,
 // with none missing and none added. Its path names ShadowGraph, so the handler
-// that runs it is recognised as ShadowGraph's. It can capture when its build
-// ships the capture hook template, and with it the verb and the capture reader
-// (FND-P6-10): an earlier build refuses a store holding capture.
+// that runs it is recognised as ShadowGraph's. The template identifies the
+// original capture reader; the retention module identifies the later semantic
+// reader floor. The packed lifecycle declaration gates new capture activation.
+// These are build capabilities, not substitutes for the gate's tested commit.
 export async function pinnedRuntime(directory) {
   const path = await canonicalPath(directory);
   const refused = () => new Error(`runtime_not_verified (${path})`);
@@ -102,7 +103,11 @@ export async function pinnedRuntime(directory) {
     .filter((name) => name !== 'package.tgz' && name !== 'runtime.json');
   if (present.length !== packed.size || present.some((name) => !packed.has(name))) throw refused();
   for (const [name, body] of packed) if (!(await readFile(join(path, name))).equals(body)) throw refused();
-  return { path, commit: manifest.commit, tree: manifest.tree, tarballSha256: digest, captures: packed.has('integrations/claude-code.capture-hooks.json') };
+  const retentionReader = packed.has('src/internal/capture-retention.js');
+  let lifecycle;
+  try { lifecycle = JSON.parse(packed.get('src/capture-lifecycle-capability.json')?.toString('utf8') ?? 'null'); } catch { throw refused(); }
+  const captureLifecycle = retentionReader && lifecycle?.version === 1;
+  return { path, commit: manifest.commit, tree: manifest.tree, tarballSha256: digest, captures: packed.has('integrations/claude-code.capture-hooks.json'), retentionReader, captureLifecycle };
 }
 
 // The command a hook of one kind runs for a pinned runtime: this Node binary

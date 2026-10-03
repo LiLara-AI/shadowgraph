@@ -168,7 +168,10 @@ export function restoreRecordValid(record, ledgerTombstones) {
   if (!within(add, ['tombstones', 'quarantine', 'tokensStripped']) || !Array.isArray(add.tombstones) || !Array.isArray(add.quarantine)) return false;
   if (add.tombstones.some((tombstone) => tombstoneIssue(tombstone) !== null) || add.quarantine.some((entry) => !isObject(entry) || !named(entry.token))) return false;
   if ('tokensStripped' in add && !isObject(add.tokensStripped)) return false;
-  if (!within(inputs, ['live', 'descent', 'descentMode', 'overlap', 'postdated'])) return false;
+  if (!within(inputs, ['live', 'descent', 'descentMode', 'overlap', 'postdated', 'retention'])) return false;
+  if (inputs.retention !== undefined && (!within(inputs.retention, ['overrides', 'freshDestination', 'at'])
+    || !Array.isArray(inputs.retention.overrides) || retentionOverridesIssue(inputs.retention.overrides)
+    || typeof inputs.retention.freshDestination !== 'boolean' || !isValidIsoInstant(inputs.retention.at))) return false;
   if (!Array.isArray(inputs.live) || !inputs.live.every((id) => typeof id === 'string')) return false;
   if (typeof inputs.descent !== 'boolean' || !['logical', 'hard', null].includes(inputs.descentMode)) return false;
   if (!Array.isArray(inputs.overlap) || !inputs.overlap.every((entry) => within(entry, ['id', 'token']) && typeof entry.id === 'string' && (entry.token === null || named(entry.token)))) return false;
@@ -197,8 +200,20 @@ export function purgeRecordValid(record, ledgerTombstones) {
   return record.purges.every((purge) => recordedBy(purge, ledgerTombstones));
 }
 
+export const itemRecordedBy = (item, tombstones) => tombstones.some((tombstone) => tombstone.kind === 'item' && tombstone.mode === 'logical'
+  && tombstone.at === item.marker.at && tombstone.seq === item.marker.seq && tombstone.moveIn === 'none'
+  && Array.isArray(tombstone.tokens) && tombstone.tokens.length === 1 && tombstone.tokens[0] === item.token);
+
+export function captureItemRecordValid(record, tombstones) {
+  if (!within(record, ['kind', 'items']) || record.kind !== 'capture_item' || !Array.isArray(record.items) || !record.items.length) return false;
+  if (!record.items.every((item) => within(item, ['id', 'token', 'marker']) && named(item.id) && named(item.token) && markerValid(item.marker))) return false;
+  if (['id', 'token'].some((name) => new Set(record.items.map((item) => item[name])).size !== record.items.length)
+    || new Set(record.items.map((item) => item.marker.id)).size !== record.items.length) return false;
+  return record.items.every((item) => itemRecordedBy(item, tombstones));
+}
+
 // A record of either kind this build writes and resolves (PR-37d design §3.5).
-export const pendingRecordValid = (record, ledgerTombstones) => restoreRecordValid(record, ledgerTombstones) || purgeRecordValid(record, ledgerTombstones);
+export const pendingRecordValid = (record, ledgerTombstones) => restoreRecordValid(record, ledgerTombstones) || purgeRecordValid(record, ledgerTombstones) || captureItemRecordValid(record, ledgerTombstones);
 
 async function readKnowledge(file, { ledger }) {
   let text;
@@ -411,15 +426,21 @@ function viewFor(payload, ledger, { pending, absent }) {
   if (!ledger?.pending.length) return viewOf(ledger);
   const [record] = ledger.pending;
   if (pending === 'refuse' || ledger.pending.length > 1) throw pendingUnsupported();
+  // Item deletion is completed by an ordinary write only. Its provisional
+  // suppression view is internal to save; a read, hook or backup refuses.
+  if (captureItemRecordValid(record, ledger.tombstones)) {
+    if (pending !== 'suppress') throw pendingUnsupported();
+    return { ...viewOf(ledger), pending: true, purging: new Set() };
+  }
   if (pending === 'read') throw purgeRecordValid(record, ledger.tombstones) || restoreRecordValid(record, ledger.tombstones) ? recordWaits() : pendingUnsupported();
   if (purgeRecordValid(record, ledger.tombstones)) return { ...viewOf(ledger), pending: true, purging: new Set(record.purges.map((purge) => purge.project)) };
   if (!restoreRecordValid(record, ledger.tombstones)) throw pendingUnsupported();
-  if (ledger.retentionOverrides.length || hasCaptureRetentionState(payload)) throw pendingUnsupported();
+  if ((ledger.retentionOverrides.length || hasCaptureRetentionState(payload)) && !record.inputs.retention) throw pendingUnsupported();
   const state = restoreBinding(record, payload, { absent });
   if (state === 'unknown') throw restoreUnresolvable();
   if (state !== 'committed') return { ...viewOf(ledger), pending: true };
-  const merged = { tombstones: mergedTombstones(ledger.tombstones, record.add.tombstones), quarantine: [...ledger.quarantine, ...record.add.quarantine] };
-  const view = { ...viewOf(merged), pending: true, knowledge: true };
+  const merged = { tombstones: mergedTombstones(ledger.tombstones, record.add.tombstones), quarantine: [...ledger.quarantine, ...record.add.quarantine], retentionOverrides: record.inputs.retention?.overrides ?? ledger.retentionOverrides };
+  const view = { ...viewOf(merged), pending: true, knowledge: true, ...(record.inputs.retention ? { retentionAt: record.inputs.retention.at } : {}) };
   const { remove, quarantine } = classifyRestore(payload, { ...merged, tokensStripped: ledger.tokensStripped ?? record.add.tokensStripped }, record.inputs);
   const own = new Map([...(payload?.records ?? []), ...(payload?.facts ?? [])].filter(isObject).map((entity) => [entity.id, entity.erasureToken]));
   for (const { id } of [...remove, ...quarantine]) {
@@ -444,7 +465,7 @@ const IDENTITY_MOVED = Symbol('the stored payload moved under an unfenced read')
 // there. `reread` is the bracket of an unfenced read (PR-37c design §8.1): the
 // payload's identity read again after the ledger, which must equal the one
 // read before it, or the read starts again; a view error stands only then.
-export async function attachDeletionView(payload, file, { registry = false, env = process.env, pending = 'suppress', absent = false, reread } = {}) {
+export async function attachDeletionView(payload, file, { registry = false, env = process.env, pending = 'inspect', absent = false, reread } = {}) {
   let view;
   let failure;
   try {
@@ -492,7 +513,7 @@ export async function readUnfenced(file, read, { afterPayloadRead, ...options } 
 export async function refuseAbsentWithRecord(file) {
   try { await stat(file); return; } catch (error) { if (error.code !== 'ENOENT') return; }
   const ledger = await readLedger(file);
-  if (!ledger?.pending.length || (ledger.pending.length === 1 && purgeRecordValid(ledger.pending[0], ledger.tombstones))) return;
+  if (!ledger?.pending.length || (ledger.pending.length === 1 && (purgeRecordValid(ledger.pending[0], ledger.tombstones) || captureItemRecordValid(ledger.pending[0], ledger.tombstones)))) return;
   throw ledger.pending.length === 1 && restoreRecordValid(ledger.pending[0], ledger.tombstones) ? restoreUnresolvable() : pendingUnsupported();
 }
 
@@ -719,7 +740,7 @@ async function replaceFile(target, bytes, mode, move) {
   }
 }
 
-const KEPT_AS_WRITTEN = new Set(['tombstones', 'quarantine', 'pending', 'tokensStripped']);
+const KEPT_AS_WRITTEN = new Set(['tombstones', 'quarantine', 'pending', 'tokensStripped', 'retentionOverrides']);
 
 // Writes the ledger beside a store (PR-37c design §2). The caller holds the
 // store fence; this never takes it. An existing ledger is rewritten in place,

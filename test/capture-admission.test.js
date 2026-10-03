@@ -425,7 +425,8 @@ test('the delivery head says capture is on only for the store it delivers, on th
     return text === '' ? null : JSON.parse(text).hookSpecificOutput.additionalContext.split('\n').find((line) => line.startsWith('processing: '));
   };
   const processing = async (args) => JSON.parse((await deliver(args)).slice('processing: '.length));
-  const graph = createShadowGraph({ now });
+  const fixtureNow = new Date().toISOString();
+  const graph = createShadowGraph({ now: () => fixtureNow });
   graph.addDecision({ project: 'alpha', title: 'Cache', chosen: 'redis' });
   const stored = createJsonFileStore(file);
   await stored.save(privilegedSnapshot(graph));

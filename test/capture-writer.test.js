@@ -122,7 +122,7 @@ test('a capture is recorded pending, its text outside the journal under a random
   assert.deepEqual(snapshot.captureContent, [{ contentRef: item.contentRef, project: 'alpha', attribution: 'project', originId: 'origin-a', text: 'the prompt text' }]);
   assert.equal(snapshot.captureSessions.length, 1);
   // A session records when it was opened (PR-37c design §1.3, R9).
-  assert.deepEqual({ ...snapshot.captureSessions[0], id: undefined }, { id: undefined, originId: 'origin-a', sessionId: 'session-1', project: 'alpha', attribution: 'project', startedAt: NOW, occurrenceSeqHighWater: 1 });
+  assert.deepEqual({ ...snapshot.captureSessions[0], id: undefined }, { id: undefined, originId: 'origin-a', sessionId: 'session-1', project: 'alpha', attribution: 'project', startedAt: NOW, occurrenceSeqHighWater: 1, updatedAt: NOW });
   const [entry] = entriesOf(snapshot, item.id);
   assert.equal(entry.type, 'capture.recorded');
   assert.deepEqual(entry.payload, item);
@@ -512,8 +512,10 @@ test('a stale or damaged session record never hands an ordinal out twice', () =>
   record(graph);
   const early = privilegedSnapshot(graph).captureSessions[0];
   record(graph);
-  graph.importData({ schemaVersion: 7, captureSessions: [{ ...early, occurrenceSeqHighWater: 1 }] });
-  assert.equal(record(graph).occurrenceSeq, 4, 'a merged earlier copy moves nothing back');
+  const beforeMerge = privilegedSnapshot(graph);
+  assert.throws(() => graph.importData({ schemaVersion: 7, captureSessions: [{ ...early, occurrenceSeqHighWater: 1 }] }), { code: 'purge_aware_restore_unsupported_at_this_build' });
+  assert.deepEqual(privilegedSnapshot(graph), beforeMerge, 'retention-bearing merge refuses before changing a cursor or mark');
+  assert.equal(record(graph).occurrenceSeq, 4, 'a refused earlier copy moves nothing back');
   for (const mark of [undefined, null, 0, '5', 1.5, -3]) {
     const seeded = createShadowGraph({ now });
     record(seeded);

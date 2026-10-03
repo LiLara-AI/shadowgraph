@@ -14,7 +14,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createJsonFileStore } from '../src/storage.js';
-import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { privilegedInspectCapture, privilegedRecordCapture, privilegedSnapshot, privilegedTransitionCapture } from '../src/internal/snapshot.js';
 import { downgradeToSchema5, downgradeToSchema6 } from '../src/schema-conversion.js';
 import { assemblePayload, DELIVERY_CAP_BYTES, readHookInput, readStoreForDelivery, redactText, redactValue, runDeliver } from '../src/delivery.js';
 import { lineViolationCategories } from '../scripts/check-package.mjs';
@@ -84,6 +84,35 @@ function parsed(result) {
 }
 
 const silent = (result) => assert.deepEqual([result.code, result.stdout, result.stderr], [0, '', '']);
+
+test('capture correction is reflected in the next delivery and invalidates its compact revision without enqueueing extraction', async (t) => {
+  const { cwd, file } = await workspace(t);
+  let at = new Date().toISOString();
+  const graph = createShadowGraph({ now: () => at });
+  const capture = privilegedRecordCapture(graph, { project: 'app', originId: 'origin-correction', text: 'synthetic capture source', source: { event: 'Stop', sessionId: 'session' }, admission: { limits: { maxStoreBytes: 2 ** 30, maxQueueDepth: 100, maxItemsPerSession: 100, maxItemBytes: 2 ** 20 }, storeBytes: 0 } });
+  const decision = graph.addDecision({ project: 'app', title: 'queue broker policy', chosen: 'before correction' });
+  privilegedTransitionCapture(graph, { id: capture.id, to: 'processing', lease: { leaseId: 'fixture-lease', ownerId: 'fixture-worker', ownerBootId: 'fixture-boot', leaseExpiresAt: new Date(Date.now() + 60_000).toISOString() } });
+  privilegedTransitionCapture(graph, { id: capture.id, to: 'extracted', producedRecordIds: [decision.id] });
+  const store = createJsonFileStore(file);
+  graph.setRevision(await store.save(privilegedSnapshot(graph)));
+  const compact = () => graph.context({ project: 'app', query: 'queue broker', compact: true }).relevant.items.find((item) => item.line?.recordId === decision.id).line;
+  const oldLine = compact();
+  const before = parsed(await run([], { cwd, stdin: hook('UserPromptSubmit', 'queue broker'), env: { SHADOWGRAPH_FILE: file } }));
+  assert.ok(before.items.some((item) => item.expansion.recordId === decision.id));
+  at = new Date(Date.now() + 1000).toISOString();
+  const replacement = graph.addDecision({ project: 'app', title: 'queue broker policy corrected', chosen: 'after correction' });
+  graph.supersedeDecision({ project: 'app', decisionId: decision.id, replacementId: replacement.id });
+  graph.setRevision(await store.save(privilegedSnapshot(graph)));
+  assert.notEqual(compact().boundRevision.digest, oldLine.boundRevision.digest);
+  const inspection = privilegedInspectCapture(graph, { project: 'app' }).items[0];
+  assert.equal(inspection.derivedInvalidated, true);
+  assert.equal(inspection.state, 'extracted');
+  const stable = await readStoreForDelivery({ file, storage: 'json' });
+  const after = parsed(await run([], { cwd, stdin: hook('UserPromptSubmit', 'queue broker'), env: { SHADOWGRAPH_FILE: file } }));
+  assert.match(after.items.find((item) => item.expansion.recordId === decision.id).line, /status superseded/u);
+  assert.ok(after.items.some((item) => item.expansion.recordId === replacement.id));
+  assert.deepEqual((await readStoreForDelivery({ file, storage: 'json' })).payload, stable.payload);
+});
 
 test('cap: many matching records, multibyte text included, fit in 8 000 bytes as whole items, the drop declared', async (t) => {
   const { cwd, file } = await workspace(t);

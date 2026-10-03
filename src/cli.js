@@ -112,7 +112,13 @@ async function deliverFromHook() {
 // worker is inside the store it may finish, up to a hard cap below the hook
 // timeout (superviseCapture in src/capture-hook.js).
 async function captureFromHook() {
-  if (rest.length !== 1 || rest[0] !== '--hook') throw new Error('Usage: shadowgraph capture --hook (run by the capture hook; it writes only the private store the capture activation names)');
+  if (rest[0] !== '--hook') {
+    if (rest.length < 1 || rest.length > 2 || !['inspect', 'expire', 'cancel', 'delete', 'retention'].includes(rest[0]) || (rest[0] === 'expire' && rest.length !== 1)) throw new Error('Usage: shadowgraph capture --hook | inspect [JSON] | expire | cancel|delete JSON | retention JSON');
+    const { captureLifecycle } = await import('./internal/capture-lifecycle.js');
+    console.log(JSON.stringify(await captureLifecycle(rest[0], rest[1] === undefined ? {} : parse(rest[1])), null, 2));
+    return;
+  }
+  if (rest.length !== 1) throw new Error('Usage: shadowgraph capture --hook');
   try {
     process.removeAllListeners('warning');
     for (const stream of [process.stdout, process.stderr, process.stdin]) stream.on('error', () => {});
@@ -160,6 +166,7 @@ async function changeHooks() {
     `Usage: shadowgraph ${command} [--capture] [--settings <path>]${install ? ' [--runtime <directory>]' : ''}`);
   const runtime = options.runtime ? await pinnedRuntime(options.runtime) : null;
   if (install && kind === 'capture' && runtime && !runtime.captures) throw new Error(`runtime_cannot_capture (${runtime.path} is ${runtime.commit}, a build without the capture verb)`);
+  if (install && kind === 'capture' && runtime && !runtime.captureLifecycle) throw new Error(`runtime_cannot_capture_lifecycle (${runtime.path} does not declare the required capture lifecycle)`);
   return changeHookSettings(options.settings ?? defaultSettingsPath(), install ? 'install' : 'uninstall', { kind, ...(runtime ? { command: runtimeHookCommand(runtime.path, undefined, kind ?? 'deliver') } : {}) });
 }
 

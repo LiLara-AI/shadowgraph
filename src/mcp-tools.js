@@ -447,6 +447,7 @@ const captureStatusSchema = {
     processing: integerCount('Items claimed.'),
     failed: integerCount('Items failed.'),
     blocked: integerCount('Items blocked.'),
+    expired: integerCount('Unextracted items whose raw expired; a gap, not extraction backlog.'),
     oldestPendingAt: stringOrNull('Oldest pending capture.'),
     extractionAvailable: { type: 'boolean', description: 'Whether extraction runs.' },
     limited: captureLimitedSchema,

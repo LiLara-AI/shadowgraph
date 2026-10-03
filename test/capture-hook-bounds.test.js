@@ -353,7 +353,10 @@ test('RT-12 activation records its own kind\'s handlers and the default server; 
   assert.equal(JSON.parse(deliveryOnly.stdout).record.capabilities.delivery.hooksInstalled, false);
   // install-hooks --capture with a runtime that can capture writes that runtime's capture command.
   const template = readFileSync('integrations/claude-code.capture-hooks.json', 'utf8');
-  const able = await syntheticRuntime(join(home, 'shadowgraph-runtime', 'able'), { 'src/cli.js': '// synthetic', 'integrations/claude-code.capture-hooks.json': template });
+  const able = await syntheticRuntime(join(home, 'shadowgraph-runtime', 'able'), {
+    'src/cli.js': '// synthetic', 'integrations/claude-code.capture-hooks.json': template,
+    'src/internal/capture-retention.js': '// synthetic reader', 'src/capture-lifecycle-capability.json': '{"version":1}'
+  });
   const hooksFile = join(home, 'host-hooks-fixture.json');
   const installed = await cli(['install-hooks', '--capture', '--settings', hooksFile, '--runtime', able]);
   assert.equal(installed.code, 0, installed.stderr);

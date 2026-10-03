@@ -28,7 +28,7 @@ import { SELF_SIGNALS, stripDeliveredBlocks } from './internal/capture-source.js
 import { CAPTURE_COLLECTIONS, CAPTURE_CONTENT, CAPTURE_ENTRY_TYPES, CAPTURE_EVENT_IDENTITY, CAPTURE_IMPORT_TYPE, CAPTURE_KIND, CAPTURE_SESSIONS, CAPTURE_TRANSITIONS, captureCollectionIssue, captureEntryReachedBy, captureEventIssue, captureItemIssue, captureObservationIssue, CAPTURE_LIMIT_EVENT, CAPTURE_REFUSED_EVENT, OTHER_OWNER } from './internal/capture.js';
 import { TRANSCRIPT_ANCHOR_BYTES, TRANSCRIPT_GAP_REASONS, TRANSCRIPT_TRIGGERS, cursorBlock, cursorShape, digest, lastLineEnd, matchKey, transcriptEntry, transcriptLines } from './internal/transcript.js';
 import { CREDENTIAL_WITHHELD, captureWithheld, redactText, redactValue, withholdFlagged } from './internal/redaction.js';
-import { RAW_EXPIRED, captureRawExpired, effectiveCaptureExpiry, hasCaptureRetentionState } from './internal/capture-retention.js';
+import { RAW_EXPIRED, RAW_RETENTION_DAYS, captureRawExpired, effectiveCaptureExpiry, hasCaptureRetentionState } from './internal/capture-retention.js';
 import { DELETION_INTENT, DELETION_VIEW, IDEMPOTENCY_KEY_WITHHELD, PURGE_AWARE_RESTORE_UNSUPPORTED, PURGE_BACKUPS_STATEMENT, SCOPE_KEY_WITHHELD, SESSION_WITHHELD, deletionError, journalHead } from './internal/deletion-knowledge.js';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
@@ -1005,7 +1005,10 @@ export function createShadowGraph(options = {}) {
   // An item identified only by its ordinal whose material repeats the session's
   // previous item of the same event is marked possibleDuplicateOf it (F-11a).
   const retentionPolicy = () => deletion.get('view')?.retentionOverrides ?? [];
-  const rawExpired = (item, at = now()) => captureRawExpired(item, retentionPolicy(), at);
+  const rawExpired = (item, at = now()) => {
+    const restoreAt = deletion.get('view')?.retentionAt;
+    return captureRawExpired(item, retentionPolicy(), isValidIsoInstant(restoreAt) && Date.parse(restoreAt) > Date.parse(at) ? restoreAt : at);
+  };
 
   function recordCapture(input = {}, { keyBlock = null, withhold = false } = {}) {
     if (!isPlainObject(input)) throw new Error('A capture needs an input object');
@@ -1064,7 +1067,7 @@ export function createShadowGraph(options = {}) {
     const withheldText = redacted !== undefined && (withhold || captureWithheld(redacted));
     const text = withheldText ? undefined : redacted;
     const observation = input.observation === undefined ? undefined : withholdFlagged(redactValue(input.observation));
-    const crossing = admissionCrossing(admission, text, originId, observed.sessionId, [observation ?? null, observed]);
+    const crossing = admissionCrossing(admission, text, originId, observed.sessionId, [observation ?? null, observed], at);
     if (crossing) return refuseAdmission(crossing, session, sessions, at);
     const contentHash = text === undefined ? null : createHash('sha256').update(text).digest('hex');
     const item = {
@@ -1080,11 +1083,12 @@ export function createShadowGraph(options = {}) {
       expiresAt: null, createdAt: at, updatedAt: at,
       ...(observation === undefined ? {} : { observation })
     };
+    item.expiresAt = effectiveCaptureExpiry(item, retentionPolicy());
     const issue = captureItemIssue(item);
     if (issue) throw new Error(`Capture refused: ${issue}`);
     assertJournalCapacity(1);
     captures.set(item.id, item);
-    const next = { ...(session ?? newCaptureSession(originId, observed.sessionId, owner)), project: owner.project, attribution: owner.attribution, occurrenceSeqHighWater: occurrenceSeq };
+    const next = { ...(session ?? newCaptureSession(originId, observed.sessionId, owner)), project: owner.project, attribution: owner.attribution, occurrenceSeqHighWater: occurrenceSeq, updatedAt: at };
     if (stripped.removed) next.selfEvents = countSelfEvent(next.selfEvents, 'S-1', observed.event, stripped.removed);
     // An accepted item shows the store's limits and this session's no longer bind.
     if (next.limited?.since) next.limited = { ...next.limited, since: null, lastPeriod: { from: next.limited.since, to: at } };
@@ -1128,12 +1132,13 @@ export function createShadowGraph(options = {}) {
   // escaped material once, what it describes (its observation and source) three
   // times, as the item, its journal entry and its retry value each hold it, and
   // a fixed allowance for the rest.
-  function admissionCrossing({ limits, storeBytes }, text, originId, sessionId, described) {
+  function admissionCrossing({ limits, storeBytes }, text, originId, sessionId, described, at) {
     const bytes = text === undefined ? 0 : Buffer.byteLength(text);
     if (bytes > limits.maxItemBytes) return { limit: 'maxItemBytes', ceiling: limits.maxItemBytes, scope: 'item' };
     let sessionItems = 0;
     let queued = 0;
     for (const item of captures.values()) {
+      if (rawExpired(item, at)) continue;
       if (item.state !== 'extracted') queued += 1;
       if (item.originId === originId && item.source?.sessionId === sessionId) sessionItems += 1;
     }
@@ -1160,7 +1165,7 @@ export function createShadowGraph(options = {}) {
     }
     if (crossing.scope === 'session' && session && !session.limited?.since) {
       const limited = { limit: crossing.limit, ceiling: crossing.ceiling, since: at, lastPeriod: session.limited?.lastPeriod ?? null, periods: (session.limited?.periods ?? 0) + 1 };
-      extras.set(CAPTURE_SESSIONS, sessions.map((entry) => (entry === session ? { ...entry, limited } : entry)));
+      extras.set(CAPTURE_SESSIONS, sessions.map((entry) => (entry === session ? { ...entry, limited, updatedAt: at } : entry)));
       return { refused, changed: true };
     }
     return { refused, changed: false };
@@ -1219,6 +1224,212 @@ export function createShadowGraph(options = {}) {
     return latest?.id ?? null;
   }
 
+  // OD-2 removes eligible uncited raw, including raw held in quarantine.
+  // The view is reapplied after the operation: expiry never releases it.
+  // Canonical records, authority and deletion knowledge are not mutated.
+  function expireCapture({ maxItems = 64, maxSessions = 64, mayContinue = () => true, endLimits = false } = {}) {
+    if (![maxItems, maxSessions].every((value) => Number.isSafeInteger(value) && value > 0) || typeof mayContinue !== 'function') throw new Error('Capture expiry requires positive work bounds');
+    const result = { changed: false, expired: 0, keptCited: 0, sessionsRemoved: 0, more: false };
+    if (!mayContinue()) return { ...result, more: true };
+    if (deletion.has('held')) {
+      unhold();
+      try { return expireCapture({ maxItems, maxSessions, mayContinue, endLimits }); } finally { hold(); }
+    }
+    const at = now();
+    const cited = new Set();
+    // Typed source links only; keep the complete source entry when cited span
+    // and context cannot safely be separated. Held canonical records count.
+    for (const entity of [...records.values(), ...facts.values()]) {
+      if (!mayContinue()) return { ...result, more: true };
+      if (typeof entity.captureRef === 'string') cited.add(entity.captureRef);
+      for (const claim of entity.claims ?? []) if (typeof claim?.sourceRef === 'string') cited.add(claim.sourceRef);
+    }
+    const selected = new Map();
+    for (const item of captures.values()) {
+      if (!mayContinue()) { result.more = true; break; }
+      if (!rawExpired(item, at)) continue;
+      if (cited.has(item.id) || cited.has(item.contentRef)) { result.keptCited += 1; continue; }
+      const expiry = effectiveCaptureExpiry(item, retentionPolicy());
+      if (item.contentRef === null && item.contentHash === null && item.possibleDuplicateOf === null && item.expiresAt === expiry && !['pending', 'failed'].includes(item.state)) continue;
+      if (selected.size >= maxItems) { result.more = true; break; }
+      selected.set(item.id, { item, expiry });
+    }
+    const refs = new Set([...selected.values()].map(({ item }) => item.contentRef).filter(Boolean));
+    const states = [...selected.values()].filter(({ item }) => ['pending', 'failed'].includes(item.state));
+    assertJournalCapacity(states.length);
+    // Redact raw pointers/hashes in every known capture copy, keeping the
+    // historical state each entry witnessed. New state changes are journaled.
+    const scrub = (item) => {
+      if (item?.kind !== CAPTURE_KIND || item.schemaVersion !== SCHEMA_VERSION) return;
+      const selectedItem = selected.get(item.id);
+      if (selectedItem) {
+        item.contentRef = null;
+        item.contentHash = null;
+        item.possibleDuplicateOf = null;
+        item.expiresAt = selectedItem.expiry;
+      } else if (selected.has(item.possibleDuplicateOf)) item.possibleDuplicateOf = null;
+    };
+    if (selected.size) {
+      for (const item of captures.values()) scrub(item);
+      for (const value of idempotency.values()) scrub(value);
+      for (const entry of journal) {
+        if (entry.type === 'projection.baseline') for (const item of entry.payload?.records ?? []) scrub(item);
+        else scrub(entry.payload);
+      }
+      const content = extras.get(CAPTURE_CONTENT) ?? [];
+      const kept = content.filter((entry) => !refs.has(entry.contentRef));
+      if (kept.length) extras.set(CAPTURE_CONTENT, kept);
+      else extras.delete(CAPTURE_CONTENT);
+      for (const { item } of states) {
+        const next = { ...item, state: 'blocked', blockedReason: RAW_EXPIRED, updatedAt: at };
+        captures.set(item.id, next);
+        appendJournal({ type: 'capture.state_changed', entityKind: CAPTURE_KIND, entityId: item.id, project: item.project, payload: next });
+      }
+      result.changed = true;
+      result.expired = selected.size;
+    }
+    // Session-only metadata has its own finite lifetime. A represented session
+    // keeps its ordinal and cursor, including the expired Stop refusal.
+    const represented = new Set([...captures.values()].map((item) => JSON.stringify([item.originId, item.source.sessionId])));
+    const sessions = extras.get(CAPTURE_SESSIONS) ?? [];
+    for (const session of sessions) {
+      if (!session.limited?.since) continue;
+      const count = [...captures.values()].filter((item) => item.originId === session.originId && item.source.sessionId === session.sessionId && !rawExpired(item, at)).length;
+      if (count < session.limited.ceiling) {
+        session.limited = { ...session.limited, since: null, lastPeriod: { from: session.limited.since, to: at } };
+        result.changed = true;
+      }
+    }
+    let changedSessions = 0;
+    const keptSessions = sessions.filter((session) => {
+      // A refusal is a privacy/exclusion barrier, not orphaned raw metadata.
+      // Dropping it could ingest a delayed old transcript copy after deletion.
+      if (session.cursor?.blocked) return true;
+      if (represented.has(JSON.stringify([session.originId, session.sessionId]))) return true;
+      if (!mayContinue()) { result.more = true; return true; }
+      const last = [session.updatedAt, session.cursor?.advancedAt, session.cursor?.blocked?.at, session.startedAt, ...(Array.isArray(session.gaps) ? session.gaps.flatMap((gap) => [gap?.from, gap?.to]) : [])].filter(isValidIsoInstant).sort(compareInstants).at(-1);
+      const days = session.attribution === 'project' ? retentionPolicy().find((entry) => entry.project === session.project)?.days ?? RAW_RETENTION_DAYS : RAW_RETENTION_DAYS;
+      if (last && Date.parse(last) + days * 86_400_000 > Date.parse(at)) return true;
+      // Stable recent metadata must not consume every mutation slot forever.
+      if (changedSessions >= maxSessions) { result.more = true; return true; }
+      changedSessions += 1;
+      if (!last) { session.updatedAt = at; result.changed = true; return true; }
+      result.changed = true;
+      result.sessionsRemoved += 1;
+      return false;
+    });
+    if (keptSessions.length !== sessions.length) {
+      if (keptSessions.length) extras.set(CAPTURE_SESSIONS, keptSessions);
+      else extras.delete(CAPTURE_SESSIONS);
+    }
+    if (endLimits && events.some((entry) => entry?.type === CAPTURE_LIMIT_EVENT && entry.since)) result.changed = true;
+    if (result.expired || endLimits) endStoreLimits(at);
+    else {
+      // Even contentless/cited expired items stop contributing to admission.
+      const queued = [...captures.values()].filter((item) => item.state !== 'extracted' && !rawExpired(item, at)).length;
+      events.forEach((entry, index) => {
+        if (entry?.type === CAPTURE_LIMIT_EVENT && entry.limit === 'maxQueueDepth' && entry.since && queued < entry.ceiling) {
+          replaceEvent(index, { ...entry, at, since: null, lastPeriod: { from: entry.since, to: at } });
+          result.changed = true;
+        }
+      });
+    }
+    return result;
+  }
+
+  // CLI-only lifecycle access uses exactly its owner, never a grant that
+  // widens experience reads. Quarantined captures are absent from this map.
+  function captureOwner(input = {}) {
+    const scope = resolveScope({ project: input.project, originId: input.originId, binding: input.binding });
+    const owns = (item) => item && (scope.state === 'project_selected'
+      ? item.attribution === 'project' && item.project === scope.project
+      : item.attribution === 'unattributed' && sameOrigin(item.originId, scope.originId));
+    return { scope, owns };
+  }
+
+  function inspectCapture(input = {}) {
+    const { scope, owns } = captureOwner(input);
+    const items = [...captures.values()].filter((item) => owns(item) && (input.id === undefined || input.id === item.id));
+    if (input.id !== undefined && !items.length) throw Object.assign(new Error('Capture item not found in this scope'), { code: 'capture_item_not_found' });
+    const at = now();
+    return { revision, scope, items: items.map((item) => {
+      // Only explicit metadata is projected: future/unknown fields and raw
+      // carriers must never leak through a spread of the persisted item.
+      const produced = item.producedRecordIds.map((id) => records.get(id) ?? facts.get(id));
+      const referenced = new Set();
+      // The frozen capture contract permits record references as string
+      // values in receipts and carried fields, not only producedRecordIds.
+      const collect = (value) => {
+        if (typeof value === 'string') {
+          const entity = records.get(value) ?? facts.get(value);
+          if (owns(entity)) referenced.add(entity);
+        } else if (value && typeof value === 'object') for (const child of Object.values(value)) collect(child);
+      };
+      collect(item);
+      const invalidated = [...produced, ...referenced].some((entity) => !owns(entity)
+        || ['superseded', 'invalidated', 'reconsidered', 'stale', 'archived'].includes(entity.status)
+        || (isValidIsoInstant(entity.updatedAt) && compareInstants(entity.updatedAt, item.updatedAt) > 0));
+      const expired = rawExpired(item, at);
+      const rawAvailable = !expired && item.contentRef !== null && (extras.get(CAPTURE_CONTENT) ?? []).some((entry) => entry.contentRef === item.contentRef);
+      const projectFields = (value, names) => Object.fromEntries(names.filter((name) => value?.[name] !== undefined).map((name) => [name, clone(value[name])]));
+      return {
+        ...projectFields(item, ['id', 'kind', 'schemaVersion', 'project', 'attribution', 'originId', 'state', 'occurrenceSeq', 'observedAt', 'createdAt', 'updatedAt', 'blockedReason', 'attempts', 'sourceIdentity']),
+        source: projectFields(item.source, ['event', 'sessionId', 'role', 'hostEventId', 'toolCallId', 'turnIndex']),
+        observation: projectFields(item.observation, ['host', 'hostVersion', 'toolName', 'outcome']),
+        expiresAt: effectiveCaptureExpiry(item, retentionPolicy()), rawAvailable,
+        producedRecords: produced.filter(owns).map((entity) => projectFields(entity, ['id', 'kind', 'status', 'updatedAt'])),
+        derivedInvalidated: invalidated, reprocessable: invalidated && rawAvailable,
+        reprocessingUnavailableReason: expired ? RAW_EXPIRED : rawAvailable ? null : 'raw_unavailable'
+      };
+    }) };
+  }
+
+  function cancelCapture(input = {}) {
+    const item = captures.get(input.id);
+    if (!captureOwner(input).owns(item)) throw Object.assign(new Error('Capture item not found in this scope'), { code: 'capture_item_not_found' });
+    if (isNewerThanWriter(item) || !['pending', 'failed', 'blocked'].includes(item.state)) throw Object.assign(new Error('Only pending, failed or blocked capture can be cancelled before extraction'), { code: 'capture_cancel_state_refused' });
+    if (item.state === 'blocked' && item.blockedReason === 'capture_cancelled') return { id: item.id, changed: false, state: 'blocked' };
+    assertJournalCapacity(1);
+    const next = { ...item, state: 'blocked', blockedReason: 'capture_cancelled', lease: null, updatedAt: now() };
+    captures.set(item.id, next);
+    appendJournal({ type: 'capture.state_changed', entityKind: CAPTURE_KIND, entityId: item.id, project: item.project, payload: next });
+    return { id: item.id, changed: true, state: 'blocked' };
+  }
+
+  function preserveDeletedCaptureSession(item, at) {
+    // Restored deletion knowledge must retain the same replay barrier as a
+    // direct deletion, even when the backup never had a transcript cursor.
+    if (typeof item.originId !== 'string' || typeof item.source?.sessionId !== 'string') return;
+    const { sessions, session, held } = captureSession(item.originId, item.source.sessionId, item.project);
+    const nextSession = {
+      ...(session ?? newCaptureSession(item.originId, item.source.sessionId, item)), occurrenceSeqHighWater: held, updatedAt: at,
+      cursor: { ...(session?.cursor ?? {}), anchor: null, blocked: session?.cursor?.blocked ?? { reason: 'capture_deleted', at } }
+    };
+    extras.set(CAPTURE_SESSIONS, session ? sessions.map((entry) => entry === session ? nextSession : entry) : [...sessions, nextSession]);
+  }
+
+  function deleteCapture(input = {}, { recovery = false } = {}) {
+    const item = captures.get(input.id);
+    if (!item || (!recovery && !captureOwner(input).owns(item))) throw Object.assign(new Error('Capture item not found in this scope'), { code: 'capture_item_not_found' });
+    if (isNewerThanWriter(item) || !['pending', 'failed', 'blocked'].includes(item.state)) throw Object.assign(new Error('Only pending, failed or blocked capture can be deleted before extraction'), { code: 'capture_delete_state_refused' });
+    if (recovery && (item.erasureToken !== input.token || input.marker.seq !== journalSeq + 1)) throw Object.assign(new Error('Capture deletion recovery identity differs'), { code: 'capture_delete_identity_refused' });
+    assertJournalCapacity(1);
+    const at = recovery ? input.marker.at : now();
+    const headEntryId = journalHead({ journal });
+    const epochEntryId = journal.find((entry) => entry.seq === journalEpoch)?.id ?? null;
+    const marker = appendJournal({ type: 'capture.state_changed', entityKind: CAPTURE_KIND, entityId: item.id, project: item.project, at,
+      ...(recovery ? { id: input.marker.id } : {}), payload: { ...item, state: 'blocked', blockedReason: 'capture_deleted', updatedAt: at } });
+    reapplyDeletion({ remove: [{ id: item.id, mode: 'logical' }] }, { journal: false, captureDeleted: true });
+    const { erasureToken: token } = item;
+    deletion.set('intents', [...(deletion.get('intents') ?? []), {
+      tombstone: { kind: 'item', mode: 'logical', at, seq: marker.seq, tokens: [item.erasureToken], moveIn: 'none' },
+      lineage: { epochEntryId: epochEntryId ?? marker.id, headEntryId, markerEntryId: marker.id },
+      marker: { id: marker.id, at, seq: marker.seq }, item: { id: item.id, token }
+    }]);
+    endStoreLimits(at);
+    return { removed: 1, mode: 'logical', backups: PURGE_BACKUPS_STATEMENT };
+  }
+
   // What capture holds for one read's scope (plan v1.4.4 §24.1, M-9; PR-36b),
   // or null when the store holds no capture state at all, so a store without
   // capture reads exactly as it did. The counts are over the captures the
@@ -1242,10 +1453,10 @@ export function createShadowGraph(options = {}) {
     let expiredFrom = null;
     let queued = 0;
     for (const item of captures.values()) {
-      if (item.state !== 'extracted') queued += 1;
+      if (item.state !== 'extracted' && !rawExpired(item, at)) queued += 1;
       if (item.schemaVersion > SCHEMA_VERSION || !UNEXTRACTED_STATES.includes(item.state) || !owns(item)) continue;
       if (rawExpired(item, at)) {
-        status.blocked += 1;
+        status.expired = (status.expired ?? 0) + 1;
         const expiry = effectiveCaptureExpiry(item, retentionPolicy());
         if (expiredFrom === null || compareInstants(expiry, expiredFrom) < 0) expiredFrom = expiry;
         continue;
@@ -1277,7 +1488,7 @@ export function createShadowGraph(options = {}) {
     // whose transcript stopped being read, and the periods their records keep,
     // each reason counted by session and never named.
     const periods = new Map();
-    const sessionGapReasons = [...TRANSCRIPT_GAP_REASONS, RAW_EXPIRED];
+    const sessionGapReasons = [...TRANSCRIPT_GAP_REASONS, RAW_EXPIRED, 'capture_deleted'];
     for (const session of sessions) {
       if (!owns(session)) continue;
       const stopped = isPlainObject(session.cursor?.blocked) ? [{ reason: session.cursor.blocked.reason, from: session.cursor.blocked.at, to: null }] : [];
@@ -1326,7 +1537,7 @@ export function createShadowGraph(options = {}) {
     const { sessions, session, held, owner, withheld } = captureSession(originId, source.sessionId, input.project);
     if (withheld) return { refused: { reason: SESSION_WITHHELD }, changed: false };
     const base = session ?? { ...newCaptureSession(originId, source.sessionId, owner), occurrenceSeqHighWater: held };
-    const next = { ...base, selfEvents: countSelfEvent(base.selfEvents, input.signal, source.event) };
+    const next = { ...base, selfEvents: countSelfEvent(base.selfEvents, input.signal, source.event), updatedAt: now() };
     extras.set(CAPTURE_SESSIONS, session ? sessions.map((entry) => (entry === session ? next : entry)) : [...sessions, next]);
     return clone(next.selfEvents);
   }
@@ -1399,7 +1610,7 @@ export function createShadowGraph(options = {}) {
       const current = extras.get(CAPTURE_SESSIONS) ?? [];
       const index = current.findIndex((entry) => entry.originId === originId && entry.sessionId === sessionId);
       const owner = cursor ? {} : { project: input.project, attribution: 'project' };
-      const record = { ...(index === -1 ? newCaptureSession(originId, sessionId, { project: input.project, attribution: 'project' }) : current[index]), ...owner, cursor: next, gaps, gapsDropped };
+      const record = { ...(index === -1 ? newCaptureSession(originId, sessionId, { project: input.project, attribution: 'project' }) : current[index]), ...owner, cursor: next, gaps, gapsDropped, updatedAt: at };
       extras.set(CAPTURE_SESSIONS, index === -1 ? [...current, record] : current.map((entry, at) => (at === index ? record : entry)));
       result.changed = true;
       return result;
@@ -4163,12 +4374,12 @@ export function createShadowGraph(options = {}) {
   // never purges authority and never appends project.purged (rev6:397); with
   // `journal` it appends restore.reapplied, the logical entry first, with C4's
   // four counts only.
-  function reapplyDeletion(plan, { journal: reapplied = true, tokens = [] } = {}) {
+  function reapplyDeletion(plan, { journal: reapplied = true, tokens = [], captureDeleted = false } = {}) {
     // A held W is put back and held again from what is left, as a purge
     // reaches it (`shadowgraph quarantine purge`, on a viewed graph).
     if (deletion.has('held')) {
       unhold();
-      try { return reapplyDeletion(plan, { journal: reapplied, tokens }); } finally { hold(); }
+      try { return reapplyDeletion(plan, { journal: reapplied, tokens, captureDeleted }); } finally { hold(); }
     }
     const entityOf = (entityId) => records.get(entityId) ?? captures.get(entityId) ?? facts.get(entityId);
     const modes = new Map();
@@ -4218,7 +4429,7 @@ export function createShadowGraph(options = {}) {
       } else if (mode === 'logical') {
         if (entry.payload !== null || entry.redacted !== true) skeletons += 1;
         // A deleted capture's skeleton keeps saying so.
-        scrubLogicalPurgeSkeleton(entry, entry.redacted === true && entry.redactedReason === 'capture_deleted' ? 'capture_deleted' : undefined);
+        scrubLogicalPurgeSkeleton(entry, (captureDeleted && entry.entityKind === CAPTURE_KIND) || (entry.redacted === true && entry.redactedReason === 'capture_deleted') ? 'capture_deleted' : undefined);
       }
     }
     for (const entry of stagedJournal) {
@@ -4242,6 +4453,7 @@ export function createShadowGraph(options = {}) {
     assertJournalBaselinePlacement(nextJournal, { journalEpoch: nextEpoch, sourceSchemaVersion: SCHEMA_VERSION });
     assertHardPurgeGapLedgers(nextJournal, { journalEpoch: nextEpoch, sourceSchemaVersion: SCHEMA_VERSION });
 
+    for (const item of removedCaptures) preserveDeletedCaptureSession(item, now());
     for (const entityId of removed) { records.delete(entityId); captures.delete(entityId); facts.delete(entityId); }
     for (const relationId of removedRelationIds) relations.delete(relationId);
     for (const [key, signal] of reviewSignals) if (removed.has(signal.decisionId)) reviewSignals.delete(key);
@@ -6050,6 +6262,10 @@ export function createShadowGraph(options = {}) {
     accessRefusal: transactional('accessRefusal', authority.transportRefusal),
     bindProject: transactional('bindProject', bindProject), resolveProjectBinding,
     recordCapture: transactional('recordCapture', recordCapture), transitionCapture: transactional('transitionCapture', transitionCapture),
+    expireCapture: transactional('expireCapture', expireCapture, { mode: 'snapshot' }),
+    inspectCapture, cancelCapture: transactional('cancelCapture', cancelCapture),
+    deleteCapture: transactional('deleteCapture', deleteCapture, { mode: 'snapshot' }),
+    completeCaptureDelete: transactional('completeCaptureDelete', (input) => deleteCapture(input, { recovery: true }), { mode: 'snapshot' }),
     recordSelfEvent: transactional('recordSelfEvent', recordSelfEvent), recordTranscript: transactional('recordTranscript', recordTranscript),
     reapplyDeletion: transactional('reapplyDeletion', reapplyDeletion, { mode: 'snapshot' }), quarantined,
     completePurge: transactional('completePurge', (project, options) => purgeProject(project, { mode: options.mode, marker: options.marker }), { mode: 'snapshot' }) });

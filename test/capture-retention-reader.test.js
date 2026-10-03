@@ -105,7 +105,7 @@ for (const [backend, options] of BACKENDS) {
     assert.equal(block(graph).pending, 1);
     clock = '2026-10-02T00:00:00.000Z';
     assert.equal(block(graph).pending, 0);
-    assert.equal(block(graph).blocked, 1);
+    assert.equal(block(graph).expired, 1);
     assert.equal(block(graph, 'q').pending, 1);
     assert.equal(block(graph).gaps.some((gap) => gap.reason === 'raw_expired'), true);
     assert.match(graph.search('', { project: 'p' }).completeness.limitation.detail, /re-extraction/i);
@@ -116,9 +116,9 @@ for (const [backend, options] of BACKENDS) {
     assert.equal(rebuilt.rebuildable, true);
     graph.setRevision(await f.store.save(privilegedSnapshot(graph)));
     assert.deepEqual((await f.store.load()).captureContent, before.captureContent);
-    assert.equal(block(graph).blocked, 1, 'rebuild/save cannot discard the effective policy');
+    assert.equal(block(graph).expired, 1, 'rebuild/save cannot discard the effective policy');
     graph.replaceData(privilegedSnapshot(graph));
-    assert.equal(block(graph).blocked, 1, 'replaceData keeps the installed policy');
+    assert.equal(block(graph).expired, 1, 'replaceData keeps the installed policy');
   });
 
   test(`retention reader ${backend}: merge cannot replace a stricter installed policy with a looser source`, options, async (t) => {
@@ -151,28 +151,27 @@ for (const [backend, options] of BACKENDS) {
     assert.deepEqual(before.captureContent, loaded.captureContent, 'the reader neither deletes source evidence nor releases quarantine');
   });
 
-  for (const side of ['destination', 'backup']) test(`retention reader ${backend}: ${side} overrides refuse unsupported restore before writes`, options, async (t) => {
+  for (const side of ['destination', 'backup']) test(`retention reader ${backend}: ${side} overrides are enforced by the final lifecycle restore`, options, async (t) => {
     const f = await fixture(t, backend);
     if (side === 'backup') await writeControls(f, [{ project: 'p', days: 1 }]);
     await backup(f, 'source');
     if (side === 'destination') await writeControls(f, [{ project: 'p', days: 2 }]);
-    const before = [await readFile(f.file), await readFile(ledgerPath(f.file))];
-    await assert.rejects(restore(f, join(f.dir, 'source')), { code: 'purge_aware_restore_unsupported_at_this_build' });
-    assert.deepEqual([await readFile(f.file), await readFile(ledgerPath(f.file))], before);
+    const result = await restore(f, join(f.dir, 'source'));
+    assert.equal(result.retention.overrides[0].days, side === 'backup' ? 1 : 2);
+    assert.equal((await readLedger(f.file)).pending.length, 0);
   });
 
-  test(`retention reader ${backend}: recorded item deadlines require the lifecycle recovery floor too`, options, async (t) => {
+  test(`retention reader ${backend}: recorded item deadlines survive the final lifecycle restore`, options, async (t) => {
     const f = await fixture(t, backend);
     const payload = await f.store.load();
     stampDeadlines(payload);
     await f.store.save(payload);
     await backup(f, 'stamped');
-    const before = await readFile(f.file);
-    await assert.rejects(restore(f, join(f.dir, 'stamped')), { code: 'purge_aware_restore_unsupported_at_this_build' });
-    assert.deepEqual(await readFile(f.file), before);
+    await restore(f, join(f.dir, 'stamped'));
+    assert.equal((await f.store.load()).records.find((item) => item.id === f.item.id).expiresAt, '2026-10-03T00:00:00.000Z');
   });
 
-  for (const control of ['override', 'recorded deadline']) test(`retention reader ${backend}: a pending retention-sensitive restore with ${control} is never resolved by load, save, backup or restore`, options, async (t) => {
+  for (const control of ['override', 'recorded deadline']) test(`retention reader ${backend}: a legacy pending restore lacking retention inputs with ${control} is never resolved by load, save, backup or restore`, options, async (t) => {
     const f = await fixture(t, backend);
     await backup(f, 'before');
     f.graph.purgeProject('p');
@@ -185,6 +184,8 @@ for (const [backend, options] of BACKENDS) {
     assert.equal(result.completion, 'pending');
     const ledger = JSON.parse(await readFile(ledgerPath(f.file), 'utf8'));
     assert.equal(ledger.pending[0].kind, 'restore');
+    delete ledger.pending[0].inputs.retention;
+    await writeFile(ledgerPath(f.file), JSON.stringify(ledger));
     if (control === 'override') {
       ledger.retentionOverrides = [{ project: 'p', days: 1 }];
       await writeFile(ledgerPath(f.file), JSON.stringify(ledger));
@@ -196,7 +197,7 @@ for (const [backend, options] of BACKENDS) {
     }
   });
 
-  for (const pending of ['purge', 'restore']) for (const control of ['override', 'recorded deadline', ...(backend === 'sqlite' ? ['WAL deadline'] : [])]) test(`retention reader ${backend}: unsupported source ${control} refuses before completing a destination ${pending}`, options, async (t) => {
+  for (const pending of ['purge', 'restore']) for (const control of ['override', 'recorded deadline', ...(backend === 'sqlite' ? ['WAL deadline'] : [])]) test(`retention reader ${backend}: source ${control} is checked before completing a destination ${pending}`, options, async (t) => {
     const f = await fixture(t, backend);
     const source = join(f.dir, 'before');
     await backup(f, 'before');
@@ -224,8 +225,23 @@ for (const [backend, options] of BACKENDS) {
     const files = [f.file, ledgerPath(f.file), registryFile(f.env), source, ledgerPath(source), ...['-wal', '-shm', '-journal'].map((suffix) => `${source}${suffix}`)];
     const bytes = () => Promise.all(files.map((file) => readFile(file).then((value) => createHash('sha256').update(value).digest('hex')).catch((error) => { if (error.code === 'ENOENT') return null; throw error; })));
     const before = await bytes();
-    await assert.rejects(restore(f, source), { code: 'purge_aware_restore_unsupported_at_this_build' });
-    assert.deepEqual(await bytes(), before, 'unsupported restore cannot complete a purge/restore or alter the registry first');
+    if (control === 'WAL deadline') {
+      await assert.rejects(restore(f, source), { code: 'purge_aware_restore_unsupported_at_this_build' });
+      assert.deepEqual(await bytes(), before, 'WAL source refusal cannot complete a purge/restore or alter the registry first');
+    } else {
+      if (pending === 'restore') {
+        // Completing the interrupted deletion reconciliation now preserves
+        // its session barrier. A second restore must honor the existing
+        // destination-cursor refusal rather than replace that barrier.
+        await assert.rejects(restore(f, source), { code: 'purge_aware_restore_unsupported_at_this_build' });
+        assert.equal((await f.store.load()).captureSessions.find((entry) => entry.sessionId === 'session-p').cursor.blocked.reason, 'capture_deleted');
+      } else {
+        const result = await restore(f, source);
+        assert.equal(result.completion, undefined);
+      }
+      assert.equal((await readLedger(f.file)).pending.length, 0);
+      assert.equal((await f.store.load()).records.some((item) => item.project === 'p'), false, 'purged material stays removed');
+    }
   });
 }
 
@@ -241,7 +257,7 @@ test('retention reader: an empty graph with installed policy cannot silently ado
   assert.deepEqual(privilegedSnapshot(graph), before);
   record(graph);
   clock = '2026-10-04T00:00:00.000Z';
-  assert.equal(block(graph).blocked, 1, 'the installed policy survives the refused merge');
+  assert.equal(block(graph).expired, 1, 'the installed policy survives the refused merge');
 });
 
 test('retention reader: default, override, recorded deadline, invalid clock and future-schema boundaries', () => {
@@ -250,7 +266,8 @@ test('retention reader: default, override, recorded deadline, invalid clock and 
   assert.equal(effectiveCaptureExpiry(item), '2026-10-08T00:00:00.000Z');
   assert.equal(captureRawExpired(item, [], '2026-10-07T23:59:59.999Z'), false);
   assert.equal(captureRawExpired(item, [], '2026-10-08T00:00:00.000Z'), true);
-  assert.equal(effectiveCaptureExpiry(item, [{ project: 'p', days: 30 }]), '2026-10-31T00:00:00.000Z');
+  assert.equal(effectiveCaptureExpiry({ ...item, expiresAt: null }, [{ project: 'p', days: 30 }]), '2026-10-31T00:00:00.000Z', 'historical unstamped raw follows the override');
+  assert.equal(effectiveCaptureExpiry(item, [{ project: 'p', days: 30 }]), '2026-10-08T00:00:00.000Z', 'new stamped raw never gains lifetime');
   assert.equal(effectiveCaptureExpiry({ ...item, expiresAt: '2026-10-03T00:00:00.000Z' }, [{ project: 'p', days: 30 }]), '2026-10-03T00:00:00.000Z');
   assert.equal(captureRawExpired({ ...item, state: 'blocked', blockedReason: 'raw_expired', expiresAt: '2026-10-31T00:00:00.000Z' }, [{ project: 'p', days: 30 }], START), true, 'an expired skeleton never becomes usable again');
   assert.equal(effectiveCaptureExpiry({ ...item, attribution: 'unattributed', project: null }, [{ project: 'p', days: 1 }]), '2026-10-08T00:00:00.000Z');

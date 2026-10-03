@@ -372,7 +372,7 @@ test('JSON and SQLite: a capture-bearing backup restores through the backend pri
   const destination = join(directory, 'data.json');
   await writeFile(source, JSON.stringify(payload, null, 2));
   const live = createShadowGraph({ now });
-  await restoreFile(source, destination, { afterReplace: (restored) => live.replaceData(restored) });
+  await restoreFile(source, destination, { now: NOW, afterReplace: (restored) => live.replaceData(restored) });
   check(JSON.parse(await readFile(destination, 'utf8')), live, 'JSON');
 
   try { await import('node:sqlite'); } catch { t.skip(NODE_SQLITE_NOT_APPLICABLE_REASON); return; }
@@ -662,7 +662,9 @@ test('attribution refuses an origin that holds a capture, and a record a capture
 
 // The four types are named only where they are read (src/internal/capture.js,
 // src/journal.js) and by the writer (PR-34: recordCapture names the recording;
-// every move's type comes from capture.js). Apart from the writer, the only
+// moves may come from capture.js, and lifecycle writes name state changes).
+// The restore wrapper names a state change only to verify deletion identity.
+// Apart from the writer, the only
 // code that journals one is import's journal-less normalisation of an item it
 // was given (snapshotType). The scan covers src/ and scripts/.
 test('no production code emits a capture journal type outside the writer', async () => {
@@ -684,10 +686,10 @@ test('no production code emits a capture journal type outside the writer', async
     if (/['"`](?:capture\.recorded|capture\.state_changed|extraction\.completed|extraction\.failed)['"`]/.test(text)) naming.push(name);
     if (/CAPTURE_(?:IMPORT_TYPE|ENTRY_STATES|ENTRY_TYPES)\b/.test(text)) usingTypes.push(name);
   }
-  assert.deepEqual(naming.sort(), ['src/internal/capture.js', 'src/journal.js', 'src/shadowgraph.js']);
+  assert.deepEqual(naming.sort(), ['src/internal/capture.js', 'src/internal/restore-wrapper.js', 'src/journal.js', 'src/shadowgraph.js']);
   assert.deepEqual(usingTypes.sort(), ['src/internal/capture.js', 'src/journal.js', 'src/shadowgraph.js']);
   const kernel = await readFile(join(root, 'src', 'shadowgraph.js'), 'utf8');
-  assert.deepEqual(kernel.match(/['"`](?:capture\.recorded|capture\.state_changed|extraction\.completed|extraction\.failed)['"`]/g), ["'capture.recorded'"], 'the writer names only the recording');
+  assert.deepEqual(kernel.match(/['"`](?:capture\.recorded|capture\.state_changed|extraction\.completed|extraction\.failed)['"`]/g), ["'capture.recorded'", ...Array(3).fill("'capture.state_changed'")], 'recording, expiry, cancellation and deletion stay in the kernel writer');
   // The kernel reads the types to hide their entries, and picks one only for
   // an imported item's journal-less snapshot.
   // Line endings follow the checkout (CRLF on a Windows clone).
@@ -899,7 +901,7 @@ test('a memory-only JSON restore keeps every capture and collection', async (t) 
   const destination = join(directory, 'data.json');
   await writeFile(source, JSON.stringify(payload, null, 2));
   const live = createShadowGraph({ now });
-  await restoreFile(source, destination, { memoryOnly: true, afterReplace: (restored) => live.replaceData(restored) });
+  await restoreFile(source, destination, { now: NOW, memoryOnly: true, afterReplace: (restored) => live.replaceData(restored) });
   const installed = JSON.parse(await readFile(destination, 'utf8'));
   assert.deepEqual(capturesOf(installed), capturesOf(payload));
   assert.equal(bytes(installed.captureContent), bytes(payload.captureContent));

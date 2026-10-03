@@ -1401,25 +1401,26 @@ for (const [backend, options] of BACKENDS) test(`PR-37c descent ${backend}: no g
   assert.deepEqual([viaDescent.reapplied.removed, viaDescent.reapplied.quarantined], [0, 1], 'no newer marker: quarantine (M13)');
 });
 
-for (const [backend, options] of BACKENDS) test(`retention reader rev6:428 ${backend}: nonempty overrides refuse restore until the lifecycle writer can merge stricter, with no change`, options, async (t) => {
+for (const [backend, options] of BACKENDS) test(`capture lifecycle rev6:428 ${backend}: existing destinations keep the stricter policy and fresh destinations explicitly adopt backup controls`, options, async (t) => {
   const b = backup();
   const overrides = [{ project: 'p', days: 30 }];
   for (const carried of [[{ project: 'p', days: 365 }], [{ project: 'p', days: 7 }], undefined]) {
     const state = await storeOf(t, backend, purgedStore('logical'));
     await writeLedgerFile(state, { version: 1, retentionOverrides: overrides });
-    const before = await hashes(state);
-    await assert.rejects(restoring(state, await backupOf(t, backend, b.payload, { version: 1, ...(carried ? { retentionOverrides: carried } : {}) })), { code: 'purge_aware_restore_unsupported_at_this_build' });
-    assert.deepEqual(await hashes(state), before, 'reader does not partially adopt or change a policy');
+    const result = await restoring(state, await backupOf(t, backend, b.payload, { version: 1, ...(carried ? { retentionOverrides: carried } : {}) }));
+    const expected = [{ project: 'p', days: Math.min(30, carried?.[0].days ?? 7) }];
+    assert.deepEqual((await knowledge.readLedger(state.file)).retentionOverrides, expected);
+    assert.deepEqual(result.retention, {
+      overrides: expected, freshDestination: false, at: result.retention.at,
+      differences: [{ project: 'p', destinationDays: 30, backupDays: carried?.[0].days ?? 7, effectiveDays: expected[0].days }]
+    });
+    assert.equal(visible(await load(state)).has(b.ids.hidden), false, 'deletion reconciliation still hides purged material');
   }
   const fresh = await freshOf(t, backend);
-  // SQLite construction materializes its empty store, before restore is
-  // invoked. Baseline that existing constructor effect separately.
-  if (backend === 'sqlite') (await createStorage({ type: backend, file: fresh.file })).close();
-  const before = [existsSync(fresh.file), existsSync(knowledge.ledgerPath(fresh.file))];
-  const empty = backend === 'sqlite' ? await hashes(fresh) : null;
-  await assert.rejects(restoring(fresh, await backupOf(t, backend, b.payload, { version: 1, tombstones: [itemTombstone([b.tokens.hidden])], retentionOverrides: [{ project: 'p', days: 365 }] })), { code: 'purge_aware_restore_unsupported_at_this_build' });
-  assert.deepEqual([existsSync(fresh.file), existsSync(knowledge.ledgerPath(fresh.file))], before, 'refusal creates neither a payload nor a ledger');
-  if (empty) assert.deepEqual(await hashes(fresh), empty, 'constructed empty SQLite store remains unchanged');
+  const result = await restoring(fresh, await backupOf(t, backend, b.payload, { version: 1, tombstones: [itemTombstone([b.tokens.hidden])], retentionOverrides: [{ project: 'p', days: 365 }] }));
+  assert.equal(result.retention.freshDestination, true);
+  assert.deepEqual((await knowledge.readLedger(fresh.file)).retentionOverrides, [{ project: 'p', days: 365 }]);
+  assert.equal(visible(await load(fresh)).has(b.ids.hidden), false);
 });
 
 for (const [backend, options] of BACKENDS) test(`PR-37c rev6:429 write half ${backend}: a record a crash left is completed by the next CLI write, which then conflicts once, and the write after it succeeds (M25)`, options, async (t) => {

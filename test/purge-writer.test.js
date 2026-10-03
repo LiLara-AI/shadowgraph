@@ -1648,10 +1648,8 @@ for (const [backend, options] of BACKENDS) test(`D7 ${backend}: the crash window
       }
       texts.push(...await mcp(t, state, [['shadowgraph_search', { query: 'hidden decision', project: 'p' }], ['shadowgraph_journal', { project: 'p' }]]));
       texts.push(...await http(state, (url) => Promise.all(['/records?project=p', '/search?project=p&q=hidden'].map(async (path) => (await fetch(url(path))).text()))));
-      const listed = await withStore(state, (store) => quarantine.quarantineSelection(store, 'list', {}));
-      assert.deepEqual(listed.entries.map((item) => item.id), [s.other], 'the listing shows none of p\'s quarantined items');
-      const selection = await withStore(state, (store) => quarantine.quarantineSelection(store, 'release', { ids: [s.other] }));
-      assert.deepEqual(selection.ids, [s.other], 'a release selection, its confirmation declined');
+      await assert.rejects(withStore(state, (store) => quarantine.quarantineSelection(store, 'list', {})), { code: PENDING }, 'FND-P6-20: listing refuses pending without resolving');
+      await assert.rejects(withStore(state, (store) => quarantine.quarantineSelection(store, 'release', { ids: [s.other] })), { code: PENDING }, 'FND-P6-20: confirmation selection refuses pending too');
       await assert.rejects(s.capturing(), { code: PENDING }, 'the hook refuses');
       assert.deepEqual(await hashesOf(state), window, 'nothing wrote the store, its ledger or the registry');
       for (const text of texts) assert.equal(text.includes(SENTINEL), false, text.slice(0, 160));
@@ -1934,7 +1932,7 @@ for (const [backend, options] of BACKENDS) test(`D26 ${backend}: a purge save wh
     await restoring;
     await assert.rejects(saving, { name: 'RevisionConflictError' });
   });
-  assert.deepEqual([await ledgerOf(state), await registryOf(state.env)], [null, null], 'the conflicted purge wrote nothing');
+  assert.deepEqual([await ledgerOf(state), await registryOf(state.env)], [null, null], 'the conflicted purge wrote no deletion knowledge and the no-op retention reconciliation wrote no controls');
   const window = await crashWindow(t, backend);
   const copy = await backupOf(window.state, 'copy');
   assert.deepEqual(await readJson(ledgerPath(copy.file)), { version: 1, tombstones: window.ledger.tombstones }, 'the sidecar: the tombstone, no record');

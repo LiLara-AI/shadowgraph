@@ -14,6 +14,7 @@ import { createJsonFileStore, createStorage } from '../src/storage.js';
 import { privilegedRecordCapture, privilegedSnapshot } from '../src/internal/snapshot.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 import { runtimeHookCommand } from '../src/host-hooks.js';
+import { ledgerPath } from '../src/internal/deletion-knowledge.js';
 import { activeCapture, CAPTURE_LIMITS, coverageIssue, limitsIssue, storeRepository } from '../src/capture-hook.js';
 
 const CLI = resolve('src/cli.js');
@@ -266,6 +267,33 @@ async function syntheticRuntime(directory, files) {
   return directory;
 }
 
+test('lifecycle runtime floor refuses template-only capture and retention-blind delivery before writing settings or activation', async (t) => {
+  const { home, store, record } = await setup(t);
+  const settings = join(home, 'settings-fixture.json');
+  await writeFile(settings, '{}');
+  const base = { 'src/cli.js': '// synthetic', 'integrations/claude-code.capture-hooks.json': '{}' };
+  const prior = await syntheticRuntime(join(home, 'shadowgraph-runtime', 'prior'), base);
+  const reader = await syntheticRuntime(join(home, 'shadowgraph-runtime', 'reader'), { ...base, 'src/internal/capture-retention.js': '// semantic reader fixture' });
+  const deliver = (runtime) => run(['activate', 'delivery', '--evidence', 'fixture', '--store', store, '--host-version', VERIFIED, '--settings', settings, '--runtime', runtime], home);
+  for (const runtime of [prior, reader]) {
+    const result = await activate(home, store, '--runtime', runtime);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /activation_runtime_cannot_capture_lifecycle/u);
+    const hook = await run(['install-hooks', '--capture', '--settings', settings, '--runtime', runtime], home);
+    assert.equal(hook.code, 1);
+    assert.match(hook.stderr, /runtime_cannot_capture_lifecycle/u);
+    assert.equal(await readFile(settings, 'utf8'), '{}');
+    assert.equal(existsSync(record), false);
+  }
+  // Policy alone imposes the reader floor, even before the first capture.
+  await writeFile(ledgerPath(store), JSON.stringify({ version: 1, retentionOverrides: [{ project: 'alpha', days: 1 }] }));
+  const refused = await deliver(prior);
+  assert.equal(refused.code, 1);
+  assert.match(refused.stderr, /activation_runtime_cannot_read_retention/u);
+  assert.equal(existsSync(record), false);
+  assert.equal((await deliver(reader)).code, 0);
+});
+
 test('a pinned runtime must be able to capture, and every installed handler must run it with its own verb (FND-P6-10)', async (t) => {
   const { home, store } = await setup(t);
   const settings = join(home, 'settings-fixture.json');
@@ -306,9 +334,10 @@ test('a pinned runtime must be able to capture, and every installed handler must
   await kept.save(privilegedSnapshot(graph));
   assert.match((await deliverOld()).stderr, /activation_runtime_cannot_read_capture/u);
   assert.equal((await run(['deactivate', 'delivery'], home)).code, 0);
-  // A runtime that ships the capture hook template can.
+  // The lifecycle build ships its declared capability with the reader and hook.
   const template = readFileSync('integrations/claude-code.capture-hooks.json', 'utf8');
-  const able = await syntheticRuntime(join(home, 'shadowgraph-runtime', 'able'), { 'src/cli.js': '// synthetic', 'integrations/claude-code.capture-hooks.json': template });
+  const able = await syntheticRuntime(join(home, 'shadowgraph-runtime', 'able'), { 'src/cli.js': '// synthetic', 'integrations/claude-code.capture-hooks.json': template,
+    'src/internal/capture-retention.js': '// semantic reader fixture', 'src/capture-lifecycle-capability.json': '{"version":1}' });
   const accepted = await activate(home, store, '--runtime', able, '--mcp-servers', 'memory,shadowgraph');
   assert.equal(accepted.code, 0, accepted.stderr);
   const capture = JSON.parse(accepted.stdout).record.capabilities.capture;

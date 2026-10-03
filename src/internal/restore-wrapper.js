@@ -31,11 +31,11 @@ import { isValidIsoInstant } from '../fact-validity.js';
 import { createDestinationFence, currentRevision, fenceLockPath, nextRevisionAfter, restoreLock } from '../revision-store.js';
 import { requiresLegacyPurgeMigration, validateRestorePayload } from '../restore-validation.js';
 import { repositoryOf } from './owner-files.js';
-import { hasCaptureRetentionState } from './capture-retention.js';
-import { privilegedCompletePurge, privilegedReapplyDeletion, privilegedSnapshot } from './snapshot.js';
+import { hasCaptureRetentionState, RAW_RETENTION_DAYS } from './capture-retention.js';
+import { privilegedCompleteCaptureDelete, privilegedCompletePurge, privilegedExpireCapture, privilegedReapplyDeletion, privilegedSnapshot } from './snapshot.js';
 import {
   CONTROL_LEDGER_MALFORMED, CONTROL_LEDGER_NEWER_VERSION, DELETION_FILE_DESTINATION_REFUSED, DELETION_INTENT, DELETION_PENDING_UNSUPPORTED, PURGE_AWARE_RESTORE_UNSUPPORTED, attachLedgerView, canonical,
-  canonicalPath, classifyRestore, deletionError, journalHead, ledgerSnapshot, linkCount, markerMatches, mergeAppliesTo, mergedTombstones, pendingUnsupported, purgeRecordValid, readLedger,
+  canonicalPath, captureItemRecordValid, itemRecordedBy, classifyRestore, deletionError, journalHead, ledgerSnapshot, linkCount, markerMatches, mergeAppliesTo, mergedTombstones, pendingUnsupported, purgeRecordValid, readLedger,
   readRegistry, recordedBy, refusedWrite, registryFile, restoreBinding, restoreLedgerBytes, restoreRecordValid, restoreUnresolvable, unlinkLedgerIfRecordOnly, writeLedger, writeRegistry
 } from './deletion-knowledge.js';
 
@@ -68,21 +68,20 @@ function refusal(message, cause) {
 const UNREADABLE_DESTINATION = 'the destination cannot be read, so deletion records it may hold cannot be ruled out; restore into a fresh path instead';
 const UNREADABLE_KNOWLEDGE = 'the deletion records that reach it cannot be read, or were written by a newer ShadowGraph build; a later ShadowGraph build is needed';
 const PENDING_DELETION = 'the store has a deletion this build cannot complete';
-const RETENTION_UNSUPPORTED = 'capture retention requires a later lifecycle build to reconcile it safely; this reader does not restore it';
 
-// A pending operation must not be completed as a side effect of refusing an
-// unsupported retention-bearing restore. This guard runs inside the resolver's
-// destination fence. The normal pre-step checks again before the primitive.
+// Check the source before completing any destination record. Legacy pending
+// restores without explicit retention inputs remain unsupported when retention
+// is present; the final lifecycle shape can be resumed. Source WAL is never
+// opened or checkpointed as a side effect of this preflight.
 export function retentionRestoreGuard(source, destination, backend = 'json') {
   return async ({ read }) => {
     const mine = await readLedger(destination);
     if (!mine?.pending.length) return;
-    const carried = await readLedger(source);
-    if (mine.retentionOverrides.length) throw pendingUnsupported();
-    if (carried?.retentionOverrides.length) throw refusal(RETENTION_UNSUPPORTED);
+    await readLedger(source);
     let d;
     try { d = await read(); } catch (error) { throw refusal(UNREADABLE_DESTINATION, error); }
-    if (hasCaptureRetentionState(d)) throw pendingUnsupported();
+    if (mine.pending[0]?.kind === 'restore' && !mine.pending[0]?.inputs?.retention
+      && (mine.retentionOverrides.length || hasCaptureRetentionState(d))) throw pendingUnsupported();
     let b;
     try {
       if (backend === 'sqlite') {
@@ -106,7 +105,9 @@ export function retentionRestoreGuard(source, destination, backend = 'json') {
       if (error?.code === PURGE_AWARE_RESTORE_UNSUPPORTED) throw error;
       throw refusal('the source cannot be checked for retention before completing the pending operation', error);
     }
-    if (hasCaptureRetentionState(b)) throw refusal(RETENTION_UNSUPPORTED);
+    // Parsing the sidecar above validates its policy even if no deletion
+    // knowledge is present. Validate the payload before any resolver write.
+    try { validateRestorePayload(b); } catch (error) { throw refusal('the restore source is invalid', error); }
   };
 }
 
@@ -251,7 +252,8 @@ function restoreInputs(b, d, knowledge, mine) {
 const knowledgeOf = (ledger, record) => ({
   tombstones: mergedTombstones(ledger?.tombstones ?? [], record.add.tombstones),
   quarantine: [...(ledger?.quarantine ?? []), ...record.add.quarantine],
-  tokensStripped: ledger?.tokensStripped ?? record.add.tokensStripped
+  tokensStripped: ledger?.tokensStripped ?? record.add.tokensStripped,
+  retentionOverrides: record.inputs.retention?.overrides ?? ledger?.retentionOverrides ?? []
 });
 
 // The post-step's effect on a payload (§6.1-§6.5): classified, then applied on
@@ -261,12 +263,22 @@ const knowledgeOf = (ledger, record) => ({
 // an empty effect writes nothing (§6.5). `quarantine` holds the ledger entries
 // of everything this run quarantines.
 function postStepOf(current, record, ledger, { verifier, instant, minted }) {
+  // Recovery may run after a clock rollback. Never undo expiry established
+  // at the original restore instant recorded before installation.
+  if (record.inputs.retention && (!isValidIsoInstant(instant) || Date.parse(instant) < Date.parse(record.inputs.retention.at))) instant = record.inputs.retention.at;
   const plan = classifyRestore(current, knowledgeOf(ledger, record), record.inputs);
-  if (!plan.remove.length && !plan.quarantine.length) return NO_EFFECT;
+  if (!plan.remove.length && !plan.quarantine.length && !record.inputs.retention) return NO_EFFECT;
   const staging = createShadowGraph({ verifier, now: () => instant });
-  staging.importData(structuredClone(current));
+  const candidate = structuredClone(current);
+  let cursorChanged = false;
+  if (record.inputs.retention) for (const session of candidate.captureSessions ?? []) {
+    if (session.cursor && !session.cursor.blocked && session.cursor.anchor !== null) { session.cursor.anchor = null; cursorChanged = true; }
+  }
+  staging.importData(attachLedgerView(candidate, { retentionOverrides: knowledgeOf(ledger, record).retentionOverrides }));
   const effect = privilegedReapplyDeletion(staging, plan, { tokens: minted ?? [] });
-  const written = effect.counts.removed > 0 || effect.counts.quarantined > 0;
+  const expiry = record.inputs.retention ? privilegedExpireCapture(staging, { maxItems: Math.max(1, current.records?.length ?? 0), maxSessions: Math.max(1, current.captureSessions?.length ?? 0) }) : { changed: false };
+  effect.payload = privilegedSnapshot(staging);
+  const written = effect.counts.removed > 0 || effect.counts.quarantined > 0 || expiry.changed || cursorChanged;
   if (written) validateRestorePayload(effect.payload);
   const tokenOf = new Map(entitiesOf(effect.payload).map((entity) => [entity.id, entity.erasureToken]));
   const entry = (token) => ({ token, at: instant });
@@ -281,8 +293,22 @@ function postStepOf(current, record, ledger, { verifier, instant, minted }) {
 // ---------------------------------------------------------------------------
 
 // What one restore carries from its hook to its post-step: never persisted.
-export function restoreContext({ source, destination, read, env = process.env, verifier, instant, backend = 'json' }) {
-  return { source, destination, read, env, verifier, instant, backend, calls: 0, knowledge: 'none', ledger: null, record: null, prior: null, post: null };
+export function restoreContext({ source, destination, read, env = process.env, verifier, instant, backend = 'json', freshlyCreated = false }) {
+  return { source, destination, read, env, verifier, instant, backend, freshlyCreated, calls: 0, knowledge: 'none', ledger: null, record: null, prior: null, post: null };
+}
+
+function retentionInputs(ctx, b, d, mine, carried) {
+  const captureState = (payload) => payload?.records?.some((item) => item.kind === 'capture') || payload?.captureSessions?.length;
+  if (!captureState(b) && !captureState(d) && !mine?.retentionOverrides.length && !carried?.retentionOverrides.length) return null;
+  const emptyMaterialized = ctx.freshlyCreated && d?.revision === 0 && Object.values(d).every((value) => !Array.isArray(value) || !value.length);
+  const freshDestination = (d === null || emptyMaterialized) && mine === null;
+  const left = mine?.retentionOverrides ?? [], right = carried?.retentionOverrides ?? [];
+  const projects = [...new Set([...left, ...right].map((entry) => entry.project))];
+  const overrides = freshDestination ? structuredClone(right) : projects.map((project) => {
+    const a = left.find((entry) => entry.project === project), b = right.find((entry) => entry.project === project);
+    return { ...(a ?? b), project, days: Math.min(a?.days ?? RAW_RETENTION_DAYS, b?.days ?? RAW_RETENTION_DAYS) };
+  });
+  return { overrides, freshDestination, at: ctx.instant };
 }
 
 // The post-step run on B before anything is written (§4.6): a candidate that
@@ -336,7 +362,6 @@ async function preStep(ctx, given) {
   // carries one (C3), an empty list being none (review finding 15).
   if (mine.ledger?.pending.length) throw refusal(PENDING_DELETION);
   if (carried.ledger?.pending.length) throw refusal('the backup\'s deletion records hold a pending record, which a backup never carries');
-  if (mine.ledger?.retentionOverrides.length || carried.ledger?.retentionOverrides.length || hasCaptureRetentionState(d) || hasCaptureRetentionState(b)) throw refusal(RETENTION_UNSUPPORTED);
   if (!carried.ledger && (await linkCount(ctx.source)) > 1) throw refusal('the backup has another hard link and no deletion records beside its name, so records beside the other name cannot be ruled out');
   if (holdsCursor(d)) throw refusal('the destination holds a transcript cursor, which a restore cannot carry yet; a later ShadowGraph build is needed');
   const knowledge = mergeKnowledge({ d, b, mine: mine.ledger, carried: carried.ledger, registry, instant: ctx.instant });
@@ -347,7 +372,18 @@ async function preStep(ctx, given) {
   // rule reaches B -- descent included -- so the inputs and the plan are
   // computed only when M or Q holds something. Then the restore is the
   // primitive alone, and only a flag B's sidecar carries is still written.
-  const inputs = merged ? restoreInputs(b, d, knowledge, mine.ledger) : NO_INPUTS;
+  const retention = retentionInputs(ctx, b, d, mine.ledger, carried.ledger);
+  if (retention) {
+    const left = mine.ledger?.retentionOverrides ?? [], right = carried.ledger?.retentionOverrides ?? [];
+    const projects = [...new Set([...left, ...right].map((entry) => entry.project))];
+    ctx.retentionReport = { ...retention, differences: projects.map((project) => ({
+      project,
+      destinationDays: left.find((entry) => entry.project === project)?.days ?? RAW_RETENTION_DAYS,
+      backupDays: right.find((entry) => entry.project === project)?.days ?? RAW_RETENTION_DAYS,
+      effectiveDays: retention.overrides.find((entry) => entry.project === project)?.days ?? RAW_RETENTION_DAYS
+    })).filter((entry) => entry.destinationDays !== entry.backupDays) };
+  }
+  const inputs = { ...(merged ? restoreInputs(b, d, knowledge, mine.ledger) : NO_INPUTS), ...(retention ? { retention } : {}) };
   const plan = merged ? classifyRestore(b, knowledge, inputs) : { remove: [], quarantine: [] };
   if (merged) refuseUntokenable(ctx, b, plan, { carried: carried.ledger, registry });
   const add = {
@@ -357,8 +393,8 @@ async function preStep(ctx, given) {
   };
   // Through an alias, the ledger these records live in would be left behind
   // (re-review N-1): D's own records count, though they write nothing here.
-  if (merged || add.tokensStripped !== undefined || mine.ledger?.tokensStripped !== undefined) await refuseAliasDestination(ctx.destination);
-  if (!add.tombstones.length && !add.quarantine.length && !add.tokensStripped && !plan.remove.length && !plan.quarantine.length) return;
+  if (merged || retention || add.tokensStripped !== undefined || mine.ledger?.tokensStripped !== undefined) await refuseAliasDestination(ctx.destination);
+  if (!retention && !add.tombstones.length && !add.quarantine.length && !add.tokensStripped && !plan.remove.length && !plan.quarantine.length) return;
   const record = {
     kind: 'restore',
     pre: { revision: d === null ? 0 : currentRevision(d), head: journalHead(d), existed: d !== null },
@@ -366,6 +402,15 @@ async function preStep(ctx, given) {
     add,
     inputs
   };
+  // Capture presence alone does not require a control-ledger write. Prove
+  // the post-step is empty before installation; real expiry/cursor changes
+  // and effective policy changes still use the recoverable record.
+  if (retention && !add.tombstones.length && !add.quarantine.length && add.tokensStripped === undefined
+    && !plan.remove.length && !plan.quarantine.length
+    && canonical(retention.overrides) === canonical(mine.ledger?.retentionOverrides ?? [])) {
+    const effect = postStepOf(b, record, mine.ledger, { verifier: ctx.verifier, instant: ctx.instant });
+    if (!effect.payload && !effect.quarantine.length) return;
+  }
   // What a discard puts back: the ledger's bytes and mode, or nothing (§2 step 5).
   const written = await writeLedger(ctx.destination, (ledger) => { ledger.pending = [record]; }, { env: ctx.env });
   ctx.prior = { path: written.path, text: written.text, bytes: mine.bytes, mode: mine.mode };
@@ -425,8 +470,8 @@ export function activation(ctx, callerAfterReplace) {
     const copy = structuredClone(ctx.post?.payload ?? installed);
     if (ctx.record) {
       const knowledge = knowledgeOf(ctx.ledger, ctx.record);
-      attachLedgerView(copy, { tombstones: knowledge.tombstones, quarantine: firstPerToken([...knowledge.quarantine, ...ctx.post.quarantine]) });
-    } else if (ctx.ledger?.tombstones.length || ctx.ledger?.quarantine.length) attachLedgerView(copy, ctx.ledger);
+      attachLedgerView(copy, { tombstones: knowledge.tombstones, quarantine: firstPerToken([...knowledge.quarantine, ...ctx.post.quarantine]), retentionOverrides: knowledge.retentionOverrides });
+    } else if (ctx.ledger) attachLedgerView(copy, ctx.ledger);
     await callerAfterReplace(copy);
   };
 }
@@ -449,6 +494,9 @@ function ledgerStepOne(ledger, effect) {
   const quarantine = firstPerToken([...record.add.quarantine, ...effect.quarantine]).filter((entry) => !held.has(entry.token));
   if (quarantine.length) ledger.quarantine = [...(ledger.quarantine ?? []), ...quarantine];
   if (record.add.tokensStripped !== undefined && ledger.tokensStripped === undefined) ledger.tokensStripped = record.add.tokensStripped;
+  if (record.inputs.retention && (record.inputs.retention.overrides.length || Object.hasOwn(ledger, 'retentionOverrides'))) {
+    ledger.retentionOverrides = structuredClone(record.inputs.retention.overrides);
+  }
   if (effect.payload) {
     const { kind, pre, expected, add, inputs } = record;
     ledger.pending = [{ kind, pre, expected, post: { revision: expected.revision + 1, head: journalHead(effect.payload) }, add, inputs, minted: record.minted ?? effect.minted }];
@@ -483,16 +531,20 @@ async function discard(file, env, prior) {
 // the quarantine selection's, which then reads and writes nothing (§4.2,
 // V-19). Resolves to whether the payload was written, or null when there is no
 // record, or none this resolver completes.
-async function resolveRecord({ read, commit, checkPurge }, file, env, { verifier, instant, computed, restoreFault, purges = true, lock } = {}) {
+async function resolveRecord({ read, commit, checkPurge }, file, env, { verifier, instant, computed, restoreFault, purges = true, items = false, lock } = {}) {
   const ledger = await readLedger(file);
   if (!ledger?.pending.length) return null;
   const [record] = ledger.pending;
+  if (ledger.pending.length === 1 && captureItemRecordValid(record, ledger.tombstones)) {
+    if (!items) throw pendingUnsupported();
+    return completePurges({ read, commit, checkPurge }, file, env, ledger, record, { verifier, lock });
+  }
   if (ledger.pending.length === 1 && purgeRecordValid(record, ledger.tombstones)) return purges ? completePurges({ read, commit, checkPurge }, file, env, ledger, record, { verifier, lock }) : null;
   if (ledger.pending.length > 1 || !restoreRecordValid(record, ledger.tombstones)) throw pendingUnsupported();
-  if (ledger.retentionOverrides.length) throw pendingUnsupported();
+  if (ledger.retentionOverrides.length && !record.inputs.retention) throw pendingUnsupported();
   let current;
   try { current = await read(); } catch { throw restoreUnresolvable(); }
-  if (hasCaptureRetentionState(current)) throw pendingUnsupported();
+  if (hasCaptureRetentionState(current) && !record.inputs.retention) throw pendingUnsupported();
   const state = restoreBinding(record, current, { absent: current === null });
   if (state === 'unknown') throw restoreUnresolvable();
   if (state === 'pre') { await discard(file, env); return false; }
@@ -512,13 +564,13 @@ async function resolveRecord({ read, commit, checkPurge }, file, env, { verifier
 // (f)). `held`: the caller already holds the store fence. `purges`: whether a
 // purge record is completed, false only for the quarantine selection (PR-37d
 // design §4.2); the registry lock takes the store's own lock options (§3.7).
-export async function resolvePendingRestore(io, { held = false, verifier, purges = true, beforeResolve } = {}) {
+export async function resolvePendingRestore(io, { held = false, verifier, purges = true, items = false, beforeResolve } = {}) {
   await io.run(async (store) => {
     // A destructive save can require a backend-specific refusal before even
     // settling a restore record. Recheck under the fence after waiting for
     // the restore lock; the first save attempt no longer holds that fence.
     await beforeResolve?.(store);
-    return resolveRecord(store, io.file, io.env, { verifier, instant: new Date().toISOString(), purges, lock: io.lock });
+    return resolveRecord(store, io.file, io.env, { verifier, instant: new Date().toISOString(), purges, items, lock: io.lock });
   }, { held });
 }
 
@@ -564,6 +616,7 @@ export async function settleAfterFailure(io, ctx, { held = false } = {}) {
 // called only after `io.run` returns (review finding 7).
 export async function completeRestore(io, ctx, result, callerAfterReplace, { held = false, load, restoreFault } = {}) {
   const outcome = { ...result, deletionKnowledge: ctx.knowledge };
+  if (ctx.retentionReport) outcome.retention = structuredClone(ctx.retentionReport);
   if (ctx.knowledge === 'present') outcome.reapplied = { ...(ctx.post?.counts ?? NO_EFFECT.counts) };
   if (!ctx.record) return outcome;
   let written;
@@ -608,7 +661,7 @@ export async function saveResolving(io, options, attempt, beforeResolve) {
   try { return await attempt(); }
   catch (error) { if (!(error instanceof RestorePendingError)) throw error; }
   return restoreLock(io.file, options).run(async () => {
-    await resolvePendingRestore(io, { beforeResolve });
+    await resolvePendingRestore(io, { beforeResolve, items: true });
     try { return await attempt(); }
     catch (error) {
       if (error instanceof RestorePendingError) throw pendingUnsupported();
@@ -708,6 +761,8 @@ export async function recordPurges(file, { current, data, env = process.env, loc
   const stored = new Set(journalOf(current).map((entry) => entry.id));
   const fresh = freshPurgeIntents(current, data);
   if (!fresh.length) return null;
+  const itemDeletion = fresh.every((intent) => intent.tombstone.kind === 'item');
+  if (!itemDeletion && fresh.some((intent) => intent.tombstone.kind === 'item')) throw refusedWrite('item and project removal in one uncommitted operation');
   // Item 3: no hook path ever writes the ledger or the registry (rev6:202-204).
   if (hook) throw refusedWrite('deletion records from the capture hook');
   // Item 4: intents and journal travel in one snapshot (declared equivalent).
@@ -727,7 +782,9 @@ export async function recordPurges(file, { current, data, env = process.env, loc
     const k1 = written.get(splicing.marker.id);
     lifted = { ...liftMarker(k1, data, null, k1.at), moveIn: spliced.map((marker) => liftMarker(marker, current, null, k1.at).moveIn).reduce(riskier, 'none') };
   }
-  const record = { kind: 'purge', purges: fresh.map(({ tombstone, marker }) => ({ project: tombstone.purgedProject, mode: tombstone.mode, marker })) };
+  const record = itemDeletion
+    ? { kind: 'capture_item', items: fresh.map(({ item, marker }) => ({ ...item, marker })) }
+    : { kind: 'purge', purges: fresh.map(({ tombstone, marker }) => ({ project: tombstone.purgedProject, mode: tombstone.mode, marker })) };
   const ours = (purge) => fresh.some((intent) => intent.marker.id === purge?.marker?.id) || stored.has(purge?.marker?.id);
   let recorded = false;
   try {
@@ -749,7 +806,7 @@ export async function recordPurges(file, { current, data, env = process.env, loc
           kept.add(canonical(tombstone));
           next.tombstones = [...(next.tombstones ?? []), tombstone];
         }
-        if ((next.pending ?? []).some((existing) => existing?.kind !== 'purge' || !Array.isArray(existing.purges) || !existing.purges.every(ours))) throw refusedWrite('a pending record this purge did not write');
+        if ((next.pending ?? []).some((existing) => existing?.kind !== record.kind || !Array.isArray(itemDeletion ? existing.items : existing.purges) || !(itemDeletion ? existing.items : existing.purges).every(ours))) throw refusedWrite('a pending record this purge did not write');
         next.pending = [record];
       }, { env, rename: move });
       recorded = true;
@@ -786,6 +843,9 @@ export async function recordPurges(file, { current, data, env = process.env, loc
 // An unreadable store keeps the record and refuses. Resolves to whether the
 // payload was written.
 async function completePurges({ read, commit, checkPurge }, file, env, ledger, record, { verifier, lock } = {}) {
+  const itemDeletion = record.kind === 'capture_item';
+  const operations = itemDeletion ? record.items : record.purges;
+  const recorded = itemDeletion ? itemRecordedBy : recordedBy;
   // Includes the absent/empty and already-committed branches: neither may
   // clear a record or append registry knowledge before a backend refusal.
   await checkPurge?.();
@@ -794,8 +854,8 @@ async function completePurges({ read, commit, checkPurge }, file, env, ledger, r
   const clear = () => writeLedger(file, clearRecord, { env });
   if (current === null || Object.values(current).every((value) => !Array.isArray(value) || !value.length)) {
     const registry = await registryUsable(file, env);
-    const forms = record.purges.map((purge) => ({
-      ...ledger.tombstones.find((tombstone) => recordedBy(purge, [tombstone])),
+    const forms = operations.map((purge) => ({
+      ...ledger.tombstones.find((tombstone) => recorded(purge, [tombstone])),
       lineage: { epochEntryId: null, headEntryId: null, markerEntryId: purge.marker.id }
     }));
     await underRegistryLock(registry, lock, async () => {
@@ -807,15 +867,24 @@ async function completePurges({ read, commit, checkPurge }, file, env, ledger, r
     return false;
   }
   const stored = new Set(journalOf(current).map((entry) => entry.id));
-  const open = record.purges.filter((purge) => !stored.has(purge.marker.id));
+  if (itemDeletion) for (const item of operations.filter((operation) => stored.has(operation.marker.id))) {
+    const marker = journalOf(current).find((entry) => entry.id === item.marker.id);
+    if (marker.seq !== item.marker.seq || marker.at !== item.marker.at || marker.entityKind !== 'capture' || marker.type !== 'capture.state_changed'
+      || marker.redacted !== true || marker.redactedReason !== 'capture_deleted' || marker.payload !== null || marker.entityId !== null
+      || entitiesOf(current).some((entity) => entity.id === item.id || entity.erasureToken === item.token)) throw pendingUnsupported();
+  }
+  const open = operations.filter((purge) => !stored.has(purge.marker.id));
   if (!open.length) {
     await clear();
     return false;
   }
-  const keyedOn = (tombstone) => record.purges.some((purge) => markerMatches(tombstone, { ...purge.marker, project: purge.project }));
+  const keyedOn = (tombstone) => operations.some((purge) => itemDeletion ? itemRecordedBy(purge, [tombstone]) : markerMatches(tombstone, { ...purge.marker, project: purge.project }));
   const staging = createShadowGraph({ verifier, now: () => open[0].marker.at });
-  staging.importData(attachLedgerView(structuredClone(current), { tombstones: ledger.tombstones.filter((tombstone) => !keyedOn(tombstone)), quarantine: ledger.quarantine }));
-  for (const purge of open) privilegedCompletePurge(staging, purge.project, { mode: purge.mode, marker: purge.marker });
+  staging.importData(attachLedgerView(structuredClone(current), { tombstones: ledger.tombstones.filter((tombstone) => !keyedOn(tombstone)), quarantine: ledger.quarantine, retentionOverrides: ledger.retentionOverrides }));
+  for (const purge of open) {
+    if (itemDeletion) privilegedCompleteCaptureDelete(staging, purge);
+    else privilegedCompletePurge(staging, purge.project, { mode: purge.mode, marker: purge.marker });
+  }
   await commit(privilegedSnapshot(staging));
   return true;
 }

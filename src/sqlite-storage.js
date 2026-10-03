@@ -13,7 +13,7 @@ import { SCHEMA_VERSION } from './shadowgraph.js';
 import { extraCollections, isExtraCollectionKey, refusePublicExport } from './internal/collections.js';
 import { RUNTIME_MISSES } from './internal/miss-ledger.js';
 import { CAPTURE_CONTENT, CAPTURE_SESSIONS } from './internal/capture.js';
-import { DELETION_VIEW, attachDeletionView, backupSidecar, journalHead, refuseAbsentWithRecord, refuseDeletionFileDestination, registerStoreIo, writeSidecar } from './internal/deletion-knowledge.js';
+import { DELETION_VIEW, attachDeletionView, backupSidecar, captureItemRecordValid, journalHead, pendingUnsupported, readLedger, refuseAbsentWithRecord, refuseDeletionFileDestination, registerStoreIo, writeSidecar } from './internal/deletion-knowledge.js';
 import { RestorePendingError, purgeRecorded, recordPurges, resolvePendingRestore, saveResolving } from './internal/restore-wrapper.js';
 
 // One generic carrier for every top-level collection this build does not
@@ -361,7 +361,13 @@ export async function createSqliteStore(filePath, options = {}) {
   await fence.run(async () => {
     let database;
     try {
+      // Preparing SQLite changes journal mode/schema even before a payload
+      // write. Defer preparation while any record waits so refusal is pure.
       await refuseAbsentWithRecord(filePath);
+      let ledger;
+      try { ledger = await readLedger(filePath); }
+      catch { return; } // Operations report unreadable controls before opening or writing.
+      if (ledger?.pending.length) return;
       database = openLiveDatabase('initial');
     } finally { closeChecked(database, 'initial'); }
   });
@@ -450,6 +456,7 @@ export async function createSqliteStore(filePath, options = {}) {
         if (restoring) throw new Error('SQLite restore is in progress');
         let database;
         try {
+          if ((await readLedger(filePath))?.pending.some((record) => record.kind === 'capture_item')) throw pendingUnsupported();
           await refuseAbsentWithRecord(filePath);
           database = openLiveDatabase('load');
           // The payload, then the deletion records beside it (PR-37a), in one
@@ -476,6 +483,11 @@ export async function createSqliteStore(filePath, options = {}) {
         if (restoring) throw new Error('SQLite restore is in progress');
         let database;
         try {
+          const ledger = await readLedger(filePath);
+          if (ledger?.pending.some((record) => record.kind === 'capture_item')) {
+            if (pending === 'suppress' && ledger.pending.length === 1 && captureItemRecordValid(ledger.pending[0], ledger.tombstones)) throw new RestorePendingError();
+            throw pendingUnsupported();
+          }
           await refuseAbsentWithRecord(filePath);
           database = openLiveDatabase('save');
           const current = await attachDeletionView(exportSqlitePayload(database), filePath, { env: options.env, pending });
@@ -499,6 +511,7 @@ export async function createSqliteStore(filePath, options = {}) {
         if (restoring) throw new Error('SQLite restore is in progress');
         let database;
         try {
+          if ((await readLedger(filePath))?.pending.length) throw pendingUnsupported();
           await refuseAbsentWithRecord(filePath);
           database = openLiveDatabase('update');
           // The capture hook's only write: any pending record refuses it before

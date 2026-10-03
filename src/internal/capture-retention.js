@@ -6,7 +6,9 @@ import { CAPTURE_KIND, CAPTURE_SCHEMA_VERSION, captureItemIssue } from './captur
 export const RAW_RETENTION_DAYS = 7;
 export const RAW_EXPIRED = 'raw_expired';
 const DAY = 86_400_000;
-const MAX_INSTANT = 8_640_000_000_000_000;
+// Capture timestamps use the schema's four-digit ISO year, not Date's
+// wider signed-year range. Large finite policies saturate at this boundary.
+const MAX_INSTANT = Date.parse('9999-12-31T23:59:59.999Z');
 
 // Recorded deadlines/skeletons need destination-aware lifecycle reconciliation
 // at restore, even when no project override is present.

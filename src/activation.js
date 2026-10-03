@@ -9,11 +9,12 @@ import { execFile } from 'node:child_process';
 import { lstat, readFile, rename } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { promisify } from 'node:util';
-import { CAPTURE_LIMITS, storeRepository } from './capture-hook.js';
+import { CAPTURE_LIMITS, expireCaptureStore, storeRepository } from './capture-hook.js';
 import { activationFile, DELIVERY_CAP_BYTES, DELIVERY_DEADLINE_MS, readStoreForDelivery } from './delivery.js';
 import { defaultSettingsPath, HOOK_TEMPLATE_URL, installedHandlers, pinnedRuntime, runtimeHookCommand } from './host-hooks.js';
 import { confirmOwnerAction } from './internal/owner-confirmation.js';
 import { credentialLiteralIn } from './internal/credential-literal.js';
+import { DELETION_VIEW } from './internal/deletion-knowledge.js';
 import { canonicalPath, isScratchFile, readText, writeJsonAtomically } from './internal/owner-files.js';
 import { mintOriginId, usableOriginId } from './scope.js';
 
@@ -110,6 +111,7 @@ export async function activateDelivery({ env = process.env, evidence, store, sto
   // A build before the capture reader refuses a store holding capture, so it
   // would deliver nothing from it (FND-P6-06, FND-P6-10).
   if (pinned && !pinned.captures && holdsCapture(payload)) throw new Error(`activation_runtime_cannot_read_capture (${pinned.path} is ${pinned.commit}, a build that cannot read the capture ${storeFile} holds or may hold; install a later runtime)`);
+  if (pinned && !pinned.retentionReader && (holdsCapture(payload) || payload?.[DELETION_VIEW]?.retentionOverrides?.length)) throw new Error(`activation_runtime_cannot_read_retention (${pinned.path} does not enforce capture retention; install a compatible runtime)`);
   sharedWith(record?.capabilities?.capture, 'capture', storeFile, storage, pinned);
   const at = new Date().toISOString();
   const delivery = {
@@ -169,6 +171,7 @@ export async function activateCapture({ env = process.env, evidence, store, stor
   const settingsFile = await canonicalPath(settings);
   const { handlers, pinned } = await hooksRunning(settingsFile, runtime);
   if (pinned && !pinned.captures) throw new Error(`activation_runtime_cannot_capture (${pinned.path} is ${pinned.commit}, a build without the capture verb and reader; install a later runtime)`);
+  if (pinned && !pinned.captureLifecycle) throw new Error(`activation_runtime_cannot_capture_lifecycle (${pinned.path} does not declare the required capture lifecycle; install a compatible runtime)`);
   sharedWith(record?.capabilities?.delivery, 'delivery', storeFile, storage, pinned);
   // The origin: the capability's own, else the latest one the history kept.
   const history = Array.isArray(record?.history) ? record.history : [];
@@ -235,7 +238,16 @@ async function gitRepository(path) {
 // one the system cannot read for now (another process holding it) fails the
 // command and stays as it is.
 export const deactivateDelivery = (options) => deactivate('delivery', options);
-export const deactivateCapture = (options) => deactivate('capture', options);
+export async function deactivateCapture(options = {}) {
+  // Disabling capture is durable before cleanup starts. A locked, unreadable
+  // or pending store cannot re-enable capture or masquerade as cleaned up.
+  const result = await deactivate('capture', options);
+  if (!result.changed) return result;
+  let cleanup;
+  try { cleanup = await expireCaptureStore({ env: options.env, timeoutMs: options.cleanupTimeoutMs, endLimits: true }); }
+  catch (error) { cleanup = { status: 'deferred', reason: error.code ?? 'capture_cleanup_failed', changed: false, expired: 0 }; }
+  return { ...result, cleanup };
+}
 
 async function deactivate(capability, { env = process.env, surface = 'cli' } = {}) {
   let path, record, keptAside = null;
