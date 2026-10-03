@@ -439,11 +439,11 @@ async function discard(file, env, prior) {
 // the quarantine selection's, which then reads and writes nothing (§4.2,
 // V-19). Resolves to whether the payload was written, or null when there is no
 // record, or none this resolver completes.
-async function resolveRecord({ read, commit }, file, env, { verifier, instant, computed, restoreFault, purges = true, lock } = {}) {
+async function resolveRecord({ read, commit, checkPurge }, file, env, { verifier, instant, computed, restoreFault, purges = true, lock } = {}) {
   const ledger = await readLedger(file);
   if (!ledger?.pending.length) return null;
   const [record] = ledger.pending;
-  if (ledger.pending.length === 1 && purgeRecordValid(record, ledger.tombstones)) return purges ? completePurges({ read, commit }, file, env, ledger, record, { verifier, lock }) : null;
+  if (ledger.pending.length === 1 && purgeRecordValid(record, ledger.tombstones)) return purges ? completePurges({ read, commit, checkPurge }, file, env, ledger, record, { verifier, lock }) : null;
   if (ledger.pending.length > 1 || !restoreRecordValid(record, ledger.tombstones)) throw pendingUnsupported();
   let current;
   try { current = await read(); } catch { throw restoreUnresolvable(); }
@@ -466,8 +466,14 @@ async function resolveRecord({ read, commit }, file, env, { verifier, instant, c
 // (f)). `held`: the caller already holds the store fence. `purges`: whether a
 // purge record is completed, false only for the quarantine selection (PR-37d
 // design §4.2); the registry lock takes the store's own lock options (§3.7).
-export async function resolvePendingRestore(io, { held = false, verifier, purges = true } = {}) {
-  await io.run((store) => resolveRecord(store, io.file, io.env, { verifier, instant: new Date().toISOString(), purges, lock: io.lock }), { held });
+export async function resolvePendingRestore(io, { held = false, verifier, purges = true, beforeResolve } = {}) {
+  await io.run(async (store) => {
+    // A destructive save can require a backend-specific refusal before even
+    // settling a restore record. Recheck under the fence after waiting for
+    // the restore lock; the first save attempt no longer holds that fence.
+    await beforeResolve?.();
+    return resolveRecord(store, io.file, io.env, { verifier, instant: new Date().toISOString(), purges, lock: io.lock });
+  }, { held });
 }
 
 // Step 0's refusal carries the restore code, as every refusal by a restore
@@ -552,11 +558,11 @@ export class RestorePendingError extends Error {
 // write a record between the two (review finding 12); the retry usually ends
 // in a revision conflict, which the callers reload on (V-9). A record still
 // there then is one this build cannot resolve.
-export async function saveResolving(io, options, attempt) {
+export async function saveResolving(io, options, attempt, beforeResolve) {
   try { return await attempt(); }
   catch (error) { if (!(error instanceof RestorePendingError)) throw error; }
   return restoreLock(io.file, options).run(async () => {
-    await resolvePendingRestore(io);
+    await resolvePendingRestore(io, { beforeResolve });
     try { return await attempt(); }
     catch (error) {
       if (error instanceof RestorePendingError) throw pendingUnsupported();
@@ -645,11 +651,16 @@ function epochOf(registry, current) {
 // store's fence options, which the registry lock takes too. Resolves to null
 // when no intent is fresh -- the write is then exactly as before -- or to the
 // clear the caller runs after its payload commit (step 12).
-export async function recordPurges(file, { current, data, env = process.env, lock = {}, hook = false, fault, rename: move } = {}) {
+export function freshPurgeIntents(current, data) {
   // §3.2 items 1-2: an intent whose marker the stored journal holds was
   // committed already.
   const stored = new Set(journalOf(current).map((entry) => entry.id));
-  const fresh = (data?.[DELETION_INTENT] ?? []).filter((intent) => !stored.has(intent.marker.id));
+  return (data?.[DELETION_INTENT] ?? []).filter((intent) => !stored.has(intent.marker.id));
+}
+
+export async function recordPurges(file, { current, data, env = process.env, lock = {}, hook = false, fault, rename: move } = {}) {
+  const stored = new Set(journalOf(current).map((entry) => entry.id));
+  const fresh = freshPurgeIntents(current, data);
   if (!fresh.length) return null;
   // Item 3: no hook path ever writes the ledger or the registry (rev6:202-204).
   if (hook) throw refusedWrite('deletion records from the capture hook');
@@ -728,7 +739,10 @@ export async function recordPurges(file, { current, data, env = process.env, loc
 //   canonically present and clears the record.
 // An unreadable store keeps the record and refuses. Resolves to whether the
 // payload was written.
-async function completePurges({ read, commit }, file, env, ledger, record, { verifier, lock } = {}) {
+async function completePurges({ read, commit, checkPurge }, file, env, ledger, record, { verifier, lock } = {}) {
+  // Includes the absent/empty and already-committed branches: neither may
+  // clear a record or append registry knowledge before a backend refusal.
+  await checkPurge?.();
   let current;
   try { current = await read(); } catch { throw pendingUnsupported(); }
   const clear = () => writeLedger(file, clearRecord, { env });

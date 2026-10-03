@@ -3,8 +3,8 @@ import { basename, dirname, join } from 'node:path';
 import { nextRevision, assertRevision, createDestinationFence, restoreLock } from './revision-store.js';
 import { SCHEMA_VERSION } from './shadowgraph.js';
 import { refusePublicExport } from './internal/collections.js';
-import { DELETION_VIEW, attachDeletionView, canonicalPath, commitFile, readUnfenced, refuseDeletionFileDestination, registerStoreIo, storeIo } from './internal/deletion-knowledge.js';
-import { RestorePendingError, activation, asRestoreRefusal, completeRestore, purgeRecorded, recordPurges, resolvePendingRestore, restoreContext, restoreHook, saveResolving, settleAfterFailure } from './internal/restore-wrapper.js';
+import { DELETION_FILE_DESTINATION_REFUSED, DELETION_INTENT, DELETION_VIEW, attachDeletionView, canonicalPath, commitFile, deletionError, readUnfenced, refuseDeletionFileDestination, registerStoreIo, storeIo } from './internal/deletion-knowledge.js';
+import { RestorePendingError, activation, asRestoreRefusal, completeRestore, freshPurgeIntents, purgeRecorded, recordPurges, resolvePendingRestore, restoreContext, restoreHook, saveResolving, settleAfterFailure } from './internal/restore-wrapper.js';
 
 // Journal lives INSIDE the same payload as the state and is written by the same
 // atomic temp-write + rename. See journal-contract.md §atomicity: state and
@@ -20,12 +20,25 @@ const unreadable = () => new Error('ShadowGraph storage is invalid or unreadable
 // 1); as every save writes one inside the store fence, none is in flight there.
 // A store whose file is named `restore` shares that shape with the JSON restore
 // primitive's own temporary file, kept for a crashed restore's recovery, so
-// nothing beside it is removed (declared).
+// nothing beside it is removed. A destructive operation instead refuses any
+// ambiguity before recording or resolving deletion knowledge below.
 async function removeLeftTemporaries(target) {
-  if (basename(target) === 'restore') return;
+  if (basename(target).toLowerCase() === 'restore') return;
   const prefix = `.${basename(target)}.`;
   for (const name of await readdir(dirname(target))) {
     if (name.startsWith(prefix) && name.endsWith('.tmp') && /^\d+\.\d{13}\.[a-z0-9]+$/u.test(name.slice(prefix.length, -'.tmp'.length))) await rm(join(dirname(target), name), { force: true });
+  }
+}
+
+// The old and current save format is deliberately unchanged: older sweepers
+// must not silently miss a new suffix. A restore-named store's killed save is
+// indistinguishable from R16's recovery temporary. Do not inspect or remove
+// either; refuse before durable effects. Case-fold conservatively, including
+// on a case-sensitive host that can later hand the store to Windows.
+async function refuseAmbiguousTemporaries(target) {
+  if (basename(target).toLowerCase() !== 'restore') return;
+  if ((await readdir(dirname(target))).some((name) => /^\.restore\.\d+\.\d{13}\.[a-z0-9]+\.tmp$/iu.test(name))) {
+    throw deletionError(DELETION_FILE_DESTINATION_REFUSED, 'Refusing to purge: a save temporary cannot be distinguished from a restore recovery file beside this store; recover or relocate the store before retrying, preserving recovery files');
   }
 }
 
@@ -43,6 +56,7 @@ async function readStored(filePath) {
 export function createJsonFileStore(filePath, options = {}) {
   let saveQueue = Promise.resolve();
   const fence = createDestinationFence(filePath, options);
+  const checkPurge = async () => refuseAmbiguousTemporaries(await canonicalPath(filePath));
   // One step inside the fence, after this handle's earlier ones.
   const fenced = (step) => {
     const operation = saveQueue.then(() => fence.run(step));
@@ -67,6 +81,7 @@ export function createJsonFileStore(filePath, options = {}) {
     const context = { current, payload, destructive: false };
     const target = await canonicalPath(filePath);
     await refuseDeletionFileDestination(filePath, options.env);
+    if (freshPurgeIntents(current, input).length) await checkPurge();
     const clear = await recordPurges(filePath, { current, data: input, env: options.env, lock: options, hook, fault: (stage) => options.saveFault?.(stage, context) });
     const temporaryPath = join(dirname(target), `.${basename(target)}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`);
     // The store keeps its mode, or is owner-only when new; a capture store is
@@ -110,6 +125,7 @@ export function createJsonFileStore(filePath, options = {}) {
     run(step, { held = false } = {}) {
       let last;
       const tools = {
+        checkPurge,
         read: async () => {
           const { text, payload } = await readStored(filePath);
           last = payload;
@@ -140,12 +156,20 @@ export function createJsonFileStore(filePath, options = {}) {
     // instead (PR-37d review finding 2).
     async save(data, { pending = 'suppress' } = {}) {
       refusePublicExport(data);
+      // Committed intents stay on long-lived graphs. Only a fresh intent
+      // needs the destructive preflight; re-read under each fence, including
+      // the resolver's, because another writer can run between the attempts.
+      const beforeResolve = data?.[DELETION_INTENT]?.length ? async () => {
+        const { payload } = await readStored(filePath);
+        if (freshPurgeIntents(payload, data).length) await checkPurge();
+      } : undefined;
       return saveResolving(io, options, () => fenced(async () => {
+        await beforeResolve?.();
         const current = await readFenced(pending);
         if (current[DELETION_VIEW]?.pending) throw new RestorePendingError();
         assertRevision(current, data?.expectedRevision ?? (data?.revision === undefined ? undefined : data.revision));
         return commit(current, data);
-      }));
+      }), beforeResolve);
     },
     // Load, change and write under one hold of the fence, so no revision can
     // conflict (automatic capture, PR-36c; PR-36 design review D-2): `change`

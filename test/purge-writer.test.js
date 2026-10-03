@@ -583,12 +583,139 @@ test('D9 json: the sweep takes only commit()\'s own temporary-file shape: a date
   assert.equal(existsSync(left), false, 'a killed save\'s temporary file is removed');
   for (const path of backups) assert.equal(existsSync(path) && await readFile(path, 'utf8'), 'planted', `${basename(path)} is kept`);
   // The JSON restore primitive names its own `.restore.<pid>.<ms>.<random>.tmp`, commit()'s shape for a store named
-  // `restore`, so nothing beside such a store is taken (declared).
+  // `restore`. Refuse before recording a purge rather than silently retaining
+  // what could also be an ordinary save's copy of the purged material.
   const restore = await storeAt(t, 'json', privilegedSnapshot(projectGraph().graph), { name: 'restore' });
   const restoring = join(restore.dir, `.restore.4321.${ms}.k3j4.tmp`);
   await writeFile(restoring, 'planted');
-  await purge(restore, 'p', 'hard');
+  const before = await hashesOf(restore);
+  await assert.rejects(purge(restore, 'p', 'hard'), { code: DESTINATION });
+  assert.deepEqual(await hashesOf(restore), before, 'ambiguous residue refuses before any deletion write');
   assert.equal(existsSync(restoring) && await readFile(restoring, 'utf8'), 'planted', 'beside a store named restore');
+});
+
+for (const name of ['restore', 'RESTORE']) test(`D9 corrective json ${name}: historical and current save-shaped residue refuses before deletion records, preserves recovery files, and does not prevent an ordinary save`, async (t) => {
+  const state = await storeAt(t, 'json', privilegedSnapshot(projectGraph().graph), { name });
+  const files = [
+    `.restore.1234.1700000000000.abc.tmp`,
+    `.${name}.${process.pid}.${Date.now()}.xyz.tmp`,
+    '.restore.1234.1700000000000.abc.rollback',
+    '.restore.1234.1700000000000.abc.recovery'
+  ];
+  for (const file of files) await writeFile(join(state.dir, file), SENTINEL);
+  for (const mode of ['logical', 'hard']) {
+    const before = await hashesOf(state);
+    await assert.rejects(purge(state, 'p', mode), (error) => error.code === DESTINATION && !error.message.includes(RECORDED) && !error.message.includes(state.dir));
+    assert.deepEqual(await hashesOf(state), before, mode);
+    for (const file of files) assert.equal(await readFile(join(state.dir, file), 'utf8'), SENTINEL, file);
+  }
+  await write(state, (graph) => graph.addDecision({ project: 'q', title: 'ordinary save remains supported', chosen: 'q' }));
+  assert.equal(await ledgerOf(state), null);
+  assert.equal(await registryOf(state.env), null);
+});
+
+test('D9 corrective json: retained committed intents do not turn a later ordinary save into a purge', async (t) => {
+  const state = await storeAt(t, 'json', privilegedSnapshot(projectGraph().graph), { name: 'restore' });
+  await withStore(state, async (store) => {
+    const graph = graphOf(await store.load());
+    graph.purgeProject('p', { mode: 'hard' });
+    graph.setRevision(await store.save(privilegedSnapshot(graph)));
+    const before = await hashesOf(state);
+    const left = join(state.dir, '.restore.1234.1700000000000.abc.tmp');
+    await writeFile(left, SENTINEL);
+    graph.addDecision({ project: 'q', title: 'ordinary save with retained intent', chosen: 'q' });
+    graph.setRevision(await store.save(privilegedSnapshot(graph)));
+    const after = await hashesOf(state);
+    assert.notEqual(after[0], before[0]);
+    assert.deepEqual(after.slice(1), before.slice(1), 'ordinary save does not touch deletion knowledge');
+    assert.equal(await readFile(left, 'utf8'), SENTINEL);
+    graph.purgeProject('q', { mode: 'hard' });
+    await assert.rejects(store.save(privilegedSnapshot(graph)), { code: DESTINATION });
+    assert.deepEqual(await hashesOf(state), after, 'a fresh intent still refuses beside retained ones');
+  });
+});
+
+test('D9 corrective json: an unambiguous restore-named store can purge while genuine rollback and recovery files remain untouched', async (t) => {
+  const state = await storeAt(t, 'json', privilegedSnapshot(projectGraph().graph), { name: 'restore' });
+  const files = ['.restore.1234.1700000000000.abc.rollback', '.restore.1234.1700000000000.abc.recovery'];
+  for (const file of files) await writeFile(join(state.dir, file), SENTINEL);
+  await purge(state, 'p', 'hard');
+  assert.equal((await readFile(state.file, 'utf8')).includes(SENTINEL), false);
+  for (const file of files) assert.equal(await readFile(join(state.dir, file), 'utf8'), SENTINEL);
+});
+
+test('D9 corrective json: the ordinary-save sweep precedes the payload commit even when commit fails', async (t) => {
+  const state = await storeAt(t, 'json', privilegedSnapshot(projectGraph().graph));
+  const left = join(state.dir, `.${basename(state.file)}.1234.1700000000000.abc.tmp`);
+  await writeFile(left, await readFile(state.file));
+  const { thrown, saveFault } = fault('beforeCommit');
+  await assert.rejects(purge(state, 'p', 'hard', { saveFault }), (error) => error === thrown);
+  assert.equal(existsSync(left), false, 'swept before the failed payload commit');
+  assert.equal((await ledgerOf(state)).pending[0].kind, 'purge');
+});
+
+for (const position of ['uncommitted', 'committed', 'absent', 'empty']) test(`D9 corrective json ${position}: ambiguous residue refuses pending purge completion through save, backup and restore without changing any durable file`, async (t) => {
+  const state = await storeAt(t, 'json', privilegedSnapshot(projectGraph().graph), { name: 'restore' });
+  const source = await backupOf(state, 'before-purge');
+  await crashWindow(t, 'json', { state, stage: position === 'committed' ? 'beforeRecordCleared' : 'deletionLedgerWritten' });
+  if (position === 'absent') await rm(state.file);
+  if (position === 'empty') await writeFile(state.file, JSON.stringify(privilegedSnapshot(createShadowGraph())));
+  const left = join(state.dir, '.restore.1234.1700000000000.abc.tmp');
+  await writeFile(left, SENTINEL);
+  const before = await hashesOf(state);
+  for (const [entry, act] of [
+    ['save', () => write(state, (graph) => graph.addDecision({ project: 'q', title: 'next', chosen: 'q' }))],
+    ['backup', () => backupOf(state, 'refused-copy')],
+    ['restore', () => restoreInto(state, source)]
+  ]) {
+    await assert.rejects(act(), { code: DESTINATION }, entry);
+    assert.deepEqual(await hashesOf(state), before, entry);
+    assert.equal(await readFile(left, 'utf8'), SENTINEL, entry);
+  }
+});
+
+test('D9 corrective json: a purge through a store alias refuses ambiguity at the canonical name before any write', async (t) => {
+  const state = await storeAt(t, 'json', privilegedSnapshot(projectGraph().graph), { name: 'restore' });
+  const alias = join(state.dir, 'alias.json');
+  try { await symlink(state.file, alias, 'file'); }
+  catch (error) { if (error.code === 'EPERM') return t.skip('file symlinks unavailable'); throw error; }
+  const left = join(state.dir, '.restore.1234.1700000000000.abc.tmp');
+  await writeFile(left, SENTINEL);
+  const before = await hashesOf(state);
+  await assert.rejects(purge({ ...state, file: alias }, 'p', 'hard'), { code: DESTINATION });
+  assert.deepEqual(await hashesOf(state), before);
+  assert.equal(await readFile(left, 'utf8'), SENTINEL);
+});
+
+for (const arrival of ['before save', 'between save and resolution']) test(`D9 corrective json: ambiguity arriving ${arrival} prevents a fresh purge from settling an earlier restore record`, async (t) => {
+  const state = await storeAt(t, 'json', privilegedSnapshot(projectGraph().graph), { name: 'restore' });
+  const source = await backupOf(state, 'before-purge');
+  await purge(state, 'p');
+  const result = await restoreInto(state, source, { restoreFault: (stage) => { if (stage === 'beforePostStep') throw new Error('interrupt post-step'); } });
+  assert.equal(result.completion, 'pending');
+  assert.equal((await ledgerOf(state)).pending[0].kind, 'restore');
+  const left = join(state.dir, '.restore.1234.1700000000000.abc.tmp');
+  const original = fs.promises.unlink;
+  let planted = false;
+  if (arrival === 'before save') await writeFile(left, SENTINEL);
+  else {
+    const lockPath = await fenceLockPath(state.file);
+    fs.promises.unlink = async (path, ...args) => {
+      const result = await original(path, ...args);
+      if (!planted && String(path) === lockPath) {
+        planted = true;
+        await writeFile(left, SENTINEL);
+      }
+      return result;
+    };
+    syncBuiltinESMExports();
+  }
+  const before = await hashesOf(state);
+  try { await assert.rejects(purge(state, 'q', 'hard'), { code: DESTINATION }); }
+  finally { fs.promises.unlink = original; syncBuiltinESMExports(); }
+  if (arrival !== 'before save') assert.equal(planted, true, 'the initial save released its fence before ambiguity appeared');
+  assert.deepEqual(await hashesOf(state), before, 'the existing restore record is not resolved on the way to refusal');
+  assert.equal(await readFile(left, 'utf8'), SENTINEL);
 });
 
 test('D9 json: a purge that faults before its record is cleared has already removed the killed saves\' temporary files, so none holds what it purged (re-review new finding 6)', async (t) => {
