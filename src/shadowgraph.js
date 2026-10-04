@@ -26,6 +26,7 @@ import { attemptOutcome } from './internal/outcome.js';
 import { RUNTIME_MISSES, missReachedBy, runtimeMissLedgerIssue, withFallbackMisses } from './internal/miss-ledger.js';
 import { supersessionOrder, temporalEvidence, versionTimes } from './internal/temporal-evidence.js';
 import { T1_DERIVATION_VERSION, t1Digest, t1Inputs, t1Line } from './compact-tier.js';
+import { withoutSourceCopies } from './internal/source-availability.js';
 import { SELF_SIGNALS, stripDeliveredBlocks } from './internal/capture-source.js';
 import { CAPTURE_COLLECTIONS, CAPTURE_CONTENT, CAPTURE_ENTRY_TYPES, CAPTURE_EVENT_IDENTITY, CAPTURE_IMPORT_TYPE, CAPTURE_KIND, CAPTURE_SESSIONS, CAPTURE_TRANSITIONS, captureCollectionIssue, captureEntryReachedBy, captureEventIssue, captureItemIssue, captureObservationIssue, CAPTURE_LIMIT_EVENT, CAPTURE_REFUSED_EVENT, OTHER_OWNER } from './internal/capture.js';
 import { TRANSCRIPT_ANCHOR_BYTES, TRANSCRIPT_GAP_REASONS, TRANSCRIPT_TRIGGERS, cursorBlock, cursorShape, digest, lastLineEnd, matchKey, transcriptEntry, transcriptLines } from './internal/transcript.js';
@@ -135,6 +136,12 @@ function storedEntityIssue(entity) {
 function claimModelIssue(entity) {
   const tokenIssue = erasureTokenIssue(entity);
   if (tokenIssue) return tokenIssue;
+  const unavailableSources = new Set();
+  if (entity.sourceAvailability === 'unavailable' && named(entity.captureRef)) unavailableSources.add(entity.captureRef);
+  for (const item of [...(Array.isArray(entity.claims) ? entity.claims : []),
+    ...(Array.isArray(entity.causalClaim?.evidence) ? entity.causalClaim.evidence : [])]) {
+    if (item?.sourceAvailability === 'unavailable' && named(item.sourceRef)) unavailableSources.add(item.sourceRef);
+  }
   if (entity.claims !== undefined) {
     if (!Array.isArray(entity.claims)) return 'claims must be a list';
     for (const [index, claim] of entity.claims.entries()) {
@@ -143,12 +150,18 @@ function claimModelIssue(entity) {
       if (!named(claim.verifierVersion)) return `claims[${index}] carries no verifierVersion: a claim's class comes from the claim verifier`;
       if (!named(claim.text) || !named(claim.sourceRef)) return `claims[${index}] names no text or sourceRef`;
       if (claim.class === 'entailed' && !named(claim.rule)) return `claims[${index}] is entailed and names no rule`;
-      if (claim.class === 'ambiguous' && (!Array.isArray(claim.readings) || !claim.readings.length || !claim.readings.every(named))) return `claims[${index}] is ambiguous and records no readings`;
+      if ((claim.sourceAvailability === 'unavailable' || unavailableSources.has(claim.sourceRef))
+        && ['evidence', 'readings'].some(key => Object.hasOwn(claim, key))) return `claims[${index}] unavailable source retains an evidence copy`;
+      if (claim.class === 'ambiguous' && claim.sourceAvailability !== 'unavailable' && (!Array.isArray(claim.readings) || !claim.readings.length || !claim.readings.every(named))) return `claims[${index}] is ambiguous and records no readings`;
       if (claim.span !== undefined && !(isPlainObject(claim.span) && Number.isSafeInteger(claim.span.start) && Number.isSafeInteger(claim.span.end) && claim.span.start >= 0 && claim.span.start < claim.span.end)) return `claims[${index}].span must be a start before an end`;
     }
   }
   if (entity.causalClaim !== undefined) {
     const cause = entity.causalClaim;
+    if ((cause?.sourceAvailability === 'unavailable' || (Array.isArray(cause?.evidence) && cause.evidence.some(item => unavailableSources.has(item?.sourceRef))))
+      && Object.hasOwn(cause ?? {}, 'readings')) return 'unavailable causal source retains readings';
+    if (cause?.sourceAvailability === 'unavailable' && Array.isArray(cause.evidence) && !cause.evidence.some(item => item?.sourceAvailability === 'unavailable') && cause.evidence.some(item => Object.hasOwn(item ?? {}, 'text'))) return 'unavailable causal source has no unavailable evidence node';
+    if (Array.isArray(cause?.evidence) && cause.evidence.some(item => (item?.sourceAvailability === 'unavailable' || unavailableSources.has(item?.sourceRef)) && ['text', 'evidence', 'readings'].some(key => Object.hasOwn(item ?? {}, key)))) return 'unavailable causal source retains an evidence copy';
     if (!isPlainObject(cause) || !CAUSAL_STATES.includes(cause.state)) return `causalClaim.state must be one of ${CAUSAL_STATES.join(', ')}`;
     if (cause.class !== undefined && (!CLAIM_CLASSES.includes(cause.class) || cause.class === 'unsupported')) return 'causalClaim.class must be quoted, entailed or ambiguous';
     if (cause.class !== undefined && !named(cause.verifierVersion)) return 'causalClaim carries a class but no verifierVersion: a class comes from the claim verifier';
@@ -398,10 +411,10 @@ function publicValue(value, derive = true) {
   return copy ?? value;
 }
 
-function tokenFreeApi(api) {
+function tokenFreeApi(api, project = value => value) {
   return Object.fromEntries(Object.entries(api).map(([name, member]) => [name, typeof member !== 'function' ? member : (...args) => {
     const result = member(...args);
-    return result && typeof result.then === 'function' ? result.then((value) => publicValue(value)) : publicValue(result);
+    return result && typeof result.then === 'function' ? result.then((value) => publicValue(project(value))) : publicValue(project(result));
   }]));
 }
 
@@ -5512,8 +5525,21 @@ export function createShadowGraph(options = {}) {
     return extractionSupersession(record, records, relations, other => other.kind !== 'memory' || sameMemoryScopeValues(other.scope, memoryScope));
   }
 
+  function sourceReadView(value) {
+    const held = deletion.get('held');
+    if (!held) return value;
+    const ids = new Set(held.ids);
+    const refs = new Set(withheldCaptures().map(item => item.contentRef).filter(Boolean));
+    for (const [, item] of held.collections[CAPTURE_CONTENT]?.items ?? []) refs.add(item.contentRef);
+    for (const ref of refs) ids.add(ref);
+    // A surviving capture can reference the same withheld raw entry. Its
+    // evidence is unavailable too; this overlay never changes persisted data.
+    for (const item of captures.values()) if (refs.has(item.contentRef)) ids.add(item.id);
+    return withoutSourceCopies(value, ids);
+  }
+
   function canonicalRecord(record) {
-    const { embedding, ...shown } = publicValue(clone(extractionView(record)));
+    const { embedding, ...shown } = publicValue(sourceReadView(clone(extractionView(record))));
     return shown;
   }
 
@@ -5712,7 +5738,7 @@ export function createShadowGraph(options = {}) {
   }
 
   function liveSnapshot() {
-    return storeSnapshot(null);
+    return sourceReadView(storeSnapshot(null));
   }
 
   function storeSnapshot(held) {
@@ -6632,7 +6658,7 @@ export function createShadowGraph(options = {}) {
     issueAccess: transactional('issueAccess', authority.issue),
     revokeAccess: transactional('revokeAccess', authority.revoke),
     discardAccess: transactional('discardAccess', authority.discard)
-  }), { snapshot, liveSnapshot, withheldCounts, validate: integrity, rebuild: replay,
+  }, sourceReadView), { snapshot, liveSnapshot, withheldCounts, validate: integrity, rebuild: replay,
     issueAccess: transactional('ownerIssueAccess', authority.issueOwner), inspectAccess: authority.inspect,
     accessRefusal: transactional('accessRefusal', authority.transportRefusal),
     bindProject: transactional('bindProject', bindProject), resolveProjectBinding,

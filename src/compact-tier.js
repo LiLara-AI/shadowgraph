@@ -7,6 +7,7 @@
 import { createHash } from 'node:crypto';
 import { effectiveFactExpirationBoundary, isValidIsoInstant } from './fact-validity.js';
 import { negationsIn } from './verification.js';
+import { sourceUnavailable } from './internal/source-availability.js';
 
 export const T1_DERIVATION_VERSION = 't1-line-v1';
 // G-5 §2.2: the byte ceiling of `line`, set by measurement over the
@@ -166,6 +167,7 @@ function reasonPart(record) {
 export function t1Parts(record) {
   const parts = [];
   const add = (name, text) => parts.push({ name, text });
+  if (sourceUnavailable(record)) add('sourceAvailability', 'cited source unavailable; recorded verification retained');
   if (record.kind === 'decision') {
     add('title', `Decision ${show(record.title)}`);
     add('chosen', `chose ${show(record.chosen)}`);
@@ -256,7 +258,9 @@ export function t1Line(record, { asOf = null, scope = {}, derivedAt = new Date()
     preconditions: preconditionsOf(shown),
     status: { lifecycle: shown.status ?? null, supersededBy: shown.supersededBy ?? null, verification: shown.verificationStatus ?? null, correctedBy: null },
     ...(shown.kind === 'attempt' ? { outcome: { resultClass: shown.resultClass ?? null, outcomeEvidenceState: shown.outcomeEvidence?.state ?? null, reasonState: causeStateOf(shown) } } : {}),
-    provenance: { sourceClass: shown.sourceClass ?? null, sourceRef: shown.captureRef ?? null },
+    provenance: { sourceClass: shown.sourceClass ?? null, sourceRef: shown.captureRef ?? null,
+      ...(shown.sourceAvailability === 'unavailable' ? { sourceAvailability: 'unavailable' } : {}),
+      ...(sourceUnavailable(shown) ? { citedEvidenceUnavailable: true } : {}) },
     boundRevision: { recordId: shown.id, digest },
     derived: true, derivationVersion: T1_DERIVATION_VERSION,
     decisiveOmitted,
