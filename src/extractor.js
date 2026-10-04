@@ -283,7 +283,10 @@ export function createExtractor({ executable, env = process.env, scratchRoot = t
         try { response = JSON.parse(out.stdout); } catch { return { status: 'blocked', blockedReason: 'unrecognised_response', receipt }; }
         if (!object(response) || response.type !== 'result' || response.subtype !== 'success' || response.is_error !== false) return { status: 'blocked', blockedReason: 'unknown_terminal', receipt };
         const models = Object.keys(response.modelUsage ?? {});
-        if (!models.length || models.some(model => model !== EXTRACTION_MODEL.replace('[1m]', ''))) return { status: 'blocked', blockedReason: 'model_unverified', receipt };
+        // The verified host can report the exact requested context suffix.
+        // Accept only that spelling or its bare ID, never prefix matches or
+        // multiple identities whose usage would otherwise be undercounted.
+        if (models.length !== 1 || ![EXTRACTION_MODEL, EXTRACTION_MODEL.replace('[1m]', '')].includes(models[0])) return { status: 'blocked', blockedReason: 'model_unverified', receipt };
         const usage = response.modelUsage[models[0]];
         receipt.usage = Object.fromEntries(['inputTokens', 'outputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens'].filter(k => Number.isSafeInteger(usage?.[k]) && usage[k] >= 0).map(k => [k, usage[k]]));
         if (!validateSchemaValue(schema, response.structured_output)) return { status: 'schema_invalid', receipt };

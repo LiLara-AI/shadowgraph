@@ -126,6 +126,32 @@ test('private input is stdin only, transient cwd is empty, output receipt carrie
   await assert.rejects(readdir(captured.cwd), { code: 'ENOENT' });
 });
 
+test('approved model usage accepts the exact requested context suffix and preserves numeric usage', async (t) => {
+  for (const model of ['claude-opus-5', 'claude-opus-5[1m]']) {
+    const usage = { inputTokens: 17, outputTokens: 9, cacheReadInputTokens: 4, cacheCreationInputTokens: 3 };
+    const s = await fixture(t, { output: { ...successful, modelUsage: { [model]: usage } } });
+    const out = await s.executor.extract({ prompt: 'synthetic', schema: SCHEMA });
+    assert.equal(out.status, 'success', model);
+    assert.deepEqual(out.value, successful.structured_output);
+    assert.deepEqual(out.receipt.usage, usage);
+    assert.equal(out.receipt.model, 'claude-opus-5[1m]');
+    assert.equal(s.calls.filter(x => x.args.includes('-p')).length, 1);
+  }
+});
+
+test('model usage refuses other models, unapproved suffixes and ambiguous multiple identities', async (t) => {
+  for (const models of [[], ['claude-opus-5-5'], ['claude-opus-5[200k]'], ['claude-opus-5[1m]extra'],
+    ['claude-opus-5[1m][1m]'], ['CLAUDE-OPUS-5[1m]'], [' claude-opus-5[1m]'],
+    ['claude-opus-5[1m]', 'claude-opus-5'], ['claude-opus-5[1m]', 'claude-opus-5-5']]) {
+    const s = await fixture(t, { output: { ...successful, modelUsage: Object.fromEntries(models.map(model => [model, { inputTokens: 7 }])) } });
+    const out = await s.executor.extract({ prompt: 'synthetic', schema: SCHEMA });
+    assert.equal(out.status, 'blocked', JSON.stringify(models));
+    assert.equal(out.blockedReason, 'model_unverified');
+    assert.equal(out.value, undefined);
+    assert.equal(s.calls.filter(x => x.args.includes('-p')).length, 1);
+  }
+});
+
 test('invalid output, alternate model and unknown/limit terminal responses cannot be successful or silently retried', async (t) => {
   for (const [output, expected] of [
     [{ ...successful, structured_output: { claims: [2] } }, 'schema_invalid'],
