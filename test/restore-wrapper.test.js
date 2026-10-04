@@ -1179,7 +1179,7 @@ async function recreatedOf(t, backend) {
   return state;
 }
 
-for (const [backend, options] of BACKENDS) test(`PR-37c rev6:418-423 ${backend}: a registry tombstone that reaches B's tokens removes them and quarantines its project's tokenless material, into a new path, another store and a recreated directory, merged without its lineage; one naming only tokens B lacks reaches nothing and writes nothing (M1)`, options, async (t) => {
+for (const [backend, options] of BACKENDS) test(`PR-37c rev6:418-423 ${backend}: a registry tombstone that reaches B's tokens removes them and quarantines its project's tokenless material, into a new path, another store and a recreated directory, merged without its lineage; one naming only tokens B lacks reaches nothing and only advances generation (M1)`, options, async (t) => {
   const b = backup();
   const dir = await scratchDirectory(t, 'restore-wrapper-registry-');
   const env = { ...process.env, SHADOWGRAPH_HOME: join(dir, 'home') };
@@ -1198,7 +1198,7 @@ for (const [backend, options] of BACKENDS) test(`PR-37c rev6:418-423 ${backend}:
       const after = await stored(state);
       if (!applies) {
         assert.equal(result.deletionKnowledge, 'none', label);
-        assert.equal(existsSync(knowledge.ledgerPath(state.file)), false, label);
+        assert.deepEqual(await ledgerOf(state), { version: 1, generationBase: 1, generationCounters: [] }, label);
         assert.equal(typeCount(after, 'restore.reapplied'), 0, label);
         continue;
       }
@@ -1224,7 +1224,7 @@ for (const [backend, options] of BACKENDS) test(`PR-37c rev6:424 ${backend}: a r
     const state = await freshOf(t, backend);
     const result = await restoring(state, await storeOf(t, backend, b.payload), {}, { env });
     assert.equal(result.deletionKnowledge, 'none', JSON.stringify(tokens));
-    assert.equal(existsSync(knowledge.ledgerPath(state.file)), false);
+    assert.deepEqual(await ledgerOf(state), { version: 1, generationBase: 1, generationCounters: [] });
     const after = await stored(state);
     assert.deepEqual(after.records.map((item) => [item.id, item.erasureToken]), b.payload.records.map((item) => [item.id, item.erasureToken]));
     assert.equal(visible(await load(state)).has(b.ids.legacy), true);
@@ -1446,17 +1446,18 @@ for (const [backend, options] of BACKENDS) test(`PR-37c rev6:429 write half ${ba
   await write();
 });
 
-test('PR-37c binding json: a restore into a fresh path that rolls back leaves it absent with no ledger, and the next restore there proceeds (§8.2, V-17)', async (t) => {
+test('PR-37c binding json: a restore into a fresh path that rolls back leaves the store absent but retains generation, and the next restore advances again (§8.2, V-17)', async (t) => {
   const b = backup();
   const source = await backupOf(t, 'json', b.payload, { version: 1, tombstones: [itemTombstone([b.tokens.hidden])] });
   const fresh = await freshOf(t, 'json');
   await assert.rejects(restoreFile(source.file, fresh.file, { restoreFault: (stage) => { if (stage === 'afterReplacementRename') throw new Error('injected'); } }), { code: 'json_restore_rolled_back' });
   assert.equal(existsSync(fresh.file), false);
-  assert.equal(existsSync(knowledge.ledgerPath(fresh.file)), false, 'the record is discarded with the ledger it made');
+  assert.deepEqual(await ledgerOf(fresh), { version: 1, generationBase: 1, generationCounters: [] }, 'only the allocated generation survives rollback');
   assert.equal((await restoreFile(source.file, fresh.file)).reapplied.removed, 1);
+  assert.equal((await ledgerOf(fresh)).generationBase, 2);
 });
 
-for (const [backend, options] of BACKENDS) test(`PR-37c rolled back ${backend}: a fault, or a caller activation that throws, rolls back and discards the record, D's ledger byte- and mode-equal, absent included (M18, M22, M30)`, options, async (t) => {
+for (const [backend, options] of BACKENDS) test(`PR-37c rolled back ${backend}: a fault, or a caller activation that throws, rolls back and discards the record, D's payload and prior knowledge/mode unchanged, with only the allocated generation retained (M18, M22, M30)`, options, async (t) => {
   const b = backup();
   const prior = '{"version":1,"futureRetentionControls":[{"project":"p","days":30}]}';
   const cases = [
@@ -1469,7 +1470,8 @@ for (const [backend, options] of BACKENDS) test(`PR-37c rolled back ${backend}: 
     const mode = withLedger ? (await stat(knowledge.ledgerPath(state.file))).mode & 0o777 : null;
     const before = await hashes(state);
     await assert.rejects(restoring(state, await storeOf(t, backend, b.payload), restoreOptions, storeOptions), { code: `${backend}_restore_rolled_back` }, label);
-    assert.deepEqual(await hashes(state), before, `${label}, ledger ${withLedger}: D and its ledger as they were`);
+    assert.equal((await hashes(state))[0], before[0], `${label}: D is unchanged`);
+    assert.deepEqual(await ledgerOf(state), { ...(withLedger ? JSON.parse(prior) : { version: 1 }), generationBase: 1, generationCounters: [] }, `${label}: prior knowledge is unchanged and pending is discarded`);
     if (withLedger) assert.equal((await stat(knowledge.ledgerPath(state.file))).mode & 0o777, mode);
   }
 });
@@ -1549,7 +1551,7 @@ for (const [backend, options] of BACKENDS) test(`PR-37c postdated ${backend}: a 
   const fresh = await freshOf(t, backend);
   const result = await restoring(fresh, await storeOf(t, backend, privilegedSnapshot(own)));
   assert.equal(result.deletionKnowledge, 'none', 'B\'s markers are never lifted (M44)');
-  assert.equal(existsSync(knowledge.ledgerPath(fresh.file)), false);
+  assert.deepEqual(await ledgerOf(fresh), { version: 1, generationBase: 1, generationCounters: [] });
   assert.equal(visible(await load(fresh)).has(again.id), true);
 });
 
@@ -1856,7 +1858,7 @@ for (const [backend, options] of BACKENDS) test(`PR-37c empty pending ${backend}
   assert.equal(Object.hasOwn(await ledgerOf(state), 'pending'), false);
 });
 
-for (const [backend, options] of BACKENDS) test(`PR-37c unrelated knowledge ${backend}: tombstones of a project B does not hold change nothing -- no entry, no revision of the post-step, D's ledger byte-equal -- and a lifted clean marker of one adds only itself (M17, M61)`, options, async (t) => {
+for (const [backend, options] of BACKENDS) test(`PR-37c unrelated knowledge ${backend}: tombstones of a project B does not hold change nothing -- no entry, no revision of the post-step, D's deletion knowledge unchanged, only generation advanced -- and a lifted clean marker of one adds only itself (M17, M61)`, options, async (t) => {
   const b = backup();
   const state = await storeOf(t, backend, ownStore());
   const text = JSON.stringify({ version: 1, tombstones: [foreign({ mode: 'logical', moveIn: 'none' }), foreign({ moveIn: 'none', seq: 100 })] });
@@ -1865,7 +1867,7 @@ for (const [backend, options] of BACKENDS) test(`PR-37c unrelated knowledge ${ba
   const installed = Math.max((await stored(state)).revision, (await stored(source)).revision) + 1;
   const result = await restoring(state, source);
   assert.deepEqual([result.deletionKnowledge, result.reapplied], ['present', ZERO]);
-  assert.equal(await readFile(knowledge.ledgerPath(state.file), 'utf8'), text);
+  assert.deepEqual(await ledgerOf(state), { ...JSON.parse(text), generationBase: 1, generationCounters: [] });
   const after = await stored(state);
   assert.equal(after.revision, installed);
   assert.deepEqual([typeCount(after, 'restore.reapplied'), typeCount(after, 'entity.token_assigned')], [0, 0]);
@@ -2614,9 +2616,9 @@ for (const [backend, options] of BACKENDS) for (const [kind, missing] of ALIAS_K
   }
 });
 
-// Re-review N-1: where no deletion record reaches the restore, an alias of the store file's own name is no reason to
-// refuse; the restore is the primitive alone (T-10 at the verb level).
-for (const [backend, options] of BACKENDS) for (const [kind, missing] of ALIAS_KINDS) test(`PR-37c re-review N-1 ${backend}: a restore through an alias of D's file name (${kind}) that no deletion record reaches proceeds as the primitive alone, writing no ledger`, options, async (t) => {
+// PR39 supersedes N-1's no-control-write exception: every replacement now advances
+// generation. A file-name alias cannot safely bind that required ledger.
+for (const [backend, options] of BACKENDS) for (const [kind, missing] of ALIAS_KINDS) test(`PR-37c re-review N-1 ${backend}: a restore through an alias of D's file name (${kind}) is refused without effects even when no deletion record reaches it (PR39 generation floor)`, options, async (t) => {
   const b = backup();
   const state = await storeOf(t, backend, ownStore());
   const source = await storeOf(t, backend, b.payload);
@@ -2631,10 +2633,10 @@ for (const [backend, options] of BACKENDS) for (const [kind, missing] of ALIAS_K
     const store = await createStorage({ type: 'sqlite', file: alias });
     try { return await store.restore(source.file); } finally { store.close(); }
   };
-  assert.equal((await restore()).deletionKnowledge, 'none');
+  const before = [await hashes(state), await namesIn(state)];
+  await assert.rejects(restore(), { code: PURGE_AWARE });
+  assert.deepEqual([await hashes(state), await namesIn(state)], before, 'no payload, ledger or recovery-file changes');
   assert.deepEqual((await readdir(state.dir)).filter((name) => name.toLowerCase().endsWith('.control.json')), [], 'no ledger');
-  const restored = graphOf(await load({ ...state, file: alias })).exportData({ project: 'p' }).records.map((item) => item.id).sort();
-  assert.deepEqual(restored, b.payload.records.filter((item) => item.project === 'p').map((item) => item.id).sort(), 'the backup\'s memory, as the primitive installs it');
 });
 
 // Re-review N-3: a JSON save now writes the file an alias names, so the capture ceiling measures that file and its
@@ -2783,13 +2785,13 @@ for (const [backend, options] of BACKENDS) test(`PR-37c review 5 ${backend}: a h
 
 // Finding 6: the downgrade's flag carried in B's sidecar (§4.3, §4.7). With nothing else merged it is the one thing a
 // restore may still write (§4.6, review finding 2).
-for (const [backend, options] of BACKENDS) test(`PR-37c review 6 ${backend}: a downgrade flag in B's sidecar is carried: into a fresh path D's ledger is its version and the flag alone and no knowledge is reported; beside D's move-in-some tombstone it disables the token proof in that very restore (X-stripped-carried, X-stripped-commit)`, options, async (t) => {
+for (const [backend, options] of BACKENDS) test(`PR-37c review 6 ${backend}: a downgrade flag in B's sidecar is carried: into a fresh path D's ledger is its version, flag and generation and no knowledge is reported; beside D's move-in-some tombstone it disables the token proof in that very restore (X-stripped-carried, X-stripped-commit)`, options, async (t) => {
   const b = backup();
   const flag = { at: BEFORE };
   const fresh = await freshOf(t, backend);
   const result = await restoring(fresh, await backupOf(t, backend, b.payload, { version: 1, tokensStripped: flag }));
   assert.equal(result.deletionKnowledge, 'none', 'M and Q are empty');
-  assert.deepEqual(await ledgerOf(fresh), { version: 1, tokensStripped: flag });
+  assert.deepEqual(await ledgerOf(fresh), { version: 1, tokensStripped: flag, generationBase: 1, generationCounters: [] });
   assert.equal(typeCount(await stored(fresh), 'restore.reapplied'), 0, 'the plan is empty');
   const state = await storeOf(t, backend, ownStore());
   await writeLedgerFile(state, { version: 1, tombstones: [foreign()] });
@@ -2809,7 +2811,7 @@ for (const [backend, options] of BACKENDS) test(`PR-37c review 7 ${backend}: a r
   const graph = createShadowGraph({ now: () => NOW });
   const result = await restoring(state, await storeOf(t, backend, b.payload), { afterReplace: (payload) => graph.replaceData(payload) });
   assert.deepEqual([result.deletionKnowledge, result.reapplied], ['present', ZERO]);
-  assert.deepEqual(await readFile(knowledge.ledgerPath(state.file)), ledger, 'no record was written');
+  assert.deepEqual(await ledgerOf(state), { ...JSON.parse(ledger), generationBase: 1, generationCounters: [] }, 'generation alone advanced; no pending record or new deletion knowledge');
   const live = new Set(privilegedLiveSnapshot(graph).records.map((item) => item.id));
   assert.deepEqual([live.has(b.ids.hidden), live.has(b.ids.kept)], [false, true]);
 });

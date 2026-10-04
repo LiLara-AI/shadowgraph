@@ -103,10 +103,10 @@ for (const state of ['pending', 'failed', 'blocked']) test(`capture cancellation
   assert.equal(kernel.privilegedRebuild(f.graph).rebuildable, true);
 });
 
-test('capture cancellation refuses other owners, quarantined, unknown, processing and extracted items without change', () => {
+test('capture cancellation refuses other owners, quarantined, unknown and extracted items without change', () => {
   const f = fixture(); const other = f.record('q'); const inflight = f.record();
   kernel.privilegedTransitionCapture(f.graph, { id: inflight.id, to: 'processing', lease });
-  for (const id of [other.id, 'missing', inflight.id]) {
+  for (const id of [other.id, 'missing']) {
     const before = f.snapshot();
     assert.throws(() => kernel.privilegedCancelCapture(f.graph, { project: 'p', id }));
     assert.deepEqual(f.snapshot(), before);

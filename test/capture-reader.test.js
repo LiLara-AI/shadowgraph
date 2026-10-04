@@ -686,10 +686,15 @@ test('no production code emits a capture journal type outside the writer', async
     if (/['"`](?:capture\.recorded|capture\.state_changed|extraction\.completed|extraction\.failed)['"`]/.test(text)) naming.push(name);
     if (/CAPTURE_(?:IMPORT_TYPE|ENTRY_STATES|ENTRY_TYPES)\b/.test(text)) usingTypes.push(name);
   }
-  assert.deepEqual(naming.sort(), ['src/internal/capture.js', 'src/internal/restore-wrapper.js', 'src/journal.js', 'src/shadowgraph.js']);
+  assert.deepEqual(naming.sort(), ['src/internal/capture.js', 'src/internal/extraction-worker.js', 'src/internal/restore-wrapper.js', 'src/journal.js', 'src/shadowgraph.js']);
+  // The worker reads creation witnesses to select items in journal order.
+  // Its sole literal use must remain a comparison, never a journal emission.
+  const worker = await readFile(join(root, 'src', 'internal', 'extraction-worker.js'), 'utf8');
+  assert.deepEqual(worker.match(/['"`](?:capture\.recorded|capture\.state_changed|extraction\.completed|extraction\.failed)['"`]/g), ["'capture.recorded'"]);
+  assert.match(worker, /entry\.type === 'capture\.recorded' && wanted\.has\(entry\.entityId\)/);
   assert.deepEqual(usingTypes.sort(), ['src/internal/capture.js', 'src/journal.js', 'src/shadowgraph.js']);
   const kernel = await readFile(join(root, 'src', 'shadowgraph.js'), 'utf8');
-  assert.deepEqual(kernel.match(/['"`](?:capture\.recorded|capture\.state_changed|extraction\.completed|extraction\.failed)['"`]/g), ["'capture.recorded'", ...Array(3).fill("'capture.state_changed'")], 'recording, expiry, cancellation and deletion stay in the kernel writer');
+  assert.deepEqual(kernel.match(/['"`](?:capture\.recorded|capture\.state_changed|extraction\.completed|extraction\.failed)['"`]/g), ["'capture.recorded'", ...Array(4).fill("'capture.state_changed'"), "'extraction.completed'", "'capture.state_changed'", "'extraction.failed'", "'capture.state_changed'"], 'recording, expiry, cancellation, deletion and leased extraction stay in the kernel writer');
   // The kernel reads the types to hide their entries, and picks one only for
   // an imported item's journal-less snapshot.
   // Line endings follow the checkout (CRLF on a Windows clone).

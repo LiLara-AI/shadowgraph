@@ -410,10 +410,12 @@ for (const [backend, options] of BACKENDS) {
     const backup = join(state.dir, `backup.${extension}`);
     await backupFile(state.file, backup, { store, env });
     assert.deepEqual(await Promise.all(files.map(fileHash)), purged);
-    // q's marker is recorded by its tombstone, so the restore lifts nothing and writes neither (PR-37d design §1.1).
+    // q's marker is recorded by its tombstone, so restore lifts nothing. PR39 advances the
+    // restore base and records removal of the capture suppressed by p's existing item tombstone.
     if (backend === 'sqlite') await store.restore(backup);
     else await restoreFile(backup, state.file, { env });
-    assert.deepEqual(await Promise.all(files.map(fileHash)), purged, 'nothing lifted');
+    assert.deepEqual(JSON.parse(await readFile(files[0], 'utf8')), { ...ledgerPurged, generationBase: (ledgerPurged.generationBase ?? 0) + 1, generationCounters: [{ token: f.tokens.capture, counter: 1 }] }, 'no tombstone lifted; restore generation and suppressed-capture removal recorded');
+    assert.equal(await fileHash(files[1]), purged[1], 'registry unchanged');
     const restored = await Promise.all(files.map(fileHash));
     graph.replaceData(await store.load());
     await downgradeStore({ graph, store, file: state.file, storageType: backend, output: join(state.dir, `down.${extension}`), preservationCopy: join(state.dir, `kept.${extension}`), toSchemaVersion: 6, now });
@@ -668,15 +670,15 @@ const PROCEEDING = {
   },
   'D ledger quarantine': async ({ result, ledgerBefore, destination }) => {
     assert.equal(result.deletionKnowledge, 'present');
-    assert.equal(await fileHash(ledgerPath(destination.file)), ledgerBefore, 'nothing written');
+    assert.deepEqual(JSON.parse(await readFile(ledgerPath(destination.file), 'utf8')), { ...ledgerBefore, generationBase: 1, generationCounters: [] }, 'only generation advances');
   },
   'B sidecar with knowledge': async ({ result, destination }) => {
     assert.equal(result.deletionKnowledge, 'none', 'an empty tombstone list');
-    assert.equal(existsSync(ledgerPath(destination.file)), false);
+    assert.deepEqual(JSON.parse(await readFile(ledgerPath(destination.file), 'utf8')), { version: 1, generationBase: 1, generationCounters: [] });
   },
   'registry tombstone': async ({ result, destination }) => {
     assert.equal(result.deletionKnowledge, 'none', 'a token B lacks');
-    assert.equal(existsSync(ledgerPath(destination.file)), false);
+    assert.deepEqual(JSON.parse(await readFile(ledgerPath(destination.file), 'utf8')), { version: 1, generationBase: 1, generationCounters: [] });
   },
   // Lifted; B's q material quarantined, its p material visible.
   'D purge marker': async ({ result, destination, source }) => {
@@ -705,19 +707,22 @@ for (const [backend, options] of BACKENDS) {
     for (const memoryOnly of [false, true]) {
       const { destination, source, env, restore } = await restoreCase(t, backend, TRIGGERS[name]);
       const registryBefore = await fileHash(registryFile(env));
-      const ledgerBefore = await fileHash(ledgerPath(destination.file));
+      const ledgerBefore = await readFile(ledgerPath(destination.file), 'utf8').then(JSON.parse, error => { if (error.code === 'ENOENT') return null; throw error; });
       const result = await restore(memoryOnly);
       await check({ result, destination, source, ledgerBefore });
       assert.equal(await fileHash(registryFile(env)), registryBefore, 'the registry is never written');
     }
   });
-  for (const [name, setup] of Object.entries(NON_TRIGGERS)) test(`PR-37a restore ${backend} proceeds: ${name}; D's ledger and the registry are never written`, options, async (t) => {
+  for (const [name, setup] of Object.entries(NON_TRIGGERS)) test(`PR-37a restore ${backend} proceeds: ${name}; D's generation advances while prior knowledge and the registry stay unchanged`, options, async (t) => {
     const { restore, destination, source, env } = await restoreCase(t, backend, setup);
     const files = [ledgerPath(destination.file), registryFile(env)];
     const before = await Promise.all(files.map(fileHash));
+    const prior = await readFile(files[0], 'utf8').then(JSON.parse, error => { if (error.code === 'ENOENT') return { version: 1 }; throw error; });
+    let base = 0;
     for (const memoryOnly of [false, true]) {
       await restore(memoryOnly);
-      assert.deepEqual(await Promise.all(files.map(fileHash)), before);
+      assert.deepEqual(JSON.parse(await readFile(files[0], 'utf8')), { ...prior, generationBase: ++base, generationCounters: [] });
+      assert.equal(await fileHash(files[1]), before[1]);
     }
     const restored = await load(destination);
     assert.deepEqual(restored.records.map((item) => item.id), (await load(source)).records.map((item) => item.id));
@@ -928,14 +933,16 @@ test('PR-37a restore.reapplied: a hand-built post-step store restore-validates w
   assert.deepEqual(emitters, ['shadowgraph.js']);
 });
 
-test('PR-37a codes: every deletion refusal is a public MCP code, and nothing in src names a generation counter', async () => {
+test('PR-37a codes: every deletion refusal is a public MCP code, and generation state is confined to the internal ledger implementation', async () => {
   const mcp = await readFile(new URL('../src/mcp.js', import.meta.url), 'utf8');
   assert.match(mcp, /\.\.\.DELETION_CODES/);
   assert.equal(DELETION_CODES.length, 9);
   const src = fileURLToPath(new URL('../src/', import.meta.url));
+  const users = [];
   for (const name of (await readdir(src, { recursive: true })).filter((item) => item.endsWith('.js'))) {
-    assert.equal(/generationBase/.test(await readFile(join(src, name), 'utf8')), false, name);
+    if (/generationBase/.test(await readFile(join(src, name), 'utf8'))) users.push(name.replaceAll('\\', '/'));
   }
+  assert.deepEqual(users.sort(), ['internal/capture-generation.js', 'internal/deletion-knowledge.js']);
 });
 
 // F17 asks that the registry root not be under the home; on Windows the
@@ -1430,7 +1437,7 @@ for (const surface of ['cli', 'http', 'mcp']) test(`T-17 ${surface}: a registry 
     const label = `${trigger} memoryOnly=${memoryOnly}: ${text.slice(0, 200)}`;
     assert.match(text, trigger === 'registry' ? /deletionKnowledge\\?"\s*:\s*\\?"none/ : /deletionKnowledge\\?"\s*:\s*\\?"present/, label);
     assert.notEqual(await content(destination), before, label);
-    if (trigger === 'registry') assert.equal(existsSync(ledgerPath(destination.file)), false, label);
+    if (trigger === 'registry') assert.deepEqual(JSON.parse(await readFile(ledgerPath(destination.file), 'utf8')), { version: 1, generationBase: 1, generationCounters: [] }, label);
     else assert.deepEqual(JSON.parse(await readFile(ledgerPath(destination.file), 'utf8')).tombstones.map((item) => [item.purgedProject, item.tokens]), [['q', null]], label);
   }
 });
@@ -1587,6 +1594,7 @@ for (const [backend, options] of BACKENDS) test(`R2-P5 ${backend}: a restore int
   const destination = await storeOf(t, backend, f.payload, VIEWS.item(f).ledger);
   const source = await storeOf(t, backend, fixture().payload);
   const ledger = await readFile(ledgerPath(destination.file));
+  let generationBase = 0;
   // A case variant of the file's own name is the same name on win32 (re-review N-4): it proceeds.
   const caseVariant = join(dirname(destination.file), basename(destination.file).toUpperCase());
   for (const name of [namespaced(destination.file), caseVariant, shortName(destination.file)].filter(Boolean)) {
@@ -1595,9 +1603,9 @@ for (const [backend, options] of BACKENDS) test(`R2-P5 ${backend}: a restore int
       : (async () => { const store = await createStorage({ type: 'sqlite', file: name }); try { return await store.restore(source.file); } finally { store.close(); } })();
     const fileAlias = basename(name).toLowerCase() !== basename(destination.file).toLowerCase();
     if (fileAlias) await assert.rejects(attempt, { code: PURGE_AWARE_RESTORE_UNSUPPORTED }, name);
-    else assert.equal((await attempt).deletionKnowledge, 'present', name);
-    assert.deepEqual(await readFile(ledgerPath(destination.file)), ledger, `${name}: nothing to add`);
-    assert.deepEqual((await readdir(destination.dir)).filter((item) => item.toLowerCase().endsWith('.control.json')), [`store.${backend === 'sqlite' ? 'db' : 'json'}.control.json`], name);
+    else { assert.equal((await attempt).deletionKnowledge, 'present', name); generationBase++; }
+    assert.deepEqual(JSON.parse(await readFile(ledgerPath(destination.file))), { ...JSON.parse(ledger), generationBase, generationCounters: [] }, `${name}: only successful replacement advances generation`);
+    assert.deepEqual((await readdir(destination.dir)).filter((item) => item.toLowerCase().endsWith('.control.json')).map((item) => item.toLowerCase()), [`store.${backend === 'sqlite' ? 'db' : 'json'}.control.json`], name);
   }
 });
 

@@ -32,6 +32,7 @@ import { createDestinationFence, currentRevision, fenceLockPath, nextRevisionAft
 import { requiresLegacyPurgeMigration, validateRestorePayload } from '../restore-validation.js';
 import { repositoryOf } from './owner-files.js';
 import { hasCaptureRetentionState, RAW_RETENTION_DAYS } from './capture-retention.js';
+import { restoreGeneration } from './capture-generation.js';
 import { privilegedCompleteCaptureDelete, privilegedCompletePurge, privilegedExpireCapture, privilegedReapplyDeletion, privilegedSnapshot } from './snapshot.js';
 import {
   CONTROL_LEDGER_MALFORMED, CONTROL_LEDGER_NEWER_VERSION, DELETION_FILE_DESTINATION_REFUSED, DELETION_INTENT, DELETION_PENDING_UNSUPPORTED, PURGE_AWARE_RESTORE_UNSUPPORTED, attachLedgerView, canonical,
@@ -370,8 +371,8 @@ async function preStep(ctx, given) {
   ctx.ledger = mine.ledger;
   // T-10 at the verb level (review finding 2; §4.6): with nothing merged no
   // rule reaches B -- descent included -- so the inputs and the plan are
-  // computed only when M or Q holds something. Then the restore is the
-  // primitive alone, and only a flag B's sidecar carries is still written.
+  // computed only when M or Q holds something. The payload remains the
+  // primitive's result; PR39 still advances generation in its sidecar.
   const retention = retentionInputs(ctx, b, d, mine.ledger, carried.ledger);
   if (retention) {
     const left = mine.ledger?.retentionOverrides ?? [], right = carried.ledger?.retentionOverrides ?? [];
@@ -393,7 +394,13 @@ async function preStep(ctx, given) {
   };
   // Through an alias, the ledger these records live in would be left behind
   // (re-review N-1): D's own records count, though they write nothing here.
-  if (merged || retention || add.tokensStripped !== undefined || mine.ledger?.tokensStripped !== undefined) await refuseAliasDestination(ctx.destination);
+  // VAR18: every real restore advances the ledger base, even when neither
+  // payload carries capture and B has no sidecar. No restored byte changes.
+  await refuseAliasDestination(ctx.destination);
+  const generation = restoreGeneration(mine.ledger, carried.ledger);
+  await writeLedger(ctx.destination, ledger => Object.assign(ledger, generation), { env: ctx.env });
+  const generationPrior = await ledgerSnapshot(ctx.destination);
+  ctx.ledger = generationPrior.ledger;
   if (!retention && !add.tombstones.length && !add.quarantine.length && !add.tokensStripped && !plan.remove.length && !plan.quarantine.length) return;
   const record = {
     kind: 'restore',
@@ -402,7 +409,7 @@ async function preStep(ctx, given) {
     add,
     inputs
   };
-  // Capture presence alone does not require a control-ledger write. Prove
+  // Capture presence alone does not require a pending-record write. Prove
   // the post-step is empty before installation; real expiry/cursor changes
   // and effective policy changes still use the recoverable record.
   if (retention && !add.tombstones.length && !add.quarantine.length && add.tokensStripped === undefined
@@ -413,7 +420,9 @@ async function preStep(ctx, given) {
   }
   // What a discard puts back: the ledger's bytes and mode, or nothing (§2 step 5).
   const written = await writeLedger(ctx.destination, (ledger) => { ledger.pending = [record]; }, { env: ctx.env });
-  ctx.prior = { path: written.path, text: written.text, bytes: mine.bytes, mode: mine.mode };
+  // A failed primitive may discard its pending work but never reuse the base
+  // already allocated. The rollback point therefore includes that advance.
+  ctx.prior = { path: written.path, text: written.text, bytes: generationPrior.bytes, mode: generationPrior.mode };
   ctx.record = record;
 }
 
@@ -510,10 +519,9 @@ function clearRecord(ledger) {
 }
 
 // A discard (§8.4, §12.1): nothing the record would have added was ever
-// committed, so nothing is lost. D's ledger goes back byte for byte, mode
-// included, while it is still exactly what the pre-step wrote; one the pre-step
-// made, holding nothing else, is removed. Otherwise the record is removed by
-// rewrite, and a ledger left with only its version and the record goes.
+// committed, so nothing is lost. Prior knowledge and mode are restored while
+// retaining the PR39 generation advance. The legacy record-only cleanup stays
+// available for recovery of older records; it never removes generation state.
 async function discard(file, env, prior) {
   if (prior && (prior.bytes ? await restoreLedgerBytes(prior.path, prior.text, prior.bytes, prior.mode) : await unlinkLedgerIfRecordOnly(prior.path, prior.text))) return;
   const { path, bytes } = await ledgerSnapshot(file);
@@ -757,10 +765,10 @@ export function freshPurgeIntents(current, data) {
   return (data?.[DELETION_INTENT] ?? []).filter((intent) => !stored.has(intent.marker.id));
 }
 
-export async function recordPurges(file, { current, data, env = process.env, lock = {}, hook = false, fault, rename: move } = {}) {
+export async function recordPurges(file, { current, data, env = process.env, lock = {}, hook = false, fault, rename: move, beforeRecord } = {}) {
   const stored = new Set(journalOf(current).map((entry) => entry.id));
   const fresh = freshPurgeIntents(current, data);
-  if (!fresh.length) return null;
+  if (!fresh.length) { await beforeRecord?.(); return null; }
   const itemDeletion = fresh.every((intent) => intent.tombstone.kind === 'item');
   if (!itemDeletion && fresh.some((intent) => intent.tombstone.kind === 'item')) throw refusedWrite('item and project removal in one uncommitted operation');
   // Item 3: no hook path ever writes the ledger or the registry (rev6:202-204).
@@ -796,6 +804,9 @@ export async function recordPurges(file, { current, data, env = process.env, loc
       // finding 6, re-review new finding 2).
       const known = await readRegistry(env);
       const forms = fresh.reduce((made, { tombstone, lineage }) => [...made, { ...tombstone, lineage: { ...lineage, epochEntryId: lineage.epochEntryId ?? epochOf(known, current) ?? made.map((form) => form.lineage.epochEntryId).find(named) ?? null } }], []);
+      // Generation is durable before any invalidating record or payload, but
+      // only after the destination/registry refusal checks above have passed.
+      await beforeRecord?.();
       // Step 4: the lifted form, then each tombstone, each unless already
       // present, and the record, which only a purge record of this commit or
       // of a committed marker may stand beside (§3.5).

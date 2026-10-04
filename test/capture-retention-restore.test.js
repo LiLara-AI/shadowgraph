@@ -71,7 +71,7 @@ for (const [backend, options] of BACKENDS) {
       assert.equal((await readLedger(f.destination)).retentionOverrides[0].days, 5);
     } finally { store.close?.(); }
   });
-  test(`capture retention restore ${backend}: no-effect reconciliation preserves callback policy and reports differing windows without control writes`, options, async (t) => {
+  test(`capture retention restore ${backend}: no-effect reconciliation preserves callback policy and reports differing windows with only the required generation advance`, options, async (t) => {
     const f = await fixture(t, backend);
     const before = await readFile(ledgerPath(f.destination));
     const sourceBefore = await readFile(ledgerPath(f.backup));
@@ -79,7 +79,7 @@ for (const [backend, options] of BACKENDS) {
     const result = await f.restore({ now: '2026-10-01T00:00:00.000Z', afterReplace: (payload) => running.replaceData(payload) });
     assert.equal(running.search('', { project: 'p' }).completeness.capture.expired, 1);
     assert.deepEqual(result.retention.differences, [{ project: 'p', destinationDays: 2, backupDays: 30, effectiveDays: 2 }]);
-    assert.deepEqual(await readFile(ledgerPath(f.destination)), before);
+    assert.deepEqual(JSON.parse(await readFile(ledgerPath(f.destination))), { ...JSON.parse(before), generationBase: 1, generationCounters: [] });
     assert.deepEqual(await readFile(ledgerPath(f.backup)), sourceBefore);
     const loaded = createShadowGraph({ now: () => '2026-10-04T00:00:00.000Z' }); loaded.importData(await f.load());
     assert.deepEqual(running.search('', { project: 'p' }).completeness.capture, loaded.search('', { project: 'p' }).completeness.capture);
@@ -111,11 +111,11 @@ for (const [backend, options] of BACKENDS) {
     assert.equal(item.expiresAt, '2026-10-03T00:00:00.000Z');
     assert.equal(item.blockedReason, 'raw_expired');
   });
-  test(`capture retention restore ${backend}: rejection inside activation restores exact destination policy bytes`, options, async (t) => {
+  test(`capture retention restore ${backend}: rejection inside activation restores destination policy while retaining the allocated generation`, options, async (t) => {
     const f = await fixture(t, backend);
     const before = await readFile(ledgerPath(f.destination));
     await assert.rejects(f.restore({ afterReplace: () => { throw new Error('synthetic caller refusal'); } }), /synthetic caller refusal/u);
-    assert.deepEqual(await readFile(ledgerPath(f.destination)), before);
+    assert.deepEqual(JSON.parse(await readFile(ledgerPath(f.destination))), { ...JSON.parse(before), generationBase: 1, generationCounters: [] });
     assert.equal((await f.load()).records.length, 0);
   });
 }

@@ -345,16 +345,16 @@ async function matchesTwin(t, backend, fixture, configuration, memoryOnly, surfa
   const twin = await twinOf(t, backend, built, configuration, memoryOnly, restored[0]?.at);
   assert.deepEqual(after, twin.payload, `${label}: the stored payload is the primitive's`);
   for (const type of ['entity.token_assigned', 'restore.reapplied']) assert.equal(counted(after, type), counted(pair.backup, type), `${label}: no ${type}`);
-  // Knowledge on disk: none made in (a) and (c), D's own unchanged in (b) and (b, purged), the lifted marker its one
-  // addition in (b, lifted).
+  // PR39 control data advances independently of the byte-equal R16 payload.
+  // Existing deletion knowledge stays exact; the lifted-marker case adds only that marker and generation.
   const ledgerAfter = await readLedger(pair);
-  if (configuration === 'a' || configuration === 'c') assert.equal(ledgerAfter, null, `${label}: no ledger`);
-  else if (configuration === 'b' || configuration === 'b purged') assert.equal(ledgerAfter, ledgerBefore, `${label}: D's ledger byte-equal`);
+  if (configuration === 'a' || configuration === 'c') assert.deepEqual(JSON.parse(ledgerAfter), { version: 1, generationBase: 1, generationCounters: [] }, `${label}: generation-only ledger`);
+  else if (configuration === 'b' || configuration === 'b purged') assert.deepEqual(JSON.parse(ledgerAfter), { ...JSON.parse(ledgerBefore), generationBase: 1, generationCounters: [] }, `${label}: D's knowledge unchanged, generation advanced`);
   else {
     const [before, now] = [JSON.parse(ledgerBefore), JSON.parse(ledgerAfter)];
     assert.deepEqual(now.tombstones.slice(0, -1), before.tombstones, label);
     assert.deepEqual(now.tombstones.at(-1), { kind: 'project', purgedProject: 'zeta', mode: 'logical', at: pair.marker.at, seq: pair.marker.seq, tokens: null, moveIn: 'none' }, `${label}: the lifted marker, move-in none (M61)`);
-    assert.deepEqual({ ...now, tombstones: before.tombstones }, before, `${label}: nothing else changes`);
+    assert.deepEqual({ ...now, tombstones: before.tombstones }, { ...before, generationBase: 1, generationCounters: [] }, `${label}: only marker and generation change`);
   }
   assert.equal(await readRegistry(pair), registryBefore, `${label}: the registry is never written`);
   if (configuration === 'a') assert.equal(registryBefore, null, label);
@@ -478,7 +478,7 @@ async function copyPair(t, made) {
   return { dir, home, env: { ...process.env, SHADOWGRAPH_HOME: home }, backend: made.backend, saved, target };
 }
 
-for (const [backend, options] of BACKENDS) test(`PR-37c T-10 review 2 ${backend}: a ledger-less copy of a re-applied store restoring an ancestor backup, logical and hard, is the primitive alone through every restore entry -- the twin's bytes, no ledger, no knowledge reported (X-t10-gate)`, options, async (t) => {
+for (const [backend, options] of BACKENDS) test(`PR-37c T-10 review 2 ${backend}: a ledger-less copy of a re-applied store restoring an ancestor backup, logical and hard, is the primitive alone through every restore entry -- the twin's bytes, generation-only ledger, no deletion knowledge reported (X-t10-gate)`, options, async (t) => {
   for (const mode of ['logical', 'hard']) for (const lifted of [false, true]) {
     const made = await reappliedCopy(t, backend, mode, { lifted });
     for (const surface of SURFACES[backend]) {
@@ -502,7 +502,7 @@ for (const [backend, options] of BACKENDS) test(`PR-37c T-10 review 2 ${backend}
       if (backend === 'json') assert.equal(sha256(await readFile(pair.target)), sha256(await readFile(twin.target)), `${label}: the primitive's bytes`);
       else assert.deepEqual(after, await stored(twin), `${label}: the primitive's payload`);
       assert.equal(after.records.some((item) => item.id === made.legacy), true, `${label}: B0's tokenless decision is restored, as the primitive restores it`);
-      assert.equal(existsSync(ledgerPath(pair.target)), false, `${label}: no ledger`);
+      assert.deepEqual(JSON.parse(await readFile(ledgerPath(pair.target), 'utf8')), { version: 1, generationBase: 1, generationCounters: [] }, `${label}: generation-only ledger`);
       assert.equal(existsSync(registryFile(pair.env)), false, `${label}: no registry`);
       assert.equal(run.result.deletionKnowledge, 'none', label);
       assert.deepEqual(['reapplied', 'completion'].filter((name) => Object.hasOwn(run.result, name)), [], label);

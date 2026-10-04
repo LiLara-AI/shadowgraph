@@ -313,10 +313,11 @@ test('real child receives deliberate environment plus documented Windows OS name
   assert.ok(value.env.every(name => ['EXPLICIT_FIXTURE', ...required].includes(name)));
 });
 
-test('extractor is unreachable from every production module at the additive boundary', async () => {
+test('extractor is reachable only from the inert internal worker and its schema verifier', async () => {
   const root = fileURLToPath(new URL('../src/', import.meta.url));
   const entries = await readdir(root, { recursive: true });
-  for (const name of entries.filter(x => x.endsWith('.js') && x !== 'extractor.js')) {
+  const internal = new Set(['extractor.js', 'internal/extraction-worker.js', 'internal/extraction-output.js']);
+  for (const name of entries.filter(x => x.endsWith('.js') && !internal.has(x.replaceAll('\\', '/')))) {
     assert.doesNotMatch(await readFile(join(root, name), 'utf8'), /(?:from\s*|import\s*\()["'][^"']*extractor\.js/, name);
   }
 });

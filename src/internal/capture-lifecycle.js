@@ -80,12 +80,13 @@ export async function captureLifecycle(verb, input = {}, { env = process.env, cw
       result = verb === 'delete' ? privilegedDeleteCapture(graph, context) : privilegedCancelCapture(graph, context);
       return verb === 'delete' || result.changed ? privilegedSnapshot(graph) : null;
     };
-    if (verb === 'delete') {
+    if (verb === 'delete' || verb === 'cancel') {
       const io = storeIo(store);
       await io.run(async ({ read, commit }) => {
         const payload = await read();
         if (payload === null) fail('capture_cleanup_store_unavailable');
-        await commit(await change(await attachDeletionView(payload, io.file, { env: io.env, pending: 'refuse' })));
+        const next = await change(await attachDeletionView(payload, io.file, { env: io.env, pending: 'refuse' }));
+        if (next !== null) await commit(next);
       });
     } else await store.update(change);
     return result;

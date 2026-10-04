@@ -19,6 +19,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { isValidIsoInstant } from '../fact-validity.js';
 import { CREATION_ENTRY_TYPES, replayedEntity } from '../journal.js';
 import { hasCaptureRetentionState, retentionOverridesIssue } from './capture-retention.js';
+import { generationIssue, hookExpiryOnly, invalidatedCaptureTokens, joinGenerations } from './capture-generation.js';
 
 // The view a load attaches to the payload it returns. A symbol is never
 // serialised, so the payload's bytes are unchanged. A caller holding a loaded
@@ -120,8 +121,13 @@ function parseKnowledge(text, { ledger }) {
   const pending = ledger ? list('pending') : [];
   const retentionIssue = ledger ? retentionOverridesIssue(value.retentionOverrides) : null;
   if (retentionIssue) throw malformed(retentionIssue);
+  const generationError = ledger ? generationIssue(value) : null;
+  if (generationError) throw malformed(generationError);
   // Downgrade's flag disables the token proof (PR-37c design §1.1, §6.2).
-  return { tombstones, quarantine, pending, retentionOverrides: ledger ? value.retentionOverrides ?? [] : [], tokensStripped: value.tokensStripped, members: Object.keys(value) };
+  return { tombstones, quarantine, pending, retentionOverrides: ledger ? value.retentionOverrides ?? [] : [],
+    ...(ledger && value.generationBase !== undefined ? { generationBase: value.generationBase } : {}),
+    ...(ledger && value.generationCounters !== undefined ? { generationCounters: value.generationCounters } : {}),
+    tokensStripped: value.tokensStripped, members: Object.keys(value) };
 }
 
 // A value as text with its object keys sorted at every depth: the equality the
@@ -740,7 +746,7 @@ async function replaceFile(target, bytes, mode, move) {
   }
 }
 
-const KEPT_AS_WRITTEN = new Set(['tombstones', 'quarantine', 'pending', 'tokensStripped', 'retentionOverrides']);
+const KEPT_AS_WRITTEN = new Set(['tombstones', 'quarantine', 'pending', 'tokensStripped', 'retentionOverrides', 'generationBase', 'generationCounters']);
 
 // Writes the ledger beside a store (PR-37c design §2). The caller holds the
 // store fence; this never takes it. An existing ledger is rewritten in place,
@@ -776,9 +782,35 @@ export async function writeLedger(file, change, { env = process.env, rename: mov
   for (const name of Object.keys(original)) if (!KEPT_AS_WRITTEN.has(name) && canonical(original[name]) !== canonical(next[name])) throw refusedWrite(`${name} would change`);
   const written = `${JSON.stringify(next, null, 2)}\n`;
   const parsed = parseKnowledge(written, { ledger: true });
+  if ((next.generationBase ?? 0) < (original.generationBase ?? 0)) throw refusedWrite('generationBase would decrease');
+  for (const entry of original.generationCounters ?? []) {
+    if (!next.generationCounters?.some(value => value.token === entry.token && value.counter >= entry.counter)) throw refusedWrite('generation counter would decrease or disappear');
+  }
   if (parsed.pending.length > 1 || parsed.pending.some((record) => !pendingRecordValid(record, parsed.tombstones))) throw refusedWrite('a pending record this build does not write');
   await replaceFile(target, written, 0o600, move);
   return { path: target, text: written };
+}
+
+// Called under the payload writer's fence, before any invalidating bytes are
+// persisted. Hook cleanup uses the expiry term and raw availability instead:
+// it must never write control data or resolve a pending operation.
+export async function recordGenerationChanges(file, current, next, { hook = false, env } = {}) {
+  const tokens = invalidatedCaptureTokens(current, next);
+  if (!tokens.length) return;
+  if (hook) {
+    if (!hookExpiryOnly(current, next, tokens)) throw deletionError('capture_hook_invalidating_write', 'A hook cannot perform this invalidating write');
+    return;
+  }
+  await writeLedger(file, ledger => {
+    const state = joinGenerations(ledger);
+    const counters = new Map(state.generationCounters.map(entry => [entry.token, entry]));
+    for (const token of tokens) {
+      const entry = counters.get(token) ?? { token, counter: 0 };
+      if (entry.counter === Number.MAX_SAFE_INTEGER) throw refusedWrite('generation counter exhausted');
+      counters.set(token, { ...entry, counter: entry.counter + 1 });
+    }
+    Object.assign(ledger, state, { generationCounters: [...counters.values()] });
+  }, { env });
 }
 
 // Writes the per-user deletion registry (PR-37d design §3.8), at its

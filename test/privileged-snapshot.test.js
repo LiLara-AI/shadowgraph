@@ -21,7 +21,7 @@ const NOW = '2026-01-01T00:00:00.000Z';
 const SNAPSHOT_IMPORTERS = [
   'src/shadowgraph.js', 'src/cli.js', 'src/server.js', 'src/mcp.js', 'src/markdown-workspace.js', 'src/restore-validation.js',
   'src/schema-conversion.js', 'src/capture-hook.js',
-  'src/internal/access-transport.js', 'src/internal/restore-wrapper.js', 'src/internal/quarantine.js', 'src/internal/capture-lifecycle.js',
+  'src/internal/access-transport.js', 'src/internal/restore-wrapper.js', 'src/internal/quarantine.js', 'src/internal/capture-lifecycle.js', 'src/internal/extraction-worker.js',
   'scripts/bench-journal.mjs', 'scripts/context-size.mjs'
 ];
 

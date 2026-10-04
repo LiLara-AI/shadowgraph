@@ -13,7 +13,7 @@ import { SCHEMA_VERSION } from './shadowgraph.js';
 import { extraCollections, isExtraCollectionKey, refusePublicExport } from './internal/collections.js';
 import { RUNTIME_MISSES } from './internal/miss-ledger.js';
 import { CAPTURE_CONTENT, CAPTURE_SESSIONS } from './internal/capture.js';
-import { DELETION_VIEW, attachDeletionView, backupSidecar, captureItemRecordValid, journalHead, pendingUnsupported, readLedger, refuseAbsentWithRecord, refuseDeletionFileDestination, registerStoreIo, writeSidecar } from './internal/deletion-knowledge.js';
+import { DELETION_VIEW, attachDeletionView, backupSidecar, captureItemRecordValid, journalHead, pendingUnsupported, readLedger, recordGenerationChanges, refuseAbsentWithRecord, refuseDeletionFileDestination, registerStoreIo, writeSidecar } from './internal/deletion-knowledge.js';
 import { RestorePendingError, purgeRecorded, recordPurges, resolvePendingRestore, saveResolving } from './internal/restore-wrapper.js';
 
 // One generic carrier for every top-level collection this build does not
@@ -321,7 +321,8 @@ export async function createSqliteStore(filePath, options = {}) {
   async function commitPayload(database, current, data, { hook = false } = {}) {
     await refuseDeletionFileDestination(filePath, options.env);
     const context = () => ({ current, payload: data, destructive: removesPersistedRows(current, data) });
-    const clear = await recordPurges(filePath, { current, data, env: options.env, lock: options, hook, fault: (stage) => saveFault(stage, context()) });
+    const clear = await recordPurges(filePath, { current, data, env: options.env, lock: options, hook, fault: (stage) => saveFault(stage, context()),
+      beforeRecord: () => recordGenerationChanges(filePath, current, data, { hook, env: options.env }) });
     try {
       const revision = writeOver(database, current, data);
       if (clear) {
@@ -403,7 +404,7 @@ export async function createSqliteStore(filePath, options = {}) {
     run(step, { held = false } = {}) {
       let last;
       const tools = {
-        read: async () => (last = await readDestination()),
+        read: async () => { const value = await readDestination(); last = structuredClone(value); return value; },
         commit: async (next) => {
           let database;
           try {
@@ -517,10 +518,11 @@ export async function createSqliteStore(filePath, options = {}) {
           // The capture hook's only write: any pending record refuses it before
           // `change` runs (PR-37c design §8.3, R8).
           const current = await attachDeletionView(exportSqlitePayload(database), filePath, { env: options.env, pending: 'refuse' });
+          const before = structuredClone(current);
           const next = await change(current);
           if (next === null || next === undefined) return null;
           refusePublicExport(next);
-          return await commitPayload(database, current, next, { hook: true });
+          return await commitPayload(database, before, next, { hook: true });
         } finally {
           closeChecked(database, 'update');
         }

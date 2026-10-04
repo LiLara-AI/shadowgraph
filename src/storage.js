@@ -3,7 +3,7 @@ import { basename, dirname, join } from 'node:path';
 import { nextRevision, assertRevision, createDestinationFence, restoreLock } from './revision-store.js';
 import { SCHEMA_VERSION } from './shadowgraph.js';
 import { refusePublicExport } from './internal/collections.js';
-import { DELETION_FILE_DESTINATION_REFUSED, DELETION_INTENT, DELETION_VIEW, attachDeletionView, canonicalPath, commitFile, deletionError, readUnfenced, refuseDeletionFileDestination, registerStoreIo, storeIo } from './internal/deletion-knowledge.js';
+import { DELETION_FILE_DESTINATION_REFUSED, DELETION_INTENT, DELETION_VIEW, attachDeletionView, canonicalPath, commitFile, deletionError, readUnfenced, recordGenerationChanges, refuseDeletionFileDestination, registerStoreIo, storeIo } from './internal/deletion-knowledge.js';
 import { RestorePendingError, activation, asRestoreRefusal, completeRestore, freshPurgeIntents, purgeRecorded, recordPurges, resolvePendingRestore, restoreContext, restoreHook, retentionRestoreGuard, saveResolving, settleAfterFailure } from './internal/restore-wrapper.js';
 
 // Journal lives INSIDE the same payload as the state and is written by the same
@@ -82,7 +82,8 @@ export function createJsonFileStore(filePath, options = {}) {
     const target = await canonicalPath(filePath);
     await refuseDeletionFileDestination(filePath, options.env);
     if (freshPurgeIntents(current, input).length) await checkPurge();
-    const clear = await recordPurges(filePath, { current, data: input, env: options.env, lock: options, hook, fault: (stage) => options.saveFault?.(stage, context) });
+    const clear = await recordPurges(filePath, { current, data: input, env: options.env, lock: options, hook, fault: (stage) => options.saveFault?.(stage, context),
+      beforeRecord: () => recordGenerationChanges(filePath, current, input, { hook, env: options.env }) });
     const temporaryPath = join(dirname(target), `.${basename(target)}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`);
     // The store keeps its mode, or is owner-only when new; a capture store is
     // owner-only whatever it was (FND-P6-11; PR-37b).
@@ -128,7 +129,7 @@ export function createJsonFileStore(filePath, options = {}) {
         checkPurge,
         read: async () => {
           const { text, payload } = await readStored(filePath);
-          last = payload;
+          last = structuredClone(payload);
           return text === null ? null : payload;
         },
         commit: async (next) => commit(last ?? (await readStored(filePath)).payload, next),
@@ -180,10 +181,11 @@ export function createJsonFileStore(filePath, options = {}) {
     async update(change) {
       return fenced(async () => {
         const current = await readFenced('refuse');
+        const before = structuredClone(current);
         const next = await change(current);
         if (next === null || next === undefined) return null;
         refusePublicExport(next);
-        return commit(current, next, { hook: true });
+        return commit(before, next, { hook: true });
       });
     },
     close() {}

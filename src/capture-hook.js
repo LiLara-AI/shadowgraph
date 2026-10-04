@@ -95,7 +95,7 @@ const COMMIT_MARGIN_MS = 250;
 // keeps its lock fresh, so this is safe short (D-3).
 const CAPTURE_STALE_LOCK_MS = 2000;
 const GIT_TIMEOUT_MS = 3000;
-const STORE_SIDE_FILES = Object.freeze(['-wal', '-shm', '-journal']);
+const STORE_SIDE_FILES = Object.freeze(['-wal', '-shm', '-journal', '.control.json']);
 const named = (value) => typeof value === 'string' && value.trim() !== '';
 
 // A key or argument naming a credential, by the redactor's names or the short

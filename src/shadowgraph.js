@@ -29,6 +29,7 @@ import { CAPTURE_COLLECTIONS, CAPTURE_CONTENT, CAPTURE_ENTRY_TYPES, CAPTURE_EVEN
 import { TRANSCRIPT_ANCHOR_BYTES, TRANSCRIPT_GAP_REASONS, TRANSCRIPT_TRIGGERS, cursorBlock, cursorShape, digest, lastLineEnd, matchKey, transcriptEntry, transcriptLines } from './internal/transcript.js';
 import { CREDENTIAL_WITHHELD, captureWithheld, redactText, redactValue, withholdFlagged } from './internal/redaction.js';
 import { RAW_EXPIRED, RAW_RETENTION_DAYS, captureRawExpired, effectiveCaptureExpiry, hasCaptureRetentionState } from './internal/capture-retention.js';
+import { invalidatedCaptureTokens } from './internal/capture-generation.js';
 import { DELETION_INTENT, DELETION_VIEW, IDEMPOTENCY_KEY_WITHHELD, PURGE_AWARE_RESTORE_UNSUPPORTED, PURGE_BACKUPS_STATEMENT, SCOPE_KEY_WITHHELD, SESSION_WITHHELD, deletionError, journalHead } from './internal/deletion-knowledge.js';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
@@ -1237,6 +1238,31 @@ export function createShadowGraph(options = {}) {
     }
     const at = now();
     const cited = new Set();
+    // Unsupported extraction output has its own seven-day lifetime, even
+    // when accepted records require the raw citation to remain. Scrub every
+    // persisted copy so replay cannot recover expired unsupported text.
+    const outputExpired = new Set();
+    for (const item of captures.values()) {
+      if (!mayContinue()) { result.more = true; break; }
+      if (item.extractionOutput?.unsupported?.length && isValidIsoInstant(item.extractionOutput.expiresAt)
+        && Date.parse(item.extractionOutput.expiresAt) <= Date.parse(at)) {
+        if (outputExpired.size >= maxItems) { result.more = true; break; }
+        outputExpired.add(item.id);
+      }
+    }
+    const expireOutput = value => {
+      if (!value || typeof value !== 'object') return;
+      if (value.kind === CAPTURE_KIND && outputExpired.has(value.id) && value.extractionOutput) {
+        value.extractionOutput = { ...value.extractionOutput, unsupported: [], expired: true };
+      } else for (const child of Object.values(value)) expireOutput(child);
+    };
+    if (outputExpired.size) {
+      for (const item of captures.values()) expireOutput(item);
+      for (const value of idempotency.values()) expireOutput(value);
+      for (const entry of journal) expireOutput(entry.payload);
+      result.changed = true;
+      result.outputsExpired = outputExpired.size;
+    }
     // Typed source links only; keep the complete source entry when cited span
     // and context cannot safely be separated. Held canonical records count.
     for (const entity of [...records.values(), ...facts.values()]) {
@@ -1377,6 +1403,12 @@ export function createShadowGraph(options = {}) {
         source: projectFields(item.source, ['event', 'sessionId', 'role', 'hostEventId', 'toolCallId', 'turnIndex']),
         observation: projectFields(item.observation, ['host', 'hostVersion', 'toolName', 'outcome']),
         expiresAt: effectiveCaptureExpiry(item, retentionPolicy()), rawAvailable,
+        ...(item.extractionOutput ? { extractionOutput: {
+          unsupported: isValidIsoInstant(item.extractionOutput.expiresAt) && Date.parse(item.extractionOutput.expiresAt) > Date.parse(at)
+            ? clone(item.extractionOutput.unsupported ?? []) : [],
+          expiresAt: item.extractionOutput.expiresAt,
+          expired: !isValidIsoInstant(item.extractionOutput.expiresAt) || Date.parse(item.extractionOutput.expiresAt) <= Date.parse(at)
+        } } : {}),
         producedRecords: produced.filter(owns).map((entity) => projectFields(entity, ['id', 'kind', 'status', 'updatedAt'])),
         derivedInvalidated: invalidated, reprocessable: invalidated && rawAvailable,
         reprocessingUnavailableReason: expired ? RAW_EXPIRED : rawAvailable ? null : 'raw_unavailable'
@@ -1387,10 +1419,10 @@ export function createShadowGraph(options = {}) {
   function cancelCapture(input = {}) {
     const item = captures.get(input.id);
     if (!captureOwner(input).owns(item)) throw Object.assign(new Error('Capture item not found in this scope'), { code: 'capture_item_not_found' });
-    if (isNewerThanWriter(item) || !['pending', 'failed', 'blocked'].includes(item.state)) throw Object.assign(new Error('Only pending, failed or blocked capture can be cancelled before extraction'), { code: 'capture_cancel_state_refused' });
+    if (isNewerThanWriter(item) || !['pending', 'processing', 'failed', 'blocked'].includes(item.state)) throw Object.assign(new Error('Only uncompleted capture can be cancelled'), { code: 'capture_cancel_state_refused' });
     if (item.state === 'blocked' && item.blockedReason === 'capture_cancelled') return { id: item.id, changed: false, state: 'blocked' };
     assertJournalCapacity(1);
-    const next = { ...item, state: 'blocked', blockedReason: 'capture_cancelled', lease: null, updatedAt: now() };
+    const next = { ...item, state: 'blocked', blockedReason: 'capture_cancelled', cancelRequested: true, lease: null, updatedAt: now() };
     captures.set(item.id, next);
     appendJournal({ type: 'capture.state_changed', entityKind: CAPTURE_KIND, entityId: item.id, project: item.project, payload: next });
     return { id: item.id, changed: true, state: 'blocked' };
@@ -1909,6 +1941,85 @@ export function createShadowGraph(options = {}) {
     return clone(next);
   }
 
+  function claimCapture(input) {
+    const item = captures.get(input.id), at = now();
+    if (!captureOwner(input).owns(item) || isNewerThanWriter(item) || rawExpired(item, at) || item.cancelRequested
+      || !(item.state === 'pending' || (item.state === 'processing' && Date.parse(item.lease?.leaseExpiresAt) <= Date.parse(at)))) return null;
+    const next = { ...clone(item), state: 'processing', lease: clone(input.lease), updatedAt: at };
+    if (captureItemIssue(next)) throw new Error('Invalid extraction lease');
+    assertJournalCapacity(1); captures.set(item.id, next);
+    appendJournal({ type: 'capture.state_changed', entityKind: CAPTURE_KIND, entityId: item.id, project: item.project, payload: next });
+    return clone(next);
+  }
+
+  // Only the fenced worker calls this with locally verified fields. Canonical
+  // IDs and confidence/trust stay owned by the existing builders. Decoration
+  // reaches each new journal/idempotency copy before this transaction commits.
+  function completeExtraction(input) {
+    const item = captures.get(input.id), at = now();
+    if (!item || item.state !== 'processing' || item.lease?.leaseId !== input.leaseId || item.cancelRequested
+      || rawExpired(item, at) || Date.parse(item.lease.leaseExpiresAt) <= Date.parse(at)) throw new Error('Extraction lease is no longer usable');
+    const producedRecordIds = [];
+    const decorate = (value, id, fields) => {
+      if (!value || typeof value !== 'object') return;
+      if (value.id === id && value.kind !== CAPTURE_KIND) Object.assign(value, clone(fields));
+      else for (const child of Object.values(value)) decorate(child, id, fields);
+    };
+    for (const [index, proposed] of input.prepared.records.entries()) {
+      const sourceClass = item.source.role === 'tool' ? 'tool_observed' : 'agent_claimed';
+      const args = { ...proposed.values, project: item.project, originId: item.originId, sourceClass,
+        observedAt: item.observedAt, sessionId: item.source.sessionId,
+        idempotencyKey: `${input.key}:${index}` };
+      let record;
+      if (proposed.kind === 'decision') record = addDecision({ ...args, alternatives: proposed.alternatives });
+      else if (proposed.kind === 'attempt') record = addAttempt(args);
+      else record = remember({ ...args, memoryType: 'episode', key: `${input.key}:${index}` }).memory;
+      const fields = { captureRef: item.id, claims: proposed.claims, verificationStatus: 'unverified' };
+      if (proposed.kind === 'attempt') {
+        fields.outcomeEvidence = clone(item.observation?.outcome?.outcomeEvidence ?? { state: 'absent' });
+        if (fields.outcomeEvidence.state === 'observed') fields.resultClass = fields.outcomeEvidence.exitStatus === 0 ? 'succeeded' : 'failed';
+        if (!proposed.reason) fields.causalClaim = { state: 'unknown' };
+        else {
+          const { class: claimClass, verifierVersion, checks, rule, readings, span, sourceRef, evidence } = proposed.reason;
+          fields.causalClaim = { statement: args.reason, state: 'recorded', sourceClass, class: claimClass, verifierVersion, ...(checks ? { checks } : {}),
+            ...(rule ? { rule } : {}), ...(readings ? { readings } : {}),
+            evidence: [{ sourceRef, span, text: evidence }] };
+        }
+      }
+      decorate(records.get(record.id), record.id, fields);
+      for (const entry of journal) decorate(entry.payload, record.id, fields);
+      for (const value of idempotency.values()) decorate(value, record.id, fields);
+      producedRecordIds.push(record.id);
+    }
+    const next = { ...clone(item), state: 'extracted', lease: null, attempts: item.attempts + 1,
+      producedRecordIds, updatedAt: at, receipts: [...item.receipts, clone(input.receipt)],
+      extractionOutput: { unsupported: clone(input.prepared.unsupported), createdAt: at, expiresAt: new Date(Date.parse(at) + 7 * 86_400_000).toISOString() } };
+    assertJournalCapacity(1); captures.set(item.id, next);
+    appendJournal({ type: 'extraction.completed', entityKind: CAPTURE_KIND, entityId: item.id, project: item.project, payload: next });
+    return { status: 'committed', produced: producedRecordIds.length, unsupported: input.prepared.unsupported.length };
+  }
+
+  function settleExtraction(input) {
+    if (!['superseded_result', 'schema_invalid', 'executor_blocked', 'executor_failed'].includes(input.reason)) throw new Error('Invalid extraction terminal reason');
+    const at = now(), item = captures.get(input.id);
+    if (input.reason === 'superseded_result') {
+      // No purged/quarantined identity, source, project or result is recreated.
+      // One bounded diagnostic remains valid even when the item has vanished.
+      const index = events.findIndex(value => value.type === 'extraction.superseded');
+      replaceEvent(index, { id: events[index]?.id ?? id('event'), type: 'extraction.superseded', at, count: Math.min(Number.MAX_SAFE_INTEGER, (events[index]?.count ?? 0) + 1) });
+    }
+    if (!item || item.state !== 'processing' || item.lease?.leaseId !== input.leaseId) return { status: input.reason };
+    const superseded = input.reason === 'superseded_result';
+    const next = { ...clone(item), state: superseded ? item.cancelRequested ? 'blocked' : 'pending' : input.reason === 'schema_invalid' ? 'failed' : 'blocked',
+      lease: null, attempts: item.attempts + 1, updatedAt: at,
+      lastError: superseded ? item.lastError : input.reason,
+      blockedReason: superseded ? item.cancelRequested ? 'capture_invalidated' : null : input.reason === 'schema_invalid' ? null : input.reason,
+      supersededResults: superseded ? [...item.supersededResults.slice(-15), { at, reason: input.reason }] : item.supersededResults };
+    assertJournalCapacity(1); captures.set(item.id, next);
+    appendJournal({ type: superseded ? 'capture.state_changed' : 'extraction.failed', entityKind: CAPTURE_KIND, entityId: item.id, project: item.project, payload: next });
+    return { status: input.reason };
+  }
+
   // One aggregate per public delivery, even when it composes multiple reads.
   // Failed operations roll back canonical effects before a separate refusal
   // audit commit. Transports persist that committed rejection before delivery.
@@ -2327,10 +2438,27 @@ export function createShadowGraph(options = {}) {
         throw error;
       };
       try {
+        // A graph with no active claim pays no snapshot cost. Every ordinary
+        // mutation, including import/attribution and asynchronous verification,
+        // marks the affected claim before its outer transaction can publish.
+        const generationBefore = mode !== 'none' && [...captures.values()].some(item => item.state === 'processing' && !item.cancelRequested)
+          ? snapshot() : null;
+        const cancelInvalidated = () => {
+          if (!generationBefore) return;
+          const tokens = new Set(invalidatedCaptureTokens(generationBefore, snapshot()));
+          const affected = [...captures.values()].filter(item => item.state === 'processing' && !item.cancelRequested && tokens.has(item.erasureToken));
+          assertJournalCapacity(affected.length);
+          for (const item of affected) {
+            const next = { ...clone(item), cancelRequested: true, updatedAt: now() };
+            captures.set(item.id, next);
+            appendJournal({ type: 'capture.state_changed', entityKind: CAPTURE_KIND, entityId: item.id, project: item.project, payload: next });
+          }
+        };
         const value = operation(...args);
         if (value && typeof value.then === 'function') {
           return Promise.resolve(value).then(
             (result) => {
+              try { cancelInvalidated(); } catch (error) { return rollback(error); }
               transactionContext = null;
               activeMutation = null;
               // Expiring previously verified trust is a successful lifecycle
@@ -2347,6 +2475,7 @@ export function createShadowGraph(options = {}) {
             rollback
           );
         }
+        cancelInvalidated();
         transactionContext = null;
         activeMutation = null;
         return value;
@@ -6262,6 +6391,8 @@ export function createShadowGraph(options = {}) {
     accessRefusal: transactional('accessRefusal', authority.transportRefusal),
     bindProject: transactional('bindProject', bindProject), resolveProjectBinding,
     recordCapture: transactional('recordCapture', recordCapture), transitionCapture: transactional('transitionCapture', transitionCapture),
+    claimCapture: transactional('claimCapture', claimCapture), completeExtraction: transactional('completeExtraction', completeExtraction, { mode: 'snapshot' }),
+    settleExtraction: transactional('settleExtraction', settleExtraction),
     expireCapture: transactional('expireCapture', expireCapture, { mode: 'snapshot' }),
     inspectCapture, cancelCapture: transactional('cancelCapture', cancelCapture),
     deleteCapture: transactional('deleteCapture', deleteCapture, { mode: 'snapshot' }),

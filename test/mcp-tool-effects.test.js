@@ -413,7 +413,8 @@ test('every advertised tool annotation matches the effects the server actually h
   assert.equal(purged.repeat.journalDelta, 1, 'a second purge still records that it happened');
   // Its deletion records: the store's ledger and the per-user registry, and no
   // lock left in either folder (PR-37d design §9.2 D30).
-  assert.deepEqual(purged.first.newFiles, ['home/deletion-registry.json', 'store/data.json.control.json']);
+  assert.deepEqual(restored.first.newFiles, ['store/data.json.control.json'], 'restore already created the generation ledger');
+  assert.deepEqual(purged.first.newFiles, ['home/deletion-registry.json']);
   assert.deepEqual((await listFiles(rpc.directory)).filter((name) => name.endsWith('.lock')), []);
 
   // --- the assertion this file exists for ---------------------------------

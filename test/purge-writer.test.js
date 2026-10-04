@@ -289,7 +289,7 @@ for (const [backend, options] of BACKENDS) test(`D1 ${backend}: a purge writes o
     const marker = markerOf(after, 'p');
     const tombstone = { kind: 'project', purgedProject: 'p', mode, at: marker.at, seq: marker.seq, tokens: tokensIn(before, 'p'), moveIn: 'none' };
     assert.equal(tombstone.tokens.length, 6, `${mode}: two decisions, the memory, the fact, the capture and W`);
-    assert.deepEqual(await ledgerOf(state), { version: 1, quarantine: quarantined, tombstones: [tombstone] }, `${mode}: no lineage, no pending member`);
+    assert.deepEqual(await ledgerOf(state), { version: 1, quarantine: quarantined, tombstones: [tombstone], generationBase: 0, generationCounters: before.records.filter(item => item.kind === 'capture' && item.project === 'p').map(item => ({ token: item.erasureToken, counter: 1 })) }, `${mode}: no lineage, no pending member`);
     assert.deepEqual(await registryOf(state.env), { version: 1, tombstones: [{ ...tombstone, lineage: { epochEntryId: epochOf(before), headEntryId: headOf(before), markerEntryId: marker.id } }] }, mode);
     for (const path of [ledgerPath(state.file), registryFile(state.env)]) {
       const text = await readFile(path, 'utf8');
@@ -328,10 +328,10 @@ for (const [backend, options] of BACKENDS) test(`D2 ${backend}: a backup of a pu
   const copy = await backupOf(state, 'backup');
   const ids = entitiesOf(await stored(copy)).map((entity) => entity.id);
   assert.ok(ids.length > 0);
-  const ledger = await fileHash(ledgerPath(state.file));
+  const ledger = await ledgerOf(state);
   const into = await restoreInto(state, copy);
   assert.deepEqual([into.deletionKnowledge, into.reapplied], ['present', ZERO]);
-  assert.equal(await fileHash(ledgerPath(state.file)), ledger, 'nothing lifted: the ledger is byte-equal');
+  assert.deepEqual(await ledgerOf(state), { ...ledger, generationBase: ledger.generationBase + 1 }, 'nothing lifted; generation alone advances');
   const seen = visible(await load(state));
   assert.deepEqual(ids.filter((id) => !seen.has(id)), []);
   const fresh = freshAt(state, 'fresh');
@@ -523,7 +523,7 @@ for (const [backend, options] of BACKENDS) test(`D8 ${backend}: a fault after th
     const next = await stored(state);
     assert.equal(next.revision, after.revision + 1, `${mode}: the revision not moved by the resolution`);
     assert.deepEqual(next.journal.filter((entry) => entry.type === 'project.purged').map((entry) => entry.id), [marker.id], `${mode}: one marker`);
-    assert.deepEqual(await ledgerOf(state), { version: 1, tombstones: ledger.tombstones }, `${mode}: no second tombstone, no record`);
+    assert.deepEqual(await ledgerOf(state), { version: 1, tombstones: ledger.tombstones, generationBase: ledger.generationBase, generationCounters: ledger.generationCounters }, `${mode}: no second tombstone, no record, generation preserved`);
   }
   if (backend !== 'json') return;
   const { graph } = projectGraph();
@@ -825,7 +825,7 @@ for (const [backend, options] of BACKENDS) test(`D41 ${backend}: the intent is a
     assert.deepEqual(Object.getOwnPropertySymbols({ ...snapshot }), []);
     await store.save({ ...snapshot });
   });
-  assert.deepEqual([await ledgerOf(state), await registryOf(state.env)], [null, null]);
+  assert.deepEqual([await ledgerOf(state), await registryOf(state.env)], [{ version: 1, generationBase: 0, generationCounters: privilegedSnapshot(graph).records.filter(item => item.kind === 'capture' && item.project === 'p').map(item => ({ token: item.erasureToken, counter: 1 })) }, null], 'no deletion knowledge; invalidating save still advances generation');
 });
 
 for (const [backend, options] of BACKENDS) test(`D43 ${backend}: a graph that imports a purged graph's snapshot adopts no intent (P50)`, options, async (t) => {
@@ -1255,7 +1255,7 @@ for (const [backend, options] of BACKENDS) test(`D23 ${backend}: another lineage
     const result = await restoreInto(destination, backup);
     if (!gapped) {
       assert.equal(result.deletionKnowledge, 'none', label);
-      assert.equal(existsSync(ledgerPath(destination.file)), false, label);
+      assert.deepEqual(await ledgerOf(destination), { version: 1, generationBase: 1, generationCounters: [] }, label);
       assert.deepEqual(await stored(destination), await stored(twin), `${label}: as with no registry`);
       assert.equal(visible(await load(destination)).has(legacy), true, label);
     } else {
@@ -1667,7 +1667,7 @@ for (const [backend, options] of BACKENDS) test(`D7 ${backend}: the crash window
     assert.match(next.stderr, /revision conflict/i, entry);
     const after = await stored(state);
     assert.deepEqual(after.journal.filter((item) => item.type === 'project.purged' && item.project === 'p').map((item) => [item.id, item.at, item.seq]), [[marker.id, marker.at, marker.seq]], `${entry}: one marker, the record's`);
-    assert.deepEqual(await ledgerOf(state), { version: 1, quarantine: ledger.quarantine, tombstones: ledger.tombstones }, `${entry}: the one tombstone, no record`);
+    assert.deepEqual(await ledgerOf(state), { version: 1, quarantine: ledger.quarantine, tombstones: ledger.tombstones, generationBase: ledger.generationBase, generationCounters: ledger.generationCounters.map(value => ({ ...value, counter: value.counter + 1 })) }, `${entry}: one tombstone, no record, recovery advances generation again`);
     assert.equal((await registryOf(state.env)).tombstones.length, 1, `${entry}: the one entry`);
     for (const path of [state.file, `${state.file}-wal`]) {
       if (!existsSync(path)) continue;
@@ -1785,7 +1785,7 @@ for (const [backend, options] of BACKENDS) test(`D10 ${backend}: a purge record 
       await store.save(privilegedSnapshot(live));
     });
     assert.equal((await stored(state)).journal.some((entry) => entry.type === 'project.purged'), false, `${stage}: no purge re-run on the empty store`);
-    assert.deepEqual(await ledgerOf(state), { version: 1, tombstones: ledger.tombstones }, `${stage}: the tombstone stays, the record goes`);
+    assert.deepEqual(await ledgerOf(state), { version: 1, tombstones: ledger.tombstones, generationBase: ledger.generationBase, generationCounters: ledger.generationCounters }, `${stage}: tombstone and generation stay, record goes`);
     const expected = stage === 'beforeCommit' ? registry : [{ ...ledger.tombstones[0], lineage: { epochEntryId: null, headEntryId: null, markerEntryId: marker.id } }];
     assert.deepEqual((await registryOf(state.env)).tombstones, expected, `${stage}: one entry`);
     const fresh = freshAt(state, `fresh-${stage}`);
@@ -1932,10 +1932,10 @@ for (const [backend, options] of BACKENDS) test(`D26 ${backend}: a purge save wh
     await restoring;
     await assert.rejects(saving, { name: 'RevisionConflictError' });
   });
-  assert.deepEqual([await ledgerOf(state), await registryOf(state.env)], [null, null], 'the conflicted purge wrote no deletion knowledge and the no-op retention reconciliation wrote no controls');
+  assert.deepEqual([await ledgerOf(state), await registryOf(state.env)], [{ version: 1, generationBase: 1, generationCounters: [] }, null], 'the conflicted purge wrote no deletion knowledge; successful restore advanced generation');
   const window = await crashWindow(t, backend);
   const copy = await backupOf(window.state, 'copy');
-  assert.deepEqual(await readJson(ledgerPath(copy.file)), { version: 1, tombstones: window.ledger.tombstones }, 'the sidecar: the tombstone, no record');
+  assert.deepEqual(await readJson(ledgerPath(copy.file)), { version: 1, tombstones: window.ledger.tombstones, generationBase: window.ledger.generationBase, generationCounters: window.ledger.generationCounters.map(value => ({ ...value, counter: value.counter + 1 })) }, 'the sidecar: tombstone and recovered generation, no record');
   assert.equal((await ledgerOf(window.state)).pending, undefined);
   for (const each of [window.state, copy]) assert.equal(markerOf(await stored(each), 'p')?.id, window.marker.id);
 });
