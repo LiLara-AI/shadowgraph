@@ -9,8 +9,11 @@ import { repositoryOf } from './owner-files.js';
 import { attachDeletionView, readLedger, storeIo } from './deletion-knowledge.js';
 import { claimAuthorityInvalid, effectiveGeneration } from './capture-generation.js';
 import { captureRawExpired } from './capture-retention.js';
-import { privilegedClaimCapture, privilegedCompleteExtraction, privilegedLiveSnapshot, privilegedSettleExtraction, privilegedSnapshot } from './snapshot.js';
+import { privilegedClaimCapture, privilegedCompleteExtraction, privilegedExtractionStatus, privilegedLiveSnapshot, privilegedSettleExtraction, privilegedSnapshot } from './snapshot.js';
 import { EXTRACTION_SCHEMA, OUTPUT_SCHEMA_VERSION, PROMPT_VERSION, extractionPrompt, extractionText, prepareExtraction } from './extraction-output.js';
+import { FROZEN_WORKER_BUDGETS, withWorkerBudget } from './extraction-budget.js';
+import { invokeWithRetry, awaitWorkerStep } from './extraction-policy.js';
+import { sessionJournalEntries, workerReason } from './extraction-session.js';
 
 const digest = value => createHash('sha256').update(value).digest('hex');
 const refusal = code => { throw Object.assign(new Error(`Extraction refused (${code})`), { code }); };
@@ -20,17 +23,26 @@ const owns = (item, options) => options.project ? item.attribution === 'project'
 const raw = (payload, item) => (payload.captureContent ?? []).find(entry => entry.contentRef === item.contentRef)?.text;
 
 async function fenced(options, action) {
+  const check = () => { if (options.signal?.aborted) refusal('drain_stopped'); };
+  check();
   if (!isAbsolute(options.file) || await repositoryOf(options.file)) refusal('capture_store_inside_repository');
   if (!(typeof options.project === 'string' && options.project.trim()) && !(typeof options.originId === 'string' && options.originId.trim())) refusal('capture_scope_required');
-  const store = await (options.openStore ?? createStorage)(options);
+  const store = await awaitWorkerStep(() => (options.openStore ?? createStorage)(options), options.signal, late => late.close());
   try {
+    check();
     const io = storeIo(store);
     return await io.run(async ({ read, commit }) => {
+      check();
       const payload = await read(); if (!payload) return { status: 'idle' };
+      check();
       await attachDeletionView(payload, io.file, { env: io.env, pending: 'refuse' });
       const at = clock(options), ledger = await readLedger(io.file);
+      check();
       const graph = createShadowGraph({ now: () => at }); graph.importData(payload);
-      return action({ payload, graph, ledger, at, commit });
+      return action({ payload, graph, ledger, at, commit: async next => {
+        if (options.guard && !await awaitWorkerStep(options.guard, options.signal)) refusal('drain_stopped');
+        check(); return commit(next);
+      } });
     });
   } finally { store.close(); }
 }
@@ -65,6 +77,7 @@ export async function claimCapture(options) {
       const selected = { ...item, lease };
       if (claimAuthorityInvalid(selected, live, at)) continue;
       const generation = effectiveGeneration(selected, ledger, live, at);
+      options.beforeClaim?.({ inputBytes: Buffer.byteLength(extractionPrompt(item, text)), journalEntries: sessionJournalEntries(live.journal, item) + 2 });
       const claimed = privilegedClaimCapture(graph, { id: item.id, project: options.project, originId: options.originId, lease });
       if (!claimed) continue;
       await commit(privilegedSnapshot(graph));
@@ -80,7 +93,7 @@ export async function commitCapture(options, claim, response) {
   return fenced(options, async ({ graph, ledger, at, commit }) => {
     const live = privilegedLiveSnapshot(graph), item = live.records.find(value => value.kind === 'capture' && value.id === claim.id);
     const settle = async reason => {
-      const result = privilegedSettleExtraction(graph, { id: claim.id, leaseId: claim.leaseId, reason });
+      const result = privilegedSettleExtraction(graph, { id: claim.id, leaseId: claim.leaseId, reason, attemptCount: options.attemptCount, blockedReason: response?.blockedReason });
       await commit(privilegedSnapshot(graph)); return result;
     };
     if (!item || !owns(item, options) || item.state !== 'processing' || item.cancelRequested || item.lease?.leaseId !== claim.leaseId
@@ -88,7 +101,7 @@ export async function commitCapture(options, claim, response) {
       || Date.parse(item.lease.leaseExpiresAt) <= Date.parse(at) || captureRawExpired(item, ledger?.retentionOverrides ?? [], at)
       || claimAuthorityInvalid(item, live, at) || effectiveGeneration(item, ledger, live, at) !== claim.generation
       || typeof raw(live, item) !== 'string' || digest(extractionText(raw(live, item))) !== claim.rawHash) return settle('superseded_result');
-    if (response?.status !== 'success') return settle(response?.status === 'schema_invalid' ? 'schema_invalid' : response?.status === 'blocked' ? 'executor_blocked' : 'executor_failed');
+    if (response?.status !== 'success') return settle(response?.status === 'worker_blocked' ? 'worker_blocked' : response?.status === 'schema_invalid' ? 'schema_invalid' : response?.status === 'blocked' ? 'executor_blocked' : 'executor_failed');
     if (response.receipt?.invocationStarted !== true || response.receipt.model !== EXTRACTION_MODEL) return settle('executor_failed');
     let prepared;
     try { prepared = prepareExtraction(item, extractionText(raw(live, item)), response.value); }
@@ -98,7 +111,9 @@ export async function commitCapture(options, claim, response) {
     const receipt = { promptVersion: PROMPT_VERSION, schemaVersion: OUTPUT_SCHEMA_VERSION, model: EXTRACTION_MODEL,
       at, generation: claim.generation, invocationStarted: response.receipt?.invocationStarted === true,
       usage: Object.fromEntries(Object.entries(response.receipt?.usage ?? {}).filter(([name, value]) => ['inputTokens', 'outputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens'].includes(name) && Number.isSafeInteger(value) && value >= 0)) };
-    const result = privilegedCompleteExtraction(graph, { id: item.id, leaseId: claim.leaseId, prepared, key, receipt });
+    let result;
+    try { result = privilegedCompleteExtraction(graph, { id: item.id, leaseId: claim.leaseId, prepared, key, receipt, attemptCount: options.attemptCount, journalCeiling: options.journalCeiling }); }
+    catch (error) { if (error.code !== 'session_journal') throw error; response = { blockedReason: 'session_journal' }; return settle('worker_blocked'); }
     await commit(privilegedSnapshot(graph));
     return result;
   });
@@ -110,4 +125,74 @@ export async function runExtractionItem(options) {
   try { response = await options.executor.invoke({ prompt: extractionPrompt(claim.item, claim.text), schema: EXTRACTION_SCHEMA }); }
   catch { response = { status: 'failed' }; }
   return commitCapture(options, claim, response);
+}
+
+async function claimIsCurrent(options, claim) {
+  return fenced(options, ({ graph, ledger, at }) => {
+    const live = privilegedLiveSnapshot(graph), item = live.records.find(value => value.id === claim.id && value.kind === 'capture');
+    return Boolean(item && owns(item, options) && item.state === 'processing' && !item.cancelRequested && item.erasureToken === claim.token
+      && ['leaseId', 'ownerId', 'ownerBootId', 'leaseExpiresAt', 'accessId'].every(key => item.lease?.[key] === claim.lease[key])
+      && Date.parse(item.lease.leaseExpiresAt) > Date.parse(at) && !claimAuthorityInvalid(item, live, at)
+      && !captureRawExpired(item, ledger?.retentionOverrides ?? [], at) && effectiveGeneration(item, ledger, live, at) === claim.generation
+      && typeof raw(live, item) === 'string' && digest(extractionText(raw(live, item))) === claim.rawHash);
+  });
+}
+
+async function recordWorkerStatus(options, reason) {
+  return fenced(options, async ({ graph, commit }) => {
+    if (!privilegedExtractionStatus(graph, { project: options.project, originId: options.originId, reason })) return false;
+    await commit(privilegedSnapshot(graph)); return true;
+  });
+}
+
+// Internal bounded drain. PR41 supplies activation/deactivation checks and the
+// production trigger; synthetic callers here never imply real-host approval.
+export async function runExtractionDrain(options) {
+  const controller = new AbortController(), budgets = options.budgets ?? FROZEN_WORKER_BUDGETS;
+  const stop = () => controller.abort(); options.signal?.addEventListener('abort', stop, { once: true });
+  if (options.signal?.aborted) stop();
+  const timer = setTimeout(stop, Number.isSafeInteger(budgets.wallMs) && budgets.wallMs > 0 ? Math.min(budgets.wallMs, FROZEN_WORKER_BUDGETS.wallMs) : 1);
+  const signal = controller.signal;
+  let completed = 0, claimed = null, attempts = 0;
+  const blocked = async reason => {
+    reason = workerReason(reason);
+    const cleanup = { ...options, guard: undefined, signal: AbortSignal.timeout(1000), lockTimeoutMs: Math.min(options.lockTimeoutMs ?? 1000, 1000) };
+    if (claimed) {
+      await commitCapture({ ...cleanup, attemptCount: attempts }, claimed, { status: 'worker_blocked', blockedReason: reason });
+      claimed = null;
+    }
+    const storeReceiptWritten = await recordWorkerStatus(cleanup, reason);
+    return { status: 'blocked', blockedReason: reason, completed, storeReceiptWritten };
+  };
+  try {
+    return await withWorkerBudget({ ...options, now: () => Date.parse(clock(options)), signal }, async budget => {
+      for (;;) {
+        budget.check(); if (options.guard && !await awaitWorkerStep(options.guard, signal)) return blocked('drain_stopped'); budget.check();
+        claimed = await claimCapture({ ...options, signal, leaseMs: 300000, beforeClaim: input => budget.admit(input) });
+        if (claimed.status !== 'claimed') { claimed = null; return { status: 'idle', completed, storeReceiptWritten: await recordWorkerStatus({ ...options, signal }, null) }; }
+        attempts = 0;
+        const response = await invokeWithRetry({ request: { prompt: extractionPrompt(claimed.item, claimed.text), schema: EXTRACTION_SCHEMA }, signal, sleep: options.sleep,
+          reserve: () => budget.reserve(), invoke: async request => {
+            budget.check();
+            if (options.guard && !await awaitWorkerStep(options.guard, signal) || !await claimIsCurrent({ ...options, signal }, claimed)) return { status: 'blocked', blockedReason: 'drain_stopped' };
+            budget.check(); attempts += 1;
+            return options.executor.extract({ ...request, signal });
+          } });
+        if (response.status === 'blocked') return blocked(response.blockedReason);
+        budget.check(); if (options.guard && !await awaitWorkerStep(options.guard, signal)) return blocked('drain_stopped'); budget.check();
+        const result = await commitCapture({ ...options, signal, attemptCount: attempts, journalCeiling: budget.budgets.journalEntriesPerSession }, claimed, response);
+        claimed = null;
+        if (result.status === 'worker_blocked') return blocked('session_journal');
+        if (result.status === 'committed') completed += 1;
+      }
+    });
+  } catch (error) {
+    if (signal.aborted) {
+      try { return await blocked('drain_stopped'); } catch { return { status: 'blocked', blockedReason: 'drain_stopped', completed, storeReceiptWritten: false }; }
+    }
+    if (['input_bytes', 'session_journal', 'drain_items', 'drain_calls', 'window_calls', 'drain_time', 'drain_stopped', 'worker_usage_unavailable', 'worker_clock_invalid', 'worker_budgets_invalid'].includes(error.code)) {
+      try { return await blocked(error.code); } catch { /* failed medium cannot hold a receipt */ }
+    }
+    return { status: 'unavailable', reason: 'worker_or_store_unavailable', completed, storeReceiptWritten: false };
+  } finally { clearTimeout(timer); options.signal?.removeEventListener('abort', stop); }
 }

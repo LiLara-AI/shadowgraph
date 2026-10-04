@@ -46,7 +46,7 @@ export function prepareExtraction(item, source, value) {
   const allowed = { decision: ['title', 'chosen', 'goal', 'alternative'], attempt: ['solution', 'result', 'reason'], memory: ['text'] };
   for (const proposed of value.records) {
     const accepted = [], values = {}, alternatives = [], places = new Set();
-    let reason = null;
+    let reason = null, conflict = false;
     for (const given of proposed.fields) {
       const field = { ...given, text: extractionText(given.text) || '[withheld]', sourceRef: given.sourceRef === item.id ? item.id : 'unknown_source' };
       const outcome = classifyClaim(field, field.sourceRef === item.id ? source : '');
@@ -62,8 +62,15 @@ export function prepareExtraction(item, source, value) {
       }
       if (proposed.kind === 'attempt' && field.name === 'reason') reason = { ...outcome, evidence: source.slice(outcome.span.start, outcome.span.end) };
       if (field.name === 'alternative') alternatives.push({ label: field.text });
-      else if (Object.hasOwn(values, field.name)) throw Object.assign(new Error('Repeated extraction field'), { code: 'extraction_schema_invalid' });
+      else if (Object.hasOwn(values, field.name)) conflict ||= values[field.name] !== field.text;
       else values[field.name] = field.text;
+    }
+    if (conflict) {
+      // Valid model output with competing values is observed, never quality-
+      // retried. Keep its support class and evidence in expiring provenance;
+      // it cannot form one unambiguous canonical field assignment.
+      unsupported.push(...accepted.map(claim => ({ ...claim, supportedClass: claim.class, class: 'unsupported', failingDimension: 'field_conflict' })));
+      continue;
     }
     if (required[proposed.kind].some(name => !values[name]) || !places.size || [...places].every(place => usedPlaces.has(place))) continue;
     for (const place of places) usedPlaces.add(place);

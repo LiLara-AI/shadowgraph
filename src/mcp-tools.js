@@ -412,18 +412,18 @@ const pageSchema = {
 const readScopeSchema = {
   type: 'object', description: 'The resolved read boundary.', required: ['project', 'requestState', 'originPresented', 'grant'],
   properties: {
-    project: stringOrNull('Resolved project, or null when unresolved.'),
+    project: stringOrNull('Resolved project, or null.'),
     requestState: { type: 'string', enum: ['project_selected', 'project_unresolved'], description: 'Whether a project was resolved.' },
-    originPresented: { type: 'boolean', description: 'Whether a usable origin was presented; not a project selection.' },
+    originPresented: { type: 'boolean', description: 'Usable origin presented; not project selection.' },
     grant: { anyOf: [{ type: 'null' }, { type: 'object', required: ['accessId', 'expiresAt', 'surface'], properties: {
       accessId: { type: 'string', description: 'The currently rechecked grant identifier.' },
       expiresAt: { type: 'string', description: 'Earliest effective expiry of this read authority.' },
       surface: { type: 'string', enum: ['cli', 'mcp', 'http'], description: 'Actual runtime surface of this read.' }
-    } }], description: 'Rechecked effective grant, or null when none is usable.' }
+    } }], description: 'Effective rechecked grant, or null.' }
   }
 };
 const captureLimitedSchema = {
-  type: 'array', description: 'Store limits refusing new material now; none removed.',
+  type: 'array', description: 'Admission limits; accepted items kept.',
   items: { type: 'object', required: ['limit', 'ceiling', 'since'], properties: {
     limit: { type: 'string', enum: ['maxQueueDepth', 'maxStoreBytes'], description: 'The limit reached.' },
     ceiling: integerCount('The limit value.'),
@@ -431,25 +431,26 @@ const captureLimitedSchema = {
   } }
 };
 const captureGapsSchema = {
-  type: 'array', description: 'What capture refused or did not read: bounded, never named.',
+  type: 'array', description: 'Capture refusal/unread gaps; no identities.',
   items: { type: 'object', required: ['reason', 'from', 'to'], properties: {
-    reason: { type: 'string', enum: ['maxQueueDepth', 'maxStoreBytes', 'maxItemsPerSession', 'session_in_another_project', 'raw_expired', ...TRANSCRIPT_GAP_REASONS], description: 'Why it was refused, not read or expired.' },
-    from: { type: 'string', description: 'When the refusal, or the period not read, began.' },
-    to: stringOrNull('When it ended, if known.'),
-    sessions: integerCount('Sessions it covers: at their limit, or with this part of their transcript not read.')
+    reason: { type: 'string', enum: ['maxQueueDepth', 'maxStoreBytes', 'maxItemsPerSession', 'session_in_another_project', 'raw_expired', ...TRANSCRIPT_GAP_REASONS], description: 'Why capture has a gap.' },
+    from: { type: 'string', description: 'Gap start time.' },
+    to: stringOrNull('End time, if known.'),
+    sessions: integerCount('Sessions covered by this gap.')
   } }
 };
 const captureStatusSchema = {
-  type: 'object', description: 'When the store holds capture state: this scope\'s captured items not yet understood.',
+  type: 'object', description: 'Scoped unprocessed capture, when present.',
   required: ['pending', 'processing', 'failed', 'blocked', 'oldestPendingAt', 'extractionAvailable', 'limited', 'gaps'],
   properties: {
     pending: integerCount('Items waiting.'),
     processing: integerCount('Items claimed.'),
     failed: integerCount('Items failed.'),
     blocked: integerCount('Items blocked.'),
-    expired: integerCount('Unextracted items whose raw expired; a gap, not extraction backlog.'),
+    expired: integerCount('Raw expired before extraction; a gap, not backlog.'),
     oldestPendingAt: stringOrNull('Oldest pending capture.'),
     extractionAvailable: { type: 'boolean', description: 'Whether extraction runs.' },
+    workerErrors: { type: 'array', description: 'Scoped worker stops; fixed codes.', items: { type: 'object', required: ['reason', 'at'], properties: { reason: { type: 'string', description: 'Worker stop code.' }, at: { type: 'string', description: 'Stop timestamp.' } } } },
     limited: captureLimitedSchema,
     gaps: captureGapsSchema
   }
@@ -458,7 +459,7 @@ const readCoverageSchema = {
   type: 'object', description: 'Request coverage and any withheld detail.', required: ['scope', 'complete'],
   properties: {
     scope: readScopeSchema,
-    complete: { type: 'boolean', description: 'Coverage of known candidates in this request, false when project_unresolved, detail is withheld or capture is pending; not total semantic recall.' },
+    complete: { type: 'boolean', description: 'Known-candidate coverage; false for unresolved scope, withheld detail or pending capture; not recall.' },
     losslessItems: { type: 'boolean', description: 'False when returned items have withheld or transformed detail.' },
     limitation: { type: 'object', description: 'Limits of this view.', required: ['code', 'detail'], properties: { code: { type: 'string', description: 'Stable limitation code.' }, detail: { type: 'string', description: 'What this view cannot establish.' } } },
     capture: captureStatusSchema,
@@ -1008,7 +1009,7 @@ const relevantSchema = {
       }
     },
     processing: {
-      type: 'object', description: 'Captured material in this scope not yet understood, as the completeness capture block states it; no extraction runs in this build.', required: ['pending', 'failed', 'blocked', 'oldestPendingAt', 'extractionAvailable'],
+      type: 'object', description: 'Scoped capture processing; extraction is inactive in this build.', required: ['pending', 'failed', 'blocked', 'oldestPendingAt', 'extractionAvailable'],
       properties: {
         pending: integerCount('Items awaiting extraction.'),
         processing: integerCount('Items an extraction has claimed; present when the store holds capture state.'),
@@ -1016,6 +1017,7 @@ const relevantSchema = {
         blocked: integerCount('Items whose extraction is blocked.'),
         oldestPendingAt: stringOrNull('When the oldest pending item arrived.'),
         extractionAvailable: { type: 'boolean', description: 'Whether extraction runs.' },
+        workerErrors: captureStatusSchema.properties.workerErrors,
         limited: captureLimitedSchema,
         gaps: captureGapsSchema
       }

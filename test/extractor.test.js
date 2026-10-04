@@ -164,6 +164,41 @@ test('bounded process kills output overflow/timeout, settles spawn errors, and n
   }
 });
 
+test('PR40: malformed input and positively unstarted spawn failure expose bounded retry evidence', async t => {
+  const s = await fixture(t, { processResult: { failure: 'spawn_failed', processStarted: false, outputBytes: 0 } });
+  const malformed = await s.executor.extract({ prompt: '', schema: SCHEMA });
+  assert.deepEqual(malformed.receipt, { invocationStarted: false, processStarted: false, outputBytes: 0, zeroUsage: true, model: EXTRACTION_MODEL });
+  const transport = await s.executor.extract({ prompt: 'synthetic', schema: SCHEMA });
+  assert.equal(transport.status, 'transport_error'); assert.equal(transport.receipt.zeroUsage, true);
+  for (const processResult of [{ failure: 'spawn_failed' }, { failure: 'spawn_failed', processStarted: true, outputBytes: 0 }, { failure: 'spawn_failed', processStarted: false, outputBytes: 1 }, { failure: 'timeout', processStarted: false, outputBytes: 0 }]) {
+    const other = await fixture(t, { processResult });
+    assert.equal((await other.executor.extract({ prompt: 'synthetic', schema: SCHEMA })).status, 'blocked');
+  }
+});
+
+test('PR40: real process evidence distinguishes an unstarted executable from discarded response bytes', async t => {
+  const root = await scratchDirectory(t);
+  const missing = await runBounded({ executable: join(root, 'missing-executable'), args: [], cwd: root, env: {} });
+  assert.equal(missing.failure, 'spawn_failed'); assert.equal(missing.processStarted, false); assert.equal(missing.outputBytes, 0);
+  const partial = await runBounded({ executable: process.execPath, args: ['-e', "process.stdout.write('synthetic');setTimeout(()=>{},2000)"], cwd: root, env: {}, timeoutMs: 500 });
+  assert.equal(partial.failure, 'timeout'); assert.equal(partial.processStarted, true); assert.equal(partial.outputBytes, 9); assert.equal(partial.stdout, '');
+});
+
+test('PR40: stopped extraction starts no process and runBounded abort kills a child without claiming model cancellation', async t => {
+  const controller = new AbortController(); controller.abort(); const s = await fixture(t);
+  assert.equal((await s.executor.extract({ prompt: 'synthetic', schema: SCHEMA, signal: controller.signal })).status, 'blocked');
+  assert.equal(s.calls.length, 0);
+  const active = new AbortController(); let child, kills = 0;
+  const spawnProcess = () => {
+    child = new EventEmitter(); child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
+    child.kill = () => { kills++; queueMicrotask(() => child.emit('close', null)); };
+    queueMicrotask(() => { child.emit('spawn'); child.stdout.write('partial'); active.abort(); }); return child;
+  };
+  const out = await runBounded({ executable: '/fake', args: [], cwd: '/', env: {}, signal: active.signal, spawnProcess });
+  assert.equal(out.failure, 'aborted'); assert.equal(kills, 1); assert.equal(out.processStarted, true); assert.equal(out.outputBytes, 7);
+  assert.equal(out.stdout, '');
+});
+
 test('host automatic refusal fallback is disabled before sending any extraction material', () => {
   const request = buildInvocation({ executable: resolve('host'), cwd: resolve('scratch'), schema: SCHEMA, env: {} });
   const settings = JSON.parse(request.args[request.args.indexOf('--settings') + 1]);

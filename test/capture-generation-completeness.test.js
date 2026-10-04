@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
 import { generationIssue, invalidatedCaptureTokens, effectiveGeneration } from '../src/internal/capture-generation.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
-import { privilegedRecordCapture, privilegedSnapshot, privilegedIssueAccess } from '../src/internal/snapshot.js';
+import { privilegedRecordCapture, privilegedSnapshot, privilegedIssueAccess, privilegedExtractionStatus } from '../src/internal/snapshot.js';
 
 const source = path => readFile(new URL(`../src/${path}`, import.meta.url), 'utf8');
 const inventory = {
@@ -13,6 +13,8 @@ const inventory = {
   authority: 'requestAccess issueAccess ownerIssueAccess revokeAccess discardAccess',
   capture: 'recordCapture transitionCapture claimCapture completeExtraction settleExtraction expireCapture recordSelfEvent recordTranscript',
   audit: 'memoryHistory traverse expand redact review reconsider maintain getReviewSignals acknowledgeReview search retrieve recall validate repairPlan context reviewContext exportData getJournal rebuild stats accessRefusal'
+  // Worker diagnostics change session status only, never claim material or authority.
+  , operational: 'extractionStatus'
   , revisionOnly: 'setRevision'
 };
 
@@ -73,4 +75,18 @@ test('generation completeness separates write invalidation from both fenced cloc
   assert.equal(effectiveGeneration(leased, null, before, at), 0);
   assert.equal(effectiveGeneration(leased, null, before, '2026-10-01T00:01:00.000Z'), 1, 'covering grant clock term');
   assert.equal(effectiveGeneration(leased, null, before, '2026-10-08T00:00:00.000Z'), 2, 'retention plus grant clock terms');
+});
+
+test('generation classification: worker status changes only operational session diagnostics', () => {
+  const graph = createShadowGraph({ now: () => '2026-10-01T00:00:00.000Z' });
+  privilegedRecordCapture(graph, { project: 'p', originId: 'fixture', text: 'Synthetic status fixture.', source: { event: 'Stop', sessionId: 's' }, admission: { limits: { maxStoreBytes: 2 ** 30, maxItemBytes: 2 ** 20, maxQueueDepth: 100, maxItemsPerSession: 100 }, storeBytes: 0 } });
+  const before = privilegedSnapshot(graph);
+  for (const reason of ['drain_calls', null]) {
+    assert.equal(privilegedExtractionStatus(graph, { project: 'p', reason }), true);
+    const after = privilegedSnapshot(graph);
+    assert.equal(after.captureSessions[0].extraction.state, reason ? 'blocked' : 'idle');
+    assert.deepEqual(invalidatedCaptureTokens(before, after), []);
+    const material = payload => Object.fromEntries(Object.entries(payload).filter(([key]) => key !== 'captureSessions'));
+    assert.deepEqual(material(after), material(before), 'records, raw, authority, journal and every other collection remain unchanged');
+  }
 });

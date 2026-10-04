@@ -88,6 +88,9 @@ export function privilegedCompleteExtraction(graph, input) {
 export function privilegedSettleExtraction(graph, input) {
   return primitive(graph, 'settleExtraction', 'privilegedSettleExtraction')(input);
 }
+export function privilegedExtractionStatus(graph, input) {
+  return primitive(graph, 'extractionStatus', 'privilegedExtractionStatus')(input);
+}
 // OD-2 cleanup, reached only through fenced lifecycle writes. Never a read.
 export function privilegedExpireCapture(graph, options) {
   return primitive(graph, 'expireCapture', 'privilegedExpireCapture')(options);

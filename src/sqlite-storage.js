@@ -301,6 +301,7 @@ export async function createSqliteStore(filePath, options = {}) {
     try {
       replaceRelational(database, payload);
       saveFault('beforeCommit', context);
+      options.signal?.throwIfAborted();
       database.exec('COMMIT');
       committed = true;
       if (destructive) securelyCompactCommittedSave(database, payload, context);

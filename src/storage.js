@@ -1,4 +1,4 @@
-import { readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { nextRevision, assertRevision, createDestinationFence, restoreLock } from './revision-store.js';
 import { SCHEMA_VERSION } from './shadowgraph.js';
@@ -93,7 +93,13 @@ export function createJsonFileStore(filePath, options = {}) {
       try {
         await writeFile(temporaryPath, JSON.stringify(payload, null, 2) + '\n', { encoding: 'utf8', mode });
         options.saveFault?.('beforeCommit', context);
-        await commitFile(temporaryPath, target, options.rename);
+        options.signal?.throwIfAborted();
+        await commitFile(temporaryPath, target, (from, to) => {
+          // A failed sharing-violation attempt has not committed. Recheck
+          // cancellation before each retry after commitFile's backoff.
+          options.signal?.throwIfAborted();
+          return (options.rename ?? rename)(from, to);
+        });
       } catch (error) {
         await rm(temporaryPath, { force: true });
         throw error;
@@ -201,6 +207,7 @@ export async function createStorage(options = {}) {
       restoreFault: options.restoreFault,
       restoreFs: options.restoreFs,
       saveFault: options.saveFault,
+      signal: options.signal,
       lockTimeoutMs: options.lockTimeoutMs,
       staleLockMs: options.staleLockMs,
       lockPollIntervalMs: options.lockPollIntervalMs,

@@ -396,7 +396,7 @@ export async function runDeliver({ args = [], readInput = () => '', file, storag
     const status = relevant.capture;
     const processing = capturing || status ? {
       ...(capturing ? captureState() : { capture: 'not_active' }), extraction: 'not_active',
-      ...(status ? { pending: status.pending, processing: status.processing, failed: status.failed, blocked: status.blocked, oldestPendingAt: status.oldestPendingAt, extractionAvailable: status.extractionAvailable, limited: status.limited.map((entry) => entry.limit), gaps: [...new Set(status.gaps.map((entry) => entry.reason))] } : {})
+      ...(status ? { pending: status.pending, processing: status.processing, failed: status.failed, blocked: status.blocked, oldestPendingAt: status.oldestPendingAt, extractionAvailable: status.extractionAvailable, ...(status.workerErrors ? { workerErrors: status.workerErrors.map(entry => entry.reason) } : {}), limited: status.limited.map((entry) => entry.limit), gaps: [...new Set(status.gaps.map((entry) => entry.reason))] } : {})
     } : undefined;
     emit(assemblePayload({ head, items: session ? sessionOrder(items) : items, processing }).text);
   } catch {

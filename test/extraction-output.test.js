@@ -21,10 +21,21 @@ test('extraction output cannot assign trust, authority, kinds or unsupported can
   for (const extra of [{ verificationStatus: 'verified' }, { erasureToken: 'forged' }, { access: [] }, { confidence: 1 }]) {
     assert.throws(() => prepareExtraction(item, text, { records: [{ kind: 'memory', fields: [field('text')], ...extra }] }), { code: 'extraction_schema_invalid' });
   }
-  for (const fields of [[field('text', text, 'foreign-source')], [field('text', 'All production work succeeded.')], [field('text', text), field('text', text)]]) {
-    if (fields.length > 1) assert.throws(() => prepareExtraction(item, text, { records: [{ kind: 'memory', fields }] }), { code: 'extraction_schema_invalid' });
-    else { const value = prepareExtraction(item, text, { records: [{ kind: 'memory', fields }] }); assert.equal(value.records.length, 0); assert.equal(value.unsupported.length, 1); }
+  for (const fields of [[field('text', text, 'foreign-source')], [field('text', 'All production work succeeded.')]]) {
+    const value = prepareExtraction(item, text, { records: [{ kind: 'memory', fields }] }); assert.equal(value.records.length, 0); assert.equal(value.unsupported.length, 1);
   }
+});
+
+test('valid repeated fields deduplicate identical observations and retain conflicting observations without retry', () => {
+  const same = prepareExtraction(item, text, { records: [{ kind: 'memory', fields: [field('text'), field('text')] }] });
+  assert.equal(same.records.length, 1); assert.equal(same.records[0].claims.length, 1);
+  // Both spellings are locally supported by the same span. Different field
+  // assignments are retained once as provenance, without choosing a value.
+  const alternate = text.slice(0, -1);
+  assert.equal(prepareExtraction(item, text, { records: [{ kind: 'memory', fields: [field('text', alternate)] }] }).records.length, 1);
+  const conflict = prepareExtraction(item, text, { records: [{ kind: 'memory', fields: [field('text'), field('text', alternate)] }] });
+  assert.equal(conflict.records.length, 0); assert.equal(conflict.unsupported.length, 1);
+  assert.ok(conflict.unsupported.every(x => x.failingDimension === 'field_conflict' && x.supportedClass === 'quoted'));
 });
 
 test('extraction strips self-delivery and redacts input and unsupported output', () => {

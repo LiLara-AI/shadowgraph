@@ -95,14 +95,14 @@ export function buildInvocation({ executable, cwd, schema, env = process.env }) 
 // Both pipes share one byte bound. A kill is followed by a bounded settlement:
 // no host process or broken pipe can hold the worker indefinitely. Raw failures
 // stay in memory and are never included in a public receipt.
-export function runBounded({ executable, args, cwd, env, input = '', timeoutMs = EXTRACTOR_LIMITS.checkTimeoutMs, maxOutputBytes = EXTRACTOR_LIMITS.outputBytes, spawnProcess = spawn }) {
+export function runBounded({ executable, args, cwd, env, input = '', timeoutMs = EXTRACTOR_LIMITS.checkTimeoutMs, maxOutputBytes = EXTRACTOR_LIMITS.outputBytes, spawnProcess = spawn, signal }) {
   return new Promise(resolveResult => {
-    let child, settled = false, bytes = 0, failure = null, killTimer;
+    let child, settled = false, bytes = 0, failure = null, killTimer, processStarted = false;
     const stdout = [], stderr = [];
     const finish = (code = null) => {
       if (settled) return;
-      settled = true; clearTimeout(timer); clearTimeout(killTimer);
-      resolveResult({ code, failure, stdout: failure ? '' : Buffer.concat(stdout).toString('utf8'), stderr: failure ? '' : Buffer.concat(stderr).toString('utf8') });
+      settled = true; clearTimeout(timer); clearTimeout(killTimer); signal?.removeEventListener('abort', abort);
+      resolveResult({ code, failure, processStarted, outputBytes: bytes, stdout: failure ? '' : Buffer.concat(stdout).toString('utf8'), stderr: failure ? '' : Buffer.concat(stderr).toString('utf8') });
     };
     const stop = (reason) => {
       if (settled) return;
@@ -110,9 +110,13 @@ export function runBounded({ executable, args, cwd, env, input = '', timeoutMs =
       try { child?.kill(); } catch {}
       killTimer ??= setTimeout(() => finish(), 500);
     };
+    const abort = () => stop('aborted');
     const timer = setTimeout(() => stop('timeout'), timeoutMs);
+    if (signal?.aborted) { failure = 'aborted'; finish(); return; }
+    signal?.addEventListener('abort', abort, { once: true });
     try {
       child = spawnProcess(executable, args, { cwd, env, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      child.once('spawn', () => { processStarted = true; });
       for (const [stream, chunks] of [[child.stdout, stdout], [child.stderr, stderr]]) stream.on('data', chunk => {
         bytes += chunk.length;
         if (bytes > maxOutputBytes) stop('output_limit');
@@ -126,12 +130,12 @@ export function runBounded({ executable, args, cwd, env, input = '', timeoutMs =
   });
 }
 
-async function registryPolicy(env) {
+async function registryPolicy(env, signal) {
   if (process.platform !== 'win32') return [];
   const executable = join(env.SYSTEMROOT ?? env.SystemRoot ?? 'C:\\Windows', 'System32', 'reg.exe');
   const present = [];
   for (const hive of ['HKLM', 'HKCU']) {
-    const out = await runBounded({ executable, args: ['query', `${hive}\\SOFTWARE\\Policies\\ClaudeCode`, '/v', 'Settings'], cwd: tmpdir(), env: childEnvironment(env), maxOutputBytes: 65536 });
+    const out = await runBounded({ executable, args: ['query', `${hive}\\SOFTWARE\\Policies\\ClaudeCode`, '/v', 'Settings'], cwd: tmpdir(), env: childEnvironment(env), maxOutputBytes: 65536, signal });
     if (out.failure) throw error('policy_unreadable');
     if (out.code === 0) present.push(hive);
     else if (!/unable to find|cannot find|not found/iu.test(out.stderr + out.stdout)) throw error('policy_unreadable');
@@ -142,7 +146,7 @@ async function registryPolicy(env) {
 // Initial profile is conservative on managed installations: no policy source
 // is overridden, even when a particular document might prove harmless. A later
 // profile can inspect its resolved meaning; absent/unknown are never conflated.
-export async function inspectPolicy({ env = process.env, userSettings, policyPaths, registry = () => registryPolicy(env), platform = process.platform } = {}) {
+export async function inspectPolicy({ env = process.env, userSettings, policyPaths, signal, registry = () => registryPolicy(env, signal), platform = process.platform } = {}) {
   // File absence alone does not establish absence of macOS MDM or Windows
   // policy inherited by WSL. They need their own verified inspection profile.
   if (platform !== 'win32') return blocked('policy_platform_unverified');
@@ -167,30 +171,31 @@ export async function inspectPolicy({ env = process.env, userSettings, policyPat
   } catch { return blocked('policy_unreadable'); }
 }
 
-async function outsideRepository(cwd, env) {
+async function outsideRepository(cwd, env, signal) {
   for (let path = await realpath(cwd); ; path = dirname(path)) {
     try { await lstat(join(path, '.git')); return false; } catch (e) { if (e.code !== 'ENOENT') return false; }
     if (dirname(path) === path) break;
   }
-  const out = await runBounded({ executable: 'git', args: ['rev-parse', '--absolute-git-dir'], cwd, env: { ...childEnvironment(env), LC_ALL: 'C' }, timeoutMs: 3000 });
+  const out = await runBounded({ executable: 'git', args: ['rev-parse', '--absolute-git-dir'], cwd, env: { ...childEnvironment(env), LC_ALL: 'C' }, timeoutMs: 3000, signal });
   return !out.failure && out.code !== 0 && /not a git repository/iu.test(out.stderr);
 }
 
 export function createExtractor({ executable, env = process.env, scratchRoot = tmpdir(), runProcess = runBounded, inspectPolicy: policyInspection = inspectPolicy } = {}) {
   // Snapshot at each call, not at construction: a long-lived worker must not
   // reuse a route that was checked before its configuration changed.
-  async function checkAt(cwd, parent) {
+  async function checkAt(cwd, parent, signal) {
+    if (signal?.aborted) return blocked('drain_stopped');
     const forbidden = forbiddenEnvironment(parent);
     if (forbidden.length) return blocked('provider_environment', { variableNames: forbidden.sort() });
     if (!isAbsolute(executable ?? '')) return blocked('executable_not_absolute');
     let binary, digest;
     try { binary = await realpath(executable); if (!(await lstat(binary)).isFile()) return blocked('executable_unavailable'); digest = sha(await readFile(binary)); }
     catch { return blocked('executable_unavailable'); }
-    if (!await outsideRepository(cwd, parent)) return blocked('invocation_cwd_unverified');
-    const policy = await policyInspection({ env: parent });
+    if (!await outsideRepository(cwd, parent, signal)) return blocked('invocation_cwd_unverified');
+    const policy = await policyInspection({ env: parent, signal });
     if (!policy.ok) return blocked(policy.blockedReason ?? 'policy_unverified');
     const childEnv = childEnvironment(parent);
-    const probe = args => runProcess({ executable: binary, args, cwd, env: childEnv, shell: false, windowsHide: true, input: '', timeoutMs: EXTRACTOR_LIMITS.checkTimeoutMs, maxOutputBytes: EXTRACTOR_LIMITS.outputBytes });
+    const probe = args => signal?.aborted ? Promise.resolve({ failure: 'aborted' }) : runProcess({ executable: binary, args, cwd, env: childEnv, shell: false, windowsHide: true, input: '', timeoutMs: EXTRACTOR_LIMITS.checkTimeoutMs, maxOutputBytes: EXTRACTOR_LIMITS.outputBytes, signal });
     try {
       const version = await probe(['--version']);
       if (version.failure || version.code !== 0 || /\d+\.\d+\.\d+/u.exec(version.stdout)?.[0] !== PROFILE_VERSION) return blocked('host_version_unverified');
@@ -221,20 +226,21 @@ export function createExtractor({ executable, env = process.env, scratchRoot = t
   }
   return {
     check: () => { const parent = { ...env }; return withDirectory(cwd => checkAt(cwd, parent)).catch(() => blocked('scratch_unavailable')); },
-    async extract({ prompt, schema } = {}) {
+    async extract({ prompt, schema, signal } = {}) {
       const parent = { ...env };
       let receipt = { invocationStarted: false, model: EXTRACTION_MODEL };
+      if (signal?.aborted) return { status: 'blocked', blockedReason: 'drain_stopped', receipt };
       try {
         if (typeof prompt !== 'string' || !prompt.trim() || Buffer.byteLength(prompt) > EXTRACTOR_LIMITS.inputBytes) throw error('input_limit');
         checkedSchema(schema); if (Buffer.byteLength(JSON.stringify(schema)) > 65536) throw error('schema_size_limit');
         schema = JSON.parse(JSON.stringify(schema));
-      } catch { return { status: 'malformed_invocation', blockedReason: 'invalid_input_or_schema', receipt: { invocationStarted: false, model: EXTRACTION_MODEL } }; }
+      } catch { return { status: 'malformed_invocation', blockedReason: 'invalid_input_or_schema', receipt: { invocationStarted: false, processStarted: false, outputBytes: 0, zeroUsage: true, model: EXTRACTION_MODEL } }; }
       return withDirectory(async cwd => {
-        const checked = await checkAt(cwd, parent);
+        const checked = await checkAt(cwd, parent, signal);
         if (!checked.ok) return { status: 'blocked', blockedReason: checked.blockedReason, receipt: { ...checked, invocationStarted: false, model: EXTRACTION_MODEL } };
         receipt = { ...checked, invocationStarted: false, schemaSha256: sha(JSON.stringify(schema)) };
         let policy;
-        try { policy = await policyInspection({ env: parent }); }
+        try { policy = await policyInspection({ env: parent, signal }); }
         catch { return { status: 'blocked', blockedReason: 'policy_unreadable', receipt }; }
         if (!policy.ok) return { status: 'blocked', blockedReason: policy.blockedReason ?? 'policy_unverified', receipt };
         // A settings/environment change while diagnostics were running requires
@@ -242,11 +248,14 @@ export function createExtractor({ executable, env = process.env, scratchRoot = t
         if (JSON.stringify(childEnvironment(env)) !== JSON.stringify(childEnvironment(parent)) || forbiddenEnvironment(env).length) return { status: 'blocked', blockedReason: 'configuration_changed_before_invoke', receipt };
         if ((await readdir(cwd)).length) return { status: 'blocked', blockedReason: 'invocation_cwd_not_empty', receipt };
         if (sha(await readFile(checked.executable)) !== checked.binarySha256) return { status: 'blocked', blockedReason: 'host_changed_before_invoke', receipt };
+        if (signal?.aborted) return { status: 'blocked', blockedReason: 'drain_stopped', receipt };
         const request = buildInvocation({ executable: checked.executable, cwd, schema, env: parent });
         receipt.invocationStarted = true;
         let out;
-        try { out = await runProcess({ ...request, input: prompt, timeoutMs: EXTRACTOR_LIMITS.timeoutMs, maxOutputBytes: EXTRACTOR_LIMITS.outputBytes }); }
+        try { out = await runProcess({ ...request, input: prompt, timeoutMs: EXTRACTOR_LIMITS.timeoutMs, maxOutputBytes: EXTRACTOR_LIMITS.outputBytes, signal }); }
         catch { return { status: 'blocked', blockedReason: 'invocation_failed', receipt }; }
+        if (signal?.aborted) return { status: 'blocked', blockedReason: 'drain_stopped', receipt };
+        if (out.failure === 'spawn_failed' && out.processStarted === false && out.outputBytes === 0) return { status: 'transport_error', receipt: { ...receipt, invocationStarted: false, processStarted: false, outputBytes: 0, zeroUsage: true } };
         if (out.failure || out.code !== 0) return { status: 'blocked', blockedReason: out.failure ?? 'unknown_terminal', receipt };
         let response;
         try { response = JSON.parse(out.stdout); } catch { return { status: 'blocked', blockedReason: 'unrecognised_response', receipt }; }
