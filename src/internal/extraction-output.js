@@ -4,8 +4,7 @@ import { validateSchemaValue } from '../extractor.js';
 import { redactText, captureWithheld } from './redaction.js';
 import { stripDeliveredBlocks } from './capture-source.js';
 
-export const PROMPT_VERSION = 'capture-fields-v1';
-export const OUTPUT_SCHEMA_VERSION = 'capture-fields-v1';
+export { PROMPT_VERSION, OUTPUT_SCHEMA_VERSION } from './extraction-contract.js';
 const string = maxLength => ({ type: 'string', minLength: 1, maxLength });
 const fields = ['title', 'chosen', 'goal', 'alternative', 'solution', 'result', 'reason', 'text'];
 export const EXTRACTION_SCHEMA = {

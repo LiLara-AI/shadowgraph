@@ -158,8 +158,15 @@ async function changeActivation() {
 
 async function extractOnce() {
   const automatic = rest.includes('--automatic');
-  const options = flagsOf(rest.filter(value => value !== '--automatic'), { '--project': 'project', '--origin': 'originId' }, 'Usage: shadowgraph extract [--project <project> | --origin <origin>]');
-  if (rest.filter(value => value === '--automatic').length > 1) throw new Error('duplicate --automatic');
+  const status = rest.includes('--status');
+  const usage = 'Usage: shadowgraph extract [--status | --reprocess <captureId>] [--project <project> | --origin <origin>]';
+  const options = flagsOf(rest.filter(value => !['--automatic', '--status'].includes(value)), { '--project': 'project', '--origin': 'originId', '--reprocess': 'id' }, usage);
+  if (['--automatic', '--status'].some(flag => rest.filter(value => value === flag).length > 1)) throw new Error('duplicate extract flag');
+  if ((automatic && (status || options.id)) || (status && options.id)) throw new Error(usage);
+  if (status || options.id) {
+    const { captureLifecycle } = await import('./internal/capture-lifecycle.js');
+    return captureLifecycle(status ? 'inspect' : 'reprocess', options);
+  }
   const { runActivatedExtraction } = await import('./extraction-runtime.js');
   const controller = new AbortController(), stop = () => controller.abort();
   process.once('SIGTERM', stop); process.once('SIGINT', stop);

@@ -66,7 +66,7 @@ const owner = item => item.attribution === 'project' ? ['project', item.project]
 const sharesOwner = (a, b) => canonical(owner(a)) === canonical(owner(b));
 const material = (payload, item) => (payload?.captureContent ?? []).filter(entry => entry.contentRef === item.contentRef);
 const invalidatingFields = item => Object.fromEntries([
-  'project', 'attribution', 'originId', 'source', 'observation', 'contentRef', 'contentHash', 'expiresAt', 'cancelRequested'
+  'project', 'attribution', 'originId', 'source', 'observation', 'contentRef', 'contentHash', 'expiresAt', 'cancelRequested', 'reprocessRequest'
 ].map(name => [name, item[name]]));
 
 // Store commit points compare the persisted old/new values. This also covers

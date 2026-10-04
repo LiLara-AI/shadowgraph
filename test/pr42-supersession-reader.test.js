@@ -119,7 +119,7 @@ for (const type of ['json', 'sqlite']) {
       assert.deepEqual(await store.load(), before);
     } finally { store.close(); }
   });
-  test(`PR42 reader ${type}: queued reprocessing fails closed before a reader-floor worker invokes extraction`, skip, async t => {
+  test(`PR42 worker ${type}: an unjournalled reprocess request fails closed before extraction`, skip, async t => {
     const root = await scratchDirectory(t, 'shadowgraph-pr42-floor-');
     const graph = createShadowGraph({ now: () => NOW });
     const item = privilegedRecordCapture(graph, { project: 'p', originId: 'fixture', text: 'Synthetic queue fixture.', source: { event: 'Stop', sessionId: 's' }, admission: { limits: { maxStoreBytes: 2 ** 30, maxQueueDepth: 100, maxItemBytes: 2 ** 20, maxItemsPerSession: 100 }, storeBytes: 0 } });

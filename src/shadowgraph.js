@@ -21,6 +21,7 @@ import { extractionSupersession } from './internal/extraction-supersession.js';
 import { accessScopeContains, validateAccess, intersectAccessScope, accessDiagnostics, reconcileAccessLedger } from './access.js';
 import { createAccessLifecycle } from './internal/access-lifecycle.js';
 import { assertCreationInput } from './internal/creation-id.js';
+import { EXTRACTION_RECIPE } from './internal/extraction-contract.js';
 import { attemptOutcome } from './internal/outcome.js';
 import { RUNTIME_MISSES, missReachedBy, runtimeMissLedgerIssue, withFallbackMisses } from './internal/miss-ledger.js';
 import { supersessionOrder, temporalEvidence, versionTimes } from './internal/temporal-evidence.js';
@@ -1399,6 +1400,13 @@ export function createShadowGraph(options = {}) {
         || (isValidIsoInstant(entity.updatedAt) && compareInstants(entity.updatedAt, item.updatedAt) > 0));
       const expired = rawExpired(item, at);
       const rawAvailable = !expired && item.contentRef !== null && (extras.get(CAPTURE_CONTENT) ?? []).some((entry) => entry.contentRef === item.contentRef);
+      const recipeChanges = item.state === 'extracted'
+        ? Object.keys(EXTRACTION_RECIPE).filter(key => item.receipts.at(-1)?.[key] !== EXTRACTION_RECIPE[key]) : [];
+      const lastReprocessing = item.receipts.at(-1)?.reprocessing;
+      const reprocessOutcome = lastReprocessing && typeof lastReprocessing === 'object' ? {
+        ...Object.fromEntries(['preservedCorrections', 'skippedProposals'].filter(key => Number.isSafeInteger(lastReprocessing[key]) && lastReprocessing[key] >= 0).map(key => [key, lastReprocessing[key]])),
+        ...(typeof lastReprocessing.retainedPriorEvidence === 'boolean' ? { retainedPriorEvidence: lastReprocessing.retainedPriorEvidence } : {})
+      } : undefined;
       const projectFields = (value, names) => Object.fromEntries(names.filter((name) => value?.[name] !== undefined).map((name) => [name, clone(value[name])]));
       return {
         ...projectFields(item, ['id', 'kind', 'schemaVersion', 'project', 'attribution', 'originId', 'state', 'occurrenceSeq', 'observedAt', 'createdAt', 'updatedAt', 'blockedReason', 'attempts', 'sourceIdentity']),
@@ -1412,10 +1420,32 @@ export function createShadowGraph(options = {}) {
           expired: !isValidIsoInstant(item.extractionOutput.expiresAt) || Date.parse(item.extractionOutput.expiresAt) <= Date.parse(at)
         } } : {}),
         producedRecords: produced.filter(owns).map((entity) => projectFields(entity, ['id', 'kind', 'status', 'updatedAt'])),
-        derivedInvalidated: invalidated, reprocessable: invalidated && rawAvailable,
+        derivedInvalidated: invalidated, recipeChanged: recipeChanges.length > 0,
+        ...(reprocessOutcome ? { lastReprocessing: reprocessOutcome } : {}),
+        reprocessReasons: [...recipeChanges, ...(invalidated ? ['derivedInvalidated'] : [])],
+        reprocessable: (invalidated || recipeChanges.length > 0) && rawAvailable,
         reprocessingUnavailableReason: expired ? RAW_EXPIRED : rawAvailable ? null : 'raw_unavailable'
       };
     }) };
+  }
+
+  function requestReprocess(input = {}) {
+    const item = captures.get(input.id), at = now();
+    if (!captureOwner(input).owns(item)) throw Object.assign(new Error('Capture item not found in this scope'), { code: 'capture_item_not_found' });
+    if (rawExpired(item, at)) throw Object.assign(new Error('Expired raw cannot be re-extracted'), { code: RAW_EXPIRED });
+    if (item.contentRef === null || !(extras.get(CAPTURE_CONTENT) ?? []).some(entry => entry.contentRef === item.contentRef)) {
+      throw Object.assign(new Error('Capture raw is unavailable for re-extraction'), { code: 'raw_unavailable' });
+    }
+    const retryReprocess = item.reprocessRequest && ['failed', 'blocked'].includes(item.state);
+    if (isNewerThanWriter(item) || (!['extracted', 'processing'].includes(item.state) && !retryReprocess) || item.cancelRequested) {
+      throw Object.assign(new Error('Capture is not eligible for a reprocess request'), { code: 'capture_reprocess_state_refused' });
+    }
+    assertJournalCapacity(1);
+    const next = { ...clone(item), state: 'pending', lease: null, blockedReason: null, lastError: null, updatedAt: at,
+      reprocessRequest: { id: randomUUID(), at, actor: 'owner', surface: 'cli' } };
+    captures.set(item.id, next);
+    appendJournal({ type: 'capture.state_changed', entityKind: CAPTURE_KIND, entityId: item.id, project: item.project, payload: next });
+    return { id: item.id, state: 'pending', requestId: next.reprocessRequest.id };
   }
 
   function cancelCapture(input = {}) {
@@ -1966,6 +1996,77 @@ export function createShadowGraph(options = {}) {
     return clone(next);
   }
 
+  // Compare with the canonical witness at the producing extraction, not
+  // timestamps: an owner can correct a record within the same clock tick.
+  // Missing provenance is not permission to overwrite imported experience.
+  const extractionRecordHash = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
+  function reprocessingPrior(item) {
+    if (!item.reprocessRequest) return { replaceable: [], protected: [] };
+    const result = { replaceable: [], protected: [] }, owner = captureOwner(item);
+    for (const recordId of new Set(item.producedRecordIds)) {
+      const record = records.get(recordId);
+      // Later skipped/no-op runs retain this ID but cannot adopt a manual
+      // correction as extraction-owned content. Its first production wins.
+      const completion = journal.find(entry => entry.type === 'extraction.completed' && entry.entityId === item.id
+        && entry.payload?.producedRecordIds?.includes(recordId));
+      let witness = completion && [...journal].reverse().find(entry => entry.seq < completion.seq && entry.entityId === recordId
+        && entry.payload?.kind === record?.kind)?.payload;
+      // A reused decision may gain history links from this writer itself.
+      // Advance only through an explicit before/after hash chain tied to the
+      // completed extraction and canonical journal witness. Never adopt the
+      // latest arbitrary snapshot, which could be an owner's correction.
+      if (witness?.kind === 'decision') for (const finished of journal) {
+        if (finished.seq <= completion.seq || finished.type !== completion.type || finished.entityId !== item.id) continue;
+        const result = finished.payload?.receipts?.at(-1)?.reprocessing;
+        if (!result?.requestId || result.requestId !== finished.payload?.reprocessRequest?.id) continue;
+        for (const update of Array.isArray(result.linkageUpdates) ? result.linkageUpdates : []) {
+          if (update?.before !== extractionRecordHash(witness)) continue;
+          const entry = journal.find(value => value.id === update.entryId && value.entityId === recordId
+            && value.type === 'decision.recorded' && value.seq > completion.seq && value.seq < finished.seq);
+          const cause = entry && journal.find(value => value.id === entry.causationId && value.type === 'decision.superseded'
+            && value.seq > completion.seq && value.seq < entry.seq && value.payload?.captureRef === item.id
+            && value.payload?.supersededBy === recordId);
+          const withoutLinks = value => Object.fromEntries(Object.entries(value).filter(([key]) => !['supersedes', 'updatedAt'].includes(key)));
+          if (!cause || entry.payload?.kind !== 'decision' || update.after !== extractionRecordHash(entry.payload)
+            || extractionRecordHash(withoutLinks(entry.payload)) !== extractionRecordHash(withoutLinks(witness))
+            || !Array.isArray(entry.payload.supersedes) || !(witness.supersedes ?? []).every(id => entry.payload.supersedes.includes(id))) continue;
+          witness = entry.payload;
+        }
+      }
+      const corrected = !record || !witness || !owner.owns(record) || record.captureRef !== item.id || isNewerThanWriter(record)
+        || ['superseded', 'invalidated', 'archived', 'abandoned'].includes(record.status)
+        || [...relations.values()].some(edge => edge.to === recordId && edge.relation === 'supersedes')
+        || JSON.stringify(canonical(record)) !== JSON.stringify(canonical(witness));
+      result[corrected ? 'protected' : 'replaceable'].push({ record, witness, recordId });
+    }
+    return result;
+  }
+
+  function sameExtractionFields(record, proposed) {
+    const fields = { memory: ['text'], decision: ['title', 'chosen', 'goal'], attempt: ['solution', 'result', 'reason'] };
+    return record.kind === proposed.kind && fields[record.kind].every(key => (record[key] ?? '') === (proposed.values[key] ?? ''))
+      && (record.kind !== 'decision' || JSON.stringify((record.alternatives ?? []).map(value => value.label)) === JSON.stringify(proposed.alternatives.map(value => value.label)));
+  }
+
+  // A replacement is a new representation of this capture, possibly split,
+  // merged or reclassified. Canonical experience is retained as linked history.
+  function supersedeExtractionRecord(previous, replacement, at) {
+    if (previous.kind === 'attempt') return; // reader derives it from relations
+    if (previous.status === 'superseded') return; // remember already linked it
+    if (previous.kind === 'decision' && replacement.kind === 'decision') {
+      supersedeDecision({ project: previous.project, originId: previous.originId, decisionId: previous.id, replacementId: replacement.id });
+      return;
+    }
+    touchMutableObject(previous);
+    previous.status = 'superseded'; previous.supersededBy = replacement.id; previous.updatedAt = at;
+    if (previous.kind === 'memory') {
+      previous.temporal = { ...previous.temporal, validTo: earliestBoundary(previous.temporal?.validTo, at), invalidatedAt: at };
+      if (currentMemories.get(memoryScopeKey(previous))?.id === previous.id) currentMemories.delete(memoryScopeKey(previous));
+    }
+    appendJournal({ type: `${previous.kind}.superseded`, entityKind: previous.kind, entityId: previous.id, project: previous.project,
+      payload: clone(previous), provenance: writeProvenance(replacement) });
+  }
+
   // Only the fenced worker calls this with locally verified fields. Canonical
   // IDs and confidence/trust stay owned by the existing builders. Decoration
   // reaches each new journal/idempotency copy before this transaction commits.
@@ -1973,13 +2074,36 @@ export function createShadowGraph(options = {}) {
     const item = captures.get(input.id), at = now();
     if (!item || item.state !== 'processing' || item.lease?.leaseId !== input.leaseId || item.cancelRequested
       || rawExpired(item, at) || Date.parse(item.lease.leaseExpiresAt) <= Date.parse(at)) throw new Error('Extraction lease is no longer usable');
-    const producedRecordIds = [];
+    const prior = reprocessingPrior(item), producedRecordIds = [], reused = new Set(), usedMemoryKeys = new Set();
+    const overlaps = (a, b) => a.sourceRef === b.sourceRef && a.span?.start < b.span?.end && b.span?.start < a.span?.end;
+    // A proposal overlapping an owner-corrected claim cannot quietly revive
+    // it under another ID or kind. Without its original source witness, skip
+    // the proposal conservatively. No model judgement overrides this check.
+    const proposals = input.prepared.records.filter(proposed => !prior.protected.some(({ witness }) =>
+      !witness?.claims?.length || proposed.claims.some(claim => witness.claims.some(old => overlaps(claim, old)))));
+    // Reserve all identical identities before a changed proposal can consume
+    // their memory keys. Output order must not silently retire retained output.
+    const identicalMatches = proposals.map(proposed => {
+      const match = prior.replaceable.find(({ record }) => !reused.has(record.id) && sameExtractionFields(record, proposed));
+      if (match) {
+        reused.add(match.record.id);
+        if (match.record.kind === 'memory') usedMemoryKeys.add(match.record.key);
+      }
+      return match;
+    });
+    const linkageBefore = new Map(prior.replaceable.filter(({ record }) => reused.has(record.id) && record.kind === 'decision')
+      .map(({ record }) => [record.id, extractionRecordHash(record)]));
     const decorate = (value, id, fields) => {
       if (!value || typeof value !== 'object') return;
       if (value.id === id && value.kind !== CAPTURE_KIND) Object.assign(value, clone(fields));
       else for (const child of Object.values(value)) decorate(child, id, fields);
     };
-    for (const [index, proposed] of input.prepared.records.entries()) {
+    for (const [index, proposed] of proposals.entries()) {
+      const identical = identicalMatches[index];
+      if (identical) {
+        producedRecordIds.push(identical.record.id);
+        continue;
+      }
       const sourceClass = item.source.role === 'tool' ? 'tool_observed' : 'agent_claimed';
       const args = { ...proposed.values, project: item.project, originId: item.originId, sourceClass,
         observedAt: item.observedAt, sessionId: item.source.sessionId,
@@ -1987,7 +2111,12 @@ export function createShadowGraph(options = {}) {
       let record;
       if (proposed.kind === 'decision') record = addDecision({ ...args, alternatives: proposed.alternatives });
       else if (proposed.kind === 'attempt') record = addAttempt(args);
-      else record = remember({ ...args, memoryType: 'episode', key: `${input.key}:${index}` }).memory;
+      else {
+        const predecessor = prior.replaceable.find(({ record: old }) => old.kind === 'memory' && !usedMemoryKeys.has(old.key) && !reused.has(old.id));
+        const key = predecessor?.record.key ?? `${input.key}:${index}`;
+        usedMemoryKeys.add(key);
+        record = remember({ ...args, memoryType: 'episode', key }).memory;
+      }
       const fields = { captureRef: item.id, claims: proposed.claims, verificationStatus: 'unverified' };
       if (proposed.kind === 'attempt') {
         fields.outcomeEvidence = clone(item.observation?.outcome?.outcomeEvidence ?? { state: 'absent' });
@@ -2005,8 +2134,33 @@ export function createShadowGraph(options = {}) {
       for (const value of idempotency.values()) decorate(value, record.id, fields);
       producedRecordIds.push(record.id);
     }
+    if (producedRecordIds.length) {
+      for (const { record: previous } of prior.replaceable) {
+        if (producedRecordIds.includes(previous.id)) continue;
+        const replacements = producedRecordIds.map(id => records.get(id));
+        const primary = replacements.find(record => record.kind === previous.kind) ?? replacements[0];
+        supersedeExtractionRecord(previous, primary, at);
+        for (const replacement of replacements) {
+          if (![...relations.values()].some(edge => edge.from === replacement.id && edge.to === previous.id && edge.relation === 'supersedes')) {
+            addRelation({ from: replacement.id, to: previous.id, relation: 'supersedes' }, item.project);
+          }
+        }
+      }
+      producedRecordIds.push(...prior.protected.map(value => value.recordId));
+    } else if (item.reprocessRequest) producedRecordIds.push(...item.producedRecordIds);
+    const linkageUpdates = [...linkageBefore].flatMap(([recordId, before]) => {
+      const after = extractionRecordHash(records.get(recordId));
+      if (before === after) return [];
+      const entry = [...journal].reverse().find(value => value.entityId === recordId && value.type === 'decision.recorded');
+      // The before hash already binds the canonical record ID. Do not carry
+      // that ID again as a receipt reference: inspection treats such IDs as
+      // cited experience, whereas this is internal historical linkage proof.
+      return [{ before, after, entryId: entry.id }];
+    });
+    const reprocessing = item.reprocessRequest ? { requestId: item.reprocessRequest.id, preservedCorrections: prior.protected.length, linkageUpdates,
+      skippedProposals: input.prepared.records.length - proposals.length, retainedPriorEvidence: proposals.length === 0 } : undefined;
     const next = { ...clone(item), state: 'extracted', lease: null, attempts: item.attempts + (input.attemptCount ?? 1),
-      producedRecordIds, updatedAt: at, receipts: [...item.receipts, clone(input.receipt)],
+      producedRecordIds, updatedAt: at, receipts: [...item.receipts, { ...clone(input.receipt), ...(reprocessing ? { reprocessing } : {}) }],
       extractionOutput: { unsupported: clone(input.prepared.unsupported), createdAt: at, expiresAt: new Date(Date.parse(at) + 7 * 86_400_000).toISOString() } };
     assertJournalCapacity(1); captures.set(item.id, next);
     appendJournal({ type: 'extraction.completed', entityKind: CAPTURE_KIND, entityId: item.id, project: item.project, payload: next });
@@ -4236,9 +4390,16 @@ export function createShadowGraph(options = {}) {
   }
 
   // The review signals of the request's scope (P1 reconciliation F-04).
+  function reviewSignalView(signal, boundary) {
+    const decision = decisionIn(boundary, signal.decisionId);
+    if (!decision || !['superseded', 'archived', 'abandoned'].includes(decision.status)) return clone(signal);
+    const replacement = decision.supersededBy && decisionIn(boundary, decision.supersededBy);
+    return { ...clone(signal), historical: true, decisionState: decision.status, ...(replacement ? { supersededBy: replacement.id } : {}) };
+  }
+
   function getReviewSignals(input = {}) {
     const boundary = readBoundary(input);
-    const items = scopedView(boundary).reviewSignals.filter((item) => !input.status || item.status === input.status).map(clone);
+    const items = scopedView(boundary).reviewSignals.filter((item) => !input.status || item.status === input.status).map(item => reviewSignalView(item, boundary));
     return scopedItems(items, boundary, items);
   }
 
@@ -6426,7 +6587,7 @@ export function createShadowGraph(options = {}) {
     settleExtraction: transactional('settleExtraction', settleExtraction),
     extractionStatus: transactional('extractionStatus', extractionStatus),
     expireCapture: transactional('expireCapture', expireCapture, { mode: 'snapshot' }),
-    inspectCapture, cancelCapture: transactional('cancelCapture', cancelCapture),
+    inspectCapture, requestReprocess: transactional('requestReprocess', requestReprocess), cancelCapture: transactional('cancelCapture', cancelCapture),
     deleteCapture: transactional('deleteCapture', deleteCapture, { mode: 'snapshot' }),
     completeCaptureDelete: transactional('completeCaptureDelete', (input) => deleteCapture(input, { recovery: true }), { mode: 'snapshot' }),
     recordSelfEvent: transactional('recordSelfEvent', recordSelfEvent), recordTranscript: transactional('recordTranscript', recordTranscript),

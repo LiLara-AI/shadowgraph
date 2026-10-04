@@ -40,7 +40,12 @@ test('capture inspection derives correction invalidation and raw availability wi
   const { memory } = f.graph.remember({ project: 'p', memoryType: 'note', key: 'choice', text: 'before correction' });
   kernel.privilegedTransitionCapture(f.graph, { id: item.id, to: 'processing', lease });
   kernel.privilegedTransitionCapture(f.graph, { id: item.id, to: 'extracted', producedRecordIds: [memory.id] });
-  assert.equal(f.inspect({ project: 'p' }).items[0].reprocessable, false);
+  // This legacy transition fixture has no recipe receipt. PR42 exposes that
+  // uncertainty as recipe drift, independently of correction invalidation.
+  const initial = f.inspect({ project: 'p' }).items[0];
+  assert.equal(initial.derivedInvalidated, false);
+  assert.equal(initial.reprocessable, true);
+  assert.deepEqual(initial.reprocessReasons, ['promptVersion', 'schemaVersion', 'model']);
   f.clock('2026-10-01T01:00:00.000Z');
   f.graph.remember({ project: 'p', memoryType: 'note', key: 'choice', text: 'after correction' });
   const before = f.snapshot();

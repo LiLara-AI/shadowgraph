@@ -100,6 +100,10 @@ export function privilegedInspectCapture(graph, input) {
   return primitive(graph, 'inspectCapture', 'privilegedInspectCapture')(input);
 }
 
+export function privilegedRequestReprocess(graph, input) {
+  return primitive(graph, 'requestReprocess', 'privilegedRequestReprocess')(input);
+}
+
 export function privilegedCancelCapture(graph, input) {
   return primitive(graph, 'cancelCapture', 'privilegedCancelCapture')(input);
 }

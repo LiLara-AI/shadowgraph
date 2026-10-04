@@ -66,9 +66,18 @@ export async function claimCapture(options) {
     queue.sort((a, b) => order.get(a.id) - order.get(b.id));
     const sessions = new Set();
     for (const item of queue) {
-      // Reader floor only: pending is not proof this worker understands a
-      // replacement request. The subsequent writer changes this boundary.
-      if (item.reprocessRequest !== undefined) refusal('capture_reprocessing_unsupported');
+      // Pending alone is not an owner reprocessing request. Require the
+      // explicit local request and its journal witness before any invocation.
+      if (item.reprocessRequest !== undefined) {
+        const request = item.reprocessRequest;
+        if (!request || Object.keys(request).sort().join(',') !== 'actor,at,id,surface'
+          || request.actor !== 'owner' || request.surface !== 'cli' || typeof request.id !== 'string' || !request.id
+          || !isValidIsoInstant(request.at) || !live.journal.some(entry => entry.type === 'capture.state_changed'
+            && entry.entityId === item.id && entry.payload?.state === 'pending' && entry.payload.lease === null
+            && ['id', 'at', 'actor', 'surface'].every(key => entry.payload.reprocessRequest?.[key] === request[key]))) {
+          refusal('capture_reprocessing_unsupported');
+        }
+      }
       const session = JSON.stringify([item.originId, item.source.sessionId]);
       if (sessions.has(session)) continue; sessions.add(session);
       if (item.state === 'processing' && Date.parse(item.lease?.leaseExpiresAt) > Date.parse(at)) continue;

@@ -7,7 +7,7 @@ import { createStorage } from '../storage.js';
 import { captureStoreForLifecycle, expireCaptureStore } from '../capture-hook.js';
 import { accessContext, discoverWorkspace } from './access-transport.js';
 import { confirmOwnerAction } from './owner-confirmation.js';
-import { privilegedCancelCapture, privilegedDeleteCapture, privilegedInspectCapture, privilegedSnapshot } from './snapshot.js';
+import { privilegedCancelCapture, privilegedDeleteCapture, privilegedInspectCapture, privilegedRequestReprocess, privilegedSnapshot } from './snapshot.js';
 import { attachDeletionView, pendingUnsupported, readLedger, storeIo, writeLedger } from './deletion-knowledge.js';
 import { RAW_RETENTION_DAYS, retentionOverridesIssue } from './capture-retention.js';
 
@@ -40,9 +40,9 @@ export async function applyCaptureRetention(store, { project, days }, { expected
 }
 
 export async function captureLifecycle(verb, input = {}, { env = process.env, cwd = process.cwd() } = {}) {
-  if (!['inspect', 'expire', 'cancel', 'delete', 'retention'].includes(verb) || !input || typeof input !== 'object' || Array.isArray(input)) throw new Error(USAGE);
+  if (!['inspect', 'expire', 'cancel', 'delete', 'retention', 'reprocess'].includes(verb) || !input || typeof input !== 'object' || Array.isArray(input)) throw new Error(USAGE);
   const allowed = verb === 'expire' ? [] : verb === 'retention' ? ['project', 'days'] : ['project', 'originId', 'id'];
-  if (Object.keys(input).some((key) => !allowed.includes(key)) || (['cancel', 'delete'].includes(verb) && (typeof input.id !== 'string' || !input.id.trim()))) throw new Error(USAGE);
+  if (Object.keys(input).some((key) => !allowed.includes(key)) || (['cancel', 'delete', 'reprocess'].includes(verb) && (typeof input.id !== 'string' || !input.id.trim()))) throw new Error(USAGE);
   if (verb === 'expire') return expireCaptureStore({ env });
   const descriptor = await captureStoreForLifecycle(env);
   const workspace = await discoverWorkspace(cwd);
@@ -71,7 +71,9 @@ export async function captureLifecycle(verb, input = {}, { env = process.env, cw
       if (!(await confirmOwnerAction('Change capture raw retention', { store: descriptor.file, project, previousDays, days: input.days, effect: 'Eligible uncited raw, including quarantined raw, expires under this policy. Expired raw cannot be re-extracted. Longer retention never extends a recorded deadline.' }))) fail('owner_confirmation_required');
       return applyCaptureRetention(store, { project, days: input.days }, { expectedOverrides: overrides, beforeChange: unchangedActivation });
     }
-    if (!(await confirmOwnerAction(verb === 'delete' ? 'Delete this captured work; earlier backups retain it' : 'Cancel this captured work', { store: descriptor.file, storage: descriptor.type, scope: selected.scope, items: selected.items }))) fail('owner_confirmation_required');
+    const title = verb === 'reprocess' ? 'Queue reprocessing through the activated extraction route; preserve corrections and history'
+      : verb === 'delete' ? 'Delete this captured work; earlier backups retain it' : 'Cancel this captured work';
+    if (!(await confirmOwnerAction(title, { store: descriptor.file, storage: descriptor.type, scope: selected.scope, items: selected.items }))) fail('owner_confirmation_required');
     let result;
     const change = async (payload) => {
       await unchangedActivation();
@@ -79,10 +81,11 @@ export async function captureLifecycle(verb, input = {}, { env = process.env, cw
       const context = accessContext(graph, input, 'cli', workspace, { confirmedByStore: true });
       const current = privilegedInspectCapture(graph, context);
       if (JSON.stringify(current) !== JSON.stringify(selected)) fail('capture_item_changed_while_confirming');
-      result = verb === 'delete' ? privilegedDeleteCapture(graph, context) : privilegedCancelCapture(graph, context);
-      return verb === 'delete' || result.changed ? privilegedSnapshot(graph) : null;
+      result = verb === 'reprocess' ? privilegedRequestReprocess(graph, context)
+        : verb === 'delete' ? privilegedDeleteCapture(graph, context) : privilegedCancelCapture(graph, context);
+      return verb === 'delete' || verb === 'reprocess' || result.changed ? privilegedSnapshot(graph) : null;
     };
-    if (verb === 'delete' || verb === 'cancel') {
+    if (verb === 'delete' || verb === 'cancel' || verb === 'reprocess') {
       const io = storeIo(store);
       await io.run(async ({ read, commit }) => {
         const payload = await read();

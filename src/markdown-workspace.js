@@ -166,8 +166,13 @@ function memoryRelativePath(memory) {
 }
 
 async function push({ graph, directory, state, project, dryRun }) {
-  const memories = graph.exportData({ project }).records
-    .filter((record) => record.kind === 'memory' && record.status === 'active')
+  const owned = graph.exportData({ project }).records.filter(record => record.kind === 'memory');
+  const activeIdentities = new Set(owned.filter(record => record.status === 'active').map(identity));
+  const memories = owned
+    // Refresh an existing projection when its canonical memory is invalidated.
+    // Do not publish previously untracked history or replace a newer active value.
+    .filter(record => record.status === 'active' || (!activeIdentities.has(identity(record))
+      && state.files[memoryRelativePath(record)]?.memoryId === record.id))
     .sort((left, right) => String(left.id).localeCompare(String(right.id)));
   const files = [];
   const conflicts = [];
@@ -259,6 +264,10 @@ async function pull({ graph, directory, state, project, dryRun }) {
     }
     if (prior && currentHash && currentHash !== prior.memoryHash && fileHash !== prior.baseHash) {
       conflicts.push({ path, reason: 'both_file_and_memory_changed' });
+      continue;
+    }
+    if (baselineMemory && baselineMemory.status !== 'active') {
+      conflicts.push({ path, reason: 'canonical_memory_not_active' });
       continue;
     }
     if (baselineMemory && parsed.status !== baselineMemory.status) {

@@ -9,7 +9,8 @@ import { lstat, mkdtemp, readFile, realpath, readdir, rm } from 'node:fs/promise
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 
-export const EXTRACTION_MODEL = 'claude-opus-5[1m]';
+import { EXTRACTION_MODEL } from './internal/extraction-contract.js';
+export { EXTRACTION_MODEL } from './internal/extraction-contract.js';
 export const EXTRACTOR_LIMITS = Object.freeze({ inputBytes: 256 * 1024, outputBytes: 512 * 1024, timeoutMs: 120000, checkTimeoutMs: 10000 });
 const PROFILE_VERSION = '2.1.288';
 const FLAGS = ['--safe-mode', '--tools', '--setting-sources', '--settings', '--strict-mcp-config', '--mcp-config', '--disable-slash-commands', '--no-session-persistence', '--session-id', '--json-schema', '--model', '--output-format', '--system-prompt'];

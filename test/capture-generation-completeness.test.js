@@ -9,7 +9,7 @@ import { privilegedRecordCapture, privilegedSnapshot, privilegedIssueAccess, pri
 
 const source = path => readFile(new URL(`../src/${path}`, import.meta.url), 'utf8');
 const inventory = {
-  material: 'replaceData addDecision addAttempt remember applyMemoryPlan addFact migrateAttribution backfillErasureTokens attribute verifyFact setOutcome addConfidenceEvidence updateDecisionStatus supersedeDecision link purgeProject importData bindProject cancelCapture deleteCapture completeCaptureDelete reapplyDeletion completePurge',
+  material: 'replaceData addDecision addAttempt remember applyMemoryPlan addFact migrateAttribution backfillErasureTokens attribute verifyFact setOutcome addConfidenceEvidence updateDecisionStatus supersedeDecision link purgeProject importData bindProject requestReprocess cancelCapture deleteCapture completeCaptureDelete reapplyDeletion completePurge',
   authority: 'requestAccess issueAccess ownerIssueAccess revokeAccess discardAccess',
   capture: 'recordCapture transitionCapture claimCapture completeExtraction settleExtraction expireCapture recordSelfEvent recordTranscript',
   audit: 'memoryHistory traverse expand redact review reconsider maintain getReviewSignals acknowledgeReview search retrieve recall validate repairPlan context reviewContext exportData getJournal rebuild stats accessRefusal'
@@ -68,6 +68,7 @@ test('generation completeness separates write invalidation from both fenced cloc
     attribution: p => { p.records.find(r => r.id === item.id).originId = 'changed'; },
     redaction: p => { p.captureContent[0].text = '[redacted]'; },
     cancellation: p => { p.records.find(r => r.id === item.id).cancelRequested = true; },
+    reprocessing: p => { p.records.find(r => r.id === item.id).reprocessRequest = { id: 'owner-request' }; },
     sweep: p => { p.captureContent = []; }
   };
   for (const [name, change] of Object.entries(edits)) { const next = structuredClone(before); change(next); assert.deepEqual(invalidatedCaptureTokens(before, next), [item.erasureToken], name); }
