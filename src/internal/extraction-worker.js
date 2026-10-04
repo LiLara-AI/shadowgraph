@@ -66,6 +66,9 @@ export async function claimCapture(options) {
     queue.sort((a, b) => order.get(a.id) - order.get(b.id));
     const sessions = new Set();
     for (const item of queue) {
+      // Reader floor only: pending is not proof this worker understands a
+      // replacement request. The subsequent writer changes this boundary.
+      if (item.reprocessRequest !== undefined) refusal('capture_reprocessing_unsupported');
       const session = JSON.stringify([item.originId, item.source.sessionId]);
       if (sessions.has(session)) continue; sessions.add(session);
       if (item.state === 'processing' && Date.parse(item.lease?.leaseExpiresAt) > Date.parse(at)) continue;

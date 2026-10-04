@@ -73,7 +73,8 @@ const stateOf = (state, basis, ids = []) => ({ state, basis, evidence: ids.slice
 export function temporalEvidence(record, { kind = record.kind, successors = [], predecessors = [], at, asOf = null } = {}) {
   const evidence = { recordedAt: versionTimes(record, kind).recordedAt, eventTime: eventTimeOf(record, kind) };
   // An attempt is an event, not a state.
-  if (kind === 'attempt') return { ...evidence, currentState: null };
+  if (kind === 'attempt') return { ...evidence, currentState: record.derivationState === 'superseded'
+    ? stateOf(asOf === null ? 'historical' : 'undetermined', asOf === null ? 'explicit_supersession' : null, record.supersededBy ?? []) : null };
   const [later, earlier] = [idsOf(successors), idsOf(predecessors)];
   if (kind === 'decision') {
     // No event time places a decision at an earlier instant.

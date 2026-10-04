@@ -17,6 +17,7 @@ import { privilegedSnapshot, privilegedValidate, registerPrivileged } from './in
 import { extraCollections, refusePublicExport, NATIVE_STORE_KEYS, PUBLIC_EXPORT_KIND, REDACTION_EXPORT_KIND } from './internal/collections.js';
 import { isLegacyOwned, resolveScope, sameOrigin, usableOriginId } from './scope.js';
 import { createHash, randomUUID } from 'node:crypto';
+import { extractionSupersession } from './internal/extraction-supersession.js';
 import { accessScopeContains, validateAccess, intersectAccessScope, accessDiagnostics, reconcileAccessLedger } from './access.js';
 import { createAccessLifecycle } from './internal/access-lifecycle.js';
 import { assertCreationInput } from './internal/creation-id.js';
@@ -3463,7 +3464,7 @@ export function createShadowGraph(options = {}) {
     };
     const root = reach(input.id);
     if (!root) return scopedResult({ root: input.id, direction, depth, nodes: [], relations: [], limitation: { code: 'scoped_coverage', detail: 'No record with this id is visible in the scope of this traversal.' } }, boundary);
-    const seen = new Set([input.id]); const nodes = [clone(root)]; const edges = []; let frontier = [input.id];
+    const seen = new Set([input.id]); const nodes = [clone(extractionView(root, memoryScope))]; const edges = []; let frontier = [input.id];
     for (let level = 0; level < depth && frontier.length; level += 1) {
       const next = [];
       for (const relation of relations.values()) {
@@ -3475,7 +3476,7 @@ export function createShadowGraph(options = {}) {
         const target = reach(targetId);
         if (!target) continue;
         if (!edges.some((item) => item.id === relation.id)) edges.push(clone(relation));
-        if (!seen.has(targetId)) { seen.add(targetId); next.push(targetId); nodes.push(clone(target)); }
+        if (!seen.has(targetId)) { seen.add(targetId); next.push(targetId); nodes.push(clone(extractionView(target, memoryScope))); }
       }
       frontier = next;
     }
@@ -4119,7 +4120,7 @@ export function createShadowGraph(options = {}) {
     const knownFacts = { ...stored.values, ...suppliedFacts };
     const reusable = []; const diagnostics = [];
     for (const record of records.values()) {
-      if (record.kind !== 'attempt' || !inScope(record)) continue;
+      if (record.kind !== 'attempt' || !inScope(record) || extractionView(record).derivationState === 'superseded') continue;
       // An attempt whose outcome is undetermined (PR-24) is not a failure that
       // may be reconsidered: it is in no collection and is only counted.
       if (attemptOutcome(record) === 'undetermined') continue;
@@ -4975,7 +4976,7 @@ export function createShadowGraph(options = {}) {
       if (terms.length && perTerm.some((fields) => fields.length === 0)) continue;
       const matched = [...new Set(perTerm.flat())];
       hits.push({
-        record: clone(record),
+        record: clone(extractionView(record, memoryScope)),
         score: terms.length ? score(record, terms, rawTerms) : 0,
         matched,
         reason: terms.length ? `Matched ${matched.join(', ')}` : 'Matched filters only',
@@ -5003,7 +5004,7 @@ export function createShadowGraph(options = {}) {
       const relatedId = directIds.has(relation.from) ? relation.to : directIds.has(relation.to) ? relation.from : null;
       const related = relatedId && entity(relatedId, boundary);
       if (related && related.kind !== 'alternative' && (related.kind !== 'memory' || sameMemoryScopeValues(related.scope, memoryScope)) && !directIds.has(relatedId)) {
-        results.push({ record: clone(related), score: 1, graphBoost: 1, matched: ['relationship'], matchedBy: 'graph', reason: `Related by ${relation.relation}`, reasons: [`Related by ${relation.relation}`], filters: appliedFilters(options) });
+        results.push({ record: clone(extractionView(related, memoryScope)), score: 1, graphBoost: 1, matched: ['relationship'], matchedBy: 'graph', reason: `Related by ${relation.relation}`, reasons: [`Related by ${relation.relation}`], filters: appliedFilters(options) });
         directIds.add(relatedId);
       }
     }
@@ -5025,7 +5026,7 @@ export function createShadowGraph(options = {}) {
   function rankingView(boundary, memoryScope) {
     const reach = scopedReach(boundary, memoryScope);
     return {
-      records: [...records.values()].filter(boundary.visible),
+      records: [...records.values()].filter(boundary.visible).map(record => extractionView(record, memoryScope)),
       facts: [...facts.values()].filter(boundary.visible),
       relations: [...relations.values()].filter((relation) => reach(relation.from) && reach(relation.to))
     };
@@ -5115,10 +5116,10 @@ export function createShadowGraph(options = {}) {
     // Only a failure is collected (PR-24). An attempt whose outcome is
     // undetermined -- captured, with no declared class -- is in no collection,
     // is never implied to have succeeded, and is counted on this one.
-    const attemptsInScope = [...records.values()].filter((x) => x.kind === 'attempt' && inScope(x));
+    const attemptsInScope = [...records.values()].filter((x) => x.kind === 'attempt' && inScope(x) && extractionView(x).derivationState !== 'superseded');
     const failed = attemptsInScope.filter((x) => attemptOutcome(x) === 'failed');
     const failedAttemptsToAvoid = {
-      ...collect(failed.map(clone)),
+      ...collect(failed.map(record => clone(extractionView(record)))),
       undetermined: attemptsInScope.filter((x) => attemptOutcome(x) === 'undetermined').length
     };
     const evaluated = evaluateForRead({ changedFacts: input.changedFacts ?? [], facts: input.facts ?? {} }, boundary, { persistSignals });
@@ -5233,7 +5234,7 @@ export function createShadowGraph(options = {}) {
       for (const id of linkIds(record.supersededBy)) if (entityOf(id)) link('successors', record.id, entityOf(id));
       for (const id of linkIds(record.supersedes)) if (entityOf(id)) link('predecessors', record.id, entityOf(id));
     }
-    const evidenceOf = (record) => temporalEvidence(record, {
+    const evidenceOf = (record) => temporalEvidence(extractionView(record), {
       kind: facts.get(record.id) === record ? 'fact' : record.kind,
       successors: linksOf('successors', record.id), predecessors: linksOf('predecessors', record.id),
       at: asOf ?? currentAt, asOf
@@ -5294,8 +5295,12 @@ export function createShadowGraph(options = {}) {
 
   // A full record (T2) as a read delivers it: the public record, the embedding
   // (a derived index) left out.
+  function extractionView(record, memoryScope = normalizeMemoryScope()) {
+    return extractionSupersession(record, records, relations, other => other.kind !== 'memory' || sameMemoryScopeValues(other.scope, memoryScope));
+  }
+
   function canonicalRecord(record) {
-    const { embedding, ...shown } = publicValue(clone(record));
+    const { embedding, ...shown } = publicValue(clone(extractionView(record)));
     return shown;
   }
 
@@ -5413,9 +5418,10 @@ export function createShadowGraph(options = {}) {
   // superseded, then the most recent), and the number of supersession links
   // that name a record outside the reach or none at all, counted alike.
   function counterpartsOf(stored, reach) {
+    stored = extractionView(stored);
     const found = [];
     const unreachable = new Set();
-    const push = (record, relation) => { if (record !== stored && !found.some((item) => item.record === record)) found.push({ record, relation }); };
+    const push = (record, relation) => { if (record.id !== stored.id && !found.some((item) => item.record.id === record.id)) found.push({ record: extractionView(record), relation }); };
     if (facts.get(stored.id) === stored) {
       for (const fact of facts.values()) if (fact.key === stored.key && fact.project === stored.project && reach(fact.id)) push(fact, 'same_key');
     }

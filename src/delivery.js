@@ -12,6 +12,7 @@ import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { readExtractionAvailability } from './internal/extraction-availability.js';
+import { extractionSupersession } from './internal/extraction-supersession.js';
 import { activeCapture, storeRepository } from './capture-hook.js';
 import { createShadowGraph, MAX_PAGE_LIMIT, SCHEMA_VERSION } from './shadowgraph.js';
 import { show, t1Line } from './compact-tier.js';
@@ -281,7 +282,7 @@ function itemOf({ tier, line, record, temporalEvidence }, records) {
   // then asks for expansion.
   const rendered = t1Line(redactValue(full), {
     asOf: line.expansion.asOf, scope: line.expansion.scope, derivedAt: line.expansion.derivedAt,
-    visible: (id) => id === line.status?.supersededBy
+    visible: (id) => (Array.isArray(line.status?.supersededBy) ? line.status.supersededBy : [line.status?.supersededBy]).includes(id)
   });
   const omitted = rendered.decisiveOmitted;
   return { tier, line: rendered.line, claimClass: line.claimClass, requiresExpansion: line.requiresExpansion || omitted.length > 0, ...(omitted.length ? { omitted } : {}), ...time, expansion: line.expansion };
@@ -377,7 +378,8 @@ export async function runDeliver({ args = [], readInput = () => '', file, storag
     // The records behind the lines, in this scope and as a read shows them,
     // looked up by id.
     const exported = session ? null : graph.exportData(input);
-    const records = new Map(exported ? [...exported.records, ...exported.facts].map((record) => [record.id, record]) : []);
+    const canonical = new Map(exported ? [...exported.records, ...exported.facts].map((record) => [record.id, record]) : []);
+    const records = new Map([...canonical].map(([id, record]) => [id, extractionSupersession(record, canonical, exported.relations)]));
     const head = {
       trigger, store: 'available', scope: relevant.scope, complete: relevant.complete,
       limitation: unresolved ? PROJECT_UNRESOLVED : session ? NOT_ASSESSED : relevant.limitation ?? null,
