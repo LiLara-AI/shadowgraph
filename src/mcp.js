@@ -11,6 +11,7 @@ import { loadLocalEvidenceVerifier } from './verification.js';
 import { BATCH_PROTOCOL_VERSIONS, LEGACY_PROTOCOL_VERSIONS, METADATA_TIER, buildToolCatalog, metadataTierForProtocolVersion, negotiateLegacyProtocolVersion, projectTool, selectTools, toolResult } from './mcp-tools.js';
 import { privilegedAccessRefusal, privilegedSnapshot } from './internal/snapshot.js';
 import { accessContext, bindWorkspaceProject, currentAccessOperation, discoverWorkspace, hasAccessReference } from './internal/access-transport.js';
+import { readExtractionAvailability } from './internal/extraction-availability.js';
 import { DELETION_CODES } from './internal/deletion-knowledge.js';
 
 const file = process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json';
@@ -78,7 +79,8 @@ const MODERN_PROTOCOL_VERSION = '2026-07-28';
 const SUPPORTED_PROTOCOL_VERSIONS = Object.freeze([MODERN_PROTOCOL_VERSION, ...LEGACY_PROTOCOL_VERSIONS]);
 const JSON_RPC_ERROR = Symbol('shadowgraph.jsonRpcError');
 const PUBLIC_ERROR = Symbol('shadowgraph.publicError');
-const graph = createShadowGraph({ verifier, ...(injectedNow ? { now: injectedNow } : {}) });
+let extractionAvailability = () => false;
+const graph = createShadowGraph({ extractionAvailable: scope => extractionAvailability(scope), verifier, ...(injectedNow ? { now: injectedNow } : {}) });
 graph.importData(await store.load());
 const workspace = await discoverWorkspace();
 const embeddingClient = process.env.SHADOWGRAPH_EMBEDDING_URL ? createEmbeddingClient({
@@ -252,6 +254,7 @@ function storeUnavailableExpansion(args) {
 }
 
 async function callUnqueued(name, args, tier, accessManaged = false) {
+  extractionAvailability = await readExtractionAvailability({ store, storage: process.env.SHADOWGRAPH_STORAGE ?? 'json' });
   if (persistenceUnavailable) {
     // Only a well-formed handle is answered; anything else fails as every tool does.
     const handle = args && typeof args === 'object' && !Array.isArray(args) && typeof args.recordId === 'string' && args.recordId !== '' && typeof args.digest === 'string' && args.digest !== ''
@@ -722,6 +725,7 @@ async function handleMessage(request, emit, batchFailure = null) {
         // makes the latch closed rather than merely early. callUnqueued does the
         // same for tools/call.
         if (persistenceUnavailable) throw unavailableError();
+        extractionAvailability = await readExtractionAvailability({ store, storage: process.env.SHADOWGRAPH_STORAGE ?? 'json' });
         // The context resource is the default-path read (plan v1.4.4 §13.2): it
         // changes no canonical truth, so nothing is persisted after it.
         return graph.context(accessContext(graph, {}, 'mcp', workspace));

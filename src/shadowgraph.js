@@ -1475,7 +1475,7 @@ export function createShadowGraph(options = {}) {
   // start only. `gaps` declares what capture refused, bounded: each store
   // limit's last closed period, the scope's sessions that reached their limit
   // (counted, never named, from the earliest refusal each records), and material refused because another project owned
-  // its session. Nothing is extracted in this build.
+  // its session. Availability is a non-persistent host configuration projection.
   function captureStatus(scope) {
     const sessions = extras.get(CAPTURE_SESSIONS) ?? [];
     const entries = events.filter((entry) => entry?.type === CAPTURE_LIMIT_EVENT || entry?.type === CAPTURE_REFUSED_EVENT);
@@ -1539,6 +1539,7 @@ export function createShadowGraph(options = {}) {
     }
     const errors = sessions.filter(session => owns(session) && session.extraction?.state === 'blocked' && isValidIsoInstant(session.extraction.at));
     if (errors.length) status.workerErrors = [...new Set(errors.map(session => workerReason(session.extraction.reason)))].map(reason => ({ reason, at: errors.filter(session => workerReason(session.extraction.reason) === reason).map(session => session.extraction.at).sort(compareInstants)[0] }));
+    if (!errors.length && typeof options.extractionAvailable === 'function') status.extractionAvailable = options.extractionAvailable(scope) === true;
     return status;
   }
 

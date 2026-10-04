@@ -12,7 +12,8 @@
 //       never quoted prose, a here-document, a here-string or a comment;
 //   S-2 a correlation mark that ShadowGraph minted into its own invocation,
 //       found in the event's arguments (tool input or prompt), not its output;
-//   S-3 worker attribution: a session its own worker recorded as its own.
+//   S-3 worker attribution: its own recorded invocation/session id during
+//       that invocation's lease window, never the observer's session.
 // Process ancestry is not used: no host is known to supply it. An event with no
 // signal is captured and marked unattributed_observer; absence never excludes,
 // so a user developing ShadowGraph itself is captured like anyone else. What
@@ -62,12 +63,12 @@ const texts = (value) => (Array.isArray(value) ? value.filter((item) => typeof i
 // entry points, its activation record, the marker files it reads, and the
 // per-user deletion registry with its lock (PR-37d design §7.3). The registry
 // path given is canonical already, so its lock is the one fenceLockPath names.
-export function captureArtefacts({ storeFile, runtimeDirectory, activationFile, markerFiles = [], registryFile } = {}) {
+export function captureArtefacts({ storeFile, runtimeDirectory, activationFile, markerFiles = [], registryFile, workerFiles = [] } = {}) {
   const files = [];
   if (storeFile) files.push(storeFile, ...STORE_SIDE_FILES.map((suffix) => `${storeFile}${suffix}`));
   if (registryFile) files.push(registryFile, `${registryFile}.lock`);
   if (activationFile) files.push(activationFile);
-  files.push(...markerFiles);
+  files.push(...markerFiles, ...workerFiles);
   return {
     artefactPaths: files,
     storeFiles: storeFile ? [storeFile] : [],
@@ -398,7 +399,8 @@ export function soleProgram(command, toolName) {
 // Whether ShadowGraph produced this event, and by which signal; otherwise how
 // it is captured. `event` is { event, sessionId, cwd, toolName, toolInput,
 // prompt }; `context` is captureArtefacts() plus home, correlationTokens and
-// workerSessionIds. S-3 is matched by session until the worker exists (P7).
+// workerInvocations plus the observer's trusted observedAt clock. A legacy
+// session-name list alone cannot establish an active worker invocation.
 // Anything malformed in either is ignored, never thrown.
 export function classifyCaptureSource(event, context) {
   const observed = event !== null && typeof event === 'object' ? event : {};
@@ -406,7 +408,13 @@ export function classifyCaptureSource(event, context) {
   if (targetsShadowGraph(observed, known)) return { selfEvent: true, signal: 'S-1' };
   const tokens = texts(known.correlationTokens).filter((token) => token.length >= 16);
   if (tokens.length && strings([observed.toolInput, observed.prompt]).some((value) => tokens.some((token) => value.includes(token)))) return { selfEvent: true, signal: 'S-2' };
-  if (texts(known.workerSessionIds).includes(observed.sessionId)) return { selfEvent: true, signal: 'S-3' };
+  const at = Date.parse(known.observedAt);
+  if (Number.isFinite(at) && Array.isArray(known.workerInvocations) && known.workerInvocations.some(row => {
+    const from = Date.parse(row?.from), to = Date.parse(row?.to);
+    return typeof row?.invocationId === 'string' && row.invocationId.length > 0 && row.invocationId === observed.sessionId
+      && typeof row.leaseId === 'string' && row.leaseId.length > 0
+      && Number.isFinite(from) && Number.isFinite(to) && from <= at && at < to;
+  })) return { selfEvent: true, signal: 'S-3' };
   return { selfEvent: false, sourceIdentity: UNATTRIBUTED_OBSERVER };
 }
 

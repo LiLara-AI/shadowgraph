@@ -1,5 +1,6 @@
 // Owner CLI lifecycle only. No MCP/HTTP entry point and no manual-store
 // fallback. Inspection is read-only; cancellation is terminal-confirmed.
+import { readExtractionAvailability } from './extraction-availability.js';
 import { readFile } from 'node:fs/promises';
 import { createShadowGraph } from '../shadowgraph.js';
 import { createStorage } from '../storage.js';
@@ -48,10 +49,11 @@ export async function captureLifecycle(verb, input = {}, { env = process.env, cw
   const store = await createStorage({ type: descriptor.type, file: descriptor.file, env, mode: 0o600 });
   try {
     let selected, overrides;
+    const graphOptions = { extractionAvailable: await readExtractionAvailability({ file: descriptor.file, storage: descriptor.type, env }) };
     // A fenced no-op read refuses any pending deletion or restore and never
     // completes one, including while forming the owner's confirmation.
     await store.update(async (payload) => {
-      const graph = createShadowGraph(); graph.importData(payload);
+      const graph = createShadowGraph(graphOptions); graph.importData(payload);
       selected = privilegedInspectCapture(graph, accessContext(graph, input, 'cli', workspace, { confirmedByStore: true }));
       if (verb === 'retention') overrides = (await readLedger(descriptor.file))?.retentionOverrides ?? [];
       return null;
@@ -73,7 +75,7 @@ export async function captureLifecycle(verb, input = {}, { env = process.env, cw
     let result;
     const change = async (payload) => {
       await unchangedActivation();
-      const graph = createShadowGraph(); graph.importData(payload);
+      const graph = createShadowGraph(graphOptions); graph.importData(payload);
       const context = accessContext(graph, input, 'cli', workspace, { confirmedByStore: true });
       const current = privilegedInspectCapture(graph, context);
       if (JSON.stringify(current) !== JSON.stringify(selected)) fail('capture_item_changed_while_confirming');

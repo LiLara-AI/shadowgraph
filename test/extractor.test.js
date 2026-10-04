@@ -10,7 +10,7 @@ import { buildInvocation, createExtractor, inspectPolicy, runBounded, validateSc
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const SCHEMA = { type: 'object', properties: { claims: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 100 } } }, required: ['claims'], additionalProperties: false };
-const HELP = '--safe-mode --tools --setting-sources --settings --strict-mcp-config --mcp-config --disable-slash-commands --no-session-persistence --json-schema --model --output-format --system-prompt';
+const HELP = '--safe-mode --tools --setting-sources --settings --strict-mcp-config --mcp-config --disable-slash-commands --no-session-persistence --session-id --json-schema --model --output-format --system-prompt';
 const AUTH = { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', apiKeySource: null };
 const DOCTOR = 'Managed settings (remote): not fetched — requires an Enterprise or Team subscription';
 const successful = { type: 'result', subtype: 'success', is_error: false, structured_output: { claims: ['bounded observation'] }, modelUsage: { 'claude-opus-5': { inputTokens: 12, outputTokens: 8 } } };
@@ -31,7 +31,7 @@ async function fixture(t, overrides = {}) {
   };
   const env = { HOME: root, USERPROFILE: root, PATH: process.env.PATH, SYSTEMROOT: process.env.SYSTEMROOT ?? '', ...(overrides.env ?? {}) };
   const executor = createExtractor({ executable, env, scratchRoot: root, runProcess: runner, inspectPolicy: async () => overrides.policy ?? { ok: true, sources: [] } });
-  return { root, executable, env, calls, executor };
+  return { root, executable, env, calls, executor, runner };
 }
 
 test('invocation pins subscription model, inline schema, zero tools/customizations and no persistent session', () => {
@@ -348,11 +348,66 @@ test('real child receives deliberate environment plus documented Windows OS name
   assert.ok(value.env.every(name => ['EXPLICIT_FIXTURE', ...required].includes(name)));
 });
 
-test('extractor is reachable only from the inert internal worker and its schema verifier', async () => {
+test('extractor imports are limited to the worker, verifier and explicit owner activation', async () => {
   const root = fileURLToPath(new URL('../src/', import.meta.url));
   const entries = await readdir(root, { recursive: true });
-  const internal = new Set(['extractor.js', 'internal/extraction-worker.js', 'internal/extraction-output.js']);
+  const internal = new Set(['extractor.js', 'activation.js', 'extraction-runtime.js', 'internal/extraction-worker.js', 'internal/extraction-output.js', 'internal/extraction-child.js']);
   for (const name of entries.filter(x => x.endsWith('.js') && !internal.has(x.replaceAll('\\', '/')))) {
     assert.doesNotMatch(await readFile(join(root, name), 'utf8'), /(?:from\s*|import\s*\()["'][^"']*extractor\.js/, name);
   }
+});
+
+test('executor carries the registered dedicated session and correlation mark only in controlled arguments', async t => {
+  const identity = { invocationId: 'ad260cbf-6460-419c-8aaf-1f4c38afcefa', correlationToken: 'sgcorr_583a6f19-08e9-4c33-9c52-d9dddaab9a72' };
+  const s = await fixture(t);
+  const out = await s.executor.extract({ prompt: 'same untrusted material', schema: SCHEMA, identity });
+  assert.equal(out.status, 'success');
+  const call = s.calls.find(x => x.args.includes('-p'));
+  assert.equal(call.args[call.args.indexOf('--session-id') + 1], identity.invocationId);
+  assert.ok(call.args[call.args.indexOf('--system-prompt') + 1].includes(identity.correlationToken));
+  assert.equal(call.input, 'same untrusted material');
+  const bad = await fixture(t);
+  assert.equal((await bad.executor.extract({ prompt: 'data', schema: SCHEMA, identity: { ...identity, invocationId: '--resume' } })).status, 'malformed_invocation');
+  assert.equal(bad.calls.length, 0);
+});
+
+test('bounded process distinguishes a requested kill from confirmed local child settlement', async () => {
+  const controller = new AbortController(); let kills = 0;
+  const out = await runBounded({ executable: '/fake', args: [], cwd: '/', env: {}, signal: controller.signal, spawnProcess: () => {
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.stdin = new PassThrough();
+    child.kill = () => { kills++; return false; }; child.unref = () => {};
+    queueMicrotask(() => { child.emit('spawn'); controller.abort(); }); return child;
+  } });
+  assert.ok(kills > 0); assert.equal(out.failure, 'aborted'); assert.equal(out.localChildStopped, false);
+});
+
+test('bounded child shutdown escalates a refused soft termination before declaring settlement', async () => {
+  const controller = new AbortController(), signals = [];
+  const out = await runBounded({ executable: '/fake', args: [], cwd: '/', env: {}, signal: controller.signal, spawnProcess: () => {
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.stdin = new PassThrough();
+    child.kill = signal => { signals.push(signal); if (signal === 'SIGKILL') queueMicrotask(() => child.emit('close', null)); return true; };
+    queueMicrotask(() => { child.emit('spawn'); controller.abort(); }); return child;
+  } });
+  assert.ok(signals.includes('SIGKILL')); assert.equal(out.localChildStopped, true); assert.equal(out.failure, 'aborted');
+});
+
+test('activated executor binary/configuration pin is checked before every model invocation', async t => {
+  const s = await fixture(t), expectedReceipt = await s.executor.check();
+  const executor = createExtractor({ executable: s.executable, env: s.env, scratchRoot: s.root, runProcess: s.runner, inspectPolicy: async () => ({ ok: true }), expectedReceipt });
+  assert.equal((await executor.extract({ prompt: 'synthetic', schema: SCHEMA })).status, 'success');
+  const before = s.calls.filter(x => x.args.includes('-p')).length;
+  await writeFile(s.executable, 'changed synthetic executable');
+  const out = await executor.extract({ prompt: 'synthetic', schema: SCHEMA });
+  assert.equal(out.status, 'blocked'); assert.equal(out.blockedReason, 'activated_executor_changed');
+  assert.equal(s.calls.filter(x => x.args.includes('-p')).length, before);
+});
+test('registered invocation identity is snapshotted before asynchronous configuration checks', async t => {
+  const s = await fixture(t);
+  const identity = { invocationId: 'ad260cbf-6460-419c-8aaf-1f4c38afcefa', correlationToken: 'sgcorr_583a6f19-08e9-4c33-9c52-d9dddaab9a72' };
+  const original = structuredClone(identity);
+  const executor = createExtractor({ executable: s.executable, env: s.env, scratchRoot: s.root, runProcess: s.runner,
+    inspectPolicy: async () => { identity.invocationId = 'bd260cbf-6460-419c-8aaf-1f4c38afcefa'; return { ok: true }; } });
+  assert.equal((await executor.extract({ prompt: 'synthetic', schema: SCHEMA, identity })).status, 'success');
+  const request = s.calls.find(x => x.args.includes('-p'));
+  assert.equal(request.args[request.args.indexOf('--session-id') + 1], original.invocationId);
 });

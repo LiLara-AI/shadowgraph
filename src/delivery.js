@@ -11,6 +11,7 @@ import { lstat, readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { readExtractionAvailability } from './internal/extraction-availability.js';
 import { activeCapture, storeRepository } from './capture-hook.js';
 import { createShadowGraph, MAX_PAGE_LIMIT, SCHEMA_VERSION } from './shadowgraph.js';
 import { show, t1Line } from './compact-tier.js';
@@ -359,7 +360,8 @@ export async function runDeliver({ args = [], readInput = () => '', file, storag
     // the line says so while memory is served (PR-37c design §8.5).
     else if (!unavailable && read.payload?.[DELETION_VIEW]?.pending) cannotLoad('deletion_pending');
     if (unavailable) return session ? emit(unavailablePayload(trigger, unavailable, quiet)) : undefined;
-    const graph = createShadowGraph();
+    const extractionAvailability = await readExtractionAvailability(pinned ? pinned.store : { file, storage });
+    const graph = createShadowGraph({ extractionAvailable: extractionAvailability });
     try { graph.importData(read.payload); }
     catch {
       cannotLoad('store_unreadable');
@@ -395,7 +397,7 @@ export async function runDeliver({ args = [], readInput = () => '', file, storag
     // names of the limits and gaps the reads declare.
     const status = relevant.capture;
     const processing = capturing || status ? {
-      ...(capturing ? captureState() : { capture: 'not_active' }), extraction: 'not_active',
+      ...(capturing ? captureState() : { capture: 'not_active' }), extraction: extractionAvailability.active ? 'active' : 'not_active',
       ...(status ? { pending: status.pending, processing: status.processing, failed: status.failed, blocked: status.blocked, oldestPendingAt: status.oldestPendingAt, extractionAvailable: status.extractionAvailable, ...(status.workerErrors ? { workerErrors: status.workerErrors.map(entry => entry.reason) } : {}), limited: status.limited.map((entry) => entry.limit), gaps: [...new Set(status.gaps.map((entry) => entry.reason))] } : {})
     } : undefined;
     emit(assemblePayload({ head, items: session ? sessionOrder(items) : items, processing }).text);

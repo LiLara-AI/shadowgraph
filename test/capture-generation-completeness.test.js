@@ -50,7 +50,7 @@ test('generation source scan: both store commits advance before payload and rest
     if (!entry.isFile() || !entry.name.endsWith('.js')) continue;
     const path = `${directory}${entry.name}`, code = await source(path);
     if (/generationBase\s*(?::|=)|generationCounters\s*(?::|=)/u.test(code)) writers.push(path);
-    if (path !== 'internal/extraction-worker.js') assert.doesNotMatch(code, /(?:from\s+|import\s*\()['"][^'"]*extraction-worker\.js/u, `${path}: worker remains inert until its activation change`);
+    if (!['internal/extraction-worker.js', 'extraction-runtime.js'].includes(path)) assert.doesNotMatch(code, /(?:from\s+|import\s*\()['"][^'"]*extraction-worker\.js/u, `${path}: only the activated CLI controller may import the worker`);
   }
   assert.deepEqual(writers.sort(), ['internal/capture-generation.js', 'internal/deletion-knowledge.js']);
 });

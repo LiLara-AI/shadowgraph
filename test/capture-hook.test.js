@@ -285,10 +285,10 @@ test('the store is entered and left around the work, and a commit starts only wi
   assert.deepEqual(outside, []);
   // Time runs out inside the store: nothing is committed, and the store is left.
   const base = Date.now();
-  let calls = 0;
+  let entered = false;
   const late = [];
-  const clock = () => (calls++ < 2 ? base : base + 900);
-  assert.equal(await capture(s, prompt('later', { message_id: 'msg_9' }), { deadline: base + 1000, now: clock, post: (message) => late.push(message) }), 'out_of_time');
+  const clock = () => entered ? base + 900 : base;
+  assert.equal(await capture(s, prompt('later', { message_id: 'msg_9' }), { deadline: base + 1000, now: clock, post: (message) => { late.push(message); if (message === 'enter') entered = true; } }), 'out_of_time');
   assert.deepEqual(late, ['enter', 'leave']);
   assert.equal(bytes(await load(s)), before);
 });
@@ -414,4 +414,18 @@ test('a store\'s update loads, changes and writes under one hold of its fence, o
     assert.equal(after.records.filter((record) => record.kind === 'decision').length, 4, type);
     store.close?.();
   }
+});
+
+test('hook reads registered dedicated worker identity while preserving user sessions', async t => {
+  const { randomUUID } = await import('node:crypto');
+  const { registerInvocation } = await import('../src/internal/extraction-identity.js');
+  const s = await setup(t), at = Date.now();
+  const row = { invocationId: randomUUID(), leaseId: randomUUID(), correlationToken: `sgcorr_${randomUUID()}`, from: new Date(at).toISOString(), to: new Date(at + 300000).toISOString() };
+  await registerInvocation(row, { env: s.env, now: () => at });
+  assert.equal(await capture(s, prompt('own invocation', { session_id: row.invocationId }), { env: s.env }), 'self_event');
+  assert.equal((await items(s)).length, 0);
+  assert.equal(await capture(s, prompt('ordinary user work', { session_id: 'user-session', tool_use_id: row.invocationId }), { env: s.env }), 'written');
+  assert.equal((await items(s)).length, 1);
+  assert.equal(await capture(s, prompt(row.correlationToken, { session_id: 'worker-other', message_id: 'm2' }), { env: s.env }), 'self_event');
+  assert.equal((await items(s)).length, 1);
 });

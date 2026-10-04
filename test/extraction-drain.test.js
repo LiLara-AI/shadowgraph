@@ -199,3 +199,36 @@ test('drain json: cancellation between transient rename attempts never commits m
   assert.notEqual(item.state, 'extracted'); assert.equal(item.receipts.length, 0);
   assert.equal(JSON.parse(await readFile(usageFile(f.options.env))).calls.length, 1);
 });
+
+for (const type of ['json', 'sqlite']) test(`drain registers each dedicated invocation before execution and preserves retry prompt identity (${type})`, async t => {
+  const { readInvocationContext, identityFile } = await import('../src/internal/extraction-identity.js');
+  const f = await setup(t, type); const identities = [], prompts = [];
+  const out = await runExtractionDrain({ ...f.options, sleep: async () => {}, executor: { extract: async request => {
+    assert.ok(request.identity, 'worker must provide its registered identity');
+    const context = await readInvocationContext({ env: f.options.env, now: () => Date.parse(f.options.now()) });
+    const row = context.workerInvocations.find(row => row.invocationId === request.identity.invocationId);
+    assert.ok(row, 'registration exists before the executor is entered');
+    const item = (await f.read()).records.find(x => x.kind === 'capture');
+    assert.equal(row.leaseId, item.lease.leaseId); assert.equal(row.to, item.lease.leaseExpiresAt);
+    identities.push(request.identity); prompts.push(request.prompt);
+    return identities.length === 1 ? { status: 'schema_invalid' } : f.response;
+  } } });
+  assert.equal(out.completed, 1); assert.equal(identities.length, 2);
+  assert.notEqual(identities[0].invocationId, identities[1].invocationId);
+  assert.equal(identities[0].correlationToken, identities[1].correlationToken); assert.equal(prompts[0], prompts[1]);
+  assert.doesNotMatch(await readFile(identityFile(f.options.env), 'utf8'), /Synthetic observation/);
+  const bad = await setup(t, type); await writeFile(identityFile(bad.options.env), '{}'); let calls = 0;
+  const blocked = await runExtractionDrain({ ...bad.options, executor: { extract: async () => { calls++; return bad.response; } } });
+  assert.equal(calls, 0); assert.equal(blocked.completed, 0);
+  assert.equal((await bad.read()).records.find(x => x.kind === 'capture').state, 'pending');
+});
+
+for (const type of ['json', 'sqlite']) test(`one automatic drain shares its call ceiling across distinct project queues (${type})`, async t => {
+  const f = await setup(t, type, 1, { calls: 1 }); const graph = createShadowGraph({ now: f.options.now }); graph.importData(await f.read());
+  const other = privilegedRecordCapture(graph, { project: 'q', originId: 'synthetic-origin', text: 'Other project observation.', admission, source: { event: 'UserPromptSubmit', sessionId: 'other-session' } });
+  const store = await createStorage(f.options); await store.save(privilegedSnapshot(graph)); store.close(); let calls = 0;
+  const out = await runExtractionDrain({ ...f.options, project: undefined, scopes: [{ project: 'p' }, { project: 'q' }], executor: { extract: async () => { calls++; return f.response; } } });
+  assert.equal(calls, 1); assert.equal(out.completed, 1); assert.equal(out.blockedReason, 'drain_calls');
+  const items = (await f.read()).records.filter(x => x.kind === 'capture');
+  assert.equal(items.find(x => x.id === f.items[0].id).state, 'extracted'); assert.equal(items.find(x => x.id === other.id).state, 'pending');
+});

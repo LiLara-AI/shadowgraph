@@ -124,15 +124,16 @@ test('RT-6 the commit margin is twice the time spent inside the store, and at le
   const s = await setup(t);
   const clock = (spent) => {
     const base = Date.now();
-    let calls = 0;
-    // Before the section: the git bound, the lock bound, then `entered`; everything after is `spent` later.
-    return { base, now: () => (calls++ < 3 ? base : base + spent) };
+    let entered = false, storeCalls = 0;
+    // The first clock inside the section is its entry instant; later work costs spent.
+    return { base, post: message => { if (message === 'enter') entered = true; },
+      now: () => !entered || storeCalls++ === 0 ? base : base + spent };
   };
   const slow = clock(400);
-  assert.equal(await capture(s, prompt('slow', { message_id: 'msg_a' }), { deadline: slow.base + 1_000, now: slow.now }), 'out_of_time', '400 + 2 x 400 > 1000');
+  assert.equal(await capture(s, prompt('slow', { message_id: 'msg_a' }), { deadline: slow.base + 1_000, now: slow.now, post: slow.post }), 'out_of_time', '400 + 2 x 400 > 1000');
   assert.deepEqual(await items(s), []);
   const quick = clock(100);
-  assert.equal(await capture(s, prompt('quick', { message_id: 'msg_b' }), { deadline: quick.base + 1_000, now: quick.now }), 'written', '100 + max(250, 200) <= 1000');
+  assert.equal(await capture(s, prompt('quick', { message_id: 'msg_b' }), { deadline: quick.base + 1_000, now: quick.now, post: quick.post }), 'written', '100 + max(250, 200) <= 1000');
 });
 
 test('RT-7 the store bytes admission sees include an orphaned temporary file', async (t) => {

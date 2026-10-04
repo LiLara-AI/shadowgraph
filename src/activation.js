@@ -4,12 +4,14 @@
 // step of any rollback. The record is `<SHADOWGRAPH_HOME or ~/.shadowgraph>/
 // activation.json`, in exactly the shape delivery reads (src/delivery.js), with
 // an append-only history. It holds configuration and evidence references,
-// never memory. `delivery` and `capture` exist; extraction arrives in P7.
+// never memory. Delivery, capture and extraction share this record fence.
+import { randomUUID } from 'node:crypto';
+import { createDestinationFence } from './revision-store.js';
 import { execFile } from 'node:child_process';
 import { lstat, readFile, rename } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, isAbsolute } from 'node:path';
 import { promisify } from 'node:util';
-import { CAPTURE_LIMITS, expireCaptureStore, storeRepository } from './capture-hook.js';
+import { CAPTURE_LIMITS, activeCapture, expireCaptureStore, storeRepository } from './capture-hook.js';
 import { activationFile, DELIVERY_CAP_BYTES, DELIVERY_DEADLINE_MS, readStoreForDelivery } from './delivery.js';
 import { defaultSettingsPath, HOOK_TEMPLATE_URL, installedHandlers, pinnedRuntime, runtimeHookCommand } from './host-hooks.js';
 import { confirmOwnerAction } from './internal/owner-confirmation.js';
@@ -36,6 +38,15 @@ async function recordAt(env) {
   error.code = 'activation_record_unreadable';
   error.path = path;
   throw error;
+}
+
+// Confirm and probe outside the short record fence. Compare the exact approved
+// record again inside it so another capability cannot be restored by a stale write.
+async function saveActivation(path, expected, next) {
+  return createDestinationFence(path).run(async () => {
+    if (await readText(path) !== expected) throw new Error('activation_record_changed_while_confirming');
+    await writeJsonAtomically(path, next);
+  });
 }
 
 // The installed host's version, read once at activation (a bounded call); a
@@ -113,6 +124,7 @@ export async function activateDelivery({ env = process.env, evidence, store, sto
   if (pinned && !pinned.captures && holdsCapture(payload)) throw new Error(`activation_runtime_cannot_read_capture (${pinned.path} is ${pinned.commit}, a build that cannot read the capture ${storeFile} holds or may hold; install a later runtime)`);
   if (pinned && !pinned.retentionReader && (holdsCapture(payload) || payload?.[DELETION_VIEW]?.retentionOverrides?.length)) throw new Error(`activation_runtime_cannot_read_retention (${pinned.path} does not enforce capture retention; install a compatible runtime)`);
   sharedWith(record?.capabilities?.capture, 'capture', storeFile, storage, pinned);
+  sharedWith(record?.capabilities?.extraction, 'extraction', storeFile, storage, pinned);
   const at = new Date().toISOString();
   const delivery = {
     state: 'active', changedAt: at, evidence,
@@ -132,7 +144,7 @@ export async function activateDelivery({ env = process.env, evidence, store, sto
     capabilities: { ...(record?.capabilities ?? {}), delivery },
     history: [...(Array.isArray(record?.history) ? record.history : []), { at, capability: 'delivery', state: 'active', evidence, surface, hostVersion: version, store: storeFile, runtimeCommit: pinned?.commit ?? null }]
   };
-  await writeJsonAtomically(path, next);
+  await saveActivation(path, text, next);
   return { capability: 'delivery', state: 'active', file: path, record: next, ...warning };
 }
 
@@ -173,6 +185,7 @@ export async function activateCapture({ env = process.env, evidence, store, stor
   if (pinned && !pinned.captures) throw new Error(`activation_runtime_cannot_capture (${pinned.path} is ${pinned.commit}, a build without the capture verb and reader; install a later runtime)`);
   if (pinned && !pinned.captureLifecycle) throw new Error(`activation_runtime_cannot_capture_lifecycle (${pinned.path} does not declare the required capture lifecycle; install a compatible runtime)`);
   sharedWith(record?.capabilities?.delivery, 'delivery', storeFile, storage, pinned);
+  sharedWith(record?.capabilities?.extraction, 'extraction', storeFile, storage, pinned);
   // The origin: the capability's own, else the latest one the history kept.
   const history = Array.isArray(record?.history) ? record.history : [];
   const kept = [record?.capabilities?.capture?.originId, ...history.filter((entry) => entry?.capability === 'capture').map((entry) => entry.originId).reverse()];
@@ -195,7 +208,7 @@ export async function activateCapture({ env = process.env, evidence, store, stor
     capabilities: { ...(record?.capabilities ?? {}), capture },
     history: [...history, { at, capability: 'capture', state: 'active', evidence, surface, hostVersion: version, store: storeFile, originId: capture.originId, coverage, limits: capture.limits, runtimeCommit: pinned?.commit ?? null }]
   };
-  await writeJsonAtomically(path, next);
+  await saveActivation(path, text, next);
   return { capability: 'capture', state: 'active', file: path, record: next };
 }
 
@@ -238,6 +251,12 @@ async function gitRepository(path) {
 // one the system cannot read for now (another process holding it) fails the
 // command and stays as it is.
 export const deactivateDelivery = (options) => deactivate('delivery', options);
+export async function deactivateExtraction(options = {}) {
+  const result = await deactivate('extraction', options);
+  const { waitForExtractionStop } = await import('./internal/extraction-state.js');
+  // Even an already disabled record may have a worker still settling.
+  return { ...result, cleanup: await waitForExtractionStop(options) };
+}
 export async function deactivateCapture(options = {}) {
   // Disabling capture is durable before cleanup starts. A locked, unreadable
   // or pending store cannot re-enable capture or masquerade as cleaned up.
@@ -250,23 +269,67 @@ export async function deactivateCapture(options = {}) {
 }
 
 async function deactivate(capability, { env = process.env, surface = 'cli' } = {}) {
-  let path, record, keptAside = null;
-  try {
-    ({ path, record } = await recordAt(env));
-  } catch (error) {
-    if (error.code !== 'activation_record_unreadable') throw error;
-    ({ path } = error);
-    keptAside = `${path}.unreadable-${new Date().toISOString().replace(/[:.]/gu, '-')}`;
-    await rename(path, keptAside);
-    record = { history: [] };
-  }
-  if (!keptAside && record?.capabilities?.[capability]?.state !== 'active') return { capability, state: 'deactivated', changed: false, file: path };
+  const file = activationFile(env);
+  if (!file) throw new Error('activation_home_not_absolute');
+  return createDestinationFence(await canonicalPath(file)).run(async () => {
+    let path, record, keptAside = null;
+    try {
+      ({ path, record } = await recordAt(env));
+    } catch (error) {
+      if (error.code !== 'activation_record_unreadable') throw error;
+      ({ path } = error);
+      keptAside = `${path}.unreadable-${new Date().toISOString().replace(/[:.]/gu, '-')}`;
+      await rename(path, keptAside);
+      record = { history: [] };
+    }
+    if (!keptAside && record?.capabilities?.[capability]?.state !== 'active') return { capability, state: 'deactivated', changed: false, file: path };
+    const at = new Date().toISOString();
+    const next = {
+      version: RECORD_VERSION,
+      capabilities: { ...(record.capabilities ?? {}), [capability]: { ...(record.capabilities?.[capability] ?? {}), state: 'deactivated', changedAt: at } },
+      history: [...(Array.isArray(record.history) ? record.history : []), { at, capability, state: 'deactivated', surface, ...(keptAside ? { replacedUnreadableRecord: keptAside } : {}) }]
+    };
+    await writeJsonAtomically(path, next);
+    return { capability, state: 'deactivated', changed: true, file: path, record: next, ...(keptAside ? { keptAside } : {}) };
+  });
+}
+
+// AG-3 is explicit. No live activation, route discovery or model call occurs
+// merely by importing this module. executorCheck/afterConfirmation are test seams.
+export async function activateExtraction({ env = process.env, evidence, store, storage = 'json', hostVersion,
+  settings = defaultSettingsPath(), runtime, executable, noOverageConfirmed, surface = 'cli', executorCheck, afterConfirmation } = {}) {
+  if (noOverageConfirmed !== true && noOverageConfirmed !== 'true') throw new Error('extraction_requires_no_overage_confirmation');
+  if (surface !== 'cli' || typeof executable !== 'string' || !isAbsolute(executable)) throw new Error('extraction_requires_explicit_executable');
+  const { storeFile, payload } = await checkedActivation({ evidence, store, storage, hostVersion });
+  if (!payload) throw new Error('extraction_store_busy');
+  if (await storeRepository(storeFile) || await gitRepository(storeFile)) throw new Error('capture_store_inside_repository');
+  const { path, text, record } = await recordAt(env);
+  const settingsFile = await canonicalPath(settings), { pinned } = await hooksRunning(settingsFile, runtime);
+  if (!pinned?.extraction) throw new Error('activation_runtime_cannot_extract');
+  if (!await activeCapture(env)) throw new Error('extraction_requires_active_capture');
+  for (const name of ['delivery', 'capture']) sharedWith(record?.capabilities?.[name], name, storeFile, storage, pinned);
+  const { createExtractor, EXTRACTION_MODEL } = await import('./extractor.js');
+  const { validExecutorReceipt, workerSettlement } = await import('./internal/extraction-state.js');
+  if (await workerSettlement(env) !== 'clear') throw new Error('worker_settlement_unconfirmed');
+  const { FROZEN_WORKER_BUDGETS, initializeUsage } = await import('./internal/extraction-budget.js');
+  const checked = await (executorCheck ?? (() => createExtractor({ executable, env }).check()))();
+  if (!validExecutorReceipt(checked) || checked.executable !== await canonicalPath(executable)) throw new Error('extraction_executor_unverified');
+  // Copy only resolved configuration and bounded metadata, never host diagnostics
+  // or auth response fields. The executor repeats all checks on every invocation.
+  const executor = Object.fromEntries(['ok', 'executable', 'binarySha256', 'hostVersion', 'model', 'restrictions', 'environmentNames', 'switches', 'configurationProfile']
+    .filter(key => checked[key] !== undefined).map(key => [key, structuredClone(checked[key])]));
   const at = new Date().toISOString();
-  const next = {
-    version: RECORD_VERSION,
-    capabilities: { ...(record.capabilities ?? {}), [capability]: { ...(record.capabilities?.[capability] ?? {}), state: 'deactivated', changedAt: at } },
-    history: [...(Array.isArray(record.history) ? record.history : []), { at, capability, state: 'deactivated', surface, ...(keptAside ? { replacedUnreadableRecord: keptAside } : {}) }]
-  };
-  await writeJsonAtomically(path, next);
-  return { capability, state: 'deactivated', changed: true, file: path, record: next, ...(keptAside ? { keptAside } : {}) };
+  const extraction = { state: 'active', activationId: randomUUID(), changedAt: at, evidence, store: { file: storeFile, storage },
+    runtime: pinned, settings: settingsFile, surface, model: EXTRACTION_MODEL, budgets: { ...FROZEN_WORKER_BUDGETS }, executor, noOverageConfirmed: true };
+  if (!(await isScratchFile(path)) && !await confirmOwnerAction('Activate extraction (subscription only; no overage authorized)', { record: path, ...extraction })) throw new Error(`activation_requires_owner_confirmation (${path})`);
+  await afterConfirmation?.();
+  if (await readText(path) !== text) throw new Error('activation_record_changed_while_confirming');
+  await initializeUsage({ env }); // Existing usage must validate and is never reset.
+  if (await readText(path) !== text) throw new Error('activation_record_changed_while_confirming');
+  const next = { version: RECORD_VERSION, capabilities: { ...(record?.capabilities ?? {}), extraction },
+    history: [...(Array.isArray(record?.history) ? record.history : []), { at, capability: 'extraction', state: 'active', evidence, surface,
+      activationId: extraction.activationId, store: storeFile, runtimeCommit: pinned.commit, model: extraction.model, budgets: extraction.budgets,
+      noOverageConfirmed: true, executor }] };
+  await saveActivation(path, text, next);
+  return { capability: 'extraction', state: 'active', file: path, record: next };
 }

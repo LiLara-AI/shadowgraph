@@ -3,6 +3,7 @@ import { constants as fsConstants } from 'node:fs';
 import { access, stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
+import { readExtractionAvailability } from './internal/extraction-availability.js';
 import { createStorage } from './storage.js';
 import { createShadowGraph } from './shadowgraph.js';
 import { backupFile, restoreFile } from './backup.js';
@@ -17,7 +18,7 @@ import { accessContext, bindWorkspaceProject, currentAccessOperation, discoverWo
 import { confirmOwnerAction, ownerAnswer } from './internal/owner-confirmation.js';
 import { applyQuarantine, quarantineSelection } from './internal/quarantine.js';
 import { changeHookSettings, defaultSettingsPath, pinnedRuntime, runtimeHookCommand } from './host-hooks.js';
-import { activateCapture, activateDelivery, deactivateCapture, deactivateDelivery } from './activation.js';
+import { activateCapture, activateDelivery, activateExtraction, deactivateCapture, deactivateDelivery, deactivateExtraction } from './activation.js';
 
 // On Windows a program is otherwise looked for in the working directory before
 // the path, so a `git.exe` a repository ships would run when a hook reads its
@@ -145,12 +146,25 @@ async function changeActivation() {
   const usage = command === 'activate'
     ? 'Usage: shadowgraph activate delivery --evidence <ref> --store <path> [--storage json|sqlite] [--host-version <version>] [--settings <path>] [--runtime <directory>]\n'
       + '       shadowgraph activate capture --evidence <ref> --store <path> [--storage json] [--only <project,...> | --exclude <project,...>] [--mcp-servers <name,...>] [--host-version <version>] [--settings <path>] [--runtime <directory>]'
-    : 'Usage: shadowgraph deactivate delivery|capture';
-  if (capability !== 'delivery' && capability !== 'capture') throw new Error(usage);
-  if (command === 'deactivate') return (capability === 'delivery' ? deactivateDelivery : deactivateCapture)(flagsOf(flags, {}, usage));
+      + '\n       shadowgraph activate extraction --evidence <ref> --store <path> --runtime <directory> --executable <absolute-path> --no-overage-confirmed true [--settings <path>]'
+    : 'Usage: shadowgraph deactivate delivery|capture|extraction';
+  if (!['delivery', 'capture', 'extraction'].includes(capability)) throw new Error(usage);
+  if (command === 'deactivate') return ({ delivery: deactivateDelivery, capture: deactivateCapture, extraction: deactivateExtraction })[capability](flagsOf(flags, {}, usage));
   const names = { '--evidence': 'evidence', '--store': 'store', '--storage': 'storage', '--host-version': 'hostVersion', '--settings': 'settings', '--runtime': 'runtime' };
+  if (capability === 'extraction') return activateExtraction(flagsOf(flags, { ...names, '--executable': 'executable', '--no-overage-confirmed': 'noOverageConfirmed' }, usage));
   if (capability === 'delivery') return activateDelivery(flagsOf(flags, names, usage));
   return activateCapture(flagsOf(flags, { ...names, '--only': 'only', '--exclude': 'exclude', '--mcp-servers': 'mcpServers' }, usage));
+}
+
+async function extractOnce() {
+  const automatic = rest.includes('--automatic');
+  const options = flagsOf(rest.filter(value => value !== '--automatic'), { '--project': 'project', '--origin': 'originId' }, 'Usage: shadowgraph extract [--project <project> | --origin <origin>]');
+  if (rest.filter(value => value === '--automatic').length > 1) throw new Error('duplicate --automatic');
+  const { runActivatedExtraction } = await import('./extraction-runtime.js');
+  const controller = new AbortController(), stop = () => controller.abort();
+  process.once('SIGTERM', stop); process.once('SIGINT', stop);
+  try { return await runActivatedExtraction({ ...options, automatic, signal: controller.signal }); }
+  finally { process.removeListener('SIGTERM', stop); process.removeListener('SIGINT', stop); }
 }
 
 // The Claude Code hook blocks (plan rev6 PR-31; PR-36c) are written into one
@@ -195,7 +209,7 @@ async function runOneShot() {
   const restoreValidator = createRestoreValidator();
   const store = await createStorage({ type: storageType, file, restoreValidator });
   try {
-    const graph = createShadowGraph();
+    const graph = createShadowGraph({ extractionAvailable: await readExtractionAvailability({ file, storage: storageType, store }) });
     graph.importData(await store.load());
     const workspace = await discoverWorkspace();
     const prepared = (value = {}) => accessContext(graph, value, 'cli', workspace);
@@ -396,7 +410,7 @@ async function runOneShot() {
     else if (command === 'decision') { result = graph.addDecision(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'attempt') { result = graph.addAttempt(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
     else {
-      throw new Error('Usage: shadowgraph <setup|doctor|serve|mcp|stats|list|search|retrieve|recall|remember|markdown-sync|context|review-context|deliver|capture|install-hooks|uninstall-hooks|activate|deactivate|review|reconsider|maintain|signals|ack|validate|repair-plan|backup|restore|migrate|downgrade|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge|quarantine|request-access|issue-access|delegate-access|revoke-access|discard-access|access-status|bind|attribute> [JSON/path] (restore <path> [--memory-only]; quarantine list|release|purge [JSON]; install-hooks and uninstall-hooks [--capture] [--settings <path>]; activate delivery|capture --evidence <ref> --store <path> [--runtime <directory>]; deactivate delivery|capture; capture --hook). Writes require project or originId (or confirmed workspace binding). Creation IDs are generated: omit id, retain returned IDs, and use idempotencyKey for retries. Reference IDs remain supported.');
+      throw new Error('Usage: shadowgraph <setup|doctor|serve|mcp|stats|list|search|retrieve|recall|remember|markdown-sync|context|review-context|deliver|capture|extract|install-hooks|uninstall-hooks|activate|deactivate|review|reconsider|maintain|signals|ack|validate|repair-plan|backup|restore|migrate|downgrade|decision|attempt|fact|outcome|status|link|traverse|redact|supersede|purge-preview|purge|quarantine|request-access|issue-access|delegate-access|revoke-access|discard-access|access-status|bind|attribute> [JSON/path] (restore <path> [--memory-only]; quarantine list|release|purge [JSON]; install-hooks and uninstall-hooks [--capture] [--settings <path>]; activate delivery|capture|extraction --evidence <ref> --store <path> [--runtime <directory>]; deactivate delivery|capture|extraction; extract [--project <project> | --origin <origin>]; capture --hook). Writes require project or originId (or confirmed workspace binding). Creation IDs are generated: omit id, retain returned IDs, and use idempotencyKey for retries. Reference IDs remain supported.');
     }
     return result;
   } finally {
@@ -409,6 +423,7 @@ try {
   else if (command === 'serve') await startHttp();
   else if (command === 'deliver') await deliverFromHook();
   else if (command === 'capture') await captureFromHook();
+  else if (command === 'extract') console.log(JSON.stringify(await extractOnce(), null, 2));
   else if (command === 'install-hooks' || command === 'uninstall-hooks') console.log(JSON.stringify(await changeHooks(), null, 2));
   else if (command === 'activate' || command === 'deactivate') console.log(JSON.stringify(await changeActivation(), null, 2));
   else {

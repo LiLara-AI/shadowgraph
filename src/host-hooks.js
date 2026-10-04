@@ -107,7 +107,10 @@ export async function pinnedRuntime(directory) {
   let lifecycle;
   try { lifecycle = JSON.parse(packed.get('src/capture-lifecycle-capability.json')?.toString('utf8') ?? 'null'); } catch { throw refused(); }
   const captureLifecycle = retentionReader && lifecycle?.version === 1;
-  return { path, commit: manifest.commit, tree: manifest.tree, tarballSha256: digest, captures: packed.has('integrations/claude-code.capture-hooks.json'), retentionReader, captureLifecycle };
+  let worker;
+  try { worker = JSON.parse(packed.get('src/extraction-capability.json')?.toString('utf8') ?? 'null'); } catch { throw refused(); }
+  const extraction = captureLifecycle && worker?.version === 1 && worker.workerFloor === 'PR40' && worker.activationFloor === 'PR41';
+  return { path, commit: manifest.commit, tree: manifest.tree, tarballSha256: digest, captures: packed.has('integrations/claude-code.capture-hooks.json'), retentionReader, captureLifecycle, extraction };
 }
 
 // The command a hook of one kind runs for a pinned runtime: this Node binary
@@ -148,7 +151,7 @@ export async function installedHandlers(path) {
 // the file is a scratch file (src/internal/owner-files.js), and the file must
 // still hold what was read. `command` replaces the template's, for a pinned
 // runtime. `afterConfirmation` is a test seam only.
-export async function changeHookSettings(requested, action, { command, kind, afterConfirmation } = {}) {
+export async function changeHookSettings(requested, action, { command, kind, afterConfirmation, env = process.env } = {}) {
   if (kind !== undefined && !Object.hasOwn(HOOK_KINDS, kind)) throw new Error(`hook_kind_unknown (${kind})`);
   const path = await canonicalPath(requested);
   const { text, settings } = await readSettings(path);
@@ -156,7 +159,10 @@ export async function changeHookSettings(requested, action, { command, kind, aft
   let result;
   if (action === 'uninstall') {
     const removed = Object.values(handlersByEvent(settings, kind)).flat().length;
-    if (removed === 0) return { settings: path, changed: false, removed: 0 };
+    if (removed === 0) {
+      const { deactivateExtraction } = await import('./activation.js');
+      return { settings: path, changed: false, removed: 0, extraction: await deactivateExtraction({ env }) };
+    }
     next = withoutShadowGraphHooks(settings, kind);
     result = { settings: path, changed: true, removed };
   } else {
@@ -172,6 +178,10 @@ export async function changeHookSettings(requested, action, { command, kind, aft
   if (!(await isScratchFile(path)) && !await confirmOwnerAction(title, { settings: path, action })) throw new Error(`hook_settings_require_owner_confirmation (${path})`);
   await afterConfirmation?.();
   if (await readText(path) !== text) throw new Error('settings_changed_while_confirming');
+  if (action === 'uninstall') {
+    const { deactivateExtraction } = await import('./activation.js');
+    result.extraction = await deactivateExtraction({ env });
+  }
   await writeJsonAtomically(path, next);
   return result;
 }

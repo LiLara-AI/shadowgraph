@@ -1,3 +1,4 @@
+import { readExtractionAvailability } from './internal/extraction-availability.js';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { timingSafeEqual } from 'node:crypto';
@@ -77,7 +78,8 @@ function coerceQuery(params) {
 export async function createShadowGraphServer(options = {}) {
   const restoreValidator = createRestoreValidator(options);
   const store = options.store ?? await createStorage({ type: options.storage ?? process.env.SHADOWGRAPH_STORAGE, file: options.file ?? process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json', restoreValidator });
-  const graph = createShadowGraph(options);
+  let extractionAvailability = () => false;
+  const graph = createShadowGraph({ ...options, extractionAvailable: scope => extractionAvailability(scope) });
   graph.importData(await store.load());
   const workspace = await discoverWorkspace(options.cwd);
   const dashboardRoot = new URL('../dashboard/', import.meta.url);
@@ -122,6 +124,7 @@ export async function createShadowGraphServer(options = {}) {
   }
 
   async function handle(path, method, body, accessManaged = false) {
+    extractionAvailability = await readExtractionAvailability({ store, storage: options.storage ?? process.env.SHADOWGRAPH_STORAGE ?? 'json', env: options.env });
     if (persistenceUnavailable) {
       if (method === 'GET' && path === '/health') return {
         ok: false, name: NAME, version: VERSION, status: 'degraded',

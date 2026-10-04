@@ -224,7 +224,7 @@ test('S-2: a correlation token ShadowGraph minted marks its own invocation; S-3:
   for (let depth = 0; depth < 20000; depth += 1) deep = { deep };
   assert.deepEqual(classifyCaptureSource(tool('Task', deep), minted), CAPTURED, 'past the bound nothing is read, so the event is captured');
   const worker = { ...without, sessionId: 'worker-session-7' };
-  assert.deepEqual(classifyCaptureSource(worker, { ...CONTEXT, workerSessionIds: ['worker-session-7'] }), { selfEvent: true, signal: 'S-3' });
+  assert.deepEqual(classifyCaptureSource(worker, { ...CONTEXT, observedAt: NOW, workerInvocations: [{ invocationId: 'worker-session-7', leaseId: 'own-lease', from: NOW, to: '2026-01-01T00:05:00.000Z' }] }), { selfEvent: true, signal: 'S-3' });
   assert.deepEqual(classifyCaptureSource(worker, CONTEXT), CAPTURED);
 });
 

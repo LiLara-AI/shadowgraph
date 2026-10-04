@@ -21,7 +21,11 @@ import { canonicalPath, repositoryOf as storeRepository } from './internal/owner
 import { KEYED_NAMES, KEYED_VALUES, REDACTED, isCredentialName } from './internal/redaction.js';
 import { privilegedExpireCapture, privilegedRecordCapture, privilegedRecordSelfEvent, privilegedRecordTranscript, privilegedSnapshot } from './internal/snapshot.js';
 import { TRANSCRIPT_TRIGGERS } from './internal/transcript.js';
+import { workerFenceFile, settlementFile } from './internal/extraction-state.js';
+import { usageFile } from './internal/extraction-budget.js';
+import { fenceLockPath } from './revision-store.js';
 import { usableOriginId } from './scope.js';
+import { readInvocationContext, identityFile } from './internal/extraction-identity.js';
 
 // Conservative admission limits, frozen until measured figures replace them
 // through a gate (§22.6.3). Crossing one refuses new items; it is never raised
@@ -266,6 +270,8 @@ export async function runCapture({ capture, input, deadline, record = null, regi
   const registryCanonical = registry && await fencePath(registry);
   // Opened before the store's lock is taken, so the lock is never held while
   // the file is found, and after anything else here that can throw.
+  const invocationContext = await readInvocationContext({ env, now });
+  const workerFiles = (await Promise.all([identityFile(env), usageFile(env), workerFenceFile(env), settlementFile(env)].map(async file => [await canonicalPath(file), await fenceLockPath(file)]))).flat();
   const transcript = await openTranscript(event.transcriptPath);
   const lockTimeoutMs = deadline - now() - COMMIT_MARGIN_MS;
   if (lockTimeoutMs <= 0) {
@@ -297,7 +303,8 @@ export async function runCapture({ capture, input, deadline, record = null, regi
       let changed = privilegedExpireCapture(graph, { mayContinue }).changed;
       const bound = accessContext(graph, {}, 'cli', workspace, { confirmedByStore: true }).binding?.project ?? null;
       const project = bound !== null && covered(capture.coverage, bound) ? bound : null;
-      const context = { ...captureArtefacts({ storeFile: file, runtimeDirectory: capture.runtime?.path ?? null, activationFile: record, markerFiles, registryFile: registryCanonical }), home, mcpServerNames: capture.mcpServerNames ?? ['shadowgraph'], correlationTokens: [], workerSessionIds: [] };
+      const workerInvocations = invocationContext.workerInvocations.filter(row => Date.parse(row.from) <= entered && entered < Date.parse(row.to));
+      const context = { ...captureArtefacts({ storeFile: file, runtimeDirectory: capture.runtime?.path ?? null, activationFile: record, markerFiles, registryFile: registryCanonical, workerFiles }), home, mcpServerNames: capture.mcpServerNames ?? ['shadowgraph'], workerInvocations, observedAt: new Date(entered).toISOString(), correlationTokens: workerInvocations.map(row => row.correlationToken) };
       // The transcript cursor's step; a throw is undone by its own transaction
       // and never costs the event's own item.
       const cursor = (step) => {

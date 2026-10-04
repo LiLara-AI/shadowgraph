@@ -92,7 +92,9 @@ test('install then uninstall gives back the settings file byte for byte, and a h
     assert.equal(ours(JSON.parse(await readFile(settings, 'utf8'))).length, 2);
     const removed = await run(['uninstall-hooks', '--settings', settings], home);
     assert.equal(removed.code, 0, removed.stderr);
-    assert.deepEqual(JSON.parse(removed.stdout), { settings: real(settings), changed: true, removed: 2 });
+    const { extraction, ...removal } = JSON.parse(removed.stdout);
+    assert.deepEqual(removal, { settings: real(settings), changed: true, removed: 2 });
+    assert.equal(extraction.state, 'deactivated'); assert.equal(extraction.cleanup.status, 'complete');
     assert.equal(await readFile(settings, 'utf8'), formatted(original));
   }
 });
@@ -102,7 +104,9 @@ test('nothing to change writes nothing: an absent file stays absent, and a secon
   const absent = join(home, 'absent-fixture.json');
   const none = await run(['uninstall-hooks', '--settings', absent], home);
   assert.equal(none.code, 0, none.stderr);
-  assert.deepEqual(JSON.parse(none.stdout), { settings: real(absent), changed: false, removed: 0 });
+  const { extraction, ...removal } = JSON.parse(none.stdout);
+  assert.deepEqual(removal, { settings: real(absent), changed: false, removed: 0 });
+  assert.equal(extraction.changed, false); assert.equal(extraction.cleanup.status, 'complete');
   assert.equal(existsSync(absent), false);
   const settings = join(home, 'host-hooks-fixture.json');
   await writeFile(settings, formatted({ model: 'opus' }));

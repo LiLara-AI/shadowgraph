@@ -14,6 +14,7 @@ import { EXTRACTION_SCHEMA, OUTPUT_SCHEMA_VERSION, PROMPT_VERSION, extractionPro
 import { FROZEN_WORKER_BUDGETS, withWorkerBudget } from './extraction-budget.js';
 import { invokeWithRetry, awaitWorkerStep } from './extraction-policy.js';
 import { sessionJournalEntries, workerReason } from './extraction-session.js';
+import { registerInvocation } from './extraction-identity.js';
 
 const digest = value => createHash('sha256').update(value).digest('hex');
 const refusal = code => { throw Object.assign(new Error(`Extraction refused (${code})`), { code }); };
@@ -153,6 +154,10 @@ export async function runExtractionDrain(options) {
   if (options.signal?.aborted) stop();
   const timer = setTimeout(stop, Number.isSafeInteger(budgets.wallMs) && budgets.wallMs > 0 ? Math.min(budgets.wallMs, FROZEN_WORKER_BUDGETS.wallMs) : 1);
   const signal = controller.signal;
+  const scopes = options.scopes ?? [{ project: options.project, originId: options.originId }];
+  let scopeIndex = 0;
+  const selectScope = () => { const scope = scopes[scopeIndex]; options = { ...options, project: scope?.project, originId: scope?.originId }; };
+  selectScope();
   let completed = 0, claimed = null, attempts = 0;
   const blocked = async reason => {
     reason = workerReason(reason);
@@ -165,18 +170,33 @@ export async function runExtractionDrain(options) {
     return { status: 'blocked', blockedReason: reason, completed, storeReceiptWritten };
   };
   try {
+    if (!Array.isArray(scopes) || scopes.some(scope => !scope || Boolean(scope.project) === Boolean(scope.originId)
+      || (scope.project !== undefined && (typeof scope.project !== 'string' || !scope.project.trim()))
+      || (scope.originId !== undefined && (typeof scope.originId !== 'string' || !scope.originId.trim())))) refusal('capture_scope_required');
+    if (!scopes.length) return { status: 'idle', completed: 0 };
     return await withWorkerBudget({ ...options, now: () => Date.parse(clock(options)), signal }, async budget => {
       for (;;) {
         budget.check(); if (options.guard && !await awaitWorkerStep(options.guard, signal)) return blocked('drain_stopped'); budget.check();
         claimed = await claimCapture({ ...options, signal, leaseMs: 300000, beforeClaim: input => budget.admit(input) });
-        if (claimed.status !== 'claimed') { claimed = null; return { status: 'idle', completed, storeReceiptWritten: await recordWorkerStatus({ ...options, signal }, null) }; }
+        if (claimed.status !== 'claimed') {
+          claimed = null;
+          const storeReceiptWritten = await recordWorkerStatus({ ...options, signal }, null);
+          if (++scopeIndex < scopes.length) { selectScope(); continue; }
+          return { status: 'idle', completed, storeReceiptWritten };
+        }
         attempts = 0;
+        const correlationToken = `sgcorr_${randomUUID()}`;
         const response = await invokeWithRetry({ request: { prompt: extractionPrompt(claimed.item, claimed.text), schema: EXTRACTION_SCHEMA }, signal, sleep: options.sleep,
           reserve: () => budget.reserve(), invoke: async request => {
             budget.check();
             if (options.guard && !await awaitWorkerStep(options.guard, signal) || !await claimIsCurrent({ ...options, signal }, claimed)) return { status: 'blocked', blockedReason: 'drain_stopped' };
+            budget.check();
+            const identity = { invocationId: randomUUID(), correlationToken, leaseId: claimed.leaseId, from: clock(options), to: claimed.lease.leaseExpiresAt };
+            await registerInvocation(identity, { env: options.env, now: () => Date.parse(clock(options)) });
+            budget.check();
+            if (options.guard && !await awaitWorkerStep(options.guard, signal)) return { status: 'blocked', blockedReason: 'drain_stopped' };
             budget.check(); attempts += 1;
-            return options.executor.extract({ ...request, signal });
+            return options.executor.extract({ ...request, signal, identity });
           } });
         if (response.status === 'blocked') return blocked(response.blockedReason);
         budget.check(); if (options.guard && !await awaitWorkerStep(options.guard, signal)) return blocked('drain_stopped'); budget.check();
