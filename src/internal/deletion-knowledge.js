@@ -192,8 +192,10 @@ export function restoreRecordValid(record, ledgerTombstones) {
 // project, at its marker's seq and instant, naming tokens. The lifted form
 // keyed on the same marker (§3.2 item 5) names none, so it is never taken for
 // the purge's own (re-review N1, P61).
-export const recordedBy = (purge, tombstones) => tombstones.some((tombstone) => isObject(tombstone) && tombstone.kind === 'project'
-  && tombstone.purgedProject === purge.project && tombstone.seq === purge.marker.seq && tombstone.at === purge.marker.at && Array.isArray(tombstone.tokens));
+export const recordedBy = (purge, tombstones) => tombstones.some((tombstone) => isObject(tombstone)
+  && (Object.hasOwn(purge, 'originId') ? tombstone.kind === 'origin' && tombstone.purgedOrigin === purge.originId
+    : tombstone.kind === 'project' && tombstone.purgedProject === purge.project)
+  && tombstone.seq === purge.marker.seq && tombstone.at === purge.marker.at && Array.isArray(tombstone.tokens));
 
 // The purge-pending record this build writes, validated strictly (PR-37d
 // design §3.5): exactly its members, one element per purge naming its project,
@@ -202,7 +204,10 @@ export const recordedBy = (purge, tombstones) => tombstones.some((tombstone) => 
 const markerValid = (marker) => within(marker, ['id', 'at', 'seq']) && named(marker.id) && isValidIsoInstant(marker.at) && Number.isSafeInteger(marker.seq) && marker.seq > 0;
 export function purgeRecordValid(record, ledgerTombstones) {
   if (!within(record, ['kind', 'purges']) || record.kind !== 'purge' || !Array.isArray(record.purges) || !record.purges.length) return false;
-  if (!record.purges.every((purge) => within(purge, ['project', 'mode', 'marker']) && named(purge.project) && ['logical', 'hard'].includes(purge.mode) && markerValid(purge.marker))) return false;
+  if (!record.purges.every((purge) => within(purge, ['project', 'originId', 'mode', 'marker'])
+    && Object.hasOwn(purge, 'project') !== Object.hasOwn(purge, 'originId')
+    && (Object.hasOwn(purge, 'originId') ? named(purge.originId) && purge.originId.trim() : named(purge.project))
+    && ['logical', 'hard'].includes(purge.mode) && markerValid(purge.marker))) return false;
   if (new Set(record.purges.map((purge) => purge.marker.id)).size !== record.purges.length) return false;
   return record.purges.every((purge) => recordedBy(purge, ledgerTombstones));
 }
@@ -221,11 +226,6 @@ export function captureItemRecordValid(record, tombstones) {
 
 // A record of either kind this build writes and resolves (PR-37d design §3.5).
 export const pendingRecordValid = (record, ledgerTombstones) => restoreRecordValid(record, ledgerTombstones) || purgeRecordValid(record, ledgerTombstones) || captureItemRecordValid(record, ledgerTombstones);
-
-// Structural preservation is distinct from permission to resolve a record.
-// The standalone origin reader cannot yet perform origin-sensitive recovery.
-export const originRestorePending = (record, tombstones = []) => record?.kind === 'restore'
-  && [...tombstones, ...(Array.isArray(record.add?.tombstones) ? record.add.tombstones : [])].some(item => item?.kind === 'origin');
 
 async function readKnowledge(file, { ledger }) {
   let text;
@@ -379,6 +379,27 @@ export function classifyRestore(payload, { tombstones = [], quarantine = [], tok
   const origins = new Set(counted.filter((tombstone) => tombstone.kind === 'origin' && named(tombstone.purgedOrigin)).map((tombstone) => tombstone.purgedOrigin));
   // A missing or unrecognised moveIn reads as "unknown" (§4.5).
   const moveRisk = counted.some((tombstone) => tombstone.moveIn !== 'none');
+  // Raw entries without an owner-matching capture have no erasure token or
+  // recorded creation witness. Do not reinstall potentially purged bytes that
+  // this format cannot withhold. Postdating is the existing marker proof above,
+  // never an optional timestamp on the raw. The shared classifier also protects
+  // recovery of an older pending restore and merge preflight, without writes.
+  const bindings = new Map();
+  for (const item of payload?.records ?? []) {
+    if (item?.kind !== 'capture' || !named(item.contentRef)) continue;
+    if (!bindings.has(item.contentRef)) bindings.set(item.contentRef, []);
+    bindings.get(item.contentRef).push(item);
+  }
+  const sameOwner = (left, right) => left.attribution === right.attribution
+    && (left.attribution === 'project' ? named(left.project) && left.project === right.project
+      : left.attribution === 'unattributed' && left.project === null && right.project === null && named(left.originId) && left.originId === right.originId);
+  const unbound = (payload?.captureContent ?? []).filter(raw => {
+    const reached = (raw?.attribution === 'project' && projects.has(raw.project))
+      || (raw?.attribution === 'unattributed' && raw.project === null && origins.has(raw.originId));
+    return (moveRisk || reached) && !(bindings.get(raw?.contentRef) ?? []).some(item => sameOwner(raw, item));
+  }).length;
+  if (unbound) throw deletionError(PURGE_AWARE_RESTORE_UNSUPPORTED,
+    `Deletion records reach unbound capture raw that this build cannot safely withhold (count ${unbound}); the restore or merge is refused before installation`);
   const stripped = tokensStripped !== undefined;
   // The entries of B's journal that name each entity (`hold()`'s predicate),
   // and the first of them by seq.
@@ -438,7 +459,6 @@ export function classifyRestore(payload, { tombstones = [], quarantine = [], tok
 function viewFor(payload, ledger, { pending, absent }) {
   if (!ledger?.pending.length) return viewOf(ledger);
   const [record] = ledger.pending;
-  if (originRestorePending(record, ledger.tombstones)) throw pendingUnsupported();
   if (pending === 'refuse' || ledger.pending.length > 1) throw pendingUnsupported();
   // Item deletion is completed by an ordinary write only. Its provisional
   // suppression view is internal to save; a read, hook or backup refuses.
@@ -447,7 +467,9 @@ function viewFor(payload, ledger, { pending, absent }) {
     return { ...viewOf(ledger), pending: true, purging: new Set() };
   }
   if (pending === 'read') throw purgeRecordValid(record, ledger.tombstones) || restoreRecordValid(record, ledger.tombstones) ? recordWaits() : pendingUnsupported();
-  if (purgeRecordValid(record, ledger.tombstones)) return { ...viewOf(ledger), pending: true, purging: new Set(record.purges.map((purge) => purge.project)) };
+  if (purgeRecordValid(record, ledger.tombstones)) return { ...viewOf(ledger), pending: true,
+    purging: new Set(record.purges.filter(purge => Object.hasOwn(purge, 'project')).map(purge => purge.project)),
+    purgingOrigins: new Set(record.purges.filter(purge => Object.hasOwn(purge, 'originId')).map(purge => purge.originId)) };
   if (!restoreRecordValid(record, ledger.tombstones)) throw pendingUnsupported();
   if ((ledger.retentionOverrides.length || hasCaptureRetentionState(payload)) && !record.inputs.retention) throw pendingUnsupported();
   const state = restoreBinding(record, payload, { absent });

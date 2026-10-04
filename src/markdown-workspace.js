@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
-import { dirname, join, relative, resolve } from 'node:path';
+import { lstat, mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
+import { dirname, join, parse, relative, resolve } from 'node:path';
 import { privilegedLiveSnapshot, privilegedSnapshot } from './internal/snapshot.js';
 import { isLegacyOwned, resolveScope } from './scope.js';
 
@@ -127,7 +127,7 @@ async function loadState(directory) {
   const content = await readOptional(join(directory, STATE_FILE));
   if (!content) return { version: 1, files: {} };
   const state = JSON.parse(content);
-  if (state?.version !== 1 || !state.files || typeof state.files !== 'object') throw new Error('Unsupported Markdown sync state');
+  if (state?.version !== 1 || !state.files || typeof state.files !== 'object' || Array.isArray(state.files)) throw new Error('Unsupported Markdown sync state');
   return state;
 }
 
@@ -165,7 +165,66 @@ function memoryRelativePath(memory) {
   return `${safeSegment(memory.project)}/${name}`;
 }
 
-async function push({ graph, directory, state, project, dryRun }) {
+// Check every component, including the workspace's ancestors. A tracked name
+// is never authority to follow a junction, symlink, alternate stream or escape.
+async function safeWorkspacePath(directory, name) {
+  if (typeof name !== 'string' || /[\\:\u0000-\u001f]/u.test(name)
+    || name.split('/').some(part => !part || part === '.' || part === '..' || /[. ]$/u.test(part)
+      || /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/iu.test(part))) {
+    throw new Error('Unsafe Markdown workspace path');
+  }
+  const path = resolve(directory, ...name.split('/'));
+  const root = parse(path).root;
+  let component = root;
+  for (const part of relative(root, path).split(/[\\/]/u)) {
+    component = join(component, part);
+    const info = await lstat(component).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+    if (info?.isSymbolicLink()) throw new Error('Unsafe link in Markdown workspace path');
+  }
+  return path;
+}
+
+async function pruneMissing({ graph, directory, state, project, dryRun, desiredPaths }) {
+  // Validate the complete inventory before deleting even the first file.
+  const entries = await Promise.all(Object.entries(state.files).map(async ([name, prior]) =>
+    ({ name, prior, path: await safeWorkspacePath(directory, name) })));
+  const liveIds = new Set(privilegedLiveSnapshot(graph).records.map(record => record.id));
+  const conflicts = [], candidates = [];
+  for (const entry of entries) {
+    const { name, prior, path } = entry;
+    if (!prior || liveIds.has(prior.memoryId) || desiredPaths.has(name)) continue;
+    const content = await readOptional(path);
+    if (content === null) {
+      // Older tracking has no owner. A missing file cannot prove one.
+      if (prior.project === project) candidates.push(entry);
+      continue;
+    }
+    let parsed;
+    try { parsed = parseMemoryMarkdown(content); } catch { continue; }
+    if (parsed.project !== project || (prior.project !== undefined && prior.project !== project)) continue;
+    if (parsed.id !== prior.memoryId || hash(content) !== prior.baseHash) {
+      conflicts.push({ path, reason: 'stale_projection_changed' }); continue;
+    }
+    const info = await lstat(path);
+    if (!info.isFile() || info.nlink > 1) { conflicts.push({ path, reason: 'unsafe_projection_file' }); continue; }
+    candidates.push({ ...entry, content });
+  }
+  let pruned = 0;
+  for (const { name, path, content } of candidates) {
+    if (content !== undefined) {
+      // Recheck after preflight. Interrupted deletion leaves its tracking so
+      // retry can finish without mistaking another project's file for ours.
+      await safeWorkspacePath(directory, name);
+      if (await readOptional(path) !== content) throw new Error('Markdown projection changed during prune');
+      if (!dryRun) await unlink(path);
+      pruned += 1;
+    }
+    delete state.files[name];
+  }
+  return { pruned, conflicts };
+}
+
+async function push({ graph, directory, state, project, dryRun, prune }) {
   const owned = graph.exportData({ project }).records.filter(record => record.kind === 'memory');
   const activeIdentities = new Set(owned.filter(record => record.status === 'active').map(identity));
   const memories = owned
@@ -175,7 +234,9 @@ async function push({ graph, directory, state, project, dryRun }) {
       && state.files[memoryRelativePath(record)]?.memoryId === record.id))
     .sort((left, right) => String(left.id).localeCompare(String(right.id)));
   const files = [];
-  const conflicts = [];
+  const cleanup = prune === true ? await pruneMissing({ graph, directory, state, project, dryRun,
+    desiredPaths: new Set(memories.map(memoryRelativePath)) }) : { pruned: 0, conflicts: [] };
+  const conflicts = cleanup.conflicts;
   let written = 0;
   let unchanged = 0;
   for (const memory of memories) {
@@ -202,10 +263,10 @@ async function push({ graph, directory, state, project, dryRun }) {
       written += 1;
       if (!dryRun) await atomicWrite(path, desired);
     }
-    state.files[relativePath] = { baseHash: desiredHash, memoryHash: memoryHash(memory), memoryId: memory.id };
+    state.files[relativePath] = { baseHash: desiredHash, memoryHash: memoryHash(memory), memoryId: memory.id, project: memory.project };
     files.push({ path, relativePath, memoryId: memory.id });
   }
-  return { written, unchanged, files, conflicts };
+  return { written, unchanged, files, conflicts, pruned: cleanup.pruned };
 }
 
 async function pull({ graph, directory, state, project, dryRun }) {
@@ -213,6 +274,7 @@ async function pull({ graph, directory, state, project, dryRun }) {
   // The live form (PR-37a): a file never matches what deletion records withhold.
   const snapshot = privilegedLiveSnapshot(graph);
   const allMemoriesById = new Map(snapshot.records.filter((record) => record.kind === 'memory').map((memory) => [memory.id, memory]));
+  const storedIds = new Set(privilegedSnapshot(graph).records.map(record => record.id));
   // A file names its project and is matched only to a memory that project
   // owns -- never to legacy "default" data or an origin's memory (P1 finding
   // F-25) -- read the way any read of that project is.
@@ -245,12 +307,12 @@ async function pull({ graph, directory, state, project, dryRun }) {
     const own = ownMemories(parsed.project);
     const fileHash = hash(content);
     const prior = state.files[relativePath];
-    if (prior && !allMemoriesById.has(prior.memoryId)) {
+    if ((prior && !allMemoriesById.has(prior.memoryId)) || (storedIds.has(parsed.id) && !allMemoriesById.has(parsed.id))) {
       conflicts.push({ path, reason: 'canonical_memory_missing' });
       continue;
     }
     // A baseline that exists but belongs to another owner has changed identity.
-    const baselineMemory = prior ? own.byId.get(prior.memoryId) ?? null : null;
+    const baselineMemory = own.byId.get(prior?.memoryId ?? parsed.id) ?? null;
     if (prior && (!baselineMemory || parsed.id !== prior.memoryId || identity(parsed) !== identity(baselineMemory))) {
       conflicts.push({ path, reason: 'identity_changed' });
       continue;
@@ -294,7 +356,7 @@ async function pull({ graph, directory, state, project, dryRun }) {
     });
     results.push(result);
     if (result.operation !== 'NOOP') imported += 1;
-    state.files[relativePath] = { baseHash: fileHash, memoryHash: memoryHash(result.memory), memoryId: result.memory.id };
+    state.files[relativePath] = { baseHash: fileHash, memoryHash: memoryHash(result.memory), memoryId: result.memory.id, project: result.memory.project };
     own.byIdentity.set(identity(result.memory), result.memory);
     files.push({ path, relativePath, memoryId: result.memory.id });
   }
@@ -309,6 +371,8 @@ export async function syncMarkdownWorkspace(options = {}) {
   if (options.persist && !options.loadPersisted) throw new Error('Markdown sync persist requires loadPersisted for durable reconciliation');
   const mode = options.mode ?? 'push';
   if (!['push', 'pull'].includes(mode)) throw new Error('Markdown sync mode must be push or pull');
+  if (options.prune !== undefined && typeof options.prune !== 'boolean') throw new Error('Markdown prune must be an explicit boolean');
+  if (options.prune && mode !== 'push') throw new Error('Markdown prune requires push mode');
   // A push writes one named project's own memories and nothing else (P1
   // findings F-08, F-21). With no project -- an origin included, which has no
   // project to file its memories under -- it refuses and writes no file.
@@ -319,6 +383,7 @@ export async function syncMarkdownWorkspace(options = {}) {
     };
   }
   const directory = resolve(options.directory);
+  if (options.prune) await safeWorkspacePath(directory, STATE_FILE);
   await mkdir(directory, { recursive: true });
   const state = await loadState(directory);
   const graphSnapshot = mode === 'pull' && options.dryRun !== true ? privilegedSnapshot(options.graph) : null;

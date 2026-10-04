@@ -6,7 +6,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { privilegedSnapshot, privilegedLiveSnapshot, privilegedRecordCapture } from '../src/internal/snapshot.js';
 import { withFallbackMisses } from '../src/internal/miss-ledger.js';
 import { rebuildProjection, schema5PurgeArtifactIssue, hardPurgeGapLedgerReport, journalFactLifecycleIssues } from '../src/journal.js';
-import { attachLedgerView, ledgerPath, readLedger, markerMatches, restoreRecordValid, originRestorePending } from '../src/internal/deletion-knowledge.js';
+import { attachLedgerView, ledgerPath, readLedger, markerMatches, restoreRecordValid } from '../src/internal/deletion-knowledge.js';
 import { createStorage } from '../src/storage.js';
 import { backupFile, restoreFile } from '../src/backup.js';
 import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
@@ -15,12 +15,6 @@ import { scratchDirectory } from '../tools/scratch-directory.js';
 const NOW = '2026-10-04T00:00:00.000Z';
 const now = () => NOW;
 const sqlite = (await getRuntimeCapabilities()).nodeSqlite;
-test('origin recovery guard accepts omitted ordinary tombstones and still checks added origin knowledge', () => {
-  assert.equal(originRestorePending({ kind: 'restore', add: { tombstones: [] } }), false);
-  assert.equal(originRestorePending({ kind: 'restore', add: { tombstones: [{ kind: 'origin' }] } }), true);
-  assert.equal(originRestorePending({ kind: 'restore', add: { tombstones: [{ kind: 'project' }] } }), false);
-});
-
 test('origin deletion skeleton reader accepts its explicit reason without carrying identity', () => {
   const skeleton = { id: 'synthetic-origin-skeleton', seq: 1, type: 'decision.recorded', at: NOW,
     project: null, entityKind: 'decision', entityId: null, schemaVersion: 7, payload: null,
@@ -161,7 +155,9 @@ test('origin suppression covers only its predated sessions and unresolved-scope 
   assert.deepEqual(privilegedSnapshot(viewed).captureSessions, snapshot.captureSessions);
 });
 
-for (const backend of ['json', 'sqlite']) test(`${backend} origin reader preserves completed knowledge and refuses unsupported restore before writes`, backend === 'sqlite' && !sqlite.available ? { skip: sqlite.reason } : {}, async t => {
+// The standalone reader's refusal tests remain in its immutable commit. The
+// writer now proves the replacement recovery behavior, not mere preservation.
+for (const backend of ['json', 'sqlite']) test(`${backend} origin writer restores while preserving completed knowledge and unknown ledger members`, backend === 'sqlite' && !sqlite.available ? { skip: sqlite.reason } : {}, async t => {
   const dir = await scratchDirectory(t, 'pr43-origin-restore-'), file = join(dir, backend === 'json' ? 'store.json' : 'store.db');
   const backup = join(dir, backend === 'json' ? 'backup.json' : 'backup.db');
   const env = { SHADOWGRAPH_HOME: join(dir, 'home') };
@@ -172,46 +168,55 @@ for (const backend of ['json', 'sqlite']) test(`${backend} origin reader preserv
     await writeFile(ledgerPath(file), JSON.stringify({ version: 1, tombstones: [tombstone], future: { preserve: true } }));
     await store.load();
     await backupFile(file, backup, { store });
-    const before = await readFile(file), ledgerBefore = await readFile(ledgerPath(file));
-    await assert.rejects(backend === 'json' ? restoreFile(backup, file, { env }) : store.restore(backup), { code: 'purge_aware_restore_unsupported_at_this_build' });
-    assert.deepEqual(await readFile(file), before);
-    assert.deepEqual(await readFile(ledgerPath(file)), ledgerBefore);
-    const pending = { kind: 'restore', pre: { revision: snapshot.revision ?? 0, head: null, existed: true }, expected: { revision: 1, head: null },
-      add: { tombstones: [tombstone], quarantine: [] }, inputs: { live: [], descent: false, descentMode: null, overlap: [], postdated: [] } };
-    assert.equal(restoreRecordValid(pending, []), true, 'structural preservation is not recovery support');
-    await writeFile(ledgerPath(file), JSON.stringify({ version: 1, tombstones: [tombstone], pending: [pending] }));
-    const pendingBefore = await readFile(ledgerPath(file));
-    for (const operation of [() => store.load(), () => store.save(snapshot), () => store.update(current => current)]) {
-      await assert.rejects(operation(), { code: 'deletion_pending_unsupported_at_this_build' });
-      assert.deepEqual(await readFile(ledgerPath(file)), pendingBefore);
-      assert.deepEqual(await readFile(file), before);
-    }
+    const backupBefore = await readFile(backup);
+    const result = await (backend === 'json' ? restoreFile(backup, file, { env }) : store.restore(backup));
+    assert.equal(result.deletionKnowledge, 'present');
+    assert.deepEqual((await readLedger(file)).tombstones, [tombstone]);
+    assert.deepEqual(JSON.parse(await readFile(ledgerPath(file), 'utf8')).future, { preserve: true });
+    assert.deepEqual(await readFile(backup), backupBefore);
+    assert.equal((await readLedger(file)).pending.length, 0);
+    assert.ok((await store.load()).records.some(record => record.project === 'p'));
   } finally { store.close(); }
 });
 
-for (const backend of ['json', 'sqlite']) test(`${backend} origin pending recovery refuses backup in every binding before ledger cleanup`, backend === 'sqlite' && !sqlite.available ? { skip: sqlite.reason } : {}, async t => {
+for (const backend of ['json', 'sqlite']) test(`${backend} origin pending restore recovery resolves only verified pre, expected and post bindings`, backend === 'sqlite' && !sqlite.available ? { skip: sqlite.reason } : {}, async t => {
   const dir = await scratchDirectory(t, 'pr43-origin-pending-');
   const file = join(dir, backend === 'json' ? 'store.json' : 'store.db');
   const env = { SHADOWGRAPH_HOME: join(dir, 'home') };
   const store = await createStorage({ type: backend, file, env });
   try {
     await store.save(fixture().snapshot);
-    const current = await store.load(), before = await readFile(file);
+    const current = await store.load();
     const binding = { revision: current.revision, head: current.journal.at(-1).id };
     const tombstone = { kind: 'origin', purgedOrigin: 'origin-a', at: NOW, tokens: [], mode: 'logical', moveIn: 'none' };
-    for (const state of ['pre', 'expected', 'post']) for (const placement of ['existing', 'added']) {
+    for (const state of ['pre', 'expected', 'post', 'unknown']) for (const placement of ['existing', 'added']) {
       const pending = { kind: 'restore', pre: { revision: binding.revision + 10, head: 'other-pre', existed: true },
         expected: { revision: binding.revision + 11, head: 'other-expected' }, post: { revision: binding.revision + 12, head: 'other-post' }, minted: [],
         add: { tombstones: placement === 'added' ? [tombstone] : [], quarantine: [] },
         inputs: { live: [], descent: false, descentMode: null, overlap: [], postdated: [] } };
-      pending[state] = { ...pending[state], ...binding };
-      const tombstones = placement === 'existing' ? [tombstone] : [];
+      if (state !== 'unknown') pending[state] = { ...pending[state], ...binding };
+      // The post binding exists only after ledger step one has appended add.
+      const tombstones = placement === 'existing' || state === 'post' ? [tombstone] : [];
       assert.equal(restoreRecordValid(pending, tombstones), true);
       await writeFile(ledgerPath(file), JSON.stringify({ version: 1, tombstones, pending: [pending] }));
       const ledgerBefore = await readFile(ledgerPath(file));
-      await assert.rejects(backupFile(file, join(dir, `${state}-${placement}.backup`), { store, env }), { code: 'deletion_pending_unsupported_at_this_build' });
+      const before = await readFile(file);
+      if (state === 'unknown') await assert.rejects(store.load(), /resolve|restore/i);
+      else await store.load();
       assert.deepEqual(await readFile(ledgerPath(file)), ledgerBefore);
       assert.deepEqual(await readFile(file), before);
+      const operation = () => backupFile(file, join(dir, `${state}-${placement}.backup`), { store, env });
+      if (state === 'unknown') {
+        await assert.rejects(operation(), /resolve|restore/i);
+        assert.deepEqual(await readFile(ledgerPath(file)), ledgerBefore);
+        assert.deepEqual(await readFile(file), before);
+      } else {
+        await operation();
+        const ledger = await readLedger(file);
+        assert.equal(ledger.pending.length, 0);
+        assert.deepEqual(ledger.tombstones, placement === 'added' && state === 'pre' ? [] : [tombstone]);
+        assert.deepEqual((await store.load()).records, current.records);
+      }
     }
   } finally { store.close(); }
 });

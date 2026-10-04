@@ -27,6 +27,7 @@ import { RUNTIME_MISSES, missReachedBy, runtimeMissLedgerIssue, withFallbackMiss
 import { supersessionOrder, temporalEvidence, versionTimes } from './internal/temporal-evidence.js';
 import { T1_DERIVATION_VERSION, t1Digest, t1Inputs, t1Line } from './compact-tier.js';
 import { withoutSourceCopies } from './internal/source-availability.js';
+import { assertSourceRemovalSafe } from './internal/source-deletion.js';
 import { SELF_SIGNALS, stripDeliveredBlocks } from './internal/capture-source.js';
 import { CAPTURE_COLLECTIONS, CAPTURE_CONTENT, CAPTURE_ENTRY_TYPES, CAPTURE_EVENT_IDENTITY, CAPTURE_IMPORT_TYPE, CAPTURE_KIND, CAPTURE_SESSIONS, CAPTURE_TRANSITIONS, captureCollectionIssue, captureEntryReachedBy, captureEventIssue, captureItemIssue, captureObservationIssue, CAPTURE_LIMIT_EVENT, CAPTURE_REFUSED_EVENT, OTHER_OWNER } from './internal/capture.js';
 import { TRANSCRIPT_ANCHOR_BYTES, TRANSCRIPT_GAP_REASONS, TRANSCRIPT_TRIGGERS, cursorBlock, cursorShape, digest, lastLineEnd, matchKey, transcriptEntry, transcriptLines } from './internal/transcript.js';
@@ -200,6 +201,14 @@ function ownedByProject(entity, project) {
   return entity?.project === project && entity?.attribution !== 'unattributed' && !isLegacyOwned(entity);
 }
 
+const originScope = scope => Object.hasOwn(scope, 'originId');
+const ownedByPurgeScope = (entity, scope) => originScope(scope)
+  ? entity?.attribution === 'unattributed' && entity.originId === scope.originId
+  : ownedByProject(entity, scope.project);
+const purgeMarkerInScope = (entry, scope) => originScope(scope)
+  ? entry?.type === 'origin.purged' && entry.payload?.originId === scope.originId
+  : entry?.type === 'project.purged' && entry.project === scope.project;
+
 // What a purge's commit point writes (PR-37d design §1, §2.1): the ledger
 // tombstone, the registry's lineage anchors and the marker's identity, built
 // from values purgeLive already holds, after staging validation and before the
@@ -209,7 +218,7 @@ function ownedByProject(entity, project) {
 // included; `absorbed` the intents of the earlier markers a hard re-purge
 // splices (§2.4), whose tokens and move-in it takes over.
 const MOVE_IN_ORDER = ['none', 'some', 'unknown'];
-function purgeIntent({ project, mode, marker, entities, journal, epoch, absorbed }) {
+function purgeIntent({ scope, mode, marker, entities, journal, epoch, absorbed }) {
   const tokens = new Set(absorbed.flatMap((intent) => intent.tombstone.tokens));
   for (const entity of entities) if (typeof entity.erasureToken === 'string' && entity.erasureToken) tokens.add(entity.erasureToken);
   // §1.3, per removed entity (V-4): its naming entries, by hold()'s predicate.
@@ -220,14 +229,15 @@ function purgeIntent({ project, mode, marker, entities, journal, epoch, absorbed
   const histories = [...naming.values()];
   let moveIn = 'none';
   if (histories.some((entries) => !entries.some((entry) => CREATION_ENTRY_TYPES.includes(entry.type)))) moveIn = 'unknown';
-  else if (histories.some((entries) => entries.some((entry) => entry.type === 'entity.attributed' && entry.project === project))) moveIn = 'some';
+  else if (histories.some((entries) => entries.some((entry) => entry.type === 'entity.attributed'
+    && (originScope(scope) ? ownedByPurgeScope(replayedEntity(entry), scope) : entry.project === scope.project)))) moveIn = 'some';
   for (const intent of absorbed) if (MOVE_IN_ORDER.indexOf(intent.tombstone.moveIn) > MOVE_IN_ORDER.indexOf(moveIn)) moveIn = intent.tombstone.moveIn;
   // §1.4: the epoch entry (the marker itself when the journal was empty; null
   // when a hard purge spliced it, filled at the commit point), the head before
   // the marker, and the marker.
   const epochEntryId = epoch === null ? marker.id : journal.find((entry) => entry?.seq === epoch)?.id ?? null;
   return {
-    tombstone: { kind: 'project', purgedProject: project, mode, at: marker.at, seq: marker.seq, tokens: [...tokens].sort(), moveIn },
+    tombstone: { ...(originScope(scope) ? { kind: 'origin', purgedOrigin: scope.originId } : { kind: 'project', purgedProject: scope.project }), mode, at: marker.at, seq: marker.seq, tokens: [...tokens].sort(), moveIn },
     lineage: { epochEntryId, headEntryId: journalHead({ journal }), markerEntryId: marker.id },
     marker: { id: marker.id, at: marker.at, seq: marker.seq }
   };
@@ -597,6 +607,19 @@ function rewriteBaselineForProjectPurge(entry, project, removed, removedRelation
   return true;
 }
 
+// Keep every replay/retry copy of surviving experience consistent with source
+// deletion. This removes typed evidence copies, not accepted canonical text.
+function rewriteDeletedSourceCopies(entries, removed) {
+  const baselines = new Set();
+  for (let index = 0; index < entries.length; index += 1) {
+    const previous = entries[index], next = withoutSourceCopies(previous, removed);
+    if (next === previous) continue;
+    entries[index] = next;
+    if (next.type === 'projection.baseline') { sanitizeRewrittenBaseline(next); baselines.add(next.seq); }
+  }
+  return baselines;
+}
+
 function journalProjectionSignature(report) {
   return JSON.stringify(canonical(report.projection));
 }
@@ -605,7 +628,7 @@ function journalProjectionSignature(report) {
 // Drop its replay effect only when every surviving member and retry mapping is
 // already identical in the surviving prefix. Keep initial/useful baselines and
 // let the normal validators refuse every other malformed placement.
-function normalizeRewrittenPurgeBaselines(entries, rewritten, modeFor) {
+function normalizeRewrittenPurgeBaselines(entries, rewritten, modeFor, reason) {
   const removedSequences = [];
   let skeletons = 0;
   for (const entry of [...entries]) {
@@ -629,7 +652,7 @@ function normalizeRewrittenPurgeBaselines(entries, rewritten, modeFor) {
       entries.splice(entries.indexOf(entry), 1);
       removedSequences.push(entry.seq);
     } else {
-      scrubLogicalPurgeSkeleton(entry);
+      scrubLogicalPurgeSkeleton(entry, reason);
       skeletons += 1;
     }
   }
@@ -1320,6 +1343,13 @@ export function createShadowGraph(options = {}) {
       if (!mayContinue()) return { ...result, more: true };
       if (typeof entity.captureRef === 'string') cited.add(entity.captureRef);
       for (const claim of entity.claims ?? []) if (typeof claim?.sourceRef === 'string') cited.add(claim.sourceRef);
+      for (const evidence of entity.causalClaim?.evidence ?? []) if (typeof evidence?.sourceRef === 'string') cited.add(evidence.sourceRef);
+    }
+    // Citations may name an item or its raw reference; multiple accepted items
+    // can share that reference. Protect the same cited bytes through every alias.
+    for (const item of captures.values()) {
+      if (!mayContinue()) return { ...result, more: true };
+      if (cited.has(item.id) && item.contentRef !== null) cited.add(item.contentRef);
     }
     const selected = new Map();
     for (const item of captures.values()) {
@@ -1332,6 +1362,12 @@ export function createShadowGraph(options = {}) {
       selected.set(item.id, { item, expiry });
     }
     const refs = new Set([...selected.values()].map(({ item }) => item.contentRef).filter(Boolean));
+    // An unexpired or unknown-schema item still retains its shared raw. Clear
+    // eligible expired pointers, but do not erase another item's retained bytes.
+    for (const item of captures.values()) {
+      if (!mayContinue()) return { ...result, more: true };
+      if (!selected.has(item.id)) refs.delete(item.contentRef);
+    }
     const states = [...selected.values()].filter(({ item }) => ['pending', 'failed'].includes(item.state));
     assertJournalCapacity(states.length);
     // Redact raw pointers/hashes in every known capture copy, keeping the
@@ -2419,7 +2455,8 @@ export function createShadowGraph(options = {}) {
     // next write: exactly what the purge's selection removes (PR-37d design
     // §4.1).
     const withheldEntity = (entity) => (entity?.erasureToken !== undefined && view.tokens.has(entity.erasureToken)) || Boolean(view.ids?.has(entity?.id))
-      || (view.purging?.has(entity?.project) === true && ownedByProject(entity, entity.project));
+      || (view.purging?.has(entity?.project) === true && ownedByProject(entity, entity.project))
+      || (entity?.attribution === 'unattributed' && view.purgingOrigins?.has(entity.originId) === true);
     const heldRecords = [...records.values()].filter(withheldEntity);
     const heldCaptures = [...captures.values()].filter(withheldEntity);
     const heldFacts = [...facts.values()].filter(withheldEntity);
@@ -2434,9 +2471,9 @@ export function createShadowGraph(options = {}) {
     // no entity and predate it, whether or not it names tokens; one with no
     // valid instant predates it. Access and authority entries never are.
     const predates = (project, at) => typeof project === 'string'
-      && view.projects.some((tombstone) => tombstone.project === project && !(isValidIsoInstant(at) && compareInstants(at, tombstone.at) >= 0));
+      && (view.purging?.has(project) === true || view.projects.some((tombstone) => tombstone.project === project && !(isValidIsoInstant(at) && compareInstants(at, tombstone.at) >= 0)));
     const originPredates = (owner, at) => owner?.attribution === 'unattributed'
-      && (view.origins ?? []).some(tombstone => tombstone.originId === owner.originId && !(isValidIsoInstant(at) && compareInstants(at, tombstone.at) >= 0));
+      && (view.purgingOrigins?.has(owner.originId) === true || (view.origins ?? []).some(tombstone => tombstone.originId === owner.originId && !(isValidIsoInstant(at) && compareInstants(at, tombstone.at) >= 0)));
     const entityKeys = ['recordId', 'factId', 'replacementId'];
     const namesNothing = (item) => ![...entityKeys, 'relationId'].some((key) => item?.[key] !== undefined && item?.[key] !== null);
     const heldEvents = events.filter((item) => entityKeys.some((key) => ids.has(item?.[key])) || relationIds.has(item?.relationId)
@@ -2448,11 +2485,13 @@ export function createShadowGraph(options = {}) {
       || (entry?.scope?.requestState === 'project_unresolved' && entry.scope.project === null
         && originPredates({ attribution: 'unattributed', originId: entry.scope.originId }, entry.at)));
     const contentRefs = new Set(heldCaptures.map((item) => item.contentRef).filter(Boolean));
-    const heldContent = extra(CAPTURE_CONTENT).filter((entry) => contentRefs.has(entry?.contentRef));
+    const heldContent = extra(CAPTURE_CONTENT).filter((entry) => contentRefs.has(entry?.contentRef)
+      || (view.purging?.has(entry?.project) === true && ownedByProject(entry, entry.project))
+      || (entry?.attribution === 'unattributed' && entry.project === null && view.purgingOrigins?.has(entry.originId) === true));
     // A session opened after the tombstone captures; one with no valid start
     // predates it, which fails closed (PR-37c design §1.3, R9).
     const heldSessions = extra(CAPTURE_SESSIONS).filter((session) => (session?.attribution === 'project' && predates(session.project, session.startedAt)) || originPredates(session, session.startedAt));
-    if (![heldRecords, heldCaptures, heldFacts, heldEvents, heldMisses, heldSessions].some((list) => list.length)) return;
+    if (![heldRecords, heldCaptures, heldFacts, heldEvents, heldMisses, heldSessions, heldContent].some((list) => list.length)) return;
     // W's journal entries become logical skeletons and the baseline is
     // rewritten without W, as a logical purge leaves them; the originals are
     // kept by id for the persistence snapshot.
@@ -4537,55 +4576,64 @@ export function createShadowGraph(options = {}) {
     return result;
   }
 
-  function projectPurgeSelection(project) {
-    if (typeof project !== 'string' || !project.trim()) throw new Error('A project name is required');
-    const recordsForProject = [...records.values()].filter((item) => ownedByProject(item, project));
-    const capturesForProject = [...captures.values()].filter((item) => ownedByProject(item, project));
-    const factsForProject = [...facts.values()].filter((item) => ownedByProject(item, project));
+  function purgeSelection(scope) {
+    const origin = originScope(scope), { project, originId } = scope;
+    if (origin ? usableOriginId(originId) === null : typeof project !== 'string' || !project.trim()) throw new Error(origin ? 'An origin identifier is required' : 'A project name is required');
+    const owns = item => ownedByPurgeScope(item, scope);
+    const recordsForProject = [...records.values()].filter(owns);
+    const capturesForProject = [...captures.values()].filter(owns);
+    const factsForProject = [...facts.values()].filter(owns);
     const ids = new Set(recordsForProject.map((item) => item.id));
     for (const record of recordsForProject) for (const alternative of record.alternatives ?? []) ids.add(alternative.id);
     for (const fact of factsForProject) ids.add(fact.id);
     for (const item of capturesForProject) ids.add(item.id);
     const relationIds = new Set([...relations.values()].filter((item) => ids.has(item.from) || ids.has(item.to)).map((item) => item.id));
     const referencesRemoved = (item) => {
+      if (origin && String(item.type).startsWith('access.')) return false;
       const entityId = item.entityId ?? item.recordId ?? item.factId;
       const relationId = item.relationId ?? (item.entityKind === 'relation' ? entityId : null);
-      if (relationId) return relationIds.has(relationId) || (!relations.has(relationId) && item.project === project && project !== 'default');
+      if (relationId) return relationIds.has(relationId) || (!relations.has(relationId) && !origin && item.project === project && project !== 'default');
       if (entityId) {
         if (ids.has(entityId)) return true;
         if (rawEntity(entityId) || captures.has(entityId)) return false;
       }
-      if (item.type === 'project.purged') return item.project === project;
+      if (['project.purged', 'origin.purged'].includes(item.type)) return purgeMarkerInScope(item, scope);
       // Capture's refusal entry names its project and nothing else, and only
       // this build writes it: it is never a legacy breadcrumb (PR-36b).
-      if (item.type === CAPTURE_REFUSED_EVENT) return item.project === project;
+      if (item.type === CAPTURE_REFUSED_EVENT) return !origin && item.project === project;
       // An unreferenced legacy "default" breadcrumb cannot establish ownership.
-      return item.payload ? ownedByProject(item.payload, project) : item.project === project && project !== 'default';
+      return item.payload ? owns(item.payload) : origin ? owns(item) : item.project === project && project !== 'default';
     };
     const removedEvents = new Set(events.filter(referencesRemoved));
     // The runtime miss ledger's entries recorded in the project, or naming an
     // entity it removes, go with it (PR-28a).
     const misses = Array.isArray(extras.get(RUNTIME_MISSES)) ? extras.get(RUNTIME_MISSES) : [];
     const removedEntityIds = new Set([...ids, ...relationIds]);
-    const reachesMiss = (entry) => missReachedBy(entry, project, removedEntityIds);
+    const reachesMiss = (entry) => origin
+      ? removedEntityIds.has(entry?.recordId) || (entry?.scope?.requestState === 'project_unresolved' && entry.scope.project === null && entry.scope.originId === originId)
+      : missReachedBy(entry, project, removedEntityIds);
     // Capture's own collections: the entries the project owns, and the content
     // a capture it removes names (PR-33).
     const removedContentRefs = new Set(capturesForProject.map((item) => item.contentRef).filter(Boolean));
-    const reachesCaptureEntry = (entry) => captureEntryReachedBy(entry, project, removedContentRefs);
+    const reachesCaptureEntry = (entry) => origin ? owns(entry) || removedContentRefs.has(entry?.contentRef) : captureEntryReachedBy(entry, project, removedContentRefs);
     // Capture's counts, of live memory as every other count is (PR-37d design
     // §6.1, FND-P6-02); and apart from them the project's records, captures and
     // facts deletion records hold out of it, which a purge removes too (R5 L1
     // VS1): counts only, never in the marker.
     const reached = (name) => (Array.isArray(extras.get(name)) ? extras.get(name) : []).filter(reachesCaptureEntry).length;
     const held = deletion.get('held')?.collections ?? {};
-    const withheld = ['records', 'captures', 'facts'].flatMap((name) => held[name]?.items ?? []).filter(([, item]) => ownedByProject(item, project)).length;
+    const withheld = ['records', 'captures', 'facts'].flatMap((name) => held[name]?.items ?? []).filter(([, item]) => owns(item)).length;
     // `entities`: what a purge's tombstone names by token (PR-37d design §1.2).
-    return { ids, relationIds, removedEvents, referencesRemoved, reachesMiss, reachesCaptureEntry, entities: [...recordsForProject, ...capturesForProject, ...factsForProject], summary: { project, records: recordsForProject.length, facts: factsForProject.length, relations: relationIds.size, events: removedEvents.size, journal: journal.filter(referencesRemoved).length, runtimeMisses: misses.filter(reachesMiss).length, captures: capturesForProject.length, captureContent: reached(CAPTURE_CONTENT), captureSessions: reached(CAPTURE_SESSIONS), withheld } };
+    return { ids, relationIds, removedEvents, referencesRemoved, reachesMiss, reachesCaptureEntry, entities: [...recordsForProject, ...capturesForProject, ...factsForProject], summary: { ...scope, records: recordsForProject.length, facts: factsForProject.length, relations: relationIds.size, events: removedEvents.size, journal: journal.filter(referencesRemoved).length, runtimeMisses: misses.filter(reachesMiss).length, captures: capturesForProject.length, captureContent: reached(CAPTURE_CONTENT), captureSessions: reached(CAPTURE_SESSIONS), withheld } };
   }
 
   function projectSummary(project) {
-    return projectPurgeSelection(project).summary;
+    return purgeSelection({ project }).summary;
   }
+
+  function originSummary(originId) { return purgeSelection({ originId }).summary; }
+  function purgeOrigin(originId, options = {}) { return purgeScope({ originId }, options); }
+  function purgeProject(project, options = {}) { return purgeScope({ project }, options); }
 
   // G5: `mode` defaults to a LOGICAL purge. Content is removed and an auditable
   // skeleton remains, so a rebuild does not resurrect purged data and the history
@@ -4597,25 +4645,38 @@ export function createShadowGraph(options = {}) {
   // is left. Its result and its marker count what it removed from live memory
   // (review K-2, C-6); only a hard purge's journal positions, which its marker
   // must name for the store's gaps to be explained, include W's (declared).
-  function purgeProject(project, purgeOptions = {}) {
-    if (!deletion.has('held')) return purgeLive(project, purgeOptions);
-    const live = projectPurgeSelection(project);
+  function purgeScope(scope, purgeOptions = {}) {
+    if (!deletion.has('held')) return purgeLive(scope, purgeOptions);
+    const live = purgeSelection(scope);
     const idempotencyRemoved = [...idempotency.values()].filter((value) => live.ids.has(value?.id)).length;
     // What a logical purge of the live graph alone redacts: W's entries are
     // skeletons there already.
-    const journalEntriesRedacted = journal.filter((item) => !(item.type === 'project.purged' && item.project === project && item.payload?.mode === 'hard')
+    const journalEntriesRedacted = journal.filter((item) => !(purgeMarkerInScope(item, scope) && (originScope(scope) || item.payload?.mode === 'hard'))
       && live.referencesRemoved(item) && (item.payload !== null || item.redacted !== true)).length;
     unhold();
-    const result = purgeLive(project, purgeOptions);
-    journal.find((entry) => entry.id === result.journalEntryId).payload.removed = live.ids.size;
-    hold();
-    return { ...result, ...live.summary, removed: live.ids.size, idempotencyRemoved, ...(result.mode === 'logical' ? { journalEntriesRedacted } : {}) };
+    try {
+      const result = purgeLive(scope, purgeOptions);
+      journal.find((entry) => entry.id === result.journalEntryId).payload.removed = live.ids.size;
+      return { ...result, ...live.summary, removed: live.ids.size, idempotencyRemoved, ...(result.mode === 'logical' ? { journalEntriesRedacted } : {}) };
+    } finally { hold(); }
   }
 
-  function purgeLive(project, purgeOptions = {}) {
+  function removedSourceReferences(removed, contentRefs) {
+    const sources = new Set([...removed, ...contentRefs]);
+    for (const item of captures.values()) if (contentRefs.has(item.contentRef)) sources.add(item.id);
+    assertSourceRemovalSafe({ records: [...records.values()], facts: [...facts.values()], journal,
+      idempotency: [...idempotency.values()] }, sources, removed, SCHEMA_VERSION);
+    return sources;
+  }
+
+  function purgeLive(scope, purgeOptions = {}) {
+    const origin = originScope(scope), { project } = scope;
     const mode = purgeOptions.mode ?? (purgeOptions.hard === true ? 'hard' : 'logical');
     if (!['logical', 'hard'].includes(mode)) throw new Error('Purge mode must be logical or hard');
-    const { summary, ids: removed, relationIds: removedRelationIds, removedEvents: eventsToRemove, referencesRemoved, reachesMiss, reachesCaptureEntry, entities } = projectPurgeSelection(project);
+    const { summary, ids: removed, relationIds: removedRelationIds, removedEvents: eventsToRemove, referencesRemoved, reachesMiss, reachesCaptureEntry, entities } = purgeSelection(scope);
+    const contentRefs = new Set(entities.filter(item => item.kind === CAPTURE_KIND).map(item => item.contentRef).filter(Boolean));
+    for (const entry of extras.get(CAPTURE_CONTENT) ?? []) if (reachesCaptureEntry(entry)) contentRefs.add(entry.contentRef);
+    const sourceReferences = removedSourceReferences(removed, contentRefs);
     const idempotencyKeysToRemove = [...idempotency]
       .filter(([, value]) => removed.has(value?.id))
       .map(([key]) => key);
@@ -4630,7 +4691,7 @@ export function createShadowGraph(options = {}) {
     const splicedMarkers = new Set();
     const removedJournalSequences = mode === 'hard'
       ? stagedJournal
-        .filter((item) => item.type === 'project.purged' && item.project === project && item.payload?.mode === 'hard')
+        .filter((item) => purgeMarkerInScope(item, scope) && item.payload?.mode === 'hard')
         .flatMap((item) => Array.isArray(item.payload?.removedJournalSequences) ? item.payload.removedJournalSequences.filter(Number.isInteger) : [])
       : [];
     if (mode === 'hard') {
@@ -4638,24 +4699,26 @@ export function createShadowGraph(options = {}) {
         const item = stagedJournal[index];
         if (referencesRemoved(item)) {
           if (Number.isInteger(item.seq)) removedJournalSequences.push(item.seq);
-          if (item.type === 'project.purged') splicedMarkers.add(item.id);
+          if (['project.purged', 'origin.purged'].includes(item.type)) splicedMarkers.add(item.id);
           stagedJournal.splice(index, 1);
           journalEntriesRemoved += 1;
         }
       }
     } else {
       for (const item of stagedJournal) {
-        if (item.type === 'project.purged' && item.project === project && item.payload?.mode === 'hard') continue;
+        // An origin marker's selector lives in its content-free payload. Keep
+        // it under logical re-purge so later recovery can still name its scope.
+        if (purgeMarkerInScope(item, scope) && (origin || item.payload?.mode === 'hard')) continue;
         if (referencesRemoved(item)) {
           if (item.payload !== null || item.redacted !== true) journalEntriesRedacted += 1;
           // A deleted capture's skeleton keeps saying so.
-          scrubLogicalPurgeSkeleton(item, item.redacted === true && item.redactedReason === 'capture_deleted' ? 'capture_deleted' : undefined);
+          scrubLogicalPurgeSkeleton(item, item.redacted === true && item.redactedReason === 'capture_deleted' ? 'capture_deleted' : origin ? 'origin_purged' : undefined);
         }
       }
     }
-    const rewrittenBaselines = new Set();
+    const rewrittenBaselines = rewriteDeletedSourceCopies(stagedJournal, sourceReferences);
     for (const item of stagedJournal) if (rewriteBaselineForProjectPurge(item, project, removed, removedRelationIds)) rewrittenBaselines.add(item.seq);
-    const normalized = normalizeRewrittenPurgeBaselines(stagedJournal, rewrittenBaselines, () => mode);
+    const normalized = normalizeRewrittenPurgeBaselines(stagedJournal, rewrittenBaselines, () => mode, origin ? 'origin_purged' : undefined);
     removedJournalSequences.push(...normalized.removedSequences);
     journalEntriesRemoved += normalized.removedSequences.length;
     journalEntriesRedacted += normalized.skeletons;
@@ -4663,8 +4726,8 @@ export function createShadowGraph(options = {}) {
     // Only the completion of a pending purge forces the marker's id and instant
     // (PR-37d design §2.5): the public registration never passes one.
     const purgeEntry = prebuildJournalEntry({
-      type: 'project.purged', entityKind: 'project', entityId: null, project, id: purgeOptions.marker?.id, at: purgeOptions.marker?.at,
-      payload: { project, mode, removed: removed.size, removedJournalSequences: uniqueRemovedJournalSequences }
+      type: origin ? 'origin.purged' : 'project.purged', entityKind: origin ? 'origin' : 'project', entityId: null, project: origin ? null : project, id: purgeOptions.marker?.id, at: purgeOptions.marker?.at,
+      payload: { ...scope, mode, removed: removed.size, removedJournalSequences: uniqueRemovedJournalSequences }
     }, journalSeq + 1);
     stagedJournal.push(purgeEntry);
     const stagedJournalEpoch = journalEpoch ?? purgeEntry.seq;
@@ -4682,7 +4745,7 @@ export function createShadowGraph(options = {}) {
     // §2.1); an earlier intent whose marker this purge splices is absorbed.
     const intents = deletion.get('intents') ?? [];
     const absorbed = intents.filter((item) => splicedMarkers.has(item.marker.id));
-    const intent = purgeIntent({ project, mode, marker: purgeEntry, entities, journal, epoch: journalEpoch, absorbed });
+    const intent = purgeIntent({ scope, mode, marker: purgeEntry, entities, journal, epoch: journalEpoch, absorbed });
 
     for (const recordId of removed) { records.delete(recordId); captures.delete(recordId); }
     for (const [scopeKey, memory] of currentMemories) if (removed.has(memory.id)) currentMemories.delete(scopeKey);
@@ -4691,12 +4754,18 @@ export function createShadowGraph(options = {}) {
     for (const [key, fact] of currentFacts) if (removed.has(fact.id)) currentFacts.delete(key);
     for (const [key, signal] of reviewSignals) if (removed.has(signal.decisionId)) reviewSignals.delete(key);
     for (const key of idempotencyKeysToRemove) idempotency.delete(key);
+    for (const collection of [records, facts, idempotency]) for (const [key, value] of collection) {
+      const next = withoutSourceCopies(value, sourceReferences);
+      if (next !== value) collection.set(key, next);
+    }
+    recomputeCurrentMemories();
+    recomputeCurrentFacts();
     filterInPlace(events, (item) => !eventsToRemove.has(item));
     journal.splice(0, journal.length, ...stagedJournal);
     journalSeq = purgeEntry.seq;
     journalEpoch = stagedJournalEpoch;
     deletion.set('intents', [...intents.filter((item) => !absorbed.includes(item)), intent]);
-    authority.purge(project);
+    if (!origin) authority.purge(project);
     // In both modes the miss-ledger entries the purge reaches are removed, and
     // the last entries take the collection with them (PR-28a).
     if (summary.runtimeMisses) {
@@ -4773,6 +4842,7 @@ export function createShadowGraph(options = {}) {
     const removedCaptures = [...removed].map((entityId) => captures.get(entityId)).filter(Boolean);
     const removedCaptureIds = new Set(removedCaptures.map(byId));
     const contentRefs = new Set(removedCaptures.map((item) => item.contentRef).filter(Boolean));
+    const sourceReferences = removedSourceReferences(removed, contentRefs);
     const priorOf = replayedEntities();
     const assigning = (plan.quarantine ?? []).map((entry) => ({ ...entry, entity: entityOf(entry.id) }))
       .filter(({ entity }) => entity !== undefined && entity.erasureToken === undefined);
@@ -4805,7 +4875,7 @@ export function createShadowGraph(options = {}) {
         scrubLogicalPurgeSkeleton(entry, (captureDeleted && entry.entityKind === CAPTURE_KIND) || (entry.redacted === true && entry.redactedReason === 'capture_deleted') ? 'capture_deleted' : undefined);
       }
     }
-    const rewrittenBaselines = new Set();
+    const rewrittenBaselines = rewriteDeletedSourceCopies(stagedJournal, sourceReferences);
     for (const entry of stagedJournal) {
       if (rewriteBaselineForProjectPurge(entry, null, removed, removedRelationIds)) rewrittenBaselines.add(entry.seq);
       for (const item of entry?.type === 'projection.baseline' ? entry.payload?.records ?? [] : [entry?.payload]) {
@@ -4821,7 +4891,10 @@ export function createShadowGraph(options = {}) {
     skeletons += normalized.skeletons;
     let sequence = journalSeq;
     const assigned = assigning.map(({ token }, index) => token ?? tokens[index] ?? allocateErasureToken());
-    const appended = assigning.map(({ entity }, index) => prebuildJournalEntry(tokenAssignment({ ...entity, erasureToken: assigned[index] }, priorOf), ++sequence));
+    // Assignment remains a token-only change relative to the rewritten
+    // journal. Its witness must lose the same source copies as that journal.
+    const cleanedPrior = new Map([...priorOf].map(([id, entity]) => [id, withoutSourceCopies(entity, sourceReferences)]));
+    const appended = assigning.map(({ entity }, index) => prebuildJournalEntry(tokenAssignment({ ...entity, erasureToken: assigned[index] }, cleanedPrior), ++sequence));
     const logical = [...modes.values()].filter((mode) => mode === 'logical').length;
     const hard = removed.size - logical;
     const marker = (payload) => prebuildJournalEntry({ type: 'restore.reapplied', payload }, ++sequence);
@@ -4839,6 +4912,10 @@ export function createShadowGraph(options = {}) {
     for (const relationId of removedRelationIds) relations.delete(relationId);
     for (const [key, signal] of reviewSignals) if (removed.has(signal.decisionId)) reviewSignals.delete(key);
     for (const [key, value] of [...idempotency]) if (removed.has(value?.id)) idempotency.delete(key);
+    for (const collection of [records, facts, idempotency]) for (const [key, value] of collection) {
+      const next = withoutSourceCopies(value, sourceReferences);
+      if (next !== value) collection.set(key, next);
+    }
     filterInPlace(events, (item) => !(['recordId', 'factId', 'replacementId'].some((key) => removed.has(item?.[key])) || removedRelationIds.has(item?.relationId)));
     const removedEntityIds = new Set([...removed, ...removedRelationIds]);
     const prune = (name, keep) => {
@@ -4854,7 +4931,10 @@ export function createShadowGraph(options = {}) {
     journal.splice(0, journal.length, ...nextJournal);
     journalSeq = sequence;
     journalEpoch = nextEpoch;
-    assigning.forEach(({ entity }, index) => {
+    assigning.forEach(({ id }, index) => {
+      // Source cleanup can replace the canonical object. Mutate its current
+      // identity, not the preflight object retained in `assigning`.
+      const entity = entityOf(id);
       touchMutableObject(entity);
       entity.erasureToken = assigned[index];
       tokenRetryValues(entity);
@@ -6635,8 +6715,10 @@ export function createShadowGraph(options = {}) {
     expand: auditedRead('expand', expand),
     redact: auditedRead('redact', redact),
     projectSummary,
+    originSummary,
     // No caller forces a marker (PR-37d design §2.5): only the mode reaches it.
     purgeProject: transactional('purgeProject', (project, options) => purgeProject(project, { mode: options?.mode, hard: options?.hard }), { mode: 'snapshot' }),
+    purgeOrigin: transactional('purgeOrigin', (originId, options) => purgeOrigin(originId, { mode: options?.mode, hard: options?.hard }), { mode: 'snapshot' }),
     review: auditedRead('review', review),
     reconsider: auditedRead('reconsider', reconsider),
     maintain: auditedRead('maintain', maintain),
@@ -6672,7 +6754,7 @@ export function createShadowGraph(options = {}) {
     completeCaptureDelete: transactional('completeCaptureDelete', (input) => deleteCapture(input, { recovery: true }), { mode: 'snapshot' }),
     recordSelfEvent: transactional('recordSelfEvent', recordSelfEvent), recordTranscript: transactional('recordTranscript', recordTranscript),
     reapplyDeletion: transactional('reapplyDeletion', reapplyDeletion, { mode: 'snapshot' }), quarantined,
-    completePurge: transactional('completePurge', (project, options) => purgeProject(project, { mode: options.mode, marker: options.marker }), { mode: 'snapshot' }) });
+    completePurge: transactional('completePurge', (selection, options) => purgeScope(typeof selection === 'string' ? { project: selection } : selection, { mode: options.mode, marker: options.marker }), { mode: 'snapshot' }) });
 }
 
 // `strict` is for caller writes, where a typo should fail loudly instead of

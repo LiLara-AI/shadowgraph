@@ -37,17 +37,14 @@ import { privilegedCompleteCaptureDelete, privilegedCompletePurge, privilegedExp
 import {
   CONTROL_LEDGER_MALFORMED, CONTROL_LEDGER_NEWER_VERSION, DELETION_FILE_DESTINATION_REFUSED, DELETION_INTENT, DELETION_PENDING_UNSUPPORTED, PURGE_AWARE_RESTORE_UNSUPPORTED, attachLedgerView, canonical,
   canonicalPath, captureItemRecordValid, itemRecordedBy, classifyRestore, deletionError, journalHead, ledgerSnapshot, linkCount, markerMatches, mergeAppliesTo, mergedTombstones, pendingUnsupported, purgeRecordValid, readLedger,
-  readRegistry, recordedBy, refusedWrite, registryFile, restoreBinding, restoreLedgerBytes, restoreRecordValid, restoreUnresolvable, originRestorePending, unlinkLedgerIfRecordOnly, writeLedger, writeRegistry
+  readRegistry, recordedBy, refusedWrite, registryFile, restoreBinding, restoreLedgerBytes, restoreRecordValid, restoreUnresolvable, unlinkLedgerIfRecordOnly, writeLedger, writeRegistry
 } from './deletion-knowledge.js';
 
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const named = (value) => typeof value === 'string' && value.length > 0;
 const entitiesOf = (payload) => [...(payload?.records ?? []), ...(payload?.facts ?? [])].filter(isObject);
 const journalOf = (payload) => (Array.isArray(payload?.journal) ? payload.journal.filter(isObject) : []);
-const markersOf = (payload) => journalOf(payload).filter((entry) => entry.type === 'project.purged');
-const originKnowledge = (payload, ledger) => journalOf(payload).some(entry => entry.type === 'origin.purged')
-  || ledger?.tombstones?.some(item => item.kind === 'origin');
-const refuseOriginRestore = () => { throw refusal('origin deletion recovery requires a later writer build'); };
+const markersOf = (payload) => journalOf(payload).filter((entry) => ['project.purged', 'origin.purged'].includes(entry.type));
 const holdsCursor = (payload) => Array.isArray(payload?.captureSessions) && payload.captureSessions.some((session) => isObject(session?.cursor));
 const firstPerToken = (entries) => {
   const seen = new Set();
@@ -82,7 +79,6 @@ export function retentionRestoreGuard(source, destination, backend = 'json') {
     const mine = await readLedger(destination);
     if (!mine?.pending.length) return;
     const carried = await readLedger(source);
-    if (originKnowledge(null, mine) || originKnowledge(null, carried)) refuseOriginRestore();
     let d;
     try { d = await read(); } catch (error) { throw refusal(UNREADABLE_DESTINATION, error); }
     if (mine.pending[0]?.kind === 'restore' && !mine.pending[0]?.inputs?.retention
@@ -112,7 +108,6 @@ export function retentionRestoreGuard(source, destination, backend = 'json') {
     }
     // Parsing the sidecar above validates its policy even if no deletion
     // knowledge is present. Validate the payload before any resolver write.
-    if (originKnowledge(d) || originKnowledge(b)) refuseOriginRestore();
     try { validateRestorePayload(b); } catch (error) { throw refusal('the restore source is invalid', error); }
   };
 }
@@ -144,14 +139,16 @@ export async function refuseAliasDestination(destination) {
 // journal holds an attribution into the project, a skeleton's included, and
 // `none` when neither does. A marker naming no project is unknown: no window
 // of its can be read.
-function moveInOf(marker, mode, project, d, b) {
+function moveInOf(marker, mode, scope, d, b) {
   const journal = journalOf(d);
   const epoch = d?.journalEpoch;
-  if (mode !== 'logical' || !named(project) || !Number.isSafeInteger(marker.seq) || !Number.isSafeInteger(epoch)) return 'unknown';
+  const origin = Object.hasOwn(scope, 'originId');
+  if (mode !== 'logical' || !named(origin ? scope.originId : scope.project) || !Number.isSafeInteger(marker.seq) || !Number.isSafeInteger(epoch)) return 'unknown';
   const sequences = new Set(journal.map((entry) => entry.seq).filter(Number.isSafeInteger));
   for (let seq = epoch; seq <= marker.seq; seq += 1) if (!sequences.has(seq)) return 'unknown';
   if (journal.some((entry) => entry.type === 'projection.baseline' && entry.seq < marker.seq)) return 'unknown';
-  return [...journal, ...journalOf(b)].some((entry) => entry.type === 'entity.attributed' && entry.project === project) ? 'some' : 'none';
+  return [...journal, ...journalOf(b)].some((entry) => entry.type === 'entity.attributed'
+    && (origin ? entry.payload?.attribution === 'unattributed' && entry.payload.originId === scope.originId : entry.project === scope.project)) ? 'some' : 'none';
 }
 
 // D's purge marker as a tombstone (§1.1): its project, a skeleton marker as
@@ -159,11 +156,15 @@ function moveInOf(marker, mode, project, d, b) {
 // is not one, the restore's (V-11), its seq, no tokens, and its move-in
 // evidence, which only D's journal has and the primitive replaces.
 function liftMarker(marker, d, b, instant) {
+  const origin = marker.type === 'origin.purged';
   const project = marker.payload?.project ?? marker.project;
+  const originId = marker.payload?.originId;
+  if (origin && !named(originId)) throw refusal('an origin purge marker no longer names its scope');
+  const scope = origin ? { originId } : { project };
   const mode = marker.payload === null || marker.payload?.mode === 'logical' ? 'logical' : 'hard';
   return {
-    kind: 'project', ...(named(project) ? { purgedProject: project } : {}), mode,
-    at: isValidIsoInstant(marker.at) ? marker.at : instant, seq: marker.seq, tokens: null, moveIn: moveInOf(marker, mode, project, d, b)
+    ...(origin ? { kind: 'origin', purgedOrigin: originId } : { kind: 'project', ...(named(project) ? { purgedProject: project } : {}) }), mode,
+    at: isValidIsoInstant(marker.at) ? marker.at : instant, seq: marker.seq, tokens: null, moveIn: moveInOf(marker, mode, scope, d, b)
   };
 }
 
@@ -364,8 +365,6 @@ async function preStep(ctx, given) {
   let registry;
   try { [mine, carried, registry] = [await ledgerSnapshot(ctx.destination), await ledgerSnapshot(ctx.source), await readRegistry(ctx.env)]; }
   catch (error) { throw refusal(UNREADABLE_KNOWLEDGE, error); }
-  if (originKnowledge(d, mine.ledger) || originKnowledge(b, carried.ledger)
-    || registry?.tombstones?.some(item => item.kind === 'origin' && mergeAppliesTo(item, b))) refuseOriginRestore();
   // Step 0 resolved any record; one here is a defence. A sidecar never
   // carries one (C3), an empty list being none (review finding 15).
   if (mine.ledger?.pending.length) throw refusal(PENDING_DELETION);
@@ -505,7 +504,6 @@ export function activation(ctx, callerAfterReplace) {
 // tokens it assigns (kept on a re-run) and the state the commit leaves.
 function ledgerStepOne(ledger, effect) {
   const [record] = ledger.pending;
-  if (originRestorePending(record, ledger.tombstones)) throw pendingUnsupported();
   const kept = new Set((ledger.tombstones ?? []).map(canonical));
   const tombstones = record.add.tombstones.filter((tombstone) => !kept.has(canonical(tombstone)) && kept.add(canonical(tombstone)));
   if (tombstones.length) ledger.tombstones = [...(ledger.tombstones ?? []), ...tombstones];
@@ -553,7 +551,6 @@ async function resolveRecord({ read, commit, checkPurge }, file, env, { verifier
   const ledger = await readLedger(file);
   if (!ledger?.pending.length) return null;
   const [record] = ledger.pending;
-  if (originRestorePending(record, ledger.tombstones)) throw pendingUnsupported();
   if (ledger.pending.length === 1 && captureItemRecordValid(record, ledger.tombstones)) {
     if (!items) throw pendingUnsupported();
     return completePurges({ read, commit, checkPurge }, file, env, ledger, record, { verifier, lock });
@@ -794,16 +791,22 @@ export async function recordPurges(file, { current, data, env = process.env, loc
   // tombstone records is recorded by one lifted form keyed on the splicing
   // hard purge's own marker K1, its move-in the riskiest of theirs.
   const spliced = markersOf(current).filter((marker) => !written.has(marker.id) && !(ledger?.tombstones ?? []).some((tombstone) => markerMatches(tombstone, marker)));
-  let lifted = null;
-  if (spliced.length) {
-    const splicing = fresh.find((intent) => intent.tombstone.mode === 'hard');
+  const lifted = [];
+  for (const marker of spliced) {
+    const prior = liftMarker(marker, current, null, marker.at);
+    const splicing = fresh.find(({ tombstone }) => tombstone.mode === 'hard' && tombstone.kind === prior.kind
+      && (prior.kind === 'origin' ? tombstone.purgedOrigin === prior.purgedOrigin : tombstone.purgedProject === prior.purgedProject));
     if (!splicing) throw refusedWrite('a purge marker spliced by no hard purge');
     const k1 = written.get(splicing.marker.id);
-    lifted = { ...liftMarker(k1, data, null, k1.at), moveIn: spliced.map((marker) => liftMarker(marker, current, null, k1.at).moveIn).reduce(riskier, 'none') };
+    const form = liftMarker(k1, data, null, k1.at);
+    const earlier = lifted.find(item => item.kind === form.kind && item.seq === form.seq && item.at === form.at
+      && (form.kind === 'origin' ? item.purgedOrigin === form.purgedOrigin : item.purgedProject === form.purgedProject));
+    if (earlier) earlier.moveIn = riskier(earlier.moveIn, prior.moveIn);
+    else lifted.push({ ...form, moveIn: prior.moveIn });
   }
   const record = itemDeletion
     ? { kind: 'capture_item', items: fresh.map(({ item, marker }) => ({ ...item, marker })) }
-    : { kind: 'purge', purges: fresh.map(({ tombstone, marker }) => ({ project: tombstone.purgedProject, mode: tombstone.mode, marker })) };
+    : { kind: 'purge', purges: fresh.map(({ tombstone, marker }) => ({ ...(tombstone.kind === 'origin' ? { originId: tombstone.purgedOrigin } : { project: tombstone.purgedProject }), mode: tombstone.mode, marker })) };
   const ours = (purge) => fresh.some((intent) => intent.marker.id === purge?.marker?.id) || stored.has(purge?.marker?.id);
   let recorded = false;
   try {
@@ -823,7 +826,7 @@ export async function recordPurges(file, { current, data, env = process.env, loc
       // of a committed marker may stand beside (§3.5).
       await writeLedger(file, (next) => {
         const kept = new Set((next.tombstones ?? []).map(canonical));
-        for (const tombstone of [lifted, ...fresh.map((intent) => intent.tombstone)].filter(Boolean)) {
+        for (const tombstone of [...lifted, ...fresh.map((intent) => intent.tombstone)]) {
           if (kept.has(canonical(tombstone))) continue;
           kept.add(canonical(tombstone));
           next.tombstones = [...(next.tombstones ?? []), tombstone];
@@ -900,12 +903,13 @@ async function completePurges({ read, commit, checkPurge }, file, env, ledger, r
     await clear();
     return false;
   }
-  const keyedOn = (tombstone) => operations.some((purge) => itemDeletion ? itemRecordedBy(purge, [tombstone]) : markerMatches(tombstone, { ...purge.marker, project: purge.project }));
+  const keyedOn = (tombstone) => operations.some((purge) => itemDeletion ? itemRecordedBy(purge, [tombstone]) : markerMatches(tombstone,
+    { ...purge.marker, ...(Object.hasOwn(purge, 'originId') ? { type: 'origin.purged', payload: { originId: purge.originId } } : { project: purge.project }) }));
   const staging = createShadowGraph({ verifier, now: () => open[0].marker.at });
   staging.importData(attachLedgerView(structuredClone(current), { tombstones: ledger.tombstones.filter((tombstone) => !keyedOn(tombstone)), quarantine: ledger.quarantine, retentionOverrides: ledger.retentionOverrides }));
   for (const purge of open) {
     if (itemDeletion) privilegedCompleteCaptureDelete(staging, purge);
-    else privilegedCompletePurge(staging, purge.project, { mode: purge.mode, marker: purge.marker });
+    else privilegedCompletePurge(staging, Object.hasOwn(purge, 'originId') ? { originId: purge.originId } : purge.project, { mode: purge.mode, marker: purge.marker });
   }
   await commit(privilegedSnapshot(staging));
   return true;

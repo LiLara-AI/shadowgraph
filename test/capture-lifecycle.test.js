@@ -227,6 +227,60 @@ test('capture lifecycle: a typed claim sourceRef preserves the required full evi
   assert.deepEqual(f.snapshot(), before);
 });
 
+for (const reference of ['id', 'contentRef']) for (const held of [false, true]) test(`capture lifecycle: causal-only ${reference} citation protects raw (quarantined=${held})`, () => {
+  const f = fixture(), item = f.record();
+  const decision = f.graph.addDecision({ project: 'p', title: 'Synthetic causal experience', chosen: 'retain source' });
+  const payload = f.snapshot();
+  const cite = value => {
+    if (!value || typeof value !== 'object') return;
+    if (value.id === decision.id && value.kind === 'decision') value.causalClaim = {
+      state: 'recorded', class: 'quoted', verifierVersion: 'fixture',
+      evidence: [{ sourceRef: item[reference], text: 'synthetic uncited raw' }]
+    };
+    else for (const child of Object.values(value)) cite(child);
+  };
+  cite(payload);
+  if (held) attachLedgerView(payload, { quarantine: [{ token: payload.records.find(x => x.id === decision.id).erasureToken, at: START }] });
+  const graph = createShadowGraph({ now: () => END }); graph.importData(payload);
+  if (held) assert.equal(kernel.privilegedLiveSnapshot(graph).records.some(x => x.id === decision.id), false, 'fixture is actually held');
+  const before = kernel.privilegedSnapshot(graph);
+  assert.equal(kernel.privilegedExpireCapture(graph).expired, 0);
+  assert.deepEqual(kernel.privilegedSnapshot(graph), before);
+  if (held) assert.equal(kernel.privilegedLiveSnapshot(graph).records.some(x => x.id === decision.id), false);
+});
+
+test('capture lifecycle: a cited capture identity protects a shared raw entry from another capture expiry', () => {
+  const f = fixture(), item = f.record();
+  const decision = f.graph.addDecision({ project: 'p', title: 'Shared raw citation', chosen: 'retain source' });
+  const payload = f.snapshot(), peer = { ...structuredClone(item), id: 'shared-raw-peer', erasureToken: 'shared-raw-peer-token' };
+  payload.records.push(peer);
+  const cite = value => {
+    if (!value || typeof value !== 'object') return;
+    if (value.id === decision.id && value.kind === 'decision') value.claims = [{ class: 'quoted', verifierVersion: 'fixture', text: 'Accepted', sourceRef: peer.id }];
+    else for (const child of Object.values(value)) cite(child);
+  };
+  cite(payload);
+  const graph = createShadowGraph({ now: () => END }); graph.importData(payload);
+  const before = kernel.privilegedSnapshot(graph);
+  assert.equal(kernel.privilegedExpireCapture(graph).expired, 0);
+  assert.deepEqual(kernel.privilegedSnapshot(graph), before);
+});
+
+for (const kind of ['unexpired', 'future-schema']) test(`capture lifecycle: shared raw survives while a ${kind} capture still retains it`, () => {
+  const f = fixture(), item = f.record(), payload = f.snapshot();
+  const peer = { ...structuredClone(item), id: 'shared-retained-peer', erasureToken: 'shared-retained-peer-token' };
+  if (kind === 'unexpired') Object.assign(peer, { createdAt: END, updatedAt: END, observedAt: END, expiresAt: '2026-10-15T00:00:00.000Z' });
+  else peer.schemaVersion += 1;
+  payload.records.push(peer);
+  const graph = createShadowGraph({ now: () => END }); graph.importData(payload);
+  const before = kernel.privilegedSnapshot(graph), raw = before.captureContent;
+  assert.equal(kernel.privilegedExpireCapture(graph).expired, 1);
+  const after = kernel.privilegedSnapshot(graph);
+  assert.deepEqual(after.captureContent, raw);
+  assert.deepEqual(after.records.find(x => x.id === peer.id), before.records.find(x => x.id === peer.id));
+  assert.equal(after.records.find(x => x.id === item.id).contentRef, null);
+});
+
 test('capture lifecycle: removing expired Stop raw cannot recapture a later transcript copy', () => {
   const f = fixture();
   const stop = f.record('Stop');

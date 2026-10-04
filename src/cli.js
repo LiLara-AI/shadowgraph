@@ -384,8 +384,19 @@ async function runOneShot() {
     else if (command === 'traverse') result = graph.traverse(parse(input));
     else if (command === 'redact') result = graph.redact(parse(input));
     else if (command === 'supersede') { result = graph.supersedeDecision(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
-    else if (command === 'purge-preview') result = graph.projectSummary(parse(input).project);
-    else if (command === 'purge') { const value = parse(input); result = graph.purgeProject(value.project, { mode: value.mode }); await store.save(privilegedSnapshot(graph)); }
+    else if (command === 'purge-preview' || command === 'purge') {
+      const value = parse(input);
+      if (!value || typeof value !== 'object' || Array.isArray(value)
+        || Object.hasOwn(value, 'project') === Object.hasOwn(value, 'originId')) {
+        throw new Error('Purge requires exactly one explicit project or originId');
+      }
+      const origin = Object.hasOwn(value, 'originId');
+      if (command === 'purge-preview') result = origin ? graph.originSummary(value.originId) : graph.projectSummary(value.project);
+      else {
+        result = origin ? graph.purgeOrigin(value.originId, { mode: value.mode }) : graph.purgeProject(value.project, { mode: value.mode });
+        await store.save(privilegedSnapshot(graph));
+      }
+    }
     else if (command === 'confidence-evidence') { result = graph.addConfidenceEvidence(prepared(parse(input))); await store.save(privilegedSnapshot(graph)); }
     else if (command === 'journal') result = graph.getJournal(parse(input || '{}'));
     else if (command === 'rebuild') result = graph.rebuild(parse(input || '{}'));

@@ -9,7 +9,7 @@ import { privilegedRecordCapture, privilegedSnapshot, privilegedIssueAccess, pri
 
 const source = path => readFile(new URL(`../src/${path}`, import.meta.url), 'utf8');
 const inventory = {
-  material: 'replaceData addDecision addAttempt remember applyMemoryPlan addFact migrateAttribution backfillErasureTokens attribute verifyFact setOutcome addConfidenceEvidence updateDecisionStatus supersedeDecision link purgeProject importData bindProject requestReprocess cancelCapture deleteCapture completeCaptureDelete reapplyDeletion completePurge',
+  material: 'replaceData addDecision addAttempt remember applyMemoryPlan addFact migrateAttribution backfillErasureTokens attribute verifyFact setOutcome addConfidenceEvidence updateDecisionStatus supersedeDecision link purgeProject purgeOrigin importData bindProject requestReprocess cancelCapture deleteCapture completeCaptureDelete reapplyDeletion completePurge',
   authority: 'requestAccess issueAccess ownerIssueAccess revokeAccess discardAccess',
   capture: 'recordCapture transitionCapture claimCapture completeExtraction settleExtraction expireCapture recordSelfEvent recordTranscript',
   audit: 'memoryHistory traverse expand redact review reconsider maintain getReviewSignals acknowledgeReview search retrieve recall validate repairPlan context reviewContext exportData getJournal rebuild stats accessRefusal'
