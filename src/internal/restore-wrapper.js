@@ -37,7 +37,7 @@ import { privilegedCompleteCaptureDelete, privilegedCompletePurge, privilegedExp
 import {
   CONTROL_LEDGER_MALFORMED, CONTROL_LEDGER_NEWER_VERSION, DELETION_FILE_DESTINATION_REFUSED, DELETION_INTENT, DELETION_PENDING_UNSUPPORTED, PURGE_AWARE_RESTORE_UNSUPPORTED, attachLedgerView, canonical,
   canonicalPath, captureItemRecordValid, itemRecordedBy, classifyRestore, deletionError, journalHead, ledgerSnapshot, linkCount, markerMatches, mergeAppliesTo, mergedTombstones, pendingUnsupported, purgeRecordValid, readLedger,
-  readRegistry, recordedBy, refusedWrite, registryFile, restoreBinding, restoreLedgerBytes, restoreRecordValid, restoreUnresolvable, unlinkLedgerIfRecordOnly, writeLedger, writeRegistry
+  readRegistry, recordedBy, refusedWrite, registryFile, restoreBinding, restoreLedgerBytes, restoreRecordValid, restoreUnresolvable, originRestorePending, unlinkLedgerIfRecordOnly, writeLedger, writeRegistry
 } from './deletion-knowledge.js';
 
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -45,6 +45,9 @@ const named = (value) => typeof value === 'string' && value.length > 0;
 const entitiesOf = (payload) => [...(payload?.records ?? []), ...(payload?.facts ?? [])].filter(isObject);
 const journalOf = (payload) => (Array.isArray(payload?.journal) ? payload.journal.filter(isObject) : []);
 const markersOf = (payload) => journalOf(payload).filter((entry) => entry.type === 'project.purged');
+const originKnowledge = (payload, ledger) => journalOf(payload).some(entry => entry.type === 'origin.purged')
+  || ledger?.tombstones?.some(item => item.kind === 'origin');
+const refuseOriginRestore = () => { throw refusal('origin deletion recovery requires a later writer build'); };
 const holdsCursor = (payload) => Array.isArray(payload?.captureSessions) && payload.captureSessions.some((session) => isObject(session?.cursor));
 const firstPerToken = (entries) => {
   const seen = new Set();
@@ -78,7 +81,8 @@ export function retentionRestoreGuard(source, destination, backend = 'json') {
   return async ({ read }) => {
     const mine = await readLedger(destination);
     if (!mine?.pending.length) return;
-    await readLedger(source);
+    const carried = await readLedger(source);
+    if (originKnowledge(null, mine) || originKnowledge(null, carried)) refuseOriginRestore();
     let d;
     try { d = await read(); } catch (error) { throw refusal(UNREADABLE_DESTINATION, error); }
     if (mine.pending[0]?.kind === 'restore' && !mine.pending[0]?.inputs?.retention
@@ -108,6 +112,7 @@ export function retentionRestoreGuard(source, destination, backend = 'json') {
     }
     // Parsing the sidecar above validates its policy even if no deletion
     // knowledge is present. Validate the payload before any resolver write.
+    if (originKnowledge(d) || originKnowledge(b)) refuseOriginRestore();
     try { validateRestorePayload(b); } catch (error) { throw refusal('the restore source is invalid', error); }
   };
 }
@@ -359,6 +364,8 @@ async function preStep(ctx, given) {
   let registry;
   try { [mine, carried, registry] = [await ledgerSnapshot(ctx.destination), await ledgerSnapshot(ctx.source), await readRegistry(ctx.env)]; }
   catch (error) { throw refusal(UNREADABLE_KNOWLEDGE, error); }
+  if (originKnowledge(d, mine.ledger) || originKnowledge(b, carried.ledger)
+    || registry?.tombstones?.some(item => item.kind === 'origin' && mergeAppliesTo(item, b))) refuseOriginRestore();
   // Step 0 resolved any record; one here is a defence. A sidecar never
   // carries one (C3), an empty list being none (review finding 15).
   if (mine.ledger?.pending.length) throw refusal(PENDING_DELETION);
@@ -498,6 +505,7 @@ export function activation(ctx, callerAfterReplace) {
 // tokens it assigns (kept on a re-run) and the state the commit leaves.
 function ledgerStepOne(ledger, effect) {
   const [record] = ledger.pending;
+  if (originRestorePending(record, ledger.tombstones)) throw pendingUnsupported();
   const kept = new Set((ledger.tombstones ?? []).map(canonical));
   const tombstones = record.add.tombstones.filter((tombstone) => !kept.has(canonical(tombstone)) && kept.add(canonical(tombstone)));
   if (tombstones.length) ledger.tombstones = [...(ledger.tombstones ?? []), ...tombstones];
@@ -545,6 +553,7 @@ async function resolveRecord({ read, commit, checkPurge }, file, env, { verifier
   const ledger = await readLedger(file);
   if (!ledger?.pending.length) return null;
   const [record] = ledger.pending;
+  if (originRestorePending(record, ledger.tombstones)) throw pendingUnsupported();
   if (ledger.pending.length === 1 && captureItemRecordValid(record, ledger.tombstones)) {
     if (!items) throw pendingUnsupported();
     return completePurges({ read, commit, checkPurge }, file, env, ledger, record, { verifier, lock });

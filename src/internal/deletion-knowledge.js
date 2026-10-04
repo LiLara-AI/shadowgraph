@@ -95,6 +95,7 @@ function tombstoneIssue(tombstone) {
   if (!isObject(tombstone)) return '';
   if (tombstone.tokens !== null && !(Array.isArray(tombstone.tokens) && tombstone.tokens.every(named))) return '.tokens';
   if (tombstone.kind === 'project' && tombstone.purgedProject !== undefined && !(named(tombstone.purgedProject) && isValidIsoInstant(tombstone.at))) return '.purgedProject';
+  if (tombstone.kind === 'origin' && !(named(tombstone.purgedOrigin) && tombstone.purgedOrigin.trim() && isValidIsoInstant(tombstone.at))) return '.purgedOrigin';
   return null;
 }
 
@@ -221,6 +222,11 @@ export function captureItemRecordValid(record, tombstones) {
 // A record of either kind this build writes and resolves (PR-37d design §3.5).
 export const pendingRecordValid = (record, ledgerTombstones) => restoreRecordValid(record, ledgerTombstones) || purgeRecordValid(record, ledgerTombstones) || captureItemRecordValid(record, ledgerTombstones);
 
+// Structural preservation is distinct from permission to resolve a record.
+// The standalone origin reader cannot yet perform origin-sensitive recovery.
+export const originRestorePending = (record, tombstones = []) => record?.kind === 'restore'
+  && [...tombstones, ...(Array.isArray(record.add?.tombstones) ? record.add.tombstones : [])].some(item => item?.kind === 'origin');
+
 async function readKnowledge(file, { ledger }) {
   let text;
   try { text = await readFile(file, 'utf8'); }
@@ -318,6 +324,7 @@ function viewOf(ledger) {
     // Project tombstones bound the project's non-entity entries that predate
     // them, whether or not they name tokens (design §12 C5).
     projects: (ledger?.tombstones ?? []).filter((tombstone) => tombstone.kind === 'project' && named(tombstone.purgedProject)).map((tombstone) => ({ project: tombstone.purgedProject, at: tombstone.at, mode: tombstone.mode ?? null })),
+    origins: (ledger?.tombstones ?? []).filter((tombstone) => tombstone.kind === 'origin' && named(tombstone.purgedOrigin)).map((tombstone) => ({ originId: tombstone.purgedOrigin, at: tombstone.at, mode: tombstone.mode ?? null })),
     // Tokenless entities held by id, only while a committed restore waits for
     // its post-step (PR-37c design §8.1).
     ids: new Set(),
@@ -431,6 +438,7 @@ export function classifyRestore(payload, { tombstones = [], quarantine = [], tok
 function viewFor(payload, ledger, { pending, absent }) {
   if (!ledger?.pending.length) return viewOf(ledger);
   const [record] = ledger.pending;
+  if (originRestorePending(record, ledger.tombstones)) throw pendingUnsupported();
   if (pending === 'refuse' || ledger.pending.length > 1) throw pendingUnsupported();
   // Item deletion is completed by an ordinary write only. Its provisional
   // suppression view is internal to save; a read, hook or backup refuses.
@@ -576,6 +584,8 @@ export function mergeAppliesTo(tombstone, payload) {
 // with the restore's own, so it is keyed on its project and seq alone (review
 // finding 16); otherwise every later restore would lift it again.
 export function markerMatches(tombstone, marker) {
+  if (marker?.type === 'origin.purged') return tombstone?.kind === 'origin' && tombstone.purgedOrigin === marker.payload?.originId
+    && tombstone.seq === marker.seq && (tombstone.at === marker.at || !isValidIsoInstant(marker.at));
   const project = marker?.payload?.project ?? marker?.project;
   return tombstone?.kind === 'project' && (tombstone.purgedProject ?? null) === (project ?? null)
     && tombstone.seq === marker?.seq && (tombstone.at === marker?.at || !isValidIsoInstant(marker?.at));

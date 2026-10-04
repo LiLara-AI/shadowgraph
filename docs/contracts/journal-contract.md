@@ -121,6 +121,40 @@ Both modes remove relations pointing at purged entities, so referential integrit
 
 **Right to erasure vs auditability:** hard purge is the deliberate exception. It satisfies erasure at the cost of a discontinuous journal, which is why the sequence gap is reported rather than concealed, and why "append-only" is not claimed anywhere.
 
+The origin-deletion reader also understands `origin.purged`: a null project,
+`entityKind: origin`, null entity ID, and the closed payload `{ originId, mode,
+removed, removedJournalSequences }`. It selects only explicitly unattributed
+entities with that origin; a project-owned entity's origin is provenance and
+does not put it in this scope. The same canonical marker and hard-gap rules
+apply. This reader emits no origin purge operation. Completed artifacts can be
+read and preserved; origin-sensitive restore and pending origin recovery refuse
+until the separate writer/recovery implementation is available. Carrying unknown
+members in an earlier build does not establish semantic reader compatibility.
+The origin type always uses the closed scope rules, even with an omitted or
+historical entry schema label; legacy project-wide relation deletion never
+applies to an origin marker. PR42 predecessors can carry logical origin markers
+without replaying them and can retain origin-owned non-entity material in a
+tombstone overlay. They are not supported semantic readers after origin writes.
+This separate reader is the minimum floor for completed origin artifacts;
+origin-sensitive restore or pending recovery requires the later complete writer
+floor. Its conservative refusal includes backup recovery before any pending
+record is discarded or cleared. A migration baseline may add a retry key but
+may not rebind an existing key to a different entity.
+
+Canonical origin-deletion skeletons use the explicit `origin_purged` reason.
+They retain the same closed, identity-free skeleton shape as project deletion;
+accepting this reason does not admit arbitrary fields or restore erased state.
+An ordinary restore ledger may omit its empty tombstone array. Origin recovery
+checks still examine both existing tombstones and additions in a pending record.
+
+Deletion may leave a midstream migration baseline with no new state. Only a
+baseline changed by that deletion, whose surviving entities and retry mappings
+are identical to the surviving prefix, loses its replay effect: logical deletion
+keeps an allowlisted skeleton; hard deletion accounts for its sequence in the
+marker. Initial baselines and baselines retaining new entities or retry mappings
+remain. A new retry mapping must match its existing canonical entity. Baseline
+placement still refuses rewrites or resurrection of existing state.
+
 ## 10. Atomicity — by co-location, not protocol
 
 The journal lives **inside the same payload as the state** and is written by the same operation. JSON: the store snapshot serializes both, `save()` does one temp-write plus `rename()`. SQLite: `save()` runs `BEGIN IMMEDIATE` → replace → `COMMIT`. State and journal therefore **cannot** diverge on a failed write.

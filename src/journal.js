@@ -90,13 +90,14 @@ const PURGE_MARKER_FIELDS = new Set([
 const PURGE_MARKER_PAYLOAD_FIELDS = new Set([
   'project', 'mode', 'removed', 'removedJournalSequences'
 ]);
+const ORIGIN_PURGE_PAYLOAD_FIELDS = new Set(['originId', 'mode', 'removed', 'removedJournalSequences']);
 // What a restore that re-applied deletion knowledge (PR-37's post-step) may
 // record: its mode, the journal sequences a hard re-application spliced out,
 // and a closed set of counts. Nothing else, so no id or content can ride in a
 // member name (plan rev6 section 3.8 item 1).
 const RESTORE_REAPPLIED_COUNTS = Object.freeze(['removed', 'quarantined', 'skeletons', 'spliced']);
 // The entry types whose hard mode explains missing journal sequences.
-export const HARD_GAP_EVIDENCE_TYPES = Object.freeze(['project.purged', 'restore.reapplied']);
+export const HARD_GAP_EVIDENCE_TYPES = Object.freeze(['project.purged', 'origin.purged', 'restore.reapplied']);
 // The entry types that record an entity's creation: a token one of them
 // carries was the entity's from its start, which a restore's token proof
 // relies on (PR-37c design §6.2). Named here, where the capture types are read.
@@ -126,6 +127,7 @@ export const REPLAYABLE_ENTRY_TYPES = Object.freeze([
   'confidence.changed',
   'relation.created',
   'project.purged',
+  'origin.purged',
   'restore.reapplied',
   'entity.attributed',
   'entity.token_assigned',
@@ -182,6 +184,7 @@ export function replayedEntity(entry) {
 // v6 distinguishes the real project "default" from legacy storage labels.
 // Older purge markers retain their original bucket semantics.
 function purgedOwner(entity, project, marker, fallbackProject = null) {
+  if (marker.type === 'origin.purged') return entity?.attribution === 'unattributed' && entity?.originId === marker.payload?.originId;
   if ((marker.schemaVersion ?? 0) < 6) return (entity?.project ?? fallbackProject) === project;
   return !isLegacyOwned(entity) && entity?.attribution !== 'unattributed' && entity?.project === project;
 }
@@ -227,6 +230,7 @@ export const JOURNAL_TYPE_ENTITY_KIND = Object.freeze({
   'memory.recorded': 'memory', 'memory.indexed': 'memory',
   'memory.superseded': 'memory', 'memory.invalidated': 'memory',
   'project.purged': 'project',
+  'origin.purged': 'origin',
   'capture.recorded': 'capture', 'capture.state_changed': 'capture',
   'extraction.completed': 'capture', 'extraction.failed': 'capture'
 });
@@ -255,7 +259,10 @@ const KIND_TO_COLLECTION = Object.freeze({
 export function schema5PurgeArtifactIssue(entry, sourceSchemaVersion = undefined) {
   const entrySchemaVersion = Number.isInteger(entry?.schemaVersion) ? entry.schemaVersion : sourceSchemaVersion;
   const currentEnvelope = canonicalPurgeSchema(sourceSchemaVersion);
-  if ((!currentEnvelope && !canonicalPurgeSchema(entrySchemaVersion)) || !entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+  // Origin markers have no legacy raw-identity format. A stale or omitted
+  // schema label cannot exempt this new type from its closed scope contract.
+  if (entry.type !== 'origin.purged' && !currentEnvelope && !canonicalPurgeSchema(entrySchemaVersion)) return null;
   const canonicalNullProvenance = (value) => value
     && typeof value === 'object'
     && !Array.isArray(value)
@@ -282,26 +289,31 @@ export function schema5PurgeArtifactIssue(entry, sourceSchemaVersion = undefined
     // A deleted capture leaves its own reason, on its own entries only (PR-33
     // reads it; the deletion that writes it arrives later).
     const allowedReasons = canonicalPurgeSchema(entrySchemaVersion)
-      ? ['project_purged', ...(CAPTURE_ENTRY_TYPES.includes(entry.type) ? ['capture_deleted'] : [])]
+      ? ['project_purged', 'origin_purged', ...(CAPTURE_ENTRY_TYPES.includes(entry.type) ? ['capture_deleted'] : [])]
       : ['project_purged', 'legacy_project_purged'];
     if (!allowedReasons.includes(entry.redactedReason)) return 'redacted purge skeleton has a noncanonical redactedReason';
     return null;
   }
 
   if (entry.type === 'restore.reapplied') return restoreReappliedIssue(entry, canonicalNullProvenance, nonEmptyString);
-  if (entry.type !== 'project.purged') return null;
+  if (!['project.purged', 'origin.purged'].includes(entry.type)) return null;
+  const origin = entry.type === 'origin.purged';
   const forbidden = Object.keys(entry).find((name) => !PURGE_MARKER_FIELDS.has(name));
   if (forbidden) return `purge marker contains forbidden identity field ${forbidden}`;
   if (!nonEmptyString(entry.id)) return 'purge marker id must be a non-empty string';
   if (!Number.isSafeInteger(entry.seq) || entry.seq <= 0) return 'purge marker seq must be a positive safe integer';
-  if (entry.entityKind !== 'project' || entry.entityId !== null) return 'purge marker must use project kind and erase entityId';
+  if (entry.entityKind !== (origin ? 'origin' : 'project') || entry.entityId !== null) return `purge marker must use ${origin ? 'origin' : 'project'} kind and erase entityId`;
   if (!canonicalNullProvenance(entry.provenance)) return 'purge marker must erase provenance identity';
   if (!entry.payload || typeof entry.payload !== 'object' || Array.isArray(entry.payload)) return 'purge marker payload must be an object';
-  const forbiddenPayload = Object.keys(entry.payload).find((name) => !PURGE_MARKER_PAYLOAD_FIELDS.has(name));
+  const forbiddenPayload = Object.keys(entry.payload).find((name) => !(origin ? ORIGIN_PURGE_PAYLOAD_FIELDS : PURGE_MARKER_PAYLOAD_FIELDS).has(name));
   if (forbiddenPayload) return `purge marker contains forbidden payload field ${forbiddenPayload}`;
-  if (!nonEmptyString(entry.project)) return 'purge marker project must be a non-empty string';
-  if (!nonEmptyString(entry.payload.project)) return 'purge marker payload.project must be a non-empty string';
-  if (entry.project !== entry.payload.project) return 'purge marker project must equal payload.project';
+  if (origin) {
+    if (entry.project !== null || !nonEmptyString(entry.payload.originId)) return 'origin purge marker requires null project and a non-empty originId';
+  } else {
+    if (!nonEmptyString(entry.project)) return 'purge marker project must be a non-empty string';
+    if (!nonEmptyString(entry.payload.project)) return 'purge marker payload.project must be a non-empty string';
+    if (entry.project !== entry.payload.project) return 'purge marker project must equal payload.project';
+  }
   if (!['logical', 'hard'].includes(entry.payload.mode)) return 'purge marker mode must be exactly logical or hard';
   if (!Number.isSafeInteger(entry.payload.removed) || entry.payload.removed < 0) return 'purge marker removed must be a non-negative safe integer';
   if (!Object.hasOwn(entry.payload, 'removedJournalSequences') || !Array.isArray(entry.payload.removedJournalSequences)) {
@@ -458,7 +470,7 @@ export function journalFactLifecycleIssues(entries = [], options = {}) {
         if (!fact?.id) continue;
         states.set(fact.id, {
           project: fact.project ?? null,
-          attribution: fact.attribution,
+          attribution: fact.attribution, originId: fact.originId,
           phase: ['expired', 'superseded'].includes(fact.status) ? 'terminal' : 'active',
           terminalType: ['expired', 'superseded'].includes(fact.status) ? fact.status : null,
           verified: fact.verificationStatus === 'verified' && Boolean(fact.verification)
@@ -466,7 +478,7 @@ export function journalFactLifecycleIssues(entries = [], options = {}) {
       }
       continue;
     }
-    if (entry.type === 'project.purged') {
+    if (['project.purged', 'origin.purged'].includes(entry.type)) {
       const project = entry.payload?.project ?? entry.project;
       for (const [factId, state] of states) if (purgedOwner(state, project, entry)) states.delete(factId);
       continue;
@@ -485,7 +497,7 @@ export function journalFactLifecycleIssues(entries = [], options = {}) {
       const project = entry.project ?? fact.project ?? null;
       const state = states.get(factId);
       if (!state) {
-        states.set(factId, { project, attribution: fact.attribution, phase: terminalType ? 'terminal' : 'active', terminalType, verified });
+        states.set(factId, { project, attribution: fact.attribution, originId: fact.originId, phase: terminalType ? 'terminal' : 'active', terminalType, verified });
         continue;
       }
       if ((terminalType ? 'terminal' : 'active') !== state.phase || terminalType !== state.terminalType || verified !== state.verified) {
@@ -494,6 +506,7 @@ export function journalFactLifecycleIssues(entries = [], options = {}) {
       }
       state.project = project;
       state.attribution = fact.attribution;
+      state.originId = fact.originId;
       continue;
     }
     if (!['fact.observed', 'fact.verified', 'fact.expired', 'fact.superseded'].includes(entry.type)) continue;
@@ -509,7 +522,7 @@ export function journalFactLifecycleIssues(entries = [], options = {}) {
       }
       states.set(factId, {
         project: entry.project ?? entry.payload?.project ?? null,
-        attribution: entry.payload?.attribution,
+        attribution: entry.payload?.attribution, originId: entry.payload?.originId,
         phase: ['expired', 'superseded'].includes(entry.payload?.status) ? 'terminal' : 'active',
         terminalType: ['expired', 'superseded'].includes(entry.payload?.status) ? entry.payload.status : null,
         verified: entry.payload?.verificationStatus === 'verified' && Boolean(entry.payload?.verification)
@@ -623,16 +636,20 @@ export function journalBaselinePlacementIssues(entries = [], options = {}) {
     }
     for (const item of entry.payload?.idempotency ?? []) {
       if (!item?.key) continue;
+      const bound = currentIdempotency.get(item.key);
+      if (bound && bound.id !== item.value?.id) return `migration baseline would rewrite idempotency key ${item.key}`;
       const canonicalEntity = item.value?.id ? currentEntities.get(item.value.id)?.entity : null;
       const previous = canonicalEntity ?? currentIdempotency.get(item.key);
       if (previous && !same(previous, item.value)) return `migration baseline would rewrite idempotency key ${item.key}`;
-      if (!previous) addsNewState = true;
+      // A new retry key is new projection state even when its canonical
+      // entity already exists. The value above must still match that entity.
+      if (!currentIdempotency.has(item.key)) addsNewState = true;
     }
     return addsNewState ? null : 'migration baseline does not add any previously unseen projection state';
   };
 
   for (const entry of replayable) {
-    if (entry.type === 'project.purged') {
+    if (['project.purged', 'origin.purged'].includes(entry.type)) {
       const project = entry.payload?.project ?? entry.project;
       const purgedIds = new Set(entry.payload?.purgedEntityIds ?? []);
       for (const [entityId, value] of currentEntities) if (value.collection !== 'relations' && purgedOwner(value.entity, project, entry, value.project)) {
@@ -643,7 +660,7 @@ export function journalBaselinePlacementIssues(entries = [], options = {}) {
         if (value.collection !== 'relations' && purgedIds.has(entityId)) currentEntities.delete(entityId);
       }
       for (const [entityId, value] of [...currentEntities]) {
-        if (value.collection === 'relations' && (((entry.schemaVersion ?? 0) < 6 && value.project === project) || purgedIds.has(value.entity?.from) || purgedIds.has(value.entity?.to))) currentEntities.delete(entityId);
+        if (value.collection === 'relations' && ((entry.type === 'project.purged' && (entry.schemaVersion ?? 0) < 6 && value.project === project) || purgedIds.has(value.entity?.from) || purgedIds.has(value.entity?.to))) currentEntities.delete(entityId);
       }
       for (const [key, value] of [...currentIdempotency]) if (purgedOwner(value, project, entry) || purgedIds.has(value?.id)) currentIdempotency.delete(key);
       priorReplayableEntries += 1;
@@ -932,7 +949,7 @@ export function rebuildProjection(entries = [], options = {}) {
   for (const entry of inRange) {
     if (invalidBaselineSequences.has(entry.seq)) continue;
     if (invalidLifecycleSequences.has(entry.seq)) continue;
-    if (entry.type === 'project.purged') {
+    if (['project.purged', 'origin.purged'].includes(entry.type)) {
       const project = entry.payload?.project ?? entry.project;
       // Schema <=5 markers may carry raw purgedEntityIds. They remain readable for
       // compatibility, but new markers need none: collect the project's current
@@ -949,7 +966,7 @@ export function rebuildProjection(entries = [], options = {}) {
       for (const [key, value] of [...entities]) {
         if (value.collection !== 'relations') continue;
         const relation = value.entity;
-        if (((entry.schemaVersion ?? 0) < 6 && value.project === project) || purgedIds.has(relation?.from) || purgedIds.has(relation?.to)) entities.delete(key);
+        if ((entry.type === 'project.purged' && (entry.schemaVersion ?? 0) < 6 && value.project === project) || purgedIds.has(relation?.from) || purgedIds.has(relation?.to)) entities.delete(key);
       }
       // P0-1: idempotency payloads are CLONES of purged entities. If a replay
       // rebuilt them, a retry with an old key would hand back deleted content and

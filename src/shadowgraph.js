@@ -588,6 +588,41 @@ function journalProjectionSignature(report) {
   return JSON.stringify(canonical(report.projection));
 }
 
+// Deletion can remove the only additions in a midstream migration baseline.
+// Drop its replay effect only when every surviving member and retry mapping is
+// already identical in the surviving prefix. Keep initial/useful baselines and
+// let the normal validators refuse every other malformed placement.
+function normalizeRewrittenPurgeBaselines(entries, rewritten, modeFor) {
+  const removedSequences = [];
+  let skeletons = 0;
+  for (const entry of [...entries]) {
+    if (!rewritten.has(entry.seq) || entry.type !== 'projection.baseline'
+      || entry.derivedFrom !== 'live_state_at_migration' || !entry.payload || entry.redacted === true) continue;
+    const prefix = entries.filter(item => item.seq < entry.seq);
+    if (!prefix.some(item => REPLAYABLE_ENTRY_TYPES.includes(item.type) && item.replayable !== false)) continue;
+    // A staged hard deletion may have gaps whose marker is appended afterwards.
+    // They do not change the fold; every other diagnostic still refuses this
+    // optimization, and the final complete journal must prove all gap coverage.
+    const report = rebuildProjection(prefix, { sourceSchemaVersion: SCHEMA_VERSION });
+    if (report.skipped.length || (!report.rebuildable && report.reason !== 'journal contains unexplained sequence gaps inside the replay range')) continue;
+    const same = (left, right) => JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
+    const redundant = ['records', 'facts', 'relations', 'idempotency'].every(name => {
+      const key = name === 'idempotency' ? 'key' : 'id';
+      const previous = new Map(report.projection[name].map(item => [item[key], item]));
+      return (entry.payload[name] ?? []).every(item => previous.has(item[key]) && same(previous.get(item[key]), item));
+    });
+    if (!redundant) continue;
+    if (modeFor(entry) === 'hard') {
+      entries.splice(entries.indexOf(entry), 1);
+      removedSequences.push(entry.seq);
+    } else {
+      scrubLogicalPurgeSkeleton(entry);
+      skeletons += 1;
+    }
+  }
+  return { removedSequences, skeletons };
+}
+
 // Schemas 1–4 could express a purge only by retaining raw entity ids in the
 // marker. Before removing that privacy-sensitive ledger, migrate the referenced
 // pre-marker snapshots into payload-free tombstones (and shared baseline members
@@ -2350,7 +2385,7 @@ export function createShadowGraph(options = {}) {
     const incoming = data?.[DELETION_VIEW];
     if (retentionPolicy().length || incoming?.retentionOverrides?.length || hasCaptureRetentionState(data) || hasCaptureRetentionState({ records: [...captures.values(), ...withheldCaptures()] })) return true;
     if (deletion.get('view')?.knowledge || incoming?.knowledge || incoming?.registryApplies) return true;
-    if (journal.some((entry) => entry?.type === 'project.purged')) return true;
+    if (journal.some((entry) => ['project.purged', 'origin.purged'].includes(entry?.type))) return true;
     const cursors = new Set((extras.get(CAPTURE_SESSIONS) ?? []).filter((session) => isPlainObject(session?.cursor)).map(byId));
     return Array.isArray(data?.captureSessions) && data.captureSessions.some((session) => cursors.has(session?.id));
   }
@@ -2364,7 +2399,7 @@ export function createShadowGraph(options = {}) {
   // W taken out of the live graph (design §2.2, §2.3, §11 R-3, R-10, §12 C5).
   function hold() {
     const view = deletion.get('view');
-    if (!view || (!view.tokens.size && !view.projects.length && !view.ids?.size) || deletion.has('held')) return;
+    if (!view || (!view.tokens.size && !view.projects.length && !view.origins?.length && !view.ids?.size) || deletion.has('held')) return;
     // By its token, or by its id when a committed restore waits for its
     // post-step and the entity has no token yet (PR-37c design §1.4, §8.1); or
     // whole, tokenless included, when a purge of its project waits for the
@@ -2387,19 +2422,23 @@ export function createShadowGraph(options = {}) {
     // valid instant predates it. Access and authority entries never are.
     const predates = (project, at) => typeof project === 'string'
       && view.projects.some((tombstone) => tombstone.project === project && !(isValidIsoInstant(at) && compareInstants(at, tombstone.at) >= 0));
+    const originPredates = (owner, at) => owner?.attribution === 'unattributed'
+      && (view.origins ?? []).some(tombstone => tombstone.originId === owner.originId && !(isValidIsoInstant(at) && compareInstants(at, tombstone.at) >= 0));
     const entityKeys = ['recordId', 'factId', 'replacementId'];
     const namesNothing = (item) => ![...entityKeys, 'relationId'].some((key) => item?.[key] !== undefined && item?.[key] !== null);
     const heldEvents = events.filter((item) => entityKeys.some((key) => ids.has(item?.[key])) || relationIds.has(item?.relationId)
-      || (namesNothing(item) && !String(item?.type).startsWith('access.') && predates(item?.project, item?.at)));
+      || (namesNothing(item) && !String(item?.type).startsWith('access.') && (predates(item?.project, item?.at) || originPredates(item, item?.at))));
     const heldSignals = [...reviewSignals.values()].filter((signal) => ids.has(signal.decisionId));
     const heldRetries = [...idempotency.entries()].filter(([, value]) => ids.has(value?.id)).map(([key, value]) => ({ key, value: canonicalIdempotencyValue(value) }));
     const extra = (name) => (Array.isArray(extras.get(name)) ? extras.get(name) : []);
-    const heldMisses = extra(RUNTIME_MISSES).filter((entry) => ids.has(entry?.recordId) || predates(entry?.scope?.project, entry?.at));
+    const heldMisses = extra(RUNTIME_MISSES).filter((entry) => ids.has(entry?.recordId) || predates(entry?.scope?.project, entry?.at)
+      || (entry?.scope?.requestState === 'project_unresolved' && entry.scope.project === null
+        && originPredates({ attribution: 'unattributed', originId: entry.scope.originId }, entry.at)));
     const contentRefs = new Set(heldCaptures.map((item) => item.contentRef).filter(Boolean));
     const heldContent = extra(CAPTURE_CONTENT).filter((entry) => contentRefs.has(entry?.contentRef));
     // A session opened after the tombstone captures; one with no valid start
     // predates it, which fails closed (PR-37c design §1.3, R9).
-    const heldSessions = extra(CAPTURE_SESSIONS).filter((session) => session?.attribution === 'project' && predates(session.project, session.startedAt));
+    const heldSessions = extra(CAPTURE_SESSIONS).filter((session) => (session?.attribution === 'project' && predates(session.project, session.startedAt)) || originPredates(session, session.startedAt));
     if (![heldRecords, heldCaptures, heldFacts, heldEvents, heldMisses, heldSessions].some((list) => list.length)) return;
     // W's journal entries become logical skeletons and the baseline is
     // rewritten without W, as a logical purge leaves them; the originals are
@@ -4601,7 +4640,12 @@ export function createShadowGraph(options = {}) {
         }
       }
     }
-    for (const item of stagedJournal) rewriteBaselineForProjectPurge(item, project, removed, removedRelationIds);
+    const rewrittenBaselines = new Set();
+    for (const item of stagedJournal) if (rewriteBaselineForProjectPurge(item, project, removed, removedRelationIds)) rewrittenBaselines.add(item.seq);
+    const normalized = normalizeRewrittenPurgeBaselines(stagedJournal, rewrittenBaselines, () => mode);
+    removedJournalSequences.push(...normalized.removedSequences);
+    journalEntriesRemoved += normalized.removedSequences.length;
+    journalEntriesRedacted += normalized.skeletons;
     const uniqueRemovedJournalSequences = [...new Set(removedJournalSequences)].sort((left, right) => left - right);
     // Only the completion of a pending purge forces the marker's id and instant
     // (PR-37d design §2.5): the public registration never passes one.
@@ -4748,12 +4792,20 @@ export function createShadowGraph(options = {}) {
         scrubLogicalPurgeSkeleton(entry, (captureDeleted && entry.entityKind === CAPTURE_KIND) || (entry.redacted === true && entry.redactedReason === 'capture_deleted') ? 'capture_deleted' : undefined);
       }
     }
+    const rewrittenBaselines = new Set();
     for (const entry of stagedJournal) {
-      rewriteBaselineForProjectPurge(entry, null, removed, removedRelationIds);
+      if (rewriteBaselineForProjectPurge(entry, null, removed, removedRelationIds)) rewrittenBaselines.add(entry.seq);
       for (const item of entry?.type === 'projection.baseline' ? entry.payload?.records ?? [] : [entry?.payload]) {
         if (removedCaptureIds.has(item?.possibleDuplicateOf)) item.possibleDuplicateOf = null;
       }
     }
+    const normalized = normalizeRewrittenPurgeBaselines(stagedJournal, rewrittenBaselines, entry => {
+      const original = journal.find(item => item.seq === entry.seq)?.payload;
+      const reached = [...(original?.records ?? []), ...(original?.facts ?? []), ...(original?.relations ?? []), ...(original?.idempotency ?? []).map(item => item.value)];
+      return reached.some(item => modes.get(item?.id) === 'hard' || relationModes.get(item?.id) === 'hard') ? 'hard' : 'logical';
+    });
+    spliced.push(...normalized.removedSequences);
+    skeletons += normalized.skeletons;
     let sequence = journalSeq;
     const assigned = assigning.map(({ token }, index) => token ?? tokens[index] ?? allocateErasureToken());
     const appended = assigning.map(({ entity }, index) => prebuildJournalEntry(tokenAssignment({ ...entity, erasureToken: assigned[index] }, priorOf), ++sequence));
@@ -5994,7 +6046,8 @@ export function createShadowGraph(options = {}) {
       };
       for (const record of importedRecords) {
         const existingRecord = records.get(record.id) ?? captures.get(record.id);
-        if (existingRecord && (existingRecord.kind !== record.kind || existingRecord.project !== record.project)) throw new Error(`Existing entity id ${record.id} cannot change kind or project`);
+        if (existingRecord && (existingRecord.kind !== record.kind || existingRecord.project !== record.project || !sameOwnerKey(existingRecord, record))) throw new Error(existingRecord.kind !== record.kind || existingRecord.project !== record.project
+          ? `Existing entity id ${record.id} cannot change kind or project` : `Existing entity id ${record.id} cannot change owner`);
         keepErasureToken(existingRecord, record);
         // PR-23: a legacy attempt's cause is shown, not stored, so one merged
         // back from a public result keeps none.
@@ -6010,14 +6063,15 @@ export function createShadowGraph(options = {}) {
       for (const fact of importedFacts) {
         if (records.has(fact.id) || captures.has(fact.id) || relations.has(fact.id) || existingAlternativeOwners.has(fact.id)) throw new Error(`Entity id already exists: ${fact.id}`);
         const existingFact = facts.get(fact.id);
-        if (existingFact && existingFact.project !== fact.project) throw new Error(`Existing entity id ${fact.id} cannot change kind or project`);
+        if (existingFact && (existingFact.project !== fact.project || !sameOwnerKey(existingFact, fact))) throw new Error(existingFact.project !== fact.project
+          ? `Existing entity id ${fact.id} cannot change kind or project` : `Existing entity id ${fact.id} cannot change owner`);
         keepErasureToken(existingFact, fact);
       }
       for (const relation of importedRelations) {
         if (records.has(relation.id) || captures.has(relation.id) || facts.has(relation.id) || existingAlternativeOwners.has(relation.id)) throw new Error(`Entity id already exists: ${relation.id}`);
         if ([relation.from, relation.to].some((endpoint) => captures.has(endpoint) || importedCaptureIds.has(endpoint))) throw new Error('Relation endpoints must exist before import, and a capture item is never one');
         const existingRelation = relations.get(relation.id);
-        if (existingRelation && (existingRelation.project !== relation.project || existingRelation.from !== relation.from || existingRelation.to !== relation.to || existingRelation.relation !== relation.relation)) throw new Error(`Existing relation id ${relation.id} cannot change identity`);
+        if (existingRelation && (existingRelation.project !== relation.project || !sameOwnerKey(existingRelation, relation) || existingRelation.from !== relation.from || existingRelation.to !== relation.to || existingRelation.relation !== relation.relation)) throw new Error(`Existing relation id ${relation.id} cannot change identity`);
       }
       // Nor may a relation the store holds come to name one.
       for (const relation of relations.values()) if (importedCaptureIds.has(relation.from) || importedCaptureIds.has(relation.to)) throw new Error('Relation endpoints must exist before import, and a capture item is never one');
