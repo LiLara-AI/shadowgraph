@@ -1464,15 +1464,18 @@ for (const [backend, options] of BACKENDS) test(`PR-37c rolled back ${backend}: 
     ['fault', {}, { restoreFault: (stage) => { if (stage === 'afterReplacementRename') throw new Error('injected'); } }],
     ['caller activation', { afterReplace: () => { throw new Error('the caller refuses'); } }, {}]
   ];
-  for (const [label, restoreOptions, storeOptions] of cases) for (const withLedger of [true, false]) {
+  for (const [label, restoreOptions, storeOptions] of cases) for (const priorMode of [0o640, 0o600, null]) {
+    const withLedger = priorMode !== null;
     const state = await storeOf(t, backend, purgedStore('logical'));
-    if (withLedger) await writeFile(knowledge.ledgerPath(state.file), prior, { mode: 0o640 });
+    if (withLedger) await writeFile(knowledge.ledgerPath(state.file), prior, { mode: priorMode });
     const mode = withLedger ? (await stat(knowledge.ledgerPath(state.file))).mode & 0o777 : null;
     const before = await hashes(state);
     await assert.rejects(restoring(state, await storeOf(t, backend, b.payload), restoreOptions, storeOptions), { code: `${backend}_restore_rolled_back` }, label);
     assert.equal((await hashes(state))[0], before[0], `${label}: D is unchanged`);
     assert.deepEqual(await ledgerOf(state), { ...(withLedger ? JSON.parse(prior) : { version: 1 }), generationBase: 1, generationCounters: [] }, `${label}: prior knowledge is unchanged and pending is discarded`);
-    if (withLedger) assert.equal((await stat(knowledge.ledgerPath(state.file))).mode & 0o777, mode);
+    const afterMode = (await stat(knowledge.ledgerPath(state.file))).mode & 0o777;
+    if (withLedger) assert.equal(afterMode, mode, `${label}: existing ledger mode survives discard`);
+    else if (process.platform !== 'win32') assert.equal(afterMode, 0o600, `${label}: newly allocated generation ledger stays owner-only`);
   }
 });
 

@@ -421,8 +421,10 @@ async function preStep(ctx, given) {
   // What a discard puts back: the ledger's bytes and mode, or nothing (§2 step 5).
   const written = await writeLedger(ctx.destination, (ledger) => { ledger.pending = [record]; }, { env: ctx.env });
   // A failed primitive may discard its pending work but never reuse the base
-  // already allocated. The rollback point therefore includes that advance.
-  ctx.prior = { path: written.path, text: written.text, bytes: generationPrior.bytes, mode: generationPrior.mode };
+  // already allocated. Keep those bytes but restore an existing ledger's
+  // original mode; generation allocation's owner-only write is not its mode
+  // before the operation. A newly created ledger remains owner-only.
+  ctx.prior = { path: written.path, text: written.text, bytes: generationPrior.bytes, mode: mine.mode ?? generationPrior.mode };
   ctx.record = record;
 }
 
