@@ -1,7 +1,7 @@
 {
   "host": "claude-code",
   "extraction": {
-    "status": "Additive executor only; no production caller, activation or model call before AG-3.",
+    "status": "Activation-gated owner CLI and detached one-shot worker implemented. Extraction stays inert until explicit AG-3 approval; fixtures are not real-host activation evidence.",
     "model": "claude-opus-5[1m]",
     "configurationProfile": "subscription-unmanaged-safe-mode-v1",
     "hostProfile": "Windows Claude Code 2.1.288. Unknown versions and other platform policy sources block; synthetic portability tests are not host activation evidence.",
@@ -11,7 +11,7 @@
     "limits": "Input 256 KiB; inline schema 64 KiB; combined child output 512 KiB; invocation 120 seconds; each diagnostic 10 seconds. Unknown terminal results block without retry.",
     "hostBookkeeping": "The host may refresh its own subscription credentials and bookkeeping despite session persistence being disabled. ShadowGraph never reads or records credentials."
   },
-  "verifiedVersion": "2.1.270",
+  "verifiedVersion": "2.1.288",
   "versionPolicy": "The delivery evidence is bound to this host and version. Another host or version is unverified until its own receipt. The version is read at activation and recorded there; the delivered head reports it as verified or unverified, and a host that updates after activation stays recorded as it was until the next activation.",
   "handler": {
     "type": "command",
