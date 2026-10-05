@@ -220,6 +220,7 @@ The opt-ins that can send data off the machine are all off by default:
   configured; a remote endpoint additionally requires `SHADOWGRAPH_ALLOW_REMOTE_EMBEDDINGS=1`,
   because that means memory and query text leave your machine.
 - **Deletion reach and retained copies.** See the [data lifecycle map](docs/data-lifecycle.md) for origin-scoped purge, source-evidence availability, explicit Markdown pruning, retention and recovery floors.
+- **Integrated behavior.** The [experience lifecycle contract](docs/contracts/integrated-lifecycle-contract.md) connects capture, extraction, correction, delivery, retention, deletion and recovery, including their activation and verification limits.
 - **Markdown export.** `markdown-sync` writes plaintext copies you control. ShadowGraph cannot find
   or delete those copies later — see [Storage, backup, and deletion](#storage-backup-and-deletion).
 - **Host delivery.** Inert unless you install the hooks and activate delivery for one store. Once

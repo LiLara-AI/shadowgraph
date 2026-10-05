@@ -3077,13 +3077,25 @@ export function createShadowGraph(options = {}) {
     if (previous && JSON.stringify(previousContent) === JSON.stringify(nextContent) && sameRequestedInterval) {
       const indexUpdated = input.embedding !== undefined && JSON.stringify(canonical(previous.embedding)) !== JSON.stringify(canonical(embedding));
       if (indexUpdated) {
-        assertJournalCapacity(1);
+        // Refresh every retry alias through the existing complete-snapshot
+        // entry format, so predecessor readers also replay the new index.
+        const retryKeys = [];
+        for (const [key, value] of idempotency) if (value?.id === previous.id) {
+          if (value.kind !== previous.kind || !sameOwnerKey(value, previous)
+            || !key.startsWith(idempotencyKeyPrefix(previous))) throw new Error('Idempotency entry identity does not match its entity');
+          canonicalIdempotencyValue(value);
+          retryKeys.push(key);
+        }
+        assertJournalCapacity(Math.max(1, retryKeys.length));
         const indexedAt = recordedAt;
         touchMutableObject(previous);
         previous.embedding = embedding;
         previous.updatedAt = indexedAt;
         event('memory.indexed', { recordId: previous.id, project });
-        appendJournal({ type: 'memory.indexed', entityKind: 'memory', entityId: previous.id, project, payload: clone(previous), provenance: writeProvenance({ ...previous, ...input }) });
+        for (const key of retryKeys.length ? retryKeys : [undefined]) {
+          appendJournal({ type: 'memory.indexed', entityKind: 'memory', entityId: previous.id, project, payload: clone(previous), provenance: writeProvenance({ ...previous, ...input }), idempotencyKey: key });
+          if (key !== undefined) idempotency.set(key, { ...idempotency.get(key), embedding: clone(embedding), updatedAt: indexedAt });
+        }
       }
       return { operation: 'NOOP', memory: clone(previous), ...(indexUpdated ? { indexUpdated: true } : {}) };
     }
@@ -6441,9 +6453,20 @@ export function createShadowGraph(options = {}) {
             idempotency: sortIdempotency([...finalIdempotency.entries()].map(([key, value]) => ({ key, value: clone(value) })))
           };
           const rebuilt = rebuildProjection(combinedJournal, { journalEpoch: generatedEpoch }).projection;
+          const rebuiltEntities = new Map([...rebuilt.records, ...rebuilt.facts].map((item) => [item.id, item]));
+          // Retry snapshots can predate lifecycle-only changes. Compare their
+          // canonical values as normal import/rebuild does, but only after
+          // validating the replayed identity and semantic binding.
+          const rebuiltIdempotency = rebuilt.idempotency.map(({ key, value }) => {
+            const entity = rebuiltEntities.get(value?.id);
+            if (!entity || entity.kind !== value.kind || !sameOwnerKey(entity, value)
+              || !key.startsWith(idempotencyKeyPrefix(value))
+              || !idempotencySemanticallyMatches(value, entity)) throw new Error('Rebuilt idempotency entry does not match its canonical entity');
+            return { key, value: clone(entity) };
+          });
           const rebuiltProjection = {
             records: sortById(rebuilt.records), facts: sortById(rebuilt.facts),
-            relations: sortById(rebuilt.relations), idempotency: sortIdempotency(rebuilt.idempotency)
+            relations: sortById(rebuilt.relations), idempotency: sortIdempotency(rebuiltIdempotency)
           };
           if (!sameSnapshot(rebuiltProjection, expectedProjection)) {
             throw new Error('Journal-less merge snapshot deltas do not reproduce the final live projection');

@@ -32,6 +32,7 @@
   },
   "homepage": "https://github.com/LiLara-AI/shadowgraph#readme",
   "files": [
+    "docs/data-lifecycle.md",
     "src/",
     "dashboard/",
     "integrations/README.md",
