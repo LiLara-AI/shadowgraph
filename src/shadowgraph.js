@@ -25,7 +25,7 @@ import { EXTRACTION_RECIPE } from './internal/extraction-contract.js';
 import { attemptOutcome } from './internal/outcome.js';
 import { RUNTIME_MISSES, missReachedBy, runtimeMissLedgerIssue, withFallbackMisses } from './internal/miss-ledger.js';
 import { supersessionOrder, temporalEvidence, versionTimes } from './internal/temporal-evidence.js';
-import { T1_DERIVATION_VERSION, t1Digest, t1Inputs, t1Line } from './compact-tier.js';
+import { T1_DERIVATION_VERSION, t1Digest, t1Inputs, t1Line, visibleRecordReferences } from './compact-tier.js';
 import { withoutSourceCopies } from './internal/source-availability.js';
 import { assertSourceRemovalSafe } from './internal/source-deletion.js';
 import { SELF_SIGNALS, stripDeliveredBlocks } from './internal/capture-source.js';
@@ -380,6 +380,16 @@ function clone(value) {
 // one ({ id, kind, ... }) does not. A legacy fact or relation may carry no kind.
 const RECORD_FIELDS = new Map([['decision', ['title', 'chosen', 'goal']], ['attempt', ['solution', 'result', 'reason']], ['memory', ['text', 'key']], ['fact', ['key', 'value']]]);
 const isRecord = (value) => typeof value.id === 'string' && (value.kind === undefined || (RECORD_FIELDS.get(value.kind) ?? []).some((field) => Object.hasOwn(value, field)));
+// Recognize historical output records without consulting today's live maps.
+// Import accepts attempts without content and facts without a value. Their
+// identity/kind or fact key, not optional content, establishes this boundary.
+// Administrative item envelopes project their entity before wrapping it.
+const isReferenceRecord = value => typeof value.id === 'string' && (
+  (RECORD_FIELDS.get(value.kind) ?? []).some(field => Object.hasOwn(value, field))
+  || value.kind === 'attempt'
+  || (value.kind === 'alternative' && Object.hasOwn(value, 'label'))
+  || ((value.kind === undefined || value.kind === 'fact') && typeof value.key === 'string')
+);
 // Where a public result holds a caller's own value, or an entry as it was
 // written: a journal payload, or a retry value (an idempotency entry's value).
 const AS_STORED_KEYS = new Set(['payload', 'value', 'expected', 'observed']);
@@ -2294,7 +2304,9 @@ export function createShadowGraph(options = {}) {
       try {
         return transactional(name, () => {
           readOperation = current;
-          const result = operation(...args), boundary = current.boundary;
+          const output = operation(...args), boundary = current.boundary;
+          // Redaction projects before its caller-controlled transformations.
+          const result = boundary && name !== 'redact' ? publicReferences(output, boundary.reaches) : output;
           if (boundary?.requestedAccess) {
             const ids = new Set();
             const visit = value => {
@@ -2321,6 +2333,37 @@ export function createShadowGraph(options = {}) {
         throw error;
       } finally { readOperation = previous; }
     };
+  }
+  // A mutation's echo can be used as a read (including a no-op or a retry).
+  // Project after the operation has stored its complete result, but inside its
+  // transaction so a failed projection rolls back too. Internal composition and
+  // retry storage never consume the projected public response.
+  function mutationReply(name, operation, options) {
+    return transactional(name, (...args) => {
+      const result = operation(...args);
+      return result && typeof result.then === 'function' ? result.then(value => publicReferences(value)) : publicReferences(result);
+    }, options);
+  }
+  // Only public read results cross this projection. Live scopedView objects,
+  // privileged snapshots and replay remain complete. Stop at each entity so
+  // arbitrary nested user content is not interpreted as graph relationships;
+  // containers such as journal payloads and retry values are still visited.
+  function publicReferences(value, reaches = null) {
+    if (!value || typeof value !== 'object') return value;
+    if (isReferenceRecord(value)) {
+      // Mutation echoes are limited to the returned record's existing owner
+      // and memory scope. A read grant never widens mutation ownership.
+      const own = { visible: item => !isLegacyOwned(value) && !isLegacyOwned(item) && sameOwnerKey(value, item) };
+      return visibleRecordReferences(value, reaches ?? scopedReach(own, normalizeMemoryScope(value.kind === 'memory' ? value.scope : undefined)));
+    }
+    let result = value;
+    for (const [key, item] of Object.entries(value)) {
+      const shown = publicReferences(item, reaches);
+      if (shown === item) continue;
+      if (result === value) result = Array.isArray(value) ? [...value] : { ...value };
+      result[key] = shown;
+    }
+    return result;
   }
   // The entity whose owner an integrity issue belongs to, for the issues that
   // name an owner only inside a composite key (duplicate fact and memory scopes).
@@ -3139,8 +3182,8 @@ export function createShadowGraph(options = {}) {
   // reconciliation F-17): with no project and no origin it is empty, never the
   // legacy "default" bucket.
   function memoryHistory(input = {}) {
-    const boundary = readBoundary(input);
     const scope = normalizeMemoryScope(input.scope);
+    const boundary = readBoundary(input, { memoryScope: scope });
     const items = [...records.values()]
       .filter((record) => record.kind === 'memory' && boundary.visible(record) && sameMemoryScopeValues(record.scope, scope) && record.memoryType === input.memoryType && record.key === input.key)
       .sort((left, right) => (left.version ?? 1) - (right.version ?? 1) || compareInstants(left.temporal?.validFrom ?? left.createdAt, right.temporal?.validFrom ?? right.createdAt) || String(left.id).localeCompare(String(right.id)))
@@ -3560,7 +3603,10 @@ export function createShadowGraph(options = {}) {
         assignedProject: null,
         entity: clone(entity)
       }));
-    return paginate(items, options, { view: 'legacy_attribution' });
+    const visible = new Set(items.map(item => item.id));
+    for (const item of items) for (const alternative of item.entity.alternatives ?? []) visible.add(alternative.id);
+    const shown = items.map(item => ({ ...item, entity: publicReferences(item.entity, id => visible.has(id)) }));
+    return paginate(shown, options, { view: 'legacy_attribution' });
   }
 
   async function verifyFact(input = {}) {
@@ -3714,7 +3760,7 @@ export function createShadowGraph(options = {}) {
     if (!['in', 'out', 'both'].includes(direction)) throw new Error('Traversal direction must be in, out, or both');
     const depth = input.depth ?? 1;
     if (!Number.isInteger(depth) || depth < 1 || depth > 10) throw new Error('Traversal depth must be an integer between 1 and 10');
-    const boundary = readBoundary(input);
+    const boundary = readBoundary(input, { memoryScope });
     const reach = (entityId) => {
       const found = entity(entityId, boundary);
       return found && (found.kind !== 'memory' || sameMemoryScopeValues(found.scope, memoryScope)) ? found : undefined;
@@ -4568,7 +4614,7 @@ export function createShadowGraph(options = {}) {
     // not survive in the audit trail just because it was also written there. A
     // projection baseline holds the whole store, so no scoped view carries one,
     // and redaction has no baseline to rewrite.
-    const transformed = transform(data);
+    const transformed = transform(publicReferences(data, boundary.reaches));
     // The output is a read: collections this build cannot interpret stay out of
     // it (plan v1.4.4 §10.9.6).
     for (const key of Object.keys(transformed)) if (!NATIVE_STORE_KEYS.includes(key)) delete transformed[key];
@@ -5129,7 +5175,7 @@ export function createShadowGraph(options = {}) {
   // never every project, and never the shared "default" bucket. Owners follow
   // the owner model the writes use, so legacy data in "default", or stored with
   // no project, belongs to no project a caller can name (OD-1).
-  function readBoundary(options = {}) {
+  function readBoundary(options = {}, { memoryScope } = {}) {
     const inherited = options.readProvenance;
     const request = inherited === undefined ? options : inherited?.version === 1 && inherited.request && typeof inherited.request === 'object' ? inherited.request : {};
     const scope = { ...resolveScope({ project: request.project, originId: request.originId, binding: inherited === undefined ? options.binding : undefined }) };
@@ -5173,7 +5219,8 @@ export function createShadowGraph(options = {}) {
     };
     // Whether an id -- a relation endpoint, say -- resolves inside it.
     const boundary = { scope, visible, baseVisible, accessId, surface, requestedAccess, provenance, widerRead: false, reaches: (entityId) => entity(entityId, boundary) !== undefined };
-    if (readOperation && requestedAccess) readOperation.boundary ??= boundary;
+    if (memoryScope !== undefined) boundary.reaches = scopedReach(boundary, memoryScope);
+    if (readOperation) readOperation.boundary ??= boundary;
     return boundary;
   }
 
@@ -5306,15 +5353,15 @@ export function createShadowGraph(options = {}) {
   }
 
   function search(query = '', options = {}) {
-    const boundary = readBoundary(options);
+    const boundary = readBoundary(options, { memoryScope: normalizeMemoryScope(options.scope) });
     const hits = rank(query, options, boundary);
     return scopedPage(hits, options, boundary, { query: String(query), filters: appliedFilters(options) }, { contentFields: [...CONTENT_SEARCH_FIELDS] });
   }
 
   function retrieve(query = '', options = {}) {
-    const boundary = readBoundary(options);
-    const hits = rank(query, options, boundary);
     const memoryScope = normalizeMemoryScope(options.scope);
+    const boundary = readBoundary(options, { memoryScope });
+    const hits = rank(query, options, boundary);
     const directIds = new Set(hits.map((item) => item.record.id));
     const results = hits.map((item) => ({ ...item, graphBoost: 0, reasons: [item.reason] }));
     // A neighbour joins only from inside the same boundary as the hits.
@@ -5352,7 +5399,7 @@ export function createShadowGraph(options = {}) {
 
   function recall(query = '', options = {}) {
     validateTemporalFields(options, ['asOf', 'currentAt']);
-    const boundary = readBoundary(options);
+    const boundary = readBoundary(options, { memoryScope: normalizeMemoryScope(options.scope) });
     const recallOptions = { ...options, project: boundary.scope.grant ? null : boundary.scope.project, scope: normalizeMemoryScope(options.scope), currentAt: options.currentAt ?? (options.asOf ? null : now()) };
     // Ranking only READS the graph, but this used to hand it `exportData()`,
     // which deep-clones every record, fact, relation, review signal, idempotency
@@ -5419,7 +5466,7 @@ export function createShadowGraph(options = {}) {
   function buildContext(input, { persistSignals, factual }) {
     const relevance = factual && (input.query != null || input.focalId != null);
     if (relevance) validateRelevanceInput(input);
-    const boundary = readBoundary(input);
+    const boundary = readBoundary(input, { memoryScope: normalizeMemoryScope() });
     const project = boundary.scope.project;
     const inScope = boundary.visible;
     const limit = input.limit;
@@ -5650,7 +5697,7 @@ export function createShadowGraph(options = {}) {
   // same handle over the same store gives the same bytes.
   function expand(input = {}) {
     validateExpandInput(input);
-    const boundary = readBoundary(input);
+    const boundary = readBoundary(input, { memoryScope: normalizeMemoryScope() });
     const reach = scopedReach(boundary, normalizeMemoryScope());
     const { recordId } = input;
     const boundRevision = { recordId, digest: input.digest };
@@ -6718,21 +6765,21 @@ export function createShadowGraph(options = {}) {
     // partial nested operation. Read-only paths pay no snapshot cost.
     setRevision: transactional('setRevision', setRevision, { mode: 'none' }),
     replaceData: transactional('replaceData', replaceData, { mode: 'snapshot' }),
-    addDecision: transactional('addDecision', addDecision),
-    addAttempt: transactional('addAttempt', addAttempt),
-    remember: transactional('remember', remember),
-    applyMemoryPlan: transactional('applyMemoryPlan', applyMemoryPlan),
+    addDecision: mutationReply('addDecision', addDecision),
+    addAttempt: mutationReply('addAttempt', addAttempt),
+    remember: mutationReply('remember', remember),
+    applyMemoryPlan: mutationReply('applyMemoryPlan', applyMemoryPlan),
     memoryHistory: auditedRead('memoryHistory', memoryHistory),
-    addFact: transactional('addFact', addFact),
+    addFact: mutationReply('addFact', addFact),
     migrateAttribution: transactional('migrateAttribution', migrateAttribution),
     backfillErasureTokens: transactional('backfillErasureTokens', backfillErasureTokens),
     attribute: transactional('attribute', attribute, { mode: 'snapshot' }),
     legacyAttributionReview,
-    verifyFact: transactional('verifyFact', verifyFact),
-    setOutcome: transactional('setOutcome', setOutcome),
-    addConfidenceEvidence: transactional('addConfidenceEvidence', addConfidenceEvidence),
-    updateDecisionStatus: transactional('updateDecisionStatus', updateDecisionStatus),
-    supersedeDecision: transactional('supersedeDecision', supersedeDecision),
+    verifyFact: mutationReply('verifyFact', verifyFact),
+    setOutcome: mutationReply('setOutcome', setOutcome),
+    addConfidenceEvidence: mutationReply('addConfidenceEvidence', addConfidenceEvidence),
+    updateDecisionStatus: mutationReply('updateDecisionStatus', updateDecisionStatus),
+    supersedeDecision: mutationReply('supersedeDecision', supersedeDecision),
     link: transactional('link', link),
     traverse: auditedRead('traverse', traverse),
     expand: auditedRead('expand', expand),

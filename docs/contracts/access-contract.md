@@ -65,6 +65,31 @@ wider evaluation is read-only, including when foreign evidence would otherwise
 produce a new signal about an own decision. Maintenance changes only own records
 and facts.
 
+Full public reads apply the same named-reference visibility rule as compact T1:
+`failedAttempts`, `relatedTo`, `supersedes` and `supersededBy` retain only targets
+reachable in the resolved read boundary, including the requested memory scope
+where that read has one. This also covers historical records, journal payloads,
+public rebuild views, nested alternatives and expansion counterparts. Mutation
+responses, including unchanged-status and idempotent replies, project references
+within the returned record's owner and memory scope; a wider read remains a
+separate grant-bearing operation. Legacy attribution review retains references
+only within its declared administrative view. Unresolvable references are
+withheld. Redaction applies this rule before caller-defined masking. Stored IDs,
+links, journal history and privileged persistence/replay remain unchanged; a
+scoped public export remains unsuitable for saving or restoring a store.
+
+An explicit wider retrieval can return another project's technical experience,
+its recorded outcome, proposed reason, conditions, evidence and uncertainty.
+Its source project and local choices remain attributable. A project grant also
+permits reading that project's private constraints: it is not lesson-only sharing.
+There is no lesson selector or automatic generalization of local choices into
+universal instructions. Relevance ranking does not narrow the grant's authority.
+
+The automatic delivery hook resolves its covered workspace's project and does
+not select a wider-read grant merely because one exists in the store. Explicit
+cross-project retrieval and automatic hook delivery are distinct paths. Synthetic
+CLI coverage of these paths is not proof of usefulness in a real model session.
+
 Results identify a successfully rechecked grant in `completeness.scope.grant` as
 `{accessId, expiresAt, surface}`. Otherwise it is null. Origin-only requests remain
 project-unresolved even with a grant. Grant-bearing results also carry

@@ -1256,7 +1256,7 @@ for (const [backend, options] of BACKENDS) test(`T-4 ${backend}: HTTP, CLI and M
   }
 });
 
-test('R-11.4: a live link field may name a withheld id, as a logical purge leaves it, and nothing else does', async (t) => {
+test('R-11.4: a stored live link survives logical purge while public reads withhold its inaccessible target', async (t) => {
   const f = fixture();
   const graph = createShadowGraph({ now });
   graph.importData(structuredClone(f.payload));
@@ -1269,9 +1269,12 @@ test('R-11.4: a live link field may name a withheld id, as a logical purge leave
     else if (Array.isArray(value)) value.forEach((item) => walk(item, key));
     else if (value && typeof value === 'object') for (const [child, item] of Object.entries(value)) walk(item, child);
   };
-  walk([viewed.exportData({ project: 'p' }).records, viewed.search('kept', { project: 'p' }), viewed.context({ project: 'p', query: 'kept decision' })], null);
-  assert.ok(found.length, 'the link field is there');
+  walk(privilegedLiveSnapshot(viewed).records, null);
+  assert.ok(found.length, 'the canonical live relationship is still there');
   assert.deepEqual([...new Set(found)].filter((key) => !LINK_FIELDS.has(key)), []);
+  found.length = 0;
+  walk([viewed.exportData({ project: 'p' }).records, viewed.search('kept', { project: 'p' }), viewed.context({ project: 'p', query: 'kept decision' })], null);
+  assert.deepEqual(found, [], 'public records do not name the withheld target, even through link fields');
 });
 
 test('T-9/R-8: a copy whose sidecar cannot land leaves no payload copy (the ledger copy lands first)', async (t) => {

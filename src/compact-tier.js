@@ -63,6 +63,33 @@ const ruleText = (rule) => (isObject(rule)
 const verbatim = (value) => (typeof value === 'string' ? value : show(value));
 const hiddenLink = () => false;
 
+// Full reads and compact derivation use the same named-reference boundary.
+// This is a detached view: stored links and arbitrary record content stay as
+// written. An unknown target is no more visible than a foreign one.
+export function visibleRecordReferences(record, visible = hiddenLink) {
+  let result = record;
+  for (const field of LINK_FIELDS) {
+    if (!Object.hasOwn(record, field)) continue;
+    const stored = record[field];
+    if (Array.isArray(stored)) {
+      const kept = stored.filter(id => visible(id));
+      if (kept.length === stored.length) continue;
+      if (result === record) result = { ...record };
+      result[field] = kept;
+    } else if (stored != null && !visible(stored)) {
+      if (result === record) result = { ...record };
+      delete result[field];
+    }
+  }
+  // Alternatives are known entities inside a decision, not arbitrary metadata.
+  // Historical imports can retain named links on them too.
+  if (record.kind === 'decision' && Array.isArray(record.alternatives)) {
+    const alternatives = record.alternatives.map(item => item && typeof item === 'object' ? visibleRecordReferences(item, visible) : item);
+    if (alternatives.some((item, index) => item !== record.alternatives[index])) result = { ...result, alternatives };
+  }
+  return result;
+}
+
 // The closure (VAR-09): derivation version 1 renders only the record's own
 // fields -- a linked record by its id alone, and only when the caller's
 // `visible` says it is inside the request's boundary (no link is, unless the
@@ -74,12 +101,7 @@ const hiddenLink = () => false;
 export function t1Inputs(record, { asOf = null, visible = hiddenLink } = {}) {
   if (asOf !== null && !isValidIsoInstant(asOf)) throw new TypeError('asOf must be null or an ISO 8601 instant string');
   const { embedding, erasureToken, ...rest } = record;
-  for (const field of LINK_FIELDS) {
-    if (!Object.hasOwn(rest, field)) continue;
-    if (Array.isArray(rest[field])) rest[field] = rest[field].filter((id) => visible(id));
-    else if (rest[field] != null && !visible(rest[field])) delete rest[field];
-  }
-  return { derivationVersion: T1_DERIVATION_VERSION, asOf: asOf === null ? null : new Date(asOf).toISOString(), record: rest };
+  return { derivationVersion: T1_DERIVATION_VERSION, asOf: asOf === null ? null : new Date(asOf).toISOString(), record: visibleRecordReferences(rest, visible) };
 }
 export const t1Digest = (inputs) => createHash('sha256').update(JSON.stringify(canonical(inputs))).digest('hex');
 

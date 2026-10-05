@@ -263,8 +263,10 @@ test('a line renders no link outside the read boundary', () => {
   graph.importData({ records: [{ id: 'decision-linked', kind: 'decision', project: 'alpha', title: 'linked rollout', chosen: 'a', status: 'superseded', supersededBy: alice.id }] });
   const [linked] = graph.context({ project: 'alpha', query: 'linked', compact: true }).relevant.items;
   assert.equal(JSON.stringify(linked.line).includes(alice.id), false);
-  // The full record is the record as stored, its links with it, as every read of a full record returns it.
-  assert.equal(graph.context({ project: 'alpha', query: 'predecessor' }).relevant.items[0].record.supersededBy, 'decision-beta');
+  // Full public records use the same boundary; canonical relationships stay stored.
+  assert.equal(Object.hasOwn(graph.context({ project: 'alpha', query: 'predecessor' }).relevant.items[0].record, 'supersededBy'), false);
+  assert.equal(privilegedSnapshot(graph).records.find(record => record.id === 'decision-alpha').supersededBy, 'decision-beta');
+  assert.equal(privilegedSnapshot(graph).records.find(record => record.id === 'decision-linked').supersededBy, alice.id);
 });
 
 test('a grant widens the ranked set and names itself in each line handle', () => {

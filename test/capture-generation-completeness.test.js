@@ -22,8 +22,11 @@ test('generation source scan: all graph mutation and audited-read entries are cl
   const graph = await source('shadowgraph.js');
   const tail = graph.slice(graph.indexOf('return registerPrivileged'));
   assert.ok(tail.length > 1000, 'locate the actual public/privileged surface');
-  const entries = [...tail.matchAll(/(?:transactional|auditedRead)\('([^']+)'/gu)].map(match => match[1]).sort();
+  const entries = [...tail.matchAll(/(?:transactional|auditedRead|mutationReply)\('([^']+)'/gu)].map(match => match[1]).sort();
   assert.deepEqual(entries, Object.values(inventory).flatMap(value => value.split(' ')).sort());
+  const reply = graph.slice(graph.indexOf('function mutationReply('), graph.indexOf('function publicReferences('));
+  assert.match(reply, /return transactional\(name, \(\.\.\.args\) => \{/u, 'public reply projection stays inside the common transaction fence');
+  assert.match(reply, /const result = operation\(\.\.\.args\)/u, 'the operation runs before its reply is projected');
   assert.match(graph, /invalidatedCaptureTokens\(generationBefore, snapshot\(\)\)/u);
   assert.match(graph, /cancelRequested: true/u);
   const capture = await source('internal/capture.js');
