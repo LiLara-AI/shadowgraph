@@ -2,6 +2,10 @@
 
 ## Unreleased — scope coverage
 
+- Complete the P6–P8 capture lifecycle: policy-driven uncited raw expiry, inspection and pending-item deletion; generation-guarded, budgeted extraction through the separately approved subscription executor; owner correction and explicit reprocessing that supersedes prior extraction output while preserving owner edits. Delivery remains a bounded project read, and all capabilities require their activation procedures.
+- Extend deletion to exact unattributed origins, controlled source-evidence copies and explicit tracked Markdown pruning. Reader, pending-read, recovery and worker floors are separate; unknown-member preservation is not semantic compatibility. Backups, restore recovery files and host/user-held copies remain outside complete-erasure claims.
+- Verify the integrated JSON/SQLite capture-to-extraction-to-delivery, correction/reprocessing, retention/deletion, backup/restore, restart and deactivation lifecycle. Correct keyed journal-less overwrite parity after legitimate lifecycle changes, and keep every retry alias replayable after index-only refresh with atomic journal-capacity checks. See the [integrated contract](docs/contracts/integrated-lifecycle-contract.md) and [data lifecycle map](docs/data-lifecycle.md).
+
 - A standalone capture-retention reader validates project windows and enforces effective raw expiry at consumption. It preserves persistence data and unknown ledger members, reports expired backlog honestly, and refuses retention-sensitive restore/merge until lifecycle reconciliation is available. Older readers that merely preserve controls do not meet this semantic floor.
 
 - A JSON purge or pending-purge completion now refuses before durable writes when a store named `restore` has ambiguous save/recovery temporaries. Historical and current save filenames stay compatible; recovery files remain untouched. Ordinary saves with already-committed purge intents remain supported. The corrective build is the safe purge/recovery floor for this case.

@@ -77,3 +77,9 @@ while protecting edited files. Pull cannot revive a non-active tracked memory.
 Review-signal reads identify superseded/archived decision history without
 rewriting review evidence or acknowledgement. The private miss ledger remains
 historical diagnostic data; it is never used to resurrect a current claim.
+
+## Bounded installed-host latency observation
+
+On Windows Claude Code 2.1.288, the approved installed runtime `5b24a20e11cbdbdb44b2806cecec822af7607118` produced five controlled JSON-store observations from durable owner correction to the stdout write callback of the first applicable corrected UserPromptSubmit delivery: 4,695, 4,598, 4,707, 4,643 and 4,564 ms; median 4,643 ms, nearest-rank p95 4,707 ms (the maximum for five samples). Each preceding SessionStart had a valid nonapplicable working set.
+
+The interval includes local preflight, supervisor and host startup. It excludes human waiting and model completion; stdout/pipe timing is not acknowledgement that the model consumed the corrected content. This is installed-host synthetic-work evidence, not a general latency guarantee, a final-source-runtime benchmark or a natural-work acceptance result. The earlier failed attempt and all reserved usage remain historical evidence; nothing was refunded.

@@ -99,3 +99,9 @@ Breaking shape change: `review()` and `getReviewSignals()` now return `{ items, 
 An owner's historical signal citing out-of-scope facts is returned as identity/lifecycle fields plus a limitation. Historical condition text, coverage, reason, title and alternative labels are withheld together. Such a result is partial and not lossless; another owner's signals never create counts or notices. All-in-scope history stays full, status filters apply before coverage is calculated, and stored evidence/identity/acknowledgement remain unchanged. Export, redaction, statistics and maintenance carry the same partial signal coverage.
 
 Redaction stamps its marker and completeness after transformation/native-key filtering and is never lossless or a usable store. Statistics and integrity/action results add coverage without replacing their existing counts, verdicts or limitations. CLI doctor forwards validation coverage; dashboard object metadata renders as JSON text.
+
+## Capture, extraction and source availability
+
+Scoped completeness also reports captured backlog, processing, blocked/error states, admission and transcript gaps, quarantined material, and pending restore status. These are known observations and limitations, not a guarantee that all host work was captured. Capture items remain hidden from ordinary experience reads. Expired or deleted raw cannot be reconstructed from a completeness count.
+
+`extractionAvailable` projects the current exact-store configuration and outstanding execution state. It is false when configuration or settlement is unavailable; it is not a provider-health probe, does not start work, and is not saved in memory or restored from a backup. Source evidence that was removed is explicitly unavailable without changing a surviving record's verification result. Quarantine remains hidden until an authorized release; raw expiry does not release it. See [extraction status](../extraction.md) and [data lifecycle](../data-lifecycle.md).

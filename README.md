@@ -219,14 +219,17 @@ The opt-ins that can send data off the machine are all off by default:
 - **Embeddings.** No endpoint is configured. A localhost OpenAI-compatible server works once
   configured; a remote endpoint additionally requires `SHADOWGRAPH_ALLOW_REMOTE_EMBEDDINGS=1`,
   because that means memory and query text leave your machine.
-- **Deletion reach and retained copies.** See the [data lifecycle map](docs/data-lifecycle.md) for origin-scoped purge, source-evidence availability, explicit Markdown pruning, retention and recovery floors.
-- **Integrated behavior.** The [experience lifecycle contract](docs/contracts/integrated-lifecycle-contract.md) connects capture, extraction, correction, delivery, retention, deletion and recovery, including their activation and verification limits.
+- **Extraction.** Separately approved extraction sends eligible redacted captures through the supported first-party Claude subscription route. No API-key, alternate-provider, proxy or paid fallback is supported by this executor; the owner must disable subscription overage. Pattern redaction cannot guarantee every secret is removed. See [extraction and its host limits](docs/extraction.md).
 - **Markdown export.** `markdown-sync` writes plaintext copies you control. ShadowGraph cannot find
   or delete those copies later — see [Storage, backup, and deletion](#storage-backup-and-deletion).
 - **Host delivery.** Inert unless you install the hooks and activate delivery for one store. Once
   active, the records it delivers (credential-shaped values redacted first) become part of Claude
   Code's session transcript and of what the model receives, like any context; ShadowGraph cannot
   remove them from the transcript. See [the integrations guide](integrations/README.md).
+
+Capture, extraction and delivery require their separate activation procedures. Capture uses the enrolled external store; existing manual stores are not automatically migrated. Eligible uncited raw expires under the configured policy even when quarantined, while accepted experience and required cited evidence are protected. Expired raw may no longer be re-extracted.
+
+See the [data lifecycle map](docs/data-lifecycle.md) for deletion reach, retained copies, explicit Markdown pruning and recovery floors, and the [integrated experience lifecycle](docs/contracts/integrated-lifecycle-contract.md) for correction, reprocessing, restart and shutdown boundaries.
 
 For shared local use, set a Bearer token:
 
@@ -337,7 +340,7 @@ shadowgraph recall '{"project":"my-app","query":"development environment"}'
 `repair-plan` · `backup` · `restore` · `decision` · `attempt` · `fact` · `outcome` · `status` ·
 `link` · `traverse` · `redact` · `supersede` · `purge-preview` · `purge` · `journal` · `rebuild` ·
 `confidence-evidence` · `review-context` · `deliver` · `capture` · `install-hooks` · `uninstall-hooks` ·
-`activate` · `deactivate`
+`activate` · `deactivate` · `extract` · `quarantine`
 
 Full argument shapes are in the [API reference](docs/api-reference.md).
 </details>
