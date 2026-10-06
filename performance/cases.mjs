@@ -57,6 +57,7 @@ export function runPerformance(file = PERFORMANCE_FILE) {
     process.stderr.write(`performance step failed: ${error.message}\n`);
     return 1;
   } finally {
-    rmSync(home, { recursive: true, force: true });
+    // Removing the temporary home cannot change the result.
+    try { rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* left behind in the temporary directory */ }
   }
 }

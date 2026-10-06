@@ -9,6 +9,8 @@
 // for node's test discovery, so `npm test` does not run it a second time.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { CONTEXT_DELIVERY_BUDGET } from '../src/mcp-tools.js';
 import { checkWriteBudget, measureWrites } from '../scripts/context-size.mjs';
 import { RUNTIME_MISSES_PER_READ } from '../src/internal/miss-ledger.js';
@@ -22,16 +24,18 @@ const timings = (report) => JSON.stringify({ grantAdded: report.grant.addedMsMax
 // it, from the content-free phase records (PR #12).
 // - The effectful operations are exact: per save, one lock acquisition, one
 //   temporary write and one committed rename; outside a save, none.
-// - The calls per file role are at most the most measured anywhere: Windows and
-//   Linux, Node 20, 22 and 24, with the temporary directory reached directly
-//   and through an 8.3 short name. The 8.3 name adds one control-file probe per
-//   store check, as the store checks the name it was given and its canonical
-//   name. Fewer is fine; more fails, so no extra read, write, rename, lock or
-//   probe goes unseen.
+// - The calls per file role are at most those measured on Windows and Linux,
+//   Node 20, 22 and 24. Fewer is fine; more fails, so no extra read, write,
+//   rename, lock or probe goes unseen.
+// - Where the temporary directory is reached through an alias (an 8.3 short
+//   name on Windows), the store checks its control file under the name it was
+//   given and under its canonical name: one more "other" call per check,
+//   measured on Windows Node 24. The bound follows the path form in use.
 // - A lock wait or rename retry the runner forces is counted apart, reported
 //   with its error code, and its time stays inside the elapsed budget above.
-const SAVE_CALLS_AT_MOST = { lock: 6, store: 9, temp: 2, other: 5 };
-const FENCED_DELIVERY_CALLS_AT_MOST = { lock: 0, store: 5, temp: 0, other: 3 };
+const ALIASED = realpathSync.native(tmpdir()) !== tmpdir();
+const SAVE_CALLS_AT_MOST = { lock: 6, store: 9, temp: 2, other: ALIASED ? 5 : 4 };
+const FENCED_DELIVERY_CALLS_AT_MOST = { lock: 0, store: 5, temp: 0, other: ALIASED ? 3 : 2 };
 const OWN_DELIVERY_CALLS_AT_MOST = { lock: 0, store: 0, temp: 0, other: 0 };
 const atMost = (calls, limits) => Object.keys(limits).every((role) => calls[role] <= limits[role]);
 function assertStructure(report, label = '') {

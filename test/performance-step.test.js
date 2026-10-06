@@ -43,7 +43,10 @@ test('every required job runs the performance step, mandatory and before the sui
   assert.match(workflow, /\n    name: \$\{\{ matrix\.os \}\} \/ Node \$\{\{ matrix\.node-version \}\}\n/u);
   const { scripts } = JSON.parse(await read('package.json'));
   assert.equal(scripts['test:performance'], 'node performance/run.mjs');
-  assert.equal(await read('performance/run.mjs').then((source) => /process\.exitCode = runPerformance\(/u.test(source) && !/isMain|import\.meta\.url ===/u.test(source)), true, 'the entry script always runs the step');
+  const entry = await read('performance/run.mjs');
+  assert.match(entry, /^process\.exitCode = runPerformance\(process\.argv\[2\] \?\? PERFORMANCE_FILE\);$/mu, 'the entry script always runs the step, on the performance file unless told otherwise');
+  assert.doesNotMatch(entry, /isMain|import\.meta\.url ===/u);
+  assert.equal(PERFORMANCE_FILE, 'performance/default-path-budget.perf.js');
 });
 
 test('the performance file declares exactly the measured cases and is not one the suite discovers', async () => {
