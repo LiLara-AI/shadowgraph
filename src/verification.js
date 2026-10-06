@@ -492,23 +492,34 @@ const expandContractions = (text) => text.replace(APOSTROPHE, "'").replace(/\bca
 // No usable span: which dimension explains the difference? First, the claim
 // must be about the source at all; then a marker the claim adds that the source
 // never has; then a marker the closest source unit has that the claim drops.
+// What a diagnosis reads of the whole source does not depend on the claim, so a
+// source read once (verifiedClaims reads each sourceRef once) is summarised once,
+// not once per claim that has no span in it.
+const sourceSummaries = new WeakMap();
+function summaryOf(source) {
+  let summary = sourceSummaries.get(source);
+  if (!summary) {
+    const words = source.units.flatMap((unit) => unit.words);
+    summary = { content: new Set(contentOf(words)), markers: markersOf(words), unitContent: source.units.map((unit) => contentOf(unit.words)) };
+    sourceSummaries.set(source, summary);
+  }
+  return summary;
+}
 function diagnoseClaim(claimText, source) {
   const claimWords = wordsOf(claimText);
   const content = contentOf(claimWords);
-  const sourceWords = source.units.flatMap((unit) => unit.words);
-  const sourceContent = new Set(contentOf(sourceWords));
+  const { content: sourceContent, markers: sourceMarkers, unitContent } = summaryOf(source);
   if (!content.length || content.filter((word) => sourceContent.has(word)).length / content.length < 0.5) return 'no_span';
   const claimMarkers = markersOf(claimWords);
-  const sourceMarkers = markersOf(sourceWords);
   const added = FAILURE_ORDER.find((dimension) => [...claimMarkers[dimension]].some((marker) => !sourceMarkers[dimension].has(marker)));
   if (added) return added;
   const wanted = new Set(content);
   let closest = null;
   let best = -1;
-  for (const unit of source.units) {
-    const overlap = contentOf(unit.words).filter((word) => wanted.has(word)).length;
+  source.units.forEach((unit, index) => {
+    const overlap = unitContent[index].filter((word) => wanted.has(word)).length;
     if (overlap > best) { best = overlap; closest = unit; }
-  }
+  });
   const closestMarkers = markersOf(closest?.words ?? []);
   if (closest?.question.at(-1)) closestMarkers.modality.add('?');
   return FAILURE_ORDER.find((dimension) => [...closestMarkers[dimension]].some((marker) => !claimMarkers[dimension].has(marker))) ?? 'no_span';
