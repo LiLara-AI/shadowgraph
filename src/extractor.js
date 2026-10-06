@@ -10,6 +10,7 @@ import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 
 import { EXTRACTION_MODEL } from './internal/extraction-contract.js';
+import { commandPath } from './internal/owner-files.js';
 export { EXTRACTION_MODEL } from './internal/extraction-contract.js';
 export const EXTRACTOR_LIMITS = Object.freeze({ inputBytes: 256 * 1024, outputBytes: 512 * 1024, timeoutMs: 120000, checkTimeoutMs: 10000 });
 const PROFILE_VERSION = '2.1.288';
@@ -193,7 +194,9 @@ async function outsideRepository(cwd, env, signal) {
     try { await lstat(join(path, '.git')); return false; } catch (e) { if (e.code !== 'ENOENT') return false; }
     if (dirname(path) === path) break;
   }
-  const out = await runBounded({ executable: 'git', args: ['rev-parse', '--absolute-git-dir'], cwd, env: { ...childEnvironment(env), LC_ALL: 'C' }, timeoutMs: 3000, signal });
+  const git = commandPath('git', env);
+  if (!git) return false;
+  const out = await runBounded({ executable: git, args: ['rev-parse', '--absolute-git-dir'], cwd, env: { ...childEnvironment(env), LC_ALL: 'C' }, timeoutMs: 3000, signal });
   return !out.failure && out.code !== 0 && /not a git repository/iu.test(out.stderr);
 }
 

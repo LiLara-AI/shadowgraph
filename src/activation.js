@@ -17,7 +17,7 @@ import { defaultSettingsPath, HOOK_TEMPLATE_URL, installedHandlers, pinnedRuntim
 import { confirmOwnerAction } from './internal/owner-confirmation.js';
 import { credentialLiteralIn } from './internal/credential-literal.js';
 import { DELETION_VIEW } from './internal/deletion-knowledge.js';
-import { canonicalPath, isScratchFile, readText, writeJsonAtomically } from './internal/owner-files.js';
+import { canonicalPath, commandPath, isScratchFile, readText, writeJsonAtomically } from './internal/owner-files.js';
 import { mintOriginId, usableOriginId } from './scope.js';
 
 export const COVERAGE_MANIFEST_URL = new URL('../integrations/claude-code.coverage.json', import.meta.url);
@@ -55,7 +55,9 @@ async function claudeVersion() {
   try {
     // No shell, so no command file is looked for in the working directory; a
     // host installed only as a command script reads as unknown.
-    const { stdout } = await run('claude', ['--version'], { timeout: 5000, windowsHide: true });
+    const claude = commandPath('claude');
+    if (!claude) return 'unknown';
+    const { stdout } = await run(claude, ['--version'], { timeout: 5000, windowsHide: true });
     return /\d+\.\d+\.\d+/u.exec(stdout)?.[0] ?? 'unknown';
   } catch {
     return 'unknown';
@@ -65,7 +67,9 @@ async function claudeVersion() {
 // The git working tree a path lies in, if any (a bounded call).
 async function workingTree(path) {
   try {
-    return (await run('git', ['rev-parse', '--show-toplevel'], { cwd: dirname(path), timeout: 3000, windowsHide: true })).stdout.trim() || null;
+    const git = commandPath('git');
+    if (!git) return null;
+    return (await run(git, ['rev-parse', '--show-toplevel'], { cwd: dirname(path), timeout: 3000, windowsHide: true })).stdout.trim() || null;
   } catch {
     return null;
   }
@@ -234,9 +238,11 @@ function sharedWith(other, name, storeFile, storage, pinned) {
 async function gitRepository(path) {
   const plain = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^GIT_/iu.test(name)));
   const placed = process.env.GIT_DIR || process.env.GIT_WORK_TREE ? [process.env] : [];
+  const git = commandPath('git');
+  if (!git) return 'a repository git could not rule out (git is not on PATH)';
   for (const env of [plain, ...placed]) {
     try {
-      return (await run('git', ['rev-parse', '--absolute-git-dir'], { cwd: dirname(path), timeout: 3000, windowsHide: true, env: { ...env, LC_ALL: 'C' } })).stdout.trim() || dirname(path);
+      return (await run(git, ['rev-parse', '--absolute-git-dir'], { cwd: dirname(path), timeout: 3000, windowsHide: true, env: { ...env, LC_ALL: 'C' } })).stdout.trim() || dirname(path);
     } catch (error) {
       if (!/not a git repository/iu.test(String(error.stderr ?? ''))) return `a repository git could not rule out (${String(error.stderr || error.code || error.message).trim()})`;
     }

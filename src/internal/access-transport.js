@@ -6,6 +6,7 @@ import { copyFile, mkdir, rename, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import * as privileged from './snapshot.js';
 import { isCommittedRejection } from '../shadowgraph.js';
+import { commandPath } from './owner-files.js';
 
 const execute = promisify(execFile);
 
@@ -27,10 +28,12 @@ export async function discoverWorkspace(cwd = process.cwd(), { timeout = 0 } = {
   const work = resolve(cwd);
   try {
     // The first line is the answer; the rest is the path, which may itself hold a newline.
-    const { stdout } = await execute('git', ['rev-parse', '--is-inside-work-tree', '--show-toplevel'], { cwd: work, timeout });
+    const git = commandPath('git');
+    if (!git) throw new Error('git is not on PATH');
+    const { stdout } = await execute(git, ['rev-parse', '--is-inside-work-tree', '--show-toplevel'], { cwd: work, timeout });
     const inside = stdout.slice(0, stdout.indexOf('\n')).trim();
     const root = resolve(gitAnswer(stdout.slice(stdout.indexOf('\n') + 1)));
-    const { stdout: common } = await execute('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: work, timeout });
+    const { stdout: common } = await execute(git, ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: work, timeout });
     const step = relative(root, realpathSync.native(work));
     const within = step !== '..' && !step.startsWith(`..${sep}`) && !isAbsolute(step);
     return { worktreeRoot: root, commonDir: resolve(gitAnswer(common)), ...(inside === 'true' && within ? {} : { outsideWorkTree: true }) };
