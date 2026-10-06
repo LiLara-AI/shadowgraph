@@ -80,6 +80,21 @@ for (const type of ['json', 'sqlite']) {
     const g = createShadowGraph(); g.importData(data);
     assert.ok(!(g.search('', { project: 'p' }).completeness.capture.workerErrors ?? []).some(x => x.reason === 'drain_stopped'));
   });
+  test(`drain ${type}: a stop whose cleanup outlasts its bound is still a stop, with no receipt and no second cleanup`, skip, async t => {
+    const f = await setup(t, type, 2); let calls = 0, cleanupOpens = 0, late;
+    const openStore = async o => {
+      if (o.lockTimeoutMs === undefined) return createStorage(o);
+      cleanupOpens += 1;
+      if (late) return createStorage(o);
+      late = new Promise(resolve => setTimeout(resolve, 1100)).then(() => createStorage(o)); return late;
+    };
+    const result = await runExtractionDrain({ ...f.options, openStore, guard: async () => false, executor: { extract: async () => { calls++; return f.response; } } });
+    await late;
+    assert.deepEqual([result.status, result.blockedReason, result.completed, result.storeReceiptWritten], ['blocked', 'drain_stopped', 0, false]);
+    assert.equal(calls, 0); assert.equal(cleanupOpens, 1);
+    const data = await f.read();
+    assert.deepEqual(data.records.filter(x => x.kind === 'capture').map(x => [x.state, x.lease]), [['pending', null], ['pending', null]]);
+  });
   test(`drain ${type}: output journal ceiling rolls back every proposed canonical record`, skip, async t => {
     const f = await setup(t, type, 1, { journalEntriesPerSession: 3 });
     const response = { ...f.response, value: { records: [{ kind: 'memory', fields: [{ name: 'text', text: 'Synthetic observation 0.', sourceRef: f.items[0].id }] }] } };
