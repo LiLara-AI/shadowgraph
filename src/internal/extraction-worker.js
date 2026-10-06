@@ -158,9 +158,18 @@ async function recordWorkerStatus(options, reason) {
   });
 }
 
+// A block's cleanup (release the claim, record the worker status) is bounded at
+// one second. CLEANUP_BOUND_FOR_TESTS is a test-only seam for that bound: no
+// production caller sets it, and a symbol key cannot arrive from a command line,
+// a request, an environment variable, a workspace or a stored setting, so every
+// production drain keeps one second (owner decision, PR #12).
+const CLEANUP_BOUND_MS = 1000;
+export const CLEANUP_BOUND_FOR_TESTS = Symbol('extraction cleanup bound (tests only)');
+
 // Internal bounded drain. PR41 supplies activation/deactivation checks and the
 // production trigger; synthetic callers here never imply real-host approval.
 export async function runExtractionDrain(options) {
+  const cleanupMs = Number.isSafeInteger(options[CLEANUP_BOUND_FOR_TESTS]) && options[CLEANUP_BOUND_FOR_TESTS] > 0 ? options[CLEANUP_BOUND_FOR_TESTS] : CLEANUP_BOUND_MS;
   const controller = new AbortController(), budgets = options.budgets ?? FROZEN_WORKER_BUDGETS;
   const stop = () => controller.abort(); options.signal?.addEventListener('abort', stop, { once: true });
   if (options.signal?.aborted) stop();
@@ -173,7 +182,7 @@ export async function runExtractionDrain(options) {
   let completed = 0, claimed = null, attempts = 0, cleanupFailed = null;
   const blocked = async reason => {
     reason = workerReason(reason);
-    const cleanup = { ...options, guard: undefined, signal: AbortSignal.timeout(1000), lockTimeoutMs: Math.min(options.lockTimeoutMs ?? 1000, 1000) };
+    const cleanup = { ...options, guard: undefined, signal: AbortSignal.timeout(cleanupMs), lockTimeoutMs: Math.min(options.lockTimeoutMs ?? 1000, 1000) };
     try {
       if (claimed) {
         await commitCapture({ ...cleanup, attemptCount: attempts }, claimed, { status: 'worker_blocked', blockedReason: reason });
