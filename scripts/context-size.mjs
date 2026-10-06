@@ -268,10 +268,16 @@ export function windowPhases({ started, ended, events, gc = [], excluded = [] })
   const known = new Set([...renames, ...writes, ...of('readFile', 'store'), ...inside.filter((event) => event.role === 'lock')]);
   const others = inside.filter((event) => !known.has(event));
   const gcMs = covered(gc.map((entry) => ({ started: Math.max(entry.started, started), ended: Math.min(entry.ended, ended) })).filter((entry) => entry.ended > entry.started));
+  const count = (role) => inside.filter((event) => event.role === role).length;
   return {
     ms: round(windowMs),
-    lock: { attempts: lockOpens.length, codes: codes(lockOpens), waitMs: round(lockWaitMs), pollMs: round(lockPollMs), handleAndReleaseMs: round(sum(inside.filter((event) => event.role === 'lock' && event.op !== 'open'))) },
-    rename: { attempts: renames.length, codes: codes(renames), callMs: round(sum(renames)), backoffMs: round(renameBackoffMs) },
+    calls: { lock: count('lock'), store: count('store'), temp: count('temp'), other: count('other') },
+    lock: { attempts: lockOpens.length, acquired: lockOpens.filter((event) => !event.code).length,
+      // Lock calls made while waiting for the lock (failed opens and staleness probes), counted apart.
+      contentionCalls: firstLock ? inside.filter((event) => event.role === 'lock' && event.started >= lockOpens[0].started && event.started < firstLock.started).length : lockOpens.length,
+      codes: codes(lockOpens), waitMs: round(lockWaitMs), pollMs: round(lockPollMs), handleAndReleaseMs: round(sum(inside.filter((event) => event.role === 'lock' && event.op !== 'open'))) },
+    rename: { attempts: renames.length, committed: renames.filter((event) => !event.code).length, codes: codes(renames), callMs: round(sum(renames)), backoffMs: round(renameBackoffMs) },
+    writes: writes.length,
     readMs: round(sum(of('readFile', 'store'))),
     writeMs: round(sum(writes)),
     preWriteGapMs: round(preWriteGapMs),

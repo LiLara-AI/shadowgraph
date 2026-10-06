@@ -21,8 +21,10 @@ test('a save window splits into lock wait and polls, rename retries and backoff,
     event('readFile', 'store', 200, 201)
   ];
   const save = windowPhases({ started: 0, ended: 100, events, gc: [{ started: 60, ended: 64 }] });
-  assert.deepEqual(save.lock, { attempts: 3, codes: { EEXIST: 1, EPERM: 1 }, waitMs: 53, pollMs: 50, handleAndReleaseMs: 4 });
-  assert.deepEqual(save.rename, { attempts: 2, codes: { EPERM: 1 }, callMs: 2, backoffMs: 20 });
+  assert.deepEqual(save.calls, { lock: 7, store: 1, temp: 3, other: 1 });
+  assert.deepEqual(save.lock, { attempts: 3, acquired: 1, contentionCalls: 2, codes: { EEXIST: 1, EPERM: 1 }, waitMs: 53, pollMs: 50, handleAndReleaseMs: 4 });
+  assert.deepEqual(save.rename, { attempts: 2, committed: 1, codes: { EPERM: 1 }, callMs: 2, backoffMs: 20 });
+  assert.equal(save.writes, 1);
   assert.deepEqual([save.ms, save.readMs, save.writeMs, save.preWriteGapMs, save.fsMs, save.gcMs, save.unaccountedMs], [100, 3, 4, 12, 17, 4, 1]);
   assert.deepEqual(save.otherFs, { calls: 1, ms: 1, codes: { ENOENT: 1 } });
   const delivery = windowPhases({ started: 0, ended: 300, events, excluded: [{ started: 0, ended: 100 }] });

@@ -42,7 +42,20 @@ jobs:
           python-version: '3.11'
       - run: npm ci
       - run: npm run check
-      - run: npm test
+      # The delivery-budget performance cases (250 ms elapsed added latency per
+      # grant delivery, all of its I/O included, a cold store, every sample) run
+      # once per job in their own mandatory step, before the suite: some suite
+      # tests start detached processes, and none may compete with this
+      # measurement. The step fails unless every performance case ran and
+      # passed (PR #12).
+      - name: Delivery-budget performance (dedicated, before the suite)
+        id: performance
+        run: npm run test:performance
+      # The suite still runs when only the performance step failed, so its own
+      # results are kept; the job stays failed.
+      - name: Test suite
+        if: ${{ success() || (failure() && steps.performance.outcome == 'failure') }}
+        run: npm test
       - run: npm audit --omit=dev
       - run: npm run check:integrations
       - name: Install pinned MCP gate clients
