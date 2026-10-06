@@ -14,8 +14,14 @@ jobs:
     name: ${{ matrix.os }} / Node ${{ matrix.node-version }}
     runs-on: ${{ matrix.os }}
     # The full suite runs about 17 minutes locally, the T-10 file alone about
-    # 6 (PR-37c review finding 14): 45 leaves margin for the slower legs.
-    timeout-minutes: 45
+    # 6 (PR-37c review finding 14): 45 leaves margin for the Ubuntu legs. On
+    # GitHub's Windows runners SQLite file I/O is several times slower: the
+    # T-10 SQLite restore matrix (test/restore-wrapper-r16.test.js) took 40-85 s
+    # a case against about 5 s on Ubuntu, `npm test` took 37 minutes on Node 24
+    # and was cut off at 45 with about nine tenths done on Node 22 (runs
+    # 37407942637 and 37407954378). Windows Node 20 skips SQLite and takes about
+    # 18. Windows legs get 75; a hang still stops at that bound.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 75 || 45 }}
     strategy:
       fail-fast: false
       matrix:
