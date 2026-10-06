@@ -18,6 +18,9 @@ import { createJsonFileStore } from '../src/storage.js';
 import { privilegedSnapshot } from '../src/internal/snapshot.js';
 import { RUNTIME_MISSES_PER_READ } from '../src/internal/miss-ledger.js';
 
+// Per-delivery evidence for a failure message: which delivery was slow, and its saves.
+const timings = (report) => JSON.stringify({ own: report.ownScope.deliveryMs, grant: report.grant.deliveryMs, grantSaves: report.grant.saveMs, nullReference: report.nullReference.deliveryMs, nullReferenceSaves: report.nullReference.saveMs });
+
 const cliPath = fileURLToPath(new URL('../src/cli.js', import.meta.url));
 const runCli = (file, cwd, command, value) => spawnSync(process.execPath, [cliPath, command, JSON.stringify(value)], {
   cwd, encoding: 'utf8', env: { ...process.env, SHADOWGRAPH_FILE: file, SHADOWGRAPH_STORAGE: 'json' }
@@ -50,7 +53,7 @@ test('the declared delivery budget is frozen and states every §13.3 category', 
 
 test('repeated and replayed deliveries on the HTTP transport stay within the declared budget', async () => {
   const report = await measureWrites({ deliveries: 3 });
-  assert.deepEqual(checkWriteBudget(report), []);
+  assert.deepEqual(checkWriteBudget(report), [], timings(report));
 
   const own = report.ownScope;
   assert.equal(own.relevant, null, 'a plain delivery carries no relevant block');
@@ -84,7 +87,7 @@ test('repeated and replayed deliveries on the HTTP transport stay within the dec
 // default-path read, inside the same frozen budget.
 test('a relevance read stays within the declared budget and writes nothing in its own scope', async () => {
   const report = await measureWrites({ deliveries: 2, request: { query: 'cache region deploy', compact: true } });
-  assert.deepEqual(checkWriteBudget(report), []);
+  assert.deepEqual(checkWriteBudget(report), [], timings(report));
   const own = report.ownScope;
   assert.deepEqual(own.relevant, { established: true, tiers: ['T1'] }, 'the measured delivery is a relevance read, delivered as lines');
   assert.deepEqual([own.saves, own.bytesWritten, own.revisionDelta, own.journalDelta, own.storeChanged], [0, 0, 0, 0, false]);
@@ -99,7 +102,7 @@ test('a relevance read stays within the declared budget and writes nothing in it
 // frozen budget. The ledger is declared operational data, not canonical truth.
 test('a fallback read records runtime misses inside the same frozen budget', async () => {
   const report = await measureWrites({ deliveries: 2, request: { query: 'zebra crossing', compact: true } });
-  assert.deepEqual(checkWriteBudget(report), []);
+  assert.deepEqual(checkWriteBudget(report), [], timings(report));
   const own = report.ownScope;
   assert.deepEqual(own.relevant, { established: false, tiers: ['T2'] }, 'the measured delivery is answered by the fallback');
   assert.deepEqual([own.saves, own.bytesWritten, own.revisionDelta, own.journalDelta, own.storeChanged, own.runtimeMissesAdded], [0, 0, 0, 0, false, 0]);
@@ -126,14 +129,14 @@ test('a fallback read by a long or escaped project name or origin stays inside t
   ];
   for (const [label, { project, originId }] of cases) {
     const report = await measureWrites({ deliveries: 1, ...(project ? { project } : {}), request: { query: 'zebra crossing', compact: true, ...(originId ? { originId } : {}) } });
-    assert.deepEqual(checkWriteBudget(report), [], label);
+    assert.deepEqual(checkWriteBudget(report), [], `${label} ${timings(report)}`);
     assert.equal(report.grant.canonicalWrites, 0, label);
   }
 });
 
 test('the budget check fails each category it measures rather than adjusting', async () => {
   const report = await measureWrites({ deliveries: 1 });
-  assert.deepEqual(checkWriteBudget(report), []);
+  assert.deepEqual(checkWriteBudget(report), [], timings(report));
   const { ownScope, grant } = CONTEXT_DELIVERY_BUDGET;
   const cases = [];
   for (const [tier, declared] of [['ownScope', ownScope], ['grant', grant], ['nullReference', grant]]) {

@@ -301,7 +301,9 @@ export async function measureWrites({ deliveries = 5, request = {}, project = PR
     // the snapshot and the whole-store save.
     const added = (tier) => round(Math.max(0, ...tier.delivered.map((item) => item.ms - own.deliveryMsMean)));
     const [lastRead, replay] = own.delivered.slice(-2);
-    const strip = ({ delivered, ...rest }) => rest;
+    // Each delivery's wall time and its saves' times stay in the report, so a budget failure shows which
+    // delivery was slow and whether its save was, not only the maximum.
+    const strip = ({ delivered, ...rest }) => ({ ...rest, deliveryMs: delivered.map((item) => round(item.ms)), saveMs: delivered.map((item) => item.saves.map((save) => round(save.ms))) });
     return {
       storeBytes,
       ownScope: { ...strip(own), addedMsMax: own.saveMsMax, replayIdentical: !own.storeChanged && lastRead.text === replay.text, relevant: relevantSummary(lastRead.text) },
