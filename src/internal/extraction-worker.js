@@ -170,16 +170,18 @@ export async function runExtractionDrain(options) {
   let scopeIndex = 0;
   const selectScope = () => { const scope = scopes[scopeIndex]; options = { ...options, project: scope?.project, originId: scope?.originId }; };
   selectScope();
-  let completed = 0, claimed = null, attempts = 0;
+  let completed = 0, claimed = null, attempts = 0, cleanupFailed = null;
   const blocked = async reason => {
     reason = workerReason(reason);
     const cleanup = { ...options, guard: undefined, signal: AbortSignal.timeout(1000), lockTimeoutMs: Math.min(options.lockTimeoutMs ?? 1000, 1000) };
-    if (claimed) {
-      await commitCapture({ ...cleanup, attemptCount: attempts }, claimed, { status: 'worker_blocked', blockedReason: reason });
-      claimed = null;
-    }
-    const storeReceiptWritten = await recordWorkerStatus(cleanup, reason);
-    return { status: 'blocked', blockedReason: reason, completed, storeReceiptWritten };
+    try {
+      if (claimed) {
+        await commitCapture({ ...cleanup, attemptCount: attempts }, claimed, { status: 'worker_blocked', blockedReason: reason });
+        claimed = null;
+      }
+      const storeReceiptWritten = await recordWorkerStatus(cleanup, reason);
+      return { status: 'blocked', blockedReason: reason, completed, storeReceiptWritten };
+    } catch (error) { cleanupFailed = reason; throw error; }
   };
   try {
     if (!Array.isArray(scopes) || scopes.some(scope => !scope || Boolean(scope.project) === Boolean(scope.originId)
@@ -219,6 +221,13 @@ export async function runExtractionDrain(options) {
       }
     });
   } catch (error) {
+    // A block whose own bounded cleanup failed is not a new block: the
+    // cleanup's error (its 1 s bound reads as drain_stopped) neither replaces
+    // the reason nor runs the cleanup again. The answer is the one below for
+    // a failed cleanup of that reason; a claim it could not release keeps its
+    // lease until expiry, as after any failed commit.
+    if (cleanupFailed === 'drain_stopped') return { status: 'blocked', blockedReason: 'drain_stopped', completed, storeReceiptWritten: false };
+    if (cleanupFailed) return { status: 'unavailable', reason: 'worker_or_store_unavailable', completed, storeReceiptWritten: false };
     if (signal.aborted) {
       try { return await blocked('drain_stopped'); } catch { return { status: 'blocked', blockedReason: 'drain_stopped', completed, storeReceiptWritten: false }; }
     }

@@ -59,6 +59,27 @@ for (const type of ['json', 'sqlite']) {
       assert.ok(data.records.every(x => x.kind !== 'capture' || x.lease === null));
     }
   });
+  // A slow store (a loaded CI runner) can outlast a block's 1 s cleanup bound.
+  // That is a failed cleanup, not a stop: the cleanup's own abort neither
+  // replaces the reason nor writes a stop receipt, and the cleanup is not run
+  // again; the claim it could not release keeps its lease until expiry.
+  test(`drain ${type}: a block cleanup past its bound reports no stop and is not run again`, skip, async t => {
+    const f = await setup(t, type, 2, { calls: 1 }); let calls = 0, cleanupOpens = 0, late;
+    const openStore = async o => {
+      if (o.lockTimeoutMs === undefined) return createStorage(o); // only the bounded cleanup caps the lock wait
+      cleanupOpens += 1;
+      if (late) return createStorage(o);
+      late = new Promise(resolve => setTimeout(resolve, 1100)).then(() => createStorage(o)); return late;
+    };
+    const result = await runExtractionDrain({ ...f.options, openStore, executor: { extract: async () => { calls++; return f.response; } } });
+    await late; // its late handle is closed by the worker; the store is quiet before it is read
+    assert.deepEqual([result.status, result.reason, result.completed, result.storeReceiptWritten], ['unavailable', 'worker_or_store_unavailable', 1, false]);
+    assert.equal(calls, 1); assert.equal(cleanupOpens, 1);
+    const data = await f.read(), captures = data.records.filter(x => x.kind === 'capture');
+    assert.deepEqual(captures.map(x => x.state), ['extracted', 'processing']); assert.notEqual(captures[1].lease, null);
+    const g = createShadowGraph(); g.importData(data);
+    assert.ok(!(g.search('', { project: 'p' }).completeness.capture.workerErrors ?? []).some(x => x.reason === 'drain_stopped'));
+  });
   test(`drain ${type}: output journal ceiling rolls back every proposed canonical record`, skip, async t => {
     const f = await setup(t, type, 1, { journalEntriesPerSession: 3 });
     const response = { ...f.response, value: { records: [{ kind: 'memory', fields: [{ name: 'text', text: 'Synthetic observation 0.', sourceRef: f.items[0].id }] }] } };
