@@ -8,6 +8,10 @@ import { spawnSync } from 'node:child_process';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createStorage } from '../src/storage.js';
 import { privilegedSnapshot, privilegedIssueAccess } from '../src/internal/snapshot.js';
+import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
+
+const sqlite = (await getRuntimeCapabilities()).nodeSqlite;
+const backendSkip = (type) => (type === 'sqlite' && !sqlite.available ? { skip: sqlite.reason } : {});
 
 // Synthetic observations, not measured SQLite results or a sharing policy.
 // The point is to retain context/evidence and expose the actual grant width.
@@ -91,7 +95,7 @@ test('revocation removes explicit reuse and rechecks a previously issued expansi
   assert.deepEqual(graph.context(options).activeDecisions.find(x => x.id === local.id).failedAttempts, []);
 });
 
-for (const type of ['json', 'sqlite']) test(`${type}: an existing project grant permits explicit CLI retrieval but does not widen automatic SessionStart delivery`, async t => {
+for (const type of ['json', 'sqlite']) test(`${type}: an existing project grant permits explicit CLI retrieval but does not widen automatic SessionStart delivery`, backendSkip(type), async t => {
   const f = example();
   const root = await mkdtemp(join(tmpdir(), 'sg-useful-reuse-'));
   t.after(() => rm(root, { recursive: true, force: true }));

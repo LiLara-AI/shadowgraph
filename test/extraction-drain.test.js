@@ -13,6 +13,7 @@ import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
 const START = '2026-10-01T00:00:00.000Z';
 const admission = { limits: { maxStoreBytes: 2 ** 40, maxQueueDepth: 1000, maxItemBytes: 2 ** 20, maxItemsPerSession: 1000 }, storeBytes: 0 };
 const sqlite = (await getRuntimeCapabilities()).nodeSqlite;
+const backendSkip = (type) => (type === 'sqlite' && !sqlite.available ? { skip: sqlite.reason } : {});
 async function setup(t, type, count = 1, budgets = {}) {
   const root = await scratchDirectory(t); let at = START;
   const options = { type, file: join(root, 'memory'), env: { SHADOWGRAPH_HOME: root }, project: 'p', now: () => at, budgets: { ...FROZEN_WORKER_BUDGETS, ...budgets } };
@@ -200,7 +201,7 @@ test('drain json: cancellation between transient rename attempts never commits m
   assert.equal(JSON.parse(await readFile(usageFile(f.options.env))).calls.length, 1);
 });
 
-for (const type of ['json', 'sqlite']) test(`drain registers each dedicated invocation before execution and preserves retry prompt identity (${type})`, async t => {
+for (const type of ['json', 'sqlite']) test(`drain registers each dedicated invocation before execution and preserves retry prompt identity (${type})`, backendSkip(type), async t => {
   const { readInvocationContext, identityFile } = await import('../src/internal/extraction-identity.js');
   const f = await setup(t, type); const identities = [], prompts = [];
   const out = await runExtractionDrain({ ...f.options, sleep: async () => {}, executor: { extract: async request => {
@@ -223,7 +224,7 @@ for (const type of ['json', 'sqlite']) test(`drain registers each dedicated invo
   assert.equal((await bad.read()).records.find(x => x.kind === 'capture').state, 'pending');
 });
 
-for (const type of ['json', 'sqlite']) test(`one automatic drain shares its call ceiling across distinct project queues (${type})`, async t => {
+for (const type of ['json', 'sqlite']) test(`one automatic drain shares its call ceiling across distinct project queues (${type})`, backendSkip(type), async t => {
   const f = await setup(t, type, 1, { calls: 1 }); const graph = createShadowGraph({ now: f.options.now }); graph.importData(await f.read());
   const other = privilegedRecordCapture(graph, { project: 'q', originId: 'synthetic-origin', text: 'Other project observation.', admission, source: { event: 'UserPromptSubmit', sessionId: 'other-session' } });
   const store = await createStorage(f.options); await store.save(privilegedSnapshot(graph)); store.close(); let calls = 0;

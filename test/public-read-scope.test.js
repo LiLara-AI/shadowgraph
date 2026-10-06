@@ -14,6 +14,10 @@ import { syncMarkdownWorkspace } from '../src/markdown-workspace.js';
 import { privilegedSnapshot } from '../src/internal/snapshot.js';
 import { historicalRelation } from '../tools/historical-relation.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
+
+const sqlite = (await getRuntimeCapabilities()).nodeSqlite;
+const backendSkip = (type) => (type === 'sqlite' && !sqlite.available ? { skip: sqlite.reason } : {});
 
 // Labels below refer to IDs returned by ordinary creation, never supplied IDs.
 const fixtureIds = {};
@@ -273,7 +277,7 @@ test('a public export is never accepted as a store', async (t) => {
   assert.equal(JSON.stringify(privilegedSnapshot(graph)), before, 'a refused replace changes nothing');
   assert.throws(() => validateRestorePayload(exported), { code: 'public_export_not_a_store' });
   const directory = await scratchDirectory(t, 'shadowgraph-public-export-');
-  for (const type of ['json', 'sqlite']) {
+  for (const type of ['json', 'sqlite']) await t.test(type, backendSkip(type), async () => {
     const file = join(directory, `data.${type === 'json' ? 'json' : 'db'}`);
     const store = await createStorage({ type, file });
     try {
@@ -282,7 +286,7 @@ test('a public export is never accepted as a store', async (t) => {
       await assert.rejects(store.save(exported), { code: 'public_export_not_a_store' }, type);
       assert.equal(JSON.stringify(await store.load()), saved, `${type}: the store is unchanged`);
     } finally { store.close?.(); }
-  }
+  });
   const source = join(directory, 'public-export.json');
   await writeFile(source, JSON.stringify(exported));
   const destination = join(directory, 'restored.json');
@@ -293,7 +297,7 @@ test('a public export is never accepted as a store', async (t) => {
 test('persistence saves and reloads every project while the public export is scoped (JSON and SQLite)', async (t) => {
   const graph = fixture();
   const directory = await scratchDirectory(t, 'shadowgraph-public-persist-');
-  for (const type of ['json', 'sqlite']) {
+  for (const type of ['json', 'sqlite']) await t.test(type, backendSkip(type), async () => {
     const store = await createStorage({ type, file: join(directory, `persist.${type === 'json' ? 'json' : 'db'}`) });
     try {
       await store.save(privilegedSnapshot(graph));
@@ -304,7 +308,7 @@ test('persistence saves and reloads every project while the public export is sco
       for (const scope of Object.values(SCOPES)) assert.deepEqual(reloaded.exportData(scope), graph.exportData(scope), `${type} ${JSON.stringify(scope)}`);
       assert.deepEqual(reloaded.exportData({ project: 'alpha' }).records.map((record) => record.id).sort(), [fixtureIds['alpha-attempt'], fixtureIds['alpha-decision'], fixtureIds['alpha-due-decision'], fixtureIds['alpha-memory']].sort());
     } finally { store.close?.(); }
-  }
+  });
 });
 
 test('review signals are read inside the scope', () => {

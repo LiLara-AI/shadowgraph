@@ -8,6 +8,10 @@ import { createStorage } from '../src/storage.js';
 import { privilegedSnapshot, privilegedIssueAccess, privilegedRebuild } from '../src/internal/snapshot.js';
 import { historicalIds } from '../tools/historical-ids.js';
 import { createShadowGraphServer } from '../src/server.js';
+import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
+
+const sqlite = (await getRuntimeCapabilities()).nodeSqlite;
+const backendSkip = (type) => (type === 'sqlite' && !sqlite.available ? { skip: sqlite.reason } : {});
 
 const NOW = '2026-01-01T00:00:00.000Z', END = '2026-02-01T00:00:00.000Z';
 const fields = ['failedAttempts', 'relatedTo', 'supersedes', 'supersededBy'];
@@ -132,7 +136,7 @@ test('historical fact and memory references are projected without rewriting stab
   assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
-for (const type of ['json', 'sqlite']) test(`${type} save/load and privileged replay preserve all historical links after public reads`, async t => {
+for (const type of ['json', 'sqlite']) test(`${type} save/load and privileged replay preserve all historical links after public reads`, backendSkip(type), async t => {
   const { graph, local } = fixture({ historical: true });
   const before = privilegedSnapshot(graph);
   const dir = await mkdtemp(join(tmpdir(), 'sg-reference-roundtrip-'));

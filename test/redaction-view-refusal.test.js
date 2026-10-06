@@ -8,6 +8,10 @@ import { backupFile, restoreFile } from '../src/backup.js';
 import { validateRestorePayload } from '../src/restore-validation.js';
 import { privilegedSnapshot } from '../src/internal/snapshot.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
+
+const sqlite = (await getRuntimeCapabilities()).nodeSqlite;
+const backendSkip = (type) => (type === 'sqlite' && !sqlite.available ? { skip: sqlite.reason } : {});
 
 // Labels below refer to IDs returned by ordinary creation, never supplied IDs.
 const fixtureIds = {};
@@ -104,7 +108,7 @@ test('import, merge and replace refuse every scoped view and leave the graph unc
 test('JSON and SQLite stores refuse to save a scoped view over an existing two-project store', async (t) => {
   const graph = fixture();
   const directory = await scratchDirectory(t, 'shadowgraph-view-save-');
-  for (const type of ['json', 'sqlite']) {
+  for (const type of ['json', 'sqlite']) await t.test(type, backendSkip(type), async () => {
     const file = join(directory, `live.${type === 'json' ? 'json' : 'db'}`);
     const store = await createStorage({ type, file });
     try {
@@ -132,7 +136,7 @@ test('JSON and SQLite stores refuse to save a scoped view over an existing two-p
       const after = await store.load();
       for (const id of [...OWNERS(), fixtureIds[`alpha-after-${type}`]]) assert.ok(after.records.some((record) => record.id === id), `${type} keeps ${id}`);
     } finally { store.close?.(); }
-  }
+  });
 });
 
 test('restore refuses a scoped view and leaves an existing destination whole (JSON and SQLite)', async (t) => {
@@ -153,31 +157,33 @@ test('restore refuses a scoped view and leaves an existing destination whole (JS
   const loaded = await destinationStore.load();
   for (const id of OWNERS()) assert.ok(loaded.records.some((record) => record.id === id), `json keeps ${id}`);
 
-  // SQLite: the supported restore installs another database. A view can reach
-  // one only through a build without this guard, which keeps a key it does not
-  // know as an extra collection; that database is built the same way here.
-  const { DatabaseSync } = await import('node:sqlite');
-  const live = await createStorage({ type: 'sqlite', file: join(directory, 'destination.db') });
-  try {
-    await live.save(privilegedSnapshot(graph));
-    const before = await live.load();
-    for (const [label, view] of Object.entries(views(graph))) {
-      const sourceFile = join(directory, `view-${label.replace(/[^a-z0-9]+/gi, '-')}.db`);
-      const { exportKind, ...body } = view;
-      const sourceStore = await createStorage({ type: 'sqlite', file: sourceFile });
-      await sourceStore.save({ ...body, revision: 0 });
-      sourceStore.close();
-      const database = new DatabaseSync(sourceFile);
-      database.prepare('INSERT INTO shadowgraph_extra (collection, payload) VALUES (?, ?)').run('exportKind', JSON.stringify(exportKind));
-      database.close();
-      const check = await createStorage({ type: 'sqlite', file: sourceFile });
-      assert.equal((await check.load()).exportKind, exportKind, `sqlite ${label}: the source holds the view`);
-      check.close();
-      await assert.rejects(live.restore(sourceFile), /public_export_not_a_store/, `sqlite ${label}`);
-      assert.deepEqual(await live.load(), before, `sqlite ${label}: destination unchanged`);
-    }
-    for (const id of OWNERS()) assert.ok(before.records.some((record) => record.id === id), `sqlite keeps ${id}`);
-  } finally { live.close(); }
+  await t.test('sqlite', backendSkip('sqlite'), async () => {
+    // SQLite: the supported restore installs another database. A view can reach
+    // one only through a build without this guard, which keeps a key it does not
+    // know as an extra collection; that database is built the same way here.
+    const { DatabaseSync } = await import('node:sqlite');
+    const live = await createStorage({ type: 'sqlite', file: join(directory, 'destination.db') });
+    try {
+      await live.save(privilegedSnapshot(graph));
+      const before = await live.load();
+      for (const [label, view] of Object.entries(views(graph))) {
+        const sourceFile = join(directory, `view-${label.replace(/[^a-z0-9]+/gi, '-')}.db`);
+        const { exportKind, ...body } = view;
+        const sourceStore = await createStorage({ type: 'sqlite', file: sourceFile });
+        await sourceStore.save({ ...body, revision: 0 });
+        sourceStore.close();
+        const database = new DatabaseSync(sourceFile);
+        database.prepare('INSERT INTO shadowgraph_extra (collection, payload) VALUES (?, ?)').run('exportKind', JSON.stringify(exportKind));
+        database.close();
+        const check = await createStorage({ type: 'sqlite', file: sourceFile });
+        assert.equal((await check.load()).exportKind, exportKind, `sqlite ${label}: the source holds the view`);
+        check.close();
+        await assert.rejects(live.restore(sourceFile), /public_export_not_a_store/, `sqlite ${label}`);
+        assert.deepEqual(await live.load(), before, `sqlite ${label}: destination unchanged`);
+      }
+      for (const id of OWNERS()) assert.ok(before.records.some((record) => record.id === id), `sqlite keeps ${id}`);
+    } finally { live.close(); }
+  });
 });
 
 test('a caller-supplied restore validator cannot let a scoped view in (JSON and SQLite)', async (t) => {
@@ -195,22 +201,24 @@ test('a caller-supplied restore validator cannot let a scoped view in (JSON and 
   await assert.rejects(restoreFile(source, destination, { validate: permissive }), /public_export_not_a_store/);
   assert.deepEqual(await readFile(destination), bytes);
 
-  const { DatabaseSync } = await import('node:sqlite');
-  const sourceFile = join(directory, 'view.db');
-  const { exportKind, ...body } = view;
-  const sourceStore = await createStorage({ type: 'sqlite', file: sourceFile });
-  await sourceStore.save({ ...body, revision: 0 });
-  sourceStore.close();
-  const database = new DatabaseSync(sourceFile);
-  database.prepare('INSERT INTO shadowgraph_extra (collection, payload) VALUES (?, ?)').run('exportKind', JSON.stringify(exportKind));
-  database.close();
-  const live = await createStorage({ type: 'sqlite', file: join(directory, 'destination.db'), restoreValidator: permissive });
-  try {
-    await live.save(privilegedSnapshot(graph));
-    const before = await live.load();
-    await assert.rejects(live.restore(sourceFile, { validate: permissive }), /public_export_not_a_store/);
-    assert.deepEqual(await live.load(), before);
-  } finally { live.close(); }
+  await t.test('sqlite', backendSkip('sqlite'), async () => {
+    const { DatabaseSync } = await import('node:sqlite');
+    const sourceFile = join(directory, 'view.db');
+    const { exportKind, ...body } = view;
+    const sourceStore = await createStorage({ type: 'sqlite', file: sourceFile });
+    await sourceStore.save({ ...body, revision: 0 });
+    sourceStore.close();
+    const database = new DatabaseSync(sourceFile);
+    database.prepare('INSERT INTO shadowgraph_extra (collection, payload) VALUES (?, ?)').run('exportKind', JSON.stringify(exportKind));
+    database.close();
+    const live = await createStorage({ type: 'sqlite', file: join(directory, 'destination.db'), restoreValidator: permissive });
+    try {
+      await live.save(privilegedSnapshot(graph));
+      const before = await live.load();
+      await assert.rejects(live.restore(sourceFile, { validate: permissive }), /public_export_not_a_store/);
+      assert.deepEqual(await live.load(), before);
+    } finally { live.close(); }
+  });
 });
 
 test('the complete store still saves, backs up and restores whole (JSON and SQLite)', async (t) => {
@@ -220,7 +228,7 @@ test('the complete store still saves, backs up and restores whole (JSON and SQLi
   const complete = privilegedSnapshot(graph);
   delete complete.access;
   const directory = await scratchDirectory(t, 'shadowgraph-view-complete-');
-  for (const type of ['json', 'sqlite']) {
+  for (const type of ['json', 'sqlite']) await t.test(type, backendSkip(type), async () => {
     const extension = type === 'json' ? 'json' : 'db';
     const liveFile = join(directory, `live.${extension}`);
     const backup = join(directory, `backup.${extension}`);
@@ -244,5 +252,5 @@ test('the complete store still saves, backs up and restores whole (JSON and SQLi
     const reloaded = createShadowGraph({ now });
     reloaded.importData(restored);
     assert.deepEqual(reloaded.exportData({ project: 'beta' }).records.map((record) => record.id), [fixtureIds['beta-decision']]);
-  }
+  });
 });
