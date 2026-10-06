@@ -420,7 +420,8 @@ surfaces instead, or import from the installed path.
 
 JSON is the zero-dependency default and stores a versioned graph in `.shadowgraph/data.json`. Set
 `SHADOWGRAPH_FILE` to relocate it. Set `SHADOWGRAPH_STORAGE=sqlite` on Node 22.5+ for the WAL-backed
-relational adapter. Current exports use schema 5; schemas 1 through 4 remain importable.
+relational adapter. Stores are written at schema 7; schemas 1 through 6 remain readable, and `downgrade`
+forks a schema-6 copy for an earlier build.
 
 State and journal are written in one atomic operation, every save and restore for a destination
 shares a cross-process lock fence, and a stale write is rejected with a revision conflict rather
@@ -464,9 +465,14 @@ ShadowGraph 0.41.0 is a **Technical Preview / Early Access** release. It is not 
 - **Security review status.** An AI-assisted independent security review of commit `4a5e076` (tree
   `62c1918e`) was completed on 2026-08-30 by Antigravity Assistant (Gemini 3.7 Flash), with a PASS
   result and no unresolved findings. **No human third-party security audit has been performed.** See
-  [SECURITY.md](SECURITY.md#security-review-status).
-- **No default extractor, background watcher, or hosted sync.** ShadowGraph records what you tell it
-  to record.
+  [SECURITY.md](SECURITY.md#security-review-status). That review predates the Claude Code hooks,
+  automatic capture, transcript reading and extraction added since; they have had no equivalent
+  independent security review.
+- **Nothing is captured or extracted unless you turn it on, and there is no hosted sync.** Without the
+  optional Claude Code integration, ShadowGraph records what you tell it to record. With it, automatic
+  capture of Claude Code sessions and model-based extraction each stay inert until the owner activates
+  them separately; capture covers declared events only, with pattern-based redaction (see the
+  [integrations guide](integrations/README.md) and [extraction](docs/extraction.md)).
 - **Single maintainer.** No paid support, no patch SLA, and no bug bounty.
 
 ## Feedback and support

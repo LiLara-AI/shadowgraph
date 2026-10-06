@@ -1,13 +1,13 @@
 {
   "host": "claude-code",
   "extraction": {
-    "status": "Activation-gated owner CLI and detached one-shot worker implemented. Extraction stays inert until explicit AG-3 approval; fixtures are not real-host activation evidence.",
+    "status": "Activation-gated owner CLI and detached one-shot worker implemented. Extraction stays inert until the owner runs `shadowgraph activate extraction`; fixtures are not real-host activation evidence.",
     "model": "claude-opus-5[1m]",
     "configurationProfile": "subscription-unmanaged-safe-mode-v1",
     "hostProfile": "Windows Claude Code 2.1.288. Unknown versions and other platform policy sources block; synthetic portability tests are not host activation evidence.",
     "route": "Existing claude.ai first-party subscription sign-in only. No keys, helper, proxy/provider environment, alternate model or paid fallback.",
     "restrictions": "No tools, instruction files, hooks, MCP, plugins, skills, memory or session persistence; empty transient cwd outside repositories; explicit environment; managed policy conflicts block without disabling safeguards.",
-    "evidenceLevel": "Documented switches plus bounded local version/help/auth/doctor checks. Real invocation confinement, stdin/schema behavior and no-overage conditions require AG-3 evidence.",
+    "evidenceLevel": "Documented switches plus bounded local version/help/auth/doctor checks. These checks do not establish real invocation confinement, stdin/schema behavior or the no-overage condition: the owner verifies them on the installed host before activating extraction, and the no-overage condition is the owner's assertion, which ShadowGraph cannot detect.",
     "limits": "Input 256 KiB; inline schema 64 KiB; combined child output 512 KiB; invocation 120 seconds; each diagnostic 10 seconds. Unknown terminal results block without retry.",
     "hostBookkeeping": "The host may refresh its own subscription credentials and bookkeeping despite session persistence being disabled. ShadowGraph never reads or records credentials."
   },
@@ -38,10 +38,10 @@
       "evidence": "V-2: a command handler's stdout reached the model at a session's start on the verified version",
       "stages": {
         "sourceCapture": "not an event capture takes: a session's start carries no material",
-        "extractionReadiness": "not integrated until extraction (P7)",
-        "storedExperience": "hand-recorded records only, until extraction (P7)",
+        "extractionReadiness": "after the turn, and only while extraction is active: a detached one-shot worker extracts eligible captured material through the separately activated executor; inert otherwise",
+        "storedExperience": "hand-recorded records and, while extraction is active, unverified records extracted from earlier captured material, holding only claims the local verifier supports",
         "modelVisibleDelivery": "at the session's start: the working set as data, head first, within 8 000 bytes",
-        "pendingUnprocessed": "captured material not yet understood is declared in every scoped read, and the payload's processing line says whether capture is active and that extraction is not; nothing is extracted until P7",
+        "pendingUnprocessed": "captured material not yet understood is declared in every scoped read, and the payload's processing line says whether capture is active and whether extraction is active; captured material is extracted only by the separately activated worker, after the turn",
         "correctedExperience": "at the next session start or prompt after the correction is recorded, when the corrected record is among what the delivery selects and fits",
         "replayProtection": "delivery itself writes nothing, and a session's start is not captured"
       }
@@ -52,10 +52,10 @@
       "evidence": "the same handler runs, but no receipt shows its output reaching the model on a resumed or cleared session; the activation gate's receipts cover new sessions only, so this needs a receipt of its own",
       "stages": {
         "sourceCapture": "not an event capture takes: a session's start carries no material",
-        "extractionReadiness": "not integrated until extraction (P7)",
-        "storedExperience": "hand-recorded records only, until extraction (P7)",
+        "extractionReadiness": "after the turn, and only while extraction is active: a detached one-shot worker extracts eligible captured material through the separately activated executor; inert otherwise",
+        "storedExperience": "hand-recorded records and, while extraction is active, unverified records extracted from earlier captured material, holding only claims the local verifier supports",
         "modelVisibleDelivery": "unverified on a resumed or cleared session",
-        "pendingUnprocessed": "captured material not yet understood is declared in every scoped read and in the payload's processing line when delivered; nothing is extracted until P7",
+        "pendingUnprocessed": "captured material not yet understood is declared in every scoped read and in the payload's processing line when delivered; it is extracted only by the separately activated worker, after the turn",
         "correctedExperience": "as SessionStart, if delivery on a resumed or cleared session is verified",
         "replayProtection": "delivery itself writes nothing, and a session's start is not captured"
       }
@@ -66,10 +66,10 @@
       "evidence": "the same handler runs, but no receipt shows its output reaching the model after compaction; the activation gate's receipts cover new sessions only, so this needs a receipt of its own",
       "stages": {
         "sourceCapture": "not an event capture takes: a session's start carries no material",
-        "extractionReadiness": "not integrated until extraction (P7)",
-        "storedExperience": "hand-recorded records only, until extraction (P7)",
+        "extractionReadiness": "after the turn, and only while extraction is active: a detached one-shot worker extracts eligible captured material through the separately activated executor; inert otherwise",
+        "storedExperience": "hand-recorded records and, while extraction is active, unverified records extracted from earlier captured material, holding only claims the local verifier supports",
         "modelVisibleDelivery": "unverified after compaction",
-        "pendingUnprocessed": "captured material not yet understood is declared in every scoped read and in the payload's processing line when delivered; nothing is extracted until P7",
+        "pendingUnprocessed": "captured material not yet understood is declared in every scoped read and in the payload's processing line when delivered; it is extracted only by the separately activated worker, after the turn",
         "correctedExperience": "as SessionStart, if delivery after compaction is verified",
         "replayProtection": "delivery itself writes nothing, and a session's start is not captured"
       }
@@ -79,13 +79,13 @@
       "status": "covered",
       "evidence": "V-3: a command handler's stdout reached the model on the verified version",
       "stages": {
-        "sourceCapture": "when capture is active (AG-2), the prompt is captured into the private store, identified by the host's message_id, for a project resolved from a worktree binding the store recorded",
-        "extractionReadiness": "not integrated until extraction (P7)",
-        "storedExperience": "hand-recorded records only, until extraction (P7)",
+        "sourceCapture": "when capture is active (AG-2), the prompt is captured into the private store, identified by the host's message_id when the payload carries one (a payload may carry prompt_id instead, which capture does not read; such a prompt takes the session's occurrence ordinal), for a project resolved from a worktree binding the store recorded",
+        "extractionReadiness": "after the turn, and only while extraction is active: a detached one-shot worker extracts eligible captured material through the separately activated executor; inert otherwise",
+        "storedExperience": "hand-recorded records and, while extraction is active, unverified records extracted from earlier captured material, holding only claims the local verifier supports",
         "modelVisibleDelivery": "before the model answers the prompt: only records relevant to it, otherwise nothing",
-        "pendingUnprocessed": "captured material not yet understood is declared in every scoped read, and the payload's processing line says whether capture is active and that extraction is not; nothing is extracted until P7",
+        "pendingUnprocessed": "captured material not yet understood is declared in every scoped read, and the payload's processing line says whether capture is active and whether extraction is active; captured material is extracted only by the separately activated worker, after the turn",
         "correctedExperience": "at the next prompt after the correction is recorded, when the corrected record is among what the delivery selects and fits",
-        "replayProtection": "a re-delivered prompt with the same message_id is the same captured item; delivery itself writes nothing"
+        "replayProtection": "a re-delivered prompt with the same message_id is the same captured item; without one, a re-delivery is a second occurrence, marked possibleDuplicateOf when it repeats the previous prompt; delivery itself writes nothing"
       }
     },
     {
@@ -94,10 +94,10 @@
       "evidence": "N-7: a non-blocking PostToolUse context's visibility is not verified; the blocking alternative is forbidden",
       "stages": {
         "sourceCapture": "when capture is active (AG-2), each tool call's input and result are captured after it completes, identified by its tool_use_id; nothing reaches the model within the turn",
-        "extractionReadiness": "not integrated until extraction (P7)",
-        "storedExperience": "not before extraction commits (P7)",
+        "extractionReadiness": "after the turn, and only while extraction is active: a detached one-shot worker extracts eligible captured material through the separately activated executor; inert otherwise",
+        "storedExperience": "not before a later extraction commits, which needs extraction active; never within the turn",
         "modelVisibleDelivery": "declared gap: available at the next prompt, not within the turn",
-        "pendingUnprocessed": "captured material not yet understood is declared in every scoped read and at the next prompt; nothing is extracted until P7",
+        "pendingUnprocessed": "captured material not yet understood is declared in every scoped read and at the next prompt; it is extracted only by the separately activated worker, after the turn",
         "correctedExperience": "at the next prompt, when the corrected record is among what the delivery selects and fits",
         "replayProtection": "not applicable: nothing is delivered"
       }
@@ -108,10 +108,10 @@
       "evidence": "no hook delivers memory between the model's steps without blocking; declared gap",
       "stages": {
         "sourceCapture": "not captured as it happens: no hook delivers the assistant's text within a turn; when capture is active (AG-2), its final message is captured at Stop and the rest is read from the session's transcript at the turn's end, before compaction and at the session's end",
-        "extractionReadiness": "not integrated until extraction (P7)",
-        "storedExperience": "not before extraction commits (P7)",
+        "extractionReadiness": "after the turn, and only while extraction is active: a detached one-shot worker extracts eligible captured material through the separately activated executor; inert otherwise",
+        "storedExperience": "not before a later extraction commits, which needs extraction active; never within the turn",
         "modelVisibleDelivery": "declared gap: available at the next prompt, not within the turn",
-        "pendingUnprocessed": "captured material not yet understood is declared in every scoped read and at the next prompt; nothing is extracted until P7",
+        "pendingUnprocessed": "captured material not yet understood is declared in every scoped read and at the next prompt; it is extracted only by the separately activated worker, after the turn",
         "correctedExperience": "at the next prompt, when the corrected record is among what the delivery selects and fits",
         "replayProtection": "not applicable: nothing is delivered"
       }
@@ -122,10 +122,10 @@
       "evidence": "a contradiction found mid-turn cannot be delivered without blocking; declared gap",
       "stages": {
         "sourceCapture": "not captured as it happens: no hook delivers the assistant's text within a turn; when capture is active (AG-2), its final message is captured at Stop and the rest is read from the session's transcript at the turn's end, before compaction and at the session's end",
-        "extractionReadiness": "not integrated until extraction (P7)",
-        "storedExperience": "not before extraction commits (P7)",
+        "extractionReadiness": "after the turn, and only while extraction is active: a detached one-shot worker extracts eligible captured material through the separately activated executor; inert otherwise",
+        "storedExperience": "not before a later extraction commits, which needs extraction active; never within the turn",
         "modelVisibleDelivery": "declared gap: available at the next prompt, not within the turn",
-        "pendingUnprocessed": "captured material not yet understood is declared in every scoped read and at the next prompt; nothing is extracted until P7",
+        "pendingUnprocessed": "captured material not yet understood is declared in every scoped read and at the next prompt; it is extracted only by the separately activated worker, after the turn",
         "correctedExperience": "at the next prompt, when the corrected record is among what the delivery selects and fits",
         "replayProtection": "not applicable: nothing is delivered"
       }
@@ -146,13 +146,13 @@
       ],
       "synchronous": true
     },
-    "hostFields": "from the host's hooks reference (read 2026-09-30), not yet from the installed host: AG-2 confirms each field on the verified version before capture is activated. The transcript's entry format is not documented at all (the host says it is internal and changes between versions): the cursor reads it as a hypothesis AG-2 confirms, and stops reading a session at the first line it does not recognise",
+    "hostFields": "from the host's hooks reference (read 2026-09-30); a field a payload lacks falls back as each event row declares, and no field is assumed present on a version this manifest does not verify. The transcript's entry format is not documented at all (the host says it is internal and changes between versions): the cursor reads it as a hypothesis AG-2 confirms, and stops reading a session at the first line it does not recognise",
     "events": [
       {
         "event": "UserPromptSubmit",
         "material": "the prompt",
-        "identity": "message_id, whose shape AG-2 confirms; without one, the session's occurrence ordinal, which is not exact",
-        "exact": true,
+        "identity": "message_id when the payload carries one; otherwise (a prompt_id, which capture does not read, does not count) the session's occurrence ordinal, which is not exact",
+        "exact": false,
         "observation": "role user and the working directory"
       },
       {
@@ -218,7 +218,7 @@
       "A session one project owns refuses another project's capture (session_in_another_project), and the refused project's reads declare the gap.",
       "possibleDuplicateOf marks an item identified only by its ordinal that repeats the session's previous item of the same event, including a prompt or tool result without a host identifier; a Transcript item, although its uuid identifies it, is marked possibleDuplicateOf the newest Stop or Transcript item of its session holding the same material; it removes nothing, and extraction must never treat it as a reason to skip.",
       "The transcript cursor reconstructs a gap as a period with its bounds (plan section 22.7) only for tool calls: a call the transcript shows, used and answered within one read, that no capture holds and that is not ShadowGraph's own is counted in tool_calls_not_captured, whatever the cause (a failed store, a denied or interrupted call, an admission refusal, a payload over 1 MiB). A prompt lost to a failed store is not reconstructed: message_id has no documented relation to a transcript entry. A lost Stop loses nothing, since the cursor reads its turn.",
-      "Before extraction exists (AG-3) pending capture can fill the queue; expiry or owner deletion can relieve it. capture_limited declares any active ceiling.",
+      "While extraction is not active, pending capture can fill the queue; expiry or owner deletion can relieve it. capture_limited declares any active ceiling.",
       "tool_response.exit_code is taken from the host's documented fields and is hypothetical until AG-2 confirms it on the installed host; a non-zero status is never observed, since it is not a failure by itself (grep, diff, robocopy and wrappers use it for other results).",
       "Every event at the six hooks, in every directory, runs a synchronous hook and adds its latency, bounded by a 5 000 ms deadline (8 000 ms for a write already inside the store); the cursor reads under the store's lock, at most 4 MiB of new lines (and one line of up to 8 MiB) at a time, and records nothing more once too little time is left. SessionEnd runs within the host's SessionEnd budget, which the template's 10-second timeout raises. It is measured and declared at AG-2.",
       "A capture that cannot take the store's lock in time, or has too little time left to commit, writes nothing, there or anywhere else, and is not counted: a tool call lost this way is reconstructed (tool_calls_not_captured) when the transcript shows it used and answered within one read, after the anchor; a Stop's turn is still read by the cursor, and a prompt lost this way leaves no record. The AG-2 approval text states this with the measured burst loss.",

@@ -4,18 +4,10 @@ ShadowGraph is a local decision ledger and unified memory kernel for AI agents. 
 
 ## Install and diagnose
 
-The candidate remains `private: true` until the release checklist's independent security and benchmark gates are approved. For a built review tarball:
+The package remains `private: true` and is not published to npm until the release checklist's independent security and benchmark gates are approved. Install it from the repository, as the [main README](../README.md#1-install) describes:
 
 ```bash
-npm install --global /absolute/path/to/shadowgraph-unified-plugin-0.40.0.tgz
-shadowgraph setup
-shadowgraph doctor
-```
-
-After npm publication, the install command becomes:
-
-```bash
-npm install --global shadowgraph-unified-plugin@0.40.0
+npm install --global github:LiLara-AI/shadowgraph
 shadowgraph setup
 shadowgraph doctor
 ```
@@ -75,7 +67,7 @@ For a fixed build rather than whatever `shadowgraph` is on the path, `node scrip
 
 `claude-code.capture-hooks.json` is the capture hook block (`shadowgraph install-hooks --capture`, removed with `uninstall-hooks --capture`): at `UserPromptSubmit`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `PreCompact` and `SessionEnd` it runs `shadowgraph capture --hook`, synchronously, which records each event's material, and the assistant's text read from the session's transcript at `Stop`, `PreCompact` and `SessionEnd`, into the private store only after the owner runs `shadowgraph activate capture` for that same store, and stays silent. Capture, too, covers only projects whose worktree binding that store recorded, and writes a JSON store only. To turn it off, `shadowgraph deactivate capture` first, then `uninstall-hooks --capture`.
 
-`claude-code.coverage.json` states, for Claude Code 2.1.270 (the version the delivery evidence was taken on), where each of the seven stages of experience lands at each trigger: delivery is covered at a new session's start and at each prompt, unverified at a start after resume, clear or compaction, and not available within a turn, which is a declared gap. Its `capture` block says what capture records at each event and reads from the transcript, how each item is identified, what it never captures, and what it declares -- among them that the transcript's format is a hypothesis the capture gate confirms.
+`claude-code.coverage.json` states, for the Claude Code version it names as verified (`verifiedVersion`, 2.1.288 at this commit), where each of the seven stages of experience lands at each trigger: delivery is covered at a new session's start and at each prompt, unverified at a start after resume, clear or compaction, and not available within a turn, which is a declared gap. Its `capture` block says what capture records at each event and reads from the transcript, how each item is identified, what it never captures, and what it declares -- among them that the transcript's format is a hypothesis the capture gate confirms.
 
 Capture lifecycle controls are documented in [the API reference](../docs/api-reference.md#capture-lifecycle-controls): scoped inspection, terminal-confirmed retention/cancel/delete, and bounded expiry. Deactivation disables capture before cleanup and reports deferred cleanup honestly. Expiry can permanently prevent later re-extraction and transcript reconciliation for affected sessions; it never releases quarantine. Pinned capture activation requires the completed lifecycle build, and delivery over capture data requires the retention reader floor. Prepare and approve any real-host runtime change before installing or activating it.
 
