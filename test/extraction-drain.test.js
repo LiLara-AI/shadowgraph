@@ -28,27 +28,36 @@ async function setup(t, type, count = 1, budgets = {}) {
 }
 // A content-free trace of a drain's store operations, through its openStore
 // seam: each open as an operation or the bounded cleanup (only the cleanup caps
-// the lock wait), how its fenced run ended (an error's code or name, never a
-// message or data), and whether its signal aborted and why. With
-// `holdCleanup`, a cleanup's store open waits until the test releases it, so a
-// test decides when a cleanup may proceed: no timer race.
-function storeTrace({ holdCleanup = false } = {}) {
+// the lock wait), when its store opened and closed, how its fenced run ended (an
+// error's code or name, never a message or data), and whether its signal
+// aborted and why. With `holdCleanup`, a cleanup's store open waits until the
+// test releases it (or, with `releaseAfterMs`, until that long after the held
+// open began), so a test decides when a cleanup may proceed. Every open is
+// registered before it waits, so settled() waits for a held store too: its
+// late open and its close.
+function storeTrace({ holdCleanup = false, releaseAfterMs } = {}) {
   const started = performance.now(), events = [], closed = [];
   const at = () => Math.round(performance.now() - started);
-  let release = () => {};
-  const held = holdCleanup ? new Promise(resolve => { release = resolve; }) : null;
+  let release = () => {}, releasedAt, timer;
+  const held = holdCleanup ? new Promise(resolve => { release = () => { releasedAt ??= at(); resolve(); }; }) : null;
   const openStore = async o => {
     const entry = { kind: o.lockTimeoutMs === undefined ? 'operation' : 'cleanup', at: at() };
     events.push(entry);
-    o.signal?.addEventListener('abort', () => { entry.aborted = { reason: o.signal.reason?.name ?? 'unknown', at: at() }; }, { once: true });
-    if (held && entry.kind === 'cleanup') await held;
-    const store = await createStorage(o), io = storeIo(store), run = io.run, close = store.close;
-    io.run = (...args) => run.apply(io, args).then(value => { entry.run = 'ok'; return value; }, error => { entry.run = String(error?.code ?? error?.name ?? 'error'); throw error; });
     let done; closed.push(new Promise(resolve => { done = resolve; }));
-    store.close = (...args) => { try { return close.apply(store, args); } finally { entry.closed = at(); done(); } };
-    return store;
+    o.signal?.addEventListener('abort', () => { entry.aborted = { reason: o.signal.reason?.name ?? 'unknown', at: at() }; }, { once: true });
+    try {
+      if (held && entry.kind === 'cleanup') {
+        if (releaseAfterMs !== undefined) timer ??= setTimeout(release, releaseAfterMs);
+        await held;
+      }
+      const store = await createStorage(o), io = storeIo(store), run = io.run, close = store.close;
+      entry.opened = at();
+      io.run = (...args) => run.apply(io, args).then(value => { entry.run = 'ok'; return value; }, error => { entry.run = String(error?.code ?? error?.name ?? 'error'); throw error; });
+      store.close = (...args) => { try { return close.apply(store, args); } finally { entry.closed = at(); done(); } };
+      return store;
+    } catch (error) { entry.openError = String(error?.code ?? error?.name ?? 'error'); done(); throw error; }
   };
-  return { openStore, events, release: () => release(), settled: () => Promise.all(closed), cleanups: () => events.filter(entry => entry.kind === 'cleanup') };
+  return { openStore, events, release: () => release(), releasedAt: () => releasedAt, settled: () => Promise.all(closed), cleanups: () => events.filter(entry => entry.kind === 'cleanup') };
 }
 const usageCalls = async env => JSON.parse(await readFile(usageFile(env))).calls.length;
 const workerErrors = data => { const g = createShadowGraph(); g.importData(data); return g.search('', { project: 'p' }).completeness.capture.workerErrors ?? []; };
@@ -111,7 +120,9 @@ for (const type of ['json', 'sqlite']) {
     assert.equal(calls, 1); assert.equal(await usageCalls(f.options.env), 1);
     const before = await f.read();
     trace.release(); await trace.settled();
-    assert.equal(trace.cleanups()[0].run, undefined, 'the cleanup store opened after the timeout ran no step');
+    const [late] = trace.cleanups();
+    assert.ok(late.opened !== undefined && late.closed !== undefined, `the held cleanup store opened late and was closed: ${JSON.stringify(late)}`);
+    assert.equal(late.run, undefined, 'the cleanup store opened after the timeout ran no step');
     assert.deepEqual(await f.read(), before, 'nothing was committed after the timeout');
     const captures = before.records.filter(x => x.kind === 'capture');
     assert.deepEqual(captures.map(x => x.state), ['extracted', 'processing']);
@@ -133,35 +144,47 @@ for (const type of ['json', 'sqlite']) {
     assert.equal(calls, 0); assert.equal(await usageCalls(f.options.env), 0);
     const before = await f.read();
     trace.release(); await trace.settled();
-    assert.equal(trace.cleanups()[0].run, undefined); assert.deepEqual(await f.read(), before);
+    const [late] = trace.cleanups();
+    assert.ok(late.opened !== undefined && late.closed !== undefined, `the held cleanup store opened late and was closed: ${JSON.stringify(late)}`);
+    assert.equal(late.run, undefined); assert.deepEqual(await f.read(), before);
     assert.deepEqual(before.records.filter(x => x.kind === 'capture').map(x => [x.state, x.lease]), [['pending', null], ['pending', null]]);
     assert.ok(!workerErrors(before).some(x => x.reason === 'drain_stopped'));
   });
   // The production bound is enforced on its own, whatever look-alike setting a
-  // caller passes: a cleanup that never finishes is abandoned by its one-second
-  // timeout (not before, and not at a value a string key or environment entry
-  // names), and the drain answers while that cleanup is still held back.
+  // caller passes. The cleanup's store open is held and released 3 s after it
+  // began; the cleanup's one-second timeout was armed before that open, so it
+  // fires first whatever the runner's speed (timers fire in due order). A bound
+  // above 3 s would let the released cleanup run and commit, which fails here;
+  // one below 1 s fails the floor. The drain answers before the release.
   test(`drain ${type}: the production cleanup bound is enforced and no look-alike setting raises it`, { ...skip, timeout: 30_000 }, async t => {
-    const f = await setup(t, type, 2, { calls: 1 }), trace = storeTrace({ holdCleanup: true });
+    const f = await setup(t, type, 2, { calls: 1 }), trace = storeTrace({ holdCleanup: true, releaseAfterMs: 3000 });
     const decoys = { cleanupBoundForTests: 60_000, cleanupMs: 60_000, [String(CLEANUP_BOUND_FOR_TESTS)]: 60_000, env: { ...f.options.env, SHADOWGRAPH_EXTRACTION_CLEANUP_MS: '60000' } };
     const drainStarted = performance.now();
     const result = await runExtractionDrain({ ...f.options, ...decoys, openStore: trace.openStore, executor: { extract: async () => f.response } });
-    const answeredMs = performance.now() - drainStarted;
-    const [cleanup] = trace.cleanups();
-    assert.equal(result.status, 'unavailable', JSON.stringify(trace.events));
-    assert.equal(cleanup.aborted?.reason, 'TimeoutError'); assert.equal(cleanup.run, undefined, 'still held back when the drain answered');
-    assert.ok(answeredMs >= 1000 && answeredMs < 30_000, `answered after ${Math.round(answeredMs)} ms`);
-    trace.release(); await trace.settled();
+    const answeredMs = performance.now() - drainStarted, releasedBeforeAnswer = trace.releasedAt();
+    await trace.settled();
+    const [cleanup] = trace.cleanups(), why = JSON.stringify(trace.events);
+    assert.deepEqual(result, { status: 'unavailable', reason: 'worker_or_store_unavailable', completed: 1, storeReceiptWritten: false }, why);
+    assert.equal(releasedBeforeAnswer, undefined, 'the drain answered while its cleanup was still held');
+    assert.equal(cleanup.aborted?.reason, 'TimeoutError', why);
+    assert.ok(cleanup.aborted.at < trace.releasedAt() && cleanup.opened >= trace.releasedAt(), why);
+    assert.equal(cleanup.run, undefined, why);
+    assert.ok(answeredMs >= 1000, `answered after ${Math.round(answeredMs)} ms`);
   });
-  // The seam changes only the drain that sets it: with a raised bound, a
-  // cleanup held past one second still completes and writes its receipt.
-  test(`drain ${type}: the test-only seam raises the cleanup bound for that drain only`, { ...skip, timeout: 30_000 }, async t => {
-    const f = await setup(t, type, 2, { calls: 1 }), trace = storeTrace({ holdCleanup: true });
-    const releaseAfterBound = setTimeout(trace.release, 1500);
+  // The seam raises the bound of the drain that sets it and of no other: there a
+  // cleanup held past one second completes and writes its receipt, while a later
+  // drain without the seam still times its held cleanup out.
+  test(`drain ${type}: the test-only seam raises the cleanup bound of the drain that sets it and of no other`, { ...skip, timeout: 30_000 }, async t => {
+    const f = await setup(t, type, 2, { calls: 1 }), trace = storeTrace({ holdCleanup: true, releaseAfterMs: 1500 });
     const result = await runExtractionDrain({ ...f.options, openStore: trace.openStore, [CLEANUP_BOUND_FOR_TESTS]: 60_000, executor: { extract: async () => f.response } });
-    clearTimeout(releaseAfterBound); await trace.settled();
+    await trace.settled();
     assert.deepEqual(result, { status: 'blocked', blockedReason: 'drain_calls', completed: 1, storeReceiptWritten: true }, JSON.stringify(trace.events));
     assert.ok(trace.cleanups().every(entry => entry.run === 'ok' && !entry.aborted));
+    const g = await setup(t, type, 2, { calls: 1 }), unseamed = storeTrace({ holdCleanup: true, releaseAfterMs: 3000 });
+    const next = await runExtractionDrain({ ...g.options, openStore: unseamed.openStore, executor: { extract: async () => g.response } });
+    await unseamed.settled();
+    assert.equal(next.status, 'unavailable', JSON.stringify(unseamed.events));
+    assert.equal(unseamed.cleanups()[0].aborted?.reason, 'TimeoutError');
   });
   test(`drain ${type}: output journal ceiling rolls back every proposed canonical record`, skip, async t => {
     const f = await setup(t, type, 1, { journalEntriesPerSession: 3 });
