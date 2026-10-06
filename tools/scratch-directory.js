@@ -330,9 +330,14 @@ function startIdentity(pid) {
   }
 }
 
+// The native resolver, as the product's canonicalPath uses: on Windows it also
+// expands a short (8.3) name, which the JavaScript realpathSync leaves alone. A
+// temporary directory reached through one (GitHub's Windows runners set TEMP
+// through the runner account's short name) would otherwise hand tests paths
+// that differ from the canonical ones the product records for the same files.
 function canonical(directory) {
   try {
-    return realpathSync(directory);
+    return realpathSync.native(directory);
   } catch {
     return directory;
   }

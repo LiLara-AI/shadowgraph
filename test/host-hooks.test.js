@@ -154,7 +154,9 @@ test('host settings, whatever name reaches them, change only after the owner con
   symlinkSync(join(home, '.claude'), join(home, 'linked'), process.platform === 'win32' ? 'junction' : 'dir');
   await refusedAt(['install-hooks', '--settings', join(home, 'linked', 'settings.json')], defaultPath);
   if (process.platform === 'win32') {
-    const short = execFileSync('cmd', ['/d', '/c', `for %A in ("${defaultPath}") do @echo %~sA`], { encoding: 'utf8' }).trim();
+    // Verbatim, or Node escapes the inner quotes and cmd answers a path that is not a name of the file at all.
+    const short = execFileSync('cmd', ['/d', '/s', '/c', `"for %A in ("${defaultPath}") do @echo %~sA"`], { encoding: 'utf8', windowsVerbatimArguments: true }).trim();
+    assert.ok(existsSync(short), `the short name ${short} reaches the file`);
     if (short !== defaultPath) await refusedAt(['install-hooks', '--settings', short], defaultPath);
   }
   assert.equal(await readFile(defaultPath, 'utf8'), formatted({ model: 'opus' }));
