@@ -24,9 +24,11 @@
 //   node scripts/context-size.mjs --check        measure writes per delivery against
 //                                                the declared budget; exit 1 when over
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import fsPromises, { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
+import { PerformanceObserver } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { CONTEXT_DELIVERY_BUDGET } from '../src/mcp-tools.js';
@@ -190,6 +192,95 @@ const MINUTE = 60_000, DAY = 86_400_000;
 const ACCESS_AUDIT_TYPES = new Set(['access.used', 'access.refused', 'access.audit_overflow']);
 const mean = (items) => (items.length ? items.reduce((sum, item) => sum + item, 0) / items.length : 0);
 const round = (value) => Number(value.toFixed(4));
+
+// Content-free file-system timing for the write-budget measurement (the owner's
+// option (d) diagnostic for the Windows first-save overrun, PR #12): while a
+// measurement runs, every node:fs/promises call is recorded as its operation,
+// the role of the file it touches (never the path), its interval and any error
+// code. The calls run unchanged; the wrappers only time them, and the originals
+// are restored afterwards. A save then splits into lock wait, rename retries
+// and backoff, reads, the temporary write, the CPU gap before that write
+// (serialization and validation), garbage collection, other calls, and what no
+// call accounts for.
+const OBSERVED_CALLS = ['open', 'readFile', 'writeFile', 'rename', 'stat', 'lstat', 'realpath', 'mkdir', 'unlink', 'rm', 'readdir', 'utimes'];
+const fileRole = (path) => {
+  const name = basename(String(path));
+  return name === 'store.json' ? 'store' : name.endsWith('.lock') ? 'lock' : name.endsWith('.tmp') ? 'temp' : 'other';
+};
+export function observeFileSystem() {
+  const events = [], gc = [], originals = {};
+  const timed = (op, path, call) => async (...args) => {
+    const started = performance.now();
+    try { const value = await call(...args); events.push({ op, role: fileRole(path), started, ended: performance.now() }); return value; }
+    catch (error) { events.push({ op, role: fileRole(path), started, ended: performance.now(), code: String(error?.code ?? 'error') }); throw error; }
+  };
+  for (const name of OBSERVED_CALLS) {
+    const original = originals[name] = fsPromises[name];
+    fsPromises[name] = (path, ...rest) => timed(name, path, async () => {
+      const value = await original(path, ...rest);
+      // A lock is written and closed through its handle: those calls are timed too.
+      if (name === 'open') for (const method of ['writeFile', 'close', 'sync']) value[method] = timed(`handle.${method}`, path, value[method].bind(value));
+      return value;
+    })();
+  }
+  syncBuiltinESMExports();
+  const gcEntry = (entry) => gc.push({ started: entry.startTime, ended: entry.startTime + entry.duration });
+  const observer = new PerformanceObserver((list) => list.getEntries().forEach(gcEntry));
+  observer.observe({ entryTypes: ['gc'] });
+  return {
+    events, gc,
+    flush() { observer.takeRecords().forEach(gcEntry); },
+    stop() {
+      observer.takeRecords().forEach(gcEntry);
+      observer.disconnect();
+      Object.assign(fsPromises, originals);
+      syncBuiltinESMExports();
+    }
+  };
+}
+// Length of the union of intervals, so overlapping calls count once.
+const covered = (intervals) => {
+  let total = 0, end = -Infinity;
+  for (const { started, ended } of [...intervals].sort((a, b) => a.started - b.started)) {
+    if (ended <= end) continue;
+    total += ended - Math.max(started, end); end = ended;
+  }
+  return total;
+};
+const codes = (items) => items.reduce((all, item) => (item.code ? { ...all, [item.code]: (all[item.code] ?? 0) + 1 } : all), {});
+// One window (a save, or a delivery outside its saves) split into phases.
+// `excluded` windows (the delivery's saves) are left out of a delivery's figures.
+export function windowPhases({ started, ended, events, gc = [], excluded = [] }) {
+  const outside = (item) => !excluded.some((window) => item.started >= window.started && item.started < window.ended);
+  const inside = events.filter((event) => event.started >= started && event.started < ended && outside(event));
+  const of = (op, role) => inside.filter((event) => event.op === op && event.role === role);
+  const sum = (items) => items.reduce((total, item) => total + (item.ended - item.started), 0);
+  const span = (items) => (items.length ? items.at(-1).ended - items[0].started : 0);
+  const lockOpens = of('open', 'lock'), renames = of('rename', 'temp'), writes = of('writeFile', 'temp');
+  const firstLock = lockOpens.find((event) => !event.code);
+  const lockWaitMs = firstLock ? firstLock.ended - lockOpens[0].started : span(lockOpens);
+  const lockPollMs = Math.max(0, lockWaitMs - covered(lockOpens.filter((event) => event.ended <= (firstLock?.ended ?? Infinity))));
+  const renameBackoffMs = Math.max(0, span(renames) - covered(renames));
+  const before = writes[0] ? inside.filter((event) => event.ended <= writes[0].started) : [];
+  const preWriteGapMs = writes[0] ? Math.max(0, writes[0].started - Math.max(started, ...before.map((event) => event.ended))) : 0;
+  const fsMs = covered(inside);
+  const windowMs = ended - started - covered(excluded.filter((window) => window.started >= started && window.started < ended));
+  const known = new Set([...renames, ...writes, ...of('readFile', 'store'), ...inside.filter((event) => event.role === 'lock')]);
+  const others = inside.filter((event) => !known.has(event));
+  const gcMs = covered(gc.map((entry) => ({ started: Math.max(entry.started, started), ended: Math.min(entry.ended, ended) })).filter((entry) => entry.ended > entry.started));
+  return {
+    ms: round(windowMs),
+    lock: { attempts: lockOpens.length, codes: codes(lockOpens), waitMs: round(lockWaitMs), pollMs: round(lockPollMs), handleAndReleaseMs: round(sum(inside.filter((event) => event.role === 'lock' && event.op !== 'open'))) },
+    rename: { attempts: renames.length, codes: codes(renames), callMs: round(sum(renames)), backoffMs: round(renameBackoffMs) },
+    readMs: round(sum(of('readFile', 'store'))),
+    writeMs: round(sum(writes)),
+    preWriteGapMs: round(preWriteGapMs),
+    otherFs: { calls: others.length, ms: round(sum(others)), codes: codes(others) },
+    fsMs: round(fsMs),
+    gcMs: round(gcMs),
+    unaccountedMs: round(Math.max(0, windowMs - fsMs - lockPollMs - renameBackoffMs - preWriteGapMs))
+  };
+}
 // Canonical truth is the stored values, every non-audit event included. An
 // import rebuilds objects in its own key order, so a reload and save may reorder
 // keys without changing a value; that is compared away here, and nothing else.
@@ -216,7 +307,7 @@ const relevantSummary = (text) => {
 };
 
 // `request` adds fields to every delivery's body, such as a relevance query (PR-26).
-export async function measureWrites({ deliveries = 5, request = {}, project = PROJECT, ...options } = {}) {
+export async function measureWrites({ deliveries = 5, request = {}, project = PROJECT, observe = true, ...options } = {}) {
   let clock = DAY_ONE;
   const now = () => new Date(clock).toISOString();
   const { graph } = seedGraph({ ...options, now, project });
@@ -228,6 +319,7 @@ export async function measureWrites({ deliveries = 5, request = {}, project = PR
     expiresAt: '2099-01-01T00:00:00.000Z', reason: 'context-size write budget'
   }).entry;
   const directory = await mkdtemp(join(tmpdir(), 'shadowgraph-context-size-'));
+  const observation = observe ? observeFileSystem() : null;
   let app;
   try {
     const file = join(directory, 'store.json');
@@ -241,9 +333,9 @@ export async function measureWrites({ deliveries = 5, request = {}, project = PR
         const sizeBefore = (await stat(file)).size;
         const started = performance.now();
         const revision = await store.save(data);
-        const ms = performance.now() - started;
+        const ended = performance.now(), ms = ended - started;
         const size = (await stat(file)).size;
-        saves.push({ ms, bytesWritten: size, growthBytes: size - sizeBefore });
+        saves.push({ ms, started, ended, bytesWritten: size, growthBytes: size - sizeBefore });
         return revision;
       },
       close() {}
@@ -256,7 +348,8 @@ export async function measureWrites({ deliveries = 5, request = {}, project = PR
       const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
       const text = await response.text();
       if (!response.ok) throw new Error(`POST /context answered ${response.status}: ${text}`);
-      return { text, ms: performance.now() - started, saves: saves.slice(first) };
+      const ended = performance.now();
+      return { text, ms: ended - started, started, ended, saves: saves.slice(first) };
     }
     async function phase(instants, body) {
       saves = [];
@@ -303,7 +396,14 @@ export async function measureWrites({ deliveries = 5, request = {}, project = PR
     const [lastRead, replay] = own.delivered.slice(-2);
     // Each delivery's wall time and its saves' times stay in the report, so a budget failure shows which
     // delivery was slow and whether its save was, not only the maximum.
-    const strip = ({ delivered, ...rest }) => ({ ...rest, deliveryMs: delivered.map((item) => round(item.ms)), saveMs: delivered.map((item) => item.saves.map((save) => round(save.ms))) });
+    // With observation, `phases` gives each delivery (outside its saves) and each of its saves split by phase.
+    observation?.flush();
+    const phasesOf = (item) => ({
+      delivery: windowPhases({ ...observation, started: item.started, ended: item.ended, excluded: item.saves }),
+      saves: item.saves.map((save) => windowPhases({ ...observation, started: save.started, ended: save.ended }))
+    });
+    const strip = ({ delivered, ...rest }) => ({ ...rest, deliveryMs: delivered.map((item) => round(item.ms)), saveMs: delivered.map((item) => item.saves.map((save) => round(save.ms))),
+      ...(observation ? { phases: delivered.map(phasesOf) } : {}) });
     return {
       storeBytes,
       ownScope: { ...strip(own), addedMsMax: own.saveMsMax, replayIdentical: !own.storeChanged && lastRead.text === replay.text, relevant: relevantSummary(lastRead.text) },
@@ -311,6 +411,7 @@ export async function measureWrites({ deliveries = 5, request = {}, project = PR
       nullReference: { ...strip(nullReference), addedMsMax: added(nullReference), rewrite: 'whole_store' }
     };
   } finally {
+    observation?.stop();
     if (app) await new Promise((resolve) => app.server.close(resolve));
     await rm(directory, { recursive: true, force: true });
   }

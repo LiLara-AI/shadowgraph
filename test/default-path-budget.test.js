@@ -18,10 +18,11 @@ import { createJsonFileStore } from '../src/storage.js';
 import { privilegedSnapshot } from '../src/internal/snapshot.js';
 import { RUNTIME_MISSES_PER_READ } from '../src/internal/miss-ledger.js';
 
-// Per-delivery evidence: which delivery was slow, and its saves. A failure
-// message carries it; every measurement also prints it as a diagnostic, so a
-// passing run records how far each runner sits from the budget.
-const timings = (report) => JSON.stringify({ grantAdded: report.grant.addedMsMax, nullReferenceAdded: report.nullReference.addedMsMax, own: report.ownScope.deliveryMs, grant: report.grant.deliveryMs, grantSaves: report.grant.saveMs, nullReference: report.nullReference.deliveryMs, nullReferenceSaves: report.nullReference.saveMs });
+// Per-delivery evidence: which delivery was slow, and its saves, each split by
+// phase (content-free; scripts/context-size.mjs). A failure message carries it;
+// every measurement also prints it as a diagnostic, so a passing run records how
+// far each runner sits from the budget and where its time went.
+const timings = (report) => JSON.stringify({ grantAdded: report.grant.addedMsMax, nullReferenceAdded: report.nullReference.addedMsMax, own: report.ownScope.deliveryMs, grant: report.grant.deliveryMs, grantSaves: report.grant.saveMs, nullReference: report.nullReference.deliveryMs, nullReferenceSaves: report.nullReference.saveMs, grantPhases: report.grant.phases, nullReferencePhases: report.nullReference.phases });
 
 const cliPath = fileURLToPath(new URL('../src/cli.js', import.meta.url));
 const runCli = (file, cwd, command, value) => spawnSync(process.execPath, [cliPath, command, JSON.stringify(value)], {
