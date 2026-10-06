@@ -897,10 +897,28 @@ test('a value nested deeper than redaction follows is replaced whole, and the re
   const payload = assemblePayload({ head, items: [{ tier: 'T2', record: { id: 'r0', nested: deepValue('Hunter2Deep9') } }, { tier: 'T2', record: { id: 'r1', text: 'plain' } }] });
   assert.deepEqual([payload.delivered, payload.withheld], [2, 0]);
   assert.ok(!payload.text.includes('Hunter2Deep9'));
-  // End to end, as deep as the kernel's own prompt read goes.
+  // End to end, as deep as the kernel's own prompt read goes: 1500 levels. The kernel clones a record with a JSON
+  // round trip, whose depth the platform's stack bounds, and on Windows Node 20 that falls short of 1500: there, and
+  // only there, three quarters of the deepest record the runtime imports, still well past the 100 levels redaction
+  // follows. Everywhere else 1500 is imported or the test fails.
+  const importable = (levels) => {
+    try {
+      createShadowGraph().importData({ records: [{ id: 'probe', kind: 'decision', project: 'app', title: 'probe', chosen: 'probe', nested: deepValue('probe', levels) }] });
+      return true;
+    } catch (error) {
+      if (error instanceof RangeError) return false;
+      throw error;
+    }
+  };
+  let depth = 1500;
+  if (process.platform === 'win32' && process.versions.node.startsWith('20.') && !importable(depth)) {
+    do depth = Math.floor(depth * 0.75); while (!importable(depth));
+    depth = Math.floor(depth * 0.75);
+  }
+  assert.ok(depth > 300, `the kernel imports ${depth} levels, well past the 100 redaction follows`);
   const { cwd, file } = await workspace(t);
   await seed(file, (graph) => {
-    graph.importData({ records: [{ id: 'd-deep', kind: 'decision', project: 'app', title: 'queue broker nested', chosen: 'keep', nested: deepValue('Hunter2Deep9', 1500) }] });
+    graph.importData({ records: [{ id: 'd-deep', kind: 'decision', project: 'app', title: 'queue broker nested', chosen: 'keep', nested: deepValue('Hunter2Deep9', depth) }] });
     graph.addDecision({ project: 'app', title: 'queue broker plain', chosen: 'kafka' });
   });
   const result = parsed(await run([], { cwd, stdin: hook('UserPromptSubmit', 'queue broker'), env: { SHADOWGRAPH_FILE: file } }));
