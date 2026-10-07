@@ -46,9 +46,9 @@ Or copy `claude-code.mcp.json` to a project `.mcp.json`:
 
 Restart Claude Code after changing the configuration.
 
-### Claude Code hooks: memory at the moment it matters
+### Claude Code hooks: memory at session start and at each prompt
 
-`claude-code.hooks.json` is the hook block that lets Claude Code receive relevant memory without a memory command: at `SessionStart` and `UserPromptSubmit` it runs `shadowgraph deliver --hook`, a read that never blocks or steers the host. Add or remove it with:
+`claude-code.hooks.json` is the hook block that lets Claude Code receive relevant memory without a memory command: at `SessionStart` and `UserPromptSubmit` it runs `shadowgraph deliver --hook`, a read that never blocks or steers the host. It delivers at those two moments only, never within a turn, and its relevance is lexical. Add or remove it with:
 
 ```bash
 shadowgraph install-hooks

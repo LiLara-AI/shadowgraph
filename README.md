@@ -344,7 +344,8 @@ codex mcp add shadowgraph --env SHADOWGRAPH_MCP_COMPACT=1 -- shadowgraph mcp
 hermes mcp add shadowgraph --command shadowgraph --connect-timeout 30 --env SHADOWGRAPH_MCP_COMPACT=1 --args mcp
 ```
 
-Verified file forms for all four live in [`integrations/`](integrations/README.md). Set an absolute
+File forms for all four live in [`integrations/`](integrations/README.md); `npm run check:integrations`
+validates them as files, which is not a live run of each client. Set an absolute
 `SHADOWGRAPH_FILE` in the client environment when one store must be shared across working
 directories.
 
