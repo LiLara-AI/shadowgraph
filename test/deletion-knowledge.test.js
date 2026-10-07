@@ -35,7 +35,12 @@ import { privilegedBindProject, privilegedTransitionCapture } from '../src/inter
 import { mintOriginId } from '../src/scope.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
-const NOW = '2026-09-30T12:00:00.000Z';
+// The fixtures are dated at the run. A restore applies raw-capture retention
+// (7 days) on the real clock -- through the CLI, HTTP and MCP there is no other
+// -- so a fixed day would let the fixtures' captures expire mid-restore once a
+// week had passed: dated 2026-09-30T12:00Z, they did from 2026-10-07T12:00Z.
+// BEFORE, TOMBSTONE_AT and AFTER stay fixed and earlier.
+const NOW = new Date().toISOString();
 const BEFORE = '2026-09-10T00:00:00.000Z';
 const TOMBSTONE_AT = '2026-09-20T00:00:00.000Z';
 const AFTER = '2026-09-25T00:00:00.000Z';
