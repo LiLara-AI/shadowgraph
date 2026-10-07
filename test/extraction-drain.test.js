@@ -274,7 +274,10 @@ for (const type of ['json', 'sqlite']) {
     assert.equal(called, true);
   });
   test(`drain ${type}: wall deadline bounds an unresponsive executor and prevents late commit`, skip, async t => {
-    const f = await setup(t, type, 1, { wallMs: 1000 }); let resolveCall, called = false;
+    // The executor must be reached before the wall deadline, so the deadline is
+    // not 1 s: on slow Windows CI runners the claim alone outlasted that, and
+    // the drain stopped before any call. It still bounds the unresponsive call.
+    const f = await setup(t, type, 1, { wallMs: 10_000 }); let resolveCall, called = false;
     const result = await runExtractionDrain({ ...f.options, executor: { extract: async () => {
       called = true; return new Promise(resolve => { resolveCall = resolve; });
     } } });
