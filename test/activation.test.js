@@ -448,14 +448,21 @@ test('deactivation keeps a record it cannot read for a reason other than its con
   assert.deepEqual((await readdir(dirname(record))).filter((name) => name.includes('unreadable')), []);
 });
 
-test('on Windows the hook never runs a program the workspace holds in place of git', { skip: process.platform !== 'win32' }, async (t) => {
+test('the hook never runs a program the workspace holds in place of git', async (t) => {
   const { home, cwd, store } = await setup(t);
   assert.equal((await activate(home, store)).code, 0);
-  await copyFile(process.execPath, join(cwd, 'git.exe'));
-  await writeFile(join(cwd, 'rev-parse'), "require('fs').writeFileSync(require('path').join(__dirname, 'planted-git-ran'), 'x');\n");
-  // The variable removed however it is spelled, as a host that does not set it would leave it (an empty value still sets it).
-  const unset = Object.fromEntries(Object.keys(process.env).filter((key) => key.toLowerCase() === 'nodefaultcurrentdirectoryinexepath').map((key) => [key, undefined]));
-  const result = await run(['deliver', '--hook'], { home, cwd, stdin: hook('SessionStart'), env: unset });
+  let env;
+  if (process.platform === 'win32') {
+    await copyFile(process.execPath, join(cwd, 'git.exe'));
+    await writeFile(join(cwd, 'rev-parse'), "require('fs').writeFileSync(require('path').join(__dirname, 'planted-git-ran'), 'x');\n");
+    // The variable removed however it is spelled, as a host that does not set it would leave it (an empty value still sets it).
+    env = Object.fromEntries(Object.keys(process.env).filter((key) => key.toLowerCase() === 'nodefaultcurrentdirectoryinexepath').map((key) => [key, undefined]));
+  } else {
+    // An empty PATH entry names the working directory to a POSIX path search.
+    await writeFile(join(cwd, 'git'), `#!/bin/sh\ntouch '${join(cwd, 'planted-git-ran')}'\nexit 1\n`, { mode: 0o755 });
+    env = { PATH: `:${process.env.PATH}` };
+  }
+  const result = await run(['deliver', '--hook'], { home, cwd, stdin: hook('SessionStart'), env });
   assert.equal(result.code, 0);
   assert.equal(existsSync(join(cwd, 'planted-git-ran')), false);
   assert.ok(payloadOf(result).includes('queue broker choice'), 'delivery still ran, with the real git');

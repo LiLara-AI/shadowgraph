@@ -6,11 +6,23 @@ import { commandPath } from '../src/internal/owner-files.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
 // The program a bare command name runs (git for the workspace checks, claude for
-// the host version): on Windows an absolute name.exe on an absolute PATH entry,
-// so a working directory that holds its own git.exe is never run in its place.
+// the host version): an absolute program on an absolute PATH entry -- name.exe
+// on Windows, an executable name elsewhere -- so a working directory that holds
+// its own git is never run in its place.
 test('a bare command resolves to an absolute program on an absolute PATH entry, never from the working directory', async (t) => {
   if (process.platform !== 'win32') {
-    assert.equal(commandPath('git', { PATH: '' }), 'git', 'elsewhere a path search never takes a bare name from the working directory');
+    const root = await scratchDirectory(t, 'shadowgraph-command-path-');
+    const bin = join(root, 'bin'), plain = join(root, 'plain');
+    await mkdir(bin);
+    await mkdir(plain);
+    await writeFile(join(bin, 'git'), '#!/bin/sh\n', { mode: 0o755 });
+    await writeFile(join(plain, 'git'), '#!/bin/sh\n', { mode: 0o644 });
+    await mkdir(join(root, 'folder-only', 'git'), { recursive: true });
+    assert.equal(commandPath('git', { PATH: bin }), join(bin, 'git'), 'an absolute entry');
+    assert.equal(commandPath('git', { PATH: `${join(root, 'folder-only')}:${plain}:${bin}` }), join(bin, 'git'), 'a folder, or a file that is not executable, is not the program');
+    for (const PATH of ['', '.', 'bin', ':', `:${plain}`, `.:${plain}`, `${plain}::`]) assert.equal(commandPath('git', { PATH }), null, `relative or empty: ${JSON.stringify(PATH)}`);
+    assert.equal(commandPath('git', { path: bin }), null, 'the variable is PATH, spelled exactly');
+    assert.equal(commandPath('git', {}), null, 'no PATH at all');
     return;
   }
   const root = await scratchDirectory(t, 'shadowgraph-command-path-');

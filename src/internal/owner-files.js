@@ -3,29 +3,33 @@
 // reaches; a change to one outside a scratch location needs the owner at a
 // terminal (the callers ask); every write is a temporary file and a rename.
 import { randomUUID } from 'node:crypto';
-import { statSync } from 'node:fs';
+import { accessSync, constants, statSync } from 'node:fs';
 import { lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
-// The program a bare command name runs, as an absolute path. On Windows,
-// Node 20's process search tries the working directory before PATH and ignores
-// NoDefaultCurrentDirectoryInExePath (Node 22 honours it), so a workspace that
-// holds its own git.exe would run in place of git. Only absolute PATH entries
-// are searched, for `name.exe`; a name found in none of them is null, and the
-// caller treats it as the program missing. Elsewhere a path search never takes
-// a bare name from the working directory, so the name stands.
+// The program a bare command name runs, as an absolute path, so a workspace
+// that holds its own git is never run in its place. On Windows, Node 20's
+// process search tries the working directory before PATH and ignores
+// NoDefaultCurrentDirectoryInExePath (Node 22 honours it); elsewhere an empty
+// or relative PATH entry (`::`, a trailing `:`, `.`) names the working
+// directory. Only absolute PATH entries are searched, for `name.exe` on
+// Windows and an executable `name` elsewhere; a name found in none of them is
+// null, and the caller treats it as the program missing.
 export function commandPath(name, env = process.env) {
-  if (process.platform !== 'win32') return name;
-  const path = Object.entries(env).find(([key]) => key.toLowerCase() === 'path')?.[1] ?? '';
-  for (const entry of path.split(';').map((part) => part.trim().replace(/^"(.*)"$/u, '$1'))) {
+  const windows = process.platform === 'win32';
+  const path = (windows ? Object.entries(env).find(([key]) => key.toLowerCase() === 'path')?.[1] : env.PATH) ?? '';
+  for (const entry of path.split(windows ? ';' : ':').map((part) => (windows ? part.trim().replace(/^"(.*)"$/u, '$1') : part))) {
     if (!entry || !isAbsolute(entry)) continue;
-    const candidate = join(entry, `${name}.exe`);
-    if (statSync(candidate, { throwIfNoEntry: false })?.isFile()) return candidate;
+    const candidate = join(entry, windows ? `${name}.exe` : name);
+    if (statSync(candidate, { throwIfNoEntry: false })?.isFile() && (windows || executable(candidate))) return candidate;
   }
   return null;
 }
+const executable = (file) => {
+  try { accessSync(file, constants.X_OK); return true; } catch { return false; }
+};
 
 // The file a path reaches, whatever name reaches it: a short (8.3) name, a
 // junction or a link resolves to the file's own path, through its nearest
