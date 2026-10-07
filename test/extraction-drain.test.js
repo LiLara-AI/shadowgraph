@@ -236,8 +236,10 @@ for (const type of ['json', 'sqlite']) {
     if (type === 'json') await backupFile(f.options.file, backup);
     else { const s = await createStorage(f.options); try { await s.backup(backup); } finally { s.close(); } }
     await runExtractionDrain({ ...f.options, executor: { extract: async () => f.response } });
-    if (type === 'json') await restoreFile(backup, f.options.file);
-    else { const s = await createStorage(f.options); try { await s.restore(backup); } finally { s.close(); } }
+    // The restore runs on the fixtures' clock: on the real one, their capture
+    // would pass its 7-day raw retention once that week had gone by.
+    if (type === 'json') await restoreFile(backup, f.options.file, { now: f.options.now() });
+    else { const s = await createStorage(f.options); try { await s.restore(backup, { now: f.options.now() }); } finally { s.close(); } }
     let called = false;
     const result = await runExtractionDrain({ ...f.options, executor: { extract: async () => { called = true; return f.response; } } });
     assert.equal(result.blockedReason, 'window_calls'); assert.equal(called, false);
