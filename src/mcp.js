@@ -1,3 +1,4 @@
+import { assertToolCreationInput } from './internal/creation-id.js';
 import { createInterface } from 'node:readline';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { stat as fsStat, unlink as fsUnlink } from 'node:fs/promises';
@@ -8,6 +9,10 @@ import { VERSION } from './version.js';
 import { createRestoreValidator } from './restore-validation.js';
 import { loadLocalEvidenceVerifier } from './verification.js';
 import { BATCH_PROTOCOL_VERSIONS, LEGACY_PROTOCOL_VERSIONS, METADATA_TIER, buildToolCatalog, metadataTierForProtocolVersion, negotiateLegacyProtocolVersion, projectTool, selectTools, toolResult } from './mcp-tools.js';
+import { privilegedAccessRefusal, privilegedSnapshot } from './internal/snapshot.js';
+import { accessContext, bindWorkspaceProject, currentAccessOperation, discoverWorkspace, hasAccessReference } from './internal/access-transport.js';
+import { readExtractionAvailability } from './internal/extraction-availability.js';
+import { DELETION_CODES } from './internal/deletion-knowledge.js';
 
 const file = process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json';
 const injectedRestoreFaultStages = process.env.NODE_ENV === 'test'
@@ -74,8 +79,10 @@ const MODERN_PROTOCOL_VERSION = '2026-07-28';
 const SUPPORTED_PROTOCOL_VERSIONS = Object.freeze([MODERN_PROTOCOL_VERSION, ...LEGACY_PROTOCOL_VERSIONS]);
 const JSON_RPC_ERROR = Symbol('shadowgraph.jsonRpcError');
 const PUBLIC_ERROR = Symbol('shadowgraph.publicError');
-const graph = createShadowGraph({ verifier, ...(injectedNow ? { now: injectedNow } : {}) });
+let extractionAvailability = () => false;
+const graph = createShadowGraph({ extractionAvailable: scope => extractionAvailability(scope), verifier, ...(injectedNow ? { now: injectedNow } : {}) });
 graph.importData(await store.load());
+const workspace = await discoverWorkspace();
 const embeddingClient = process.env.SHADOWGRAPH_EMBEDDING_URL ? createEmbeddingClient({
   baseUrl: process.env.SHADOWGRAPH_EMBEDDING_URL,
   model: process.env.SHADOWGRAPH_EMBEDDING_MODEL,
@@ -83,7 +90,7 @@ const embeddingClient = process.env.SHADOWGRAPH_EMBEDDING_URL ? createEmbeddingC
   allowRemote: process.env.SHADOWGRAPH_ALLOW_REMOTE_EMBEDDINGS === '1'
 }) : null;
 let persistQueue = Promise.resolve();
-function persist() { const operation = persistQueue.then(async () => { const revision = await store.save(graph.exportData()); graph.setRevision(revision); }); persistQueue = operation.catch(() => {}); return operation; }
+function persist() { const operation = persistQueue.then(async () => { const revision = await store.save(privilegedSnapshot(graph)); graph.setRevision(revision); }); persistQueue = operation.catch(() => {}); return operation; }
 let callQueue = Promise.resolve();
 function queueCall(operation) { const queued = callQueue.then(operation); callQueue = queued.catch(() => {}); return queued; }
 let persistenceUnavailable = null;
@@ -138,7 +145,7 @@ function committedPersistenceError(persistenceError, durable, reconciliationErro
 }
 
 async function persistCommittedRejection(rejection) {
-  const committed = graph.exportData();
+  const committed = privilegedSnapshot(graph);
   let persistenceError = null;
   try { await persist(); }
   catch (error) { persistenceError = error; }
@@ -232,17 +239,57 @@ async function addConfiguredEmbeddings(args = {}) {
     : args;
 }
 
-async function callUnqueued(name, args, tier) {
-  if (persistenceUnavailable) throw unavailableError();
-  const before = graph.exportData();
+// G-5 §8: an expansion answers a store it cannot read with an explicit
+// limitation -- no content, and no failure that blocks the host's work.
+function storeUnavailableExpansion(args) {
+  const recordId = args.recordId;
+  return {
+    recordId, status: 'unavailable', revisionChanged: null, boundRevision: { recordId, digest: args.digest }, currentRevision: null, record: null, investigation: null,
+    completeness: {
+      scope: { project: typeof args.project === 'string' ? args.project : null, requestState: typeof args.project === 'string' ? 'project_selected' : 'project_unresolved', originPresented: typeof args.originId === 'string' && args.originId !== '', grant: null },
+      complete: false,
+      limitation: { code: 'expansion_unavailable', reason: 'store_unavailable', recordId, detail: 'Persistent storage is unavailable until the server restarts, so no record can be served now.' }
+    }
+  };
+}
+
+async function callUnqueued(name, args, tier, accessManaged = false) {
+  extractionAvailability = await readExtractionAvailability({ store, storage: process.env.SHADOWGRAPH_STORAGE ?? 'json' });
+  if (persistenceUnavailable) {
+    // Only a well-formed handle is answered; anything else fails as every tool does.
+    const handle = args && typeof args === 'object' && !Array.isArray(args) && typeof args.recordId === 'string' && args.recordId !== '' && typeof args.digest === 'string' && args.digest !== ''
+      && (args.maxExpansions === undefined || (Number.isInteger(args.maxExpansions) && args.maxExpansions >= 0 && args.maxExpansions <= 50));
+    if (name === 'shadowgraph_expand' && handle) return toolResult(toolsByName.get(name), storeUnavailableExpansion(args), tier);
+    throw unavailableError();
+  }
+  const tool = toolsByName.get(name);
+  if (name === 'shadowgraph_bind') return toolResult(tool, await bindWorkspaceProject(graph, store, workspace, { ...args, surface: 'mcp' }), tier);
+  if (!accessManaged && (tool?.accessLifecycle || (tool?.persistsWithAccess && hasAccessReference(args)))) {
+    return currentAccessOperation(graph, store, () => callUnqueued(name, args, tier, true), { read: !tool?.accessLifecycle });
+  }
+  if (args && typeof args === 'object' && !Array.isArray(args)) {
+    const { binding: ignoredBinding, surface: ignoredSurface, ...input } = args;
+    args = name === 'shadowgraph_attribute' ? { ...args, surface: 'mcp' } : tool?.persistsWithAccess || tool?.accessLifecycle || ['shadowgraph_record_decision', 'shadowgraph_record_attempt', 'shadowgraph_record_fact', 'shadowgraph_remember', 'shadowgraph_link', 'shadowgraph_supersede', 'shadowgraph_confidence_evidence', 'shadowgraph_record_outcome', 'shadowgraph_update_status', 'shadowgraph_ack_review'].includes(name)
+      ? accessContext(graph, input, 'mcp', workspace) : input;
+    if (name === 'shadowgraph_verify_fact' && input.project == null) {
+      const { binding } = accessContext(graph, input, 'mcp', workspace);
+      if (binding) args = { ...input, project: binding.project };
+    }
+  }
+  const before = privilegedSnapshot(graph);
   let value;
   try {
-  if (name === 'shadowgraph_record_decision') value = graph.addDecision(withRuntimeSession(args));
+  if (name === 'shadowgraph_request_wider_access') value = graph.requestAccess(args ?? {});
+  else if (name === 'shadowgraph_revoke_grant') value = graph.revokeAccess(args ?? {});
+  else if (name === 'shadowgraph_discard_access') value = graph.discardAccess(args ?? {});
+  else if (name === 'shadowgraph_attribute') value = graph.attribute(args ?? {});
+  else if (name === 'shadowgraph_record_decision') value = graph.addDecision(withRuntimeSession(args));
   else if (name === 'shadowgraph_record_attempt') value = graph.addAttempt(withRuntimeSession(args));
   else if (name === 'shadowgraph_review') value = graph.review(args ?? {});
   else if (name === 'shadowgraph_reconsider') value = graph.reconsider(args ?? {});
   else if (name === 'shadowgraph_search') value = graph.search(args?.query ?? '', args ?? {});
   else if (name === 'shadowgraph_context') value = graph.context(args ?? {});
+  else if (name === 'shadowgraph_review_context') value = graph.reviewContext(args ?? {});
   else if (name === 'shadowgraph_remember') {
     const prepared = withRuntimeSession(await addConfiguredEmbeddings(args ?? {}));
     value = Array.isArray(prepared.operations) ? graph.applyMemoryPlan(prepared) : graph.remember(prepared);
@@ -260,28 +307,32 @@ async function callUnqueued(name, args, tier) {
   }
   else if (name === 'shadowgraph_record_fact') value = graph.addFact(withRuntimeSession(args));
   else if (name === 'shadowgraph_verify_fact' && verifier) value = await graph.verifyFact(args ?? {});
-  else if (name === 'shadowgraph_record_outcome') value = graph.setOutcome(args?.decisionId, args?.outcome);
+  else if (name === 'shadowgraph_record_outcome') value = graph.setOutcome(args?.decisionId, args?.outcome, args);
   else if (name === 'shadowgraph_confidence_evidence') value = graph.addConfidenceEvidence(withRuntimeSession(args ?? {}));
-  else if (name === 'shadowgraph_update_status') value = graph.updateDecisionStatus(args?.decisionId, args?.status);
+  else if (name === 'shadowgraph_update_status') value = graph.updateDecisionStatus(args?.decisionId, args?.status, args);
   else if (name === 'shadowgraph_link') value = graph.link(args);
   else if (name === 'shadowgraph_traverse') value = graph.traverse(args ?? {});
+  else if (name === 'shadowgraph_expand') value = graph.expand(args ?? {});
   else if (name === 'shadowgraph_supersede') value = graph.supersedeDecision(args ?? {});
   else if (name === 'shadowgraph_redact') value = graph.redact(args ?? {});
   else if (name === 'shadowgraph_purge') value = graph.purgeProject(args?.project, { mode: args?.mode });
   else if (name === 'shadowgraph_maintain') value = graph.maintain(args ?? {});
   else if (name === 'shadowgraph_retrieve') value = graph.retrieve(args?.query ?? '', args ?? {});
-  else if (name === 'shadowgraph_validate') value = graph.validate();
+  else if (name === 'shadowgraph_validate') value = graph.validate(args ?? {});
   else if (name === 'shadowgraph_journal') value = graph.getJournal(args ?? {});
   else if (name === 'shadowgraph_rebuild') value = graph.rebuild(args ?? {});
   else if (name === 'shadowgraph_review_signals') value = graph.getReviewSignals(args ?? {});
   else if (name === 'shadowgraph_purge_preview') value = graph.projectSummary(args?.project);
-  else if (name === 'shadowgraph_ack_review') value = graph.acknowledgeReview(args?.id);
-  else if (name === 'shadowgraph_repair_plan') value = graph.repairPlan();
+  else if (name === 'shadowgraph_ack_review') value = graph.acknowledgeReview(args?.id, args);
+  else if (name === 'shadowgraph_repair_plan') value = graph.repairPlan(args ?? {});
   else if (name === 'shadowgraph_backup') { const { backupFile } = await import('./backup.js'); value = await backupFile(file, args?.destination, { store }); }
   else if (name === 'shadowgraph_restore') {
+    if (args?.memoryOnly !== undefined && typeof args.memoryOnly !== 'boolean') throw new Error('memoryOnly must be a boolean');
     value = store.restore
-      ? await store.restore(args?.source, { validate: restoreValidator, afterReplace: (payload) => graph.replaceData(payload) })
+      ? await store.restore(args?.source, { memoryOnly: args?.memoryOnly === true, validate: restoreValidator, verifier: verifier ?? undefined, afterReplace: (payload) => graph.replaceData(payload) })
       : await (await import('./backup.js')).restoreFile(args?.source, file, {
+        memoryOnly: args?.memoryOnly === true,
+        verifier: verifier ?? undefined,
         storage: process.env.SHADOWGRAPH_STORAGE,
         validate: restoreValidator,
         restoreFs: injectedRestoreFs,
@@ -293,6 +344,7 @@ async function callUnqueued(name, args, tier) {
   else { const error = new Error('Unknown tool'); error.code = -32601; throw error; }
   } catch (error) {
     if (isCommittedRejection(error)) {
+      if (accessManaged) throw error;
       return persistCommittedRejection(error);
     }
     // P1-4: persistence rollback is too late for a domain operation that mutates
@@ -328,7 +380,7 @@ async function callUnqueued(name, args, tier) {
   // Which tools need a durable save is declared once, per tool, in the catalog.
   // shadowgraph_restore is deliberately absent: the storage backend commits the
   // replacement itself. See src/mcp-tools.js.
-  if (persistingTools.has(name)) {
+  if (!accessManaged && persistingTools.has(name)) {
     try { await persist(); }
     catch (error) {
       try { graph.replaceData(await store.load()); }
@@ -390,6 +442,7 @@ const PUBLIC_RPC_FALLBACK_MESSAGES = new Map([
 // Only stable codes documented by the storage/journal contracts cross the MCP
 // boundary. In particular, platform codes such as ENOENT/EACCES are private.
 const PUBLIC_DOMAIN_CODES = new Set([
+  'creation_id_not_allowed',
   'committed_rejection_persistence_unconfirmed',
   'duplicate_hard_purge_ledger_sequence',
   'duplicate_journal_sequence',
@@ -411,7 +464,10 @@ const PUBLIC_DOMAIN_CODES = new Set([
   'storage_lock_timeout',
   'unexplained_journal_gap',
   'unrelated_hard_purge_ledger_sequence',
-  'unsupported_schema_version'
+  'unsupported_schema_version',
+  // The deletion-knowledge refusals (PR-37a): codes only, never a path,
+  // project or token.
+  ...DELETION_CODES
 ]);
 const PUBLIC_DOMAIN_MESSAGES = new Set([
   'A caller cannot set fact verificationStatus to verified',
@@ -478,6 +534,7 @@ function publicDomainCode(error) {
 }
 
 function publicErrorDetails(error) {
+  if (error?.code === 'creation_id_not_allowed') return { message: 'Caller-supplied creation IDs are not supported' };
   const tagged = error?.[PUBLIC_ERROR];
   if (tagged) return tagged;
 
@@ -565,10 +622,13 @@ function eraResult(modern, result, cacheScope) {
 }
 
 const resourceList = [{ uri: 'shadowgraph://context', name: 'ShadowGraph context', description: 'Current project context and open review signals.', mimeType: 'application/json' }];
-const promptList = [{ name: 'shadowgraph_consequential_task', description: 'Use ShadowGraph before, during, and after consequential work.', arguments: [] }];
+const promptList = [{ name: 'shadowgraph_consequential_task', description: 'What ShadowGraph records and returns about decisions, facts, attempts and outcomes.', arguments: [] }];
+// Plan v1.4.4 PR-19 (PC-01(a), AC-026): the prompt states what ShadowGraph holds
+// and returns; it gives no instruction about the work.
+const PROMPT_FACTS = "context returns one project's current decisions, stale facts, failed attempts, fired review conditions and conditions that could not be settled; retrieve returns the records matching a content query with their one-hop graph neighbours. ShadowGraph records decisions, assumptions, evidence, alternatives, attempts, facts and outcomes. A review signal stays open until it is acknowledged. agent_claimed and unverified facts are claims, not confirmations.";
 const promptText = verifier
-  ? 'Before consequential work call context and retrieve. Record decisions, assumptions, evidence, alternatives, failed attempts, facts, and outcomes. Review open signals before continuing. Treat agent_claimed and unverified facts as hypotheses. Only the separately configured signed local-evidence verifier can mark an active fact verified.'
-  : 'Before consequential work call context and retrieve. Record decisions, assumptions, evidence, alternatives, failed attempts, facts, and outcomes. Review open signals before continuing. Treat agent_claimed and unverified facts as hypotheses: without a separately configured verifier, nothing in ShadowGraph can be marked verified, so never present a stored claim as confirmed.';
+  ? `${PROMPT_FACTS} Only the separately configured signed local-evidence verifier can mark an active fact verified.`
+  : `${PROMPT_FACTS} Without a separately configured verifier nothing in ShadowGraph can be marked verified, so a stored claim is never a confirmation.`;
 
 // Handles one already-parsed JSON-RPC message. `emit` receives the response
 // object exactly once for a request and never for a notification, so a single
@@ -578,7 +638,7 @@ const promptText = verifier
 // The old code fell through to `reply(request.id, {})` for any unrecognised
 // method, emitting `{"id": null, "result": {}}` for notifications — a protocol
 // violation that a strict client can treat as a spurious response.
-async function handleMessage(request, emit) {
+async function handleMessage(request, emit, batchFailure = null) {
   let isNotification = false;
   try {
     if (!request || typeof request !== 'object' || Array.isArray(request)) throw rpcError(-32600, 'Invalid Request');
@@ -594,6 +654,16 @@ async function handleMessage(request, emit) {
       if (!isNotification) emit(responseFor(request.id, result, error));
     };
     const modern = requestUsesModernProtocol(request);
+    // No member of a creation-policy-invalid batch may run, including reads
+    // with durable effects and notifications. Preserve each protocol's error
+    // envelope without entering the shared mutation queue.
+    if (batchFailure) {
+      if (modern && request.method === 'tools/call') {
+        respond(modernResult({ content: [{ type: 'text', text: publicErrorMessage(batchFailure) }], isError: true }));
+        return;
+      }
+      throw batchFailure;
+    }
 
     if (persistenceUnavailable && request.method === 'resources/read') throw unavailableError();
 
@@ -636,7 +706,7 @@ async function handleMessage(request, emit) {
       respond(modernResult({
         supportedVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
         capabilities: SERVER_CAPABILITIES,
-        instructions: 'Local-first explainable decision and scoped temporal memory. Use context/retrieve before consequential work and record outcomes afterward.'
+        instructions: "Local-first explainable decision and scoped temporal memory. context returns one project's recorded decisions, stale facts, failed attempts and fired review conditions; retrieve returns the records matching a content query with their one-hop graph neighbours; record_outcome stores what happened."
       }, 'public'));
     } else if (request.method === 'tools/list') respond(eraResult(modern, { tools: toolLists[modern ? METADATA_TIER.STRUCTURED : legacyTier] }, 'public'));
     else if (request.method === 'resources/list') respond(eraResult(modern, { resources: resourceList }, 'public'));
@@ -655,17 +725,10 @@ async function handleMessage(request, emit) {
         // makes the latch closed rather than merely early. callUnqueued does the
         // same for tools/call.
         if (persistenceUnavailable) throw unavailableError();
-        const before = graph.exportData();
-        let value;
-        try { value = graph.context({}); }
-        catch (error) { graph.replaceData(before); throw error; }
-        try { await persist(); }
-        catch (error) {
-          try { graph.replaceData(await store.load()); }
-          catch { graph.replaceData(before); }
-          throw error;
-        }
-        return value;
+        extractionAvailability = await readExtractionAvailability({ store, storage: process.env.SHADOWGRAPH_STORAGE ?? 'json' });
+        // The context resource is the default-path read (plan v1.4.4 §13.2): it
+        // changes no canonical truth, so nothing is persisted after it.
+        return graph.context(accessContext(graph, {}, 'mcp', workspace));
       });
       respond(eraResult(modern, { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(context) }] }, 'private'));
     } else if (request.method === 'prompts/list') respond(eraResult(modern, { prompts: promptList }, 'public'));
@@ -674,13 +737,16 @@ async function handleMessage(request, emit) {
       const promptName = request.params?.name;
       if (typeof promptName !== 'string' || !promptName) throw rpcError(-32602, 'Invalid params: name is required');
       if (!PROMPT_NAMES.has(promptName)) throw rpcError(-32602, 'Unknown prompt');
-      respond(eraResult(modern, { description: 'ShadowGraph operating policy', messages: [{ role: 'user', content: { type: 'text', text: promptText } }] }));
+      respond(eraResult(modern, { description: 'What ShadowGraph records and returns', messages: [{ role: 'user', content: { type: 'text', text: promptText } }] }));
     } else if (request.method === 'tools/call') {
       if (request.params === undefined) throw rpcError(-32602, 'Invalid params: params is required for tools/call');
       if (typeof request.params.name !== 'string' || !request.params.name) throw rpcError(-32602, 'Invalid params: name is required for tools/call');
       const args = request.params.arguments ?? {};
       if (typeof args !== 'object' || args === null || Array.isArray(args)) throw rpcError(-32602, 'Invalid params: arguments must be an object');
       if (!toolsByName.has(request.params.name)) {
+        if (!persistenceUnavailable && ['shadowgraph_issue_access', 'shadowgraph_delegate_access', 'shadowgraph_grant', 'shadowgraph_delegate', 'shadowgraph_import'].includes(request.params.name)) {
+          await queueCall(() => currentAccessOperation(graph, store, () => privilegedAccessRefusal(graph, { surface: 'mcp', reason: 'issuance_surface_unavailable' })));
+        }
         throw rpcError(modern ? -32602 : -32601, 'Unknown tool');
       }
       try {
@@ -688,6 +754,7 @@ async function handleMessage(request, emit) {
         // revision that defines it, or to a modern `_meta` request, and only for
         // a tool that advertises an output schema at that tier. A failed call
         // stays content-only.
+        assertToolCreationInput(request.params.name, args);
         const result = await call(request.params.name, args, modern ? METADATA_TIER.STRUCTURED : legacyTier);
         respond(eraResult(modern, modern ? { ...result, isError: false } : result));
       } catch (error) {
@@ -723,8 +790,14 @@ async function handleBatch(batch) {
     writeLine(responseFor(null, null, rpcError(-32600, 'Invalid Request')));
     return;
   }
+  let batchFailure = null;
+  try {
+    for (const member of batch) {
+      if (member?.method === 'tools/call') assertToolCreationInput(member.params?.name, member.params?.arguments);
+    }
+  } catch (error) { batchFailure = error; }
   const collected = batch.map(() => []);
-  const settled = batch.map((member, index) => handleMessage(member, (response) => collected[index].push(response)));
+  const settled = batch.map((member, index) => handleMessage(member, (response) => collected[index].push(response), batchFailure));
   await Promise.all(settled);
   const responses = collected.flat();
   if (responses.length) writeLine(responses);

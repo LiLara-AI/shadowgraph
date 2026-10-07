@@ -1,3 +1,5 @@
+import { historicalIds } from '../tools/historical-ids.js';
+const fixtureIds = {};
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -18,6 +20,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedRebuild, privilegedSnapshot, privilegedValidate } from '../src/internal/snapshot.js';
 
 const NOW = '2026-08-28T12:00:00.000Z';
 const PROJECT = 'semantic-purge-project';
@@ -159,13 +162,14 @@ function currentEnvelope(marker) {
 
 function liveVictimGraph() {
   const graph = createShadowGraph({ now: () => NOW });
-  graph.addDecision({
-    id: VICTIM.id,
+  const victim = graph.addDecision({
     project: PROJECT,
     title: VICTIM.title,
     chosen: VICTIM.chosen,
     idempotencyKey: 'semantic-retry'
   });
+  // The marker is a stored artifact addressing this historical identity.
+  graph.replaceData(historicalIds(privilegedSnapshot(graph), { [VICTIM.id]: victim.id }, { now: () => NOW }));
   return graph;
 }
 
@@ -198,22 +202,22 @@ test('schema-5 purge marker values and relationships fail closed before pure fol
     );
 
     const direct = liveVictimGraph();
-    const directBefore = direct.exportData();
+    const directBefore = privilegedSnapshot(direct);
     assert.throws(
       () => direct.importData(currentEnvelope(marker)),
       testCase.detail,
       `${testCase.name}: direct import rejects`
     );
-    assert.deepEqual(direct.exportData(), directBefore, `${testCase.name}: direct import is atomic`);
+    assert.deepEqual(privilegedSnapshot(direct), directBefore, `${testCase.name}: direct import is atomic`);
 
     const replacement = liveVictimGraph();
-    const replacementBefore = replacement.exportData();
+    const replacementBefore = privilegedSnapshot(replacement);
     assert.throws(
       () => replacement.replaceData(currentEnvelope(marker)),
       testCase.detail,
       `${testCase.name}: replacement rejects`
     );
-    assert.deepEqual(replacement.exportData(), replacementBefore, `${testCase.name}: replacement is atomic`);
+    assert.deepEqual(privilegedSnapshot(replacement), replacementBefore, `${testCase.name}: replacement is atomic`);
 
     assert.throws(
       () => validateRestorePayload(currentEnvelope(marker), { now: () => NOW }),
@@ -265,14 +269,14 @@ test('hard-purge gap relationships are validated before pure fold and public gra
     assertPureRejected(rebuildProjection([seedEntry(), marker], { journalEpoch: 1 }), testCase);
 
     const direct = liveVictimGraph();
-    const directBefore = direct.exportData();
+    const directBefore = privilegedSnapshot(direct);
     assert.throws(() => direct.importData(currentEnvelope(marker)), /hard purge|journal sequence|removedJournalSequences/i);
-    assert.deepEqual(direct.exportData(), directBefore, `${testCase.name}: direct import is atomic`);
+    assert.deepEqual(privilegedSnapshot(direct), directBefore, `${testCase.name}: direct import is atomic`);
 
     const replacement = liveVictimGraph();
-    const replacementBefore = replacement.exportData();
+    const replacementBefore = privilegedSnapshot(replacement);
     assert.throws(() => replacement.replaceData(currentEnvelope(marker)), /hard purge|journal sequence|removedJournalSequences/i);
-    assert.deepEqual(replacement.exportData(), replacementBefore, `${testCase.name}: replacement is atomic`);
+    assert.deepEqual(privilegedSnapshot(replacement), replacementBefore, `${testCase.name}: replacement is atomic`);
 
     assert.throws(
       () => validateRestorePayload(currentEnvelope(marker), { now: () => NOW }),
@@ -293,13 +297,13 @@ test('graph validate and rebuild reuse one authoritative semantic marker diagnos
     journal: [marker], journalSeq: 2, journalEpoch: 1
   });
 
-  const validation = graph.validate();
+  const validation = privilegedValidate(graph);
   const markerIssues = validation.issues.filter((issue) => issue.code === INVALID_CODE);
   assert.equal(validation.valid, false);
   assert.equal(markerIssues.length, 1, 'validate reports the authoritative marker diagnostic once');
   assert.match(markerIssues[0].detail, /mode must be exactly logical or hard/i);
 
-  const rebuild = graph.rebuild();
+  const rebuild = privilegedRebuild(graph);
   assert.equal(rebuild.rebuildable, false);
   assert.equal(rebuild.reason, INVALID_REASON);
   assert.deepEqual(rebuild.projection.records.map((item) => item.id), [VICTIM.id]);
@@ -391,9 +395,9 @@ function startMcp(file) {
 
 async function writeOldDestination(path) {
   const old = createShadowGraph({ now: () => NOW });
-  old.addDecision({ id: 'semantic-old-live', project: 'old', title: 'Old state', chosen: 'keep' });
+  fixtureIds['semantic-old-live'] = old.addDecision({ project: 'old', title: 'Old state', chosen: 'keep' }).id;
   const store = createJsonFileStore(path);
-  await store.save(old.exportData());
+  await store.save(privilegedSnapshot(old));
   store.close();
 }
 
@@ -419,9 +423,9 @@ test('malformed marker rejection is atomic across JSON and SQLite restore', asyn
     sourceStore.close();
 
     const old = createShadowGraph({ now: () => NOW });
-    old.addDecision({ id: 'semantic-old-sqlite', project: 'old', title: 'Old SQLite state', chosen: 'keep' });
+    fixtureIds['semantic-old-sqlite'] = old.addDecision({ project: 'old', title: 'Old SQLite state', chosen: 'keep' }).id;
     const destinationStore = await createSqliteStore(destination);
-    await destinationStore.save(old.exportData());
+    await destinationStore.save(privilegedSnapshot(old));
     const before = await destinationStore.load();
     await assert.rejects(destinationStore.restore(source), /mode must be exactly logical or hard/i);
     assert.deepEqual(await destinationStore.load(), before);
@@ -517,16 +521,16 @@ test('schemas 1-4 raw markers migrate compatibly while canonical schema-5 logica
     const imported = createShadowGraph({ now: () => NOW });
     assert.doesNotThrow(() => imported.importData(payload), `schema ${schemaVersion}: import migrates`);
     assert.equal(imported.validate().valid, true, `schema ${schemaVersion}: migrated graph validates`);
-    assert.equal(imported.rebuild().projection.records.length, 0, `schema ${schemaVersion}: migrated rebuild stays erased`);
+    assert.equal(privilegedRebuild(imported).projection.records.length, 0, `schema ${schemaVersion}: migrated rebuild stays erased`);
     assert.doesNotThrow(() => validateRestorePayload(payload, { now: () => NOW }), `schema ${schemaVersion}: restore migration remains compatible`);
   }
 
   for (const mode of ['logical', 'hard']) {
     const source = createShadowGraph({ now: () => NOW });
-    source.addDecision({ id: `valid-kept-${mode}`, project: 'valid-kept', title: 'Keep', chosen: 'keep' });
-    source.addDecision({ id: `valid-purged-${mode}`, project: `valid-purged-${mode}`, title: 'Erase', chosen: 'erase' });
+    fixtureIds[`valid-kept-${mode}`] = source.addDecision({ project: 'valid-kept', title: 'Keep', chosen: 'keep' }).id;
+    fixtureIds[`valid-purged-${mode}`] = source.addDecision({ project: `valid-purged-${mode}`, title: 'Erase', chosen: 'erase' }).id;
     source.purgeProject(`valid-purged-${mode}`, { mode });
-    const payload = source.exportData();
+    const payload = privilegedSnapshot(source);
     const marker = payload.journal.findLast((entry) => entry.type === 'project.purged');
     assert.equal(schema5PurgeArtifactIssue(marker), null, `${mode}: canonical marker`);
     if (mode === 'logical') assert.deepEqual(marker.payload.removedJournalSequences, []);

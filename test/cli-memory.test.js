@@ -31,22 +31,30 @@ test('CLI remembers, recalls, and synchronizes Markdown memory', async (t) => {
   assert.equal(recalled.items[0].record.text, 'Prefers dark mode');
   assert.equal(recalled.signals.semantic.available, true);
 
-  const synced = await cli(file, 'markdown-sync', { directory: workspace, mode: 'push' });
+  const synced = await cli(file, 'markdown-sync', { directory: workspace, mode: 'push', project: 'app' });
   assert.equal(synced.written, 1);
   const markdown = await readFile(synced.files[0].path, 'utf8');
   assert.match(markdown, /Prefers dark mode/);
 });
 
-test('CLI context persists review signals that it creates', async (t) => {
+// Plan v1.4.4 PR-16 (§13.2): context is the default-path read and saves nothing;
+// review-context carries the evaluate-and-persist behaviour context used to have.
+test('CLI context is a read, and review-context persists the review signals it creates', async (t) => {
   const directory = await scratchDirectory(t, 'shadowgraph-cli-context-');
   const file = join(directory, 'data.json');
-  await cli(file, 'decision', {
-    id: 'cli-due', project: 'app', title: 'CLI due review', chosen: 'A',
+  const decision = await cli(file, 'decision', {
+    project: 'app', title: 'CLI due review', chosen: 'A',
     reviewAfter: '2020-01-01T00:00:00.000Z'
   });
+  const before = await readFile(file);
   const context = await cli(file, 'context', { project: 'app' });
-  assert.equal(context.openReviews.length, 1);
+  assert.equal(context.firedConditions.length, 1);
+  assert.equal(context.notice.replacement.cli, 'review-context');
+  assert.deepEqual(await readFile(file), before, 'context leaves the store bytes unchanged');
+  const evaluated = await cli(file, 'review-context', { project: 'app' });
+  assert.equal(evaluated.openReviews.length, 1);
+  assert.equal(evaluated.notice, undefined);
   const durable = JSON.parse(await readFile(file, 'utf8'));
   assert.equal(durable.reviewSignals.length, 1);
-  assert.equal(durable.reviewSignals[0].decisionId, 'cli-due');
+  assert.equal(durable.reviewSignals[0].decisionId, decision.id);
 });

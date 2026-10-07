@@ -88,7 +88,7 @@ Added to **facts**:
 
 Added to **decisions**: `sourceClass`, `actor`, `client`, `sessionId` (same semantics). Decisions have no `source` field today and none is added.
 
-Non-string `actor`/`client`/`sessionId` throw. All values are JSON-serializable and survive `exportData()` → `importData()`.
+Non-string `actor`/`client`/`sessionId` throw. All values are JSON-serializable and survive save, reload and restore.
 
 ### `sessionId` on an MCP-originated write (changed 2026-09-20)
 
@@ -116,7 +116,7 @@ is involved and stored data is never rewritten.
 
 `importData()` **preserves stored values as-is and never elevates trust.** A legacy fact on disk carrying `verificationStatus: 'verified'` keeps it.
 
-Rationale: import is a migration/restore path, not an agent assertion. The security doc requires *"Do not rewrite user data in place without a backup or transactional protection."* Rewriting on import would also break round-trip stability, since `exportData`/`importData` runs on every persist and reload.
+Rationale: import is a migration/restore path, not an agent assertion. The security doc requires *"Do not rewrite user data in place without a backup or transactional protection."* Rewriting on import would also break round-trip stability, since the store snapshot is saved and imported again on every persist and reload.
 
 Accepted residual risk: someone with filesystem write access can hand-author a `verified` fact. In a local-first single-user threat model they already own the data. Documented, not mitigated.
 

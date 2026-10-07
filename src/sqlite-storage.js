@@ -2,15 +2,57 @@
 //
 // node:sqlite is a RELEASE CANDIDATE (Node stability 1.2), not stable, so the
 // import is guarded and JSON remains a fully supported fallback.
-import { copyFile, mkdir, rename, stat, unlink } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, rename, stat, unlink } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { nextRevision, assertRevision, createDestinationFence, currentRevision, nextRevisionAfter } from './revision-store.js';
-import { createRestoreValidator, requiresLegacyPurgeMigration } from './restore-validation.js';
+import { nextRevision, assertRevision, createDestinationFence, currentRevision, nextRevisionAfter, restoreLock } from './revision-store.js';
+import { guardAuthorityRestore, validateRestorePayload, validateRestoreSnapshot } from './restore-validation.js';
+import { mergeAuthorityRestore } from './authority-restore.js';
 import { NODE_SQLITE_NOT_APPLICABLE_REASON } from './runtime-capabilities.js';
 import { SCHEMA_VERSION } from './shadowgraph.js';
+import { extraCollections, isExtraCollectionKey, refusePublicExport } from './internal/collections.js';
+import { RUNTIME_MISSES } from './internal/miss-ledger.js';
+import { CAPTURE_CONTENT, CAPTURE_SESSIONS } from './internal/capture.js';
+import { DELETION_VIEW, attachDeletionView, backupSidecar, captureItemRecordValid, journalHead, pendingUnsupported, readLedger, recordGenerationChanges, refuseAbsentWithRecord, refuseDeletionFileDestination, registerStoreIo, writeSidecar } from './internal/deletion-knowledge.js';
+import { RestorePendingError, purgeRecorded, recordPurges, resolvePendingRestore, saveResolving } from './internal/restore-wrapper.js';
+
+// One generic carrier for every top-level collection this build does not
+// handle natively (plan v1.4.4 §10.9.8): one row per collection, the whole
+// value as JSON. It is created on every open, read on every load and rewritten
+// on every save inside the same transaction, so what the build does not
+// understand round-trips instead of being dropped (axis A-5).
+const EXTRA_TABLE = 'CREATE TABLE IF NOT EXISTS shadowgraph_extra (collection TEXT PRIMARY KEY, payload TEXT NOT NULL);';
 
 const EMPTY = { schemaVersion: SCHEMA_VERSION, revision: 0, records: [], facts: [], relations: [], reviewSignals: [], idempotency: [], events: [], journal: [], journalSeq: 0, journalEpoch: null };
+
+// The store's payload as its tables hold it. Reads only: it needs an open
+// handle and writes nothing, so a read-only handle serves (delivery, PR-30).
+// A missing table is an error, as the live store always has every table; a
+// reader that cannot prepare the schema first (delivery) asks for `tolerant`,
+// and a table an older build never made then reads as empty.
+export function exportSqlitePayload(database, { tolerant = false } = {}) {
+  const exists = (name) => database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
+  const has = (name) => !tolerant || exists(name);
+  const rows = (name, query) => (has(name) ? database.prepare(query).all() : []);
+  const meta = has('shadowgraph_meta');
+  const readMeta = (key, fallback = '0') => (meta ? database.prepare('SELECT value FROM shadowgraph_meta WHERE key = ?').get(key)?.value : undefined) ?? fallback;
+  const epoch = readMeta('journalEpoch', '');
+  const result = { schemaVersion: Number(readMeta('schemaVersion', String(SCHEMA_VERSION))), revision: Number(readMeta('revision', '0')), records: [], facts: [], relations: [], reviewSignals: [], idempotency: [], events: [], journal: [], journalSeq: Number(readMeta('journalSeq', '0')), journalEpoch: epoch === '' ? null : Number(epoch) };
+  for (const row of rows('shadowgraph_entities', 'SELECT kind, payload FROM shadowgraph_entities ORDER BY rowid')) { const item = JSON.parse(row.payload); (item.kind === 'fact' ? result.facts : result.records).push(item); }
+  for (const row of rows('shadowgraph_relations', 'SELECT payload FROM shadowgraph_relations ORDER BY rowid')) result.relations.push(JSON.parse(row.payload));
+  for (const row of rows('shadowgraph_reviews', 'SELECT payload FROM shadowgraph_reviews ORDER BY rowid')) result.reviewSignals.push(JSON.parse(row.payload));
+  for (const row of rows('shadowgraph_idempotency', 'SELECT key, payload FROM shadowgraph_idempotency ORDER BY rowid')) result.idempotency.push({ key: row.key, value: JSON.parse(row.payload) });
+  for (const row of rows('shadowgraph_events', 'SELECT payload FROM shadowgraph_events ORDER BY rowid')) result.events.push(JSON.parse(row.payload));
+  // Ordered by seq, not rowid: seq is the journal's contract ordering key.
+  for (const row of rows('shadowgraph_journal', 'SELECT payload FROM shadowgraph_journal ORDER BY seq, rowid')) result.journal.push(JSON.parse(row.payload));
+  // A snapshot written by an older build has no carrier table at all. A row
+  // named after a native key is never allowed to overwrite real data; it is
+  // ignored here and removed by the next save.
+  for (const row of exists('shadowgraph_extra') ? database.prepare('SELECT collection, payload FROM shadowgraph_extra ORDER BY rowid').all() : []) {
+    if (isExtraCollectionKey(row.collection)) result[row.collection] = JSON.parse(row.payload);
+  }
+  return result;
+}
 
 export async function createSqliteStore(filePath, options = {}) {
   let DatabaseSync;
@@ -31,7 +73,7 @@ export async function createSqliteStore(filePath, options = {}) {
   };
   const fault = (stage) => options.restoreFault?.(stage);
   const saveFault = (stage, context) => options.saveFault?.(stage, context);
-  const configuredRestoreValidator = options.restoreValidator ?? createRestoreValidator();
+  const configuredRestoreValidator = options.restoreValidator;
   const fence = createDestinationFence(filePath, options);
 
   function prepareSchema(database) {
@@ -44,7 +86,8 @@ export async function createSqliteStore(filePath, options = {}) {
       CREATE TABLE IF NOT EXISTS shadowgraph_events (id TEXT PRIMARY KEY, project TEXT, payload TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS shadowgraph_journal (id TEXT PRIMARY KEY, seq INTEGER, type TEXT, project TEXT, entity_id TEXT, payload TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS shadowgraph_journal_seq ON shadowgraph_journal (seq);
-      CREATE TABLE IF NOT EXISTS shadowgraph_state (id INTEGER PRIMARY KEY CHECK (id = 1), payload TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS shadowgraph_state (id INTEGER PRIMARY KEY CHECK (id = 1), payload TEXT NOT NULL);
+      ${EXTRA_TABLE}`);
   }
 
   function prepareDatabase(database, stage) {
@@ -55,22 +98,8 @@ export async function createSqliteStore(filePath, options = {}) {
   let restoring = false;
   let permanentlyClosed = false;
 
-  function exportFrom(database) {
-    const readMeta = (key, fallback = '0') => database.prepare('SELECT value FROM shadowgraph_meta WHERE key = ?').get(key)?.value ?? fallback;
-    const epoch = readMeta('journalEpoch', '');
-    const result = { schemaVersion: Number(readMeta('schemaVersion', String(SCHEMA_VERSION))), revision: Number(readMeta('revision', '0')), records: [], facts: [], relations: [], reviewSignals: [], idempotency: [], events: [], journal: [], journalSeq: Number(readMeta('journalSeq', '0')), journalEpoch: epoch === '' ? null : Number(epoch) };
-    for (const row of database.prepare('SELECT kind, payload FROM shadowgraph_entities ORDER BY rowid').all()) { const item = JSON.parse(row.payload); (item.kind === 'fact' ? result.facts : result.records).push(item); }
-    for (const row of database.prepare('SELECT payload FROM shadowgraph_relations ORDER BY rowid').all()) result.relations.push(JSON.parse(row.payload));
-    for (const row of database.prepare('SELECT payload FROM shadowgraph_reviews ORDER BY rowid').all()) result.reviewSignals.push(JSON.parse(row.payload));
-    for (const row of database.prepare('SELECT key, payload FROM shadowgraph_idempotency ORDER BY rowid').all()) result.idempotency.push({ key: row.key, value: JSON.parse(row.payload) });
-    for (const row of database.prepare('SELECT payload FROM shadowgraph_events ORDER BY rowid').all()) result.events.push(JSON.parse(row.payload));
-    // Ordered by seq, not rowid: seq is the journal's contract ordering key.
-    for (const row of database.prepare('SELECT payload FROM shadowgraph_journal ORDER BY seq, rowid').all()) result.journal.push(JSON.parse(row.payload));
-    return result;
-  }
-
   function replaceRelational(database, data) {
-    database.exec('DELETE FROM shadowgraph_entities; DELETE FROM shadowgraph_relations; DELETE FROM shadowgraph_reviews; DELETE FROM shadowgraph_idempotency; DELETE FROM shadowgraph_events; DELETE FROM shadowgraph_journal; DELETE FROM shadowgraph_meta;');
+    database.exec(`${EXTRA_TABLE} DELETE FROM shadowgraph_entities; DELETE FROM shadowgraph_relations; DELETE FROM shadowgraph_reviews; DELETE FROM shadowgraph_idempotency; DELETE FROM shadowgraph_events; DELETE FROM shadowgraph_journal; DELETE FROM shadowgraph_meta; DELETE FROM shadowgraph_extra;`);
     const meta = database.prepare('INSERT INTO shadowgraph_meta (key,value) VALUES (?,?)');
     meta.run('schemaVersion', String(data.schemaVersion ?? SCHEMA_VERSION));
     meta.run('revision', String(data.revision ?? 0));
@@ -90,6 +119,8 @@ export async function createSqliteStore(filePath, options = {}) {
     // leave the journal describing a state that was not committed.
     const journalRow = database.prepare('INSERT INTO shadowgraph_journal (id,seq,type,project,entity_id,payload) VALUES (?,?,?,?,?,?)');
     for (const item of data.journal ?? []) journalRow.run(item.id, Number.isInteger(item.seq) ? item.seq : null, item.type ?? null, item.project ?? null, item.entityId ?? null, JSON.stringify(item));
+    const extraRow = database.prepare('INSERT INTO shadowgraph_extra (collection,payload) VALUES (?,?)');
+    for (const [collection, value] of extraCollections(data)) extraRow.run(collection, JSON.stringify(value));
   }
 
   function migrateLegacyPayload(database) {
@@ -117,11 +148,22 @@ export async function createSqliteStore(filePath, options = {}) {
     ['journal', 'id']
   ];
 
+  // The entries of a keyed extra collection are rows too: a save that removes
+  // one is destructive, so a purge's removal is scrubbed (PR-28a, PR-33).
+  const keyedExtraCollections = [[RUNTIME_MISSES, 'missId'], [CAPTURE_CONTENT, 'contentRef'], [CAPTURE_SESSIONS, 'id']];
+  const entriesOf = (payload, collection) => (Array.isArray(payload?.[collection]) ? payload[collection] : []);
+
   function removesPersistedRows(current, next) {
-    return persistedCollections.some(([collection, key]) => {
-      const nextKeys = new Set((next[collection] ?? []).map((item) => item?.[key]));
-      return (current[collection] ?? []).some((item) => !nextKeys.has(item?.[key]));
-    });
+    const nextExtras = new Set(extraCollections(next).map(([collection]) => collection));
+    return extraCollections(current).some(([collection]) => !nextExtras.has(collection))
+      || persistedCollections.some(([collection, key]) => {
+        const nextKeys = new Set((next[collection] ?? []).map((item) => item?.[key]));
+        return (current[collection] ?? []).some((item) => !nextKeys.has(item?.[key]));
+      })
+      || keyedExtraCollections.some(([collection, key]) => {
+        const nextKeys = new Set(entriesOf(next, collection).map((item) => item?.[key]));
+        return entriesOf(current, collection).some((item) => !nextKeys.has(item?.[key]));
+      });
   }
 
   function persistedPayload(data) {
@@ -141,11 +183,12 @@ export async function createSqliteStore(filePath, options = {}) {
     for (const item of [...(data.records ?? []), ...(data.facts ?? [])]) {
       (item.kind === 'fact' ? result.facts : result.records).push(item);
     }
+    for (const [collection, value] of extraCollections(data)) result[collection] = value;
     return result;
   }
 
   function assertCommittedPayload(database, payload) {
-    if (payloadIdentity(exportFrom(database)) !== payloadIdentity(persistedPayload(payload))) {
+    if (payloadIdentity(exportSqlitePayload(database)) !== payloadIdentity(persistedPayload(payload))) {
       throw new Error('committed SQLite payload does not match the requested save');
     }
   }
@@ -193,7 +236,7 @@ export async function createSqliteStore(filePath, options = {}) {
     let handle;
     try {
       handle = opener(path, openOptions);
-      const payload = exportFrom(handle);
+      const payload = exportSqlitePayload(handle);
       return { handle, payload };
     } catch (error) {
       try { closeChecked(handle, 'read-failure'); } catch { /* preserve original failure */ }
@@ -241,6 +284,56 @@ export async function createSqliteStore(filePath, options = {}) {
     return { retainedArtifacts, unknownArtifacts };
   }
 
+  // Writes `data` as the payload after `current` on an open handle, inside the
+  // fence: one transaction, securely compacted when it removes rows.
+  function writeOver(database, current, data) {
+    const payload = nextRevision(Array.isArray(data) ? { ...EMPTY, records: data } : { ...data, revision: current.revision, expectedRevision: undefined });
+    const destructive = removesPersistedRows(current, payload);
+    const context = { current, payload, destructive };
+    if (destructive) {
+      // Changing journal mode and checkpointing are forbidden inside an
+      // active transaction. The destination fence and operation-scoped
+      // handles ensure no other ShadowGraph connection is open here.
+      database.exec('PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode = DELETE; PRAGMA secure_delete = ON');
+    }
+    database.exec('BEGIN IMMEDIATE');
+    let committed = false;
+    try {
+      replaceRelational(database, payload);
+      saveFault('beforeCommit', context);
+      options.signal?.throwIfAborted();
+      database.exec('COMMIT');
+      committed = true;
+      if (destructive) securelyCompactCommittedSave(database, payload, context);
+      else saveFault('afterCommit', context);
+      return payload.revision;
+    } catch (error) {
+      if (!committed) database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  // Every payload write of this store goes through here, the purge commit
+  // point (PR-37d design §3.1, §3.4): no store at a deletion record file's
+  // name (step 0), then the deletion records of a purge the payload carries
+  // (steps 1-7), before BEGIN (V-2); then writeOver, unchanged and synchronous,
+  // so its transaction spans no await; then the purge's record cleared (step
+  // 12). Its callers await it: each closes the connection in a `finally`.
+  async function commitPayload(database, current, data, { hook = false } = {}) {
+    await refuseDeletionFileDestination(filePath, options.env);
+    const context = () => ({ current, payload: data, destructive: removesPersistedRows(current, data) });
+    const clear = await recordPurges(filePath, { current, data, env: options.env, lock: options, hook, fault: (stage) => saveFault(stage, context()),
+      beforeRecord: () => recordGenerationChanges(filePath, current, data, { hook, env: options.env }) });
+    try {
+      const revision = writeOver(database, current, data);
+      if (clear) {
+        await saveFault('beforeRecordCleared', context());
+        await clear();
+      }
+      return revision;
+    } catch (error) { throw clear ? purgeRecorded(error) : error; }
+  }
+
   function openLiveDatabase(stage) {
     if (permanentlyClosed) throw new Error('SQLite storage is closed');
     let candidate;
@@ -259,14 +352,105 @@ export async function createSqliteStore(filePath, options = {}) {
   // Creating a store still materializes and migrates the database, but no
   // connection survives the destination fence. Every later operation follows
   // the same open/use/close discipline so another process can replace the main
-  // file and remove WAL/SHM sidecars while it owns the exclusive fence.
+  // file and remove WAL/SHM sidecars while it owns the exclusive fence. Every
+  // open that can make the file first refuses an absent store with a pending
+  // restore record (PR-37c design §3.3, re-review NF-5), in a store object
+  // already open too; the restore primitive's own open is the declared
+  // exception (d37a F18). A store at a deletion record file's name is refused
+  // first, before its fence, which would be the registry's own lock file
+  // (PR-37d design §3.3 step 0, V-17).
+  await refuseDeletionFileDestination(filePath, options.env);
   await fence.run(async () => {
     let database;
-    try { database = openLiveDatabase('initial'); }
-    finally { closeChecked(database, 'initial'); }
+    try {
+      // Preparing SQLite changes journal mode/schema even before a payload
+      // write. Defer preparation while any record waits so refusal is pure.
+      await refuseAbsentWithRecord(filePath);
+      let ledger;
+      try { ledger = await readLedger(filePath); }
+      catch { return; } // Operations report unreadable controls before opening or writing.
+      if (ledger?.pending.length) return;
+      database = openLiveDatabase('initial');
+    } finally { closeChecked(database, 'initial'); }
   });
 
-  return {
+  // The stored payload with no view, or null when the file is not there,
+  // never making or preparing it (PR-37c design §3.3, review finding 4).
+  // Inside the fence no other connection is open, so it is read immutable and
+  // leaves no log behind; with a log present -- the primitive's own
+  // connection, at the hook's first call -- it is read read-only.
+  async function readDestination() {
+    try { await stat(filePath); }
+    catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    let logged = false;
+    for (const path of [`${filePath}-wal`, `${filePath}-journal`]) logged ||= await stat(path).then(() => true, () => false);
+    let database;
+    try {
+      database = !logged && openImmutableDatabase ? openImmutableDatabase(filePath) : openDatabase(filePath, { readOnly: true });
+      return exportSqlitePayload(database, { tolerant: true });
+    } finally { closeChecked(database, 'restore-read'); }
+  }
+
+  // The store's own I/O, for the restore wrapper and its resolvers (PR-37c
+  // design §3.6): `read` as above; `commit` opens the store for writing only
+  // now, on a store the binding check found present, and writes only over the
+  // revision and head `read` gave. It refuses while the primitive runs, as a
+  // save does, but for the wrapper's own read inside the primitive's hold
+  // (`held`). `lock`: the fence options a purge completion's registry lock
+  // takes too (PR-37d design §3.7).
+  const io = {
+    file: filePath,
+    env: options.env,
+    lock: options,
+    run(step, { held = false } = {}) {
+      let last;
+      const tools = {
+        read: async () => { const value = await readDestination(); last = structuredClone(value); return value; },
+        commit: async (next) => {
+          let database;
+          try {
+            database = openLiveDatabase('restore-completion');
+            const current = exportSqlitePayload(database);
+            if (!last || current.revision !== last.revision || journalHead(current) !== journalHead(last)) throw new Error('The store changed under a restore record');
+            return await commitPayload(database, current, next);
+          } finally { closeChecked(database, 'restore-completion'); }
+        }
+      };
+      if (held) return step(tools);
+      if (restoring) throw new Error('SQLite restore is in progress');
+      if (permanentlyClosed) throw new Error('SQLite storage is closed');
+      return fence.run(async () => {
+        if (restoring) throw new Error('SQLite restore is in progress');
+        return step(tools);
+      });
+    }
+  };
+
+  return registerStoreIo({
+    async validate() {
+      if (restoring) throw new Error('SQLite restore is in progress');
+      if (permanentlyClosed) throw new Error('SQLite storage is closed');
+      return fence.run(async () => {
+        if (restoring) throw new Error('SQLite restore is in progress');
+        if (permanentlyClosed) throw new Error('SQLite storage is closed');
+        let database;
+        try {
+          // Diagnose carrier collisions without materializing schema or reading
+          // payloads. Only the finite native/control key set can be reported.
+          database = openDatabase(filePath, { readOnly: true });
+          const hasCarrier = database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'shadowgraph_extra'").get();
+          const issues = hasCarrier
+            ? database.prepare('SELECT collection FROM shadowgraph_extra ORDER BY collection').all()
+              .filter(({ collection }) => !isExtraCollectionKey(collection))
+              .map(({ collection }) => ({ code: 'sqlite_extra_reserved_key', collection }))
+            : [];
+          return { valid: issues.length === 0, issues };
+        } finally {
+          closeChecked(database, 'validate');
+        }
+      });
+    },
+
     async load() {
       if (restoring) throw new Error('SQLite restore is in progress');
       if (permanentlyClosed) throw new Error('SQLite storage is closed');
@@ -274,49 +458,74 @@ export async function createSqliteStore(filePath, options = {}) {
         if (restoring) throw new Error('SQLite restore is in progress');
         let database;
         try {
+          if ((await readLedger(filePath))?.pending.some((record) => record.kind === 'capture_item')) throw pendingUnsupported();
+          await refuseAbsentWithRecord(filePath);
           database = openLiveDatabase('load');
-          return exportFrom(database);
+          // The payload, then the deletion records beside it (PR-37a), in one
+          // hold of the store fence every payload and ledger write holds too,
+          // whatever spelling it was given, so no bracket is needed (PR-37c
+          // design §8.1).
+          return await attachDeletionView(exportSqlitePayload(database), filePath, { registry: true, env: options.env });
         } finally {
           closeChecked(database, 'load');
         }
       });
     },
 
-    async save(data) {
+    // A save never commits over a restore record: it completes the record
+    // first, under the restore lock, and is tried once more (PR-37c design
+    // §8.3). A record this build cannot serve refuses it. `pending: 'read'`: a
+    // read's audit save, which refuses any record instead (PR-37d review
+    // finding 2).
+    async save(data, { pending = 'suppress' } = {}) {
+      refusePublicExport(data);
+      if (restoring) throw new Error('SQLite restore is in progress');
+      if (permanentlyClosed) throw new Error('SQLite storage is closed');
+      return saveResolving(io, options, () => fence.run(async () => {
+        if (restoring) throw new Error('SQLite restore is in progress');
+        let database;
+        try {
+          const ledger = await readLedger(filePath);
+          if (ledger?.pending.some((record) => record.kind === 'capture_item')) {
+            if (pending === 'suppress' && ledger.pending.length === 1 && captureItemRecordValid(ledger.pending[0], ledger.tombstones)) throw new RestorePendingError();
+            throw pendingUnsupported();
+          }
+          await refuseAbsentWithRecord(filePath);
+          database = openLiveDatabase('save');
+          const current = await attachDeletionView(exportSqlitePayload(database), filePath, { env: options.env, pending });
+          if (current[DELETION_VIEW]?.pending) throw new RestorePendingError();
+          assertRevision(current, data?.expectedRevision ?? data?.revision);
+          return await commitPayload(database, current, data);
+        } finally {
+          closeChecked(database, 'save');
+        }
+      }));
+    },
+
+    // Load, change and write under one hold of the fence, so no revision can
+    // conflict (automatic capture, PR-36c; PR-36 design review D-2): `change`
+    // gets the stored payload and returns the next one, or null (or nothing)
+    // to write nothing. Resolves to the new revision, or null.
+    async update(change) {
       if (restoring) throw new Error('SQLite restore is in progress');
       if (permanentlyClosed) throw new Error('SQLite storage is closed');
       return fence.run(async () => {
         if (restoring) throw new Error('SQLite restore is in progress');
         let database;
         try {
-          database = openLiveDatabase('save');
-          const current = exportFrom(database);
-          assertRevision(current, data?.expectedRevision ?? data?.revision);
-          const payload = nextRevision(Array.isArray(data) ? { ...EMPTY, records: data } : { ...data, revision: current.revision, expectedRevision: undefined });
-          const destructive = removesPersistedRows(current, payload);
-          const context = { current, payload, destructive };
-          if (destructive) {
-            // Changing journal mode and checkpointing are forbidden inside an
-            // active transaction. The destination fence and operation-scoped
-            // handles ensure no other ShadowGraph connection is open here.
-            database.exec('PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode = DELETE; PRAGMA secure_delete = ON');
-          }
-          database.exec('BEGIN IMMEDIATE');
-          let committed = false;
-          try {
-            replaceRelational(database, payload);
-            saveFault('beforeCommit', context);
-            database.exec('COMMIT');
-            committed = true;
-            if (destructive) securelyCompactCommittedSave(database, payload, context);
-            else saveFault('afterCommit', context);
-            return payload.revision;
-          } catch (error) {
-            if (!committed) database.exec('ROLLBACK');
-            throw error;
-          }
+          if ((await readLedger(filePath))?.pending.length) throw pendingUnsupported();
+          await refuseAbsentWithRecord(filePath);
+          database = openLiveDatabase('update');
+          // The capture hook's only write: any pending record refuses it before
+          // `change` runs (PR-37c design §8.3, R8).
+          const current = await attachDeletionView(exportSqlitePayload(database), filePath, { env: options.env, pending: 'refuse' });
+          const before = structuredClone(current);
+          const next = await change(current);
+          if (next === null || next === undefined) return null;
+          refusePublicExport(next);
+          return await commitPayload(database, before, next, { hook: true });
         } finally {
-          closeChecked(database, 'save');
+          closeChecked(database, 'update');
         }
       });
     },
@@ -366,13 +575,15 @@ export async function createSqliteStore(filePath, options = {}) {
         catch { /* recovery/cleanup continues */ }
       };
 
-      const validateSnapshot = async (payload) => {
-        let normalized = await configuredRestoreValidator(payload);
-        if (restoreOptions.validate && restoreOptions.validate !== configuredRestoreValidator) {
-          const customNormalized = await restoreOptions.validate(payload);
-          if (customNormalized && typeof customNormalized === 'object' && Array.isArray(customNormalized.records)) normalized = customNormalized;
-        }
-        return requiresLegacyPurgeMigration(payload) ? normalized : payload;
+      const restoreNow = restoreOptions.now ?? new Date().toISOString();
+      // Source, stage, and replacement always receive the mandatory checks.
+      // Additional validators receive isolated copies and may only reject.
+      const validateSnapshot = async (snapshotPayload) => {
+        // Before any validator, so a caller-supplied one cannot let a view in
+        // (finding F-36).
+        refusePublicExport(snapshotPayload);
+        const payload = restoreOptions.memoryOnly === true ? guardAuthorityRestore(snapshotPayload, { memoryOnly: true }) : snapshotPayload;
+        return validateRestoreSnapshot(payload, { validators: [configuredRestoreValidator, restoreOptions.validate] });
       };
 
       const confirmOldAtDestination = async () => {
@@ -382,7 +593,7 @@ export async function createSqliteStore(filePath, options = {}) {
           const info = await restoreFs.stat(destination);
           if (!info.isFile()) throw new Error('Recovery destination is not a regular SQLite file');
           inspection = openDatabase(destination, { readOnly: true });
-          const inspectedPayload = exportFrom(inspection);
+          const inspectedPayload = exportSqlitePayload(inspection);
           if (payloadIdentity(inspectedPayload) !== payloadIdentity(oldPayload)) throw new Error('Recovered payload does not match the rollback snapshot');
         } finally {
           closeQuietly(inspection, 'recovery-inspection');
@@ -390,7 +601,7 @@ export async function createSqliteStore(filePath, options = {}) {
         try {
           candidate = openDatabase(destination);
           prepareDatabase(candidate, 'recovery');
-          const payload = exportFrom(candidate);
+          const payload = exportSqlitePayload(candidate);
           if (payloadIdentity(payload) !== payloadIdentity(oldPayload)) throw new Error('Recovered payload does not match the rollback snapshot after prepare');
           liveClosed = false;
         } finally {
@@ -400,7 +611,7 @@ export async function createSqliteStore(filePath, options = {}) {
 
       try {
         db = openLiveDatabase('restore');
-        const destinationPayload = exportFrom(db);
+        const destinationPayload = exportSqlitePayload(db);
         const info = await restoreFs.stat(sourcePath);
         if (!info.isFile()) throw new Error('Restore source must be a regular SQLite file');
 
@@ -418,7 +629,7 @@ export async function createSqliteStore(filePath, options = {}) {
             { readOnly: true },
             immutableSource ? openImmutableDatabase : openDatabase
           ).handle;
-          const sourcePayload = exportFrom(sourceHandle);
+          const sourcePayload = exportSqlitePayload(sourceHandle);
           await validateSnapshot(sourcePayload);
           currentRevision(sourcePayload, 'Restore source');
           if (samePath(sourcePath, destination)) return { source, destination: reportedDestination, unchanged: true };
@@ -433,8 +644,10 @@ export async function createSqliteStore(filePath, options = {}) {
 
         try {
           stagedHandle = openDatabase(stagedPath);
-          const stagedPayload = exportFrom(stagedHandle);
-          const normalizedStagedPayload = await validateSnapshot(stagedPayload);
+          const stagedPayload = exportSqlitePayload(stagedHandle);
+          const validatedStagedPayload = await validateSnapshot(stagedPayload);
+          const normalizedStagedPayload = restoreOptions.memoryOnly === true ? validatedStagedPayload : mergeAuthorityRestore(validatedStagedPayload, destinationPayload, { now: restoreNow });
+          validateRestorePayload(normalizedStagedPayload);
           const stagedWasNormalized = normalizedStagedPayload !== stagedPayload;
           // A source snapshot may have arrived in WAL mode. At this isolated staged
           // file (never the caller's source or the live destination), checkpoint it
@@ -466,7 +679,7 @@ export async function createSqliteStore(filePath, options = {}) {
           // hook a second time at the staged path. The custom validator already
           // inspected the source/staged snapshot and runs again on the installed
           // replacement, where a failure is covered by verified rollback.
-          await configuredRestoreValidator(exportFrom(stagedHandle));
+          validateRestorePayload(exportSqlitePayload(stagedHandle));
         } finally {
           closeChecked(stagedHandle, 'staged');
           stagedHandle = undefined;
@@ -501,7 +714,7 @@ export async function createSqliteStore(filePath, options = {}) {
 
         replacementHandle = openDatabase(destination);
         prepareDatabase(replacementHandle, 'replacement');
-        const replacementPayload = exportFrom(replacementHandle);
+        const replacementPayload = exportSqlitePayload(replacementHandle);
         await validateSnapshot(replacementPayload);
         if (restoreOptions.afterReplace) await restoreOptions.afterReplace(replacementPayload);
 
@@ -542,7 +755,7 @@ export async function createSqliteStore(filePath, options = {}) {
               await restoreFs.copyFile(rollbackPath, recoveryPath);
               try {
                 ({ handle: recoveryHandle } = openReadable(recoveryPath, { readOnly: true }));
-                const recoveryPayload = exportFrom(recoveryHandle);
+                const recoveryPayload = exportSqlitePayload(recoveryHandle);
                 if (payloadIdentity(recoveryPayload) !== payloadIdentity(oldPayload)) throw new Error('Recovery copy does not match the rollback snapshot');
               } finally {
                 closeChecked(recoveryHandle, 'recovery-copy');
@@ -614,26 +827,42 @@ export async function createSqliteStore(filePath, options = {}) {
       });
     },
 
+    // A backup waits on the restore lock, completes any record a restore left,
+    // and copies only then, so it never carries one (PR-37c design §3.4, R5 L2
+    // VS1). Not an R16 body: backupFile's SQLite branch delegates here and
+    // takes no lock of its own.
     async backup(destination) {
       if (restoring) throw new Error('SQLite restore is in progress');
       if (permanentlyClosed) throw new Error('SQLite storage is closed');
-      return fence.run(async () => {
-        if (restoring) throw new Error('SQLite restore is in progress');
-        if (permanentlyClosed) throw new Error('SQLite storage is closed');
-        await mkdir(dirname(destination), { recursive: true });
-        const temporary = join(dirname(destination), `.${basename(destination)}.${process.pid}.${Date.now()}.tmp`);
-        let database;
-        try {
-          database = openLiveDatabase('backup');
-          database.exec(`VACUUM INTO '${quoteSqlPath(temporary)}'`);
-          closeChecked(database, 'backup');
-          database = undefined;
-          await rename(temporary, destination);
-          return { source: filePath, destination };
-        } finally {
-          closeChecked(database, 'backup');
-          await unlink(temporary).catch(() => {});
-        }
+      return restoreLock(filePath, options).run(async () => {
+        await resolvePendingRestore(io);
+        return fence.run(async () => {
+          if (restoring) throw new Error('SQLite restore is in progress');
+          if (permanentlyClosed) throw new Error('SQLite storage is closed');
+          // The destination's final path, never a deletion record file however
+          // it is spelled (PR-37a).
+          const target = await refuseDeletionFileDestination(destination, options.env, { ownerFiles: true });
+          await mkdir(dirname(target), { recursive: true });
+          const temporary = join(dirname(target), `.${basename(target)}.${process.pid}.${Date.now()}.tmp`);
+          let database;
+          try {
+            await refuseAbsentWithRecord(filePath);
+            database = openLiveDatabase('backup');
+            database.exec(`VACUUM INTO '${quoteSqlPath(temporary)}'`);
+            closeChecked(database, 'backup');
+            database = undefined;
+            // The payload is read, then the deletion records; their copy lands
+            // first, then the payload it describes (PR-37a, R-8).
+            await writeSidecar(target, await backupSidecar(filePath, target, options.env));
+            // A backup copy is owner-only (FND-P6-11; PR-37b).
+            await chmod(temporary, 0o600);
+            await rename(temporary, target);
+            return { source: filePath, destination };
+          } finally {
+            closeChecked(database, 'backup');
+            await unlink(temporary).catch(() => {});
+          }
+        });
       });
     },
 
@@ -641,5 +870,5 @@ export async function createSqliteStore(filePath, options = {}) {
       if (restoring) throw new Error('Cannot close SQLite storage during restore');
       permanentlyClosed = true;
     }
-  };
+  }, io);
 }

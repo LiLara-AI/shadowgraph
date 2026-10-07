@@ -9,6 +9,7 @@
 // interaction, so a batch is never used as a negotiation sequence.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { tokenFree } from '../tools/token-free.js';
 import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -152,14 +153,14 @@ test('a session negotiated at 2025-03-26 answers a batch as one array, in member
 
   // The notification carries no id and so contributes no member to the reply.
   assert.deepEqual(idsOf(batch), ['b1', 'b2']);
-  assert.equal(batch[0].result.tools.length, 28);
+  assert.equal(batch[0].result.tools.length, 35);
   assert.equal(batch[1].result.content[0].type, 'text');
   assert.equal(Object.hasOwn(batch[1].result, 'structuredContent'), false, '2025-03-26 defines annotations, not structured content');
 
   // A single message on its own line still answers as an object, not an array.
   const single = await rpc.call({ jsonrpc: '2.0', id: 'single', method: 'tools/list', params: {} });
   assert.equal(Array.isArray(single), false);
-  assert.equal(single.result.tools.length, 28);
+  assert.equal(single.result.tools.length, 35);
 });
 
 test('a batch of notifications alone writes nothing, yet every member still runs', async (t) => {
@@ -175,7 +176,7 @@ test('a batch of notifications alone writes nothing, yet every member still runs
     { jsonrpc: '2.0', method: 'notifications/initialized' },
     {
       jsonrpc: '2.0', method: 'tools/call',
-      params: { name: 'shadowgraph_record_decision', arguments: { id: 'batch-decision', project: 'batching', title: 'Batch member', chosen: 'execute' } }
+      params: { name: 'shadowgraph_record_decision', arguments: { project: 'batching', title: 'Batch member', chosen: 'execute' } }
     }
   ]);
   const search = JSON.stringify({
@@ -188,35 +189,46 @@ test('a batch of notifications alone writes nothing, yet every member still runs
   const hits = JSON.parse((await searched).result.content[0].text);
   assert.equal(rpc.lines.length, before + 1, `unexpected output: ${JSON.stringify(rpc.lines.slice(before))}`);
   assert.equal(hits.items.length, 1, 'the notification member must have executed, and before the line that followed it');
-  assert.equal(hits.items[0].record.id, 'batch-decision');
+  const recorded = hits.items[0].record;
+  assert.equal(typeof recorded.id, 'string');
+  assert.ok(recorded.id);
+  assert.equal(recorded.title, 'Batch member');
+  assert.equal(recorded.chosen, 'execute');
+  const persisted = JSON.parse(await readFile(rpc.file, 'utf8'));
+  assert.deepEqual(tokenFree(persisted.records.find(({ id }) => id === recorded.id)), recorded);
 });
 
 test('a message sent in the same chunk as a batch cannot overtake its members', async (t) => {
   const rpc = await startMcp(t);
   await rpc.negotiate(BATCHING_PROTOCOL);
 
-  // The batch records a decision; the line flushed with it moves that decision
-  // on. If the second line were dispatched between the batch members, the status
-  // change would run against a decision that did not exist yet.
+  // The batch records a decision; the line flushed with it reads that decision.
+  // If the second line overtook the batch's write, the search would be empty.
   const batch = JSON.stringify([
     { jsonrpc: '2.0', id: 'noop', method: 'tools/list', params: {} },
     {
       jsonrpc: '2.0', id: 'write', method: 'tools/call',
-      params: { name: 'shadowgraph_record_decision', arguments: { id: 'chunk-decision', project: 'chunking', title: 'Chunked', chosen: 'first' } }
+      params: { name: 'shadowgraph_record_decision', arguments: { project: 'chunking', title: 'Chunked', chosen: 'first' } }
     }
   ]);
   const dependent = JSON.stringify({
     jsonrpc: '2.0', id: 'dependent', method: 'tools/call',
-    params: { name: 'shadowgraph_update_status', arguments: { decisionId: 'chunk-decision', status: 'planned' } }
+    params: { name: 'shadowgraph_search', arguments: { project: 'chunking', query: 'Chunked', kind: 'decision' } }
   });
   const batched = rpc.waitFor((value) => Array.isArray(value), 'the batch response array');
   const followed = rpc.waitFor((value) => !Array.isArray(value) && value.id === 'dependent', 'the dependent call');
   rpc.writeRaw(`${batch}\n${dependent}\n`);
 
-  assert.deepEqual(idsOf(await batched), ['noop', 'write']);
+  const batchResponse = await batched;
+  assert.deepEqual(idsOf(batchResponse), ['noop', 'write']);
+  assert.equal(batchResponse[1].error, undefined, batchResponse[1].error?.message);
+  const recorded = JSON.parse(batchResponse[1].result.content[0].text);
   const response = await followed;
   assert.equal(response.error, undefined, response.error?.message);
-  assert.equal(JSON.parse(response.result.content[0].text).status, 'planned');
+  const hits = JSON.parse(response.result.content[0].text).items;
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].record.id, recorded.id);
+  assert.equal(hits[0].record.chosen, 'first');
 });
 
 test('an initialize with no id negotiates nothing, because nothing was agreed', async (t) => {
@@ -290,7 +302,7 @@ test('every member of a batch is answered, including the invalid ones, in order'
   for (const index of [0, 2, 3, 4]) {
     assert.deepEqual(batch[index], INVALID_REQUEST, `member ${index}`);
   }
-  assert.equal(batch[1].result.tools.length, 28);
+  assert.equal(batch[1].result.tools.length, 35);
   assert.equal(batch[5].error.code, -32600);
   assert.equal(batch[5].error.message, 'Invalid Request: jsonrpc must be 2.0');
 });
@@ -299,22 +311,29 @@ test('batch members are handled in order even when one of them is asynchronous',
   const rpc = await startMcp(t);
   await rpc.negotiate(BATCHING_PROTOCOL);
 
-  // The second member can only succeed if the first has already been applied.
+  // The second member can only find the record if the asynchronous first
+  // member has already been applied and persisted.
   const batch = await rpc.sendBatch([
     {
       jsonrpc: '2.0', id: 'write', method: 'tools/call',
-      params: { name: 'shadowgraph_record_decision', arguments: { id: 'ordered-decision', project: 'ordering', title: 'Ordered', chosen: 'first' } }
+      params: { name: 'shadowgraph_record_decision', arguments: { project: 'ordering', title: 'Ordered', chosen: 'first' } }
     },
     {
       jsonrpc: '2.0', id: 'depends', method: 'tools/call',
-      params: { name: 'shadowgraph_update_status', arguments: { decisionId: 'ordered-decision', status: 'planned' } }
+      params: { name: 'shadowgraph_search', arguments: { project: 'ordering', query: 'Ordered', kind: 'decision' } }
     },
     { jsonrpc: '2.0', id: 'list', method: 'tools/list', params: {} }
   ]);
 
   assert.deepEqual(idsOf(batch), ['write', 'depends', 'list']);
+  assert.equal(batch[0].error, undefined, batch[0].error?.message);
   assert.equal(batch[1].error, undefined, batch[1].error?.message);
-  assert.equal(JSON.parse(batch[1].result.content[0].text).status, 'planned');
+  const recorded = JSON.parse(batch[0].result.content[0].text);
+  const hits = JSON.parse(batch[1].result.content[0].text).items;
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].record.id, recorded.id);
+  const persisted = JSON.parse(await readFile(rpc.file, 'utf8'));
+  assert.deepEqual(tokenFree(persisted.records.find(({ id }) => id === recorded.id)), hits[0].record);
 });
 
 test('a modern per-request member keeps its own contract inside a batch', async (t) => {
@@ -348,11 +367,13 @@ test('a read batched behind a restore that degrades the server is refused, not s
   const sentinel = 'PRIVATE-BATCH-LATCH-PAYLOAD-4f21';
   const seeded = await rpc.call({
     jsonrpc: '2.0', id: 'latch-seed', method: 'tools/call',
-    params: { name: 'shadowgraph_record_decision', arguments: { id: 'latch-seed', project: 'latch', title: sentinel, chosen: 'keep' } }
+    params: { name: 'shadowgraph_record_decision', arguments: { project: 'latch', title: sentinel, chosen: 'keep' } }
   });
   assert.equal(seeded.error, undefined, seeded.error?.message);
   const source = join(rpc.directory, 'restore-source.json');
   await writeFile(source, await readFile(rpc.file));
+  const seededId = JSON.parse(seeded.result.content[0].text).id;
+  assert.equal(JSON.parse(await readFile(source, 'utf8')).records.find(({ id }) => id === seededId).title, sentinel);
 
   const batch = await rpc.sendBatch([
     { jsonrpc: '2.0', id: 'degrading-restore', method: 'tools/call', params: { name: 'shadowgraph_restore', arguments: { source } } },
@@ -409,7 +430,7 @@ test('a batch is an invalid request in every session that did not negotiate 2025
     // The single request that follows is answered after the array line was
     // rejected, so the rejection is already recorded once this resolves.
     const probe = await rpc.call({ jsonrpc: '2.0', id: `probe-${version}`, method: 'tools/list', params: {} });
-    assert.equal(probe.result.tools.length, 28);
+    assert.equal(probe.result.tools.length, 35);
     assert.deepEqual(rpc.lines.slice(before, -1), [INVALID_REQUEST], `negotiated ${version}`);
   }
 
@@ -422,6 +443,6 @@ test('a batch is an invalid request in every session that did not negotiate 2025
   const before = rpc.lines.length;
   rpc.sendRaw(JSON.stringify(batch));
   const probe = await rpc.call({ jsonrpc: '2.0', id: 'probe-after', method: 'tools/list', params: {} });
-  assert.equal(probe.result.tools.length, 28);
+  assert.equal(probe.result.tools.length, 35);
   assert.deepEqual(rpc.lines.slice(before, -1), [INVALID_REQUEST]);
 });

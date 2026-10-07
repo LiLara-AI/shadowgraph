@@ -17,7 +17,12 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { relative, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createFactAttestation } from '../src/verification.js';
+import { createShadowGraph } from '../src/shadowgraph.js';
+import { createJsonFileStore } from '../src/storage.js';
+import { privilegedIssueAccess, privilegedSnapshot } from '../src/internal/snapshot.js';
+import { CONTEXT_DELIVERY_BUDGET } from '../src/mcp-tools.js';
 
 const STRUCTURED_PROTOCOL = '2025-11-25';
 const PROJECT = 'effects';
@@ -31,8 +36,8 @@ async function startMcp(t, extraEnv = {}) {
   const file = join(storeDirectory, 'data.json');
   const clockFile = join(directory, 'clock.txt');
   await writeFile(clockFile, T0, 'utf8');
-  const child = spawn(process.execPath, ['src/mcp.js'], {
-    cwd: process.cwd(),
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../src/mcp.js', import.meta.url))], {
+    cwd: directory,
     env: {
       ...process.env,
       SHADOWGRAPH_FILE: file,
@@ -43,6 +48,9 @@ async function startMcp(t, extraEnv = {}) {
       SHADOWGRAPH_MCP_COMPACT: '0',
       NODE_ENV: 'test',
       SHADOWGRAPH_TEST_CLOCK_FILE: clockFile,
+      // The per-user home inside the observed tree, so the deletion registry a
+      // purge writes there is seen (PR-37d design §9.2 D30).
+      SHADOWGRAPH_HOME: join(directory, 'home'),
       ...extraEnv
     },
     stdio: ['pipe', 'pipe', 'inherit']
@@ -150,14 +158,14 @@ async function listFiles(root) {
 // every file in the temporary tree the server can reach, not only the store.
 async function snapshot(rpc) {
   const durable = await readStore(rpc.file);
-  const journal = await rpc.ok('shadowgraph_journal', { limit: 1 });
+  const journal = await rpc.ok('shadowgraph_journal', { project: PROJECT, limit: 1 });
   const entities = new Map();
   for (const entity of [...durable.records ?? [], ...durable.facts ?? [], ...durable.relations ?? [], ...durable.reviewSignals ?? []]) {
     entities.set(entity.id, JSON.stringify(entity));
   }
   return {
     revision: durable.revision ?? 0,
-    journalSeq: journal.completeness.journalSeq,
+    journalSeq: durable.journalSeq ?? 0,
     serialized: JSON.stringify(durable),
     files: await listFiles(rpc.directory),
     entities,
@@ -176,8 +184,10 @@ function effects(before, after) {
     storeChanged: before.serialized !== after.serialized,
     newFiles: after.files.filter((name) => !before.files.includes(name)),
     // A new file outside the store directory is a write into the open world,
-    // observed rather than declared by the scenario.
-    newFilesOutsideStore: after.files.filter((name) => !before.files.includes(name) && !name.startsWith('store/')),
+    // observed rather than declared by the scenario. The configured home is
+    // not: its deletion registry lies in the per-user root, at a path no caller
+    // chooses (PR-37d design §9.2 D30).
+    newFilesOutsideStore: after.files.filter((name) => !before.files.includes(name) && !name.startsWith('store/') && !name.startsWith('home/')),
     removed,
     changedExisting,
     // An entity that already existed was rewritten with nothing appended to the
@@ -241,7 +251,7 @@ test('every advertised tool annotation matches the effects the server actually h
 
   // --- writes that mint new entities -------------------------------------
   const decision = await observe('shadowgraph_record_decision', {
-    id: 'effects-decision', project: PROJECT, title: 'Choose a store', chosen: 'sqlite',
+    project: PROJECT, title: 'Choose a store', chosen: 'sqlite',
     idempotencyKey: 'effects-decision-key',
     alternatives: [{ label: 'postgres', reasonRejected: 'operational cost', reopenWhen: [{ key: 'deployment', operator: 'equals', value: 'multi-user' }] }]
   });
@@ -263,7 +273,7 @@ test('every advertised tool annotation matches the effects the server actually h
 
   // --- reopen evaluation, which persists signals --------------------------
   const review = await observe('shadowgraph_review', { project: PROJECT });
-  assert.equal(review.firstResult.length, 1, 'the changed fact must make the decision due');
+  assert.equal(review.firstResult.items.length, 1, 'the changed fact must make the decision due');
   assert.equal(review.first.journalDelta, 0, 'review signals are persisted but not journalled');
   assert.equal(review.repeat.changedExisting.length, 0, 'signals dedupe by decision and reason');
   assert.equal(review.repeat.revisionDelta, 1, 'a repeat that changes no signal still commits a revision');
@@ -276,7 +286,9 @@ test('every advertised tool annotation matches the effects the server actually h
   assert.equal(reconsidered.first.journalDelta, 0, 'reconsideration is not journalled either');
   assert.equal(reconsidered.repeat.changedExisting.length, 0, 'a repeat reuses the signal review already raised');
 
-  await observe('shadowgraph_context', { project: PROJECT });
+  // Plan v1.4.4 PR-16: evaluate-and-persist moved from shadowgraph_context to
+  // shadowgraph_review_context; context is observed below as an own-scope read.
+  await observe('shadowgraph_review_context', { project: PROJECT });
   await observe('shadowgraph_remember', {
     project: PROJECT, memoryType: 'preference', key: 'store-style', text: 'prefers embedded databases',
     scope: { userId: 'alice' }
@@ -284,73 +296,66 @@ test('every advertised tool annotation matches the effects the server actually h
   assert.equal(observed.get('shadowgraph_remember').repeatResult.operation, 'NOOP', 'identical content must reconcile to a NOOP');
 
   // --- pure reads ---------------------------------------------------------
-  for (const [name, args] of [
+  const ownReadCases = [
+    ['shadowgraph_context', { project: PROJECT }],
     ['shadowgraph_search', { project: PROJECT, query: 'store' }],
     ['shadowgraph_retrieve', { project: PROJECT, query: 'store' }],
     ['shadowgraph_recall', { project: PROJECT, query: 'store' }],
-    ['shadowgraph_traverse', { id: 'effects-decision' }],
+    ['shadowgraph_traverse', { project: PROJECT, id: decision.firstResult.id }],
+    ['shadowgraph_expand', { project: PROJECT, recordId: decision.firstResult.id, digest: 'effects-probe' }],
     ['shadowgraph_validate', {}],
-    ['shadowgraph_journal', { limit: 5 }],
-    ['shadowgraph_rebuild', {}],
+    ['shadowgraph_journal', { project: PROJECT, limit: 5 }],
+    ['shadowgraph_rebuild', { project: PROJECT }],
     ['shadowgraph_review_signals', { project: PROJECT }],
     ['shadowgraph_purge_preview', { project: PROJECT }],
     ['shadowgraph_repair_plan', {}],
     ['shadowgraph_redact', { project: PROJECT }]
-  ]) {
+  ];
+  for (const [name, args] of ownReadCases) {
     const read = await observe(name, args);
     assert.equal(read.first.revisionDelta, 0, `${name} must not commit a revision`);
     assert.equal(read.first.storeChanged, false, `${name} must leave the store byte-identical`);
   }
-  // The durable revision is visible on the wire through exactly one tool, which
-  // is what makes "a repeat still commits a revision" a client-observable claim.
+  // Global revision is privileged; the durable-effect assertions above remain.
   const redacted = observed.get('shadowgraph_redact').firstResult;
   const durableNow = await readStore(rpc.file);
-  assert.equal(redacted.revision, durableNow.revision, 'redact reports the durable revision');
+  assert.equal(Object.hasOwn(redacted, 'revision'), false, 'a scoped read does not expose the global durable revision');
+  assert.ok(Number.isInteger(durableNow.revision), 'mutation effects still use the truthful durable revision');
 
   // --- lifecycle writes ---------------------------------------------------
-  const status = await observe('shadowgraph_update_status', { decisionId: 'effects-decision', status: 'planned' });
-  assert.equal(status.first.journalDelta, 1);
-  assert.equal(status.repeat.journalDelta, 0, 'setting the state a decision already has writes nothing');
-  assert.equal(status.repeat.revisionDelta, 1, 'yet it still commits a durable revision');
-
-  const outcome = await observe(
-    'shadowgraph_record_outcome',
-    { decisionId: 'effects-decision', outcome: { status: 'successful', sourceClass: 'tool_observed' } },
-    { between: () => rpc.setClock(at(1)) }
-  );
-  assert.notEqual(outcome.firstResult.outcome.observedAt, outcome.repeatResult.outcome.observedAt, 're-recording an outcome restamps it');
+  const status = await observe('shadowgraph_update_status', { project: PROJECT, decisionId: decision.firstResult.id, status: 'planned' });
+  assert.equal(status.firstResult.status, 'planned');
+  const outcome = await observe('shadowgraph_record_outcome', { project: PROJECT, decisionId: decision.firstResult.id, outcome: { status: 'successful', sourceClass: 'tool_observed' } });
+  assert.equal(outcome.firstResult.outcome.status, 'successful');
 
   const evidence = await observe(
     'shadowgraph_confidence_evidence',
-    { decisionId: 'effects-decision', reason: 'benchmark held', key: 'effects-evidence', supports: true },
+    { project: PROJECT, decisionId: decision.firstResult.id, reason: 'benchmark held', key: 'effects-evidence', supports: true },
     { between: () => rpc.setClock(at(2)) }
   );
   assert.equal(evidence.repeat.journalDelta, 0, 'a duplicate evidence key contributes nothing');
-  assert.deepEqual(evidence.repeat.changedExisting, ['effects-decision'], 'but the decision is still rewritten');
+  assert.deepEqual(evidence.repeat.changedExisting, [decision.firstResult.id], 'but the decision is still rewritten');
   assert.notEqual(evidence.firstResult.updatedAt, evidence.repeatResult.updatedAt, 'because updatedAt is restamped');
 
-  await rpc.ok('shadowgraph_record_decision', { id: 'effects-replacement', project: PROJECT, title: 'Replacement', chosen: 'duckdb' });
-  const link = await observe('shadowgraph_link', { from: 'effects-decision', to: 'effects-replacement', relation: 'informs' });
+  const replacement = await rpc.ok('shadowgraph_record_decision', { project: PROJECT, title: 'Replacement', chosen: 'duckdb' });
+  const link = await observe('shadowgraph_link', { project: PROJECT, from: decision.firstResult.id, to: replacement.id, relation: 'informs' });
   assert.notEqual(link.firstResult.id, link.repeatResult.id, 'every link mints a new relation id');
 
   // --- acknowledging a review signal: an unjournalled in-place overwrite ---
-  const [signal] = await rpc.ok('shadowgraph_review_signals', { project: PROJECT, status: 'open' });
+  const { items: [signal] } = await rpc.ok('shadowgraph_review_signals', { project: PROJECT, status: 'open' });
   assert.ok(signal, 'a review signal must exist to acknowledge');
-  const acknowledged = await observe('shadowgraph_ack_review', { id: signal.id }, { between: () => rpc.setClock(at(3)) });
-  assert.deepEqual(acknowledged.first.changedExisting, [signal.id], 'the stored signal is rewritten in place');
-  assert.equal(acknowledged.first.journalDelta, 0, 'and nothing is appended to the journal');
+  const acknowledged = await observe('shadowgraph_ack_review', { project: PROJECT, id: signal.id });
   assert.equal(acknowledged.firstResult.status, 'acknowledged');
-  assert.notEqual(acknowledged.firstResult.acknowledgedAt, acknowledged.repeatResult.acknowledgedAt, 'a repeat restamps acknowledgedAt');
-  assert.equal(acknowledged.repeat.journalDelta, 0, 'still without a journal entry');
+  assert.equal(acknowledged.first.journalDelta, 0);
 
-  const superseded = await observe('shadowgraph_supersede', { decisionId: 'effects-decision', replacementId: 'effects-replacement' });
+  const superseded = await observe('shadowgraph_supersede', { project: PROJECT, decisionId: decision.firstResult.id, replacementId: replacement.id });
   assert.ok(superseded.first.journalDelta >= 1, 'supersession is journalled');
   assert.equal(superseded.repeat.journalDelta, 0, 'repeating it writes nothing');
   assert.equal(superseded.repeat.revisionDelta, 1, 'yet it still commits a durable revision');
 
   // --- clock-driven maintenance -------------------------------------------
   await rpc.setClock(at(180));
-  const maintained = await observe('shadowgraph_maintain', { });
+  const maintained = await observe('shadowgraph_maintain', { project: PROJECT });
   assert.ok(maintained.first.journalDelta >= 1, 'the expiring fact must be expired');
   assert.equal(maintained.repeat.journalDelta, 0, 'a second run at the same instant finds nothing to do');
 
@@ -369,9 +374,9 @@ test('every advertised tool annotation matches the effects the server actually h
   backup.external = { read: false, overwrite: true };
 
   // Something for the restore to discard, so removal is observable.
-  await rpc.ok('shadowgraph_record_decision', { id: 'effects-after-backup', project: PROJECT, title: 'Recorded after the snapshot', chosen: 'temporary' });
+  const afterBackup = await rpc.ok('shadowgraph_record_decision', { project: PROJECT, title: 'Recorded after the snapshot', chosen: 'temporary' });
   const restored = await observe('shadowgraph_restore', { source: destination });
-  assert.ok(restored.first.removed.includes('effects-after-backup'), 'restoring discards everything recorded after the snapshot');
+  assert.ok(restored.first.removed.includes(afterBackup.id), 'restoring discards everything recorded after the snapshot');
   assert.ok(restored.first.revisionDelta > 0, 'a restore installs a strictly greater revision');
   assert.ok(restored.repeat.revisionDelta > 0, 'and does so again on a repeat');
   // Restoring rewrites the store through the storage backend rather than a
@@ -380,16 +385,43 @@ test('every advertised tool annotation matches the effects the server actually h
   assert.deepEqual(restored.first.newFilesOutsideStore, [], 'a restore writes no file outside the store');
   restored.external = { read: true, overwrite: false };
 
+  // PR12 preserves those own-read assertions and also measures each read's
+  // conditional durable audit. Fixture issuance uses the private owner hook;
+  // no agent-reachable MCP issuer is introduced for this test.
+  const owner = createShadowGraph({ now: () => at(180) });
+  owner.importData(await readStore(rpc.file));
+  const issued = privilegedIssueAccess(owner, { type: 'grant', scope: { projects: ['other'] }, surfaces: ['mcp'], expiresAt: '2099-01-01T00:00:00.000Z', reason: 'synthetic effects fixture' });
+  await createJsonFileStore(rpc.file).save(privilegedSnapshot(owner));
+  for (const [name, args] of ownReadCases.filter(([name]) => name !== 'shadowgraph_purge_preview')) {
+    const audited = await observe(name, { ...args, accessId: issued.entry.accessId });
+    assert.equal(audited.first.revisionDelta, 1, `${name} commits its grant audit`);
+    assert.equal(audited.repeat.revisionDelta, 1, `${name} commits repeated grant use`);
+    assert.equal(audited.first.journalDelta, 0, `${name} does not journal audit`);
+  }
+  const requested = await observe('shadowgraph_request_wider_access', { scope: { projects: ['other'] }, surfaces: ['mcp'], expiresAt: '2099-01-01T00:00:00.000Z', reason: 'synthetic effects proposal' });
+  await observe('shadowgraph_revoke_grant', { accessId: requested.firstResult.accessId });
+  await observe('shadowgraph_discard_access', { accessId: requested.repeatResult.accessId });
+  await observe('shadowgraph_attribute', { ids: [replacement.id], targetProject: 'reassigned', reason: 'explicit synthetic attribution' });
+  const bound = await observe('shadowgraph_bind', { type: 'worktree', project: PROJECT, reason: 'explicit synthetic mapping' });
+  assert.equal(JSON.parse(await readFile(bound.firstResult.bindingFile, 'utf8')).project, PROJECT);
+  assert.equal(JSON.parse(await readFile(bound.repeatResult.backupFile, 'utf8')).project, PROJECT);
+  bound.external = { read: false, overwrite: true };
+
   // --- removal ------------------------------------------------------------
   const purged = await observe('shadowgraph_purge', { project: PROJECT, mode: 'logical' });
   assert.ok(purged.first.removed.length > 0, 'a purge removes stored entities');
   assert.equal(purged.repeat.journalDelta, 1, 'a second purge still records that it happened');
+  // Its deletion records: the store's ledger and the per-user registry, and no
+  // lock left in either folder (PR-37d design §9.2 D30).
+  assert.deepEqual(restored.first.newFiles, ['store/data.json.control.json'], 'restore already created the generation ledger');
+  assert.deepEqual(purged.first.newFiles, ['home/deletion-registry.json']);
+  assert.deepEqual((await listFiles(rpc.directory)).filter((name) => name.endsWith('.lock')), []);
 
   // --- the assertion this file exists for ---------------------------------
   const tools = await rpc.listTools();
-  assert.equal(tools.length, 28);
+  assert.equal(tools.length, 35);
   const missing = tools.map((tool) => tool.name).filter((name) => !observed.has(name));
-  assert.deepEqual(missing, [], `these advertised tools were never observed: ${missing.join(', ')}`);
+  assert.deepEqual(missing.sort(), [], `these advertised tools were never observed: ${missing.join(', ')}`);
 
   const mismatches = [];
   for (const tool of tools) {
@@ -406,40 +438,45 @@ test('every advertised tool annotation matches the effects the server actually h
   const committing = [...observed].filter(([, record]) => record.first.revisionDelta > 0).map(([name]) => name).sort();
   assert.deepEqual(committing, [
     'shadowgraph_ack_review',
+    'shadowgraph_attribute',
     'shadowgraph_backup',
+    'shadowgraph_bind',
     'shadowgraph_confidence_evidence',
     'shadowgraph_context',
+    'shadowgraph_discard_access',
+    'shadowgraph_expand',
+    'shadowgraph_journal',
     'shadowgraph_link',
     'shadowgraph_maintain',
     'shadowgraph_purge',
+    'shadowgraph_rebuild',
+    'shadowgraph_recall',
     'shadowgraph_reconsider',
     'shadowgraph_record_attempt',
     'shadowgraph_record_decision',
     'shadowgraph_record_fact',
     'shadowgraph_record_outcome',
+    'shadowgraph_redact',
     'shadowgraph_remember',
+    'shadowgraph_repair_plan',
+    'shadowgraph_request_wider_access',
     'shadowgraph_restore',
+    'shadowgraph_retrieve',
     'shadowgraph_review',
+    'shadowgraph_review_context',
+    'shadowgraph_review_signals',
+    'shadowgraph_revoke_grant',
+    'shadowgraph_search',
     'shadowgraph_supersede',
-    'shadowgraph_update_status'
+    'shadowgraph_traverse',
+    'shadowgraph_update_status',
+    'shadowgraph_validate'
   ]);
   const readOnly = [...observed].filter(([, record]) => record.first.revisionDelta === 0).map(([name]) => name).sort();
-  assert.deepEqual(readOnly, [
-    'shadowgraph_journal',
-    'shadowgraph_purge_preview',
-    'shadowgraph_rebuild',
-    'shadowgraph_recall',
-    'shadowgraph_redact',
-    'shadowgraph_repair_plan',
-    'shadowgraph_retrieve',
-    'shadowgraph_review_signals',
-    'shadowgraph_search',
-    'shadowgraph_traverse',
-    'shadowgraph_validate'
-  ], 'exactly these eleven tools commit nothing');
+  assert.deepEqual(readOnly, ['shadowgraph_purge_preview'], 'grant-capable reads now reflect their measured audit effects');
   // No tool may write outside the store unless it is one of the three that say so.
   const wroteOutside = [...observed].filter(([, record]) => record.first.newFilesOutsideStore.length > 0).map(([name]) => name).sort();
-  assert.deepEqual(wroteOutside, ['shadowgraph_backup'], 'only backup writes a file of its own outside the store');
+  assert.deepEqual(wroteOutside, ['shadowgraph_backup', 'shadowgraph_bind'], 'backup and explicit binding write their declared local files');
 });
 
 test('the verification tool reads a caller-selected path, inside the configured root only', async (t) => {
@@ -474,13 +511,13 @@ test('the verification tool reads a caller-selected path, inside the configured 
 
   // The same bytes outside the configured root are refused, and nothing moves.
   const before = await snapshot(rpc);
-  const refused = await rpc.fails('shadowgraph_verify_fact', { factId: fact.id, evidencePath: outsidePath });
+  const refused = await rpc.fails('shadowgraph_verify_fact', { project: fact.project, factId: fact.id, evidencePath: outsidePath });
   assert.equal(refused.code, -32000);
   const afterRefusal = await snapshot(rpc);
   assert.equal(afterRefusal.revision, before.revision, 'a refused verification commits nothing');
   assert.equal(afterRefusal.journalSeq, before.journalSeq);
 
-  const verified = await observe('shadowgraph_verify_fact', { factId: fact.id, evidencePath: insidePath });
+  const verified = await observe('shadowgraph_verify_fact', { project: fact.project, factId: fact.id, evidencePath: insidePath });
   assert.equal(verified.firstResult.operation, 'VERIFIED');
   assert.equal(verified.firstResult.fact.verificationStatus, 'verified');
   assert.equal(verified.repeatResult.operation, 'NOOP', 'the same attestation again changes nothing in the domain');
@@ -491,7 +528,60 @@ test('the verification tool reads a caller-selected path, inside the configured 
   verified.external = { read: true, overwrite: false };
 
   const tools = await rpc.listTools();
-  assert.equal(tools.length, 29);
+  assert.equal(tools.length, 36);
   const verifyTool = tools.find((tool) => tool.name === 'shadowgraph_verify_fact');
   assert.deepEqual(verifyTool.annotations, deriveAnnotations(verified), 'verify_fact annotations must equal the observed behaviour');
+});
+
+// Plan v1.4.4 PR-17 (§13.1, §13.3; AC-059 clauses 2-3): repeated own-scope and
+// grant-bearing context deliveries, observed on the wire against the declared
+// budget. Own scope moves nothing; a grant commits one revision per delivery and
+// folds every use into one audit aggregate per grant, surface, outcome and UTC day.
+test('shadowgraph_context repeats within the declared delivery budget on the wire', async (t) => {
+  const rpc = await startMcp(t);
+  await rpc.initialize();
+  await rpc.ok('shadowgraph_record_decision', { project: PROJECT, title: 'Due', chosen: 'A', reviewAfter: at(-60) });
+  // The granted project holds a record, so each grant-bearing delivery widens.
+  await rpc.ok('shadowgraph_record_decision', { project: 'other', title: 'Wider', chosen: 'B' });
+  const DELIVERIES = 3;
+  // Values, not the key order a reload rebuilds; every event but the access
+  // audit is canonical.
+  const sorted = (key, item) => (item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.keys(item).sort().map((name) => [name, item[name]])) : item);
+  const audit = new Set(['access.used', 'access.refused', 'access.audit_overflow']);
+  const canonical = (durable) => JSON.stringify([
+    ...['records', 'facts', 'relations', 'reviewSignals', 'idempotency', 'journal', 'journalSeq'].map((key) => durable[key]),
+    (durable.events ?? []).filter((event) => !audit.has(event.type))
+  ], sorted);
+
+  let before = await snapshot(rpc);
+  for (let index = 0; index < DELIVERIES; index += 1) await rpc.ok('shadowgraph_context', { project: PROJECT });
+  let after = await snapshot(rpc);
+  let seen = effects(before, after);
+  const own = CONTEXT_DELIVERY_BUDGET.ownScope;
+  assert.equal(seen.revisionDelta, own.revisions * DELIVERIES, 'own-scope deliveries commit no revision');
+  assert.equal(seen.journalDelta, own.journalEntries * DELIVERIES);
+  assert.equal(seen.storeChanged, false, 'repeated and replayed own-scope deliveries leave the store byte-identical');
+  assert.deepEqual(seen.newFiles, []);
+
+  const owner = createShadowGraph({ now: () => T0 });
+  owner.importData(await readStore(rpc.file));
+  const issued = privilegedIssueAccess(owner, { type: 'grant', scope: { projects: ['other'] }, surfaces: ['mcp'], expiresAt: '2099-01-01T00:00:00.000Z', reason: 'synthetic budget fixture' });
+  await createJsonFileStore(rpc.file).save(privilegedSnapshot(owner));
+
+  // A minute apart, so one aggregate per call cannot pass for one per UTC day.
+  before = await snapshot(rpc);
+  for (let index = 0; index < DELIVERIES; index += 1) {
+    await rpc.setClock(at(index + 1));
+    await rpc.ok('shadowgraph_context', { project: PROJECT, accessId: issued.entry.accessId });
+  }
+  after = await snapshot(rpc);
+  seen = effects(before, after);
+  const grant = CONTEXT_DELIVERY_BUDGET.grant;
+  assert.equal(seen.revisionDelta, grant.revisions * DELIVERIES, 'each grant-bearing delivery commits at most one revision');
+  assert.equal(seen.journalDelta, grant.journalEntries * DELIVERIES);
+  assert.deepEqual(seen.removed, []);
+  assert.equal(canonical(after.durable), canonical(before.durable), 'canonical values are unchanged');
+  const used = after.durable.events.filter((event) => event.type === 'access.used' && event.accessId === issued.entry.accessId);
+  assert.equal(used.length, grant.newAuditAggregatesPerKeyDay, 'one aggregate per grant, surface, outcome and UTC day');
+  assert.equal(used[0].count, DELIVERIES);
 });

@@ -6,6 +6,7 @@ import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 function startJsonRpcChild(file, embeddingUrl, compact = true) {
   const child = spawn(process.execPath, ['src/mcp.js'], {
@@ -66,7 +67,7 @@ test('MCP exposes simple remember/recall workflows and uses an explicit local em
   const names = listed.result.tools.map((tool) => tool.name);
   assert.equal(names.includes('shadowgraph_remember'), true);
   assert.equal(names.includes('shadowgraph_recall'), true);
-  assert.equal(names.length, 14);
+  assert.equal(names.length, 16);
   assert.equal(Object.hasOwn(listed.result.tools.find((tool) => tool.name === 'shadowgraph_recall'), 'annotations'), false);
 
   const remembered = await rpc.call({
@@ -144,15 +145,17 @@ test('MCP rolls live memory back when ordinary persistence fails', async (t) => 
   assert.deepEqual(keys, ['baseline']);
 });
 
-test('MCP context persists review signals that it creates', async (t) => {
+// Plan v1.4.4 PR-16 (§13.2): shadowgraph_context and the shadowgraph://context
+// resource are the default-path read; shadowgraph_review_context persists.
+test('MCP context and its resource are reads, and review_context persists the signals it creates', async (t) => {
   const directory = await scratchDirectory(t, 'shadowgraph-mcp-context-');
   const file = join(directory, 'data.json');
   const seed = createShadowGraph({ now: () => '2026-08-27T00:00:00.000Z' });
-  seed.addDecision({
-    id: 'due-decision', project: 'app', title: 'Due review', chosen: 'A',
+  const due = seed.addDecision({
+    project: 'app', title: 'Due review', chosen: 'A',
     reviewAfter: '2026-01-01T00:00:00.000Z'
   });
-  await writeFile(file, JSON.stringify(seed.exportData()), 'utf8');
+  await writeFile(file, JSON.stringify(privilegedSnapshot(seed)), 'utf8');
   const rpc = startJsonRpcChild(file);
   t.after(() => rpc.child.kill());
 
@@ -163,21 +166,34 @@ test('MCP context persists review signals that it creates', async (t) => {
     }
   });
   const payload = JSON.parse(response.result.content[0].text);
-  assert.equal(payload.openReviews.length, 1);
+  assert.equal(payload.firedConditions.length, 1);
+  assert.equal(payload.notice.replacement.mcp, 'shadowgraph_review_context');
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).reviewSignals.length, 0, 'the read persists nothing');
+  const evaluated = await rpc.call({
+    jsonrpc: '2.0', id: 4, method: 'tools/call', params: {
+      name: 'shadowgraph_review_context', arguments: { project: 'app' }
+    }
+  });
+  assert.equal(JSON.parse(evaluated.result.content[0].text).openReviews.length, 1);
   const durable = JSON.parse(await readFile(file, 'utf8'));
   assert.equal(durable.reviewSignals.length, 1);
-  assert.equal(durable.reviewSignals[0].decisionId, 'due-decision');
+  assert.equal(durable.reviewSignals[0].decisionId, due.id);
 });
 
-test('MCP context resource persists review signals that it creates', async (t) => {
+// The context resource cannot name a project, so its read resolves no scope:
+// it no longer reads the shared "default" bucket (plan v1.4.4 PR-08), and so
+// it evaluates nothing and raises no signal to persist. Giving the resource
+// the session's scope is P1 reconciliation F-05 (PR-13). The persistence of
+// signals a context does raise is covered by the tool test above.
+test('MCP context resource reads no project and creates no review signal', async (t) => {
   const directory = await scratchDirectory(t, 'shadowgraph-mcp-resource-context-');
   const file = join(directory, 'data.json');
   const seed = createShadowGraph({ now: () => '2026-08-27T00:00:00.000Z' });
   seed.addDecision({
-    id: 'resource-due', project: 'default', title: 'Resource due review', chosen: 'A',
+    project: 'default', title: 'Resource due review', chosen: 'A',
     reviewAfter: '2026-01-01T00:00:00.000Z'
   });
-  await writeFile(file, JSON.stringify(seed.exportData()), 'utf8');
+  await writeFile(file, JSON.stringify(privilegedSnapshot(seed)), 'utf8');
   const rpc = startJsonRpcChild(file);
   t.after(() => rpc.child.kill());
 
@@ -186,10 +202,10 @@ test('MCP context resource persists review signals that it creates', async (t) =
     jsonrpc: '2.0', id: 2, method: 'resources/read', params: { uri: 'shadowgraph://context' }
   });
   const payload = JSON.parse(response.result.contents[0].text);
-  assert.equal(payload.openReviews.length, 1);
+  assert.equal(payload.project, null);
+  assert.deepEqual([payload.activeDecisions, payload.firedConditions], [[], []]);
   const durable = JSON.parse(await readFile(file, 'utf8'));
-  assert.equal(durable.reviewSignals.length, 1);
-  assert.equal(durable.reviewSignals[0].decisionId, 'resource-due');
+  assert.equal(durable.reviewSignals.length, 0);
 });
 
 test('MCP serializes restore with a concurrent acknowledged memory write', async (t) => {
@@ -197,12 +213,12 @@ test('MCP serializes restore with a concurrent acknowledged memory write', async
   const file = join(directory, 'data.json');
   const sourceFile = join(directory, 'source.json');
   const empty = createShadowGraph();
-  await writeFile(file, JSON.stringify(empty.exportData()), 'utf8');
+  await writeFile(file, JSON.stringify(privilegedSnapshot(empty)), 'utf8');
   const source = createShadowGraph({ now: () => '2026-08-27T00:00:00.000Z' });
   for (let index = 0; index < 2500; index += 1) {
-    source.addDecision({ id: `restored-${index}`, project: 'restored', title: `Restored ${index}`, chosen: 'A' });
+    source.addDecision({ project: 'restored', title: `Restored ${index}`, chosen: 'A' });
   }
-  await writeFile(sourceFile, JSON.stringify(source.exportData()), 'utf8');
+  await writeFile(sourceFile, JSON.stringify(privilegedSnapshot(source)), 'utf8');
   const rpc = startJsonRpcChild(file, undefined, false);
   t.after(() => rpc.child.kill());
   await rpc.call({ jsonrpc: '2.0', id: 1, method: 'tools/list' });

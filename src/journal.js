@@ -7,8 +7,19 @@
 // code paths — see ADR-0001 D4/D14).
 
 import { effectiveFactExpirationBoundary, factValidityPolicyIssue, isValidIsoInstant } from './fact-validity.js';
+import { isLegacyOwned } from './scope.js';
+import { CAPTURE_ENTRY_TYPES, captureEntryIssue, captureItemIssue } from './internal/capture.js';
 
-export const JOURNAL_SCHEMA_VERSION = 5;
+export const JOURNAL_SCHEMA_VERSION = 7;
+// The highest entry schema this reader interprets. The reader is widened and
+// shipped before the writer is raised (plan v1.4.4 §9.2), so it may run ahead of
+// JOURNAL_SCHEMA_VERSION but never behind it.
+export const READABLE_JOURNAL_SCHEMA_VERSION = 7;
+// Schema 5 introduced canonical purge artifacts; every readable schema from it
+// on follows the same rules.
+function canonicalPurgeSchema(version) {
+  return Number.isInteger(version) && version >= 5 && version <= READABLE_JOURNAL_SCHEMA_VERSION;
+}
 export const INVALID_BASELINE_PLACEMENT_CODE = 'invalid_projection_baseline_placement';
 export const NONCANONICAL_SCHEMA5_PURGE_ARTIFACT_CODE = 'noncanonical_schema5_purge_artifact';
 export const INVALID_JOURNAL_SEQUENCE_CODE = 'invalid_journal_sequence';
@@ -35,7 +46,7 @@ export function isLegacyUnnumberedMetadataEntry(entry, options = {}) {
   // A current envelope can legitimately retain pre-journal breadcrumbs verbatim;
   // the entry's own old/absent schema plus its metadata-only shape is the proof.
   if (!entryIsLegacy && !entryIsUnversioned) return false;
-  if (!REPLAYABLE_ENTRY_TYPES.includes(entry.type) || ['projection.baseline', 'project.purged'].includes(entry.type)) return false;
+  if (!REPLAYABLE_ENTRY_TYPES.includes(entry.type) || ['projection.baseline', ...HARD_GAP_EVIDENCE_TYPES].includes(entry.type)) return false;
 
   return !Object.hasOwn(entry, 'payload')
     && !Object.hasOwn(entry, 'entityKind')
@@ -79,9 +90,23 @@ const PURGE_MARKER_FIELDS = new Set([
 const PURGE_MARKER_PAYLOAD_FIELDS = new Set([
   'project', 'mode', 'removed', 'removedJournalSequences'
 ]);
+const ORIGIN_PURGE_PAYLOAD_FIELDS = new Set(['originId', 'mode', 'removed', 'removedJournalSequences']);
+// What a restore that re-applied deletion knowledge (PR-37's post-step) may
+// record: its mode, the journal sequences a hard re-application spliced out,
+// and a closed set of counts. Nothing else, so no id or content can ride in a
+// member name (plan rev6 section 3.8 item 1).
+const RESTORE_REAPPLIED_COUNTS = Object.freeze(['removed', 'quarantined', 'skeletons', 'spliced']);
+// The entry types whose hard mode explains missing journal sequences.
+export const HARD_GAP_EVIDENCE_TYPES = Object.freeze(['project.purged', 'origin.purged', 'restore.reapplied']);
+// The entry types that record an entity's creation: a token one of them
+// carries was the entity's from its start, which a restore's token proof
+// relies on (PR-37c design §6.2). Named here, where the capture types are read.
+export const CREATION_ENTRY_TYPES = Object.freeze(['decision.recorded', 'attempt.recorded', 'memory.recorded', 'fact.observed', 'capture.recorded']);
 
-// Entry types that carry a replayable payload. Every one of these is produced by
-// real code in src/shadowgraph.js — no aspirational types are listed here.
+// Entry types that carry a replayable payload. Each is produced by real code in
+// src/shadowgraph.js, or read first and written later (plan v1.4.4 §9.2): the
+// four capture types are read here (PR-33), and `restore.reapplied` (PR-37a),
+// before any writer emits them.
 export const REPLAYABLE_ENTRY_TYPES = Object.freeze([
   'projection.baseline',
   'decision.recorded',
@@ -101,8 +126,91 @@ export const REPLAYABLE_ENTRY_TYPES = Object.freeze([
   'outcome.recorded',
   'confidence.changed',
   'relation.created',
-  'project.purged'
+  'project.purged',
+  'origin.purged',
+  'restore.reapplied',
+  'entity.attributed',
+  'entity.token_assigned',
+  'capture.recorded',
+  'capture.state_changed',
+  'extraction.completed',
+  'extraction.failed'
 ]);
+
+// `entity.attributed` records a change to which project or origin an entity
+// belongs (P1 reconciliation F-13). Its payload is the complete post-change
+// entity plus one `attributionChange` object -- { previousProject,
+// previousAttribution, reason } -- that is audit only and never part of the
+// replayed entity. The entry's own `project` is the new one (null when the
+// entity is unattributed). It is the one replayable type that serves several
+// entity kinds. The attribution migration writes it with reason `migration`;
+// a user's re-attribution arrives with the grant lifecycle.
+export const ATTRIBUTED_ENTITY_KINDS = Object.freeze(['decision', 'attempt', 'memory', 'fact']);
+// The kinds an entity.attributed entry may carry: a capture item's attribution
+// is read (PR-33) before anything attributes one. Tokens stay with the four.
+export const ATTRIBUTION_ENTRY_KINDS = Object.freeze([...ATTRIBUTED_ENTITY_KINDS, 'capture']);
+const futureOf = (value) => Number.isInteger(value?.schemaVersion) && value.schemaVersion > READABLE_JOURNAL_SCHEMA_VERSION;
+
+// `entity.token_assigned` (plan v1.4.4 PR-20; plan rev6 §3.2) gives a tokenless
+// entity its random, content-free erasureToken, the handle a purge tombstone
+// names it by. Its payload is the complete post-change entity. It is replayed
+// only when the entity it names has been recorded, has no token yet, and the
+// payload is that entity with the token added and nothing else changed; any
+// other entry of the type is refused, never replayed.
+const stable = (value) => JSON.stringify(value, (key, item) => (item && typeof item === 'object' && !Array.isArray(item)
+  ? Object.fromEntries(Object.keys(item).sort().map((name) => [name, item[name]]))
+  : item));
+export function tokenAssignmentIssue(prior, next) {
+  if (!prior) return 'it names no entity the journal has recorded';
+  if (prior.erasureToken !== undefined) return 'the entity already has an erasureToken';
+  if (typeof next?.erasureToken !== 'string' || !next.erasureToken) return 'it carries no erasureToken';
+  const { erasureToken, ...rest } = next;
+  return stable(rest) === stable(prior) ? null : 'it changes more than the erasureToken';
+}
+// A replayed token assignment moves the entity's retry values with it, as
+// attribution does; their keys do not depend on the token.
+export function retokenIdempotency(entries, entity) {
+  for (const [key, value] of entries) if (value?.id === entity.id) entries.set(key, entity);
+}
+export const ATTRIBUTION_CHANGE_REASONS = Object.freeze(['migration', 'user']);
+
+// The entity an entry's payload contributes to a projection.
+export function replayedEntity(entry) {
+  if (entry?.type !== 'entity.attributed' || !entry.payload || typeof entry.payload !== 'object') return entry?.payload;
+  const { attributionChange, ...entity } = entry.payload;
+  return entity;
+}
+
+// v6 distinguishes the real project "default" from legacy storage labels.
+// Older purge markers retain their original bucket semantics.
+function purgedOwner(entity, project, marker, fallbackProject = null) {
+  if (marker.type === 'origin.purged') return entity?.attribution === 'unattributed' && entity?.originId === marker.payload?.originId;
+  if ((marker.schemaVersion ?? 0) < 6) return (entity?.project ?? fallbackProject) === project;
+  return !isLegacyOwned(entity) && entity?.attribution !== 'unattributed' && entity?.project === project;
+}
+
+// Attribution moves retry identities with their canonical entity. Journal folds
+// and the live writer use the same transition; no historical payload is edited.
+export function reattributeIdempotency(entries, entity) {
+  const prefix = (value) => {
+    const scope = value.scope ?? {};
+    const identity = value.kind === 'memory' ? `${JSON.stringify([scope.userId ?? null, scope.agentId ?? null, scope.runId ?? null, value.memoryType ?? null, value.key ?? null])}:` : '';
+    const owner = value.attribution === 'unattributed' ? `@${JSON.stringify(value.originId ?? null)}:` : `:${value.project ?? 'default'}:`;
+    return `${value.kind}${owner}${identity}`;
+  };
+  const result = new Map(entries);
+  for (const [key, value] of entries) {
+    if (value?.id !== entity.id) continue;
+    const oldPrefix = prefix(value);
+    if (!key.startsWith(oldPrefix)) throw new Error('Attribution retry identity does not match its entity');
+    const nextKey = `${prefix(entity)}${key.slice(oldPrefix.length)}`;
+    const held = result.get(nextKey);
+    if (held && held.id !== entity.id) throw new Error('Attribution would collide with an existing retry identity');
+    result.delete(key);
+    result.set(nextKey, entity);
+  }
+  return result;
+}
 
 // Entry types recorded for audit that intentionally do not mutate a projection.
 export const NON_REPLAYABLE_ENTRY_TYPES = Object.freeze(['legacy_metadata_event']);
@@ -121,7 +229,10 @@ export const JOURNAL_TYPE_ENTITY_KIND = Object.freeze({
   'relation.created': 'relation',
   'memory.recorded': 'memory', 'memory.indexed': 'memory',
   'memory.superseded': 'memory', 'memory.invalidated': 'memory',
-  'project.purged': 'project'
+  'project.purged': 'project',
+  'origin.purged': 'origin',
+  'capture.recorded': 'capture', 'capture.state_changed': 'capture',
+  'extraction.completed': 'capture', 'extraction.failed': 'capture'
 });
 
 const KIND_TO_COLLECTION = Object.freeze({
@@ -129,7 +240,9 @@ const KIND_TO_COLLECTION = Object.freeze({
   attempt: 'records',
   memory: 'records',
   fact: 'facts',
-  relation: 'relations'
+  relation: 'relations',
+  // A capture item folds as a record, and the kernel keeps it off every read.
+  capture: 'records'
 });
 
 /**
@@ -145,8 +258,11 @@ const KIND_TO_COLLECTION = Object.freeze({
  */
 export function schema5PurgeArtifactIssue(entry, sourceSchemaVersion = undefined) {
   const entrySchemaVersion = Number.isInteger(entry?.schemaVersion) ? entry.schemaVersion : sourceSchemaVersion;
-  const currentEnvelope = sourceSchemaVersion === JOURNAL_SCHEMA_VERSION;
-  if ((!currentEnvelope && entrySchemaVersion !== JOURNAL_SCHEMA_VERSION) || !entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+  const currentEnvelope = canonicalPurgeSchema(sourceSchemaVersion);
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+  // Origin markers have no legacy raw-identity format. A stale or omitted
+  // schema label cannot exempt this new type from its closed scope contract.
+  if (entry.type !== 'origin.purged' && !currentEnvelope && !canonicalPurgeSchema(entrySchemaVersion)) return null;
   const canonicalNullProvenance = (value) => value
     && typeof value === 'object'
     && !Array.isArray(value)
@@ -170,26 +286,34 @@ export function schema5PurgeArtifactIssue(entry, sourceSchemaVersion = undefined
     if (forbidden) return `redacted purge skeleton contains forbidden identity field ${forbidden}`;
     if (entry.entityId !== null || entry.payload !== null) return 'redacted purge skeleton must erase entityId and payload';
     if (!canonicalNullProvenance(entry.provenance)) return 'redacted purge skeleton must erase provenance identity';
-    const allowedReasons = entrySchemaVersion === JOURNAL_SCHEMA_VERSION
-      ? ['project_purged']
+    // A deleted capture leaves its own reason, on its own entries only (PR-33
+    // reads it; the deletion that writes it arrives later).
+    const allowedReasons = canonicalPurgeSchema(entrySchemaVersion)
+      ? ['project_purged', 'origin_purged', ...(CAPTURE_ENTRY_TYPES.includes(entry.type) ? ['capture_deleted'] : [])]
       : ['project_purged', 'legacy_project_purged'];
     if (!allowedReasons.includes(entry.redactedReason)) return 'redacted purge skeleton has a noncanonical redactedReason';
     return null;
   }
 
-  if (entry.type !== 'project.purged') return null;
+  if (entry.type === 'restore.reapplied') return restoreReappliedIssue(entry, canonicalNullProvenance, nonEmptyString);
+  if (!['project.purged', 'origin.purged'].includes(entry.type)) return null;
+  const origin = entry.type === 'origin.purged';
   const forbidden = Object.keys(entry).find((name) => !PURGE_MARKER_FIELDS.has(name));
   if (forbidden) return `purge marker contains forbidden identity field ${forbidden}`;
   if (!nonEmptyString(entry.id)) return 'purge marker id must be a non-empty string';
   if (!Number.isSafeInteger(entry.seq) || entry.seq <= 0) return 'purge marker seq must be a positive safe integer';
-  if (entry.entityKind !== 'project' || entry.entityId !== null) return 'purge marker must use project kind and erase entityId';
+  if (entry.entityKind !== (origin ? 'origin' : 'project') || entry.entityId !== null) return `purge marker must use ${origin ? 'origin' : 'project'} kind and erase entityId`;
   if (!canonicalNullProvenance(entry.provenance)) return 'purge marker must erase provenance identity';
   if (!entry.payload || typeof entry.payload !== 'object' || Array.isArray(entry.payload)) return 'purge marker payload must be an object';
-  const forbiddenPayload = Object.keys(entry.payload).find((name) => !PURGE_MARKER_PAYLOAD_FIELDS.has(name));
+  const forbiddenPayload = Object.keys(entry.payload).find((name) => !(origin ? ORIGIN_PURGE_PAYLOAD_FIELDS : PURGE_MARKER_PAYLOAD_FIELDS).has(name));
   if (forbiddenPayload) return `purge marker contains forbidden payload field ${forbiddenPayload}`;
-  if (!nonEmptyString(entry.project)) return 'purge marker project must be a non-empty string';
-  if (!nonEmptyString(entry.payload.project)) return 'purge marker payload.project must be a non-empty string';
-  if (entry.project !== entry.payload.project) return 'purge marker project must equal payload.project';
+  if (origin) {
+    if (entry.project !== null || !nonEmptyString(entry.payload.originId)) return 'origin purge marker requires null project and a non-empty originId';
+  } else {
+    if (!nonEmptyString(entry.project)) return 'purge marker project must be a non-empty string';
+    if (!nonEmptyString(entry.payload.project)) return 'purge marker payload.project must be a non-empty string';
+    if (entry.project !== entry.payload.project) return 'purge marker project must equal payload.project';
+  }
   if (!['logical', 'hard'].includes(entry.payload.mode)) return 'purge marker mode must be exactly logical or hard';
   if (!Number.isSafeInteger(entry.payload.removed) || entry.payload.removed < 0) return 'purge marker removed must be a non-negative safe integer';
   if (!Object.hasOwn(entry.payload, 'removedJournalSequences') || !Array.isArray(entry.payload.removedJournalSequences)) {
@@ -213,8 +337,77 @@ export function schema5PurgeArtifactIssue(entry, sourceSchemaVersion = undefined
   return null;
 }
 
+// A `restore.reapplied` entry (plan rev6 section 3.8; PR-37a reads it, PR-37's
+// restore post-step writes it): content-free, naming no project or entity,
+// with the marker envelope, its mode, the sequences a hard re-application
+// spliced out -- positive, strictly increasing, earlier than the entry, and
+// none for a logical one -- and only the closed set of counts.
+function restoreReappliedIssue(entry, canonicalNullProvenance, nonEmptyString) {
+  const forbidden = Object.keys(entry).find((name) => !PURGE_MARKER_FIELDS.has(name));
+  if (forbidden) return `restore.reapplied contains forbidden field ${forbidden}`;
+  if (!nonEmptyString(entry.id)) return 'restore.reapplied id must be a non-empty string';
+  if (!Number.isSafeInteger(entry.seq) || entry.seq <= 0) return 'restore.reapplied seq must be a positive safe integer';
+  if (entry.entityKind !== null || entry.entityId !== null || entry.project !== null) return 'restore.reapplied names no entity kind, entity or project';
+  if (!canonicalNullProvenance(entry.provenance)) return 'restore.reapplied must erase provenance identity';
+  const payload = entry.payload;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return 'restore.reapplied payload must be an object';
+  const forbiddenPayload = Object.keys(payload).find((name) => !['mode', 'removedJournalSequences', ...RESTORE_REAPPLIED_COUNTS].includes(name));
+  if (forbiddenPayload) return `restore.reapplied contains forbidden payload field ${forbiddenPayload}`;
+  if (!['logical', 'hard'].includes(payload.mode)) return 'restore.reapplied mode must be exactly logical or hard';
+  for (const name of RESTORE_REAPPLIED_COUNTS) {
+    if (Object.hasOwn(payload, name) && (!Number.isSafeInteger(payload[name]) || payload[name] < 0)) return `restore.reapplied ${name} must be a non-negative safe integer`;
+  }
+  const sequences = payload.removedJournalSequences;
+  if (!Array.isArray(sequences)) return 'restore.reapplied removedJournalSequences must be present and be an array';
+  for (const [index, sequence] of sequences.entries()) {
+    if (!Number.isSafeInteger(sequence) || sequence <= 0) return 'restore.reapplied removedJournalSequences must contain positive safe integers';
+    if (index > 0 && sequence <= sequences[index - 1]) return 'restore.reapplied removedJournalSequences must be strictly increasing and unique';
+  }
+  if (payload.mode === 'logical' && sequences.length) return 'logical restore.reapplied must use an empty removedJournalSequences array';
+  if (sequences.some((sequence) => sequence >= entry.seq)) return 'restore.reapplied removedJournalSequences must be strictly earlier than its sequence';
+  return null;
+}
+
+function attributionEntryIssue(entry) {
+  const payload = entry.payload;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return 'entity.attributed requires an entity payload';
+  if (!ATTRIBUTION_ENTRY_KINDS.includes(payload.kind)) return `entity.attributed cannot carry a ${payload.kind ?? 'kind-less'} entity`;
+  if (entry.entityKind != null && entry.entityKind !== payload.kind) return 'entity.attributed entityKind must match payload.kind';
+  if (payload.kind === 'capture' && !futureOf(payload)) {
+    const issue = captureItemIssue(replayedEntity(entry));
+    if (issue) return `entity.attributed carries no well-formed capture item: ${issue}`;
+  }
+  const change = payload.attributionChange;
+  if (!change || typeof change !== 'object' || Array.isArray(change) || !ATTRIBUTION_CHANGE_REASONS.includes(change.reason)) {
+    return 'entity.attributed requires an attributionChange whose reason is migration or user';
+  }
+  if (payload.kind === 'fact' && Number.isInteger(entry.schemaVersion) && entry.schemaVersion >= 5) {
+    const validityIssue = factValidityPolicyIssue(replayedEntity(entry), { required: true });
+    if (validityIssue) return `entity.attributed has invalid fact validity: ${validityIssue}`;
+  }
+  return null;
+}
+
 export function journalEntryPostconditionIssue(entry) {
   if (!entry || entry.redacted === true || entry.payload === null) return null;
+  // A future entry of the type is carried, never judged (FND-P3-03).
+  if (entry.type === 'entity.attributed') return futureOf(entry) ? null : attributionEntryIssue(entry);
+  if (CAPTURE_ENTRY_TYPES.includes(entry.type)) {
+    // A future entry or item of the type is carried, never judged.
+    if (futureOf(entry)) return null;
+    const payload = entry.payload;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || payload.kind !== 'capture') return `${entry.type} requires a capture item payload`;
+    return futureOf(payload) ? null : captureEntryIssue(entry.type, payload);
+  }
+  if (entry.type === 'entity.token_assigned') {
+    // A future entry of the type is carried, never judged.
+    if (Number.isInteger(entry.schemaVersion) && entry.schemaVersion > READABLE_JOURNAL_SCHEMA_VERSION) return null;
+    const payload = entry.payload;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return 'entity.token_assigned requires an entity payload';
+    if (!ATTRIBUTED_ENTITY_KINDS.includes(payload.kind)) return `entity.token_assigned cannot carry a ${payload.kind ?? 'kind-less'} entity`;
+    if (entry.entityKind != null && entry.entityKind !== payload.kind) return 'entity.token_assigned entityKind must match payload.kind';
+    return null;
+  }
   if (!['fact.verified', 'fact.expired', 'fact.superseded'].includes(entry.type)) return null;
   const fact = entry.payload;
   if (!fact || typeof fact !== 'object' || Array.isArray(fact) || fact.kind !== 'fact') return `${entry.type} requires a fact payload`;
@@ -277,6 +470,7 @@ export function journalFactLifecycleIssues(entries = [], options = {}) {
         if (!fact?.id) continue;
         states.set(fact.id, {
           project: fact.project ?? null,
+          attribution: fact.attribution, originId: fact.originId,
           phase: ['expired', 'superseded'].includes(fact.status) ? 'terminal' : 'active',
           terminalType: ['expired', 'superseded'].includes(fact.status) ? fact.status : null,
           verified: fact.verificationStatus === 'verified' && Boolean(fact.verification)
@@ -284,9 +478,35 @@ export function journalFactLifecycleIssues(entries = [], options = {}) {
       }
       continue;
     }
-    if (entry.type === 'project.purged') {
+    if (['project.purged', 'origin.purged'].includes(entry.type)) {
       const project = entry.payload?.project ?? entry.project;
-      for (const [factId, state] of states) if (state.project === project) states.delete(factId);
+      for (const [factId, state] of states) if (purgedOwner(state, project, entry)) states.delete(factId);
+      continue;
+    }
+    // Re-attribution moves a fact between owners. It may not revive, end or
+    // verify one: the lifecycle it carries must be the lifecycle it found. When
+    // no earlier state survives -- a purge of the fact's former project removed
+    // its history -- the complete snapshot it carries establishes the state, as
+    // fact.observed would.
+    if (entry.type === 'entity.attributed' && (entry.entityKind ?? entry.payload?.kind) === 'fact') {
+      const factId = entry.entityId ?? entry.payload?.id;
+      if (!factId) continue;
+      const fact = replayedEntity(entry);
+      const terminalType = ['expired', 'superseded'].includes(fact.status) ? fact.status : null;
+      const verified = fact.verificationStatus === 'verified' && Boolean(fact.verification);
+      const project = entry.project ?? fact.project ?? null;
+      const state = states.get(factId);
+      if (!state) {
+        states.set(factId, { project, attribution: fact.attribution, originId: fact.originId, phase: terminalType ? 'terminal' : 'active', terminalType, verified });
+        continue;
+      }
+      if ((terminalType ? 'terminal' : 'active') !== state.phase || terminalType !== state.terminalType || verified !== state.verified) {
+        fail(entry, 'entity.attributed cannot change a fact lifecycle');
+        continue;
+      }
+      state.project = project;
+      state.attribution = fact.attribution;
+      state.originId = fact.originId;
       continue;
     }
     if (!['fact.observed', 'fact.verified', 'fact.expired', 'fact.superseded'].includes(entry.type)) continue;
@@ -302,6 +522,7 @@ export function journalFactLifecycleIssues(entries = [], options = {}) {
       }
       states.set(factId, {
         project: entry.project ?? entry.payload?.project ?? null,
+        attribution: entry.payload?.attribution, originId: entry.payload?.originId,
         phase: ['expired', 'superseded'].includes(entry.payload?.status) ? 'terminal' : 'active',
         terminalType: ['expired', 'superseded'].includes(entry.payload?.status) ? entry.payload.status : null,
         verified: entry.payload?.verificationStatus === 'verified' && Boolean(entry.payload?.verification)
@@ -415,26 +636,33 @@ export function journalBaselinePlacementIssues(entries = [], options = {}) {
     }
     for (const item of entry.payload?.idempotency ?? []) {
       if (!item?.key) continue;
+      const bound = currentIdempotency.get(item.key);
+      if (bound && bound.id !== item.value?.id) return `migration baseline would rewrite idempotency key ${item.key}`;
       const canonicalEntity = item.value?.id ? currentEntities.get(item.value.id)?.entity : null;
       const previous = canonicalEntity ?? currentIdempotency.get(item.key);
       if (previous && !same(previous, item.value)) return `migration baseline would rewrite idempotency key ${item.key}`;
-      if (!previous) addsNewState = true;
+      // A new retry key is new projection state even when its canonical
+      // entity already exists. The value above must still match that entity.
+      if (!currentIdempotency.has(item.key)) addsNewState = true;
     }
     return addsNewState ? null : 'migration baseline does not add any previously unseen projection state';
   };
 
   for (const entry of replayable) {
-    if (entry.type === 'project.purged') {
+    if (['project.purged', 'origin.purged'].includes(entry.type)) {
       const project = entry.payload?.project ?? entry.project;
       const purgedIds = new Set(entry.payload?.purgedEntityIds ?? []);
-      for (const [entityId, value] of currentEntities) if (value.project === project || value.entity?.project === project) purgedIds.add(entityId);
-      for (const [entityId, value] of [...currentEntities]) {
-        if (value.collection !== 'relations' && (purgedIds.has(entityId) || value.project === project || value.entity?.project === project)) currentEntities.delete(entityId);
+      for (const [entityId, value] of currentEntities) if (value.collection !== 'relations' && purgedOwner(value.entity, project, entry, value.project)) {
+        purgedIds.add(entityId);
+        for (const alternative of value.entity?.alternatives ?? []) if (alternative?.id) purgedIds.add(alternative.id);
       }
       for (const [entityId, value] of [...currentEntities]) {
-        if (value.collection === 'relations' && (value.project === project || purgedIds.has(value.entity?.from) || purgedIds.has(value.entity?.to))) currentEntities.delete(entityId);
+        if (value.collection !== 'relations' && purgedIds.has(entityId)) currentEntities.delete(entityId);
       }
-      for (const [key, value] of [...currentIdempotency]) if (value?.project === project || purgedIds.has(value?.id)) currentIdempotency.delete(key);
+      for (const [entityId, value] of [...currentEntities]) {
+        if (value.collection === 'relations' && ((entry.type === 'project.purged' && (entry.schemaVersion ?? 0) < 6 && value.project === project) || purgedIds.has(value.entity?.from) || purgedIds.has(value.entity?.to))) currentEntities.delete(entityId);
+      }
+      for (const [key, value] of [...currentIdempotency]) if (purgedOwner(value, project, entry) || purgedIds.has(value?.id)) currentIdempotency.delete(key);
       priorReplayableEntries += 1;
       continue;
     }
@@ -487,8 +715,14 @@ export function journalBaselinePlacementIssues(entries = [], options = {}) {
     }
     const collection = KIND_TO_COLLECTION[entry.entityKind];
     if (collection && entry.entityId && entry.payload && typeof entry.payload === 'object') {
-      putEntity(entry.payload, collection, entry.project);
-      if (entry.idempotencyKey) currentIdempotency.set(entry.idempotencyKey, entry.payload);
+      putEntity(replayedEntity(entry), collection, entry.project);
+      if (entry.type === 'entity.attributed') {
+        const next = reattributeIdempotency(currentIdempotency, replayedEntity(entry));
+        currentIdempotency.clear();
+        for (const [key, value] of next) currentIdempotency.set(key, value);
+      }
+      if (entry.type === 'entity.token_assigned') retokenIdempotency(currentIdempotency, replayedEntity(entry));
+      if (entry.idempotencyKey) currentIdempotency.set(entry.idempotencyKey, replayedEntity(entry));
     }
     priorReplayableEntries += 1;
   }
@@ -544,10 +778,10 @@ function hardPurgeMarkerRelationshipIssues(entries = [], options = {}) {
   }
   if (report.firstUnexplained !== null) {
     for (const marker of entries) {
-      const currentSchemaArtifact = sourceSchemaVersion === JOURNAL_SCHEMA_VERSION
-        || marker?.schemaVersion === JOURNAL_SCHEMA_VERSION;
+      const currentSchemaArtifact = canonicalPurgeSchema(sourceSchemaVersion)
+        || canonicalPurgeSchema(marker?.schemaVersion);
       if (!currentSchemaArtifact
-        || marker?.type !== 'project.purged'
+        || !HARD_GAP_EVIDENCE_TYPES.includes(marker?.type)
         || marker?.payload?.mode !== 'hard'
         || !Number.isSafeInteger(marker.seq)
         || marker.seq <= report.firstUnexplained
@@ -594,7 +828,7 @@ export function rebuildProjection(entries = [], options = {}) {
       skipped.push({ seq: null, type: null, why: 'not_an_object' });
       continue;
     }
-    if (Number.isInteger(entry.schemaVersion) && entry.schemaVersion > JOURNAL_SCHEMA_VERSION) {
+    if (Number.isInteger(entry.schemaVersion) && entry.schemaVersion > READABLE_JOURNAL_SCHEMA_VERSION) {
       skipped.push({ seq: entry.seq, type: entry.type, why: 'unsupported_schema_version' });
       continue;
     }
@@ -660,7 +894,9 @@ export function rebuildProjection(entries = [], options = {}) {
       continue;
     }
     const expectedEntityKind = JOURNAL_TYPE_ENTITY_KIND[entry.type];
-    if (expectedEntityKind && entry.entityKind != null && KIND_TO_COLLECTION[entry.entityKind] && entry.entityKind !== expectedEntityKind) {
+    if ((expectedEntityKind && entry.entityKind != null && KIND_TO_COLLECTION[entry.entityKind] && entry.entityKind !== expectedEntityKind)
+      || (entry.type === 'entity.attributed' && entry.entityKind != null && !ATTRIBUTION_ENTRY_KINDS.includes(entry.entityKind))
+      || (entry.type === 'entity.token_assigned' && entry.entityKind != null && !ATTRIBUTED_ENTITY_KINDS.includes(entry.entityKind))) {
       skipped.push({ seq: entry.seq, type: entry.type, why: 'type_entity_kind_mismatch' });
       continue;
     }
@@ -713,29 +949,35 @@ export function rebuildProjection(entries = [], options = {}) {
   for (const entry of inRange) {
     if (invalidBaselineSequences.has(entry.seq)) continue;
     if (invalidLifecycleSequences.has(entry.seq)) continue;
-    if (entry.type === 'project.purged') {
+    if (['project.purged', 'origin.purged'].includes(entry.type)) {
       const project = entry.payload?.project ?? entry.project;
       // Schema <=5 markers may carry raw purgedEntityIds. They remain readable for
       // compatibility, but new markers need none: collect the project's current
       // entities (including nested alternatives) and remove relations by endpoint.
       const purgedIds = new Set(entry.payload?.purgedEntityIds ?? []);
       for (const [key, value] of entities) {
-        if (value.entity?.project !== project && value.project !== project && !purgedIds.has(key)) continue;
+        if (value.collection === 'relations' || (!purgedOwner(value.entity, project, entry, value.project) && !purgedIds.has(key))) continue;
         purgedIds.add(key);
         for (const alternative of value.entity?.alternatives ?? []) if (alternative?.id) purgedIds.add(alternative.id);
       }
       for (const [key, value] of [...entities]) {
-        if (value.collection !== 'relations' && (value.entity?.project === project || value.project === project || purgedIds.has(key))) entities.delete(key);
+        if (value.collection !== 'relations' && purgedIds.has(key)) entities.delete(key);
       }
       for (const [key, value] of [...entities]) {
         if (value.collection !== 'relations') continue;
         const relation = value.entity;
-        if (value.project === project || purgedIds.has(relation?.from) || purgedIds.has(relation?.to)) entities.delete(key);
+        if ((entry.type === 'project.purged' && (entry.schemaVersion ?? 0) < 6 && value.project === project) || purgedIds.has(relation?.from) || purgedIds.has(relation?.to)) entities.delete(key);
       }
       // P0-1: idempotency payloads are CLONES of purged entities. If a replay
       // rebuilt them, a retry with an old key would hand back deleted content and
       // the purge would be undone by the rebuild.
-      for (const [key, value] of [...idempotency]) if (value?.project === project || purgedIds.has(value?.id)) idempotency.delete(key);
+      for (const [key, value] of [...idempotency]) if (purgedOwner(value, project, entry) || purgedIds.has(value?.id)) idempotency.delete(key);
+      applied += 1;
+      continue;
+    }
+    // What a restore re-applied is already in the entries around it: the
+    // skeletons and splices it left. The entry itself changes nothing.
+    if (entry.type === 'restore.reapplied' && entry.redacted !== true && entry.payload !== null) {
       applied += 1;
       continue;
     }
@@ -776,8 +1018,22 @@ export function rebuildProjection(entries = [], options = {}) {
     // Last writer per entity wins. Because every payload is a COMPLETE snapshot,
     // no ordering-sensitive merge is required and a corrupt entry damages one
     // entity rather than poisoning the chain.
-    entities.set(entry.entityId, { collection, entity: entry.payload, project: entry.project ?? entry.payload?.project ?? null });
-    if (entry.idempotencyKey) idempotency.set(normalizeIdempotencyKey(entry.idempotencyKey, entry.payload), entry.payload);
+    const entity = replayedEntity(entry);
+    if (entry.type === 'entity.token_assigned') {
+      const issue = tokenAssignmentIssue(entities.get(entry.entityId)?.entity, entity);
+      if (issue) {
+        skipped.push({ seq: entry.seq, type: entry.type, why: 'invalid_token_assignment', entityId: entry.entityId, detail: issue });
+        continue;
+      }
+    }
+    entities.set(entry.entityId, { collection, entity, project: entry.project ?? entity?.project ?? null });
+    if (entry.type === 'entity.attributed') {
+      const next = reattributeIdempotency(idempotency, entity);
+      idempotency.clear();
+      for (const [key, value] of next) idempotency.set(key, value);
+    }
+    if (entry.type === 'entity.token_assigned') retokenIdempotency(idempotency, entity);
+    if (entry.idempotencyKey) idempotency.set(normalizeIdempotencyKey(entry.idempotencyKey, entity), entity);
     applied += 1;
   }
 
@@ -808,7 +1064,7 @@ export function rebuildProjection(entries = [], options = {}) {
     ? { ...fact, verificationStatus: 'unverified', verificationUntrustedReason: 'journal_lifecycle_invalid' }
     : fact);
 
-  const unsupported = skipped.filter((item) => ['unsupported_schema_version', 'unknown_entry_type', 'missing_payload', 'unmappable_entity', 'type_entity_kind_mismatch', 'type_payload_postcondition_mismatch', 'fact_lifecycle_violation', INVALID_BASELINE_PLACEMENT_CODE, INVALID_JOURNAL_SEQUENCE_CODE, DUPLICATE_JOURNAL_SEQUENCE_CODE, 'marked_non_replayable', NONCANONICAL_SCHEMA5_PURGE_ARTIFACT_CODE, 'dangling_relation'].includes(item.why));
+  const unsupported = skipped.filter((item) => ['unsupported_schema_version', 'unknown_entry_type', 'missing_payload', 'unmappable_entity', 'type_entity_kind_mismatch', 'type_payload_postcondition_mismatch', 'fact_lifecycle_violation', 'invalid_token_assignment', INVALID_BASELINE_PLACEMENT_CODE, INVALID_JOURNAL_SEQUENCE_CODE, DUPLICATE_JOURNAL_SEQUENCE_CODE, 'marked_non_replayable', NONCANONICAL_SCHEMA5_PURGE_ARTIFACT_CODE, 'dangling_relation'].includes(item.why));
   const crossesEpoch = legacy.length > 0 && (journalEpoch === null || journalEpoch > 0);
 
   let rebuildable = true;
@@ -914,7 +1170,7 @@ export function hardPurgeGapLedgerReport(entries = [], options = {}) {
   const claims = [];
   const claimedInRange = new Map();
   const hardMarkers = all
-    .filter((entry) => entry?.type === 'project.purged'
+    .filter((entry) => HARD_GAP_EVIDENCE_TYPES.includes(entry?.type)
       && entry?.payload?.mode === 'hard'
       && schema5PurgeArtifactIssue(entry, sourceSchemaVersion) === null)
     .sort((left, right) => (left.seq ?? 0) - (right.seq ?? 0));

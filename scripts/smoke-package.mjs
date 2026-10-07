@@ -2,11 +2,11 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { access, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
@@ -147,6 +147,27 @@ try {
   const doctor = JSON.parse((await runNpm(['exec', '--', 'shadowgraph', 'doctor'], { cwd: appDirectory, env: cliEnv })).stdout);
   assert.equal(doctor.ok, true);
 
+  // The installed package's hook block, added to and removed from a settings
+  // file that is not the host's, leaves the file as it was.
+  const hookSettings = join(appDirectory, 'hook-settings-fixture.json');
+  const settingsBefore = `${JSON.stringify({ model: 'opus' }, null, 2)}\n`;
+  await writeFile(hookSettings, settingsBefore);
+  const hooked = JSON.parse((await runInstalledCli(installedCli, ['install-hooks', '--settings', hookSettings], { cwd: appDirectory, env: cliEnv })).stdout);
+  assert.deepEqual([hooked.changed, hooked.events], [true, ['SessionStart', 'UserPromptSubmit']]);
+  // Then the delivery lifecycle with the installed binary: activate for the
+  // smoke's store, deliver, deactivate (a scratch activation record).
+  const lifecycleEnv = { ...cliEnv, SHADOWGRAPH_HOME: join(appDirectory, 'shadowgraph-home') };
+  const deliver = () => execFileSync(process.execPath, [installedCli, 'deliver', '--hook'], { cwd: appDirectory, env: lifecycleEnv, input: JSON.stringify({ hook_event_name: 'SessionStart' }), encoding: 'utf8' });
+  assert.equal(deliver(), '', 'inert before activation');
+  const activated = JSON.parse((await runInstalledCli(installedCli, ['activate', 'delivery', '--evidence', 'clean-install-smoke', '--store', dataFile, '--host-version', '0.0.0', '--settings', hookSettings], { cwd: appDirectory, env: lifecycleEnv })).stdout);
+  assert.deepEqual([activated.state, activated.record.capabilities.delivery.hooksInstalled], ['active', true]);
+  assert.equal(JSON.parse(deliver()).hookSpecificOutput.hookEventName, 'SessionStart');
+  assert.equal(JSON.parse((await runInstalledCli(installedCli, ['deactivate', 'delivery'], { cwd: appDirectory, env: lifecycleEnv })).stdout).state, 'deactivated');
+  assert.equal(deliver(), '', 'inert after deactivation');
+  const unhooked = JSON.parse((await runInstalledCli(installedCli, ['uninstall-hooks', '--settings', hookSettings], { cwd: appDirectory, env: cliEnv })).stdout);
+  assert.deepEqual([unhooked.changed, unhooked.removed], [true, 2]);
+  assert.equal(await readFile(hookSettings, 'utf8'), settingsBefore);
+
   const memoryInput = {
     project: 'beta-demo',
     scope: { userId: 'alice' },
@@ -178,18 +199,18 @@ try {
     project: 'beta-demo', key: 'deployment', value: 'multi-user', sourceClass: 'human_confirmed'
   })], { cwd: appDirectory, env: cliEnv });
   const reviewAfterRestart = JSON.parse((await runInstalledCli(installedCli, ['review', JSON.stringify({ project: 'beta-demo' })], { cwd: appDirectory, env: cliEnv })).stdout);
-  assert.equal(reviewAfterRestart.some((item) => item.decisionId === decision.id), true);
+  assert.equal(reviewAfterRestart.items.some((item) => item.decisionId === decision.id), true);
 
   const fullFile = join(appDirectory, 'mcp full', 'data.json');
   const [fullList] = await rpc(installedCli, { SHADOWGRAPH_FILE: fullFile, SHADOWGRAPH_MCP_COMPACT: '0' }, [
     { jsonrpc: '2.0', id: 1, method: 'tools/list' }
   ]);
-  assert.equal(fullList.result.tools.length, 28);
+  assert.equal(fullList.result.tools.length, 35);
   const compactFile = join(appDirectory, 'mcp compact', 'data.json');
   const [compactList] = await rpc(installedCli, { SHADOWGRAPH_FILE: compactFile, SHADOWGRAPH_MCP_COMPACT: '1' }, [
     { jsonrpc: '2.0', id: 2, method: 'tools/list' }
   ]);
-  assert.equal(compactList.result.tools.length, 14);
+  assert.equal(compactList.result.tools.length, 16);
   const [mcpRemember] = await rpc(installedCli, { SHADOWGRAPH_FILE: compactFile, SHADOWGRAPH_MCP_COMPACT: '1' }, [
     { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'shadowgraph_remember', arguments: {
       project: 'mcp-demo', memoryType: 'note', key: 'package', text: 'Loaded from installed tarball'
@@ -239,6 +260,8 @@ try {
     cleanDirectoryContainedSpaces: /\s/.test(appDirectory),
     installedPackage: true,
     cliSetupDoctor: true,
+    hooksInstallUninstall: true,
+    deliveryLifecycle: true,
     cliRememberRestartRecall: true,
     changedFactReviewAfterRestart: true,
     mcpFullTools: fullList.result.tools.length,

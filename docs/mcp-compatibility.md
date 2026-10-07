@@ -34,19 +34,21 @@ Modern complete results include `resultType: 'complete'` and server identity met
 
 | Mode | Verifier | Advertised tools |
 | --- | --- | ---: |
-| Full | not configured | 28 |
-| Full | configured | 29 (`shadowgraph_verify_fact` is added) |
-| Compact | either | 14 |
+| Full | not configured | 35 |
+| Full | configured | 36 (`shadowgraph_verify_fact` is added) |
+| Compact | either | 16 |
 
 `SHADOWGRAPH_MCP_COMPACT=1` must be passed to the server process, not merely assumed from the Inspector launch shell. The automated gate uses Inspector's server environment option and verifies the returned list count.
 
 ### Tool inventory
 
-The **14 compact tools** are the everyday agent workflow. They are also present in full mode:
+The **16 compact tools** are the everyday agent workflow. They are also present in full mode:
 
 | Tool | Purpose |
 | --- | --- |
-| `shadowgraph_context` | Load the working set for a project before a consequential task |
+| `shadowgraph_context` | Read the working set for a project before a consequential task; persists nothing |
+| `shadowgraph_review_context` | The same working set, evaluated and persisted: raises the review signals it finds due |
+| `shadowgraph_expand` | Expand a claim line from `shadowgraph_context` to the full record it was derived from, checked against that revision, or an explicit limitation |
 | `shadowgraph_remember` | Store scoped memory (`preference`, `profile`, `goal`, `instruction`, `procedure`, `episode`, `note`) |
 | `shadowgraph_recall` | Hybrid lexical/vector/graph/temporal recall of scoped memory |
 | `shadowgraph_record_decision` | Record a decision with assumptions, evidence, and rejected alternatives |
@@ -61,7 +63,7 @@ The **14 compact tools** are the everyday agent workflow. They are also present 
 | `shadowgraph_validate` | Report graph diagnostics by severity |
 | `shadowgraph_maintain` | Stale decisions past `reviewAfter`, expire facts, then review |
 
-**Full mode adds these 14**, for 28 total:
+**Full mode adds these 19**, for 35 total:
 
 | Tool | Purpose |
 | --- | --- |
@@ -69,7 +71,7 @@ The **14 compact tools** are the everyday agent workflow. They are also present 
 | `shadowgraph_link` | Create an explainable relationship between two entities |
 | `shadowgraph_traverse` | Walk relationships from an entity by depth and direction |
 | `shadowgraph_supersede` | Replace a decision, persisting a `supersedes` relation |
-| `shadowgraph_redact` | Produce a privacy-safe export; never mutates |
+| `shadowgraph_redact` | Produce a privacy-safe export; grant-bearing calls persist bounded audit |
 | `shadowgraph_purge` | Logical (default) or explicit irreversible hard project purge |
 | `shadowgraph_purge_preview` | Show deletion counts without changing storage |
 | `shadowgraph_review_signals` | Read persisted review signals |
@@ -79,15 +81,25 @@ The **14 compact tools** are the everyday agent workflow. They are also present 
 | `shadowgraph_backup` | Write a consistent snapshot to a destination path |
 | `shadowgraph_restore` | Restore a validated JSON or SQLite backup |
 | `shadowgraph_confidence_evidence` | Apply one keyed confidence contribution |
+| `shadowgraph_request_wider_access` | Propose explicit scope, surfaces and expiry; confers no authority |
+| `shadowgraph_revoke_grant` | Revoke authority and derived grants |
+| `shadowgraph_discard_access` | Retain terminal authority and a discard tombstone |
+| `shadowgraph_bind` | Explicitly select worktree or shared-repository mapping, project and reason; back up and activate its local file |
+| `shadowgraph_attribute` | Reattribute explicit IDs or an exact origin to a named project with a reason |
 
-A 29th tool, `shadowgraph_verify_fact`, appears in full mode **only** when
+A 36th tool, `shadowgraph_verify_fact`, appears in full mode **only** when
 `SHADOWGRAPH_VERIFIER_CONFIG` names a local trust configuration. The caller supplies just `factId`
 and an evidence path inside the configured root — never verifier identity, key, signature, method,
-or target status. Compact mode stays at exactly 14 regardless.
+or target status. Compact mode stays at exactly 16 regardless.
+
+PR12 read tools accept `accessId` or `grantId`; they recheck current authority and
+commit bounded audit before delivery. Neither MCP nor HTTP exposes issuance.
+See [the access transport contract](contracts/access-transports.md) for the owner
+CLI, binding, expansion provenance, effect declarations and measured wire costs.
 
 Compact mode is a tool-advertisement choice, not lossy storage: the full relational graph,
 memories, facts, alternatives, and outcomes are stored identically in both modes. Every tool listed
-above declares an output schema except `shadowgraph_review` and `shadowgraph_review_signals`; §4
+above declares an output schema, including `shadowgraph_review` and `shadowgraph_review_signals`; §4
 explains why.
 
 Alongside tools, the server advertises exactly one resource, `shadowgraph://context`, and one
@@ -140,10 +152,11 @@ agrees nothing. Every reply in a batch is held until the last member finishes, s
 costs memory in proportion to its results.
 
 **Compatibility guarantee.** For a session negotiated at `2024-11-05`, the top-level member set of
-every tool object (`name`, `description`, `inputSchema`), the tool names and the 28/14/29 counts, and
-the serialized text result (`content[0].text`, the tool's return value as
-`JSON.stringify(value, null, 2)`) are the same as before this metadata existed, and that text block
-is identical in every tier: `structuredContent` is an addition beside it, never a replacement. Tool
+every tool object remains (`name`, `description`, `inputSchema`). Tool names and
+the current 35/16/36 counts are identical across protocol tiers. The serialized
+text result (`content[0].text`, the tool's return value as
+`JSON.stringify(value, null, 2)`) is identical in every tier: `structuredContent`
+is an addition beside it, never a replacement. Tool
 objects are **not** byte-identical to earlier releases. Descriptions were rewritten, every
 input-schema property gained a description, `shadowgraph_traverse` now documents `project` and
 `scope`, and `shadowgraph_maintain` declares that `changedFacts` holds strings. Those are additions
@@ -174,17 +187,18 @@ endpoint configured, so the two "only with an embedder" cells are covered by the
 
 | Tool | readOnly | destructive | idempotent | openWorld |
 | --- | :---: | :---: | :---: | :---: |
-| `shadowgraph_search` | yes | no | yes | no |
-| `shadowgraph_retrieve` | yes | no | yes | no |
-| `shadowgraph_recall` | yes | no | yes | only with an embedder |
-| `shadowgraph_traverse` | yes | no | yes | no |
-| `shadowgraph_validate` | yes | no | yes | no |
-| `shadowgraph_journal` | yes | no | yes | no |
-| `shadowgraph_rebuild` | yes | no | yes | no |
-| `shadowgraph_review_signals` | yes | no | yes | no |
+| `shadowgraph_search` | no | no | no | no |
+| `shadowgraph_retrieve` | no | no | no | no |
+| `shadowgraph_recall` | no | no | no | only with an embedder |
+| `shadowgraph_traverse` | no | no | no | no |
+| `shadowgraph_expand` | no | no | no | no |
+| `shadowgraph_validate` | no | no | no | no |
+| `shadowgraph_journal` | no | no | no | no |
+| `shadowgraph_rebuild` | no | no | no | no |
+| `shadowgraph_review_signals` | no | no | no | no |
 | `shadowgraph_purge_preview` | yes | no | yes | no |
-| `shadowgraph_repair_plan` | yes | no | yes | no |
-| `shadowgraph_redact` | yes | no | yes | no |
+| `shadowgraph_repair_plan` | no | no | no | no |
+| `shadowgraph_redact` | no | no | no | no |
 | `shadowgraph_record_decision` | no | no | no | no |
 | `shadowgraph_record_attempt` | no | no | no | no |
 | `shadowgraph_record_fact` | no | no | no | no |
@@ -193,6 +207,7 @@ endpoint configured, so the two "only with an embedder" cells are covered by the
 | `shadowgraph_maintain` | no | no | no | no |
 | `shadowgraph_review` | no | no | no | no |
 | `shadowgraph_context` | no | no | no | no |
+| `shadowgraph_review_context` | no | no | no | no |
 | `shadowgraph_remember` | no | no | no | only with an embedder |
 | `shadowgraph_confidence_evidence` | no | no | no | no |
 | `shadowgraph_update_status` | no | no | no | no |
@@ -202,18 +217,26 @@ endpoint configured, so the two "only with an embedder" cells are covered by the
 | `shadowgraph_purge` | no | **yes** | no | no |
 | `shadowgraph_backup` | no | **yes** | no | yes |
 | `shadowgraph_restore` | no | **yes** | no | yes |
+| `shadowgraph_request_wider_access` | no | no | no | no |
+| `shadowgraph_revoke_grant` | no | no | no | no |
+| `shadowgraph_discard_access` | no | no | no | no |
+| `shadowgraph_bind` | no | **yes** | no | yes |
+| `shadowgraph_attribute` | no | no | no | no |
 
 Six of these are worth stating plainly, because a reader would otherwise guess wrong:
 
-- `shadowgraph_context` and `shadowgraph_review` **are not read-only**. Both evaluate reopen rules
-  and persist review signals, which is why the server saves after them.
-- **Only the eleven pure reads are idempotent.** Every other tool commits a new durable revision on
-  each successful call, even when the domain result is a no-op: re-acknowledging a signal, setting
-  the state a decision already has, repeating a supersession, remembering identical text, applying an
-  evidence key that was already counted, or re-verifying the same attestation all leave the domain
-  alone and still advance the store's revision. That revision is the concurrency token other writers
-  compare and the one `shadowgraph_redact` reports, so a repeat is not without effect on the
-  environment even when the visible result is unchanged.
+- `shadowgraph_review_context` and `shadowgraph_review` **are not read-only**. Both evaluate reopen
+  rules and persist review signals, which is why the server saves after them. `shadowgraph_context`
+  and the `shadowgraph://context` resource are reads: they persist no signal and commit no revision.
+  `shadowgraph_context` is still advertised as neither read-only nor idempotent, because a
+  grant-bearing call commits the declared access audit, as every grant-capable read does.
+- Grant-capable reads declare a possible audit write and are not advertised as
+  read-only or idempotent. Their ordinary own-scope read path still commits
+  nothing; the effects test retains that check and separately measures grant
+  reads. Lifecycle writes and ordinary writing tools advance the revision even
+  on a domain no-op. Outcome, status and acknowledgement now forward the
+  explicit project/origin or confirmed workspace scope; their successful
+  results and durable effects are covered by the conformance/effects suites.
 - `shadowgraph_ack_review` is **destructive**: it rewrites a signal's `status` and `acknowledgedAt`
   in place and appends nothing to the journal, so the previous acknowledgement cannot be recovered
   and a journal rebuild does not reconstruct it. A repeat replaces the timestamp again.
@@ -226,23 +249,11 @@ Six of these are worth stating plainly, because a reader would otherwise guess w
 - `shadowgraph_link` is **not** idempotent for a second reason beyond the revision: every call mints
   a new relation id, so repeating one duplicates the relationship. There is no unlink tool.
 
-### Output schemas, and two deliberate omissions
+### Output schemas and scope-coverage envelopes
 
-26 of the 28 full-mode tools (27 of 29 with a verifier configured, 13 of 14 in compact mode) declare
-an `outputSchema` and return `structuredContent` that conforms to it. Two do not:
+All 35 full-mode tools (36 with a verifier, 16 in compact mode) declare an object-rooted output schema. In structured protocol tiers their structuredContent matches the serialized text. Review and signal-history results now use `{ items, completeness }`, a deliberate breaking shape change; array consumers use `result.items`. Older protocol tiers still receive the same envelope in text.
 
-| Tool | Why no output schema |
-| --- | --- |
-| `shadowgraph_review` | Returns a bare JSON array of due decisions. |
-| `shadowgraph_review_signals` | Returns a bare JSON array of review signals. |
-
-`structuredContent` must be a JSON **object** for 2025-06-18 and 2025-11-25 clients, and the official
-TypeScript SDK additionally requires `outputSchema.type === "object"`. Wrapping either result would
-be a change to what the tool returns, not a change to how it is described, so both keep their shape,
-declare no schema, emit no structured content in any tier, and carry the return shape in their
-description instead. `test/mcp-tool-metadata.test.js` and `test/mcp-tool-conformance.test.js` both
-assert this exact pair, so an output schema cannot be added to one without the omission list being
-updated deliberately.
+The journal and rebuild schemas omit global envelope counters; redaction describes a marked scoped view rather than a complete store. The context schema permits unresolved project:null. Input-scoping limitations remain open.
 
 The schemas are written to be portable and, more importantly, to be **satisfiable by data imported
 from an older storage schema**. Advertising an output schema is a promise: a client that validates
@@ -333,10 +344,10 @@ Detail that used to sit in a description, kept here because it is worth having s
 
 ### Glama inspection profile
 
-Glama inspects this server in **full mode**, advertising all 28 tools. Compact mode is not used for
+Glama inspects this server in **full mode**, advertising all 35 tools. Compact mode is not used for
 inspection: the published `glama.json` schema accepts only `maintainers`, so there is no supported
 way to declare the compact environment variable or to disclose in the generated configuration that
-the listing was produced from a reduced surface. Advertising 14 tools while the server offers 28
+the listing was produced from a reduced surface. Advertising 16 tools while the server offers 35
 would understate what the server does, so the tool-count penalty is accepted instead.
 
 Glama's generated container does not talk to this server directly. It runs `mcp-proxy@6.4.3` in front
@@ -355,8 +366,8 @@ over streamable HTTP, and asserts the recording and the HTTP replies against eac
   `protocolVersion: "2025-11-25"`;
 - this server negotiates `2025-11-25` with it, asserted by equality, so a silent fall-back to an
   older revision fails the gate instead of quietly hiding metadata from Glama;
-- the `tools/list` the scanner receives over HTTP is exactly 28 tools, each with four boolean
-  annotations, and an object-rooted `outputSchema` on every tool except the two documented omissions;
+- the `tools/list` the scanner receives over HTTP is exactly 35 tools, each with four boolean
+  annotations, and an object-rooted `outputSchema` on every tool;
 - that list is deep-equal to the one the server wrote to stdio, so the proxy forwarded it without
   dropping or rewriting a member. The comparison is deep rather than byte-for-byte because the
   proxy rebuilds each tool through its bundled SDK schema, which may reorder keys.
@@ -367,7 +378,7 @@ with the scanner over HTTP; that value is a property of the proxy's SDK, not of 
 
 Measured on 2026-09-03, on the 27-tool surface of that date: `requested=2025-11-25
 negotiated=2025-11-25 http=2025-11-25 tools=27 annotated=27 outputSchemas=25 forwarded=deep-equal`.
-The gate now asserts 28 tools and 26 output schemas; the reading above is left as it was taken.
+The gate now asserts 35 tools and 35 output schemas; the reading above is left as it was taken.
 
 **Residual risk.** Only the pinned proxy is under test. Glama's own scanner client, the revision it
 declares to the proxy, and how it renders what it receives are not reproduced here. The proxy version
@@ -380,9 +391,6 @@ None of these are defects in the current release, and none were changed to impro
 
 - no `shadowgraph_unlink`: a relationship is removed only by purging its project;
 - no apply counterpart to `shadowgraph_repair_plan`;
-- `shadowgraph_review` and `shadowgraph_review_signals` return bare arrays rather than the
-  `{ items, page, completeness }` envelope every other read path uses, which is also what prevents an
-  output schema;
 - naming is mixed (bare verbs, `verb_object`, noun phrases, one abbreviation), and renaming a tool
   is a breaking change for every existing client configuration.
 
@@ -403,10 +411,10 @@ tooling install, the scripts fall back to the same exact versions through `npx`.
 
 - Inspector exits non-zero;
 - Inspector writes any strict schema finding to stderr;
-- Full mode is not exactly 28 tools without a verifier;
-- Compact mode is not exactly 14 tools;
+- Full mode is not exactly 35 tools without a verifier;
+- Compact mode is not exactly 16 tools;
 - any advertised tool is missing one of the four boolean annotations;
-- any tool other than the two documented omissions is missing an object-rooted `outputSchema`.
+- any tool is missing an object-rooted `outputSchema`.
 
 Measured on 2026-09-03, that Inspector requests `protocolVersion: "2025-11-25"`, which this server
 implements and echoes, so the strict run exercises the structured tier by genuine negotiation.
@@ -420,7 +428,7 @@ fails when:
 - the proxy sends anything other than exactly one `initialize`, or requests a revision other than
   `2025-11-25`;
 - this server negotiates anything other than `2025-11-25` with it;
-- the `tools/list` received over HTTP is not exactly 28 tools with the annotation and output-schema
+- the `tools/list` received over HTTP is not exactly 35 tools with the annotation and output-schema
   coverage above;
 - that list is not deep-equal to the one the server wrote to stdio.
 
@@ -428,8 +436,8 @@ The CI matrix installs the locked gate clients and runs both gates on Node 24 on
 Windows. `test/check-glama-proxy.test.js` covers the gate's own recorder, event-stream parser, and
 assertions offline, including that each assertion rejects the failure it exists to catch;
 `test/mcp-gate-tooling.test.js` binds the scripts and CI workflow to the exact tooling lock.
-Unit/integration tests separately prove the configured-verifier full count is 28 and compact
-remains 12.
+Unit/integration tests separately prove the configured-verifier full count is 36 and compact
+remains 16.
 
 ## 6. Primary sources consulted
 
@@ -447,3 +455,30 @@ remains 12.
 ## 7. Verification boundary
 
 Automated raw-stdio tests prove exact dual-era payloads and errors, prove what each negotiated revision advertises and returns, prove batch receiving and its revision boundary, and exercise every tool that declares an output schema against a real store so the advertised schema is checked against the result the tool actually returns. The official Inspector proves strict tool-schema portability, exact full/compact counts, and that a real client using the official SDK accepts the annotations and output schemas on this machine. The pinned Glama proxy gate proves what that proxy requests, what this server negotiates with it, and that the tool list reaches an HTTP scanner unchanged; it does not exercise Glama’s own scanner. This does not by itself measure every third-party host, network transport, latency, answer quality, or future protocol revision.
+
+## Creation identity and scope alignment
+
+Creation inputs reject caller-supplied canonical IDs; reference IDs remain
+supported. See [creation identity](contracts/creation-identity.md). A policy
+violation anywhere in a supported JSON-RPC batch prevents every member from
+running. This preflight does not make arbitrary tool batches transactional.
+
+The context resource resolves the current confirmed workspace binding through
+the same access context as tools, inside the existing serialized persistence
+path. It still evaluates and persists review signals; no read/evaluate split
+is introduced. Unresolved context project identity is nullable. Link and
+traverse describe the request boundary for every entity kind; an out-of-scope
+root is indistinguishable from an absent root. `memoryOnly` is a boolean restore
+input and retains mandatory validation and recovery semantics.
+
+PR13 metadata wire measurements (bare / annotated / structured bytes): full
+54,921 / 58,409 / 239,685; full with verifier 56,069 / 59,662 / 244,232; compact
+34,848 / 36,331 / 151,693. The engineering ceilings retain about 2% headroom
+where necessary; the compact structured ceiling is unchanged. These changes
+cover explicit scope inputs and truthful creation/restore contracts, not
+benchmark campaign or audit-operation performance thresholds.
+
+Plan v1.4.4 PR-26 and PR-27 wire measurements (bare / annotated / structured bytes, 2026-09-29), after the
+default read's relevance block and `shadowgraph_expand`: full 58,789 / 62,489 / 298,375; full with verifier
+59,937 / 63,742 / 302,922; compact 38,716 / 40,411 / 210,383. The ceilings these planned additions exceed are
+re-set with about 2% headroom, recorded in `test/mcp-tool-metadata.test.js`.

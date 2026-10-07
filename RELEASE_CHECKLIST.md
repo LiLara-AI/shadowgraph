@@ -1,5 +1,10 @@
 # Release checklist — ShadowGraph 0.41.0 (Technical Preview → publication)
 
+> **Historical (v0.41.0).** This document describes the 0.41.0 Technical Preview. On `main`,
+> `github:LiLara-AI/shadowgraph` installs the `0.42.0-dev.0` development build; to install 0.41.0,
+> use `github:LiLara-AI/shadowgraph#v0.41.0`. See
+> [Moving between 0.41.0 and `main`](README.md#moving-between-0410-and-main).
+
 This checklist governs **npm publication**, which is not authorized and has not occurred.
 
 The `v0.41.0` Git tag and GitHub Release are separately maintainer-authorized as a Technical

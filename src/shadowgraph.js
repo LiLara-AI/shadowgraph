@@ -8,19 +8,286 @@
 //   search-contract.md      — content fields vs filters
 //   confidence-contract.md  — evidence-weighted bounded confidence
 
-import { assertHardPurgeGapLedgers, assertJournalBaselinePlacement, assertJournalEntrySequence, assertUniqueJournalSequences, rebuildProjection, journalGaps, duplicateSequences, journalBaselinePlacementIssues, journalEntryPostconditionIssue, journalEntrySequenceIssue, journalFactLifecycleIssues, schema5PurgeArtifactIssue, JOURNAL_ENTRY_TYPES, JOURNAL_TYPE_ENTITY_KIND, REPLAYABLE_ENTRY_TYPES } from './journal.js';
+import { CREATION_ENTRY_TYPES, HARD_GAP_EVIDENCE_TYPES, assertHardPurgeGapLedgers, assertJournalBaselinePlacement, assertJournalEntrySequence, assertUniqueJournalSequences, rebuildProjection, journalGaps, duplicateSequences, journalBaselinePlacementIssues, journalEntryPostconditionIssue, journalEntrySequenceIssue, journalFactLifecycleIssues, replayedEntity, reattributeIdempotency, schema5PurgeArtifactIssue, ATTRIBUTED_ENTITY_KINDS, ATTRIBUTION_ENTRY_KINDS, JOURNAL_ENTRY_TYPES, JOURNAL_TYPE_ENTITY_KIND, READABLE_JOURNAL_SCHEMA_VERSION, REPLAYABLE_ENTRY_TYPES } from './journal.js';
 import { createConfidence, applyContribution, setOutcomeContribution, computeConfidence, summarizeBasis, CONFIDENCE_POLICY } from './confidence.js';
 import { hybridSearch, foldText } from './hybrid-search.js';
 import { effectiveFactExpirationBoundary, factValidityPolicyIssue, isValidIsoInstant } from './fact-validity.js';
 import { evaluateRule, isSupportedOperator, isSupportedUnit, ruleOperandIssue } from './condition-eval.js';
-import { createHash } from 'node:crypto';
+import { privilegedSnapshot, privilegedValidate, registerPrivileged } from './internal/snapshot.js';
+import { extraCollections, refusePublicExport, NATIVE_STORE_KEYS, PUBLIC_EXPORT_KIND, REDACTION_EXPORT_KIND } from './internal/collections.js';
+import { isLegacyOwned, resolveScope, sameOrigin, usableOriginId } from './scope.js';
+import { createHash, randomUUID } from 'node:crypto';
+import { extractionSupersession } from './internal/extraction-supersession.js';
+import { accessScopeContains, validateAccess, intersectAccessScope, accessDiagnostics, reconcileAccessLedger } from './access.js';
+import { createAccessLifecycle } from './internal/access-lifecycle.js';
+import { assertCreationInput } from './internal/creation-id.js';
+import { EXTRACTION_RECIPE } from './internal/extraction-contract.js';
+import { attemptOutcome } from './internal/outcome.js';
+import { RUNTIME_MISSES, missReachedBy, runtimeMissLedgerIssue, withFallbackMisses } from './internal/miss-ledger.js';
+import { supersessionOrder, temporalEvidence, versionTimes } from './internal/temporal-evidence.js';
+import { T1_DERIVATION_VERSION, t1Digest, t1Inputs, t1Line, visibleRecordReferences } from './compact-tier.js';
+import { withoutSourceCopies } from './internal/source-availability.js';
+import { assertSourceRemovalSafe } from './internal/source-deletion.js';
+import { SELF_SIGNALS, stripDeliveredBlocks } from './internal/capture-source.js';
+import { CAPTURE_COLLECTIONS, CAPTURE_CONTENT, CAPTURE_ENTRY_TYPES, CAPTURE_EVENT_IDENTITY, CAPTURE_IMPORT_TYPE, CAPTURE_KIND, CAPTURE_SESSIONS, CAPTURE_TRANSITIONS, captureCollectionIssue, captureEntryReachedBy, captureEventIssue, captureItemIssue, captureObservationIssue, CAPTURE_LIMIT_EVENT, CAPTURE_REFUSED_EVENT, OTHER_OWNER } from './internal/capture.js';
+import { TRANSCRIPT_ANCHOR_BYTES, TRANSCRIPT_GAP_REASONS, TRANSCRIPT_TRIGGERS, cursorBlock, cursorShape, digest, lastLineEnd, matchKey, transcriptEntry, transcriptLines } from './internal/transcript.js';
+import { CREDENTIAL_WITHHELD, captureWithheld, redactText, redactValue, withholdFlagged } from './internal/redaction.js';
+import { RAW_EXPIRED, RAW_RETENTION_DAYS, captureRawExpired, effectiveCaptureExpiry, hasCaptureRetentionState } from './internal/capture-retention.js';
+import { invalidatedCaptureTokens } from './internal/capture-generation.js';
+import { sessionJournalEntries, workerReason } from './internal/extraction-session.js';
+import { DELETION_INTENT, DELETION_VIEW, IDEMPOTENCY_KEY_WITHHELD, PURGE_AWARE_RESTORE_UNSUPPORTED, PURGE_BACKUPS_STATEMENT, SCOPE_KEY_WITHHELD, SESSION_WITHHELD, deletionError, journalHead } from './internal/deletion-knowledge.js';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
 // docs/api-reference.md) and are frozen so a consumer cannot mutate validation
 // behaviour at a distance.
-export const SCHEMA_VERSION = 5;
-export const SUPPORTED_SCHEMA_VERSIONS = Object.freeze([1, 2, 3, 4, 5]);
+//
+// SCHEMA_VERSION is what this build WRITES; SUPPORTED_SCHEMA_VERSIONS is what it
+// reads. The reader is widened before the writer (plan v1.4.4 §9.2): PR-20 read 7
+// while writing 6 and is the floor for every store this build saves; PR-21
+// writes 7. Entities and journal entries share the one readable bound.
+export const SCHEMA_VERSION = 7;
+export const SUPPORTED_SCHEMA_VERSIONS = Object.freeze([1, 2, 3, 4, 5, 6, 7]);
+const READABLE_SCHEMA_VERSION = READABLE_JOURNAL_SCHEMA_VERSION;
 const GLOBAL_ENTITY_NAMESPACE_SCHEMA_VERSION = 4;
+// The last schema whose entities carry no attribution. Import keeps a legacy
+// entity at this version rather than stamping it 6 without saying whose it is;
+// only a write or the attribution migration makes an entity schema 6.
+const PRE_ATTRIBUTION_SCHEMA_VERSION = 5;
+
+// Schema 6 records say whose they are (plan v1.4.4 §9.3, §10.3): a named
+// project, one capture origin and no project (`unattributed`, project null), or
+// one of the two legacy states the attribution migration assigns.
+const ATTRIBUTIONS = Object.freeze(['project', 'unattributed', 'legacy_ambiguous', 'legacy_unattributed']);
+
+function attributionIssue(entity) {
+  if (entity.originId !== undefined && usableOriginId(entity.originId) === null) return 'originId must be a non-empty string';
+  if (entity.attribution === undefined) return null;
+  if (!ATTRIBUTIONS.includes(entity.attribution)) return `unknown attribution ${JSON.stringify(entity.attribution)}`;
+  if (entity.attribution === 'unattributed') {
+    if (entity.project !== null && entity.project !== undefined) return 'an unattributed entity belongs to no project';
+    if (usableOriginId(entity.originId) === null) return 'an unattributed entity requires its originId';
+  }
+  if (['project', 'legacy_ambiguous'].includes(entity.attribution) && (typeof entity.project !== 'string' || !entity.project.trim())) {
+    return `a ${entity.attribution} entity requires a project`;
+  }
+  return null;
+}
+
+// The claim-evidence model of schema 7 (plan v1.4.4 §9.4, §14). Checked: the
+// closed vocabularies and cross-field rules, and the shape each stored claim's
+// class needs (plan v1.4.4 PR-22): its text and sourceRef, a verifierVersion, a
+// rule if entailed, readings if ambiguous, and a well-formed span if it has one.
+// Values are checked for presence and shape, not against this build's verifier,
+// so a later verifier's output stays readable. Every other field -- checks,
+// captureRef, and any field a later build adds -- is carried verbatim. A stored
+// record never carries an unsupported claim: that stays in a capture item's
+// extraction output.
+const CLAIM_CLASSES = Object.freeze(['quoted', 'entailed', 'ambiguous', 'unsupported']);
+const CAUSAL_STATES = Object.freeze(['recorded', 'unknown', 'not_recorded', 'legacy_freetext']);
+const OUTCOME_EVIDENCE_STATES = Object.freeze(['observed', 'absent', 'not_applicable']);
+const isPlainObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+const named = (value) => typeof value === 'string' && value.trim() !== '';
+// Capture's admission limits (§22.6.1; the values are the activation's), and
+// the states an item holds until it is understood (§24.1).
+const ADMISSION_LIMITS = Object.freeze(['maxStoreBytes', 'maxQueueDepth', 'maxItemBytes', 'maxItemsPerSession']);
+// What one capture adds to the store besides its material, estimated for the
+// store-bytes limit: the item, its journal entry and its retry value.
+const CAPTURE_ITEM_ALLOWANCE = 6 * 1024;
+const UNEXTRACTED_STATES = Object.freeze(['pending', 'processing', 'failed', 'blocked']);
+// A session keeps its newest transcript gaps and counts the rest.
+const TRANSCRIPT_GAPS_KEPT = 8;
+
+// Plan v1.4.4 §9.4 (PR-23, VAR-08): an attempt's cause, attributed apart from
+// the observation it explains (PC-04). A reason recorded now is the caller's
+// own claim, agent_claimed whatever the attempt's sourceClass says; its
+// statement is the reason itself, kept verbatim and not copied. A reason an
+// earlier build stored is legacy free text, never classed and never evidenced:
+// derived on the way out (publicValue) and never stored. No reason, or a blank
+// one, is not recorded. Only the extractor records a cause as unknown.
+function causalClaimFor(reason, { legacy = false } = {}) {
+  const given = typeof reason === 'string' ? reason.trim() !== '' : reason != null;
+  if (!given) return { state: 'not_recorded' };
+  return legacy ? { state: 'legacy_freetext' } : { state: 'recorded', sourceClass: 'agent_claimed', evidence: [] };
+}
+
+// The entity erasureToken of schema 7: a non-empty string, carried only by a
+// decision, attempt, memory or fact that names its kind and id, so every public
+// result can be stripped of it by what the entity says it is.
+function erasureTokenIssue(entity) {
+  if (entity.erasureToken === undefined) return null;
+  if (typeof entity.erasureToken !== 'string' || !entity.erasureToken) return 'erasureToken must be a non-empty string';
+  if (!ATTRIBUTED_ENTITY_KINDS.includes(entity.kind) || typeof entity.id !== 'string' || !entity.id) return 'erasureToken is carried only by a decision, attempt, memory or fact that names its kind and id';
+  return null;
+}
+
+function captureCollectionError(issue) {
+  const error = new Error(`A capture collection is malformed (capture_collection_malformed): ${issue}`);
+  error.code = 'capture_collection_malformed';
+  return error;
+}
+
+// A capture item is no claim-bearing record: its own frozen shape governs it
+// wherever it is stored (PR-33).
+function storedEntityIssue(entity) {
+  if (entity?.kind !== CAPTURE_KIND) return claimModelIssue(entity);
+  const issue = captureItemIssue(entity);
+  return issue && `it is not a well-formed capture item (${issue})`;
+}
+
+function claimModelIssue(entity) {
+  const tokenIssue = erasureTokenIssue(entity);
+  if (tokenIssue) return tokenIssue;
+  const unavailableSources = new Set();
+  if (entity.sourceAvailability === 'unavailable' && named(entity.captureRef)) unavailableSources.add(entity.captureRef);
+  for (const item of [...(Array.isArray(entity.claims) ? entity.claims : []),
+    ...(Array.isArray(entity.causalClaim?.evidence) ? entity.causalClaim.evidence : [])]) {
+    if (item?.sourceAvailability === 'unavailable' && named(item.sourceRef)) unavailableSources.add(item.sourceRef);
+  }
+  if (entity.claims !== undefined) {
+    if (!Array.isArray(entity.claims)) return 'claims must be a list';
+    for (const [index, claim] of entity.claims.entries()) {
+      if (!isPlainObject(claim) || !CLAIM_CLASSES.includes(claim.class)) return `claims[${index}].class must be one of ${CLAIM_CLASSES.join(', ')}`;
+      if (claim.class === 'unsupported') return `claims[${index}] is unsupported, which a stored record never carries`;
+      if (!named(claim.verifierVersion)) return `claims[${index}] carries no verifierVersion: a claim's class comes from the claim verifier`;
+      if (!named(claim.text) || !named(claim.sourceRef)) return `claims[${index}] names no text or sourceRef`;
+      if (claim.class === 'entailed' && !named(claim.rule)) return `claims[${index}] is entailed and names no rule`;
+      if ((claim.sourceAvailability === 'unavailable' || unavailableSources.has(claim.sourceRef))
+        && ['evidence', 'readings'].some(key => Object.hasOwn(claim, key))) return `claims[${index}] unavailable source retains an evidence copy`;
+      if (claim.class === 'ambiguous' && claim.sourceAvailability !== 'unavailable' && (!Array.isArray(claim.readings) || !claim.readings.length || !claim.readings.every(named))) return `claims[${index}] is ambiguous and records no readings`;
+      if (claim.span !== undefined && !(isPlainObject(claim.span) && Number.isSafeInteger(claim.span.start) && Number.isSafeInteger(claim.span.end) && claim.span.start >= 0 && claim.span.start < claim.span.end)) return `claims[${index}].span must be a start before an end`;
+    }
+  }
+  if (entity.causalClaim !== undefined) {
+    const cause = entity.causalClaim;
+    if ((cause?.sourceAvailability === 'unavailable' || (Array.isArray(cause?.evidence) && cause.evidence.some(item => unavailableSources.has(item?.sourceRef))))
+      && Object.hasOwn(cause ?? {}, 'readings')) return 'unavailable causal source retains readings';
+    if (cause?.sourceAvailability === 'unavailable' && Array.isArray(cause.evidence) && !cause.evidence.some(item => item?.sourceAvailability === 'unavailable') && cause.evidence.some(item => Object.hasOwn(item ?? {}, 'text'))) return 'unavailable causal source has no unavailable evidence node';
+    if (Array.isArray(cause?.evidence) && cause.evidence.some(item => (item?.sourceAvailability === 'unavailable' || unavailableSources.has(item?.sourceRef)) && ['text', 'evidence', 'readings'].some(key => Object.hasOwn(item ?? {}, key)))) return 'unavailable causal source retains an evidence copy';
+    if (!isPlainObject(cause) || !CAUSAL_STATES.includes(cause.state)) return `causalClaim.state must be one of ${CAUSAL_STATES.join(', ')}`;
+    if (cause.class !== undefined && (!CLAIM_CLASSES.includes(cause.class) || cause.class === 'unsupported')) return 'causalClaim.class must be quoted, entailed or ambiguous';
+    if (cause.class !== undefined && !named(cause.verifierVersion)) return 'causalClaim carries a class but no verifierVersion: a class comes from the claim verifier';
+    if (cause.state === 'legacy_freetext') {
+      if (['quoted', 'entailed'].includes(cause.class)) return 'legacy free-text cause is never quoted or entailed';
+      if (cause.evidence !== undefined && (!Array.isArray(cause.evidence) || cause.evidence.length > 0)) return 'legacy free-text cause carries no evidence';
+    }
+  }
+  if (entity.outcomeEvidence !== undefined) {
+    const outcome = entity.outcomeEvidence;
+    if (!isPlainObject(outcome) || !OUTCOME_EVIDENCE_STATES.includes(outcome.state)) return `outcomeEvidence.state must be one of ${OUTCOME_EVIDENCE_STATES.join(', ')}`;
+    // A null resultClass declares no class, as it does everywhere else.
+    if (outcome.state === 'observed' && !ATTEMPT_RESULT_CLASSES.includes(entity.resultClass)) return `observed outcome evidence requires a resultClass of ${ATTEMPT_RESULT_CLASSES.join(', ')}`;
+    if (outcome.state !== 'observed' && entity.resultClass != null) return `${outcome.state} outcome evidence means resultClass is omitted`;
+  }
+  return null;
+}
+
+// Who owns an entity, for keys that must never merge two owners: an
+// unattributed entity belongs to its origin, never to a project, so its key is
+// an array a project name can never equal. An unattributed entity without a
+// usable origin is invalid (validate() says so) and is keyed by its own id, so
+// two absent origins never share a bucket. Legacy data in "default" -- stored
+// there or stored with no project -- belongs to no project anyone can name
+// (OD-1): before its attribution migration and after it, as legacy_ambiguous
+// or legacy_unattributed, it shares the one legacy key it always shared with
+// its own kind, which the real project called "default" never equals.
+// Everything else keeps the project key it always had.
+function ownerKey(entity, projectOf) {
+  if (entity?.attribution === 'unattributed') return ['origin', usableOriginId(entity.originId) ?? ['unowned', entity.id ?? null]];
+  if (isLegacyOwned(entity)) return ['legacy'];
+  return projectOf(entity?.project);
+}
+
+function ownedByProject(entity, project) {
+  return entity?.project === project && entity?.attribution !== 'unattributed' && !isLegacyOwned(entity);
+}
+
+const originScope = scope => Object.hasOwn(scope, 'originId');
+const ownedByPurgeScope = (entity, scope) => originScope(scope)
+  ? entity?.attribution === 'unattributed' && entity.originId === scope.originId
+  : ownedByProject(entity, scope.project);
+const purgeMarkerInScope = (entry, scope) => originScope(scope)
+  ? entry?.type === 'origin.purged' && entry.payload?.originId === scope.originId
+  : entry?.type === 'project.purged' && entry.project === scope.project;
+
+// What a purge's commit point writes (PR-37d design §1, §2.1): the ledger
+// tombstone, the registry's lineage anchors and the marker's identity, built
+// from values purgeLive already holds, after staging validation and before the
+// first mutation. It reads nothing but its arguments and does no I/O.
+// `journal` and `epoch` are the unspliced journal and its epoch, before the
+// marker; `entities` the records, captures and facts the purge removes, W's
+// included; `absorbed` the intents of the earlier markers a hard re-purge
+// splices (§2.4), whose tokens and move-in it takes over.
+const MOVE_IN_ORDER = ['none', 'some', 'unknown'];
+function purgeIntent({ scope, mode, marker, entities, journal, epoch, absorbed }) {
+  const tokens = new Set(absorbed.flatMap((intent) => intent.tombstone.tokens));
+  for (const entity of entities) if (typeof entity.erasureToken === 'string' && entity.erasureToken) tokens.add(entity.erasureToken);
+  // §1.3, per removed entity (V-4): its naming entries, by hold()'s predicate.
+  // None of a creation type: its history before some point is not here.
+  // Otherwise an attribution into the project among them: it moved in.
+  const naming = new Map(entities.map((entity) => [entity.id, []]));
+  for (const entry of journal) for (const id of new Set([entry?.entityId, replayedEntity(entry)?.id])) naming.get(id)?.push(entry);
+  const histories = [...naming.values()];
+  let moveIn = 'none';
+  if (histories.some((entries) => !entries.some((entry) => CREATION_ENTRY_TYPES.includes(entry.type)))) moveIn = 'unknown';
+  else if (histories.some((entries) => entries.some((entry) => entry.type === 'entity.attributed'
+    && (originScope(scope) ? ownedByPurgeScope(replayedEntity(entry), scope) : entry.project === scope.project)))) moveIn = 'some';
+  for (const intent of absorbed) if (MOVE_IN_ORDER.indexOf(intent.tombstone.moveIn) > MOVE_IN_ORDER.indexOf(moveIn)) moveIn = intent.tombstone.moveIn;
+  // §1.4: the epoch entry (the marker itself when the journal was empty; null
+  // when a hard purge spliced it, filled at the commit point), the head before
+  // the marker, and the marker.
+  const epochEntryId = epoch === null ? marker.id : journal.find((entry) => entry?.seq === epoch)?.id ?? null;
+  return {
+    tombstone: { ...(originScope(scope) ? { kind: 'origin', purgedOrigin: scope.originId } : { kind: 'project', purgedProject: scope.project }), mode, at: marker.at, seq: marker.seq, tokens: [...tokens].sort(), moveIn },
+    lineage: { epochEntryId, headEntryId: journalHead({ journal }), markerEntryId: marker.id },
+    marker: { id: marker.id, at: marker.at, seq: marker.seq }
+  };
+}
+
+// An entity written by a newer build than this one reads: kept as it arrived,
+// reported by validate() as unsupported, and given no meaning here.
+function isFutureEntity(entity) {
+  return Number.isInteger(entity?.schemaVersion) && entity.schemaVersion > READABLE_SCHEMA_VERSION;
+}
+
+// Read, but written by a newer writer than this one: a writer here that restamps
+// an entity never touches it, so nothing it carries is relabelled or lost.
+function isNewerThanWriter(entity) {
+  return Number.isInteger(entity?.schemaVersion) && entity.schemaVersion > SCHEMA_VERSION;
+}
+
+// The order the attribution migration takes entities in, and the legacy
+// attribution review lists them in: by kind, then id.
+function attributionOrder(left, right) {
+  return ATTRIBUTED_ENTITY_KINDS.indexOf(left.kind) - ATTRIBUTED_ENTITY_KINDS.indexOf(right.kind) || String(left.id).localeCompare(String(right.id));
+}
+
+// The top-level list of legacy entities stored with no project that are still
+// waiting for the attribution migration (see `projectlessLegacy`). It is
+// deliberately not one of the NATIVE_STORE_KEYS: the storage backends, and
+// every earlier build that reads schema 6, carry it with the generic top-level
+// carrier byte for byte (axis A-5), and no restore parity check compares it,
+// so a rollback to the reader floor neither loses it nor trips over it.
+const STORED_WITHOUT_PROJECT = 'storedWithoutProject';
+
+const sameOwnerKey = (left, right) => JSON.stringify(ownerKey(left, (project) => project ?? 'default')) === JSON.stringify(ownerKey(right, (project) => project ?? 'default'));
+
+// Caller idempotency keys are at most 200 characters (validateIdempotencyKey).
+// A retry stored beside another owner's key carries this after the caller's
+// key, so its text after the owner prefix is longer than any key a request can
+// send: no request can name it, and the prefix still binds it to its owner.
+const BESIDE_ANOTHER_OWNER = '#'.repeat(200);
+
+// The prefix an idempotency key must carry for the entity it maps to. An
+// unattributed entity's keys live under its origin (`kind@"origin":`), a
+// namespace no project-scoped key (`kind:project:`) can reach.
+function idempotencyKeyPrefix(value) {
+  const scope = value?.scope ?? {};
+  const identity = value?.kind === 'memory'
+    ? `${JSON.stringify([scope.userId ?? null, scope.agentId ?? null, scope.runId ?? null, value.memoryType ?? null, value.key ?? null])}:`
+    : '';
+  const owner = value?.attribution === 'unattributed' ? `@${JSON.stringify(value.originId ?? null)}:` : `:${value?.project}:`;
+  return `${value?.kind}${owner}${identity}`;
+}
 
 // A source class records WHAT WAS CLAIMED about a fact's origin. It is never proof
 // and never by itself grants trust.
@@ -57,6 +324,9 @@ export const DECISION_TRANSITIONS = Object.freeze({
   archived: Object.freeze([])
 });
 const CURRENT_DECISION_STATUSES = Object.freeze(['proposed', 'planned', 'in_progress', 'executed', 'validated', 'reconsidered']);
+// The stated policy threshold: a decision whose recorded confidence is below it
+// is reported as such by the default read (PC-01(b)).
+const LOW_CONFIDENCE_THRESHOLD = 0.5;
 
 export const OUTCOME_STATUSES = Object.freeze(['successful', 'mixed', 'failed', 'unknown']);
 // Deliberately NOT called an outcome. `outcome` here is a decision-only,
@@ -104,6 +374,68 @@ function assertFiniteJsonNumbers(value, seen = new WeakSet()) {
 function clone(value) {
   assertFiniteJsonNumbers(value);
   return JSON.parse(JSON.stringify(value));
+}
+
+// A stored record carries the fields of its kind; a summary that only names
+// one ({ id, kind, ... }) does not. A legacy fact or relation may carry no kind.
+const RECORD_FIELDS = new Map([['decision', ['title', 'chosen', 'goal']], ['attempt', ['solution', 'result', 'reason']], ['memory', ['text', 'key']], ['fact', ['key', 'value']]]);
+const isRecord = (value) => typeof value.id === 'string' && (value.kind === undefined || (RECORD_FIELDS.get(value.kind) ?? []).some((field) => Object.hasOwn(value, field)));
+// Recognize historical output records without consulting today's live maps.
+// Import accepts attempts without content and facts without a value. Their
+// identity/kind or fact key, not optional content, establishes this boundary.
+// Administrative item envelopes project their entity before wrapping it.
+const isReferenceRecord = value => typeof value.id === 'string' && (
+  (RECORD_FIELDS.get(value.kind) ?? []).some(field => Object.hasOwn(value, field))
+  || value.kind === 'attempt'
+  || (value.kind === 'alternative' && Object.hasOwn(value, 'label'))
+  || ((value.kind === undefined || value.kind === 'fact') && typeof value.key === 'string')
+);
+// Where a public result holds a caller's own value, or an entry as it was
+// written: a journal payload, or a retry value (an idempotency entry's value).
+const AS_STORED_KEYS = new Set(['payload', 'value', 'expected', 'observed']);
+
+// Every public result -- a read, a write's echo, a journal entry's payload --
+// passes through here; only the privileged snapshot does not.
+// - Plan rev6 §3.2 (DP-1): an entity's erasureToken is internal and is removed.
+// - PR-23: an attempt stored before causes were has no causalClaim, and none is
+//   stored for it: an older build replays its journal entry, which has none,
+//   and must find the live record equal to it. Its cause is derived here, as
+//   legacy free text, on the record itself only: never inside another record,
+//   whose content is its writer's, a journal payload, which is shown as it was
+//   written, or a caller's value.
+// Copies are made only along a path that changes, so stored state is never
+// touched.
+function publicValue(value, derive = true) {
+  if (Array.isArray(value)) {
+    let copy = null;
+    value.forEach((item, index) => {
+      const next = publicValue(item, derive);
+      if (next !== item) (copy ??= [...value])[index] = next;
+    });
+    return copy ?? value;
+  }
+  if (!value || typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype) return value;
+  let copy = null;
+  if (Object.hasOwn(value, 'erasureToken') && (typeof value.kind === 'string' || Object.hasOwn(value, 'id'))) {
+    const { erasureToken, ...rest } = value;
+    copy = rest;
+  }
+  const record = isRecord(value);
+  if (derive && record && value.kind === 'attempt' && value.causalClaim === undefined && !isFutureEntity(value)) {
+    copy = { ...(copy ?? value), causalClaim: causalClaimFor(value.reason, { legacy: true }) };
+  }
+  for (const [key, item] of Object.entries(copy ?? value)) {
+    const next = publicValue(item, derive && !record && !AS_STORED_KEYS.has(key));
+    if (next !== item) (copy ??= { ...value })[key] = next;
+  }
+  return copy ?? value;
+}
+
+function tokenFreeApi(api, project = value => value) {
+  return Object.fromEntries(Object.entries(api).map(([name, member]) => [name, typeof member !== 'function' ? member : (...args) => {
+    const result = member(...args);
+    return result && typeof result.then === 'function' ? result.then((value) => publicValue(project(value))) : publicValue(project(result));
+  }]));
 }
 
 // Detach one value on its way into a response. clone() is the established JSON
@@ -265,7 +597,7 @@ function journalEntryReferencesPurge(entry, ids, project) {
 function rewriteBaselineForProjectPurge(entry, project, removed, removedRelationIds) {
   if (entry?.type !== 'projection.baseline' || !entry.payload || entry.redacted === true) return false;
   const payload = entry.payload;
-  const keep = (value) => value?.project !== project && !removed.has(value?.id);
+  const keep = (value) => !removed.has(value?.id);
   const records = (payload.records ?? []).filter(keep);
   const facts = (payload.facts ?? []).filter(keep);
   const relations = (payload.relations ?? []).filter((relation) => (
@@ -285,8 +617,56 @@ function rewriteBaselineForProjectPurge(entry, project, removed, removedRelation
   return true;
 }
 
+// Keep every replay/retry copy of surviving experience consistent with source
+// deletion. This removes typed evidence copies, not accepted canonical text.
+function rewriteDeletedSourceCopies(entries, removed) {
+  const baselines = new Set();
+  for (let index = 0; index < entries.length; index += 1) {
+    const previous = entries[index], next = withoutSourceCopies(previous, removed);
+    if (next === previous) continue;
+    entries[index] = next;
+    if (next.type === 'projection.baseline') { sanitizeRewrittenBaseline(next); baselines.add(next.seq); }
+  }
+  return baselines;
+}
+
 function journalProjectionSignature(report) {
   return JSON.stringify(canonical(report.projection));
+}
+
+// Deletion can remove the only additions in a midstream migration baseline.
+// Drop its replay effect only when every surviving member and retry mapping is
+// already identical in the surviving prefix. Keep initial/useful baselines and
+// let the normal validators refuse every other malformed placement.
+function normalizeRewrittenPurgeBaselines(entries, rewritten, modeFor, reason) {
+  const removedSequences = [];
+  let skeletons = 0;
+  for (const entry of [...entries]) {
+    if (!rewritten.has(entry.seq) || entry.type !== 'projection.baseline'
+      || entry.derivedFrom !== 'live_state_at_migration' || !entry.payload || entry.redacted === true) continue;
+    const prefix = entries.filter(item => item.seq < entry.seq);
+    if (!prefix.some(item => REPLAYABLE_ENTRY_TYPES.includes(item.type) && item.replayable !== false)) continue;
+    // A staged hard deletion may have gaps whose marker is appended afterwards.
+    // They do not change the fold; every other diagnostic still refuses this
+    // optimization, and the final complete journal must prove all gap coverage.
+    const report = rebuildProjection(prefix, { sourceSchemaVersion: SCHEMA_VERSION });
+    if (report.skipped.length || (!report.rebuildable && report.reason !== 'journal contains unexplained sequence gaps inside the replay range')) continue;
+    const same = (left, right) => JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
+    const redundant = ['records', 'facts', 'relations', 'idempotency'].every(name => {
+      const key = name === 'idempotency' ? 'key' : 'id';
+      const previous = new Map(report.projection[name].map(item => [item[key], item]));
+      return (entry.payload[name] ?? []).every(item => previous.has(item[key]) && same(previous.get(item[key]), item));
+    });
+    if (!redundant) continue;
+    if (modeFor(entry) === 'hard') {
+      entries.splice(entries.indexOf(entry), 1);
+      removedSequences.push(entry.seq);
+    } else {
+      scrubLogicalPurgeSkeleton(entry, reason);
+      skeletons += 1;
+    }
+  }
+  return { removedSequences, skeletons };
 }
 
 // Schemas 1–4 could express a purge only by retaining raw entity ids in the
@@ -307,7 +687,8 @@ function migrateLegacyPurgeArtifacts({
   importedEvents,
   journalEpoch: candidateJournalEpoch
 }) {
-  if (Number.isInteger(sourceSchemaVersion) && sourceSchemaVersion >= SCHEMA_VERSION) return;
+  // Schema 5 introduced canonical purge markers; only older sources need this.
+  if (Number.isInteger(sourceSchemaVersion) && sourceSchemaVersion >= 5) return;
   const legacyMarkers = importedJournal.filter((entry) => entry?.type === 'project.purged');
   for (const marker of legacyMarkers) {
     scrubPurgeMarkerIdentity(marker);
@@ -425,9 +806,20 @@ function idempotencySemanticEntity(value) {
       recordedAt: value.temporal?.recordedAt ?? value.createdAt ?? null
     }
   });
+  // A capture's retry value names one occurrence: what it observed never
+  // changes, whatever state the item has since reached (PR-34).
+  if (value.kind === 'capture') return canonical({
+    ...common, originId: value.originId ?? null, source: value.source ?? null,
+    observedAt: value.observedAt ?? null, occurrenceSeq: value.occurrenceSeq ?? null
+  });
   if (value.kind === 'attempt') {
     const semantic = clone(value);
+    // Storage version and attribution are assigned by migration, not by the
+    // write a retry repeats; the cause follows from the reason (PR-23), and a
+    // public result shows one for an attempt that stores none.
     delete semantic.schemaVersion;
+    delete semantic.attribution;
+    delete semantic.causalClaim;
     return canonical(semantic);
   }
   return canonical(common);
@@ -473,6 +865,11 @@ function resolvePage(options = {}, total) {
   return { offset: rawOffset, limit, total, hasMore: rawOffset + limit < total, limitApplied: rawLimit !== undefined };
 }
 
+function severityCounts(issues) {
+  const count = (name) => issues.filter((issue) => issue.severity === name).length;
+  return { error: count('error'), legacy: count('legacy'), unsupported: count('unsupported'), info: count('info') };
+}
+
 function paginate(items, options, scope, extra = {}) {
   const page = resolvePage(options, items.length);
   const slice = items.slice(page.offset, page.offset + page.limit);
@@ -489,6 +886,77 @@ function paginate(items, options, scope, extra = {}) {
       limitSource: page.limitApplied ? 'caller' : 'default',
       ...extra
     }
+  };
+}
+
+// Completeness is relative to this request's known candidates, never a claim
+// of total semantic recall. An exact origin can read its unattributed records
+// while the project is still unresolved. A grant augments only the read set.
+// When the store holds capture state, the scope's capture status comes with it
+// (plan v1.4.4 §24.1, M-9). Captured material this scope has not yet had
+// understood means the view is not complete. Capture refusing material -- at a
+// store limit now, or in a gap it declares -- is said too, without making the
+// view incomplete: what was refused was never a candidate any read can find.
+// What deletion records withhold as possibly purged, and a restore that has
+// not finished, make it incomplete and are said (PR-37c design §9.3): the
+// quarantined count is exact, and the pending note covers what the restore
+// has not yet settled, in every state of its record.
+function scopeCompleteness(scope, current = { complete: true }, signals = []) {
+  const partial = signals.some((signal) => signal.limitation?.code === 'scoped_coverage');
+  const capture = scope.capture ?? null;
+  const backlog = capture ? UNEXTRACTED_STATES.reduce((sum, state) => sum + capture[state], 0) : 0;
+  const details = [current.limitation?.detail];
+  if (scope.state === 'project_unresolved') details.push(scope.grant
+    ? 'No project was resolved. The explicit wider grant augmented any permitted origin-owned content; project identity remains unresolved.'
+    : scope.originId === null
+    ? 'No project or usable origin was resolved. No project content was searched.'
+    : 'No project was resolved. Only unattributed content belonging to the presented origin was searched.');
+  if (partial) details.push('Some own signals have historical detail outside this scope. Only their identity and lifecycle are shown.');
+  if (scope.grantLimitation) details.push(`Wider access was refused (${scope.grantLimitation}); permitted own-scope access is retained.`);
+  const scoped = details.length > 1;
+  if (backlog) details.push(`${backlog} captured ${backlog === 1 ? 'item is' : 'items are'} not yet understood in this scope: captured is not stored experience.`);
+  if (capture?.limited.length) details.push(`Capture is at a limit (${capture.limited.map((entry) => entry.limit).join(', ')}): new material is refused, and nothing accepted is removed.`);
+  const refused = [...new Set((capture?.gaps ?? []).map((entry) => entry.reason).filter((reason) => reason !== RAW_EXPIRED && !TRANSCRIPT_GAP_REASONS.includes(reason)))];
+  const unread = [...new Set((capture?.gaps ?? []).map((entry) => entry.reason).filter((reason) => TRANSCRIPT_GAP_REASONS.includes(reason)))];
+  if (refused.length) details.push(`Capture refused material (${refused.join(', ')}); what it refused is not here.`);
+  if (unread.length) details.push(`Capture did not read part of a session's transcript (${unread.join(', ')}); what it did not read is not here.`);
+  if (capture?.gaps.some((entry) => entry.reason === RAW_EXPIRED)) details.push('Capture raw has reached its retention deadline and is unavailable for re-extraction.');
+  if (capture?.gaps.some((entry) => entry.reason === RAW_EXPIRED && entry.sessions > 0)) details.push('Transcript capture remains blocked for affected sessions because expired Stop material cannot safely reconcile delayed transcript copies; direct hook capture can continue.');
+  const quarantined = scope.quarantined ?? 0;
+  if (quarantined) details.push(`${quarantined} ${quarantined === 1 ? 'item of this scope is' : 'items of this scope are'} withheld as possibly purged; only the owner can release or purge them.`);
+  if (scope.restorePending) details.push('A restore has not finished; material it may remove or quarantine is withheld until the next write completes it.');
+  return {
+    ...current,
+    scope: { ...current.scope, project: scope.project, requestState: scope.state, originPresented: scope.originId !== null, grant: scope.grant ?? null },
+    complete: current.complete === true && scope.state === 'project_selected' && !partial && !scope.grantLimitation && !backlog && !quarantined && !scope.restorePending,
+    ...(capture ? { capture: { ...capture, limited: capture.limited.map((entry) => ({ ...entry })), gaps: capture.gaps.map((entry) => ({ ...entry })) } } : {}),
+    ...(quarantined ? { quarantined } : {}),
+    ...(partial ? { losslessItems: false } : {}),
+    ...(details.some(Boolean) ? { limitation: { ...current.limitation, code: current.limitation?.code ?? (scoped ? 'scoped_coverage' : backlog ? 'capture_pending' : capture?.limited.length ? 'capture_limited' : refused.length || unread.length || !(quarantined || scope.restorePending) ? 'capture_gap' : quarantined ? 'quarantine_withheld' : 'restore_pending'), detail: details.filter(Boolean).join(' ') } } : {})
+  };
+}
+
+function scopedResult(result, boundary, signals = []) {
+  return { ...result, completeness: scopeCompleteness(boundary.scope, result.completeness ?? { complete: true, ...(result.limitation ? { limitation: result.limitation } : {}) }, signals) };
+}
+
+function scopedPage(items, options, boundary, scope, extra = {}) {
+  return scopedResult(paginate(items, options, scope, extra), boundary);
+}
+
+function scopedItems(items, boundary, signals = []) {
+  return scopedResult({ items, completeness: { returned: items.length, total: items.length, omitted: 0, complete: true, losslessItems: true } }, boundary, signals);
+}
+
+// The pointer from the default-path read to the operation that took over its
+// old evaluate-and-persist behaviour (plan v1.4.4 §13.2). It is declared,
+// non-canonical interface metadata, names the replacement, and names no
+// release: when it is withdrawn is a release decision.
+function contextNotice() {
+  return {
+    code: 'context_does_not_persist',
+    detail: 'context is a read and persists no review signal. reviewContext evaluates and persists: MCP shadowgraph_review_context, CLI review-context, HTTP POST /review-context.',
+    replacement: { kernel: 'reviewContext', mcp: 'shadowgraph_review_context', cli: 'review-context', http: 'POST /review-context' }
   };
 }
 
@@ -542,6 +1010,10 @@ export function createShadowGraph(options = {}) {
   }
 
   const records = new TransactionMap();
+  // Capture items (PR-33): stored in `records[]`, held apart here so no read of
+  // records ever meets one. Only persistence, import, purge and id allocation
+  // look in this map.
+  const captures = new TransactionMap();
   const currentMemories = new TransactionMap();
   const facts = new TransactionMap();
   const currentFacts = new TransactionMap();
@@ -550,6 +1022,1621 @@ export function createShadowGraph(options = {}) {
   const relations = new TransactionMap();
   const reviewSignals = new TransactionMap();
   const idempotency = new TransactionMap();
+  // Top-level collections this build does not understand, carried verbatim
+  // through import and the privileged snapshot (axis A-5). They are never
+  // interpreted, and never part of a public read.
+  const extras = new TransactionMap();
+  // Deletion knowledge (PR-37a; design §2, §11, §12): the store control
+  // ledger's view a load hands the import, under 'view', and the withheld set W
+  // it names, under 'held'. Values here are replaced whole, never changed in
+  // place, so a transaction can undo them.
+  const deletion = new TransactionMap();
+  let readOperation = null;
+  const authority = createAccessLifecycle({
+    now,
+    read: () => ({ access: extras.get('access'), accessRevocations: extras.get('accessRevocations'), events }),
+    write: payload => {
+      if (payload.access !== undefined) extras.set('access', clone(payload.access));
+      if (payload.accessRevocations !== undefined) extras.set('accessRevocations', clone(payload.accessRevocations));
+      const previous = [...events];
+      if (transactionContext?.mode === 'undo') transactionContext.undo.push(() => { events.length = 0; Array.prototype.push.apply(events, previous); });
+      events.length = 0; Array.prototype.push.apply(events, clone(payload.events));
+    }
+  });
+
+  function bindProject(input = {}) {
+    if (!['worktree', 'shared_repository'].includes(input.type) || typeof input.path !== 'string' || !input.path.trim() || typeof input.project !== 'string' || !input.project.trim()) throw new Error('Binding requires explicit mapping type, resolved path and project');
+    const current = extras.get('projectBindings') ?? { entries: [] };
+    if (!Array.isArray(current.entries)) throw new Error('Project bindings are malformed');
+    const binding = { type: input.type, path: input.path, project: input.project, confirmed: true, confirmedAt: now() };
+    extras.set('projectBindings', { entries: [...current.entries.filter(item => !(item.type === input.type && item.path === input.path)), binding] });
+    event('project.bound', { mode: 'confirmation', activationSignal: 'local_binding_file', mappingType: binding.type, path: binding.path, boundProject: binding.project, reason: input.reason ?? null, surface: input.surface ?? 'local-owner' });
+    return clone(binding);
+  }
+  function resolveProjectBinding({ worktreeRoot, commonDir } = {}) {
+    const entries = extras.get('projectBindings')?.entries;
+    if (!Array.isArray(entries)) return null;
+    const found = entries.find(item => item.confirmed === true && item.type === 'worktree' && item.path === worktreeRoot)
+      ?? entries.find(item => item.confirmed === true && item.type === 'shared_repository' && item.path === commonDir);
+    return found ? { project: found.project, confirmed: true } : null;
+  }
+
+  // The capture writer (plan v1.4.4 PR-34, §12; the shape PR-33 froze). It is
+  // privileged: nothing registered calls it yet -- no verb, hook or worker --
+  // and nothing it writes is shown on a public read.
+  //
+  // A capture belongs to the origin that observed it and to its session's
+  // owner, fixed at the session's first capture so a binding change never
+  // splits a session. Its ordinal is the session's next, allocated inside this
+  // write -- past both the session record's mark and every ordinal a live
+  // capture of the session holds, so a stale or damaged record can never hand
+  // one out twice -- and a write that never lands allocates nothing. Identity
+  // follows the source contract (CAPTURE_EVENT_IDENTITY): the host identifier
+  // the event's row names makes a re-delivery the same occurrence, a SessionEnd
+  // is one per session, and otherwise every call is a new occurrence (F-11b).
+  // The identity key is a digest of the origin, session, event and that
+  // identifier or ordinal: never content. The raw text goes into
+  // captureContent under a random key, never into the journal.
+  //
+  // Admission (plan v1.4.4 §22.6.1, M-11; PR-36b) is checked here, inside the
+  // write: the caller passes the limits and the store's bytes on disk, and the
+  // item's bytes, the session's items, the queue (items not yet extracted) and
+  // the store are measured against them. A crossing writes no item: it returns
+  // the refusal, and only the first refusal of a store or session limit writes
+  // anything -- the start of its capture_limited episode; an accepted item ends
+  // the episodes it shows no longer bind. Nothing accepted is ever evicted, and
+  // no limit is raised here. A session one project owns never takes another
+  // project's capture: that is refused, not filed under the first project.
+  // An item identified only by its ordinal whose material repeats the session's
+  // previous item of the same event is marked possibleDuplicateOf it (F-11a).
+  const retentionPolicy = () => deletion.get('view')?.retentionOverrides ?? [];
+  const rawExpired = (item, at = now()) => {
+    const restoreAt = deletion.get('view')?.retentionAt;
+    return captureRawExpired(item, retentionPolicy(), isValidIsoInstant(restoreAt) && Date.parse(restoreAt) > Date.parse(at) ? restoreAt : at);
+  };
+
+  function recordCapture(input = {}, { keyBlock = null, withhold = false } = {}) {
+    if (!isPlainObject(input)) throw new Error('A capture needs an input object');
+    const originId = usableOriginId(input.originId);
+    if (originId === null || originId !== input.originId) throw new Error('A capture names the originId that observed it');
+    const source = input.source;
+    if (!isPlainObject(source) || !Object.hasOwn(CAPTURE_EVENT_IDENTITY, source.event)) throw new Error(`A capture source names an event the source contract covers: ${Object.keys(CAPTURE_EVENT_IDENTITY).join(', ')}`);
+    if (!named(source.sessionId)) throw new Error('A capture source names its sessionId');
+    if (input.text !== undefined && typeof input.text !== 'string') throw new Error('A capture text is a string');
+    if (input.observedAt !== undefined && !isValidIsoInstant(input.observedAt)) throw new Error('A capture observedAt is an ISO 8601 instant');
+    const admission = input.admission;
+    if (!isPlainObject(admission) || !isPlainObject(admission.limits) || !ADMISSION_LIMITS.every((name) => Number.isSafeInteger(admission.limits[name]) && admission.limits[name] > 0) || !Number.isSafeInteger(admission.storeBytes) || admission.storeBytes < 0) {
+      throw new Error(`A capture names its admission: the limits ${ADMISSION_LIMITS.join(', ')}, each a positive integer, and the store's bytes`);
+    }
+    const observationIssue = input.observation === undefined ? null : captureObservationIssue(input.observation);
+    if (observationIssue) throw new Error(`A capture ${observationIssue}`);
+    // A project named as null is no project named, as it is when left out.
+    const project = input.project ?? undefined;
+    if (project !== undefined && (typeof project !== 'string' || !project.trim())) throw new Error('A capture names its project as a non-empty string, or none');
+    const { sessions, session, held, owner, ownedBy, withheld } = captureSession(originId, source.sessionId, project);
+    // A session W holds is never minted again, nor written to (design §12 C1).
+    if (withheld) return { refused: { reason: SESSION_WITHHELD }, changed: false };
+    const observed = {
+      event: source.event, sessionId: source.sessionId, role: source.role ?? null,
+      hostEventId: source.hostEventId ?? null, toolCallId: source.toolCallId ?? null, turnIndex: source.turnIndex ?? null
+    };
+    const identifiedBy = CAPTURE_EVENT_IDENTITY[observed.event];
+    const hostIdentity = identifiedBy === 'session' ? ['session']
+      : identifiedBy !== null && observed[identifiedBy] !== null ? [identifiedBy, observed[identifiedBy]] : null;
+    const occurrenceSeq = held + 1;
+    const identityKey = createHash('sha256').update(JSON.stringify([originId, observed.sessionId, observed.event, ...(hostIdentity ?? ['occurrence', occurrenceSeq])])).digest('hex');
+    let slot;
+    try { slot = retrySlot({ ...owner, idempotencyKey: identityKey }, CAPTURE_KIND, owner); }
+    catch (error) { if (error.code === IDEMPOTENCY_KEY_WITHHELD) return { refused: { reason: IDEMPOTENCY_KEY_WITHHELD }, changed: false }; throw error; }
+    if (idempotency.has(slot)) {
+      if (hostIdentity) return clone(canonicalIdempotencyValue(idempotency.get(slot)));
+      throw new Error('Capture refused: its occurrence is already held');
+    }
+    const at = now();
+    if (ownedBy?.attribution === 'project' && project !== undefined && project !== ownedBy.project) return refuseOtherOwner(project, at);
+    // ShadowGraph's own delivered blocks never become raw material; each one
+    // removed is counted as a tool-target self-event (§16.4; PR-35).
+    const stripped = input.text === undefined ? { text: undefined, removed: 0 } : stripDeliveredBlocks(input.text);
+    // Redaction at capture, before the write (§21.2 M-2; PR-37b): after the
+    // blocks are stripped, whose closing lines are matched by their bytes, and
+    // before anything is measured, hashed or kept. Text more than twice what an
+    // item may hold is refused unredacted, as the transcript read does. What
+    // the checker still flags is withheld: the item is kept, blocked, with no
+    // content. The transcript read carries a private key's state across the
+    // entries it records (revision 2 R6), and withholds every entry of a run
+    // whose joined text the checker flags (review F1).
+    if (stripped.text !== undefined && Buffer.byteLength(stripped.text) > 2 * admission.limits.maxItemBytes) {
+      return refuseAdmission({ limit: 'maxItemBytes', ceiling: admission.limits.maxItemBytes, scope: 'item' }, session, sessions, at);
+    }
+    const redacted = stripped.text === undefined ? undefined : keyBlock ? redactValue(stripped.text, keyBlock) : redactText(stripped.text);
+    const withheldText = redacted !== undefined && (withhold || captureWithheld(redacted));
+    const text = withheldText ? undefined : redacted;
+    const observation = input.observation === undefined ? undefined : withholdFlagged(redactValue(input.observation));
+    const crossing = admissionCrossing(admission, text, originId, observed.sessionId, [observation ?? null, observed], at);
+    if (crossing) return refuseAdmission(crossing, session, sessions, at);
+    const contentHash = text === undefined ? null : createHash('sha256').update(text).digest('hex');
+    const item = {
+      id: allocateEntityId(CAPTURE_KIND), kind: CAPTURE_KIND, schemaVersion: SCHEMA_VERSION,
+      project: owner.project, attribution: owner.attribution, originId,
+      state: withheldText ? 'blocked' : 'pending', source: observed, observedAt: input.observedAt ?? at, occurrenceSeq,
+      sourceIdentity: input.sourceIdentity ?? 'unattributed_observer',
+      contentRef: text === undefined ? null : `content_${randomUUID()}`,
+      contentHash,
+      lease: null, attempts: 0, lastError: null, blockedReason: withheldText ? CREDENTIAL_WITHHELD : null, producedRecordIds: [], receipts: [],
+      erasureToken: allocateErasureToken(), cancelRequested: false, supersededResults: [],
+      possibleDuplicateOf: withheldText ? null : hostIdentity === null ? previousRepeat(originId, observed, contentHash, at) : observed.event === 'Transcript' ? assistantRepeat(originId, observed.sessionId, contentHash, at) : null,
+      expiresAt: null, createdAt: at, updatedAt: at,
+      ...(observation === undefined ? {} : { observation })
+    };
+    item.expiresAt = effectiveCaptureExpiry(item, retentionPolicy());
+    const issue = captureItemIssue(item);
+    if (issue) throw new Error(`Capture refused: ${issue}`);
+    assertJournalCapacity(1);
+    captures.set(item.id, item);
+    const next = { ...(session ?? newCaptureSession(originId, observed.sessionId, owner)), project: owner.project, attribution: owner.attribution, occurrenceSeqHighWater: occurrenceSeq, updatedAt: at };
+    if (stripped.removed) next.selfEvents = countSelfEvent(next.selfEvents, 'S-1', observed.event, stripped.removed);
+    // An accepted item shows the store's limits and this session's no longer bind.
+    if (next.limited?.since) next.limited = { ...next.limited, since: null, lastPeriod: { from: next.limited.since, to: at } };
+    endStoreLimits(at);
+    extras.set(CAPTURE_SESSIONS, session ? sessions.map((entry) => (entry === session ? next : entry)) : [...sessions, next]);
+    if (item.contentRef) extras.set(CAPTURE_CONTENT, [...(extras.get(CAPTURE_CONTENT) ?? []), { contentRef: item.contentRef, project: owner.project, attribution: owner.attribution, originId, text }]);
+    appendJournal({ type: 'capture.recorded', entityKind: CAPTURE_KIND, entityId: item.id, project: item.project, payload: item, idempotencyKey: slot });
+    idempotency.set(slot, clone(item));
+    return clone(item);
+  }
+
+  // A capture session and its owner: its record's, else that of the captures
+  // it already has (a session whose record is gone keeps its owner), else the
+  // write's. A record that holds only self-event counters has no owner yet, so
+  // ShadowGraph's own traffic never decides whose work follows: the session's
+  // first capture, or its transcript cursor (PR-36), gives it one. Its count
+  // is past the record's mark and every ordinal a live capture of the session
+  // holds.
+  function captureSession(originId, sessionId, project) {
+    const sessions = extras.get(CAPTURE_SESSIONS) ?? [];
+    const session = sessions.find((entry) => entry.originId === originId && entry.sessionId === sessionId);
+    // ponytail: a scan of every capture per write; an index by session if capture volume grows.
+    let held = Number.isSafeInteger(session?.occurrenceSeqHighWater) && session.occurrenceSeqHighWater > 0 ? session.occurrenceSeqHighWater : 0;
+    let earlier = null;
+    for (const item of captures.values()) {
+      if (item.originId !== originId || item.source?.sessionId !== sessionId || !Number.isSafeInteger(item.occurrenceSeq)) continue;
+      held = Math.max(held, item.occurrenceSeq);
+      earlier ??= item;
+    }
+    // A capture W holds keeps its ordinal (PR-37a).
+    for (const item of withheldCaptures()) if (item.originId === originId && item.source?.sessionId === sessionId && Number.isSafeInteger(item.occurrenceSeq)) held = Math.max(held, item.occurrenceSeq);
+    const owned = session && (session.occurrenceSeqHighWater > 0 || earlier || isPlainObject(session.cursor)) ? session : null;
+    const resolved = owned ?? earlier ?? writeOwner({ project, originId });
+    return { sessions, session, held, owner: { project: resolved.project, attribution: resolved.attribution, originId }, ownedBy: owned ?? earlier, withheld: sessionWithheld(originId, sessionId) };
+  }
+
+  // The first admission limit an item crosses, or null (§22.6.1): its own
+  // bytes (a transient refusal, never an episode), then its session's items
+  // (every item the session holds), the queue of items not yet extracted, and
+  // the store's bytes on disk with the item's own stored size estimated -- its
+  // escaped material once, what it describes (its observation and source) three
+  // times, as the item, its journal entry and its retry value each hold it, and
+  // a fixed allowance for the rest.
+  function admissionCrossing({ limits, storeBytes }, text, originId, sessionId, described, at) {
+    const bytes = text === undefined ? 0 : Buffer.byteLength(text);
+    if (bytes > limits.maxItemBytes) return { limit: 'maxItemBytes', ceiling: limits.maxItemBytes, scope: 'item' };
+    let sessionItems = 0;
+    let queued = 0;
+    for (const item of captures.values()) {
+      if (rawExpired(item, at)) continue;
+      if (item.state !== 'extracted') queued += 1;
+      if (item.originId === originId && item.source?.sessionId === sessionId) sessionItems += 1;
+    }
+    if (sessionItems >= limits.maxItemsPerSession) return { limit: 'maxItemsPerSession', ceiling: limits.maxItemsPerSession, scope: 'session' };
+    if (queued >= limits.maxQueueDepth) return { limit: 'maxQueueDepth', ceiling: limits.maxQueueDepth, scope: 'store' };
+    if (storeBytes + storedEstimate(text, described) > limits.maxStoreBytes) return { limit: 'maxStoreBytes', ceiling: limits.maxStoreBytes, scope: 'store' };
+    return null;
+  }
+  const storedEstimate = (text, described) => (text === undefined ? 0 : Buffer.byteLength(JSON.stringify(text))) + 3 * Buffer.byteLength(JSON.stringify(described)) + CAPTURE_ITEM_ALLOWANCE;
+
+  // A refused capture. The first refusal of a store limit opens its episode in
+  // the events carrier (one entry per limit, updated in place, holding no
+  // project, session or content), and of the session limit on the session's
+  // record; a refusal while the episode is open writes nothing. `changed` says
+  // whether anything was written, so a caller saves only then.
+  function refuseAdmission(crossing, session, sessions, at) {
+    const refused = { limit: crossing.limit, ceiling: crossing.ceiling };
+    if (crossing.scope === 'store') {
+      const index = events.findIndex((entry) => entry?.type === CAPTURE_LIMIT_EVENT && entry.limit === crossing.limit);
+      const held = index === -1 ? null : events[index];
+      if (held?.since) return { refused, changed: false };
+      replaceEvent(index, { id: held?.id ?? id('capture_limit'), type: CAPTURE_LIMIT_EVENT, at, limit: crossing.limit, ceiling: crossing.ceiling, since: at, lastPeriod: held?.lastPeriod ?? null, periods: (held?.periods ?? 0) + 1 });
+      return { refused, changed: true };
+    }
+    if (crossing.scope === 'session' && session && !session.limited?.since) {
+      const limited = { limit: crossing.limit, ceiling: crossing.ceiling, since: at, lastPeriod: session.limited?.lastPeriod ?? null, periods: (session.limited?.periods ?? 0) + 1 };
+      extras.set(CAPTURE_SESSIONS, sessions.map((entry) => (entry === session ? { ...entry, limited, updatedAt: at } : entry)));
+      return { refused, changed: true };
+    }
+    return { refused, changed: false };
+  }
+
+  // A capture refused because another project owns its session (D-6). The
+  // first such refusal for a project leaves one entry in the events carrier,
+  // labelled with that project -- so its reads declare the gap and a purge of
+  // it takes the entry along -- naming no session, other project or material.
+  function refuseOtherOwner(project, at) {
+    const held = events.some((entry) => entry?.type === CAPTURE_REFUSED_EVENT && entry.project === project && entry.reason === OTHER_OWNER);
+    if (!held) events.push({ id: id('capture_refused'), type: CAPTURE_REFUSED_EVENT, at, project, reason: OTHER_OWNER, since: at });
+    return { refused: { reason: OTHER_OWNER }, changed: !held };
+  }
+
+  // Ends every open store-limit episode, keeping the period it covered.
+  function endStoreLimits(at) {
+    events.forEach((entry, index) => {
+      if (entry?.type === CAPTURE_LIMIT_EVENT && entry.since) replaceEvent(index, { ...entry, at, since: null, lastPeriod: { from: entry.since, to: at } });
+    });
+  }
+
+  // One events-carrier entry replaced in place, or appended; undone with the
+  // write that made it.
+  function replaceEvent(index, value) {
+    if (index === -1) {
+      events.push(value);
+      return;
+    }
+    const previous = events[index];
+    if (transactionContext?.mode === 'undo') transactionContext.undo.push(() => { events[index] = previous; });
+    events[index] = value;
+  }
+
+  // The session's latest item of the same event, when its material is the
+  // same -- none, for an event that carries none, repeats none.
+  function previousRepeat(originId, observed, contentHash, at) {
+    let latest = null;
+    for (const item of captures.values()) {
+      if (item.originId === originId && item.source?.sessionId === observed.sessionId && item.source?.event === observed.event && (latest === null || item.occurrenceSeq > latest.occurrenceSeq)) latest = item;
+    }
+    // Withheld material is no repeat of anything, whatever it held (PR-37b
+    // R14): both hashes are null, and the texts were different.
+    return latest !== null && !rawExpired(latest, at) && latest.blockedReason !== CREDENTIAL_WITHHELD && latest.contentHash === contentHash ? latest.id : null;
+  }
+
+  // The newest assistant item of the session -- a Stop's final message or
+  // transcript text -- holding the same material (PR-36 rule 3; §12.2.1 row 5):
+  // what a transcript item repeats, marked and never removed.
+  function assistantRepeat(originId, sessionId, contentHash, at) {
+    if (contentHash === null) return null;
+    let latest = null;
+    for (const item of captures.values()) {
+      if (item.originId === originId && item.source?.sessionId === sessionId && ['Stop', 'Transcript'].includes(item.source?.event) && !rawExpired(item, at) && item.contentHash === contentHash && (latest === null || item.occurrenceSeq > latest.occurrenceSeq)) latest = item;
+    }
+    return latest?.id ?? null;
+  }
+
+  // OD-2 removes eligible uncited raw, including raw held in quarantine.
+  // The view is reapplied after the operation: expiry never releases it.
+  // Canonical records, authority and deletion knowledge are not mutated.
+  function expireCapture({ maxItems = 64, maxSessions = 64, mayContinue = () => true, endLimits = false } = {}) {
+    if (![maxItems, maxSessions].every((value) => Number.isSafeInteger(value) && value > 0) || typeof mayContinue !== 'function') throw new Error('Capture expiry requires positive work bounds');
+    const result = { changed: false, expired: 0, keptCited: 0, sessionsRemoved: 0, more: false };
+    if (!mayContinue()) return { ...result, more: true };
+    if (deletion.has('held')) {
+      unhold();
+      try { return expireCapture({ maxItems, maxSessions, mayContinue, endLimits }); } finally { hold(); }
+    }
+    const at = now();
+    const cited = new Set();
+    // Unsupported extraction output has its own seven-day lifetime, even
+    // when accepted records require the raw citation to remain. Scrub every
+    // persisted copy so replay cannot recover expired unsupported text.
+    const outputExpired = new Set();
+    for (const item of captures.values()) {
+      if (!mayContinue()) { result.more = true; break; }
+      if (item.extractionOutput?.unsupported?.length && isValidIsoInstant(item.extractionOutput.expiresAt)
+        && Date.parse(item.extractionOutput.expiresAt) <= Date.parse(at)) {
+        if (outputExpired.size >= maxItems) { result.more = true; break; }
+        outputExpired.add(item.id);
+      }
+    }
+    const expireOutput = value => {
+      if (!value || typeof value !== 'object') return;
+      if (value.kind === CAPTURE_KIND && outputExpired.has(value.id) && value.extractionOutput) {
+        value.extractionOutput = { ...value.extractionOutput, unsupported: [], expired: true };
+      } else for (const child of Object.values(value)) expireOutput(child);
+    };
+    if (outputExpired.size) {
+      for (const item of captures.values()) expireOutput(item);
+      for (const value of idempotency.values()) expireOutput(value);
+      for (const entry of journal) expireOutput(entry.payload);
+      result.changed = true;
+      result.outputsExpired = outputExpired.size;
+    }
+    // Typed source links only; keep the complete source entry when cited span
+    // and context cannot safely be separated. Held canonical records count.
+    for (const entity of [...records.values(), ...facts.values()]) {
+      if (!mayContinue()) return { ...result, more: true };
+      if (typeof entity.captureRef === 'string') cited.add(entity.captureRef);
+      for (const claim of entity.claims ?? []) if (typeof claim?.sourceRef === 'string') cited.add(claim.sourceRef);
+      for (const evidence of entity.causalClaim?.evidence ?? []) if (typeof evidence?.sourceRef === 'string') cited.add(evidence.sourceRef);
+    }
+    // Citations may name an item or its raw reference; multiple accepted items
+    // can share that reference. Protect the same cited bytes through every alias.
+    for (const item of captures.values()) {
+      if (!mayContinue()) return { ...result, more: true };
+      if (cited.has(item.id) && item.contentRef !== null) cited.add(item.contentRef);
+    }
+    const selected = new Map();
+    for (const item of captures.values()) {
+      if (!mayContinue()) { result.more = true; break; }
+      if (!rawExpired(item, at)) continue;
+      if (cited.has(item.id) || cited.has(item.contentRef)) { result.keptCited += 1; continue; }
+      const expiry = effectiveCaptureExpiry(item, retentionPolicy());
+      if (item.contentRef === null && item.contentHash === null && item.possibleDuplicateOf === null && item.expiresAt === expiry && !['pending', 'failed'].includes(item.state)) continue;
+      if (selected.size >= maxItems) { result.more = true; break; }
+      selected.set(item.id, { item, expiry });
+    }
+    const refs = new Set([...selected.values()].map(({ item }) => item.contentRef).filter(Boolean));
+    // An unexpired or unknown-schema item still retains its shared raw. Clear
+    // eligible expired pointers, but do not erase another item's retained bytes.
+    for (const item of captures.values()) {
+      if (!mayContinue()) return { ...result, more: true };
+      if (!selected.has(item.id)) refs.delete(item.contentRef);
+    }
+    const states = [...selected.values()].filter(({ item }) => ['pending', 'failed'].includes(item.state));
+    assertJournalCapacity(states.length);
+    // Redact raw pointers/hashes in every known capture copy, keeping the
+    // historical state each entry witnessed. New state changes are journaled.
+    const scrub = (item) => {
+      if (item?.kind !== CAPTURE_KIND || item.schemaVersion !== SCHEMA_VERSION) return;
+      const selectedItem = selected.get(item.id);
+      if (selectedItem) {
+        item.contentRef = null;
+        item.contentHash = null;
+        item.possibleDuplicateOf = null;
+        item.expiresAt = selectedItem.expiry;
+      } else if (selected.has(item.possibleDuplicateOf)) item.possibleDuplicateOf = null;
+    };
+    if (selected.size) {
+      for (const item of captures.values()) scrub(item);
+      for (const value of idempotency.values()) scrub(value);
+      for (const entry of journal) {
+        if (entry.type === 'projection.baseline') for (const item of entry.payload?.records ?? []) scrub(item);
+        else scrub(entry.payload);
+      }
+      const content = extras.get(CAPTURE_CONTENT) ?? [];
+      const kept = content.filter((entry) => !refs.has(entry.contentRef));
+      if (kept.length) extras.set(CAPTURE_CONTENT, kept);
+      else extras.delete(CAPTURE_CONTENT);
+      for (const { item } of states) {
+        const next = { ...item, state: 'blocked', blockedReason: RAW_EXPIRED, updatedAt: at };
+        captures.set(item.id, next);
+        appendJournal({ type: 'capture.state_changed', entityKind: CAPTURE_KIND, entityId: item.id, project: item.project, payload: next });
+      }
+      result.changed = true;
+      result.expired = selected.size;
+    }
+    // Session-only metadata has its own finite lifetime. A represented session
+    // keeps its ordinal and cursor, including the expired Stop refusal.
+    const represented = new Set([...captures.values()].map((item) => JSON.stringify([item.originId, item.source.sessionId])));
+    const sessions = extras.get(CAPTURE_SESSIONS) ?? [];
+    for (const session of sessions) {
+      if (!session.limited?.since) continue;
+      const count = [...captures.values()].filter((item) => item.originId === session.originId && item.source.sessionId === session.sessionId && !rawExpired(item, at)).length;
+      if (count < session.limited.ceiling) {
+        session.limited = { ...session.limited, since: null, lastPeriod: { from: session.limited.since, to: at } };
+        result.changed = true;
+      }
+    }
+    let changedSessions = 0;
+    const keptSessions = sessions.filter((session) => {
+      // A refusal is a privacy/exclusion barrier, not orphaned raw metadata.
+      // Dropping it could ingest a delayed old transcript copy after deletion.
+      if (session.cursor?.blocked) return true;
+      if (represented.has(JSON.stringify([session.originId, session.sessionId]))) return true;
+      if (!mayContinue()) { result.more = true; return true; }
+      const last = [session.updatedAt, session.cursor?.advancedAt, session.cursor?.blocked?.at, session.startedAt, ...(Array.isArray(session.gaps) ? session.gaps.flatMap((gap) => [gap?.from, gap?.to]) : [])].filter(isValidIsoInstant).sort(compareInstants).at(-1);
+      const days = session.attribution === 'project' ? retentionPolicy().find((entry) => entry.project === session.project)?.days ?? RAW_RETENTION_DAYS : RAW_RETENTION_DAYS;
+      if (last && Date.parse(last) + days * 86_400_000 > Date.parse(at)) return true;
+      // Stable recent metadata must not consume every mutation slot forever.
+      if (changedSessions >= maxSessions) { result.more = true; return true; }
+      changedSessions += 1;
+      if (!last) { session.updatedAt = at; result.changed = true; return true; }
+      result.changed = true;
+      result.sessionsRemoved += 1;
+      return false;
+    });
+    if (keptSessions.length !== sessions.length) {
+      if (keptSessions.length) extras.set(CAPTURE_SESSIONS, keptSessions);
+      else extras.delete(CAPTURE_SESSIONS);
+    }
+    if (endLimits && events.some((entry) => entry?.type === CAPTURE_LIMIT_EVENT && entry.since)) result.changed = true;
+    if (result.expired || endLimits) endStoreLimits(at);
+    else {
+      // Even contentless/cited expired items stop contributing to admission.
+      const queued = [...captures.values()].filter((item) => item.state !== 'extracted' && !rawExpired(item, at)).length;
+      events.forEach((entry, index) => {
+        if (entry?.type === CAPTURE_LIMIT_EVENT && entry.limit === 'maxQueueDepth' && entry.since && queued < entry.ceiling) {
+          replaceEvent(index, { ...entry, at, since: null, lastPeriod: { from: entry.since, to: at } });
+          result.changed = true;
+        }
+      });
+    }
+    return result;
+  }
+
+  // CLI-only lifecycle access uses exactly its owner, never a grant that
+  // widens experience reads. Quarantined captures are absent from this map.
+  function captureOwner(input = {}) {
+    const scope = resolveScope({ project: input.project, originId: input.originId, binding: input.binding });
+    const owns = (item) => item && (scope.state === 'project_selected'
+      ? item.attribution === 'project' && item.project === scope.project
+      : item.attribution === 'unattributed' && sameOrigin(item.originId, scope.originId));
+    return { scope, owns };
+  }
+
+  function inspectCapture(input = {}) {
+    const { scope, owns } = captureOwner(input);
+    const items = [...captures.values()].filter((item) => owns(item) && (input.id === undefined || input.id === item.id));
+    if (input.id !== undefined && !items.length) throw Object.assign(new Error('Capture item not found in this scope'), { code: 'capture_item_not_found' });
+    const at = now();
+    return { revision, scope, items: items.map((item) => {
+      // Only explicit metadata is projected: future/unknown fields and raw
+      // carriers must never leak through a spread of the persisted item.
+      const produced = item.producedRecordIds.map((id) => records.get(id) ?? facts.get(id));
+      const referenced = new Set();
+      // The frozen capture contract permits record references as string
+      // values in receipts and carried fields, not only producedRecordIds.
+      const collect = (value) => {
+        if (typeof value === 'string') {
+          const entity = records.get(value) ?? facts.get(value);
+          if (owns(entity)) referenced.add(entity);
+        } else if (value && typeof value === 'object') for (const child of Object.values(value)) collect(child);
+      };
+      collect(item);
+      const invalidated = [...produced, ...referenced].some((entity) => !owns(entity)
+        || ['superseded', 'invalidated', 'reconsidered', 'stale', 'archived'].includes(entity.status)
+        || (isValidIsoInstant(entity.updatedAt) && compareInstants(entity.updatedAt, item.updatedAt) > 0));
+      const expired = rawExpired(item, at);
+      const rawAvailable = !expired && item.contentRef !== null && (extras.get(CAPTURE_CONTENT) ?? []).some((entry) => entry.contentRef === item.contentRef);
+      const recipeChanges = item.state === 'extracted'
+        ? Object.keys(EXTRACTION_RECIPE).filter(key => item.receipts.at(-1)?.[key] !== EXTRACTION_RECIPE[key]) : [];
+      const lastReprocessing = item.receipts.at(-1)?.reprocessing;
+      const reprocessOutcome = lastReprocessing && typeof lastReprocessing === 'object' ? {
+        ...Object.fromEntries(['preservedCorrections', 'skippedProposals'].filter(key => Number.isSafeInteger(lastReprocessing[key]) && lastReprocessing[key] >= 0).map(key => [key, lastReprocessing[key]])),
+        ...(typeof lastReprocessing.retainedPriorEvidence === 'boolean' ? { retainedPriorEvidence: lastReprocessing.retainedPriorEvidence } : {})
+      } : undefined;
+      const projectFields = (value, names) => Object.fromEntries(names.filter((name) => value?.[name] !== undefined).map((name) => [name, clone(value[name])]));
+      return {
+        ...projectFields(item, ['id', 'kind', 'schemaVersion', 'project', 'attribution', 'originId', 'state', 'occurrenceSeq', 'observedAt', 'createdAt', 'updatedAt', 'blockedReason', 'attempts', 'sourceIdentity']),
+        source: projectFields(item.source, ['event', 'sessionId', 'role', 'hostEventId', 'toolCallId', 'turnIndex']),
+        observation: projectFields(item.observation, ['host', 'hostVersion', 'toolName', 'outcome']),
+        expiresAt: effectiveCaptureExpiry(item, retentionPolicy()), rawAvailable,
+        ...(item.extractionOutput ? { extractionOutput: {
+          unsupported: isValidIsoInstant(item.extractionOutput.expiresAt) && Date.parse(item.extractionOutput.expiresAt) > Date.parse(at)
+            ? clone(item.extractionOutput.unsupported ?? []) : [],
+          expiresAt: item.extractionOutput.expiresAt,
+          expired: !isValidIsoInstant(item.extractionOutput.expiresAt) || Date.parse(item.extractionOutput.expiresAt) <= Date.parse(at)
+        } } : {}),
+        producedRecords: produced.filter(owns).map((entity) => projectFields(entity, ['id', 'kind', 'status', 'updatedAt'])),
+        derivedInvalidated: invalidated, recipeChanged: recipeChanges.length > 0,
+        ...(reprocessOutcome ? { lastReprocessing: reprocessOutcome } : {}),
+        reprocessReasons: [...recipeChanges, ...(invalidated ? ['derivedInvalidated'] : [])],
+        reprocessable: (invalidated || recipeChanges.length > 0) && rawAvailable,
+        reprocessingUnavailableReason: expired ? RAW_EXPIRED : rawAvailable ? null : 'raw_unavailable'
+      };
+    }) };
+  }
+
+  function requestReprocess(input = {}) {
+    const item = captures.get(input.id), at = now();
+    if (!captureOwner(input).owns(item)) throw Object.assign(new Error('Capture item not found in this scope'), { code: 'capture_item_not_found' });
+    if (rawExpired(item, at)) throw Object.assign(new Error('Expired raw cannot be re-extracted'), { code: RAW_EXPIRED });
+    if (item.contentRef === null || !(extras.get(CAPTURE_CONTENT) ?? []).some(entry => entry.contentRef === item.contentRef)) {
+      throw Object.assign(new Error('Capture raw is unavailable for re-extraction'), { code: 'raw_unavailable' });
+    }
+    const retryReprocess = item.reprocessRequest && ['failed', 'blocked'].includes(item.state);
+    if (isNewerThanWriter(item) || (!['extracted', 'processing'].includes(item.state) && !retryReprocess) || item.cancelRequested) {
+      throw Object.assign(new Error('Capture is not eligible for a reprocess request'), { code: 'capture_reprocess_state_refused' });
+    }
+    assertJournalCapacity(1);
+    const next = { ...clone(item), state: 'pending', lease: null, blockedReason: null, lastError: null, updatedAt: at,
+      reprocessRequest: { id: randomUUID(), at, actor: 'owner', surface: 'cli' } };
+    captures.set(item.id, next);
+    appendJournal({ type: 'capture.state_changed', entityKind: CAPTURE_KIND, entityId: item.id, project: item.project, payload: next });
+    return { id: item.id, state: 'pending', requestId: next.reprocessRequest.id };
+  }
+
+  function cancelCapture(input = {}) {
+    const item = captures.get(input.id);
+    if (!captureOwner(input).owns(item)) throw Object.assign(new Error('Capture item not found in this scope'), { code: 'capture_item_not_found' });
+    if (isNewerThanWriter(item) || !['pending', 'processing', 'failed', 'blocked'].includes(item.state)) throw Object.assign(new Error('Only uncompleted capture can be cancelled'), { code: 'capture_cancel_state_refused' });
+    if (item.state === 'blocked' && item.blockedReason === 'capture_cancelled') return { id: item.id, changed: false, state: 'blocked' };
+    assertJournalCapacity(1);
+    const next = { ...item, state: 'blocked', blockedReason: 'capture_cancelled', cancelRequested: true, lease: null, updatedAt: now() };
+    captures.set(item.id, next);
+    appendJournal({ type: 'capture.state_changed', entityKind: CAPTURE_KIND, entityId: item.id, project: item.project, payload: next });
+    return { id: item.id, changed: true, state: 'blocked' };
+  }
+
+  function preserveDeletedCaptureSession(item, at) {
+    // Restored deletion knowledge must retain the same replay barrier as a
+    // direct deletion, even when the backup never had a transcript cursor.
+    if (typeof item.originId !== 'string' || typeof item.source?.sessionId !== 'string') return;
+    const { sessions, session, held } = captureSession(item.originId, item.source.sessionId, item.project);
+    const nextSession = {
+      ...(session ?? newCaptureSession(item.originId, item.source.sessionId, item)), occurrenceSeqHighWater: held, updatedAt: at,
+      cursor: { ...(session?.cursor ?? {}), anchor: null, blocked: session?.cursor?.blocked ?? { reason: 'capture_deleted', at } }
+    };
+    extras.set(CAPTURE_SESSIONS, session ? sessions.map((entry) => entry === session ? nextSession : entry) : [...sessions, nextSession]);
+  }
+
+  function deleteCapture(input = {}, { recovery = false } = {}) {
+    const item = captures.get(input.id);
+    if (!item || (!recovery && !captureOwner(input).owns(item))) throw Object.assign(new Error('Capture item not found in this scope'), { code: 'capture_item_not_found' });
+    if (isNewerThanWriter(item) || !['pending', 'failed', 'blocked'].includes(item.state)) throw Object.assign(new Error('Only pending, failed or blocked capture can be deleted before extraction'), { code: 'capture_delete_state_refused' });
+    if (recovery && (item.erasureToken !== input.token || input.marker.seq !== journalSeq + 1)) throw Object.assign(new Error('Capture deletion recovery identity differs'), { code: 'capture_delete_identity_refused' });
+    assertJournalCapacity(1);
+    const at = recovery ? input.marker.at : now();
+    const headEntryId = journalHead({ journal });
+    const epochEntryId = journal.find((entry) => entry.seq === journalEpoch)?.id ?? null;
+    const marker = appendJournal({ type: 'capture.state_changed', entityKind: CAPTURE_KIND, entityId: item.id, project: item.project, at,
+      ...(recovery ? { id: input.marker.id } : {}), payload: { ...item, state: 'blocked', blockedReason: 'capture_deleted', updatedAt: at } });
+    reapplyDeletion({ remove: [{ id: item.id, mode: 'logical' }] }, { journal: false, captureDeleted: true });
+    const { erasureToken: token } = item;
+    deletion.set('intents', [...(deletion.get('intents') ?? []), {
+      tombstone: { kind: 'item', mode: 'logical', at, seq: marker.seq, tokens: [item.erasureToken], moveIn: 'none' },
+      lineage: { epochEntryId: epochEntryId ?? marker.id, headEntryId, markerEntryId: marker.id },
+      marker: { id: marker.id, at, seq: marker.seq }, item: { id: item.id, token }
+    }]);
+    endStoreLimits(at);
+    return { removed: 1, mode: 'logical', backups: PURGE_BACKUPS_STATEMENT };
+  }
+
+  // What capture holds for one read's scope (plan v1.4.4 §24.1, M-9; PR-36b),
+  // or null when the store holds no capture state at all, so a store without
+  // capture reads exactly as it did. The counts are over the captures the
+  // scope owns -- its project's, or with no project its origin's unattributed
+  // ones -- never another project's; an item of a later schema is carried and
+  // never counted. `limited` is the store limits refusing material as far as
+  // the store knows (the queue checked against its items now, the store's
+  // bytes until an item is accepted or a purge runs, the next capture checking
+  // afresh): limit, ceiling and
+  // start only. `gaps` declares what capture refused, bounded: each store
+  // limit's last closed period, the scope's sessions that reached their limit
+  // (counted, never named, from the earliest refusal each records), and material refused because another project owned
+  // its session. Availability is a non-persistent host configuration projection.
+  function captureStatus(scope) {
+    const sessions = extras.get(CAPTURE_SESSIONS) ?? [];
+    const entries = events.filter((entry) => entry?.type === CAPTURE_LIMIT_EVENT || entry?.type === CAPTURE_REFUSED_EVENT);
+    if (captures.size === 0 && sessions.length === 0 && entries.length === 0) return null;
+    const owns = (entry) => (scope.state === 'project_selected' ? entry.attribution === 'project' && entry.project === scope.project : entry.attribution === 'unattributed' && sameOrigin(entry.originId, scope.originId));
+    const status = { pending: 0, processing: 0, failed: 0, blocked: 0, oldestPendingAt: null, extractionAvailable: false, limited: [], gaps: [] };
+    const at = now();
+    let expiredFrom = null;
+    let queued = 0;
+    for (const item of captures.values()) {
+      if (item.state !== 'extracted' && !rawExpired(item, at)) queued += 1;
+      if (item.schemaVersion > SCHEMA_VERSION || !UNEXTRACTED_STATES.includes(item.state) || !owns(item)) continue;
+      if (rawExpired(item, at)) {
+        status.expired = (status.expired ?? 0) + 1;
+        const expiry = effectiveCaptureExpiry(item, retentionPolicy());
+        if (expiredFrom === null || compareInstants(expiry, expiredFrom) < 0) expiredFrom = expiry;
+        continue;
+      }
+      status[item.state] += 1;
+      if (item.state === 'pending' && (status.oldestPendingAt === null || compareInstants(item.createdAt, status.oldestPendingAt) < 0)) status.oldestPendingAt = item.createdAt;
+    }
+    // One entry per store limit, however many a merge left behind.
+    for (const limit of ['maxQueueDepth', 'maxStoreBytes']) {
+      const held = entries.filter((entry) => entry.type === CAPTURE_LIMIT_EVENT && entry.limit === limit);
+      const open = held.filter((entry) => entry.since).sort((left, right) => compareInstants(left.since, right.since))[0];
+      const binding = open && (limit !== 'maxQueueDepth' || queued >= open.ceiling);
+      if (binding) status.limited.push({ limit, ceiling: open.ceiling, since: open.since });
+      else if (open) status.gaps.push({ reason: limit, from: open.since, to: null });
+      const closed = held.filter((entry) => entry.lastPeriod).sort((left, right) => compareInstants(right.lastPeriod.to, left.lastPeriod.to))[0];
+      if (closed) status.gaps.push({ reason: limit, from: closed.lastPeriod.from, to: closed.lastPeriod.to });
+    }
+    if (expiredFrom !== null) status.gaps.push({ reason: RAW_EXPIRED, from: expiredFrom, to: null });
+    const limitedSessions = sessions.filter((session) => owns(session) && (session.limited?.since || session.limited?.lastPeriod));
+    if (limitedSessions.length) {
+      const starts = limitedSessions.map((session) => session.limited.lastPeriod?.from ?? session.limited.since).sort(compareInstants);
+      const ends = limitedSessions.map((session) => (session.limited.since ? null : session.limited.lastPeriod.to));
+      status.gaps.push({ reason: 'maxItemsPerSession', sessions: limitedSessions.length, from: starts[0], to: ends.includes(null) ? null : ends.sort(compareInstants).at(-1) });
+    }
+    for (const entry of entries) {
+      if (entry.type === CAPTURE_REFUSED_EVENT && scope.state === 'project_selected' && entry.project === scope.project) status.gaps.push({ reason: entry.reason, from: entry.since, to: null });
+    }
+    // What the transcript cursor did not read (PR-36): the scope's sessions
+    // whose transcript stopped being read, and the periods their records keep,
+    // each reason counted by session and never named.
+    const periods = new Map();
+    const sessionGapReasons = [...TRANSCRIPT_GAP_REASONS, RAW_EXPIRED, 'capture_deleted', 'extraction_unknown_period'];
+    for (const session of sessions) {
+      if (!owns(session)) continue;
+      const stopped = isPlainObject(session.cursor?.blocked) ? [{ reason: session.cursor.blocked.reason, from: session.cursor.blocked.at, to: null }] : [];
+      for (const gap of [...stopped, ...(Array.isArray(session.gaps) ? session.gaps : [])]) {
+        if (!sessionGapReasons.includes(gap?.reason) || !isValidIsoInstant(gap.from) || !(gap.to === null || isValidIsoInstant(gap.to))) continue;
+        const period = periods.get(gap.reason) ?? { sessions: new Set(), from: [], to: [] };
+        period.sessions.add(session);
+        period.from.push(gap.from);
+        period.to.push(gap.to);
+        periods.set(gap.reason, period);
+      }
+    }
+    for (const [reason, period] of [...periods].sort(([left], [right]) => sessionGapReasons.indexOf(left) - sessionGapReasons.indexOf(right))) {
+      status.gaps.push({ reason, sessions: period.sessions.size, from: period.from.sort(compareInstants)[0], to: period.to.includes(null) ? null : period.to.sort(compareInstants).at(-1) });
+    }
+    const errors = sessions.filter(session => owns(session) && session.extraction?.state === 'blocked' && isValidIsoInstant(session.extraction.at));
+    if (errors.length) status.workerErrors = [...new Set(errors.map(session => workerReason(session.extraction.reason)))].map(reason => ({ reason, at: errors.filter(session => workerReason(session.extraction.reason) === reason).map(session => session.extraction.at).sort(compareInstants)[0] }));
+    if (!errors.length && typeof options.extractionAvailable === 'function') status.extractionAvailable = options.extractionAvailable(scope) === true;
+    return status;
+  }
+
+  // A session records when it was opened, so a project tombstone withholds
+  // only the sessions opened before it (PR-37c design §1.3, R9).
+  function newCaptureSession(originId, sessionId, owner) {
+    return { id: `capsession_${randomUUID()}`, originId, sessionId, project: owner.project, attribution: owner.attribution, startedAt: now() };
+  }
+
+  // A session's self-event counters (§16.3): one count per signal and event,
+  // a fixed set however many arrive.
+  function countSelfEvent(counters, signal, event, by = 1) {
+    const held = isPlainObject(counters) ? counters : {};
+    const bySignal = isPlainObject(held[signal]) ? held[signal] : {};
+    const count = Number.isSafeInteger(bySignal[event]) && bySignal[event] >= 0 ? bySignal[event] : 0;
+    return { ...held, [signal]: { ...bySignal, [event]: count + by } };
+  }
+
+  // A ShadowGraph self-event (PR-35; §16.3, AC-065): counted on its session,
+  // and nothing else -- no capture item, record, journal entry or retry key,
+  // and no ordinal. A session it opens is owned for now by the write's owner,
+  // until its first capture.
+  function recordSelfEvent(input = {}) {
+    if (!isPlainObject(input)) throw new Error('A self-event needs an input object');
+    const originId = usableOriginId(input.originId);
+    if (originId === null || originId !== input.originId) throw new Error('A self-event names the originId that observed it');
+    if (!SELF_SIGNALS.includes(input.signal)) throw new Error(`A self-event names its signal: ${SELF_SIGNALS.join(', ')}`);
+    const source = input.source;
+    if (!isPlainObject(source) || !Object.hasOwn(CAPTURE_EVENT_IDENTITY, source.event)) throw new Error(`A self-event names an event the source contract covers: ${Object.keys(CAPTURE_EVENT_IDENTITY).join(', ')}`);
+    if (!named(source.sessionId)) throw new Error('A self-event names its sessionId');
+    const { sessions, session, held, owner, withheld } = captureSession(originId, source.sessionId, input.project);
+    if (withheld) return { refused: { reason: SESSION_WITHHELD }, changed: false };
+    const base = session ?? { ...newCaptureSession(originId, source.sessionId, owner), occurrenceSeqHighWater: held };
+    const next = { ...base, selfEvents: countSelfEvent(base.selfEvents, input.signal, source.event), updatedAt: now() };
+    extras.set(CAPTURE_SESSIONS, session ? sessions.map((entry) => (entry === session ? next : entry)) : [...sessions, next]);
+    return clone(next.selfEvents);
+  }
+
+  // The transcript cursor (plan v1.4.4 §12.2, §12.2.1, §22.7; PR-36 design
+  // revision 2): the assistant text no hook delivers, read from the session's
+  // transcript through a durable per-session cursor on its captureSessions
+  // record. Privileged: the capture hook is its one caller, inside the same
+  // hold of the store's fence as the event's own item, passing the transcript
+  // as synchronous callbacks it may block on.
+  //
+  // It reads nothing from before the cursor was anchored -- at the session's
+  // first capture, at each re-activation of capture, at each new generation of
+  // the file -- so nothing outside the owner's enablement is ever read (OD-3).
+  // It reads only while the event's project, the session's owner and the
+  // project the cursor was made for agree; an event from anywhere else stops
+  // it for good (session_left_project), so no project's text is filed under
+  // another's (D-6). ShadowGraph's own sessions -- a correlation-marked prompt,
+  // a worker's -- are never read (§16). An unrecognised line blocks the
+  // session's transcript reading (§12.2). Only Stop, PreCompact and SessionEnd
+  // read; any other event only anchors and checks the project.
+  //
+  // Text is reconciled (§8): an entry whose uuid an item holds is skipped; a
+  // run of assistant text, or one entry, matching a Stop's final message
+  // recorded in this hold or the previous read is that Stop's copy and is
+  // skipped; anything else is a new Transcript item, marked
+  // possibleDuplicateOf the newest assistant item of the same material. A
+  // tool call the transcript shows but no capture holds is an unknown period
+  // (§22.7). Everything it writes is on the session record, and the items go
+  // through recordCapture's own admission, ordinal, journal and identity.
+  function recordTranscript(input = {}) {
+    if (!isPlainObject(input)) throw new Error('A transcript read needs an input object');
+    const originId = usableOriginId(input.originId);
+    if (originId === null || originId !== input.originId) throw new Error('A transcript read names the originId that observed it');
+    const sessionId = input.sessionId;
+    if (!named(sessionId)) throw new Error('A transcript read names its sessionId');
+    if (input.project !== null && !named(input.project)) throw new Error('A transcript read names its project, or null when none is resolved and covered');
+    if (!isValidIsoInstant(input.activatedAt)) throw new Error('A transcript read names the capture activation it runs under');
+    if (input.trigger !== null && !TRANSCRIPT_TRIGGERS.includes(input.trigger)) throw new Error(`A transcript read is triggered by ${TRANSCRIPT_TRIGGERS.join(', ')}, or by nothing`);
+    const file = input.transcript ?? null;
+    if (file !== null && !(isPlainObject(file) && named(file.ref) && (file.missing === true || (typeof file.size === 'function' && typeof file.read === 'function')))) throw new Error('A transcript is null, { ref, missing: true } or { ref, size, read }');
+    if (input.trigger !== null && !isPlainObject(input.admission)) throw new Error('A transcript read that reads names its admission');
+    const mayContinue = typeof input.mayContinue === 'function' ? () => Boolean(input.mayContinue()) : () => true;
+    const result = { changed: false, anchored: false, reanchored: false, bumped: false, blocked: null, read: 0, ingested: 0, reconciled: 0, refused: 0, gaps: [] };
+
+    const sessions = extras.get(CAPTURE_SESSIONS) ?? [];
+    const session = sessions.find((entry) => entry.originId === originId && entry.sessionId === sessionId);
+    // ShadowGraph's own sessions -- a worker's (S-3), or one whose prompt
+    // carried its correlation mark (S-2) -- are never read, and nothing is
+    // written for them; an S-2 mark in a tool's input marks that call, not the
+    // user's session (§16).
+    if (sessionWithheld(originId, sessionId)) return { ...result, withheld: SESSION_WITHHELD };
+    const counted = (signal, event) => Object.entries(isPlainObject(session?.selfEvents?.[signal]) ? session.selfEvents[signal] : {}).some(([name, count]) => (event === undefined || name === event) && count > 0);
+    if (counted('S-3') || counted('S-2', 'UserPromptSubmit')) return result;
+    const at = now();
+    const cursor = isPlainObject(session?.cursor) ? session.cursor : null;
+    const { held, ownedBy } = captureSession(originId, sessionId, input.project ?? undefined);
+    let gaps = Array.isArray(session?.gaps) ? session.gaps : [];
+    let gapsDropped = Number.isSafeInteger(session?.gapsDropped) ? session.gapsDropped : 0;
+    const addGap = (reason, from = cursor.advancedAt) => {
+      const gap = { reason, from, to: at, generation: cursor.transcriptGeneration };
+      result.gaps.push(gap);
+      gaps = [...gaps, gap];
+      if (gaps.length > TRANSCRIPT_GAPS_KEPT) { gapsDropped += gaps.length - TRANSCRIPT_GAPS_KEPT; gaps = gaps.slice(-TRANSCRIPT_GAPS_KEPT); }
+    };
+    // A cursor makes its session record its project's own (captureSession): a
+    // record it is created on takes the cursor's project, so a later capture
+    // from elsewhere is refused (D-6) and a purge of that project removes it.
+    const write = (next) => {
+      const current = extras.get(CAPTURE_SESSIONS) ?? [];
+      const index = current.findIndex((entry) => entry.originId === originId && entry.sessionId === sessionId);
+      const owner = cursor ? {} : { project: input.project, attribution: 'project' };
+      const record = { ...(index === -1 ? newCaptureSession(originId, sessionId, { project: input.project, attribution: 'project' }) : current[index]), ...owner, cursor: next, gaps, gapsDropped, updatedAt: at };
+      extras.set(CAPTURE_SESSIONS, index === -1 ? [...current, record] : current.map((entry, at) => (at === index ? record : entry)));
+      result.changed = true;
+      return result;
+    };
+
+    // A cursor a merge or a hand edit left malformed is never read: its
+    // position could point anywhere, before the anchor included (C-1).
+    if (cursor && !cursorBlock(cursor.blocked) && !cursorShape(cursor)) {
+      result.blocked = 'transcript_unrecognised';
+      return write({ ...cursor, blocked: { reason: 'transcript_unrecognised', detail: 'cursor_malformed', at } });
+    }
+    const agrees = input.project !== null && (!ownedBy || ownedBy.project === input.project) && (!cursor || cursor.project === input.project);
+    if (cursor && !cursor.blocked && !agrees) {
+      result.blocked = 'session_left_project';
+      return write({ ...cursor, blocked: { reason: 'session_left_project', at } });
+    }
+    // A self-event only checks the project.
+    if (input.selfEvent === true || !agrees || cursor?.blocked || file === null) return result;
+
+    // A Stop's transcript copy can arrive after any current EOF or stopMark.
+    // Once its raw expires there is no safe text reconciliation, including for
+    // withheld Stops. Persist the session refusal before reading any bytes;
+    // direct hook capture remains available, but this cursor never resumes.
+    const sessionItems = [...captures.values(), ...withheldCaptures()].filter((item) => item.originId === originId && item.source?.sessionId === sessionId);
+    if (sessionItems.some((item) => item.source.event === 'Stop' && rawExpired(item, at))) {
+      result.blocked = RAW_EXPIRED;
+      return write({ ...cursor, blocked: { reason: RAW_EXPIRED, at } });
+    }
+
+    // The file, read only through these: a callback that throws is a read
+    // that returned nothing, and whatever needed it does not happen.
+    let failed = false;
+    const read = (start, length) => {
+      if (!Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(length) || length <= 0) return Buffer.alloc(0);
+      try {
+        const bytes = file.read(start, length);
+        if (Buffer.isBuffer(bytes)) return bytes;
+      } catch { /* treated as a failed read */ }
+      failed = true;
+      return Buffer.alloc(0);
+    };
+    let size = 0;
+    if (!file.missing) {
+      try { size = file.size(); } catch { return result; }
+      if (!Number.isSafeInteger(size) || size < 0) return result;
+    }
+    // The anchor: a digest of the bytes just before a position (never the
+    // bytes), so a file rewritten under the cursor is found even before it
+    // has read anything -- at an anchoring those bytes are from before it,
+    // and only their digest is kept (contract review R-1). Null when they
+    // cannot be read.
+    const anchorAt = (position) => {
+      const from = Math.max(0, position - TRANSCRIPT_ANCHOR_BYTES);
+      const bytes = read(from, position - from);
+      return failed ? null : digest(bytes);
+    };
+    const lineEnd = () => {
+      const end = size === 0 ? 0 : lastLineEnd({ read, size, mayContinue });
+      return failed ? null : end;
+    };
+    const anchored = (end, generation, gap) => {
+      const anchor = anchorAt(end);
+      if (anchor === null) return result;
+      if (gap) addGap(gap);
+      return write({
+        transcriptRef: file.ref, transcriptGeneration: generation, base: end, position: end, anchor, skipping: false,
+        project: input.project, activatedAt: input.activatedAt, advancedAt: at, lastIngestedOccurrence: cursor?.lastIngestedOccurrence ?? null,
+        stopMark: held, blocked: null, ends: (cursor?.ends ?? 0) + (input.trigger === 'SessionEnd' ? 1 : 0), oversized: cursor?.oversized ?? 0
+      });
+    };
+    if (!cursor) {
+      const end = lineEnd();
+      if (end !== null) anchored(end, 1, null);
+      result.anchored = result.changed;
+      return result;
+    }
+    // A file gone after the cursor was made changes nothing: whatever appears
+    // there next is anchored where it is found, never read from its start,
+    // since it may carry history from before the session's first capture (C-2).
+    if (file.missing) return result;
+    if (cursor.activatedAt !== input.activatedAt) {
+      const end = lineEnd();
+      if (end !== null) anchored(end, cursor.transcriptGeneration + 1, 'transcript_reanchored');
+      result.reanchored = result.changed;
+      return result;
+    }
+    const intact = (() => {
+      if (file.ref !== cursor.transcriptRef || size < cursor.position) return false;
+      // An anchor a failed read could not take proves nothing: a new generation.
+      if (cursor.anchor === null) return false;
+      const anchor = anchorAt(cursor.position);
+      return anchor === null ? null : anchor === cursor.anchor;
+    })();
+    if (intact === null) return result;
+    if (!intact) {
+      const end = lineEnd();
+      if (end !== null) anchored(end, cursor.transcriptGeneration + 1, 'transcript_rewritten');
+      result.bumped = result.changed;
+      return result;
+    }
+    if (input.trigger === null) return result;
+
+    // W's captures count as held, so what they hold is never captured again
+    // (PR-37a); nothing here names one.
+    const ingestedUuids = new Set(sessionItems.filter((item) => item.source.event === 'Transcript').map((item) => item.source.hostEventId));
+    const heldCalls = new Set(sessionItems.filter((item) => ['PostToolUse', 'PostToolUseFailure'].includes(item.source.event)).map((item) => item.source.toolCallId));
+    const usableRefs = new Set(sessionItems.filter((item) => !rawExpired(item, at)).map((item) => item.contentRef));
+    const texts = new Map([...(extras.get(CAPTURE_CONTENT) ?? []), ...(deletion.get('held')?.collections[CAPTURE_CONTENT]?.items.map(([, entry]) => entry) ?? [])].filter((entry) => usableRefs.has(entry.contentRef)).map((entry) => [entry.contentRef, entry.text]));
+    const stopItems = sessionItems.filter((item) => item.source.event === 'Stop');
+    const stops = stopItems.filter((item) => texts.has(item.contentRef)).map((item) => ({ seq: item.occurrenceSeq, key: matchKey(texts.get(item.contentRef)) })).sort((left, right) => left.seq - right.seq);
+    // A Stop withheld for a credential has no text to match its copy, which
+    // may still be arriving: a trailing run waits for it as for any Stop, so
+    // the run is judged whole (PR-37b re-review NF-3).
+    const withheldStops = stopItems.filter((item) => item.blockedReason === CREDENTIAL_WITHHELD && !rawExpired(item, at)).map((item) => item.occurrenceSeq);
+    const priorStop = stopItems.filter((item) => item.id !== input.triggerItemId).reduce((top, item) => Math.max(top, item.occurrenceSeq), 0);
+    let stopMark = cursor.stopMark;
+    // The store's bytes as measured before this hold, plus the event's own
+    // item accepted in it (M-11), plus each item this read adds.
+    const trigger = input.triggerItemId ? captures.get(input.triggerItemId) : undefined;
+    let storeBytes = input.admission?.storeBytes + (trigger ? storedEstimate(texts.get(trigger.contentRef), [trigger.observation ?? null, trigger.source]) : 0);
+    const itemLimit = input.admission?.limits?.maxItemBytes ?? Infinity;
+    let lastIngested = cursor.lastIngestedOccurrence;
+    // Rule 2: the oldest Stop still reconcilable with this material; a
+    // reconciled Stop retires every Stop before it. A key is computed only
+    // while some Stop could take it.
+    const reconcile = (keyOf) => {
+      if (!stops.some((candidate) => candidate.seq > stopMark)) return false;
+      const key = keyOf();
+      const stop = stops.find((candidate) => candidate.seq > stopMark && candidate.key === key);
+      if (!stop) return false;
+      stopMark = stop.seq;
+      result.reconciled += 1;
+      return true;
+    };
+    // Rules 1 and 3. A private key split across the entries recorded is
+    // redacted whole (PR-37b R6).
+    const keyBlock = { open: false };
+    const ingest = (entry, withhold = false) => {
+      if (ingestedUuids.has(entry.uuid)) return;
+      const recorded = recordCapture({
+        originId, project: input.project, text: entry.text, observation: input.observation,
+        source: { event: 'Transcript', sessionId, role: 'assistant', hostEventId: entry.uuid },
+        admission: { limits: input.admission?.limits, storeBytes }
+      }, { keyBlock, withhold });
+      if (recorded.refused) {
+        result.refused += 1;
+        if (recorded.changed) result.changed = true;
+        return;
+      }
+      ingestedUuids.add(entry.uuid);
+      storeBytes += storedEstimate(entry.text, [recorded.observation ?? null, recorded.source]);
+      lastIngested = recorded.occurrenceSeq;
+      result.ingested += 1;
+    };
+    // A run: consecutive assistant text, judged whole first and then entry by
+    // entry. A user entry, a tool call, an unparsed line or text too long to
+    // be an item ends it. A run holding an entry already ingested was judged
+    // in part before, so it is judged entry by entry. Time is checked before
+    // each item is recorded: when it runs short, the rest of the run is left
+    // for the next read and the position goes back to its first entry (C-3).
+    let run = [];
+    let cut = null;
+    const keyOf = (entry) => () => (entry.key ??= matchKey(redactText(entry.stripped)));
+    // The run's text, joined as a Stop's final message is and redacted once.
+    const runText = () => (run.redacted ??= redactText(run.map((entry) => entry.stripped).join('\n\n')));
+    const runKey = () => matchKey(runText());
+    const closeRun = () => {
+      const whole = run.length > 1 && run.every((entry) => !ingestedUuids.has(entry.uuid)) && reconcile(runKey);
+      if (!whole) {
+        // A credential the checker finds only across the run's entries is
+        // withheld in each of them, as its Stop's would be (PR-37b).
+        const withhold = run.length > 1 && captureWithheld(runText());
+        for (const entry of run) {
+          if (!ingestedUuids.has(entry.uuid) && reconcile(keyOf(entry))) continue;
+          if (!ingestedUuids.has(entry.uuid) && !mayContinue()) {
+            // A run being withheld is read again from its start, so the rest
+            // is judged with the part already recorded (re-review NF-3).
+            cut = withhold ? run[0].start : entry.start;
+            break;
+          }
+          ingest(entry, withhold);
+        }
+      }
+      run = [];
+      return cut === null;
+    };
+
+    const lines = transcriptLines({ read, size, position: cursor.position, skipping: cursor.skipping, mayContinue });
+    let position = cursor.position;
+    let skipping = cursor.skipping;
+    let oversized = cursor.oversized;
+    let blocked = null;
+    const toolUses = [];
+    const toolResults = new Set();
+    for (const line of lines) {
+      // Only a line still to be judged costs time; an unparsed one is consumed.
+      if (line.text !== undefined && !mayContinue()) break;
+      if (line.skipping) {
+        if (closeRun()) [position, skipping] = [line.end, true];
+        break;
+      }
+      if (line.oversized) {
+        if (!closeRun()) break;
+        oversized += 1;
+        addGap('transcript_line_oversized');
+        [position, skipping] = [line.end, false];
+        continue;
+      }
+      if (line.text.trim()) {
+        const facts = transcriptEntry(line.text);
+        if (facts.drift) {
+          blocked = { reason: 'transcript_unrecognised', detail: facts.drift, at };
+          break;
+        }
+        // Text is measured as a Stop's is, after ShadowGraph's own delivered
+        // blocks are removed and the rest redacted; text more than twice what
+        // an item holds is not even stripped (declared: a Stop's final message
+        // quoting that much of them is recorded again, marked
+        // possibleDuplicateOf).
+        const stripped = facts.text === null || Buffer.byteLength(facts.text) > 2 * itemLimit ? null : stripDeliveredBlocks(facts.text).text;
+        const tooLong = facts.text !== null && (stripped === null || Buffer.byteLength(redactText(stripped)) > itemLimit);
+        if ((facts.type === 'user' || facts.toolUses.length || tooLong) && !closeRun()) break;
+        if (facts.type === 'assistant' && facts.text !== null) {
+          const entry = { start: line.start, uuid: facts.uuid, text: facts.text, stripped, key: null };
+          // Text beside a tool call is never a turn's final message, nor is
+          // text no item can hold (a Stop's would have been refused too).
+          if (facts.toolUses.length || tooLong) ingest(entry);
+          else run.push(entry);
+        }
+        toolUses.push(...facts.toolUses);
+        for (const id of facts.toolResults) toolResults.add(id);
+      }
+      [position, skipping] = [line.end, false];
+    }
+    // A run at the end of the window may still be growing -- the host's lag,
+    // or a read its budget or time cut short -- and so may be a Stop's final
+    // message half-written: at a Stop, or with no time left, while a Stop is
+    // still reconcilable, it is held and judged by the next read, unless a
+    // Stop already takes it, the session is blocked, or it began the window
+    // (judged, so a run that fills every window cannot hold the cursor for
+    // ever). With no Stop to wait for, a part judged now loses nothing. It is
+    // held from its first entry not yet ingested, so the next read can still
+    // match what remains whole.
+    const eligible = (key) => stops.some((stop) => stop.seq > stopMark && (key === undefined || stop.key === key))
+      || (key === undefined && withheldStops.some((seq) => seq > stopMark));
+    const holdAt = (run.find((entry) => !ingestedUuids.has(entry.uuid)) ?? run[0])?.start;
+    const growing = cut === null && run.length > 0 && !blocked && holdAt > cursor.position && (input.trigger === 'Stop' || !mayContinue())
+      && eligible() && !eligible(runKey()) && !run.some((entry) => eligible(keyOf(entry)()));
+    if (growing) {
+      [position, skipping] = [holdAt, false];
+      run = [];
+    } else if (cut === null) closeRun();
+    if (cut !== null) [position, skipping] = [cut, false];
+
+    const missing = toolUses.filter((use) => {
+      if (!toolResults.has(use.id) || heldCalls.has(use.id)) return false;
+      try { return !input.isSelfTool?.(use.name, use.input); } catch { return true; }
+    });
+    if (missing.length) addGap('tool_calls_not_captured');
+    let ends = Number.isSafeInteger(cursor.ends) ? cursor.ends : 0;
+    if (input.trigger === 'SessionEnd') {
+      ends += 1;
+      if (!blocked && (position < size || skipping)) addGap('transcript_incomplete_at_end');
+    }
+    if (blocked) result.blocked = blocked.reason;
+    stopMark = Math.max(stopMark, priorStop);
+    const next = { ...cursor, position, skipping, oversized, stopMark, ends, blocked, lastIngestedOccurrence: lastIngested };
+    result.read = position - cursor.position;
+    if (JSON.stringify(next) === JSON.stringify(cursor) && !result.gaps.length && !result.changed) return result;
+    failed = false;
+    return write({ ...next, anchor: anchorAt(position), advancedAt: at });
+  }
+
+  // One §12.5 edge (CAPTURE_TRANSITIONS): what it needs, and the one type it
+  // journals. Anything else -- another edge, a missing field, 'excluded' -- is
+  // refused before anything changes.
+  function transitionCapture(input = {}) {
+    const item = captures.get(input?.id);
+    if (!item) throw new Error(`Capture item not found: ${input?.id}`);
+    if (isNewerThanWriter(item)) throw new Error('A capture item of a future schema is not moved by this build');
+    if (rawExpired(item)) throw Object.assign(new Error('Capture raw is expired and cannot be used for re-extraction'), { code: 'capture_raw_expired' });
+    const move = `${item.state}->${input.to}`;
+    const edge = Object.hasOwn(CAPTURE_TRANSITIONS, move) ? CAPTURE_TRANSITIONS[move] : null;
+    if (!edge) throw new Error(`Illegal capture transition ${move}`);
+    const next = { ...clone(item), state: input.to, updatedAt: now() };
+    if (edge.requires) {
+      if (input[edge.requires] == null) throw new Error(`The capture transition ${move} requires ${edge.requires}`);
+      next[edge.requires] = clone(input[edge.requires]);
+    }
+    if (edge.releases) { next.lease = null; next.attempts += 1; }
+    const issue = captureItemIssue(next);
+    if (issue) throw new Error(`Capture transition refused: ${issue}`);
+    assertJournalCapacity(1);
+    captures.set(item.id, next);
+    appendJournal({ type: edge.type, entityKind: CAPTURE_KIND, entityId: item.id, project: next.project, payload: next });
+    return clone(next);
+  }
+
+  function claimCapture(input) {
+    const item = captures.get(input.id), at = now();
+    if (!captureOwner(input).owns(item) || isNewerThanWriter(item) || rawExpired(item, at) || item.cancelRequested
+      || !(item.state === 'pending' || (item.state === 'processing' && Date.parse(item.lease?.leaseExpiresAt) <= Date.parse(at)))) return null;
+    if (item.state === 'processing') {
+      const sessions = extras.get(CAPTURE_SESSIONS) ?? [];
+      extras.set(CAPTURE_SESSIONS, sessions.map(session => {
+        if (session.originId !== item.originId || session.sessionId !== item.source.sessionId) return session;
+        const gaps = session.gaps ?? [], prior = gaps.filter(gap => gap.reason === 'extraction_unknown_period');
+        return { ...session, gaps: [...gaps.filter(gap => gap.reason !== 'extraction_unknown_period'),
+          { reason: 'extraction_unknown_period', from: [item.updatedAt, ...prior.map(gap => gap.from)].sort(compareInstants)[0], to: at }] };
+      }));
+    }
+    const next = { ...clone(item), state: 'processing', lease: clone(input.lease), updatedAt: at };
+    if (captureItemIssue(next)) throw new Error('Invalid extraction lease');
+    assertJournalCapacity(1); captures.set(item.id, next);
+    appendJournal({ type: 'capture.state_changed', entityKind: CAPTURE_KIND, entityId: item.id, project: item.project, payload: next });
+    return clone(next);
+  }
+
+  // Compare with the canonical witness at the producing extraction, not
+  // timestamps: an owner can correct a record within the same clock tick.
+  // Missing provenance is not permission to overwrite imported experience.
+  const extractionRecordHash = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
+  function reprocessingPrior(item) {
+    if (!item.reprocessRequest) return { replaceable: [], protected: [] };
+    const result = { replaceable: [], protected: [] }, owner = captureOwner(item);
+    for (const recordId of new Set(item.producedRecordIds)) {
+      const record = records.get(recordId);
+      // Later skipped/no-op runs retain this ID but cannot adopt a manual
+      // correction as extraction-owned content. Its first production wins.
+      const completion = journal.find(entry => entry.type === 'extraction.completed' && entry.entityId === item.id
+        && entry.payload?.producedRecordIds?.includes(recordId));
+      let witness = completion && [...journal].reverse().find(entry => entry.seq < completion.seq && entry.entityId === recordId
+        && entry.payload?.kind === record?.kind)?.payload;
+      // A reused decision may gain history links from this writer itself.
+      // Advance only through an explicit before/after hash chain tied to the
+      // completed extraction and canonical journal witness. Never adopt the
+      // latest arbitrary snapshot, which could be an owner's correction.
+      if (witness?.kind === 'decision') for (const finished of journal) {
+        if (finished.seq <= completion.seq || finished.type !== completion.type || finished.entityId !== item.id) continue;
+        const result = finished.payload?.receipts?.at(-1)?.reprocessing;
+        if (!result?.requestId || result.requestId !== finished.payload?.reprocessRequest?.id) continue;
+        for (const update of Array.isArray(result.linkageUpdates) ? result.linkageUpdates : []) {
+          if (update?.before !== extractionRecordHash(witness)) continue;
+          const entry = journal.find(value => value.id === update.entryId && value.entityId === recordId
+            && value.type === 'decision.recorded' && value.seq > completion.seq && value.seq < finished.seq);
+          const cause = entry && journal.find(value => value.id === entry.causationId && value.type === 'decision.superseded'
+            && value.seq > completion.seq && value.seq < entry.seq && value.payload?.captureRef === item.id
+            && value.payload?.supersededBy === recordId);
+          const withoutLinks = value => Object.fromEntries(Object.entries(value).filter(([key]) => !['supersedes', 'updatedAt'].includes(key)));
+          if (!cause || entry.payload?.kind !== 'decision' || update.after !== extractionRecordHash(entry.payload)
+            || extractionRecordHash(withoutLinks(entry.payload)) !== extractionRecordHash(withoutLinks(witness))
+            || !Array.isArray(entry.payload.supersedes) || !(witness.supersedes ?? []).every(id => entry.payload.supersedes.includes(id))) continue;
+          witness = entry.payload;
+        }
+      }
+      const corrected = !record || !witness || !owner.owns(record) || record.captureRef !== item.id || isNewerThanWriter(record)
+        || ['superseded', 'invalidated', 'archived', 'abandoned'].includes(record.status)
+        || [...relations.values()].some(edge => edge.to === recordId && edge.relation === 'supersedes')
+        || JSON.stringify(canonical(record)) !== JSON.stringify(canonical(witness));
+      result[corrected ? 'protected' : 'replaceable'].push({ record, witness, recordId });
+    }
+    return result;
+  }
+
+  function sameExtractionFields(record, proposed) {
+    const fields = { memory: ['text'], decision: ['title', 'chosen', 'goal'], attempt: ['solution', 'result', 'reason'] };
+    return record.kind === proposed.kind && fields[record.kind].every(key => (record[key] ?? '') === (proposed.values[key] ?? ''))
+      && (record.kind !== 'decision' || JSON.stringify((record.alternatives ?? []).map(value => value.label)) === JSON.stringify(proposed.alternatives.map(value => value.label)));
+  }
+
+  // A replacement is a new representation of this capture, possibly split,
+  // merged or reclassified. Canonical experience is retained as linked history.
+  function supersedeExtractionRecord(previous, replacement, at) {
+    if (previous.kind === 'attempt') return; // reader derives it from relations
+    if (previous.status === 'superseded') return; // remember already linked it
+    if (previous.kind === 'decision' && replacement.kind === 'decision') {
+      supersedeDecision({ project: previous.project, originId: previous.originId, decisionId: previous.id, replacementId: replacement.id });
+      return;
+    }
+    touchMutableObject(previous);
+    previous.status = 'superseded'; previous.supersededBy = replacement.id; previous.updatedAt = at;
+    if (previous.kind === 'memory') {
+      previous.temporal = { ...previous.temporal, validTo: earliestBoundary(previous.temporal?.validTo, at), invalidatedAt: at };
+      if (currentMemories.get(memoryScopeKey(previous))?.id === previous.id) currentMemories.delete(memoryScopeKey(previous));
+    }
+    appendJournal({ type: `${previous.kind}.superseded`, entityKind: previous.kind, entityId: previous.id, project: previous.project,
+      payload: clone(previous), provenance: writeProvenance(replacement) });
+  }
+
+  // Only the fenced worker calls this with locally verified fields. Canonical
+  // IDs and confidence/trust stay owned by the existing builders. Decoration
+  // reaches each new journal/idempotency copy before this transaction commits.
+  function completeExtraction(input) {
+    const item = captures.get(input.id), at = now();
+    if (!item || item.state !== 'processing' || item.lease?.leaseId !== input.leaseId || item.cancelRequested
+      || rawExpired(item, at) || Date.parse(item.lease.leaseExpiresAt) <= Date.parse(at)) throw new Error('Extraction lease is no longer usable');
+    const prior = reprocessingPrior(item), producedRecordIds = [], reused = new Set(), usedMemoryKeys = new Set();
+    const overlaps = (a, b) => a.sourceRef === b.sourceRef && a.span?.start < b.span?.end && b.span?.start < a.span?.end;
+    // A proposal overlapping an owner-corrected claim cannot quietly revive
+    // it under another ID or kind. Without its original source witness, skip
+    // the proposal conservatively. No model judgement overrides this check.
+    const proposals = input.prepared.records.filter(proposed => !prior.protected.some(({ witness }) =>
+      !witness?.claims?.length || proposed.claims.some(claim => witness.claims.some(old => overlaps(claim, old)))));
+    // Reserve all identical identities before a changed proposal can consume
+    // their memory keys. Output order must not silently retire retained output.
+    const identicalMatches = proposals.map(proposed => {
+      const match = prior.replaceable.find(({ record }) => !reused.has(record.id) && sameExtractionFields(record, proposed));
+      if (match) {
+        reused.add(match.record.id);
+        if (match.record.kind === 'memory') usedMemoryKeys.add(match.record.key);
+      }
+      return match;
+    });
+    const linkageBefore = new Map(prior.replaceable.filter(({ record }) => reused.has(record.id) && record.kind === 'decision')
+      .map(({ record }) => [record.id, extractionRecordHash(record)]));
+    const decorate = (value, id, fields) => {
+      if (!value || typeof value !== 'object') return;
+      if (value.id === id && value.kind !== CAPTURE_KIND) Object.assign(value, clone(fields));
+      else for (const child of Object.values(value)) decorate(child, id, fields);
+    };
+    for (const [index, proposed] of proposals.entries()) {
+      const identical = identicalMatches[index];
+      if (identical) {
+        producedRecordIds.push(identical.record.id);
+        continue;
+      }
+      const sourceClass = item.source.role === 'tool' ? 'tool_observed' : 'agent_claimed';
+      const args = { ...proposed.values, project: item.project, originId: item.originId, sourceClass,
+        observedAt: item.observedAt, sessionId: item.source.sessionId,
+        idempotencyKey: `${input.key}:${index}` };
+      let record;
+      if (proposed.kind === 'decision') record = addDecision({ ...args, alternatives: proposed.alternatives });
+      else if (proposed.kind === 'attempt') record = addAttempt(args);
+      else {
+        const predecessor = prior.replaceable.find(({ record: old }) => old.kind === 'memory' && !usedMemoryKeys.has(old.key) && !reused.has(old.id));
+        const key = predecessor?.record.key ?? `${input.key}:${index}`;
+        usedMemoryKeys.add(key);
+        record = remember({ ...args, memoryType: 'episode', key }).memory;
+      }
+      const fields = { captureRef: item.id, claims: proposed.claims, verificationStatus: 'unverified' };
+      if (proposed.kind === 'attempt') {
+        fields.outcomeEvidence = clone(item.observation?.outcome?.outcomeEvidence ?? { state: 'absent' });
+        if (fields.outcomeEvidence.state === 'observed') fields.resultClass = fields.outcomeEvidence.exitStatus === 0 ? 'succeeded' : 'failed';
+        if (!proposed.reason) fields.causalClaim = { state: 'unknown' };
+        else {
+          const { class: claimClass, verifierVersion, checks, rule, readings, span, sourceRef, evidence } = proposed.reason;
+          fields.causalClaim = { statement: args.reason, state: 'recorded', sourceClass, class: claimClass, verifierVersion, ...(checks ? { checks } : {}),
+            ...(rule ? { rule } : {}), ...(readings ? { readings } : {}),
+            evidence: [{ sourceRef, span, text: evidence }] };
+        }
+      }
+      decorate(records.get(record.id), record.id, fields);
+      for (const entry of journal) decorate(entry.payload, record.id, fields);
+      for (const value of idempotency.values()) decorate(value, record.id, fields);
+      producedRecordIds.push(record.id);
+    }
+    if (producedRecordIds.length) {
+      for (const { record: previous } of prior.replaceable) {
+        if (producedRecordIds.includes(previous.id)) continue;
+        const replacements = producedRecordIds.map(id => records.get(id));
+        const primary = replacements.find(record => record.kind === previous.kind) ?? replacements[0];
+        supersedeExtractionRecord(previous, primary, at);
+        for (const replacement of replacements) {
+          if (![...relations.values()].some(edge => edge.from === replacement.id && edge.to === previous.id && edge.relation === 'supersedes')) {
+            addRelation({ from: replacement.id, to: previous.id, relation: 'supersedes' }, item.project);
+          }
+        }
+      }
+      producedRecordIds.push(...prior.protected.map(value => value.recordId));
+    } else if (item.reprocessRequest) producedRecordIds.push(...item.producedRecordIds);
+    const linkageUpdates = [...linkageBefore].flatMap(([recordId, before]) => {
+      const after = extractionRecordHash(records.get(recordId));
+      if (before === after) return [];
+      const entry = [...journal].reverse().find(value => value.entityId === recordId && value.type === 'decision.recorded');
+      // The before hash already binds the canonical record ID. Do not carry
+      // that ID again as a receipt reference: inspection treats such IDs as
+      // cited experience, whereas this is internal historical linkage proof.
+      return [{ before, after, entryId: entry.id }];
+    });
+    const reprocessing = item.reprocessRequest ? { requestId: item.reprocessRequest.id, preservedCorrections: prior.protected.length, linkageUpdates,
+      skippedProposals: input.prepared.records.length - proposals.length, retainedPriorEvidence: proposals.length === 0 } : undefined;
+    const next = { ...clone(item), state: 'extracted', lease: null, attempts: item.attempts + (input.attemptCount ?? 1),
+      producedRecordIds, updatedAt: at, receipts: [...item.receipts, { ...clone(input.receipt), ...(reprocessing ? { reprocessing } : {}) }],
+      extractionOutput: { unsupported: clone(input.prepared.unsupported), createdAt: at, expiresAt: new Date(Date.parse(at) + 7 * 86_400_000).toISOString() } };
+    assertJournalCapacity(1); captures.set(item.id, next);
+    appendJournal({ type: 'extraction.completed', entityKind: CAPTURE_KIND, entityId: item.id, project: item.project, payload: next });
+    if (input.journalCeiling !== undefined && sessionJournalEntries(journal, item) > input.journalCeiling) throw Object.assign(new Error('session_journal'), { code: 'session_journal' });
+    return { status: 'committed', produced: producedRecordIds.length, unsupported: input.prepared.unsupported.length };
+  }
+
+  function extractionStatus(input) {
+    const owner = captureOwner(input), at = now(), sessions = extras.get(CAPTURE_SESSIONS) ?? [];
+    let changed = false;
+    extras.set(CAPTURE_SESSIONS, sessions.map(session => {
+      if (!owner.owns(session)) return session;
+      changed = true;
+      return { ...session, extraction: { state: input.reason ? 'blocked' : 'idle', ...(input.reason ? { reason: workerReason(input.reason) } : {}), at } };
+    }));
+    return changed;
+  }
+
+  function settleExtraction(input) {
+    if (!['superseded_result', 'schema_invalid', 'executor_blocked', 'executor_failed', 'worker_blocked'].includes(input.reason)) throw new Error('Invalid extraction terminal reason');
+    const at = now(), item = captures.get(input.id);
+    if (input.reason === 'superseded_result') {
+      // No purged/quarantined identity, source, project or result is recreated.
+      // One bounded diagnostic remains valid even when the item has vanished.
+      const index = events.findIndex(value => value.type === 'extraction.superseded');
+      replaceEvent(index, { id: events[index]?.id ?? id('event'), type: 'extraction.superseded', at, count: Math.min(Number.MAX_SAFE_INTEGER, (events[index]?.count ?? 0) + 1) });
+    }
+    if (!item || item.state !== 'processing' || item.lease?.leaseId !== input.leaseId) return { status: input.reason };
+    const superseded = input.reason === 'superseded_result', workerBlocked = input.reason === 'worker_blocked';
+    const next = { ...clone(item), state: workerBlocked ? 'pending' : superseded ? item.cancelRequested ? 'blocked' : 'pending' : input.reason === 'schema_invalid' ? 'failed' : 'blocked',
+      lease: null, attempts: item.attempts + (input.attemptCount ?? 1), updatedAt: at,
+      lastError: superseded ? item.lastError : input.reason,
+      blockedReason: workerBlocked ? workerReason(input.blockedReason) : superseded ? item.cancelRequested ? 'capture_invalidated' : null : input.reason === 'schema_invalid' ? null : input.reason,
+      supersededResults: superseded ? [...item.supersededResults.slice(-15), { at, reason: input.reason }] : item.supersededResults };
+    assertJournalCapacity(1); captures.set(item.id, next);
+    appendJournal({ type: superseded ? 'capture.state_changed' : 'extraction.failed', entityKind: CAPTURE_KIND, entityId: item.id, project: item.project, payload: next });
+    return { status: input.reason };
+  }
+
+  // One aggregate per public delivery, even when it composes multiple reads.
+  // Failed operations roll back canonical effects before a separate refusal
+  // audit commit. Transports persist that committed rejection before delivery.
+  function auditedRead(name, operation) {
+    return (...args) => {
+      const previous = readOperation;
+      const current = { boundary: null };
+      try {
+        return transactional(name, () => {
+          readOperation = current;
+          const output = operation(...args), boundary = current.boundary;
+          // Redaction projects before its caller-controlled transformations.
+          const result = boundary && name !== 'redact' ? publicReferences(output, boundary.reaches) : output;
+          if (boundary?.requestedAccess) {
+            const ids = new Set();
+            const visit = value => {
+              if (!value || typeof value !== 'object') return;
+              // A T1 line (PR-26) names its record as recordId and carries a
+              // decision's alternatives whole, so it counts as the record does.
+              const lined = value.derived === true && typeof value.recordId === 'string' ? rawEntity(value.recordId) : undefined;
+              const carried = lined ? [value.recordId, ...(lined.kind === 'decision' && Array.isArray(lined.alternatives) ? lined.alternatives.map((alternative) => alternative?.id) : [])] : [];
+              for (const id of [value.id, value.decisionId, ...carried]) if (typeof id === 'string' && rawEntity(id) && boundary.visible(rawEntity(id))) ids.add(id);
+              for (const item of Object.values(value)) if (typeof item === 'object') visit(item);
+            };
+            visit(result);
+            if (boundary.widerRead || boundary.scope.grantLimitation) authority.aggregate({ accessId: boundary.accessId, surface: boundary.surface, reason: boundary.scope.grantLimitation ?? null, used: Boolean(boundary.scope.grant), recordsReturned: ids.size, resolvedScope: boundary.scope, grantScope: boundary.provenance?.scope });
+            if (name !== 'redact' && boundary.provenance && result && typeof result === 'object') result.readProvenance = clone(boundary.provenance);
+          }
+          return result;
+        })();
+      } catch (error) {
+        const boundary = current.boundary;
+        if (boundary?.requestedAccess && boundary.scope.grantLimitation) {
+          transactional('accessRefusal', () => authority.aggregate({ accessId: boundary.accessId, surface: boundary.surface, reason: boundary.scope.grantLimitation, recordsReturned: 0, resolvedScope: boundary.scope }))();
+          Object.defineProperty(error, COMMITTED_REJECTION, { value: true });
+        }
+        throw error;
+      } finally { readOperation = previous; }
+    };
+  }
+  // A mutation's echo can be used as a read (including a no-op or a retry).
+  // Project after the operation has stored its complete result, but inside its
+  // transaction so a failed projection rolls back too. Internal composition and
+  // retry storage never consume the projected public response.
+  function mutationReply(name, operation, options) {
+    return transactional(name, (...args) => {
+      const result = operation(...args);
+      return result && typeof result.then === 'function' ? result.then(value => publicReferences(value)) : publicReferences(result);
+    }, options);
+  }
+  // Only public read results cross this projection. Live scopedView objects,
+  // privileged snapshots and replay remain complete. Stop at each entity so
+  // arbitrary nested user content is not interpreted as graph relationships;
+  // containers such as journal payloads and retry values are still visited.
+  function publicReferences(value, reaches = null) {
+    if (!value || typeof value !== 'object') return value;
+    if (isReferenceRecord(value)) {
+      // Mutation echoes are limited to the returned record's existing owner
+      // and memory scope. A read grant never widens mutation ownership.
+      const own = { visible: item => !isLegacyOwned(value) && !isLegacyOwned(item) && sameOwnerKey(value, item) };
+      return visibleRecordReferences(value, reaches ?? scopedReach(own, normalizeMemoryScope(value.kind === 'memory' ? value.scope : undefined)));
+    }
+    let result = value;
+    for (const [key, item] of Object.entries(value)) {
+      const shown = publicReferences(item, reaches);
+      if (shown === item) continue;
+      if (result === value) result = Array.isArray(value) ? [...value] : { ...value };
+      result[key] = shown;
+    }
+    return result;
+  }
+  // The entity whose owner an integrity issue belongs to, for the issues that
+  // name an owner only inside a composite key (duplicate fact and memory scopes).
+  const issueOwners = new WeakMap();
+  // Legacy entities stored with no project at all. Import files them under
+  // "default", as every build before schema 6 did, but the attribution
+  // migration must map them to legacy_unattributed, not legacy_ambiguous (WS-11
+  // mapping iii). So the absence is kept: here by id, and in the privileged
+  // snapshot as the top-level STORED_WITHOUT_PROJECT list of those still
+  // waiting for the migration. A save after an entity's migration no longer
+  // lists it. Evidence an older save already discarded is not recreated.
+  const projectlessLegacy = new TransactionMap();
+  // Only while the entity still sits unmigrated in the "default" it was filed
+  // under, so a listed id can never demote an entity with a real project.
+  function isStoredWithoutProject(entity) {
+    return projectlessLegacy.has(entity.id) && entity.attribution === undefined && (entity.project ?? 'default') === 'default';
+  }
+  // ---- Deletion knowledge (PR-37a; design §2, §11, §12) -------------------
+  //
+  // W is the installed view's withheld set: the entities whose erasure token
+  // a tombstone or quarantine entry names, their relations, review signals,
+  // retry entries, events, runtime-miss entries, capture content and journal
+  // entries, and a tombstoned project's own entries that name no entity and
+  // predate its tombstone. W is held apart from every live map, as capture
+  // items are from records, so no read, write, search, traversal or count
+  // meets it. Its journal entries are logical skeletons in the live journal
+  // and the live baseline is rewritten without it, so the live graph is exactly
+  // what a logical purge of W would leave. Only the persistence snapshot puts W
+  // back, in place: the store never changes.
+  const byId = (item) => item?.id;
+  const WITHHELD_EXTRAS = { [RUNTIME_MISSES]: (item) => item?.missId, [CAPTURE_CONTENT]: (item) => item?.contentRef, [CAPTURE_SESSIONS]: byId };
+  const sessionKey = (originId, sessionId) => JSON.stringify([originId, sessionId]);
+
+  function withheldId(entityId) {
+    const held = deletion.get('held');
+    return Boolean(held && (held.ids.has(entityId) || held.relationIds.has(entityId)));
+  }
+
+  // A new token is never one a tombstone, quarantine entry or W already names.
+  function withheldToken(token) {
+    return Boolean(deletion.get('held')?.tokens.has(token) || deletion.get('view')?.tokens.has(token));
+  }
+
+  // The original of a live journal entry W replaced: its skeleton, or the
+  // baseline rewritten without W, sits at the original's id and sequence.
+  function heldOriginal(held, entry) {
+    const original = held?.journal.get(entry?.id);
+    return original !== undefined && original.seq === entry.seq ? original : undefined;
+  }
+
+  function withheldRecords() {
+    return deletion.get('held')?.collections.records?.items.map(([, item]) => item) ?? [];
+  }
+
+  function withheldCaptures() {
+    return deletion.get('held')?.collections.captures?.items.map(([, item]) => item) ?? [];
+  }
+
+  // What is quarantined (PR-37c design §9): the held entities whose token a
+  // quarantine entry names and no tombstone does. They are withheld as
+  // possibly purged, counted on every read of their scope, and only the owner
+  // releases or purges them.
+  function quarantinedEntities() {
+    const quarantine = deletion.get('view')?.quarantine;
+    if (!quarantine?.size) return [];
+    const held = deletion.get('held')?.collections ?? {};
+    return ['records', 'captures', 'facts'].flatMap((name) => held[name]?.items.map(([, item]) => item) ?? []).filter((entity) => quarantine.has(entity.erasureToken));
+  }
+
+  // The owner's view of it, by identity only (`shadowgraph quarantine list`,
+  // V-7): no content field and no token.
+  function quarantined() {
+    return quarantinedEntities().map((entity) => ({
+      id: entity.id, kind: entity.kind, project: entity.project, attribution: entity.attribution,
+      ...(entity.attribution === 'unattributed' ? { originId: entity.originId } : {}), createdAt: entity.createdAt
+    }));
+  }
+
+  function sessionWithheld(originId, sessionId) {
+    return deletion.get('held')?.sessions.has(sessionKey(originId, sessionId)) ?? false;
+  }
+
+  // A write never duplicates a key or scope W holds (design §11 R-3): the next
+  // save would hold both.
+  function refuseWithheldRetry(key) {
+    if (deletion.get('held')?.retryKeys.has(key)) throw deletionError(IDEMPOTENCY_KEY_WITHHELD, 'Refusing the write: its idempotency key is held by deletion records this build honours');
+  }
+
+  function refuseWithheldScope(held) {
+    if (held) throw deletionError(SCOPE_KEY_WITHHELD, 'Refusing the write: its memory or fact scope is held by deletion records this build honours');
+  }
+
+  // Replaces an array's contents, undoably inside an ordinary write.
+  function replaceContents(target, items) {
+    const previous = [...target];
+    if (transactionContext?.mode === 'undo') transactionContext.undo.push(() => { target.length = 0; Array.prototype.push.apply(target, previous); });
+    target.length = 0;
+    Array.prototype.push.apply(target, items);
+  }
+
+  function holdsData() {
+    return Boolean(records.size || captures.size || facts.size || relations.size || reviewSignals.size || idempotency.size || events.length || journal.length || extras.size || deletion.has('held'));
+  }
+
+  // Whether a merge into this graph needs deletion semantics this build lacks
+  // (design §11 R-6): the installed view or the incoming one has knowledge; a
+  // registry tombstone applies to the incoming payload; the graph's journal
+  // holds a purge marker; or the merge would replace a transcript cursor the
+  // graph holds (K-2).
+  function mergeNeedsDeletionSemantics(data) {
+    const incoming = data?.[DELETION_VIEW];
+    if (retentionPolicy().length || incoming?.retentionOverrides?.length || hasCaptureRetentionState(data) || hasCaptureRetentionState({ records: [...captures.values(), ...withheldCaptures()] })) return true;
+    if (deletion.get('view')?.knowledge || incoming?.knowledge || incoming?.registryApplies) return true;
+    if (journal.some((entry) => ['project.purged', 'origin.purged'].includes(entry?.type))) return true;
+    const cursors = new Set((extras.get(CAPTURE_SESSIONS) ?? []).filter((session) => isPlainObject(session?.cursor)).map(byId));
+    return Array.isArray(data?.captureSessions) && data.captureSessions.some((session) => cursors.has(session?.id));
+  }
+
+  // The data with a view attached, for a staging graph's import.
+  function withView(data, view) {
+    if (!view || data === null || typeof data !== 'object') return data;
+    return Object.defineProperty(Array.isArray(data) ? { records: data } : { ...data }, DELETION_VIEW, { value: view });
+  }
+
+  // W taken out of the live graph (design §2.2, §2.3, §11 R-3, R-10, §12 C5).
+  function hold() {
+    const view = deletion.get('view');
+    if (!view || (!view.tokens.size && !view.projects.length && !view.origins?.length && !view.ids?.size) || deletion.has('held')) return;
+    // By its token, or by its id when a committed restore waits for its
+    // post-step and the entity has no token yet (PR-37c design §1.4, §8.1); or
+    // whole, tokenless included, when a purge of its project waits for the
+    // next write: exactly what the purge's selection removes (PR-37d design
+    // §4.1).
+    const withheldEntity = (entity) => (entity?.erasureToken !== undefined && view.tokens.has(entity.erasureToken)) || Boolean(view.ids?.has(entity?.id))
+      || (view.purging?.has(entity?.project) === true && ownedByProject(entity, entity.project))
+      || (entity?.attribution === 'unattributed' && view.purgingOrigins?.has(entity.originId) === true);
+    const heldRecords = [...records.values()].filter(withheldEntity);
+    const heldCaptures = [...captures.values()].filter(withheldEntity);
+    const heldFacts = [...facts.values()].filter(withheldEntity);
+    const ids = new Set();
+    for (const entity of [...heldRecords, ...heldCaptures, ...heldFacts]) {
+      ids.add(entity.id);
+      for (const alternative of entity.alternatives ?? []) ids.add(alternative.id);
+    }
+    const heldRelations = [...relations.values()].filter((relation) => ids.has(relation.from) || ids.has(relation.to));
+    const relationIds = new Set(heldRelations.map(byId));
+    // Item 8: a project tombstone withholds the project's own entries that name
+    // no entity and predate it, whether or not it names tokens; one with no
+    // valid instant predates it. Access and authority entries never are.
+    const predates = (project, at) => typeof project === 'string'
+      && (view.purging?.has(project) === true || view.projects.some((tombstone) => tombstone.project === project && !(isValidIsoInstant(at) && compareInstants(at, tombstone.at) >= 0)));
+    const originPredates = (owner, at) => owner?.attribution === 'unattributed'
+      && (view.purgingOrigins?.has(owner.originId) === true || (view.origins ?? []).some(tombstone => tombstone.originId === owner.originId && !(isValidIsoInstant(at) && compareInstants(at, tombstone.at) >= 0)));
+    const entityKeys = ['recordId', 'factId', 'replacementId'];
+    const namesNothing = (item) => ![...entityKeys, 'relationId'].some((key) => item?.[key] !== undefined && item?.[key] !== null);
+    const heldEvents = events.filter((item) => entityKeys.some((key) => ids.has(item?.[key])) || relationIds.has(item?.relationId)
+      || (namesNothing(item) && !String(item?.type).startsWith('access.') && (predates(item?.project, item?.at) || originPredates(item, item?.at))));
+    const heldSignals = [...reviewSignals.values()].filter((signal) => ids.has(signal.decisionId));
+    const heldRetries = [...idempotency.entries()].filter(([, value]) => ids.has(value?.id)).map(([key, value]) => ({ key, value: canonicalIdempotencyValue(value) }));
+    const extra = (name) => (Array.isArray(extras.get(name)) ? extras.get(name) : []);
+    const heldMisses = extra(RUNTIME_MISSES).filter((entry) => ids.has(entry?.recordId) || predates(entry?.scope?.project, entry?.at)
+      || (entry?.scope?.requestState === 'project_unresolved' && entry.scope.project === null
+        && originPredates({ attribution: 'unattributed', originId: entry.scope.originId }, entry.at)));
+    const contentRefs = new Set(heldCaptures.map((item) => item.contentRef).filter(Boolean));
+    const heldContent = extra(CAPTURE_CONTENT).filter((entry) => contentRefs.has(entry?.contentRef)
+      || (view.purging?.has(entry?.project) === true && ownedByProject(entry, entry.project))
+      || (entry?.attribution === 'unattributed' && entry.project === null && view.purgingOrigins?.has(entry.originId) === true));
+    // A session opened after the tombstone captures; one with no valid start
+    // predates it, which fails closed (PR-37c design §1.3, R9).
+    const heldSessions = extra(CAPTURE_SESSIONS).filter((session) => (session?.attribution === 'project' && predates(session.project, session.startedAt)) || originPredates(session, session.startedAt));
+    if (![heldRecords, heldCaptures, heldFacts, heldEvents, heldMisses, heldSessions, heldContent].some((list) => list.length)) return;
+    // W's journal entries become logical skeletons and the baseline is
+    // rewritten without W, as a logical purge leaves them; the originals are
+    // kept by id for the persistence snapshot.
+    const originals = new Map();
+    const entryHeld = (entry) => {
+      const payload = replayedEntity(entry);
+      return ids.has(entry.entityId) || relationIds.has(entry.entityId) || ids.has(payload?.id) || relationIds.has(payload?.id)
+        || (entry.type === 'relation.created' && (ids.has(entry.payload?.from) || ids.has(entry.payload?.to)));
+    };
+    const liveJournal = journal.map((entry) => {
+      if (typeof entry?.id !== 'string') return entry;
+      if (entry.type === 'projection.baseline') {
+        const rewritten = clone(entry);
+        if (!rewriteBaselineForProjectPurge(rewritten, null, ids, relationIds)) return entry;
+        originals.set(entry.id, entry);
+        return rewritten;
+      }
+      if (!entryHeld(entry)) return entry;
+      originals.set(entry.id, entry);
+      return scrubLogicalPurgeSkeleton(clone(entry), entry.redacted === true && entry.redactedReason === 'capture_deleted' ? 'capture_deleted' : undefined);
+    });
+    // Each held item keeps its place: its index among what the collection held
+    // at this moment.
+    const collections = {};
+    const take = (name, live, keyOf, heldItems) => {
+      if (!heldItems.length) return;
+      const order = new Map(live.map((item, index) => [keyOf(item), index]));
+      collections[name] = { order, items: heldItems.map((item) => [order.get(keyOf(item)), item]) };
+    };
+    take('records', [...records.values()], byId, heldRecords);
+    take('captures', [...captures.values()], byId, heldCaptures);
+    take('facts', [...facts.values()], byId, heldFacts);
+    take('relations', [...relations.values()], byId, heldRelations);
+    take('reviewSignals', [...reviewSignals.values()], byId, heldSignals);
+    take('idempotency', [...idempotency.keys()].map((key) => ({ key })), (item) => item.key, heldRetries);
+    take('events', events, byId, heldEvents);
+    take(RUNTIME_MISSES, extra(RUNTIME_MISSES), WITHHELD_EXTRAS[RUNTIME_MISSES], heldMisses);
+    take(CAPTURE_CONTENT, extra(CAPTURE_CONTENT), WITHHELD_EXTRAS[CAPTURE_CONTENT], heldContent);
+    take(CAPTURE_SESSIONS, extra(CAPTURE_SESSIONS), byId, heldSessions);
+    const held = {
+      ids, relationIds, collections, journal: originals,
+      tokens: new Set([...heldRecords, ...heldCaptures, ...heldFacts].map((entity) => entity.erasureToken).filter((token) => token !== undefined)),
+      entities: new Map([...heldRecords, ...heldFacts].map((entity) => [entity.id, entity])),
+      retryKeys: new Set(heldRetries.map((item) => item.key)),
+      memoryScopes: new Set(heldRecords.filter((item) => item.kind === 'memory' && item.status === 'active').map(memoryScopeKey)),
+      factScopes: new Set(heldFacts.filter((fact) => fact.status === 'active').map((fact) => JSON.stringify([ownerKey(fact, (project) => project ?? 'default'), fact.key]))),
+      sessions: new Set(heldSessions.map((session) => sessionKey(session.originId, session.sessionId)))
+    };
+    for (const item of heldRecords) records.delete(item.id);
+    for (const item of heldCaptures) captures.delete(item.id);
+    for (const item of heldFacts) facts.delete(item.id);
+    for (const item of heldRelations) relations.delete(item.id);
+    for (const [key, signal] of reviewSignals) if (ids.has(signal.decisionId)) reviewSignals.delete(key);
+    for (const { key } of heldRetries) idempotency.delete(key);
+    const heldEventSet = new Set(heldEvents);
+    replaceContents(events, events.filter((item) => !heldEventSet.has(item)));
+    replaceContents(journal, liveJournal);
+    for (const [name, heldItems] of [[RUNTIME_MISSES, heldMisses], [CAPTURE_CONTENT, heldContent], [CAPTURE_SESSIONS, heldSessions]]) {
+      const heldSet = new Set(heldItems);
+      if (heldItems.length) extras.set(name, extra(name).filter((entry) => !heldSet.has(entry)));
+    }
+    deletion.set('held', held);
+    recomputeCurrentMemories();
+    recomputeCurrentFacts();
+  }
+
+  // W put back in place: the graph is then the store exactly as it is, with
+  // no view applied. A purge reaches W this way.
+  function unhold() {
+    if (!deletion.has('held')) return;
+    const whole = snapshot();
+    clearLive();
+    importPayload(whole);
+  }
+
+  // W re-emitted in place (design §2.3): each held item goes back before the
+  // first live item that came after it when it was held, and before anything
+  // written since, so the live order is kept exactly.
+  function reemit(live, keyOf, held) {
+    if (!held) return live;
+    const out = [];
+    let next = 0;
+    const flush = (limit) => { while (next < held.items.length && held.items[next][0] < limit) out.push(held.items[next++][1]); };
+    for (const item of live) {
+      flush(held.order.get(keyOf(item)) ?? Infinity);
+      out.push(item);
+    }
+    flush(Infinity);
+    return out;
+  }
+
+  // How much W holds, by collection: counts only, never an id (downgrade
+  // reports these; design §6).
+  function withheldCounts() {
+    const held = deletion.get('held');
+    if (!held) return {};
+    const counts = Object.fromEntries(Object.entries(held.collections).map(([name, { items }]) => [name, items.length]));
+    const skeletons = [...held.journal.values()].filter((entry) => entry.type !== 'projection.baseline').length;
+    if (skeletons) counts.journal = skeletons;
+    return counts;
+  }
+
   let revision = Number.isInteger(options.revision) ? options.revision : 0;
   let journalSeq = 0;
   let journalEpoch = null;
@@ -562,6 +2649,7 @@ export function createShadowGraph(options = {}) {
   function captureMutableState() {
     return structuredClone({
       records: [...records],
+      captures: [...captures],
       currentMemories: [...currentMemories],
       facts: [...facts],
       currentFacts: [...currentFacts],
@@ -570,6 +2658,9 @@ export function createShadowGraph(options = {}) {
       relations: [...relations],
       reviewSignals: [...reviewSignals],
       idempotency: [...idempotency],
+      extras: [...extras],
+      deletion: [...deletion],
+      projectlessLegacy: [...projectlessLegacy],
       revision,
       journalSeq,
       journalEpoch
@@ -582,12 +2673,16 @@ export function createShadowGraph(options = {}) {
       for (const [key, value] of entries) target.set(key, value);
     };
     restoreMap(records, snapshot.records);
+    restoreMap(captures, snapshot.captures);
     restoreMap(currentMemories, snapshot.currentMemories);
     restoreMap(facts, snapshot.facts);
     restoreMap(currentFacts, snapshot.currentFacts);
     restoreMap(relations, snapshot.relations);
     restoreMap(reviewSignals, snapshot.reviewSignals);
     restoreMap(idempotency, snapshot.idempotency);
+    restoreMap(extras, snapshot.extras);
+    restoreMap(deletion, snapshot.deletion);
+    restoreMap(projectlessLegacy, snapshot.projectlessLegacy);
     events.length = 0;
     for (const item of snapshot.events) events.push(item);
     journal.length = 0;
@@ -657,10 +2752,27 @@ export function createShadowGraph(options = {}) {
         throw error;
       };
       try {
+        // A graph with no active claim pays no snapshot cost. Every ordinary
+        // mutation, including import/attribution and asynchronous verification,
+        // marks the affected claim before its outer transaction can publish.
+        const generationBefore = mode !== 'none' && [...captures.values()].some(item => item.state === 'processing' && !item.cancelRequested)
+          ? snapshot() : null;
+        const cancelInvalidated = () => {
+          if (!generationBefore) return;
+          const tokens = new Set(invalidatedCaptureTokens(generationBefore, snapshot()));
+          const affected = [...captures.values()].filter(item => item.state === 'processing' && !item.cancelRequested && tokens.has(item.erasureToken));
+          assertJournalCapacity(affected.length);
+          for (const item of affected) {
+            const next = { ...clone(item), cancelRequested: true, updatedAt: now() };
+            captures.set(item.id, next);
+            appendJournal({ type: 'capture.state_changed', entityKind: CAPTURE_KIND, entityId: item.id, project: item.project, payload: next });
+          }
+        };
         const value = operation(...args);
         if (value && typeof value.then === 'function') {
           return Promise.resolve(value).then(
             (result) => {
+              try { cancelInvalidated(); } catch (error) { return rollback(error); }
               transactionContext = null;
               activeMutation = null;
               // Expiring previously verified trust is a successful lifecycle
@@ -677,6 +2789,7 @@ export function createShadowGraph(options = {}) {
             rollback
           );
         }
+        cancelInvalidated();
         transactionContext = null;
         activeMutation = null;
         return value;
@@ -687,16 +2800,56 @@ export function createShadowGraph(options = {}) {
   }
 
   function setRevision(value) { if (Number.isInteger(value) && value >= revision) revision = value; }
-  function assertUnusedEntityId(value, reserved = null) {
-    if (typeof value !== 'string' || !value) throw new Error('Entity id must be a non-empty string');
-    const alternativeExists = [...records.values()].some((record) => (record.alternatives ?? []).some((alternative) => alternative.id === value));
-    if (records.has(value) || facts.has(value) || relations.has(value) || alternativeExists || reserved?.has(value)) {
-      throw new Error(`Entity id already exists: ${value}`);
+  function allocateEntityId(prefix, reserved = new Set()) {
+    // Entity IDs share one namespace, including nested alternatives. Retry
+    // internally; neither a collided candidate nor occupancy leaves this API.
+    for (let attempt = 0; attempt < 128; attempt += 1) {
+      const candidate = id(prefix);
+      if (records.has(candidate) || captures.has(candidate) || facts.has(candidate) || relations.has(candidate) || reserved.has(candidate) || withheldId(candidate)) continue;
+      if ([...records.values()].some((record) => (record.alternatives ?? []).some((alternative) => alternative.id === candidate))) continue;
+      reserved.add(candidate);
+      return candidate;
     }
+    const error = new Error('Unable to allocate an entity ID');
+    error.code = 'entity_id_allocation_failed';
+    throw error;
   }
 
   function id(prefix) {
     return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  // Plan rev6 §3.2: the random, content-free handle a purge tombstone names an
+  // entity by. Never derived from the entity, and never shared by two.
+  function allocateErasureToken() {
+    for (;;) {
+      const token = randomUUID();
+      if (!withheldToken(token) && ![...records.values(), ...captures.values(), ...facts.values()].some((entity) => entity.erasureToken === token)) return token;
+    }
+  }
+
+  // An entity's retry values carry its token too; nothing else in them changes.
+  function tokenRetryValues(entity) {
+    for (const [key, value] of idempotency) {
+      if (value?.id === entity.id && value.erasureToken !== entity.erasureToken) idempotency.set(key, { ...value, erasureToken: entity.erasureToken });
+    }
+  }
+
+  // Plan rev6 §3.2: the first write to a tokenless decision, attempt, memory or
+  // fact gives it its token, on that write's own journal entry. Only a write
+  // does: a load, read, import or restore never reaches here. A fact that names
+  // no kind cannot carry one, and an entity of a newer writer is not this
+  // build's to change.
+  function withFirstWriteToken(input) {
+    if (!ATTRIBUTED_ENTITY_KINDS.includes(input.entityKind) || !isPlainObject(input.payload)) return input;
+    const live = (input.entityKind === 'fact' ? facts : records).get(input.entityId);
+    if (!live || !ATTRIBUTED_ENTITY_KINDS.includes(live.kind) || isNewerThanWriter(live)) return input;
+    if (live.erasureToken === undefined) {
+      touchMutableObject(live);
+      live.erasureToken = allocateErasureToken();
+      tokenRetryValues(live);
+    }
+    return input.payload.erasureToken === live.erasureToken ? input : { ...input, payload: { ...input.payload, erasureToken: live.erasureToken } };
   }
 
   // Legacy breadcrumb trail. Kept verbatim for backward compatibility; the journal
@@ -705,10 +2858,10 @@ export function createShadowGraph(options = {}) {
     const data = clone(payload);
     let project = data.project;
     const refId = data.recordId ?? data.factId;
-    if (!project && refId) project = entity(refId)?.project;
+    if (!project && refId) project = rawEntity(refId)?.project;
     if (!project && data.relationId) {
       const relation = relations.get(data.relationId);
-      project = entity(relation?.from)?.project ?? entity(relation?.to)?.project;
+      project = rawEntity(relation?.from)?.project ?? rawEntity(relation?.to)?.project;
     }
     events.push({ id: id('event'), type, at: now(), ...(project ? { project } : {}), ...data });
   }
@@ -736,6 +2889,7 @@ export function createShadowGraph(options = {}) {
     };
     const expectedKind = JOURNAL_TYPE_ENTITY_KIND[entry.type];
     if (expectedKind && entry.entityKind !== expectedKind) throw new Error(`${entry.type} requires entityKind ${expectedKind}`);
+    if (['entity.attributed', 'entity.token_assigned'].includes(entry.type) && !ATTRIBUTED_ENTITY_KINDS.includes(entry.entityKind)) throw new Error(`${entry.type} requires entityKind ${ATTRIBUTED_ENTITY_KINDS.join(', ')}`);
     if (entry.payload?.id !== undefined && entry.entityId !== entry.payload.id) throw new Error(`${entry.type} entityId must match payload.id`);
     if (entry.payload?.project !== undefined && entry.project !== entry.payload.project) throw new Error(`${entry.type} project must match payload.project`);
     if (entry.payload?.kind !== undefined && entry.entityKind !== entry.payload.kind) throw new Error(`${entry.type} entityKind must match payload.kind`);
@@ -758,7 +2912,7 @@ export function createShadowGraph(options = {}) {
   // `at` cannot be, because now() is injectable and millisecond ties are normal.
   function appendJournal(input) {
     assertJournalCapacity(1);
-    const entry = prebuildJournalEntry(input, journalSeq + 1);
+    const entry = prebuildJournalEntry(withFirstWriteToken(input), journalSeq + 1);
     journalSeq = entry.seq;
     if (journalEpoch === null) journalEpoch = entry.seq;
     journal.push(entry);
@@ -786,39 +2940,94 @@ export function createShadowGraph(options = {}) {
     if (typeof value !== 'string' || value.length > 200) throw new Error('idempotencyKey must be a string of at most 200 characters');
   }
 
-  function scopedIdempotencyKey(input, action) {
-    const project = normalizeProject(input?.project);
-    if (action !== 'memory') return `${action}:${project}:${input.idempotencyKey}`;
-    const scope = normalizeMemoryScope(input.scope);
-    const identity = JSON.stringify([scope.userId, scope.agentId, scope.runId, input.memoryType ?? null, input.key ?? null]);
-    return `memory:${project}:${identity}:${input.idempotencyKey}`;
+  // Who owns a new record (plan v1.4.4 §10.3; P1 reconciliation F-03). A
+  // selected project owns it -- the literal "default" included, as a real
+  // project of that name (owner decision OD-1). With no project, a presented
+  // origin owns it and no project does. With neither there is no owner, and the
+  // write is refused rather than stored under one nobody chose. The refusal
+  // blocks only ShadowGraph's own storage, never the caller's work (PC-15).
+  function writeOwner(input) {
+    const scope = resolveScope({ project: input?.project, originId: input?.originId, binding: input?.binding });
+    if (scope.state === 'project_selected') return { project: scope.project, attribution: 'project', ...(scope.originId ? { originId: scope.originId } : {}) };
+    if (scope.originId) return { project: null, attribution: 'unattributed', originId: scope.originId };
+    const error = new Error('Write refused (write_scope_unresolved): no project was selected and no origin id was presented, so nothing would own this record. Pass a project, or an originId.');
+    error.code = 'write_scope_unresolved';
+    error.reason = 'no_project_and_no_origin';
+    throw error;
+  }
+
+  // The boundary of a change to an entity that already exists (P1 findings
+  // F-16 and F-30): the write's own project, or its own origin, exactly what a
+  // new record would be written for. Nothing that widens a read widens it.
+  // With neither, the change is refused before any id is resolved, so an id
+  // that exists and one that does not are refused alike.
+  function writeBoundary(input) {
+    return readBoundary(writeOwner(input));
+  }
+
+  function decisionIn(boundary, decisionId) {
+    const found = entity(decisionId, boundary);
+    return found?.kind === 'decision' ? found : undefined;
+  }
+
+  function scopedIdempotencyKey(input, action, owner = writeOwner(input)) {
+    const scope = action === 'memory' ? normalizeMemoryScope(input.scope) : null;
+    return `${idempotencyKeyPrefix({ kind: action, ...owner, scope, memoryType: input.memoryType, key: input.key })}${input.idempotencyKey}`;
   }
 
   function idempotent(input, action) {
     if (!input?.idempotencyKey) return undefined;
     validateIdempotencyKey(input.idempotencyKey);
-    const project = normalizeProject(input.project);
-    const existing = idempotency.get(scopedIdempotencyKey(input, action));
+    // A retry matches only within its own owner. With no owner there is nothing
+    // to match; the write itself is refused once its content is validated.
+    let owner;
+    try { owner = writeOwner(input); }
+    catch (error) { if (error.code === 'write_scope_unresolved') return undefined; throw error; }
+    const existing = idempotency.get(retrySlot(input, action, owner));
     if (existing) return clone(canonicalIdempotencyValue(existing));
+    // Legacy key forms predate origins; only a project-owned retry can match one.
+    if (owner.attribution !== 'project') return undefined;
     // Legacy keys did not include project (all actions) or exact memory identity.
-    // Reuse one only when the payload belongs to the same project and, for a
-    // memory, the exact same scope/type/key; otherwise it would leak another
-    // user's retry result.
-    const legacyKeys = [`${action}:${project}:${input.idempotencyKey}`, `${action}:${input.idempotencyKey}`];
+    // Reuse one only when the entity it names has this write's owner -- never a
+    // legacy "default" record, whose owner is not the real project "default"
+    // (OD-1) -- and, for a memory, the exact same scope/type/key; otherwise it
+    // would leak another owner's retry result.
+    const legacyKeys = [`${action}:${owner.project}:${input.idempotencyKey}`, `${action}:${input.idempotencyKey}`];
     for (const key of legacyKeys) {
       const legacy = idempotency.get(key);
-      if (!legacy || (legacy.project ?? 'default') !== project) continue;
-      if (action === 'memory' && memoryScopeKey(legacy) !== memoryScopeKey(input)) continue;
+      if (!legacy || !sameOwnerKey(idempotencyHolder(legacy), owner)) continue;
+      if (action === 'memory' && memoryScopeKey(legacy) !== memoryScopeKey({ ...input, ...owner })) continue;
       return clone(canonicalIdempotencyValue(legacy));
     }
     return undefined;
   }
+
+  function idempotencyHolder(value) {
+    return (value?.kind === 'fact' ? facts.get(value.id) : value?.kind === CAPTURE_KIND ? captures.get(value.id) : records.get(value?.id)) ?? value;
+  }
+
+  // Where a write's retry is stored and looked up. A key another owner already
+  // holds -- a legacy "default" record's, presented again by the real project
+  // called "default" -- stays with its holder, and this owner's retry is kept
+  // beside it rather than matched to it or written over it.
+  function retrySlot(input, action, owner = writeOwner(input)) {
+    const key = scopedIdempotencyKey(input, action, owner);
+    refuseWithheldRetry(key);
+    const held = idempotency.get(key);
+    if (!held || sameOwnerKey(idempotencyHolder(held), owner)) return key;
+    const beside = `${key}${BESIDE_ANOTHER_OWNER}`;
+    refuseWithheldRetry(beside);
+    const alsoHeld = idempotency.get(beside);
+    if (alsoHeld && !sameOwnerKey(idempotencyHolder(alsoHeld), owner)) throw new Error('Idempotency key is already held by other owners');
+    return beside;
+  }
+
   function rememberIdempotency(input, action, value) {
-    if (input?.idempotencyKey) idempotency.set(scopedIdempotencyKey({ ...input, ...value }, action), clone(value));
+    if (input?.idempotencyKey) idempotency.set(retrySlot({ ...input, ...value }, action), clone(value));
   }
 
   function canonicalIdempotencyValue(value) {
-    const current = value?.kind === 'fact' ? facts.get(value.id) : records.get(value?.id);
+    const current = value?.kind === 'fact' ? facts.get(value.id) : value?.kind === CAPTURE_KIND ? captures.get(value.id) : records.get(value?.id);
     if (!current) throw new Error('Idempotency entry must reference an existing entity');
     if (!idempotencySemanticallyMatches(value, current)) {
       throw new Error(`Idempotency entry semantic mismatch with canonical entity ${value.id}`);
@@ -827,6 +3036,7 @@ export function createShadowGraph(options = {}) {
   }
 
   function addDecision(input) {
+    assertCreationInput('decision', input);
     const existing = idempotent(input, 'decision'); if (existing) return existing;
     if (!input || typeof input !== 'object' || typeof input.title !== 'string' || !input.title.trim() || typeof input.chosen !== 'string' || !input.chosen.trim()) throw new Error('A decision requires non-empty title and chosen strings');
     validateTemporalFields(input, ['createdAt', 'reviewAfter']);
@@ -834,54 +3044,51 @@ export function createShadowGraph(options = {}) {
     if (typeof confidence !== 'number' || confidence < 0 || confidence > 1) throw new Error('Decision confidence must be a number between 0 and 1');
     const alternatives = input.alternatives ?? [];
     if (!Array.isArray(alternatives) || alternatives.some((item) => !item || typeof item.label !== 'string' || !item.label.trim())) throw new Error('Decision alternatives must have non-empty label strings');
-    const project = normalizeProject(input.project);
+    const owner = writeOwner(input);
     const evidence = (input.evidence ?? []).map((item) => normalizeEvidence(item, now));
+    const reservedIds = new Set();
     const record = {
-      id: input.id ?? id('decision'), kind: 'decision', schemaVersion: SCHEMA_VERSION,
-      project, title: input.title, goal: input.goal ?? '', chosen: input.chosen,
+      id: allocateEntityId('decision', reservedIds), kind: 'decision', schemaVersion: SCHEMA_VERSION, erasureToken: allocateErasureToken(),
+      ...owner, title: input.title, goal: input.goal ?? '', chosen: input.chosen,
       // G2: provenance travels with the decision. Plain JSON values only.
       ...provenanceFields(input),
       // G8: confidence carries an auditable basis, not a bare number.
       confidence: createConfidence(confidence, evidence.length), status: 'proposed',
       assumptions: strings(input.assumptions, 'assumptions'), evidence,
-      alternatives: alternatives.map((item) => ({ id: item.id ?? id('alternative'), label: item.label, reasonRejected: item.reasonRejected ?? item.reason ?? '', reopenWhen: normalizeRules(item.reopenWhen ?? [], { strict: true }), status: 'rejected' })),
+      alternatives: alternatives.map((item) => ({ id: allocateEntityId('alternative', reservedIds), label: item.label, reasonRejected: item.reasonRejected ?? item.reason ?? '', reopenWhen: normalizeRules(item.reopenWhen ?? [], { strict: true }), status: 'rejected' })),
       failedAttempts: [...(input.failedAttempts ?? [])], outcome: input.outcome ?? null,
       reviewAfter: input.reviewAfter ?? null, createdAt: input.createdAt ?? now(), updatedAt: now()
     };
     clone(record);
-    assertUnusedEntityId(record.id);
-    const reservedIds = new Set([record.id]);
-    for (const alternative of record.alternatives) {
-      assertUnusedEntityId(alternative.id, reservedIds);
-      reservedIds.add(alternative.id);
-    }
     assertJournalCapacity(1);
     records.set(record.id, record);
     event('decision.recorded', { recordId: record.id });
-    appendJournal({ type: 'decision.recorded', entityKind: 'decision', entityId: record.id, project: record.project, payload: record, provenance: writeProvenance(record), idempotencyKey: input.idempotencyKey ? `decision:${record.project}:${input.idempotencyKey}` : undefined });
+    appendJournal({ type: 'decision.recorded', entityKind: 'decision', entityId: record.id, project: record.project, payload: record, provenance: writeProvenance(record), idempotencyKey: input.idempotencyKey ? retrySlot(input, 'decision', owner) : undefined });
     const result = clone(record); rememberIdempotency(input, 'decision', result); return result;
   }
 
   function addAttempt(input) {
+    assertCreationInput('attempt', input);
     const existing = idempotent(input, 'attempt'); if (existing) return existing;
     if (!input || typeof input !== 'object' || typeof input.solution !== 'string' || !input.solution.trim() || typeof input.result !== 'string' || !input.result.trim()) throw new Error('An attempt requires non-empty solution and result strings');
     if (input.resultClass !== undefined && !ATTEMPT_RESULT_CLASSES.includes(input.resultClass)) {
       throw new Error('Attempt resultClass must be failed, succeeded, or inconclusive');
     }
     validateTemporalFields(input, ['createdAt']);
-    const attempt = { id: input.id ?? id('attempt'), kind: 'attempt', schemaVersion: SCHEMA_VERSION, project: normalizeProject(input.project), ...provenanceFields(input), solution: input.solution, result: input.result, environment: input.environment ?? '', ...(input.resultClass === undefined ? {} : { resultClass: input.resultClass }), reason: input.reason ?? '', reusableWhen: normalizeRules(input.reusableWhen ?? [], { strict: true }), relatedTo: input.relatedTo ?? [], createdAt: input.createdAt ?? now() };
+    const owner = writeOwner(input);
+    const attempt = { id: allocateEntityId('attempt'), kind: 'attempt', schemaVersion: SCHEMA_VERSION, erasureToken: allocateErasureToken(), ...owner, ...provenanceFields(input), solution: input.solution, result: input.result, environment: input.environment ?? '', ...(input.resultClass === undefined ? {} : { resultClass: input.resultClass }), reason: input.reason ?? '', causalClaim: causalClaimFor(input.reason), reusableWhen: normalizeRules(input.reusableWhen ?? [], { strict: true }), relatedTo: input.relatedTo ?? [], createdAt: input.createdAt ?? now() };
     clone(attempt);
-    assertUnusedEntityId(attempt.id);
     assertJournalCapacity(1);
     records.set(attempt.id, attempt);
     event('attempt.recorded', { recordId: attempt.id });
-    appendJournal({ type: 'attempt.recorded', entityKind: 'attempt', entityId: attempt.id, project: attempt.project, payload: attempt, provenance: writeProvenance(attempt), idempotencyKey: input.idempotencyKey ? `attempt:${attempt.project}:${input.idempotencyKey}` : undefined });
+    appendJournal({ type: 'attempt.recorded', entityKind: 'attempt', entityId: attempt.id, project: attempt.project, payload: attempt, provenance: writeProvenance(attempt), idempotencyKey: input.idempotencyKey ? retrySlot(input, 'attempt', owner) : undefined });
     const result = clone(attempt); rememberIdempotency(input, 'attempt', result); return result;
   }
 
   // Scoped memory covers profile and continuity use cases without flattening
   // decisions, alternatives, evidence, and outcomes into generic text.
   function remember(input) {
+    assertCreationInput('memory', input);
     const existingRetry = idempotent(input, 'memory');
     if (existingRetry) return { operation: 'NOOP', memory: existingRetry };
     if (!input || typeof input !== 'object') throw new Error('A memory requires an input object');
@@ -890,12 +3097,14 @@ export function createShadowGraph(options = {}) {
     if (typeof input.text !== 'string' || !input.text.trim()) throw new Error('A memory requires non-empty text');
     if (input.metadata !== undefined && (!input.metadata || typeof input.metadata !== 'object' || Array.isArray(input.metadata))) throw new Error('Memory metadata must be an object');
     validateTemporalFields(input, ['recordedAt', 'createdAt', 'validFrom', 'validTo']);
-    const project = normalizeProject(input.project);
+    const owner = writeOwner(input);
+    const project = owner.project;
     const scope = normalizeMemoryScope(input.scope);
     const tags = strings(input.tags, 'tags');
     const metadata = clone(input.metadata ?? {});
     const embedding = normalizeEmbedding(input.embedding);
-    const scopeKey = memoryScopeKey({ project, scope, memoryType: input.memoryType, key: input.key });
+    const scopeKey = memoryScopeKey({ ...owner, scope, memoryType: input.memoryType, key: input.key });
+    refuseWithheldScope(deletion.get('held')?.memoryScopes.has(scopeKey));
     const previous = currentMemories.get(scopeKey);
     const latest = [...records.values()]
       .filter((record) => record.kind === 'memory' && memoryScopeKey(record) === scopeKey)
@@ -911,13 +3120,25 @@ export function createShadowGraph(options = {}) {
     if (previous && JSON.stringify(previousContent) === JSON.stringify(nextContent) && sameRequestedInterval) {
       const indexUpdated = input.embedding !== undefined && JSON.stringify(canonical(previous.embedding)) !== JSON.stringify(canonical(embedding));
       if (indexUpdated) {
-        assertJournalCapacity(1);
+        // Refresh every retry alias through the existing complete-snapshot
+        // entry format, so predecessor readers also replay the new index.
+        const retryKeys = [];
+        for (const [key, value] of idempotency) if (value?.id === previous.id) {
+          if (value.kind !== previous.kind || !sameOwnerKey(value, previous)
+            || !key.startsWith(idempotencyKeyPrefix(previous))) throw new Error('Idempotency entry identity does not match its entity');
+          canonicalIdempotencyValue(value);
+          retryKeys.push(key);
+        }
+        assertJournalCapacity(Math.max(1, retryKeys.length));
         const indexedAt = recordedAt;
         touchMutableObject(previous);
         previous.embedding = embedding;
         previous.updatedAt = indexedAt;
         event('memory.indexed', { recordId: previous.id, project });
-        appendJournal({ type: 'memory.indexed', entityKind: 'memory', entityId: previous.id, project, payload: clone(previous), provenance: writeProvenance({ ...previous, ...input }) });
+        for (const key of retryKeys.length ? retryKeys : [undefined]) {
+          appendJournal({ type: 'memory.indexed', entityKind: 'memory', entityId: previous.id, project, payload: clone(previous), provenance: writeProvenance({ ...previous, ...input }), idempotencyKey: key });
+          if (key !== undefined) idempotency.set(key, { ...idempotency.get(key), embedding: clone(embedding), updatedAt: indexedAt });
+        }
       }
       return { operation: 'NOOP', memory: clone(previous), ...(indexUpdated ? { indexUpdated: true } : {}) };
     }
@@ -928,15 +3149,16 @@ export function createShadowGraph(options = {}) {
     }
     const provenance = provenanceFields(input);
     const memory = {
-      id: input.id ?? id('memory'), kind: 'memory', schemaVersion: SCHEMA_VERSION,
-      project, scope, memoryType: input.memoryType, key: input.key, text: input.text,
-      version: (latest?.version ?? 0) + 1,
+      id: allocateEntityId('memory'), kind: 'memory', schemaVersion: SCHEMA_VERSION, erasureToken: allocateErasureToken(),
+      ...owner, scope, memoryType: input.memoryType, key: input.key, text: input.text,
+      // Versions count past W's too, as they would with no view (review C-4);
+      // nothing else here looks at W (re-review R2-2).
+      version: Math.max(latest?.version ?? 0, ...withheldRecords().filter((record) => record.kind === 'memory' && memoryScopeKey(record) === scopeKey).map((record) => record.version ?? 1)) + 1,
       metadata, tags, embedding, ...provenance, verificationStatus: 'unverified', status: 'active',
       temporal: { validFrom, validTo, recordedAt, invalidatedAt: null },
       createdAt: input.createdAt ?? recordedAt, updatedAt: recordedAt,
       ...(previous ? { supersedes: previous.id } : {})
     };
-    assertUnusedEntityId(memory.id);
     assertJournalCapacity(previous ? 2 : 1);
 
     if (previous) {
@@ -951,30 +3173,33 @@ export function createShadowGraph(options = {}) {
     records.set(memory.id, memory);
     currentMemories.set(scopeKey, memory);
     event('memory.recorded', { recordId: memory.id, project });
-    appendJournal({ type: 'memory.recorded', entityKind: 'memory', entityId: memory.id, project, payload: memory, provenance: writeProvenance(memory), idempotencyKey: input.idempotencyKey ? scopedIdempotencyKey({ ...input, ...memory }, 'memory') : undefined });
+    appendJournal({ type: 'memory.recorded', entityKind: 'memory', entityId: memory.id, project, payload: memory, provenance: writeProvenance(memory), idempotencyKey: input.idempotencyKey ? retrySlot({ ...input, ...memory }, 'memory') : undefined });
     rememberIdempotency(input, 'memory', memory);
     return { operation: previous ? 'UPDATE' : 'ADD', memory: clone(memory), ...(previous ? { previous: clone(previous) } : {}) };
   }
 
+  // Every version of one memory identity, inside the read boundary (P1
+  // reconciliation F-17): with no project and no origin it is empty, never the
+  // legacy "default" bucket.
   function memoryHistory(input = {}) {
-    const project = normalizeProject(input.project);
     const scope = normalizeMemoryScope(input.scope);
-    const scopeKey = memoryScopeKey({ project, scope, memoryType: input.memoryType, key: input.key });
+    const boundary = readBoundary(input, { memoryScope: scope });
     const items = [...records.values()]
-      .filter((record) => record.kind === 'memory' && memoryScopeKey(record) === scopeKey)
+      .filter((record) => record.kind === 'memory' && boundary.visible(record) && sameMemoryScopeValues(record.scope, scope) && record.memoryType === input.memoryType && record.key === input.key)
       .sort((left, right) => (left.version ?? 1) - (right.version ?? 1) || compareInstants(left.temporal?.validFrom ?? left.createdAt, right.temporal?.validFrom ?? right.createdAt) || String(left.id).localeCompare(String(right.id)))
       .map(clone);
-    return paginate(items, input, { project, scope, memoryType: input.memoryType, key: input.key }, { historical: true });
+    return scopedPage(items, input, boundary, { scope, memoryType: input.memoryType, key: input.key }, { historical: true });
   }
 
   function applyMemoryPlan(input = {}) {
+    assertCreationInput('memoryPlan', input);
     if (!Array.isArray(input.operations)) throw new Error('Memory plan operations must be an array');
-    const project = normalizeProject(input.project);
+    // One owner for the whole plan; each written memory inherits it.
+    const owner = writeOwner(input);
+    const project = owner.project;
     const defaultScope = normalizeMemoryScope(input.scope);
     const actions = new Set(['ADD', 'UPDATE', 'DELETE', 'NOOP']);
     const simulatedValidFrom = new Map([...currentMemories].map(([key, memory]) => [key, memory.temporal?.validFrom ?? null]));
-    const reservedIds = new Set();
-
     // Preflight the complete plan before mutating anything. Extraction output is
     // untrusted input; one malformed late operation must not leave a partial plan.
     const operations = input.operations.map((raw) => {
@@ -990,13 +3215,9 @@ export function createShadowGraph(options = {}) {
       validateIdempotencyKey(raw.idempotencyKey);
       validateTemporalFields(raw, ['recordedAt', 'createdAt', 'validFrom', 'validTo', 'validAt']);
       const scope = normalizeMemoryScope(raw.scope ?? defaultScope);
-      if (['ADD', 'UPDATE'].includes(action) && raw.id !== undefined) {
-        assertUnusedEntityId(raw.id, reservedIds);
-        reservedIds.add(raw.id);
-      }
       for (const name of ['actor', 'client', 'sessionId']) provenanceString(raw[name] ?? input[name], name);
       const recordedAt = ['ADD', 'UPDATE'].includes(action) ? (raw.recordedAt ?? now()) : raw.recordedAt;
-      const identityKey = memoryScopeKey({ project, scope, memoryType: raw.memoryType, key: raw.key });
+      const identityKey = memoryScopeKey({ ...owner, scope, memoryType: raw.memoryType, key: raw.key });
       if (['ADD', 'UPDATE'].includes(action)) {
         const validFrom = raw.validFrom ?? recordedAt;
         validateMemoryInterval(validFrom, raw.validTo ?? null);
@@ -1021,7 +3242,7 @@ export function createShadowGraph(options = {}) {
     const simulatedIdempotency = new Set();
     let requiredJournalEntries = 0;
     for (const operation of operations) {
-      const scopeKey = memoryScopeKey({ project, scope: operation.scope, memoryType: operation.memoryType, key: operation.key });
+      const scopeKey = memoryScopeKey({ ...owner, scope: operation.scope, memoryType: operation.memoryType, key: operation.key });
       const current = simulatedMemories.get(scopeKey);
       if (operation.action === 'NOOP' || (operation.action === 'DELETE' && !current)) continue;
       if (operation.action === 'DELETE') {
@@ -1030,7 +3251,7 @@ export function createShadowGraph(options = {}) {
         continue;
       }
 
-      const operationInput = { ...operation, project, scope: operation.scope };
+      const operationInput = { ...operation, project, originId: owner.originId, scope: operation.scope };
       const idempotencyKey = operation.idempotencyKey ? scopedIdempotencyKey(operationInput, 'memory') : null;
       if ((idempotencyKey && simulatedIdempotency.has(idempotencyKey)) || idempotent(operationInput, 'memory')) continue;
       const metadata = clone(operation.metadata ?? {});
@@ -1052,7 +3273,7 @@ export function createShadowGraph(options = {}) {
       } else {
         requiredJournalEntries += current ? 2 : 1;
         simulatedMemories.set(scopeKey, {
-          id: operation.id ?? `reserved-memory-${simulatedMemories.size}`,
+          id: `reserved-memory-${simulatedMemories.size}`,
           kind: 'memory', project, scope: operation.scope, memoryType: operation.memoryType,
           key: operation.key, text: operation.text, metadata, tags, embedding, status: 'active',
           temporal: { validFrom, validTo, recordedAt: operation.recordedAt, invalidatedAt: null }
@@ -1067,7 +3288,7 @@ export function createShadowGraph(options = {}) {
 
     const results = [];
     for (const operation of operations) {
-      const scopeKey = memoryScopeKey({ project, scope: operation.scope, memoryType: operation.memoryType, key: operation.key });
+      const scopeKey = memoryScopeKey({ ...owner, scope: operation.scope, memoryType: operation.memoryType, key: operation.key });
       const current = currentMemories.get(scopeKey);
       if (operation.action === 'NOOP' || (operation.action === 'DELETE' && !current)) {
         results.push({ operation: 'NOOP', memory: current ? clone(current) : null });
@@ -1095,6 +3316,7 @@ export function createShadowGraph(options = {}) {
       results.push(remember({
         ...operation,
         project,
+        originId: owner.originId,
         scope: operation.scope,
         sourceClass: operation.sourceClass ?? input.sourceClass,
         actor: operation.actor ?? input.actor,
@@ -1106,13 +3328,11 @@ export function createShadowGraph(options = {}) {
   }
 
   function addFact(input) {
+    assertCreationInput('fact', input);
     if (!input || typeof input.key !== 'string' || !input.key.trim()) throw new Error('A fact requires a non-empty key');
     validateTemporalFields(input, ['recordedAt', 'observedAt', 'validFrom', 'validTo', 'expiresAt']);
-    const project = normalizeProject(input.project);
     const confidence = input.confidence ?? 0.5;
     if (typeof confidence !== 'number' || confidence < 0 || confidence > 1) throw new Error('Fact confidence must be a number between 0 and 1');
-    const factScope = JSON.stringify([project, input.key]);
-    const previous = currentFacts.get(factScope);
     // G2: a source label is a CLAIM about origin, not a grant of trust. Unknown or
     // non-canonical labels downgrade to agent_claimed with the raw label kept for
     // audit. See provenance-contract.md §4.
@@ -1137,13 +3357,19 @@ export function createShadowGraph(options = {}) {
     if (effectiveExpirationBoundary && compareInstants(effectiveExpirationBoundary, validFrom) < 0) {
       throw new Error('Fact effective expiration boundary must not precede validFrom');
     }
+    // Ownership is decided once the content is known to be valid, so a caller
+    // learns what is wrong with the fact before learning it has no owner.
+    const owner = writeOwner(input);
+    const factScope = JSON.stringify([ownerKey(owner, (project) => project), input.key]);
+    refuseWithheldScope(deletion.get('held')?.factScopes.has(factScope));
+    const previous = currentFacts.get(factScope);
     const existing = idempotent(input, 'fact'); if (existing) return existing;
     if (previous?.temporal?.validFrom && compareInstants(validFrom, previous.temporal.validFrom) < 0) {
       throw new Error('Facts for one scope must be recorded in non-decreasing validFrom order');
     }
     const fact = {
-      id: input.id ?? id('fact'), kind: 'fact', schemaVersion: SCHEMA_VERSION,
-      project, key: input.key, value: input.value,
+      id: allocateEntityId('fact'), kind: 'fact', schemaVersion: SCHEMA_VERSION, erasureToken: allocateErasureToken(),
+      ...owner, key: input.key, value: input.value,
       source: provenance.sourceClass, ...provenance, confidence, verificationStatus,
       status: 'active', expiresAt: input.expiresAt ?? null, observedAt,
       validityPolicy: {
@@ -1154,7 +3380,6 @@ export function createShadowGraph(options = {}) {
       temporal: { validFrom, validTo, recordedAt, invalidatedAt: null }
     };
     clone(fact);
-    assertUnusedEntityId(fact.id);
     assertJournalCapacity(previous ? 2 : 1);
     if (previous) {
       touchMutableObject(previous);
@@ -1171,28 +3396,239 @@ export function createShadowGraph(options = {}) {
     }
     facts.set(fact.id, fact); currentFacts.set(factScope, fact);
     event('fact.observed', { factId: fact.id, key: fact.key });
-    appendJournal({ type: 'fact.observed', entityKind: 'fact', entityId: fact.id, project: fact.project, payload: fact, provenance: writeProvenance(fact), idempotencyKey: input.idempotencyKey ? `fact:${fact.project}:${input.idempotencyKey}` : undefined });
+    appendJournal({ type: 'fact.observed', entityKind: 'fact', entityId: fact.id, project: fact.project, payload: fact, provenance: writeProvenance(fact), idempotencyKey: input.idempotencyKey ? retrySlot(input, 'fact', owner) : undefined });
     const result = clone(fact); rememberIdempotency(input, 'fact', result); return result;
+  }
+
+  // The attribution migration (plan v1.4.4 §9.6 step 3, WS-11), under owner
+  // decision OD-1, option B. Every entity written before schema 6 gets its
+  // attribution, and each change is journalled as entity.attributed with reason
+  // `migration`, so a rebuild reproduces it:
+  //   project "default"  -> legacy_ambiguous: kept inspectable and reassignable,
+  //                         never treated as a real project named "default"
+  //   no project stored  -> legacy_unattributed
+  //   any other project  -> project, kept exactly as it was
+  // No project is rewritten, none is inferred from content, nothing is deleted.
+  // Idempotent per entity and resumable: an entity that already has an
+  // attribution is skipped, so an interrupted run continues where it stopped.
+  // `limit` bounds one batch; the caller persists between batches. The last
+  // migrated id is the high-water mark, and the journal entry that records it
+  // is persisted with the batch.
+  function migrateAttribution(input = {}) {
+    const limit = input.limit ?? Number.MAX_SAFE_INTEGER;
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('Attribution migration limit must be a positive integer');
+    const pending = [...records.values(), ...facts.values()]
+      .filter((entity) => entity.attribution === undefined && !isNewerThanWriter(entity))
+      .sort(attributionOrder);
+    const batch = pending.slice(0, limit);
+    assertJournalCapacity(batch.length);
+    const counts = { project: 0, legacy_ambiguous: 0, legacy_unattributed: 0 };
+    for (const entity of batch) {
+      const { previousProject, attribution } = migrationMapping(entity);
+      touchMutableObject(entity);
+      entity.schemaVersion = SCHEMA_VERSION;
+      entity.attribution = attribution;
+      counts[attribution] += 1;
+      appendJournal({
+        type: 'entity.attributed', entityKind: entity.kind, entityId: entity.id, project: entity.project ?? null,
+        payload: { ...clone(entity), attributionChange: { previousProject, previousAttribution: null, reason: 'migration' } }
+      });
+    }
+    const remaining = pending.length - batch.length;
+    return { migrated: batch.length, attributions: counts, remaining, complete: remaining === 0, highWaterMark: batch.at(-1)?.id ?? null };
+  }
+
+  // Plan rev6 §3.2: the only token backfill, run by migrate. Bounded, resumable
+  // and idempotent: each tokenless decision, attempt, memory or fact gets one
+  // entity.token_assigned entry that adds the token and changes nothing else,
+  // and its retry values carry it too. A fact that names no kind cannot carry a
+  // token; it is reported, and no kind is inferred for it.
+  function backfillErasureTokens(input = {}) {
+    const limit = input.limit ?? Number.MAX_SAFE_INTEGER;
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('Token backfill limit must be a positive integer');
+    const tokenless = [...records.values(), ...facts.values()]
+      .filter((entity) => entity.erasureToken === undefined && !isNewerThanWriter(entity))
+      .sort(attributionOrder);
+    // A reader replays an assignment onto the entity's last journal snapshot,
+    // which load normalisation may since have reshaped; the entry carries that
+    // snapshot with the token added, never the live form. An entity the journal
+    // cannot replay gets its token on its next write instead, and is reported.
+    const priorOf = replayedEntities();
+    const skipReason = (entity) => tokenSkipReason(entity, priorOf);
+    const pending = tokenless.filter((entity) => !skipReason(entity));
+    const skipped = tokenless.filter(skipReason).map((entity) => ({ id: entity.id, reason: skipReason(entity) }));
+    const batch = pending.slice(0, limit);
+    assertJournalCapacity(batch.length);
+    for (const entity of batch) {
+      touchMutableObject(entity);
+      entity.erasureToken = allocateErasureToken();
+      tokenRetryValues(entity);
+      appendJournal(tokenAssignment(entity, priorOf));
+    }
+    const remaining = pending.length - batch.length;
+    return { assigned: batch.length, remaining, complete: remaining === 0, highWaterMark: batch.at(-1)?.id ?? null, skipped };
+  }
+
+  // Each entity's last journal snapshot, by id: what an assignment carries.
+  function replayedEntities() {
+    const replayed = rebuildProjection(journal, { journalEpoch }).projection;
+    return new Map([...replayed.records, ...replayed.facts].map((entity) => [entity.id, entity]));
+  }
+
+  // Why a tokenless entity cannot take a token by assignment, or null: the
+  // eligibility the backfill and a restore's quarantine share (PR-37c design
+  // §4.6, §6.4). A record the attribution migration has not reached gets its
+  // token on its attribution entry; one whose snapshot an entry of this schema
+  // cannot carry gets it on its next write.
+  function tokenSkipReason(entity, priorOf) {
+    if (!ATTRIBUTED_ENTITY_KINDS.includes(entity.kind)) return 'fact_without_kind';
+    if (entity.attribution === undefined) return 'not_attributed';
+    const prior = priorOf.get(entity.id);
+    if (!prior || prior.erasureToken !== undefined) return 'not_replayable';
+    return prior.kind === 'fact' && factValidityPolicyIssue(prior, { required: true }) ? 'not_replayable' : null;
+  }
+
+  // The entry that gives an entity the token it now holds: its replayed
+  // snapshot with the token added, and nothing else changed. The one writer of
+  // the type in this build.
+  function tokenAssignment(entity, priorOf) {
+    const prior = priorOf.get(entity.id);
+    return { type: 'entity.token_assigned', entityKind: entity.kind, entityId: entity.id, project: prior.project ?? null, payload: { ...clone(prior), erasureToken: entity.erasureToken } };
+  }
+
+  // The attribution the migration gives an entity written before schema 6,
+  // decided only from what is stored and the recorded absence of a project.
+  function migrationMapping(entity) {
+    const previousProject = isStoredWithoutProject(entity) ? null : entity.project ?? null;
+    const attribution = previousProject === null
+      ? 'legacy_unattributed'
+      : previousProject === 'default' ? 'legacy_ambiguous' : 'project';
+    return { previousProject, attribution };
+  }
+
+  // Explicit local-owner administration. A grant is read authority and cannot
+  // select or widen this mutation. Attribution changes ownership only; the
+  // original origin, time, source, trust, and provenance remain byte-for-byte.
+  function attribute(input = {}) {
+    const named = Object.hasOwn(input, 'ids');
+    const origin = Object.hasOwn(input, 'originId');
+    if (named === origin) throw new Error('Attribution requires exactly one of ids or originId');
+    if (typeof input.targetProject !== 'string' || !input.targetProject.trim()) throw new Error('Attribution requires a non-empty targetProject');
+    if (typeof input.reason !== 'string' || !input.reason.trim()) throw new Error('Attribution requires an explicit reason');
+    if (input.surface !== undefined && (typeof input.surface !== 'string' || !input.surface.trim())) throw new Error('Attribution surface must be non-empty');
+    if (['grant', 'grantId', 'accessId', 'scope', 'binding'].some((key) => Object.hasOwn(input, key))) throw new Error('Read authority cannot authorize attribution');
+    if (named && (!Array.isArray(input.ids) || !input.ids.length || input.ids.some((value) => typeof value !== 'string' || !value.trim()) || new Set(input.ids).size !== input.ids.length)) throw new Error('Attribution ids must be distinct non-empty entity ids');
+    if (origin && usableOriginId(input.originId) === null) throw new Error('Attribution requires a named originId');
+    const selected = named ? input.ids.map((entityId) => {
+      const entity = records.get(entityId) ?? facts.get(entityId);
+      if (!entity) throw new Error(`Attribution entity not found: ${entityId}`);
+      return entity;
+    }) : [...records.values(), ...facts.values()].filter((entity) => entity.attribution === 'unattributed' && entity.originId === input.originId);
+    // PR-33: this build reads capture and never attributes it. An origin that
+    // holds a capture, or a record a capture names anywhere (as one it
+    // produced, in a receipt or a superseded result), stays where it is: moved
+    // apart, a purge of one owner would leave the other naming what it removed.
+    const namedByCapture = new Set();
+    const collect = (value) => {
+      if (typeof value === 'string') namedByCapture.add(value);
+      else if (value && typeof value === 'object') for (const item of Object.values(value)) collect(item);
+    };
+    for (const { id: ownId, ...item } of captures.values()) collect(item);
+    const capturesName = (entity) => namedByCapture.has(entity.id) || (entity.alternatives ?? []).some((alternative) => namedByCapture.has(alternative?.id));
+    if ((origin && [...captures.values()].some((item) => item.attribution === 'unattributed' && item.originId === input.originId)) || selected.some(capturesName)) {
+      const error = new Error('Attribution of capture material is not supported by this build: the origin holds a capture item, or a capture names a selected record');
+      error.code = 'attribution_capture_unsupported';
+      throw error;
+    }
+    if (!selected.length) throw new Error('Attribution origin has no unattributed material');
+    if (selected.some(isNewerThanWriter)) throw new Error('Attribution cannot change an entity of a future schema this build does not write');
+    const changed = selected.filter((entity) => !ownedByProject(entity, input.targetProject));
+    assertJournalCapacity(changed.length);
+    const candidate = snapshot();
+    let retries = new Map(candidate.idempotency.map((item) => [item.key, item.value]));
+    for (const previous of changed) {
+      const next = { ...clone(previous), schemaVersion: SCHEMA_VERSION, project: input.targetProject, attribution: 'project' };
+      if (next.erasureToken === undefined && ATTRIBUTED_ENTITY_KINDS.includes(next.kind)) next.erasureToken = allocateErasureToken();
+      const collection = next.kind === 'fact' ? candidate.facts : candidate.records;
+      collection[collection.findIndex((entity) => entity.id === next.id)] = next;
+      retries = reattributeIdempotency(retries, next);
+      candidate.journal.push(prebuildJournalEntry({
+        type: 'entity.attributed', entityKind: next.kind, entityId: next.id, project: next.project,
+        payload: { ...next, attributionChange: { previousProject: isStoredWithoutProject(previous) ? null : previous.project ?? null, previousAttribution: previous.attribution ?? null, reason: 'user' } },
+        provenance: writeProvenance(previous)
+      }, ++candidate.journalSeq));
+      candidate.events.push({
+        id: id('event'), type: 'attribution.changed', at: now(), project: next.project,
+        [next.kind === 'fact' ? 'factId' : 'recordId']: next.id,
+        previousProject: isStoredWithoutProject(previous) ? null : previous.project ?? null,
+        previousAttribution: previous.attribution ?? null, targetProject: next.project,
+        reason: input.reason, surface: input.surface ?? 'local-owner',
+        ...(previous.originId ? { originId: previous.originId } : {})
+      });
+    }
+    // A move cannot silently supersede or merge another owner's active identity.
+    const moved = new Set(changed.map((entity) => entity.id));
+    for (const collection of [candidate.records.filter((item) => item.kind === 'memory'), candidate.facts]) {
+      const active = collection.filter((item) => item.status === 'active');
+      const key = (item) => item.kind === 'memory' ? memoryScopeKey(item) : JSON.stringify([ownerKey(item, (project) => project ?? 'default'), item.key]);
+      for (const entity of active.filter((item) => moved.has(item.id))) if (active.some((other) => other.id !== entity.id && key(other) === key(entity))) throw new Error('Attribution would collide with an active memory or fact identity');
+    }
+    candidate.idempotency = [...retries].map(([key, value]) => ({ key, value }));
+    if (candidate[STORED_WITHOUT_PROJECT]) candidate[STORED_WITHOUT_PROJECT] = candidate[STORED_WITHOUT_PROJECT].filter((entityId) => !moved.has(entityId));
+    if (changed.length) replaceData(candidate);
+    return { attributed: changed.length, targetProject: input.targetProject, ids: changed.map((entity) => entity.id) };
+  }
+
+  // Legacy attribution review (P1 finding F-27; OD-1 option B, plan v1.4.4
+  // §10.3). The records no project owns -- legacy "default" data
+  // (legacy_ambiguous) and data stored with no project (legacy_unattributed)
+  // -- are in no project's read, and this is where they can be inspected
+  // before anyone chooses where they belong. It is an administrative view,
+  // not a project: no read scope reaches these records, and it reaches nothing
+  // else. A record the migration has not reached yet is shown with the
+  // attribution the migration's own mapping gives it. An entity from a newer
+  // writer's schema is never listed: the migration skips it and attribution
+  // refuses it, so its legacy meaning is not this build's to give. Each entry
+  // carries the canonical record, and no project is inferred. It writes
+  // nothing; reassignment is a separate, explicit action.
+  function legacyAttributionReview(options = {}) {
+    const items = [...records.values(), ...facts.values()]
+      .filter((entity) => !isNewerThanWriter(entity) && isLegacyOwned(entity))
+      .sort(attributionOrder)
+      .map((entity) => ({
+        id: entity.id,
+        kind: entity.kind,
+        attribution: entity.attribution ?? migrationMapping(entity).attribution,
+        migrated: entity.attribution !== undefined,
+        assignedProject: null,
+        entity: clone(entity)
+      }));
+    const visible = new Set(items.map(item => item.id));
+    for (const item of items) for (const alternative of item.entity.alternatives ?? []) visible.add(alternative.id);
+    const shown = items.map(item => ({ ...item, entity: publicReferences(item.entity, id => visible.has(id)) }));
+    return paginate(shown, options, { view: 'legacy_attribution' });
   }
 
   async function verifyFact(input = {}) {
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Fact verification requires an input object');
-    const allowed = new Set(['factId', 'evidencePath']);
-    if (Object.keys(input).some((name) => !allowed.has(name))) throw new Error('Fact verification only accepts factId and evidencePath');
+    const allowed = new Set(['factId', 'evidencePath', 'project', 'originId']);
+    if (Object.keys(input).some((name) => !allowed.has(name))) throw new Error('Fact verification only accepts factId, evidencePath, project and originId');
     if (typeof input.factId !== 'string' || !input.factId) throw new Error('Fact verification requires a non-empty factId');
     if (typeof input.evidencePath !== 'string' || !input.evidencePath.trim()) throw new Error('Fact verification requires a non-empty evidencePath');
     if (!verifier || typeof verifier.verify !== 'function' || typeof verifier.validateStored !== 'function') {
       throw new Error('Fact verification is unavailable: configure a separate trusted verifier');
     }
-    const fact = facts.get(input.factId);
-    if (!fact || fact.kind !== 'fact') throw new Error('Fact not found');
+    const boundary = writeBoundary(input);
+    const factInScope = () => { const found = entity(input.factId, boundary); return found?.kind === 'fact' ? found : undefined; };
+    const fact = factInScope();
+    if (!fact) throw new Error('Fact not found');
     if (fact.status !== 'active') throw new Error('Only an active fact can be verified');
     const attestation = await verifier.verify({ fact: clone(fact), evidencePath: input.evidencePath });
     // Evidence verification may perform filesystem I/O. The commit decision must
     // use a fresh trusted clock sample after that await, never the pre-I/O instant.
     const trustedValidationInstant = now();
-    const current = facts.get(input.factId);
-    if (!current || current.kind !== 'fact') throw new Error('Fact not found');
+    const current = factInScope();
+    if (!current) throw new Error('Fact not found');
     if (current.status !== 'active') throw new Error('Only an active fact can be verified');
     const next = clone(attestation);
     const candidate = { ...clone(current), verificationStatus: 'verified', verification: next };
@@ -1215,10 +3651,10 @@ export function createShadowGraph(options = {}) {
             invalidatedAt: trustedValidationInstant
           }
         };
-        const entry = prebuildJournalEntry({
+        const entry = prebuildJournalEntry(withFirstWriteToken({
           type: 'fact.expired', entityKind: 'fact', entityId: current.id,
           project: current.project, at: trustedValidationInstant, payload: expired
-        }, journalSeq + 1);
+        }), journalSeq + 1);
         touchMutableObject(current);
         Object.assign(current, expired);
         journalSeq = entry.seq;
@@ -1236,11 +3672,11 @@ export function createShadowGraph(options = {}) {
       }
       throw new Error('Fact is already verified by a different attestation');
     }
-    const entry = prebuildJournalEntry({
+    const entry = prebuildJournalEntry(withFirstWriteToken({
       type: 'fact.verified', entityKind: 'fact', entityId: current.id,
       project: current.project, at: trustedValidationInstant, payload: candidate,
       provenance: { actor: next.verifierIdentity, client: 'local-evidence-verifier', sessionId: null }
-    }, journalSeq + 1);
+    }), journalSeq + 1);
     touchMutableObject(current);
     Object.assign(current, candidate);
     journalSeq = entry.seq;
@@ -1249,7 +3685,10 @@ export function createShadowGraph(options = {}) {
     return { operation: 'VERIFIED', fact: clone(current) };
   }
 
-  function entity(entityId) {
+  // An id resolved with no boundary at all. Internal, never exported and never
+  // returned: the kernel uses it only to label its own breadcrumbs and to check
+  // the whole store's references. Every by-id read goes through entity().
+  function rawEntity(entityId) {
     if (records.has(entityId)) return records.get(entityId);
     if (facts.has(entityId)) return facts.get(entityId);
     for (const record of records.values()) {
@@ -1259,9 +3698,35 @@ export function createShadowGraph(options = {}) {
     return undefined;
   }
 
+  // The by-id chokepoint (plan v1.4.4 §10.5). An id resolves only inside the
+  // boundary of the request that names it, and an alternative only where its
+  // decision does. Outside it -- another project, legacy data, another origin
+  // -- there is no entity, exactly as for an id that exists nowhere, so no
+  // by-id answer can tell the two apart. The boundary is required.
+  function entity(entityId, boundary) {
+    if (typeof boundary?.visible !== 'function') throw new Error('entity() requires the boundary of the request it serves');
+    const found = rawEntity(entityId);
+    return found && boundary.visible(found.kind === 'alternative' ? records.get(found.decisionId) : found) ? found : undefined;
+  }
+
+  // A new relation joins two entities of the one project -- or the one origin
+  // -- it is written for (P1 reconciliation F-16, as corrected by the owner).
+  // Its boundary comes from the write's own project or origin alone, so nothing
+  // that widens a read, a wider-read grant included, ever widens a write. An
+  // endpoint outside it is refused exactly as one that does not exist.
+  // Relations stored across projects before this rule are kept as they are;
+  // scoped reads do not cross them.
   function link(input) {
+    assertCreationInput('relation', input);
     if (!input || typeof input.from !== 'string' || typeof input.to !== 'string' || typeof input.relation !== 'string' || !input.relation.trim()) throw new Error('A relationship requires from, to, and relation');
-    if (!entity(input.from) || !entity(input.to)) throw new Error('Relation endpoints must exist before linking');
+    const boundary = writeBoundary(input);
+    const from = entity(input.from, boundary);
+    const to = entity(input.to, boundary);
+    if (!from || !to) throw new Error('Relation endpoints must exist in the scope the relation is written for');
+    return addRelation(input, from.project ?? to.project ?? null);
+  }
+
+  function addRelation(input, project) {
     validateTemporalFields(input, ['recordedAt', 'createdAt', 'validFrom', 'validTo']);
     const recordedAt = input.recordedAt ?? now();
     const createdAt = input.createdAt ?? recordedAt;
@@ -1269,29 +3734,40 @@ export function createShadowGraph(options = {}) {
     const validTo = input.validTo ?? null;
     if (validTo && compareInstants(validTo, validFrom) <= 0) throw new Error('Relation validTo must be later than validFrom');
     const relation = {
-      id: input.id ?? id('relation'), kind: 'relation', schemaVersion: SCHEMA_VERSION,
+      id: allocateEntityId('relation'), kind: 'relation', schemaVersion: SCHEMA_VERSION,
       from: input.from, to: input.to, relation: input.relation, createdAt,
       temporal: { validFrom, validTo, recordedAt, invalidatedAt: null }
     };
-    assertUnusedEntityId(relation.id);
     assertJournalCapacity(1);
     relations.set(relation.id, relation);
     event('relation.created', { relationId: relation.id });
-    appendJournal({ type: 'relation.created', entityKind: 'relation', entityId: relation.id, project: entity(relation.from)?.project ?? entity(relation.to)?.project ?? null, payload: relation });
+    appendJournal({ type: 'relation.created', entityKind: 'relation', entityId: relation.id, project, payload: relation });
     return clone(relation);
   }
 
+  // A by-id read, and the walk from it, inside the boundary of the request
+  // (plan v1.4.4 §10.5). The root and every node reached resolve through
+  // entity(), so the walk never enters another project, legacy data or
+  // another origin -- not even to come back. A root outside the boundary, or
+  // outside the requested memory scope, is answered exactly as a root that does
+  // not exist: no node, no relation, and one notice that names nothing. Input
+  // is checked before any id is resolved, so a bad request fails the same way
+  // for every id.
   function traverse(input = {}) {
-    if (typeof input.id !== 'string' || !entity(input.id)) throw new Error('A traversal requires an existing id');
-    const memoryProject = normalizeProject(input.project);
+    if (typeof input?.id !== 'string' || !input.id) throw new Error('A traversal requires an id');
     const memoryScope = normalizeMemoryScope(input.scope);
-    const memoryVisible = (item) => item?.kind !== 'memory' || (item.project === memoryProject && sameMemoryScopeValues(item.scope, memoryScope));
-    if (!memoryVisible(entity(input.id))) throw new Error('Traversal root is outside the requested memory scope');
     const direction = input.direction ?? 'both';
     if (!['in', 'out', 'both'].includes(direction)) throw new Error('Traversal direction must be in, out, or both');
     const depth = input.depth ?? 1;
     if (!Number.isInteger(depth) || depth < 1 || depth > 10) throw new Error('Traversal depth must be an integer between 1 and 10');
-    const seen = new Set([input.id]); const nodes = [clone(entity(input.id))]; const edges = []; let frontier = [input.id];
+    const boundary = readBoundary(input, { memoryScope });
+    const reach = (entityId) => {
+      const found = entity(entityId, boundary);
+      return found && (found.kind !== 'memory' || sameMemoryScopeValues(found.scope, memoryScope)) ? found : undefined;
+    };
+    const root = reach(input.id);
+    if (!root) return scopedResult({ root: input.id, direction, depth, nodes: [], relations: [], limitation: { code: 'scoped_coverage', detail: 'No record with this id is visible in the scope of this traversal.' } }, boundary);
+    const seen = new Set([input.id]); const nodes = [clone(extractionView(root, memoryScope))]; const edges = []; let frontier = [input.id];
     for (let level = 0; level < depth && frontier.length; level += 1) {
       const next = [];
       for (const relation of relations.values()) {
@@ -1300,21 +3776,24 @@ export function createShadowGraph(options = {}) {
         const toMatch = direction !== 'out' && frontier.includes(relation.to);
         if (!fromMatch && !toMatch) continue;
         const targetId = fromMatch ? relation.to : relation.from;
-        if (!entity(targetId)) continue;
-        if (!memoryVisible(entity(targetId))) continue;
+        const target = reach(targetId);
+        if (!target) continue;
         if (!edges.some((item) => item.id === relation.id)) edges.push(clone(relation));
-        if (!seen.has(targetId) && entity(targetId)) { seen.add(targetId); next.push(targetId); nodes.push(clone(entity(targetId))); }
+        if (!seen.has(targetId)) { seen.add(targetId); next.push(targetId); nodes.push(clone(extractionView(target, memoryScope))); }
       }
       frontier = next;
     }
-    return { root: input.id, direction, depth, nodes, relations: edges };
+    return scopedResult({ root: input.id, direction, depth, nodes, relations: edges }, boundary);
   }
 
+  // Both decisions resolve inside the one boundary of this write, so they
+  // share an owner; another owner's decision is refused exactly as one that
+  // does not exist (P1 finding F-30).
   function supersedeDecision(input = {}) {
-    const previous = records.get(input.decisionId); const replacement = records.get(input.replacementId);
-    if (!previous || previous.kind !== 'decision' || !replacement || replacement.kind !== 'decision') throw new Error('Supersession requires two existing decisions');
+    const boundary = writeBoundary(input);
+    const previous = decisionIn(boundary, input.decisionId); const replacement = decisionIn(boundary, input.replacementId);
+    if (!previous || !replacement) throw new Error('Supersession requires two existing decisions');
     if (previous.id === replacement.id) throw new Error('A decision cannot supersede itself');
-    if (previous.project !== replacement.project) throw new Error('Superseding decisions must belong to the same project');
     if (previous.status === 'superseded' && previous.supersededBy === replacement.id) return { previous: clone(previous), replacement: clone(replacement), relation: [...relations.values()].find((item) => item.from === replacement.id && item.to === previous.id && item.relation === 'supersedes') ?? null };
     if (['superseded', 'archived'].includes(previous.status) || ['superseded', 'archived', 'abandoned', 'stale'].includes(replacement.status)) throw new Error('Supersession would create an invalid decision chain');
     assertJournalCapacity(3);
@@ -1322,15 +3801,17 @@ export function createShadowGraph(options = {}) {
     touchMutableObject(replacement);
     previous.status = 'superseded'; previous.supersededBy = replacement.id; previous.updatedAt = now();
     replacement.supersedes = [...new Set([...(replacement.supersedes ?? []), previous.id])]; replacement.updatedAt = now();
-    const relation = link({ from: replacement.id, to: previous.id, relation: 'supersedes' });
+    const relation = addRelation({ from: replacement.id, to: previous.id, relation: 'supersedes' }, replacement.project ?? previous.project ?? null);
     event('decision.superseded', { recordId: previous.id, replacementId: replacement.id });
     const cause = appendJournal({ type: 'decision.superseded', entityKind: 'decision', entityId: previous.id, project: previous.project, payload: clone(previous), provenance: writeProvenance(previous) });
     appendJournal({ type: 'decision.recorded', entityKind: 'decision', entityId: replacement.id, project: replacement.project, payload: clone(replacement), provenance: writeProvenance(replacement), causationId: cause.id });
     return { previous: clone(previous), replacement: clone(replacement), relation };
   }
 
-  function updateDecisionStatus(decisionId, status) {
-    const record = records.get(decisionId); if (!record || record.kind !== 'decision') throw new Error('Decision not found');
+  // A change named by id acts only inside the write's own boundary (P1 finding
+  // F-30); `scope` carries its project or origin.
+  function updateDecisionStatus(decisionId, status, scope = {}) {
+    const record = decisionIn(writeBoundary(scope), decisionId); if (!record) throw new Error('Decision not found');
     // G3: accept FORMATTING aliases only (case, hyphen/underscore) and store the
     // canonical value, so search({status}) matches what was written. There are no
     // SEMANTIC aliases: `archived` is not `abandoned`, `active` is not `executed`.
@@ -1352,8 +3833,8 @@ export function createShadowGraph(options = {}) {
     return clone(record);
   }
 
-  function setOutcome(decisionId, outcome) {
-    const record = records.get(decisionId); if (!record || record.kind !== 'decision') throw new Error('Decision not found');
+  function setOutcome(decisionId, outcome, scope = {}) {
+    const record = decisionIn(writeBoundary(scope), decisionId); if (!record) throw new Error('Decision not found');
     if (!OUTCOME_STATUSES.includes(outcome?.status)) throw new Error('Outcome status must be successful, mixed, failed, or unknown');
     // G2/G8: an outcome's own provenance is a CLAIM. It weights the confidence move
     // but never sets a verification status anywhere.
@@ -1393,8 +3874,8 @@ export function createShadowGraph(options = {}) {
 
   // G8: record evidence for or against a decision without inventing an outcome.
   function addConfidenceEvidence(input = {}) {
-    const record = records.get(input.decisionId);
-    if (!record || record.kind !== 'decision') throw new Error('Decision not found');
+    const record = decisionIn(writeBoundary(input), input.decisionId);
+    if (!record) throw new Error('Decision not found');
     const direction = input.supports === false ? -1 : 1;
     const provenance = normalizeSourceClass(input.sourceClass ?? input.source);
     if (typeof input.reason !== 'string' || !input.reason.trim()) throw new Error('Confidence evidence requires a non-empty reason');
@@ -1448,13 +3929,14 @@ export function createShadowGraph(options = {}) {
   }
 
   // G1: reconsideration must work from persisted state, not only from facts the
-  // caller happens to re-supply. Projects one project's ACTIVE facts into the same
+  // caller happens to re-supply. Projects one owner's ACTIVE facts into the same
   // { key: value } shape review({ facts }) already accepts, so stored and supplied
-  // facts share a single matching path. Project-scoped; superseded/expired skipped.
-  function storedFactValues(project, asOf) {
+  // facts share a single matching path. `inScope` says which facts are that
+  // owner's; superseded/expired skipped.
+  function storedFactValues(inScope, asOf) {
     const candidates = new Map();
     for (const fact of facts.values()) {
-      if ((fact.project ?? 'default') !== project) continue;
+      if (!inScope(fact)) continue;
       // Expiry is a property of the fact, not of whether housekeeping has run
       // yet. maintain() is what flips `status` to expired and stamps validTo,
       // and it may not have run since the boundary passed -- so read-time
@@ -1572,16 +4054,25 @@ export function createShadowGraph(options = {}) {
   //                   with no structured rule behind them. Off by default, so
   //                   review(), context() and maintain() pay nothing for it and
   //                   publish nothing new.
-  function evaluateReview(context = {}, { onlyDecisionId, collectGrounded = false } = {}) {
+  //   visible         REQUIRED. The read boundary of the request: only the
+  //                   decisions and facts it admits are evaluated, so no
+  //                   review, reconsideration, maintenance or context ever
+  //                   reviews, or cites the facts of, another owner (P1
+  //                   findings F-06, F-31).
+  function evaluateReview(context = {}, { onlyDecisionId, collectGrounded = false, visible, persistSignals = true } = {}) {
+    if (typeof visible !== 'function') throw new Error('evaluateReview() requires the boundary of the request it serves');
     const prepared = validateReviewInput(context);
-    const project = prepared.project;
     const changed = new Set(prepared.changedFacts); const due = []; const diagnostics = []; const explained = [];
     const reviewAt = prepared.asOf ?? now();
+    // The stored facts the request can see, and the facts known with the
+    // caller's on top, are the same for every decision it reviews: they are
+    // built once, on the first decision, not once each.
+    let stored, knownFacts;
     for (const record of records.values()) {
       if (record.kind !== 'decision') continue;
       if (onlyDecisionId !== undefined && record.id !== onlyDecisionId) continue;
       if (['archived', 'superseded', 'abandoned'].includes(record.status)) continue;
-      if (project !== undefined && record.project !== project) continue;
+      if (!visible(record)) continue;
       const matches = [];
       // Renamed from `reconsider` so it cannot be misread as the public
       // reconsider() defined below. It holds alternative labels, nothing else.
@@ -1603,8 +4094,8 @@ export function createShadowGraph(options = {}) {
       // matching `changedFacts` only: that list is an ephemeral "these just
       // changed" signal, whereas facts are durable state, so feeding state into it
       // would make every decision due forever.
-      const stored = storedFactValues(record.project ?? 'default', reviewAt);
-      const knownFacts = { ...stored.values, ...prepared.facts };
+      stored ??= storedFactValues(visible, reviewAt);
+      knownFacts ??= { ...stored.values, ...prepared.facts };
       for (const alternative of record.alternatives) for (const rule of alternative.reopenWhen) {
         if (typeof rule === 'string') {
           if (changed.has(rule)) {
@@ -1731,7 +4222,7 @@ export function createShadowGraph(options = {}) {
       const key = reviewSignalKey(item.decisionId, item.reason, item.coverage);
       let signal = reviewSignals.get(key);
       if (!signal) signal = legacySignalCovering(item.decisionId, item.coverage);
-      if (!signal) {
+      if (!signal && persistSignals) {
         signal = { id: id('review'), kind: 'review', ...clone(item), status: 'open', createdAt: now() };
         reviewSignals.set(key, signal);
       }
@@ -1741,8 +4232,8 @@ export function createShadowGraph(options = {}) {
       // acknowledge. `status` comes along because `due` is recomputed from
       // current evidence on every call and does not drop an acknowledged item,
       // so a caller needs to see which ones are already handled.
-      item.reviewSignalId = signal.id;
-      item.reviewSignalStatus = signal.status;
+      if (signal) { item.reviewSignalId = signal.id; item.reviewSignalStatus = signal.status; }
+      else item.reviewSignalStatus = 'unpersisted';
       // Coverage is signal identity, and it is persisted on the signal where a
       // caller can read it through shadowgraph_review_signals. On a due entry it
       // would be redundant with violatedConditions and pure wire weight, so it
@@ -1752,8 +4243,29 @@ export function createShadowGraph(options = {}) {
     return { due, diagnostics, explained };
   }
 
-  // Public shape is unchanged: a bare array of due decisions.
-  function review(context = {}) { return evaluateReview(context).due; }
+  function evaluateForRead(input, boundary, { persistSignals = true, ...options } = {}) {
+    // Own-scope evaluation persists unless the caller asks for a pure read (the
+    // default-path read, plan v1.4.4 §13.1). A wider evaluation can read more
+    // evidence, but never persists signals, even for an own decision using
+    // newly granted foreign evidence.
+    if (persistSignals && boundary.scope.grant) evaluateReview(input, { ...options, visible: boundary.baseVisible });
+    return evaluateReview(input, { ...options, visible: boundary.visible, persistSignals: persistSignals && !boundary.scope.grant });
+  }
+
+  // Due entries keep their content; the serializable envelope declares the
+  // request boundary even when no decision can be evaluated.
+  function review(context = {}) {
+    const boundary = readBoundary(context);
+    const due = evaluateForRead(context, boundary).due;
+    return scopedItems(due, boundary, referencedSignals(boundary, due));
+  }
+
+  // What an operation that evaluated nothing says about itself (P1 finding
+  // F-06): it had no project and no origin, so it read and changed nothing.
+  function reachesNothing(boundary) {
+    return boundary.scope.state !== 'project_selected' && boundary.scope.originId === null && !boundary.scope.grant;
+  }
+  const UNRESOLVED_OPERATION = Object.freeze({ code: 'scoped_coverage', detail: 'No project and no origin was given, so nothing was evaluated or changed.' });
 
   // Which observations a verdict was computed from, named once each. A detail
   // already carries its evidence inline; this lifts it to the decision so a
@@ -1803,30 +4315,28 @@ export function createShadowGraph(options = {}) {
    */
   function reconsider(input = {}) {
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('reconsider input must be an object');
-    const requestedProject = input.project === undefined ? undefined : normalizeProject(input.project);
+    const boundary = readBoundary(input);
     let onlyDecisionId;
-    let scopedProject = requestedProject;
     if (input.decisionId !== undefined && input.decisionId !== null) {
       // Fail closed. An unaddressable decision must never read as a grounded
       // negative: an empty `unchanged` / `complete` for a typo'd id, or for an
-      // id belonging to another project, is indistinguishable from "checked,
+      // id outside the request's scope, is indistinguishable from "checked,
       // and this decision is fine" -- the exact confusion three-valued
       // evaluation exists to prevent. So each of these is an error, never a
-      // quiet empty result.
+      // quiet empty result. An id outside the scope -- another project's,
+      // legacy data's, another origin's, or any id when no scope was given --
+      // is refused exactly as one that exists nowhere (P1 finding F-31).
       if (typeof input.decisionId !== 'string' || !input.decisionId.trim()) throw new Error('decisionId must be a non-empty string');
-      const record = records.get(input.decisionId);
-      if (!record || record.kind !== 'decision') throw new Error('Decision not found');
-      if (requestedProject !== undefined && record.project !== requestedProject) throw new Error('Decision is not accessible in this project');
+      const record = decisionIn(boundary, input.decisionId);
+      if (!record) throw new Error('Decision not found');
       if (['archived', 'superseded', 'abandoned'].includes(record.status)) throw new Error(`Decision is not open for reconsideration (status ${record.status})`);
       onlyDecisionId = record.id;
-      scopedProject = record.project;
     }
-    const evaluated = evaluateReview({
-      ...(requestedProject === undefined ? {} : { project: requestedProject }),
+    const evaluated = evaluateForRead({
       ...(input.changedFacts === undefined ? {} : { changedFacts: input.changedFacts }),
       ...(input.facts === undefined ? {} : { facts: input.facts }),
       ...(input.asOf === undefined ? {} : { asOf: input.asOf })
-    }, { onlyDecisionId, collectGrounded: true });
+    }, boundary, { onlyDecisionId, collectGrounded: true });
 
     const byDecision = new Map();
     const entryFor = (decisionId, title) => {
@@ -1882,24 +4392,20 @@ export function createShadowGraph(options = {}) {
         : incomplete ? 'manual_review' : 'unchanged';
     }
     const decisions = [...byDecision.values()];
-    return {
+    // With no project and no origin nothing was evaluated, and that must not
+    // read as "unchanged, complete" -- the same silent pass failing closed
+    // exists to prevent. It is reported as not settled, and why.
+    if (reachesNothing(boundary)) {
+      return scopedResult({ verdict: 'manual_review', evaluationCompleteness: 'partial', scope: { project: null, decisionId: null }, decisions, limitation: { ...UNRESOLVED_OPERATION } }, boundary);
+    }
+    return scopedResult({
       verdict: decisions.some((item) => item.verdict === 'review_recommended') ? 'review_recommended'
         : decisions.some((item) => item.verdict === 'manual_review') ? 'manual_review'
           : 'unchanged',
       evaluationCompleteness: decisions.some((item) => item.evaluationCompleteness === 'partial') ? 'partial' : 'complete',
-      scope: { project: scopedProject ?? null, decisionId: onlyDecisionId ?? null },
+      scope: { project: boundary.scope.project, decisionId: onlyDecisionId ?? null },
       decisions
-    };
-  }
-
-  // A declared classification wins; the legacy text heuristic is the fallback for
-  // records written before `resultClass` existed, so no stored attempt changes
-  // meaning. The two are distinguishable by whether `resultClass` is present:
-  // an inferred classification is a guess about prose and is never presented as
-  // a verified failure.
-  function attemptFailed(attempt) {
-    if (attempt.resultClass !== undefined) return attempt.resultClass === 'failed';
-    return /fail|regression|error/i.test(attempt.result);
+    }, boundary, referencedSignals(boundary, decisions));
   }
 
   // Evaluates `attempts[].reusableWhen`, the field that has been normalised and
@@ -1912,12 +4418,15 @@ export function createShadowGraph(options = {}) {
   //
   // A satisfied condition means the attempt MAY be reconsidered. It does not
   // erase the recorded failure, and it does not authorise a retry.
-  function evaluateAttemptReuse(project, reviewAt, suppliedFacts) {
-    const stored = storedFactValues(project, reviewAt);
+  function evaluateAttemptReuse(inScope, reviewAt, suppliedFacts) {
+    const stored = storedFactValues(inScope, reviewAt);
     const knownFacts = { ...stored.values, ...suppliedFacts };
     const reusable = []; const diagnostics = [];
     for (const record of records.values()) {
-      if (record.kind !== 'attempt' || record.project !== project) continue;
+      if (record.kind !== 'attempt' || !inScope(record) || extractionView(record).derivationState === 'superseded') continue;
+      // An attempt whose outcome is undetermined (PR-24) is not a failure that
+      // may be reconsidered: it is in no collection and is only counted.
+      if (attemptOutcome(record) === 'undetermined') continue;
       // Every stored condition counts, including the legacy free-text form.
       // Filtering those out made an ALL decision over a SUBSET: an attempt with
       // one unprovable prose condition and one satisfied structured condition
@@ -1986,15 +4495,21 @@ export function createShadowGraph(options = {}) {
       facts: input.facts ?? {},
       asOf: at
     });
+    // Maintenance ages, expires and reviews only what the request's scope owns
+    // (P1 finding F-06), so time-based ageing happens per project, when that
+    // project is maintained. With no project and no origin it changes nothing.
+    const boundary = readBoundary(input);
+    if (reachesNothing(boundary)) return scopedResult({ at, staleDecisionIds: [], agedDecisionIds: [], reviewSignals: [], due: [], diagnostics: [], limitation: { ...UNRESOLVED_OPERATION } }, boundary);
     const decisionsToStale = [...records.values()].filter((record) => (
       record.kind === 'decision'
+      && boundary.baseVisible(record)
       && record.reviewAfter
       && compareInstants(record.reviewAfter, at) <= 0
       && CURRENT_DECISION_STATUSES.includes(record.status)
     ));
     const factsToExpire = [...facts.values()].filter((fact) => {
       const expirationBoundary = effectiveFactExpirationBoundary(fact);
-      return fact.status === 'active' && expirationBoundary && compareInstants(expirationBoundary, at) <= 0;
+      return boundary.baseVisible(fact) && fact.status === 'active' && expirationBoundary && compareInstants(expirationBoundary, at) <= 0;
     });
     assertJournalCapacity(decisionsToStale.length + factsToExpire.length);
 
@@ -2018,15 +4533,52 @@ export function createShadowGraph(options = {}) {
       };
       appendJournal({ type: 'fact.expired', entityKind: 'fact', entityId: fact.id, project: fact.project, payload: clone(fact) });
     }
-    const { due, diagnostics } = evaluateReview(reviewInput);
-    return { at, staleDecisionIds, agedDecisionIds: [...staleDecisionIds], reviewSignals: [...reviewSignals.values()].map(clone), due, diagnostics };
+    const { due, diagnostics } = evaluateForRead(reviewInput, boundary);
+    const signals = scopedView(boundary).reviewSignals.map(clone);
+    return scopedResult({ at, staleDecisionIds, agedDecisionIds: [...staleDecisionIds], reviewSignals: signals, due, diagnostics }, boundary, signals);
   }
 
-  function getReviewSignals(input = {}) { const project = input.project === undefined ? undefined : normalizeProject(input.project); return [...reviewSignals.values()].filter((item) => (project === undefined || records.get(item.decisionId)?.project === project) && (!input.status || item.status === input.status)).map(clone); }
-  function acknowledgeReview(signalId) { const item = [...reviewSignals.values()].find((candidate) => candidate.id === signalId); if (!item) throw new Error('Review signal not found'); touchMutableObject(item); item.status = 'acknowledged'; item.acknowledgedAt = now(); return clone(item); }
+  // The review signals of the request's scope (P1 reconciliation F-04).
+  function reviewSignalView(signal, boundary) {
+    const decision = decisionIn(boundary, signal.decisionId);
+    if (!decision || !['superseded', 'archived', 'abandoned'].includes(decision.status)) return clone(signal);
+    const replacement = decision.supersededBy && decisionIn(boundary, decision.supersededBy);
+    return { ...clone(signal), historical: true, decisionState: decision.status, ...(replacement ? { supersededBy: replacement.id } : {}) };
+  }
+
+  function getReviewSignals(input = {}) {
+    const boundary = readBoundary(input);
+    const items = scopedView(boundary).reviewSignals.filter((item) => !input.status || item.status === input.status).map(item => reviewSignalView(item, boundary));
+    return scopedItems(items, boundary, items);
+  }
+
+  function referencedSignals(boundary, items) {
+    const ids = new Set(items.map((item) => item.reviewSignalId));
+    return scopedView(boundary).reviewSignals.filter((signal) => ids.has(signal.id));
+  }
+  // A signal's own fields: its decision's and its lifecycle's. Its conditions
+  // carry the facts it was evaluated on.
+  const SIGNAL_OWN_FIELDS = ['id', 'kind', 'decisionId', 'title', 'reason', 'alternativesToReconsider', 'coverage', 'status', 'createdAt', 'acknowledgedAt'];
+
+  function acknowledgeReview(signalId, scope = {}) {
+    const boundary = writeBoundary(scope);
+    const item = [...reviewSignals.values()].find((candidate) => candidate.id === signalId && decisionIn(boundary, candidate.decisionId));
+    if (!item) throw new Error('Review signal not found');
+    touchMutableObject(item); item.status = 'acknowledged'; item.acknowledgedAt = now();
+    // The decision is the caller's, so the acknowledgement is too; the answer is
+    // a read. A build before PR-10 chose review evidence by project label, so a
+    // stored signal can cite a fact outside the decision's boundary; its
+    // conditions are then not returned, and what is stored stays as it was
+    // (P1 findings F-16, F-30).
+    if (scopedView(boundary).reviewSignals.includes(item)) return clone(item);
+    return {
+      ...Object.fromEntries(SIGNAL_OWN_FIELDS.filter((key) => item[key] !== undefined).map((key) => [key, clone(item[key])])),
+      limitation: { code: 'scoped_coverage', detail: 'This signal cites evidence outside this scope, so its conditions are not shown. It is acknowledged; what is stored is unchanged.' }
+    };
+  }
 
   function redact(input = {}) {
-    const project = input.project === undefined ? undefined : normalizeProject(input.project);
+    const boundary = readBoundary(input);
     const patterns = (input.patterns ?? ['password', 'secret', 'token', 'api[-_]?key', 'authorization', 'private[-_]?key']).map((item) => new RegExp(String(item), 'i'));
     const replacement = input.replacement ?? '[REDACTED]';
     const transform = (value, key = '') => {
@@ -2039,73 +4591,153 @@ export function createShadowGraph(options = {}) {
       }
       return value;
     };
-    const data = exportData();
-    data.idempotency = data.idempotency.map((item) => ({ ...item, key: replacement }));
-    if (project) {
-      data.records = data.records.filter((item) => item.project === project);
-      data.facts = data.facts.filter((item) => item.project === project);
-      data.idempotency = data.idempotency.filter((item) => item.value?.project === project);
-      const recordIds = new Set(data.records.map((item) => item.id));
-      const decisionIds = new Set(data.records.filter((item) => item.kind === 'decision').map((item) => item.id));
-      const ids = new Set([...recordIds, ...data.facts.map((item) => item.id)]);
-      data.reviewSignals = data.reviewSignals.filter((item) => decisionIds.has(item.decisionId));
-      data.relations = data.relations.filter((item) => ids.has(item.from) && ids.has(item.to));
-      data.events = data.events.filter((item) => item.project === project && (!item.relationId || data.relations.some((relation) => relation.id === item.relationId)));
-      data.journal = data.journal.filter((item) => item.project === project);
-    }
+    // Redaction must see everything it could have to redact, so its input is the
+    // privileged snapshot (plan v1.4.4 §11.2 step 3); only its output is a read.
+    // What the output holds is chosen by the request's boundary, exactly as for
+    // every other read (scopedView): with no project and no origin it holds
+    // nothing, and it never names an id outside the scope (P1 reconciliation
+    // F-16). The caller's rules never see an erasureToken.
+    const data = publicValue(liveSnapshot());
+    const view = scopedView(boundary);
+    const chosen = (items) => new Set(items.map((item) => item.id));
+    const [recordIds, factIds, relationIds] = [view.records, view.facts, view.relations].map(chosen);
+    // The snapshot's events and journal are copies of the live arrays, in order.
+    const [eventsKept, entriesKept] = [new Set(view.events), new Set(view.journal)];
+    data.records = data.records.filter((item) => recordIds.has(item.id));
+    data.facts = data.facts.filter((item) => factIds.has(item.id));
+    data.relations = data.relations.filter((item) => relationIds.has(item.id));
+    data.reviewSignals = view.reviewSignals.map(clone);
+    data.idempotency = data.idempotency.filter((item) => recordIds.has(item.value?.id) || factIds.has(item.value?.id)).map((item) => ({ ...item, key: replacement }));
+    data.events = data.events.filter((item, index) => eventsKept.has(events[index]));
+    data.journal = data.journal.filter((item, index) => entriesKept.has(journal[index]));
     // B-4: the journal payload is redacted like every other surface. A secret must
-    // not survive in the audit trail just because it was also written there.
-    const baselineKey = (entry) => JSON.stringify([entry?.id ?? null, entry?.seq ?? null]);
-    const baselineCollections = (entry) => JSON.stringify([
-      entry?.payload?.records ?? [], entry?.payload?.facts ?? [],
-      entry?.payload?.relations ?? [], entry?.payload?.idempotency ?? []
-    ]);
-    const originalBaselineCollections = new Map(data.journal
-      .filter((entry) => entry?.type === 'projection.baseline')
-      .map((entry) => [baselineKey(entry), baselineCollections(entry)]));
-    const transformed = transform(data);
-    for (const entry of transformed.journal) {
-      if (entry?.type !== 'projection.baseline') continue;
-      const original = originalBaselineCollections.get(baselineKey(entry));
-      if (original !== undefined && original !== baselineCollections(entry)) sanitizeRewrittenBaseline(entry);
-    }
-    return transformed;
+    // not survive in the audit trail just because it was also written there. A
+    // projection baseline holds the whole store, so no scoped view carries one,
+    // and redaction has no baseline to rewrite.
+    const transformed = transform(publicReferences(data, boundary.reaches));
+    // The output is a read: collections this build cannot interpret stay out of
+    // it (plan v1.4.4 §10.9.6).
+    for (const key of Object.keys(transformed)) if (!NATIVE_STORE_KEYS.includes(key)) delete transformed[key];
+    // And it says so, stamped after every pattern and replacement has run, so
+    // none can remove or alter it: no import, save or restore takes a scoped
+    // redaction for a store (finding F-36).
+    for (const key of ['revision', 'journalSeq', 'journalEpoch']) delete transformed[key];
+    const result = scopedResult({ exportKind: REDACTION_EXPORT_KIND, ...transformed, completeness: {
+      complete: true, losslessItems: false,
+      limitation: { code: 'scoped_coverage', detail: 'Only a redacted view of this scope. This transformed output is not a complete store and cannot be imported, saved or restored.' }
+    } }, boundary, view.reviewSignals);
+    // Coverage describes the real boundary, but a redacted view must not echo
+    // its label after the body policy has run (including collection masking).
+    // Withhold it explicitly; neither null nor a replacement selects a scope.
+    result.completeness.scope.project = null;
+    result.completeness.scope.projectLabelWithheld = boundary.scope.state === 'project_selected';
+    return result;
+  }
+
+  function purgeSelection(scope) {
+    const origin = originScope(scope), { project, originId } = scope;
+    if (origin ? usableOriginId(originId) === null : typeof project !== 'string' || !project.trim()) throw new Error(origin ? 'An origin identifier is required' : 'A project name is required');
+    const owns = item => ownedByPurgeScope(item, scope);
+    const recordsForProject = [...records.values()].filter(owns);
+    const capturesForProject = [...captures.values()].filter(owns);
+    const factsForProject = [...facts.values()].filter(owns);
+    const ids = new Set(recordsForProject.map((item) => item.id));
+    for (const record of recordsForProject) for (const alternative of record.alternatives ?? []) ids.add(alternative.id);
+    for (const fact of factsForProject) ids.add(fact.id);
+    for (const item of capturesForProject) ids.add(item.id);
+    const relationIds = new Set([...relations.values()].filter((item) => ids.has(item.from) || ids.has(item.to)).map((item) => item.id));
+    const referencesRemoved = (item) => {
+      if (origin && String(item.type).startsWith('access.')) return false;
+      const entityId = item.entityId ?? item.recordId ?? item.factId;
+      const relationId = item.relationId ?? (item.entityKind === 'relation' ? entityId : null);
+      if (relationId) return relationIds.has(relationId) || (!relations.has(relationId) && !origin && item.project === project && project !== 'default');
+      if (entityId) {
+        if (ids.has(entityId)) return true;
+        if (rawEntity(entityId) || captures.has(entityId)) return false;
+      }
+      if (['project.purged', 'origin.purged'].includes(item.type)) return purgeMarkerInScope(item, scope);
+      // Capture's refusal entry names its project and nothing else, and only
+      // this build writes it: it is never a legacy breadcrumb (PR-36b).
+      if (item.type === CAPTURE_REFUSED_EVENT) return !origin && item.project === project;
+      // An unreferenced legacy "default" breadcrumb cannot establish ownership.
+      return item.payload ? owns(item.payload) : origin ? owns(item) : item.project === project && project !== 'default';
+    };
+    const removedEvents = new Set(events.filter(referencesRemoved));
+    // The runtime miss ledger's entries recorded in the project, or naming an
+    // entity it removes, go with it (PR-28a).
+    const misses = Array.isArray(extras.get(RUNTIME_MISSES)) ? extras.get(RUNTIME_MISSES) : [];
+    const removedEntityIds = new Set([...ids, ...relationIds]);
+    const reachesMiss = (entry) => origin
+      ? removedEntityIds.has(entry?.recordId) || (entry?.scope?.requestState === 'project_unresolved' && entry.scope.project === null && entry.scope.originId === originId)
+      : missReachedBy(entry, project, removedEntityIds);
+    // Capture's own collections: the entries the project owns, and the content
+    // a capture it removes names (PR-33).
+    const removedContentRefs = new Set(capturesForProject.map((item) => item.contentRef).filter(Boolean));
+    const reachesCaptureEntry = (entry) => origin ? owns(entry) || removedContentRefs.has(entry?.contentRef) : captureEntryReachedBy(entry, project, removedContentRefs);
+    // Capture's counts, of live memory as every other count is (PR-37d design
+    // §6.1, FND-P6-02); and apart from them the project's records, captures and
+    // facts deletion records hold out of it, which a purge removes too (R5 L1
+    // VS1): counts only, never in the marker.
+    const reached = (name) => (Array.isArray(extras.get(name)) ? extras.get(name) : []).filter(reachesCaptureEntry).length;
+    const held = deletion.get('held')?.collections ?? {};
+    const withheld = ['records', 'captures', 'facts'].flatMap((name) => held[name]?.items ?? []).filter(([, item]) => owns(item)).length;
+    // `entities`: what a purge's tombstone names by token (PR-37d design §1.2).
+    return { ids, relationIds, removedEvents, referencesRemoved, reachesMiss, reachesCaptureEntry, entities: [...recordsForProject, ...capturesForProject, ...factsForProject], summary: { ...scope, records: recordsForProject.length, facts: factsForProject.length, relations: relationIds.size, events: removedEvents.size, journal: journal.filter(referencesRemoved).length, runtimeMisses: misses.filter(reachesMiss).length, captures: capturesForProject.length, captureContent: reached(CAPTURE_CONTENT), captureSessions: reached(CAPTURE_SESSIONS), withheld } };
   }
 
   function projectSummary(project) {
-    if (typeof project !== 'string' || !project.trim()) throw new Error('A project name is required');
-    const recordsForProject = [...records.values()].filter((item) => item.project === project);
-    const ids = new Set(recordsForProject.map((item) => item.id));
-    for (const record of recordsForProject) for (const alternative of record.alternatives ?? []) ids.add(alternative.id);
-    for (const fact of facts.values()) if (fact.project === project) ids.add(fact.id);
-    return { project, records: recordsForProject.length, facts: [...facts.values()].filter((item) => item.project === project).length, relations: [...relations.values()].filter((item) => ids.has(item.from) || ids.has(item.to)).length, events: events.filter((item) => item.project === project || ids.has(item.recordId) || ids.has(item.factId)).length, journal: journal.filter((item) => item.project === project).length };
+    return purgeSelection({ project }).summary;
   }
+
+  function originSummary(originId) { return purgeSelection({ originId }).summary; }
+  function purgeOrigin(originId, options = {}) { return purgeScope({ originId }, options); }
+  function purgeProject(project, options = {}) { return purgeScope({ project }, options); }
 
   // G5: `mode` defaults to a LOGICAL purge. Content is removed and an auditable
   // skeleton remains, so a rebuild does not resurrect purged data and the history
   // that a purge happened survives. `hard` physically removes journal entries,
   // which creates a seq gap — declared by validate(), never hidden. This is why
   // the journal is documented as append-ORIENTED, never append-only.
-  function purgeProject(project, purgeOptions = {}) {
+  // A purge reaches W too (PC-14; design §11 R-10): W is put back, the purge
+  // runs on the store as it would with no view, and W is held again from what
+  // is left. Its result and its marker count what it removed from live memory
+  // (review K-2, C-6); only a hard purge's journal positions, which its marker
+  // must name for the store's gaps to be explained, include W's (declared).
+  function purgeScope(scope, purgeOptions = {}) {
+    if (!deletion.has('held')) return purgeLive(scope, purgeOptions);
+    const live = purgeSelection(scope);
+    const idempotencyRemoved = [...idempotency.values()].filter((value) => live.ids.has(value?.id)).length;
+    // What a logical purge of the live graph alone redacts: W's entries are
+    // skeletons there already.
+    const journalEntriesRedacted = journal.filter((item) => !(purgeMarkerInScope(item, scope) && (originScope(scope) || item.payload?.mode === 'hard'))
+      && live.referencesRemoved(item) && (item.payload !== null || item.redacted !== true)).length;
+    unhold();
+    try {
+      const result = purgeLive(scope, purgeOptions);
+      journal.find((entry) => entry.id === result.journalEntryId).payload.removed = live.ids.size;
+      return { ...result, ...live.summary, removed: live.ids.size, idempotencyRemoved, ...(result.mode === 'logical' ? { journalEntriesRedacted } : {}) };
+    } finally { hold(); }
+  }
+
+  function removedSourceReferences(removed, contentRefs) {
+    const sources = new Set([...removed, ...contentRefs]);
+    for (const item of captures.values()) if (contentRefs.has(item.contentRef)) sources.add(item.id);
+    assertSourceRemovalSafe({ records: [...records.values()], facts: [...facts.values()], journal,
+      idempotency: [...idempotency.values()] }, sources, removed, SCHEMA_VERSION);
+    return sources;
+  }
+
+  function purgeLive(scope, purgeOptions = {}) {
+    const origin = originScope(scope), { project } = scope;
     const mode = purgeOptions.mode ?? (purgeOptions.hard === true ? 'hard' : 'logical');
     if (!['logical', 'hard'].includes(mode)) throw new Error('Purge mode must be logical or hard');
-    const summary = projectSummary(project);
-    const projectRecords = [...records.values()].filter((item) => item.project === project);
-    const removed = new Set(projectRecords.map((item) => item.id));
-    for (const record of projectRecords) for (const alternative of record.alternatives ?? []) removed.add(alternative.id);
-    for (const fact of facts.values()) if (fact.project === project) removed.add(fact.id);
-    const removedRelationIds = new Set([...relations]
-      .filter(([, relation]) => removed.has(relation.from) || removed.has(relation.to))
-      .map(([relationId]) => relationId));
+    const { summary, ids: removed, relationIds: removedRelationIds, removedEvents: eventsToRemove, referencesRemoved, reachesMiss, reachesCaptureEntry, entities } = purgeSelection(scope);
+    const contentRefs = new Set(entities.filter(item => item.kind === CAPTURE_KIND).map(item => item.contentRef).filter(Boolean));
+    for (const entry of extras.get(CAPTURE_CONTENT) ?? []) if (reachesCaptureEntry(entry)) contentRefs.add(entry.contentRef);
+    const sourceReferences = removedSourceReferences(removed, contentRefs);
     const idempotencyKeysToRemove = [...idempotency]
-      .filter(([, value]) => value?.project === project || removed.has(value?.id))
+      .filter(([, value]) => removed.has(value?.id))
       .map(([key]) => key);
-    const eventsToRemove = new Set(events.filter((item) => (
-      item.project === project
-      || removed.has(item.recordId)
-      || removed.has(item.factId)
-      || (item.relationId && (removedRelationIds.has(item.relationId) || !relations.has(item.relationId)))
-    )));
 
     // Stage every journal rewrite and fully validate the marker before touching any
     // live collection. In particular, sequence overflow must leave records, facts,
@@ -2113,34 +4745,47 @@ export function createShadowGraph(options = {}) {
     const stagedJournal = clone(journal);
     let journalEntriesRedacted = 0;
     let journalEntriesRemoved = 0;
+    // The earlier markers of the project a hard purge splices (PR-37d §2.4).
+    const splicedMarkers = new Set();
     const removedJournalSequences = mode === 'hard'
       ? stagedJournal
-        .filter((item) => item.type === 'project.purged' && item.project === project && item.payload?.mode === 'hard')
+        .filter((item) => purgeMarkerInScope(item, scope) && item.payload?.mode === 'hard')
         .flatMap((item) => Array.isArray(item.payload?.removedJournalSequences) ? item.payload.removedJournalSequences.filter(Number.isInteger) : [])
       : [];
     if (mode === 'hard') {
       for (let index = stagedJournal.length - 1; index >= 0; index -= 1) {
         const item = stagedJournal[index];
-        if (item.project === project || removed.has(item.entityId) || removedRelationIds.has(item.entityId)) {
+        if (referencesRemoved(item)) {
           if (Number.isInteger(item.seq)) removedJournalSequences.push(item.seq);
+          if (['project.purged', 'origin.purged'].includes(item.type)) splicedMarkers.add(item.id);
           stagedJournal.splice(index, 1);
           journalEntriesRemoved += 1;
         }
       }
     } else {
       for (const item of stagedJournal) {
-        if (item.type === 'project.purged' && item.project === project && item.payload?.mode === 'hard') continue;
-        if (item.project === project || removed.has(item.entityId) || removedRelationIds.has(item.entityId)) {
+        // An origin marker's selector lives in its content-free payload. Keep
+        // it under logical re-purge so later recovery can still name its scope.
+        if (purgeMarkerInScope(item, scope) && (origin || item.payload?.mode === 'hard')) continue;
+        if (referencesRemoved(item)) {
           if (item.payload !== null || item.redacted !== true) journalEntriesRedacted += 1;
-          scrubLogicalPurgeSkeleton(item);
+          // A deleted capture's skeleton keeps saying so.
+          scrubLogicalPurgeSkeleton(item, item.redacted === true && item.redactedReason === 'capture_deleted' ? 'capture_deleted' : origin ? 'origin_purged' : undefined);
         }
       }
     }
-    for (const item of stagedJournal) rewriteBaselineForProjectPurge(item, project, removed, removedRelationIds);
+    const rewrittenBaselines = rewriteDeletedSourceCopies(stagedJournal, sourceReferences);
+    for (const item of stagedJournal) if (rewriteBaselineForProjectPurge(item, project, removed, removedRelationIds)) rewrittenBaselines.add(item.seq);
+    const normalized = normalizeRewrittenPurgeBaselines(stagedJournal, rewrittenBaselines, () => mode, origin ? 'origin_purged' : undefined);
+    removedJournalSequences.push(...normalized.removedSequences);
+    journalEntriesRemoved += normalized.removedSequences.length;
+    journalEntriesRedacted += normalized.skeletons;
     const uniqueRemovedJournalSequences = [...new Set(removedJournalSequences)].sort((left, right) => left - right);
+    // Only the completion of a pending purge forces the marker's id and instant
+    // (PR-37d design §2.5): the public registration never passes one.
     const purgeEntry = prebuildJournalEntry({
-      type: 'project.purged', entityKind: 'project', entityId: null, project,
-      payload: { project, mode, removed: removed.size, removedJournalSequences: uniqueRemovedJournalSequences }
+      type: origin ? 'origin.purged' : 'project.purged', entityKind: origin ? 'origin' : 'project', entityId: null, project: origin ? null : project, id: purgeOptions.marker?.id, at: purgeOptions.marker?.at,
+      payload: { ...scope, mode, removed: removed.size, removedJournalSequences: uniqueRemovedJournalSequences }
     }, journalSeq + 1);
     stagedJournal.push(purgeEntry);
     const stagedJournalEpoch = journalEpoch ?? purgeEntry.seq;
@@ -2154,18 +4799,49 @@ export function createShadowGraph(options = {}) {
       journalEpoch: stagedJournalEpoch,
       sourceSchemaVersion: SCHEMA_VERSION
     });
+    // The intent, from the journal and epoch before the marker (PR-37d design
+    // §2.1); an earlier intent whose marker this purge splices is absorbed.
+    const intents = deletion.get('intents') ?? [];
+    const absorbed = intents.filter((item) => splicedMarkers.has(item.marker.id));
+    const intent = purgeIntent({ scope, mode, marker: purgeEntry, entities, journal, epoch: journalEpoch, absorbed });
 
-    for (const [recordId, record] of records) if (record.project === project) records.delete(recordId);
-    for (const [scopeKey, memory] of currentMemories) if (memory.project === project) currentMemories.delete(scopeKey);
-    for (const [factId, fact] of facts) if (fact.project === project) facts.delete(factId);
+    for (const recordId of removed) { records.delete(recordId); captures.delete(recordId); }
+    for (const [scopeKey, memory] of currentMemories) if (removed.has(memory.id)) currentMemories.delete(scopeKey);
+    for (const factId of removed) facts.delete(factId);
     for (const relationId of removedRelationIds) relations.delete(relationId);
     for (const [key, fact] of currentFacts) if (removed.has(fact.id)) currentFacts.delete(key);
     for (const [key, signal] of reviewSignals) if (removed.has(signal.decisionId)) reviewSignals.delete(key);
     for (const key of idempotencyKeysToRemove) idempotency.delete(key);
+    for (const collection of [records, facts, idempotency]) for (const [key, value] of collection) {
+      const next = withoutSourceCopies(value, sourceReferences);
+      if (next !== value) collection.set(key, next);
+    }
+    recomputeCurrentMemories();
+    recomputeCurrentFacts();
     filterInPlace(events, (item) => !eventsToRemove.has(item));
     journal.splice(0, journal.length, ...stagedJournal);
     journalSeq = purgeEntry.seq;
     journalEpoch = stagedJournalEpoch;
+    deletion.set('intents', [...intents.filter((item) => !absorbed.includes(item)), intent]);
+    if (!origin) authority.purge(project);
+    // In both modes the miss-ledger entries the purge reaches are removed, and
+    // the last entries take the collection with them (PR-28a).
+    if (summary.runtimeMisses) {
+      const kept = extras.get(RUNTIME_MISSES).filter((entry) => !reachesMiss(entry));
+      if (kept.length) extras.set(RUNTIME_MISSES, kept);
+      else extras.delete(RUNTIME_MISSES);
+    }
+    // So do capture's collections, in both modes (PR-33).
+    for (const name of CAPTURE_COLLECTIONS) {
+      const entries = extras.get(name) ?? [];
+      const kept = entries.filter((entry) => !reachesCaptureEntry(entry));
+      if (kept.length === entries.length) continue;
+      if (kept.length) extras.set(name, kept);
+      else extras.delete(name);
+    }
+    // The store is smaller: its limit episodes end, and the next capture checks
+    // them afresh.
+    endStoreLimits(now());
 
     return {
       ...summary,
@@ -2175,20 +4851,174 @@ export function createShadowGraph(options = {}) {
       journalEntriesRemoved,
       removedJournalSequences: uniqueRemovedJournalSequences,
       idempotencyRemoved: idempotencyKeysToRemove.length,
-      journalEntryId: purgeEntry.id
+      journalEntryId: purgeEntry.id,
+      // Every purge says so, one that removes nothing included (PR-37d design §6.2).
+      backups: PURGE_BACKUPS_STATEMENT
     };
+  }
+
+  // A restore's post-step, and `quarantine purge` (PR-37c design §6.4), on a
+  // graph that holds what the store holds. Each `plan.remove` entity goes with
+  // its decision's alternatives and what names it -- relations, review
+  // signals, retry values, events, misses, a capture's content -- its journal
+  // entries becoming skeletons under `logical` and spliced under `hard`, hard
+  // winning where an entry names both, and baselines losing it. Each tokenless
+  // `plan.quarantine` entity takes a token by one entity.token_assigned entry:
+  // the one given (an overlap's), the one `tokens` holds at its place (a
+  // resolution assigns what ledger step 1 recorded, §8.4), or a new one; a
+  // tokened one changes nothing here, its token joining the ledger's
+  // quarantine instead. A capture left naming a removed one as its possible
+  // duplicate names none, history included (V-12). Everything is staged and
+  // checked before anything changes, as purgeLive does, and a candidate that
+  // cannot take a token stops it first, with its counts by cause (§4.6). It
+  // never purges authority and never appends project.purged (rev6:397); with
+  // `journal` it appends restore.reapplied, the logical entry first, with C4's
+  // four counts only.
+  function reapplyDeletion(plan, { journal: reapplied = true, tokens = [], captureDeleted = false } = {}) {
+    // A held W is put back and held again from what is left, as a purge
+    // reaches it (`shadowgraph quarantine purge`, on a viewed graph).
+    if (deletion.has('held')) {
+      unhold();
+      try { return reapplyDeletion(plan, { journal: reapplied, tokens, captureDeleted }); } finally { hold(); }
+    }
+    const entityOf = (entityId) => records.get(entityId) ?? captures.get(entityId) ?? facts.get(entityId);
+    const modes = new Map();
+    for (const { id: entityId, mode } of plan.remove ?? []) {
+      const entity = entityOf(entityId);
+      if (!entity) continue;
+      for (const member of [entity.id, ...(entity.alternatives ?? []).map(byId)]) {
+        if (modes.get(member) !== 'hard') modes.set(member, mode === 'logical' ? 'logical' : 'hard');
+      }
+    }
+    const removed = new Set(modes.keys());
+    const relationModes = new Map();
+    for (const relation of relations.values()) {
+      const ends = [relation.from, relation.to].filter((end) => removed.has(end));
+      if (ends.length) relationModes.set(relation.id, ends.some((end) => modes.get(end) === 'hard') ? 'hard' : 'logical');
+    }
+    const removedRelationIds = new Set(relationModes.keys());
+    const removedCaptures = [...removed].map((entityId) => captures.get(entityId)).filter(Boolean);
+    const removedCaptureIds = new Set(removedCaptures.map(byId));
+    const contentRefs = new Set(removedCaptures.map((item) => item.contentRef).filter(Boolean));
+    const sourceReferences = removedSourceReferences(removed, contentRefs);
+    const priorOf = replayedEntities();
+    const assigning = (plan.quarantine ?? []).map((entry) => ({ ...entry, entity: entityOf(entry.id) }))
+      .filter(({ entity }) => entity !== undefined && entity.erasureToken === undefined);
+    const untokenable = {};
+    for (const { entity } of assigning) {
+      const reason = isNewerThanWriter(entity) ? 'not_replayable' : tokenSkipReason(entity, priorOf);
+      if (reason) untokenable[reason] = (untokenable[reason] ?? 0) + 1;
+    }
+    if (Object.keys(untokenable).length) throw Object.assign(new Error('An item to withhold cannot take an erasure token'), { untokenable });
+
+    // The entries naming a removed entity or relation, by hold()'s predicate.
+    const entryMode = (entry) => {
+      if (typeof entry?.id !== 'string' || entry.type === 'projection.baseline') return null;
+      const found = [entry.entityId, replayedEntity(entry)?.id].flatMap((named) => [modes.get(named), relationModes.get(named)]);
+      if (entry.type === 'relation.created') found.push(modes.get(entry.payload?.from), modes.get(entry.payload?.to));
+      return found.includes('hard') ? 'hard' : found.includes('logical') ? 'logical' : null;
+    };
+    const stagedJournal = clone(journal);
+    const spliced = [];
+    let skeletons = 0;
+    for (let index = stagedJournal.length - 1; index >= 0; index -= 1) {
+      const entry = stagedJournal[index];
+      const mode = entryMode(entry);
+      if (mode === 'hard') {
+        spliced.push(entry.seq);
+        stagedJournal.splice(index, 1);
+      } else if (mode === 'logical') {
+        if (entry.payload !== null || entry.redacted !== true) skeletons += 1;
+        // A deleted capture's skeleton keeps saying so.
+        scrubLogicalPurgeSkeleton(entry, (captureDeleted && entry.entityKind === CAPTURE_KIND) || (entry.redacted === true && entry.redactedReason === 'capture_deleted') ? 'capture_deleted' : undefined);
+      }
+    }
+    const rewrittenBaselines = rewriteDeletedSourceCopies(stagedJournal, sourceReferences);
+    for (const entry of stagedJournal) {
+      if (rewriteBaselineForProjectPurge(entry, null, removed, removedRelationIds)) rewrittenBaselines.add(entry.seq);
+      for (const item of entry?.type === 'projection.baseline' ? entry.payload?.records ?? [] : [entry?.payload]) {
+        if (removedCaptureIds.has(item?.possibleDuplicateOf)) item.possibleDuplicateOf = null;
+      }
+    }
+    const normalized = normalizeRewrittenPurgeBaselines(stagedJournal, rewrittenBaselines, entry => {
+      const original = journal.find(item => item.seq === entry.seq)?.payload;
+      const reached = [...(original?.records ?? []), ...(original?.facts ?? []), ...(original?.relations ?? []), ...(original?.idempotency ?? []).map(item => item.value)];
+      return reached.some(item => modes.get(item?.id) === 'hard' || relationModes.get(item?.id) === 'hard') ? 'hard' : 'logical';
+    });
+    spliced.push(...normalized.removedSequences);
+    skeletons += normalized.skeletons;
+    let sequence = journalSeq;
+    const assigned = assigning.map(({ token }, index) => token ?? tokens[index] ?? allocateErasureToken());
+    // Assignment remains a token-only change relative to the rewritten
+    // journal. Its witness must lose the same source copies as that journal.
+    const cleanedPrior = new Map([...priorOf].map(([id, entity]) => [id, withoutSourceCopies(entity, sourceReferences)]));
+    const appended = assigning.map(({ entity }, index) => prebuildJournalEntry(tokenAssignment({ ...entity, erasureToken: assigned[index] }, cleanedPrior), ++sequence));
+    const logical = [...modes.values()].filter((mode) => mode === 'logical').length;
+    const hard = removed.size - logical;
+    const marker = (payload) => prebuildJournalEntry({ type: 'restore.reapplied', payload }, ++sequence);
+    if (reapplied && (logical || assigning.length)) appended.push(marker({ mode: 'logical', removedJournalSequences: [], removed: logical, quarantined: assigning.length, skeletons }));
+    if (reapplied && (hard || spliced.length)) {
+      appended.push(marker({ mode: 'hard', removedJournalSequences: [...new Set(spliced.filter(Number.isSafeInteger))].sort((left, right) => left - right), removed: hard, spliced: spliced.length }));
+    }
+    const nextJournal = [...stagedJournal, ...appended];
+    const nextEpoch = journalEpoch ?? appended[0]?.seq ?? null;
+    assertJournalBaselinePlacement(nextJournal, { journalEpoch: nextEpoch, sourceSchemaVersion: SCHEMA_VERSION });
+    assertHardPurgeGapLedgers(nextJournal, { journalEpoch: nextEpoch, sourceSchemaVersion: SCHEMA_VERSION });
+
+    for (const item of removedCaptures) preserveDeletedCaptureSession(item, now());
+    for (const entityId of removed) { records.delete(entityId); captures.delete(entityId); facts.delete(entityId); }
+    for (const relationId of removedRelationIds) relations.delete(relationId);
+    for (const [key, signal] of reviewSignals) if (removed.has(signal.decisionId)) reviewSignals.delete(key);
+    for (const [key, value] of [...idempotency]) if (removed.has(value?.id)) idempotency.delete(key);
+    for (const collection of [records, facts, idempotency]) for (const [key, value] of collection) {
+      const next = withoutSourceCopies(value, sourceReferences);
+      if (next !== value) collection.set(key, next);
+    }
+    filterInPlace(events, (item) => !(['recordId', 'factId', 'replacementId'].some((key) => removed.has(item?.[key])) || removedRelationIds.has(item?.relationId)));
+    const removedEntityIds = new Set([...removed, ...removedRelationIds]);
+    const prune = (name, keep) => {
+      const entries = extras.get(name);
+      if (!Array.isArray(entries)) return;
+      const kept = entries.filter(keep);
+      if (kept.length === entries.length) return;
+      if (kept.length) extras.set(name, kept);
+      else extras.delete(name);
+    };
+    prune(RUNTIME_MISSES, (entry) => !removedEntityIds.has(entry?.recordId));
+    prune(CAPTURE_CONTENT, (entry) => !contentRefs.has(entry?.contentRef));
+    journal.splice(0, journal.length, ...nextJournal);
+    journalSeq = sequence;
+    journalEpoch = nextEpoch;
+    assigning.forEach(({ id }, index) => {
+      // Source cleanup can replace the canonical object. Mutate its current
+      // identity, not the preflight object retained in `assigning`.
+      const entity = entityOf(id);
+      touchMutableObject(entity);
+      entity.erasureToken = assigned[index];
+      tokenRetryValues(entity);
+    });
+    for (const item of captures.values()) if (removedCaptureIds.has(item.possibleDuplicateOf)) item.possibleDuplicateOf = null;
+    for (const [key, value] of idempotency) if (removedCaptureIds.has(value?.possibleDuplicateOf)) idempotency.set(key, { ...value, possibleDuplicateOf: null });
+    recomputeCurrentMemories();
+    recomputeCurrentFacts();
+    return { counts: { removed: removed.size, quarantined: assigning.length, skeletons, spliced: spliced.length }, assignedTokens: assigned, payload: snapshot() };
   }
 
   // Diagnostics distinguish three different problems (see api-reference.md):
   //   error       — genuinely invalid data that code produced wrongly
   //   legacy      — older data that is readable but pre-dates a contract
   //   unsupported — data from a newer/unknown schema this build cannot interpret
-  function validate() {
+  //
+  // This is the store-wide check, and it is privileged (P1 reconciliation
+  // F-17): replaceData staging, rebuild normalisation and restore validation
+  // refuse a store that is broken anywhere. The public validate() below
+  // reports its verdict and lists only the issues about the request's scope.
+  function integrity() {
     const issues = [];
-    const push = (severity, code, extra) => issues.push({ code, severity, ...extra });
+    const push = (severity, code, extra) => { const issue = { code, severity, ...extra }; issues.push(issue); return issue; };
     for (const relation of relations.values()) {
-      if (!entity(relation.from)) push('error', 'missing_relation_source', { relationId: relation.id, entityId: relation.from });
-      if (!entity(relation.to)) push('error', 'missing_relation_target', { relationId: relation.id, entityId: relation.to });
+      if (!rawEntity(relation.from)) push('error', 'missing_relation_source', { relationId: relation.id, entityId: relation.from });
+      if (!rawEntity(relation.to)) push('error', 'missing_relation_target', { relationId: relation.id, entityId: relation.to });
     }
     for (const record of records.values()) if (record.kind === 'decision') {
       if (record.supersededBy === record.id) push('error', 'self_supersession', { recordId: record.id });
@@ -2235,7 +5065,7 @@ export function createShadowGraph(options = {}) {
         if (intervalIssue) push('error', 'contradictory_journal_fact_interval', { entryId: entry.id ?? null, seq: entry.seq ?? null, recordId: fact.id ?? null, detail: intervalIssue });
       }
       if (!JOURNAL_ENTRY_TYPES.includes(entry.type)) push('unsupported', 'unsupported_journal_entry', { entryId: entry.id, seq: entry.seq ?? null, type: entry.type ?? null });
-      else if (Number.isInteger(entry.schemaVersion) && entry.schemaVersion > SCHEMA_VERSION) push('unsupported', 'unsupported_journal_schema_version', { entryId: entry.id, seq: entry.seq, schemaVersion: entry.schemaVersion });
+      else if (Number.isInteger(entry.schemaVersion) && entry.schemaVersion > READABLE_SCHEMA_VERSION) push('unsupported', 'unsupported_journal_schema_version', { entryId: entry.id, seq: entry.seq, schemaVersion: entry.schemaVersion });
     }
     for (const issue of journalBaselinePlacementIssues(journal, {
       journalEpoch,
@@ -2249,22 +5079,27 @@ export function createShadowGraph(options = {}) {
     // P2-14: live records/facts written by a NEWER build. They are preserved
     // verbatim (never downgraded) and reported so a caller knows this build
     // cannot fully interpret them.
-    for (const record of records.values()) {
-      if (Number.isInteger(record.schemaVersion) && record.schemaVersion > SCHEMA_VERSION) push('unsupported', 'unsupported_record_schema_version', { recordId: record.id, schemaVersion: record.schemaVersion });
+    for (const record of [...records.values(), ...captures.values()]) {
+      if (Number.isInteger(record.schemaVersion) && record.schemaVersion > READABLE_SCHEMA_VERSION) push('unsupported', 'unsupported_record_schema_version', { recordId: record.id, schemaVersion: record.schemaVersion });
     }
     for (const fact of facts.values()) {
-      if (Number.isInteger(fact.schemaVersion) && fact.schemaVersion > SCHEMA_VERSION) push('unsupported', 'unsupported_fact_schema_version', { recordId: fact.id, schemaVersion: fact.schemaVersion });
+      if (Number.isInteger(fact.schemaVersion) && fact.schemaVersion > READABLE_SCHEMA_VERSION) push('unsupported', 'unsupported_fact_schema_version', { recordId: fact.id, schemaVersion: fact.schemaVersion });
     }
-    // P2-15: the invariant is ONE active fact per (project, key). More than one is
+    for (const entity of [...records.values(), ...facts.values()]) {
+      const detail = attributionIssue(entity);
+      if (detail) push('error', 'invalid_attribution', { recordId: entity.id, detail });
+    }
+    // P2-15: the invariant is ONE active fact per (owner, key). More than one is
     // corrupt data: import applies a deterministic recency rule so behaviour is
     // stable, but the ambiguity is still declared rather than hidden.
     const activeScopes = new Map();
     for (const fact of facts.values()) {
       if (fact.status !== 'active') continue;
-      const scope = `${fact.project ?? 'default'}::${fact.key}`;
-      activeScopes.set(scope, (activeScopes.get(scope) ?? 0) + 1);
+      const key = JSON.stringify([ownerKey(fact, (project) => project ?? 'default'), fact.key]);
+      const scope = fact.attribution === 'unattributed' ? `origin:${fact.originId}::${fact.key}` : `${fact.project ?? 'default'}::${fact.key}`;
+      activeScopes.set(key, { scope, count: (activeScopes.get(key)?.count ?? 0) + 1, owner: fact });
     }
-    for (const [scope, count] of activeScopes) if (count > 1) push('error', 'duplicate_active_fact_scope', { scope, count });
+    for (const { scope, count, owner } of activeScopes.values()) if (count > 1) issueOwners.set(push('error', 'duplicate_active_fact_scope', { scope, count }), owner);
     // A legacy id collision left these references pointing at an id that now
     // belongs to a different entity. The link still resolves, which is what makes
     // it dangerous, so it is declared rather than left to look healthy.
@@ -2280,27 +5115,201 @@ export function createShadowGraph(options = {}) {
     for (const record of records.values()) {
       if (record.kind !== 'memory' || record.status !== 'active') continue;
       const scope = memoryScopeKey(record);
-      activeMemoryScopes.set(scope, (activeMemoryScopes.get(scope) ?? 0) + 1);
+      activeMemoryScopes.set(scope, { count: (activeMemoryScopes.get(scope)?.count ?? 0) + 1, owner: record });
     }
-    for (const [scope, count] of activeMemoryScopes) if (count > 1) push('error', 'duplicate_active_memory_scope', { scope, count });
+    for (const [scope, { count, owner }] of activeMemoryScopes) if (count > 1) issueOwners.set(push('error', 'duplicate_active_memory_scope', { scope, count }), owner);
     for (const gap of journalGaps(journal)) push('info', 'journal_gap', gap);
+    for (const issue of accessDiagnostics({ access: extras.get('access'), accessRevocations: extras.get('accessRevocations'), events }, now())) push('info', issue.code, { accessId: issue.accessId });
     // `valid` is false for genuine errors AND for data this build cannot
     // interpret. Saying "valid" while holding an unsupported schema would be a
     // claim we cannot support. `legacy` and `info` do NOT invalidate: readable
     // older data is not broken data.
-    const severityCount = (name) => issues.filter((issue) => issue.severity === name).length;
     return {
       valid: !issues.some((issue) => issue.severity === 'error' || issue.severity === 'unsupported'),
       issues,
-      counts: { error: severityCount('error'), legacy: severityCount('legacy'), unsupported: severityCount('unsupported'), info: severityCount('info') }
+      counts: severityCounts(issues)
     };
   }
 
-  function repairPlan() { return { apply: false, actions: validate().issues.map((issue) => issue.code.startsWith('missing_relation_') ? { action: 'remove_relation', relationId: issue.relationId, reason: issue.code } : { action: 'manual_review', ...issue }) }; }
+  // Public integrity (P1 reconciliation F-17). `valid` is the verdict on the
+  // whole store, which names nothing in it. The issues listed are only those
+  // about records, facts and relations the request's scope owns; an issue
+  // about the journal, or about anything outside the scope, is counted in the
+  // verdict and not listed. With no project and no origin nothing is listed.
+  function validate(options = {}) {
+    const boundary = readBoundary(options);
+    const report = integrity();
+    const view = scopedView(boundary);
+    const ids = new Set([...view.records, ...view.facts].map((item) => item.id));
+    for (const record of view.records) for (const alternative of record.alternatives ?? []) ids.add(alternative.id);
+    // A relation's issue is the scope's when every endpoint that exists is in it.
+    const relationInScope = (relationId) => {
+      const relation = relations.get(relationId);
+      const endpoints = relation ? [relation.from, relation.to] : [];
+      return endpoints.some((id) => ids.has(id)) && endpoints.every((id) => ids.has(id) || !rawEntity(id));
+    };
+    const listed = (issue) => {
+      if (issueOwners.has(issue)) return boundary.visible(issueOwners.get(issue));
+      if (issue.entryId !== undefined || issue.seq !== undefined || issue.code === 'journal_gap') return false;
+      if (issue.relationId !== undefined) return relationInScope(issue.relationId);
+      return issue.recordId !== undefined && ids.has(issue.recordId);
+    };
+    const issues = report.issues.filter(listed);
+    return scopedResult({
+      valid: report.valid,
+      issues,
+      counts: severityCounts(issues),
+      limitation: { code: 'scoped_coverage', detail: 'valid is the verdict on the whole store. Only the issues about this scope\'s own records, facts and relations are listed and counted.' }
+    }, boundary);
+  }
+
+  function repairPlan(options = {}) {
+    const report = validate(options);
+    return { apply: false, actions: report.issues.map((issue) => issue.code.startsWith('missing_relation_') ? { action: 'remove_relation', relationId: issue.relationId, reason: issue.code } : { action: 'manual_review', ...issue }), completeness: report.completeness, limitation: report.limitation };
+  }
 
   // ---- G6 / G7 read paths -------------------------------------------------
-  function matchesFilters(record, options) {
-    if (options.project && record.project !== options.project) return false;
+  // The boundary one read works in (plan v1.4.4 §10.2, §10.5). A selected
+  // project sees what that project owns; with no project, a presented origin
+  // sees its own unattributed records; with neither, the read sees nothing --
+  // never every project, and never the shared "default" bucket. Owners follow
+  // the owner model the writes use, so legacy data in "default", or stored with
+  // no project, belongs to no project a caller can name (OD-1).
+  function readBoundary(options = {}, { memoryScope } = {}) {
+    const inherited = options.readProvenance;
+    const request = inherited === undefined ? options : inherited?.version === 1 && inherited.request && typeof inherited.request === 'object' ? inherited.request : {};
+    const scope = { ...resolveScope({ project: request.project, originId: request.originId, binding: inherited === undefined ? options.binding : undefined }) };
+    // The scope's capture status (M-9), read once for this read and never
+    // spread into an answer: completeness carries it where it applies.
+    Object.defineProperty(scope, 'capture', { value: captureStatus(scope), enumerable: false });
+    const baseVisible = (item) => {
+      if (!item) return false;
+      if (scope.state === 'project_selected') return ownerKey(item, (project) => project) === scope.project;
+      return item.attribution === 'unattributed' && sameOrigin(item.originId, scope.originId);
+    };
+    // What deletion records withhold from this scope, disclosed the same way
+    // (PR-37c design §9.3): the quarantined items the scope itself owns,
+    // counted by identity, never across scopes nor through a grant's wider
+    // read; and whether a restore waits for its post-step, which holds what it
+    // will remove or quarantine before the count can see it. A waiting purge
+    // makes no read incomplete: what it holds is what it will remove (PR-37d
+    // design §4.1, V-5).
+    Object.defineProperty(scope, 'quarantined', { value: quarantinedEntities().filter(baseVisible).length, enumerable: false });
+    Object.defineProperty(scope, 'restorePending', { value: deletion.get('view')?.pending === true && !deletion.get('view').purging, enumerable: false });
+    const accessId = inherited === undefined ? options.accessId ?? options.grantId : inherited?.accessId;
+    const requestedAccess = accessId !== undefined && accessId !== null || inherited !== undefined;
+    const surface = options.surface ?? 'cli';
+    let authorizedScope = null, provenance = null;
+    if (requestedAccess) {
+      const decision = inherited === undefined && options.accessId !== undefined && options.grantId !== undefined && options.accessId !== options.grantId
+        ? { ok: false, reason: 'grant_identity_conflict' }
+        : validateAccess({ access: extras.get('access'), accessRevocations: extras.get('accessRevocations'), events }, accessId, { now: now(), surface });
+      if (decision.ok && (inherited === undefined || (inherited.version === 1 && Array.isArray(inherited.surfaces) && inherited.surfaces.includes(surface) && isValidIsoInstant(inherited.expiresAt) && compareInstants(now(), inherited.expiresAt) < 0))) {
+        authorizedScope = inherited === undefined ? decision.entry.scope : intersectAccessScope(decision.entry.scope, inherited.scope);
+        scope.grant = { accessId, expiresAt: inherited === undefined || compareInstants(decision.entry.expiresAt, inherited.expiresAt) < 0 ? decision.entry.expiresAt : inherited.expiresAt, surface };
+        provenance = { version: 1, request: { project: scope.project, originId: scope.originId }, accessId, scope: clone(authorizedScope), surfaces: inherited === undefined ? [...decision.entry.surfaces] : decision.entry.surfaces.filter(value => inherited.surfaces.includes(value)), expiresAt: scope.grant.expiresAt };
+      } else scope.grantLimitation = decision.reason ?? 'grant_provenance_refused';
+    }
+    const visible = item => {
+      if (!item) return false;
+      if (baseVisible(item)) return true;
+      const allowed = authorizedScope !== null && accessScopeContains(authorizedScope, isStoredWithoutProject(item) ? { ...item, attribution: 'legacy_unattributed' } : item);
+      if (allowed) boundary.widerRead = true;
+      return allowed;
+    };
+    // Whether an id -- a relation endpoint, say -- resolves inside it.
+    const boundary = { scope, visible, baseVisible, accessId, surface, requestedAccess, provenance, widerRead: false, reaches: (entityId) => entity(entityId, boundary) !== undefined };
+    if (memoryScope !== undefined) boundary.reaches = scopedReach(boundary, memoryScope);
+    if (readOperation) readOperation.boundary ??= boundary;
+    return boundary;
+  }
+
+  // What one request may see of the store (plan v1.4.4 §10.5, §11): the
+  // entities its boundary owns, the relations joining two of them, and the
+  // review signals, breadcrumbs and journal entries that name nothing else.
+  // The public export, getJournal, stats, review signals and redact's output
+  // all come from here, so they cannot disagree, and none of them starts from
+  // the privileged snapshot. A relation stored across the boundary stays in
+  // the store and out of the view, together with its journal entry and
+  // breadcrumb, so no answer in the boundary names an id outside it (P1
+  // reconciliation F-16). A relation joins two of the view's own records or
+  // facts -- as redaction always required -- so one ending on an alternative
+  // nested in a decision is left out too. Live objects; callers clone what
+  // they return.
+  function scopedView(boundary) {
+    const inRecords = [...records.values()].filter(boundary.visible);
+    const inFacts = [...facts.values()].filter(boundary.visible);
+    const ids = new Set([...inRecords, ...inFacts].map((item) => item.id));
+    const inRelations = [...relations.values()].filter((relation) => ids.has(relation.from) && ids.has(relation.to));
+    const relationIds = new Set(inRelations.map((relation) => relation.id));
+    // Something that names no entity is placed by its project label alone --
+    // and a "default" label written before schema 6 is legacy, which no
+    // project owns (OD-1).
+    const labelled = (item, schemaVersion) => boundary.scope.state === 'project_selected' && item.project === boundary.scope.project
+      && !(item.project === 'default' && !(schemaVersion > PRE_ATTRIBUTION_SCHEMA_VERSION));
+    const named = (item, keys) => keys.map((key) => item[key]).filter((value) => value !== undefined && value !== null);
+    const eventVisible = (event) => {
+      // Capture's own entries are declared by the capture status, never listed.
+      if (event?.type === CAPTURE_LIMIT_EVENT || event?.type === CAPTURE_REFUSED_EVENT) return false;
+      const entities = named(event, ['recordId', 'factId', 'replacementId']);
+      const relationsNamed = named(event, ['relationId']);
+      if (!entities.length && !relationsNamed.length) return labelled(event);
+      return entities.every((id) => ids.has(id)) && relationsNamed.every((id) => relationIds.has(id));
+    };
+    const entryVisible = (entry) => {
+      if (heldOriginal(deletion.get('held'), entry)) return false;
+      // A baseline holds the whole store at one point in time. A capture entry,
+      // even a skeleton, is never stored experience (PC-14, PC-16(b); PR-33).
+      if (entry?.type === 'projection.baseline' || CAPTURE_ENTRY_TYPES.includes(entry?.type) || entry?.entityKind === CAPTURE_KIND) return false;
+      const payload = replayedEntity(entry);
+      if (payload?.kind === CAPTURE_KIND) return false;
+      if (entry.type === 'relation.created' && payload) return ids.has(payload.from) && ids.has(payload.to);
+      if (payload && typeof payload === 'object' && ATTRIBUTED_ENTITY_KINDS.includes(payload.kind)) return boundary.visible(payload);
+      if (entry.entityId !== null && entry.entityId !== undefined) return ids.has(entry.entityId);
+      return labelled(entry, entry.schemaVersion);
+    };
+    // A signal cites the facts its conditions were evaluated on.
+    const cited = (signal) => (signal.violatedConditions ?? []).flatMap((detail) => [detail?.evidence?.factId, ...(detail?.conflictingEvidence ?? []).map((item) => item?.factId)]).filter((id) => id !== undefined && id !== null);
+    return {
+      records: inRecords,
+      facts: inFacts,
+      relations: inRelations,
+      reviewSignals: [...reviewSignals.values()].filter((signal) => ids.has(signal.decisionId)).map((signal) => {
+        if (cited(signal).every((id) => ids.has(id))) return signal;
+        // Older evaluators could match facts by label across today's boundary.
+        // Even coverage/reason can contain historical condition text. Expose
+        // only the owner's signal identity and lifecycle; never rewrite it.
+        return {
+          ...Object.fromEntries(['id', 'kind', 'decisionId', 'status', 'createdAt', 'acknowledgedAt'].filter((key) => signal[key] !== undefined).map((key) => [key, clone(signal[key])])),
+          limitation: { code: 'scoped_coverage', detail: 'Historical detail cites evidence outside this scope. Only this own signal\'s identity and lifecycle are shown.' }
+        };
+      }),
+      events: events.filter(eventVisible),
+      journal: journal.filter(entryVisible)
+    };
+  }
+
+  // The gaps a scoped journal read positions: only those its own hard purges
+  // explain (P1 reconciliation F-09). Sequence numbers are global, so the gaps
+  // between one scope's entries are other scopes' entries, not integrity gaps;
+  // store-wide integrity is the privileged check's to report.
+  function explainedGaps(entries) {
+    const present = new Set(journal.map((entry) => entry.seq));
+    const removed = [...new Set(entries
+      .filter((entry) => entry.type === 'project.purged' && entry.payload?.mode === 'hard' && Array.isArray(entry.payload.removedJournalSequences))
+      .flatMap((entry) => entry.payload.removedJournalSequences)
+      .filter((seq) => Number.isSafeInteger(seq) && !present.has(seq)))].sort((left, right) => left - right);
+    const gaps = [];
+    for (const seq of removed) {
+      const last = gaps.at(-1);
+      if (last && last.to === seq - 1) last.to = seq;
+      else gaps.push({ from: seq, to: seq });
+    }
+    return gaps;
+  }
+
+  function matchesFilters(record, options, boundary) {
+    if (!boundary.visible(record)) return false;
     if (options.status && record.status !== options.status) return false;
     if (options.kind && record.kind !== options.kind) return false;
     if (options.sourceClass && record.sourceClass !== options.sourceClass) return false;
@@ -2312,9 +5321,7 @@ export function createShadowGraph(options = {}) {
     return Object.fromEntries(SEARCH_FILTERS.filter((name) => options[name] !== undefined).map((name) => [name, options[name]]));
   }
 
-  function rank(query = '', options = {}) {
-    if (options.project !== undefined) normalizeProject(options.project);
-    const memoryProject = normalizeProject(options.project);
+  function rank(query = '', options = {}, boundary = readBoundary(options)) {
     const memoryScope = normalizeMemoryScope(options.scope);
     // Folded on both sides, or the match is one-directional: an unaccented query
     // would find an accented record but not the reverse.
@@ -2325,8 +5332,8 @@ export function createShadowGraph(options = {}) {
     const rawTerms = String(query).toLocaleLowerCase().split(/\s+/).filter(Boolean);
     const hits = [];
     for (const record of records.values()) {
-      if (!matchesFilters(record, options)) continue;
-      if (record.kind === 'memory' && (record.project !== memoryProject || !sameMemoryScopeValues(record.scope, memoryScope))) continue;
+      if (!matchesFilters(record, options, boundary)) continue;
+      if (record.kind === 'memory' && !sameMemoryScopeValues(record.scope, memoryScope)) continue;
       // G7: a term must match a DECLARED CONTENT FIELD. Schema keys and internal
       // metadata are not content, so `search('confidence')` no longer matches a
       // record merely because it has a confidence field.
@@ -2334,7 +5341,7 @@ export function createShadowGraph(options = {}) {
       if (terms.length && perTerm.some((fields) => fields.length === 0)) continue;
       const matched = [...new Set(perTerm.flat())];
       hits.push({
-        record: clone(record),
+        record: clone(extractionView(record, memoryScope)),
         score: terms.length ? score(record, terms, rawTerms) : 0,
         matched,
         reason: terms.length ? `Matched ${matched.join(', ')}` : 'Matched filters only',
@@ -2346,31 +5353,54 @@ export function createShadowGraph(options = {}) {
   }
 
   function search(query = '', options = {}) {
-    const hits = rank(query, options);
-    return paginate(hits, options, { project: options.project ?? 'all', query: String(query), filters: appliedFilters(options) }, { contentFields: [...CONTENT_SEARCH_FIELDS] });
+    const boundary = readBoundary(options, { memoryScope: normalizeMemoryScope(options.scope) });
+    const hits = rank(query, options, boundary);
+    return scopedPage(hits, options, boundary, { query: String(query), filters: appliedFilters(options) }, { contentFields: [...CONTENT_SEARCH_FIELDS] });
   }
 
   function retrieve(query = '', options = {}) {
-    const hits = rank(query, options);
-    const memoryProject = normalizeProject(options.project);
     const memoryScope = normalizeMemoryScope(options.scope);
+    const boundary = readBoundary(options, { memoryScope });
+    const hits = rank(query, options, boundary);
     const directIds = new Set(hits.map((item) => item.record.id));
     const results = hits.map((item) => ({ ...item, graphBoost: 0, reasons: [item.reason] }));
+    // A neighbour joins only from inside the same boundary as the hits.
     for (const relation of relations.values()) {
       const relatedId = directIds.has(relation.from) ? relation.to : directIds.has(relation.to) ? relation.from : null;
-      const related = relatedId && entity(relatedId);
-      if (related && related.kind !== 'alternative' && (!options.project || related.project === options.project) && (related.kind !== 'memory' || (related.project === memoryProject && sameMemoryScopeValues(related.scope, memoryScope))) && !directIds.has(relatedId)) {
-        results.push({ record: clone(related), score: 1, graphBoost: 1, matched: ['relationship'], matchedBy: 'graph', reason: `Related by ${relation.relation}`, reasons: [`Related by ${relation.relation}`], filters: appliedFilters(options) });
+      const related = relatedId && entity(relatedId, boundary);
+      if (related && related.kind !== 'alternative' && (related.kind !== 'memory' || sameMemoryScopeValues(related.scope, memoryScope)) && !directIds.has(relatedId)) {
+        results.push({ record: clone(extractionView(related, memoryScope)), score: 1, graphBoost: 1, matched: ['relationship'], matchedBy: 'graph', reason: `Related by ${relation.relation}`, reasons: [`Related by ${relation.relation}`], filters: appliedFilters(options) });
         directIds.add(relatedId);
       }
     }
     const sorted = results.sort((a, b) => b.score - a.score || String(a.record.id).localeCompare(String(b.record.id)));
-    return paginate(sorted, options, { project: options.project ?? 'all', query: String(query), filters: appliedFilters(options) }, { includesGraphNeighbours: true, contentFields: [...CONTENT_SEARCH_FIELDS] });
+    return scopedPage(sorted, options, boundary, { query: String(query), filters: appliedFilters(options) }, { includesGraphNeighbours: true, contentFields: [...CONTENT_SEARCH_FIELDS] });
+  }
+
+  // Whether an id resolves inside the read boundary and, when it is a memory,
+  // in the memory scope read: another scope's memory never rides along, in a
+  // walk as in a traversal (docs/unified-memory.md).
+  const scopedReach = (boundary, memoryScope) => (entityId) => {
+    const found = entity(entityId, boundary);
+    return found !== undefined && (found.kind !== 'memory' || sameMemoryScopeValues(found.scope, memoryScope));
+  };
+
+  // What ranking may read: the entities inside the read boundary and the
+  // relations joining two of them that the memory scope may reach. recall()
+  // and the default read's relevance rank this one view.
+  function rankingView(boundary, memoryScope) {
+    const reach = scopedReach(boundary, memoryScope);
+    return {
+      records: [...records.values()].filter(boundary.visible).map(record => extractionView(record, memoryScope)),
+      facts: [...facts.values()].filter(boundary.visible),
+      relations: [...relations.values()].filter((relation) => reach(relation.from) && reach(relation.to))
+    };
   }
 
   function recall(query = '', options = {}) {
     validateTemporalFields(options, ['asOf', 'currentAt']);
-    const recallOptions = { ...options, project: normalizeProject(options.project), scope: normalizeMemoryScope(options.scope), currentAt: options.currentAt ?? (options.asOf ? null : now()) };
+    const boundary = readBoundary(options, { memoryScope: normalizeMemoryScope(options.scope) });
+    const recallOptions = { ...options, project: boundary.scope.grant ? null : boundary.scope.project, scope: normalizeMemoryScope(options.scope), currentAt: options.currentAt ?? (options.asOf ? null : now()) };
     // Ranking only READS the graph, but this used to hand it `exportData()`,
     // which deep-clones every record, fact, relation, review signal, idempotency
     // entry, event and the entire journal -- on every call. Ranking reads three
@@ -2381,11 +5411,16 @@ export function createShadowGraph(options = {}) {
     // So rank over live entities and clone only the page actually returned. No
     // caller receives a reference into live state, which is the property the
     // wholesale clone was really providing.
-    const rankingView = { records: [...records.values()], facts: [...facts.values()], relations: [...relations.values()] };
-    const result = hybridSearch(rankingView, query, recallOptions);
-    const envelope = paginate(
+    //
+    // Only what lies inside the read boundary is ranked, and the graph signal
+    // walks only relations between such entities: it cannot pass through
+    // another project, and a focus outside the boundary reaches nothing, just
+    // as one that does not exist.
+    const result = hybridSearch(rankingView(boundary, recallOptions.scope), query, recallOptions);
+    const envelope = scopedPage(
       result.items,
       recallOptions,
+      boundary,
       { project: recallOptions.project, scope: recallOptions.scope, query: String(query), asOf: options.asOf ?? null },
       { signals: result.signals, ranking: result.ranking }
     );
@@ -2399,52 +5434,486 @@ export function createShadowGraph(options = {}) {
 
   // context() returns several collections. Each one declares its own total and
   // whether it was truncated, so a caller can never be silently short-changed.
+  // Everything context() reads, evaluates or cites -- decisions, facts,
+  // attempts and the review signals it may raise -- lies inside one read
+  // boundary; a context with no project selected evaluates nothing and
+  // reports no project.
+  //
+  // context() is the default-path read (plan v1.4.4 §13.1-13.2, PC-25): the
+  // working set is evaluated without persisting any review signal, so reading
+  // it changes no canonical truth. Signals already persisted are still
+  // reported. The notice is declared interface metadata, not memory: it tells
+  // a caller that relied on the old implicit persist where that moved.
+  //
+  // It names each collection for what it holds (§13.4, E03): failedAttempts,
+  // firedConditions with affectedAlternatives, and belowConfidenceThreshold,
+  // the fact the generated suggestedQuestions was built from. Every record is
+  // kept.
+  //
+  // With a query or a focalId it also returns `relevant`, ahead of the working
+  // set (PR-26; relevanceBlock()).
   function context(input = {}) {
-    const project = normalizeProject(input.project);
+    return { ...buildContext(input, { persistSignals: false, factual: true }), notice: contextNotice() };
+  }
+
+  // Explicit evaluation (§13.2): the evaluate-and-persist working set that
+  // context() used to return, in its original shape, review-named because it
+  // may raise and store review signals.
+  function reviewContext(input = {}) {
+    return buildContext(input, { persistSignals: true, factual: false });
+  }
+
+  function buildContext(input, { persistSignals, factual }) {
+    const relevance = factual && (input.query != null || input.focalId != null);
+    if (relevance) validateRelevanceInput(input);
+    const boundary = readBoundary(input, { memoryScope: normalizeMemoryScope() });
+    const project = boundary.scope.project;
+    const inScope = boundary.visible;
     const limit = input.limit;
     const collect = (items) => {
       const page = resolvePage({ limit, offset: 0 }, items.length);
       return { items: items.slice(0, page.limit), total: items.length, returned: Math.min(page.limit, items.length), hasMore: page.limit < items.length };
     };
-    const activeDecisions = collect([...records.values()].filter((x) => x.kind === 'decision' && x.project === project && CURRENT_DECISION_STATUSES.includes(x.status)).map(clone));
-    const staleAssumptions = collect([...facts.values()].filter((x) => x.project === project && x.status !== 'active').map(clone));
-    const failedAttemptsToAvoid = collect([...records.values()].filter((x) => x.kind === 'attempt' && x.project === project && attemptFailed(x)).map(clone));
-    const evaluated = evaluateReview({ project, changedFacts: input.changedFacts ?? [], facts: input.facts ?? {} });
+    const current = [...records.values()].filter((x) => x.kind === 'decision' && inScope(x) && CURRENT_DECISION_STATUSES.includes(x.status));
+    const stale = [...facts.values()].filter((x) => inScope(x) && x.status !== 'active');
+    const activeDecisions = collect(current.map(clone));
+    const staleAssumptions = collect(stale.map(clone));
+    // Only a failure is collected (PR-24). An attempt whose outcome is
+    // undetermined -- captured, with no declared class -- is in no collection,
+    // is never implied to have succeeded, and is counted on this one.
+    const attemptsInScope = [...records.values()].filter((x) => x.kind === 'attempt' && inScope(x) && extractionView(x).derivationState !== 'superseded');
+    const failed = attemptsInScope.filter((x) => attemptOutcome(x) === 'failed');
+    const failedAttemptsToAvoid = {
+      ...collect(failed.map(record => clone(extractionView(record)))),
+      undetermined: attemptsInScope.filter((x) => attemptOutcome(x) === 'undetermined').length
+    };
+    const evaluated = evaluateForRead({ changedFacts: input.changedFacts ?? [], facts: input.facts ?? {} }, boundary, { persistSignals });
     const openReviews = collect(evaluated.due);
     // Conditions that could not be settled travel as their own collection, so
     // they are bounded and declared by the same completeness contract as every
     // other collection here rather than riding along unbounded.
-    const reuse = evaluateAttemptReuse(project, now(), input.facts ?? {});
+    const reuse = evaluateAttemptReuse(inScope, now(), input.facts ?? {});
     const reusableAttempts = collect(reuse.reusable);
     const conditionDiagnostics = collect([...evaluated.diagnostics, ...reuse.diagnostics]);
-    const suggestedQuestions = collect([...records.values()].filter((x) => x.kind === 'decision' && x.project === project && (x.confidence?.current ?? 0) < 0.5).map((x) => `What evidence could change the decision: ${x.title}?`));
-    const groups = { activeDecisions, staleAssumptions, failedAttemptsToAvoid, openReviews, suggestedQuestions, conditionDiagnostics, reusableAttempts };
+    // A decision of any status whose recorded confidence is below the policy
+    // threshold. The review-named shape turns each into a generated question.
+    // Values are copies, as recorded: a legacy writer may have left no status,
+    // one this build does not recognise, or a confidence that is not a number.
+    const lowConfidence = [...records.values()].filter((x) => x.kind === 'decision' && inScope(x) && (x.confidence?.current ?? 0) < LOW_CONFIDENCE_THRESHOLD);
+    const belowThreshold = collect(factual
+      ? lowConfidence.map((x) => ({ decisionId: x.id, title: clone(x.title ?? null), status: clone(x.status ?? null), confidence: clone(x.confidence?.current ?? null), threshold: LOW_CONFIDENCE_THRESHOLD }))
+      : lowConfidence.map((x) => `What evidence could change the decision: ${x.title}?`));
+    const fired = factual
+      ? { ...openReviews, items: openReviews.items.map((entry) => Object.fromEntries(Object.entries(entry).map(([key, value]) => [key === 'alternativesToReconsider' ? 'affectedAlternatives' : key, value]))) }
+      : openReviews;
+    const groups = factual
+      ? { activeDecisions, staleAssumptions, failedAttempts: failedAttemptsToAvoid, firedConditions: fired, belowConfidenceThreshold: belowThreshold, conditionDiagnostics, reusableAttempts }
+      : { activeDecisions, staleAssumptions, failedAttemptsToAvoid, openReviews, suggestedQuestions: belowThreshold, conditionDiagnostics, reusableAttempts };
+    const workingSet = [...current, ...failed, ...reuse.reusable.map((entry) => records.get(entry.attemptId)), ...stale];
     return {
       project,
-      activeDecisions: activeDecisions.items,
-      staleAssumptions: staleAssumptions.items,
-      failedAttemptsToAvoid: failedAttemptsToAvoid.items,
-      openReviews: openReviews.items,
-      suggestedQuestions: suggestedQuestions.items,
-      conditionDiagnostics: conditionDiagnostics.items,
-      reusableAttempts: reusableAttempts.items,
-      completeness: {
+      ...(relevance ? { relevant: relevanceBlock(input, boundary, workingSet) } : {}),
+      ...Object.fromEntries(Object.entries(groups).map(([name, group]) => [name, group.items])),
+      completeness: scopeCompleteness(boundary.scope, {
         scope: { project },
         complete: Object.values(groups).every((group) => !group.hasMore),
         limitSource: limit === undefined ? 'default' : 'caller',
         losslessItems: true,
-        collections: Object.fromEntries(Object.entries(groups).map(([name, group]) => [name, { returned: group.returned, total: group.total, hasMore: group.hasMore, omitted: group.total - group.returned }]))
-      }
+        collections: Object.fromEntries(Object.entries(groups).map(([name, group]) => [name, { returned: group.returned, total: group.total, hasMore: group.hasMore, omitted: group.total - group.returned, ...(group.undetermined === undefined ? {} : { undetermined: group.undetermined }) }]))
+      }, referencedSignals(boundary, openReviews.items))
     };
   }
 
-  function exportData() {
+  // Whether text names a stored entity's id: the whole text, a word of it, or
+  // a piece of a word, compared without regard to case or Unicode form. The ids
+  // are gathered once, so the cost is linear in the store and the text.
+  function namesEntity(text) {
+    const fold = (value) => String(value).normalize('NFC').toLowerCase();
+    const ids = new Set([...facts.keys(), ...relations.keys(), ...captures.keys()].map(fold));
+    for (const record of records.values()) {
+      ids.add(fold(record.id));
+      for (const alternative of Array.isArray(record.alternatives) ? record.alternatives : []) if (typeof alternative?.id === 'string') ids.add(fold(alternative.id));
+    }
+    const folded = fold(text);
+    const tokens = folded.split(/\s+/);
+    const candidates = new Set([
+      folded.trim(), ...tokens, ...tokens.map((token) => token.replace(/^[^\p{L}\p{N}_]+|[^\p{L}\p{N}_]+$/gu, '')),
+      ...folded.split(/[^\p{L}\p{N}_:-]+/u), ...folded.split(/[^\p{L}\p{N}_]+/u)
+    ]);
+    return [...candidates].some((candidate) => candidate && ids.has(candidate));
+  }
+
+  // PR-26 (plan v1.4.4 §17; G-5 §9; AC-063): relevance on the default read.
+  // Every record inside the read boundary -- memories of the project-wide scope
+  // only, as every read without a memory scope -- is ranked on the canonical
+  // record itself (T0) by the hybrid engine, over the view recall() ranks; a
+  // T1 line is only the form a ranked record is delivered in. A record is relevant when the
+  // lexical, semantic or graph signal ranked it -- recency orders, it never
+  // selects; a lexical rank counts only for a record that shares a content word
+  // with the query, so one that shares nothing but "the" or "is" is not relevant
+  // to it, while every term still orders the hits (PR-26 corrective); the head's
+  // lexical signal counts content words -- and no reusableWhen, reviewAfter or
+  // status gates it (§17.4). The
+  // semantic signal has no query vector here: no request text is sent to an
+  // embedding endpoint on the default path. When no signal establishes
+  // relevance, the working set is delivered in full rather than nothing (§9);
+  // so is any record whose line cannot carry its decisive meaning. A full
+  // record (T2) is the canonical record: the embedding, a derived index, is left
+  // out, as it is from a line's digest. The head precedes the items (§17.2).
+  function relevanceBlock(input, boundary, workingSet) {
+    const asOf = input.asOf ?? null;
+    const memoryScope = normalizeMemoryScope();
+    const currentAt = asOf ? null : now();
+    const ranked = hybridSearch(rankingView(boundary, memoryScope), input.query ?? '', {
+      project: boundary.scope.grant ? null : boundary.scope.project, focalId: input.focalId, asOf, currentAt
+    });
+    const content = ranked.lexicalContent;
+    const hits = ranked.items.filter(({ record, ranks }) => (ranks.lexical !== null && content.matched.has(record.id)) || ranks.semantic !== null || ranks.graph !== null);
+    const signals = { ...ranked.signals, lexical: { available: content.terms.length > 0, matched: content.matched.size } };
+    const established = hits.length > 0;
+    const candidates = established ? hits : [...new Map(workingSet.map((record) => [record.id, { record, score: null, ranks: null }])).values()];
+    const page = resolvePage({ limit: input.limit, offset: 0 }, candidates.length);
+    const lineContext = { asOf, scope: lineScope(boundary), derivedAt: now(), visible: scopedReach(boundary, memoryScope) };
+    // §17.5 (PR-29): each delivered record's temporal evidence at the read's
+    // instant, from the supersession links, named on either side, that the read
+    // may reach. Links are gathered for the delivered records only.
+    const reach = lineContext.visible;
+    const delivered = candidates.slice(0, page.limit).map(({ record }) => record);
+    const onPage = new Set(delivered.map((record) => record.id));
+    const linked = { successors: new Map(), predecessors: new Map() };
+    const link = (side, id, other) => {
+      if (!onPage.has(id) || other.id === id || !reach(other.id)) return;
+      const found = linked[side].get(id);
+      if (found) found.add(other);
+      else linked[side].set(id, new Set([other]));
+    };
+    // In id order, so the evidence named under its cap does not depend on how
+    // the store was loaded.
+    const linksOf = (side, id) => [...(linked[side].get(id) ?? [])].sort((left, right) => String(left.id).localeCompare(String(right.id)));
+    const entityOf = (id) => records.get(id) ?? facts.get(id);
+    for (const entity of [...records.values(), ...facts.values()]) {
+      for (const id of linkIds(entity.supersededBy)) link('predecessors', id, entity);
+      for (const id of linkIds(entity.supersedes)) link('successors', id, entity);
+    }
+    for (const record of delivered) {
+      for (const id of linkIds(record.supersededBy)) if (entityOf(id)) link('successors', record.id, entityOf(id));
+      for (const id of linkIds(record.supersedes)) if (entityOf(id)) link('predecessors', record.id, entityOf(id));
+    }
+    const evidenceOf = (record) => temporalEvidence(extractionView(record), {
+      kind: facts.get(record.id) === record ? 'fact' : record.kind,
+      successors: linksOf('successors', record.id), predecessors: linksOf('predecessors', record.id),
+      at: asOf ?? currentAt, asOf
+    });
+    let shortened = false;
+    const items = candidates.slice(0, page.limit).map(({ record, score, ranks }) => {
+      const shown = canonicalRecord(record);
+      const line = established && input.compact === true ? t1Line(shown, lineContext) : null;
+      if (line?.decisiveOmitted.length) shortened = true;
+      const evidence = evidenceOf(record);
+      return line && !line.decisiveOmitted.length ? { tier: 'T1', line, score, ranks, temporalEvidence: evidence } : { tier: 'T2', record: shown, score, ranks, temporalEvidence: evidence };
+    });
+    const byKind = { decision: 0, attempt: 0, memory: 0, fact: 0 };
+    // A legacy fact may be stored with no kind; it is still a fact.
+    for (const { record } of candidates) {
+      const kind = facts.get(record.id) === record ? 'fact' : record.kind ?? 'unknown';
+      byKind[kind] = (byKind[kind] ?? 0) + 1;
+    }
+    const hasMore = page.limit < candidates.length;
+    const head = scopeCompleteness(boundary.scope, {
+      scope: {},
+      relevance: { established, signals: Object.fromEntries(Object.entries(signals).map(([name, signal]) => [name, { available: signal.available, matched: signal.matched }])) },
+      fallback: { used: !established || shortened, reason: !established ? 'relevance_not_established' : shortened ? 'decisive_meaning_omitted' : null },
+      byKind, total: candidates.length, returned: items.length, omitted: candidates.length - items.length, hasMore,
+      complete: established && !hasMore,
+      limitSource: input.limit === undefined ? 'default' : 'caller',
+      limitation: established
+        ? { code: 'semantic_unavailable', detail: 'Relevance rests on the lexical and graph signals over the records themselves, with recency only ordering them. The semantic signal is unavailable on this path, so the counts cover what those signals found, not every record related in meaning alone.' }
+        : { code: 'relevance_not_established', detail: 'No lexical, semantic or graph signal found a relevant record, so the working set is delivered in full instead of nothing. The semantic signal is unavailable on this path.' },
+      // How many delivered records have no stored event time, so no as-of
+      // placement beyond their recording (§17.5).
+      temporal: {
+        asOf,
+        eventTimeUnknown: items.filter((item) => item.temporalEvidence.eventTime.state === 'unknown').length,
+        recordingOrderOnly: items.filter((item) => item.temporalEvidence.currentState?.basis === 'recording_order_only').length
+      },
+      // The claim class of each delivered line, in item order, where a
+      // truncated payload still carries it (§17.2).
+      lines: items.filter(({ tier }) => tier === 'T1').map(({ line }) => ({ recordId: line.recordId, claimClass: line.claimClass, requiresExpansion: line.requiresExpansion })),
+      // What capture holds for this scope, from the same status the
+      // completeness funnel declares (M-9); as it always was without capture.
+      processing: boundary.scope.capture ? { ...boundary.scope.capture, limited: boundary.scope.capture.limited.map((entry) => ({ ...entry })), gaps: boundary.scope.capture.gaps.map((entry) => ({ ...entry })) } : { pending: 0, failed: 0, blocked: 0, oldestPendingAt: null, extractionAvailable: false },
+      expansion: { operation: 'shadowgraph_expand', available: true }
+    });
+    // §9, §6.2(a): what the fallback delivered, no signal having ranked it, is a
+    // runtime miss (PR-28). It is kept in memory: this read saves nothing
+    // (PR-17's budget), and the process's next save writes it. A read without
+    // query text -- none, or blank -- records none, its only query being a focal
+    // entity id; nor does one whose query names a stored entity's id, whose
+    // digest would outlive that entity's purge.
+    if (!established && typeof input.query === 'string' && input.query.trim() !== '' && !namesEntity(input.query)) {
+      const ledger = Array.isArray(extras.get(RUNTIME_MISSES)) ? extras.get(RUNTIME_MISSES) : [];
+      const recorded = withFallbackMisses(ledger, { query: input.query, scope: boundary.scope, signals: head.relevance.signals, recordIds: items.map(({ record }) => record.id), at: now() });
+      if (recorded !== ledger) extras.set(RUNTIME_MISSES, recorded);
+    }
+    return { ...head, items };
+  }
+
+  // A full record (T2) as a read delivers it: the public record, the embedding
+  // (a derived index) left out.
+  function extractionView(record, memoryScope = normalizeMemoryScope()) {
+    return extractionSupersession(record, records, relations, other => other.kind !== 'memory' || sameMemoryScopeValues(other.scope, memoryScope));
+  }
+
+  function sourceReadView(value) {
+    const held = deletion.get('held');
+    if (!held) return value;
+    const ids = new Set(held.ids);
+    const refs = new Set(withheldCaptures().map(item => item.contentRef).filter(Boolean));
+    for (const [, item] of held.collections[CAPTURE_CONTENT]?.items ?? []) refs.add(item.contentRef);
+    for (const ref of refs) ids.add(ref);
+    // A surviving capture can reference the same withheld raw entry. Its
+    // evidence is unavailable too; this overlay never changes persisted data.
+    for (const item of captures.values()) if (refs.has(item.contentRef)) ids.add(item.id);
+    return withoutSourceCopies(value, ids);
+  }
+
+  function canonicalRecord(record) {
+    const { embedding, ...shown } = publicValue(sourceReadView(clone(extractionView(record))));
+    return shown;
+  }
+
+  // PR-27 (plan v1.4.4 §17.3; G-5 §7-§8; AC-018): a line's handle expanded to
+  // the full record inside the boundary of the read that produced the line --
+  // its project and grant, the grant re-checked now. The live record is
+  // derived exactly as a line is (the public record, the handle's as-of
+  // instant, the project-wide memory scope's reach), so an equal digest means
+  // the line came from this very revision, and a different one serves the
+  // current record, saying so, never as the revision the line came from. A
+  // record the boundary does not reach -- absent, purged, another project's or
+  // another memory scope's, an alternative -- answers alike: `purged` when the
+  // first purge of the read's project recorded after the line was derived was
+  // logical, `unavailable` otherwise. The id decides nothing, so no
+  // existence leaks (§8, plan §10.5). No ranking, no model call, no clock: the
+  // same handle over the same store gives the same bytes.
+  function expand(input = {}) {
+    validateExpandInput(input);
+    const boundary = readBoundary(input, { memoryScope: normalizeMemoryScope() });
+    const reach = scopedReach(boundary, normalizeMemoryScope());
+    const { recordId } = input;
+    const boundRevision = { recordId, digest: input.digest };
+    const stored = records.get(recordId) ?? facts.get(recordId);
+    if (!stored || !reach(recordId)) {
+      const reason = purgedSince(boundary, input.derivedAt) ? 'purged' : 'unavailable';
+      return {
+        recordId, status: reason, revisionChanged: null, boundRevision, currentRevision: null, record: null, investigation: null,
+        completeness: scopeCompleteness(boundary.scope, { scope: {}, complete: false, limitation: { code: 'expansion_unavailable', reason, recordId, detail: reason === 'purged'
+          ? 'A logical purge of this read\'s project was recorded after the line was derived. No record with this id is served, and nothing stands in for one.'
+          : 'No record with this id is inside the scope of this read.' } })
+      };
+    }
+    const lineContext = { asOf: input.asOf ?? null, scope: lineScope(boundary), derivedAt: input.derivedAt ?? null, visible: reach };
+    const record = canonicalRecord(stored);
+    const digest = t1Digest(t1Inputs(record, lineContext));
+    const current = (input.derivationVersion ?? T1_DERIVATION_VERSION) === T1_DERIVATION_VERSION && input.digest === digest;
+    const investigation = investigate(stored, lineContext, input.maxExpansions ?? DEFAULT_EXPANSIONS, reach);
+    const exhausted = investigation.budget.outcome === 'exhausted';
+    const limitation = !current
+      ? { code: 'revision_changed', detail: 'The record, or what this read reaches of its links, changed after the line was derived. This is the current record, not the revision the line came from.' }
+      : exhausted ? { code: 'investigation_budget_exhausted', detail: 'The expansion budget ran out before every counterpart was fetched in full. Each listed counterpart not fetched is marked uninvestigated, with its line; the rest are counted as omitted.' }
+      : investigation.unreachableLinks ? { code: 'links_unavailable', detail: 'Supersession links of this record name records this read cannot reach, or that do not exist; they are counted in investigation.unreachableLinks.' }
+      : null;
+    return {
+      recordId, status: current ? 'current' : 'revision_changed', revisionChanged: !current, boundRevision, currentRevision: { recordId, digest },
+      record, investigation,
+      completeness: scopeCompleteness(boundary.scope, { scope: {}, complete: limitation === null, ...(limitation ? { limitation } : {}) })
+    };
+  }
+
+  // The handle scope a line carries: the read's project and grant, and its
+  // origin when no project was resolved, so an origin-scoped read's line can be
+  // expanded from its own handle.
+  function lineScope(boundary) {
+    return {
+      project: boundary.scope.project, grantId: boundary.scope.grant?.accessId ?? null,
+      ...(boundary.scope.project == null && boundary.scope.originId != null ? { originId: boundary.scope.originId } : {})
+    };
+  }
+
+  // Whether the purge that removed a record behind a line was logical: the
+  // first canonical project.purged marker of the read's project recorded after
+  // the line was derived (G-5 §8); a hard purge answers unavailable. A later
+  // logical purge scrubs the earlier logical markers of its project to
+  // skeletons, so the first marker counts as logical unless it is recorded
+  // hard. A purge narrows every grant so that it no longer covers the purged
+  // project, so a granted project's purge is never covered: it answers
+  // unavailable, closed. The store's ledger is asked too (PR-37c design §11):
+  // a restore of a pre-purge backup wipes the marker from the journal and
+  // lifts it into a project tombstone that keeps its instant and mode. The
+  // earliest of either after the line decides; a tombstone counts as logical
+  // only when it says so, and on a tie anything not logical wins, closed.
+  function purgedSince(boundary, instant) {
+    const { project } = boundary.scope;
+    if (!project || !isValidIsoInstant(instant)) return false;
+    const later = [
+      ...journal.filter((entry) => entry.type === 'project.purged' && entry.project === project).map((entry) => ({ at: entry.at, logical: entry.payload?.mode !== 'hard' })),
+      ...(deletion.get('view')?.projects ?? []).filter((tombstone) => tombstone.project === project).map((tombstone) => ({ at: tombstone.at, logical: tombstone.mode === 'logical' }))
+    ].filter((entry) => isValidIsoInstant(entry.at) && compareInstants(entry.at, instant) > 0);
+    if (!later.length) return false;
+    const earliest = later.reduce((first, entry) => (compareInstants(entry.at, first) < 0 ? entry.at : first), later[0].at);
+    return later.every((entry) => entry.logical || compareInstants(entry.at, earliest) !== 0);
+  }
+
+  // AC-031/AC-032: the structural counterparts of an expanded record -- facts
+  // of the same key in its project, the records its supersession links name --
+  // each investigated within the budget: resolved on a stated basis,
+  // investigated and unresolved, or, past the budget, not investigated. Both
+  // positions are always delivered: the counterpart's line, and its full record
+  // once investigated. A contradiction stated only in free text is not
+  // detected, and the result says so.
+  function investigate(stored, lineContext, maxExpansions, reach) {
+    const { counterparts, unreachableLinks } = counterpartsOf(stored, reach);
+    // Positions are bounded too: at least the budget, and never fewer than
+    // MIN_POSITIONS; the rest are counted as omitted.
+    const listed = counterparts.slice(0, Math.max(maxExpansions, MIN_POSITIONS));
+    let used = 0;
+    const pairs = listed.map(({ record, relation }) => {
+      const shown = canonicalRecord(record);
+      const position = t1Line(shown, lineContext);
+      if (used >= maxExpansions) return { recordId: record.id, relation, state: 'uninvestigated', basis: [], position };
+      used += 1;
+      const basis = basisOf(stored, record);
+      return { recordId: record.id, relation, state: basis.length ? 'resolved' : 'unresolved', basis, position, record: shown };
+    });
+    return {
+      budget: { maxExpansions, used, outcome: used < counterparts.length ? 'exhausted' : 'within_budget' },
+      total: counterparts.length, omitted: counterparts.length - listed.length, unreachableLinks,
+      pairs,
+      limitation: { code: 'structural_only', detail: 'Counterparts are found by structure alone: facts of the same key and supersession links. A contradiction stated only in free text is not detected.' }
+    };
+  }
+
+  // The counterparts inside the read's reach, current rivals first (not
+  // superseded, then the most recent), and the number of supersession links
+  // that name a record outside the reach or none at all, counted alike.
+  function counterpartsOf(stored, reach) {
+    stored = extractionView(stored);
+    const found = [];
+    const unreachable = new Set();
+    const push = (record, relation) => { if (record.id !== stored.id && !found.some((item) => item.record.id === record.id)) found.push({ record: extractionView(record), relation }); };
+    if (facts.get(stored.id) === stored) {
+      for (const fact of facts.values()) if (fact.key === stored.key && fact.project === stored.project && reach(fact.id)) push(fact, 'same_key');
+    }
+    for (const [ids, relation] of [[linkIds(stored.supersedes), 'supersedes'], [linkIds(stored.supersededBy), 'superseded_by']]) {
+      for (const id of ids) {
+        const record = records.get(id) ?? facts.get(id);
+        if (record && reach(id)) push(record, relation);
+        else if (id !== stored.id) unreachable.add(id);
+      }
+    }
+    const recency = (record) => instantMs(record.temporal?.validFrom ?? record.validFrom ?? record.createdAt) ?? Number.NEGATIVE_INFINITY;
+    const superseded = (record) => (record.supersededBy == null ? 0 : 1);
+    found.sort((a, b) => superseded(a.record) - superseded(b.record) || recency(b.record) - recency(a.record) || String(a.record.id).localeCompare(String(b.record.id)));
+    return { counterparts: found, unreachableLinks: unreachable.size };
+  }
+
+  // What resolves an apparent conflict between two records, from their own
+  // fields: an explicit supersession, validity windows that do not overlap,
+  // or, for facts, the same value.
+  //
+  // A same-key write supersedes the earlier fact or memory and closes its window
+  // at the new one's start. When only the recording order tells two versions
+  // apart -- their event times unknown or equal, and no end the earlier one's
+  // writer declared by the later one's start -- neither that supersession nor
+  // that closed window decides anything, linked or not (§17.5, PR-29).
+  function basisOf(left, right) {
+    const basis = [];
+    const links = (from, to) => linkIds(from.supersededBy).includes(to.id) || linkIds(from.supersedes).includes(to.id);
+    const kindOf = (record) => (facts.get(record.id) === record ? 'fact' : record.kind);
+    const kind = kindOf(left);
+    const linked = links(left, right) || links(right, left);
+    const startOf = (record) => instantMs(versionTimes(record, kind).validFrom) ?? Number.NEGATIVE_INFINITY;
+    const leftFirst = linked ? linkIds(left.supersededBy).includes(right.id) || linkIds(right.supersedes).includes(left.id) : startOf(left) <= startOf(right);
+    const [earlier, later] = leftFirst ? [left, right] : [right, left];
+    const byRecordingOrder = kind === kindOf(right) && ['fact', 'memory'].includes(kind) && supersessionOrder(earlier, later, kind) === 'recording_order_only';
+    if (linked && !byRecordingOrder) basis.push('explicit_supersession');
+    if (facts.get(left.id) === left && facts.get(right.id) === right) {
+      const [a, b] = [validityWindow(left), validityWindow(right)];
+      const before = (earlier, later) => earlier.to !== null && later.from !== null && compareInstants(earlier.to, later.from) <= 0;
+      if (!byRecordingOrder && (before(a, b) || before(b, a))) basis.push('different_times');
+      if (JSON.stringify(canonical(left.value)) === JSON.stringify(canonical(right.value))) basis.push('same_value');
+    }
+    return basis;
+  }
+
+  function nativeCollections(held = null) {
+    const back = (name, live, keyOf = byId) => reemit(live, keyOf, held?.collections[name]);
     return {
       schemaVersion: SCHEMA_VERSION, revision,
-      records: [...records.values()].map(clone), facts: [...facts.values()].map(clone),
-      relations: [...relations.values()].map(clone), reviewSignals: [...reviewSignals.values()].map(clone),
-      idempotency: [...idempotency.entries()].map(([key, value]) => ({ key, value: clone(canonicalIdempotencyValue(value)) })),
-      events: clone(events), journal: clone(journal), journalSeq, journalEpoch
+      records: [...back('records', [...records.values()]), ...back('captures', [...captures.values()])].map(clone), facts: back('facts', [...facts.values()]).map(clone),
+      relations: back('relations', [...relations.values()]).map(clone), reviewSignals: back('reviewSignals', [...reviewSignals.values()]).map(clone),
+      idempotency: back('idempotency', [...idempotency.entries()].map(([key, value]) => ({ key, value: canonicalIdempotencyValue(value) })), (item) => item.key).map(({ key, value }) => ({ key, value: clone(value) })),
+      events: clone(back('events', events)), journal: clone(held ? journal.map((entry) => heldOriginal(held, entry) ?? entry) : journal), journalSeq, journalEpoch
+    };
+  }
+
+  // The privileged snapshot (plan v1.4.4 §11): the complete, unscoped store --
+  // every project and collection, the journal, idempotency and revision, and
+  // every top-level collection this build does not understand. It is the
+  // persistence primitive, reachable only through src/internal/snapshot.js, and
+  // it is not a read of the memory product.
+  //
+  // With deletion knowledge (PR-37a, design §11 R-2) it is the persistence
+  // form: W is put back in place, so the store a graph saves is exactly the
+  // store it would save with no view. The live form beside it is what the
+  // graph holds with W apart; redaction, the Markdown pull lookup and
+  // downgrade read that one.
+  //
+  // It carries the graph's purge intents to a store's commit point, under a
+  // non-enumerable symbol (PR-37d design §2.2); the live form never does.
+  function snapshot() {
+    const payload = storeSnapshot(deletion.get('held') ?? null);
+    const intents = deletion.get('intents');
+    return intents?.length ? Object.defineProperty(payload, DELETION_INTENT, { value: structuredClone(intents) }) : payload;
+  }
+
+  function liveSnapshot() {
+    return sourceReadView(storeSnapshot(null));
+  }
+
+  function storeSnapshot(held) {
+    const pending = [...projectlessLegacy.keys()].filter((id) => {
+      const entity = records.get(id) ?? facts.get(id) ?? held?.entities.get(id);
+      return entity !== undefined && isStoredWithoutProject(entity);
+    }).sort();
+    const extra = (key, value) => (held?.collections[key] ? reemit(value, WITHHELD_EXTRAS[key], held.collections[key]) : value);
+    return {
+      ...nativeCollections(held),
+      ...(pending.length ? { [STORED_WITHOUT_PROJECT]: pending } : {}),
+      ...Object.fromEntries([...extras].map(([key, value]) => [key, clone(extra(key, value))])),
+      ...Object.fromEntries(Object.keys(WITHHELD_EXTRAS).filter((key) => held?.collections[key] && !extras.has(key)).map((key) => [key, clone(extra(key, []))]))
+    };
+  }
+
+  // The public export (`GET /records`, the `list` verb, markdown push): a read
+  // like any other, of one scope (P1 reconciliation F-01). It holds the
+  // records, facts, relations, review signals and breadcrumbs that scope may
+  // see, and nothing of the store itself -- no journal, idempotency, revision
+  // or sequence, and no collection this build cannot interpret, the authority
+  // collections among them -- and it says what it is, so no import, save or
+  // restore takes it for a store.
+  function exportData(options = {}) {
+    const boundary = readBoundary(options);
+    const view = scopedView(boundary);
+    return {
+      exportKind: PUBLIC_EXPORT_KIND,
+      schemaVersion: SCHEMA_VERSION,
+      records: view.records.map(clone), facts: view.facts.map(clone), relations: view.relations.map(clone),
+      reviewSignals: view.reviewSignals.map(clone), events: view.events.map(clone),
+      completeness: scopeCompleteness(boundary.scope, {
+        complete: true,
+        losslessItems: true,
+        limitation: { code: 'scoped_coverage', detail: 'Only what this scope may read. A public export is not a store: it has no journal, and nothing imports, saves or restores it.' }
+      }, view.reviewSignals)
     };
   }
 
@@ -2460,9 +5929,12 @@ export function createShadowGraph(options = {}) {
   // failed replace leaves the current state exactly as it was.
   function replaceData(data = []) {
     const staging = createShadowGraph({ now, verifier });
+    // The view the data brings, or else the one installed (PR-37a, R-4):
+    // a reload brings a fresh one, and a rollback keeps the current one.
+    const view = data?.[DELETION_VIEW] ?? deletion.get('view');
     // Any parse/migration failure throws HERE, before a single live map is cleared.
     try {
-      staging.importData(data);
+      staging.importData(withView(data, view));
     } catch (cause) {
       const error = new Error(`Refusing to replace data: ${cause.message}`);
       if (cause.code !== undefined) error.code = cause.code;
@@ -2470,7 +5942,7 @@ export function createShadowGraph(options = {}) {
       error.cause = cause;
       throw error;
     }
-    const check = staging.validate();
+    const check = privilegedValidate(staging);
     const blocking = check.issues.filter((issue) => issue.severity === 'error');
     if (blocking.length) {
       const error = new Error(`Refusing to replace data: ${blocking.length} blocking issue(s) — ${[...new Set(blocking.map((issue) => issue.code))].join(', ')}`);
@@ -2479,15 +5951,48 @@ export function createShadowGraph(options = {}) {
     }
     // The staged snapshot is already migrated and validated, so this import cannot
     // fail. Only now is the live state discarded.
-    const staged = staging.exportData();
-    records.clear(); currentMemories.clear(); facts.clear(); currentFacts.clear(); relations.clear(); reviewSignals.clear(); idempotency.clear();
-    events.length = 0; journal.length = 0; revision = 0; journalSeq = 0; journalEpoch = null;
-    return importData(staged);
+    const staged = privilegedSnapshot(staging);
+    // The purge intents the data carries, or none (PR-37d design §2.2): a
+    // rollback to a privileged snapshot puts back exactly the ones it had, and
+    // a reload, whose payload carries none, drops them.
+    const intents = data?.[DELETION_INTENT];
+    clearLive();
+    if (intents?.length) deletion.set('intents', structuredClone(intents));
+    else deletion.delete('intents');
+    return importWithView(staged, view);
   }
 
+  // The purge intents stay: unhold() clears through here (PR-37d design §2.2).
+  function clearLive() {
+    records.clear(); captures.clear(); currentMemories.clear(); facts.clear(); currentFacts.clear(); relations.clear(); reviewSignals.clear(); idempotency.clear(); extras.clear(); projectlessLegacy.clear();
+    deletion.delete('held');
+    events.length = 0; journal.length = 0; revision = 0; journalSeq = 0; journalEpoch = null;
+  }
+
+  // A public import (design §4, §11 R-6). Into a graph that holds anything --
+  // W included -- it is a merge, and a merge that deletion knowledge applies
+  // to is refused: this build cannot merge it. A load into an empty graph, and
+  // replaceData's own import, are not merges.
   function importData(data = []) {
+    if ((holdsData() || retentionPolicy().length) && mergeNeedsDeletionSemantics(data)) {
+      throw deletionError(PURGE_AWARE_RESTORE_UNSUPPORTED, 'Refusing to import: deletion records apply to this merge, and this build cannot honour them in a merge; a later ShadowGraph build is needed');
+    }
+    return importWithView(data, data?.[DELETION_VIEW]);
+  }
+
+  // The import, then W held apart under the view: the one installed, or the
+  // one the data brings (design §2.1).
+  function importWithView(data, view) {
+    if (view) deletion.set('view', view);
+    const imported = importPayload(data);
+    hold();
+    return imported;
+  }
+
+  function importPayload(data = []) {
     const source = Array.isArray(data) ? { records: data } : data;
     if (source === null || typeof source !== 'object') throw new Error('Import data must be an object or an array of records');
+    refusePublicExport(source);
     // P0-2 / P2-14: the ENVELOPE schemaVersion describes the shape of the whole
     // payload, so a version this build does not know is not something to downgrade
     // silently or half-read — the fields we would ignore might be the ones that
@@ -2513,11 +6018,20 @@ export function createShadowGraph(options = {}) {
     // Preflight every migration and clone before changing any live collection.
     // Direct import is intentionally merge-oriented, but a malformed entity must
     // never leave a partially merged graph behind.
-    const importedRecords = (source.records ?? []).map((item) => migrateRecord(item));
+    // A capture item has no legacy form to migrate from: it is kept as it came.
+    const importedRecords = (source.records ?? []).map((item) => (item.kind === CAPTURE_KIND ? clone(item) : migrateRecord(item)));
     const importedFacts = (source.facts ?? []).map((fact, index, allFacts) => {
       const factId = fact.id ?? legacyFactId(fact, index, allFacts);
       return migrateFact({ ...fact, id: factId });
     });
+    // Legacy entities stored with no project, which the migrations above placed
+    // in "default". Held by object, so the legacy id remapping below cannot lose
+    // track of them. The list an earlier save kept names the rest.
+    const storedWithoutProject = (item) => typeof item?.attribution !== 'string' && (item?.project === undefined || item?.project === null);
+    const projectless = [
+      ...(source.records ?? []).map((item, index) => storedWithoutProject(item) && importedRecords[index]),
+      ...(source.facts ?? []).map((item, index) => storedWithoutProject(item) && importedFacts[index])
+    ].filter((entity) => entity?.project === 'default');
     const trustedValidationInstant = verifier && importedFacts.some((fact) => fact.verification) ? now() : null;
     for (const fact of importedFacts) {
       if (fact.verification) {
@@ -2539,6 +6053,22 @@ export function createShadowGraph(options = {}) {
     const importedSignals = (source.reviewSignals ?? []).map((signal) => clone(signal));
     const importedIdempotency = (source.idempotency ?? []).map((item) => ({ key: importIdempotencyKey(item.key, item.value), value: clone(item.value) }));
     const importedEvents = (source.events ?? []).map((item) => clone(item));
+    const importedExtras = extraCollections(source).filter(([key]) => key !== STORED_WITHOUT_PROJECT).map(([key, value]) => [key, clone(value)]);
+    // Capture's collections merge by key, as records do: an import never
+    // drops another capture's raw text or session (PR-33).
+    for (const extra of importedExtras) {
+      const [key, value] = extra;
+      if (!CAPTURE_COLLECTIONS.includes(key)) continue;
+      const keyName = key === CAPTURE_CONTENT ? 'contentRef' : 'id';
+      const held = new Map((extras.get(key) ?? []).map((item) => [item[keyName], item]));
+      const owner = (item) => JSON.stringify([item?.attribution, item?.project, item?.originId, key === CAPTURE_CONTENT ? null : item?.sessionId]);
+      const moved = value.findIndex((item) => held.has(item?.[keyName]) && owner(held.get(item[keyName])) !== owner(item));
+      if (moved !== -1) throw captureCollectionError(`${key} entry ${moved} would change the owner of an entry the store holds`);
+      const incoming = new Set(value.map((item) => item[keyName]));
+      extra[1] = [...(extras.get(key) ?? []).filter((item) => !incoming.has(item[keyName])), ...value];
+      const issue = captureCollectionIssue(key, extra[1]);
+      if (issue) throw captureCollectionError(issue);
+    }
     let pendingMigrationBaseline = null;
     let pendingJournalEntries = [];
     let pendingJournalSequence = null;
@@ -2591,8 +6121,9 @@ export function createShadowGraph(options = {}) {
       // Schemas 1–3 had collection-local ids. Schema 4 has one global entity
       // namespace, so ambiguous legacy collisions receive stable migrated ids
       // rather than silently overwriting one another or becoming backend-specific.
-      const used = new Set();
+      const used = new Set(importedRecords.filter((record) => record.kind === CAPTURE_KIND).map((record) => record.id));
       for (const [index, record] of importedRecords.entries()) {
+        if (record.kind === CAPTURE_KIND) continue;
         if (used.has(record.id)) {
           const previousId = record.id;
           record.id = legacyCollisionId(record.kind, record, index, used);
@@ -2651,6 +6182,7 @@ export function createShadowGraph(options = {}) {
           if (endpoints.length) relation.migration = { ...(relation.migration ?? {}), ambiguousLegacyEndpoints: endpoints };
         }
         for (const record of importedRecords) {
+          if (record.kind === CAPTURE_KIND) continue;
           const fields = ['supersedes', 'supersededBy', 'relatedTo', 'failedAttempts'].filter((field) => {
             const value = record[field];
             return Array.isArray(value) ? value.some((item) => ambiguousLegacyIds.has(item)) : ambiguousLegacyIds.has(value);
@@ -2664,26 +6196,50 @@ export function createShadowGraph(options = {}) {
       assertUniqueEntityIds(importedRecords, importedAlternatives, importedFacts, importedRelations);
       const existingAlternativeOwners = new Map();
       for (const record of records.values()) for (const alternative of record.alternatives ?? []) existingAlternativeOwners.set(alternative.id, record.id);
+      // Plan rev6 §3.2: the erasureToken is internal, so a merged entity that
+      // names none -- one built from a public result -- keeps the one it has. A
+      // merge never changes or drops a token.
+      const journalless = !(Array.isArray(source.journal) && source.journal.length);
+      const liveTokenHolders = new Map([...records.values(), ...captures.values(), ...facts.values()].filter((entity) => entity.erasureToken !== undefined).map((entity) => [entity.erasureToken, entity.id]));
+      const keepErasureToken = (existing, item) => {
+        if (existing?.erasureToken !== undefined && item.erasureToken !== existing.erasureToken) {
+          if (item.erasureToken !== undefined || !journalless) throw new Error(`Existing entity id ${item.id} cannot change or drop its erasureToken`);
+          item.erasureToken = existing.erasureToken;
+        }
+        const holder = liveTokenHolders.get(item.erasureToken);
+        if (item.erasureToken !== undefined && holder !== undefined && holder !== item.id) throw new Error(`${item.id} would share an erasureToken with ${holder}`);
+      };
       for (const record of importedRecords) {
-        const existingRecord = records.get(record.id);
-        if (existingRecord && (existingRecord.kind !== record.kind || existingRecord.project !== record.project)) throw new Error(`Existing entity id ${record.id} cannot change kind or project`);
+        const existingRecord = records.get(record.id) ?? captures.get(record.id);
+        if (existingRecord && (existingRecord.kind !== record.kind || existingRecord.project !== record.project || !sameOwnerKey(existingRecord, record))) throw new Error(existingRecord.kind !== record.kind || existingRecord.project !== record.project
+          ? `Existing entity id ${record.id} cannot change kind or project` : `Existing entity id ${record.id} cannot change owner`);
+        keepErasureToken(existingRecord, record);
+        // PR-23: a legacy attempt's cause is shown, not stored, so one merged
+        // back from a public result keeps none.
+        if (journalless && existingRecord?.kind === 'attempt' && existingRecord.causalClaim === undefined && !isFutureEntity(record) && JSON.stringify(record.causalClaim) === JSON.stringify(causalClaimFor(record.reason, { legacy: true }))) delete record.causalClaim;
         if (existingRecord?.kind === 'memory' && memoryScopeKey(existingRecord) !== memoryScopeKey(record)) throw new Error(`Existing memory id ${record.id} cannot change scope, type, or key`);
         if (facts.has(record.id) || relations.has(record.id) || (existingAlternativeOwners.has(record.id) && existingAlternativeOwners.get(record.id) !== record.id)) throw new Error(`Entity id already exists: ${record.id}`);
         for (const alternative of record.alternatives ?? []) {
           const existingOwner = existingAlternativeOwners.get(alternative.id);
-          if (records.has(alternative.id) || facts.has(alternative.id) || relations.has(alternative.id) || (existingOwner && existingOwner !== record.id)) throw new Error(`Entity id already exists: ${alternative.id}`);
+          if (records.has(alternative.id) || captures.has(alternative.id) || facts.has(alternative.id) || relations.has(alternative.id) || (existingOwner && existingOwner !== record.id)) throw new Error(`Entity id already exists: ${alternative.id}`);
         }
       }
+      const importedCaptureIds = new Set(importedRecords.filter((record) => record.kind === CAPTURE_KIND).map((record) => record.id));
       for (const fact of importedFacts) {
-        if (records.has(fact.id) || relations.has(fact.id) || existingAlternativeOwners.has(fact.id)) throw new Error(`Entity id already exists: ${fact.id}`);
+        if (records.has(fact.id) || captures.has(fact.id) || relations.has(fact.id) || existingAlternativeOwners.has(fact.id)) throw new Error(`Entity id already exists: ${fact.id}`);
         const existingFact = facts.get(fact.id);
-        if (existingFact && existingFact.project !== fact.project) throw new Error(`Existing entity id ${fact.id} cannot change kind or project`);
+        if (existingFact && (existingFact.project !== fact.project || !sameOwnerKey(existingFact, fact))) throw new Error(existingFact.project !== fact.project
+          ? `Existing entity id ${fact.id} cannot change kind or project` : `Existing entity id ${fact.id} cannot change owner`);
+        keepErasureToken(existingFact, fact);
       }
       for (const relation of importedRelations) {
-        if (records.has(relation.id) || facts.has(relation.id) || existingAlternativeOwners.has(relation.id)) throw new Error(`Entity id already exists: ${relation.id}`);
+        if (records.has(relation.id) || captures.has(relation.id) || facts.has(relation.id) || existingAlternativeOwners.has(relation.id)) throw new Error(`Entity id already exists: ${relation.id}`);
+        if ([relation.from, relation.to].some((endpoint) => captures.has(endpoint) || importedCaptureIds.has(endpoint))) throw new Error('Relation endpoints must exist before import, and a capture item is never one');
         const existingRelation = relations.get(relation.id);
-        if (existingRelation && (existingRelation.project !== relation.project || existingRelation.from !== relation.from || existingRelation.to !== relation.to || existingRelation.relation !== relation.relation)) throw new Error(`Existing relation id ${relation.id} cannot change identity`);
+        if (existingRelation && (existingRelation.project !== relation.project || !sameOwnerKey(existingRelation, relation) || existingRelation.from !== relation.from || existingRelation.to !== relation.to || existingRelation.relation !== relation.relation)) throw new Error(`Existing relation id ${relation.id} cannot change identity`);
       }
+      // Nor may a relation the store holds come to name one.
+      for (const relation of relations.values()) if (importedCaptureIds.has(relation.from) || importedCaptureIds.has(relation.to)) throw new Error('Relation endpoints must exist before import, and a capture item is never one');
       const availableEntityIds = new Set([...records.keys(), ...facts.keys()]);
       const overwrittenRecordIds = new Set(importedRecords.map((record) => record.id));
       for (const [alternativeId, ownerId] of existingAlternativeOwners) if (!overwrittenRecordIds.has(ownerId)) availableEntityIds.add(alternativeId);
@@ -2717,7 +6273,7 @@ export function createShadowGraph(options = {}) {
       });
       const liveEventIds = new Set(events.map((item) => item.id));
       for (const eventItem of importedEvents) if (liveEventIds.has(eventItem.id)) throw new Error(`Event id already exists: ${eventItem.id}`);
-      const finalRecords = new Map(records);
+      const finalRecords = new Map([...records, ...captures]);
       const finalFacts = new Map(facts);
       for (const record of importedRecords) finalRecords.set(record.id, record);
       for (const fact of importedFacts) finalFacts.set(fact.id, fact);
@@ -2740,20 +6296,28 @@ export function createShadowGraph(options = {}) {
         const value = item.value;
         const entity = value?.kind === 'fact' ? finalFacts.get(value.id) : finalRecords.get(value?.id);
         if (typeof item.key !== 'string' || !value || typeof value !== 'object' || typeof value.id !== 'string' || !entity) throw new Error('Idempotency entry must reference an existing entity');
-        const scope = value?.scope ?? {};
-        const expectedKeyPrefix = value?.kind === 'memory'
-          ? `memory:${value.project}:${JSON.stringify([scope.userId ?? null, scope.agentId ?? null, scope.runId ?? null, value.memoryType ?? null, value.key ?? null])}:`
-          : `${value?.kind}:${value?.project}:`;
-        if (entity.kind !== value.kind || entity.project !== value.project || !item.key.startsWith(expectedKeyPrefix)) throw new Error('Idempotency entry identity does not match its entity');
-        if (value.kind === 'memory' && memoryScopeKey(entity) !== memoryScopeKey(value)) throw new Error('Idempotency entry identity does not match its entity');
+        // A retry value built from a public result omits the erasure token, and so carries its entity's.
+        if (value.erasureToken === undefined && entity.erasureToken !== undefined && !(Array.isArray(source.journal) && source.journal.length)) value.erasureToken = entity.erasureToken;
+        // The value is checked in the migrated form its entity has, as the
+        // semantic check below always was. A legacy entity stored with no
+        // project is filed under "default" by migration; so is a retry value
+        // that stores no project, which is what a rebuild replays from that
+        // entity's own journal entry (F-26). Owners are compared by the one
+        // owner model, so a legacy retry value never names a real-"default"
+        // entity, nor a real-"default" value a legacy one.
         const migratedValue = value.kind === 'fact' ? migrateFact(value) : migrateRecord(value);
+        const sameOwner = entity.project === migratedValue.project && sameOwnerKey(entity, migratedValue)
+          && (entity.attribution === 'unattributed') === (value.attribution === 'unattributed')
+          && (value.attribution !== 'unattributed' || (usableOriginId(value.originId) !== null && entity.originId === value.originId));
+        if (entity.kind !== value.kind || !sameOwner || !item.key.startsWith(idempotencyKeyPrefix(migratedValue))) throw new Error('Idempotency entry identity does not match its entity');
+        if (value.kind === 'memory' && memoryScopeKey(entity) !== memoryScopeKey(value)) throw new Error('Idempotency entry identity does not match its entity');
         if (!idempotencySemanticallyMatches(migratedValue, entity)) throw new Error(`Idempotency entry semantic mismatch with canonical entity ${value.id}`);
         item.value = clone(entity);
       }
     }
     if (!(Array.isArray(source.journal) && source.journal.length) && (importedRecords.length || importedFacts.length || importedRelations.length || importedIdempotency.length)) {
       const sameSnapshot = (left, right) => JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
-      const finalRecords = new Map(records);
+      const finalRecords = new Map([...records, ...captures]);
       const finalFacts = new Map(facts);
       const finalRelations = new Map(relations);
       for (const item of importedRecords) finalRecords.set(item.id, item);
@@ -2776,7 +6340,7 @@ export function createShadowGraph(options = {}) {
 
       const changedEntities = [];
       for (const item of importedRecords) {
-        const previous = records.get(item.id);
+        const previous = records.get(item.id) ?? captures.get(item.id);
         if (!previous || !sameSnapshot(previous, item)) changedEntities.push({ item, previous });
       }
       for (const item of importedFacts) {
@@ -2841,13 +6405,15 @@ export function createShadowGraph(options = {}) {
         if (item.kind === 'decision') return 'decision.recorded';
         if (item.kind === 'attempt') return 'attempt.recorded';
         if (item.kind === 'relation') return 'relation.created';
+        // An item of a newer schema is carried under a plain state change.
+        if (item.kind === CAPTURE_KIND) return Object.hasOwn(CAPTURE_IMPORT_TYPE, item.state) ? CAPTURE_IMPORT_TYPE[item.state] : CAPTURE_IMPORT_TYPE.processing;
         throw new Error(`Cannot journal imported entity kind ${item.kind}`);
       };
       const originalEntity = (item) => item.kind === 'fact'
         ? facts.get(item.id)
         : item.kind === 'relation'
           ? relations.get(item.id)
-          : records.get(item.id);
+          : records.get(item.id) ?? captures.get(item.id);
       const prebuildSnapshot = (item, idempotencyKey) => prebuilt.push(prebuildJournalEntry({
         type: snapshotType(item, originalEntity(item)),
         entityKind: item.kind,
@@ -2934,9 +6500,20 @@ export function createShadowGraph(options = {}) {
             idempotency: sortIdempotency([...finalIdempotency.entries()].map(([key, value]) => ({ key, value: clone(value) })))
           };
           const rebuilt = rebuildProjection(combinedJournal, { journalEpoch: generatedEpoch }).projection;
+          const rebuiltEntities = new Map([...rebuilt.records, ...rebuilt.facts].map((item) => [item.id, item]));
+          // Retry snapshots can predate lifecycle-only changes. Compare their
+          // canonical values as normal import/rebuild does, but only after
+          // validating the replayed identity and semantic binding.
+          const rebuiltIdempotency = rebuilt.idempotency.map(({ key, value }) => {
+            const entity = rebuiltEntities.get(value?.id);
+            if (!entity || entity.kind !== value.kind || !sameOwnerKey(entity, value)
+              || !key.startsWith(idempotencyKeyPrefix(value))
+              || !idempotencySemanticallyMatches(value, entity)) throw new Error('Rebuilt idempotency entry does not match its canonical entity');
+            return { key, value: clone(entity) };
+          });
           const rebuiltProjection = {
             records: sortById(rebuilt.records), facts: sortById(rebuilt.facts),
-            relations: sortById(rebuilt.relations), idempotency: sortIdempotency(rebuilt.idempotency)
+            relations: sortById(rebuilt.relations), idempotency: sortIdempotency(rebuiltIdempotency)
           };
           if (!sameSnapshot(rebuiltProjection, expectedProjection)) {
             throw new Error('Journal-less merge snapshot deltas do not reproduce the final live projection');
@@ -2948,52 +6525,18 @@ export function createShadowGraph(options = {}) {
       }
     }
     revision = Number.isInteger(source.revision) ? Math.max(revision, source.revision) : revision;
-    for (const item of importedRecords) records.set(item.id, item);
-    currentMemories.clear();
-    const memoryScopeCandidates = new Map();
-    for (const item of records.values()) {
-      if (item.kind !== 'memory' || item.status !== 'active') continue;
-      const scope = memoryScopeKey(item);
-      if (!memoryScopeCandidates.has(scope)) memoryScopeCandidates.set(scope, []);
-      memoryScopeCandidates.get(scope).push(item);
-    }
-    for (const [scope, candidates] of memoryScopeCandidates) {
-      const winner = [...candidates].sort((left, right) => {
-        const byVersion = (right.version ?? 1) - (left.version ?? 1);
-        if (byVersion !== 0) return byVersion;
-        const byValidFrom = compareInstants(right.temporal?.validFrom, left.temporal?.validFrom);
-        if (byValidFrom !== 0) return byValidFrom;
-        const byRecordedAt = compareInstants(right.temporal?.recordedAt, left.temporal?.recordedAt);
-        return byRecordedAt !== 0 ? byRecordedAt : String(right.id).localeCompare(String(left.id));
-      })[0];
-      currentMemories.set(scope, winner);
-    }
+    for (const item of importedRecords) (item.kind === CAPTURE_KIND ? captures : records).set(item.id, item);
+    recomputeCurrentMemories();
     for (const fact of importedFacts) facts.set(fact.id, fact);
-    currentFacts.clear();
-    // P2-15: two ACTIVE facts can share a (project, key) scope in imported data.
-    // Picking whichever arrived last made the winner depend on array order, so the
-    // same file reordered produced a different current fact — and therefore
-    // different reconsideration results. Recency is now a stable rule:
-    // latest `observedAt`, and `id` as the tie-break so it is total. Ambiguity is
-    // still reported by validate() rather than hidden.
-    const scopeCandidates = new Map();
-    for (const fact of facts.values()) {
-      if (fact.status !== 'active') continue;
-      const scope = JSON.stringify([fact.project ?? 'default', fact.key]);
-      if (!scopeCandidates.has(scope)) scopeCandidates.set(scope, []);
-      scopeCandidates.get(scope).push(fact);
-    }
-    for (const [scope, candidates] of scopeCandidates) {
-      const winner = [...candidates].sort((left, right) => {
-        const byObserved = compareInstants(right.observedAt, left.observedAt);
-        return byObserved !== 0 ? byObserved : String(right.id ?? '').localeCompare(String(left.id ?? ''));
-      })[0];
-      currentFacts.set(scope, winner);
-    }
+    recomputeCurrentFacts();
     for (const relation of importedRelations) relations.set(relation.id, relation);
     for (const signal of importedSignals) reviewSignals.set(reviewSignalKey(signal.decisionId, signal.reason, signal.coverage), signal);
     for (const item of pendingIdempotencyUpdates) idempotency.set(item.key, item.value);
     for (const importedEvent of importedEvents) events.push(importedEvent);
+    for (const [key, value] of importedExtras) extras.set(key, value);
+    if (extras.has('access')) extras.set('access', reconcileAccessLedger(extras.get('access'), extras.get('accessRevocations')));
+    for (const entity of projectless) projectlessLegacy.set(entity.id, true);
+    for (const id of source[STORED_WITHOUT_PROJECT] ?? []) projectlessLegacy.set(id, true);
 
     if (importedJournal.length) {
       for (const importedEntry of importedJournal) journal.push(importedEntry);
@@ -3030,16 +6573,72 @@ export function createShadowGraph(options = {}) {
     return records.size + facts.size + relations.size;
   }
 
+  function recomputeCurrentMemories() {
+    currentMemories.clear();
+    const memoryScopeCandidates = new Map();
+    for (const item of records.values()) {
+      if (item.kind !== 'memory' || item.status !== 'active') continue;
+      const scope = memoryScopeKey(item);
+      if (!memoryScopeCandidates.has(scope)) memoryScopeCandidates.set(scope, []);
+      memoryScopeCandidates.get(scope).push(item);
+    }
+    for (const [scope, candidates] of memoryScopeCandidates) {
+      const winner = [...candidates].sort((left, right) => {
+        const byVersion = (right.version ?? 1) - (left.version ?? 1);
+        if (byVersion !== 0) return byVersion;
+        const byValidFrom = compareInstants(right.temporal?.validFrom, left.temporal?.validFrom);
+        if (byValidFrom !== 0) return byValidFrom;
+        const byRecordedAt = compareInstants(right.temporal?.recordedAt, left.temporal?.recordedAt);
+        return byRecordedAt !== 0 ? byRecordedAt : String(right.id).localeCompare(String(left.id));
+      })[0];
+      currentMemories.set(scope, winner);
+    }
+  }
+
+  function recomputeCurrentFacts() {
+    currentFacts.clear();
+    // P2-15: two ACTIVE facts can share a (project, key) scope in imported data.
+    // Picking whichever arrived last made the winner depend on array order, so the
+    // same file reordered produced a different current fact — and therefore
+    // different reconsideration results. Recency is now a stable rule:
+    // latest `observedAt`, and `id` as the tie-break so it is total. Ambiguity is
+    // still reported by validate() rather than hidden.
+    const scopeCandidates = new Map();
+    for (const fact of facts.values()) {
+      if (fact.status !== 'active') continue;
+      const scope = JSON.stringify([ownerKey(fact, (project) => project ?? 'default'), fact.key]);
+      if (!scopeCandidates.has(scope)) scopeCandidates.set(scope, []);
+      scopeCandidates.get(scope).push(fact);
+    }
+    for (const [scope, candidates] of scopeCandidates) {
+      const winner = [...candidates].sort((left, right) => {
+        const byObserved = compareInstants(right.observedAt, left.observedAt);
+        return byObserved !== 0 ? byObserved : String(right.id ?? '').localeCompare(String(left.id ?? ''));
+      })[0];
+      currentFacts.set(scope, winner);
+    }
+  }
+
+  // The journal entries of the request's scope (P1 reconciliation F-09, F-16):
+  // none with no project and no origin, never an entry that names an id
+  // outside the scope, and only the gaps the scope's own purges left.
   function getJournal(options = {}) {
-    const project = options.project === undefined ? undefined : normalizeProject(options.project);
-    const entries = journal.filter((entry) => project === undefined || entry.project === project);
-    return paginate(entries.map(clone), options, { project: project ?? 'all' }, { journalEpoch, journalSeq, gaps: journalGaps(journal) });
+    const boundary = readBoundary(options);
+    const entries = scopedView(boundary).journal;
+    return scopedPage(entries.map(clone), options, boundary, {}, {
+      gaps: explainedGaps(entries),
+      limitation: { code: 'scoped_coverage', detail: 'Only entries that name nothing outside this scope, and only the gaps this scope\'s own purges left; journal integrity outside this scope is not reported.' }
+    });
   }
 
   // Rebuild a projection from this graph's own journal, then pass the exposed
   // projection through the same schema migration and verifier policy as a normal
   // import. The raw journal remains immutable audit evidence inside this graph.
-  function rebuild(options = {}) {
+  //
+  // This is the whole-store replay, and it is privileged (P1 reconciliation
+  // F-17): restore validation compares it with the whole live store. The
+  // public rebuild() below reports the same fold, of the request's scope only.
+  function replay(options = {}) {
     const report = rebuildProjection(clone(journal), {
       ...options,
       journalEpoch,
@@ -3058,10 +6657,10 @@ export function createShadowGraph(options = {}) {
     const normalizeProjection = (policyVerifier) => {
       const staging = createShadowGraph({ now, verifier: policyVerifier });
       staging.importData(envelope);
-      const validation = staging.validate();
+      const validation = privilegedValidate(staging);
       const blocking = validation.issues.filter((issue) => issue.severity === 'error' || issue.severity === 'unsupported');
       if (blocking.length) throw new Error(`Rebuilt projection has ${blocking.length} blocking validation issue(s)`);
-      const normalized = staging.exportData();
+      const normalized = privilegedSnapshot(staging);
       const preserveAuditKeyOrder = (item, rawById) => {
         const raw = rawById.get(item.id);
         if (!raw) return item;
@@ -3104,12 +6703,61 @@ export function createShadowGraph(options = {}) {
     }
   }
 
-  function stats() {
-    const all = [...records.values()];
-    return { schemaVersion: SCHEMA_VERSION, total: all.length, decisions: all.filter((x) => x.kind === 'decision').length, attempts: all.filter((x) => x.kind === 'attempt').length, facts: facts.size, relations: relations.size, reviewSignals: reviewSignals.size, events: events.length, journal: journal.length };
+  // The public replay (P1 reconciliation F-17): whether the journal folds is a
+  // verdict on the whole store and names nothing, but the projection holds only
+  // the request's scope and the entry-level diagnostics only its own entries.
+  // With no project and no origin the projection is empty.
+  function rebuild(options = {}) {
+    const boundary = readBoundary(options);
+    const report = replay(options);
+    const recordsInScope = report.projection.records.filter((item) => item.kind !== CAPTURE_KIND && boundary.visible(item));
+    const factsInScope = report.projection.facts.filter(boundary.visible);
+    const ids = new Set([...recordsInScope, ...factsInScope].map((item) => item.id));
+    // A diagnostic is listed unless it names something outside the scope: an
+    // entry by sequence (the scope's only when every entry carrying it is), a
+    // legacy entry by id, or a relation. One about the fold itself names nothing.
+    const view = scopedView(boundary);
+    const entries = new Set(view.journal);
+    const entryIds = new Set(view.journal.map((entry) => entry?.id));
+    const relationIds = new Set(view.relations.map((relation) => relation.id));
+    const ownSequences = new Map();
+    for (const entry of journal) ownSequences.set(entry?.seq, (ownSequences.get(entry?.seq) ?? true) && entries.has(entry));
+    const own = (items) => items.filter((item) => {
+      if (Number.isInteger(item?.seq)) return ownSequences.get(item.seq) === true;
+      if (item?.id !== undefined && item?.id !== null) return entryIds.has(item.id);
+      if (item?.relationId !== undefined) return relationIds.has(item.relationId);
+      return true;
+    });
+    return scopedResult({
+      ok: report.ok, rebuildable: report.rebuildable,
+      // Preserve the whole-store verdict without global sequence diagnostics.
+      reason: report.reason?.startsWith('journal contains duplicate sequence numbers (') ? 'The journal contains duplicate sequence numbers, so entry order is ambiguous.' : report.reason,
+      projection: {
+        schemaVersion: report.projection.schemaVersion,
+        records: recordsInScope,
+        facts: factsInScope,
+        relations: report.projection.relations.filter((relation) => ids.has(relation.from) && ids.has(relation.to)),
+        idempotency: report.projection.idempotency.filter((item) => ids.has(item?.value?.id))
+      },
+      skipped: own(report.skipped).map((item) => item.why === 'invalid_exposed_projection_verification'
+        ? { ...item, detail: 'Whole-store projection validation failed. Its unscoped diagnostics are not exposed by this read.' }
+        : item),
+      legacy: own(report.legacy),
+      duplicates: own(report.duplicates),
+      completeness: { complete: report.rebuildable, limitation: { code: 'scoped_coverage', detail: 'Whether the journal rebuilds is the verdict on the whole store. The projection and the entry diagnostics hold only this scope; an unsuccessful rebuild does not establish complete projection coverage.' } },
+      limitation: { code: 'scoped_coverage', detail: 'Whether the journal rebuilds is the verdict on the whole store. The projection and the entry diagnostics hold only this scope.' }
+    }, boundary);
   }
 
-  return {
+  // Counts of what the request's scope may see (plan v1.4.4 PR-10): with no
+  // project and no origin, all zero.
+  function stats(options = {}) {
+    const boundary = readBoundary(options);
+    const view = scopedView(boundary);
+    return scopedResult({ schemaVersion: SCHEMA_VERSION, total: view.records.length, decisions: view.records.filter((x) => x.kind === 'decision').length, attempts: view.records.filter((x) => x.kind === 'attempt').length, facts: view.facts.length, relations: view.relations.length, reviewSignals: view.reviewSignals.length, events: view.events.length, journal: view.journal.length }, boundary, view.reviewSignals);
+  }
+
+  return registerPrivileged(tokenFreeApi({
     // Only direct public mutation entry points receive a transaction boundary.
     // Internal composition (applyMemoryPlan -> remember, supersedeDecision ->
     // link, maintain/context -> review, replaceData -> importData) stays inside
@@ -3117,39 +6765,66 @@ export function createShadowGraph(options = {}) {
     // partial nested operation. Read-only paths pay no snapshot cost.
     setRevision: transactional('setRevision', setRevision, { mode: 'none' }),
     replaceData: transactional('replaceData', replaceData, { mode: 'snapshot' }),
-    addDecision: transactional('addDecision', addDecision),
-    addAttempt: transactional('addAttempt', addAttempt),
-    remember: transactional('remember', remember),
-    applyMemoryPlan: transactional('applyMemoryPlan', applyMemoryPlan),
-    memoryHistory,
-    addFact: transactional('addFact', addFact),
-    verifyFact: transactional('verifyFact', verifyFact),
-    setOutcome: transactional('setOutcome', setOutcome),
-    addConfidenceEvidence: transactional('addConfidenceEvidence', addConfidenceEvidence),
-    updateDecisionStatus: transactional('updateDecisionStatus', updateDecisionStatus),
-    supersedeDecision: transactional('supersedeDecision', supersedeDecision),
+    addDecision: mutationReply('addDecision', addDecision),
+    addAttempt: mutationReply('addAttempt', addAttempt),
+    remember: mutationReply('remember', remember),
+    applyMemoryPlan: mutationReply('applyMemoryPlan', applyMemoryPlan),
+    memoryHistory: auditedRead('memoryHistory', memoryHistory),
+    addFact: mutationReply('addFact', addFact),
+    migrateAttribution: transactional('migrateAttribution', migrateAttribution),
+    backfillErasureTokens: transactional('backfillErasureTokens', backfillErasureTokens),
+    attribute: transactional('attribute', attribute, { mode: 'snapshot' }),
+    legacyAttributionReview,
+    verifyFact: mutationReply('verifyFact', verifyFact),
+    setOutcome: mutationReply('setOutcome', setOutcome),
+    addConfidenceEvidence: mutationReply('addConfidenceEvidence', addConfidenceEvidence),
+    updateDecisionStatus: mutationReply('updateDecisionStatus', updateDecisionStatus),
+    supersedeDecision: mutationReply('supersedeDecision', supersedeDecision),
     link: transactional('link', link),
-    traverse,
-    redact,
+    traverse: auditedRead('traverse', traverse),
+    expand: auditedRead('expand', expand),
+    redact: auditedRead('redact', redact),
     projectSummary,
-    purgeProject: transactional('purgeProject', purgeProject, { mode: 'snapshot' }),
-    review: transactional('review', review),
-    reconsider: transactional('reconsider', reconsider),
-    maintain: transactional('maintain', maintain),
-    getReviewSignals,
+    originSummary,
+    // No caller forces a marker (PR-37d design §2.5): only the mode reaches it.
+    purgeProject: transactional('purgeProject', (project, options) => purgeProject(project, { mode: options?.mode, hard: options?.hard }), { mode: 'snapshot' }),
+    purgeOrigin: transactional('purgeOrigin', (originId, options) => purgeOrigin(originId, { mode: options?.mode, hard: options?.hard }), { mode: 'snapshot' }),
+    review: auditedRead('review', review),
+    reconsider: auditedRead('reconsider', reconsider),
+    maintain: auditedRead('maintain', maintain),
+    getReviewSignals: auditedRead('getReviewSignals', getReviewSignals),
     acknowledgeReview: transactional('acknowledgeReview', acknowledgeReview),
-    search,
-    retrieve,
-    recall,
-    validate,
-    repairPlan,
-    context: transactional('context', context),
-    exportData,
+    search: auditedRead('search', search),
+    retrieve: auditedRead('retrieve', retrieve),
+    recall: auditedRead('recall', recall),
+    validate: auditedRead('validate', validate),
+    repairPlan: auditedRead('repairPlan', repairPlan),
+    context: auditedRead('context', context),
+    reviewContext: auditedRead('reviewContext', reviewContext),
+    exportData: auditedRead('exportData', exportData),
     importData: transactional('importData', importData),
-    getJournal,
-    rebuild,
-    stats
-  };
+    getJournal: auditedRead('getJournal', getJournal),
+    rebuild: auditedRead('rebuild', rebuild),
+    stats: auditedRead('stats', stats),
+    requestAccess: transactional('requestAccess', authority.request),
+    issueAccess: transactional('issueAccess', authority.issue),
+    revokeAccess: transactional('revokeAccess', authority.revoke),
+    discardAccess: transactional('discardAccess', authority.discard)
+  }, sourceReadView), { snapshot, liveSnapshot, withheldCounts, validate: integrity, rebuild: replay,
+    issueAccess: transactional('ownerIssueAccess', authority.issueOwner), inspectAccess: authority.inspect,
+    accessRefusal: transactional('accessRefusal', authority.transportRefusal),
+    bindProject: transactional('bindProject', bindProject), resolveProjectBinding,
+    recordCapture: transactional('recordCapture', recordCapture), transitionCapture: transactional('transitionCapture', transitionCapture),
+    claimCapture: transactional('claimCapture', claimCapture), completeExtraction: transactional('completeExtraction', completeExtraction, { mode: 'snapshot' }),
+    settleExtraction: transactional('settleExtraction', settleExtraction),
+    extractionStatus: transactional('extractionStatus', extractionStatus),
+    expireCapture: transactional('expireCapture', expireCapture, { mode: 'snapshot' }),
+    inspectCapture, requestReprocess: transactional('requestReprocess', requestReprocess), cancelCapture: transactional('cancelCapture', cancelCapture),
+    deleteCapture: transactional('deleteCapture', deleteCapture, { mode: 'snapshot' }),
+    completeCaptureDelete: transactional('completeCaptureDelete', (input) => deleteCapture(input, { recovery: true }), { mode: 'snapshot' }),
+    recordSelfEvent: transactional('recordSelfEvent', recordSelfEvent), recordTranscript: transactional('recordTranscript', recordTranscript),
+    reapplyDeletion: transactional('reapplyDeletion', reapplyDeletion, { mode: 'snapshot' }), quarantined,
+    completePurge: transactional('completePurge', (selection, options) => purgeScope(typeof selection === 'string' ? { project: selection } : selection, { mode: options.mode, marker: options.marker }), { mode: 'snapshot' }) });
 }
 
 // `strict` is for caller writes, where a typo should fail loudly instead of
@@ -3303,7 +6978,7 @@ function sameMemoryScopeValues(left, right) {
 
 function memoryScopeKey(input) {
   const scope = normalizeMemoryScope(input.scope);
-  return JSON.stringify([normalizeProject(input.project), scope.userId, scope.agentId, scope.runId, input.memoryType ?? null, input.key ?? null]);
+  return JSON.stringify([ownerKey(input, normalizeProject), scope.userId, scope.agentId, scope.runId, input.memoryType ?? null, input.key ?? null]);
 }
 
 function normalizeEmbedding(value) {
@@ -3323,6 +6998,38 @@ function validateTemporalFields(input, names) {
     if (value !== undefined && value !== null && typeof value !== 'string') throw new Error(`${name} must be a string or null`);
     if (typeof value === 'string' && !isValidTimestamp(value)) throw new Error(`${name} must be a valid timestamp`);
   }
+}
+
+// The expansion budget (AC-032): counterparts fetched in full per expansion,
+// and the fewest counterpart positions an expansion lists.
+const DEFAULT_EXPANSIONS = 5;
+const MAX_EXPANSIONS = 50;
+const MIN_POSITIONS = 10;
+// A link field as a list of ids: a memory stores one id, a decision a list.
+const linkIds = (value) => (Array.isArray(value) ? value : value == null ? [] : [value]).filter((id) => typeof id === 'string');
+
+function validateExpandInput(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('expand input must be an object');
+  for (const name of ['recordId', 'digest']) if (typeof input[name] !== 'string' || !input[name]) throw new Error(`${name} must be a non-empty string`);
+  if (input.derivationVersion !== undefined && typeof input.derivationVersion !== 'string') throw new Error('derivationVersion must be a string');
+  if (input.maxExpansions !== undefined && !(Number.isInteger(input.maxExpansions) && input.maxExpansions >= 0 && input.maxExpansions <= MAX_EXPANSIONS)) {
+    throw new Error(`maxExpansions must be an integer from 0 to ${MAX_EXPANSIONS}`);
+  }
+  validateTemporalFields(input, ['asOf', 'derivedAt']);
+}
+
+// A fact's validity window: from its declared start (or observation) to the
+// kernel's effective expiration boundary; either end may be unknown.
+function validityWindow(fact) {
+  const from = fact.temporal?.validFrom ?? fact.validFrom ?? fact.observedAt ?? null;
+  const to = effectiveFactExpirationBoundary(fact) ?? null;
+  return { from: isValidIsoInstant(from) ? from : null, to: isValidIsoInstant(to) ? to : null };
+}
+
+function validateRelevanceInput(input) {
+  for (const name of ['query', 'focalId']) if (input[name] != null && typeof input[name] !== 'string') throw new Error(`${name} must be a string`);
+  if (input.compact !== undefined && typeof input.compact !== 'boolean') throw new Error('compact must be a boolean');
+  validateTemporalFields(input, ['asOf']);
 }
 
 function validateReviewInput(input) {
@@ -3431,9 +7138,14 @@ function provenanceFields(input) {
   };
 }
 
-function normalizeEvidence(item, clock = () => new Date().toISOString()) {
+// A stored item keeps the raw label it was recorded with. Re-deriving it from
+// the already-resolved sourceClass dropped it on every load, so the next save
+// removed it. A caller recording evidence still cannot set it directly.
+function normalizeEvidence(item, clock = () => new Date().toISOString(), { stored = false } = {}) {
   const base = typeof item === 'string' ? { source: item } : (item ?? {});
-  const { sourceClass, sourceRaw } = normalizeSourceClass(base.sourceClass ?? base.type ?? base.source);
+  const derived = normalizeSourceClass(base.sourceClass ?? base.type ?? base.source);
+  const sourceClass = derived.sourceClass;
+  const sourceRaw = stored && typeof base.sourceRaw === 'string' ? base.sourceRaw : derived.sourceRaw;
   return {
     source: base.source ?? 'unknown', type: base.type ?? 'unknown',
     sourceClass, ...(sourceRaw ? { sourceRaw } : {}),
@@ -3448,9 +7160,39 @@ function validateImportShape(source) {
   };
   if (source.journalSeq !== undefined && (!Number.isSafeInteger(source.journalSeq) || source.journalSeq < 0)) throw new Error('journalSeq must be a non-negative safe integer');
   if (source.journalEpoch !== undefined && source.journalEpoch !== null && (!Number.isSafeInteger(source.journalEpoch) || source.journalEpoch <= 0)) throw new Error('journalEpoch must be a positive safe integer or null');
+  if (array(STORED_WITHOUT_PROJECT).some((id) => typeof id !== 'string' || !id)) throw new Error(`${STORED_WITHOUT_PROJECT} must be an array of entity ids`);
+  // PR-28a: the runtime miss ledger's shape is frozen; import and restore
+  // refuse anything else.
+  if (source[RUNTIME_MISSES] !== undefined) {
+    const issue = runtimeMissLedgerIssue(source[RUNTIME_MISSES]);
+    if (issue) {
+      const error = new Error(`The runtime miss ledger is malformed (runtime_miss_ledger_malformed): ${issue}`);
+      error.code = 'runtime_miss_ledger_malformed';
+      throw error;
+    }
+  }
+  // PR-33: so do capture's own collections.
+  for (const name of CAPTURE_COLLECTIONS) {
+    if (source[name] === undefined) continue;
+    const issue = captureCollectionIssue(name, source[name]);
+    if (issue) throw captureCollectionError(issue);
+  }
   for (const [index, item] of array('records').entries()) {
-    if (!item || typeof item !== 'object' || !['decision', 'attempt', 'memory'].includes(item.kind)) throw new Error(`records[${index}] is malformed`);
+    if (!item || typeof item !== 'object' || !['decision', 'attempt', 'memory', CAPTURE_KIND].includes(item.kind)) throw new Error(`records[${index}] is malformed`);
     if (typeof item.id !== 'string' || !item.id) throw new Error(`records[${index}].id must be a non-empty string`);
+    if (item.kind === CAPTURE_KIND) {
+      // A store that carries capture says its schema. A legacy one may be the
+      // fold of an older store (replay() imports at its lowest entity
+      // version); its migrations never rename a capture, and no relation may
+      // name one.
+      if (!Number.isInteger(source.schemaVersion)) throw new Error(`records[${index}] is a capture item, which only a store that declares its schemaVersion carries`);
+      if (item.project !== null && (typeof item.project !== 'string' || !item.project.trim())) throw new Error(`records[${index}].project must be a non-empty string or null`);
+      const captureIssue = isFutureEntity(item) ? null : captureItemIssue(item);
+      if (captureIssue) throw new Error(`records[${index}] is not a well-formed capture item: ${captureIssue}`);
+      continue;
+    }
+    const recordClaimIssue = isFutureEntity(item) ? null : claimModelIssue(item);
+    if (recordClaimIssue) throw new Error(`records[${index}] violates the claim model: ${recordClaimIssue}`);
     if (Number.isInteger(source.schemaVersion) && source.schemaVersion >= GLOBAL_ENTITY_NAMESPACE_SCHEMA_VERSION) {
       try { normalizeProject(item.project); }
       catch { throw new Error(`records[${index}].project must be a non-empty string`); }
@@ -3468,7 +7210,8 @@ function validateImportShape(source) {
     if (item.kind === 'memory') {
       if (!MEMORY_TYPES.includes(item.memoryType) || typeof item.key !== 'string' || !item.key.trim() || typeof item.text !== 'string' || !item.text.trim()) throw new Error(`records[${index}] memory requires memoryType, key, and text`);
       normalizeMemoryScope(item.scope);
-      if (item.project !== undefined && typeof item.project !== 'string') throw new Error(`records[${index}].project must be a string`);
+      const ownerless = item.project === null && ['unattributed', 'legacy_unattributed'].includes(item.attribution);
+      if (item.project !== undefined && typeof item.project !== 'string' && !ownerless) throw new Error(`records[${index}].project must be a string`);
       if (item.metadata !== undefined && (!item.metadata || typeof item.metadata !== 'object' || Array.isArray(item.metadata))) throw new Error(`records[${index}].metadata must be an object`);
       if (item.tags !== undefined && (!Array.isArray(item.tags) || item.tags.some((tag) => typeof tag !== 'string'))) throw new Error(`records[${index}].tags must be an array of strings`);
       normalizeEmbedding(item.embedding);
@@ -3484,6 +7227,8 @@ function validateImportShape(source) {
   for (const [index, fact] of array('facts').entries()) {
     if (!fact || typeof fact !== 'object' || (fact.id !== undefined && typeof fact.id !== 'string') || typeof fact.key !== 'string' || (fact.kind !== undefined && fact.kind !== 'fact')) throw new Error(`facts[${index}] is malformed`);
     if (Number.isInteger(source.schemaVersion) && source.schemaVersion >= GLOBAL_ENTITY_NAMESPACE_SCHEMA_VERSION && !fact.id) throw new Error(`facts[${index}].id must be a non-empty string`);
+    const factClaimIssue = isFutureEntity(fact) ? null : claimModelIssue(fact);
+    if (factClaimIssue) throw new Error(`facts[${index}] violates the claim model: ${factClaimIssue}`);
     if (Number.isInteger(source.schemaVersion) && source.schemaVersion >= GLOBAL_ENTITY_NAMESPACE_SCHEMA_VERSION) {
       try { normalizeProject(fact.project); }
       catch { throw new Error(`facts[${index}].project must be a non-empty string`); }
@@ -3499,7 +7244,7 @@ function validateImportShape(source) {
     const intervalIssue = factEffectiveExpirationIntervalIssue(fact);
     if (intervalIssue) throw new Error(`facts[${index}] ${intervalIssue}`);
     const factSchemaVersion = Number.isInteger(fact.schemaVersion) ? fact.schemaVersion : source.schemaVersion;
-    if (factSchemaVersion === SCHEMA_VERSION) {
+    if (factSchemaVersion >= 5 && factSchemaVersion <= READABLE_SCHEMA_VERSION) {
       const validityIssue = factValidityPolicyIssue(fact, { required: true });
       if (validityIssue) throw new Error(`facts[${index}] ${validityIssue}`);
       if (!['active', 'expired', 'superseded'].includes(fact.status)) throw new Error(`facts[${index}] has invalid fact lifecycle status`);
@@ -3526,6 +7271,8 @@ function validateImportShape(source) {
   for (const [index, relation] of array('relations').entries()) {
     if (!relation || typeof relation !== 'object' || typeof relation.from !== 'string' || typeof relation.to !== 'string' || typeof relation.relation !== 'string') throw new Error(`relations[${index}] is malformed`);
     if (typeof relation.id !== 'string' || !relation.id) throw new Error(`relations[${index}].id must be a non-empty string`);
+    const relationTokenIssue = isFutureEntity(relation) ? null : erasureTokenIssue(relation);
+    if (relationTokenIssue) throw new Error(`relations[${index}] violates the claim model: ${relationTokenIssue}`);
     validateTemporalFields(relation, ['recordedAt', 'createdAt', 'validFrom', 'validTo']);
     if (relation.temporal !== undefined) {
       if (!relation.temporal || typeof relation.temporal !== 'object' || Array.isArray(relation.temporal)) throw new Error(`relations[${index}].temporal must be an object`);
@@ -3553,6 +7300,17 @@ function validateImportShape(source) {
     if (purgeArtifactIssue) throw new Error(`journal[${index}] has noncanonical schema 5 purge artifact: ${purgeArtifactIssue}`);
     const expectedEntityKind = JOURNAL_TYPE_ENTITY_KIND[entry.type];
     if (expectedEntityKind && entry.entityKind != null && entry.entityKind !== expectedEntityKind) throw new Error(`journal[${index}] type ${entry.type} requires entityKind ${expectedEntityKind}`);
+    // A future entry of either type is carried, never judged (FND-P3-03). A
+    // capture's attribution is read as any entity's is (PR-33).
+    const attributableKinds = entry.type === 'entity.attributed' ? ATTRIBUTION_ENTRY_KINDS : ATTRIBUTED_ENTITY_KINDS;
+    if (['entity.attributed', 'entity.token_assigned'].includes(entry.type) && !isFutureEntity(entry) && entry.entityKind != null && !attributableKinds.includes(entry.entityKind)) throw new Error(`journal[${index}] type ${entry.type} requires entityKind ${attributableKinds.join(', ')}`);
+    const entryClaimIssue = isPlainObject(entry.payload) && entry.type !== 'projection.baseline' && entry.payload.kind !== CAPTURE_KIND && !isFutureEntity(entry) && !isFutureEntity(entry.payload) ? claimModelIssue(entry.payload) : null;
+    if (entryClaimIssue) throw new Error(`journal[${index}] payload violates the claim model: ${entryClaimIssue}`);
+    if (entry.type === 'projection.baseline' && !isFutureEntity(entry)) {
+      const baselineEntities = [...(entry.payload?.records ?? []), ...(entry.payload?.facts ?? []), ...(entry.payload?.relations ?? []), ...(entry.payload?.idempotency ?? []).map((item) => item?.value)];
+      const baselineIssue = baselineEntities.filter((entity) => isPlainObject(entity) && !isFutureEntity(entity)).map(storedEntityIssue).find(Boolean);
+      if (baselineIssue) throw new Error(`journal[${index}] projection.baseline payload violates the claim model: ${baselineIssue}`);
+    }
     if (source.schemaVersion >= 3) {
       if (typeof entry.id !== 'string' || !entry.id) throw new Error(`journal[${index}].id must be a non-empty string`);
       if (journalIds.has(entry.id)) throw new Error(`Duplicate journal id ${entry.id}`);
@@ -3577,7 +7335,7 @@ function validateImportShape(source) {
     journalEpoch: source.journalEpoch,
     sourceSchemaVersion: source.schemaVersion
   });
-  const hardPurgeMarkers = array('journal').filter((entry) => entry?.type === 'project.purged' && entry?.payload?.mode === 'hard');
+  const hardPurgeMarkers = array('journal').filter((entry) => HARD_GAP_EVIDENCE_TYPES.includes(entry?.type) && entry?.payload?.mode === 'hard');
   if (hardPurgeMarkers.length && hardPurgeMarkers.every((entry) => Object.hasOwn(entry.payload, 'removedJournalSequences'))) {
     assertHardPurgeGapLedgers(array('journal'), {
       journalEpoch: source.journalEpoch,
@@ -3598,10 +7356,22 @@ function validateImportShape(source) {
     if (!item || typeof item !== 'object' || Array.isArray(item) || typeof item.key !== 'string' || !item.key || !item.value || typeof item.value !== 'object' || Array.isArray(item.value)) throw new Error(`idempotency[${index}] is malformed`);
     if (idempotencyKeys.has(item.key)) throw new Error(`Duplicate idempotency key ${item.key}`);
     idempotencyKeys.add(item.key);
+    const valueClaimIssue = isFutureEntity(item.value) ? null : storedEntityIssue(item.value);
+    if (valueClaimIssue) throw new Error(`idempotency[${index}].value violates the claim model: ${valueClaimIssue}`);
+  }
+  // A purge tombstone names exactly one entity by its token.
+  const tokenHolders = new Map();
+  for (const entity of [...array('records'), ...array('facts')]) {
+    if (isFutureEntity(entity) || entity.erasureToken === undefined) continue;
+    const holder = tokenHolders.get(entity.erasureToken);
+    if (holder !== undefined && holder !== entity.id) throw new Error(`${holder} and ${entity.id} share an erasureToken`);
+    tokenHolders.set(entity.erasureToken, entity.id);
   }
   const eventIds = new Set();
   for (const [index, eventItem] of array('events').entries()) {
     if (!eventItem || typeof eventItem !== 'object' || Array.isArray(eventItem) || typeof eventItem.id !== 'string' || typeof eventItem.type !== 'string') throw new Error(`events[${index}] is malformed`);
+    const captureIssue = captureEventIssue(eventItem);
+    if (captureIssue) throw new Error(`events[${index}] ${captureIssue}`);
     if (eventIds.has(eventItem.id)) throw new Error(`Duplicate event id ${eventItem.id}`);
     eventIds.add(eventItem.id);
   }
@@ -3618,12 +7388,24 @@ function assertUniqueEntityIds(...collections) {
   }
 }
 
+// A schema-6 entity already says whose it is. Its project is kept exactly as
+// stored -- null for an unattributed one -- and never defaulted to "default",
+// which would hand it to a project it does not belong to.
+function keepAttributedProject(migrated, source) {
+  if (typeof source.attribution === 'string') migrated.project = source.project ?? null;
+  return migrated;
+}
+
 function migrateRecord(item) {
+  return keepAttributedProject(migrateRecordFields(item), item);
+}
+
+function migrateRecordFields(item) {
   if (item.kind === 'memory') {
     const source = clone(item);
     const recordedAt = source.temporal?.recordedAt ?? source.createdAt ?? null;
     return {
-      schemaVersion: SCHEMA_VERSION,
+      schemaVersion: PRE_ATTRIBUTION_SCHEMA_VERSION,
       project: source.project ?? 'default',
       ...source,
       scope: normalizeMemoryScope(source.scope),
@@ -3638,7 +7420,7 @@ function migrateRecord(item) {
       }
     };
   }
-  if (item.kind !== 'decision') return { schemaVersion: SCHEMA_VERSION, project: 'default', ...clone(item) };
+  if (item.kind !== 'decision') return { schemaVersion: PRE_ATTRIBUTION_SCHEMA_VERSION, project: 'default', ...clone(item) };
   const source = clone(item);
   const migratesLegacyStatus = !Number.isInteger(source.schemaVersion) || source.schemaVersion < 5;
   const legacyDecisionStatus = migratesLegacyStatus && ['active', 'aging'].includes(source.status) ? source.status : null;
@@ -3667,13 +7449,13 @@ function migrateRecord(item) {
     // that this build does not understand it. The original version is preserved
     // and validate() reports it as `unsupported`.
     ...source,
-    schemaVersion: Number.isInteger(source.schemaVersion) && source.schemaVersion > SCHEMA_VERSION ? source.schemaVersion : SCHEMA_VERSION,
+    schemaVersion: Number.isInteger(source.schemaVersion) && source.schemaVersion > PRE_ATTRIBUTION_SCHEMA_VERSION ? source.schemaVersion : PRE_ATTRIBUTION_SCHEMA_VERSION,
     project: source.project ?? 'default', confidence,
     ...(legacyDecisionStatus ? {
       status: migratedDecisionStatus,
       migration: { ...(source.migration ?? {}), legacyDecisionStatus }
     } : {}),
-    evidence: (source.evidence ?? []).map((entry) => normalizeEvidence(entry)),
+    evidence: (source.evidence ?? []).map((entry) => normalizeEvidence(entry, undefined, { stored: true })),
     alternatives: (source.alternatives ?? []).map((a, index) => ({ ...a, id: a.id ?? `alternative_${source.id}_${index}`, reopenWhen: normalizeRules(a.reopenWhen ?? []) }))
   };
 }
@@ -3682,12 +7464,16 @@ function migrateRecord(item) {
 // anything reading sourceClass got undefined. Backfill the class from the stored
 // label, keep the original verbatim, and NEVER raise verification (contract §6).
 function migrateFact(fact) {
+  return keepAttributedProject(migrateFactFields(fact), fact);
+}
+
+function migrateFactFields(fact) {
   const source = clone(fact);
   // P2-14: a fact written by a NEWER build keeps its own schemaVersion rather than
   // being relabelled as one this build understands. validate() reports it as
   // `unsupported` so the caller learns we cannot fully interpret it.
-  const future = Number.isInteger(source.schemaVersion) && source.schemaVersion > SCHEMA_VERSION;
-  const imported = { project: 'default', confidence: 0.5, status: 'active', ...source, schemaVersion: future ? source.schemaVersion : SCHEMA_VERSION };
+  const future = Number.isInteger(source.schemaVersion) && source.schemaVersion > PRE_ATTRIBUTION_SCHEMA_VERSION;
+  const imported = { project: 'default', confidence: 0.5, status: 'active', ...source, schemaVersion: future ? source.schemaVersion : PRE_ATTRIBUTION_SCHEMA_VERSION };
   if (!SOURCE_CLASSES.includes(imported.sourceClass)) {
     const { sourceClass, sourceRaw } = normalizeSourceClass(imported.sourceClass ?? imported.source);
     imported.sourceClass = sourceClass;

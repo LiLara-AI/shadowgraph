@@ -1,5 +1,8 @@
+import { historicalIds } from '../tools/historical-ids.js';
+const fixtureIds = {};
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { tokenFree } from '../tools/token-free.js';
 import { spawn } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
 import { once } from 'node:events';
@@ -14,14 +17,15 @@ import { createRestoreValidator } from '../src/restore-validation.js';
 import { rebuildProjection } from '../src/journal.js';
 import { createFactAttestation, createLocalEvidenceVerifier } from '../src/verification.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const FIXED_NOW = '2026-08-27T12:00:00.000Z';
 const JSON_ARTIFACT = /^\.restore\..+\.(?:tmp|rollback)$/;
 
 function graphPayload(id, title) {
   const graph = createShadowGraph({ now: () => FIXED_NOW });
-  graph.addDecision({ id, project: 'rrv', title, chosen: title });
-  return graph.exportData();
+  fixtureIds[id] = graph.addDecision({ project: 'rrv', title, chosen: title }).id;
+  return privilegedSnapshot(graph);
 }
 
 async function writePayload(path, payload) {
@@ -131,9 +135,10 @@ async function verifierFixture(directory) {
 async function signedFactPayload(directory, fixture, options = {}) {
   const graph = createShadowGraph({ verifier: fixture.verifier, now: () => options.now ?? FIXED_NOW });
   const fact = graph.addFact({
-    id: options.id ?? 'rrv02-signed-fact', project: 'rrv', key: options.key ?? 'rrv02-key',
+    project: 'rrv', key: options.key ?? 'rrv02-key',
     value: options.value ?? 'signed', expiresAt: options.expiresAt ?? '2026-09-30T00:00:00.000Z'
   });
+  fixtureIds[options.id ?? 'rrv02-signed-fact'] = fact.id;
   const evidencePath = join(fixture.evidenceRoot, `${fact.id}.json`);
   await writeFile(evidencePath, JSON.stringify(createFactAttestation({
     fact,
@@ -142,19 +147,20 @@ async function signedFactPayload(directory, fixture, options = {}) {
     verifiedAt: options.verifiedAt ?? '2026-08-27T12:05:00.000Z',
     privateKey: fixture.keys.privateKey
   })), 'utf8');
-  await graph.verifyFact({ factId: fact.id, evidencePath });
-  if (options.terminal === 'expired') graph.maintain({ now: options.expiredAt ?? '2026-10-01T00:00:00.000Z' });
+  await graph.verifyFact({ project: fact.project, factId: fact.id, evidencePath });
+  if (options.terminal === 'expired') graph.maintain({ project: fact.project, now: options.expiredAt ?? '2026-10-01T00:00:00.000Z' });
   if (options.terminal === 'superseded') {
     graph.addFact({
-      id: `${fact.id}-replacement`, project: fact.project, key: fact.key, value: 'replacement',
+      project: fact.project, key: fact.key, value: 'replacement',
       validFrom: '2026-09-01T00:00:00.000Z', observedAt: '2026-09-01T00:00:00.000Z',
       recordedAt: '2026-09-01T00:00:00.000Z'
     });
   }
-  return graph.exportData();
+  return privilegedSnapshot(graph);
 }
 
 function appendVerifiedResurrection(payload, factId) {
+  factId = fixtureIds[factId] ?? factId;
   const verified = payload.journal.find((entry) => entry.type === 'fact.verified' && entry.entityId === factId);
   assert.ok(verified, 'fixture requires a verified journal entry');
   const resurrection = structuredClone(verified);
@@ -168,6 +174,7 @@ function appendVerifiedResurrection(payload, factId) {
 }
 
 function rewriteTerminalAsDuplicateVerification(payload, factId) {
+  factId = fixtureIds[factId] ?? factId;
   const verified = payload.journal.find((entry) => entry.type === 'fact.verified' && entry.entityId === factId);
   const terminal = payload.journal.findLast((entry) => ['fact.expired', 'fact.superseded'].includes(entry.type) && entry.entityId === factId);
   assert.ok(verified && terminal, 'fixture requires verified and terminal journal entries');
@@ -179,11 +186,11 @@ function rewriteTerminalAsDuplicateVerification(payload, factId) {
 
 function legacyVerifiedIdempotencyPayload(schemaVersion, suffix = String(schemaVersion)) {
   const graph = createShadowGraph({ now: () => FIXED_NOW });
-  graph.addFact({
-    id: `rrv03-fact-${suffix}`, project: 'rrv03', key: `legacy-${suffix}`, value: { schemaVersion, stable: true },
+  const fact = graph.addFact({
+    project: 'rrv03', key: `legacy-${suffix}`, value: { schemaVersion, stable: true },
     sourceClass: 'human_confirmed', actor: 'legacy-writer', idempotencyKey: `retry-${suffix}`
   });
-  const payload = graph.exportData();
+  const payload = historicalIds(privilegedSnapshot(graph), { [`rrv03-fact-${suffix}`]: fact.id }, { now: () => FIXED_NOW });
   payload.schemaVersion = schemaVersion;
   const markLegacyVerified = (fact) => {
     fact.schemaVersion = schemaVersion;
@@ -191,6 +198,8 @@ function legacyVerifiedIdempotencyPayload(schemaVersion, suffix = String(schemaV
     delete fact.verification;
     delete fact.verificationUntrustedReason;
     delete fact.legacyVerificationStatus;
+    // Schemas 1-5 predate erasure tokens (schema 7).
+    delete fact.erasureToken;
   };
   markLegacyVerified(payload.facts[0]);
   markLegacyVerified(payload.idempotency[0].value);
@@ -202,14 +211,14 @@ function legacyVerifiedIdempotencyPayload(schemaVersion, suffix = String(schemaV
 }
 
 function assertCanonicalUnverifiedRetry(graph, schemaVersion, suffix = String(schemaVersion)) {
-  const canonicalFact = graph.exportData().facts.find((fact) => fact.id === `rrv03-fact-${suffix}`);
+  const canonicalFact = privilegedSnapshot(graph).facts.find((fact) => fact.id === `rrv03-fact-${suffix}`);
   const retry = graph.addFact({
     project: 'rrv03', key: 'ignored-on-retry', value: 'ignored', idempotencyKey: `retry-${suffix}`
   });
   assert.equal(canonicalFact.verificationStatus, 'unverified');
   assert.equal(canonicalFact.legacyVerificationStatus, 'verified');
   assert.deepEqual(retry, canonicalFact, `schema ${schemaVersion} retry must return the canonical migrated fact`);
-  const cached = graph.exportData().idempotency.find((item) => item.value.id === canonicalFact.id);
+  const cached = privilegedSnapshot(graph).idempotency.find((item) => item.value.id === canonicalFact.id);
   assert.deepEqual(cached.value, canonicalFact, `schema ${schemaVersion} cache must store canonical content`);
   return canonicalFact;
 }
@@ -358,7 +367,7 @@ test('RRV-01: real HTTP JSON restore latches degraded state, exposes retained ev
 
   const blockedWrite = await fetch(`${base}/decisions`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ id: 'rrv01-http-post-fatal', title: 'MUST NOT LAND', chosen: 'unsafe' })
+    body: JSON.stringify({ title: 'MUST NOT LAND', chosen: 'unsafe' })
   });
   assert.equal(blockedWrite.status, 503);
   assert.equal((await blockedWrite.json()).code, 'persistence_unavailable');
@@ -407,7 +416,7 @@ test('RRV-01: real MCP JSON restore fail-closes after unconfirmed recovery and p
   const evidenceBeforeLaterCalls = await readFile(retainedPath);
 
   const blockedWrite = await rpc.call(mcpTool(3, 'shadowgraph_record_decision', {
-    id: 'rrv01-mcp-post-fatal', project: 'rrv', title: 'MUST NOT LAND', chosen: 'unsafe'
+    project: 'rrv', title: 'MUST NOT LAND', chosen: 'unsafe'
   }));
   assertPrivateLegacyMcpFailure(blockedWrite, {
     code: -32001,
@@ -471,11 +480,11 @@ test('RRV-01: real MCP SQLite unconfirmed recovery uses the same fail-closed lat
   assert.equal(rollbackNames.length, 1, 'unconfirmed SQLite recovery retains one complete rollback database');
   const rollbackPath = join(directory, rollbackNames[0]);
   const retained = await createSqliteStore(rollbackPath);
-  try { assert.equal((await retained.load()).records[0].id, 'rrv01-mcp-sqlite-old'); }
+  try { assert.equal((await retained.load()).records[0].id, fixtureIds['rrv01-mcp-sqlite-old']); }
   finally { retained.close(); }
 
   const blockedWrite = await rpc.call(mcpTool(22, 'shadowgraph_record_decision', {
-    id: 'rrv01-mcp-sqlite-post-fatal', title: 'MUST NOT LAND SQLITE', chosen: 'unsafe'
+    title: 'MUST NOT LAND SQLITE', chosen: 'unsafe'
   }));
   const blockedRead = await rpc.call(mcpTool(23, 'shadowgraph_search', { query: 'RRV01' }));
   const sqliteLatch = {
@@ -518,13 +527,13 @@ test('RRV-02: core import and journal rebuild reject rewritten, duplicate, and p
 
   for (const { label, payload } of attacks) {
     const target = createShadowGraph({ verifier: fixture.verifier, now: () => FIXED_NOW });
-    const before = target.exportData();
+    const before = privilegedSnapshot(target);
     assert.throws(
       () => target.importData(payload),
       /fact.*lifecycle|duplicate.*fact\.verified|terminal.*verified|monotonic/i,
       label
     );
-    assert.deepEqual(target.exportData(), before, `${label}: failed merge-oriented import must be atomic`);
+    assert.deepEqual(privilegedSnapshot(target), before, `${label}: failed merge-oriented import must be atomic`);
 
     const report = rebuildProjection(payload.journal, { journalEpoch: payload.journalEpoch });
     assert.equal(report.rebuildable, false, `${label}: raw journal rebuild must be declared incomplete`);
@@ -543,7 +552,7 @@ test('RRV-02: an active signed fact is trusted before but never at or after its 
 
   const preExpiry = createShadowGraph({ verifier: fixture.verifier, now: () => '2026-08-27T23:59:59.999Z' });
   assert.doesNotThrow(() => preExpiry.importData(payload), 'a valid pre-expiry backup must remain restorable');
-  assert.equal(preExpiry.exportData().facts[0].verificationStatus, 'verified');
+  assert.equal(privilegedSnapshot(preExpiry).facts[0].verificationStatus, 'verified');
   assert.doesNotThrow(() => createRestoreValidator({
     verifier: fixture.verifier,
     now: () => '2026-08-27T23:59:59.999Z'
@@ -557,12 +566,12 @@ test('RRV-02: an active signed fact is trusted before but never at or after its 
   let trustedInstant = '2026-08-27T23:59:59.999Z';
   const rebuilding = createShadowGraph({ verifier: fixture.verifier, now: () => trustedInstant });
   rebuilding.importData(payload);
-  const rawJournal = structuredClone(rebuilding.exportData().journal);
+  const rawJournal = structuredClone(privilegedSnapshot(rebuilding).journal);
   trustedInstant = boundary;
-  const report = rebuilding.rebuild();
+  const report = rebuilding.rebuild({ project: 'rrv' });
   assert.equal(report.rebuildable, false);
   assert.notEqual(report.projection.facts[0]?.verificationStatus, 'verified');
-  assert.deepEqual(rebuilding.exportData().journal, rawJournal, 'failed trusted rebuild must not rewrite audit evidence');
+  assert.deepEqual(privilegedSnapshot(rebuilding).journal, rawJournal, 'failed trusted rebuild must not rewrite audit evidence');
 });
 
 test('RRV-02: JSON and SQLite restore reject lifecycle resurrection before replacing either destination', async (t) => {
@@ -634,7 +643,7 @@ test('RRV-02: real HTTP and MCP restore reject lifecycle resurrection atomically
     assert.equal(response.status, 400);
     assert.match((await response.json()).error, /lifecycle|duplicate.*fact\.verified|monotonic/i);
     assert.deepEqual(await readFile(httpDestination), httpBefore);
-    const records = await (await fetch(`${base}/records`)).json();
+    const records = await (await fetch(`${base}/records?project=${old.records[0].project}`)).json();
     assert.deepEqual(records.records.map((record) => record.id), [old.records[0].id]);
   } finally {
     await new Promise((resolveClose) => app.server.close(resolveClose));
@@ -665,9 +674,9 @@ test('RRV-02: legitimate signed expiration and supersession remain importable an
     const payload = await signedFactPayload(directory, fixture, { id: `rrv02-legitimate-${terminal}`, terminal });
     const graph = createShadowGraph({ verifier: fixture.verifier, now: () => '2026-10-02T00:00:00.000Z' });
     assert.doesNotThrow(() => graph.importData(payload), terminal);
-    const signed = graph.exportData().facts.find((fact) => fact.verification);
+    const signed = privilegedSnapshot(graph).facts.find((fact) => fact.verification);
     assert.equal(signed.status, terminal);
-    const report = graph.rebuild();
+    const report = graph.rebuild({ project: 'rrv' });
     assert.equal(report.rebuildable, true, `${terminal} journal must remain rebuildable`);
     assert.equal(report.projection.facts.find((fact) => fact.id === signed.id).status, terminal);
     assert.doesNotThrow(() => createRestoreValidator({
@@ -683,7 +692,7 @@ test('RRV-03: schemas 1-5 normalize legacy verified idempotency to the canonical
     graph.importData(legacyVerifiedIdempotencyPayload(schemaVersion));
     const canonical = assertCanonicalUnverifiedRetry(graph, schemaVersion);
 
-    const report = graph.rebuild();
+    const report = graph.rebuild({ project: 'rrv03' });
     assert.equal(report.rebuildable, true, `schema ${schemaVersion} journal must rebuild`);
     const rebuiltFact = report.projection.facts.find((fact) => fact.id === canonical.id);
     const rebuiltCache = report.projection.idempotency.find((item) => item.value.id === canonical.id);
@@ -700,9 +709,9 @@ test('RRV-03: unexplained idempotency semantic mismatches are rejected atomicall
   const payload = legacyVerifiedIdempotencyPayload(5, 'mismatch');
   payload.idempotency[0].value.value = { schemaVersion: 5, stable: false, injected: 'cache-only poison' };
   const graph = createShadowGraph({ now: () => FIXED_NOW });
-  const before = graph.exportData();
+  const before = privilegedSnapshot(graph);
   assert.throws(() => graph.importData(payload), /idempotency.*semantic.*mismatch|canonical entity/i);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('RRV-03: schemas 1-5 keep canonical unverified retries across JSON and SQLite restart', async (t) => {
@@ -760,9 +769,11 @@ test('RRV-03: CLI, HTTP, and real MCP retries expose only the canonical unverifi
     const retry = await response.json();
     assert.equal(response.status, 200);
     assert.equal(retry.verificationStatus, 'unverified');
-    const exported = await (await fetch(`${base}/records`)).json();
+    const exported = await (await fetch(`${base}/records?project=rrv03`)).json();
     assert.deepEqual(retry, exported.facts[0]);
-    assert.deepEqual(exported.idempotency[0].value, exported.facts[0]);
+    assert.equal(Object.hasOwn(exported, 'idempotency'), false, 'the public export carries no retry cache');
+    const httpDurable = JSON.parse(await readFile(httpFile, 'utf8'));
+    assert.deepEqual(httpDurable.idempotency[0].value, httpDurable.facts[0]);
   } finally {
     await new Promise((resolveClose) => app.server.close(resolveClose));
   }
@@ -787,7 +798,7 @@ test('RRV-03: valid signed facts return the final verified entity on retry when 
   const fixture = await verifierFixture(directory);
   const graph = createShadowGraph({ verifier: fixture.verifier, now: () => FIXED_NOW });
   const fact = graph.addFact({
-    id: 'rrv03-valid-signed', project: 'rrv03', key: 'valid-signed', value: true,
+    project: 'rrv03', key: 'valid-signed', value: true,
     expiresAt: '2026-12-31T00:00:00.000Z', idempotencyKey: 'valid-signed-retry'
   });
   const evidencePath = join(fixture.evidenceRoot, 'rrv03-valid-signed.json');
@@ -795,20 +806,20 @@ test('RRV-03: valid signed facts return the final verified entity on retry when 
     fact, verifierIdentity: 'approver', evidenceReference: 'ticket:rrv03-valid',
     verifiedAt: '2026-08-27T12:05:00.000Z', privateKey: fixture.keys.privateKey
   })), 'utf8');
-  await graph.verifyFact({ factId: fact.id, evidencePath });
-  const canonical = graph.exportData().facts[0];
+  await graph.verifyFact({ project: 'rrv03', factId: fact.id, evidencePath });
+  const canonical = privilegedSnapshot(graph).facts[0];
   assert.equal(canonical.verificationStatus, 'verified');
 
   const retryInput = { project: 'rrv03', key: 'ignored', value: false, idempotencyKey: 'valid-signed-retry' };
-  assert.deepEqual(graph.addFact(retryInput), canonical, 'same-process retry must reflect verification');
-  assert.deepEqual(graph.exportData().idempotency[0].value, canonical);
-  const report = graph.rebuild();
+  assert.deepEqual(graph.addFact(retryInput), tokenFree(canonical), 'same-process retry must reflect verification');
+  assert.deepEqual(privilegedSnapshot(graph).idempotency[0].value, canonical);
+  const report = graph.rebuild({ project: 'rrv03' });
   assert.equal(report.rebuildable, true);
   assert.deepEqual(report.projection.idempotency[0].value, report.projection.facts[0]);
   assert.equal(report.projection.idempotency[0].value.verificationStatus, 'verified');
 
   const restarted = createShadowGraph({ verifier: fixture.verifier, now: () => FIXED_NOW });
-  restarted.importData(graph.exportData());
-  assert.deepEqual(restarted.addFact(retryInput), restarted.exportData().facts[0]);
+  restarted.importData(privilegedSnapshot(graph));
+  assert.deepEqual(restarted.addFact(retryInput), tokenFree(privilegedSnapshot(restarted).facts[0]));
   assert.equal(restarted.addFact(retryInput).verificationStatus, 'verified');
 });

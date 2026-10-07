@@ -9,6 +9,7 @@ import { createShadowGraphServer } from '../src/server.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const snapshot = (id) => ({
   schemaVersion: 3,
@@ -24,10 +25,15 @@ const snapshot = (id) => ({
   journalEpoch: null
 });
 
+// How many records with this title the in-memory graph holds. The fixture
+// records are legacy "default" data, which no project read returns (OD-1;
+// plan v1.4.4 PR-08), so the graph is inspected through the privileged snapshot.
+const heldTitled = (graph, title) => privilegedSnapshot(graph).records.filter((record) => record.title === title).length;
+
 const journalSnapshot = (title = 'NEW') => {
   const graph = createShadowGraph({ now: () => '2026-01-01T00:00:00.000Z' });
   graph.addDecision({ project: 'default', title, chosen: title });
-  return graph.exportData();
+  return privilegedSnapshot(graph);
 };
 
 const NODE_SQLITE = (await getRuntimeCapabilities()).nodeSqlite;
@@ -39,15 +45,19 @@ async function artifacts(directory) {
   return (await readdir(directory)).filter((name) => artifactPattern.test(name)).sort();
 }
 
+// The pair's stores take a home of its own: a hard-purged snapshot saved here
+// writes its tombstone and registry entry, which no other pair, and no run of
+// this file without the preload, may merge (PR-37d design §7.4, §9.3).
 async function createPair(t, prefix, options = {}) {
   const directory = await scratchDirectory(t, prefix);
   const livePath = join(directory, 'live.db');
   const sourcePath = join(directory, 'source.db');
+  const env = { SHADOWGRAPH_HOME: join(directory, 'home') };
   let live;
   let source;
   try {
-    live = await createSqliteStore(livePath, options.liveOptions);
-    source = await createSqliteStore(sourcePath, options.sourceOptions);
+    live = await createSqliteStore(livePath, { env, ...options.liveOptions });
+    source = await createSqliteStore(sourcePath, { env, ...options.sourceOptions });
   } catch (error) {
     closeQuietly(live);
     closeQuietly(source);
@@ -159,7 +169,7 @@ test('SQLite restore rejects an unexplained journal sequence gap without hard-pu
   graph.addDecision({ project: 'kept-a', title: 'A', chosen: 'A' });
   const removed = graph.addDecision({ project: 'missing-without-purge', title: 'REMOVED', chosen: 'REMOVED' });
   graph.addDecision({ project: 'kept-b', title: 'B', chosen: 'B' });
-  const unexplained = graph.exportData();
+  const unexplained = privilegedSnapshot(graph);
   unexplained.records = unexplained.records.filter((record) => record.id !== removed.id);
   unexplained.journal = unexplained.journal.filter((entry) => entry.entityId !== removed.id);
 
@@ -181,7 +191,7 @@ test('SQLite restore accepts a documented hard-purge journal gap with a matching
   graph.addDecision({ project: 'purged', title: 'PURGED', chosen: 'PURGED' });
   graph.addDecision({ project: 'kept-b', title: 'B', chosen: 'B' });
   graph.purgeProject('purged', { mode: 'hard' });
-  const hardPurged = graph.exportData();
+  const hardPurged = privilegedSnapshot(graph);
 
   await pair.source.save(hardPurged);
   pair.source.close();
@@ -211,7 +221,7 @@ test('SQLite restore accepts a documented hard purge that removes the leading jo
   graph.addDecision({ project: 'kept-a', title: 'A', chosen: 'A' });
   graph.addDecision({ project: 'kept-b', title: 'B', chosen: 'B' });
   graph.purgeProject('purged-first', { mode: 'hard' });
-  const hardPurged = graph.exportData();
+  const hardPurged = privilegedSnapshot(graph);
 
   await pair.source.save(hardPurged);
   pair.source.close();
@@ -592,8 +602,8 @@ test('HTTP SQLite restore failure keeps in-memory graph and persistent database 
     });
     assert.equal(response.status, 400);
     assert.match((await response.json()).error, /previous database restored/);
-    assert.equal(app.graph.search('OLD').page.total, 1);
-    assert.equal(app.graph.search('NEW').page.total, 0);
+    assert.equal(heldTitled(app.graph, 'OLD'), 1);
+    assert.equal(heldTitled(app.graph, 'NEW'), 0);
     assert.equal((await pair.live.load()).records[0].id, 'OLD');
   } finally {
     await new Promise((resolveClose) => app.server.close(resolveClose));
@@ -628,7 +638,7 @@ test('HTTP SQLite restore reports unconfirmed recovery as 500, retains rollback,
     });
     assert.equal(response.status, 500);
     assert.match((await response.json()).error, /rollback is unconfirmed/);
-    assert.equal(app.graph.search('OLD').page.total, 1, 'in-memory state must not be replaced after an unconfirmed disk recovery');
+    assert.equal(heldTitled(app.graph, 'OLD'), 1, 'in-memory state must not be replaced after an unconfirmed disk recovery');
 
     const base = `http://127.0.0.1:${app.server.address().port}`;
     const writeAfterFatal = await fetch(`${base}/decisions`, {
@@ -637,7 +647,7 @@ test('HTTP SQLite restore reports unconfirmed recovery as 500, retains rollback,
     });
     assert.equal(writeAfterFatal.status, 503, 'unconfirmed recovery must latch the server unavailable before graph mutation');
     assert.match((await writeAfterFatal.json()).error, /persistent storage unavailable/i);
-    assert.equal(app.graph.search('POST_FATAL').page.total, 0, 'a degraded server must not mutate in-memory graph state');
+    assert.equal(heldTitled(app.graph, 'POST_FATAL'), 0, 'a degraded server must not mutate in-memory graph state');
 
     const readAfterFatal = await fetch(`${base}/search?query=OLD`);
     assert.equal(readAfterFatal.status, 503, 'a degraded server must not serve potentially divergent graph reads');
@@ -797,7 +807,7 @@ test('CLI SQLite restore refuses a domain-invalid snapshot and preserves old sta
   const result = await new Promise((resolveChild, rejectChild) => {
     const child = spawn(process.execPath, ['src/cli.js', 'restore', pair.sourcePath], {
       cwd: process.cwd(),
-      env: { ...process.env, SHADOWGRAPH_STORAGE: 'sqlite', SHADOWGRAPH_FILE: pair.livePath }
+      env: { ...process.env, SHADOWGRAPH_HOME: join(pair.directory, 'home'), SHADOWGRAPH_STORAGE: 'sqlite', SHADOWGRAPH_FILE: pair.livePath }
     });
     let stdout = '';
     let stderr = '';
@@ -943,18 +953,25 @@ test('HTTP rejects a concurrent mutation before graph state changes during resto
     });
     assert.equal(writeResponse.status, 400);
     assert.match((await writeResponse.json()).error, /restore is in progress/);
-    assert.equal(app.graph.search('RACE').page.total, 0, 'rejected write must not mutate the graph');
+    assert.equal(heldTitled(app.graph, 'RACE'), 0, 'rejected write must not mutate the graph');
     const contextResponse = await fetch(`${base}/context`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'default' })
     });
-    assert.equal(contextResponse.status, 400, 'context can create review signals and must be blocked during restore');
+    assert.equal(contextResponse.status, 400, 'context stays blocked during restore');
     assert.match((await contextResponse.json()).error, /restore is in progress/);
-    assert.equal(app.graph.getReviewSignals().length, 0, 'blocked context must not create an in-memory-only review signal');
+    // Plan v1.4.4 PR-16: review-context carries evaluate-and-persist, so it is
+    // the route that could otherwise leave an in-memory-only review signal.
+    const reviewContextResponse = await fetch(`${base}/review-context`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ project: 'default' })
+    });
+    assert.equal(reviewContextResponse.status, 400, 'review-context can create review signals and must be blocked during restore');
+    assert.match((await reviewContextResponse.json()).error, /restore is in progress/);
+    assert.equal(privilegedSnapshot(app.graph).reviewSignals.length, 0, 'blocked review-context must not create an in-memory-only review signal');
     releaseStat();
     const restoreResponse = await restoreResponsePromise;
     assert.equal(restoreResponse.status, 200);
-    assert.equal(app.graph.search('NEW').page.total, 1);
-    assert.equal(app.graph.search('RACE').page.total, 0);
+    assert.equal(heldTitled(app.graph, 'NEW'), 1);
+    assert.equal(heldTitled(app.graph, 'RACE'), 0);
     assert.equal((await pair.live.load()).records.some((record) => record.title === 'RACE'), false);
   } finally {
     releaseStat();

@@ -1,7 +1,16 @@
+import { historicalIds } from '../tools/historical-ids.js';
+const fixtureIds = {};
+// Capture already-created results; creation inputs never pass through this helper.
+function captureId(label, result, alternatives = []) {
+  fixtureIds[label] = (result.memory ?? result).id;
+  alternatives.forEach((name, index) => { fixtureIds[name] = result.alternatives[index].id; });
+  return result;
+}
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createShadowGraph, rebuildProjection } from '../src/shadowgraph.js';
 import { validateRestorePayload } from '../src/restore-validation.js';
+import { privilegedRebuild, privilegedSnapshot } from '../src/internal/snapshot.js';
 
 test('scoped memory reconciliation adds, deduplicates, and supersedes without losing history', () => {
   const times = [
@@ -65,7 +74,7 @@ test('scoped memory reconciliation adds, deduplicates, and supersedes without lo
   assert.deepEqual(history.items.map((item) => item.status), ['superseded', 'active']);
   assert.equal(history.completeness.complete, true);
 
-  const journalTypes = graph.getJournal({ limit: 20 }).items.map((entry) => entry.type);
+  const journalTypes = graph.getJournal({ project: 'trip', limit: 20 }).items.map((entry) => entry.type);
   assert.deepEqual(journalTypes, ['memory.recorded', 'memory.superseded', 'memory.recorded']);
 });
 
@@ -85,7 +94,7 @@ test('a validated memory plan invalidates in-scope state without partial writes 
   assert.deepEqual(seed.results.map((item) => item.operation), ['ADD', 'ADD']);
   graph.remember({ project: 'app', scope: bob, memoryType: 'preference', key: 'theme', text: 'Prefers light mode' });
 
-  const beforeInvalidPlan = graph.exportData();
+  const beforeInvalidPlan = privilegedSnapshot(graph);
   assert.throws(() => graph.applyMemoryPlan({
     project: 'app',
     scope: alice,
@@ -94,7 +103,7 @@ test('a validated memory plan invalidates in-scope state without partial writes 
       { action: 'ERASE', memoryType: 'goal', key: 'release' }
     ]
   }), /Memory plan action must be ADD, UPDATE, DELETE, or NOOP/);
-  assert.deepEqual(graph.exportData(), beforeInvalidPlan);
+  assert.deepEqual(privilegedSnapshot(graph), beforeInvalidPlan);
 
   const removed = graph.applyMemoryPlan({
     project: 'app',
@@ -111,7 +120,7 @@ test('a validated memory plan invalidates in-scope state without partial writes 
   assert.deepEqual(aliceHistory.items.map((item) => item.status), ['invalidated']);
   assert.deepEqual(bobHistory.items.map((item) => item.text), ['Prefers light mode']);
   assert.deepEqual(bobHistory.items.map((item) => item.status), ['active']);
-  assert.equal(graph.getJournal({ limit: 20 }).items.at(-1).type, 'memory.invalidated');
+  assert.equal(graph.getJournal({ project: 'app', limit: 20 }).items.at(-1).type, 'memory.invalidated');
 });
 
 test('recall fuses lexical, semantic, graph, and temporal signals while declaring unavailable semantics', () => {
@@ -136,7 +145,7 @@ test('recall fuses lexical, semantic, graph, and temporal signals while declarin
     text: 'Bob also likes boutique hotels', embedding: [1, 0]
   });
   const decision = graph.addDecision({ project: 'trip', title: 'Travel booking policy', chosen: 'Respect saved preferences' });
-  graph.link({ from: decision.id, to: currentHotel.id, relation: 'uses_preference' });
+  graph.link({ project: 'trip', from: decision.id, to: currentHotel.id, relation: 'uses_preference' });
 
   const fused = graph.recall('lodging taste', {
     project: 'trip', scope: alice, queryEmbedding: [0.99, 0.01], focalId: decision.id,
@@ -164,15 +173,15 @@ test('recall fuses lexical, semantic, graph, and temporal signals while declarin
 
 test('facts and relations preserve bi-temporal history for point-in-time recall', () => {
   const graph = createShadowGraph({ now: () => '2026-09-02T12:00:00.000Z' });
-  const oldFact = graph.addFact({
-    id: 'fact-old', project: 'deploy', key: 'deployment-mode', value: 'single-user',
+  const oldFact = captureId('fact-old', graph.addFact({
+    project: 'deploy', key: 'deployment-mode', value: 'single-user',
     validFrom: '2026-08-01T00:00:00.000Z', observedAt: '2026-08-02T00:00:00.000Z'
-  });
-  const newFact = graph.addFact({
-    id: 'fact-new', project: 'deploy', key: 'deployment-mode', value: 'multi-user',
+  }));
+  const newFact = captureId('fact-new', graph.addFact({
+    project: 'deploy', key: 'deployment-mode', value: 'multi-user',
     validFrom: '2026-09-01T00:00:00.000Z', observedAt: '2026-09-02T00:00:00.000Z'
-  });
-  const storedOld = graph.exportData().facts.find((fact) => fact.id === oldFact.id);
+  }));
+  const storedOld = privilegedSnapshot(graph).facts.find((fact) => fact.id === oldFact.id);
   assert.equal(storedOld.status, 'superseded');
   assert.equal(storedOld.temporal.validTo, '2026-09-01T00:00:00.000Z');
   assert.equal(storedOld.temporal.invalidatedAt, '2026-09-02T12:00:00.000Z');
@@ -181,6 +190,7 @@ test('facts and relations preserve bi-temporal history for point-in-time recall'
 
   const decision = graph.addDecision({ project: 'deploy', title: 'Deployment architecture', chosen: 'Choose by active mode' });
   const relation = graph.link({
+    project: 'deploy',
     from: decision.id,
     to: newFact.id,
     relation: 'depends_on',
@@ -221,19 +231,19 @@ test('reconsideration does not consume a future-valid fact before its valid time
   graph.addFact({ project: 'deploy', key: 'deployment-mode', value: 'single-user', validFrom: '2026-08-01T00:00:00.000Z' });
   graph.addFact({ project: 'deploy', key: 'deployment-mode', value: 'multi-user', validFrom: '2026-09-01T00:00:00.000Z' });
 
-  assert.equal(graph.review({ project: 'deploy' }).some((item) => item.decisionId === decision.id), false);
+  assert.equal(graph.review({ project: 'deploy' }).items.some((item) => item.decisionId === decision.id), false);
   current = '2026-09-02T00:00:00.000Z';
-  assert.equal(graph.review({ project: 'deploy' }).some((item) => item.decisionId === decision.id), true);
+  assert.equal(graph.review({ project: 'deploy' }).items.some((item) => item.decisionId === decision.id), true);
 });
 
 test('out-of-order fact backfills are rejected before corrupting temporal intervals', () => {
   const graph = createShadowGraph({ now: () => '2026-09-10T00:00:00.000Z' });
   graph.addFact({ project: 'deploy', key: 'mode', value: 'multi-user', validFrom: '2026-09-01T00:00:00.000Z' });
-  const before = graph.exportData();
+  const before = privilegedSnapshot(graph);
   assert.throws(() => graph.addFact({
     project: 'deploy', key: 'mode', value: 'single-user', validFrom: '2026-08-01T00:00:00.000Z'
   }), /Facts for one scope must be recorded in non-decreasing validFrom order/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('logical purge clears scoped memory indexes and rebuild cannot resurrect purged payloads', () => {
@@ -246,8 +256,8 @@ test('logical purge clears scoped memory indexes and rebuild cannot resurrect pu
 
   const purged = graph.purgeProject('private');
   assert.equal(purged.mode, 'logical');
-  assert.equal(graph.exportData().records.some((record) => record.project === 'private'), false);
-  assert.equal(JSON.stringify(graph.exportData()).includes('alice@example.test'), false);
+  assert.equal(privilegedSnapshot(graph).records.some((record) => record.project === 'private'), false);
+  assert.equal(JSON.stringify(privilegedSnapshot(graph)).includes('alice@example.test'), false);
 
   const replacement = graph.remember({
     project: 'private', scope: { userId: 'alice' }, memoryType: 'profile', key: 'email',
@@ -256,7 +266,7 @@ test('logical purge clears scoped memory indexes and rebuild cannot resurrect pu
   assert.equal(replacement.operation, 'ADD');
   assert.equal(replacement.previous, undefined);
 
-  const rebuilt = graph.rebuild();
+  const rebuilt = privilegedRebuild(graph);
   assert.equal(rebuilt.rebuildable, true);
   assert.equal(rebuilt.projection.records.some((record) => record.text === 'alice@example.test'), false);
   assert.equal(rebuilt.projection.records.some((record) => record.text === 'new@example.test'), true);
@@ -277,7 +287,7 @@ test('duplicate active memory scopes resolve deterministically and remain declar
   for (const records of [[newer, older], [older, newer]]) {
     const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
     graph.importData({ schemaVersion: 4, records });
-    assert.equal(graph.validate().issues.some((issue) => issue.code === 'duplicate_active_memory_scope'), true);
+    assert.equal(graph.validate({ project: 'app' }).issues.some((issue) => issue.code === 'duplicate_active_memory_scope'), true);
     const result = graph.remember({
       project: 'app', scope: { userId: 'alice' }, memoryType: 'preference', key: 'theme', text: 'System'
     });
@@ -293,9 +303,9 @@ test('invalid memory intervals are rejected before direct or planned writes muta
     project: 'app', memoryType: 'goal', key: 'deadline', text: 'Ship',
     validFrom: '2026-05-01T00:00:00.000Z', validTo: '2026-04-01T00:00:00.000Z'
   }), /Memory validTo must be later than validFrom/);
-  assert.equal(graph.exportData().records.length, 0);
+  assert.equal(privilegedSnapshot(graph).records.length, 0);
 
-  const before = graph.exportData();
+  const before = privilegedSnapshot(graph);
   assert.throws(() => graph.applyMemoryPlan({
     project: 'app',
     operations: [
@@ -306,13 +316,13 @@ test('invalid memory intervals are rejected before direct or planned writes muta
       }
     ]
   }), /Memory validTo must be later than validFrom/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 
   graph.remember({
     project: 'app', memoryType: 'goal', key: 'ordered', text: 'Initial',
     validFrom: '2026-05-01T00:00:00.000Z'
   });
-  const beforeBackfill = graph.exportData();
+  const beforeBackfill = privilegedSnapshot(graph);
   assert.throws(() => graph.applyMemoryPlan({
     project: 'app',
     operations: [
@@ -320,9 +330,9 @@ test('invalid memory intervals are rejected before direct or planned writes muta
       { action: 'UPDATE', memoryType: 'goal', key: 'ordered', text: 'Backfill', validFrom: '2026-04-01T00:00:00.000Z' }
     ]
   }), /Memories for one identity must be recorded in non-decreasing validFrom order/);
-  assert.deepEqual(graph.exportData(), beforeBackfill);
+  assert.deepEqual(privilegedSnapshot(graph), beforeBackfill);
 
-  const beforeDeleteBackfill = graph.exportData();
+  const beforeDeleteBackfill = privilegedSnapshot(graph);
   assert.throws(() => graph.applyMemoryPlan({
     project: 'app',
     operations: [
@@ -330,12 +340,12 @@ test('invalid memory intervals are rejected before direct or planned writes muta
       { action: 'ADD', memoryType: 'goal', key: 'ordered', text: 'Historical backfill', validFrom: '2026-04-01T00:00:00.000Z' }
     ]
   }), /Memories for one identity must be recorded in non-decreasing validFrom order/);
-  assert.deepEqual(graph.exportData(), beforeDeleteBackfill);
+  assert.deepEqual(privilegedSnapshot(graph), beforeDeleteBackfill);
 });
 
 test('memory plan preflights retry keys before the first operation mutates state', () => {
   const graph = createShadowGraph({ now: () => '2026-04-01T00:00:00.000Z' });
-  const before = graph.exportData();
+  const before = privilegedSnapshot(graph);
   assert.throws(() => graph.applyMemoryPlan({
     project: 'app',
     operations: [
@@ -343,7 +353,7 @@ test('memory plan preflights retry keys before the first operation mutates state
       { action: 'ADD', memoryType: 'note', key: 'second', text: 'Invalid retry', idempotencyKey: 42 }
     ]
   }), /idempotencyKey must be a string/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 
   assert.throws(() => graph.applyMemoryPlan({
     project: 'app',
@@ -352,7 +362,7 @@ test('memory plan preflights retry keys before the first operation mutates state
       { action: 'ADD', memoryType: 'note', key: 'second', text: 'Invalid time', createdAt: { attacker: true } }
     ]
   }), /createdAt must be a string or null/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('current recall excludes an ended validity window while historical recall includes it', () => {
@@ -433,7 +443,7 @@ test('deleting a future-effective memory closes it at its validFrom boundary', (
   graph.applyMemoryPlan({
     project: 'app', operations: [{ action: 'DELETE', memoryType: 'note', key: 'scheduled' }]
   });
-  const stored = graph.exportData().records.find((record) => record.id === scheduled.id);
+  const stored = privilegedSnapshot(graph).records.find((record) => record.id === scheduled.id);
   assert.equal(stored.temporal.validTo, '2026-09-01T00:00:00.000Z');
   assert.equal(graph.validate().valid, true);
 });
@@ -465,8 +475,8 @@ test('memory idempotency retries are isolated by exact scope identity', () => {
   assert.equal(alice.operation, 'ADD');
   assert.equal(bob.operation, 'ADD');
   assert.equal(bob.memory.scope.userId, 'bob');
-  assert.equal(graph.exportData().records.filter((record) => record.kind === 'memory').length, 2);
-  assert.equal(graph.rebuild().projection.idempotency.length, 2);
+  assert.equal(privilegedSnapshot(graph).records.filter((record) => record.kind === 'memory').length, 2);
+  assert.equal(graph.rebuild({ project: 'app' }).projection.idempotency.length, 2);
 });
 
 test('project-only recall cannot expose memories from any scoped identity', () => {
@@ -487,21 +497,26 @@ test('project-only search and retrieve cannot expose scoped memories', () => {
   const shared = graph.remember({ project: 'app', memoryType: 'note', key: 'shared', text: 'Shared project note' }).memory;
   const alice = graph.remember({ project: 'app', scope: { userId: 'alice' }, memoryType: 'profile', key: 'private', text: 'Alice private' }).memory;
   const bob = graph.remember({ project: 'app', scope: { userId: 'bob' }, memoryType: 'profile', key: 'private', text: 'Bob private' }).memory;
-  const defaultShared = graph.remember({ memoryType: 'note', key: 'default-shared', text: 'Default shared' }).memory;
+  const defaultShared = graph.remember({ project: 'default', memoryType: 'note', key: 'default-shared', text: 'Default shared' }).memory;
   graph.remember({ project: 'other', memoryType: 'note', key: 'other-shared', text: 'Other shared' });
   const decision = graph.addDecision({ project: 'app', title: 'Public decision', chosen: 'A' });
-  graph.link({ from: decision.id, to: alice.id, relation: 'personalized_by' });
-  graph.link({ from: decision.id, to: bob.id, relation: 'personalized_by' });
+  graph.link({ project: 'app', from: decision.id, to: alice.id, relation: 'personalized_by' });
+  graph.link({ project: 'app', from: decision.id, to: bob.id, relation: 'personalized_by' });
 
   const projectSearchMemories = graph.search('', { project: 'app' }).items.filter((item) => item.record.kind === 'memory');
   const projectRetrieveMemories = graph.retrieve('', { project: 'app' }).items.filter((item) => item.record.kind === 'memory');
   assert.deepEqual(projectSearchMemories.map((item) => item.record.id), [shared.id]);
   assert.deepEqual(projectRetrieveMemories.map((item) => item.record.id), [shared.id]);
 
-  const omittedProjectSearch = graph.search('', {}).items.filter((item) => item.record.kind === 'memory');
-  const omittedProjectRetrieve = graph.retrieve('', {}).items.filter((item) => item.record.kind === 'memory');
-  assert.deepEqual(omittedProjectSearch.map((item) => item.record.id), [defaultShared.id]);
-  assert.deepEqual(omittedProjectRetrieve.map((item) => item.record.id), [defaultShared.id]);
+  // project_only (plan v1.4.4 PR-08): a read that selects no project exposes
+  // no memory and no record at all -- the "default" project's included, which
+  // a read reaches only by selecting it.
+  assert.deepEqual(graph.search('', {}).items, []);
+  assert.deepEqual(graph.retrieve('', {}).items, []);
+  const defaultSearchMemories = graph.search('', { project: 'default' }).items.filter((item) => item.record.kind === 'memory');
+  const defaultRetrieveMemories = graph.retrieve('', { project: 'default' }).items.filter((item) => item.record.kind === 'memory');
+  assert.deepEqual(defaultSearchMemories.map((item) => item.record.id), [defaultShared.id]);
+  assert.deepEqual(defaultRetrieveMemories.map((item) => item.record.id), [defaultShared.id]);
 
   const aliceSearchMemories = graph.search('', { project: 'app', scope: { userId: 'alice' } }).items.filter((item) => item.record.kind === 'memory');
   const aliceRetrieveMemories = graph.retrieve('', { project: 'app', scope: { userId: 'alice' } }).items.filter((item) => item.record.kind === 'memory');
@@ -511,26 +526,34 @@ test('project-only search and retrieve cannot expose scoped memories', () => {
 
   const unscopedTraversal = graph.traverse({ id: decision.id });
   assert.equal(unscopedTraversal.nodes.some((node) => node.id === alice.id || node.id === bob.id), false);
+  const projectTraversal = graph.traverse({ id: decision.id, project: 'app' });
+  assert.equal(projectTraversal.nodes[0].id, decision.id);
+  assert.equal(projectTraversal.nodes.some((node) => node.id === alice.id || node.id === bob.id), false);
   const aliceTraversal = graph.traverse({ id: decision.id, project: 'app', scope: { userId: 'alice' } });
   assert.equal(aliceTraversal.nodes.some((node) => node.id === alice.id), true);
   assert.equal(aliceTraversal.nodes.some((node) => node.id === bob.id), false);
-  assert.throws(() => graph.traverse({ id: alice.id }), /outside the requested memory scope/);
+  const outsideMemoryScope = graph.traverse({ id: alice.id, project: 'app' });
+  assert.deepEqual(outsideMemoryScope.nodes, []);
+  assert.deepEqual({ ...outsideMemoryScope, root: null }, { ...graph.traverse({ id: 'memory_absent', project: 'app' }), root: null });
 });
 
-test('omitted project recall is confined to the default project', () => {
+test('omitted project recall reads no project, not even "default"', () => {
   const graph = createShadowGraph({ now: () => '2026-04-01T00:00:00.000Z' });
-  const defaultMemory = graph.remember({ memoryType: 'note', key: 'default', text: 'Default project' }).memory;
+  const defaultMemory = graph.remember({ project: 'default', memoryType: 'note', key: 'default', text: 'Default project' }).memory;
   graph.remember({ project: 'alpha', memoryType: 'note', key: 'private', text: 'Alpha private' });
   graph.remember({ project: 'beta', memoryType: 'note', key: 'private', text: 'Beta private' });
 
+  // project_only (plan v1.4.4 PR-08): no project selected is not the
+  // "default" project, and is not reported as one.
   const recalled = graph.recall('', {});
-  assert.deepEqual(recalled.items.map((item) => item.record.id), [defaultMemory.id]);
-  assert.equal(recalled.completeness.scope.project, 'default');
+  assert.deepEqual(recalled.items, []);
+  assert.equal(recalled.completeness.scope.project, null);
+  assert.deepEqual(graph.recall('', { project: 'default' }).items.map((item) => item.record.id), [defaultMemory.id]);
 });
 
 test('memory project must be a non-empty string on writes, plans, and recall', () => {
   const graph = createShadowGraph({ now: () => '2026-04-01T00:00:00.000Z' });
-  const before = graph.exportData();
+  const before = privilegedSnapshot(graph);
   assert.throws(() => graph.remember({
     project: { tenant: 'a' }, memoryType: 'note', key: 'bad-project', text: 'Bad', idempotencyKey: 'same'
   }), /project must be a non-empty string/);
@@ -538,98 +561,98 @@ test('memory project must be a non-empty string on writes, plans, and recall', (
     project: { tenant: 'b' }, operations: [{ action: 'ADD', memoryType: 'note', key: 'bad-plan', text: 'Bad' }]
   }), /project must be a non-empty string/);
   assert.throws(() => graph.recall('', { project: { tenant: 'c' } }), /project must be a non-empty string/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('memory scope rejects non-objects, unknown keys, and non-string identifiers', () => {
   const graph = createShadowGraph({ now: () => '2026-04-01T00:00:00.000Z' });
   graph.remember({ project: 'app', memoryType: 'note', key: 'shared', text: 'Shared' });
-  const before = graph.exportData();
+  const before = privilegedSnapshot(graph);
   assert.throws(() => graph.recall('', { project: 'app', scope: 'alice' }), /Memory scope must be an object/);
   assert.throws(() => graph.recall('', { project: 'app', scope: { tenantId: 'a' } }), /unknown field tenantId/);
   assert.throws(() => graph.remember({
     project: 'app', scope: { userId: 42 }, memoryType: 'note', key: 'bad', text: 'Bad'
   }), /userId must be a string or null/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('all runtime entity writes require a non-empty string project', () => {
   const graph = createShadowGraph({ now: () => '2026-04-01T00:00:00.000Z' });
-  const before = graph.exportData();
+  const before = privilegedSnapshot(graph);
   assert.throws(() => graph.addDecision({ project: { tenant: 'a' }, title: 'Bad', chosen: 'A' }), /project must be a non-empty string/);
   assert.throws(() => graph.addAttempt({ project: '', solution: 'Bad', result: 'failed' }), /project must be a non-empty string/);
   assert.throws(() => graph.addFact({ project: 42, key: 'bad', value: true }), /project must be a non-empty string/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('runtime writes reject non-JSON values before mutating canonical state', () => {
   const graph = createShadowGraph({ now: () => '2026-04-01T00:00:00.000Z' });
-  const before = graph.exportData();
-  assert.throws(() => graph.addFact({ id: 'bigint-fact', project: 'app', key: 'bad', value: 1n }), /serialize a BigInt/);
-  assert.deepEqual(graph.exportData(), before);
+  const before = privilegedSnapshot(graph);
+  assert.throws(() => captureId('bigint-fact', graph.addFact({ project: 'app', key: 'bad', value: 1n })), /serialize a BigInt/);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 
-  assert.throws(() => graph.addFact({ id: 'nan-fact', project: 'app', key: 'bad', value: Number.NaN }), /Non-finite numbers are not JSON-serializable/);
-  assert.deepEqual(graph.exportData(), before);
-  assert.throws(() => graph.addFact({ id: 'infinite-fact', project: 'app', key: 'bad', value: Number.POSITIVE_INFINITY }), /Non-finite numbers are not JSON-serializable/);
-  assert.deepEqual(graph.exportData(), before);
-  assert.throws(() => graph.addFact({
-    id: 'lossy-fact', project: 'app', key: 'bad',
+  assert.throws(() => captureId('nan-fact', graph.addFact({ project: 'app', key: 'bad', value: Number.NaN })), /Non-finite numbers are not JSON-serializable/);
+  assert.deepEqual(privilegedSnapshot(graph), before);
+  assert.throws(() => captureId('infinite-fact', graph.addFact({ project: 'app', key: 'bad', value: Number.POSITIVE_INFINITY })), /Non-finite numbers are not JSON-serializable/);
+  assert.deepEqual(privilegedSnapshot(graph), before);
+  assert.throws(() => captureId('lossy-fact', graph.addFact({
+    project: 'app', key: 'bad',
     value: { missing: undefined, when: new Date('2026-01-01T00:00:00.000Z'), map: new Map([['x', 1]]) }
-  }), /plain JSON data/);
-  assert.deepEqual(graph.exportData(), before);
+  })), /plain JSON data/);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 
   const cyclic = {};
   cyclic.self = cyclic;
-  assert.throws(() => graph.addFact({ id: 'cyclic-fact', project: 'app', key: 'bad', value: cyclic }), /circular structure/i);
-  assert.deepEqual(graph.exportData(), before);
+  assert.throws(() => captureId('cyclic-fact', graph.addFact({ project: 'app', key: 'bad', value: cyclic })), /circular structure/i);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 
-  assert.throws(() => graph.addDecision({
-    id: 'bigint-decision', project: 'app', title: 'Bad', chosen: 'A', failedAttempts: [{ payload: 1n }]
-  }), /serialize a BigInt/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.throws(() => captureId('bigint-decision', graph.addDecision({
+    project: 'app', title: 'Bad', chosen: 'A', failedAttempts: [{ payload: 1n }]
+  })), /serialize a BigInt/);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('empty project identifiers never become cross-project read wildcards', () => {
   const graph = createShadowGraph({ now: () => '2026-04-01T00:00:00.000Z' });
   graph.addDecision({ project: 'alpha', title: 'Alpha', chosen: 'A', reviewAfter: '2020-01-01T00:00:00.000Z' });
   graph.addDecision({ project: 'beta', title: 'Beta', chosen: 'B', reviewAfter: '2020-01-01T00:00:00.000Z' });
-  const before = graph.exportData();
+  const before = privilegedSnapshot(graph);
   const calls = [
     () => graph.search('', { project: '' }),
     () => graph.retrieve('', { project: '' }),
     () => graph.getJournal({ project: '' }),
-    () => graph.review({ project: '' }),
-    () => graph.getReviewSignals({ project: '' }),
+    () => graph.review({ project: '' }).items,
+    () => graph.getReviewSignals({ project: '' }).items,
     () => graph.redact({ project: '' }),
     () => graph.context({ project: '' })
   ];
   for (const call of calls) assert.throws(call, /project must be a non-empty string/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('caller-owned memory ids cannot overwrite an existing graph entity', () => {
   const graph = createShadowGraph({ now: () => '2026-04-01T00:00:00.000Z' });
-  const decision = graph.addDecision({ id: 'shared-id', project: 'app', title: 'Keep this decision', chosen: 'A' });
-  const before = graph.exportData();
+  const decision = captureId('shared-id', graph.addDecision({ project: 'app', title: 'Keep this decision', chosen: 'A' }));
+  const before = privilegedSnapshot(graph);
 
   assert.throws(() => graph.remember({
     id: decision.id, project: 'app', memoryType: 'note', key: 'collision', text: 'Must not overwrite'
-  }), /Entity id already exists/);
-  assert.deepEqual(graph.exportData(), before);
+  }), { code: 'creation_id_not_allowed' });
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
-test('memory plan reserves caller-owned ids before applying any operation', () => {
+test('memory plan rejects caller-owned ids before applying any operation', () => {
   const graph = createShadowGraph({ now: () => '2026-04-01T00:00:00.000Z' });
-  graph.addDecision({ id: 'reserved-id', project: 'app', title: 'Existing', chosen: 'A' });
-  const before = graph.exportData();
+  captureId('reserved-id', graph.addDecision({ project: 'app', title: 'Existing', chosen: 'A' }));
+  const before = privilegedSnapshot(graph);
   assert.throws(() => graph.applyMemoryPlan({
     project: 'app',
     operations: [
-      { action: 'ADD', id: 'new-id', memoryType: 'note', key: 'first', text: 'Must not land' },
-      { action: 'ADD', id: 'reserved-id', memoryType: 'note', key: 'second', text: 'Collision' }
+      { action: 'ADD', memoryType: 'note', key: 'first', text: 'Must not land' },
+      { action: 'ADD', id: fixtureIds['reserved-id'], memoryType: 'note', key: 'second', text: 'Collision' }
     ]
-  }), /Entity id already exists/);
-  assert.deepEqual(graph.exportData(), before);
+  }), { code: 'creation_id_not_allowed' });
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('re-adding an invalidated memory continues its version history', () => {
@@ -656,7 +679,7 @@ test('same-content retries can refresh a derived embedding without creating a me
   assert.equal(refreshed.memory.id, added.memory.id);
   assert.equal(graph.memoryHistory({ project: 'app', memoryType: 'note', key: 'route' }).items.length, 1);
   assert.equal(graph.recall('', { project: 'app', queryEmbedding: [0, 1] }).items[0].scores.semantic, 1);
-  assert.deepEqual(graph.rebuild().projection.records.find((record) => record.id === added.memory.id).embedding, [0, 1]);
+  assert.deepEqual(graph.rebuild({ project: 'app' }).projection.records.find((record) => record.id === added.memory.id).embedding, [0, 1]);
 });
 
 test('maintenance closes an expired fact interval before review and recall', () => {
@@ -670,8 +693,8 @@ test('maintenance closes an expired fact interval before review and recall', () 
     validFrom: '2026-01-01T00:00:00.000Z', expiresAt: '2026-02-01T00:00:00.000Z'
   });
 
-  const maintenance = graph.maintain({ at: '2026-03-01T00:00:00.000Z' });
-  const expired = graph.exportData().facts.find((item) => item.id === fact.id);
+  const maintenance = graph.maintain({ project: 'app', at: '2026-03-01T00:00:00.000Z' });
+  const expired = privilegedSnapshot(graph).facts.find((item) => item.id === fact.id);
   assert.equal(maintenance.due.some((item) => item.decisionId === decision.id), false);
   assert.equal(expired.temporal.validTo, '2026-02-01T00:00:00.000Z');
   assert.equal(expired.temporal.invalidatedAt, '2026-03-01T00:00:00.000Z');
@@ -682,9 +705,9 @@ test('maintenance closes an expired fact interval before review and recall', () 
 test('malformed persisted memory envelopes are rejected atomically', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
   graph.remember({ project: 'safe', memoryType: 'note', key: 'keep', text: 'Keep me' });
-  const before = graph.exportData();
+  const before = privilegedSnapshot(graph);
   assert.throws(() => graph.replaceData({ schemaVersion: '4', records: [] }), /schemaVersion must be an integer/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
   const base = {
     id: 'bad-memory', kind: 'memory', schemaVersion: 4, project: 'bad',
     scope: { userId: null, agentId: null, runId: null }, memoryType: 'note',
@@ -705,79 +728,81 @@ test('malformed persisted memory envelopes are rejected atomically', () => {
 
   for (const memory of invalid) {
     assert.throws(() => graph.replaceData({ schemaVersion: 4, records: [memory] }));
-    assert.deepEqual(graph.exportData(), before);
+    assert.deepEqual(privilegedSnapshot(graph), before);
   }
 });
 
 test('schema 4 restore rejects orphaned review signals', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addDecision({ id: 'kept-decision', project: 'A', title: 'Keep', chosen: 'A' });
-  const before = graph.exportData();
+  captureId('kept-decision', graph.addDecision({ project: 'A', title: 'Keep', chosen: 'A' }));
+  const before = privilegedSnapshot(graph);
   const payload = {
     ...before,
     reviewSignals: [{ id: 'orphan-review', kind: 'review', decisionId: 'missing-decision', reason: 'orphan', status: 'open' }]
   };
   assert.throws(() => graph.replaceData(payload), /Review signal must reference an existing decision/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('schema 4 restore rejects duplicate review signal ids', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addDecision({ id: 'kept-decision', project: 'A', title: 'Keep', chosen: 'A' });
-  const before = graph.exportData();
+  captureId('kept-decision', graph.addDecision({ project: 'A', title: 'Keep', chosen: 'A' }));
+  const before = privilegedSnapshot(graph);
   const payload = {
     ...before,
     reviewSignals: [
-      { id: 'same-review-id', kind: 'review', decisionId: 'kept-decision', reason: 'one', status: 'open' },
-      { id: 'same-review-id', kind: 'review', decisionId: 'kept-decision', reason: 'two', status: 'open' }
+      { id: 'same-review-id', kind: 'review', decisionId: fixtureIds['kept-decision'], reason: 'one', status: 'open' },
+      { id: 'same-review-id', kind: 'review', decisionId: fixtureIds['kept-decision'], reason: 'two', status: 'open' }
     ]
   };
   assert.throws(() => graph.replaceData(payload), /Duplicate review signal id/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('schema 4 restore rejects duplicate review signal identities', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addDecision({ id: 'reviewed-decision', project: 'A', title: 'Keep', chosen: 'A' });
-  const before = graph.exportData();
+  captureId('reviewed-decision', graph.addDecision({ project: 'A', title: 'Keep', chosen: 'A' }));
+  const before = privilegedSnapshot(graph);
   const payload = {
     ...before,
     reviewSignals: [
-      { id: 'review-one', kind: 'review', decisionId: 'reviewed-decision', reason: 'same', status: 'open' },
-      { id: 'review-two', kind: 'review', decisionId: 'reviewed-decision', reason: 'same', status: 'acknowledged' }
+      { id: 'review-one', kind: 'review', decisionId: fixtureIds['reviewed-decision'], reason: 'same', status: 'open' },
+      { id: 'review-two', kind: 'review', decisionId: fixtureIds['reviewed-decision'], reason: 'same', status: 'acknowledged' }
     ]
   };
   assert.throws(() => graph.replaceData(payload), /Duplicate review signal identity/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('review signal identity cannot collide across delimiter-bearing values', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addDecision({ id: 'x:y', project: 'app', title: 'First', chosen: 'A', alternatives: [{ label: 'B', reopenWhen: ['z'] }] });
-  graph.addDecision({ id: 'x', project: 'app', title: 'Second', chosen: 'A', alternatives: [{ label: 'B', reopenWhen: ['y:z'] }] });
+  captureId('x:y', graph.addDecision({ project: 'app', title: 'First', chosen: 'A', alternatives: [{ label: 'B', reopenWhen: ['z'] }] }));
+  captureId('x', graph.addDecision({ project: 'app', title: 'Second', chosen: 'A', alternatives: [{ label: 'B', reopenWhen: ['y:z'] }] }));
+  // These pre-policy stored identities deliberately exercise delimiter collisions.
+  graph.replaceData(historicalIds(privilegedSnapshot(graph), { 'x:y': fixtureIds['x:y'], x: fixtureIds['x'] }));
 
-  const due = graph.review({ project: 'app', changedFacts: ['z', 'y:z'] });
+  const due = graph.review({ project: 'app', changedFacts: ['z', 'y:z'] }).items;
   assert.equal(due.length, 2);
-  assert.equal(graph.getReviewSignals({ project: 'app' }).length, 2);
-  assert.equal(graph.exportData().reviewSignals.length, 2);
+  assert.equal(graph.getReviewSignals({ project: 'app' }).items.length, 2);
+  assert.equal(privilegedSnapshot(graph).reviewSignals.length, 2);
 });
 
 test('schema 4 restore rejects duplicate compatibility event ids', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addDecision({ id: 'kept-decision', project: 'A', title: 'Keep', chosen: 'A' });
-  const before = graph.exportData();
+  captureId('kept-decision', graph.addDecision({ project: 'A', title: 'Keep', chosen: 'A' }));
+  const before = privilegedSnapshot(graph);
   const duplicate = structuredClone(before.events[0]);
   const payload = { ...before, events: [before.events[0], duplicate] };
   assert.throws(() => graph.replaceData(payload), /Duplicate event id/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('all supported schemas reject duplicate idempotency keys', () => {
   for (const schemaVersion of [1, 2, 3, 4]) {
     const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-    const first = graph.addDecision({ id: `idem-first-${schemaVersion}`, project: 'app', title: 'First', chosen: 'A' });
-    const second = graph.addDecision({ id: `idem-second-${schemaVersion}`, project: 'app', title: 'Second', chosen: 'B' });
-    const before = graph.exportData();
+    const first = captureId(`idem-first-${schemaVersion}`, graph.addDecision({ project: 'app', title: 'First', chosen: 'A' }));
+    const second = captureId(`idem-second-${schemaVersion}`, graph.addDecision({ project: 'app', title: 'Second', chosen: 'B' }));
+    const before = privilegedSnapshot(graph);
     const payload = {
       ...before,
       schemaVersion,
@@ -787,16 +812,16 @@ test('all supported schemas reject duplicate idempotency keys', () => {
       ]
     };
     assert.throws(() => graph.replaceData(payload), /Duplicate idempotency key/);
-    assert.deepEqual(graph.exportData(), before);
+    assert.deepEqual(privilegedSnapshot(graph), before);
   }
 });
 
 test('legacy idempotency keys cannot collide after canonicalization', () => {
   for (const schemaVersion of [1, 2, 3]) {
     const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-    const first = graph.addDecision({ id: `legacy-idem-first-${schemaVersion}`, project: 'app', title: 'First', chosen: 'A' });
-    const second = graph.addDecision({ id: `legacy-idem-second-${schemaVersion}`, project: 'app', title: 'Second', chosen: 'B' });
-    const before = graph.exportData();
+    const first = captureId(`legacy-idem-first-${schemaVersion}`, graph.addDecision({ project: 'app', title: 'First', chosen: 'A' }));
+    const second = captureId(`legacy-idem-second-${schemaVersion}`, graph.addDecision({ project: 'app', title: 'Second', chosen: 'B' }));
+    const before = privilegedSnapshot(graph);
     const payload = {
       ...before,
       schemaVersion,
@@ -806,14 +831,14 @@ test('legacy idempotency keys cannot collide after canonicalization', () => {
       ]
     };
     assert.throws(() => graph.replaceData(payload), /Duplicate canonical idempotency key/);
-    assert.deepEqual(graph.exportData(), before);
+    assert.deepEqual(privilegedSnapshot(graph), before);
   }
 });
 
 test('schema 4 restore rejects idempotency entries for missing entities', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addDecision({ id: 'kept-decision', project: 'A', title: 'Keep', chosen: 'A' });
-  const before = graph.exportData();
+  captureId('kept-decision', graph.addDecision({ project: 'A', title: 'Keep', chosen: 'A' }));
+  const before = privilegedSnapshot(graph);
   const payload = {
     ...before,
     idempotency: [{
@@ -823,16 +848,16 @@ test('schema 4 restore rejects idempotency entries for missing entities', () => 
   };
   assert.throws(() => validateRestorePayload(payload, { now: () => '2026-03-01T00:00:00.000Z' }), /Idempotency entry must reference an existing entity/);
   assert.throws(() => graph.replaceData(payload), /Idempotency entry must reference an existing entity/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('schema 4 restore rejects memory idempotency keys for a different scope', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  const memory = graph.remember({
-    id: 'alice-memory', project: 'app', scope: { userId: 'alice' },
+  const memory = captureId('alice-memory', graph.remember({
+    project: 'app', scope: { userId: 'alice' },
     memoryType: 'note', key: 'k', text: 'Alice secret'
-  }).memory;
-  const before = graph.exportData();
+  })).memory;
+  const before = privilegedSnapshot(graph);
   const payload = {
     ...before,
     idempotency: [{
@@ -841,14 +866,14 @@ test('schema 4 restore rejects memory idempotency keys for a different scope', (
     }]
   };
   assert.throws(() => graph.replaceData(payload), /Idempotency entry identity does not match its entity/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('merge import never decreases the live revision', () => {
   const graph = createShadowGraph();
   graph.setRevision(10);
   graph.importData({ schemaVersion: 4, revision: 1, records: [] });
-  assert.equal(graph.exportData().revision, 10);
+  assert.equal(privilegedSnapshot(graph).revision, 10);
 });
 
 test('merge import never regresses a declared journal sequence high-water mark', () => {
@@ -864,14 +889,14 @@ test('merge import never regresses a declared journal sequence high-water mark',
     journalEpoch: 50
   });
   graph.addFact({ project: 'app', key: 'after-high-water', value: true });
-  assert.equal(graph.exportData().journal.at(-1).seq, 101);
-  assert.equal(graph.exportData().journalSeq, 101);
+  assert.equal(privilegedSnapshot(graph).journal.at(-1).seq, 101);
+  assert.equal(privilegedSnapshot(graph).journalSeq, 101);
 });
 
 test('persisted entity ids must be unique within the records collection', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
   graph.remember({ project: 'safe', memoryType: 'note', key: 'keep', text: 'Keep me' });
-  const before = graph.exportData();
+  const before = privilegedSnapshot(graph);
   const decision = {
     id: 'duplicate-id', kind: 'decision', schemaVersion: 4, project: 'app',
     title: 'Decision', chosen: 'A', alternatives: []
@@ -883,29 +908,29 @@ test('persisted entity ids must be unique within the records collection', () => 
   };
 
   assert.throws(() => graph.replaceData({ schemaVersion: 4, records: [decision, memory] }), /Duplicate entity id/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('schema 4 entity ids are globally unique so JSON and SQLite accept the same graph', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addFact({ id: 'shared-id', project: 'app', key: 'mode', value: 'safe' });
-  const before = graph.exportData();
+  captureId('shared-id', graph.addFact({ project: 'app', key: 'mode', value: 'safe' }));
+  const before = privilegedSnapshot(graph);
   assert.throws(() => graph.remember({
-    id: 'shared-id', project: 'app', memoryType: 'note', key: 'collision', text: 'Must not land'
-  }), /Entity id already exists/);
-  assert.deepEqual(graph.exportData(), before);
+    id: fixtureIds['shared-id'], project: 'app', memoryType: 'note', key: 'collision', text: 'Must not land'
+  }), { code: 'creation_id_not_allowed' });
+  assert.deepEqual(privilegedSnapshot(graph), before);
 
   const reverse = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  reverse.remember({ id: 'record-id', project: 'app', memoryType: 'note', key: 'record', text: 'Record' });
-  const reverseBefore = reverse.exportData();
-  assert.throws(() => reverse.addFact({ id: 'record-id', project: 'app', key: 'fact', value: true }), /Entity id already exists/);
-  assert.deepEqual(reverse.exportData(), reverseBefore);
+  captureId('record-id', reverse.remember({ project: 'app', memoryType: 'note', key: 'record', text: 'Record' }));
+  const reverseBefore = privilegedSnapshot(reverse);
+  assert.throws(() => reverse.addFact({ id: fixtureIds['record-id'], project: 'app', key: 'fact', value: true }), { code: 'creation_id_not_allowed' });
+  assert.deepEqual(privilegedSnapshot(reverse), reverseBefore);
 
-  reverse.addDecision({ id: 'from-id', project: 'app', title: 'From', chosen: 'A' });
-  reverse.addDecision({ id: 'to-id', project: 'app', title: 'To', chosen: 'B' });
-  const beforeRelation = reverse.exportData();
-  assert.throws(() => reverse.link({ id: 'record-id', from: 'from-id', to: 'to-id', relation: 'supports' }), /Entity id already exists/);
-  assert.deepEqual(reverse.exportData(), beforeRelation);
+  captureId('from-id', reverse.addDecision({ project: 'app', title: 'From', chosen: 'A' }));
+  captureId('to-id', reverse.addDecision({ project: 'app', title: 'To', chosen: 'B' }));
+  const beforeRelation = privilegedSnapshot(reverse);
+  assert.throws(() => reverse.link({ id: fixtureIds['record-id'], project: 'app', from: fixtureIds['from-id'], to: fixtureIds['to-id'], relation: 'supports' }), { code: 'creation_id_not_allowed' });
+  assert.deepEqual(privilegedSnapshot(reverse), beforeRelation);
 
   const memory = {
     id: 'cross-id', kind: 'memory', schemaVersion: 4, project: 'app',
@@ -914,101 +939,101 @@ test('schema 4 entity ids are globally unique so JSON and SQLite accept the same
   };
   const fact = { id: 'cross-id', kind: 'fact', schemaVersion: 4, project: 'app', key: 'fact', value: true };
   assert.throws(() => graph.replaceData({ schemaVersion: 4, records: [memory], facts: [fact] }), /Duplicate entity id/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('alternative ids share the schema 4 entity namespace and cannot target another project', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.remember({ id: 'shared-alternative-id', project: 'project-b', memoryType: 'note', key: 'protected', text: 'Protected' });
-  const before = graph.exportData();
+  captureId('shared-alternative-id', graph.remember({ project: 'project-b', memoryType: 'note', key: 'protected', text: 'Protected' }));
+  const before = privilegedSnapshot(graph);
   assert.throws(() => graph.addDecision({
     id: 'decision-a', project: 'project-a', title: 'Decision A', chosen: 'A',
-    alternatives: [{ id: 'shared-alternative-id', label: 'B', reasonRejected: 'No' }]
-  }), /Entity id already exists/);
-  assert.deepEqual(graph.exportData(), before);
+    alternatives: [{ id: fixtureIds['shared-alternative-id'], label: 'B', reasonRejected: 'No' }]
+  }), { code: 'creation_id_not_allowed' });
+  assert.deepEqual(privilegedSnapshot(graph), before);
 
   const source = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  const importedMemory = source.remember({ id: 'import-shared-id', project: 'project-b', memoryType: 'note', key: 'protected', text: 'Protected' }).memory;
-  const importedDecision = source.addDecision({
-    id: 'import-decision', project: 'project-a', title: 'Decision A', chosen: 'A',
-    alternatives: [{ id: 'initial-alternative-id', label: 'B', reasonRejected: 'No' }]
-  });
-  const payload = source.exportData();
+  const importedMemory = captureId('import-shared-id', source.remember({ project: 'project-b', memoryType: 'note', key: 'protected', text: 'Protected' })).memory;
+  const importedDecision = captureId('import-decision', source.addDecision({
+    project: 'project-a', title: 'Decision A', chosen: 'A',
+    alternatives: [{ label: 'B', reasonRejected: 'No' }]
+  }), ['initial-alternative-id']);
+  const payload = privilegedSnapshot(source);
   payload.records.find((record) => record.id === importedDecision.id).alternatives[0].id = importedMemory.id;
   assert.throws(() => graph.replaceData(payload), /Duplicate entity id/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('direct link refuses missing endpoints before journaling or persistence', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addDecision({ id: 'present', project: 'app', title: 'Present', chosen: 'A' });
-  const before = graph.exportData();
-  assert.throws(() => graph.link({ from: 'present', to: 'missing', relation: 'supports' }), /Relation endpoints must exist/);
-  assert.deepEqual(graph.exportData(), before);
+  captureId('present', graph.addDecision({ project: 'app', title: 'Present', chosen: 'A' }));
+  const before = privilegedSnapshot(graph);
+  assert.throws(() => graph.link({ project: 'app', from: fixtureIds['present'], to: 'missing', relation: 'supports' }), /Relation endpoints must exist/);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('journal rebuild preserves relations whose endpoint is a nested alternative', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  const decision = graph.addDecision({
-    id: 'decision-with-alt', project: 'app', title: 'Choose', chosen: 'A',
-    alternatives: [{ id: 'alternative-b', label: 'B', reasonRejected: 'No' }]
-  });
-  graph.link({ id: 'alt-link', from: decision.id, to: 'alternative-b', relation: 'rejects' });
-  const rebuilt = graph.rebuild();
+  const decision = captureId('decision-with-alt', graph.addDecision({
+    project: 'app', title: 'Choose', chosen: 'A',
+    alternatives: [{ label: 'B', reasonRejected: 'No' }]
+  }), ['alternative-b']);
+  captureId('alt-link', graph.link({ project: 'app', from: decision.id, to: fixtureIds['alternative-b'], relation: 'rejects' }));
+  const rebuilt = privilegedRebuild(graph);
   assert.equal(rebuilt.rebuildable, true);
-  assert.equal(rebuilt.projection.relations.some((relation) => relation.id === 'alt-link'), true);
+  assert.equal(rebuilt.projection.relations.some((relation) => relation.id === fixtureIds['alt-link']), true);
 });
 
 test('schema 4 merge cannot remove an alternative used by a live relation', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addDecision({
-    id: 'decision-with-used-alt', project: 'app', title: 'Choose', chosen: 'A',
-    alternatives: [{ id: 'used-alternative', label: 'B', reasonRejected: 'No' }]
-  });
-  graph.link({ id: 'used-alt-link', from: 'decision-with-used-alt', to: 'used-alternative', relation: 'rejects' });
-  const before = graph.exportData();
-  const changed = { ...before.records.find((record) => record.id === 'decision-with-used-alt'), alternatives: [] };
+  captureId('decision-with-used-alt', graph.addDecision({
+    project: 'app', title: 'Choose', chosen: 'A',
+    alternatives: [{ label: 'B', reasonRejected: 'No' }]
+  }), ['used-alternative']);
+  captureId('used-alt-link', graph.link({ project: 'app', from: fixtureIds['decision-with-used-alt'], to: fixtureIds['used-alternative'], relation: 'rejects' }));
+  const before = privilegedSnapshot(graph);
+  const changed = { ...before.records.find((record) => record.id === fixtureIds['decision-with-used-alt']), alternatives: [] };
   assert.throws(() => graph.importData({ schemaVersion: 4, records: [changed] }), /Relation endpoints must exist after import/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('temporal inputs must be strings before any memory or fact write', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  const before = graph.exportData();
+  const before = privilegedSnapshot(graph);
   assert.throws(() => graph.remember({
     project: 'app', memoryType: 'note', key: 'bad-time', text: 'Bad', validFrom: { attacker: true }
   }), /validFrom must be a string or null/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 
   assert.throws(() => graph.applyMemoryPlan({
     project: 'app',
     operations: [{ action: 'ADD', memoryType: 'note', key: 'bad-plan-time', text: 'Bad', validFrom: { attacker: true } }]
   }), /validFrom must be a string or null/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 
   assert.throws(() => graph.addFact({
     project: 'app', key: 'bad-fact-time', value: true, validFrom: { attacker: true }
   }), /validFrom must be a string or null/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('decision and attempt timestamps are validated before runtime mutation', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  const before = graph.exportData();
+  const before = privilegedSnapshot(graph);
   assert.throws(() => graph.addDecision({ project: 'app', title: 'Bad', chosen: 'A', reviewAfter: 'not-a-timestamp' }), /reviewAfter must be a valid timestamp/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
   assert.throws(() => graph.addAttempt({ project: 'app', solution: 'Bad', result: 'failed', createdAt: 'not-a-timestamp' }), /createdAt must be a valid timestamp/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
   assert.throws(() => graph.remember({ project: 'app', memoryType: 'note', key: 'bad-calendar', text: 'Bad', validFrom: '2026-02-30T00:00:00.000Z' }), /validFrom must be a valid timestamp/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
   assert.throws(() => graph.remember({ project: 'app', memoryType: 'note', key: 'implementation-date', text: 'Bad', validFrom: 'March 1, 2026' }), /validFrom must be a valid timestamp/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('schema 4 restore rejects non-timestamp memory temporal strings', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
   graph.remember({ project: 'safe', memoryType: 'note', key: 'keep', text: 'Keep me' });
-  const before = graph.exportData();
+  const before = privilegedSnapshot(graph);
   const memory = {
     id: 'bad-time-memory', kind: 'memory', schemaVersion: 4, project: 'app',
     scope: { userId: null, agentId: null, runId: null }, memoryType: 'note',
@@ -1016,19 +1041,19 @@ test('schema 4 restore rejects non-timestamp memory temporal strings', () => {
     temporal: { validFrom: 'not-a-timestamp', validTo: null, recordedAt: 'also-bad', invalidatedAt: null }
   };
   assert.throws(() => graph.replaceData({ schemaVersion: 4, records: [memory] }), /validFrom must be a valid timestamp/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('schema 4 restore rejects malformed fact and relation temporal fields atomically', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
   graph.remember({ project: 'safe', memoryType: 'note', key: 'keep', text: 'Keep me' });
-  const before = graph.exportData();
+  const before = privilegedSnapshot(graph);
 
   assert.throws(() => graph.replaceData({
     schemaVersion: 4,
     facts: [{ id: 'bad-fact', kind: 'fact', schemaVersion: 4, project: 'app', key: 'mode', value: true, temporal: { validFrom: { attacker: true } } }]
   }), /validFrom must be a string or null/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 
   const records = [
     { id: 'from', kind: 'decision', schemaVersion: 4, project: 'app', title: 'From', chosen: 'A', alternatives: [] },
@@ -1039,7 +1064,7 @@ test('schema 4 restore rejects malformed fact and relation temporal fields atomi
     records,
     relations: [{ id: 'bad-relation', kind: 'relation', schemaVersion: 4, from: 'from', to: 'to', relation: 'supports', temporal: { validFrom: { attacker: true } } }]
   }), /validFrom must be a string or null/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 
   assert.throws(() => graph.replaceData({
     schemaVersion: 4,
@@ -1048,7 +1073,7 @@ test('schema 4 restore rejects malformed fact and relation temporal fields atomi
       temporal: { validFrom: '2026-09-01T00:00:00.000Z', validTo: '2026-08-01T00:00:00.000Z' }
     }]
   }), /Stored fact validTo must not precede validFrom/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 
   assert.throws(() => graph.replaceData({
     schemaVersion: 4,
@@ -1058,13 +1083,13 @@ test('schema 4 restore rejects malformed fact and relation temporal fields atomi
       temporal: { validFrom: '2026-09-01T00:00:00.000Z', validTo: '2026-08-01T00:00:00.000Z' }
     }]
   }), /Stored relation validTo must not precede validFrom/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('schema 4 import rejects malformed projects and alternative ids before merge', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addDecision({ id: 'keep', project: 'safe', title: 'Keep', chosen: 'A' });
-  const before = graph.exportData();
+  captureId('keep', graph.addDecision({ project: 'safe', title: 'Keep', chosen: 'A' }));
+  const before = privilegedSnapshot(graph);
   const decision = {
     id: 'bad-decision', kind: 'decision', schemaVersion: 4, project: { tenant: 'bad' },
     title: 'Bad', chosen: 'A', alternatives: [], status: 'active', confidence: { initial: 0.5, current: 0.5, history: [] }
@@ -1083,78 +1108,78 @@ test('schema 4 import rejects malformed projects and alternative ids before merg
     { schemaVersion: 4, facts: [badFact] }
   ]) {
     assert.throws(() => graph.importData(payload), /project must be a non-empty string|id must be a non-empty string/i);
-    assert.deepEqual(graph.exportData(), before);
+    assert.deepEqual(privilegedSnapshot(graph), before);
   }
 });
 
 test('schema 4 merge import rejects cross-collection ids already present in live state', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addDecision({ id: 'live-id', project: 'safe', title: 'Live', chosen: 'A' });
-  const before = graph.exportData();
+  captureId('live-id', graph.addDecision({ project: 'safe', title: 'Live', chosen: 'A' }));
+  const before = privilegedSnapshot(graph);
   assert.throws(() => graph.importData({
     schemaVersion: 4,
-    facts: [{ id: 'live-id', kind: 'fact', schemaVersion: 4, project: 'safe', key: 'collision', value: true }]
+    facts: [{ id: fixtureIds['live-id'], kind: 'fact', schemaVersion: 4, project: 'safe', key: 'collision', value: true }]
   }), /Entity id already exists/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 
   const collidingMemory = {
-    id: 'live-id', kind: 'memory', schemaVersion: 4, project: 'safe',
+    id: fixtureIds['live-id'], kind: 'memory', schemaVersion: 4, project: 'safe',
     scope: { userId: null, agentId: null, runId: null }, memoryType: 'note', key: 'collision', text: 'Collision', version: 1, status: 'active'
   };
-  assert.throws(() => graph.importData({ schemaVersion: 4, records: [collidingMemory] }), /Existing entity id live-id cannot change kind or project/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.throws(() => graph.importData({ schemaVersion: 4, records: [collidingMemory] }), { message: `Existing entity id ${fixtureIds['live-id']} cannot change kind or project` });
+  assert.deepEqual(privilegedSnapshot(graph), before);
 
-  const movedDecision = { ...before.records.find((record) => record.id === 'live-id'), project: 'other', title: 'Moved' };
-  assert.throws(() => graph.importData({ schemaVersion: 4, records: [movedDecision] }), /Existing entity id live-id cannot change kind or project/);
-  assert.deepEqual(graph.exportData(), before);
+  const movedDecision = { ...before.records.find((record) => record.id === fixtureIds['live-id']), project: 'other', title: 'Moved' };
+  assert.throws(() => graph.importData({ schemaVersion: 4, records: [movedDecision] }), { message: `Existing entity id ${fixtureIds['live-id']} cannot change kind or project` });
+  assert.deepEqual(privilegedSnapshot(graph), before);
 
   const existingEntry = before.journal[0];
   assert.throws(() => graph.importData({ schemaVersion: 4, journal: [{ ...existingEntry }] }), /Journal id or sequence already exists/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('schema 4 merge import cannot change an existing memory identity', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.remember({
-    id: 'immutable-memory', project: 'app', scope: { userId: 'alice' },
+  captureId('immutable-memory', graph.remember({
+    project: 'app', scope: { userId: 'alice' },
     memoryType: 'profile', key: 'email', text: 'Alice secret'
-  });
-  const before = graph.exportData();
+  }));
+  const before = privilegedSnapshot(graph);
   const changed = {
-    ...before.records.find((record) => record.id === 'immutable-memory'),
+    ...before.records.find((record) => record.id === fixtureIds['immutable-memory']),
     scope: { userId: 'bob', agentId: null, runId: null }
   };
-  assert.throws(() => graph.importData({ schemaVersion: 4, records: [changed] }), /Existing memory id immutable-memory cannot change scope, type, or key/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.throws(() => graph.importData({ schemaVersion: 4, records: [changed] }), { message: `Existing memory id ${fixtureIds['immutable-memory']} cannot change scope, type, or key` });
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('schema 4 merge import rejects dangling relations before mutation', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addDecision({ id: 'present-import-node', project: 'safe', title: 'Present', chosen: 'A' });
-  const before = graph.exportData();
+  captureId('present-import-node', graph.addDecision({ project: 'safe', title: 'Present', chosen: 'A' }));
+  const before = privilegedSnapshot(graph);
   assert.throws(() => graph.importData({
     schemaVersion: 4,
     relations: [{ id: 'dangling-import', kind: 'relation', schemaVersion: 4, from: 'missing-a', to: 'missing-b', relation: 'supports' }]
   }), /Relation endpoints must exist before import/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('large schema 4 journal import avoids call-stack failure and partial mutation', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addDecision({ id: 'keep-large-import', project: 'safe', title: 'Keep', chosen: 'A' });
+  captureId('keep-large-import', graph.addDecision({ project: 'safe', title: 'Keep', chosen: 'A' }));
   const journal = Array.from({ length: 150000 }, (_, index) => ({
     id: `large-journal-${index}`, seq: index + 2, type: 'legacy_metadata_event',
     schemaVersion: 4, project: null, entityKind: null, entityId: null, payload: null
   }));
   assert.doesNotThrow(() => graph.importData({ schemaVersion: 4, journal, journalSeq: journal.length + 1, journalEpoch: 1 }));
-  assert.equal(graph.exportData().journal.length, journal.length + 1);
-  assert.equal(graph.exportData().records.some((record) => record.id === 'keep-large-import'), true);
+  assert.equal(privilegedSnapshot(graph).journal.length, journal.length + 1);
+  assert.equal(privilegedSnapshot(graph).records.some((record) => record.id === fixtureIds['keep-large-import']), true);
 });
 
 test('schema 4 direct import rejects duplicate incoming journal sequences atomically', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addDecision({ id: 'keep-sequence', project: 'safe', title: 'Keep', chosen: 'A' });
-  const before = graph.exportData();
+  captureId('keep-sequence', graph.addDecision({ project: 'safe', title: 'Keep', chosen: 'A' }));
+  const before = privilegedSnapshot(graph);
   const entry = {
     type: 'legacy_metadata_event', schemaVersion: 4, seq: 2,
     project: null, entityKind: null, entityId: null, payload: null
@@ -1164,7 +1189,7 @@ test('schema 4 direct import rejects duplicate incoming journal sequences atomic
     journal: [{ ...entry, id: 'incoming-seq-a' }, { ...entry, id: 'incoming-seq-b' }],
     journalSeq: 2, journalEpoch: 2
   }), /Duplicate journal sequence/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 
   assert.throws(() => graph.importData({
     schemaVersion: 4,
@@ -1172,23 +1197,23 @@ test('schema 4 direct import rejects duplicate incoming journal sequences atomic
     journalSeq: 2,
     journalEpoch: 1
   }), /seq must be a positive safe integer/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 
   assert.throws(() => graph.importData({ schemaVersion: 4, journal: [], journalSeq: Number.MAX_SAFE_INTEGER + 1 }), /journalSeq must be a non-negative safe integer/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('merge import rebuilds the current-memory index instead of retaining overwritten private payloads', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.remember({
-    id: 'same-memory-id', project: 'app', scope: { userId: 'alice' },
+  captureId('same-memory-id', graph.remember({
+    project: 'app', scope: { userId: 'alice' },
     memoryType: 'profile', key: 'email', text: 'old-secret@example.test',
     validFrom: '2026-01-01T00:00:00.000Z'
-  });
+  }));
   graph.importData({
     schemaVersion: 4,
     records: [{
-      id: 'same-memory-id', kind: 'memory', schemaVersion: 4, project: 'app',
+      id: fixtureIds['same-memory-id'], kind: 'memory', schemaVersion: 4, project: 'app',
       scope: { userId: 'alice', agentId: null, runId: null }, memoryType: 'profile',
       key: 'email', text: 'invalidated placeholder', version: 1, status: 'invalidated',
       metadata: {}, tags: [], embedding: null,
@@ -1199,12 +1224,12 @@ test('merge import rebuilds the current-memory index instead of retaining overwr
     }]
   });
 
-  const journalLengthAfterImport = graph.exportData().journal.length;
+  const journalLengthAfterImport = privilegedSnapshot(graph).journal.length;
   const result = graph.remember({
     project: 'app', scope: { userId: 'alice' }, memoryType: 'profile', key: 'email',
     text: 'new@example.test', validFrom: '2026-03-01T00:00:00.000Z'
   });
-  const after = graph.exportData();
+  const after = privilegedSnapshot(graph);
   assert.equal(result.operation, 'ADD');
   assert.equal(after.records.some((record) => record.text === 'old-secret@example.test'), false);
   assert.equal(JSON.stringify(after.journal.slice(journalLengthAfterImport)).includes('old-secret@example.test'), false);
@@ -1234,7 +1259,7 @@ test('supersession and invalidation never extend an already-ended validity inter
     validFrom: '2026-01-01T00:00:00.000Z', validTo: '2026-02-01T00:00:00.000Z'
   });
   graph.addFact({ project: 'app', key: 'mode', value: 'spring', validFrom: '2026-03-01T00:00:00.000Z' });
-  assert.equal(graph.exportData().facts.find((item) => item.id === fact.id).temporal.validTo, '2026-02-01T00:00:00.000Z');
+  assert.equal(privilegedSnapshot(graph).facts.find((item) => item.id === fact.id).temporal.validTo, '2026-02-01T00:00:00.000Z');
 });
 
 test('same-content memory writes still validate and apply explicit temporal changes', () => {
@@ -1243,12 +1268,12 @@ test('same-content memory writes still validate and apply explicit temporal chan
     project: 'app', memoryType: 'note', key: 'policy', text: 'Same text',
     validFrom: '2026-01-01T00:00:00.000Z'
   });
-  const beforeInvalid = graph.exportData();
+  const beforeInvalid = privilegedSnapshot(graph);
   assert.throws(() => graph.remember({
     project: 'app', memoryType: 'note', key: 'policy', text: 'Same text',
     validFrom: '2026-04-01T00:00:00.000Z', validTo: '2026-02-01T00:00:00.000Z'
   }), /Memory validTo must be later than validFrom/);
-  assert.deepEqual(graph.exportData(), beforeInvalid);
+  assert.deepEqual(privilegedSnapshot(graph), beforeInvalid);
 
   const reasserted = graph.remember({
     project: 'app', memoryType: 'note', key: 'policy', text: 'Same text',
@@ -1283,8 +1308,8 @@ test('semantic recall requires embedding model compatibility, not dimension alon
 test('journal-bearing schema 3 snapshots remain restorable after schema 4 migration', () => {
   const now = () => '2026-03-01T00:00:00.000Z';
   const legacy = createShadowGraph({ now });
-  legacy.addDecision({ id: 'legacy-decision', project: 'app', title: 'Legacy', chosen: 'A' });
-  const payload = legacy.exportData();
+  captureId('legacy-decision', legacy.addDecision({ project: 'app', title: 'Legacy', chosen: 'A' }));
+  const payload = privilegedSnapshot(legacy);
   payload.schemaVersion = 3;
   payload.records = payload.records.map((record) => ({ ...record, schemaVersion: 3 }));
   payload.journal = payload.journal.map((entry) => ({
@@ -1299,9 +1324,9 @@ test('journal-bearing schema 3 snapshots remain restorable after schema 4 migrat
 test('an unrelated empty hard-purge marker cannot excuse arbitrary journal gaps', () => {
   const now = () => '2026-03-01T00:00:00.000Z';
   const graph = createShadowGraph({ now });
-  const kept = graph.addDecision({ id: 'kept', project: 'kept', title: 'Kept', chosen: 'A' });
-  const removed = graph.addDecision({ id: 'removed', project: 'removed', title: 'Removed', chosen: 'B' });
-  const payload = graph.exportData();
+  const kept = captureId('kept', graph.addDecision({ project: 'kept', title: 'Kept', chosen: 'A' }));
+  const removed = captureId('removed', graph.addDecision({ project: 'removed', title: 'Removed', chosen: 'B' }));
+  const payload = privilegedSnapshot(graph);
   payload.records = payload.records.filter((record) => record.id !== removed.id);
   payload.journal = payload.journal.filter((entry) => entry.entityId !== removed.id);
   payload.journal.push({
@@ -1321,8 +1346,8 @@ test('an unrelated empty hard-purge marker cannot excuse arbitrary journal gaps'
 test('restore rejects huge hard-purge gaps without expanding every missing sequence', () => {
   const now = () => '2026-03-01T00:00:00.000Z';
   const graph = createShadowGraph({ now });
-  graph.addDecision({ id: 'gap-kept', project: 'kept', title: 'Kept', chosen: 'A' });
-  const payload = graph.exportData();
+  captureId('gap-kept', graph.addDecision({ project: 'kept', title: 'Kept', chosen: 'A' }));
+  const payload = privilegedSnapshot(graph);
   payload.journal.push({
     id: 'huge-gap-marker', seq: 100002, type: 'project.purged', schemaVersion: 5,
     at: '2026-03-01T00:00:00.000Z', project: 'other', entityKind: 'project', entityId: null,
@@ -1339,35 +1364,35 @@ test('restore rejects huge hard-purge gaps without expanding every missing seque
 test('restore rejects journal identity mismatches and duplicate journal ids', () => {
   const now = () => '2026-03-01T00:00:00.000Z';
   const graph = createShadowGraph({ now });
-  graph.addDecision({ id: 'journal-record', project: 'app', title: 'Journal', chosen: 'A' });
-  const mismatched = graph.exportData();
+  captureId('journal-record', graph.addDecision({ project: 'app', title: 'Journal', chosen: 'A' }));
+  const mismatched = privilegedSnapshot(graph);
   mismatched.journal[0].entityId = 'different-entity';
   assert.throws(() => validateRestorePayload(mismatched, { now }), /journal.*entityId.*payload\.id/i);
 
-  const wrongProject = graph.exportData();
+  const wrongProject = privilegedSnapshot(graph);
   wrongProject.journal[0].project = 'other';
   assert.throws(() => validateRestorePayload(wrongProject, { now }), /journal.*project.*payload\.project/i);
 
-  const wrongKind = graph.exportData();
+  const wrongKind = privilegedSnapshot(graph);
   wrongKind.journal[0].entityKind = 'attempt';
   wrongKind.journal[0].type = 'attempt.recorded';
   assert.throws(() => validateRestorePayload(wrongKind, { now }), /journal.*entityKind.*payload\.kind/i);
 
   for (const schemaVersion of [1, 2, 3, 4]) {
-    const wrongType = graph.exportData();
+    const wrongType = privilegedSnapshot(graph);
     wrongType.schemaVersion = schemaVersion;
     wrongType.journal[0] = { ...wrongType.journal[0], schemaVersion, type: 'attempt.recorded' };
     assert.throws(() => validateRestorePayload(wrongType, { now }), /journal.*type.*entityKind/i);
   }
 
-  const duplicated = graph.exportData();
+  const duplicated = privilegedSnapshot(graph);
   const duplicate = structuredClone(duplicated.journal[0]);
   duplicate.seq = 2;
   duplicated.journal.push(duplicate);
   duplicated.journalSeq = 2;
   assert.throws(() => validateRestorePayload(duplicated, { now }), /duplicate journal id/i);
 
-  const schema3Base = graph.exportData();
+  const schema3Base = privilegedSnapshot(graph);
   const schema3Mismatch = {
     ...schema3Base,
     schemaVersion: 3,
@@ -1401,38 +1426,38 @@ test('direct journal rebuild rejects type and entity-kind mismatches', () => {
 
 test('legacy merge import cannot create schema 4 cross-collection id collisions', () => {
   const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
-  graph.addFact({ id: 'legacy-shared-id', project: 'safe', key: 'keep', value: true });
-  const before = graph.exportData();
+  captureId('legacy-shared-id', graph.addFact({ project: 'safe', key: 'keep', value: true }));
+  const before = privilegedSnapshot(graph);
   assert.throws(() => graph.importData({
     schemaVersion: 3,
     records: [{
-      id: 'legacy-shared-id', kind: 'memory', project: 'safe',
+      id: fixtureIds['legacy-shared-id'], kind: 'memory', project: 'safe',
       scope: { userId: null, agentId: null, runId: null }, memoryType: 'note', key: 'collision', text: 'Must not land', status: 'active', version: 1
     }]
   }), /Entity id already exists|Duplicate entity id/);
-  assert.deepEqual(graph.exportData(), before);
+  assert.deepEqual(privilegedSnapshot(graph), before);
 });
 
 test('legacy collision migration remaps dependent journal and idempotency identities', () => {
   const now = () => '2026-03-01T00:00:00.000Z';
   const source = createShadowGraph({ now });
-  source.addDecision({ id: 'legacy-shared', project: 'app', title: 'Decision', chosen: 'A' });
-  source.addFact({ id: 'legacy-fact-original', project: 'app', key: 'mode', value: 'safe', idempotencyKey: 'fact-retry' });
-  const payload = source.exportData();
+  captureId('legacy-shared', source.addDecision({ project: 'app', title: 'Decision', chosen: 'A' }));
+  captureId('legacy-fact-original', source.addFact({ project: 'app', key: 'mode', value: 'safe', idempotencyKey: 'fact-retry' }));
+  const payload = privilegedSnapshot(source);
   payload.schemaVersion = 3;
   payload.records = payload.records.map((record) => ({ ...record, schemaVersion: 3 }));
-  payload.facts = payload.facts.map((fact) => ({ ...fact, id: 'legacy-shared', schemaVersion: 3 }));
-  payload.idempotency = payload.idempotency.map((item) => ({ ...item, value: { ...item.value, id: 'legacy-shared', schemaVersion: 3 } }));
+  payload.facts = payload.facts.map((fact) => ({ ...fact, id: fixtureIds['legacy-shared'], schemaVersion: 3 }));
+  payload.idempotency = payload.idempotency.map((item) => ({ ...item, value: { ...item.value, id: fixtureIds['legacy-shared'], schemaVersion: 3 } }));
   payload.journal = payload.journal.map((entry) => entry.entityKind === 'fact'
-    ? { ...entry, schemaVersion: 3, entityId: 'legacy-shared', payload: { ...entry.payload, id: 'legacy-shared', schemaVersion: 3 } }
+    ? { ...entry, schemaVersion: 3, entityId: fixtureIds['legacy-shared'], payload: { ...entry.payload, id: fixtureIds['legacy-shared'], schemaVersion: 3 } }
     : { ...entry, schemaVersion: 3, payload: entry.payload ? { ...entry.payload, schemaVersion: 3 } : entry.payload });
 
   assert.doesNotThrow(() => validateRestorePayload(payload, { now }));
   const restored = createShadowGraph({ now });
   restored.replaceData(payload);
-  const exported = restored.exportData();
+  const exported = privilegedSnapshot(restored);
   const migratedFact = exported.facts[0];
-  assert.notEqual(migratedFact.id, 'legacy-shared');
+  assert.notEqual(migratedFact.id, fixtureIds['legacy-shared']);
   assert.equal(exported.idempotency[0].value.id, migratedFact.id);
   const factJournal = exported.journal.find((entry) => entry.entityKind === 'fact');
   assert.equal(factJournal.entityId, migratedFact.id);
@@ -1443,9 +1468,9 @@ test('hard-purge sequence evidence survives later hard and logical purges of the
   const now = () => '2026-03-01T00:00:00.000Z';
   for (const secondMode of ['hard', 'logical']) {
     const graph = createShadowGraph({ now });
-    graph.addDecision({ id: `gone-${secondMode}`, project: 'gone', title: 'Gone', chosen: 'A' });
+    captureId(`gone-${secondMode}`, graph.addDecision({ project: 'gone', title: 'Gone', chosen: 'A' }));
     graph.purgeProject('gone', { mode: 'hard' });
     graph.purgeProject('gone', { mode: secondMode });
-    assert.doesNotThrow(() => validateRestorePayload(graph.exportData(), { now }));
+    assert.doesNotThrow(() => validateRestorePayload(privilegedSnapshot(graph), { now }));
   }
 });

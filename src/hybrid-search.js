@@ -8,6 +8,26 @@ const SIGNALS = Object.freeze(['lexical', 'semantic', 'graph', 'temporal']);
 const DEFAULT_WEIGHTS = Object.freeze({ lexical: 1, semantic: 1, graph: 0.8, temporal: 0.4 });
 const RRF_K = 60;
 
+// English function words: the common stop-word list, the modals and other
+// closed-class words it leaves out, and the pieces a contraction or "e.g."
+// splits into. They say nothing of a subject, so where relevance is decided --
+// the default read's relevant block, which host delivery reads at every prompt
+// -- a record that shares only these with a query is not relevant to it
+// (`lexicalContent`). Ranking itself still uses every term. An acronym that folds
+// to one of them ("IT", "US") is dropped with it; other languages' function
+// words are not listed.
+const FUNCTION_WORDS = new Set(`a about above across after again against all along already also although am among amongst an and
+another any anybody anyone anything are around as at be because been before behind being below beside besides between beyond
+both but by can cannot could despite did do does doing don down during e each eg either else etc even ever every everybody
+everyone everything except few for from further g had has have having he hence her here hers herself him himself his how
+however i ie if in inside into is it its itself just least less let many may me might more most much must my myself neither
+no nobody none nor not nothing now of off on once only onto or other ought our ours ourselves out outside over own per quite
+rather same several shall she should since so some somebody someone something still such than that the their theirs them
+themselves then there therefore these they this those though through thus to too toward towards under unless until up upon us
+very via was we were what whatever when whenever where whereas wherever whether which whichever while who whoever whom whose
+why will with within without would yet you your yours yourself yourselves s t d ll m o re ve y ma ain aren couldn didn doesn
+hadn hasn haven isn mightn mustn needn shan shouldn wasn weren won wouldn`.split(/\s+/u));
+
 // Arabic orthographic folds. These are separate letters, not combining marks, so
 // no Unicode normalisation form unifies them.
 //
@@ -142,9 +162,13 @@ function visible(record, options) {
   return true;
 }
 
+// BM25 over every query term; `contentMatched` also names the records that
+// share at least one content word (not a function word) with the query.
 function lexicalRanking(candidates, query) {
   const queryTerms = [...new Set(tokenize(query))];
-  if (!queryTerms.length) return { list: [], raw: new Map(), terms: [] };
+  const contentTerms = queryTerms.filter((term) => !FUNCTION_WORDS.has(term));
+  const contentMatched = new Set();
+  if (!queryTerms.length) return { list: [], raw: new Map(), terms: [], contentTerms, contentMatched };
   const documents = candidates.map((record) => ({ record, tokens: tokenize(searchableText(record)) }));
   const averageLength = documents.reduce((sum, item) => sum + item.tokens.length, 0) / Math.max(documents.length, 1);
   const raw = new Map();
@@ -159,16 +183,22 @@ function lexicalRanking(candidates, query) {
       if (!frequency) continue;
       const normalization = frequency + k1 * (1 - b + b * (item.tokens.length / Math.max(averageLength, 1)));
       raw.set(item.record.id, (raw.get(item.record.id) ?? 0) + idf * ((frequency * (k1 + 1)) / normalization));
+      if (!FUNCTION_WORDS.has(term)) contentMatched.add(item.record.id);
     }
   }
   const list = [...raw.entries()].sort((left, right) => right[1] - left[1] || String(left[0]).localeCompare(String(right[0]))).map(([id]) => id);
-  return { list, raw, terms: queryTerms };
+  return { list, raw, terms: queryTerms, contentTerms, contentMatched };
 }
 
 function vectorValues(value) {
   const values = Array.isArray(value) ? value : value?.values;
   if (!Array.isArray(values) || values.length === 0 || values.some((item) => typeof item !== 'number' || !Number.isFinite(item))) return null;
   return values;
+}
+
+function carriesVector(value) {
+  const values = Array.isArray(value) ? value : value?.values;
+  return Array.isArray(values) && values.length > 0;
 }
 
 function embeddingDescriptor(value) {
@@ -251,7 +281,17 @@ function ranks(list) {
 }
 
 export function hybridSearch(snapshot, query = '', options = {}) {
-  const records = [...(snapshot.records ?? []), ...(snapshot.facts ?? [])].filter((record) => visible(record, options));
+  // A legacy fact may be stored with no kind. What the caller hands over as a
+  // fact is matched, and gated by validity, as the fact it is, and returned as
+  // it was stored.
+  const stored = new Map();
+  const facts = (snapshot.facts ?? []).map((fact) => {
+    if (fact.kind != null) return fact;
+    const ranked = { ...fact, kind: 'fact' };
+    stored.set(ranked, fact);
+    return ranked;
+  });
+  const records = [...(snapshot.records ?? []), ...facts].filter((record) => visible(record, options));
   const byId = new Map(records.map((record) => [record.id, record]));
   const lexical = lexicalRanking(records, query);
   const semantic = semanticRanking(records, options.queryEmbedding);
@@ -283,17 +323,22 @@ export function hybridSearch(snapshot, query = '', options = {}) {
         reasons.push(`${name} rank ${rank}`);
       }
     }
-    return { record, score, ranks: hitRanks, scores: rawScores, reasons };
+    return { record: stored.get(record) ?? record, score, ranks: hitRanks, scores: rawScores, reasons };
   }).filter((item) => item.record).sort((left, right) => right.score - left.score || String(left.record.id).localeCompare(String(right.record.id)));
 
   return {
     items,
     signals: {
       lexical: { available: lexical.terms.length > 0, matched: lexical.list.length, terms: lexical.terms },
-      semantic: { available: semantic.available, matched: semantic.list.length, reason: semantic.reason },
+      // How many candidates carry a stored vector, query vector or not (EVG-10);
+      // presence only, so no vector is read on a path that does not rank by one.
+      semantic: { available: semantic.available, matched: semantic.list.length, indexed: records.filter((record) => carriesVector(record.embedding)).length, reason: semantic.reason },
       graph: { available: graph.available, matched: graph.list.length, reason: graph.reason },
       temporal: { available: temporal.available, matched: temporal.list.length, reason: temporal.reason, asOf: options.asOf ?? null }
     },
-    ranking: { strategy: 'weighted_rrf', k: RRF_K, weights }
+    ranking: { strategy: 'weighted_rrf', k: RRF_K, weights },
+    // Where relevance is decided: the query's content words and the records one
+    // of them matched (recall() passes on items, signals and ranking only).
+    lexicalContent: { terms: lexical.contentTerms, matched: lexical.contentMatched }
   };
 }

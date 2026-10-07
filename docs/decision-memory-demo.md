@@ -3,8 +3,9 @@
 One worked example, run four ways. It shows the thing ShadowGraph exists for: a decision that
 carries its own rejection reasons and reopens itself when the world changes.
 
-Every command and response on this page was executed against ShadowGraph 0.40.0. Identifiers and
-timestamps will differ in your run; nothing else will.
+Every command on this page was run against `0.42.0-dev.0`, the development build on `main`, and
+every response shape and value shown matches that run. Responses marked abridged leave fields out.
+The identifiers and timestamps shown come from an earlier run; yours will differ.
 
 ## The story
 
@@ -30,7 +31,7 @@ Each command takes one JSON argument. Use the row for your shell:
 | Windows PowerShell | `shadowgraph review '{\"project\":\"checkout-service\"}'` |
 | Windows `cmd.exe` | `shadowgraph review "{\"project\":\"checkout-service\"}"` |
 
-The examples below use the bash form. All three were tested.
+The examples below use the bash form.
 
 ---
 
@@ -48,17 +49,22 @@ shadowgraph setup
 shadowgraph doctor
 ```
 
+Abridged:
+
 ```json
 {
   "ok": true,
   "command": "doctor",
-  "version": "0.40.0",
+  "version": "0.42.0-dev.0",
   "node": { "version": "24.18.0", "supported": true, "requirement": ">=20" },
-  "storage": { "type": "json", "path": "...", "initialized": true, "readable": true, "writable": true },
+  "storage": { "type": "json", "initialized": true, "readable": true, "writable": true },
   "graph": { "valid": true, "issues": 0 },
   "mcp": { "available": true, "recommendedMode": "compact", "fullMode": "Set SHADOWGRAPH_MCP_COMPACT=0 or remove it." }
 }
 ```
+
+`graph.valid` is the verdict on the whole store. `doctor` names no project, so its `graph` entry also
+carries a `scoped_coverage` limitation saying no project's own issues were listed.
 
 ### Record the decision and why the alternative lost
 
@@ -103,7 +109,22 @@ shadowgraph review '{"project":"checkout-service"}'
 ```
 
 ```json
-[]
+{
+  "items": [],
+  "completeness": {
+    "returned": 0,
+    "total": 0,
+    "omitted": 0,
+    "complete": true,
+    "losslessItems": true,
+    "scope": {
+      "project": "checkout-service",
+      "requestState": "project_selected",
+      "originPresented": false,
+      "grant": null
+    }
+  }
+}
 ```
 
 The rule is stored and the fact does not match it. This is the quiet state — no noise.
@@ -125,40 +146,55 @@ Note what is *not* in this command: the fact that changed. `review` reads stored
 shadowgraph review '{"project":"checkout-service"}'
 ```
 
+Abridged:
+
 ```json
-[
-  {
-    "decisionId": "decision_1788079304730_yjawcg",
-    "title": "Choose the datastore",
-    "reason": "deployment",
-    "alternativesToReconsider": ["PostgreSQL"]
-  }
-]
+{
+  "items": [
+    {
+      "decisionId": "decision_1788079304730_yjawcg",
+      "title": "Choose the datastore",
+      "reason": "deployment",
+      "alternativesToReconsider": ["PostgreSQL"]
+    }
+  ]
+}
 ```
+
+Each item also carries `violatedConditions`, which names the stored fact it matched as evidence, and
+the `reviewSignalId` and `reviewSignalStatus` of the signal it recorded; the result ends with a
+`completeness` block like the one above.
 
 ### Review signals persist, and can be acknowledged
 
 ```bash
-shadowgraph signals '{}'
+shadowgraph signals '{"project":"checkout-service"}'
 ```
+
+Abridged:
 
 ```json
-[
-  {
-    "id": "review_1788079327576_q1wmw5",
-    "kind": "review",
-    "decisionId": "decision_1788079304730_yjawcg",
-    "title": "Choose the datastore",
-    "reason": "deployment",
-    "alternativesToReconsider": ["PostgreSQL"],
-    "status": "open",
-    "createdAt": "2026-08-30T08:42:07.576Z"
-  }
-]
+{
+  "items": [
+    {
+      "id": "review_1788079327576_q1wmw5",
+      "kind": "review",
+      "decisionId": "decision_1788079304730_yjawcg",
+      "title": "Choose the datastore",
+      "reason": "deployment",
+      "alternativesToReconsider": ["PostgreSQL"],
+      "status": "open",
+      "createdAt": "2026-08-30T08:42:07.576Z"
+    }
+  ]
+}
 ```
 
+Signals are read one project at a time: `signals '{}'` returns no item and marks its result
+incomplete (`scoped_coverage`).
+
 ```bash
-shadowgraph ack '{"id":"review_1788079327576_q1wmw5"}'
+shadowgraph ack '{"project":"checkout-service","id":"review_1788079327576_q1wmw5"}'
 ```
 
 ```json
@@ -168,7 +204,7 @@ shadowgraph ack '{"id":"review_1788079327576_q1wmw5"}'
 ### Close the loop with an outcome
 
 ```bash
-shadowgraph outcome '{"decisionId":"decision_1788079304730_yjawcg","outcome":{"status":"mixed","lessons":["Fine for one user, wrong once reporting spans users"]}}'
+shadowgraph outcome '{"project":"checkout-service","decisionId":"decision_1788079304730_yjawcg","outcome":{"status":"mixed","lessons":["Fine for one user, wrong once reporting spans users"]}}'
 ```
 
 Outcomes are `successful`, `mixed`, `failed`, or `unknown`, and each applies one evidence-weighted
@@ -178,7 +214,7 @@ contribution to the decision's confidence history rather than overwriting a numb
 
 ## 2. MCP
 
-The same story through the stdio MCP server in compact mode, which advertises 14 workflow tools.
+The same story through the stdio MCP server in compact mode, which advertises 16 workflow tools.
 
 ```bash
 SHADOWGRAPH_MCP_COMPACT=1 shadowgraph mcp
@@ -191,25 +227,28 @@ An agent calls, in order:
 | Load context first | `shadowgraph_context` | `{"project":"checkout-service"}` |
 | Record the decision | `shadowgraph_record_decision` | project, title, chosen, confidence, alternatives with `reasonRejected` + `reopenWhen` |
 | Record the fact | `shadowgraph_record_fact` | `{"project":"checkout-service","key":"deployment","value":"single-user","sourceClass":"human_confirmed","confidence":1}` |
-| Record what failed | `shadowgraph_record_attempt` | solution, result, reason |
+| Record what failed | `shadowgraph_record_attempt` | project, solution, result, reason |
 | Later, the changed fact | `shadowgraph_record_fact` | same key, `"value":"multi-user"` |
 | Ask what to revisit | `shadowgraph_review` | `{"project":"checkout-service"}` |
 
-`shadowgraph_review` returns exactly the CLI payload:
+Every write names its project; without one it is refused (`write_scope_unresolved`).
+`shadowgraph_review` returns the same result as the CLI, abridged:
 
 ```json
-[
-  {
-    "decisionId": "decision_1788079560852_g3b79y",
-    "title": "Choose the datastore",
-    "reason": "deployment",
-    "alternativesToReconsider": ["PostgreSQL"]
-  }
-]
+{
+  "items": [
+    {
+      "decisionId": "decision_1788079560852_g3b79y",
+      "title": "Choose the datastore",
+      "reason": "deployment",
+      "alternativesToReconsider": ["PostgreSQL"]
+    }
+  ]
+}
 ```
 
 Compact mode changes only which tools are advertised. The full relational graph, memories, facts,
-alternatives, and outcomes are stored unchanged, and full mode (28 tools) exposes the rest of the
+alternatives, and outcomes are stored unchanged, and full mode (35 tools) exposes the rest of the
 surface. See [MCP compatibility](mcp-compatibility.md).
 
 A copy-ready agent policy is in [`integrations/agent-policy.md`](../integrations/agent-policy.md).
@@ -242,18 +281,22 @@ curl -s -X POST http://127.0.0.1:8787/review \
   -d '{"project":"checkout-service"}'
 ```
 
+Abridged:
+
 ```json
-[{"decisionId":"decision_1788079574685_u1fnj3","title":"Choose the datastore","reason":"deployment","alternativesToReconsider":["PostgreSQL"]}]
+{"items":[{"decisionId":"decision_1788079574685_u1fnj3","title":"Choose the datastore","reason":"deployment","alternativesToReconsider":["PostgreSQL"]}]}
 ```
 
-Signals persist and are readable separately:
+Signals persist and are readable separately, one project at a time:
 
 ```bash
-curl -s http://127.0.0.1:8787/review-signals
+curl -s 'http://127.0.0.1:8787/review-signals?project=checkout-service'
 ```
 
+Abridged:
+
 ```json
-[{"id":"review_1788079575127_sk0rtb","kind":"review","decisionId":"decision_1788079574685_u1fnj3","title":"Choose the datastore","reason":"deployment","alternativesToReconsider":["PostgreSQL"],"status":"open","createdAt":"2026-08-30T08:46:15.127Z"}]
+{"items":[{"id":"review_1788079575127_sk0rtb","kind":"review","decisionId":"decision_1788079574685_u1fnj3","title":"Choose the datastore","reason":"deployment","alternativesToReconsider":["PostgreSQL"],"status":"open","createdAt":"2026-08-30T08:46:15.127Z"}]}
 ```
 
 The server binds to `127.0.0.1` only. For shared local use set `SHADOWGRAPH_API_TOKEN` and send
@@ -269,12 +312,12 @@ reviews.
 **Process 1 — decide and persist:**
 
 ```js
-import { createStorage } from 'shadowgraph-unified-plugin/storage';
-import { createShadowGraph } from 'shadowgraph-unified-plugin';
+import { createShadowGraphServer } from 'shadowgraph-unified-plugin/server';
 
-const store = await createStorage({ type: 'json', file: './.shadowgraph/data.json' });
-const graph = createShadowGraph();
-graph.importData(await store.load());
+// Opens and loads the store; persist() saves the whole store. Nothing listens
+// until server.listen() is called. graph.exportData() is a read of one project,
+// not a store, and saving it is refused.
+const { graph, persist } = await createShadowGraphServer({ file: './.shadowgraph/data.json' });
 
 graph.addDecision({
   project: 'checkout-service',
@@ -303,8 +346,7 @@ graph.addFact({
   confidence: 1
 });
 
-await store.save(graph.exportData());
-store.close?.();
+await persist();
 ```
 
 **Process 2 — a cold start that knows nothing:**
@@ -318,8 +360,9 @@ const graph = createShadowGraph();
 graph.importData(await store.load());
 
 console.log(graph.review({ project: 'checkout-service' }));
-// [ { decisionId: 'decision_...', title: 'Choose the datastore',
-//     reason: 'deployment', alternativesToReconsider: [ 'PostgreSQL' ] } ]
+// { items: [ { decisionId: 'decision_...', title: 'Choose the datastore',
+//     reason: 'deployment', alternativesToReconsider: [ 'PostgreSQL' ], ... } ],
+//   completeness: { ... } }
 
 const priorAttempts = graph.search('SQLite file per user', { project: 'checkout-service' });
 console.log(priorAttempts.items[0].record.result);

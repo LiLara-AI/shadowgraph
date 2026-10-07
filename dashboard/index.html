@@ -20,6 +20,9 @@
   <p class="notice"><strong>Local-only:</strong> this read-only page is served by the ShadowGraph API at <code>127.0.0.1</code> and reads only that same local origin. It is not a public deployment console.</p>
   <section>
     <label>API token (optional) <input id="token" type="password" autocomplete="off" placeholder="Required only when SHADOWGRAPH_API_TOKEN is set"></label>
+    <p><label>Project <input id="project" placeholder="Explicit project scope"></label></p>
+    <p><label>Origin <input id="origin" placeholder="Explicit origin scope"></label></p>
+    <p>Choose a project or an origin for these reads. Leave both blank to use the confirmed workspace binding; an unresolved scope returns an empty view.</p>
     <button id="load">Load</button>
     <p>The token stays only in this page's memory and is <strong>not persisted</strong> to storage, cookies, or local browser storage. Closing or reloading the page clears it.</p>
   </section>
@@ -30,7 +33,10 @@
     const $ = (id) => document.getElementById(id);
     async function request(path) {
       const token = $('token').value;
-      const response = await fetch(path, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+      const scope = new URLSearchParams();
+      if ($('project').value) scope.set('project', $('project').value);
+      if ($('origin').value) scope.set('originId', $('origin').value);
+      const response = await fetch(`${path}${scope.size ? `?${scope}` : ''}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) {
         const hint = response.status === 401 ? ' Enter the SHADOWGRAPH_API_TOKEN configured for the local server.' : '';
@@ -42,7 +48,12 @@
       const [stats, signals, records] = await Promise.all([
         request('/stats'), request('/review-signals'), request('/records')
       ]);
-      $('stats').innerHTML = Object.entries(stats).map(([key, value]) => `<div class="card"><b>${key}</b><br>${value}</div>`).join('');
+      $('stats').replaceChildren(...Object.entries(stats).map(([key, value]) => {
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.textContent = `${key}: ${typeof value === 'object' ? JSON.stringify(value, null, 2) : value}`;
+        return card;
+      }));
       $('signals').textContent = JSON.stringify(signals, null, 2);
       $('records').textContent = JSON.stringify(records, null, 2);
     }

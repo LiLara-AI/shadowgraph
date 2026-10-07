@@ -8,10 +8,11 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { restoreFile } from '../src/backup.js';
 import { createShadowGraphServer } from '../src/server.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
-import { createDestinationFence } from '../src/revision-store.js';
+import { createDestinationFence, fenceLockPath } from '../src/revision-store.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const FIXED_NOW = '2026-08-27T12:00:00.000Z';
 
@@ -25,17 +26,18 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+// Administrative historical fixtures retain named identities across restore races.
 function graphPayload(id, revision = 0) {
   const graph = createShadowGraph({ now: () => FIXED_NOW });
-  graph.addDecision({ id, project: 'fifth-review', title: id, chosen: id });
-  return { ...graph.exportData(), revision };
+  graph.importData({ records: [{ kind: 'decision', id, project: 'fifth-review', title: id, chosen: id  }] });
+  return { ...privilegedSnapshot(graph), revision };
 }
 
 function writerPayload(current, id) {
   const graph = createShadowGraph({ now: () => FIXED_NOW });
   graph.importData(current);
-  graph.addDecision({ id, project: 'fifth-review', title: id, chosen: id });
-  return graph.exportData();
+  graph.importData({ records: [{ kind: 'decision', id, project: 'fifth-review', title: id, chosen: id  }] });
+  return privilegedSnapshot(graph);
 }
 
 async function settleState(promise, milliseconds = 150) {
@@ -652,9 +654,13 @@ for (const backend of ['json', 'sqlite']) {
     const pendingPayload = writerPayload(await store.load(), `${backend}-lock-writer`);
     const lockPath = `${resolve(destination)}.lock`;
     await writeFile(lockPath, 'live-owner', 'utf8');
+    // The fence names its lock beside the store's canonical path (PR-37c
+    // design §3.1, check R3-2), which a scratch root's 8.3 folder names may
+    // not be; the lock written above is the same file either way.
+    const fenceLock = await fenceLockPath(destination);
     await assert.rejects(store.save(pendingPayload), (error) => {
       assert.equal(error.code, 'storage_lock_timeout');
-      assert.equal(resolve(error.lockPath), resolve(lockPath));
+      assert.equal(resolve(error.lockPath), fenceLock);
       return true;
     });
 
@@ -884,9 +890,9 @@ test('DS-P1-003 MCP restore fences an external JSON writer in a separate server 
   seed.close();
   const replacementGraph = createShadowGraph({ now: () => FIXED_NOW });
   for (let index = 0; index < 3000; index += 1) {
-    replacementGraph.addDecision({ id: `mcp-restored-${index}`, project: 'fifth-review', title: `MCP ${index}`, chosen: `MCP ${index}` });
+    replacementGraph.addDecision({ project: 'fifth-review', title: `MCP ${index}`, chosen: `MCP ${index}` });
   }
-  await writePayload(source, { ...replacementGraph.exportData(), revision: 17 });
+  await writePayload(source, { ...privilegedSnapshot(replacementGraph), revision: 17 });
   const writerStore = createJsonFileStore(destination);
   const stalePayload = writerPayload(await writerStore.load(), 'mcp-external-writer');
   const rpc = startMcp(destination);

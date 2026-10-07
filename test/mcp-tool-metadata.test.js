@@ -23,6 +23,7 @@ import {
 } from '../src/mcp-tools.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { measureAll } from '../scripts/mcp-wire-size.mjs';
+import { privilegedIssueAccess, privilegedSnapshot } from '../src/internal/snapshot.js';
 
 // --- expected inventory ----------------------------------------------------
 const FULL_TOOL_NAMES = [
@@ -31,6 +32,7 @@ const FULL_TOOL_NAMES = [
   'shadowgraph_review',
   'shadowgraph_search',
   'shadowgraph_context',
+  'shadowgraph_review_context',
   'shadowgraph_remember',
   'shadowgraph_recall',
   'shadowgraph_record_fact',
@@ -39,6 +41,7 @@ const FULL_TOOL_NAMES = [
   'shadowgraph_update_status',
   'shadowgraph_link',
   'shadowgraph_traverse',
+  'shadowgraph_expand',
   'shadowgraph_supersede',
   'shadowgraph_redact',
   'shadowgraph_purge',
@@ -53,7 +56,12 @@ const FULL_TOOL_NAMES = [
   'shadowgraph_repair_plan',
   'shadowgraph_backup',
   'shadowgraph_restore',
-  'shadowgraph_reconsider'
+  'shadowgraph_reconsider',
+  'shadowgraph_request_wider_access',
+  'shadowgraph_revoke_grant',
+  'shadowgraph_discard_access',
+  'shadowgraph_bind',
+  'shadowgraph_attribute'
 ];
 const COMPACT_EXPECTED = [
   'shadowgraph_record_decision',
@@ -61,10 +69,16 @@ const COMPACT_EXPECTED = [
   'shadowgraph_review',
   'shadowgraph_search',
   'shadowgraph_context',
+  // Plan v1.4.4 PR-16: shadowgraph_context became the default-path read, and the
+  // evaluate-and-persist behaviour a compact client relied on moved here.
+  'shadowgraph_review_context',
   'shadowgraph_remember',
   'shadowgraph_recall',
   'shadowgraph_record_fact',
   'shadowgraph_record_outcome',
+  // Plan v1.4.4 PR-27: a line the default read delivers names shadowgraph_expand,
+  // so a compact client can call it.
+  'shadowgraph_expand',
   'shadowgraph_maintain',
   'shadowgraph_retrieve',
   'shadowgraph_validate',
@@ -78,9 +92,11 @@ const COMPACT_EXPECTED = [
 // writes but is missing here would silently stop being saved.
 const PERSISTING_EXPECTED = [
   'shadowgraph_ack_review',
+  'shadowgraph_attribute',
   'shadowgraph_backup',
+  'shadowgraph_bind',
   'shadowgraph_confidence_evidence',
-  'shadowgraph_context',
+  'shadowgraph_discard_access',
   'shadowgraph_link',
   'shadowgraph_maintain',
   'shadowgraph_purge',
@@ -90,7 +106,10 @@ const PERSISTING_EXPECTED = [
   'shadowgraph_record_fact',
   'shadowgraph_record_outcome',
   'shadowgraph_remember',
+  'shadowgraph_request_wider_access',
   'shadowgraph_review',
+  'shadowgraph_review_context',
+  'shadowgraph_revoke_grant',
   'shadowgraph_supersede',
   'shadowgraph_update_status',
   'shadowgraph_verify_fact'
@@ -101,48 +120,61 @@ const PERSISTING_EXPECTED = [
 // asserted separately because it depends on whether an embedding endpoint was
 // configured.
 //
-// Only the eleven pure reads are idempotent: every other tool commits a new
-// durable revision on each successful call, even when the domain result is a
-// no-op, and that revision is the concurrency token other writers compare.
+// Grant-capable reads declare their conditional audit write even though their
+// ordinary own-scope calls remain pure. Restore commits through its backend.
 const ANNOTATIONS_EXPECTED = {
+  shadowgraph_bind: [false, true, false, true],
+  shadowgraph_attribute: [false, false, false, false],
   shadowgraph_record_decision: [false, false, false, false],
   shadowgraph_record_attempt: [false, false, false, false],
   shadowgraph_review: [false, false, false, false],
-  shadowgraph_search: [true, false, true, false],
+  shadowgraph_search: [false, false, false, false],
   shadowgraph_context: [false, false, false, false],
+  shadowgraph_review_context: [false, false, false, false],
   shadowgraph_remember: [false, false, false, false],
-  shadowgraph_recall: [true, false, true, false],
+  shadowgraph_recall: [false, false, false, false],
   shadowgraph_record_fact: [false, false, false, false],
   shadowgraph_record_outcome: [false, false, false, false],
   shadowgraph_confidence_evidence: [false, false, false, false],
   shadowgraph_update_status: [false, false, false, false],
   shadowgraph_link: [false, false, false, false],
-  shadowgraph_traverse: [true, false, true, false],
+  shadowgraph_traverse: [false, false, false, false],
+  shadowgraph_expand: [false, false, false, false],
   shadowgraph_supersede: [false, false, false, false],
-  shadowgraph_redact: [true, false, true, false],
+  shadowgraph_redact: [false, false, false, false],
   shadowgraph_purge: [false, true, false, false],
   shadowgraph_maintain: [false, false, false, false],
-  shadowgraph_retrieve: [true, false, true, false],
-  shadowgraph_validate: [true, false, true, false],
-  shadowgraph_journal: [true, false, true, false],
-  shadowgraph_rebuild: [true, false, true, false],
-  shadowgraph_review_signals: [true, false, true, false],
+  shadowgraph_retrieve: [false, false, false, false],
+  shadowgraph_validate: [false, false, false, false],
+  shadowgraph_journal: [false, false, false, false],
+  shadowgraph_rebuild: [false, false, false, false],
+  shadowgraph_review_signals: [false, false, false, false],
   shadowgraph_purge_preview: [true, false, true, false],
   shadowgraph_ack_review: [false, true, false, false],
-  shadowgraph_repair_plan: [true, false, true, false],
+  shadowgraph_repair_plan: [false, false, false, false],
   shadowgraph_backup: [false, true, false, true],
   shadowgraph_restore: [false, true, false, true],
   shadowgraph_reconsider: [false, false, false, false],
+  shadowgraph_request_wider_access: [false, false, false, false],
+  shadowgraph_revoke_grant: [false, false, false, false],
+  shadowgraph_discard_access: [false, false, false, false],
   shadowgraph_verify_fact: [false, false, false, true]
 };
 // Overlapping tools must name the siblings a model would otherwise confuse them
 // with, so routing is decidable from the description alone.
 const ROUTING_EXPECTED = {
+  shadowgraph_bind: ['shadowgraph_attribute'],
+  shadowgraph_attribute: ['shadowgraph_bind'],
+  shadowgraph_request_wider_access: ['shadowgraph_revoke_grant'],
+  shadowgraph_revoke_grant: ['shadowgraph_request_wider_access'],
+  shadowgraph_discard_access: ['shadowgraph_request_wider_access'],
   shadowgraph_search: ['shadowgraph_retrieve', 'shadowgraph_recall', 'shadowgraph_context', 'shadowgraph_traverse'],
   shadowgraph_retrieve: ['shadowgraph_search', 'shadowgraph_recall', 'shadowgraph_traverse', 'shadowgraph_context'],
   shadowgraph_recall: ['shadowgraph_search', 'shadowgraph_retrieve', 'shadowgraph_remember'],
-  shadowgraph_context: ['shadowgraph_search', 'shadowgraph_retrieve', 'shadowgraph_recall', 'shadowgraph_review'],
+  shadowgraph_context: ['shadowgraph_search', 'shadowgraph_retrieve', 'shadowgraph_recall', 'shadowgraph_review_context'],
+  shadowgraph_review_context: ['shadowgraph_context', 'shadowgraph_review'],
   shadowgraph_traverse: ['shadowgraph_search', 'shadowgraph_recall', 'shadowgraph_retrieve'],
+  shadowgraph_expand: ['shadowgraph_context', 'shadowgraph_traverse'],
   shadowgraph_review: ['shadowgraph_review_signals', 'shadowgraph_ack_review', 'shadowgraph_maintain'],
   shadowgraph_reconsider: ['shadowgraph_review', 'shadowgraph_ack_review'],
   shadowgraph_review_signals: ['shadowgraph_review', 'shadowgraph_ack_review'],
@@ -171,11 +203,17 @@ const ROUTING_EXPECTED = {
 // Constraints that existed before descriptions were written, pinned so a
 // documentation pass cannot quietly change what a host will accept.
 const INPUT_CONSTRAINTS_EXPECTED = {
+  shadowgraph_bind: { required: ['type', 'project', 'reason'], enums: { type: ['worktree', 'shared_repository'] } },
+  shadowgraph_attribute: { required: ['targetProject', 'reason'], enums: {} },
+  shadowgraph_request_wider_access: { required: ['scope', 'surfaces', 'expiresAt', 'reason'], enums: {} },
+  shadowgraph_revoke_grant: { required: ['accessId'], enums: {} },
+  shadowgraph_discard_access: { required: ['accessId'], enums: {} },
   shadowgraph_record_decision: { required: ['title', 'chosen'], enums: {} },
   shadowgraph_record_attempt: { required: ['solution', 'result'], enums: {} },
   shadowgraph_review: { required: null, enums: {} },
   shadowgraph_search: { required: null, enums: { kind: ['decision', 'attempt'] } },
   shadowgraph_context: { required: null, enums: {} },
+  shadowgraph_review_context: { required: null, enums: {} },
   shadowgraph_remember: { required: null, enums: {} },
   shadowgraph_recall: { required: null, enums: {} },
   shadowgraph_record_fact: { required: ['key'], enums: { verificationStatus: ['unverified', 'contradicted'] } },
@@ -184,6 +222,7 @@ const INPUT_CONSTRAINTS_EXPECTED = {
   shadowgraph_update_status: { required: ['decisionId', 'status'], enums: {} },
   shadowgraph_link: { required: ['from', 'to', 'relation'], enums: {} },
   shadowgraph_traverse: { required: ['id'], enums: { direction: ['in', 'out', 'both'] } },
+  shadowgraph_expand: { required: ['recordId', 'digest'], enums: {} },
   shadowgraph_supersede: { required: ['decisionId', 'replacementId'], enums: {} },
   shadowgraph_redact: { required: null, enums: {} },
   shadowgraph_purge: { required: ['project'], enums: { mode: ['logical', 'hard'] } },
@@ -274,25 +313,25 @@ function walkNodes(node, visit, path = 'schema', depth = 0) {
 
 test('the catalog advertises exactly the documented full, compact, and verifier inventories', () => {
   assert.deepEqual(fullCatalog.map((entry) => entry.name), FULL_TOOL_NAMES);
-  assert.equal(fullCatalog.length, 28);
+  assert.equal(fullCatalog.length, 35);
   assert.deepEqual(verifierCatalog.map((entry) => entry.name), [...FULL_TOOL_NAMES, 'shadowgraph_verify_fact']);
-  assert.equal(verifierCatalog.length, 29);
+  assert.equal(verifierCatalog.length, 36);
 
   const compact = selectTools(fullCatalog, { compact: true });
   assert.deepEqual(compact.map((entry) => entry.name), COMPACT_EXPECTED);
-  assert.equal(compact.length, 14);
+  assert.equal(compact.length, 16);
   assert.deepEqual([...COMPACT_TOOL_NAMES], COMPACT_EXPECTED);
 
   // The optional verification tool is a full-mode capability only.
   const compactWithVerifier = selectTools(verifierCatalog, { compact: true });
   assert.deepEqual(compactWithVerifier.map((entry) => entry.name), COMPACT_EXPECTED);
 
-  assert.equal(new Set(verifierCatalog.map((entry) => entry.name)).size, 29);
+  assert.equal(new Set(verifierCatalog.map((entry) => entry.name)).size, 36);
   for (const entry of verifierCatalog) assert.match(entry.name, /^shadowgraph_[a-z_]+$/u);
 });
 
 test('every tool carries the four behavioural annotations its handler actually justifies', () => {
-  assert.equal(Object.keys(ANNOTATIONS_EXPECTED).length, 29);
+  assert.equal(Object.keys(ANNOTATIONS_EXPECTED).length, 36);
   for (const entry of verifierCatalog) {
     const expected = ANNOTATIONS_EXPECTED[entry.name];
     assert.ok(expected, `${entry.name} has no expected annotation row`);
@@ -306,15 +345,17 @@ test('every tool carries the four behavioural annotations its handler actually j
   }
 });
 
-test('a read-only tool never persists, and every other writing tool does except restore', () => {
+test('persistence is declared for ordinary writes and conditional grant audit writes', () => {
   const persisting = verifierCatalog.filter((entry) => entry.persists).map((entry) => entry.name).sort();
   assert.deepEqual(persisting, PERSISTING_EXPECTED);
-  assert.equal(persisting.length, 17);
+  assert.equal(persisting.length, 22);
+  const grantReads = ['shadowgraph_context', 'shadowgraph_expand', 'shadowgraph_journal', 'shadowgraph_maintain', 'shadowgraph_rebuild', 'shadowgraph_recall', 'shadowgraph_reconsider', 'shadowgraph_redact', 'shadowgraph_repair_plan', 'shadowgraph_retrieve', 'shadowgraph_review', 'shadowgraph_review_context', 'shadowgraph_review_signals', 'shadowgraph_search', 'shadowgraph_traverse', 'shadowgraph_validate'];
+  assert.deepEqual(verifierCatalog.filter((entry) => entry.persistsWithAccess).map((entry) => entry.name).sort(), grantReads);
   for (const entry of verifierCatalog) {
     // shadowgraph_restore writes, but its storage backend commits the
     // replacement itself, so src/mcp.js must not save again afterwards.
     const expected = !entry.annotations.readOnlyHint && entry.name !== 'shadowgraph_restore';
-    assert.equal(entry.persists, expected, `${entry.name} persists flag must agree with readOnlyHint`);
+    assert.equal(entry.persists || entry.persistsWithAccess === true, expected, `${entry.name} persistence flags must agree with readOnlyHint`);
     if (entry.annotations.readOnlyHint) {
       assert.equal(entry.annotations.destructiveHint, false, `${entry.name} cannot be both read-only and destructive`);
       assert.equal(entry.annotations.idempotentHint, true, `${entry.name} is read-only, so repeating it changes nothing`);
@@ -328,11 +369,11 @@ test('a read-only tool never persists, and every other writing tool does except 
 test('recall and remember declare an open world only when an embedding endpoint is configured', () => {
   const withEmbedding = buildToolCatalog({ verifier: true, embeddingConfigured: true });
   const openWorld = withEmbedding.filter((entry) => entry.annotations.openWorldHint).map((entry) => entry.name).sort();
-  assert.deepEqual(openWorld, ['shadowgraph_backup', 'shadowgraph_recall', 'shadowgraph_remember', 'shadowgraph_restore', 'shadowgraph_verify_fact']);
+  assert.deepEqual(openWorld, ['shadowgraph_backup', 'shadowgraph_bind', 'shadowgraph_recall', 'shadowgraph_remember', 'shadowgraph_restore', 'shadowgraph_verify_fact']);
 
   const withoutEmbedding = buildToolCatalog({ verifier: true, embeddingConfigured: false });
   const closedWorld = withoutEmbedding.filter((entry) => entry.annotations.openWorldHint).map((entry) => entry.name).sort();
-  assert.deepEqual(closedWorld, ['shadowgraph_backup', 'shadowgraph_restore', 'shadowgraph_verify_fact']);
+  assert.deepEqual(closedWorld, ['shadowgraph_backup', 'shadowgraph_bind', 'shadowgraph_restore', 'shadowgraph_verify_fact']);
 
   // Only the annotation moves: the advertised text stays the same either way, so
   // one description cannot contradict the other deployment.
@@ -360,9 +401,22 @@ const DESCRIPTION_CAP = 350;
 // description, itself under the per-description cap. `full` (8,861) and
 // `verifier` (9,210) both grew by the same 346 and still sit under their
 // existing budgets, so neither was moved.
+//
+// Raised again on 2026-09-28 for plan v1.4.4 PR-16, which split the default-path
+// read (shadowgraph_context) from explicit evaluate-and-persist
+// (shadowgraph_review_context, the 34th full and 15th compact tool). Measured with
+// `npm run size:mcp`: full 9,267, verifier 9,616, compact 4,186 characters. The
+// growth is the new tool's own description plus context's rewritten effects text;
+// compact still sits under its existing budget, so it was not moved.
+//
+// Raised again on 2026-09-29 for plan v1.4.4 PR-27, which adds shadowgraph_expand
+// (the 35th full and 16th compact tool) and names relevance in the context
+// description. Measured the same way: full 9,695, verifier 10,044, compact 4,614
+// characters. Full and verifier are re-set with the same ~2.5% headroom; compact
+// still sits under its budget, so it was not moved.
 const DESCRIPTION_TOTALS = {
-  full: 9100,
-  verifier: 9400,
+  full: 9900,
+  verifier: 10250,
   compact: 4750
 };
 // A tool whose result a caller could destroy something with has to say so in
@@ -374,8 +428,8 @@ const DISCLOSURE_EXPECTED = {
   shadowgraph_restore: /replace/iu,
   shadowgraph_ack_review: /overwrit/iu,
   shadowgraph_link: /duplicat/iu,
-  shadowgraph_review: /bare JSON array/u,
-  shadowgraph_review_signals: /bare JSON array/u
+  shadowgraph_review: /items, completeness/u,
+  shadowgraph_review_signals: /items, completeness/u
 };
 
 test('every description is composed, single-line, and within its budget', () => {
@@ -468,10 +522,65 @@ test('the advertised description text stays within its aggregate budget', () => 
 // which did not, and which could not be evaluated, rather than a bare due list.
 // Budgets below keep roughly 2% headroom, as before.
 const WIRE_BUDGETS = {
-  'withoutVerifier.full': { bare: 44_500, annotated: 47_500, structured: 191_000 },
-  'withoutVerifier.compact': { bare: 31_500, annotated: 33_000, structured: 126_000 },
-  'withVerifier.full': { bare: 45_500, annotated: 48_500, structured: 195_500 },
-  'withVerifier.compact': { bare: 31_500, annotated: 33_000, structured: 126_000 }
+  // PR12 adds five planned tools, grant inputs, effective grant fields and
+  // bounded read provenance. Exact measurement and transition accounting:
+  // docs/contracts/access-transports.md. These engineering wire ceilings do
+  // not change campaign, benchmark or audit-operation performance thresholds.
+  // PR13: explicit scope inputs, creation-ID refusal and truthful restore/read
+  // contracts. Measured bare/annotated/structured: full 54921/58409/239685,
+  // verifier full 56069/59662/244232, compact 34848/36331/151693.
+  // Retain ~2% headroom where needed; compact structured ceiling is unchanged.
+  // PR-16 (plan v1.4.4 §13.2): shadowgraph_context became the default-path read
+  // and shadowgraph_review_context carries evaluate-and-persist with the same
+  // working set, so that output schema is now advertised twice -- this catalog
+  // forbids $ref, so it cannot be shared on the wire, and it is not shrunk to
+  // clear a budget. Measured with `npm run size:mcp` on 2026-09-28,
+  // bare/annotated/structured: full 56294/59888/269148, verifier full
+  // 57442/61141/273695, compact 36221/37810/181156. Roughly 2% headroom.
+  // PR-23 documents an attempt's causalClaim in its output schema. Measured on
+  // 2026-09-28: full 56362/59956/271044, verifier full 57510/61209/275591,
+  // compact 36289/37878/183052; every ceiling unchanged. PR-24 rewords the
+  // result-class descriptions and counts undetermined attempts: full
+  // 56406/60000/271688, verifier full 57554/61253/276235, compact
+  // 36333/37922/183696; every ceiling unchanged.
+  // PR-26 (plan v1.4.4 §17.2) adds shadowgraph_context's relevance inputs
+  // (query, focalId, asOf, compact) and its relevant block: head, T1 line and
+  // T2 record schemas. Measured on 2026-09-29: full 57152/60746/283848,
+  // verifier full 58300/61999/288395, compact 37079/38668/195856. The ceilings
+  // this planned addition exceeds are re-set with ~2% headroom (recorded
+  // variance, PR-12/13/16 precedent); the four it leaves inside are unchanged.
+  // PR-27 adds shadowgraph_expand to both modes, with its output schema.
+  // Measured on 2026-09-29: full 58789/62489/298375, verifier full
+  // 59937/63742/302922, compact 38716/40411/210383. Every tier grew past its
+  // ceiling, and each is re-set with ~2% headroom (recorded variance).
+  // PR-28 adds semantic.indexed to the recall signals and PR-29 the relevant
+  // block's temporal evidence. Measured on 2026-09-29: full 58793/62493/301024,
+  // verifier full 59941/63746/305571, compact 38720/40415/212682; every ceiling
+  // unchanged. The PR-26 corrective rewords the relevant head's lexical signal
+  // (content words). Measured on 2026-09-30: full 58793/62493/301123, verifier
+  // full 59941/63746/305670, compact 38720/40415/212781; every ceiling unchanged.
+  // PR-36b (plan v1.4.4 §24.1, M-9) declares the capture status every
+  // completeness-bearing read carries: an optional capture block in the read
+  // coverage schema, inlined at every read's output schema since this catalog
+  // forbids $ref, and the relevance head's processing fields. Its wording was
+  // cut to the shortest meaningful first; the structure is the guarantee and is
+  // not shrunk. Measured on 2026-09-30, with the declared gaps: full
+  // 58793/62493/322851, verifier full 59941/63746/327398, compact
+  // 38720/40415/227653. The four structured ceilings (three values) are re-set
+  // with ~2% headroom (recorded variance, PR-12/13/16/26/27 precedent); the
+  // eight bare and annotated ceilings are unchanged.
+  // PR-37d (design §6.3, V-10) adds the purge's and the preview's capture
+  // counts and withheld count, and the purge's backups statement, to their
+  // output schemas (full and verifier only: neither tool is compact), and
+  // rewords the purge's effects. Measured with `npm run size:mcp` on
+  // 2026-10-02: full 58846/62546/329996, verifier full 59994/63799/334543,
+  // compact 38720/40415/230998. The two full structured ceilings are re-set
+  // with ~2% headroom (recorded variance, PR-12/13/16/26/27/36b precedent);
+  // every other ceiling is unchanged.
+  'withoutVerifier.full': { bare: 59_900, annotated: 63_700, structured: 336_600 },
+  'withoutVerifier.compact': { bare: 39_500, annotated: 41_200, structured: 232_300 },
+  'withVerifier.full': { bare: 61_100, annotated: 65_000, structured: 341_200 },
+  'withVerifier.compact': { bare: 39_500, annotated: 41_200, structured: 232_300 }
 };
 
 test('the advertised tool list stays within its wire-size budget, at every tier', () => {
@@ -494,7 +603,7 @@ test('the advertised tool list stays within its wire-size budget, at every tier'
 
 test('overlapping tools route to their siblings by name, and every named sibling exists', () => {
   const known = new Set(verifierCatalog.map((entry) => entry.name));
-  assert.equal(Object.keys(ROUTING_EXPECTED).length, 29);
+  assert.equal(Object.keys(ROUTING_EXPECTED).length, 36);
   for (const entry of verifierCatalog) {
     const siblings = ROUTING_EXPECTED[entry.name];
     assert.ok(siblings, `${entry.name} has no expected routing row`);
@@ -527,7 +636,7 @@ test('every input property, at every nesting level, carries a meaningful descrip
 });
 
 test('input schemas keep the constraints they had before descriptions were written', () => {
-  assert.equal(Object.keys(INPUT_CONSTRAINTS_EXPECTED).length, 29);
+  assert.equal(Object.keys(INPUT_CONSTRAINTS_EXPECTED).length, 36);
   for (const entry of verifierCatalog) {
     const expected = INPUT_CONSTRAINTS_EXPECTED[entry.name];
     assert.ok(expected, `${entry.name} has no expected constraint row`);
@@ -545,16 +654,16 @@ test('input schemas keep the constraints they had before descriptions were writt
   assert.equal(byName.get('shadowgraph_verify_fact').inputSchema.additionalProperties, false);
 });
 
-test('output schemas are declared for every tool that returns an object, and deliberately omitted for the two that do not', () => {
+test('output schemas are declared for every tool, including the two scope-coverage envelopes', () => {
   const withoutSchema = verifierCatalog.filter((entry) => !entry.outputSchema).map((entry) => entry.name).sort();
-  assert.deepEqual(withoutSchema, ['shadowgraph_review', 'shadowgraph_review_signals']);
+  assert.deepEqual(withoutSchema, []);
   assert.deepEqual(Object.keys(OUTPUT_SCHEMA_OMISSIONS).sort(), withoutSchema);
   for (const [name, reason] of Object.entries(OUTPUT_SCHEMA_OMISSIONS)) {
     assert.ok(reason.length >= 40, `${name} omission must be explained`);
     // The description carries the return shape when no schema can.
-    assert.match(byName.get(name).description, /bare JSON array/u);
+    assert.match(byName.get(name).description, /items, completeness/u);
   }
-  assert.equal(verifierCatalog.filter((entry) => entry.outputSchema).length, 27);
+  assert.equal(verifierCatalog.filter((entry) => entry.outputSchema).length, 36);
 });
 
 test('every output schema is portable: object-rooted, single-typed, and free of references', () => {
@@ -648,7 +757,7 @@ test('metadata tiers follow the revision the server negotiated', () => {
 
 test('projected tools and results carry exactly the members each tier defines', () => {
   const structured = byName.get('shadowgraph_validate');
-  const unstructured = byName.get('shadowgraph_review');
+  const { outputSchema: omitted, ...unstructured } = byName.get('shadowgraph_review'); // generic formatter fallback, no real tool omits it
 
   assert.deepEqual(Object.keys(projectTool(structured, METADATA_TIER.BARE)), ['name', 'description', 'inputSchema']);
   assert.deepEqual(Object.keys(projectTool(structured, METADATA_TIER.ANNOTATED)), ['name', 'description', 'inputSchema', 'annotations']);
@@ -675,52 +784,193 @@ test('projected tools and results carry exactly the members each tier defines', 
 test('output schemas accept data imported from an older storage schema', () => {
   // Over-specifying an output schema is worse than omitting one: a client that
   // validates would turn a successful read of legacy data into an exception.
+  // The same schema-3 data, optionally stored under one explicit project.
+  const legacyData = (project) => {
+    const owned = (item) => (project === undefined ? item : { ...item, project });
+    return {
+      schemaVersion: 3,
+      records: [
+        owned({
+          id: 'legacy-decision-1',
+          kind: 'decision',
+          title: 'Ship the legacy build',
+          chosen: 'ship',
+          status: 'active',
+          confidence: 0.7,
+          assumptions: ['the deployment stays single-user'],
+          evidence: ['a hallway conversation'],
+          alternatives: [{ label: 'wait', reasonRejected: 'too slow', reopenWhen: [{ key: 'deployment', value: 'multi-user' }] }]
+        }),
+        owned({ id: 'legacy-attempt-1', kind: 'attempt', solution: 'tried the old path', result: 'failed during build' })
+      ],
+      facts: [owned({ id: 'legacy-fact-1', key: 'deployment', value: 'single-user', source: 'human-confirmed', verificationStatus: 'verified' })],
+      relations: [{ id: 'legacy-relation-1', from: 'legacy-decision-1', to: 'legacy-fact-1', relation: 'depends_on' }],
+      reviewSignals: [],
+      idempotency: [],
+      events: [],
+      journal: []
+    };
+  };
   const graph = createShadowGraph({ now: () => '2026-01-01T00:00:00.000Z' });
-  graph.importData({
-    schemaVersion: 3,
-    records: [
-      {
-        id: 'legacy-decision-1',
-        kind: 'decision',
-        title: 'Ship the legacy build',
-        chosen: 'ship',
-        status: 'active',
-        confidence: 0.7,
-        assumptions: ['the deployment stays single-user'],
-        evidence: ['a hallway conversation'],
-        alternatives: [{ label: 'wait', reasonRejected: 'too slow', reopenWhen: [{ key: 'deployment', value: 'multi-user' }] }]
-      },
-      { id: 'legacy-attempt-1', kind: 'attempt', solution: 'tried the old path', result: 'failed during build' }
-    ],
-    facts: [{ id: 'legacy-fact-1', key: 'deployment', value: 'single-user', source: 'human-confirmed', verificationStatus: 'verified' }],
-    relations: [{ id: 'legacy-relation-1', from: 'legacy-decision-1', to: 'legacy-fact-1', relation: 'depends_on' }],
-    reviewSignals: [],
-    idempotency: [],
-    events: [],
-    journal: []
-  });
+  graph.importData(legacyData());
+  // The core reads return only what a selected project owns (plan v1.4.4
+  // PR-08), and legacy data stored with no project belongs to none. So they
+  // read the same legacy shapes imported under an explicit legacy project,
+  // which the import keeps (WS-11 mapping i).
+  const owned = createShadowGraph({ now: () => '2026-01-01T00:00:00.000Z' });
+  owned.importData(legacyData('legacy-app'));
+  const read = { project: 'legacy-app' };
+  const [searched, retrieved, recalled, context] = [owned.search('', read), owned.retrieve('', read), owned.recall('', read), owned.context(read)];
+  assert.deepEqual(searched.items.map((item) => item.record.id), ['legacy-attempt-1', 'legacy-decision-1'], 'the core reads do read the legacy records');
+  assert.equal(retrieved.items.some((item) => item.record.id === 'legacy-fact-1' && item.matchedBy === 'graph'), true);
+  assert.equal(recalled.items.length, 3);
+  assert.deepEqual([context.activeDecisions.length, context.failedAttempts.length], [1, 1]);
+  const traversed = owned.traverse({ id: 'legacy-decision-1', ...read });
+  assert.deepEqual(traversed.nodes.map((node) => node.id), ['legacy-decision-1', 'legacy-fact-1'], 'traverse reads the legacy records too');
 
   const checks = [
-    ['shadowgraph_search', graph.search('')],
-    ['shadowgraph_retrieve', graph.retrieve('')],
-    ['shadowgraph_recall', graph.recall('')],
-    ['shadowgraph_context', graph.context({})],
-    ['shadowgraph_traverse', graph.traverse({ id: 'legacy-decision-1' })],
+    ['shadowgraph_search', searched],
+    ['shadowgraph_retrieve', retrieved],
+    ['shadowgraph_recall', recalled],
+    ['shadowgraph_context', context],
+    ['shadowgraph_traverse', traversed],
     ['shadowgraph_journal', graph.getJournal({})],
     ['shadowgraph_rebuild', graph.rebuild()],
     ['shadowgraph_redact', graph.redact()],
     ['shadowgraph_validate', graph.validate()],
     ['shadowgraph_repair_plan', graph.repairPlan()],
     ['shadowgraph_purge_preview', graph.projectSummary('default')],
-    ['shadowgraph_maintain', graph.maintain({})]
+    ['shadowgraph_maintain', graph.maintain({})],
+    ['shadowgraph_journal', owned.getJournal(read)],
+    ['shadowgraph_rebuild', owned.rebuild(read)],
+    ['shadowgraph_redact', owned.redact(read)],
+    ['shadowgraph_validate', owned.validate(read)],
+    ['shadowgraph_repair_plan', owned.repairPlan(read)],
+    ['shadowgraph_maintain', owned.maintain(read)]
   ];
   for (const [name, value] of checks) {
     assertValid(byName.get(name).outputSchema, value, `${name} over schema-3 data`);
   }
   // The legacy verified fact is preserved rather than elevated or rejected.
-  const [fact] = graph.exportData().facts;
+  const [fact] = privilegedSnapshot(graph).facts;
   assert.equal(fact.verificationStatus, 'unverified');
   assert.equal(fact.legacyVerificationStatus, 'verified');
+});
+
+// Plan v1.4.4 PR-26: only the default read advertises the relevance inputs, and
+// every shape its relevant block takes -- lines and full records of every kind,
+// a kind-less legacy fact, a page, the fallback, a grant, no project -- matches
+// the advertised output schema.
+test('the default read advertises relevance, and every shape of its relevant block matches its schema', () => {
+  const tool = byName.get('shadowgraph_context');
+  assert.deepEqual(['query', 'focalId', 'asOf', 'compact'].map((name) => tool.inputSchema.properties[name]?.type), ['string', 'string', 'string', 'boolean']);
+  assert.equal(byName.get('shadowgraph_review_context').inputSchema.properties.query, undefined);
+  const relevantSchema = tool.outputSchema.properties.relevant;
+  assert.deepEqual(relevantSchema.required, ['scope', 'relevance', 'fallback', 'byKind', 'total', 'returned', 'omitted', 'hasMore', 'complete', 'limitSource', 'limitation', 'temporal', 'lines', 'processing', 'expansion', 'items']);
+  // PR-29: every item carries its temporal evidence.
+  assert.deepEqual(relevantSchema.properties.items.items.properties.temporalEvidence.required, ['recordedAt', 'eventTime', 'currentState']);
+  assert.ok(relevantSchema.properties.items.items.required.includes('temporalEvidence'));
+  assert.deepEqual(relevantSchema.properties.byKind.required, ['decision', 'attempt', 'memory', 'fact']);
+  assert.deepEqual(relevantSchema.properties.lines.items.required, ['recordId', 'claimClass', 'requiresExpansion']);
+  for (const field of ['polarity', 'scope', 'preconditions', 'status', 'provenance', 'boundRevision', 'decisiveOmitted', 'requiresExpansion', 'expansion']) {
+    assert.ok(relevantSchema.properties.items.items.properties.line.required.includes(field), `a line always carries ${field}`);
+  }
+  const graph = createShadowGraph({ now: () => '2026-03-01T00:00:00.000Z' });
+  graph.importData({ facts: [{ id: 'legacy-fact', key: 'region', value: 'eu', project: 'alpha', status: 'superseded', validTo: '2025-01-01T00:00:00.000Z' }] });
+  graph.addDecision({ project: 'alpha', title: 'region rollout', chosen: 'eu first', alternatives: [{ label: 'us first', reasonRejected: 'latency' }] });
+  graph.addDecision({ project: 'alpha', title: `region sizing ${'budget '.repeat(80)}`, chosen: 'fixed' });
+  graph.addFact({ project: 'alpha', key: 'region_count', value: 3 });
+  graph.remember({ project: 'alpha', memoryType: 'note', key: 'region note', text: 'regions are never cheap' });
+  graph.addAttempt({ project: 'alpha', solution: 'region failover drill', result: 'failed: dns', resultClass: 'failed', reason: 'ttl too long' });
+  graph.addDecision({ project: 'beta', title: 'region beta', chosen: 'b' });
+  const grant = privilegedIssueAccess(graph, { type: 'grant', scope: { projects: ['beta'] }, surfaces: ['cli'], expiresAt: '2099-01-01T00:00:00.000Z', reason: 'schema fixture' }).entry;
+  const reads = [
+    { project: 'alpha', query: 'region' },
+    { project: 'alpha', query: 'region', compact: true },
+    { project: 'alpha', query: 'region', compact: true, asOf: '2024-06-01T00:00:00.000Z' },
+    { project: 'alpha', query: 'region', compact: true, limit: 1 },
+    { project: 'alpha', query: 'zebra', compact: true },
+    { project: 'alpha', accessId: grant.accessId, query: 'region', compact: true },
+    { query: 'region' },
+    { project: 'alpha', focalId: 'missing' }
+  ];
+  const shapes = new Set();
+  for (const [index, input] of reads.entries()) {
+    const value = JSON.parse(JSON.stringify(graph.context(input)));
+    assertValid(tool.outputSchema, value, `shadowgraph_context relevance read ${index}`);
+    for (const item of value.relevant.items) shapes.add(`${item.tier}:${String(item.tier === 'T1' ? item.line.kind : item.record.kind)}`);
+  }
+  for (const shape of ['T1:decision', 'T1:attempt', 'T1:memory', 'T1:fact', 'T1:null', 'T2:decision', 'T2:attempt']) assert.ok(shapes.has(shape), `no relevance read delivered ${shape}`);
+});
+
+// Plan v1.4.4 PR-27: every shape an expansion takes -- current with resolved,
+// unresolved and uninvestigated counterparts, revision_changed, purged,
+// unavailable, under a grant -- matches the advertised output schema.
+test('every shape of an expansion matches its advertised schema', () => {
+  const schema = byName.get('shadowgraph_expand').outputSchema;
+  const input = byName.get('shadowgraph_expand').inputSchema;
+  assert.deepEqual([input.required, input.properties.maxExpansions.minimum, input.properties.maxExpansions.maximum], [['recordId', 'digest'], 0, 50]);
+  assert.deepEqual(schema.required, ['recordId', 'status', 'revisionChanged', 'boundRevision', 'currentRevision', 'record', 'investigation', 'completeness']);
+  assert.deepEqual(schema.properties.status.enum, ['current', 'revision_changed', 'purged', 'unavailable']);
+  assert.equal(input.properties.maxExpansions.type, 'integer');
+  const investigation = schema.properties.investigation.anyOf.find((branch) => branch.type === 'object');
+  assert.deepEqual(investigation.required, ['budget', 'total', 'omitted', 'unreachableLinks', 'pairs', 'limitation']);
+  assert.deepEqual(investigation.properties.budget.properties.outcome.enum, ['within_budget', 'exhausted']);
+  const pairSchema = investigation.properties.pairs.items;
+  assert.deepEqual(pairSchema.properties.basis.items.enum, ['explicit_supersession', 'different_times', 'same_value']);
+  assert.deepEqual(pairSchema.properties.state.enum, ['resolved', 'unresolved', 'uninvestigated']);
+  assert.deepEqual(schema.properties.completeness.properties.limitation.properties.reason.enum, ['purged', 'unavailable', 'store_unavailable']);
+  let clock = '2026-03-01T00:00:00.000Z';
+  const graph = createShadowGraph({ now: () => clock });
+  graph.importData({ facts: [
+    { id: 'fact-eu', kind: 'fact', project: 'alpha', key: 'region', value: 'eu', status: 'active', validFrom: '2025-01-01T00:00:00.000Z' },
+    { id: 'fact-us', kind: 'fact', project: 'alpha', key: 'region', value: 'us', status: 'active', validFrom: '2025-01-01T00:00:00.000Z' }
+  ] });
+  // Distinct stored event times resolve the pair (PR-29: without them only the recording order would).
+  graph.addFact({ project: 'alpha', key: 'latency', value: '5ms', validFrom: '2025-01-01T00:00:00.000Z' });
+  graph.addFact({ project: 'alpha', key: 'latency', value: '30ms', validFrom: '2025-06-01T00:00:00.000Z' });
+  const decision = graph.addDecision({ project: 'alpha', title: 'region rollout', chosen: 'eu first' });
+  graph.addDecision({ project: 'beta', title: 'region beta', chosen: 'b' });
+  const grant = privilegedIssueAccess(graph, { type: 'grant', scope: { projects: ['beta'] }, surfaces: ['cli'], expiresAt: '2099-01-01T00:00:00.000Z', reason: 'schema fixture' }).entry;
+  const handles = (input) => graph.context({ query: 'region latency', compact: true, ...input }).relevant.items
+    .map(({ line }) => { const { operation, scope, ...handle } = line.expansion; return { ...handle, project: scope.project, ...(scope.grantId ? { grantId: scope.grantId } : {}) }; });
+  const own = handles({ project: 'alpha' });
+  const reads = [...own, ...own.map((handle) => ({ ...handle, maxExpansions: 0 })), ...handles({ project: 'alpha', accessId: grant.accessId }), { ...own[0], recordId: 'decision:missing' }];
+  graph.setOutcome(decision.id, { status: 'failed', sourceClass: 'tool_observed' }, { project: 'alpha' });
+  reads.push(own.find((handle) => handle.recordId === decision.id));
+  const statuses = new Set();
+  const states = new Set();
+  for (const [index, input] of reads.entries()) {
+    const value = JSON.parse(JSON.stringify(graph.expand(input)));
+    assertValid(schema, value, `shadowgraph_expand read ${index}`);
+    statuses.add(value.status);
+    for (const pair of value.investigation?.pairs ?? []) states.add(pair.state);
+  }
+  clock = '2026-03-02T00:00:00.000Z';
+  graph.purgeProject('alpha', { mode: 'logical' });
+  const purged = JSON.parse(JSON.stringify(graph.expand(own[0])));
+  assertValid(schema, purged, 'shadowgraph_expand after a purge');
+  statuses.add(purged.status);
+  assert.deepEqual([...statuses].sort(), ['current', 'purged', 'revision_changed', 'unavailable']);
+  assert.deepEqual([...states].sort(), ['resolved', 'uninvestigated', 'unresolved']);
+});
+
+// Plan v1.4.4 PR-19: belowConfidenceThreshold reports a decision of any status,
+// so it carries what a legacy or lenient writer stored -- no status, a status
+// this build does not recognise, a non-numeric confidence -- as a copy.
+test('the default read accepts below-threshold decisions a legacy writer left', () => {
+  const graph = createShadowGraph({ now: () => '2026-01-01T00:00:00.000Z' });
+  graph.importData({ records: [
+    { id: 'no-status', kind: 'decision', project: 'legacy-app', title: 'No status', chosen: 'a', confidence: 0.1 },
+    { id: 'null-status', kind: 'decision', project: 'legacy-app', title: 'Null status', chosen: 'a', status: null, confidence: 0.1 },
+    { id: 'odd-status', kind: 'decision', project: 'legacy-app', title: 'Odd status', chosen: 'a', status: { v: 'x' }, confidence: 0.1 },
+    { id: 'text-confidence', kind: 'decision', project: 'legacy-app', title: 'Text confidence', chosen: 'a', status: 'proposed', confidence: { current: '0.3' } }
+  ] });
+  const view = graph.context({ project: 'legacy-app' });
+  assert.deepEqual(view.belowConfidenceThreshold.map((item) => item.decisionId).sort(), ['no-status', 'null-status', 'odd-status', 'text-confidence']);
+  assertValid(byName.get('shadowgraph_context').outputSchema, JSON.parse(JSON.stringify(view)), 'shadowgraph_context over lenient legacy data');
+  view.belowConfidenceThreshold.find((item) => item.decisionId === 'odd-status').status.v = 'changed';
+  assert.deepEqual(privilegedSnapshot(graph).records.find((record) => record.id === 'odd-status').status, { v: 'x' }, 'a returned value is a copy');
 });
 
 test('the subset validator this file relies on actually rejects bad data', () => {

@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createShadowGraphServer } from '../src/server.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 function client(file, env = {}) {
   const child = spawn(process.execPath, ['src/mcp.js'], {
@@ -63,7 +64,8 @@ const decision = {
 
 test('compact mode advertises reconsideration and answers with a verdict and its evidence', async (t) => {
   const directory = await scratchDirectory(t, 'reconsider-compact-');
-  const rpc = client(join(directory, 'data.json'), { SHADOWGRAPH_MCP_COMPACT: '1' });
+  const file = join(directory, 'data.json');
+  const rpc = client(file, { SHADOWGRAPH_MCP_COMPACT: '1' });
   t.after(() => rpc.stop());
 
   const listed = await rpc.send('tools/list', {});
@@ -71,7 +73,7 @@ test('compact mode advertises reconsideration and answers with a verdict and its
   assert.ok(names.includes('shadowgraph_reconsider'), 'a compact client can reach reconsideration');
   assert.ok(names.includes('shadowgraph_ack_review'), 'and can still close what it raises');
 
-  await rpc.call('shadowgraph_record_decision', decision);
+  const recorded = await rpc.call('shadowgraph_record_decision', decision);
 
   // No evidence yet: uncertainty, never a clean pass.
   const unevaluated = await rpc.call('shadowgraph_reconsider', { project: 'p' });
@@ -85,14 +87,21 @@ test('compact mode advertises reconsideration and answers with a verdict and its
   assert.equal(recommended.verdict, 'review_recommended');
   assert.equal(recommended.evaluationCompleteness, 'complete');
   assert.equal(recommended.decisions[0].triggeredRules[0].key, 'replicaLagMs');
+  assert.equal(recommended.decisions[0].decisionId, recorded.id);
 
   // The signal it raises is nameable and closable from compact alone.
   const signalId = recommended.decisions[0].reviewSignalId;
   assert.ok(signalId, 'the entry names the signal a client must acknowledge');
-  const acknowledged = await rpc.call('shadowgraph_ack_review', { id: signalId });
+  const acknowledged = await rpc.call('shadowgraph_ack_review', { project: 'p', id: signalId });
+  assert.equal(acknowledged.id, signalId);
   assert.equal(acknowledged.status, 'acknowledged');
+  const exited = new Promise((resolve) => rpc.child.once('exit', resolve));
+  rpc.stop();
+  await exited;
 
-  const settled = await rpc.call('shadowgraph_reconsider', { project: 'p' });
+  const reopened = client(file, { SHADOWGRAPH_MCP_COMPACT: '1' });
+  t.after(() => reopened.stop());
+  const settled = await reopened.call('shadowgraph_reconsider', { project: 'p' });
   assert.equal(settled.decisions[0].reviewSignalId, signalId, 'a repeat raises no second signal');
   assert.equal(settled.decisions[0].reviewSignalStatus, 'acknowledged');
 });
@@ -138,7 +147,7 @@ test('an MCP write carries the runtime session, and a caller-supplied sessionId 
   // every write in one process shares it.
   const graph = createShadowGraph();
   graph.importData(JSON.parse(await readFile(file, 'utf8')));
-  const stored = graph.exportData().facts;
+  const stored = privilegedSnapshot(graph).facts;
   const first = stored.find((item) => item.id === fact.id);
   const other = stored.find((item) => item.id === second.id);
 

@@ -42,7 +42,7 @@ Rules that the server enforces, so do not attempt to work around them:
 1. Record the outcome.
 2. Update the decision status.
 3. Call `shadowgraph_maintain` when facts or time-sensitive conditions changed.
-4. Review and acknowledge open review signals; do not silently continue from a stale decision.
+4. Review and acknowledge open review signals; do not silently continue from a stale decision. `shadowgraph_context` is a read and persists no signal: call `shadowgraph_review_context` or `shadowgraph_review` to raise the signal ids that `shadowgraph_ack_review` takes.
 
 ## Privacy and integrity
 

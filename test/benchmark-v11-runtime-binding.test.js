@@ -517,6 +517,7 @@ test('the acceptance binding reserves against its persistent campaign before dis
 
 test('the scored binding records a scored campaign session before dispatch', async (t) => {
   const h = await harness(t);
+  h.injections.now = () => '2026-09-12T00:00:00.000Z';
   h.input.definition = { ...h.input.definition, scored: true, finalProfile: true };
   h.input.campaign = { root: path.join(h.directory, 'scored-campaign'), policy: {
     campaignId: 'shadowgraph-v11-final-program', implementationLockHash: IMPLEMENTATION_LOCK_HASH,

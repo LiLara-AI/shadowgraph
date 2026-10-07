@@ -13,6 +13,9 @@ import { generateKeyPairSync } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createShadowGraph } from '../src/shadowgraph.js';
+import { privilegedRecordCapture, privilegedRecordTranscript, privilegedSnapshot } from '../src/internal/snapshot.js';
 import { createFactAttestation } from '../src/verification.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
@@ -28,8 +31,7 @@ const WIRE_BY_NEGOTIATED = {
   '2025-06-18': { toolKeys: ['name', 'description', 'inputSchema', 'annotations', 'outputSchema'], structured: true },
   '2025-11-25': { toolKeys: ['name', 'description', 'inputSchema', 'annotations', 'outputSchema'], structured: true }
 };
-const OMITTED_OUTPUT_SCHEMA = ['shadowgraph_review', 'shadowgraph_review_signals'];
-
+const OMITTED_OUTPUT_SCHEMA = [];
 function modernParams(values = {}) {
   return {
     ...values,
@@ -100,8 +102,8 @@ async function terminateChild(child, { gracefulMs = GRACEFUL_STOP_MS, forcedMs =
 
 async function startMcp(t, extraEnv = {}) {
   const directory = await scratchDirectory(t, 'shadowgraph-conformance-');
-  const child = spawn(process.execPath, ['src/mcp.js'], {
-    cwd: process.cwd(),
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../src/mcp.js', import.meta.url))], {
+    cwd: directory,
     env: { ...process.env, SHADOWGRAPH_FILE: join(directory, 'data.json'), ...extraEnv },
     stdio: ['pipe', 'pipe', 'inherit']
   });
@@ -224,7 +226,7 @@ test('every advertised output schema accepts the result its own tool really retu
   const rpc = await startMcp(t);
   await rpc.initialize('2025-06-18');
   const listed = await rpc.listTools({});
-  assert.equal(listed.tools.length, 28);
+  assert.equal(listed.tools.length, 35);
 
   const schemas = new Map();
   for (const tool of listed.tools) {
@@ -237,7 +239,7 @@ test('every advertised output schema accepts the result its own tool really retu
     assert.equal(tool.outputSchema.type, 'object');
     schemas.set(tool.name, tool.outputSchema);
   }
-  assert.equal(schemas.size, 26);
+  assert.equal(schemas.size, 35);
 
   const exercised = new Set();
   const callTool = conformingCaller(rpc, schemas, exercised);
@@ -265,21 +267,30 @@ test('every advertised output schema accepts the result its own tool really retu
   await callTool('shadowgraph_record_fact', { project, key: 'deployment', value: 'multi-user', sourceClass: 'tool_observed', confidence: 0.9 });
 
   const due = await callTool('shadowgraph_review', { project });
-  assert.equal(Array.isArray(due), true, 'shadowgraph_review returns a bare array');
-  assert.equal(due.some((item) => item.decisionId === decisionA.id), true);
+  assert.equal(Array.isArray(due.items), true, 'review carries an items envelope');
+  assert.equal(due.completeness.scope.requestState, 'project_selected');
+  assert.equal(due.items.some((item) => item.decisionId === decisionA.id), true);
 
   // The same evaluation, read as a reconsideration. Its result is object
-  // rooted, so unlike shadowgraph_review it can and does carry an output schema.
+  // rooted, with its own evaluation verdict as well as scope coverage.
   const reconsidered = await callTool('shadowgraph_reconsider', { project });
   assert.equal(reconsidered.verdict, 'review_recommended');
   assert.equal(reconsidered.evaluationCompleteness, 'complete');
   assert.equal(reconsidered.decisions.some((item) => item.decisionId === decisionA.id), true);
 
   const signals = await callTool('shadowgraph_review_signals', { project, status: 'open' });
-  assert.equal(Array.isArray(signals), true, 'shadowgraph_review_signals returns a bare array');
-  assert.ok(signals.length >= 1);
-  const acknowledged = await callTool('shadowgraph_ack_review', { id: signals[0].id });
-  assert.equal(acknowledged.status, 'acknowledged');
+  assert.equal(Array.isArray(signals.items), true, 'signal history carries an items envelope');
+  assert.equal(signals.completeness.scope.requestState, 'project_selected');
+  assert.ok(signals.items.length >= 1);
+  const lifecycleWrites = [
+    ['shadowgraph_ack_review', { project, id: signals.items[0].id }],
+    ['shadowgraph_update_status', { project, decisionId: decisionB.id, status: 'planned' }],
+    ['shadowgraph_record_outcome', { project, decisionId: decisionB.id, outcome: { status: 'successful', sourceClass: 'tool_observed', lessons: ['migration first'] } }]
+  ];
+  for (const [name, args] of lifecycleWrites) {
+    const result = await callTool(name, args);
+    assert.ok(result, `${name} returns its schema-validated successful result`);
+  }
 
   await callTool('shadowgraph_record_attempt', { project, solution: 'rolled out to everyone', result: 'failed during rollout', reason: 'no migration path', environment: 'node 24' });
 
@@ -302,24 +313,38 @@ test('every advertised output schema accepts the result its own tool really retu
   await callTool('shadowgraph_recall', { project, scope: { userId: 'alice' }, query: 'hotels', preferRecent: true, limit: 5 });
   await callTool('shadowgraph_search', { project, query: 'rollout' });
   await callTool('shadowgraph_context', { project });
-  await callTool('shadowgraph_link', { from: decisionA.id, to: decisionB.id, relation: 'informs' });
-  await callTool('shadowgraph_traverse', { id: decisionA.id, depth: 2, direction: 'both' });
+  // PR-26: the relevant block as lines, as full records, and as the declared fallback.
+  const lines = await callTool('shadowgraph_context', { project, query: 'rollout', compact: true });
+  assert.equal(lines.relevant.items[0].tier, 'T1');
+  assert.equal((await callTool('shadowgraph_context', { project, query: 'rollout' })).relevant.items[0].tier, 'T2');
+  assert.equal((await callTool('shadowgraph_context', { project, query: 'zebra' })).relevant.fallback.used, true);
+  // PR-27: a line's handle expands to its record; an unknown id is an explicit limitation.
+  const { operation, scope, ...handle } = lines.relevant.items[0].line.expansion;
+  const expansion = Object.fromEntries(Object.entries({ ...handle, project: scope.project }).filter(([, value]) => value !== null));
+  assert.equal((await callTool('shadowgraph_expand', expansion)).status, 'current');
+  assert.equal((await callTool('shadowgraph_expand', { ...expansion, recordId: 'decision:missing' })).status, 'unavailable');
+  // Every handle field and the budget pass through the transport.
+  const unbudgeted = await callTool('shadowgraph_expand', { ...expansion, maxExpansions: 0 });
+  assert.equal(unbudgeted.investigation.budget.maxExpansions, 0);
+  assert.equal((await callTool('shadowgraph_expand', { ...expansion, derivationVersion: 't1-line-v0' })).status, 'revision_changed');
+  assert.equal((await callTool('shadowgraph_expand', { ...expansion, asOf: '2020-01-01T00:00:00.000Z' })).status, 'revision_changed');
+  await callTool('shadowgraph_review_context', { project });
+  await callTool('shadowgraph_link', { project, from: decisionA.id, to: decisionB.id, relation: 'informs' });
+  await callTool('shadowgraph_traverse', { project, id: decisionA.id, depth: 2, direction: 'both' });
   // Retrieved after the link so a one-hop graph neighbour is really present.
   const retrieved = await callTool('shadowgraph_retrieve', { project, query: '' });
   assert.equal(retrieved.completeness.includesGraphNeighbours, true);
 
-  await callTool('shadowgraph_update_status', { decisionId: decisionB.id, status: 'planned' });
-  await callTool('shadowgraph_record_outcome', { decisionId: decisionB.id, outcome: { status: 'successful', sourceClass: 'tool_observed', lessons: ['migration first'] } });
-  await callTool('shadowgraph_confidence_evidence', { decisionId: decisionB.id, reason: 'a second successful rollout', key: 'evidence-1', supports: true });
-  const superseded = await callTool('shadowgraph_supersede', { decisionId: decisionA.id, replacementId: decisionB.id });
+  await callTool('shadowgraph_confidence_evidence', { project, decisionId: decisionB.id, reason: 'a second successful rollout', key: 'evidence-1', supports: true });
+  const superseded = await callTool('shadowgraph_supersede', { project, decisionId: decisionA.id, replacementId: decisionB.id });
   assert.equal(superseded.previous.status, 'superseded');
 
-  await callTool('shadowgraph_maintain', {});
+  await callTool('shadowgraph_maintain', { project });
   const validated = await callTool('shadowgraph_validate', {});
   assert.equal(validated.valid, true, `store must stay valid: ${JSON.stringify(validated.issues)}`);
   const journal = await callTool('shadowgraph_journal', { project, limit: 5 });
   assert.equal(journal.page.hasMore, true, 'a small limit must report that more entries exist');
-  await callTool('shadowgraph_rebuild', {});
+  await callTool('shadowgraph_rebuild', { project });
   await callTool('shadowgraph_purge_preview', { project });
   await callTool('shadowgraph_repair_plan', {});
   await callTool('shadowgraph_redact', { project });
@@ -331,18 +356,73 @@ test('every advertised output schema accepts the result its own tool really retu
   assert.equal(restored.source, destination);
   const purged = await callTool('shadowgraph_purge', { project, mode: 'logical' });
   assert.equal(purged.mode, 'logical');
+  assert.equal(purged.backups, 'Earlier backups still contain the purged material.');
+  const proposal = await callTool('shadowgraph_request_wider_access', { scope: { projects: ['other'] }, surfaces: ['mcp'], expiresAt: '2099-01-01T00:00:00.000Z', reason: 'synthetic schema conformance' });
+  await callTool('shadowgraph_revoke_grant', { accessId: proposal.accessId });
+  const discarded = await callTool('shadowgraph_request_wider_access', { scope: { projects: ['other'] }, surfaces: ['mcp'], expiresAt: '2099-01-01T00:00:00.000Z', reason: 'synthetic discard conformance' });
+  await callTool('shadowgraph_discard_access', { accessId: discarded.accessId });
+  const material = await callTool('shadowgraph_record_decision', { project, title: 'attribution schema probe', chosen: 'kept' });
+  await callTool('shadowgraph_attribute', { ids: [material.id], targetProject: 'reassigned', reason: 'explicit synthetic attribution' });
+  await callTool('shadowgraph_bind', { type: 'worktree', project, reason: 'explicit synthetic mapping' });
 
   // Nothing may be left untested: a tool that advertises a schema but is never
   // exercised here is an unverified promise.
   const advertised = listed.tools.map((tool) => tool.name);
   const missing = advertised.filter((name) => !exercised.has(name));
-  assert.deepEqual(missing, [], `these advertised tools were never exercised: ${missing.join(', ')}`);
+  assert.deepEqual(missing.sort(), [], `these advertised tools were never exercised: ${missing.join(', ')}`);
+});
+
+// The capture status (M-9, PR-36b) rides on every scoped completeness of a
+// capture-bearing store, so each tool carrying one must still meet its own
+// advertised output schema: items waiting, a store limit binding now, and a
+// gap of every kind.
+test('the capture status of a capture-bearing store meets every advertised output schema', async (t) => {
+  const seed = await scratchDirectory(t, 'shadowgraph-conformance-capture-');
+  const file = join(seed, 'data.json');
+  const project = 'conformance';
+  const graph = createShadowGraph();
+  const decision = graph.addDecision({ project, title: 'Adopt redis cache', chosen: 'redis' });
+  graph.link({ from: decision.id, to: graph.addDecision({ project, title: 'Adopt sqs queue', chosen: 'sqs' }).id, relation: 'related_to', project });
+  const WIDE = { maxStoreBytes: 2 ** 40, maxQueueDepth: 2 ** 30, maxItemBytes: 2 ** 40, maxItemsPerSession: 2 ** 30 };
+  let texts = 0;
+  const capture = (fields = {}, limits = {}) => privilegedRecordCapture(graph, {
+    project, originId: 'origin-a', text: `material ${texts += 1}`, admission: { limits: { ...WIDE, ...limits }, storeBytes: 0 }, ...fields,
+    source: { event: 'UserPromptSubmit', sessionId: 's-1', ...fields.source }
+  });
+  capture();
+  capture();
+  capture({}, { maxItemsPerSession: 2 });
+  capture({ source: { sessionId: 's-2' } }, { maxStoreBytes: 1 });
+  capture({ source: { sessionId: 's-2' } });
+  capture({ project: 'elsewhere', source: { sessionId: 's-3' } });
+  capture({ source: { sessionId: 's-3' } });
+  capture({ source: { sessionId: 's-4' } }, { maxQueueDepth: 4 });
+  // The transcript cursor's reasons (PR-36): a rewritten transcript, then the session leaving its project.
+  const cursor = (fields) => privilegedRecordTranscript(graph, { originId: 'origin-a', sessionId: 's-1', project, activatedAt: '2026-01-01T00:00:00.000Z', trigger: null, triggerItemId: null, admission: { limits: WIDE, storeBytes: 0 }, ...fields });
+  cursor({ transcript: { ref: 'r-1', missing: true } });
+  cursor({ transcript: { ref: 'r-2', size: () => 0, read: () => Buffer.alloc(0) } });
+  cursor({ project: 'elsewhere', transcript: null });
+  await writeFile(file, JSON.stringify(privilegedSnapshot(graph)));
+  const rpc = await startMcp(t, { SHADOWGRAPH_FILE: file });
+  await rpc.initialize('2025-06-18');
+  const schemas = new Map((await rpc.listTools({})).tools.map((tool) => [tool.name, tool.outputSchema]));
+  const callTool = conformingCaller(rpc, schemas, new Set());
+  const searched = await callTool('shadowgraph_search', { project, query: '' });
+  assert.deepEqual([searched.completeness.capture.pending, searched.completeness.capture.limited.map((entry) => entry.limit), searched.completeness.capture.gaps.map((entry) => entry.reason)],
+    [3, ['maxQueueDepth'], ['maxStoreBytes', 'maxItemsPerSession', 'session_in_another_project', 'session_left_project', 'transcript_rewritten']], 'the seed declares every kind');
+  for (const [name, args] of [
+    ['shadowgraph_retrieve', { project, query: 'redis' }], ['shadowgraph_recall', { project, query: 'redis' }],
+    ['shadowgraph_context', { project }], ['shadowgraph_context', { project, query: 'redis' }], ['shadowgraph_context', { project, query: 'redis', compact: true }],
+    ['shadowgraph_review', { project }], ['shadowgraph_review_signals', { project }], ['shadowgraph_reconsider', { project }], ['shadowgraph_maintain', { project }],
+    ['shadowgraph_traverse', { project, id: decision.id }], ['shadowgraph_journal', { project }], ['shadowgraph_rebuild', { project }], ['shadowgraph_validate', { project }],
+    ['shadowgraph_redact', { project }], ['shadowgraph_review_context', { project }], ['shadowgraph_repair_plan', { project }]
+  ]) assert.match(JSON.stringify(await callTool(name, args)), /"capture":\{"pending":3,/u, `${name} ${JSON.stringify(args)} carries the block`);
 });
 
 test('a legacy tool-execution failure stays a protocol error and carries no structured content', async (t) => {
   const rpc = await startMcp(t);
   await rpc.initialize('2025-11-25');
-  const failed = await rpc.call('tools/call', { name: 'shadowgraph_update_status', arguments: { decisionId: 'missing', status: 'planned' } });
+  const failed = await rpc.call('tools/call', { name: 'shadowgraph_confidence_evidence', arguments: { project: 'conformance', decisionId: 'missing', reason: 'r', key: 'k' } });
   assert.equal(failed.result, undefined);
   assert.equal(failed.error.code, -32000);
   assert.match(failed.error.message, /Decision not found/u);
@@ -362,7 +442,7 @@ test('the verifier build advertises and satisfies the verification tool contract
   const rpc = await startMcp(t, { SHADOWGRAPH_VERIFIER_CONFIG: configPath });
   await rpc.initialize('2025-11-25');
   const listed = await rpc.listTools({});
-  assert.equal(listed.tools.length, 29);
+  assert.equal(listed.tools.length, 36);
   const verifyTool = listed.tools.find((tool) => tool.name === 'shadowgraph_verify_fact');
   assert.ok(verifyTool, 'the verification tool must be advertised when a verifier is configured');
   assert.deepEqual(verifyTool.annotations, { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true });
@@ -380,10 +460,10 @@ test('the verifier build advertises and satisfies the verification tool contract
     privateKey: keys.privateKey
   })), 'utf8');
 
-  const verified = await callTool('shadowgraph_verify_fact', { factId: fact.id, evidencePath });
+  const verified = await callTool('shadowgraph_verify_fact', { project: 'app', factId: fact.id, evidencePath });
   assert.equal(verified.operation, 'VERIFIED');
   assert.equal(verified.fact.verificationStatus, 'verified');
-  const repeated = await callTool('shadowgraph_verify_fact', { factId: fact.id, evidencePath });
+  const repeated = await callTool('shadowgraph_verify_fact', { project: 'app', factId: fact.id, evidencePath });
   assert.equal(repeated.operation, 'NOOP');
 });
 
@@ -409,18 +489,18 @@ test('initialize negotiates a revision, and the wire shape follows the one it RE
     const wire = WIRE_BY_NEGOTIATED[negotiated];
     assert.ok(wire, `no expectation recorded for negotiated revision ${negotiated}`);
     const listed = await rpc.listTools({});
-    assert.equal(listed.tools.length, 28, `requested ${requested}`);
+    assert.equal(listed.tools.length, 35, `requested ${requested}`);
     const validateTool = listed.tools.find((tool) => tool.name === 'shadowgraph_validate');
     assert.deepEqual(Object.keys(validateTool), wire.toolKeys, `negotiated ${negotiated} tool members`);
-    // A tool that declares no output schema never gains that member, at any tier.
+    // The review envelope now participates in the same negotiated schema tier.
     const reviewTool = listed.tools.find((tool) => tool.name === 'shadowgraph_review');
     assert.deepEqual(
       Object.keys(reviewTool),
-      wire.toolKeys.filter((key) => key !== 'outputSchema'),
-      `negotiated ${negotiated} members of a tool with no output schema`
+      wire.toolKeys,
+      `negotiated ${negotiated} members of the review envelope`
     );
     if (wire.toolKeys.includes('annotations')) {
-      assert.deepEqual(validateTool.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
+      assert.deepEqual(validateTool.annotations, { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false });
     }
     const called = await rpc.call('tools/call', { name: 'shadowgraph_validate', arguments: {} });
     assert.deepEqual(
@@ -430,7 +510,11 @@ test('initialize negotiates a revision, and the wire shape follows the one it RE
     );
     assert.equal(Object.hasOwn(called.result, 'resultType'), false, 'a handshake result never gains modern members');
     const reviewed = await rpc.call('tools/call', { name: 'shadowgraph_review', arguments: {} });
-    assert.deepEqual(Object.keys(reviewed.result), ['content'], 'a bare-array tool never emits structured content');
+    assert.deepEqual(Object.keys(reviewed.result), wire.structured ? ['content', 'structuredContent'] : ['content']);
+    const envelope = JSON.parse(reviewed.result.content[0].text);
+    assert.equal(envelope.completeness.complete, false);
+    assert.equal(envelope.completeness.limitation.code, 'scoped_coverage');
+    if (wire.structured) assert.deepEqual(reviewed.result.structuredContent, envelope);
   }
 });
 
@@ -478,7 +562,7 @@ test('a later initialize renegotiates, in both directions', async (t) => {
 });
 
 test('a session that never initializes keeps the pre-2025 wire shape, in full and compact mode', async (t) => {
-  for (const [mode, expectedCount] of [['0', 28], ['1', 14]]) {
+  for (const [mode, expectedCount] of [['0', 35], ['1', 16]]) {
     const rpc = await startMcp(t, { SHADOWGRAPH_MCP_COMPACT: mode });
     const listed = await rpc.listTools({});
     assert.equal(listed.tools.length, expectedCount, `compact=${mode}`);
@@ -493,7 +577,7 @@ test('a session that never initializes keeps the pre-2025 wire shape, in full an
 test('modern requests receive the full metadata regardless of any handshake', async (t) => {
   const rpc = await startMcp(t);
   const listed = await rpc.call('tools/list', modernParams());
-  assert.equal(listed.result.tools.length, 28);
+  assert.equal(listed.result.tools.length, 35);
   assert.equal(listed.result.resultType, 'complete');
   const validateTool = listed.result.tools.find((tool) => tool.name === 'shadowgraph_validate');
   assert.deepEqual(Object.keys(validateTool), ['name', 'description', 'inputSchema', 'annotations', 'outputSchema']);

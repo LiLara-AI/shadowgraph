@@ -25,11 +25,11 @@ function toolFixture(name, { outputSchema = true } = {}) {
     ...(outputSchema ? { outputSchema: { type: 'object' } } : {})
   };
 }
-// 28 tools, two of which legitimately carry no output schema.
+// 35 tools, each with an object-rooted output schema.
 const TOOLS = [
-  toolFixture('shadowgraph_review', { outputSchema: false }),
-  toolFixture('shadowgraph_review_signals', { outputSchema: false }),
-  ...Array.from({ length: 26 }, (_, index) => toolFixture(`shadowgraph_tool_${index}`))
+  toolFixture('shadowgraph_review'),
+  toolFixture('shadowgraph_review_signals'),
+  ...Array.from({ length: 33 }, (_, index) => toolFixture(`shadowgraph_tool_${index}`))
 ];
 
 function recordOf({ requested = '2025-11-25', negotiated = '2025-11-25', tools = TOOLS, initializes = 1, listings = 1 } = {}) {
@@ -111,13 +111,13 @@ test('the handshake assertion accepts the pinned exchange and rejects every way 
 
 test('the tool assertion compares what the scanner received against what the server wrote', () => {
   const record = recordOf();
-  assert.equal(assertTools(TOOLS, record), 26, 'twenty-six of the twenty-eight declare an output schema');
+  assert.equal(assertTools(TOOLS, record), 35, 'every tool declares an object output schema');
 
   // Key order may differ across the proxy's schema rebuild; values may not.
   const reordered = TOOLS.map((tool) => Object.fromEntries(Object.entries(tool).reverse()));
-  assert.equal(assertTools(reordered, record), 26);
+  assert.equal(assertTools(reordered, record), 35);
 
-  assert.throws(() => assertTools(TOOLS.slice(1), record), /received 27 tools/u);
+  assert.throws(() => assertTools(TOOLS.slice(1), record), /received 34 tools/u);
   assert.throws(() => assertTools(TOOLS, recordOf({ listings: 2 })), /sent 2 tools\/list requests/u);
 
   const dropped = TOOLS.map((tool, index) => (index === 5 ? { ...tool, annotations: undefined } : tool));
@@ -126,8 +126,8 @@ test('the tool assertion compares what the scanner received against what the ser
   const unschematised = TOOLS.map((tool, index) => (index === 6 ? { ...tool, outputSchema: undefined } : tool));
   assert.throws(() => assertTools(unschematised, recordOf({ tools: unschematised })), /without an object-rooted output schema/u);
 
-  const overSchematised = TOOLS.map((tool) => (tool.name === 'shadowgraph_review' ? { ...tool, outputSchema: { type: 'object' } } : tool));
-  assert.throws(() => assertTools(overSchematised, recordOf({ tools: overSchematised })), /bare array reached the scanner with an output schema/u);
+  const missingReviewSchema = TOOLS.map((tool) => (tool.name === 'shadowgraph_review' ? { ...tool, outputSchema: undefined } : tool));
+  assert.throws(() => assertTools(missingReviewSchema, recordOf({ tools: missingReviewSchema })), /without an object-rooted output schema/u);
 
   // The proxy dropping or rewriting a member in transit.
   const mutated = TOOLS.map((tool, index) => (index === 3 ? { ...tool, description: 'changed in transit' } : tool));

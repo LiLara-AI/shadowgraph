@@ -142,7 +142,7 @@ function requestFor(operation, overrides = {}) {
   return createAdapterRequest({ operation, correlation, namespace, payload });
 }
 
-test('MCP schemas expose optional non-empty explicit ids for v1.1 records', async (t) => {
+test('MCP creation schemas omit caller-selected entity ids', async (t) => {
   const directory = await scratchDirectory(t, 'shadowgraph-v11-schema-');
   const responses = await runMcp({
     file: path.join(directory, 'state.json'),
@@ -156,21 +156,17 @@ test('MCP schemas expose optional non-empty explicit ids for v1.1 records', asyn
   const decision = tools.find((tool) => tool.name === 'shadowgraph_record_decision').inputSchema;
   const attempt = tools.find((tool) => tool.name === 'shadowgraph_record_attempt').inputSchema;
 
-  for (const schema of [
-    decision.properties.id,
-    decision.properties.alternatives.items.properties.id,
-    attempt.properties.id
-  ]) {
-    assert.equal(schema.type, 'string');
-    assert.equal(schema.minLength, 1);
-    assert.match(schema.description, /\S/, 'the Glama-facing schema keeps a meaningful parameter description');
-  }
+  for (const properties of [
+    decision.properties,
+    decision.properties.alternatives.items.properties,
+    attempt.properties
+  ]) assert.equal(Object.hasOwn(properties, 'id'), false);
   assert.equal(decision.required.includes('id'), false);
   assert.equal(attempt.required.includes('id'), false);
 });
 
 for (const storage of ['json', 'sqlite']) {
-  test(`explicit decision, alternative, and attempt ids survive ${storage} MCP restart`, async (t) => {
+  test(`generated decision, alternative, and attempt ids survive ${storage} MCP restart`, async (t) => {
     if (storage === 'sqlite' && !(await getRuntimeCapabilities()).nodeSqlite.available) {
       t.skip((await getRuntimeCapabilities()).nodeSqlite.reason);
       return;
@@ -184,23 +180,23 @@ for (const storage of ['json', 'sqlite']) {
         initialize(),
         { jsonrpc: '2.0', method: 'notifications/initialized', params: {} },
         toolCall(2, 'shadowgraph_record_decision', {
-          id: 'harness-decision-id',
           title: 'scenario-one',
           chosen: 'safe-choice',
           project: 'primary-project',
-          alternatives: [{ id: 'harness-alternative-id', label: 'other-choice' }]
+          alternatives: [{ label: 'other-choice' }]
         }),
         toolCall(3, 'shadowgraph_record_attempt', {
-          id: 'harness-attempt-id',
           solution: 'unsafe-choice',
           result: 'failed',
           project: 'primary-project'
         })
       ]
     });
-    assert.equal(toolPayload(first.find((response) => response.id === 2)).id, 'harness-decision-id');
-    assert.equal(toolPayload(first.find((response) => response.id === 2)).alternatives[0].id, 'harness-alternative-id');
-    assert.equal(toolPayload(first.find((response) => response.id === 3)).id, 'harness-attempt-id');
+    const decision = toolPayload(first.find((response) => response.id === 2));
+    const attempt = toolPayload(first.find((response) => response.id === 3));
+    const ids = [decision.id, decision.alternatives[0].id, attempt.id];
+    for (const id of ids) assert.equal(typeof id === 'string' && id.length > 0, true);
+    assert.equal(new Set(ids).size, 3);
 
     const restarted = await runMcp({
       file,
@@ -214,9 +210,9 @@ for (const storage of ['json', 'sqlite']) {
     });
     const decisions = toolPayload(restarted.find((response) => response.id === 2)).items;
     const attempts = toolPayload(restarted.find((response) => response.id === 3)).items;
-    assert.equal(decisions[0].record.id, 'harness-decision-id');
-    assert.equal(decisions[0].record.alternatives[0].id, 'harness-alternative-id');
-    assert.equal(attempts[0].record.id, 'harness-attempt-id');
+    assert.equal(decisions[0].record.id, decision.id);
+    assert.equal(decisions[0].record.alternatives[0].id, decision.alternatives[0].id);
+    assert.equal(attempts[0].record.id, attempt.id);
   });
 }
 
@@ -233,8 +229,8 @@ test('node adapter host negotiates legacy MCP and enforces exact full and compac
     storage: 'json',
     compact: true
   }, async ({ tools }) => tools.map(({ name }) => name));
-  assert.equal(full.length, 28);
-  assert.equal(compact.length, 14);
+  assert.equal(full.length, 35);
+  assert.equal(compact.length, 16);
   assert.equal(full.includes('shadowgraph_verify_fact'), false);
   assert.equal(compact.includes('shadowgraph_verify_fact'), false);
 });
@@ -387,8 +383,8 @@ function alternateReference(request, namespace) {
   }, namespace);
 }
 
-for (const backend of ['json', 'sqlite']) {
-  test(`ShadowGraph ${backend} adapter uses one opaque leaf and verifies fresh native persistence and isolation`, async (t) => {
+for (const [backend, mode] of [['json', 'full'], ['json', 'compact'], ['sqlite', 'full'], ['sqlite', 'compact']]) {
+  test(`ShadowGraph ${backend} ${mode} adapter uses one opaque leaf and verifies fresh native persistence and isolation`, async (t) => {
     if (backend === 'sqlite' && !(await getRuntimeCapabilities()).nodeSqlite.available) {
       t.skip((await getRuntimeCapabilities()).nodeSqlite.reason);
       return;
@@ -398,16 +394,17 @@ for (const backend of ['json', 'sqlite']) {
     const { createStorage } = await import('../src/storage.js');
     const directory = await scratchDirectory(t, `shadowgraph-v11-adapter-${backend}-`);
     const stateRoot = path.join(directory, 'owned-state');
-    const adapter = createShadowGraphAdapter({ stateRoot, backend, mode: 'full', timeoutMs: 10_000 });
+    const adapter = createShadowGraphAdapter({ stateRoot, backend, mode, timeoutMs: 10_000 });
+    const modeRequest = (operation, overrides = {}) => requestFor(operation, { armId: `shadowgraph-${mode}`, ...overrides });
 
-    const reset = requestFor('reset', { phase: 'SETUP' });
+    const reset = modeRequest('reset', { phase: 'SETUP' });
     const resetResponse = await adapter.execute(reset, {});
     validateAdapterResponse({ request: reset, response: resetResponse });
     assert.equal(resetResponse.status, 'SUCCEEDED');
     assert.equal(resetResponse.storage.bytes, 0);
     assert.deepEqual(resetResponse.operations, Object.fromEntries(OPERATION_FIELDS.map((field) => [field, 0])));
 
-    const emptyRetrieve = requestFor('retrieve', { phase: 'A' });
+    const emptyRetrieve = modeRequest('retrieve', { phase: 'A' });
     const emptyResponse = await adapter.execute(emptyRetrieve, {});
     assert.equal(emptyResponse.status, 'SUCCEEDED');
     assert.deepEqual(emptyResponse.result.nativeContext, []);
@@ -421,7 +418,7 @@ for (const backend of ['json', 'sqlite']) {
         recalledAlternativeIds: ['remembered-alternative-a', 'remembered-alternative-b']
       })
     };
-    const persist = requestFor('persist', { phase: 'A', record: decisionRecord });
+    const persist = modeRequest('persist', { phase: 'A', record: decisionRecord });
     const persistResponse = await adapter.execute(persist, {});
     validateAdapterResponse({ request: persist, response: persistResponse });
     assert.equal(persistResponse.status, 'SUCCEEDED');
@@ -429,14 +426,19 @@ for (const backend of ['json', 'sqlite']) {
     assert.equal(persistResponse.operations.mcpToolCalls, 1);
     assert.ok(persistResponse.storage.bytes > 0);
 
-    const restartedRetrieve = await adapter.execute(emptyRetrieve, {});
+    const restartedAdapter = createShadowGraphAdapter({ stateRoot, backend, mode, timeoutMs: 10_000 });
+    const restartedRetrieve = await restartedAdapter.execute(emptyRetrieve, {});
+    const nativeDecisionId = restartedRetrieve.result.nativeContext[0].nativeEntityId;
+    assert.equal(typeof nativeDecisionId, 'string');
+    assert.notEqual(nativeDecisionId, decisionRecord.id);
     assert.deepEqual(restartedRetrieve.result.nativeContext, [{
+      nativeEntityId: nativeDecisionId,
       id: decisionRecord.id,
       type: decisionRecord.type,
       content: decisionRecord.content
     }]);
 
-    const verify = requestFor('verify', { phase: 'A', record: decisionRecord });
+    const verify = modeRequest('verify', { phase: 'A', record: decisionRecord });
     const verifyResponse = await adapter.execute(verify, {});
     validateAdapterResponse({ request: verify, response: verifyResponse });
     assert.equal(verifyResponse.status, 'SUCCEEDED');
@@ -458,15 +460,18 @@ for (const backend of ['json', 'sqlite']) {
         reason: 'The unsafe approach failed deterministically.'
       }
     };
-    const persistAttempt = requestFor('persist', { phase: 'B', record: attemptRecord });
+    const persistAttempt = modeRequest('persist', { phase: 'B', record: attemptRecord });
     const attemptResponse = await adapter.execute(persistAttempt, {});
     assert.equal(attemptResponse.status, 'SUCCEEDED');
-    const retrieveAttempts = requestFor('retrieve', { phase: 'B' });
+    const retrieveAttempts = modeRequest('retrieve', { phase: 'B' });
     const attemptContext = await adapter.execute(retrieveAttempts, {});
-    assert.deepEqual(attemptContext.result.nativeContext.find(({ id }) => id === attemptRecord.id), attemptRecord);
+    const retrievedAttempt = attemptContext.result.nativeContext.find(({ id }) => id === attemptRecord.id);
+    assert.equal(typeof retrievedAttempt.nativeEntityId, 'string');
+    assert.notEqual(retrievedAttempt.nativeEntityId, attemptRecord.id);
+    assert.deepEqual(retrievedAttempt, { ...attemptRecord, nativeEntityId: retrievedAttempt.nativeEntityId });
 
     const alternateNamespace = { projectId: 'alternate-project', userId: null };
-    const alternateRetrieve = requestFor('retrieve', {
+    const alternateRetrieve = modeRequest('retrieve', {
       phase: 'ISOLATION_PROJECT',
       namespace: alternateNamespace
     });
@@ -479,18 +484,18 @@ for (const backend of ['json', 'sqlite']) {
       type: 'decision',
       content: decisionContent({ choiceId: 'outer-decision-isolation' })
     };
-    const persistIsolation = requestFor('persist', {
+    const persistIsolation = modeRequest('persist', {
       phase: 'ISOLATION_PROJECT',
       namespace: { projectId: 'primary-project', userId: null },
       record: isolationRecord
     });
     assert.equal((await adapter.execute(persistIsolation, {})).status, 'SUCCEEDED');
-    const isolationVerifyBase = requestFor('verify', {
+    const isolationVerifyBase = modeRequest('verify', {
       phase: 'ISOLATION_PROJECT',
       namespace: { projectId: 'primary-project', userId: null },
       record: isolationRecord
     });
-    const isolationVerify = requestFor('verify', {
+    const isolationVerify = modeRequest('verify', {
       phase: 'ISOLATION_PROJECT',
       namespace: { projectId: 'primary-project', userId: null },
       record: isolationRecord,
@@ -526,12 +531,17 @@ for (const backend of ['json', 'sqlite']) {
     const store = await createStorage({ file: paths.file, type: backend });
     const direct = await store.load();
     await store.close();
-    const nativeDecision = direct.records.find(({ id }) => id === decisionRecord.id);
+    const nativeDecision = direct.records.find(({ id }) => id === nativeDecisionId);
     assert.ok(nativeDecision);
-    assert.deepEqual(
-      nativeDecision.alternatives.map(({ id }) => id),
-      [`${decisionRecord.id}:alternative:0`, `${decisionRecord.id}:alternative:1`]
-    );
+    const alternativeIds = nativeDecision.alternatives.map(({ id }) => id);
+    assert.equal(alternativeIds.length, 2);
+    for (const id of alternativeIds) {
+      assert.equal(typeof id === 'string' && id.length > 0, true);
+      assert.equal(id.startsWith(`${decisionRecord.id}:alternative:`), false);
+    }
+    assert.equal(new Set([nativeDecisionId, retrievedAttempt.nativeEntityId, ...alternativeIds]).size, 4);
+    assert.ok(nativeDecision.goal.startsWith('shadowgraph-benchmark-record:v2:'));
+    assert.deepEqual(JSON.parse(Buffer.from(nativeDecision.goal.split(':').at(-1), 'base64url')), decisionRecord);
     assert.equal(direct.records.some(({ project }) => project === alternateNamespace.projectId), false);
 
     const finalReset = await adapter.execute(reset, {});
@@ -1092,7 +1102,9 @@ test('successful persist response followed by nonzero exit poisons and blocks du
       if (request.params.name === 'shadowgraph_record_decision') {
         appendFileSync(${JSON.stringify(callsFile)}, 'persist\\n');
         const result = { content: [{ type: 'text', text: JSON.stringify({
-          id: request.params.arguments.id,
+          ...request.params.arguments,
+          id: 'native-post-response-id',
+          alternatives: request.params.arguments.alternatives.map((alternative, index) => ({ ...alternative, id: 'native-alternative-' + index })),
           kind: 'decision'
         }) }] };
         process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\\n', () => process.exit(9));
@@ -1469,4 +1481,129 @@ test('an in-memory poison latch blocks reuse when both durable marker writes fai
   const afterSuccessfulReset = await adapter.execute(persist, {});
   assert.equal(afterSuccessfulReset.status, 'FAILED');
   assert.equal((await readFile(callsFile, 'utf8')).trim().split('\n').length, 2);
+});
+
+for (const backend of ['json', 'sqlite']) {
+  test(`ShadowGraph ${backend} validates persisted logical identity, legacy decoding, and clone isolation`, async (t) => {
+    if (backend === 'sqlite' && !(await getRuntimeCapabilities()).nodeSqlite.available) return t.skip('SQLite unavailable');
+    const { createShadowGraphAdapter } = await import('../benchmark/adapters/shadowgraph.mjs');
+    const { statePaths } = await import('../benchmark/lib/node-adapter-host.mjs');
+    const { canonicalJson } = await import('../benchmark/lib/v11-contract.mjs');
+    const directory = await scratchDirectory(t, `shadowgraph-v11-identity-${backend}-`);
+    const stateRoot = path.join(directory, 'state');
+    const adapter = createShadowGraphAdapter({ stateRoot, backend, mode: 'full', timeoutMs: 10_000 });
+    const reset = requestFor('reset');
+    await adapter.execute(reset, {});
+    const paths = await statePaths({ stateRoot, backend, request: reset });
+    const record = { id: 'logical-only-in-native-text', type: 'decision', content: decisionContent() };
+    const encoded = (version, value) => `shadowgraph-benchmark-record:${version}:${Buffer.from(canonicalJson(value)).toString('base64url')}`;
+    async function nativeWrite(goal, project = 'primary-project') {
+      const responses = await runMcp({ file: paths.file, storage: backend, requests: [
+        initialize(), toolCall(2, 'shadowgraph_record_decision', { title: 'scenario-one', chosen: 'safe-choice', project, goal })
+      ] });
+      const result = toolPayload(responses.find(({ id }) => id === 2));
+      assert.equal(typeof result.id, 'string');
+      return result;
+    }
+    const native = await nativeWrite(encoded('v2', record));
+    assert.notEqual(native.id, record.id);
+    const retrieved = await adapter.execute(requestFor('retrieve'), {});
+    assert.equal(retrieved.status, 'SUCCEEDED');
+    assert.deepEqual(retrieved.result.nativeContext, [{ ...record, nativeEntityId: native.id }]);
+    assert.equal((await adapter.execute(requestFor('verify', { record }), {})).status, 'SUCCEEDED');
+    const wrongContent = { ...record, content: decisionContent({ recommendation: 'Different content.' }) };
+    const wrongHash = await adapter.execute(requestFor('verify', { record: wrongContent }), {});
+    assert.equal(wrongHash.status, 'FAILED');
+    assert.equal(wrongHash.result.persistenceEvidence.observedContentSha256, recordContentSha256(record.content));
+    const missing = await adapter.execute(requestFor('verify', { record: { ...record, id: 'missing-logical-id' } }), {});
+    assert.equal(missing.status, 'FAILED');
+    assert.deepEqual(missing.result.persistenceEvidence.matchedRecordIds, []);
+
+    for (const [index, cloneRecord, idCount, contentCount] of [
+      [0, record, 1, 1], [1, { ...record, id: 'different-logical-id' }, 0, 1], [2, wrongContent, 1, 0]
+    ]) {
+      const alternateNamespace = { projectId: `alternate-project-${index}`, userId: null };
+      const alternateNative = await nativeWrite(encoded('v2', cloneRecord), alternateNamespace.projectId);
+      assert.notEqual(alternateNative.id, native.id);
+      const verify = requestFor('verify', { record });
+      const cloneRequest = requestFor('verify', { record, payload: {
+        alternateNamespace, alternateNamespaceRef: alternateReference(verify, alternateNamespace),
+        expectedAbsentRecord: verify.payload.expectedRecord
+      } });
+      const clone = await adapter.execute(cloneRequest, {});
+      validateAdapterResponse({ request: cloneRequest, response: clone });
+      assert.equal(clone.status, 'FAILED');
+      assert.equal(clone.result.isolationEvidence.matchingRecordIdCount, idCount);
+      assert.equal(clone.result.isolationEvidence.matchingContentCount, contentCount);
+    }
+
+    await nativeWrite(encoded('v2', record));
+    const duplicate = await adapter.execute(requestFor('verify', { record }), {});
+    validateAdapterResponse({ request: requestFor('verify', { record }), response: duplicate });
+    assert.equal(duplicate.status, 'FAILED');
+    assert.equal(duplicate.result.persistenceEvidence.verified, false);
+    const duplicateRetrieve = await adapter.execute(requestFor('retrieve'), {});
+    assert.equal(duplicateRetrieve.status, 'FAILED');
+    assert.equal(duplicateRetrieve.failure.cause, 'CONTRACT_FAILURE');
+
+    await adapter.execute(reset, {});
+    const legacy = await nativeWrite(encoded('v1', record.content));
+    const legacyRecord = { ...record, id: legacy.id };
+    assert.deepEqual((await adapter.execute(requestFor('retrieve'), {})).result.nativeContext,
+      [{ ...legacyRecord, nativeEntityId: legacy.id }]);
+    assert.equal((await adapter.execute(requestFor('verify', { record: legacyRecord }), {})).status, 'SUCCEEDED');
+
+    for (const invalid of [
+      { ...record, id: '' }, { ...record, type: 'failed_attempt' },
+      { ...record, nativeEntityId: 'forged' }, { ...record, content: null }
+    ]) {
+      await adapter.execute(reset, {});
+      await nativeWrite(encoded('v2', invalid));
+      const response = await adapter.execute(requestFor('retrieve'), {});
+      assert.equal(response.status, 'FAILED');
+      assert.equal(response.failure.cause, 'CONTRACT_FAILURE');
+    }
+  });
+}
+
+test('persist refuses ambiguous native identity and content receipts without retry', async (t) => {
+  const { createShadowGraphAdapter } = await import('../benchmark/adapters/shadowgraph.mjs');
+  const { COMPACT_TOOL_NAMES, statePaths } = await import('../benchmark/lib/node-adapter-host.mjs');
+  const directory = await scratchDirectory(t, 'shadowgraph-v11-native-receipt-');
+  for (const fault of ['missing-id', 'duplicate-alternative-id', 'changed-content', 'wrong-project']) {
+    const stateRoot = path.join(directory, fault);
+    const callsFile = path.join(directory, `${fault}-calls.txt`);
+    const entryPath = await writeMcpFixture(directory, fault, fixtureServerSource(COMPACT_TOOL_NAMES, `
+      appendFileSync(${JSON.stringify(callsFile)}, 'persist\\n');
+      const args = request.params.arguments;
+      if (Object.hasOwn(args, 'id') || args.alternatives.some((alternative) => Object.hasOwn(alternative, 'id'))) {
+        throw new Error('Caller-selected creation id');
+      }
+      const record = { ...args, kind: 'decision', id: 'native-generated-id',
+        alternatives: args.alternatives.map((alternative, index) => ({ ...alternative, id: 'native-alt-' + index })) };
+      const fault = ${JSON.stringify(fault)};
+      if (fault === 'missing-id') delete record.id;
+      if (fault === 'duplicate-alternative-id') record.alternatives[0].id = record.id;
+      if (fault === 'changed-content') {
+        const logical = JSON.parse(Buffer.from(record.goal.split(':').at(-1), 'base64url'));
+        logical.content.recommendation = 'Changed after commit';
+        record.goal = 'shadowgraph-benchmark-record:v2:' + Buffer.from(JSON.stringify(logical)).toString('base64url');
+      }
+      if (fault === 'wrong-project') record.project = 'another-project';
+      send(request.id, { content: [{ type: 'text', text: JSON.stringify(record) }] });
+    `, `import { appendFileSync } from 'node:fs';`));
+    const adapter = createShadowGraphAdapter({ stateRoot, backend: 'json', mode: 'compact', mcpEntry: entryPath, timeoutMs: 2_000 });
+    const reset = requestFor('reset', { armId: 'shadowgraph-compact' });
+    assert.equal((await adapter.execute(reset, {})).status, 'SUCCEEDED');
+    const request = requestFor('persist', { armId: 'shadowgraph-compact' });
+    const response = await adapter.execute(request, {});
+    assert.equal(response.status, 'FAILED', fault);
+    assert.equal(response.failure.cause, 'CONTRACT_FAILURE', fault);
+    assert.equal(response.operations.memoryWriteOperations, 1);
+    assert.equal(response.operations.mcpToolCalls, 1);
+    const paths = await statePaths({ stateRoot, backend: 'json', request: reset });
+    assert.equal((await lstat(paths.poison)).isFile(), true, fault);
+    assert.equal((await adapter.execute(request, {})).status, 'FAILED');
+    assert.equal((await readFile(callsFile, 'utf8')).trim().split('\n').length, 1);
+  }
 });

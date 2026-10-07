@@ -1,5 +1,10 @@
 # ShadowGraph 0.41.0 — Technical Preview release notes
 
+> **Historical (v0.41.0).** This document describes the 0.41.0 Technical Preview. On `main`,
+> `github:LiLara-AI/shadowgraph` installs the `0.42.0-dev.0` development build; to install 0.41.0,
+> use `github:LiLara-AI/shadowgraph#v0.41.0`. See
+> [Moving between 0.41.0 and `main`](README.md#moving-between-0410-and-main).
+
 > Technical Preview / Early Access only — not Beta, not stable. Install from GitHub. The package
 > remains `private: true` and is **not published to npm**. A Git tag `v0.41.0` and a GitHub Release
 > for this version are maintainer-authorized; npm publication is **not** authorized and has not

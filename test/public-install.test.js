@@ -47,13 +47,13 @@ test('CLI setup initializes a clean store and doctor reports actionable health',
     next: 'Run `shadowgraph doctor`, then `shadowgraph remember <JSON>`.'
   });
   const payload = JSON.parse(await readFile(file, 'utf8'));
-  assert.equal(payload.schemaVersion, 5);
+  assert.equal(payload.schemaVersion, 7, 'a new store is written at the schema-7 writer version');
   assert.equal(payload.revision, 1);
 
   const doctor = JSON.parse((await runCli(['doctor'], env)).stdout);
   assert.equal(doctor.ok, true);
   assert.equal(doctor.command, 'doctor');
-  assert.match(doctor.version, /^0\.41\.0$/);
+  assert.match(doctor.version, /^0\.42\.0-dev\.0$/);
   assert.equal(doctor.node.supported, true);
   assert.deepEqual(doctor.storage, { type: 'json', path: resolve(file), initialized: true, readable: true, writable: true });
   assert.equal(doctor.graph.valid, true);
@@ -90,7 +90,7 @@ test('CLI mcp launches the compact stdio server used by client configurations', 
   t.after(() => child.kill());
   const response = readOneResponse(child);
   child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' })}\n`);
-  assert.equal((await response).result.tools.length, 14);
+  assert.equal((await response).result.tools.length, 16);
 });
 
 test('dashboard is served locally, explains token handling, and does not bypass API auth', async (t) => {

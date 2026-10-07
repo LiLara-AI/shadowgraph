@@ -9,13 +9,14 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { privilegedRebuild, privilegedSnapshot } from '../src/internal/snapshot.js';
 
 const NOW = '2026-08-28T00:00:00.000Z';
 const LATER = '2026-08-29T00:00:00.000Z';
 const FAULT = 'injected transaction fault';
 
 function exportBytes(graph) {
-  return JSON.stringify(graph.exportData());
+  return JSON.stringify(privilegedSnapshot(graph));
 }
 
 function controlledClock(value = NOW) {
@@ -39,11 +40,11 @@ function graphWithClock(options = {}) {
 }
 
 function decisionInput(id, extra = {}) {
-  return { id, project: 'transaction', title: id, chosen: 'A', ...extra };
+  return { project: 'transaction', title: id, chosen: 'A', ...extra };
 }
 
 function memoryInput(id, key, text, extra = {}) {
-  return { id, project: 'transaction', scope: {}, memoryType: 'note', key, text, ...extra };
+  return { project: 'transaction', scope: {}, memoryType: 'note', key, text, ...extra };
 }
 
 function projectionFromLive(data) {
@@ -58,8 +59,8 @@ function projectionFromLive(data) {
 }
 
 function assertRebuildParity(graph, label) {
-  const live = graph.exportData();
-  const rebuilt = graph.rebuild();
+  const live = privilegedSnapshot(graph);
+  const rebuilt = privilegedRebuild(graph);
   assert.equal(rebuilt.rebuildable, true, `${label}: journal remains rebuildable`);
   assert.deepEqual(projectionFromLive(rebuilt.projection), projectionFromLive(live), `${label}: rebuilt projection matches live state`);
 }
@@ -68,7 +69,7 @@ function importDeltaScenario() {
   const { graph, clock } = graphWithClock();
   const decision = graph.addDecision(decisionInput('transaction-import-decision', { title: 'old' }));
   const source = createShadowGraph({ now: () => NOW });
-  const fact = source.addFact({ id: 'transaction-import-fact', project: 'transaction', key: 'imported', value: true });
+  const fact = source.addFact({ project: 'transaction', key: 'imported', value: true });
   clock.arm();
   return {
     graph,
@@ -87,7 +88,7 @@ const CLOCK_MUTATOR_CASES = [
     build() {
       const { graph, clock } = graphWithClock();
       clock.arm();
-      return { graph, clock, invoke: () => graph.addDecision(decisionInput('transaction-decision', { alternatives: [{ id: 'transaction-decision-alt', label: 'B' }], idempotencyKey: 'decision-retry' })) };
+      return { graph, clock, invoke: () => graph.addDecision(decisionInput('transaction-decision', { alternatives: [{ label: 'B' }], idempotencyKey: 'decision-retry' })) };
     }
   },
   {
@@ -95,7 +96,7 @@ const CLOCK_MUTATOR_CASES = [
     build() {
       const { graph, clock } = graphWithClock();
       clock.arm();
-      return { graph, clock, invoke: () => graph.addAttempt({ id: 'transaction-attempt', project: 'transaction', solution: 'try', result: 'result', idempotencyKey: 'attempt-retry' }) };
+      return { graph, clock, invoke: () => graph.addAttempt({ project: 'transaction', solution: 'try', result: 'result', idempotencyKey: 'attempt-retry' }) };
     }
   },
   {
@@ -118,8 +119,8 @@ const CLOCK_MUTATOR_CASES = [
         graph,
         clock,
         invoke: () => graph.applyMemoryPlan({ project: 'transaction', scope: {}, operations: [
-          { action: 'ADD', id: 'transaction-plan-add', memoryType: 'note', key: 'plan-add', text: 'add' },
-          { action: 'UPDATE', id: 'transaction-plan-new', memoryType: 'note', key: 'plan-update', text: 'new' },
+          { action: 'ADD', memoryType: 'note', key: 'plan-add', text: 'add' },
+          { action: 'UPDATE', memoryType: 'note', key: 'plan-update', text: 'new' },
           { action: 'DELETE', memoryType: 'note', key: 'plan-delete' },
           { action: 'NOOP', memoryType: 'note', key: 'plan-noop' }
         ] })
@@ -130,9 +131,9 @@ const CLOCK_MUTATOR_CASES = [
     name: 'addFact multi-entry supersession',
     build() {
       const { graph, clock } = graphWithClock();
-      graph.addFact({ id: 'transaction-fact-old', project: 'transaction', key: 'fact-update', value: 'old' });
+      graph.addFact({ project: 'transaction', key: 'fact-update', value: 'old' });
       clock.arm();
-      return { graph, clock, invoke: () => graph.addFact({ id: 'transaction-fact-new', project: 'transaction', key: 'fact-update', value: 'new', idempotencyKey: 'fact-retry' }) };
+      return { graph, clock, invoke: () => graph.addFact({ project: 'transaction', key: 'fact-update', value: 'new', idempotencyKey: 'fact-retry' }) };
     }
   },
   {
@@ -143,9 +144,9 @@ const CLOCK_MUTATOR_CASES = [
         validateStored() { return true; }
       };
       const { graph, clock } = graphWithClock({ verifier });
-      const fact = graph.addFact({ id: 'transaction-verify', project: 'transaction', key: 'verified', value: true });
+      const fact = graph.addFact({ project: 'transaction', key: 'verified', value: true });
       clock.arm();
-      return { graph, clock, invoke: () => graph.verifyFact({ factId: fact.id, evidencePath: 'trusted.json' }) };
+      return { graph, clock, invoke: () => graph.verifyFact({ project: 'transaction', factId: fact.id, evidencePath: 'trusted.json' }) };
     }
   },
   {
@@ -155,7 +156,7 @@ const CLOCK_MUTATOR_CASES = [
       const from = graph.addDecision(decisionInput('transaction-link-from'));
       const to = graph.addDecision(decisionInput('transaction-link-to'));
       clock.arm();
-      return { graph, clock, invoke: () => graph.link({ id: 'transaction-link', from: from.id, to: to.id, relation: 'depends_on' }) };
+      return { graph, clock, invoke: () => graph.link({ project: 'transaction', from: from.id, to: to.id, relation: 'depends_on' }) };
     }
   },
   {
@@ -165,7 +166,7 @@ const CLOCK_MUTATOR_CASES = [
       const previous = graph.addDecision(decisionInput('transaction-supersede-old'));
       const replacement = graph.addDecision(decisionInput('transaction-supersede-new'));
       clock.arm();
-      return { graph, clock, invoke: () => graph.supersedeDecision({ decisionId: previous.id, replacementId: replacement.id }) };
+      return { graph, clock, invoke: () => graph.supersedeDecision({ project: 'transaction', decisionId: previous.id, replacementId: replacement.id }) };
     }
   },
   {
@@ -174,7 +175,7 @@ const CLOCK_MUTATOR_CASES = [
       const { graph, clock } = graphWithClock();
       const decision = graph.addDecision(decisionInput('transaction-status'));
       clock.arm();
-      return { graph, clock, invoke: () => graph.updateDecisionStatus(decision.id, 'planned') };
+      return { graph, clock, invoke: () => graph.updateDecisionStatus(decision.id, 'planned', { project: 'transaction' }) };
     }
   },
   {
@@ -183,7 +184,7 @@ const CLOCK_MUTATOR_CASES = [
       const { graph, clock } = graphWithClock();
       const decision = graph.addDecision(decisionInput('transaction-outcome'));
       clock.arm();
-      return { graph, clock, invoke: () => graph.setOutcome(decision.id, { status: 'successful' }) };
+      return { graph, clock, invoke: () => graph.setOutcome(decision.id, { status: 'successful' }, { project: 'transaction' }) };
     }
   },
   {
@@ -192,7 +193,7 @@ const CLOCK_MUTATOR_CASES = [
       const { graph, clock } = graphWithClock();
       const decision = graph.addDecision(decisionInput('transaction-confidence'));
       clock.arm();
-      return { graph, clock, invoke: () => graph.addConfidenceEvidence({ decisionId: decision.id, key: 'transaction-evidence', reason: 'evidence' }) };
+      return { graph, clock, invoke: () => graph.addConfidenceEvidence({ project: 'transaction', decisionId: decision.id, key: 'transaction-evidence', reason: 'evidence' }) };
     }
   },
   {
@@ -200,21 +201,21 @@ const CLOCK_MUTATOR_CASES = [
     build() {
       const { graph, clock } = graphWithClock();
       for (const suffix of ['a', 'b']) graph.addDecision(decisionInput(`transaction-review-${suffix}`, {
-        alternatives: [{ id: `transaction-review-alt-${suffix}`, label: 'B', reopenWhen: ['changed'] }]
+        alternatives: [{ label: 'B', reopenWhen: ['changed'] }]
       }));
       clock.arm();
-      return { graph, clock, invoke: () => graph.review({ project: 'transaction', changedFacts: ['changed'] }) };
+      return { graph, clock, invoke: () => graph.review({ project: 'transaction', changedFacts: ['changed'] }).items };
     }
   },
   {
-    name: 'context nested review mutation',
+    name: 'reviewContext nested review mutation',
     build() {
       const { graph, clock } = graphWithClock();
       graph.addDecision(decisionInput('transaction-context', {
-        alternatives: [{ id: 'transaction-context-alt', label: 'B', reopenWhen: ['changed'] }]
+        alternatives: [{ label: 'B', reopenWhen: ['changed'] }]
       }));
       clock.arm();
-      return { graph, clock, invoke: () => graph.context({ project: 'transaction', changedFacts: ['changed'] }) };
+      return { graph, clock, invoke: () => graph.reviewContext({ project: 'transaction', changedFacts: ['changed'] }) };
     }
   },
   {
@@ -223,10 +224,10 @@ const CLOCK_MUTATOR_CASES = [
       const { graph, clock } = graphWithClock();
       for (const suffix of ['a', 'b']) {
         graph.addDecision(decisionInput(`transaction-maintain-decision-${suffix}`, { reviewAfter: NOW }));
-        graph.addFact({ id: `transaction-maintain-fact-${suffix}`, project: 'transaction', key: `maintain-${suffix}`, value: suffix, expiresAt: NOW });
+        graph.addFact({ project: 'transaction', key: `maintain-${suffix}`, value: suffix, expiresAt: NOW });
       }
       clock.arm();
-      return { graph, clock, invoke: () => graph.maintain({ now: LATER }) };
+      return { graph, clock, invoke: () => graph.maintain({ project: 'transaction', now: LATER }) };
     }
   },
   {
@@ -234,12 +235,12 @@ const CLOCK_MUTATOR_CASES = [
     build() {
       const { graph, clock } = graphWithClock();
       graph.addDecision(decisionInput('transaction-ack', {
-        alternatives: [{ id: 'transaction-ack-alt', label: 'B', reopenWhen: ['changed'] }]
+        alternatives: [{ label: 'B', reopenWhen: ['changed'] }]
       }));
-      graph.review({ project: 'transaction', changedFacts: ['changed'], asOf: NOW });
-      const signal = graph.getReviewSignals()[0];
+      graph.review({ project: 'transaction', changedFacts: ['changed'], asOf: NOW }).items;
+      const signal = graph.getReviewSignals({ project: 'transaction' }).items[0];
       clock.arm();
-      return { graph, clock, invoke: () => graph.acknowledgeReview(signal.id) };
+      return { graph, clock, invoke: () => graph.acknowledgeReview(signal.id, { project: 'transaction' }) };
     }
   },
   {
@@ -347,19 +348,19 @@ test('transaction boundary: reads and true no-op mutations do not clone the whol
   const graph = createShadowGraph({ now: () => NOW });
   const decisionInputWithRetry = decisionInput('transaction-noop-decision', { idempotencyKey: 'noop-decision' });
   const decision = graph.addDecision(decisionInputWithRetry);
-  const factInput = { id: 'transaction-noop-fact', project: 'transaction', key: 'noop', value: true, idempotencyKey: 'noop-fact' };
-  graph.addFact(factInput);
+  const factInput = { project: 'transaction', key: 'noop', value: true, idempotencyKey: 'noop-fact' };
+  const fact = graph.addFact(factInput);
   graph.remember(memoryInput('transaction-noop-memory', 'noop-memory', 'same'));
   const original = globalThis.structuredClone;
   try {
     globalThis.structuredClone = () => { throw new Error('unexpected whole-graph snapshot'); };
     assert.equal(graph.addDecision({ ...decisionInputWithRetry, title: 'ignored retry' }).id, decision.id);
-    assert.equal(graph.addFact({ ...factInput, value: false }).id, factInput.id);
+    assert.equal(graph.addFact({ ...factInput, value: false }).id, fact.id);
     assert.equal(graph.remember({ project: 'transaction', scope: {}, memoryType: 'note', key: 'noop-memory', text: 'same' }).operation, 'NOOP');
     assert.equal(graph.applyMemoryPlan({ project: 'transaction', scope: {}, operations: [{ action: 'NOOP', memoryType: 'note', key: 'absent' }] }).results[0].operation, 'NOOP');
-    assert.equal(graph.updateDecisionStatus(decision.id, 'proposed').status, 'proposed');
+    assert.equal(graph.updateDecisionStatus(decision.id, 'proposed', { project: 'transaction' }).status, 'proposed');
     assert.doesNotThrow(() => graph.search(''));
-    assert.doesNotThrow(() => graph.exportData());
+    assert.doesNotThrow(() => graph.exportData({ project: 'transaction' }));
   } finally {
     globalThis.structuredClone = original;
   }
@@ -412,7 +413,7 @@ test('transaction boundary: purge publication faults restore every live and audi
     const graph = createShadowGraph({ now: () => NOW });
     graph.addDecision(decisionInput(`transaction-purge-delete-a-${mode}`, { idempotencyKey: `purge-a-${mode}` }));
     graph.addDecision(decisionInput(`transaction-purge-delete-b-${mode}`, { idempotencyKey: `purge-b-${mode}` }));
-    graph.addDecision({ id: `transaction-purge-kept-${mode}`, project: 'kept', title: 'kept', chosen: 'A' });
+    graph.addDecision({ project: 'kept', title: 'kept', chosen: 'A' });
     return { graph, invoke: () => graph.purgeProject('transaction', { mode }) };
   };
   const original = Map.prototype.delete;
@@ -447,7 +448,7 @@ test('transaction boundary: purge publication faults restore every live and audi
       }
       assert.equal(exportBytes(attempt.graph), before, `${mode}: delete ${failAt} restores exportData byte-for-byte`);
       await invokeAsPromise(attempt.invoke);
-      const after = attempt.graph.exportData();
+      const after = privilegedSnapshot(attempt.graph);
       assert.equal(after.records.some((item) => item.project === 'transaction'), false);
       assert.equal(after.records.some((item) => item.project === 'kept'), true);
       if (mode === 'logical') assertRebuildParity(attempt.graph, `${mode}: retry after delete ${failAt}`);
@@ -471,12 +472,12 @@ test('transaction boundary: synchronous clock reentry fails explicitly and rolls
   const before = exportBytes(graph);
   reenter = true;
   assert.throws(
-    () => graph.updateDecisionStatus(decision.id, 'planned'),
+    () => graph.updateDecisionStatus(decision.id, 'planned', { project: 'transaction' }),
     /mutation.*(?:already|in progress)|reentrant/i
   );
   reenter = false;
   assert.equal(exportBytes(graph), before);
-  assert.equal(graph.updateDecisionStatus(decision.id, 'planned').status, 'planned', 'graph remains usable after rejected reentry');
+  assert.equal(graph.updateDecisionStatus(decision.id, 'planned', { project: 'transaction' }).status, 'planned', 'graph remains usable after rejected reentry');
 });
 
 test('transaction boundary: verifyFact spans await, rejects concurrent direct mutation explicitly, and releases after rejection', async () => {
@@ -491,14 +492,14 @@ test('transaction boundary: verifyFact spans await, rejects concurrent direct mu
     validateStored() { return true; }
   };
   const graph = createShadowGraph({ now: () => NOW, verifier });
-  const fact = graph.addFact({ id: 'transaction-async-fact', project: 'transaction', key: 'async', value: true });
+  const fact = graph.addFact({ project: 'transaction', key: 'async', value: true });
   const before = exportBytes(graph);
-  const pending = graph.verifyFact({ factId: fact.id, evidencePath: 'trusted.json' });
+  const pending = graph.verifyFact({ project: 'transaction', factId: fact.id, evidencePath: 'trusted.json' });
   await entered;
 
   let concurrentError = null;
   try {
-    graph.addAttempt({ id: 'transaction-concurrent-attempt', project: 'transaction', solution: 'concurrent', result: 'must reject' });
+    graph.addAttempt({ project: 'transaction', solution: 'concurrent', result: 'must reject' });
   } catch (error) {
     concurrentError = error;
   }
@@ -506,7 +507,8 @@ test('transaction boundary: verifyFact spans await, rejects concurrent direct mu
   await assert.rejects(pending, /injected verifier rejection/);
   assert.match(concurrentError?.message ?? '', /mutation.*(?:already|in progress)|reentrant/i);
   assert.equal(exportBytes(graph), before, 'verifier rejection and concurrent attempt leave no state');
-  assert.equal(graph.addAttempt({ id: 'transaction-after-rejection', project: 'transaction', solution: 'after', result: 'works' }).id, 'transaction-after-rejection');
+  const after = graph.addAttempt({ project: 'transaction', solution: 'after', result: 'works' });
+  assert.equal(privilegedSnapshot(graph).records.some(record => record.id === after.id), true);
 });
 
 async function postJson(base, path, body) {
@@ -529,7 +531,7 @@ async function durableServerFaultScenario(backend, t) {
   }
   const seed = createShadowGraph({ now: () => NOW });
   seed.addDecision(decisionInput(`transaction-${backend}-kept`));
-  await store.save(seed.exportData());
+  await store.save(privilegedSnapshot(seed));
   const durableBefore = await store.load();
 
   const clock = controlledClock();
@@ -551,12 +553,13 @@ async function durableServerFaultScenario(backend, t) {
 
     const successful = await postJson(base, '/decisions', decisionInput(`transaction-${backend}-success`));
     assert.equal(successful.status, 200);
+    const created = await successful.json();
     const persisted = await store.load();
     const restarted = createShadowGraph({ now: () => NOW });
     restarted.importData(persisted);
     assertRebuildParity(restarted, `${backend}: successful retry restart`);
-    assert.equal(persisted.records.some((item) => item.id === `transaction-${backend}-rejected`), false);
-    assert.equal(persisted.records.some((item) => item.id === `transaction-${backend}-success`), true);
+    assert.equal(persisted.records.some((item) => item.title === `transaction-${backend}-rejected`), false);
+    assert.equal(persisted.records.some((item) => item.id === created.id), true);
   } finally {
     await new Promise((resolve) => app.server.close(resolve));
     store.close();
@@ -571,13 +574,17 @@ test('transaction boundary: HTTP rejection preserves SQLite durability and a lat
   await durableServerFaultScenario('sqlite', t);
 });
 
+// One safe journal sequence left: a supersession (three entries) overflows, a
+// confidence-evidence write (one entry) fits.
 function nearBoundaryPayload(id) {
   const graph = createShadowGraph({ now: () => NOW });
   graph.addDecision(decisionInput(id));
-  const data = graph.exportData();
-  data.journal[0].seq = Number.MAX_SAFE_INTEGER - 1;
+  graph.addDecision(decisionInput(`${id}-replacement`));
+  const data = privilegedSnapshot(graph);
+  data.journal[0].seq = Number.MAX_SAFE_INTEGER - 2;
+  data.journal[1].seq = Number.MAX_SAFE_INTEGER - 1;
   data.journalSeq = Number.MAX_SAFE_INTEGER - 1;
-  data.journalEpoch = Number.MAX_SAFE_INTEGER - 1;
+  data.journalEpoch = Number.MAX_SAFE_INTEGER - 2;
   return data;
 }
 
@@ -653,7 +660,7 @@ function startMcp(file) {
 
 async function seedNearBoundaryFile(file, id) {
   const store = createJsonFileStore(file);
-  try { await store.save(nearBoundaryPayload(id)); }
+  try { const payload = nearBoundaryPayload(id); await store.save(payload); return { decisionId: payload.records[0].id, replacementId: payload.records[1].id }; }
   finally { store.close(); }
 }
 
@@ -666,34 +673,39 @@ function assertPersistedRebuildParity(data, label) {
 test('transaction boundary: CLI rejection preserves bytes, then a smaller successful write restarts with rebuild parity', async (t) => {
   const directory = await scratchDirectory(t, 'shadowgraph-transaction-cli-');
   const file = join(directory, 'data.json');
-  const decisionId = 'transaction-cli-decision';
-  await seedNearBoundaryFile(file, decisionId);
+  const { decisionId, replacementId } = await seedNearBoundaryFile(file, 'transaction-cli-decision');
   const before = await readFile(file);
 
-  const rejected = await runCli(file, 'outcome', { decisionId, outcome: { status: 'successful', observedAt: NOW } });
+  // The outcome verb passes only the id, so until its transport is aligned
+  // (PR-13) it carries no write scope and is refused before any id resolves.
+  const unscoped = await runCli(file, 'outcome', { decisionId, outcome: { status: 'successful', observedAt: NOW } });
+  assert.notEqual(unscoped.code, 0);
+  assert.match(unscoped.stderr, /write_scope_unresolved/);
+  assert.deepEqual(await readFile(file), before, 'CLI refusal preserves exact durable bytes');
+
+  const rejected = await runCli(file, 'supersede', { project: 'transaction', decisionId, replacementId });
   assert.notEqual(rejected.code, 0);
   assert.match(rejected.stderr, /journal sequence overflow/i);
   assert.deepEqual(await readFile(file), before, 'CLI rejection preserves exact durable bytes');
 
-  const successful = await runCli(file, 'status', { decisionId, status: 'planned' });
+  const successful = await runCli(file, 'confidence-evidence', { project: 'transaction', decisionId, key: 'cli-evidence', reason: 'fits in the last sequence' });
   assert.equal(successful.code, 0, successful.stderr);
   const persisted = JSON.parse(await readFile(file, 'utf8'));
-  assert.equal(persisted.records.find((item) => item.id === decisionId).status, 'planned');
+  assert.equal(persisted.records.find((item) => item.id === decisionId).confidence.basis.contributions.some((item) => item.key === 'cli-evidence'), true);
   assertPersistedRebuildParity(persisted, 'CLI later successful write');
 });
 
 test('transaction boundary: MCP rejection preserves bytes, then a smaller successful write restarts with rebuild parity', async (t) => {
   const directory = await scratchDirectory(t, 'shadowgraph-transaction-mcp-');
   const file = join(directory, 'data.json');
-  const decisionId = 'transaction-mcp-decision';
-  await seedNearBoundaryFile(file, decisionId);
+  const { decisionId, replacementId } = await seedNearBoundaryFile(file, 'transaction-mcp-decision');
   const before = await readFile(file);
   const rpc = startMcp(file);
   try {
     await rpc.call({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
     const rejected = await rpc.call({
       jsonrpc: '2.0', id: 2, method: 'tools/call',
-      params: { name: 'shadowgraph_record_outcome', arguments: { decisionId, outcome: { status: 'successful', observedAt: NOW } } }
+      params: { name: 'shadowgraph_supersede', arguments: { project: 'transaction', decisionId, replacementId } }
     });
     assert.equal(rejected.result, undefined, 'legacy tool failures use the numeric JSON-RPC error form');
     assert.deepEqual(rejected.error, { code: -32000, message: 'Tool execution failed' });
@@ -705,13 +717,13 @@ test('transaction boundary: MCP rejection preserves bytes, then a smaller succes
 
     const successful = await rpc.call({
       jsonrpc: '2.0', id: 3, method: 'tools/call',
-      params: { name: 'shadowgraph_update_status', arguments: { decisionId, status: 'planned' } }
+      params: { name: 'shadowgraph_confidence_evidence', arguments: { project: 'transaction', decisionId, key: 'mcp-evidence', reason: 'fits in the last sequence' } }
     });
     assert.equal(successful.error, undefined);
   } finally {
     await rpc.stop();
   }
   const persisted = JSON.parse(await readFile(file, 'utf8'));
-  assert.equal(persisted.records.find((item) => item.id === decisionId).status, 'planned');
+  assert.equal(persisted.records.find((item) => item.id === decisionId).confidence.basis.contributions.some((item) => item.key === 'mcp-evidence'), true);
   assertPersistedRebuildParity(persisted, 'MCP later successful write');
 });
