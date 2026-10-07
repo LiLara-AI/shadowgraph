@@ -295,8 +295,10 @@ for (const type of ['json', 'sqlite']) {
     }
   });
   test(`drain ${type}: never-resolving guards are deadline bounded and late guards cannot start calls`, skip, async t => {
+    // The deadline under test includes the production cleanup bound, so this
+    // drain runs without the seam: a slow cleanup still answers within it.
     const f = await setup(t, type, 1, { wallMs: 50 }); let release, calls = 0;
-    const pending = runExtractionDrain({ ...f.options, guard: () => new Promise(resolve => { release = resolve; }), executor: { extract: async () => { calls++; return f.response; } } });
+    const pending = runExtractionDrain({ ...f.production, guard: () => new Promise(resolve => { release = resolve; }), executor: { extract: async () => { calls++; return f.response; } } });
     const result = await Promise.race([pending, new Promise(resolve => setTimeout(() => resolve('hung'), 1800))]);
     if (result === 'hung') release(true);
     assert.notEqual(result, 'hung'); release(true); await pending; assert.equal(calls, 0);

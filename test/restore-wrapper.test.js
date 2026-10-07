@@ -1845,7 +1845,9 @@ for (const [backend, options] of BACKENDS) test(`PR-37c possibleDuplicateOf ${ba
   assert.equal(payload.records.find((item) => item.id === second.id).possibleDuplicateOf, first.id);
   const state = await storeOf(t, backend, ownStore());
   await writeLedgerFile(state, { version: 1, tombstones: [itemTombstone([tokenOf(payload, first.id)])] });
-  const result = await restoring(state, await storeOf(t, backend, payload));
+  // On the captures' own clock: on the real one, once their 7-day retention
+  // had passed, expiry would clear possibleDuplicateOf as well as the removal.
+  const result = await restoring(state, await storeOf(t, backend, payload), { now: NOW });
   assert.equal(result.reapplied.removed, 1);
   const after = await stored(state);
   assert.equal(JSON.stringify(after).includes(first.id), false, 'scrubbed everywhere');
