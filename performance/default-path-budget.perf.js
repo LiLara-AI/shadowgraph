@@ -25,8 +25,11 @@ const timings = (report) => JSON.stringify({ grantAdded: report.grant.addedMsMax
 // - The effectful operations are exact: per save, one lock acquisition, one
 //   temporary write and one committed rename; outside a save, none.
 // - The calls per file role are at most those measured on Windows and Linux,
-//   Node 20, 22 and 24. Fewer is fine; more fails, so no extra read, write,
-//   rename, lock or probe goes unseen.
+//   Node 20, 22 and 24. Fewer is fine; more fails, so an extra read, write,
+//   rename, lock or probe through node:fs/promises or a handle it opens is
+//   seen. The synchronous node:fs API is not observed (scripts/context-size.mjs):
+//   the save and lock paths make no such call, and a delivery's read of a
+//   workspace binding file is not counted.
 // - Where the temporary directory is reached through an alias (an 8.3 short
 //   name on Windows), the store checks its control file under the name it was
 //   given and under its canonical name: one more "other" call per check,

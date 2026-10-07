@@ -202,7 +202,14 @@ const round = (value) => Number(value.toFixed(4));
 // and backoff, reads, the temporary write, the CPU gap before that write
 // (serialization and validation), garbage collection, other calls, and what no
 // call accounts for.
-const OBSERVED_CALLS = ['open', 'readFile', 'writeFile', 'rename', 'stat', 'lstat', 'realpath', 'mkdir', 'unlink', 'rm', 'readdir', 'utimes'];
+// Every node:fs/promises function that touches a file, and every method of a
+// handle one opens, so a new kind of call on these paths is counted too. The
+// synchronous and callback node:fs functions are not observed: the store's
+// save and lock paths make no such call, and a delivery's one (the read of a
+// workspace binding file, readFileSync) is not counted.
+const OBSERVED_CALLS = ['open', 'readFile', 'writeFile', 'rename', 'stat', 'lstat', 'realpath', 'mkdir', 'unlink', 'rm', 'readdir', 'utimes',
+  'access', 'appendFile', 'chmod', 'chown', 'copyFile', 'cp', 'lchown', 'link', 'lutimes', 'mkdtemp', 'opendir', 'readlink', 'rmdir', 'statfs', 'symlink', 'truncate'].filter((name) => typeof fsPromises[name] === 'function');
+const HANDLE_CALLS = ['appendFile', 'chmod', 'chown', 'close', 'datasync', 'read', 'readFile', 'readv', 'stat', 'sync', 'truncate', 'utimes', 'write', 'writeFile', 'writev'];
 const fileRole = (path) => {
   const name = basename(String(path));
   return name === 'store.json' ? 'store' : name.endsWith('.lock') ? 'lock' : name.endsWith('.tmp') ? 'temp' : 'other';
@@ -219,7 +226,7 @@ export function observeFileSystem() {
     fsPromises[name] = (path, ...rest) => timed(name, path, async () => {
       const value = await original(path, ...rest);
       // A lock is written and closed through its handle: those calls are timed too.
-      if (name === 'open') for (const method of ['writeFile', 'close', 'sync']) value[method] = timed(`handle.${method}`, path, value[method].bind(value));
+      if (name === 'open') for (const method of HANDLE_CALLS.filter((method) => typeof value[method] === 'function')) value[method] = timed(`handle.${method}`, path, value[method].bind(value));
       return value;
     })();
   }

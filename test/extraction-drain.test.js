@@ -35,14 +35,17 @@ async function setup(t, type, count = 1, budgets = {}) {
 // open began), so a test decides when a cleanup may proceed. Every open is
 // registered before it waits, so settled() waits for a held store too: its
 // late open and its close.
+// The bound each traced cleanup's signal was armed with, read from a spy on
+// AbortSignal.timeout: the call whose result is the signal its store open got.
+const armedWith = (timeouts, trace) => [...new Set(trace.cleanups().map(entry => timeouts.mock.calls.find(call => call.result === trace.signalOf(entry))?.arguments[0]))];
 function storeTrace({ holdCleanup = false, releaseAfterMs } = {}) {
-  const started = performance.now(), events = [], closed = [];
+  const started = performance.now(), events = [], closed = [], signals = new Map();
   const at = () => Math.round(performance.now() - started);
   let release = () => {}, releasedAt, timer;
   const held = holdCleanup ? new Promise(resolve => { release = () => { releasedAt ??= at(); resolve(); }; }) : null;
   const openStore = async o => {
     const entry = { kind: o.lockTimeoutMs === undefined ? 'operation' : 'cleanup', at: at() };
-    events.push(entry);
+    events.push(entry); signals.set(entry, o.signal);
     let done; closed.push(new Promise(resolve => { done = resolve; }));
     o.signal?.addEventListener('abort', () => { entry.aborted = { reason: o.signal.reason?.name ?? 'unknown', at: at() }; }, { once: true });
     try {
@@ -57,7 +60,7 @@ function storeTrace({ holdCleanup = false, releaseAfterMs } = {}) {
       return store;
     } catch (error) { entry.openError = String(error?.code ?? error?.name ?? 'error'); done(); throw error; }
   };
-  return { openStore, events, release: () => release(), releasedAt: () => releasedAt, settled: () => Promise.all(closed), cleanups: () => events.filter(entry => entry.kind === 'cleanup') };
+  return { openStore, events, release: () => release(), releasedAt: () => releasedAt, settled: () => Promise.all(closed), cleanups: () => events.filter(entry => entry.kind === 'cleanup'), signalOf: entry => signals.get(entry) };
 }
 const usageCalls = async env => JSON.parse(await readFile(usageFile(env))).calls.length;
 const workerErrors = data => { const g = createShadowGraph(); g.importData(data); return g.search('', { project: 'p' }).completeness.capture.workerErrors ?? []; };
@@ -158,6 +161,7 @@ for (const type of ['json', 'sqlite']) {
   // one below 1 s fails the floor. The drain answers before the release.
   test(`drain ${type}: the production cleanup bound is enforced and no look-alike setting raises it`, { ...skip, timeout: 30_000 }, async t => {
     const f = await setup(t, type, 2, { calls: 1 }), trace = storeTrace({ holdCleanup: true, releaseAfterMs: 3000 });
+    const timeouts = t.mock.method(AbortSignal, 'timeout');
     const decoys = { cleanupBoundForTests: 60_000, cleanupMs: 60_000, [String(CLEANUP_BOUND_FOR_TESTS)]: 60_000, env: { ...f.options.env, SHADOWGRAPH_EXTRACTION_CLEANUP_MS: '60000' } };
     const drainStarted = performance.now();
     const result = await runExtractionDrain({ ...f.options, ...decoys, openStore: trace.openStore, executor: { extract: async () => f.response } });
@@ -170,21 +174,25 @@ for (const type of ['json', 'sqlite']) {
     assert.ok(cleanup.aborted.at < trace.releasedAt() && cleanup.opened >= trace.releasedAt(), why);
     assert.equal(cleanup.run, undefined, why);
     assert.ok(answeredMs >= 1000, `answered after ${Math.round(answeredMs)} ms`);
+    assert.deepEqual(armedWith(timeouts, trace), [1000], 'the cleanup signal is armed with exactly the production bound');
   });
   // The seam raises the bound of the drain that sets it and of no other: there a
   // cleanup held past one second completes and writes its receipt, while a later
   // drain without the seam still times its held cleanup out.
   test(`drain ${type}: the test-only seam raises the cleanup bound of the drain that sets it and of no other`, { ...skip, timeout: 30_000 }, async t => {
     const f = await setup(t, type, 2, { calls: 1 }), trace = storeTrace({ holdCleanup: true, releaseAfterMs: 1500 });
+    const timeouts = t.mock.method(AbortSignal, 'timeout');
     const result = await runExtractionDrain({ ...f.options, openStore: trace.openStore, [CLEANUP_BOUND_FOR_TESTS]: 60_000, executor: { extract: async () => f.response } });
     await trace.settled();
+    assert.deepEqual(armedWith(timeouts, trace), [60_000], 'the seamed cleanup signal is armed with the seam');
     assert.deepEqual(result, { status: 'blocked', blockedReason: 'drain_calls', completed: 1, storeReceiptWritten: true }, JSON.stringify(trace.events));
     assert.ok(trace.cleanups().every(entry => entry.run === 'ok' && !entry.aborted));
     const g = await setup(t, type, 2, { calls: 1 }), unseamed = storeTrace({ holdCleanup: true, releaseAfterMs: 3000 });
     const next = await runExtractionDrain({ ...g.options, openStore: unseamed.openStore, executor: { extract: async () => g.response } });
     await unseamed.settled();
-    assert.equal(next.status, 'unavailable', JSON.stringify(unseamed.events));
+    assert.deepEqual(next, { status: 'unavailable', reason: 'worker_or_store_unavailable', completed: 1, storeReceiptWritten: false }, JSON.stringify(unseamed.events));
     assert.equal(unseamed.cleanups()[0].aborted?.reason, 'TimeoutError');
+    assert.deepEqual(armedWith(timeouts, unseamed), [1000], 'a later drain without the seam is armed with the production bound');
   });
   test(`drain ${type}: output journal ceiling rolls back every proposed canonical record`, skip, async t => {
     const f = await setup(t, type, 1, { journalEntriesPerSession: 3 });
@@ -365,11 +373,13 @@ for (const type of ['json', 'sqlite']) test(`one automatic drain shares its call
 // seam, so no command line, request, environment, workspace or stored setting
 // reaches it, and the production bound stays one second.
 test('only tests name the drain cleanup seam; production keeps the one-second bound', async () => {
-  const root = new URL('../src/', import.meta.url), naming = [];
-  for (const name of await readdir(root, { recursive: true })) {
-    const path = name.split(/[\\/]/u).join('/');
-    if (path.endsWith('.js') && (await readFile(new URL(path, root), 'utf8')).includes('CLEANUP_BOUND_FOR_TESTS')) naming.push(path);
+  const repo = new URL('../', import.meta.url), naming = [];
+  const { files } = JSON.parse(await readFile(new URL('package.json', repo), 'utf8'));
+  // Every file the package ships, not only src/.
+  for (const entry of files) {
+    const paths = entry.endsWith('/') ? (await readdir(new URL(entry, repo), { recursive: true })).map(name => entry + name.split(/[\\/]/u).join('/')) : [entry];
+    for (const path of paths) if (/\.[cm]?js$/u.test(path) && (await readFile(new URL(path, repo), 'utf8')).includes('CLEANUP_BOUND_FOR_TESTS')) naming.push(path);
   }
-  assert.deepEqual(naming, ['internal/extraction-worker.js']);
-  assert.match(await readFile(new URL('internal/extraction-worker.js', root), 'utf8'), /^const CLEANUP_BOUND_MS = 1000;$/mu);
+  assert.deepEqual(naming, ['src/internal/extraction-worker.js']);
+  assert.match(await readFile(new URL('src/internal/extraction-worker.js', repo), 'utf8'), /^const CLEANUP_BOUND_MS = 1000;$/mu);
 });
