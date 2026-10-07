@@ -674,12 +674,17 @@ export function storeIo(store) {
 // compared without case on every platform, as a volume may fold case where
 // the platform does not (re-review R2-T3). Resolves to the destination's
 // final path, which the copy is written to.
+// The same holds for the owner's files beside the registry, which ShadowGraph
+// reads as the owner's own decisions: a copy carries unknown top-level members
+// byte for byte, so one written over the activation record or extraction
+// state could stand in for an owner's activation (PR #12 security review).
+const OWNER_FILES = ['activation.json', 'extraction-usage.json', 'extraction-invocations.json', 'extraction-worker', 'extraction-worker.settlement.json'];
 export async function refuseDeletionFileDestination(destination, env = process.env) {
   const target = await canonicalPath(destination, { followLink: false });
   const registry = registryFile(env);
   const name = basename(target).toLowerCase();
   let refused = name.endsWith(CONTROL_SUFFIX);
-  for (const guarded of registry ? [registry, `${registry}.lock`] : []) {
+  for (const guarded of registry ? [registry, `${registry}.lock`, ...OWNER_FILES.map((file) => join(dirname(registry), file))] : []) {
     if (refused) break;
     const [file, record] = await Promise.all([identity(target), identity(guarded)]);
     if (file && record) refused = file.id === record.id;
@@ -688,7 +693,7 @@ export async function refuseDeletionFileDestination(destination, env = process.e
       refused = folder && home ? folder.id === home.id : folded(dirname(target)) === folded(await canonicalPath(dirname(guarded)));
     }
   }
-  if (refused) throw deletionError(DELETION_FILE_DESTINATION_REFUSED, 'Refusing to write a copy over a deletion record file');
+  if (refused) throw deletionError(DELETION_FILE_DESTINATION_REFUSED, 'Refusing to write a copy over a deletion record file or an owner control file');
   return target;
 }
 

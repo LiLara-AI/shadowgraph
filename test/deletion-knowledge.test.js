@@ -1310,6 +1310,33 @@ test('T-14: a downgrade whose output is a deletion record path is refused', asyn
   await assert.rejects(downgradeStore({ graph, store, file: state.file, storageType: 'json', output: join(state.dir, 'x.control.json'), preservationCopy: join(state.dir, 'kept.json'), toSchemaVersion: 6, now }), { code: 'deletion_file_destination_refused' });
 });
 
+// PR #12 security review: a store copy carries unknown top-level members byte
+// for byte, so one written over the activation record could turn capture or
+// delivery on with no owner confirmation. No copy lands on the owner's files
+// beside the registry, existing or not, however the name is cased.
+test('a copy never lands on the activation record or the extraction state files', async (t) => {
+  const f = fixture();
+  const state = await storeOf(t, 'json', f.payload, VIEWS.item(f).ledger);
+  const env = { SHADOWGRAPH_HOME: join(state.dir, 'home') };
+  await mkdir(env.SHADOWGRAPH_HOME, { recursive: true });
+  const activation = join(env.SHADOWGRAPH_HOME, 'activation.json');
+  await writeFile(activation, '{"version":1,"capabilities":{}}');
+  const before = await fileHash(activation);
+  for (const name of ['activation.json', 'Activation.JSON', 'extraction-usage.json', 'extraction-invocations.json', 'extraction-worker', 'extraction-worker.settlement.json']) {
+    await assert.rejects(backupFile(state.file, join(env.SHADOWGRAPH_HOME, name), { env }), { code: 'deletion_file_destination_refused' }, name);
+  }
+  assert.equal(await fileHash(activation), before);
+  assert.deepEqual(await readdir(env.SHADOWGRAPH_HOME), ['activation.json'], 'nothing was written beside it');
+  const store = await createStorage({ file: state.file });
+  const graph = createShadowGraph({ now });
+  graph.importData(await store.load());
+  assert.ok(process.env.SHADOWGRAPH_HOME, 'the process home is the isolated test home');
+  await assert.rejects(downgradeStore({ graph, store, file: state.file, storageType: 'json', output: join(dirname(registryFile()), 'activation.json'), preservationCopy: join(state.dir, 'kept.json'), toSchemaVersion: 6, now }), { code: 'deletion_file_destination_refused' });
+  // Any other name in that folder still takes a backup.
+  await backupFile(state.file, join(env.SHADOWGRAPH_HOME, 'store-backup.json'), { env });
+  assert.ok(existsSync(join(env.SHADOWGRAPH_HOME, 'store-backup.json')));
+});
+
 test('T-6/C1: a capture re-sent with the host id of a withheld capture is refused and writes nothing', async (t) => {
   const graph = createShadowGraph({ now });
   const source = { event: 'UserPromptSubmit', sessionId: 'session-9', role: 'user', hostEventId: 'msg_1' };
