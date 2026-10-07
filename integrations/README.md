@@ -12,6 +12,8 @@ shadowgraph setup
 shadowgraph doctor
 ```
 
+This installs `main`, the development build `0.42.0-dev.0`, which is newer than the 0.41.0 Technical Preview. See [Moving between 0.41.0 and `main`](../README.md#moving-between-0410-and-main) before switching a store between them.
+
 The global install makes the `shadowgraph` binary available to GUI clients that may not launch from a project containing `node_modules/.bin`. If `shadowgraph doctor` is not found, add npm's global bin directory to the environment used by the client and restart it.
 
 All templates recommend `SHADOWGRAPH_MCP_COMPACT=1`: 16 workflow tools with the same full-fidelity stored graph. To use all 35 tools, remove that environment variable or set it to `0`; compact mode is a tool-advertisement choice, not lossy storage.

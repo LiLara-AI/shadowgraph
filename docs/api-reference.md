@@ -1,6 +1,6 @@
 # ShadowGraph — API Reference
 
-**Version:** 0.41.0 · **Schema version:** 7 · **Supported import schemas:** 1, 2, 3, 4, 5, 6, 7
+**Version:** 0.42.0-dev.0 · **Schema version:** 7 · **Supported import schemas:** 1, 2, 3, 4, 5, 6, 7
 
 Authoritative contracts: [provenance](contracts/provenance-contract.md) · [lifecycle](contracts/lifecycle-contract.md) · [journal](contracts/journal-contract.md) · [completeness](contracts/completeness-contract.md) · [search](contracts/search-contract.md) · [confidence](contracts/confidence-contract.md) · [SQLite restore](contracts/sqlite-restore-contract.md)
 

@@ -45,6 +45,11 @@ repository. A global install puts `shadowgraph` on your `PATH`, which is what MC
 npm install --global github:LiLara-AI/shadowgraph
 ```
 
+This installs the current `main` branch: the development build `0.42.0-dev.0`, newer than the 0.41.0
+Technical Preview and not a release. To install the Technical Preview instead, use
+`github:LiLara-AI/shadowgraph#v0.41.0`. Before moving a store between the two, read
+[Moving between 0.41.0 and `main`](#moving-between-0410-and-main).
+
 <details>
 <summary>Or clone and run from source</summary>
 
@@ -421,7 +426,8 @@ surfaces instead, or import from the installed path.
 JSON is the zero-dependency default and stores a versioned graph in `.shadowgraph/data.json`. Set
 `SHADOWGRAPH_FILE` to relocate it. Set `SHADOWGRAPH_STORAGE=sqlite` on Node 22.5+ for the WAL-backed
 relational adapter. Stores are written at schema 7; schemas 1 through 6 remain readable, and `downgrade`
-forks a schema-6 copy for an earlier build.
+forks a copy at schema 5 (the default, which 0.41.0 reads) or schema 6 for an earlier build, without
+changing the store.
 
 State and journal are written in one atomic operation, every save and restore for a destination
 shares a cross-process lock fence, and a stale write is rejected with a revision conflict rather
@@ -450,7 +456,9 @@ separately.
 
 ## Limitations and Technical Preview status
 
-ShadowGraph 0.41.0 is a **Technical Preview / Early Access** release. It is not Beta and not stable.
+The latest release is the 0.41.0 **Technical Preview / Early Access** (tag `v0.41.0`). It is not Beta
+and not stable. `main` carries `0.42.0-dev.0`, a development build: not released, not stable, and its
+acceptance criteria have not been assessed.
 
 - **Interfaces and the storage schema may still change.** Do not use it for data you cannot
   reproduce.
@@ -474,6 +482,21 @@ ShadowGraph 0.41.0 is a **Technical Preview / Early Access** release. It is not 
   them separately; capture covers declared events only, with pattern-based redaction (see the
   [integrations guide](integrations/README.md) and [extraction](docs/extraction.md)).
 - **Single maintainer.** No paid support, no patch SLA, and no bug bounty.
+
+### Moving between 0.41.0 and `main`
+
+- **Upgrading.** This build reads every store 0.41.0 wrote (schemas 1 through 5) and writes schema 7 on
+  its next save. Take a backup first: `shadowgraph backup`.
+- **Going back to 0.41.0.** 0.41.0 reads schemas 1 through 5 only, so it cannot open a store this build
+  has saved. Fork a schema-5 copy with `shadowgraph downgrade '{"output":"<new file>"}'`, which writes
+  the copy as a separate file after a verified preservation copy and never changes the store, then point
+  0.41.0 at the copy. `<output>.report.json` names what schema 5 cannot hold, such as record
+  attribution, erasure tokens, claim evidence and capture state.
+- **Backups.** A backup this build takes is a schema-7 store. To use one with 0.41.0, restore it into a
+  fresh path with this build and fork a schema-5 copy as above.
+- **Capture and extraction.** If you turned them on, turn them off and make sure no extraction is running
+  before you switch builds; see the [integrations guide](integrations/README.md) and the
+  [data lifecycle map](docs/data-lifecycle.md).
 
 ## Feedback and support
 

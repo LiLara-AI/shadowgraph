@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — scope coverage
+## 0.42.0-dev.0 — development build on `main` (unreleased, not tagged)
 
 - Complete the P6–P8 capture lifecycle: policy-driven uncited raw expiry, inspection and pending-item deletion; generation-guarded, budgeted extraction through the separately approved subscription executor; owner correction and explicit reprocessing that supersedes prior extraction output while preserving owner edits. Delivery remains a bounded project read, and all capabilities require their activation procedures.
 - Extend deletion to exact unattributed origins, controlled source-evidence copies and explicit tracked Markdown pruning. Reader, pending-read, recovery and worker floors are separate; unknown-member preservation is not semantic compatibility. Backups, restore recovery files and host/user-held copies remain outside complete-erasure claims.
