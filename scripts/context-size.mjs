@@ -202,9 +202,10 @@ const round = (value) => Number(value.toFixed(4));
 // and backoff, reads, the temporary write, the CPU gap before that write
 // (serialization and validation), garbage collection, other calls, and what no
 // call accounts for.
-// Every node:fs/promises function that touches a file, and every method of a
-// handle one opens, so a new kind of call on these paths is counted too. The
-// synchronous and callback node:fs functions are not observed: the store's
+// The node:fs/promises functions that touch a file, and the methods of a
+// handle one opens, so a new kind of call on these paths is counted too; the
+// stream and iterator ones (glob, watch, a handle's streams and readLines) are
+// not, nor are the synchronous and callback node:fs functions: the store's
 // save and lock paths make no such call, and a delivery's one (the read of a
 // workspace binding file, readFileSync) is not counted.
 const OBSERVED_CALLS = ['open', 'readFile', 'writeFile', 'rename', 'stat', 'lstat', 'realpath', 'mkdir', 'unlink', 'rm', 'readdir', 'utimes',

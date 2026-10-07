@@ -26,8 +26,9 @@ const timings = (report) => JSON.stringify({ grantAdded: report.grant.addedMsMax
 //   temporary write and one committed rename; outside a save, none.
 // - The calls per file role are at most those measured on Windows and Linux,
 //   Node 20, 22 and 24. Fewer is fine; more fails, so an extra read, write,
-//   rename, lock or probe through node:fs/promises or a handle it opens is
-//   seen. The synchronous node:fs API is not observed (scripts/context-size.mjs):
+//   rename, lock or probe through the node:fs/promises calls or handle methods
+//   that touch a file is seen. The synchronous node:fs API and the stream and
+//   iterator calls are not observed (scripts/context-size.mjs):
 //   the save and lock paths make no such call, and a delivery's read of a
 //   workspace binding file is not counted.
 // - Where the temporary directory is reached through an alias (an 8.3 short

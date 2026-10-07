@@ -3,9 +3,9 @@
 One worked example, run four ways. It shows the thing ShadowGraph exists for: a decision that
 carries its own rejection reasons and reopens itself when the world changes.
 
-Every command on this page was run against `0.42.0-dev.0`, the development build on `main`.
-Responses marked abridged show only their first fields; identifiers and timestamps will differ in
-your run.
+Every command on this page was run against `0.42.0-dev.0`, the development build on `main`, and
+every response shape and value shown matches that run. Responses marked abridged leave fields out.
+The identifiers and timestamps shown come from an earlier run; yours will differ.
 
 ## The story
 

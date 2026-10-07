@@ -305,10 +305,10 @@ recommended, unchanged, or a human should look. `shadowgraph_context` is a read 
 nothing; `shadowgraph_review_context` persists the review signals it finds due, and
 `shadowgraph_expand` expands a claim line to its full record. Full mode advertises 35 — see the
 [MCP compatibility guide](docs/mcp-compatibility.md) for the complete inventory, every protocol
-revision, and verified client behaviour. Full mode includes owner tools — backup and restore to
-paths the caller names, purge, `shadowgraph_bind` and `shadowgraph_attribute` — that run without the
-terminal confirmation the CLI asks for, so give an agent compact mode unless you want it to have them
-(see [SECURITY.md](SECURITY.md#local-threat-model)).
+revision, and verified client behaviour. Full mode includes owner tools: backup to a path the caller
+names, restore from one, purge, and `shadowgraph_bind` and `shadowgraph_attribute`, which run there
+without the terminal confirmation the CLI asks for them. Give an agent compact mode unless you want it
+to have them (see [SECURITY.md](SECURITY.md#local-threat-model)).
 
 ### AI tool setup
 
@@ -524,20 +524,23 @@ acceptance criteria have not been assessed.
 
 ### Moving between 0.41.0 and `main`
 
-- **Take a backup before upgrading.** `shadowgraph backup [<file>]` copies the store as it is on
-  disk, so a backup taken before this build first saves the store is still a schema-5 store that
-  0.41.0 opens. Once this build has saved the store, its backups are schema-7 stores; to use one with
+- **Take a backup before upgrading.** `shadowgraph backup [<file>]` copies the store: a JSON store
+  byte for byte, a SQLite store table by table. A backup taken before this build first saves the
+  store is still a schema-5 store that 0.41.0 opens. (Opening a SQLite store, this build adds a table
+  of its own to it; 0.41.0 still reads the store.) Once this build has saved the store, its backups are schema-7 stores; to use one with
   0.41.0, restore it into a fresh path with this build and fork a schema-5 copy as below.
 - **Upgrading.** This build reads every store 0.41.0 wrote (schemas 1 through 5) and writes schema 7 on
   its next save. What changes for you:
   - A write that names no project is refused (`write_scope_unresolved`). Pass `project`, or bind the
     workspace to a project with `shadowgraph bind`.
-  - Records 0.41.0 wrote without a project were stored in `default`. This build treats them as legacy
-    material whose owner is uncertain: no read returns them, not even with `"project":"default"`.
+  - Records 0.41.0 stored in `default` -- written without a project, which 0.41.0 put there, or
+    naming `default` -- are legacy material whose owner this build treats as uncertain: no read
+    returns them, not even with `"project":"default"`.
     They are not deleted. The JavaScript API's `legacyAttributionReview()` lists them, and
     `shadowgraph attribute '{"ids":["<id>"],"targetProject":"<project>","reason":"<why>"}'`, which
     you confirm at a terminal, moves named records into a project. To note their ids before
-    upgrading, run 0.41.0's `shadowgraph list '{"project":"default"}'`. If you rely on such records
+    upgrading, run 0.41.0's `shadowgraph list`, which prints every record, and keep the ids of those
+    with `"project": "default"`. If you rely on such records
     and do not want to move them, stay on 0.41.0.
   - Some results changed shape; for example, `review` returns `{"items": [...], "completeness": {...}}`
     instead of an array. The [changelog](CHANGELOG.md) lists every breaking change.

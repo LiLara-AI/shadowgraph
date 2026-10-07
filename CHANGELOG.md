@@ -18,8 +18,8 @@ between them.
 
 ### Security
 
-- `git` and `claude` are run only from absolute PATH entries, so a workspace that holds its own `git` is never run in its place during hook delivery. On Windows under Node 20 a workspace's `git.exe` was found first; on other platforms an empty or relative PATH entry (a trailing `:`, `::` or `.`) named the workspace.
-- A backup, a `migrate` preservation copy and a `downgrade` output are refused over the activation record and the extraction state files beside the deletion registry, as they already were over deletion records (`deletion_file_destination_refused`). A store copy carries unknown members byte for byte, so one written there could otherwise stand in for an owner's activation.
+- `git` and `claude` are run only from absolute PATH entries, so a workspace's own `git` is no longer found through the working directory during hook delivery. On Windows under Node 20 a workspace's `git.exe` was found first; on other platforms an empty or relative PATH entry (a trailing `:`, `::` or `.`) named the workspace. An absolute PATH entry that points into a workspace is still searched. Both security entries concern code added since 0.41.0, which runs no program and has no activation record.
+- A backup, a `migrate` preservation copy and a `downgrade` output are refused over the activation record and the extraction state files beside the deletion registry, and over their locks, as they already were over deletion records (`deletion_file_destination_refused`). A store copy carries unknown members byte for byte, so one written there could otherwise stand in for an owner's activation.
 
 ### Changes, as each landed
 
