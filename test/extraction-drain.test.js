@@ -273,16 +273,31 @@ for (const type of ['json', 'sqlite']) {
     assert.ok((await f.read()).records.every(x => x.kind === 'capture' && x.state !== 'extracted'));
     assert.equal(called, true);
   });
-  test(`drain ${type}: wall deadline bounds an unresponsive executor and prevents late commit`, skip, async t => {
-    // The executor must be reached before the wall deadline, so the deadline is
-    // not 1 s: on slow Windows CI runners the claim alone outlasted that, and
-    // the drain stopped before any call. It still bounds the unresponsive call.
-    const f = await setup(t, type, 1, { wallMs: 10_000 }); let resolveCall, called = false;
-    const result = await runExtractionDrain({ ...f.options, executor: { extract: async () => {
-      called = true; return new Promise(resolve => { resolveCall = resolve; });
+  // The wall deadline is the drain's own timer, armed with its budget. The
+  // executor never answers, and the test fires that timer itself once the call
+  // has started, so no runner's speed decides whether the call is reached first
+  // (slow Windows CI runners outlasted a 1 s budget before it). The timer must
+  // be armed with exactly the configured budget before the call, and a response
+  // arriving after the stop opens no store and commits nothing.
+  test(`drain ${type}: wall deadline bounds an unresponsive executor and prevents late commit`, { ...skip, timeout: 120_000 }, async t => {
+    const wallMs = 10_000, f = await setup(t, type, 1, { wallMs }), trace = storeTrace();
+    const realSetTimeout = globalThis.setTimeout; let resolveCall, called = false, armedBeforeCall = false, fireWall = null;
+    t.mock.method(globalThis, 'setTimeout', (callback, ms, ...args) => {
+      if (ms !== wallMs || fireWall) return realSetTimeout(callback, ms, ...args);
+      const handle = realSetTimeout(() => {}, 2 ** 31 - 1);
+      fireWall = () => { clearTimeout(handle); callback(...args); };
+      return handle;
+    });
+    const result = await runExtractionDrain({ ...f.options, openStore: trace.openStore, executor: { extract: async () => {
+      called = true; armedBeforeCall = fireWall !== null;
+      if (armedBeforeCall) realSetTimeout(fireWall, 0);
+      return new Promise(resolve => { resolveCall = resolve; });
     } } });
-    assert.equal(called, true); assert.equal(result.status, 'blocked'); assert.equal(result.blockedReason, 'drain_stopped');
-    resolveCall(f.response); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(called, true); assert.equal(armedBeforeCall, true, 'the wall timer was armed with exactly the configured budget before the call');
+    assert.equal(result.status, 'blocked'); assert.equal(result.blockedReason, 'drain_stopped');
+    const opened = trace.events.length;
+    resolveCall(f.response); await new Promise(resolve => realSetTimeout(resolve, 2000));
+    assert.equal(trace.events.length, opened, 'no store is opened after the drain stopped');
     const data = await f.read(); assert.equal(data.records.find(x => x.kind === 'capture').state, 'pending');
     assert.equal(data.records.find(x => x.kind === 'capture').receipts.length, 0);
   });
