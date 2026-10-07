@@ -133,7 +133,12 @@ export function runBounded({ executable, args, cwd, env, input = '', timeoutMs =
     if (signal?.aborted) { failure = 'aborted'; finish(); return; }
     signal?.addEventListener('abort', abort, { once: true });
     try {
-      child = spawnProcess(executable, args, { cwd, env, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      // A call with no input gets no stdin pipe: a child that exits before an
+      // empty pipe is closed (git rev-parse, a version probe) would otherwise
+      // fail the close with EPIPE and read as input_failed, though nothing was
+      // lost. A call with input keeps the pipe, and losing it stays a failure.
+      const piped = input !== '';
+      child = spawnProcess(executable, args, { cwd, env, shell: false, windowsHide: true, stdio: [piped ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
       child.once('spawn', () => { processStarted = true; });
       for (const [stream, chunks] of [[child.stdout, stdout], [child.stderr, stderr]]) stream.on('data', chunk => {
         bytes += chunk.length;
@@ -142,8 +147,10 @@ export function runBounded({ executable, args, cwd, env, input = '', timeoutMs =
       });
       child.once('error', () => { failure = 'spawn_failed'; finish(); });
       child.once('close', code => { childClosed = true; finish(code); });
-      child.stdin.on('error', () => stop('input_failed'));
-      child.stdin.end(input);
+      if (piped) {
+        child.stdin.on('error', () => stop('input_failed'));
+        child.stdin.end(input);
+      }
     } catch { failure = 'spawn_failed'; finish(); }
   });
 }

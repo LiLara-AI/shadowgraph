@@ -407,6 +407,23 @@ test('bounded process distinguishes a requested kill from confirmed local child 
   assert.ok(kills > 0); assert.equal(out.failure, 'aborted'); assert.equal(out.localChildStopped, false);
 });
 
+// A child that exits before its stdin closes (git rev-parse does) made the
+// close fail with EPIPE, about one call in twenty on Linux, and the empty-input
+// call read as input_failed. With no input there is no pipe to lose; with
+// input, a lost pipe is still a failure.
+test('a call without input opens no stdin pipe, and a lost pipe still fails a call with input', async () => {
+  const run = input => runBounded({ executable: '/fake', args: [], cwd: '/', env: {}, input, spawnProcess: (_exe, _args, options) => {
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
+    child.stdin = options.stdio[0] === 'pipe' ? new PassThrough() : null;
+    child.kill = () => true;
+    queueMicrotask(() => { child.emit('spawn'); child.stdin?.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })); child.emit('close', 128); });
+    return child;
+  } });
+  const empty = await run('');
+  assert.equal(empty.failure, null); assert.equal(empty.code, 128); assert.equal(empty.processStarted, true);
+  assert.equal((await run('synthetic prompt')).failure, 'input_failed');
+});
+
 test('bounded child shutdown escalates a refused soft termination before declaring settlement', async () => {
   const controller = new AbortController(), signals = [];
   const out = await runBounded({ executable: '/fake', args: [], cwd: '/', env: {}, signal: controller.signal, spawnProcess: () => {
