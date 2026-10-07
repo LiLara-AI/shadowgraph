@@ -401,7 +401,10 @@ test('a store\'s update loads, changes and writes under one hold of its fence, o
     assert.equal((await store.load()).revision, start);
     assert.equal((await store.load()).schemaVersion, privilegedSnapshot(createShadowGraph()).schemaVersion, `${type}: the store is as it was`);
     // Parallel updates from separate handles serialise on the fence: none conflicts, none is lost.
-    const handles = await Promise.all(Array.from({ length: 4 }, () => createStorage({ type, file })));
+    // The last waits for the other three, so its lock wait is not the default 5 s: on a slow runner
+    // (a Windows CI job near its 75-minute limit) three SQLite updates outlasted it. The wait's own
+    // timeout is tested elsewhere; here it would only race the runner.
+    const handles = await Promise.all(Array.from({ length: 4 }, () => createStorage({ type, file, lockTimeoutMs: 120_000 })));
     await Promise.all(handles.map((handle, index) => handle.update((current) => {
       const graph = createShadowGraph();
       graph.importData(current);
