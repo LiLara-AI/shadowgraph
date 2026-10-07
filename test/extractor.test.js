@@ -409,10 +409,13 @@ test('bounded process distinguishes a requested kill from confirmed local child 
 
 // A child that exits before its stdin closes (git rev-parse does) made the
 // close fail with EPIPE, about one call in twenty on Linux, and the empty-input
-// call read as input_failed. With no input there is no pipe to lose; with
-// input, a lost pipe is still a failure.
-test('a call without input opens no stdin pipe, and a lost pipe still fails a call with input', async () => {
+// call read as input_failed. With no input there is no pipe to lose, and the
+// child's stdin is the null device, never the parent's (an MCP server's own
+// protocol stream); with input, a stdin error is still a failure.
+test('a call without input opens no stdin pipe, and a stdin error still fails a call with input', async () => {
+  const stdins = [];
   const run = input => runBounded({ executable: '/fake', args: [], cwd: '/', env: {}, input, spawnProcess: (_exe, _args, options) => {
+    stdins.push(options.stdio[0]);
     const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
     child.stdin = options.stdio[0] === 'pipe' ? new PassThrough() : null;
     child.kill = () => true;
@@ -422,6 +425,7 @@ test('a call without input opens no stdin pipe, and a lost pipe still fails a ca
   const empty = await run('');
   assert.equal(empty.failure, null); assert.equal(empty.code, 128); assert.equal(empty.processStarted, true);
   assert.equal((await run('synthetic prompt')).failure, 'input_failed');
+  assert.deepEqual(stdins, ['ignore', 'pipe']);
 });
 
 test('bounded child shutdown escalates a refused soft termination before declaring settlement', async () => {

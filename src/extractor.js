@@ -136,7 +136,8 @@ export function runBounded({ executable, args, cwd, env, input = '', timeoutMs =
       // A call with no input gets no stdin pipe: a child that exits before an
       // empty pipe is closed (git rev-parse, a version probe) would otherwise
       // fail the close with EPIPE and read as input_failed, though nothing was
-      // lost. A call with input keeps the pipe, and losing it stays a failure.
+      // lost. A call with input keeps the pipe, and an error writing it stays
+      // a failure.
       const piped = input !== '';
       child = spawnProcess(executable, args, { cwd, env, shell: false, windowsHide: true, stdio: [piped ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
       child.once('spawn', () => { processStarted = true; });
