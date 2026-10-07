@@ -7,7 +7,7 @@
     "node": ">=22.19.0"
   },
   "dependencies": {
-    "@modelcontextprotocol/inspector": "2.4.0",
+    "@modelcontextprotocol/inspector": "2.9.0",
     "mcp-proxy": "6.4.3"
   }
 }
