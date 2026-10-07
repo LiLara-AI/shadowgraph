@@ -14,7 +14,7 @@ import { activation, asRestoreRefusal, completeRestore, resolvePendingRestore, r
 // record a restore left first, so it never carries one (PR-37c design §3.4);
 // a SQLite store's own backup does both itself.
 export async function backupFile(source, destination, options = {}) {
-  const target = await refuseDeletionFileDestination(destination, options.env);
+  const target = await refuseDeletionFileDestination(destination, options.env, { ownerFiles: true });
   await mkdir(dirname(target), { recursive: true });
   if (options.store?.backup) return options.store.backup(destination);
   return restoreLock(source, options).run(async () => {

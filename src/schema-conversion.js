@@ -399,7 +399,7 @@ export async function downgradeStore({ graph, store, file, storageType = 'json',
   // VS5). It never lands on a deletion record file, and no other ledger may
   // already sit beside it; the flag-only ledger an interrupted downgrade left
   // is the one a re-run accepts.
-  const target = await refuseDeletionFileDestination(output);
+  const target = await refuseDeletionFileDestination(output, undefined, { ownerFiles: true });
   for (const path of [ledgerPath(output), ledgerPath(target)]) {
     if (await exists(path) && !(await flagOnly(path))) throw deletionError(BACKUP_CONTROL_LEDGER_STALE, 'Refusing the downgrade: a deletion record file already sits beside its output');
   }

@@ -841,7 +841,7 @@ export async function createSqliteStore(filePath, options = {}) {
           if (permanentlyClosed) throw new Error('SQLite storage is closed');
           // The destination's final path, never a deletion record file however
           // it is spelled (PR-37a).
-          const target = await refuseDeletionFileDestination(destination, options.env);
+          const target = await refuseDeletionFileDestination(destination, options.env, { ownerFiles: true });
           await mkdir(dirname(target), { recursive: true });
           const temporary = join(dirname(target), `.${basename(target)}.${process.pid}.${Date.now()}.tmp`);
           let database;
