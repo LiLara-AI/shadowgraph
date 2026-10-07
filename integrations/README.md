@@ -1,10 +1,10 @@
 # ShadowGraph integrations
 
-ShadowGraph is a local decision ledger and unified memory kernel for AI agents. The MCP server is stdio-based and ships inside the npm package.
+ShadowGraph is a local decision ledger and unified memory kernel for AI agents. The MCP server is stdio-based and ships inside the package; the package is not published to npm.
 
 ## Install and diagnose
 
-The package remains `private: true` and is not published to npm until the release checklist's independent security and benchmark gates are approved. Install it from the repository, as the [main README](../README.md#1-install) describes:
+The package remains `private: true` and is not published to npm. Publication would need the release checklist's independent security and benchmark gates and an explicit maintainer authorization, none of which is complete. Install it from the repository, as the [main README](../README.md#1-install) describes:
 
 ```bash
 npm install --global github:LiLara-AI/shadowgraph

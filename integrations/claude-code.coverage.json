@@ -85,7 +85,7 @@
         "modelVisibleDelivery": "before the model answers the prompt: only records relevant to it, otherwise nothing",
         "pendingUnprocessed": "captured material not yet understood is declared in every scoped read, and the payload's processing line says whether capture is active and whether extraction is active; captured material is extracted only by the separately activated worker, after the turn",
         "correctedExperience": "at the next prompt after the correction is recorded, when the corrected record is among what the delivery selects and fits",
-        "replayProtection": "a re-delivered prompt with the same message_id is the same captured item; without one, a re-delivery is a second occurrence, marked possibleDuplicateOf when it repeats the previous prompt; delivery itself writes nothing"
+        "replayProtection": "a re-delivered prompt with the same message_id is the same captured item; without one (the verified host's payloads observed at AG-2 carried prompt_id and no message_id), a re-delivery is a second occurrence, marked possibleDuplicateOf when it repeats the previous prompt; delivery itself writes nothing"
       }
     },
     {
@@ -158,7 +158,7 @@
       {
         "event": "PostToolUse",
         "material": "the tool's name, then every leaf of tool_input and tool_response labelled by its path, each string with its own line breaks",
-        "identity": "tool_use_id; without one, the session's occurrence ordinal, which is not exact",
+        "identity": "tool_use_id, which is exact; without one, the session's occurrence ordinal, which is not exact",
         "exact": true,
         "observation": "the tool's name and the working directory; an outcome observed only as a success, from a Bash or PowerShell exit_code of 0 for a single command, otherwise absent, and none at all for a call without a tool_use_id"
       },

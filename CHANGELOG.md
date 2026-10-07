@@ -2,9 +2,32 @@
 
 ## 0.42.0-dev.0 — development build on `main` (unreleased, not tagged)
 
+Not a release: the 0.41.0 Technical Preview (tag `v0.41.0`) remains the latest release. Read
+[Moving between 0.41.0 and `main`](README.md#moving-between-0410-and-main) before moving a store
+between them.
+
+### Breaking for 0.41.0 users
+
+- Stores are written at schema 7. 0.41.0 reads schemas 1 to 5 only and refuses a store this build has saved; `downgrade` forks a schema-5 copy (the default) or a schema-6 copy and never changes the store.
+- Every write names a project, a workspace binding (`shadowgraph bind`), or a capture-origin id; a write with none of them is refused (`write_scope_unresolved`) instead of landing in `default`. A by-id change (an outcome, a status, confidence evidence, a supersession, a fact verification, a review acknowledgement) without one is refused the same way, and one naming another project's id is answered as for a missing id.
+- Reads are project-only: `search`, `retrieve`, `recall`, `context`, `traverse`, the journal, `stats`, the public export (`list`, `GET /records`), `redact` and review signals return only the selected project's records, and nothing when no project is selected, reported as incomplete (`scoped_coverage`).
+- Schema 6 records ownership (`attribution`). Records stored in `default`, or with no project, before schema 6 are legacy (`legacy_ambiguous`, `legacy_unattributed`) and no project read returns them, not even one naming `default`; the kernel's `legacyAttributionReview()` lists them and `attribute` reassigns named records. `migrate` backfills attribution and erasure tokens after a verified preservation copy.
+- New owner CLI verbs: `bind` and `attribute`, each confirmed at a terminal; the wider-access verbs `request-access`, `issue-access`, `delegate-access`, `revoke-access`, `discard-access` and `access-status`; `migrate` and `downgrade`; and the hook, capture, activation and extraction verbs in the entries below.
+- MCP advertises 35 tools in full mode (28 in 0.41.0) and 16 in compact mode (14 in 0.41.0).
+- `review()` and `getReviewSignals()` return `{ items, completeness }`, and `context()` renames its collections and no longer persists review signals (entries below).
+
+### Security
+
+- `git` and `claude` are run only from absolute PATH entries, so a workspace that holds its own `git` is never run in its place during hook delivery. On Windows under Node 20 a workspace's `git.exe` was found first; on other platforms an empty or relative PATH entry (a trailing `:`, `::` or `.`) named the workspace.
+- A backup, a `migrate` preservation copy and a `downgrade` output are refused over the activation record and the extraction state files beside the deletion registry, as they already were over deletion records (`deletion_file_destination_refused`). A store copy carries unknown members byte for byte, so one written there could otherwise stand in for an owner's activation.
+
+### Changes, as each landed
+
+Each entry below was written when its change landed. Where one says that nothing calls, captures or writes something yet, a later change in this list adds that caller or writer, and "as before" means the build before that change, not 0.41.0.
+
 - Complete the P6–P8 capture lifecycle: policy-driven uncited raw expiry, inspection and pending-item deletion; generation-guarded, budgeted extraction through the separately approved subscription executor; owner correction and explicit reprocessing that supersedes prior extraction output while preserving owner edits. Delivery remains a bounded project read, and all capabilities require their activation procedures.
 - Extend deletion to exact unattributed origins, controlled source-evidence copies and explicit tracked Markdown pruning. Reader, pending-read, recovery and worker floors are separate; unknown-member preservation is not semantic compatibility. Backups, restore recovery files and host/user-held copies remain outside complete-erasure claims.
-- Verify the integrated JSON/SQLite capture-to-extraction-to-delivery, correction/reprocessing, retention/deletion, backup/restore, restart and deactivation lifecycle. Correct keyed journal-less overwrite parity after legitimate lifecycle changes, and keep every retry alias replayable after index-only refresh with atomic journal-capacity checks. See the [integrated contract](docs/contracts/integrated-lifecycle-contract.md) and [data lifecycle map](docs/data-lifecycle.md).
+- Regression-test, with a synthetic extraction executor and fixture activation (not real-host or acceptance evidence), the integrated JSON/SQLite capture-to-extraction-to-delivery, correction/reprocessing, retention/deletion, backup/restore, restart and deactivation lifecycle. Correct keyed journal-less overwrite parity after legitimate lifecycle changes, and keep every retry alias replayable after index-only refresh with atomic journal-capacity checks. See the [integrated contract](docs/contracts/integrated-lifecycle-contract.md) and [data lifecycle map](docs/data-lifecycle.md).
 
 - A standalone capture-retention reader validates project windows and enforces effective raw expiry at consumption. It preserves persistence data and unknown ledger members, reports expired backlog honestly, and refuses retention-sensitive restore/merge until lifecycle reconciliation is available. Older readers that merely preserve controls do not meet this semantic floor.
 
