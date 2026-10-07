@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PERFORMANCE_FILE, assertDeclaredCasesPassed, declaredCases } from '../performance/cases.mjs';
@@ -90,4 +90,15 @@ test('the step entry script exits non-zero unless every declared case of its fil
     status[name] = spawnSync(process.execPath, [entry, file], { encoding: 'utf8', windowsHide: true }).status;
   }
   assert.deepEqual(status, { passing: 0, failing: 1, skipped: 1, crashed: 1, empty: 1, unregistered: 1 });
+});
+
+test('the step creates the measured stores in the job temporary directory when CI gives one', async (t) => {
+  const root = await scratchDirectory(t), job = join(root, 'job-temp'), entry = fileURLToPath(new URL('../performance/run.mjs', import.meta.url));
+  await mkdir(job);
+  const file = join(root, 'where.perf.js');
+  await writeFile(file, "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { tmpdir } from 'node:os';\ntest('a', () => { assert.ok(tmpdir().startsWith(process.env.EXPECTED_JOB_TEMP), tmpdir()); });\n");
+  const run = spawnSync(process.execPath, [entry, file], { encoding: 'utf8', windowsHide: true, env: { ...process.env, RUNNER_TEMP: job, EXPECTED_JOB_TEMP: job } });
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  assert.match(run.stdout, /"temporaryDirectory":"job \(RUNNER_TEMP\)"/u);
+  assert.deepEqual(await readdir(job), [], 'the step removes what it created there');
 });
