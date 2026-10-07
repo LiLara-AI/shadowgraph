@@ -1322,7 +1322,8 @@ test('a copy never lands on the activation record or the extraction state files'
   const activation = join(env.SHADOWGRAPH_HOME, 'activation.json');
   await writeFile(activation, '{"version":1,"capabilities":{}}');
   const before = await fileHash(activation);
-  for (const name of ['activation.json', 'Activation.JSON', 'extraction-usage.json', 'extraction-invocations.json', 'extraction-worker', 'extraction-worker.settlement.json']) {
+  const owned = ['activation.json', 'extraction-usage.json', 'extraction-invocations.json', 'extraction-worker', 'extraction-worker.settlement.json'];
+  for (const name of [...owned, 'Activation.JSON', ...owned.map((file) => `${file}.lock`)]) {
     await assert.rejects(backupFile(state.file, join(env.SHADOWGRAPH_HOME, name), { env }), { code: 'deletion_file_destination_refused' }, name);
   }
   assert.equal(await fileHash(activation), before);
@@ -1335,6 +1336,21 @@ test('a copy never lands on the activation record or the extraction state files'
   // Any other name in that folder still takes a backup.
   await backupFile(state.file, join(env.SHADOWGRAPH_HOME, 'store-backup.json'), { env });
   assert.ok(existsSync(join(env.SHADOWGRAPH_HOME, 'store-backup.json')));
+});
+
+// A SQLite store's own backup, which a library caller may reach directly,
+// refuses the same files.
+test('a SQLite backup called directly never lands on the activation record or its lock', BACKENDS[1][1], async (t) => {
+  const f = fixture();
+  const state = await storeOf(t, 'sqlite', f.payload, VIEWS.item(f).ledger);
+  const env = { SHADOWGRAPH_HOME: join(state.dir, 'home') };
+  await mkdir(env.SHADOWGRAPH_HOME, { recursive: true });
+  const store = await createStorage({ type: 'sqlite', file: state.file, env });
+  t.after(() => store.close?.());
+  for (const name of ['activation.json', 'activation.json.lock']) {
+    await assert.rejects(store.backup(join(env.SHADOWGRAPH_HOME, name)), { code: 'deletion_file_destination_refused' }, name);
+  }
+  assert.deepEqual(await readdir(env.SHADOWGRAPH_HOME), []);
 });
 
 test('T-6/C1: a capture re-sent with the host id of a withheld capture is refused and writes nothing', async (t) => {

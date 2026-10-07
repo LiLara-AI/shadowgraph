@@ -679,9 +679,11 @@ export function storeIo(store) {
 // owner's files beside the registry, which ShadowGraph reads as the owner's
 // own decisions: a copy carries unknown top-level members byte for byte, so
 // one written over the activation record or extraction state could stand in
-// for an owner's activation (PR #12 security review). A store's own saves,
-// whose path the owner configured, skip them and so make no extra call.
-const OWNER_FILES = ['activation.json', 'extraction-usage.json', 'extraction-invocations.json', 'extraction-worker', 'extraction-worker.settlement.json'];
+// for an owner's activation (PR #12 security review); one written over their
+// fence locks would keep deactivation waiting. A store's own saves, whose path
+// the owner configured, skip them and so make no extra call.
+const OWNER_FILES = ['activation.json', 'extraction-usage.json', 'extraction-invocations.json', 'extraction-worker', 'extraction-worker.settlement.json']
+  .flatMap((name) => [name, `${name}.lock`]);
 export async function refuseDeletionFileDestination(destination, env = process.env, { ownerFiles = false } = {}) {
   const target = await canonicalPath(destination, { followLink: false });
   const registry = registryFile(env);
