@@ -391,6 +391,8 @@ export async function downgradeStore({ graph, store, file, storageType = 'json',
     }
   }
   if (await exists(output)) throw new Error(`Refusing to overwrite an existing file with a downgrade: ${output}`);
+  // A log left beside it would replay over the new output (post-merge review R1-1).
+  for (const path of sidecars(output)) if (await exists(path)) throw new Error(`Refusing a downgrade: a SQLite log file already sits beside its output: ${path}`);
   if (await exists(reportPath)) throw new Error(`Refusing to overwrite an existing report: ${reportPath}`);
   // The output is below the deletion-knowledge floor, which ignores a ledger,
   // and gets one holding only the tokensStripped flag, which a re-upgrade

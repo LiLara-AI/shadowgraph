@@ -196,6 +196,11 @@ export async function createShadowGraphServer(options = {}) {
     if (method === 'POST' && path === '/retrieve') return graph.retrieve(body?.query ?? '', body ?? {});
     if (method === 'GET' && path === '/validate') return graph.validate(body ?? {});
     if (method === 'POST' && path === '/repair-plan') return graph.repairPlan(body ?? {});
+    if (method === 'POST' && (path === '/backup' || path === '/restore')) {
+      // A missing path would otherwise name a file `undefined` (post-merge review R1-5).
+      const named = path === '/backup' ? body?.destination : body?.source;
+      if (typeof named !== 'string' || !named.trim()) throw new Error(`${path === '/backup' ? 'destination' : 'source'} must be a non-empty string`);
+    }
     if (method === 'POST' && path === '/backup') return backupFile(options.file ?? process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json', body?.destination, { store });
     if (method === 'POST' && path === '/restore') {
       if (body?.memoryOnly !== undefined && typeof body.memoryOnly !== 'boolean') throw new Error('memoryOnly must be a boolean');
@@ -303,7 +308,9 @@ export async function createShadowGraphServer(options = {}) {
       const status = storageUnavailable ? 503 : recoveryUnconfirmed ? 500 : notFound ? 404 : 400;
       response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
       response.end(JSON.stringify({
-        error: notFound ? 'decision not found' : error.message,
+        // A restore source that is not JSON, or a platform file error, would
+        // otherwise repeat the file's first bytes or a full path (post-merge review R4-6).
+        error: notFound ? 'decision not found' : error instanceof SyntaxError ? 'invalid JSON data' : error.syscall ? `file operation failed (${error.code})` : error.message,
         ...(error.code ? { code: error.code } : {}),
         ...(error.recoveryCode ? { recoveryCode: error.recoveryCode } : {}),
         ...(error.retainedArtifacts ? { retainedArtifacts: error.retainedArtifacts } : {}),

@@ -842,6 +842,12 @@ export async function createSqliteStore(filePath, options = {}) {
           // The destination's final path, never a deletion record file however
           // it is spelled (PR-37a).
           const target = await refuseDeletionFileDestination(destination, options.env, { ownerFiles: true });
+          // A log already beside the destination would replay over the copy at
+          // its first open (post-merge review R1-1). It may belong to another
+          // database, so it is refused, never removed.
+          for (const path of sidecars(target)) {
+            if (await stat(path).then(() => true, () => false)) throw new Error('Refusing a SQLite backup: a -wal, -shm or -journal file already sits beside its destination');
+          }
           await mkdir(dirname(target), { recursive: true });
           const temporary = join(dirname(target), `.${basename(target)}.${process.pid}.${Date.now()}.tmp`);
           let database;

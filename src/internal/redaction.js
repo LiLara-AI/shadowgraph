@@ -54,7 +54,14 @@ const KNOWN_TOKENS = [
   /\bdop_v1_[a-f0-9]{64}\b/gu,
   /\bshp(?:at|ca|pa|ss)_[a-fA-F0-9]{32}\b/gu,
   /\bpypi-AgE[A-Za-z0-9_-]{50,}/gu,
-  /\bhooks\.slack\.com\/services\/[A-Za-z0-9/_-]+/gu
+  /\bhooks\.slack\.com\/services\/[A-Za-z0-9/_-]+/gu,
+  // Shapes the post-merge review (R3-9) found passing: Stripe webhook secrets,
+  // Google OAuth access tokens, Slack app tokens, Docker and Grafana tokens.
+  /\bwhsec_[A-Za-z0-9]{24,}/gu,
+  /\bya29\.[A-Za-z0-9_-]{20,}/gu,
+  /\bxapp-[A-Za-z0-9-]{10,}/gu,
+  /\bdckr_pat_[A-Za-z0-9_-]{20,}/gu,
+  /\bglsa_[A-Za-z0-9_]{32,}/gu
 ];
 // A URL wherever the checker finds one (`1https://` included): from the start of
 // a run of scheme characters only, so the scan stays linear on long words.

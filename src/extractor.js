@@ -7,7 +7,7 @@ import { runSupervised } from './internal/extraction-supervision.js';
 import { createHash } from 'node:crypto';
 import { lstat, mkdtemp, readFile, realpath, readdir, rm } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative } from 'node:path';
 
 import { EXTRACTION_MODEL } from './internal/extraction-contract.js';
 import { commandPath } from './internal/owner-files.js';
@@ -158,7 +158,10 @@ export function runBounded({ executable, args, cwd, env, input = '', timeoutMs =
 
 async function registryPolicy(env, signal) {
   if (process.platform !== 'win32') return [];
-  const executable = join(env.SYSTEMROOT ?? env.SystemRoot ?? 'C:\\Windows', 'System32', 'reg.exe');
+  // An empty or relative root would name a reg.exe relative to the working
+  // directory (post-merge review R2-2): only an absolute one is taken.
+  const root = env.SYSTEMROOT ?? env.SystemRoot;
+  const executable = join(isAbsolute(root ?? '') ? root : 'C:\\Windows', 'System32', 'reg.exe');
   const present = [];
   for (const hive of ['HKLM', 'HKCU']) {
     const out = await runBounded({ executable, args: ['query', `${hive}\\SOFTWARE\\Policies\\ClaudeCode`, '/v', 'Settings'], cwd: tmpdir(), env: childEnvironment(env), maxOutputBytes: 65536, signal });
@@ -177,9 +180,13 @@ export async function inspectPolicy({ env = process.env, userSettings, policyPat
   // policy inherited by WSL. They need their own verified inspection profile.
   if (platform !== 'win32') return blocked('policy_platform_unverified');
   const home = env.USERPROFILE ?? env.HOME ?? homedir();
-  const system = process.platform === 'win32' ? join(env.ProgramFiles ?? 'C:\\Program Files', 'ClaudeCode') : process.platform === 'darwin' ? '/Library/Application Support/ClaudeCode' : '/etc/claude-code';
+  // The variable's folder and the default one both: a changed ProgramFiles
+  // must not hide a policy at the default place (post-merge review R2-2).
+  const systems = process.platform === 'win32'
+    ? [...new Set([...(isAbsolute(env.ProgramFiles ?? '') ? [env.ProgramFiles] : []), 'C:\\Program Files'].map(folder => join(folder, 'ClaudeCode')))]
+    : [process.platform === 'darwin' ? '/Library/Application Support/ClaudeCode' : '/etc/claude-code'];
   userSettings ??= join(home, '.claude', 'settings.json');
-  policyPaths ??= ['managed-settings.json', 'managed-settings.d', 'managed-mcp.json', 'CLAUDE.md', 'skills'].map(name => join(system, name));
+  policyPaths ??= systems.flatMap(system => ['managed-settings.json', 'managed-settings.d', 'managed-mcp.json', 'CLAUDE.md', 'skills'].map(name => join(system, name)));
   // Fetch ineligibility does not prove an old policy cache absent. Inspect
   // metadata only; never read, delete or override an administrator's content.
   policyPaths = [...policyPaths, join(home, '.claude', 'remote-settings.json')];
@@ -219,6 +226,9 @@ export function createExtractor({ executable, env = process.env, scratchRoot = t
     let binary, digest;
     try { binary = await realpath(executable); if (!(await lstat(binary)).isFile()) return blocked('executable_unavailable'); digest = sha(await readFile(binary)); }
     catch { return blocked('executable_unavailable'); }
+    // On Windows a program file only: a .cmd or .bat runs through cmd.exe, which
+    // parses its arguments again (post-merge review R2-4; CVE-2024-27980).
+    if (process.platform === 'win32' && extname(binary).toLowerCase() !== '.exe') return blocked('executable_unavailable');
     if (!await outsideRepository(cwd, parent, signal)) return blocked('invocation_cwd_unverified');
     const policy = await policyInspection({ env: parent, signal });
     if (!policy.ok) return blocked(policy.blockedReason ?? 'policy_unverified');
