@@ -6,12 +6,23 @@ import { isDeepStrictEqual } from 'node:util';
 import { createDestinationFence, fenceLockPath } from '../revision-store.js';
 import { FROZEN_WORKER_BUDGETS, usageFile } from './extraction-budget.js';
 import { canonicalPath, repositoryOf, writeJsonAtomically } from './owner-files.js';
+import { HOST_PROFILES } from './extraction-contract.js';
 
 export const workerFenceFile = (env = process.env) => join(dirname(usageFile(env)), 'extraction-worker');
 export const settlementFile = env => `${workerFenceFile(env)}.settlement.json`;
+// A host profile that requires validation is valid only with the binary it names
+// and the record of that binary's passing host validation (activation.js).
+const validatedHost = (value) => {
+  const profile = Object.hasOwn(HOST_PROFILES, value?.hostVersion ?? '') ? HOST_PROFILES[value.hostVersion] : null;
+  if (!profile) return false;
+  if (profile.binarySha256 && value.binarySha256 !== profile.binarySha256) return false;
+  const v = value.hostValidation;
+  return !profile.requiresHostValidation || (/^[0-9a-f]{64}$/.test(v?.sha256 ?? '') && v.hostVersion === value.hostVersion
+    && v.binarySha256 === value.binarySha256 && /^[0-9a-f]{40}$/.test(v.runtimeCommit ?? '') && typeof v.file === 'string' && isAbsolute(v.file));
+};
 export function validExecutorReceipt(value) {
   return value?.ok === true && typeof value.executable === 'string' && isAbsolute(value.executable)
-    && /^[0-9a-f]{64}$/.test(value.binarySha256 ?? '') && value.hostVersion === '2.1.288'
+    && /^[0-9a-f]{64}$/.test(value.binarySha256 ?? '') && validatedHost(value)
     && value.model === 'claude-opus-5[1m]' && Array.from({ length: 10 }, (_, i) => `E-${i + 1}`).every(key => value.restrictions?.[key] === true);
 }
 const sameStore = (a, b) => a?.file === b?.file && a?.storage === b?.storage;
@@ -26,7 +37,8 @@ export async function activeExtraction(env = process.env) {
       || value.model !== 'claude-opus-5[1m]' || !validExecutorReceipt(value.executor)
       || typeof value.store?.file !== 'string' || !isAbsolute(value.store.file) || !['json', 'sqlite'].includes(value.store.storage)
       || value.runtime?.extraction !== true || typeof value.runtime.path !== 'string' || !isAbsolute(value.runtime.path)
-      || !/^[0-9a-f]{40}$/.test(value.runtime.commit ?? '')) return null;
+      || !/^[0-9a-f]{40}$/.test(value.runtime.commit ?? '')
+      || (value.executor.hostValidation && value.executor.hostValidation.runtimeCommit !== value.runtime.commit)) return null;
     // Capture enrollment is the automatic writer's scope, never a read grant.
     const capture = record.capabilities.capture;
     if (capture?.state !== 'active' || !sameStore(capture.store, value.store) || !sameRuntime(capture.runtime, value.runtime)) return null;

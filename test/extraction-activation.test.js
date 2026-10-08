@@ -320,3 +320,51 @@ test('concurrent deactivation preserves both disabled capabilities and both hist
     assert.equal(await (await state()).activeExtraction(f.env), null);
   }
 });
+
+// D1 (owner decision 2026-10-08): extraction on host 2.1.292 is trusted only
+// with a passing real-host validation receipt for its exact binary under the
+// activated runtime. The version string and the configuration check alone never do.
+import { HOST_PROFILES } from '../src/internal/extraction-contract.js';
+async function validation292(t) {
+  const f = await writable(t);
+  const executor = { ...f.extraction.executor, hostVersion: '2.1.292', binarySha256: HOST_PROFILES['2.1.292'].binarySha256 };
+  const receipt = { kind: 'shadowgraph-extraction-host-validation', version: 1, hostVersion: '2.1.292', binarySha256: executor.binarySha256,
+    runtimeCommit: 'a'.repeat(40), validatedAt: '2026-10-08T00:00:00.000Z', checks: { confinement: 'pass', routing: 'pass', recursion: 'pass', shutdown: 'pass' } };
+  const file = join(f.root, 'host-validation.json');
+  return { ...f, executor, receipt, receiptFile: file, options: { ...f.options, executorCheck: async () => structuredClone(executor) } };
+}
+test('a 2.1.292 host activates extraction only with a passing validation receipt for that binary under this runtime', async t => {
+  const f = await validation292(t), { activateExtraction } = await activation(), { activeExtraction } = await state();
+  const before = await readFile(f.file);
+  await assert.rejects(activateExtraction(f.options), /extraction_host_validation_required/);
+  for (const change of [r => { r.binarySha256 = 'c'.repeat(64); }, r => { r.runtimeCommit = 'c'.repeat(40); }, r => { r.checks.shutdown = 'fail'; },
+    r => { delete r.checks.recursion; }, r => { r.kind = 'other'; }, r => { r.hostVersion = '2.1.288'; }]) {
+    const copy = structuredClone(f.receipt); change(copy); await writeFile(f.receiptFile, JSON.stringify(copy));
+    await assert.rejects(activateExtraction({ ...f.options, hostValidation: f.receiptFile }), /extraction_host_validation_mismatch/);
+  }
+  await writeFile(f.receiptFile, '{broken');
+  await assert.rejects(activateExtraction({ ...f.options, hostValidation: f.receiptFile }), /extraction_host_validation_unreadable/);
+  assert.deepEqual(await readFile(f.file), before, 'nothing was written');
+  // A different binary that reports 2.1.292 is refused even with a matching receipt.
+  await writeFile(f.receiptFile, JSON.stringify({ ...f.receipt, binarySha256: 'd'.repeat(64) }));
+  await assert.rejects(activateExtraction({ ...f.options, hostValidation: f.receiptFile, executorCheck: async () => ({ ...f.executor, binarySha256: 'd'.repeat(64) }) }), /extraction_executor_unverified/);
+  const bytes = JSON.stringify(f.receipt); await writeFile(f.receiptFile, bytes);
+  const result = await activateExtraction({ ...f.options, hostValidation: f.receiptFile });
+  assert.equal(result.state, 'active');
+  const active = await activeExtraction(f.env);
+  assert.equal(active.executor.hostVersion, '2.1.292');
+  assert.equal(active.executor.hostValidation.sha256, createHash('sha256').update(bytes).digest('hex'));
+  assert.equal(active.executor.hostValidation.runtimeCommit, 'a'.repeat(40));
+});
+test('the extraction reader refuses a 2.1.292 record without its validation or with one bound to another runtime', async t => {
+  const f = await setup(t), { activeExtraction } = await state();
+  const executor = f.record.capabilities.extraction.executor;
+  Object.assign(executor, { hostVersion: '2.1.292', binarySha256: HOST_PROFILES['2.1.292'].binarySha256 });
+  await f.save(); assert.equal(await activeExtraction(f.env), null, 'no validation record');
+  executor.hostValidation = { file: join(f.root, 'v.json'), sha256: 'e'.repeat(64), hostVersion: '2.1.292', binarySha256: executor.binarySha256, runtimeCommit: 'c'.repeat(40), validatedAt: null };
+  await f.save(); assert.equal(await activeExtraction(f.env), null, 'validation of another runtime');
+  executor.hostValidation.runtimeCommit = f.record.capabilities.extraction.runtime.commit;
+  await f.save(); assert.equal((await activeExtraction(f.env)).executor.hostVersion, '2.1.292');
+  executor.binarySha256 = 'd'.repeat(64); executor.hostValidation.binarySha256 = 'd'.repeat(64);
+  await f.save(); assert.equal(await activeExtraction(f.env), null, 'a binary the profile does not name');
+});

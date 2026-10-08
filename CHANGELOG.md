@@ -23,6 +23,7 @@ between them.
 - From the post-merge security review of `46579c3`: a store copy is also refused over any lock file and, on Windows, over a name ending in a dot or a space or naming a stream, which Windows writes into the file it folds onto; a SQLite backup or `downgrade` output is refused when a `-wal`, `-shm` or `-journal` file already sits beside it, which SQLite would replay over the copy; MCP and HTTP `backup` and `restore` refuse a missing or non-string path; an HTTP error no longer repeats a restore source's bytes, nor the path in a platform file error; a malformed tar size is refused instead of looping.
 - Capture: the hook's own save removes the temporary copy a killed save left beside the store, which could hold raw text past its expiry; redaction also covers Stripe webhook secrets, Google OAuth access tokens, Slack app tokens, Docker and Grafana tokens.
 - Extraction: on Windows the executable must be an `.exe` (a `.cmd` or `.bat` runs through `cmd.exe`); the managed-policy check also looks in the default `Program Files` folder whatever `ProgramFiles` says, and runs `reg.exe` from the default `Windows` folder when `SYSTEMROOT` is empty or relative.
+- Extraction host profile: Claude Code 2.1.292 is accepted on its one profiled binary only, and an extraction activation on it needs `--host-validation <receipt>`, the receipt of a passing real-host validation of that binary under the installed runtime (confinement, routing, recursion, shutdown). A version string never trusts a host by itself; 2.1.288 is unchanged.
 
 ### Changes, as each landed
 

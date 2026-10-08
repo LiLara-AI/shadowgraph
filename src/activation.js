@@ -5,7 +5,7 @@
 // activation.json`, in exactly the shape delivery reads (src/delivery.js), with
 // an append-only history. It holds configuration and evidence references,
 // never memory. Delivery, capture and extraction share this record fence.
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createDestinationFence } from './revision-store.js';
 import { execFile } from 'node:child_process';
 import { lstat, readFile, rename } from 'node:fs/promises';
@@ -19,6 +19,7 @@ import { credentialLiteralIn } from './internal/credential-literal.js';
 import { DELETION_VIEW } from './internal/deletion-knowledge.js';
 import { canonicalPath, commandPath, isScratchFile, readText, writeJsonAtomically } from './internal/owner-files.js';
 import { mintOriginId, usableOriginId } from './scope.js';
+import { HOST_PROFILES, HOST_VALIDATION_CHECKS, HOST_VALIDATION_KIND } from './internal/extraction-contract.js';
 
 export const COVERAGE_MANIFEST_URL = new URL('../integrations/claude-code.coverage.json', import.meta.url);
 const RECORD_VERSION = 1;
@@ -302,8 +303,24 @@ async function deactivate(capability, { env = process.env, surface = 'cli' } = {
 
 // AG-3 is explicit. No live activation, route discovery or model call occurs
 // merely by importing this module. executorCheck/afterConfirmation are test seams.
+// A host profile that requires validation (extraction-contract.js) activates
+// only with the receipt of a passing real-host validation of that binary under
+// this runtime: the version string and the configuration check are
+// prerequisites, not that validation. The receipt's identity is recorded.
+async function checkedHostValidation(file, checked, pinned) {
+  if (typeof file !== 'string' || !isAbsolute(file)) throw new Error('extraction_host_validation_required');
+  const bytes = await readFile(file).catch(() => null);
+  if (!bytes || bytes.length > 1024 * 1024) throw new Error('extraction_host_validation_unreadable');
+  let receipt;
+  try { receipt = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('extraction_host_validation_unreadable'); }
+  if (receipt?.kind !== HOST_VALIDATION_KIND || receipt.version !== 1 || receipt.hostVersion !== checked.hostVersion
+    || receipt.binarySha256 !== checked.binarySha256 || receipt.runtimeCommit !== pinned.commit
+    || !HOST_VALIDATION_CHECKS.every((name) => receipt.checks?.[name] === 'pass')) throw new Error('extraction_host_validation_mismatch');
+  return { file: await canonicalPath(file), sha256: createHash('sha256').update(bytes).digest('hex'), hostVersion: receipt.hostVersion,
+    binarySha256: receipt.binarySha256, runtimeCommit: receipt.runtimeCommit, validatedAt: typeof receipt.validatedAt === 'string' ? receipt.validatedAt : null };
+}
 export async function activateExtraction({ env = process.env, evidence, store, storage = 'json', hostVersion,
-  settings = defaultSettingsPath(), runtime, executable, noOverageConfirmed, surface = 'cli', executorCheck, afterConfirmation } = {}) {
+  settings = defaultSettingsPath(), runtime, executable, noOverageConfirmed, surface = 'cli', executorCheck, afterConfirmation, hostValidation } = {}) {
   if (noOverageConfirmed !== true && noOverageConfirmed !== 'true') throw new Error('extraction_requires_no_overage_confirmation');
   if (surface !== 'cli' || typeof executable !== 'string' || !isAbsolute(executable)) throw new Error('extraction_requires_explicit_executable');
   const { storeFile, payload } = await checkedActivation({ evidence, store, storage, hostVersion });
@@ -319,11 +336,12 @@ export async function activateExtraction({ env = process.env, evidence, store, s
   if (await workerSettlement(env) !== 'clear') throw new Error('worker_settlement_unconfirmed');
   const { FROZEN_WORKER_BUDGETS, initializeUsage } = await import('./internal/extraction-budget.js');
   const checked = await (executorCheck ?? (() => createExtractor({ executable, env }).check()))();
-  if (!validExecutorReceipt(checked) || checked.executable !== await canonicalPath(executable)) throw new Error('extraction_executor_unverified');
   // Copy only resolved configuration and bounded metadata, never host diagnostics
   // or auth response fields. The executor repeats all checks on every invocation.
   const executor = Object.fromEntries(['ok', 'executable', 'binarySha256', 'hostVersion', 'model', 'restrictions', 'environmentNames', 'switches', 'configurationProfile']
-    .filter(key => checked[key] !== undefined).map(key => [key, structuredClone(checked[key])]));
+    .filter(key => checked?.[key] !== undefined).map(key => [key, structuredClone(checked[key])]));
+  if (checked?.ok === true && HOST_PROFILES[checked.hostVersion]?.requiresHostValidation) executor.hostValidation = await checkedHostValidation(hostValidation, checked, pinned);
+  if (!validExecutorReceipt(executor) || checked.executable !== await canonicalPath(executable)) throw new Error('extraction_executor_unverified');
   const at = new Date().toISOString();
   const extraction = { state: 'active', activationId: randomUUID(), changedAt: at, evidence, store: { file: storeFile, storage },
     runtime: pinned, settings: settingsFile, surface, model: EXTRACTION_MODEL, budgets: { ...FROZEN_WORKER_BUDGETS }, executor, noOverageConfirmed: true };
