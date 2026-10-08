@@ -1,6 +1,6 @@
 # ShadowGraph — MCP Compatibility Status
 
-**Last verified:** 2026-09-03 against official MCP specification/schema sources, `@modelcontextprotocol/inspector@2.4.0`, and the pinned `mcp-proxy@6.4.3` that fronts Glama’s generated container.
+**Last verified:** 2026-09-03 against official MCP specification/schema sources, `@modelcontextprotocol/inspector@2.4.0`, and the pinned `mcp-proxy@6.4.3` that fronts Glama’s generated container. On 2026-10-08 the Inspector gate client moved to `@modelcontextprotocol/inspector@2.9.0` (it brings `@modelcontextprotocol/client` 2.2.0, the fix for GHSA-6qxp-vccf-f47h, and drops `@modelcontextprotocol/sdk` from the gate tooling); the same strict gate below passed unchanged with it. The specification sources were not rechecked then.
 **Implemented revisions:** handshake `2024-11-05`, `2025-03-26`, `2025-06-18`, and `2025-11-25`, negotiated by `initialize`; modern `2026-07-28` through per-request `_meta` (dual-era stdio server).
 
 ## 1. Honest compatibility statement
@@ -407,7 +407,7 @@ they cannot run. CI installs those external clients from the isolated
 `tooling/mcp-gates/package-lock.json` before the live gates; in a source checkout without that local
 tooling install, the scripts fall back to the same exact versions through `npx`.
 
-`scripts/check-mcp.mjs` invokes pinned official `@modelcontextprotocol/inspector@2.4.0` twice with `tools/list --strict --format json`. It fails when:
+`scripts/check-mcp.mjs` invokes pinned official `@modelcontextprotocol/inspector@2.9.0` twice with `tools/list --strict --format json`. It fails when:
 
 - Inspector exits non-zero;
 - Inspector writes any strict schema finding to stderr;

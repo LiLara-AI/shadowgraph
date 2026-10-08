@@ -12,11 +12,11 @@ test('external MCP gate clients are reproducibly locked outside the product pack
 
   assert.equal(manifest.private, true);
   assert.deepEqual(manifest.dependencies, {
-    '@modelcontextprotocol/inspector': '2.4.0',
+    '@modelcontextprotocol/inspector': '2.9.0',
     'mcp-proxy': '6.4.3'
   });
   assert.deepEqual(lock.packages[''].dependencies, manifest.dependencies);
-  assert.equal(lock.packages['node_modules/@modelcontextprotocol/inspector'].version, '2.4.0');
+  assert.equal(lock.packages['node_modules/@modelcontextprotocol/inspector'].version, '2.9.0');
   assert.equal(lock.packages['node_modules/mcp-proxy'].version, '6.4.3');
 });
 
