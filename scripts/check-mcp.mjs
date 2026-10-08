@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const INSPECTOR_VERSION = '2.4.0';
+const INSPECTOR_VERSION = '2.9.0';
 // CI installs the exact client through tooling/mcp-gates/package-lock.json.
 // npx remains a bounded fallback for a source checkout without those tools.
 const INSPECTOR_TIMEOUT_MS = 300_000;
