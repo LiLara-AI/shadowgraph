@@ -168,6 +168,8 @@ test('R3-9: redaction covers the credential shapes the review found passing', ()
     assert.ok(!redacted.includes(body), credential.slice(0, 6));
     assert.match(redacted, /\[REDACTED\]/u);
   }
+  const base64 = 'Zq9+Snt/4Kx7Wv2Rt8Pm4Lb6Hq3Nc5Jd1Fg0=';
+  assert.ok(!redactText(`secret whsec${'_'}${base64}`).includes('Snt/4Kx7Wv2Rt8'), 'a base64 webhook secret too (fix review N-2)');
 });
 
 test('R2-4: on Windows the extraction executable must be a program file, never a .cmd or .bat', WINDOWS, async (t) => {

@@ -57,7 +57,7 @@ const KNOWN_TOKENS = [
   /\bhooks\.slack\.com\/services\/[A-Za-z0-9/_-]+/gu,
   // Shapes the post-merge review (R3-9) found passing: Stripe webhook secrets,
   // Google OAuth access tokens, Slack app tokens, Docker and Grafana tokens.
-  /\bwhsec_[A-Za-z0-9]{24,}/gu,
+  /\bwhsec_[A-Za-z0-9+/=]{24,}/gu,
   /\bya29\.[A-Za-z0-9_-]{20,}/gu,
   /\bxapp-[A-Za-z0-9-]{10,}/gu,
   /\bdckr_pat_[A-Za-z0-9_-]{20,}/gu,

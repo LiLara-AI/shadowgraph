@@ -687,7 +687,7 @@ const OWNER_FILES = ['activation.json', 'extraction-usage.json', 'extraction-inv
 // Windows drops a name's trailing dots and spaces and writes `name:stream` into
 // the file `name`, so such a spelling of a file not there yet passes the name
 // checks below and still lands on it (post-merge review R1-2). No such name is
-// the one Windows keeps: refuse it. The drive and the `\\?\` prefix are not names.
+// the one Windows keeps: a copy to one is refused. The drive and the `\\?\` prefix are not names.
 const foldedByWindows = (path) => process.platform === 'win32'
   && path.split(/[\\/]+/u).filter((part) => part && !/^(?:[A-Za-z]:|\?|\.)$/u.test(part)).some((part) => /[. ]$/u.test(part) || part.includes(':'));
 export async function refuseDeletionFileDestination(destination, env = process.env, { ownerFiles = false } = {}) {
@@ -696,7 +696,7 @@ export async function refuseDeletionFileDestination(destination, env = process.e
   const name = basename(target).toLowerCase();
   // A copy is never a lock file either: one over a store's own fence lock keeps
   // that store's writers waiting (post-merge review R1-3).
-  let refused = name.endsWith(CONTROL_SUFFIX) || foldedByWindows(target) || (ownerFiles && name.endsWith('.lock'));
+  let refused = name.endsWith(CONTROL_SUFFIX) || (ownerFiles && (foldedByWindows(target) || name.endsWith('.lock')));
   for (const guarded of registry ? [registry, `${registry}.lock`, ...(ownerFiles ? OWNER_FILES.map((file) => join(dirname(registry), file)) : [])] : []) {
     if (refused) break;
     const [file, record] = await Promise.all([identity(target), identity(guarded)]);

@@ -231,7 +231,7 @@ acknowledgement sent with one changes only what it owns, and the same call witho
 CLI counts only the named project's content, and nothing without one.
 Wider access is explicit and revocable: an access grant the owner issues at a terminal
 (`issue-access`) opens the projects or origins it names to explicit reads that present it, until it
-expires or is revoked. It is not lesson-only sharing, and automatic hook delivery never uses one. A project name is a selector, not access control: any caller of the CLI, MCP or HTTP API may name a project explicitly and read it; what a grant alone opens is an origin's records and legacy records. See
+expires or is revoked. It is not lesson-only sharing, and automatic hook delivery never uses one. A project name, like a presented origin id, is a selector, not access control: any caller of the CLI, MCP or HTTP API that names one explicitly reads it. Legacy records are what only a grant opens. See
 the [access transport contract](docs/contracts/access-transports.md).
 Omitted scope means all-null scope. Purge is previewable, logical by default, and explicitly
 irreversible in hard mode.
