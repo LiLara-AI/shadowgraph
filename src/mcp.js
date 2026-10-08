@@ -10,7 +10,7 @@ import { createRestoreValidator } from './restore-validation.js';
 import { loadLocalEvidenceVerifier } from './verification.js';
 import { BATCH_PROTOCOL_VERSIONS, LEGACY_PROTOCOL_VERSIONS, METADATA_TIER, buildToolCatalog, metadataTierForProtocolVersion, negotiateLegacyProtocolVersion, projectTool, selectTools, toolResult } from './mcp-tools.js';
 import { privilegedAccessRefusal, privilegedSnapshot } from './internal/snapshot.js';
-import { accessContext, bindWorkspaceProject, currentAccessOperation, discoverWorkspace, hasAccessReference } from './internal/access-transport.js';
+import { accessContext, currentAccessOperation, discoverWorkspace, hasAccessReference } from './internal/access-transport.js';
 import { readExtractionAvailability } from './internal/extraction-availability.js';
 import { DELETION_CODES } from './internal/deletion-knowledge.js';
 
@@ -263,13 +263,13 @@ async function callUnqueued(name, args, tier, accessManaged = false) {
     throw unavailableError();
   }
   const tool = toolsByName.get(name);
-  if (name === 'shadowgraph_bind') return toolResult(tool, await bindWorkspaceProject(graph, store, workspace, { ...args, surface: 'mcp' }), tier);
+  if (name === 'shadowgraph_bind' || name === 'shadowgraph_attribute') return toolResult(tool, ownerProposal(name, args), tier);
   if (!accessManaged && (tool?.accessLifecycle || (tool?.persistsWithAccess && hasAccessReference(args)))) {
     return currentAccessOperation(graph, store, () => callUnqueued(name, args, tier, true), { read: !tool?.accessLifecycle });
   }
   if (args && typeof args === 'object' && !Array.isArray(args)) {
     const { binding: ignoredBinding, surface: ignoredSurface, ...input } = args;
-    args = name === 'shadowgraph_attribute' ? { ...args, surface: 'mcp' } : tool?.persistsWithAccess || tool?.accessLifecycle || ['shadowgraph_record_decision', 'shadowgraph_record_attempt', 'shadowgraph_record_fact', 'shadowgraph_remember', 'shadowgraph_link', 'shadowgraph_supersede', 'shadowgraph_confidence_evidence', 'shadowgraph_record_outcome', 'shadowgraph_update_status', 'shadowgraph_ack_review'].includes(name)
+    args = tool?.persistsWithAccess || tool?.accessLifecycle || ['shadowgraph_record_decision', 'shadowgraph_record_attempt', 'shadowgraph_record_fact', 'shadowgraph_remember', 'shadowgraph_link', 'shadowgraph_supersede', 'shadowgraph_confidence_evidence', 'shadowgraph_record_outcome', 'shadowgraph_update_status', 'shadowgraph_ack_review'].includes(name)
       ? accessContext(graph, input, 'mcp', workspace) : input;
     if (name === 'shadowgraph_verify_fact' && input.project == null) {
       const { binding } = accessContext(graph, input, 'mcp', workspace);
@@ -282,7 +282,6 @@ async function callUnqueued(name, args, tier, accessManaged = false) {
   if (name === 'shadowgraph_request_wider_access') value = graph.requestAccess(args ?? {});
   else if (name === 'shadowgraph_revoke_grant') value = graph.revokeAccess(args ?? {});
   else if (name === 'shadowgraph_discard_access') value = graph.discardAccess(args ?? {});
-  else if (name === 'shadowgraph_attribute') value = graph.attribute(args ?? {});
   else if (name === 'shadowgraph_record_decision') value = graph.addDecision(withRuntimeSession(args));
   else if (name === 'shadowgraph_record_attempt') value = graph.addAttempt(withRuntimeSession(args));
   else if (name === 'shadowgraph_review') value = graph.review(args ?? {});
@@ -536,6 +535,34 @@ function publicDomainCode(error) {
     if (PUBLIC_DOMAIN_CODES.has(candidate)) return candidate;
   }
   return null;
+}
+
+// Owner decision D3 (2026-10-08): in full mode, bind and attribute only
+// propose. Nothing is written, applied or looked up: no binding file, store
+// entry, journal event or audit, and no lookup of the named identifiers, so a
+// proposal neither changes ownership or bindings nor tells the caller whether a
+// record exists. The owner applies one with the CLI verb, which shows it and
+// asks for confirmation at a terminal.
+function ownerProposal(name, args) {
+  const input = args && typeof args === 'object' && !Array.isArray(args) ? args : {};
+  const text = (value, field) => {
+    if (typeof value !== 'string' || !value.trim()) throw new Error(`${field} must be a non-empty string`);
+    return value;
+  };
+  if (input.accessId !== undefined || input.grantId !== undefined) throw new Error('A grant is never write authority for a binding or an attribution');
+  if (name === 'shadowgraph_bind') {
+    if (!['worktree', 'shared_repository'].includes(input.type)) throw new Error('type must be worktree or shared_repository');
+    return { proposal: true, applied: false, action: 'bind',
+      ownerCommand: { verb: 'bind', input: { project: text(input.project, 'project'), reason: text(input.reason, 'reason') }, mappingType: input.type },
+      note: `Nothing changed. The owner applies this with \`shadowgraph bind <input as JSON>\` in this workspace, chooses ${input.type} and confirms at a terminal.` };
+  }
+  const byIds = input.ids !== undefined;
+  if (byIds === (input.originId !== undefined)) throw new Error('Supply either ids or one originId');
+  if (byIds && (!Array.isArray(input.ids) || !input.ids.length || input.ids.some((id) => typeof id !== 'string' || !id.trim()))) throw new Error('ids must be non-empty strings');
+  const selection = byIds ? { ids: [...new Set(input.ids)] } : { originId: text(input.originId, 'originId') };
+  return { proposal: true, applied: false, action: 'attribute',
+    ownerCommand: { verb: 'attribute', input: { ...selection, targetProject: text(input.targetProject, 'targetProject'), reason: text(input.reason, 'reason') } },
+    note: 'Nothing changed, and the identifiers were not looked up. The owner applies this with `shadowgraph attribute <input as JSON>`, which shows it and asks for confirmation at a terminal.' };
 }
 
 function publicErrorDetails(error) {

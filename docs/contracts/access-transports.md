@@ -66,11 +66,17 @@ write authority.
 HTTP adds only `POST /access-requests`, `POST /access-grants/revoke`, and
 `POST /access-grants/discard`. MCP full mode adds only
 `shadowgraph_request_wider_access`, `shadowgraph_revoke_grant`, and
-`shadowgraph_discard_access`, plus the planned explicit local `shadowgraph_bind`
-and `shadowgraph_attribute` actions. Bind requires mapping type, project and
-reason; attribution requires IDs or exact origin, target project and reason.
-These two MCP actions do not use the grant issuance TTY gate. There is no HTTP
-binding or attribution route. Neither surface has an issuer or authority-import
+`shadowgraph_discard_access`, plus `shadowgraph_bind` and `shadowgraph_attribute`,
+which only propose (owner decision D3, 2026-10-08). Bind requires mapping type,
+project and reason; attribution requires IDs or exact origin, target project and
+reason. A proposal writes, applies and looks up nothing: no binding file, store
+entry, journal event or audit, and no lookup of the named identifiers, so it
+neither changes ownership or bindings nor discloses whether a record exists. It
+returns the CLI verb and input the owner runs; `bind` and `attribute` at the CLI
+apply it after terminal confirmation. A grant is refused as write authority. A
+binding or attribution an MCP call applied before D3 stays as it was recorded,
+with `surface: 'mcp'` on its event: nothing relabels it as owner-confirmed. There
+is no HTTP binding or attribution route. Neither surface has an issuer or authority-import
 operation. Existing HTTP bearer, Host, Origin, and body-size protections remain.
 
 Invalid CLI issuance preflight and attempted unavailable HTTP/MCP issuance

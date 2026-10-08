@@ -92,9 +92,7 @@ const COMPACT_EXPECTED = [
 // writes but is missing here would silently stop being saved.
 const PERSISTING_EXPECTED = [
   'shadowgraph_ack_review',
-  'shadowgraph_attribute',
   'shadowgraph_backup',
-  'shadowgraph_bind',
   'shadowgraph_confidence_evidence',
   'shadowgraph_discard_access',
   'shadowgraph_link',
@@ -123,8 +121,9 @@ const PERSISTING_EXPECTED = [
 // Grant-capable reads declare their conditional audit write even though their
 // ordinary own-scope calls remain pure. Restore commits through its backend.
 const ANNOTATIONS_EXPECTED = {
-  shadowgraph_bind: [false, true, false, true],
-  shadowgraph_attribute: [false, false, false, false],
+  // Owner decision D3 (2026-10-08): full-mode bind and attribute only propose.
+  shadowgraph_bind: [true, false, true, false],
+  shadowgraph_attribute: [true, false, true, false],
   shadowgraph_record_decision: [false, false, false, false],
   shadowgraph_record_attempt: [false, false, false, false],
   shadowgraph_review: [false, false, false, false],
@@ -348,7 +347,7 @@ test('every tool carries the four behavioural annotations its handler actually j
 test('persistence is declared for ordinary writes and conditional grant audit writes', () => {
   const persisting = verifierCatalog.filter((entry) => entry.persists).map((entry) => entry.name).sort();
   assert.deepEqual(persisting, PERSISTING_EXPECTED);
-  assert.equal(persisting.length, 22);
+  assert.equal(persisting.length, 20);
   const grantReads = ['shadowgraph_context', 'shadowgraph_expand', 'shadowgraph_journal', 'shadowgraph_maintain', 'shadowgraph_rebuild', 'shadowgraph_recall', 'shadowgraph_reconsider', 'shadowgraph_redact', 'shadowgraph_repair_plan', 'shadowgraph_retrieve', 'shadowgraph_review', 'shadowgraph_review_context', 'shadowgraph_review_signals', 'shadowgraph_search', 'shadowgraph_traverse', 'shadowgraph_validate'];
   assert.deepEqual(verifierCatalog.filter((entry) => entry.persistsWithAccess).map((entry) => entry.name).sort(), grantReads);
   for (const entry of verifierCatalog) {
@@ -369,11 +368,11 @@ test('persistence is declared for ordinary writes and conditional grant audit wr
 test('recall and remember declare an open world only when an embedding endpoint is configured', () => {
   const withEmbedding = buildToolCatalog({ verifier: true, embeddingConfigured: true });
   const openWorld = withEmbedding.filter((entry) => entry.annotations.openWorldHint).map((entry) => entry.name).sort();
-  assert.deepEqual(openWorld, ['shadowgraph_backup', 'shadowgraph_bind', 'shadowgraph_recall', 'shadowgraph_remember', 'shadowgraph_restore', 'shadowgraph_verify_fact']);
+  assert.deepEqual(openWorld, ['shadowgraph_backup', 'shadowgraph_recall', 'shadowgraph_remember', 'shadowgraph_restore', 'shadowgraph_verify_fact']);
 
   const withoutEmbedding = buildToolCatalog({ verifier: true, embeddingConfigured: false });
   const closedWorld = withoutEmbedding.filter((entry) => entry.annotations.openWorldHint).map((entry) => entry.name).sort();
-  assert.deepEqual(closedWorld, ['shadowgraph_backup', 'shadowgraph_bind', 'shadowgraph_restore', 'shadowgraph_verify_fact']);
+  assert.deepEqual(closedWorld, ['shadowgraph_backup', 'shadowgraph_restore', 'shadowgraph_verify_fact']);
 
   // Only the annotation moves: the advertised text stays the same either way, so
   // one description cannot contradict the other deployment.

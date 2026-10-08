@@ -2072,27 +2072,39 @@ const CATALOG = [
     outputSchema: { type: 'object', description: 'The terminal authority transition and its audit outcome.' }
   })),
   {
-    name: 'shadowgraph_bind', compact: false, persists: true,
-    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-    describe: { does: 'Explicitly bind this workspace or shared repository to a project.', route: 'shadowgraph_attribute reassigns named material.', effects: 'Writes a local binding file and store audit; backs up any file it replaces. Paths are resolved locally.' },
+    name: 'shadowgraph_bind', compact: false, persists: false,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    describe: { does: 'Propose binding this workspace or shared repository to a project; the owner applies it with `shadowgraph bind` at a terminal.', route: 'shadowgraph_attribute proposes reassigning named material.', effects: 'None: writes no binding file, store entry or audit, and applies nothing.' },
     inputSchema: { type: 'object', required: ['type', 'project', 'reason'], properties: {
       type: { type: 'string', enum: ['worktree', 'shared_repository'], description: 'Explicitly choose this worktree or the shared Git repository.' },
       project: { type: 'string', description: 'Exact project selected by this local binding.' },
       reason: { type: 'string', description: 'Explicit reason for creating or replacing this mapping.' }
     } },
-    outputSchema: { type: 'object', description: 'The confirmed mapping, activated local signal path and optional prior-file backup.' }
+    outputSchema: { type: 'object', required: ['proposal', 'applied', 'action', 'ownerCommand', 'note'], properties: {
+      proposal: { type: 'boolean', const: true, description: 'Always true: this tool only proposes.' },
+      applied: { type: 'boolean', const: false, description: 'Always false: nothing was written or changed.' },
+      action: { type: 'string', enum: ['bind', 'attribute'], description: 'The owner CLI verb that would apply it.' },
+      ownerCommand: { type: 'object', description: 'The CLI verb and its JSON input, for the owner to run and confirm at a terminal.' },
+      note: { type: 'string', description: 'What was and was not done.' }
+    } }
   },
   {
-    name: 'shadowgraph_attribute', compact: false, persists: true, accessLifecycle: true,
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-    describe: { does: 'Explicitly reassign named material or one exact origin to a project.', route: 'shadowgraph_bind selects a workspace project for future calls.', effects: 'Persists attribution and audit; keeps identity and provenance. Read grants cannot authorize this action.' },
+    name: 'shadowgraph_attribute', compact: false, persists: false,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    describe: { does: 'Propose reassigning named material or one exact origin to a project; the owner applies it with `shadowgraph attribute` at a terminal.', route: 'shadowgraph_bind proposes a workspace binding.', effects: 'None: moves nothing, looks up none of the identifiers and so tells nothing about whether they exist. Grants are refused.' },
     inputSchema: { type: 'object', required: ['targetProject', 'reason'], properties: {
       ids: stringList('Explicit material identifiers; supply either these or one originId.'),
       originId: { type: 'string', description: 'Exact capture origin to reassign; alternative to explicit ids.' },
       targetProject: { type: 'string', description: 'Exact project receiving the selected material.' },
       reason: { type: 'string', description: 'Explicit reason retained in the attribution audit.' }
     } },
-    outputSchema: { type: 'object', description: 'The explicit attribution result and affected material identifiers.' }
+    outputSchema: { type: 'object', required: ['proposal', 'applied', 'action', 'ownerCommand', 'note'], properties: {
+      proposal: { type: 'boolean', const: true, description: 'Always true: this tool only proposes.' },
+      applied: { type: 'boolean', const: false, description: 'Always false: nothing was written or changed.' },
+      action: { type: 'string', enum: ['bind', 'attribute'], description: 'The owner CLI verb that would apply it.' },
+      ownerCommand: { type: 'object', description: 'The CLI verb and its JSON input, for the owner to run and confirm at a terminal.' },
+      note: { type: 'string', description: 'What was and was not done.' }
+    } }
   },
   {
     name: 'shadowgraph_verify_fact',

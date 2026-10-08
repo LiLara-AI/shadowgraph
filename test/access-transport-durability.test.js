@@ -71,31 +71,46 @@ function toolValue(response) {
   return JSON.parse(response.result.content[0].text);
 }
 
-test('PR12 MCP bind writes a local confirmed signal and explicit attribution preserves material', async (t) => {
+// Owner decision D3 (2026-10-08): full-mode MCP bind and attribute only
+// propose. Nothing is written or looked up; the owner CLI path, which asks for
+// terminal confirmation, applies them through the same kernel as before.
+test('D3: MCP bind and attribute propose without writing, binding or disclosing; the owner CLI path still applies them', async (t) => {
   const f = await fixture(t, 'json');
   const rpc = startMcp(t, f.file, 'json', {}, f.directory);
   const call = async (name, args) => toolValue(await rpc('tools/call', { name, arguments: args }));
-  const first = await call('shadowgraph_bind', { type: 'worktree', project: 'alpha', reason: 'explicit synthetic mapping', path: '/ignored-caller-path' });
-  const file = join(f.directory, '.shadowgraph', 'project-binding.json');
-  assert.equal(first.bindingFile, file);
-  const before = await readFile(file, 'utf8');
-  assert.equal(JSON.parse(before).project, 'alpha');
-  assert.deepEqual(projects(await call('shadowgraph_retrieve', { query: 'marker' })), ['alpha']);
-  const changed = await call('shadowgraph_bind', { type: 'worktree', project: 'beta', reason: 'explicit synthetic rebind' });
-  assert.equal(await readFile(changed.backupFile, 'utf8'), before);
-  assert.deepEqual(projects(await call('shadowgraph_retrieve', { query: 'marker' })), ['beta']);
-  const durable = await f.store.load();
-  const confirmation = durable.events.find((event) => event.type === 'project.bound');
-  assert.equal(confirmation.surface, 'mcp');
-  assert.equal(confirmation.mode, 'confirmation');
-  assert.equal(confirmation.activationSignal, 'local_binding_file');
-  const selected = durable.records.find((record) => record.project === 'beta');
-  await call('shadowgraph_attribute', { ids: [selected.id], targetProject: 'gamma', reason: 'explicit synthetic reassignment' });
+  const before = await f.store.load();
+  const proposed = await call('shadowgraph_bind', { type: 'worktree', project: 'alpha', reason: 'explicit synthetic mapping', path: '/ignored-caller-path' });
+  assert.deepEqual({ ...proposed, note: undefined }, { proposal: true, applied: false, action: 'bind', note: undefined,
+    ownerCommand: { verb: 'bind', input: { project: 'alpha', reason: 'explicit synthetic mapping' }, mappingType: 'worktree' } });
+  await assert.rejects(stat(join(f.directory, '.shadowgraph')), { code: 'ENOENT' }, 'no binding file is written');
+  assert.deepEqual((await call('shadowgraph_retrieve', { query: 'marker' })).items, [], 'the proposal selects no project');
+  const selected = before.records.find((record) => record.project === 'beta');
+  const known = await call('shadowgraph_attribute', { ids: [selected.id], targetProject: 'gamma', reason: 'explicit synthetic reassignment' });
+  const missing = await call('shadowgraph_attribute', { ids: ['decision-that-does-not-exist'], targetProject: 'gamma', reason: 'explicit synthetic reassignment' });
+  const shape = (value) => ({ ...value, ownerCommand: { ...value.ownerCommand, input: { ...value.ownerCommand.input, ids: null } } });
+  assert.deepEqual(shape(known), shape(missing), 'a foreign id and a missing one get the same answer: nothing is looked up');
+  assert.equal(known.applied, false);
+  assert.ok((await rpc('tools/call', { name: 'shadowgraph_attribute', arguments: { ids: [selected.id], targetProject: 'alpha', reason: 'not grant-authorized', accessId: f.accessId } })).error);
+  for (const args of [{ targetProject: 'gamma', reason: 'no selection' }, { ids: [selected.id], originId: 'origin_x', targetProject: 'gamma', reason: 'both' }, { ids: [selected.id], targetProject: '', reason: 'empty' }]) {
+    assert.ok((await rpc('tools/call', { name: 'shadowgraph_attribute', arguments: args })).error, JSON.stringify(args));
+  }
   const after = await f.store.load();
-  const attributed = after.records.find((record) => record.id === selected.id);
+  assert.equal(after.revision, before.revision, 'no proposal saves anything');
+  assert.deepEqual(after.records, before.records);
+  assert.deepEqual(after.events, before.events, 'no audit or binding event is recorded');
+  // The owner CLI verbs call these after terminal confirmation (src/cli.js).
+  const workspace = { worktreeRoot: f.directory, commonDir: null };
+  const first = await bindWorkspaceProject(f.graph, f.store, workspace, { type: 'worktree', project: 'alpha', reason: 'owner mapping', surface: 'cli' });
+  const previous = await readFile(first.bindingFile, 'utf8');
+  assert.equal(JSON.parse(previous).project, 'alpha');
+  const changed = await bindWorkspaceProject(f.graph, f.store, workspace, { type: 'worktree', project: 'beta', reason: 'owner rebind', surface: 'cli' });
+  assert.equal(await readFile(changed.backupFile, 'utf8'), previous);
+  const confirmation = (await f.store.load()).events.find((event) => event.type === 'project.bound');
+  assert.deepEqual([confirmation.surface, confirmation.mode, confirmation.activationSignal], ['cli', 'confirmation', 'local_binding_file']);
+  await currentAccessOperation(f.graph, f.store, () => f.graph.attribute({ ids: [selected.id], targetProject: 'gamma', reason: 'owner reassignment', surface: 'cli' }));
+  const attributed = (await f.store.load()).records.find((record) => record.id === selected.id);
   assert.equal(attributed.project, 'gamma');
   for (const field of ['title', 'chosen', 'sourceClass', 'createdAt']) assert.deepEqual(attributed[field], selected[field]);
-  assert.ok((await rpc('tools/call', { name: 'shadowgraph_attribute', arguments: { ids: [selected.id], targetProject: 'alpha', reason: 'not grant-authorized', accessId: f.accessId } })).error);
 });
 
 test('PR12 binding files resolve worktree before shared mapping and fail closed on malformed local signal', async (t) => {
@@ -128,16 +143,17 @@ test('PR12 failed binding file activation leaves only an explicit confirmation a
   assert.equal(confirmation.surface, 'mcp');
 });
 
-test('PR12 MCP binding activation failure saves confirmation once and leaves the call queue usable', async (t) => {
+test('D3: an MCP binding proposal in an occupied workspace saves nothing and leaves the call queue usable', async (t) => {
   const f = await fixture(t, 'json');
   await writeFile(join(f.directory, '.shadowgraph'), 'synthetic occupied configuration path');
   const before = await f.store.load();
   const rpc = startMcp(t, f.file, 'json', {}, f.directory);
-  const refused = await rpc('tools/call', { name: 'shadowgraph_bind', arguments: { type: 'worktree', project: 'alpha', reason: 'synthetic activation failure' } });
-  assert.ok(refused.error);
+  const proposed = toolValue(await rpc('tools/call', { name: 'shadowgraph_bind', arguments: { type: 'worktree', project: 'alpha', reason: 'synthetic occupied path' } }));
+  assert.equal(proposed.applied, false);
+  assert.equal(await readFile(join(f.directory, '.shadowgraph'), 'utf8'), 'synthetic occupied configuration path');
   const after = await f.store.load();
-  assert.equal(after.revision, before.revision + 1, 'only the confirmation save commits');
-  assert.equal(after.events.filter((event) => event.type === 'project.bound').length, 1);
+  assert.equal(after.revision, before.revision, 'a proposal commits nothing');
+  assert.equal(after.events.filter((event) => event.type === 'project.bound').length, 0);
   const unbound = toolValue(await rpc('tools/call', { name: 'shadowgraph_retrieve', arguments: { query: 'marker' } }));
   assert.deepEqual(unbound.items, []);
   const own = toolValue(await rpc('tools/call', { name: 'shadowgraph_retrieve', arguments: { project: 'alpha', query: 'marker' } }));
