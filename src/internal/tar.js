@@ -9,6 +9,8 @@ export function* tarEntries(archive) {
     if (header.every((byte) => byte === 0)) return;
     const field = (from, length) => header.subarray(from, from + length).toString('utf8').replace(/\0.*$/su, '');
     const size = Number.parseInt(field(124, 12).trim() || '0', 8);
+    // A size that is not a whole count would never move past the entry (post-merge review R1-4).
+    if (!Number.isSafeInteger(size) || size < 0) throw new Error('Malformed tar entry size');
     const type = field(156, 1) || '0';
     const body = archive.subarray(at + 512, at + 512 + size);
     const name = longName ?? [field(345, 155), field(0, 100)].filter(Boolean).join('/');

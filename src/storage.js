@@ -89,7 +89,9 @@ export function createJsonFileStore(filePath, options = {}) {
     // owner-only whatever it was (FND-P6-11; PR-37b).
     const mode = options.mode ?? await stat(target).then((info) => info.mode & 0o777, () => 0o600);
     try {
-      if (clear) await removeLeftTemporaries(target);
+      // The capture hook's save too: a hook stopped at its hard cap can leave one
+      // that holds raw text past its expiry (post-merge review R3-2).
+      if (clear || hook) await removeLeftTemporaries(target);
       try {
         await writeFile(temporaryPath, JSON.stringify(payload, null, 2) + '\n', { encoding: 'utf8', mode });
         options.saveFault?.('beforeCommit', context);

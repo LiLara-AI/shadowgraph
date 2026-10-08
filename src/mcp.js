@@ -325,8 +325,13 @@ async function callUnqueued(name, args, tier, accessManaged = false) {
   else if (name === 'shadowgraph_purge_preview') value = graph.projectSummary(args?.project);
   else if (name === 'shadowgraph_ack_review') value = graph.acknowledgeReview(args?.id, args);
   else if (name === 'shadowgraph_repair_plan') value = graph.repairPlan(args ?? {});
-  else if (name === 'shadowgraph_backup') { const { backupFile } = await import('./backup.js'); value = await backupFile(file, args?.destination, { store }); }
+  else if (name === 'shadowgraph_backup') {
+    // A missing destination would otherwise write a file named `undefined` (post-merge review R1-5).
+    if (typeof args?.destination !== 'string' || !args.destination.trim()) throw new Error('destination must be a non-empty string');
+    const { backupFile } = await import('./backup.js'); value = await backupFile(file, args.destination, { store });
+  }
   else if (name === 'shadowgraph_restore') {
+    if (typeof args?.source !== 'string' || !args.source.trim()) throw new Error('source must be a non-empty string');
     if (args?.memoryOnly !== undefined && typeof args.memoryOnly !== 'boolean') throw new Error('memoryOnly must be a boolean');
     value = store.restore
       ? await store.restore(args?.source, { memoryOnly: args?.memoryOnly === true, validate: restoreValidator, verifier: verifier ?? undefined, afterReplace: (payload) => graph.replaceData(payload) })

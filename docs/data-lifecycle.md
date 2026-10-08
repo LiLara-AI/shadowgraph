@@ -63,7 +63,7 @@ Pull refuses a tracked missing canonical record and an untracked identity still 
 | Location | Controlled behavior and retained limits |
 | --- | --- |
 | Active canonical store | JSON/SQLite records, facts, journal, retry values, indexes and typed source-evidence copies follow the authorized deletion selection and restore knowledge. Recorded verification and surviving accepted text are governed by their own scope. |
-| Store locks and ordinary save temporaries | Transient files use the existing fenced cleanup and refusal rules. Genuine interrupted-restore recovery files are retained, separately from ordinary save residue. |
+| Store locks and ordinary save temporaries | Transient files use the existing fenced cleanup and refusal rules: a purge's write and every capture hook's save remove the temporary copy a killed save left beside the store. Genuine interrupted-restore recovery files are retained, separately from ordinary save residue. |
 | Raw capture and pending queue | Configured retention applies to eligible uncited raw. Cited evidence is protected from automatic expiry. Expiry never releases quarantine. |
 | Extraction child workspace/request/response | Bounded redacted material uses the approved first-party subscription route. Child settlement and temporary cleanup have separate evidence; no alternate provider or paid fallback. |
 | Host session transcripts | Host-controlled copies of hook input and delivered output are outside store purge. |
