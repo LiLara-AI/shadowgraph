@@ -481,3 +481,15 @@ test('the executor accepts a profiled host version only on the binary its profil
   assert.equal(check.ok, true);
   assert.equal(check.hostVersion, '2.1.292');
 });
+
+test('an invocation is refused when the host version differs from the activated one, even on the same binary', async (t) => {
+  const s = await fixture(t, { version: '2.1.292 (Claude Code)' });
+  const { createHash } = await import('node:crypto');
+  const digest = createHash('sha256').update(await readFile(s.executable)).digest('hex');
+  const profiles = { '2.1.288': { binarySha256: null, requiresHostValidation: false }, '2.1.292': { binarySha256: digest, requiresHostValidation: true } };
+  const expectedReceipt = { ...(await createExtractor({ executable: s.executable, env: s.env, scratchRoot: s.root, runProcess: s.runner, inspectPolicy: async () => ({ ok: true }), hostProfiles: profiles }).check()), hostVersion: '2.1.288' };
+  const executor = createExtractor({ executable: s.executable, env: s.env, scratchRoot: s.root, runProcess: s.runner, inspectPolicy: async () => ({ ok: true }), hostProfiles: profiles, expectedReceipt });
+  const out = await executor.extract({ prompt: 'synthetic', schema: SCHEMA });
+  assert.equal(out.blockedReason, 'activated_executor_changed');
+  assert.equal(s.calls.filter((call) => call.args.includes('-p')).length, 0, 'no model invocation');
+});

@@ -98,6 +98,13 @@ test('D3: MCP bind and attribute propose without writing, binding or disclosing;
   assert.equal(after.revision, before.revision, 'no proposal saves anything');
   assert.deepEqual(after.records, before.records);
   assert.deepEqual(after.events, before.events, 'no audit or binding event is recorded');
+  // Nor in the server's memory: the next saving call persists no trace of the proposals.
+  await call('shadowgraph_record_decision', { project: 'alpha', title: 'later saved decision', chosen: 'x' });
+  const saved = await f.store.load();
+  assert.equal(saved.revision, before.revision + 1);
+  assert.deepEqual(saved.records.filter((record) => record.title !== 'later saved decision'), before.records, 'no record moved');
+  assert.equal(saved.events.filter((event) => ['project.bound', 'attribution.changed'].includes(event.type)).length, 0);
+  assert.equal(saved.records.find((record) => record.id === selected.id).project, 'beta');
   // The owner CLI verbs call these after terminal confirmation (src/cli.js).
   const workspace = { worktreeRoot: f.directory, commonDir: null };
   const first = await bindWorkspaceProject(f.graph, f.store, workspace, { type: 'worktree', project: 'alpha', reason: 'owner mapping', surface: 'cli' });
@@ -134,7 +141,11 @@ test('PR12 failed binding file activation leaves only an explicit confirmation a
   const occupied = join(f.directory, 'occupied-workspace');
   await writeFile(occupied, 'existing synthetic file');
   const workspace = { worktreeRoot: occupied, commonDir: null };
+  const revision = (await f.store.load()).revision;
   await assert.rejects(bindWorkspaceProject(f.graph, f.store, workspace, { type: 'worktree', project: 'inactive', reason: 'synthetic activation failure', surface: 'mcp' }));
+  const stored = await f.store.load();
+  assert.equal(stored.revision, revision + 1, 'only the confirmation save commits');
+  assert.equal(stored.events.filter((event) => event.type === 'project.bound').length, 1);
   assert.equal(await readFile(occupied, 'utf8'), 'existing synthetic file');
   assert.equal(accessContext(f.graph, {}, 'mcp', workspace).binding, undefined);
   const confirmation = (await f.store.load()).events.find((event) => event.type === 'project.bound');
