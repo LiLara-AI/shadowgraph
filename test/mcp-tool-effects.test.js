@@ -401,11 +401,11 @@ test('every advertised tool annotation matches the effects the server actually h
   const requested = await observe('shadowgraph_request_wider_access', { scope: { projects: ['other'] }, surfaces: ['mcp'], expiresAt: '2099-01-01T00:00:00.000Z', reason: 'synthetic effects proposal' });
   await observe('shadowgraph_revoke_grant', { accessId: requested.firstResult.accessId });
   await observe('shadowgraph_discard_access', { accessId: requested.repeatResult.accessId });
-  await observe('shadowgraph_attribute', { ids: [replacement.id], targetProject: 'reassigned', reason: 'explicit synthetic attribution' });
+  // Owner decision D3 (2026-10-08): full-mode bind and attribute only propose.
+  const attributed = await observe('shadowgraph_attribute', { ids: [replacement.id], targetProject: 'reassigned', reason: 'explicit synthetic attribution' });
+  assert.deepEqual([attributed.firstResult.proposal, attributed.firstResult.applied, attributed.firstResult.ownerCommand.verb], [true, false, 'attribute']);
   const bound = await observe('shadowgraph_bind', { type: 'worktree', project: PROJECT, reason: 'explicit synthetic mapping' });
-  assert.equal(JSON.parse(await readFile(bound.firstResult.bindingFile, 'utf8')).project, PROJECT);
-  assert.equal(JSON.parse(await readFile(bound.repeatResult.backupFile, 'utf8')).project, PROJECT);
-  bound.external = { read: false, overwrite: true };
+  assert.deepEqual([bound.firstResult.proposal, bound.firstResult.applied, bound.firstResult.ownerCommand.verb], [true, false, 'bind']);
 
   // --- removal ------------------------------------------------------------
   const purged = await observe('shadowgraph_purge', { project: PROJECT, mode: 'logical' });
@@ -438,9 +438,7 @@ test('every advertised tool annotation matches the effects the server actually h
   const committing = [...observed].filter(([, record]) => record.first.revisionDelta > 0).map(([name]) => name).sort();
   assert.deepEqual(committing, [
     'shadowgraph_ack_review',
-    'shadowgraph_attribute',
     'shadowgraph_backup',
-    'shadowgraph_bind',
     'shadowgraph_confidence_evidence',
     'shadowgraph_context',
     'shadowgraph_discard_access',
@@ -473,10 +471,11 @@ test('every advertised tool annotation matches the effects the server actually h
     'shadowgraph_validate'
   ]);
   const readOnly = [...observed].filter(([, record]) => record.first.revisionDelta === 0).map(([name]) => name).sort();
-  assert.deepEqual(readOnly, ['shadowgraph_purge_preview'], 'grant-capable reads now reflect their measured audit effects');
+  // Owner decision D3 (2026-10-08): the bind and attribute proposals are read-only.
+  assert.deepEqual(readOnly, ['shadowgraph_attribute', 'shadowgraph_bind', 'shadowgraph_purge_preview'], 'grant-capable reads now reflect their measured audit effects');
   // No tool may write outside the store unless it is one of the three that say so.
   const wroteOutside = [...observed].filter(([, record]) => record.first.newFilesOutsideStore.length > 0).map(([name]) => name).sort();
-  assert.deepEqual(wroteOutside, ['shadowgraph_backup', 'shadowgraph_bind'], 'backup and explicit binding write their declared local files');
+  assert.deepEqual(wroteOutside, ['shadowgraph_backup'], 'backup writes its declared local file; a binding proposal writes none');
 });
 
 test('the verification tool reads a caller-selected path, inside the configured root only', async (t) => {

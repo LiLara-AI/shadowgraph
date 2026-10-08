@@ -84,8 +84,8 @@ The **16 compact tools** are the everyday agent workflow. They are also present 
 | `shadowgraph_request_wider_access` | Propose explicit scope, surfaces and expiry; confers no authority |
 | `shadowgraph_revoke_grant` | Revoke authority and derived grants |
 | `shadowgraph_discard_access` | Retain terminal authority and a discard tombstone |
-| `shadowgraph_bind` | Explicitly select worktree or shared-repository mapping, project and reason; back up and activate its local file |
-| `shadowgraph_attribute` | Reattribute explicit IDs or an exact origin to a named project with a reason |
+| `shadowgraph_bind` | Propose a worktree or shared-repository mapping, project and reason; writes nothing, and the owner applies it with `shadowgraph bind` at a terminal |
+| `shadowgraph_attribute` | Propose reattributing explicit IDs or an exact origin to a named project with a reason; moves and looks up nothing, and the owner applies it with `shadowgraph attribute` at a terminal |
 
 A 36th tool, `shadowgraph_verify_fact`, appears in full mode **only** when
 `SHADOWGRAPH_VERIFIER_CONFIG` names a local trust configuration. The caller supplies just `factId`
@@ -220,8 +220,8 @@ endpoint configured, so the two "only with an embedder" cells are covered by the
 | `shadowgraph_request_wider_access` | no | no | no | no |
 | `shadowgraph_revoke_grant` | no | no | no | no |
 | `shadowgraph_discard_access` | no | no | no | no |
-| `shadowgraph_bind` | no | **yes** | no | yes |
-| `shadowgraph_attribute` | no | no | no | no |
+| `shadowgraph_bind` | **yes** | no | **yes** | no |
+| `shadowgraph_attribute` | **yes** | no | **yes** | no |
 
 Six of these are worth stating plainly, because a reader would otherwise guess wrong:
 

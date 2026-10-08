@@ -146,12 +146,12 @@ async function changeActivation() {
   const usage = command === 'activate'
     ? 'Usage: shadowgraph activate delivery --evidence <ref> --store <path> [--storage json|sqlite] [--host-version <version>] [--settings <path>] [--runtime <directory>]\n'
       + '       shadowgraph activate capture --evidence <ref> --store <path> [--storage json] [--only <project,...> | --exclude <project,...>] [--mcp-servers <name,...>] [--host-version <version>] [--settings <path>] [--runtime <directory>]'
-      + '\n       shadowgraph activate extraction --evidence <ref> --store <path> --runtime <directory> --executable <absolute-path> --no-overage-confirmed true [--settings <path>]'
+      + '\n       shadowgraph activate extraction --evidence <ref> --store <path> --runtime <directory> --executable <absolute-path> --no-overage-confirmed true [--host-validation <receipt>] [--settings <path>]'
     : 'Usage: shadowgraph deactivate delivery|capture|extraction';
   if (!['delivery', 'capture', 'extraction'].includes(capability)) throw new Error(usage);
   if (command === 'deactivate') return ({ delivery: deactivateDelivery, capture: deactivateCapture, extraction: deactivateExtraction })[capability](flagsOf(flags, {}, usage));
   const names = { '--evidence': 'evidence', '--store': 'store', '--storage': 'storage', '--host-version': 'hostVersion', '--settings': 'settings', '--runtime': 'runtime' };
-  if (capability === 'extraction') return activateExtraction(flagsOf(flags, { ...names, '--executable': 'executable', '--no-overage-confirmed': 'noOverageConfirmed' }, usage));
+  if (capability === 'extraction') return activateExtraction(flagsOf(flags, { ...names, '--executable': 'executable', '--no-overage-confirmed': 'noOverageConfirmed', '--host-validation': 'hostValidation' }, usage));
   if (capability === 'delivery') return activateDelivery(flagsOf(flags, names, usage));
   return activateCapture(flagsOf(flags, { ...names, '--only': 'only', '--exclude': 'exclude', '--mcp-servers': 'mcpServers' }, usage));
 }

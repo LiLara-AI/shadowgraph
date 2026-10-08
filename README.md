@@ -250,7 +250,7 @@ The opt-ins that can send data off the machine are all off by default:
 - **Embeddings.** No endpoint is configured. A localhost OpenAI-compatible server works once
   configured; a remote endpoint additionally requires `SHADOWGRAPH_ALLOW_REMOTE_EMBEDDINGS=1`,
   because that means memory and query text leave your machine.
-- **Extraction.** Separately approved extraction sends eligible redacted captures through the supported first-party Claude subscription route. No API-key, alternate-provider, proxy or paid fallback is supported by this executor; the owner must disable subscription overage. Pattern redaction cannot guarantee every secret is removed. Extraction runs only on Windows with Claude Code 2.1.288, the host version its restrictions were verified against; on any other platform or version it is refused. See [extraction and its host limits](docs/extraction.md).
+- **Extraction.** Separately approved extraction sends eligible redacted captures through the supported first-party Claude subscription route. No API-key, alternate-provider, proxy or paid fallback is supported by this executor; the owner must disable subscription overage. Pattern redaction cannot guarantee every secret is removed. Extraction runs only on Windows, with Claude Code 2.1.288, or with the profiled Claude Code 2.1.292 binary and the receipt of a passing real-host validation of it (ShadowGraph checks the receipt's identity, not the validation itself); on any other platform, version or binary it is refused. See [extraction and its host limits](docs/extraction.md).
 - **Markdown export.** `markdown-sync` writes plaintext copies you control. ShadowGraph cannot find
   or delete those copies later — see [Storage, backup, and deletion](#storage-backup-and-deletion).
 - **Host delivery.** Inert unless you install the hooks and activate delivery for one store. Once
@@ -306,9 +306,9 @@ nothing; `shadowgraph_review_context` persists the review signals it finds due, 
 `shadowgraph_expand` expands a claim line to its full record. Full mode advertises 35 — see the
 [MCP compatibility guide](docs/mcp-compatibility.md) for the complete inventory, every protocol
 revision, and verified client behaviour. Full mode includes owner tools: backup to a path the caller
-names, restore from one, purge, and `shadowgraph_bind` and `shadowgraph_attribute`, which run there
-without the terminal confirmation the CLI asks for them. Give an agent compact mode unless you want it
-to have them (see [SECURITY.md](SECURITY.md#local-threat-model)).
+names, restore from one and purge. Its `shadowgraph_bind` and `shadowgraph_attribute` only propose: they
+change nothing and return the `shadowgraph bind` or `attribute` input the owner runs and confirms at a
+terminal. Give an agent compact mode unless you want it to have the owner tools (see [SECURITY.md](SECURITY.md#local-threat-model)).
 
 ### AI tool setup
 

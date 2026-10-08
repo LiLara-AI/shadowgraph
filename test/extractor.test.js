@@ -458,3 +458,38 @@ test('registered invocation identity is snapshotted before asynchronous configur
   const request = s.calls.find(x => x.args.includes('-p'));
   assert.equal(request.args[request.args.indexOf('--session-id') + 1], original.invocationId);
 });
+
+// D1 (owner decision 2026-10-08): a host profile is a version and, for 2.1.292,
+// the one binary it was prepared against; any other version or binary blocks.
+import { HOST_PROFILES } from '../src/internal/extraction-contract.js';
+test('the executor accepts a profiled host version only on the binary its profile names', async (t) => {
+  for (const [version, profiles, expected] of [
+    ['2.1.300 (Claude Code)', undefined, 'host_version_unverified'],
+    ['2.1.292 (Claude Code)', undefined, 'host_binary_unverified']
+  ]) {
+    const s = await fixture(t, { version });
+    const executor = createExtractor({ executable: s.executable, env: s.env, scratchRoot: s.root, runProcess: s.runner, inspectPolicy: async () => ({ ok: true, sources: [] }), ...(profiles ? { hostProfiles: profiles } : {}) });
+    assert.equal((await executor.check()).blockedReason, expected, version);
+  }
+  assert.ok(HOST_PROFILES['2.1.292'].requiresHostValidation && /^[0-9a-f]{64}$/u.test(HOST_PROFILES['2.1.292'].binarySha256));
+  const s = await fixture(t, { version: '2.1.292 (Claude Code)' });
+  const { createHash } = await import('node:crypto');
+  const digest = createHash('sha256').update(await readFile(s.executable)).digest('hex');
+  const executor = createExtractor({ executable: s.executable, env: s.env, scratchRoot: s.root, runProcess: s.runner, inspectPolicy: async () => ({ ok: true, sources: [] }),
+    hostProfiles: { '2.1.292': { binarySha256: digest, requiresHostValidation: true } } });
+  const check = await executor.check();
+  assert.equal(check.ok, true);
+  assert.equal(check.hostVersion, '2.1.292');
+});
+
+test('an invocation is refused when the host version differs from the activated one, even on the same binary', async (t) => {
+  const s = await fixture(t, { version: '2.1.292 (Claude Code)' });
+  const { createHash } = await import('node:crypto');
+  const digest = createHash('sha256').update(await readFile(s.executable)).digest('hex');
+  const profiles = { '2.1.288': { binarySha256: null, requiresHostValidation: false }, '2.1.292': { binarySha256: digest, requiresHostValidation: true } };
+  const expectedReceipt = { ...(await createExtractor({ executable: s.executable, env: s.env, scratchRoot: s.root, runProcess: s.runner, inspectPolicy: async () => ({ ok: true }), hostProfiles: profiles }).check()), hostVersion: '2.1.288' };
+  const executor = createExtractor({ executable: s.executable, env: s.env, scratchRoot: s.root, runProcess: s.runner, inspectPolicy: async () => ({ ok: true }), hostProfiles: profiles, expectedReceipt });
+  const out = await executor.extract({ prompt: 'synthetic', schema: SCHEMA });
+  assert.equal(out.blockedReason, 'activated_executor_changed');
+  assert.equal(s.calls.filter((call) => call.args.includes('-p')).length, 0, 'no model invocation');
+});
