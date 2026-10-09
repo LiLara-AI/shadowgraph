@@ -124,6 +124,15 @@ for (const type of ['json', 'sqlite']) {
     captures = (await f.read()).records.filter(x => x.kind === 'capture');
     assert.deepEqual(captures.map(x => x.state), ['blocked', 'extracted']);
   });
+  // Re-check N-B: a budget stop later in the same drain must not hide the refusal from the status.
+  test(`drain ${type}: a refusal stays visible when the same drain later stops on a budget`, skip, async t => {
+    const f = await setup(t, type, 5, { items: 4 }); let calls = 0;
+    const out = await runExtractionDrain({ ...f.options, sleep: async () => {}, executor: { extract: async () => (++calls === 1 ? refusal : f.response) } });
+    assert.deepEqual([out.status, out.blockedReason, calls], ['blocked', 'drain_items', 4]);
+    const data = await f.read();
+    assert.ok(workerErrors(data).some(x => x.reason === 'provider_refusal'), JSON.stringify(workerErrors(data)));
+    assert.deepEqual(data.records.filter(x => x.kind === 'capture').map(x => x.state), ['blocked', 'extracted', 'extracted', 'extracted', 'pending']);
+  });
   // Every other blocked response is unchanged: it ends the drain and leaves the item pending.
   test(`drain ${type}: an unknown_terminal response still ends the drain with the item pending`, skip, async t => {
     const f = await setup(t, type, 2); let calls = 0;

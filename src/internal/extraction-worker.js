@@ -164,6 +164,7 @@ async function recordWorkerStatus(options, reason) {
 // a request, an environment variable, a workspace or a stored setting, so every
 // production drain keeps one second (owner decision, PR #12).
 const CLEANUP_BOUND_MS = 1000;
+const BUDGET_STOPS = Object.freeze(['drain_items', 'drain_calls', 'window_calls', 'drain_time']);
 export const CLEANUP_BOUND_FOR_TESTS = Symbol('extraction cleanup bound (tests only)');
 
 // Internal bounded drain. PR41 supplies activation/deactivation checks and the
@@ -186,10 +187,13 @@ export async function runExtractionDrain(options) {
     const cleanup = { ...options, guard: undefined, signal: AbortSignal.timeout(cleanupMs), lockTimeoutMs: Math.min(options.lockTimeoutMs ?? 1000, 1000) };
     try {
       if (claimed) {
-        await commitCapture({ ...cleanup, attemptCount: attempts }, claimed, held ?? { status: 'worker_blocked', blockedReason: reason });
+        const settled = await commitCapture({ ...cleanup, attemptCount: attempts }, claimed, held ?? { status: 'worker_blocked', blockedReason: reason });
+        if (settled?.status === 'provider_refusal') refusedInScope = true;
         claimed = null; held = null;
       }
-      const storeReceiptWritten = await recordWorkerStatus(cleanup, reason);
+      // A budget stop is ordinary operation; a refusal settled in this scope is the signal worth keeping.
+      const shown = refusedInScope && BUDGET_STOPS.includes(reason) ? 'provider_refusal' : reason;
+      const storeReceiptWritten = await recordWorkerStatus(cleanup, shown);
       return { status: 'blocked', blockedReason: reason, completed, storeReceiptWritten };
     } catch (error) { cleanupFailed = reason; throw error; }
   };
