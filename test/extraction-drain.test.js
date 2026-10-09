@@ -84,6 +84,16 @@ for (const type of ['json', 'sqlite']) {
     const g = createShadowGraph(); g.importData(data); const status = g.search('', { project: 'p' }).completeness.capture;
     assert.equal(status.extractionAvailable, false); assert.ok(status.workerErrors.some(x => x.reason === 'executor_blocked'));
   });
+  // Naming only: the disposition is the existing fail-closed worker block (item stays pending, drain stops).
+  test(`drain ${type}: a provider refusal keeps its name, is charged once, never retried and never succeeds`, skip, async t => {
+    const f = await setup(t, type, 2); let calls = 0;
+    const out = await runExtractionDrain({ ...f.options, sleep: async () => {}, executor: { extract: async () => { calls++; return { status: 'blocked', blockedReason: 'provider_refusal', receipt: { invocationStarted: true } }; } } });
+    assert.deepEqual([out.status, out.blockedReason, out.completed], ['blocked', 'provider_refusal', 0]);
+    assert.equal(calls, 1); assert.equal(await usageCalls(f.options.env), 1);
+    const data = await f.read(), captures = data.records.filter(x => x.kind === 'capture');
+    assert.deepEqual(captures.map(x => [x.state, x.blockedReason]), [['pending', 'provider_refusal'], ['pending', null]]);
+    assert.ok(workerErrors(data).some(x => x.reason === 'provider_refusal'));
+  });
   test(`drain ${type}: a second schema-invalid response persists failed once with two charged calls`, skip, async t => {
     const f = await setup(t, type); let calls = 0;
     await runExtractionDrain({ ...f.options, sleep: async () => {}, executor: { extract: async () => { calls++; return { status: 'schema_invalid' }; } } });

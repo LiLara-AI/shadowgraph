@@ -24,6 +24,12 @@ const object = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 const error = (code) => Object.assign(new Error(code), { code });
 const sha = (data) => createHash('sha256').update(data).digest('hex');
 const blocked = (reason, details = {}) => ({ ok: false, blockedReason: reason, ...details });
+// The host's own structured evidence of a provider safeguard refusal: an error result whose
+// stop_reason is `refusal`. The result text is never read, so nothing of the input is kept.
+const providerRefusal = (stdout) => {
+  try { const r = JSON.parse(stdout); return object(r) && r.type === 'result' && r.is_error === true && r.stop_reason === 'refusal'; } catch { return false; }
+};
+const terminalReason = (stdout) => providerRefusal(stdout) ? 'provider_refusal' : 'unknown_terminal';
 
 // A small, explicit schema dialect. Unknown keywords are refused rather than
 // silently delegating validation to the model or following external references.
@@ -302,10 +308,10 @@ export function createExtractor({ executable, env = process.env, scratchRoot = t
         receipt.localChildStopped = out.localChildStopped !== false;
         if (signal?.aborted) return { status: 'blocked', blockedReason: 'drain_stopped', receipt };
         if (out.failure === 'spawn_failed' && out.processStarted === false && out.outputBytes === 0) return { status: 'transport_error', receipt: { ...receipt, invocationStarted: false, processStarted: false, outputBytes: 0, zeroUsage: true } };
-        if (out.failure || out.code !== 0) return { status: 'blocked', blockedReason: out.failure ?? 'unknown_terminal', receipt };
+        if (out.failure || out.code !== 0) return { status: 'blocked', blockedReason: out.failure ?? terminalReason(out.stdout), receipt };
         let response;
         try { response = JSON.parse(out.stdout); } catch { return { status: 'blocked', blockedReason: 'unrecognised_response', receipt }; }
-        if (!object(response) || response.type !== 'result' || response.subtype !== 'success' || response.is_error !== false) return { status: 'blocked', blockedReason: 'unknown_terminal', receipt };
+        if (!object(response) || response.type !== 'result' || response.subtype !== 'success' || response.is_error !== false) return { status: 'blocked', blockedReason: terminalReason(out.stdout), receipt };
         const models = Object.keys(response.modelUsage ?? {});
         // The verified host can report the exact requested context suffix.
         // Accept only that spelling or its bare ID, never prefix matches or

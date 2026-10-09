@@ -7,5 +7,5 @@ export function sessionJournalEntries(journal, item) {
   }).length;
 }
 export const WORKER_REASONS = Object.freeze(['input_bytes', 'session_journal', 'drain_items', 'drain_calls', 'window_calls',
-  'drain_time', 'drain_stopped', 'worker_usage_unavailable', 'worker_clock_invalid', 'worker_budgets_invalid', 'executor_blocked', 'unknown_terminal']);
+  'drain_time', 'drain_stopped', 'worker_usage_unavailable', 'worker_clock_invalid', 'worker_budgets_invalid', 'executor_blocked', 'unknown_terminal', 'provider_refusal']);
 export const workerReason = reason => WORKER_REASONS.includes(reason) ? reason : 'executor_blocked';

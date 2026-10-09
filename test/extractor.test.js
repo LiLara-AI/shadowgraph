@@ -166,6 +166,28 @@ test('invalid output, alternate model and unknown/limit terminal responses canno
   }
 });
 
+// The host's own structured stop_reason is the evidence; the result text is never read or kept.
+test('a host-reported safeguard refusal is named provider_refusal, never success; other errors stay unknown_terminal', async (t) => {
+  const refusal = { type: 'result', subtype: 'success', is_error: true, stop_reason: 'refusal', result: 'refused private text', modelUsage: { 'claude-opus-5': { inputTokens: 3, outputTokens: 0 } } };
+  for (const [output, processResult, expected] of [
+    [refusal, { code: 1 }, 'provider_refusal'],
+    [refusal, { code: 0 }, 'provider_refusal'],
+    [{ ...refusal, stop_reason: 'end_turn' }, { code: 1 }, 'unknown_terminal'],
+    [{ ...refusal, stop_reason: undefined }, { code: 1 }, 'unknown_terminal'],
+    [{ ...refusal, type: 'assistant' }, { code: 1 }, 'unknown_terminal'],
+    [{ is_error: true, result: 'usage limit reached private text' }, { code: 1 }, 'unknown_terminal'],
+    [`${JSON.stringify(refusal)}\nprivate text`, { code: 1 }, 'unknown_terminal'],
+    [refusal, { code: null, failure: 'timeout' }, 'timeout']
+  ]) {
+    const s = await fixture(t, { output, processResult });
+    const out = await s.executor.extract({ prompt: 'private', schema: SCHEMA });
+    const why = JSON.stringify([output, processResult]);
+    assert.equal(out.status, 'blocked', why); assert.equal(out.blockedReason, expected, why); assert.equal(out.value, undefined, why);
+    assert.equal(s.calls.filter(x => x.args.includes('-p')).length, 1, why);
+    assert.doesNotMatch(JSON.stringify(out), /private text/, why);
+  }
+});
+
 test('input limits refuse before configuration work and schema validation rejects malformed values', async (t) => {
   const s = await fixture(t);
   assert.equal((await s.executor.extract({ prompt: 'x'.repeat(EXTRACTOR_LIMITS.inputBytes + 1), schema: SCHEMA })).status, 'malformed_invocation');
