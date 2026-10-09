@@ -179,14 +179,15 @@ export async function runExtractionDrain(options) {
   let scopeIndex = 0;
   const selectScope = () => { const scope = scopes[scopeIndex]; options = { ...options, project: scope?.project, originId: scope?.originId }; };
   selectScope();
-  let completed = 0, claimed = null, attempts = 0, cleanupFailed = null;
+  // held: a refusal not yet committed, so a block before its commit still settles it on its item.
+  let completed = 0, claimed = null, attempts = 0, cleanupFailed = null, held = null, refusedInScope = false;
   const blocked = async reason => {
     reason = workerReason(reason);
     const cleanup = { ...options, guard: undefined, signal: AbortSignal.timeout(cleanupMs), lockTimeoutMs: Math.min(options.lockTimeoutMs ?? 1000, 1000) };
     try {
       if (claimed) {
-        await commitCapture({ ...cleanup, attemptCount: attempts }, claimed, { status: 'worker_blocked', blockedReason: reason });
-        claimed = null;
+        await commitCapture({ ...cleanup, attemptCount: attempts }, claimed, held ?? { status: 'worker_blocked', blockedReason: reason });
+        claimed = null; held = null;
       }
       const storeReceiptWritten = await recordWorkerStatus(cleanup, reason);
       return { status: 'blocked', blockedReason: reason, completed, storeReceiptWritten };
@@ -203,8 +204,9 @@ export async function runExtractionDrain(options) {
         claimed = await claimCapture({ ...options, signal, leaseMs: 300000, beforeClaim: input => budget.admit(input) });
         if (claimed.status !== 'claimed') {
           claimed = null;
-          const storeReceiptWritten = await recordWorkerStatus({ ...options, signal }, null);
-          if (++scopeIndex < scopes.length) { selectScope(); continue; }
+          // A scope that settled a refusal says so, so a provider refusing every item is visible, not a quiet idle.
+          const storeReceiptWritten = await recordWorkerStatus({ ...options, signal }, refusedInScope ? 'provider_refusal' : null);
+          if (++scopeIndex < scopes.length) { selectScope(); refusedInScope = false; continue; }
           return { status: 'idle', completed, storeReceiptWritten };
         }
         attempts = 0;
@@ -224,9 +226,11 @@ export async function runExtractionDrain(options) {
         // A provider refusal belongs to this item, not to the worker: it is settled on the item below
         // (charged once, never claimed again) and the drain goes on to other eligible work.
         if (response.status === 'blocked' && response.blockedReason !== 'provider_refusal') return blocked(response.blockedReason);
+        held = response.status === 'blocked' ? response : null;
         budget.check(); if (options.guard && !await awaitWorkerStep(options.guard, signal)) return blocked('drain_stopped'); budget.check();
         const result = await commitCapture({ ...options, signal, attemptCount: attempts, journalCeiling: budget.budgets.journalEntriesPerSession }, claimed, response);
-        claimed = null;
+        claimed = null; held = null;
+        if (result.status === 'provider_refusal') refusedInScope = true;
         if (result.status === 'worker_blocked') return blocked('session_journal');
         if (result.status === 'committed') completed += 1;
       }
