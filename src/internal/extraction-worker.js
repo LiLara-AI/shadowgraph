@@ -114,7 +114,7 @@ export async function commitCapture(options, claim, response) {
       || Date.parse(item.lease.leaseExpiresAt) <= Date.parse(at) || captureRawExpired(item, ledger?.retentionOverrides ?? [], at)
       || claimAuthorityInvalid(item, live, at) || effectiveGeneration(item, ledger, live, at) !== claim.generation
       || typeof raw(live, item) !== 'string' || digest(extractionText(raw(live, item))) !== claim.rawHash) return settle('superseded_result');
-    if (response?.status !== 'success') return settle(response?.status === 'worker_blocked' ? 'worker_blocked' : response?.status === 'schema_invalid' ? 'schema_invalid' : response?.status === 'blocked' ? 'executor_blocked' : 'executor_failed');
+    if (response?.status !== 'success') return settle(response?.status === 'worker_blocked' ? 'worker_blocked' : response?.status === 'schema_invalid' ? 'schema_invalid' : response?.status === 'blocked' ? (response.blockedReason === 'provider_refusal' ? 'provider_refusal' : 'executor_blocked') : 'executor_failed');
     if (response.receipt?.invocationStarted !== true || response.receipt.model !== EXTRACTION_MODEL) return settle('executor_failed');
     let prepared;
     try { prepared = prepareExtraction(item, extractionText(raw(live, item)), response.value); }
@@ -164,6 +164,7 @@ async function recordWorkerStatus(options, reason) {
 // a request, an environment variable, a workspace or a stored setting, so every
 // production drain keeps one second (owner decision, PR #12).
 const CLEANUP_BOUND_MS = 1000;
+const BUDGET_STOPS = Object.freeze(['drain_items', 'drain_calls', 'window_calls', 'drain_time']);
 export const CLEANUP_BOUND_FOR_TESTS = Symbol('extraction cleanup bound (tests only)');
 
 // Internal bounded drain. PR41 supplies activation/deactivation checks and the
@@ -179,16 +180,20 @@ export async function runExtractionDrain(options) {
   let scopeIndex = 0;
   const selectScope = () => { const scope = scopes[scopeIndex]; options = { ...options, project: scope?.project, originId: scope?.originId }; };
   selectScope();
-  let completed = 0, claimed = null, attempts = 0, cleanupFailed = null;
+  // held: a refusal not yet committed, so a block before its commit still settles it on its item.
+  let completed = 0, claimed = null, attempts = 0, cleanupFailed = null, held = null, refusedInScope = false;
   const blocked = async reason => {
     reason = workerReason(reason);
     const cleanup = { ...options, guard: undefined, signal: AbortSignal.timeout(cleanupMs), lockTimeoutMs: Math.min(options.lockTimeoutMs ?? 1000, 1000) };
     try {
       if (claimed) {
-        await commitCapture({ ...cleanup, attemptCount: attempts }, claimed, { status: 'worker_blocked', blockedReason: reason });
-        claimed = null;
+        const settled = await commitCapture({ ...cleanup, attemptCount: attempts }, claimed, held ?? { status: 'worker_blocked', blockedReason: reason });
+        if (settled?.status === 'provider_refusal') refusedInScope = true;
+        claimed = null; held = null;
       }
-      const storeReceiptWritten = await recordWorkerStatus(cleanup, reason);
+      // A budget stop is ordinary operation; a refusal settled in this scope is the signal worth keeping.
+      const shown = refusedInScope && BUDGET_STOPS.includes(reason) ? 'provider_refusal' : reason;
+      const storeReceiptWritten = await recordWorkerStatus(cleanup, shown);
       return { status: 'blocked', blockedReason: reason, completed, storeReceiptWritten };
     } catch (error) { cleanupFailed = reason; throw error; }
   };
@@ -203,8 +208,9 @@ export async function runExtractionDrain(options) {
         claimed = await claimCapture({ ...options, signal, leaseMs: 300000, beforeClaim: input => budget.admit(input) });
         if (claimed.status !== 'claimed') {
           claimed = null;
-          const storeReceiptWritten = await recordWorkerStatus({ ...options, signal }, null);
-          if (++scopeIndex < scopes.length) { selectScope(); continue; }
+          // A scope that settled a refusal says so, so a provider refusing every item is visible, not a quiet idle.
+          const storeReceiptWritten = await recordWorkerStatus({ ...options, signal }, refusedInScope ? 'provider_refusal' : null);
+          if (++scopeIndex < scopes.length) { selectScope(); refusedInScope = false; continue; }
           return { status: 'idle', completed, storeReceiptWritten };
         }
         attempts = 0;
@@ -221,10 +227,14 @@ export async function runExtractionDrain(options) {
             budget.check(); attempts += 1;
             return options.executor.extract({ ...request, signal, identity });
           } });
-        if (response.status === 'blocked') return blocked(response.blockedReason);
+        // A provider refusal belongs to this item, not to the worker: it is settled on the item below
+        // (charged once, never claimed again) and the drain goes on to other eligible work.
+        if (response.status === 'blocked' && response.blockedReason !== 'provider_refusal') return blocked(response.blockedReason);
+        held = response.status === 'blocked' ? response : null;
         budget.check(); if (options.guard && !await awaitWorkerStep(options.guard, signal)) return blocked('drain_stopped'); budget.check();
         const result = await commitCapture({ ...options, signal, attemptCount: attempts, journalCeiling: budget.budgets.journalEntriesPerSession }, claimed, response);
-        claimed = null;
+        claimed = null; held = null;
+        if (result.status === 'provider_refusal') refusedInScope = true;
         if (result.status === 'worker_blocked') return blocked('session_journal');
         if (result.status === 'committed') completed += 1;
       }
