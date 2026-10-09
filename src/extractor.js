@@ -25,7 +25,7 @@ const error = (code) => Object.assign(new Error(code), { code });
 const sha = (data) => createHash('sha256').update(data).digest('hex');
 const blocked = (reason, details = {}) => ({ ok: false, blockedReason: reason, ...details });
 // The host's own structured evidence of a provider safeguard refusal: an error result whose
-// stop_reason is `refusal`. The result text is never read, so nothing of the input is kept.
+// stop_reason is `refusal`. Only those fields decide; the result text is neither classified nor kept.
 const providerRefusal = (stdout) => {
   try { const r = JSON.parse(stdout); return object(r) && r.type === 'result' && r.is_error === true && r.stop_reason === 'refusal'; } catch { return false; }
 };

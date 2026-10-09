@@ -85,7 +85,7 @@ for (const type of ['json', 'sqlite']) {
     assert.equal(status.extractionAvailable, false); assert.ok(status.workerErrors.some(x => x.reason === 'executor_blocked'));
   });
   // Naming only: the disposition is the existing fail-closed worker block (item stays pending, drain stops).
-  test(`drain ${type}: a provider refusal keeps its name, is charged once, never retried and never succeeds`, skip, async t => {
+  test(`drain ${type}: a provider refusal keeps its name, is charged once, is not retried within the drain and never succeeds`, skip, async t => {
     const f = await setup(t, type, 2); let calls = 0;
     const out = await runExtractionDrain({ ...f.options, sleep: async () => {}, executor: { extract: async () => { calls++; return { status: 'blocked', blockedReason: 'provider_refusal', receipt: { invocationStarted: true } }; } } });
     assert.deepEqual([out.status, out.blockedReason, out.completed], ['blocked', 'provider_refusal', 0]);
