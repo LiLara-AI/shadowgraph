@@ -84,15 +84,38 @@ for (const type of ['json', 'sqlite']) {
     const g = createShadowGraph(); g.importData(data); const status = g.search('', { project: 'p' }).completeness.capture;
     assert.equal(status.extractionAvailable, false); assert.ok(status.workerErrors.some(x => x.reason === 'executor_blocked'));
   });
-  // Naming only: the disposition is the existing fail-closed worker block (item stays pending, drain stops).
-  test(`drain ${type}: a provider refusal keeps its name, is charged once, is not retried within the drain and never succeeds`, skip, async t => {
-    const f = await setup(t, type, 2); let calls = 0;
-    const out = await runExtractionDrain({ ...f.options, sleep: async () => {}, executor: { extract: async () => { calls++; return { status: 'blocked', blockedReason: 'provider_refusal', receipt: { invocationStarted: true } }; } } });
-    assert.deepEqual([out.status, out.blockedReason, out.completed], ['blocked', 'provider_refusal', 0]);
-    assert.equal(calls, 1); assert.equal(await usageCalls(f.options.env), 1);
-    const data = await f.read(), captures = data.records.filter(x => x.kind === 'capture');
-    assert.deepEqual(captures.map(x => [x.state, x.blockedReason]), [['pending', 'provider_refusal'], ['pending', null]]);
-    assert.ok(workerErrors(data).some(x => x.reason === 'provider_refusal'));
+  // A refusal belongs to the refused item: it is charged once, kept (raw, retention) and never claimed again,
+  // and the drain goes on to other eligible work instead of stopping on it.
+  const refusal = { status: 'blocked', blockedReason: 'provider_refusal', receipt: { invocationStarted: true } };
+  test(`drain ${type}: a provider refusal is charged once, never claimed again, keeps its data and does not hold back later items`, skip, async t => {
+    const f = await setup(t, type, 3); let calls = 0;
+    const before = (await f.read()).records.filter(x => x.kind === 'capture');
+    const executor = { extract: async () => (++calls === 1 ? refusal : f.response) };
+    const out = await runExtractionDrain({ ...f.options, sleep: async () => {}, executor });
+    assert.deepEqual([out.status, out.completed], ['idle', 2]);
+    assert.equal(calls, 3); assert.equal(await usageCalls(f.options.env), 3);
+    let data = await f.read(); let captures = data.records.filter(x => x.kind === 'capture');
+    assert.deepEqual(captures.map(x => [x.state, x.blockedReason]), [['blocked', 'provider_refusal'], ['extracted', null], ['extracted', null]]);
+    const refused = captures[0];
+    assert.equal(refused.attempts, 1); assert.equal(refused.lastError, 'provider_refusal'); assert.equal(refused.cancelRequested, false);
+    assert.equal(refused.contentRef, before[0].contentRef); assert.equal(refused.expiresAt, before[0].expiresAt);
+    assert.ok((data.captureContent ?? []).some(entry => entry.contentRef === refused.contentRef), 'the refused raw stays under normal retention');
+    // A later drain spends nothing on it.
+    const again = await runExtractionDrain({ ...f.options, sleep: async () => {}, executor });
+    assert.equal(again.status, 'idle'); assert.equal(calls, 3); assert.equal(await usageCalls(f.options.env), 3);
+    data = await f.read(); captures = data.records.filter(x => x.kind === 'capture');
+    assert.deepEqual([captures[0].state, captures[0].attempts], ['blocked', 1]);
+  });
+  test(`drain ${type}: a refusal in one project does not hold back another project's work in the same drain`, skip, async t => {
+    const f = await setup(t, type, 1);
+    const graph = createShadowGraph({ now: f.options.now }); graph.importData(await f.read());
+    privilegedRecordCapture(graph, { project: 'q', originId: 'synthetic-origin', text: 'Synthetic observation in q.', admission, source: { event: 'UserPromptSubmit', sessionId: 'other-session' } });
+    const store = await createStorage(f.options); await store.save(privilegedSnapshot(graph)); store.close();
+    let calls = 0;
+    const out = await runExtractionDrain({ ...f.options, scopes: [{ project: 'p' }, { project: 'q' }], sleep: async () => {}, executor: { extract: async () => (++calls === 1 ? refusal : f.response) } });
+    assert.deepEqual([out.status, out.completed, calls], ['idle', 1, 2]);
+    const captures = (await f.read()).records.filter(x => x.kind === 'capture');
+    assert.deepEqual(captures.map(x => [x.project, x.state]), [['p', 'blocked'], ['q', 'extracted']]);
   });
   test(`drain ${type}: a second schema-invalid response persists failed once with two charged calls`, skip, async t => {
     const f = await setup(t, type); let calls = 0;

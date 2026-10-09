@@ -2274,7 +2274,8 @@ export function createShadowGraph(options = {}) {
   }
 
   function settleExtraction(input) {
-    if (!['superseded_result', 'schema_invalid', 'executor_blocked', 'executor_failed', 'worker_blocked'].includes(input.reason)) throw new Error('Invalid extraction terminal reason');
+    // provider_refusal: the provider's safeguard refused this item; it is blocked so no drain sends it again.
+    if (!['superseded_result', 'schema_invalid', 'executor_blocked', 'executor_failed', 'worker_blocked', 'provider_refusal'].includes(input.reason)) throw new Error('Invalid extraction terminal reason');
     const at = now(), item = captures.get(input.id);
     if (input.reason === 'superseded_result') {
       // No purged/quarantined identity, source, project or result is recreated.

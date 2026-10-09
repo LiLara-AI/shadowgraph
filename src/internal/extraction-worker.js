@@ -114,7 +114,7 @@ export async function commitCapture(options, claim, response) {
       || Date.parse(item.lease.leaseExpiresAt) <= Date.parse(at) || captureRawExpired(item, ledger?.retentionOverrides ?? [], at)
       || claimAuthorityInvalid(item, live, at) || effectiveGeneration(item, ledger, live, at) !== claim.generation
       || typeof raw(live, item) !== 'string' || digest(extractionText(raw(live, item))) !== claim.rawHash) return settle('superseded_result');
-    if (response?.status !== 'success') return settle(response?.status === 'worker_blocked' ? 'worker_blocked' : response?.status === 'schema_invalid' ? 'schema_invalid' : response?.status === 'blocked' ? 'executor_blocked' : 'executor_failed');
+    if (response?.status !== 'success') return settle(response?.status === 'worker_blocked' ? 'worker_blocked' : response?.status === 'schema_invalid' ? 'schema_invalid' : response?.status === 'blocked' ? (response.blockedReason === 'provider_refusal' ? 'provider_refusal' : 'executor_blocked') : 'executor_failed');
     if (response.receipt?.invocationStarted !== true || response.receipt.model !== EXTRACTION_MODEL) return settle('executor_failed');
     let prepared;
     try { prepared = prepareExtraction(item, extractionText(raw(live, item)), response.value); }
@@ -221,7 +221,9 @@ export async function runExtractionDrain(options) {
             budget.check(); attempts += 1;
             return options.executor.extract({ ...request, signal, identity });
           } });
-        if (response.status === 'blocked') return blocked(response.blockedReason);
+        // A provider refusal belongs to this item, not to the worker: it is settled on the item below
+        // (charged once, never claimed again) and the drain goes on to other eligible work.
+        if (response.status === 'blocked' && response.blockedReason !== 'provider_refusal') return blocked(response.blockedReason);
         budget.check(); if (options.guard && !await awaitWorkerStep(options.guard, signal)) return blocked('drain_stopped'); budget.check();
         const result = await commitCapture({ ...options, signal, attemptCount: attempts, journalCeiling: budget.budgets.journalEntriesPerSession }, claimed, response);
         claimed = null;
