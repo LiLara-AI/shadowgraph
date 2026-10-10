@@ -188,6 +188,27 @@ test('anything else a source says, in any words, keeps a claim from being quoted
   assert.equal(classifyClaim(claim('the app uses react 18 and tailwind'), 'Please add a dark mode toggle. The app uses React 18 and Tailwind.').class, 'unsupported');
 });
 
+test('a parenthesis or bracket that belongs to the claim stays part of the quote', () => {
+  const parenthetical = 'The parser cannot read line 3 (nested quote).';
+  assert.equal(classifyClaim(claim(parenthetical), parenthetical).class, 'quoted');
+  assert.equal(classifyClaim(claim(parenthetical, { start: 0, end: parenthetical.length }), parenthetical).class, 'quoted');
+  const bracketed = 'The parser rejected line 3 [nested quote].';
+  assert.equal(classifyClaim(claim(bracketed), bracketed).class, 'quoted');
+  const qualified = 'The job stopped (in staging).';
+  assert.equal(classifyClaim(claim(qualified), qualified).class, 'quoted');
+  assert.equal(classifyClaim(claim('the job stopped'), qualified).failingDimension, 'scope');
+  // A bracket at each edge is a wrapper only when the two close each other.
+  const twoParentheticals = '(1) The parser stopped at line 3 (nested quote)';
+  assert.equal(classifyClaim(claim(twoParentheticals), twoParentheticals).class, 'quoted');
+  // Outer wrappers still come off the claim. A wrapper that is only in the source does not.
+  assert.equal(classifyClaim(claim('(The job stopped.)'), 'The job stopped.').class, 'quoted');
+  assert.equal(classifyClaim(claim('[(The job stopped.)]'), 'The job stopped.').class, 'quoted');
+  assert.equal(classifyClaim(claim('The job stopped.'), '(The job stopped.)').class, 'unsupported');
+  const source = 'tool: Bash\nerror:\nThe parser cannot read line 3 (nested quote)';
+  assert.equal(classifyClaim(claim(source), source).class, 'quoted', 'the whole capture is one quote');
+  assert.equal(classifyClaim(claim('The parser cannot read line 3 (nested quote)'), source).class, 'unsupported', 'one line of it is not');
+});
+
 test('verifiedClaims checks each claim against its own source, and no duplicate hides an unsupported claim', () => {
   const source = 'The job stopped.';
   const span = spanOf(source, 'The job stopped');
