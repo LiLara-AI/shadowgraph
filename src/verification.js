@@ -526,12 +526,29 @@ function diagnoseClaim(claimText, source) {
 }
 
 // The claim's own words, with outer quotes, brackets and final punctuation
-// taken off, without a backtracking pattern.
+// taken off, without a backtracking pattern. A bracket pair is outer only when
+// the bracket at one edge closes the one at the other; a parenthesis or square
+// bracket that closes anything inside the claim is part of the claim.
 function claimWordsOf(text) {
+  const partner = new Map();
+  const open = [];
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (character === '(' || character === '[') open.push(index);
+    else if ((character === ')' || character === ']') && text[open.at(-1)] === (character === ')' ? '(' : '[')) partner.set(open.pop(), index);
+  }
   let from = 0;
   let to = text.length;
-  while (from < to && /[\s"'“‘(\[]/.test(text[from])) from += 1;
-  while (to > from && /[\s"'”’)\].!;:,]/.test(text[to - 1])) to -= 1;
+  const peelEdges = () => {
+    while (from < to && /[\s"'“‘]/.test(text[from])) from += 1;
+    while (to > from && /[\s"'”’.!;:,]/.test(text[to - 1])) to -= 1;
+  };
+  peelEdges();
+  while (from < to && partner.get(from) === to - 1) {
+    from += 1;
+    to -= 1;
+    peelEdges();
+  }
   return normaliseClaimText(text.slice(from, to)).text;
 }
 
