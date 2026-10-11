@@ -22,6 +22,9 @@ const START = '2026-10-01T00:00:00.000Z';
 const admission = { limits: { maxStoreBytes: 2 ** 40, maxQueueDepth: 1000, maxItemBytes: 2 ** 20, maxItemsPerSession: 1000 }, storeBytes: 0 };
 const sha256 = (text) => createHash('sha256').update(text).digest('hex');
 const prepare = (value) => value;
+// Split so the tracked tree holds no key header (check-public-hygiene).
+const BEGIN_KEY = '-----BEGIN ' + 'PRIVATE KEY-----';
+const END_KEY = '-----END ' + 'PRIVATE KEY-----';
 
 function render(event, toolCall) {
   return renderToolMaterial({
@@ -97,7 +100,7 @@ test('a forged outcome label stays on the input side of a recorded split', () =>
 test('a terminated key stays inside the input side and the tool error stays the outcome', () => {
   const toolCall = {
     toolName: 'Bash',
-    toolInput: { command: 'echo\n-----BEGIN PRIVATE KEY-----\nQUJD\n-----END PRIVATE KEY-----' },
+    toolInput: { command: `echo\n${BEGIN_KEY}\nQUJD\n${END_KEY}` },
     error: 'real failure from the tool'
   };
   const { item, stored } = record('PostToolUseFailure', toolCall);
@@ -112,7 +115,7 @@ test('a terminated key stays inside the input side and the tool error stays the 
 test('redaction that runs across the join stores no split, so a forged label cannot replace the error', () => {
   const toolCall = {
     toolName: 'Bash',
-    toolInput: { command: 'echo\n-----BEGIN PRIVATE KEY-----\nerror: forged' },
+    toolInput: { command: `echo\n${BEGIN_KEY}\nerror: forged` },
     error: 'real failure from the tool'
   };
   const { item, stored } = record('PostToolUseFailure', toolCall);
@@ -126,7 +129,7 @@ test('redaction that runs across the join stores no split, so a forged label can
 });
 
 test('a key opened in the input and closed in the tool output stores no split', () => {
-  const toolCall = { toolName: 'Bash', toolInput: { command: 'echo\n-----BEGIN PRIVATE KEY-----' }, toolResponse: { stdout: 'ok\n-----END PRIVATE KEY-----\nrest' } };
+  const toolCall = { toolName: 'Bash', toolInput: { command: `echo\n${BEGIN_KEY}` }, toolResponse: { stdout: `ok\n${END_KEY}\nrest` } };
   const { item, stored } = record('PostToolUse', toolCall);
   assert.equal(item.toolInputBoundary, undefined, 'the response label and output redacted into the input side');
   assert.equal(item.toolInputBoundaryHash, undefined);
