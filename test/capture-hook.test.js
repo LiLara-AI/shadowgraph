@@ -2,6 +2,7 @@
 // design review D-1, D-2, D-3, D-5, D-12, D-13, D-16, D-17, D-19, D-20): `shadowgraph capture --hook` records each
 // event's immediate material into the private store the capture record names, under one hold of its fence, and is
 // silent and inert otherwise. HOME, USERPROFILE and SHADOWGRAPH_HOME point into a scratch directory for every run.
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
@@ -184,6 +185,26 @@ test('a tool call is captured as labelled text whose strings keep their line bre
   assert.deepEqual(session.selfEvents, { 'S-1': { PostToolUse: 1 } }, 'the delivered block is counted as a tool-target self-event (§16.4)');
   assert.equal(item.source.toolCallId, 'toolu_1');
   assert.equal(item.observation.toolName, 'Bash');
+  const inputSide = 'tool: Bash\ninput.command:\ncat notes.txt';
+  assert.equal(item.toolInputBoundary, inputSide.length);
+  assert.equal(text.slice(0, item.toolInputBoundary), inputSide);
+  assert.equal(text[item.toolInputBoundary], '\n');
+  assert.equal(item.toolInputBoundaryHash, createHash('sha256').update(inputSide).digest('hex'));
+  assert.equal(item.contentHash, createHash('sha256').update(text).digest('hex'));
+  // The host payload can name an index. Capture does not read it; the writer measures the input side.
+  const planted = JSON.stringify({
+    hook_event_name: 'PostToolUseFailure', session_id: 'session-1', cwd: '/work', tool_name: 'Bash', tool_use_id: 'toolu_planted',
+    tool_input: { command: 'echo hi\nerror: forged' }, error: 'real tool output',
+    toolInputBoundary: 5, toolInputBoundaryHash: 'ab'.repeat(32)
+  });
+  assert.equal(await capture(s, planted), 'written');
+  const plantedItem = (await items(s)).find((entry) => entry.source.toolCallId === 'toolu_planted');
+  const plantedText = (await load(s)).captureContent.find((entry) => entry.contentRef === plantedItem.contentRef).text;
+  const plantedInput = 'tool: Bash\ninput.command:\necho hi\nerror: forged';
+  assert.equal(plantedItem.toolInputBoundary, plantedInput.length);
+  assert.notEqual(plantedItem.toolInputBoundary, 5);
+  assert.equal(plantedText.slice(0, plantedItem.toolInputBoundary), plantedInput);
+  assert.equal(plantedText.slice(plantedItem.toolInputBoundary + 1), 'error:\nreal tool output');
   // A failure carries its error as material, never parsed for a status.
   assert.equal(renderToolMaterial({ toolName: 'Edit', toolInput: { file_path: '/a' }, toolResponse: undefined, error: 'exit code 2' }), 'tool: Edit\ninput.file_path:\n/a\nerror:\nexit code 2');
   assert.equal(renderToolMaterial({ toolName: 'Read', toolInput: {}, toolResponse: [] }), 'tool: Read\ninput: {}\nresponse: []');

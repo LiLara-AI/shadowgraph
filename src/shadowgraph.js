@@ -32,6 +32,7 @@ import { SELF_SIGNALS, stripDeliveredBlocks } from './internal/capture-source.js
 import { CAPTURE_COLLECTIONS, CAPTURE_CONTENT, CAPTURE_ENTRY_TYPES, CAPTURE_EVENT_IDENTITY, CAPTURE_IMPORT_TYPE, CAPTURE_KIND, CAPTURE_SESSIONS, CAPTURE_TRANSITIONS, captureCollectionIssue, captureEntryReachedBy, captureEventIssue, captureItemIssue, captureObservationIssue, CAPTURE_LIMIT_EVENT, CAPTURE_REFUSED_EVENT, OTHER_OWNER } from './internal/capture.js';
 import { TRANSCRIPT_ANCHOR_BYTES, TRANSCRIPT_GAP_REASONS, TRANSCRIPT_TRIGGERS, cursorBlock, cursorShape, digest, lastLineEnd, matchKey, transcriptEntry, transcriptLines } from './internal/transcript.js';
 import { CREDENTIAL_WITHHELD, captureWithheld, redactText, redactValue, withholdFlagged } from './internal/redaction.js';
+import { provenToolInputSplit } from './internal/tool-material.js';
 import { RAW_EXPIRED, RAW_RETENTION_DAYS, captureRawExpired, effectiveCaptureExpiry, hasCaptureRetentionState } from './internal/capture-retention.js';
 import { invalidatedCaptureTokens } from './internal/capture-generation.js';
 import { sessionJournalEntries, workerReason } from './internal/extraction-session.js';
@@ -1155,6 +1156,15 @@ export function createShadowGraph(options = {}) {
     const crossing = admissionCrossing(admission, text, originId, observed.sessionId, [observation ?? null, observed], at);
     if (crossing) return refuseAdmission(crossing, session, sessions, at);
     const contentHash = text === undefined ? null : createHash('sha256').update(text).digest('hex');
+    // A tool call's input/output split, only when this write can prove it on
+    // the text it is about to store. Older items, prompts, and any call whose
+    // redaction crosses the join carry neither field.
+    const split = typeof text === 'string' && !keyBlock && !withhold
+      ? provenToolInputSplit({
+        event: observed.event, storedText: text, toolCall: input.toolCall,
+        prepare: (value) => redactText(stripDeliveredBlocks(value).text)
+      })
+      : null;
     const item = {
       id: allocateEntityId(CAPTURE_KIND), kind: CAPTURE_KIND, schemaVersion: SCHEMA_VERSION,
       project: owner.project, attribution: owner.attribution, originId,
@@ -1166,7 +1176,8 @@ export function createShadowGraph(options = {}) {
       erasureToken: allocateErasureToken(), cancelRequested: false, supersededResults: [],
       possibleDuplicateOf: withheldText ? null : hostIdentity === null ? previousRepeat(originId, observed, contentHash, at) : observed.event === 'Transcript' ? assistantRepeat(originId, observed.sessionId, contentHash, at) : null,
       expiresAt: null, createdAt: at, updatedAt: at,
-      ...(observation === undefined ? {} : { observation })
+      ...(observation === undefined ? {} : { observation }),
+      ...(split === null ? {} : { toolInputBoundary: split.boundary, toolInputBoundaryHash: split.hash })
     };
     item.expiresAt = effectiveCaptureExpiry(item, retentionPolicy());
     const issue = captureItemIssue(item);
@@ -1388,6 +1399,9 @@ export function createShadowGraph(options = {}) {
       if (selectedItem) {
         item.contentRef = null;
         item.contentHash = null;
+        // The input side's split and hash describe the text, so they go with it.
+        delete item.toolInputBoundary;
+        delete item.toolInputBoundaryHash;
         item.possibleDuplicateOf = null;
         item.expiresAt = selectedItem.expiry;
       } else if (selected.has(item.possibleDuplicateOf)) item.possibleDuplicateOf = null;

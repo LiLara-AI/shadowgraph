@@ -186,7 +186,19 @@ export function captureItemIssue(item) {
   if (!isValidIsoInstant(item.createdAt) || !isValidIsoInstant(item.updatedAt)) return 'createdAt and updatedAt are ISO 8601 instants';
   if (item.state === 'failed' && item.lastError === null) return 'a failed item says why in lastError';
   if (item.state === 'blocked' && item.blockedReason === null) return 'a blocked item says why in blockedReason';
-  if (item.observation !== undefined) return captureObservationIssue(item.observation);
+  if (item.observation !== undefined) {
+    const observation = captureObservationIssue(item.observation);
+    if (observation) return observation;
+  }
+  // Absent together on every item captured before the split was recorded, and
+  // on any call whose join could not be proved. Never invented on read.
+  // Checked even when an observation is present: a tool item always has one.
+  // A pair beside expired text is not refused: a build before this one expires
+  // raw without removing it, and extraction never uses a pair without the text.
+  if (item.toolInputBoundary !== undefined || item.toolInputBoundaryHash !== undefined) {
+    const hashOk = typeof item.toolInputBoundaryHash === 'string' && SHA256.test(item.toolInputBoundaryHash);
+    if (!count(item.toolInputBoundary) || !hashOk) return 'toolInputBoundary is a non-negative integer with the SHA-256 of that input side';
+  }
   return null;
 }
 
