@@ -27,9 +27,9 @@ const mcp = fileURLToPath(new URL('../src/mcp.js', import.meta.url));
 const claim = (text, span) => ({ text, sourceRef: 'capture:c1', ...(span ? { span } : {}) });
 const spanOf = (source, text) => ({ start: source.indexOf(text), end: source.indexOf(text) + text.length });
 
-test('the verifier is local and declared: six dimensions, one named rule, a version', () => {
+test('the verifier is local and declared: six dimensions, the named rules, a version', () => {
   assert.deepEqual([...CLAIM_DIMENSIONS], ['quantifier', 'polarity', 'actor', 'time', 'scope', 'modality']);
-  assert.deepEqual(Object.keys(CLAIM_DERIVATION_RULES), ['contraction-expansion-v1']);
+  assert.deepEqual(Object.keys(CLAIM_DERIVATION_RULES), ['contraction-expansion-v1', 'tool-call-coverage-v1']);
   assert.equal(typeof CLAIM_VERIFIER_VERSION, 'string');
   assert.ok(CLAIM_VERIFIER_VERSION);
 });

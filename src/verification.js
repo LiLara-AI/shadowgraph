@@ -263,7 +263,10 @@ export async function loadLocalEvidenceVerifier(configPath) {
 export const CLAIM_VERIFIER_VERSION = 'claim-verifier-v1';
 export const CLAIM_DIMENSIONS = Object.freeze(['quantifier', 'polarity', 'actor', 'time', 'scope', 'modality']);
 export const CLAIM_DERIVATION_RULES = Object.freeze({
-  'contraction-expansion-v1': "reads n't, 're, 've, 'll and 'm (with any apostrophe) as the words they contract; nothing else"
+  'contraction-expansion-v1': "reads n't, 're, 've, 'll and 'm (with any apostrophe) as the words they contract; nothing else",
+  // Applied only to a split capture recorded. classifyClaim never selects it
+  // by reading labels, and it does not assign a decision, alternative or cause.
+  'tool-call-coverage-v1': 'copies a capture-recorded input side into the attempt solution and the outcome side into its result; it does not verify the tool report or assign a cause'
 });
 // The order a failure is reported in: what reverses or hedges a claim first.
 const FAILURE_ORDER = ['polarity', 'modality', 'quantifier', 'actor', 'time', 'scope'];
@@ -673,6 +676,21 @@ export function verifiedClaims(claims, sources) {
     accepted.push(outcome);
   }
   return { accepted, unsupported, countsByDimension };
+}
+
+// The capture-recorded split, checked here and nowhere discovered. Both sides
+// have to be the exact stored text. A missing or altered boundary is not a
+// claim. This does not read labels and does not set a verification status.
+export function toolCallCoverageClaims({ sourceRef, sourceText, boundary, solution, result }) {
+  if (typeof sourceText !== 'string' || typeof sourceRef !== 'string' || !sourceRef) return null;
+  if (!Number.isSafeInteger(boundary) || boundary < 0 || boundary >= sourceText.length || sourceText[boundary] !== '\n') return null;
+  const input = sourceText.slice(0, boundary);
+  const outcome = sourceText.slice(boundary + 1);
+  if (!input || !outcome || solution !== input || result !== outcome) return null;
+  const claim = (text, start, end) => ({
+    text, sourceRef, class: 'entailed', rule: 'tool-call-coverage-v1', verifierVersion: CLAIM_VERIFIER_VERSION, span: { start, end }
+  });
+  return [claim(input, 0, boundary), claim(outcome, boundary + 1, sourceText.length)];
 }
 
 // Plan v1.4.4 §17, G-5 §3.1 (PR-25): the negating words of a text, read as the
