@@ -5,7 +5,7 @@ import { PassThrough } from 'node:stream';
 import { mkdir, readFile, writeFile, readdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildInvocation, createExtractor, inspectPolicy, runBounded, validateSchemaValue, EXTRACTION_MODEL, EXTRACTOR_LIMITS } from '../src/extractor.js';
+import { buildInvocation, createExtractor, inspectPolicy, runBounded, validateSchemaValue, EXTRACTION_MAX_TURNS, EXTRACTION_MODEL, EXTRACTOR_LIMITS } from '../src/extractor.js';
 
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
@@ -13,7 +13,7 @@ const SCHEMA = { type: 'object', properties: { claims: { type: 'array', maxItems
 const HELP = '--safe-mode --tools --setting-sources --settings --strict-mcp-config --mcp-config --disable-slash-commands --no-session-persistence --session-id --json-schema --model --output-format --system-prompt';
 const AUTH = { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', apiKeySource: null };
 const DOCTOR = 'Managed settings (remote): not fetched — requires an Enterprise or Team subscription';
-const successful = { type: 'result', subtype: 'success', is_error: false, structured_output: { claims: ['bounded observation'] }, modelUsage: { 'claude-opus-5': { inputTokens: 12, outputTokens: 8 } } };
+const successful = { type: 'result', subtype: 'success', is_error: false, num_turns: 2, structured_output: { claims: ['bounded observation'] }, modelUsage: { 'claude-opus-5': { inputTokens: 12, outputTokens: 8 } } };
 const result = (value, extra = {}) => ({ code: 0, stdout: typeof value === 'string' ? value : JSON.stringify(value), stderr: '', ...extra });
 async function fixture(t, overrides = {}) {
   const root = await scratchDirectory(t, 'shadowgraph-executor-');
@@ -43,11 +43,26 @@ test('invocation pins subscription model, inline schema, zero tools/customizatio
   assert.equal(after('--model'), EXTRACTION_MODEL);
   assert.deepEqual(JSON.parse(after('--mcp-config')), { mcpServers: {} });
   assert.equal(JSON.parse(after('--settings')).disableAllHooks, true);
+  // The host stops before sending a model turn beyond this cap (a structured call takes 2).
+  assert.equal(EXTRACTION_MAX_TURNS, 2);
+  assert.equal(after('--max-turns'), '2');
   for (const flag of ['--safe-mode', '--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence']) assert.ok(request.args.includes(flag));
   for (const flag of ['--bare', '--fallback-model', '--resume', '--continue', '--dangerously-skip-permissions']) assert.ok(!request.args.includes(flag));
   assert.equal(request.env.UNRELATED_SECRET, undefined);
   assert.equal(request.env.CLAUDE_CODE_SIMPLE, undefined);
   assert.equal(request.shell, false);
+});
+
+test('a success is accepted only with a reported turn count within the cap; the cap itself is not required in --help', async (t) => {
+  const ok = await fixture(t);
+  assert.equal((await ok.executor.extract({ prompt: 'p', schema: SCHEMA })).status, 'success', 'the pinned host hides --max-turns from --help');
+  for (const output of [{ ...successful, num_turns: 3 }, { ...successful, num_turns: undefined }, { ...successful, num_turns: '2' }, { ...successful, num_turns: -1 }]) {
+    const s = await fixture(t, { output });
+    const out = await s.executor.extract({ prompt: 'p', schema: SCHEMA });
+    assert.equal(out.status, 'blocked', JSON.stringify(output.num_turns)); assert.equal(out.blockedReason, 'turn_limit_unverified');
+  }
+  const stopped = await fixture(t, { output: { type: 'result', subtype: 'error_max_turns', is_error: true, num_turns: 3, modelUsage: successful.modelUsage } });
+  assert.equal((await stopped.executor.extract({ prompt: 'p', schema: SCHEMA })).status, 'blocked');
 });
 
 test('schema paths, external references and unsupported schema semantics fail before a child starts', async (t) => {
