@@ -47,9 +47,10 @@ jobs:
       # once per job in their own mandatory step, before the suite: some suite
       # tests start detached processes, and none may compete with this
       # measurement. The step fails unless every performance case ran and
-      # passed (PR #12). It first writes out the file-system writes the job's
-      # earlier steps left pending, which the kernel would otherwise write out
-      # during the measurement, ahead of a measured save's own writes.
+      # passed (PR #12). It first waits, within a bound, for ext4 to finish
+      # initialising a fresh runner disk, then writes out the file-system writes
+      # the job's earlier steps left pending: the kernel would otherwise write
+      # both during the measurement, ahead of a measured save's own writes.
       - name: Delivery-budget performance (dedicated, before the suite)
         id: performance
         run: npm run test:performance

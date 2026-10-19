@@ -3,10 +3,11 @@
 // run executes the performance cases in their own process, under a fresh
 // ShadowGraph home of its own, and fails unless the run exits cleanly, the TAP
 // summary has no failure, cancellation, skip or todo, and every case the file
-// declares reported `ok` exactly once. Before the cases it writes out the
-// file-system writes earlier steps left pending, and it prints the execution
-// conditions first (content-free, that flush included), so each run records
-// what it ran on.
+// declares reported `ok` exactly once. Before the cases it waits, within a
+// bound, for ext4's background initialisation of a fresh disk, then writes out
+// the file-system writes earlier steps left pending, and it prints the
+// execution conditions first (content-free, both included), so each run
+// records what it ran on.
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { availableParallelism, freemem, loadavg, tmpdir, totalmem } from 'node:os';
@@ -58,12 +59,29 @@ export function flushPendingWrites({ platform = process.platform, run = spawnSyn
 }
 
 // Whether ext4 is still zeroing inode tables in the background (the
-// ext4lazyinit thread of a freshly provisioned disk), which writes throughout
-// the step and is not pending writes a flush removes; null off Linux.
+// ext4lazyinit thread of a freshly provisioned disk); null off Linux.
 export function ext4LazyInitRunning(platform = process.platform) {
   if (platform !== 'linux') return null;
   const named = (pid) => { try { return readFileSync(`/proc/${pid}/comm`, 'utf8').trim() === 'ext4lazyinit'; } catch { return false; } };
   try { return readdirSync('/proc').some((pid) => /^\d+$/u.test(pid) && named(pid)); } catch { return null; }
+}
+
+// Waits, at most boundMs, for that background initialisation to finish before
+// any case runs. On some GitHub Ubuntu runners it is still running when the
+// step starts: it writes about 3 GB of zeroes over one to three minutes after
+// boot, behind which a measured save's rename waited 300 ms and failed the
+// step after the flush below had run. Like the flush, this removes writing
+// that is not the delivery's, and none of the delivery's own. Past the bound
+// the wait is recorded as unfinished, and the cases still run and decide the
+// step.
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+export function waitForExt4LazyInit({ running = ext4LazyInitRunning, sleep = sleepSync, now = () => performance.now(), boundMs = 300_000 } = {}) {
+  const atStart = running();
+  if (atStart !== true) return atStart === null ? null : { runningAtStart: false };
+  const started = now();
+  let finished = false;
+  while (!finished && now() - started < boundMs) { sleep(1000); finished = running() !== true; }
+  return { runningAtStart: true, finished, waitedMs: Math.round(now() - started) };
 }
 
 // Returns the step's exit code: 0 only when every check above holds.
@@ -76,7 +94,7 @@ export function runPerformance(file = PERFORMANCE_FILE) {
   const scratch = job && isAbsolute(job) && existsSync(job) ? mkdtempSync(join(job, 'shadowgraph-performance-')) : null;
   const conditions = { node: process.version, platform: process.platform, arch: process.arch, parallelism: availableParallelism(),
     loadAverage: loadavg().map((value) => Number(value.toFixed(2))), freeMemoryMb: Math.round(freemem() / 2 ** 20), totalMemoryMb: Math.round(totalmem() / 2 ** 20),
-    temporaryDirectory: scratch ? 'job (RUNNER_TEMP)' : 'system', pendingWrites: flushPendingWrites(), ext4LazyInit: ext4LazyInitRunning() };
+    temporaryDirectory: scratch ? 'job (RUNNER_TEMP)' : 'system', ext4LazyInit: waitForExt4LazyInit(), pendingWrites: flushPendingWrites() };
   process.stdout.write(`performance step conditions ${JSON.stringify(conditions)}\n`);
   const home = mkdtempSync(join(scratch ?? tmpdir(), 'shadowgraph-performance-home-'));
   // A caller that is itself a test process marks its environment; the child

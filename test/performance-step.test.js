@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PERFORMANCE_FILE, assertDeclaredCasesPassed, declaredCases, flushPendingWrites } from '../performance/cases.mjs';
+import { PERFORMANCE_FILE, assertDeclaredCasesPassed, declaredCases, flushPendingWrites, waitForExt4LazyInit } from '../performance/cases.mjs';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
 // The delivery-budget performance cases run in their own mandatory CI step
@@ -94,8 +94,9 @@ test('the step entry script exits non-zero unless every declared case of its fil
 
 // The step writes out the file-system writes earlier steps left pending (up to
 // about 1 GB on a runner) before it measures, so the kernel's flush of them
-// cannot throttle a measured save's own writes; it records the flush, and
-// whether ext4 is still initialising the disk in the background.
+// cannot throttle a measured save's own writes. Before that it waits, within a
+// bound, for ext4 to finish initialising a fresh disk in the background. It
+// records both.
 test('the step writes out pending file-system writes before it measures, and records it', async (t) => {
   const root = await scratchDirectory(t), entry = fileURLToPath(new URL('../performance/run.mjs', import.meta.url));
   const file = join(root, 'flush.perf.js');
@@ -112,7 +113,28 @@ test('the step writes out pending file-system writes before it measures, and rec
     assert.ok(ms >= 0);
     if (process.platform === 'linux') assert.ok(Number.isInteger(dirtyKbBefore) && Number.isInteger(dirtyKbAfter), JSON.stringify(conditions.pendingWrites));
   }
-  assert.equal(typeof conditions.ext4LazyInit, process.platform === 'linux' ? 'boolean' : 'object');
+  if (process.platform === 'linux') assert.equal(typeof conditions.ext4LazyInit.runningAtStart, 'boolean', JSON.stringify(conditions.ext4LazyInit));
+  else assert.equal(conditions.ext4LazyInit, null);
+});
+
+// ext4lazyinit zeroes a fresh runner disk's inode tables: about 3 GB over one
+// to three minutes after boot, on some runners. The step waits for it, within a
+// bound, polling once a second; past the bound it records that it is still
+// running, and the cases still run and decide the step.
+test('the step waits, within a bound, for ext4 to finish initialising the disk, and records it', () => {
+  const clock = { at: 0 }, sleeps = [];
+  const run = (states, boundMs) => {
+    clock.at = 0; sleeps.length = 0;
+    const queue = [...states];
+    return waitForExt4LazyInit({ running: () => queue.shift(), sleep: (ms) => { sleeps.push(ms); clock.at += ms; }, now: () => clock.at, boundMs });
+  };
+  assert.equal(run([null], 5000), null, 'nothing to wait for off Linux');
+  assert.deepEqual(run([false], 5000), { runningAtStart: false });
+  assert.deepEqual(sleeps, []);
+  assert.deepEqual(run([true, true, true, false], 5000), { runningAtStart: true, finished: true, waitedMs: 3000 });
+  assert.deepEqual(sleeps, [1000, 1000, 1000], 'polls once a second');
+  assert.deepEqual(run(Array(20).fill(true), 5000), { runningAtStart: true, finished: false, waitedMs: 5000 }, 'gives up at the bound');
+  assert.deepEqual(run([true, null], 5000), { runningAtStart: true, finished: true, waitedMs: 1000 }, 'a check that can no longer read /proc ends the wait');
 });
 
 test('the flush is one system-wide sync, and one that fails or cannot start is recorded as not flushed', () => {
