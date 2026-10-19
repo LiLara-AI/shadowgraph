@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { mkdir, readFile, writeFile, readdir } from 'node:fs/promises';
+import fsPromises, { mkdir, readFile, writeFile, readdir, rm, stat } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildInvocation, createExtractor, inspectPolicy, runBounded, validateSchemaValue, EXTRACTION_MAX_TURNS, EXTRACTION_MODEL, EXTRACTOR_LIMITS } from '../src/extractor.js';
@@ -530,4 +531,157 @@ test('an invocation is refused when the host version differs from the activated 
   const out = await executor.extract({ prompt: 'synthetic', schema: SCHEMA });
   assert.equal(out.blockedReason, 'activated_executor_changed');
   assert.equal(s.calls.filter((call) => call.args.includes('-p')).length, 0, 'no model invocation');
+});
+
+// Record 27: the shared remote-settings cache is applied by the traced 2.1.292 binary only when the host's own
+// eligibility is true, and its doctor then never prints the ineligible line. Existence stays a fact; applicability
+// is the host's own report; conflict with the policy's content is never assessed, so an applied policy still blocks.
+async function remoteCacheFixture(t, { cache = true, doctor = DOCTOR, version = '2.1.292 (Claude Code)', flag = true, pinned = true, policyPaths = [], registry = [], onDoctor } = {}) {
+  const root = await scratchDirectory(t, 'shadowgraph-remote-cache-');
+  const executable = join(root, process.platform === 'win32' ? 'host.exe' : 'host');
+  await writeFile(executable, 'fake host binary');
+  await mkdir(join(root, '.claude')); await writeFile(join(root, '.claude', 'settings.json'), '{}');
+  const cacheFile = join(root, '.claude', 'remote-settings.json');
+  if (cache) await writeFile(cacheFile, 'private managed content');
+  const { createHash } = await import('node:crypto');
+  const digest = createHash('sha256').update(await readFile(executable)).digest('hex');
+  const profiles = { '2.1.288': { binarySha256: null, requiresHostValidation: false },
+    '2.1.292': { binarySha256: pinned ? digest : null, requiresHostValidation: true, ...(flag ? { remoteCacheGatedByEligibility: true } : {}) } };
+  const calls = [];
+  const runner = async (request) => {
+    calls.push(request);
+    if (request.args.includes('--version')) return result(version);
+    if (request.args.includes('--help')) return result(HELP);
+    if (request.args.includes('auth')) return result(AUTH);
+    if (request.args.includes('doctor')) { await onDoctor?.(cacheFile); return typeof doctor === 'string' ? result(doctor) : doctor; }
+    return result(successful);
+  };
+  const env = { HOME: root, USERPROFILE: root, PATH: process.env.PATH, SYSTEMROOT: process.env.SYSTEMROOT ?? '' };
+  // The real inspection on a scratch home; only the machine-wide sources are substituted.
+  const policy = options => inspectPolicy({ ...options, platform: 'win32', policyPaths, registry: async () => registry });
+  const executor = createExtractor({ executable, env, scratchRoot: root, runProcess: runner, inspectPolicy: policy, hostProfiles: profiles });
+  return { root, cacheFile, calls, executor, invoked: () => calls.filter(x => x.args.includes('-p')).length };
+}
+
+test('inspection reports the remote cache as a separate existence fact and still refuses on it alone', async (t) => {
+  const s = await remoteCacheFixture(t);
+  const out = await inspectPolicy({ platform: 'win32', env: { HOME: s.root, USERPROFILE: s.root }, policyPaths: [], registry: async () => [] });
+  assert.equal(out.ok, false); assert.equal(out.blockedReason, 'managed_policy_present');
+  assert.equal(out.remoteCachePresent, true); assert.deepEqual(out.sources, ['remote-settings.json']);
+  assert.doesNotMatch(JSON.stringify(out), /private managed content/);
+});
+
+test('a remote cache the pinned, flagged host reports as not applicable no longer blocks; the three facts stay apart', async (t) => {
+  const s = await remoteCacheFixture(t);
+  const check = await s.executor.check();
+  assert.equal(check.ok, true, check.blockedReason);
+  assert.deepEqual(check.remotePolicy, { cache: 'present', applicability: 'host_reported_ineligible', conflict: 'not_assessed' });
+  assert.ok(Object.values(check.restrictions).every(x => x === true));
+  const out = await s.executor.extract({ prompt: 'synthetic', schema: SCHEMA });
+  assert.equal(out.status, 'success'); assert.equal(s.invoked(), 1);
+  assert.equal(out.receipt.remotePolicy.cache, 'present');
+  assert.doesNotMatch(JSON.stringify(out), /private managed content/);
+  const absent = await remoteCacheFixture(t, { cache: false });
+  assert.deepEqual((await absent.executor.check()).remotePolicy, { cache: 'absent', applicability: 'host_reported_ineligible', conflict: 'not_assessed' });
+});
+
+test('with a remote cache present, any doctor report other than one unambiguous ineligible line blocks', async (t) => {
+  for (const doctor of [
+    'Managed settings (remote): loaded', 'Managed settings (remote): none configured for this organization',
+    'Managed settings (remote): fetch failed — using stale cache (network error)', 'Managed settings (remote): fetch failed — no policy applied (http_5xx)',
+    'Managed settings (remote): checking… (fetch in progress; re-run in a moment)',
+    'Managed settings (remote): not fetched — no usable credentials for the settings fetch',
+    'Claude Code doctor\nNo installation issues found.', '',
+    `${DOCTOR}\nManaged settings (remote): loaded`, `${DOCTOR}\n${DOCTOR}`,
+    // One line, but not one unambiguous report (review F1): two reports, a \r overwrite, qualifiers, trailing text.
+    `Managed settings (remote): loaded ${DOCTOR}`, `Managed settings (remote): loaded\r${DOCTOR}`, `${DOCTOR}\rManaged settings (remote): loaded`,
+    'Managed settings (remote): not fetched (cache applied) — requires an Enterprise or Team subscription',
+    `${DOCTOR}; cached remote-settings.json loaded (3 keys)`, 'Managed settings (remote): not fetched — does not requires an Enterprise or Team subscription',
+    `${DOCTOR}\nmanaged settings (REMOTE): loaded`, `\x1b[2m${DOCTOR} (stale)\x1b[0m`,
+    { code: 0, stdout: undefined, stderr: '' }, { code: 1, stdout: DOCTOR, stderr: '' }, { code: null, failure: 'timeout', stdout: '', stderr: '' },
+    { code: null, failure: 'output_limit', stdout: '', stderr: '' }, { code: null, failure: 'spawn_failed', stdout: '', stderr: '' }
+  ]) {
+    const s = await remoteCacheFixture(t, { doctor });
+    const out = await s.executor.extract({ prompt: 'synthetic', schema: SCHEMA });
+    assert.equal(out.status, 'blocked', JSON.stringify(doctor)); assert.equal(out.blockedReason, 'remote_policy_unverified', JSON.stringify(doctor));
+    assert.equal(s.invoked(), 0, JSON.stringify(doctor));
+  }
+});
+
+test('an unflagged, unpinned or other host profile keeps refusing on the remote cache before any diagnostic probe', async (t) => {
+  for (const options of [{ flag: false }, { pinned: false }, { version: '2.1.288 (Claude Code)' }]) {
+    const s = await remoteCacheFixture(t, options);
+    const out = await s.executor.extract({ prompt: 'synthetic', schema: SCHEMA });
+    assert.equal(out.status, 'blocked', JSON.stringify(options)); assert.equal(out.blockedReason, 'managed_policy_present', JSON.stringify(options));
+    assert.ok(s.calls.every(x => !x.args.includes('doctor') && !x.args.includes('auth') && !x.args.includes('-p')), JSON.stringify(options));
+    // A binary no flagged profile pins is refused before any host process starts (review F4).
+    if (!options.version) assert.equal(s.calls.length, 0, JSON.stringify(options));
+  }
+  // The flag never substitutes for the binary pin itself.
+  // A different binary: with the cache, refused before any process; without it, the pin refuses it as before.
+  for (const cache of [true, false]) {
+    const s = await remoteCacheFixture(t, { cache });
+    await writeFile(join(s.root, process.platform === 'win32' ? 'host.exe' : 'host'), 'a different binary');
+    assert.equal((await s.executor.check()).blockedReason, cache ? 'managed_policy_present' : 'host_binary_unverified', `cache ${cache}`);
+    if (cache) assert.equal(s.calls.length, 0);
+  }
+});
+
+test('system and registry policies still block on existence alone, with or without the remote cache', async (t) => {
+  for (const cache of [false, true]) {
+    const managed = await remoteCacheFixture(t, { cache });
+    const file = join(managed.root, 'managed-settings.json'); await writeFile(file, '{}');
+    const withFile = await remoteCacheFixture(t, { cache, policyPaths: [file] });
+    const withRegistry = await remoteCacheFixture(t, { cache, registry: ['HKLM'] });
+    for (const s of [withFile, withRegistry]) {
+      const out = await s.executor.extract({ prompt: 'synthetic', schema: SCHEMA });
+      assert.equal(out.blockedReason, 'managed_policy_present', `cache ${cache}`);
+      assert.equal(s.calls.length, 0, 'no host process before the policy refusal');
+    }
+  }
+});
+
+test('a remote cache appearing or vanishing between the check and the invocation never starts a model call', async (t) => {
+  for (const cache of [false, true]) {
+    const s = await remoteCacheFixture(t, { cache, onDoctor: async file => { if (cache) await rm(file); else await writeFile(file, 'written by an eligible host'); } });
+    const out = await s.executor.extract({ prompt: 'synthetic', schema: SCHEMA });
+    assert.equal(out.status, 'blocked', `cache ${cache}`); assert.equal(out.blockedReason, 'configuration_changed_before_invoke', `cache ${cache}`);
+    assert.equal(s.invoked(), 0);
+  }
+  // A system policy appearing beside the deferred cache is an effective-policy refusal, not a cache change (review F6).
+  const root = await scratchDirectory(t, 'shadowgraph-late-policy-'); const late = join(root, 'managed-settings.json');
+  const s = await remoteCacheFixture(t, { policyPaths: [late], onDoctor: async () => { await writeFile(late, '{}'); } });
+  const out = await s.executor.extract({ prompt: 'synthetic', schema: SCHEMA });
+  assert.equal(out.blockedReason, 'managed_policy_present'); assert.equal(s.invoked(), 0);
+});
+
+test('the remote cache is never opened or changed by a check or an extraction', async (t) => {
+  const s = await remoteCacheFixture(t);
+  const before = { bytes: await readFile(s.cacheFile), stat: await stat(s.cacheFile) };
+  // Every file-system call that could open, read, write, move or delete it is observed (review F2).
+  const touched = [];
+  const names = ['open', 'readFile', 'writeFile', 'appendFile', 'copyFile', 'cp', 'rm', 'rename', 'unlink', 'truncate', 'chmod', 'utimes', 'lstat'];
+  const original = Object.fromEntries(names.map(name => [name, fsPromises[name]]));
+  for (const name of names) fsPromises[name] = async (path, ...rest) => { if (resolve(String(path)) === resolve(s.cacheFile)) touched.push(name); return original[name](path, ...rest); };
+  syncBuiltinESMExports();
+  let result;
+  try { result = await s.executor.extract({ prompt: 'synthetic', schema: SCHEMA }); }
+  finally { Object.assign(fsPromises, original); syncBuiltinESMExports(); }
+  assert.equal(result.status, 'success');
+  assert.ok(touched.length > 0 && touched.every(name => name === 'lstat'), `only lstat touched the cache: ${touched}`);
+  const after = await stat(s.cacheFile);
+  assert.deepEqual(await readFile(s.cacheFile), before.bytes);
+  assert.equal(after.mtimeMs, before.stat.mtimeMs); assert.equal(after.size, before.stat.size);
+  // A directory in its place cannot be read as a file: existence alone is all that is ever taken.
+  const d = await remoteCacheFixture(t, { cache: false }); await mkdir(d.cacheFile);
+  const check = await d.executor.check();
+  assert.equal(check.ok, true, check.blockedReason); assert.equal(check.remotePolicy.cache, 'present');
+  const source = await readFile(fileURLToPath(new URL('../src/extractor.js', import.meta.url)), 'utf8');
+  assert.equal(source.match(/remote-settings\.json/g).length, 1, 'the cache path is named once, for lstat only');
+});
+
+test('only the traced 2.1.292 binary profile carries the remote-cache flag', () => {
+  assert.equal(HOST_PROFILES['2.1.292'].remoteCacheGatedByEligibility, true);
+  assert.equal(HOST_PROFILES['2.1.292'].binarySha256, 'eb95bb65955f8b1702e800815f9a2c0388a5de0f196c354c7ee1dd5cb9a2ba23');
+  for (const [version, profile] of Object.entries(HOST_PROFILES)) if (version !== '2.1.292') assert.notEqual(profile.remoteCacheGatedByEligibility, true, version);
 });

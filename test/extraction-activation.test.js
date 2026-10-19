@@ -356,6 +356,14 @@ test('a 2.1.292 host activates extraction only with a passing validation receipt
   assert.equal(active.executor.hostValidation.sha256, createHash('sha256').update(bytes).digest('hex'));
   assert.equal(active.executor.hostValidation.runtimeCommit, 'a'.repeat(40));
 });
+test('an activation records whether a remote policy cache was left to the host\'s own report', async t => {
+  const f = await validation292(t), { activateExtraction } = await activation(), { activeExtraction } = await state();
+  await writeFile(f.receiptFile, JSON.stringify(f.receipt));
+  const remotePolicy = { cache: 'present', applicability: 'host_reported_ineligible', conflict: 'not_assessed' };
+  const result = await activateExtraction({ ...f.options, hostValidation: f.receiptFile, executorCheck: async () => ({ ...structuredClone(f.executor), remotePolicy }) });
+  assert.deepEqual((await activeExtraction(f.env)).executor.remotePolicy, remotePolicy);
+  assert.deepEqual(result.record.history.at(-1).executor.remotePolicy, remotePolicy);
+});
 test('the extraction reader refuses a 2.1.292 record without its validation or with one bound to another runtime', async t => {
   const f = await setup(t), { activeExtraction } = await state();
   const executor = f.record.capabilities.extraction.executor;
