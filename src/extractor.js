@@ -181,6 +181,7 @@ async function registryPolicy(env, signal) {
 }
 
 const REMOTE_CACHE = 'remote-settings.json';
+const REMOTE_INELIGIBLE = 'Managed settings (remote): not fetched — requires an Enterprise or Team subscription';
 // Initial profile is conservative on managed installations: no policy source
 // is overridden, even when a particular document might prove harmless. A later
 // profile can inspect its resolved meaning; absent/unknown are never conflated.
@@ -246,6 +247,8 @@ export function createExtractor({ executable, env = process.env, scratchRoot = t
     const policy = await policyInspection({ env: parent, signal });
     const cacheOnly = remoteCacheOnly(policy);
     if (!policy.ok && !cacheOnly) return blocked(policy.blockedReason ?? 'policy_unverified');
+    // No flagged profile pins this binary: refuse on the cache before any host process starts (review F4).
+    if (cacheOnly && !Object.values(hostProfiles).some(profile => profile.remoteCacheGatedByEligibility === true && profile.binarySha256 === digest)) return blocked('managed_policy_present', { sources: policy.sources });
     const childEnv = childEnvironment(parent);
     const probe = args => signal?.aborted ? Promise.resolve({ failure: 'aborted' }) : processCall({ executable: binary, args, cwd, env: childEnv, shell: false, windowsHide: true, input: '', timeoutMs: EXTRACTOR_LIMITS.checkTimeoutMs, maxOutputBytes: EXTRACTOR_LIMITS.outputBytes, signal });
     try {
@@ -262,9 +265,11 @@ export function createExtractor({ executable, env = process.env, scratchRoot = t
       let route; try { route = JSON.parse(auth.stdout); } catch { return blocked('auth_unverified'); }
       if (auth.failure || auth.code !== 0 || route.loggedIn !== true || route.authMethod !== 'claude.ai' || route.apiProvider !== 'firstParty' || route.apiKeySource) return blocked('auth_route_unapproved');
       const doctor = await probe([...configurationArgs(), 'doctor']);
-      // Exactly one remote-settings line, and it is the host's own ineligible report; any other state may apply a cache.
-      const remote = (doctor.stdout ?? '').replace(/\x1b\[[0-9;?]*[A-Za-z]/gu, '').split(/\r?\n/u).filter(line => /Managed settings \(remote\):/iu.test(line));
-      if (doctor.failure || doctor.code !== 0 || remote.length !== 1 || !/Managed settings \(remote\): not fetched[^\r\n]*requires an Enterprise or Team subscription/iu.test(remote[0])) return blocked('remote_policy_unverified');
+      // Exactly one remote-settings report in the whole output, and it is the host's own ineligible line verbatim;
+      // any other, extra or decorated state may apply a cache (post-merge review F1).
+      const diagnostic = (doctor.stdout ?? '').replace(/\x1b\[[0-9;?]*[A-Za-z]/gu, '');
+      const remote = diagnostic.split(/\r\n|\r|\n/u).filter(line => /Managed settings \(remote\):/iu.test(line));
+      if (doctor.failure || doctor.code !== 0 || diagnostic.split(/Managed settings \(remote\):/iu).length !== 2 || remote[0].trim() !== REMOTE_INELIGIBLE) return blocked('remote_policy_unverified');
       if (sha(await readFile(binary)) !== digest) return blocked('host_changed_during_check');
       return { ok: true, executable: binary, binarySha256: digest, hostVersion, model: EXTRACTION_MODEL,
         remotePolicy: { cache: cacheOnly ? 'present' : 'absent', applicability: 'host_reported_ineligible', conflict: 'not_assessed' },

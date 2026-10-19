@@ -338,7 +338,8 @@ export async function activateExtraction({ env = process.env, evidence, store, s
   const checked = await (executorCheck ?? (() => createExtractor({ executable, env }).check()))();
   // Copy only resolved configuration and bounded metadata, never host diagnostics
   // or auth response fields. The executor repeats all checks on every invocation.
-  const executor = Object.fromEntries(['ok', 'executable', 'binarySha256', 'hostVersion', 'model', 'restrictions', 'environmentNames', 'switches', 'configurationProfile']
+  // remotePolicy: whether a remote policy cache was present and left to the host's own report, shown at confirmation.
+  const executor = Object.fromEntries(['ok', 'executable', 'binarySha256', 'hostVersion', 'model', 'restrictions', 'environmentNames', 'switches', 'configurationProfile', 'remotePolicy']
     .filter(key => checked?.[key] !== undefined).map(key => [key, structuredClone(checked[key])]));
   if (checked?.ok === true && HOST_PROFILES[checked.hostVersion]?.requiresHostValidation) executor.hostValidation = await checkedHostValidation(hostValidation, checked, pinned);
   if (!validExecutorReceipt(executor) || checked.executable !== await canonicalPath(executable)) throw new Error('extraction_executor_unverified');
