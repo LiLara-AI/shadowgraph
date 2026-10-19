@@ -40,11 +40,12 @@ function systemDirtyKb() {
 
 // Writes out the file-system writes earlier steps left pending, before any
 // case runs. On a GitHub Ubuntu runner the job's setup leaves up to about 1 GB
-// of dirty pages, which the kernel writes out 30 s later, often during this
-// step; its writeback throttling then holds a measured save's own write behind
-// them: a rename over the store first writes out the new file's data (ext4
-// auto_da_alloc), and slept in wbt_wait (traced on the runner). Every measured
-// save still writes, renames and waits for its own I/O inside its delivery's
+// of dirty pages, which the kernel writes out 30 s later, sometimes during
+// this step; its writeback throttling then holds a measured save's own write
+// behind them: a rename over the store first submits the new file's data for
+// write-out (ext4 auto_da_alloc), and that submission slept in wbt_wait
+// (traced on the runner). Every measured save still writes its temporary file,
+// renames it over the store and submits that write-out inside its delivery's
 // time; this removes only the earlier steps' backlog. Windows has no
 // system-wide flush, so nothing is run there. A flush that fails is recorded,
 // and the cases still run and decide the step.

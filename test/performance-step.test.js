@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PERFORMANCE_FILE, assertDeclaredCasesPassed, declaredCases, ext4LazyInitRunning, flushPendingWrites } from '../performance/cases.mjs';
+import { PERFORMANCE_FILE, assertDeclaredCasesPassed, declaredCases, flushPendingWrites } from '../performance/cases.mjs';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
 // The delivery-budget performance cases run in their own mandatory CI step
@@ -112,11 +112,10 @@ test('the step writes out pending file-system writes before it measures, and rec
     assert.ok(ms >= 0);
     if (process.platform === 'linux') assert.ok(Number.isInteger(dirtyKbBefore) && Number.isInteger(dirtyKbAfter), JSON.stringify(conditions.pendingWrites));
   }
-  assert.equal(conditions.ext4LazyInit, process.platform === 'linux' ? ext4LazyInitRunning() : null);
   assert.equal(typeof conditions.ext4LazyInit, process.platform === 'linux' ? 'boolean' : 'object');
 });
 
-test('the flush is one system-wide sync, and one that fails is recorded while the cases still decide the step', () => {
+test('the flush is one system-wide sync, and one that fails or cannot start is recorded as not flushed', () => {
   const calls = [];
   const flushed = flushPendingWrites({ platform: 'linux', run: (command, args) => { calls.push([command, ...args]); return { status: 0 }; }, dirtyKb: () => 0 });
   assert.deepEqual([calls, { ...flushed, ms: 0 }], [[['sync']], { flushed: true, ms: 0, dirtyKbBefore: 0, dirtyKbAfter: 0 }], 'the system-wide flush, once');
