@@ -1,6 +1,7 @@
-# Diagnostic only, on a throwaway branch that is never merged: CI's own steps
-# and the fix branch's performance step on 12 fresh runners, recording the
-# ext4lazyinit wait, the flush and every save's rename time.
+# Diagnostic only, on a throwaway branch that is never merged: on runners where
+# ext4lazyinit ran, why does a rename still stall after it has finished?
+# CI's own steps, the fix branch's step (which waits for ext4lazyinit and
+# flushes), then bpftrace stacks of every slow rename over five more runs.
 name: perf-diagnostic
 
 on:
@@ -11,33 +12,48 @@ permissions:
   contents: read
 
 jobs:
-  fix:
-    name: fix a4783e9 / Node ${{ matrix.node-version }} / ${{ matrix.replica }}
+  trace:
+    name: trace / ${{ matrix.replica }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
-        node-version: [20, 22, 24]
-        replica: [1, 2, 3, 4]
+        replica: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     steps:
       - uses: actions/checkout@v4
         with:
           ref: a4783e90a36a5c3c77fe0d7f21c977a5c07126fb
           fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          path: diagtools
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: 22
           cache: npm
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - run: npm ci
-      - run: npm run check
-      - name: Delivery-budget performance (as CI)
+      - run: npm ci && npm run check
+      - name: Step as CI
         run: |
-          echo "uptime at step start $(cut -d' ' -f1 /proc/uptime)"
-          npm run test:performance > "$RUNNER_TEMP/perf.log" 2>&1 && r=0 || r=$?
-          grep -o 'performance step conditions.*' "$RUNNER_TEMP/perf.log"
-          echo "exit=$r worst=$(grep -o '"grantAdded":[0-9.]*,"nullReferenceAdded":[0-9.]*' "$RUNNER_TEMP/perf.log" | tr ',' '\n' | cut -d: -f2 | sort -n | tail -1) max_rename_ms=$(grep -o '"callMs":[0-9.]*' "$RUNNER_TEMP/perf.log" | cut -d: -f2 | sort -n | tail -1) renames_over_20ms=$(grep -o '"callMs":[0-9.]*' "$RUNNER_TEMP/perf.log" | cut -d: -f2 | awk '$1>20' | wc -l)"
-          exit $r
+          findmnt -n -o SOURCE,OPTIONS /
+          npm run test:performance > "$RUNNER_TEMP/perf1.log" 2>&1 && r=0 || r=$?
+          echo "run1 exit=$r $(grep -o '"ext4LazyInit":{[^}]*}' "$RUNNER_TEMP/perf1.log") max_rename_ms=$(grep -o '"callMs":[0-9.]*' "$RUNNER_TEMP/perf1.log" | cut -d: -f2 | sort -n | tail -1)"
+      - name: Install bpftrace
+        run: sudo apt-get install -y -qq bpftrace >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y -qq bpftrace >/dev/null); sync
+      - name: Five more runs, traced
+        run: |
+          dev=$(basename "$(findmnt -n -o SOURCE /)" | sed 's/p\?[0-9]*$//')
+          cat /sys/block/$dev/queue/wbt_lat_usec /sys/block/$dev/queue/scheduler
+          sudo bpftrace diagtools/diag/rename.bt > "$RUNNER_TEMP/bt.txt" 2>&1 &
+          sleep 8
+          for i in 2 3 4 5 6; do
+            s0=$(awk -v d="$dev" '$3==d{print $8, $10, $15}' /proc/diskstats)
+            npm run test:performance > "$RUNNER_TEMP/perf$i.log" 2>&1 && r=0 || r=$?
+            s1=$(awk -v d="$dev" '$3==d{print $8, $10, $15}' /proc/diskstats)
+            echo "run$i exit=$r max_rename_ms=$(grep -o '"callMs":[0-9.]*' "$RUNNER_TEMP/perf$i.log" | cut -d: -f2 | sort -n | tail -1) diskstats(writes sectors write_ms) before=[$s0] after=[$s1]"
+          done
+          sleep 2; sudo kill -INT %1; wait || true
+          grep -A20 SLOW_RENAME "$RUNNER_TEMP/bt.txt" | head -150
+          grep -c SLOW_RQ "$RUNNER_TEMP/bt.txt" || true
+          grep SLOW_RQ "$RUNNER_TEMP/bt.txt" | awk '{print $3, $4}' | sort | uniq -c | sort -rn | head
+          sed -n '/@rq_us/,/^$/p' "$RUNNER_TEMP/bt.txt"
