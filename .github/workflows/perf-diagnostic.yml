@@ -23,7 +23,7 @@ jobs:
       matrix:
         variant: [base, fix]
         node-version: [20, 22, 24]
-        replica: [1, 2, 3]
+        replica: [4, 5, 6]
     steps:
       - name: Start tracing (tracefs, in memory)
         run: |
@@ -41,14 +41,18 @@ jobs:
         with:
           ref: ${{ matrix.variant == 'base' && '218c3c957728e5319264838195b0326323d1f600' || 'fix/delivery-budget-benchmark' }}
           fetch-depth: 0
+      - run: echo "dirty-after-checkout $(awk '/^Dirty:/{print $2}' /proc/meminfo) kB"
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
+      - run: echo "dirty-after-setup-node $(awk '/^Dirty:/{print $2}' /proc/meminfo) kB"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - run: echo "dirty-after-setup-python $(awk '/^Dirty:/{print $2}' /proc/meminfo) kB"
       - run: npm ci
+      - run: echo "dirty-after-npm-ci $(awk '/^Dirty:/{print $2}' /proc/meminfo) kB"
       - run: echo "check $(cut -d' ' -f1 /proc/uptime)" >> /dev/shm/marks.txt
       - run: npm run check
       - name: Conditions before the step
@@ -65,13 +69,15 @@ jobs:
         run: |
           for i in 2 3 4; do
             echo "perf$i $(cut -d' ' -f1 /proc/uptime)" >> /dev/shm/marks.txt
-            npm run --silent test:performance > "$RUNNER_TEMP/run-$i.log" 2>&1; echo "run $i exit $? $(grep -o '"pendingWrites":{[^}]*}' "$RUNNER_TEMP/run-$i.log")"
+            npm run --silent test:performance > "$RUNNER_TEMP/run-$i.log" 2>&1 && r=0 || r=$?; echo "run $i exit $r $(grep -o '"pendingWrites":{[^}]*}' "$RUNNER_TEMP/run-$i.log")"
           done
           echo "end $(cut -d' ' -f1 /proc/uptime)" >> /dev/shm/marks.txt
       - uses: actions/checkout@v4
+        if: always()
         with:
           path: diagtools
       - name: Analysis
+        if: always()
         run: |
           sleep 1; sudo pkill -f trace_pipe || true
           echo "first run outcome: ${{ steps.performance.outcome }}"
