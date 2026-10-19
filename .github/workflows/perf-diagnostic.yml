@@ -1,7 +1,9 @@
-# Diagnostic only, on a throwaway branch that is never merged: repeats the
-# delivery-budget performance step on 480816a and 218c3c9 on the CI runner,
-# under the same preceding steps as CI (npm ci, npm run check), and traces the
-# kernel side of every rename the step makes.
+# Diagnostic only, on a throwaway branch that is never merged.
+# A/B on the CI runner: the unmodified performance step (218c3c9) against the
+# fix branch's step (which writes out pending writes first). Before each run a
+# copy of node_modules leaves a backlog like npm ci's, and the run starts 28 s
+# later, so the kernel's 30 s expiry writes that backlog out during the run.
+# Every rename the step makes is traced.
 name: perf-diagnostic
 
 on:
@@ -12,59 +14,63 @@ permissions:
   contents: read
 
 jobs:
-  diag:
-    name: ${{ matrix.rev }} / Node ${{ matrix.node-version }}
+  ab:
+    name: A/B / Node ${{ matrix.node-version }} / ${{ matrix.replica }}
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        rev: [480816a, 218c3c9]
-        node-version: [20, 22]
+        node-version: [20, 22, 24]
+        replica: [1, 2]
     steps:
       - uses: actions/checkout@v4
         with:
           path: diag
       - uses: actions/checkout@v4
         with:
-          ref: ${{ matrix.rev == '480816a' && '480816ae70a1bf50d8c1355f230812fc9e290ff1' || '218c3c957728e5319264838195b0326323d1f600' }}
-          path: rev
-          fetch-depth: 0
+          ref: 218c3c957728e5319264838195b0326323d1f600
+          path: base
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/delivery-budget-benchmark
+          path: fix
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
       - name: Install bpftrace
         run: sudo apt-get update -qq && sudo apt-get install -y -qq bpftrace >/dev/null && bpftrace --version
-      - name: npm ci and npm run check (as in CI)
-        working-directory: rev
-        run: npm ci && npm run check
+      - name: npm ci
+        run: (cd base && npm ci) && (cd fix && npm ci) && git -C base log --oneline -1 && git -C fix log --oneline -1 && du -sh base/node_modules
       - name: Environment
         run: |
-          set -x
-          git -C rev log --oneline -1
-          uname -a
           findmnt -T "$RUNNER_TEMP"
-          lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,ROTA,MODEL
-          for d in /sys/block/sd* /sys/block/nvme*; do [ -e "$d" ] && echo "$d $(cat $d/queue/scheduler) wbt=$(cat $d/queue/wbt_lat_usec 2>/dev/null) nr=$(cat $d/queue/nr_requests)"; done
-          sysctl vm.dirty_ratio vm.dirty_background_ratio vm.dirty_expire_centisecs vm.dirty_writeback_centisecs
-          grep -E '^(Dirty|Writeback):' /proc/meminfo
-          cat /proc/pressure/io || true
-      - name: Performance step, 10 runs, traced
-        working-directory: rev
+          for d in /sys/block/sd* /sys/block/nvme*; do [ -e "$d" ] && echo "$d $(cat $d/queue/scheduler) wbt=$(cat $d/queue/wbt_lat_usec 2>/dev/null)"; done
+          sync
+      - name: A/B runs, traced
         run: |
           sudo bpftrace "$GITHUB_WORKSPACE/diag/diag/rename.bt" > "$RUNNER_TEMP/bt.txt" 2>&1 &
           BT=$!
           sleep 8
-          for i in $(seq 1 10); do
-            echo "=== run $i mono_ms=$(awk '{printf "%d", $1*1000}' /proc/uptime) $(grep -E '^(Dirty|Writeback):' /proc/meminfo | tr -s ' ' | tr '\n' ' ') psi=$(head -1 /proc/pressure/io)"
-            npm run --silent test:performance > "$RUNNER_TEMP/run-$i.log" 2>&1; status=$?
-            echo "run $i exit $status worst=$(grep -o '"grantAdded":[0-9.]*' "$RUNNER_TEMP/run-$i.log" | cut -d: -f2 | sort -n | tail -1)"
+          for i in 1 2 3 4; do
+            if [ $((i % 2)) -eq 1 ]; then order="base fix"; else order="fix base"; fi
+            for v in $order; do
+              cp -a base/node_modules "$RUNNER_TEMP/backlog"
+              sleep 28
+              start=$(awk '{printf "%d", $1*1000}' /proc/uptime)
+              dirty=$(awk '/^Dirty:/{print $2}' /proc/meminfo)
+              (cd $v && npm run --silent test:performance > "$RUNNER_TEMP/$v-$i.log" 2>&1); status=$?
+              end=$(awk '{printf "%d", $1*1000}' /proc/uptime)
+              worst=$(grep -o '"grantAdded":[0-9.]*,"nullReferenceAdded":[0-9.]*' "$RUNNER_TEMP/$v-$i.log" | tr ',' '\n' | cut -d: -f2 | sort -n | tail -1)
+              echo "AB variant=$v i=$i exit=$status worst=$worst start=$start end=$end dirty_kb_at_start=$dirty $(grep -o '"pendingWrites":{[^}]*}' "$RUNNER_TEMP/$v-$i.log")"
+              rm -rf "$RUNNER_TEMP/backlog"; sync
+            done
           done
           sleep 2
           sudo kill -INT $BT; wait $BT || true
       - name: Trace output
         if: always()
-        run: cat "$RUNNER_TEMP/bt.txt"
+        run: grep -E -A18 'SLOW_RENAME' "$RUNNER_TEMP/bt.txt" | head -400; grep -c SLOW_RQ "$RUNNER_TEMP/bt.txt" || true; sed -n '/@rename_us/,/^$/p' "$RUNNER_TEMP/bt.txt"
       - name: Diagnostic lines
         if: always()
-        run: for f in "$RUNNER_TEMP"/run-*.log; do echo "### $f"; grep -E 'performance step conditions|grantAdded|^not ok|performance step failed' "$f"; done
+        run: for f in "$RUNNER_TEMP"/base-*.log "$RUNNER_TEMP"/fix-*.log; do echo "### $f"; grep -E 'performance step conditions|grantAdded|^not ok|performance step failed' "$f"; done
