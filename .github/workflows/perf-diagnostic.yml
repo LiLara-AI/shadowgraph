@@ -1,6 +1,6 @@
-# Diagnostic only, on a throwaway branch that is never merged: how long the
-# ext4lazyinit kernel thread keeps initialising a fresh runner's disk, and how
-# much it writes.
+# Diagnostic only, on a throwaway branch that is never merged: CI's own steps
+# and the fix branch's performance step on 12 fresh runners, recording the
+# ext4lazyinit wait, the flush and every save's rename time.
 name: perf-diagnostic
 
 on:
@@ -11,26 +11,33 @@ permissions:
   contents: read
 
 jobs:
-  lazyinit:
-    name: lazyinit probe ${{ matrix.replica }}
+  fix:
+    name: fix a4783e9 / Node ${{ matrix.node-version }} / ${{ matrix.replica }}
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        replica: [1, 2, 3, 4, 5, 6, 7, 8]
+        node-version: [20, 22, 24]
+        replica: [1, 2, 3, 4]
     steps:
-      - name: Poll ext4lazyinit
+      - uses: actions/checkout@v4
+        with:
+          ref: a4783e9
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: npm ci
+      - run: npm run check
+      - name: Delivery-budget performance (as CI)
         run: |
-          findmnt -n -o SOURCE,SIZE,OPTIONS /; df -h / | tail -1
-          sudo dumpe2fs -h "$(findmnt -n -o SOURCE /)" 2>/dev/null | grep -E 'Inode count|Inode size|Block count|Flex block group size|Filesystem features' || true
-          dev=$(basename "$(findmnt -n -o SOURCE /)" | sed 's/p\?[0-9]*$//')
-          w0=$(awk -v d="$dev" '$3==d{print $10}' /proc/diskstats)
-          start=$(cut -d' ' -f1 /proc/uptime)
-          echo "probe start uptime=$start"
-          for i in $(seq 1 240); do
-            if ! pgrep -x ext4lazyinit >/dev/null; then echo "ext4lazyinit absent at uptime=$(cut -d' ' -f1 /proc/uptime)"; break; fi
-            [ $((i % 6)) -eq 0 ] && echo "still running uptime=$(cut -d' ' -f1 /proc/uptime) written_MB=$(( ($(awk -v d="$dev" '$3==d{print $10}' /proc/diskstats) - w0) / 2048 ))"
-            sleep 5
-          done
-          echo "end uptime=$(cut -d' ' -f1 /proc/uptime) written_MB=$(( ($(awk -v d="$dev" '$3==d{print $10}' /proc/diskstats) - w0) / 2048 ))"
+          echo "uptime at step start $(cut -d' ' -f1 /proc/uptime)"
+          npm run test:performance > "$RUNNER_TEMP/perf.log" 2>&1 && r=0 || r=$?
+          grep -o 'performance step conditions.*' "$RUNNER_TEMP/perf.log"
+          echo "exit=$r worst=$(grep -o '"grantAdded":[0-9.]*,"nullReferenceAdded":[0-9.]*' "$RUNNER_TEMP/perf.log" | tr ',' '\n' | cut -d: -f2 | sort -n | tail -1) max_rename_ms=$(grep -o '"callMs":[0-9.]*' "$RUNNER_TEMP/perf.log" | cut -d: -f2 | sort -n | tail -1) renames_over_20ms=$(grep -o '"callMs":[0-9.]*' "$RUNNER_TEMP/perf.log" | cut -d: -f2 | awk '$1>20' | wc -l)"
+          exit $r
