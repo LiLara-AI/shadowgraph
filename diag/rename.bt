@@ -1,0 +1,84 @@
+// Why does one rename() of the performance step take 100-600 ms on a runner?
+// Traces every rename syscall made by a node thread, the longest off-CPU wait
+// inside it (with its kernel stack and the state it slept in), and the I/O and
+// journal activity around it. Timestamps are monotonic milliseconds.
+
+tracepoint:syscalls:sys_enter_rename,
+tracepoint:syscalls:sys_enter_renameat,
+tracepoint:syscalls:sys_enter_renameat2
+/ comm == "node" || comm == "libuv-worker" /
+{
+  @in[tid] = nsecs;
+}
+
+tracepoint:sched:sched_switch
+/ @in[args->prev_pid] /
+{
+  @offat[args->prev_pid] = nsecs;
+  @offstk[args->prev_pid] = kstack(16);
+  @offstate[args->prev_pid] = args->prev_state;
+}
+
+tracepoint:sched:sched_switch
+/ @offat[args->next_pid] /
+{
+  $d = nsecs - @offat[args->next_pid];
+  @offsum[args->next_pid] += $d;
+  if ($d > @maxoff[args->next_pid]) {
+    @maxoff[args->next_pid] = $d;
+    @maxstk[args->next_pid] = @offstk[args->next_pid];
+    @maxstate[args->next_pid] = @offstate[args->next_pid];
+  }
+  delete(@offat[args->next_pid]);
+}
+
+kprobe:ext4_alloc_da_blocks / @in[tid] / { @da[tid] = nsecs; }
+kretprobe:ext4_alloc_da_blocks / @da[tid] / { @dams[tid] = nsecs - @da[tid]; delete(@da[tid]); }
+
+tracepoint:syscalls:sys_exit_rename,
+tracepoint:syscalls:sys_exit_renameat,
+tracepoint:syscalls:sys_exit_renameat2
+/ @in[tid] /
+{
+  $us = (nsecs - @in[tid]) / 1000;
+  @rename_us = hist($us);
+  @renames = count();
+  if ($us >= 20000) {
+    printf("SLOW_RENAME t=%lld comm=%s ms=%lld offcpu_ms=%lld longest_wait_ms=%lld state=%lld alloc_da_blocks_ms=%lld\n%s\n",
+      nsecs / 1000000, comm, $us / 1000, @offsum[tid] / 1000000, @maxoff[tid] / 1000000, @maxstate[tid], @dams[tid] / 1000000, @maxstk[tid]);
+  }
+  delete(@in[tid]); delete(@offsum[tid]); delete(@maxoff[tid]); delete(@maxstk[tid]); delete(@maxstate[tid]); delete(@dams[tid]);
+}
+
+// Block requests: latency from issue to completion, and the slow ones with who issued them.
+tracepoint:block:block_rq_issue
+{
+  @issued[args->dev, args->sector] = nsecs;
+  @issuer[args->dev, args->sector] = comm;
+  @rwbs[args->dev, args->sector] = args->rwbs;
+}
+tracepoint:block:block_rq_complete
+/ @issued[args->dev, args->sector] /
+{
+  $us = (nsecs - @issued[args->dev, args->sector]) / 1000;
+  @rq_us = hist($us);
+  if ($us >= 50000) {
+    printf("SLOW_RQ t=%lld dev=%d issuer=%s rwbs=%s bytes=%d ms=%lld\n", nsecs / 1000000, args->dev, @issuer[args->dev, args->sector], @rwbs[args->dev, args->sector], args->nr_sector * 512, $us / 1000);
+  }
+  delete(@issued[args->dev, args->sector]); delete(@issuer[args->dev, args->sector]); delete(@rwbs[args->dev, args->sector]);
+}
+
+tracepoint:jbd2:jbd2_start_commit { @commit_at[args->transaction] = nsecs; }
+tracepoint:jbd2:jbd2_end_commit / @commit_at[args->transaction] /
+{
+  $ms = (nsecs - @commit_at[args->transaction]) / 1000000;
+  @commit_ms = hist($ms);
+  if ($ms >= 50) { printf("SLOW_COMMIT t=%lld tid=%d ms=%lld\n", nsecs / 1000000, args->transaction, $ms); }
+  delete(@commit_at[args->transaction]);
+}
+
+END
+{
+  clear(@in); clear(@offat); clear(@offstk); clear(@offstate); clear(@offsum); clear(@maxoff); clear(@maxstk); clear(@maxstate);
+  clear(@da); clear(@dams); clear(@issued); clear(@issuer); clear(@rwbs); clear(@commit_at);
+}
