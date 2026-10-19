@@ -180,6 +180,7 @@ async function registryPolicy(env, signal) {
   return present;
 }
 
+const REMOTE_CACHE = 'remote-settings.json';
 // Initial profile is conservative on managed installations: no policy source
 // is overridden, even when a particular document might prove harmless. A later
 // profile can inspect its resolved meaning; absent/unknown are never conflated.
@@ -197,20 +198,24 @@ export async function inspectPolicy({ env = process.env, userSettings, policyPat
   policyPaths ??= systems.flatMap(system => ['managed-settings.json', 'managed-settings.d', 'managed-mcp.json', 'CLAUDE.md', 'skills'].map(name => join(system, name)));
   // Fetch ineligibility does not prove an old policy cache absent. Inspect
   // metadata only; never read, delete or override an administrator's content.
-  policyPaths = [...policyPaths, join(home, '.claude', 'remote-settings.json')];
+  const remoteCache = join(home, '.claude', REMOTE_CACHE);
+  policyPaths = [...policyPaths, remoteCache];
   try {
     let settings = {};
     try { settings = JSON.parse(await readFile(userSettings, 'utf8')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
     if (!object(settings) || (settings.env !== undefined && !object(settings.env))) return blocked('settings_unreadable');
     if (Object.hasOwn(settings, 'apiKeyHelper') || forbiddenEnvironment(settings.env ?? {}).length) return blocked('settings_provider_route');
     const present = [];
+    let remoteCachePresent = false;
     for (const path of policyPaths) {
-      try { await lstat(path); present.push(basename(path)); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+      try { await lstat(path); present.push(basename(path)); remoteCachePresent ||= path === remoteCache; } catch (e) { if (e.code !== 'ENOENT') throw e; }
     }
     present.push(...await registry());
-    return present.length ? blocked('managed_policy_present', { sources: present }) : { ok: true, sources: [] };
+    return present.length ? blocked('managed_policy_present', { sources: present, remoteCachePresent }) : { ok: true, sources: [], remoteCachePresent };
   } catch { return blocked('policy_unreadable'); }
 }
+// The refusal's only source is the remote cache: whether the host applies it is then the executor's question (record 27).
+const remoteCacheOnly = policy => policy?.blockedReason === 'managed_policy_present' && policy.remoteCachePresent === true && policy.sources?.length === 1 && policy.sources[0] === REMOTE_CACHE;
 
 async function outsideRepository(cwd, env, signal) {
   for (let path = await realpath(cwd); ; path = dirname(path)) {
@@ -239,7 +244,8 @@ export function createExtractor({ executable, env = process.env, scratchRoot = t
     if (process.platform === 'win32' && extname(binary).toLowerCase() !== '.exe') return blocked('executable_unavailable');
     if (!await outsideRepository(cwd, parent, signal)) return blocked('invocation_cwd_unverified');
     const policy = await policyInspection({ env: parent, signal });
-    if (!policy.ok) return blocked(policy.blockedReason ?? 'policy_unverified');
+    const cacheOnly = remoteCacheOnly(policy);
+    if (!policy.ok && !cacheOnly) return blocked(policy.blockedReason ?? 'policy_unverified');
     const childEnv = childEnvironment(parent);
     const probe = args => signal?.aborted ? Promise.resolve({ failure: 'aborted' }) : processCall({ executable: binary, args, cwd, env: childEnv, shell: false, windowsHide: true, input: '', timeoutMs: EXTRACTOR_LIMITS.checkTimeoutMs, maxOutputBytes: EXTRACTOR_LIMITS.outputBytes, signal });
     try {
@@ -248,16 +254,20 @@ export function createExtractor({ executable, env = process.env, scratchRoot = t
       if (version.failure || version.code !== 0 || !Object.hasOwn(hostProfiles, hostVersion ?? '')) return blocked('host_version_unverified');
       // A profile that names its binary accepts that binary only.
       if (hostProfiles[hostVersion].binarySha256 && hostProfiles[hostVersion].binarySha256 !== digest) return blocked('host_binary_unverified');
+      // Record 27: only a profile traced to one pinned binary leaves the remote cache to that host's own eligibility.
+      if (cacheOnly && !(hostProfiles[hostVersion].remoteCacheGatedByEligibility === true && hostProfiles[hostVersion].binarySha256 === digest)) return blocked('managed_policy_present', { sources: policy.sources });
       const help = await probe(['--help']);
       if (help.failure || help.code !== 0 || FLAGS.some(flag => !help.stdout.includes(flag))) return blocked('restriction_switch_unavailable');
       const auth = await probe([...configurationArgs(), 'auth', 'status']);
       let route; try { route = JSON.parse(auth.stdout); } catch { return blocked('auth_unverified'); }
       if (auth.failure || auth.code !== 0 || route.loggedIn !== true || route.authMethod !== 'claude.ai' || route.apiProvider !== 'firstParty' || route.apiKeySource) return blocked('auth_route_unapproved');
       const doctor = await probe([...configurationArgs(), 'doctor']);
-      const diagnostic = doctor.stdout.replace(/\x1b\[[0-9;?]*[A-Za-z]/gu, '');
-      if (doctor.failure || doctor.code !== 0 || !/Managed settings \(remote\): not fetched[^\r\n]*requires an Enterprise or Team subscription/iu.test(diagnostic)) return blocked('remote_policy_unverified');
+      // Exactly one remote-settings line, and it is the host's own ineligible report; any other state may apply a cache.
+      const remote = (doctor.stdout ?? '').replace(/\x1b\[[0-9;?]*[A-Za-z]/gu, '').split(/\r?\n/u).filter(line => /Managed settings \(remote\):/iu.test(line));
+      if (doctor.failure || doctor.code !== 0 || remote.length !== 1 || !/Managed settings \(remote\): not fetched[^\r\n]*requires an Enterprise or Team subscription/iu.test(remote[0])) return blocked('remote_policy_unverified');
       if (sha(await readFile(binary)) !== digest) return blocked('host_changed_during_check');
       return { ok: true, executable: binary, binarySha256: digest, hostVersion, model: EXTRACTION_MODEL,
+        remotePolicy: { cache: cacheOnly ? 'present' : 'absent', applicability: 'host_reported_ineligible', conflict: 'not_assessed' },
         restrictions: Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`E-${i + 1}`, true])),
         environmentNames: Object.keys(childEnv).sort(), switches: FLAGS, configurationProfile: 'subscription-unmanaged-safe-mode-v1' };
     } catch { return blocked('configuration_check_failed'); }
@@ -296,7 +306,8 @@ export function createExtractor({ executable, env = process.env, scratchRoot = t
         let policy;
         try { policy = await policyInspection({ env: parent, signal }); }
         catch { return { status: 'blocked', blockedReason: 'policy_unreadable', receipt }; }
-        if (!policy.ok) return { status: 'blocked', blockedReason: policy.blockedReason ?? 'policy_unverified', receipt };
+        if (!policy.ok && !remoteCacheOnly(policy)) return { status: 'blocked', blockedReason: policy.blockedReason ?? 'policy_unverified', receipt };
+        if (remoteCacheOnly(policy) !== (checked.remotePolicy.cache === 'present')) return { status: 'blocked', blockedReason: 'configuration_changed_before_invoke', receipt };
         // A settings/environment change while diagnostics were running requires
         // a new self-check. Never mix one check's receipt with another route.
         if (JSON.stringify(childEnvironment(env)) !== JSON.stringify(childEnvironment(parent)) || forbiddenEnvironment(env).length) return { status: 'blocked', blockedReason: 'configuration_changed_before_invoke', receipt };
