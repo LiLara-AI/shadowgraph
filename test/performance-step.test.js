@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { appendFileSync } from 'node:fs';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PERFORMANCE_FILE, assertDeclaredCasesPassed, declaredCases, flushPendingWrites, waitForExt4LazyInit } from '../performance/cases.mjs';
+import { PERFORMANCE_FILE, assertDeclaredCasesPassed, declaredCases, flushPendingWrites, runPerformance, waitForExt4LazyInit } from '../performance/cases.mjs';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
 // The delivery-budget performance cases run in their own mandatory CI step
@@ -92,11 +93,11 @@ test('the step entry script exits non-zero unless every declared case of its fil
   assert.deepEqual(status, { passing: 0, failing: 1, skipped: 1, crashed: 1, empty: 1, unregistered: 1 });
 });
 
-// The step writes out the file-system writes earlier steps left pending (up to
-// about 1 GB on a runner) before it measures, so the kernel's flush of them
-// cannot throttle a measured save's own writes. Before that it waits, within a
-// bound, for ext4 to finish initialising a fresh disk in the background. It
-// records both.
+// The step writes out the system's pending file-system writes (on a runner,
+// mostly the job's setup, up to about 1 GB) before it measures, so the kernel's
+// flush of them cannot throttle a measured save's own writes. Before that it
+// waits, within a bound, for ext4 to finish initialising a fresh disk in the
+// background. It records both.
 test('the step writes out pending file-system writes before it measures, and records it', async (t) => {
   const root = await scratchDirectory(t), entry = fileURLToPath(new URL('../performance/run.mjs', import.meta.url));
   const file = join(root, 'flush.perf.js');
@@ -134,7 +135,88 @@ test('the step waits, within a bound, for ext4 to finish initialising the disk, 
   assert.deepEqual(run([true, true, true, false], 5000), { runningAtStart: true, finished: true, waitedMs: 3000 });
   assert.deepEqual(sleeps, [1000, 1000, 1000], 'polls once a second');
   assert.deepEqual(run(Array(20).fill(true), 5000), { runningAtStart: true, finished: false, waitedMs: 5000 }, 'gives up at the bound');
-  assert.deepEqual(run([true, null], 5000), { runningAtStart: true, finished: true, waitedMs: 1000 }, 'a check that can no longer read /proc ends the wait');
+  assert.deepEqual(run([true, true, null], 5000), { runningAtStart: true, finished: null, waitedMs: 2000 }, 'a check that can no longer read /proc ends the wait, not knowing whether it finished');
+  assert.deepEqual(sleeps, [1000, 1000]);
+});
+
+// What the cases' process sees decides the order, not the order of the output:
+// the stand-in preparations each leave a mark in a file, and the one case
+// passes only if both marks are there, in that order, when it runs.
+test('the step waits, then flushes, then starts the cases, after both have returned', async (t) => {
+  const root = await scratchDirectory(t), marks = join(root, 'marks'), file = join(root, 'order.perf.js');
+  await writeFile(file, `import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { readFileSync } from 'node:fs';\ntest('a', () => { assert.equal(readFileSync(${JSON.stringify(marks)}, 'utf8'), 'wait,flush'); });\n`);
+  const events = [];
+  const status = runPerformance(file, {
+    waitForDisk: () => { events.push('wait'); appendFileSync(marks, 'wait'); return { runningAtStart: false }; },
+    flush: () => { events.push('flush'); appendFileSync(marks, ',flush'); return { flushed: true }; },
+    spawn: (...args) => { events.push('spawn'); return spawnSync(...args); },
+    stdout: { write: (text) => events.push(`stdout: ${text.split('\n')[0]}`) },
+    stderr: { write: (text) => events.push(`stderr: ${text}`) }
+  });
+  assert.equal(status, 0, JSON.stringify(events));
+  assert.deepEqual(events.map((event) => event.replace(/^(stdout: performance step conditions) .*$/u, '$1').replace(/^stdout: TAP version .*$/u, 'stdout: TAP')), [
+    'stdout: performance step: waiting, within a bound, for any ext4 background initialisation',
+    'wait',
+    'stdout: performance step: writing out pending file-system writes',
+    'flush',
+    'stdout: performance step conditions',
+    'spawn',
+    'stdout: TAP'
+  ]);
+  const conditions = JSON.parse(events[4].replace(/^stdout: performance step conditions /u, ''));
+  assert.deepEqual([conditions.ext4LazyInit, conditions.pendingWrites], [{ runningAtStart: false }, { flushed: true }]);
+});
+
+// Each preparation only removes writing that is not the delivery's. One that
+// fails, cannot start, stops at its bound or throws is recorded, and the cases
+// still run and decide the step; the temporary directories go either way.
+test('a preparation that fails still lets the cases decide the step', async (t) => {
+  const root = await scratchDirectory(t), job = join(root, 'job-temp');
+  await mkdir(job);
+  const header = "import test from 'node:test';\n";
+  await writeFile(join(root, 'passing.perf.js'), `${header}test('a', () => {});\n`);
+  await writeFile(join(root, 'failing.perf.js'), `${header}test('a', () => { throw new Error('over budget'); });\n`);
+  const preparations = {
+    unfinished: { waitForDisk: () => ({ runningAtStart: true, finished: false, waitedMs: 300_000 }), flush: () => ({ flushed: false, error: 'ENOENT', ms: 0, dirtyKbBefore: 9, dirtyKbAfter: 9 }) },
+    thrown: { waitForDisk: () => { throw new Error('cannot wait'); }, flush: () => { throw Object.assign(new Error('spawn sync EACCES'), { code: 'EACCES' }); } }
+  };
+  const recorded = { unfinished: [{ runningAtStart: true, finished: false, waitedMs: 300_000 }, { flushed: false, error: 'ENOENT', ms: 0, dirtyKbBefore: 9, dirtyKbAfter: 9 }], thrown: [{ error: 'cannot wait' }, { error: 'EACCES' }] };
+  const runnerTemp = process.env.RUNNER_TEMP;
+  process.env.RUNNER_TEMP = job;
+  t.after(() => { if (runnerTemp === undefined) delete process.env.RUNNER_TEMP; else process.env.RUNNER_TEMP = runnerTemp; });
+  for (const [name, preparation] of Object.entries(preparations)) {
+    for (const [fixture, expected] of [['passing', 0], ['failing', 1]]) {
+      const out = [], spawned = [];
+      const status = runPerformance(join(root, `${fixture}.perf.js`), { ...preparation,
+        spawn: (...args) => { spawned.push(args[1].at(-1)); return spawnSync(...args); },
+        stdout: { write: (text) => out.push(text) }, stderr: { write: (text) => out.push(text) } });
+      const why = `${name} preparation, ${fixture} case: ${out.join('')}`;
+      assert.equal(status, expected, why);
+      assert.equal(spawned.length, 1, `the cases ran: ${why}`);
+      const conditions = JSON.parse(out.join('').match(/^performance step conditions (\{.*\})$/mu)[1]);
+      assert.deepEqual([conditions.ext4LazyInit, conditions.pendingWrites], recorded[name], why);
+      assert.deepEqual(await readdir(job), [], `the step removes what it created there: ${why}`);
+    }
+  }
+});
+
+// The same, end to end: with no `sync` to run, the flush is recorded as not
+// started (off Windows, which runs none), and the cases decide the exit code.
+test('the step entry script lets the cases decide when the flush cannot start', async (t) => {
+  const root = await scratchDirectory(t), empty = join(root, 'empty-path'), entry = fileURLToPath(new URL('../performance/run.mjs', import.meta.url));
+  await mkdir(empty);
+  const header = "import test from 'node:test';\n";
+  const env = process.platform === 'win32' ? process.env : { ...process.env, PATH: empty };
+  for (const [fixture, source, expected] of [['passing', `${header}test('a', () => {});\n`, 0], ['failing', `${header}test('a', () => { throw new Error('over budget'); });\n`, 1]]) {
+    const file = join(root, `${fixture}.perf.js`);
+    await writeFile(file, source);
+    const run = spawnSync(process.execPath, [entry, file], { encoding: 'utf8', windowsHide: true, env });
+    assert.equal(run.status, expected, run.stdout + run.stderr);
+    const { pendingWrites } = JSON.parse(run.stdout.match(/^performance step conditions (\{.*\})$/mu)[1]);
+    if (process.platform === 'win32') assert.deepEqual(pendingWrites, { flushed: false, reason: 'no_system_flush' });
+    else assert.deepEqual([pendingWrites.flushed, pendingWrites.error], [false, 'ENOENT'], JSON.stringify(pendingWrites));
+    assert.match(run.stdout, expected === 0 ? /^ok 1 - a$/mu : /^not ok 1 - a$/mu, 'the case ran');
+  }
 });
 
 test('the flush is one system-wide sync, and one that fails or cannot start is recorded as not flushed', () => {
