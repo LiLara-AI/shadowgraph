@@ -5,9 +5,10 @@
 // summary has no failure, cancellation, skip or todo, and every case the file
 // declares reported `ok` exactly once. Before the cases it waits, within a
 // bound, for ext4's background initialisation of a fresh disk, then writes out
-// the file-system writes earlier steps left pending, and it prints the
-// execution conditions first (content-free, both included), so each run
-// records what it ran on.
+// the system's pending file-system writes, printing a progress line before
+// each. Then, before the cases, it prints the execution conditions
+// (content-free, with both preparations' outcomes), so each run records what it
+// ran on. A preparation that fails is recorded, and the cases still decide.
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { availableParallelism, freemem, loadavg, tmpdir, totalmem } from 'node:os';
@@ -39,17 +40,18 @@ function systemDirtyKb() {
   try { return Number(readFileSync('/proc/meminfo', 'utf8').match(/^Dirty:\s+(\d+) kB$/mu)[1]); } catch { return null; }
 }
 
-// Writes out the file-system writes earlier steps left pending, before any
-// case runs. On a GitHub Ubuntu runner the job's setup leaves up to about 1 GB
-// of dirty pages, which the kernel writes out 30 s later, sometimes during
-// this step; its writeback throttling then holds a measured save's own write
-// behind them: a rename over the store first submits the new file's data for
-// write-out (ext4 auto_da_alloc), and that submission slept in wbt_wait
-// (traced on the runner). Every measured save still writes its temporary file,
-// renames it over the store and submits that write-out inside its delivery's
-// time; this removes only the earlier steps' backlog. Windows has no
-// system-wide flush, so nothing is run there. A flush that fails is recorded,
-// and the cases still run and decide the step.
+// Writes out the system's pending file-system writes before any case runs:
+// one `sync`, which writes out every dirty page on the system at that moment,
+// whichever process wrote it. On a GitHub Ubuntu runner they are mostly the
+// job's setup, up to about 1 GB, which the kernel writes out 30 s later,
+// sometimes during this step; its writeback throttling then holds a measured
+// save's own write behind them: a rename over the store first submits the new
+// file's data for write-out (ext4 auto_da_alloc), and that submission slept in
+// wbt_wait (traced on the runner). No case has started yet, so none of the
+// measured I/O is among them: every measured save still writes its temporary
+// file, renames it over the store and submits that write-out inside its
+// delivery's time. Windows has no system-wide flush, so nothing is run there.
+// A flush that fails is recorded, and the cases still run and decide the step.
 export function flushPendingWrites({ platform = process.platform, run = spawnSync, dirtyKb = systemDirtyKb } = {}) {
   if (platform === 'win32') return { flushed: false, reason: 'no_system_flush' };
   const dirtyKbBefore = dirtyKb(), started = performance.now();
@@ -70,52 +72,75 @@ export function ext4LazyInitRunning(platform = process.platform) {
 // any case runs. On some GitHub Ubuntu runners it is still running when the
 // step starts: it writes about 3 GB of zeroes over one to three minutes after
 // boot, behind which a measured save's rename waited 300 ms and failed the
-// step after the flush below had run. Like the flush, this removes writing
-// that is not the delivery's, and none of the delivery's own. Past the bound
-// the wait is recorded as unfinished, and the cases still run and decide the
-// step.
+// step after the flush had run. Like the flush, this removes writing that is
+// not the delivery's, and none of the delivery's own. Past the bound the wait
+// is recorded as unfinished (finished: false); when /proc can no longer be read
+// during the wait, whether it finished is unknown (finished: null). Either way
+// the cases still run and decide the step.
 const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 export function waitForExt4LazyInit({ running = ext4LazyInitRunning, sleep = sleepSync, now = () => performance.now(), boundMs = 300_000 } = {}) {
   const atStart = running();
   if (atStart !== true) return atStart === null ? null : { runningAtStart: false };
   const started = now();
   let finished = false;
-  while (!finished && now() - started < boundMs) { sleep(1000); finished = running() !== true; }
+  while (finished === false && now() - started < boundMs) {
+    sleep(1000);
+    const state = running();
+    finished = state === true ? false : state === false ? true : null;
+  }
   return { runningAtStart: true, finished, waitedMs: Math.round(now() - started) };
 }
 
-// Returns the step's exit code: 0 only when every check above holds.
-export function runPerformance(file = PERFORMANCE_FILE) {
+// Runs one preparation. Each only removes writing that is not the delivery's,
+// so one that throws is recorded like one that fails, and the cases still run
+// and decide the step.
+function prepare(step) {
+  try { return step(); } catch (error) { return { error: String(error?.code ?? error?.message ?? error) }; }
+}
+
+// Returns the step's exit code: 0 only when every check above holds. The
+// options stand in for the preparation, the cases' process and the output, so
+// the suite can check what runs in which order; CI passes none.
+export function runPerformance(file = PERFORMANCE_FILE, { waitForDisk = waitForExt4LazyInit, flush = flushPendingWrites, spawn = spawnSync, stdout = process.stdout, stderr = process.stderr } = {}) {
   // Where the measured stores are created: in the job's own temporary directory
   // when CI gives one (RUNNER_TEMP; on GitHub's runners it is on the workspace
   // disk, where a project's .shadowgraph store lives), otherwise in the
   // system's. The workload and every file operation are the same either way.
   const job = process.env.RUNNER_TEMP;
   const scratch = job && isAbsolute(job) && existsSync(job) ? mkdtempSync(join(job, 'shadowgraph-performance-')) : null;
-  const conditions = { node: process.version, platform: process.platform, arch: process.arch, parallelism: availableParallelism(),
-    loadAverage: loadavg().map((value) => Number(value.toFixed(2))), freeMemoryMb: Math.round(freemem() / 2 ** 20), totalMemoryMb: Math.round(totalmem() / 2 ** 20),
-    temporaryDirectory: scratch ? 'job (RUNNER_TEMP)' : 'system', ext4LazyInit: waitForExt4LazyInit(), pendingWrites: flushPendingWrites() };
-  process.stdout.write(`performance step conditions ${JSON.stringify(conditions)}\n`);
-  const home = mkdtempSync(join(scratch ?? tmpdir(), 'shadowgraph-performance-home-'));
-  // A caller that is itself a test process marks its environment; the child
-  // must not inherit that mark, or node would skip the files it was given.
-  const { NODE_TEST_CONTEXT: _inheritedTestContext, ...env } = process.env;
+  let home = null;
   try {
-    const result = spawnSync(process.execPath, ['--test', '--test-concurrency=1', '--test-reporter=tap', '--import', './test/helpers/isolated-home.mjs', file], {
+    // The wait, then the flush, so the flush is the last preparation and
+    // covers whatever was written during the wait; no case starts before both
+    // have returned.
+    stdout.write('performance step: waiting, within a bound, for any ext4 background initialisation\n');
+    const ext4LazyInit = prepare(waitForDisk);
+    stdout.write('performance step: writing out pending file-system writes\n');
+    const pendingWrites = prepare(flush);
+    // Sampled after the preparation, so they describe what the cases run on.
+    const conditions = { node: process.version, platform: process.platform, arch: process.arch, parallelism: availableParallelism(),
+      loadAverage: loadavg().map((value) => Number(value.toFixed(2))), freeMemoryMb: Math.round(freemem() / 2 ** 20), totalMemoryMb: Math.round(totalmem() / 2 ** 20),
+      temporaryDirectory: scratch ? 'job (RUNNER_TEMP)' : 'system', ext4LazyInit, pendingWrites };
+    stdout.write(`performance step conditions ${JSON.stringify(conditions)}\n`);
+    home = mkdtempSync(join(scratch ?? tmpdir(), 'shadowgraph-performance-home-'));
+    // A caller that is itself a test process marks its environment; the child
+    // must not inherit that mark, or node would skip the files it was given.
+    const { NODE_TEST_CONTEXT: _inheritedTestContext, ...env } = process.env;
+    const result = spawn(process.execPath, ['--test', '--test-concurrency=1', '--test-reporter=tap', '--import', './test/helpers/isolated-home.mjs', file], {
       cwd: ROOT, encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 2 ** 20,
       env: { ...env, SHADOWGRAPH_HOME: home, ...(scratch ? { TMPDIR: scratch, TEMP: scratch, TMP: scratch } : {}) }
     });
-    const stdout = result.stdout ?? '';
-    if (stdout) process.stdout.write(stdout);
-    if (result.stderr) process.stderr.write(result.stderr);
+    const tap = result.stdout ?? '';
+    if (tap) stdout.write(tap);
+    if (result.stderr) stderr.write(result.stderr);
     if (result.error) throw result.error;
     if (result.signal) throw new Error(`performance process ended with signal ${result.signal}`);
     if (result.status !== 0) throw new Error(`performance process exited with ${result.status}`);
-    assertTapSummary(stdout);
-    assertDeclaredCasesPassed(stdout, declaredCases(readFileSync(resolve(ROOT, file), 'utf8')));
+    assertTapSummary(tap);
+    assertDeclaredCasesPassed(tap, declaredCases(readFileSync(resolve(ROOT, file), 'utf8')));
     return 0;
   } catch (error) {
-    process.stderr.write(`performance step failed: ${error.message}\n`);
+    stderr.write(`performance step failed: ${error.message}\n`);
     return 1;
   } finally {
     // Removing the temporary directories cannot change the result.
