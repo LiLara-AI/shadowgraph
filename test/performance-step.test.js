@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PERFORMANCE_FILE, assertDeclaredCasesPassed, declaredCases } from '../performance/cases.mjs';
+import { PERFORMANCE_FILE, assertDeclaredCasesPassed, declaredCases, flushPendingWrites, waitForExt4LazyInit } from '../performance/cases.mjs';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
 // The delivery-budget performance cases run in their own mandatory CI step
@@ -90,6 +90,62 @@ test('the step entry script exits non-zero unless every declared case of its fil
     status[name] = spawnSync(process.execPath, [entry, file], { encoding: 'utf8', windowsHide: true }).status;
   }
   assert.deepEqual(status, { passing: 0, failing: 1, skipped: 1, crashed: 1, empty: 1, unregistered: 1 });
+});
+
+// The step writes out the file-system writes earlier steps left pending (up to
+// about 1 GB on a runner) before it measures, so the kernel's flush of them
+// cannot throttle a measured save's own writes. Before that it waits, within a
+// bound, for ext4 to finish initialising a fresh disk in the background. It
+// records both.
+test('the step writes out pending file-system writes before it measures, and records it', async (t) => {
+  const root = await scratchDirectory(t), entry = fileURLToPath(new URL('../performance/run.mjs', import.meta.url));
+  const file = join(root, 'flush.perf.js');
+  await writeFile(file, "import test from 'node:test';\ntest('a', () => {});\n");
+  const run = spawnSync(process.execPath, [entry, file], { encoding: 'utf8', windowsHide: true });
+  assert.equal(run.status, 0, run.stdout + run.stderr);
+  const conditions = JSON.parse(run.stdout.match(/^performance step conditions (\{.*\})$/mu)[1]);
+  assert.ok(run.stdout.indexOf('performance step conditions') < run.stdout.indexOf('TAP version'), 'flushed and recorded before any case runs');
+  if (process.platform === 'win32') {
+    assert.deepEqual(conditions.pendingWrites, { flushed: false, reason: 'no_system_flush' });
+  } else {
+    const { flushed, ms, dirtyKbBefore, dirtyKbAfter } = conditions.pendingWrites;
+    assert.equal(flushed, true);
+    assert.ok(ms >= 0);
+    if (process.platform === 'linux') assert.ok(Number.isInteger(dirtyKbBefore) && Number.isInteger(dirtyKbAfter), JSON.stringify(conditions.pendingWrites));
+  }
+  if (process.platform === 'linux') assert.equal(typeof conditions.ext4LazyInit.runningAtStart, 'boolean', JSON.stringify(conditions.ext4LazyInit));
+  else assert.equal(conditions.ext4LazyInit, null);
+});
+
+// ext4lazyinit zeroes a fresh runner disk's inode tables: about 3 GB over one
+// to three minutes after boot, on some runners. The step waits for it, within a
+// bound, polling once a second; past the bound it records that it is still
+// running, and the cases still run and decide the step.
+test('the step waits, within a bound, for ext4 to finish initialising the disk, and records it', () => {
+  const clock = { at: 0 }, sleeps = [];
+  const run = (states, boundMs) => {
+    clock.at = 0; sleeps.length = 0;
+    const queue = [...states];
+    return waitForExt4LazyInit({ running: () => queue.shift(), sleep: (ms) => { sleeps.push(ms); clock.at += ms; }, now: () => clock.at, boundMs });
+  };
+  assert.equal(run([null], 5000), null, 'nothing to wait for off Linux');
+  assert.deepEqual(run([false], 5000), { runningAtStart: false });
+  assert.deepEqual(sleeps, []);
+  assert.deepEqual(run([true, true, true, false], 5000), { runningAtStart: true, finished: true, waitedMs: 3000 });
+  assert.deepEqual(sleeps, [1000, 1000, 1000], 'polls once a second');
+  assert.deepEqual(run(Array(20).fill(true), 5000), { runningAtStart: true, finished: false, waitedMs: 5000 }, 'gives up at the bound');
+  assert.deepEqual(run([true, null], 5000), { runningAtStart: true, finished: true, waitedMs: 1000 }, 'a check that can no longer read /proc ends the wait');
+});
+
+test('the flush is one system-wide sync, and one that fails or cannot start is recorded as not flushed', () => {
+  const calls = [];
+  const flushed = flushPendingWrites({ platform: 'linux', run: (command, args) => { calls.push([command, ...args]); return { status: 0 }; }, dirtyKb: () => 0 });
+  assert.deepEqual([calls, { ...flushed, ms: 0 }], [[['sync']], { flushed: true, ms: 0, dirtyKbBefore: 0, dirtyKbAfter: 0 }], 'the system-wide flush, once');
+  const failed = flushPendingWrites({ platform: 'linux', run: () => ({ status: 1 }), dirtyKb: () => 7 });
+  assert.deepEqual({ ...failed, ms: 0 }, { flushed: false, status: 1, ms: 0, dirtyKbBefore: 7, dirtyKbAfter: 7 });
+  const missing = flushPendingWrites({ platform: 'darwin', run: () => ({ status: null, error: Object.assign(new Error('spawn sync ENOENT'), { code: 'ENOENT' }) }), dirtyKb: () => null });
+  assert.deepEqual({ ...missing, ms: 0 }, { flushed: false, error: 'ENOENT', ms: 0, dirtyKbBefore: null, dirtyKbAfter: null });
+  assert.deepEqual(flushPendingWrites({ platform: 'win32', run: () => assert.fail('no flush is run on Windows') }), { flushed: false, reason: 'no_system_flush' });
 });
 
 test('the step creates the measured stores in the job temporary directory when CI gives one', async (t) => {
