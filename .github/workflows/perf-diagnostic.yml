@@ -1,9 +1,6 @@
-# Diagnostic only, on a throwaway branch that is never merged.
-# CI-faithful A/B: each job runs CI's own steps up to and including the
-# performance step, on the unmodified 218c3c9 (base) or the fix branch (fix),
-# with kernel tracing (tracefs, nothing installed; the capture is kept in
-# memory) of every rename syscall, block request and writeback event. The
-# performance step then runs three more times.
+# Diagnostic only, on a throwaway branch that is never merged: how long the
+# ext4lazyinit kernel thread keeps initialising a fresh runner's disk, and how
+# much it writes.
 name: perf-diagnostic
 
 on:
@@ -14,71 +11,26 @@ permissions:
   contents: read
 
 jobs:
-  ab:
-    name: ${{ matrix.variant }} / Node ${{ matrix.node-version }} / ${{ matrix.replica }}
+  lazyinit:
+    name: lazyinit probe ${{ matrix.replica }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        variant: [base, fix]
-        node-version: [20, 22, 24]
-        replica: [4, 5, 6]
+        replica: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
-      - name: Start tracing (tracefs, in memory)
+      - name: Poll ext4lazyinit
         run: |
-          sudo bash -c '
-            T=/sys/kernel/tracing; [ -d $T/events ] || T=/sys/kernel/debug/tracing
-            echo 32768 > $T/buffer_size_kb
-            for e in syscalls/sys_enter_rename syscalls/sys_exit_rename syscalls/sys_enter_renameat syscalls/sys_exit_renameat syscalls/sys_enter_renameat2 syscalls/sys_exit_renameat2 block/block_rq_issue block/block_rq_complete writeback/writeback_start writeback/writeback_written ext4/ext4_lazy_itable_init; do
-              [ -d $T/events/$e ] && echo 1 > $T/events/$e/enable || echo "no event $e"
-            done
-            echo 1 > $T/tracing_on
-            nohup cat $T/trace_pipe > /dev/shm/trace.txt 2>/dev/null &
-          '
-          echo "start $(cut -d' ' -f1 /proc/uptime)" > /dev/shm/marks.txt
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ matrix.variant == 'base' && '218c3c957728e5319264838195b0326323d1f600' || 'fix/delivery-budget-benchmark' }}
-          fetch-depth: 0
-      - run: echo "dirty-after-checkout $(awk '/^Dirty:/{print $2}' /proc/meminfo) kB"
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node-version }}
-          cache: npm
-      - run: echo "dirty-after-setup-node $(awk '/^Dirty:/{print $2}' /proc/meminfo) kB"
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - run: echo "dirty-after-setup-python $(awk '/^Dirty:/{print $2}' /proc/meminfo) kB"
-      - run: npm ci
-      - run: echo "dirty-after-npm-ci $(awk '/^Dirty:/{print $2}' /proc/meminfo) kB"
-      - run: echo "check $(cut -d' ' -f1 /proc/uptime)" >> /dev/shm/marks.txt
-      - run: npm run check
-      - name: Conditions before the step
-        run: |
-          echo "perf1 $(cut -d' ' -f1 /proc/uptime)" >> /dev/shm/marks.txt
-          grep -E '^(Dirty|Writeback):' /proc/meminfo | tr -s ' ' | tr '\n' ' '; echo; findmnt -T "$RUNNER_TEMP" -o SOURCE,OPTIONS -n
-          pgrep -a ext4lazyinit || echo "no ext4lazyinit thread"
-          git log --oneline -1
-      - name: Delivery-budget performance (as CI)
-        id: performance
-        run: npm run test:performance
-        continue-on-error: true
-      - name: Three more runs
-        run: |
-          for i in 2 3 4; do
-            echo "perf$i $(cut -d' ' -f1 /proc/uptime)" >> /dev/shm/marks.txt
-            npm run --silent test:performance > "$RUNNER_TEMP/run-$i.log" 2>&1 && r=0 || r=$?; echo "run $i exit $r $(grep -o '"pendingWrites":{[^}]*}' "$RUNNER_TEMP/run-$i.log")"
+          findmnt -n -o SOURCE,SIZE,OPTIONS /; df -h / | tail -1
+          sudo dumpe2fs -h "$(findmnt -n -o SOURCE /)" 2>/dev/null | grep -E 'Inode count|Inode size|Block count|Flex block group size|Filesystem features' || true
+          dev=$(basename "$(findmnt -n -o SOURCE /)" | sed 's/p\?[0-9]*$//')
+          w0=$(awk -v d="$dev" '$3==d{print $10}' /proc/diskstats)
+          start=$(cut -d' ' -f1 /proc/uptime)
+          echo "probe start uptime=$start"
+          for i in $(seq 1 240); do
+            if ! pgrep -x ext4lazyinit >/dev/null; then echo "ext4lazyinit absent at uptime=$(cut -d' ' -f1 /proc/uptime)"; break; fi
+            [ $((i % 6)) -eq 0 ] && echo "still running uptime=$(cut -d' ' -f1 /proc/uptime) written_MB=$(( ($(awk -v d="$dev" '$3==d{print $10}' /proc/diskstats) - w0) / 2048 ))"
+            sleep 5
           done
-          echo "end $(cut -d' ' -f1 /proc/uptime)" >> /dev/shm/marks.txt
-      - uses: actions/checkout@v4
-        if: always()
-        with:
-          path: diagtools
-      - name: Analysis
-        if: always()
-        run: |
-          sleep 1; sudo pkill -f trace_pipe || true
-          echo "first run outcome: ${{ steps.performance.outcome }}"
-          node diagtools/diag/analyze.mjs /dev/shm/trace.txt /dev/shm/marks.txt
+          echo "end uptime=$(cut -d' ' -f1 /proc/uptime) written_MB=$(( ($(awk -v d="$dev" '$3==d{print $10}' /proc/diskstats) - w0) / 2048 ))"
