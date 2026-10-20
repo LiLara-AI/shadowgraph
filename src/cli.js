@@ -209,9 +209,12 @@ function flagsOf(list, names, usage) {
 async function hookStores() {
   const { activeDelivery } = await import('./delivery.js');
   const { activeCapture } = await import('./capture-hook.js');
-  const same = (a, b) => (process.platform === 'win32' ? resolve(a).toLowerCase() === resolve(b).toLowerCase() : resolve(a) === resolve(b));
+  const { canonicalPath } = await import('./internal/owner-files.js');
+  // Activation records the store's real path; compare real paths so a short name or link to it is the same store.
+  const here = await canonicalPath(file).catch(() => resolve(file));
+  const same = (a) => (process.platform === 'win32' ? a.toLowerCase() === here.toLowerCase() : a === here);
   const stores = [await activeDelivery(), await activeCapture()].map((capability) => capability?.store).filter(Boolean);
-  return { stores, other: stores.find((store) => !same(store.file, file) || store.storage !== storageType) };
+  return { stores, other: stores.find((store) => !same(store.file) || store.storage !== storageType) };
 }
 async function assertBindStoreActive() {
   const { other } = await hookStores();
