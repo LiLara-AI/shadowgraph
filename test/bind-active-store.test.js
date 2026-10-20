@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, realpath, writeFile } from 'node:fs/promises';
+import { mkdir, realpath, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { scratchDirectory } from '../tools/scratch-directory.js';
@@ -48,11 +48,15 @@ test('doctor names the store the activated hooks read and whether it is the one 
   assert.deepEqual(JSON.parse(run(['doctor'], s.activeStore).stdout).hooks, { activeStore: s.activeStore, sameStore: true });
 });
 
-test('bind accepts the active store however its path is spelled', async (t) => {
+test('bind accepts the active store reached through a link, as activation records its real path', async (t) => {
   const s = await fixture(t, 'delivery');
-  const spelled = join(s.workspace, '..', 'active', '.', 'memory.json');
-  const run = s.bind({ SHADOWGRAPH_FILE: process.platform === 'win32' ? spelled.toUpperCase() : spelled });
+  const link = join(s.activeStore, '..', '..', 'link');
+  await mkdir(join(s.activeStore, '..'), { recursive: true });
+  await symlink(join(s.activeStore, '..'), link, process.platform === 'win32' ? 'junction' : 'dir');
+  const run = s.bind({ SHADOWGRAPH_FILE: join(link, 'memory.json') });
   assert.doesNotMatch(run.stderr + run.stdout, /binding_store_not_active/u);
+  assert.ok(run.stdout.includes('Store: '), run.stdout + run.stderr);
+  assert.match(run.stderr + run.stdout, /binding_requires_owner_confirmation/u);
 });
 
 test('bind with the active store named proceeds to the owner prompts and shows the store it writes', async (t) => {
