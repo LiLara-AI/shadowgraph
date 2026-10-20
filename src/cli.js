@@ -203,8 +203,27 @@ function flagsOf(list, names, usage) {
   return options;
 }
 
+// Hooks honour a binding only when the active delivery/capture store records it, so a bind
+// into any other store would silently do nothing for them (run record 30). Checked before
+// any store is opened or created.
+async function hookStores() {
+  const { activeDelivery } = await import('./delivery.js');
+  const { activeCapture } = await import('./capture-hook.js');
+  const { canonicalPath } = await import('./internal/owner-files.js');
+  // Activation records the store's real path; compare real paths so a short name or link to it is the same store.
+  const here = await canonicalPath(file).catch(() => resolve(file));
+  const same = (a) => (process.platform === 'win32' ? a.toLowerCase() === here.toLowerCase() : a === here);
+  const stores = [await activeDelivery(), await activeCapture()].map((capability) => capability?.store).filter(Boolean);
+  return { stores, other: stores.find((store) => !same(store.file) || store.storage !== storageType) };
+}
+async function assertBindStoreActive() {
+  const { other } = await hookStores();
+  if (other) throw new Error(`binding_store_not_active: this command would bind in ${file} (${storageType}), but the active store is ${other.file} (${other.storage}). Set SHADOWGRAPH_FILE=${other.file} and SHADOWGRAPH_STORAGE=${other.storage}, then run bind again.`);
+}
+
 async function runOneShot() {
   assertStorageType();
+  if (command === 'bind') await assertBindStoreActive();
   const initializedBeforeOpen = await exists(file);
   if (command === 'doctor' && storageType === 'sqlite') {
     const { nodeSqlite } = await getRuntimeCapabilities();
@@ -238,7 +257,7 @@ async function runOneShot() {
       if (command === 'access-status') return privileged.privilegedAccessInspection(graph);
       if (command === 'bind') {
         if (typeof value.project !== 'string' || !value.project.trim()) throw new Error('bind requires a non-empty project');
-        process.stdout.write(`Worktree mapping: ${workspace.worktreeRoot}\nShared repository mapping: ${workspace.commonDir ?? '(not a Git repository)'}\n`);
+        process.stdout.write(`Store: ${file}\nWorktree mapping: ${workspace.worktreeRoot}\nShared repository mapping: ${workspace.commonDir ?? '(not a Git repository)'}\n`);
         const choice = await ownerAnswer('Select worktree or shared_repository: ');
         if (!['worktree', 'shared_repository'].includes(choice) || (choice === 'shared_repository' && !workspace.commonDir)) throw new Error('binding_requires_owner_confirmation');
         const binding = { type: choice, path: choice === 'worktree' ? workspace.worktreeRoot : workspace.commonDir, project: value.project, reason: value.reason, surface: 'cli' };
@@ -351,6 +370,8 @@ async function runOneShot() {
       const nodeMajor = Number.parseInt(process.versions.node.split('.')[0], 10);
       const nodeSupported = nodeMajor >= 20;
       const graphValid = validation.valid === true;
+      // Which store the activated hooks read; a different one here is legitimate (a per-project MCP store) but never implied.
+      const hooks = await hookStores();
       return {
         ok: nodeSupported && graphValid && storageDiagnostics?.valid !== false,
         command: 'doctor',
@@ -359,6 +380,7 @@ async function runOneShot() {
         storage: { type: storageType, path: file, initialized: true, readable: true, writable: true,
           ...(storageDiagnostics?.issues?.length ? { diagnostics: storageDiagnostics } : {}) },
         graph: { valid: graphValid, issues: validation.issues?.length ?? 0, completeness: validation.completeness, limitation: validation.limitation },
+        hooks: hooks.stores.length ? { activeStore: hooks.stores[0].file, sameStore: !hooks.other } : { activeStore: null },
         mcp: { available: true, recommendedMode: 'compact', fullMode: 'Set SHADOWGRAPH_MCP_COMPACT=0 or remove it.' }
       };
     }
