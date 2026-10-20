@@ -1,9 +1,20 @@
 # Release checklist — ShadowGraph 0.41.0 (Technical Preview → publication)
 
-> **Historical (v0.41.0).** This document describes the 0.41.0 Technical Preview. On `main`,
-> `github:LiLara-AI/shadowgraph` installs the `0.42.0-dev.0` development build; to install 0.41.0,
+> **Historical (v0.41.0).** This document describes the 0.41.0 Technical Preview. The current
+> release is 0.42.0 (`github:LiLara-AI/shadowgraph#v0.42.0`); to install 0.41.0,
 > use `github:LiLara-AI/shadowgraph#v0.41.0`. See
-> [Moving between 0.41.0 and `main`](README.md#moving-between-0410-and-main).
+> [Moving between 0.41.0 and 0.42.0](README.md#moving-between-0410-and-0420).
+
+## 0.42.0 Technical Preview: Git tag and GitHub Release
+
+A tag and a GitHub Release publish no package and close none of the npm gates below. For 0.42.0:
+
+- [ ] Package and lockfile name/version `shadowgraph-unified-plugin@0.42.0`, `"private": true` (`check:package`).
+- [ ] Every required CI job green on the exact release commit: `npm test`, `npm run check` (public hygiene included), the delivery-budget performance step, `check:integrations`, `check:package` and `smoke:package` on Ubuntu and Windows × Node 20/22/24, and `check:mcp` on the Node 24 jobs.
+- [ ] Release notes, README and changelog name only demonstrated capabilities: no benchmark, savings or broad host-support claim.
+- [ ] Maintainer authorization of the tag `v0.42.0` on that commit and of the GitHub Release, recording the packed tarball's SHA-256.
+
+## npm publication (historical, 0.41.0)
 
 This checklist governs **npm publication**, which is not authorized and has not occurred.
 

@@ -1,5 +1,9 @@
 # ShadowGraph — short announcement copy
 
+> **Historical (v0.41.0).** Copy written for the 0.41.0 Technical Preview. Some of it no longer
+> holds for 0.42.0: `review` returns `{ items, completeness }`, and with the optional Claude Code
+> integration activated, sessions are captured and attempts can be extracted from them.
+
 Ready-to-post variants. Every one of them leads with the **problem**, not the technology.
 
 The core message, in one line:

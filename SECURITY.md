@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-The latest release is the 0.41.0 **Technical Preview / Early Access** (tag `v0.41.0`); `main` carries the development build `0.42.0-dev.0`. ShadowGraph is installed from GitHub and not published to npm. Security fixes land on `main`; the `v0.41.0` tag is not patched, and there are no patched older versions. Do not treat a Technical Preview build as a production security boundary.
+The latest release is the 0.42.0 **Technical Preview / Early Access** (tag `v0.42.0`). ShadowGraph is installed from GitHub and not published to npm. Security fixes land on `main`; the `v0.41.0` and `v0.42.0` tags are not patched, and there are no patched older versions. Do not treat a Technical Preview build as a production security boundary.
 
 ## Security review status
 

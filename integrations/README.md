@@ -7,12 +7,12 @@ ShadowGraph is a local decision ledger and unified memory kernel for AI agents. 
 The package remains `private: true` and is not published to npm. Publication would need the release checklist's independent security and benchmark gates and an explicit maintainer authorization, none of which is complete. Install it from the repository, as the [main README](../README.md#1-install) describes:
 
 ```bash
-npm install --global github:LiLara-AI/shadowgraph
+npm install --global github:LiLara-AI/shadowgraph#v0.42.0
 shadowgraph setup
 shadowgraph doctor
 ```
 
-This installs `main`, the development build `0.42.0-dev.0`, which is newer than the 0.41.0 Technical Preview. See [Moving between 0.41.0 and `main`](../README.md#moving-between-0410-and-main) before switching a store between them.
+Use `github:LiLara-AI/shadowgraph#v0.42.0` for the 0.42.0 Technical Preview; without the tag you get `main`. See [Moving between 0.41.0 and 0.42.0](../README.md#moving-between-0410-and-0420) before switching a store between them.
 
 The global install makes the `shadowgraph` binary available to GUI clients that may not launch from a project containing `node_modules/.bin`. If `shadowgraph doctor` is not found, add npm's global bin directory to the environment used by the client and restart it.
 
@@ -69,7 +69,7 @@ For a fixed build rather than whatever `shadowgraph` is on the path, `node scrip
 
 `claude-code.capture-hooks.json` is the capture hook block (`shadowgraph install-hooks --capture`, removed with `uninstall-hooks --capture`): at `UserPromptSubmit`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `PreCompact` and `SessionEnd` it runs `shadowgraph capture --hook`, synchronously, which records each event's material, and the assistant's text read from the session's transcript at `Stop`, `PreCompact` and `SessionEnd`, into the private store only after the owner runs `shadowgraph activate capture` for that same store, and stays silent. Capture, too, covers only projects whose worktree binding that store recorded, and writes a JSON store only. To turn it off, `shadowgraph deactivate capture` first, then `uninstall-hooks --capture`.
 
-`claude-code.coverage.json` states, for the Claude Code version it names as verified (`verifiedVersion`, 2.1.288 at this commit), where each of the seven stages of experience lands at each trigger: delivery is covered at a new session's start and at each prompt, unverified at a start after resume, clear or compaction, and not available within a turn, which is a declared gap. Its `capture` block says what capture records at each event and reads from the transcript, how each item is identified, what it never captures, and what it declares -- among them that the transcript's format is a hypothesis the capture gate confirms.
+`claude-code.coverage.json` states, for the Claude Code version it names as verified for delivery coverage (`verifiedVersion`, 2.1.288 at this commit; extraction has its own host profiles, see [extraction](../docs/extraction.md)), where each of the seven stages of experience lands at each trigger: delivery is covered at a new session's start and at each prompt, unverified at a start after resume, clear or compaction, and not available within a turn, which is a declared gap. Its `capture` block says what capture records at each event and reads from the transcript, how each item is identified, what it never captures, and what it declares -- among them that the transcript's format is a hypothesis the capture gate confirms.
 
 Capture lifecycle controls are documented in [the API reference](../docs/api-reference.md#capture-lifecycle-controls): scoped inspection, terminal-confirmed retention/cancel/delete, and bounded expiry. Deactivation disables capture before cleanup and reports deferred cleanup honestly. Expiry can permanently prevent later re-extraction and transcript reconciliation for affected sessions; it never releases quarantine. Pinned capture activation requires the completed lifecycle build, and delivery over capture data requires the retention reader floor. Prepare and approve any real-host runtime change before installing or activating it.
 

@@ -5,7 +5,7 @@
 **Local-first decision memory for AI agents.** ShadowGraph remembers what an agent decided, what it
 rejected, why it rejected it, and when that decision should be reconsidered.
 
-> Status: **Technical Preview / Early Access.** Install from GitHub — it is not on npm.
+> Status: **Technical Preview / Early Access, 0.42.0.** Install from GitHub — it is not on npm.
 > See [Limitations and Technical Preview status](#limitations-and-technical-preview-status).
 
 ## Why it matters
@@ -35,7 +35,7 @@ machine; data leaves the machine only through opt-ins you turn on (see
 ### Requirements
 
 - Node.js 20+ (the optional SQLite backend needs Node 22.5+ for `node:sqlite`)
-- No runtime npm dependencies, no build step, no account, no network calls
+- No runtime npm dependencies, no build step, no account, no network calls by default (the opt-ins are listed under [Local-first and privacy](#local-first-and-privacy))
 
 ### 1. Install
 
@@ -43,13 +43,13 @@ ShadowGraph is **not published to npm**. During the Technical Preview, install i
 repository. A global install puts `shadowgraph` on your `PATH`, which is what MCP clients need:
 
 ```bash
-npm install --global github:LiLara-AI/shadowgraph
+npm install --global github:LiLara-AI/shadowgraph#v0.42.0
 ```
 
-This installs the current `main` branch: the development build `0.42.0-dev.0`, newer than the 0.41.0
-Technical Preview and not a release. To install the Technical Preview instead, use
-`github:LiLara-AI/shadowgraph#v0.41.0`. Before moving a store between the two, read
-[Moving between 0.41.0 and `main`](#moving-between-0410-and-main).
+This installs the 0.42.0 Technical Preview. Without `#v0.42.0` you get `main`, which may be ahead of
+the release. To install the previous Technical Preview, use `github:LiLara-AI/shadowgraph#v0.41.0`.
+Before moving a store between 0.41.0 and 0.42.0, read
+[Moving between 0.41.0 and 0.42.0](#moving-between-0410-and-0420).
 
 <details>
 <summary>Or clone and run from source</summary>
@@ -57,6 +57,7 @@ Technical Preview and not a release. To install the Technical Preview instead, u
 ```bash
 git clone https://github.com/LiLara-AI/shadowgraph.git
 cd shadowgraph
+git checkout v0.42.0
 npm install
 node src/cli.js setup
 node src/cli.js doctor
@@ -315,7 +316,7 @@ terminal. Give an agent compact mode unless you want it to have the owner tools 
 Install globally first so the client can find `shadowgraph` on its `PATH`:
 
 ```bash
-npm install --global github:LiLara-AI/shadowgraph
+npm install --global github:LiLara-AI/shadowgraph#v0.42.0
 shadowgraph setup
 shadowgraph doctor
 ```
@@ -408,7 +409,7 @@ POST /relationships          POST /traverse            POST /redact
 POST /supersede              POST /maintain            POST /retrieve
 POST /review-signals/ack     POST /repair-plan         POST /backup
 POST /restore                POST /rebuild             POST /confidence-evidence
-POST /projects/purge-preview
+POST /reconsider             POST /review-context      POST /projects/purge-preview
 
 DELETE /projects
 ```
@@ -451,7 +452,7 @@ console.log(graph.review({ project: 'checkout-service' }));
 ```
 
 The bare-specifier import resolves when ShadowGraph is a dependency of your project
-(`npm install github:LiLara-AI/shadowgraph`). With a `--global` install, use the CLI, HTTP, or MCP
+(`npm install github:LiLara-AI/shadowgraph#v0.42.0`). With a `--global` install, use the CLI, HTTP, or MCP
 surfaces instead, or import from the installed path.
 
 ## Storage, backup, and deletion
@@ -491,14 +492,13 @@ later; a purge does not reach them (see the [data lifecycle map](docs/data-lifec
 
 ## Limitations and Technical Preview status
 
-The latest release is the 0.41.0 **Technical Preview / Early Access** (tag `v0.41.0`). It is not Beta
-and not stable. `main` carries `0.42.0-dev.0`, a development build: not released, not stable, and its
-acceptance criteria have not been assessed.
+The latest release is the 0.42.0 **Technical Preview / Early Access** (tag `v0.42.0`). It is not Beta
+and not stable, and its acceptance criteria have not been assessed.
 
 - **Interfaces and the storage schema may still change.** Do not use it for data you cannot
   reproduce.
-- **Not on npm.** The package is deliberately `private: true`. The `v0.41.0` Git tag and GitHub
-  Release are maintainer-authorized for this Technical Preview; **npm publication is not
+- **Not on npm.** The package is deliberately `private: true`. The `v0.41.0` and `v0.42.0` Git tags
+  and GitHub Releases are maintainer-authorized Technical Previews; **npm publication is not
   authorized** and has not occurred.
 - **No comparative benchmark has been measured.** Comparative benchmark infrastructure was executed,
   but no arm was measured because no common local/free LLM and embedding endpoint was available. No
@@ -520,16 +520,24 @@ acceptance criteria have not been assessed.
 - **Capture and delivery cover one enrolled store.** Delivery reads the one store its activation
   pins, and capture writes the store it was enrolled with; other stores you use by hand are neither
   delivered nor captured into, and are not migrated.
+- **What the Claude Code integration has shown, and has not.** Delivery, capture and extraction were
+  exercised end to end once, in a synthetic run on Windows with Claude Code 2.1.292: a failed attempt
+  was captured, extracted into an `attempt` record and delivered to a fresh session, which cited it
+  in its answer but not in the exact form the run required. That is one controlled run, not a measure
+  of how often or how well memory is used. Delivery relevance is lexical only. Extraction is
+  experimental: Windows, the profiled host binaries and an owner activation only, and between its
+  per-call checks and the model call the account can still change. Turning conversations into
+  decision memory automatically remains a goal, not a finished capability.
 - **Single maintainer.** No paid support, no patch SLA, and no bug bounty.
 
-### Moving between 0.41.0 and `main`
+### Moving between 0.41.0 and 0.42.0
 
 - **Take a backup before upgrading.** `shadowgraph backup [<file>]` copies the store: a JSON store
   byte for byte, a SQLite store table by table. A backup taken before this build first saves the
   store is still a schema-5 store that 0.41.0 opens. (Opening a SQLite store, this build adds a table
   of its own to it; 0.41.0 still reads the store.) Once this build has saved the store, its backups are schema-7 stores; to use one with
   0.41.0, restore it into a fresh path with this build and fork a schema-5 copy as below.
-- **Upgrading.** This build reads every store 0.41.0 wrote (schemas 1 through 5) and writes schema 7 on
+- **Upgrading.** 0.42.0 reads every store 0.41.0 wrote (schemas 1 through 5) and writes schema 7 on
   its next save. What changes for you:
   - A write that names no project is refused (`write_scope_unresolved`). Pass `project`, or bind the
     workspace to a project with `shadowgraph bind`.
