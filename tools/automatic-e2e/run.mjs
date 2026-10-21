@@ -41,7 +41,7 @@ const owner = { SystemRoot: process.env.SystemRoot, PATH: process.env.PATH, TEMP
 // Claude Code desktop session; the values here are placeholders).
 const hookEnv = terminalEnv ? owner : { ...owner, ANTHROPIC_BASE_URL: 'https://api.anthropic.com', CLAUDE_CODE_SIMPLE: '1', CLAUDECODE: '1',
   CLAUDE_CODE_ENTRYPOINT: 'claude-desktop', CLAUDE_CODE_SESSION_ID: 'host-session', CLAUDE_CODE_MESSAGING_TOKEN: 'placeholder',
-  CLAUDE_CODE_ACCOUNT_UUID: 'placeholder', CLAUDE_CODE_ORGANIZATION_UUID: 'placeholder', CLAUDE_CODE_USER_EMAIL: 'placeholder@example.invalid' };
+  CLAUDE_CODE_ACCOUNT_UUID: 'placeholder', CLAUDE_CODE_ORGANIZATION_UUID: 'placeholder', CLAUDE_CODE_USER_EMAIL: 'Synthetic-Owner@example.invalid' };
 const receipt = { kind: 'shadowgraph-automatic-e2e', version: 1, at: new Date().toISOString(), node: process.version, hookEnvironment: terminalEnv ? 'terminal' : 'desktop-host', steps: [], checks: {} };
 const step = (name, value) => { receipt.steps.push({ name, ...value }); return value; };
 // An informational check reports a known limitation and does not decide the result.

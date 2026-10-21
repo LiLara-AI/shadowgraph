@@ -88,11 +88,32 @@ test('a decision sentence that stands alone is kept as a typed decision with its
 });
 
 test('no decision is read from words that turn it; the message is kept as it is said, or not at all', () => {
-  for (const [label, source] of [
+  // Each case is proposed with its chosen part only, which its positive twin
+  // accepts, so it fails for the words it adds and for nothing else.
+  const chosenOnly = chosen => ({ records: [{ kind: 'decision', fields: [field('title', 'Parser choice'), field('chosen', chosen)] }] });
+  for (const [source, chosen] of [[DECISION, 'use the streaming tokenizer'], ['We will use the streaming tokenizer instead of the per-line regex parser.', 'use the streaming tokenizer'],
+    ['We will use SQLite instead of JSON because JSON is slow.', 'SQLite'], ['In the draft, we will use SQLite.', 'SQLite'], ['We will use option B.', 'option B']]) {
+    assert.deepEqual(kinds(prepareExtraction(item, source, chosenOnly(chosen))), ['decision'], `positive twin: ${source}`);
+  }
+  for (const [label, source, chosen = 'use the streaming tokenizer'] of [
+    ['a condition after the reason', 'We will use SQLite instead of JSON because JSON is slow, unless the team objects.', 'SQLite'],
+    ['a qualifier after the reason', 'We will use SQLite instead of JSON because JSON is slow, but not for prod.', 'SQLite'],
+    ['a hedged reason', 'We will use SQLite instead of JSON because JSON may be slow.', 'SQLite'],
+    ['a reason about the chosen part', 'We will use SQLite instead of JSON because it is faster.', 'SQLite'],
+    ['a reason with no alternative to hold it', 'We will use SQLite because it is simple, unless the team objects.', 'SQLite'],
+    ['a reason and no alternative', 'We will use SQLite because SQLite is simple.', 'SQLite'],
+    ['a missed sentence end', 'We will use option B. Just kidding.', 'option B. Just kidding'],
+    ['a quantity as a lead', 'In some cases, we will use SQLite.', 'SQLite'],
+    ['a time in a lead', 'For the next release, we will use SQLite.', 'SQLite'],
+    ['an outage as a lead', 'In case of an outage, we will use SQLite.', 'SQLite'],
+    ['someone as a lead', "In Bob's opinion, we will use SQLite.", 'SQLite'],
     ['negated', 'For the config loader we will not use the streaming tokenizer instead of the per-line regex parser.'],
     ['contracted negation', "We won't use the streaming tokenizer instead of the per-line regex parser."],
     ['hedged', 'We might use the streaming tokenizer instead of the per-line regex parser.'],
     ['hedged lead', 'Maybe we will use the streaming tokenizer instead of the per-line regex parser.'],
+    ['a hedge as a lead', 'In theory, we will use the streaming tokenizer instead of the per-line regex parser.'],
+    ['a time as a lead', 'For now, we will use the streaming tokenizer instead of the per-line regex parser.'],
+    ['an owner as a lead', 'For our loader, we will use the streaming tokenizer instead of the per-line regex parser.'],
     ['someone else decides', 'They will use the streaming tokenizer instead of the per-line regex parser.'],
     ['an opinion about a decision', 'I think we will use the streaming tokenizer instead of the per-line regex parser.'],
     ['a time on the choice', 'We will use the streaming tokenizer tomorrow instead of the per-line regex parser.'],
@@ -103,7 +124,7 @@ test('no decision is read from words that turn it; the message is kept as it is 
     ['another request beside it', `${DECISION} Run node parse-demo.mjs sample.cfg.`],
     ['an aside after the reason', 'We will use the streaming tokenizer instead of the per-line regex parser (for now).']
   ]) {
-    const result = prepareExtraction(item, source, { records: [phrases()] });
+    const result = prepareExtraction(item, source, chosenOnly(chosen));
     assert.deepEqual(result.records.map(record => ({ kind: record.kind, values: record.values })), [{ kind: 'memory', values: { text: source } }], label);
     assert.equal(result.records[0].claims[0].class, 'quoted', label);
   }

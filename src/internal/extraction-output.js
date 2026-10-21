@@ -1,6 +1,6 @@
 // The model proposes typed fields; the local verifier decides their support.
 import { createHash } from 'node:crypto';
-import { CLAIM_VERIFIER_VERSION, classifyClaim, decisionFrameClaims, toolCallCoverageClaims } from '../verification.js';
+import { CLAIM_VERIFIER_VERSION, classifyClaim, decisionFrameClaims, mentionsAny, toolCallCoverageClaims } from '../verification.js';
 import { validateSchemaValue } from '../extractor.js';
 import { redactText, captureWithheld } from './redaction.js';
 import { stripDeliveredBlocks } from './capture-source.js';
@@ -181,8 +181,8 @@ export function prepareExtraction(item, source, value) {
       }
     }
     if (decisionReasons.length) {
-      // One verified reason for the one rejected alternative; any other shape names no alternative.
-      if (alternatives.length === 1 && new Set(decisionReasons.map(({ field }) => field.text)).size === 1) {
+      // One verified reason for the one rejected alternative, which it names; any other shape names no alternative.
+      if (alternatives.length === 1 && new Set(decisionReasons.map(({ field }) => field.text)).size === 1 && mentionsAny(decisionReasons[0].field.text, alternatives[0].label)) {
         const { field, outcome } = decisionReasons[0];
         alternatives[0].reasonRejected = field.text;
         places.add(placeOf(item, outcome));

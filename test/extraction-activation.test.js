@@ -236,6 +236,14 @@ test('a session under another profile or a session token does not start the work
   assert.equal(spawned, 0);
   assert.equal((await run({ CLAUDE_CONFIG_DIR: '', CLAUDE_CODE_OAUTH_TOKEN: '' })).status, 'requested', 'an empty selector selects nothing');
   assert.equal(spawned, 1);
+  // A desktop host names its session's account: only the bound one starts the worker.
+  const { accountEmailDigest } = await import('../src/internal/extraction-contract.js');
+  assert.deepEqual(await run({ CLAUDE_CODE_USER_EMAIL: 'owner@example.invalid' }), { status: 'refused', reason: 'session_account_differs' }, 'no bound e-mail: refused');
+  const record = JSON.parse(await readFile(f.file, 'utf8')), executor = record.capabilities.extraction.executor;
+  executor.accountEmailFingerprint = accountEmailDigest(executor.accountSalt, 'owner@example.invalid'); await writeFile(f.file, JSON.stringify(record));
+  assert.equal((await run({ CLAUDE_CODE_USER_EMAIL: ' Owner@Example.invalid ' })).status, 'requested');
+  assert.deepEqual(await run({ CLAUDE_CODE_USER_EMAIL: 'other@example.invalid' }), { status: 'refused', reason: 'session_account_differs' });
+  assert.equal(spawned, 2);
 });
 test('uninstall disables extraction even when no hooks remain', async t => {
   const f = await activated(t); const settings = join(f.root, 'host-config.json'); await writeFile(settings, '{"model":"owner-choice"}');

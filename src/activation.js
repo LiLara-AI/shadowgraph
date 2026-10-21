@@ -341,7 +341,7 @@ export async function activateExtraction({ env = process.env, evidence, store, s
   // Copy only resolved configuration and bounded metadata, never host diagnostics
   // or auth response fields. The executor repeats all checks on every invocation.
   // remotePolicy: whether a remote policy cache was present and left to the host's own report, shown at confirmation.
-  const executor = Object.fromEntries(['ok', 'executable', 'binarySha256', 'hostVersion', 'model', 'restrictions', 'environmentNames', 'switches', 'configurationProfile', 'remotePolicy', 'accountFingerprint']
+  const executor = Object.fromEntries(['ok', 'executable', 'binarySha256', 'hostVersion', 'model', 'restrictions', 'environmentNames', 'switches', 'configurationProfile', 'remotePolicy', 'accountFingerprint', 'accountEmailFingerprint']
     .filter(key => checked?.[key] !== undefined).map(key => [key, structuredClone(checked[key])]));
   // A host that names no account in `auth status` cannot be bound to one.
   if (checked?.ok === true && !/^[0-9a-f]{64}$/u.test(checked.accountFingerprint ?? '')) throw new Error('extraction_account_unidentified');

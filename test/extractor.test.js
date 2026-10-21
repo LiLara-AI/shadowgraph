@@ -496,7 +496,7 @@ test('the activated account is bound: another account or none blocks before any 
   const runner = async request => request.args.includes('auth') ? result(auth) : s.runner(request);
   const make = (options = {}) => createExtractor({ executable: s.executable, env: s.env, scratchRoot: s.root, runProcess: runner, inspectPolicy: async () => ({ ok: true }), ...options });
   const salt = 'c'.repeat(32), expectedReceipt = { ...(await make({ accountSalt: salt }).check()), accountSalt: salt };
-  assert.match(expectedReceipt.accountFingerprint, /^[0-9a-f]{64}$/u);
+  assert.match(expectedReceipt.accountFingerprint, /^[0-9a-f]{64}$/u); assert.match(expectedReceipt.accountEmailFingerprint, /^[0-9a-f]{64}$/u);
   assert.doesNotMatch(JSON.stringify(expectedReceipt), /synthetic-a|synthetic-org-a/u);
   assert.notEqual((await make({ accountSalt: 'd'.repeat(32) }).check()).accountFingerprint, expectedReceipt.accountFingerprint, 'keyed per activation');
   assert.equal((await make({ expectedReceipt }).extract({ prompt: 'synthetic', schema: SCHEMA })).status, 'success');

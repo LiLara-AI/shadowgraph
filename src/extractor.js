@@ -9,7 +9,7 @@ import { lstat, mkdtemp, readFile, realpath, readdir, rm } from 'node:fs/promise
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, relative } from 'node:path';
 
-import { EXTRACTION_MODEL, HOST_PROFILES } from './internal/extraction-contract.js';
+import { EXTRACTION_MODEL, HOST_PROFILES, accountEmailDigest } from './internal/extraction-contract.js';
 import { commandPath } from './internal/owner-files.js';
 export { EXTRACTION_MODEL } from './internal/extraction-contract.js';
 // Model turns per invocation. The pinned host enforces --max-turns before it sends a further turn (hidden from its
@@ -273,7 +273,7 @@ export function createExtractor({ executable, env = process.env, scratchRoot = t
       const auth = await probe([...configurationArgs(), 'auth', 'status']);
       let route; try { route = JSON.parse(auth.stdout); } catch { return blocked('auth_unverified'); }
       if (auth.failure || auth.code !== 0 || !object(route) || route.loggedIn !== true || route.authMethod !== 'claude.ai' || route.apiProvider !== 'firstParty' || route.apiKeySource) return blocked('auth_route_unapproved');
-      const accountFingerprint = accountOf(route, accountSalt);
+      const accountFingerprint = accountOf(route, accountSalt), accountEmailFingerprint = accountEmailDigest(accountSalt, route.email);
       const doctor = await probe([...configurationArgs(), 'doctor']);
       // Exactly one remote-settings report in the whole output, and it is the host's own ineligible line verbatim;
       // any other, extra or decorated state may apply a cache (post-merge review F1).
@@ -284,7 +284,7 @@ export function createExtractor({ executable, env = process.env, scratchRoot = t
       return { ok: true, executable: binary, binarySha256: digest, hostVersion, model: EXTRACTION_MODEL,
         remotePolicy: { cache: cacheOnly ? 'present' : 'absent', applicability: 'host_reported_ineligible', conflict: 'not_assessed' },
         restrictions: Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`E-${i + 1}`, true])),
-        environmentNames: Object.keys(childEnv).sort(), switches: FLAGS, configurationProfile: 'subscription-unmanaged-safe-mode-v1', accountFingerprint };
+        environmentNames: Object.keys(childEnv).sort(), switches: FLAGS, configurationProfile: 'subscription-unmanaged-safe-mode-v1', accountFingerprint, accountEmailFingerprint };
     } catch { return blocked('configuration_check_failed'); }
   }
   let childSettlementUnconfirmed = false;
