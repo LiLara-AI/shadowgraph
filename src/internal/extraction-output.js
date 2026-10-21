@@ -1,6 +1,6 @@
 // The model proposes typed fields; the local verifier decides their support.
 import { createHash } from 'node:crypto';
-import { CLAIM_VERIFIER_VERSION, classifyClaim, toolCallCoverageClaims } from '../verification.js';
+import { CLAIM_VERIFIER_VERSION, classifyClaim, decisionFrameClaims, toolCallCoverageClaims } from '../verification.js';
 import { validateSchemaValue } from '../extractor.js';
 import { redactText, captureWithheld } from './redaction.js';
 import { stripDeliveredBlocks } from './capture-source.js';
@@ -72,14 +72,53 @@ function coversToolCall(proposed, item, split) {
   return true;
 }
 
+const withEvidence = (claim, source) => ({ ...claim, evidence: source.slice(claim.span.start, claim.span.end) });
+const placeOf = (item, claim) => JSON.stringify([item.id, claim.span.start, claim.span.end]);
+
+// A proposed decision whose chosen text is the chosen part of a decision frame
+// (verification.js, decision-frame-v1): its parts are the sentence's own words,
+// and the stated reason is the rejected alternative's.
+function framedDecision(proposed, item, source) {
+  const given = name => proposed.fields.filter(field => field.name === name).map(field => fieldOf(field, item));
+  const chosen = given('chosen');
+  if (chosen.length !== 1 || chosen[0].sourceRef !== item.id || proposed.fields.some(field => field.sourceRef !== item.id)) return null;
+  const frame = decisionFrameClaims({ sourceRef: item.id, sourceText: source, chosen: chosen[0].text,
+    alternatives: given('alternative').map(field => field.text), reasons: given('reason').map(field => field.text) });
+  if (!frame || captureWithheld(frame.statement.text)) return null;
+  const claims = [frame.statement, frame.title, frame.chosen, frame.alternative, frame.reason].filter(Boolean).map(claim => withEvidence(claim, source));
+  return {
+    kind: 'decision', values: { title: frame.title.text, chosen: frame.chosen.text },
+    alternatives: frame.alternative ? [{ label: frame.alternative.text, ...(frame.reason ? { reasonRejected: frame.reason.text } : {}) }] : [],
+    claims, reason: null, places: [placeOf(item, frame.statement)]
+  };
+}
+
+// A decision the fields do not establish is kept as the message that says it:
+// the whole source, quoted by the ordinary rule, as a memory. Nothing is read
+// into it, so a reversal or a hedge anywhere in it stays in its text.
+function literalDecision(proposed, item, source) {
+  const text = source.trim();
+  if (!proposed.fields.some(field => field.sourceRef === item.id) || !text || text.length > 8192 || captureWithheld(text)) return null;
+  const outcome = classifyClaim({ text, sourceRef: item.id }, source);
+  if (outcome.class !== 'quoted' && outcome.class !== 'entailed') return null;
+  return { kind: 'memory', values: { text }, alternatives: [], claims: [withEvidence(outcome, source)], reason: null, places: [placeOf(item, outcome)] };
+}
+
 export function prepareExtraction(item, source, value) {
   if (!validateSchemaValue(EXTRACTION_SCHEMA, value)) throw Object.assign(new Error('Invalid extraction output'), { code: 'extraction_schema_invalid' });
   const records = [], unsupported = [], usedPlaces = new Set(), rejected = new Set();
   const required = { decision: ['title', 'chosen'], attempt: ['solution', 'result'], memory: ['text'] };
-  const allowed = { decision: ['title', 'chosen', 'goal', 'alternative'], attempt: ['solution', 'result', 'reason'], memory: ['text'] };
+  const allowed = { decision: ['title', 'chosen', 'goal', 'alternative', 'reason'], attempt: ['solution', 'result', 'reason'], memory: ['text'] };
   const split = recordedToolInputSplit(item, source);
+  const keep = ({ places, ...record }) => {
+    if (places.every(place => usedPlaces.has(place))) return;
+    for (const place of places) usedPlaces.add(place);
+    records.push(record);
+  };
   for (const proposed of value.records) {
-    const accepted = [], values = {}, alternatives = [], places = new Set();
+    const framed = proposed.kind === 'decision' ? framedDecision(proposed, item, source) : null;
+    if (framed) { keep(framed); continue; }
+    const accepted = [], values = {}, alternatives = [], places = new Set(), decisionReasons = [];
     let reason = null, conflict = false;
     const covered = proposed.kind === 'attempt' && split !== null && coversToolCall(proposed, item, split);
     // A proved split is the only attempt shape. The ordinary whole-text quote
@@ -116,6 +155,8 @@ export function prepareExtraction(item, source, value) {
         if (!rejected.has(key)) { rejected.add(key); unsupported.push({ ...outcome, class: 'unsupported', failingDimension: outcome.failingDimension ?? 'unsupported_field' }); }
         continue;
       }
+      // A decision's reason belongs to the alternative it rejected; which one is known only below.
+      if (proposed.kind === 'decision' && field.name === 'reason') { decisionReasons.push({ field, outcome }); continue; }
       const place = JSON.stringify([item.id, outcome.span.start, outcome.span.end]);
       places.add(place);
       if (!accepted.some(claim => claim.span.start === outcome.span.start && claim.span.end === outcome.span.end)) {
@@ -139,16 +180,35 @@ export function prepareExtraction(item, source, value) {
         }
       }
     }
+    if (decisionReasons.length) {
+      // One verified reason for the one rejected alternative; any other shape names no alternative.
+      if (alternatives.length === 1 && new Set(decisionReasons.map(({ field }) => field.text)).size === 1) {
+        const { field, outcome } = decisionReasons[0];
+        alternatives[0].reasonRejected = field.text;
+        places.add(placeOf(item, outcome));
+        if (!accepted.some(claim => claim.span.start === outcome.span.start && claim.span.end === outcome.span.end)) accepted.push(withEvidence(outcome, source));
+      } else {
+        for (const { field, outcome } of decisionReasons) {
+          const key = JSON.stringify([field.text, field.sourceRef, field.span]);
+          if (!rejected.has(key)) { rejected.add(key); unsupported.push({ ...outcome, supportedClass: outcome.class, class: 'unsupported', failingDimension: 'unsupported_field' }); }
+        }
+      }
+    }
     if (conflict) {
       // Valid model output with competing values is observed, never quality-
       // retried. Keep its support class and evidence in expiring provenance;
       // it cannot form one unambiguous canonical field assignment.
       unsupported.push(...accepted.map(claim => ({ ...claim, supportedClass: claim.class, class: 'unsupported', failingDimension: 'field_conflict' })));
+      const literal = proposed.kind === 'decision' ? literalDecision(proposed, item, source) : null;
+      if (literal) keep(literal);
       continue;
     }
-    if (required[proposed.kind].some(name => !values[name]) || !places.size || [...places].every(place => usedPlaces.has(place))) continue;
-    for (const place of places) usedPlaces.add(place);
-    records.push({ kind: proposed.kind, values, alternatives, claims: accepted, reason });
+    if (required[proposed.kind].some(name => !values[name]) || !places.size) {
+      const literal = proposed.kind === 'decision' ? literalDecision(proposed, item, source) : null;
+      if (literal) keep(literal);
+      continue;
+    }
+    keep({ kind: proposed.kind, values, alternatives, claims: accepted, reason, places: [...places] });
   }
   return { records, unsupported };
 }

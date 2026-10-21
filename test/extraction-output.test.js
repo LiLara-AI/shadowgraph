@@ -50,3 +50,80 @@ test('extraction strips self-delivery and redacts input and unsupported output',
   const result = prepareExtraction(item, text, { records: [{ kind: 'memory', fields: [field('text', `token=${secret}`, secret)] }] });
   assert.equal(result.records.length, 0); assert.equal(JSON.stringify(result).includes(secret), false);
 });
+
+// Independent review F1/F2 (record 32 D2/D3): a decision said in a sentence that
+// stands alone keeps its parts -- chosen, rejected alternative, stated reason --
+// each the sentence's own words, when the model proposes only the phrases; a
+// decision the sentence does not establish is kept as the message itself; and
+// nothing the ordinary verifier refuses is accepted by either route.
+const DECISION = 'For the config loader we will use the streaming tokenizer instead of the per-line regex parser, because the regex parser cannot handle nested quotes.';
+const phrases = (chosen = 'use the streaming tokenizer', alternative = 'the per-line regex parser', reason = 'the regex parser cannot handle nested quotes') => ({ kind: 'decision',
+  fields: [field('title', 'Config loader parser'), field('chosen', chosen), ...(alternative ? [field('alternative', alternative)] : []), ...(reason ? [field('reason', reason)] : [])] });
+const kinds = result => result.records.map(record => record.kind);
+
+test('a decision sentence that stands alone is kept as a typed decision with its alternative and reason', () => {
+  const result = prepareExtraction(item, DECISION, { records: [phrases()] });
+  assert.deepEqual(kinds(result), ['decision']);
+  const [decision] = result.records;
+  assert.deepEqual(decision.values, { title: 'For the config loader we will use the streaming tokenizer', chosen: 'the streaming tokenizer' });
+  assert.deepEqual(decision.alternatives, [{ label: 'the per-line regex parser', reasonRejected: 'the regex parser cannot handle nested quotes' }]);
+  assert.equal(decision.claims[0].class, 'quoted'); assert.equal(decision.claims[0].evidence, DECISION.slice(0, -1));
+  for (const claim of decision.claims.slice(1)) {
+    assert.equal(claim.rule, 'decision-frame-v1'); assert.equal(claim.evidence, DECISION.slice(claim.span.start, claim.span.end)); assert.equal(claim.evidence, claim.text);
+  }
+  // The model's phrasing of a part need not repeat an article or the verb, and parts it leaves out are still the sentence's.
+  for (const proposal of [phrases('the streaming tokenizer', 'per-line regex parser', 'because the regex parser cannot handle nested quotes'), phrases('streaming tokenizer', null, null)]) {
+    assert.deepEqual(prepareExtraction(item, DECISION, { records: [proposal] }).records[0].alternatives, decision.alternatives);
+  }
+  for (const [source, chosen, alternatives] of [
+    ["Let's go with the SQLite store rather than the JSON file.", 'the SQLite store', [{ label: 'the JSON file' }]],
+    ['We decided to keep the v2 schema.', 'the v2 schema', []],
+    ["- I'll switch to node-fetch in place of axios because axios adds 2 MB.", 'node-fetch', [{ label: 'axios', reasonRejected: 'axios adds 2 MB' }]]
+  ]) {
+    const typed = prepareExtraction(item, source, { records: [{ kind: 'decision', fields: [field('title', chosen), field('chosen', chosen)] }] });
+    assert.deepEqual(kinds(typed), ['decision'], source); assert.equal(typed.records[0].values.chosen, chosen, source); assert.deepEqual(typed.records[0].alternatives, alternatives, source);
+  }
+  // The model's own whole-message memory lands on the sentence's place: it is the same experience, recorded once.
+  assert.deepEqual(kinds(prepareExtraction(item, DECISION, { records: [phrases(), { kind: 'memory', fields: [field('text', DECISION)] }] })), ['decision']);
+});
+
+test('no decision is read from words that turn it; the message is kept as it is said, or not at all', () => {
+  for (const [label, source] of [
+    ['negated', 'For the config loader we will not use the streaming tokenizer instead of the per-line regex parser.'],
+    ['contracted negation', "We won't use the streaming tokenizer instead of the per-line regex parser."],
+    ['hedged', 'We might use the streaming tokenizer instead of the per-line regex parser.'],
+    ['hedged lead', 'Maybe we will use the streaming tokenizer instead of the per-line regex parser.'],
+    ['someone else decides', 'They will use the streaming tokenizer instead of the per-line regex parser.'],
+    ['an opinion about a decision', 'I think we will use the streaming tokenizer instead of the per-line regex parser.'],
+    ['a time on the choice', 'We will use the streaming tokenizer tomorrow instead of the per-line regex parser.'],
+    ['a condition on the choice', 'We will use the streaming tokenizer if it is fast instead of the per-line regex parser.'],
+    ['a negated alternative', 'We will use the streaming tokenizer instead of not the per-line regex parser.'],
+    ['a retraction after it', `${DECISION} Kidding.`],
+    ['untested', `${DECISION} Untested.`],
+    ['another request beside it', `${DECISION} Run node parse-demo.mjs sample.cfg.`],
+    ['an aside after the reason', 'We will use the streaming tokenizer instead of the per-line regex parser (for now).']
+  ]) {
+    const result = prepareExtraction(item, source, { records: [phrases()] });
+    assert.deepEqual(result.records.map(record => ({ kind: record.kind, values: record.values })), [{ kind: 'memory', values: { text: source } }], label);
+    assert.equal(result.records[0].claims[0].class, 'quoted', label);
+  }
+  // A question decides nothing, and is not kept either.
+  for (const source of ['Should we use the streaming tokenizer instead of the per-line regex parser?', 'We will use the streaming tokenizer instead of the per-line regex parser, right?']) {
+    assert.deepEqual(prepareExtraction(item, source, { records: [phrases()] }).records, [], source);
+  }
+  // The model's reading must be the sentence's: a swapped or invented part is another reading.
+  for (const proposal of [phrases('use the per-line regex parser', 'the streaming tokenizer'), phrases(undefined, 'the regex parser'), phrases(undefined, undefined, 'the tokenizer is faster')]) {
+    assert.deepEqual(kinds(prepareExtraction(item, DECISION, { records: [proposal] })), ['memory']);
+  }
+  // A decision cited only to another source keeps nothing.
+  assert.deepEqual(prepareExtraction(item, DECISION, { records: [{ kind: 'decision', fields: [field('chosen', 'use the streaming tokenizer', 'foreign-source')] }] }).records, []);
+});
+
+test('a verified decision reason is the reason its one rejected alternative was rejected, and no other', () => {
+  const one = prepareExtraction(item, text, { records: [{ kind: 'decision', fields: ['title', 'chosen', 'alternative', 'reason'].map(name => field(name)) }] });
+  assert.deepEqual(one.records[0].alternatives, [{ label: text, reasonRejected: text }]); assert.equal(one.records[0].reason, null);
+  assert.equal(one.unsupported.length, 0);
+  const none = prepareExtraction(item, text, { records: [{ kind: 'decision', fields: ['title', 'chosen', 'reason'].map(name => field(name)) }] });
+  assert.deepEqual(none.records[0].alternatives, []);
+  assert.deepEqual(none.unsupported.map(x => [x.failingDimension, x.supportedClass]), [['unsupported_field', 'quoted']]);
+});

@@ -266,7 +266,10 @@ export const CLAIM_DERIVATION_RULES = Object.freeze({
   'contraction-expansion-v1': "reads n't, 're, 've, 'll and 'm (with any apostrophe) as the words they contract; nothing else",
   // Applied only to a split capture recorded. classifyClaim never selects it
   // by reading labels, and it does not assign a decision, alternative or cause.
-  'tool-call-coverage-v1': 'copies a capture-recorded input side into the attempt solution and the outcome side into its result; it does not verify the tool report or assign a cause'
+  'tool-call-coverage-v1': 'copies a capture-recorded input side into the attempt solution and the outcome side into its result; it does not verify the tool report or assign a cause',
+  // Applied only to a decision a model proposed, whose chosen text it must
+  // match. The sentence itself must be quoted by the rules above.
+  'decision-frame-v1': 'reads one quoted sentence of the form "[For|In ...,] we|I|let\'s <decide> <chosen> [instead of|rather than|in place of <alternative>][, because <reason>]" into its parts, word for word; the reason is the one stated, not a verified cause'
 });
 // The order a failure is reported in: what reverses or hedges a claim first.
 const FAILURE_ORDER = ['polarity', 'modality', 'quantifier', 'actor', 'time', 'scope'];
@@ -691,6 +694,104 @@ export function toolCallCoverageClaims({ sourceRef, sourceText, boundary, soluti
     text, sourceRef, class: 'entailed', rule: 'tool-call-coverage-v1', verifierVersion: CLAIM_VERIFIER_VERSION, span: { start, end }
   });
   return [claim(input, 0, boundary), claim(outcome, boundary + 1, sourceText.length)];
+}
+
+// A decision said in one sentence that stands alone in its source -- the
+// sentence is quoted by the rules above -- read into its parts at fixed
+// connectives (decision-frame-v1). Each part is the source's own words. The
+// chosen and the rejected parts hold no negation, hedge, time or other actor,
+// the sentence holds no question, and nothing follows the reason, so no part
+// is read out of words that turn it. Anything else is not a frame, and the
+// caller keeps the message as it is said instead of fields read from a piece.
+const FRAME_SUFFIX = new Map([["'ll", 'will'], ["'re", 'are'], ["'m", 'am'], ["'ve", 'have']]);
+const FRAME_VERBS = [['use'], ['go', 'with'], ['switch', 'to'], ['adopt'], ['keep'], ['stick', 'with'], ['choose'], ['pick']];
+const FRAME_HEADS = [
+  ...['we', 'i'].flatMap((who) => [
+    ...FRAME_VERBS.flatMap((verb) => [[who, 'will', ...verb], [who, 'decided', 'to', ...verb], [who, 'have', 'decided', 'to', ...verb]]),
+    ...['are', 'am'].flatMap((be) => [[who, be, 'going', 'with'], ...FRAME_VERBS.map((verb) => [who, be, 'going', 'to', ...verb])]),
+    [who, 'chose'], [who, 'picked'], [who, 'decided', 'on']
+  ]),
+  ...FRAME_VERBS.map((verb) => ['let', 'us', ...verb])
+].sort((a, b) => b.length - a.length);
+const FRAME_CONTRASTS = [['instead', 'of'], ['rather', 'than'], ['in', 'place', 'of']];
+const FRAME_TURNING = new Set(['polarity', 'modality', 'actor', 'time']);
+// Inside a part only what joins one name: "per-line", "src/cli.js".
+const FRAME_JOINERS = new Set(['', '-', '/', '.', '_', '+', '#', '@']);
+const startsWith = (tokens, at, words) => words.every((word, offset) => tokens[at + offset]?.w === word && (offset === 0 || tokens[at + offset].gap === ''));
+
+function decisionFrameOf(text, unit) {
+  const tokens = [];
+  let previous = unit.bodyFrom;
+  for (const word of unit.words) {
+    const gap = text.slice(previous, word.start).trim();
+    const at = { gap, start: word.start, end: word.end };
+    previous = word.end;
+    if (word.base === 'let' && word.suffix === "'s") tokens.push({ w: 'let', marker: null, ...at }, { w: 'us', marker: 'actor', ...at, gap: '' });
+    else if (FRAME_SUFFIX.has(word.suffix)) {
+      const second = FRAME_SUFFIX.get(word.suffix);
+      tokens.push({ w: word.base, marker: markerOf({ word: word.base, base: word.base, suffix: '' }), ...at }, { w: second, marker: markerOf({ word: second, base: second, suffix: '' }), ...at, gap: '' });
+    } else tokens.push({ w: word.word, marker: word.marker, ...at });
+  }
+  if (!tokens.length || tokens[0].gap || !['', '.', '!'].includes(text.slice(previous, unit.to).trim())) return null;
+  const subject = tokens.findIndex((token, index) => token.w === 'we' || token.w === 'i' || (token.w === 'let' && tokens[index + 1]?.w === 'us'));
+  const head = subject < 0 ? undefined : FRAME_HEADS.find((words) => startsWith(tokens, subject, words));
+  if (!head) return null;
+  // A lead names where the decision holds, and is kept in the title: "For the config loader, ...".
+  if (subject > 0) {
+    const lead = tokens.slice(0, subject);
+    if (lead.length < 2 || !['for', 'in'].includes(lead[0].w) || !['', ','].includes(tokens[subject].gap)
+      || lead.some(({ marker, gap }, index) => ['polarity', 'modality', 'actor'].includes(marker) || (index > 0 && !FRAME_JOINERS.has(gap)))) return null;
+  }
+  const from = subject + head.length;
+  let contrast = -1, contrastEnd = -1, because = -1;
+  for (let index = from; index < tokens.length && because < 0; index += 1) {
+    const words = FRAME_CONTRASTS.find((candidate) => startsWith(tokens, index, candidate));
+    if (tokens[index].w === 'because') because = index;
+    else if (words && contrast >= 0) return null;
+    else if (words) [contrast, contrastEnd] = [index, index + words.length];
+  }
+  const part = (first, last, { turning, joiners }) => {
+    const slice = tokens.slice(first, last);
+    if (!slice.length || slice[0].gap !== '' || !slice.some(({ w, marker }) => !marker && !CLAIM_STOP_WORDS.has(w))
+      || slice.some(({ marker, gap }, index) => (!turning && FRAME_TURNING.has(marker)) || (index > 0 && !joiners.has(gap)))) return null;
+    return [slice[0].start, slice.at(-1).end];
+  };
+  const strict = { turning: false, joiners: FRAME_JOINERS };
+  const chosenEnd = contrast >= 0 ? contrast : because >= 0 ? because : tokens.length;
+  const chosen = part(from, chosenEnd, strict);
+  const alternative = contrast >= 0 ? part(contrastEnd, because >= 0 ? because : tokens.length, strict) : null;
+  // The reason runs to the sentence's end, so whatever it says stays in it.
+  const reason = because >= 0 ? part(because + 1, tokens.length, { turning: true, joiners: new Set([...FRAME_JOINERS, ',']) }) : null;
+  if (!chosen || (contrast >= 0 && (!alternative || !['', ','].includes(tokens[contrast].gap))) || (because >= 0 && (!reason || !['', ','].includes(tokens[because].gap)))) return null;
+  return { title: [tokens[0].start, chosen[1]], chosen, alternative, reason };
+}
+// What a proposed part says, to compare with the frame's: its words, without a
+// leading decide verb (for the chosen part), "because" (for the reason) or article.
+function frameCore(text, lead = []) {
+  const words = expandContractions(claimWordsOf(text)).split(' ').filter(Boolean);
+  const verb = lead.find((candidate) => candidate.every((word, offset) => words[offset] === word));
+  const rest = words.slice(verb?.length ?? 0);
+  while (['the', 'a', 'an'].includes(rest[0])) rest.shift();
+  return rest.join(' ');
+}
+export function decisionFrameClaims({ sourceRef, sourceText, chosen, alternatives = [], reasons = [] }) {
+  if (typeof sourceText !== 'string' || typeof sourceRef !== 'string' || !sourceRef || typeof chosen !== 'string') return null;
+  const want = frameCore(chosen, [['to'], ...FRAME_VERBS, ...FRAME_VERBS.map((verb) => ['to', ...verb])].sort((a, b) => b.length - a.length));
+  if (!want) return null;
+  const source = readSource(sourceText);
+  const text = ([start, end]) => sourceText.slice(start, end);
+  const frames = source.units.map((unit, index) => ({ index, frame: decisionFrameOf(sourceText, unit) }))
+    .filter(({ frame }) => frame && frameCore(text(frame.chosen)) === want);
+  if (frames.length !== 1) return null;
+  const [{ index, frame }] = frames;
+  // A proposed rejected part or reason that is not the frame's is another reading.
+  if (alternatives.some((given) => !frame.alternative || frameCore(given) !== frameCore(text(frame.alternative)))) return null;
+  if (reasons.some((given) => !frame.reason || frameCore(given, [['because']]) !== frameCore(text(frame.reason)))) return null;
+  const unit = source.units[index];
+  const statement = classifyAgainst({ text: sourceText.slice(unit.bodyFrom, unit.to), sourceRef }, source);
+  if (statement.class !== 'quoted' && statement.class !== 'entailed') return null;
+  const claim = (span) => span && ({ text: text(span), sourceRef, class: 'entailed', rule: 'decision-frame-v1', verifierVersion: CLAIM_VERIFIER_VERSION, span: { start: span[0], end: span[1] } });
+  return { statement, title: claim(frame.title), chosen: claim(frame.chosen), alternative: claim(frame.alternative), reason: claim(frame.reason) };
 }
 
 // Plan v1.4.4 §17, G-5 §3.1 (PR-25): the negating words of a text, read as the

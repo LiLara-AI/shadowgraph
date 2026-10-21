@@ -2153,7 +2153,7 @@ export function createShadowGraph(options = {}) {
   function sameExtractionFields(record, proposed) {
     const fields = { memory: ['text'], decision: ['title', 'chosen', 'goal'], attempt: ['solution', 'result', 'reason'] };
     return record.kind === proposed.kind && fields[record.kind].every(key => (record[key] ?? '') === (proposed.values[key] ?? ''))
-      && (record.kind !== 'decision' || JSON.stringify((record.alternatives ?? []).map(value => value.label)) === JSON.stringify(proposed.alternatives.map(value => value.label)));
+      && (record.kind !== 'decision' || JSON.stringify((record.alternatives ?? []).map(value => [value.label, value.reasonRejected ?? ''])) === JSON.stringify(proposed.alternatives.map(value => [value.label, value.reasonRejected ?? ''])));
   }
 
   // A replacement is a new representation of this capture, possibly split,
