@@ -105,15 +105,19 @@ try {
   const calls = async () => (await readFile(join(p.host, 'calls.jsonl'), 'utf8').catch(() => '')).split('\n').filter(Boolean).map(line => JSON.parse(line));
   const worker = async () => JSON.parse(await readFile(join(p.sgHome, 'extraction-worker'), 'utf8').catch(() => 'null'));
   const captures = async () => (await storeNow()).records.filter(r => r.kind === 'capture');
-  const settle = async (limitMs = 120000) => {
-    const started = Date.now(); await sleep(1500);
+  // Settled: the worker this Stop requested has written its fence after the
+  // Stop was sent, stopped, and left nothing processing.
+  const settle = async (since, limitMs = 120000) => {
+    const started = Date.now();
     while (Date.now() - started < limitMs) {
-      const open = (await captures()).filter(c => c.state === 'processing').length, fence = await worker();
-      if (!open && (fence === null || fence.state === 'stopped')) { await sleep(1500); if (!(await captures()).some(c => c.state === 'processing')) return Date.now() - started; }
-      await sleep(500);
+      const fence = await worker(), open = (await captures()).some(c => c.state === 'processing');
+      if (fence && Date.parse(fence.at) >= since && fence.state === 'stopped' && !open) return Date.now() - started;
+      await sleep(250);
     }
     return null;
   };
+  // A drain the window refuses before any call writes no fence: it waits out `limitMs`.
+  const stop = async (session, message, limitMs) => { const since = Date.now(); await hook('Stop', { session_id: session, stop_hook_active: false, last_assistant_message: message }); return settle(since, limitMs); };
 
   // Session A: a conversational decision with a rejected alternative and its
   // reason, then a real attempted action that fails, then the turn ends.
@@ -123,8 +127,7 @@ try {
   await hook('UserPromptSubmit', { session_id: A, prompt: decision });
   await hook('PostToolUseFailure', { session_id: A, tool_name: 'Bash', tool_input: { command }, tool_use_id: 'toolu_e2e_1', error: failure });
   const callsBefore = (await calls()).length;
-  await hook('Stop', { session_id: A, stop_hook_active: false, last_assistant_message: 'The parser failed on line 3 of sample.cfg; the tokenizer plan stands.' });
-  const settledA = await settle();
+  const settledA = await stop(A, 'The parser failed on line 3 of sample.cfg; the tokenizer plan stands.');
   const afterA = await storeNow(), capA = afterA.records.filter(r => r.kind === 'capture'), callsA = await calls();
   step('session A', { captures: capA.map(c => ({ event: c.source?.event, role: c.source?.role, state: c.state, attribution: c.attribution, project: c.project })), settledMs: settledA, executorCalls: callsA.length - callsBefore, worker: await worker() });
   check('capture_by_hooks', capA.length === 3 && capA.every(c => c.attribution === 'project' && c.project === 'config-loader'), capA.map(c => c.state));
@@ -138,13 +141,15 @@ try {
     attempt && { sourceClass: attempt.sourceClass, outcomeEvidence: attempt.outcomeEvidence?.state, resultClass: attempt.resultClass ?? null });
   check('decision_message_recorded_verbatim_with_evidence', memory && memory.verificationStatus === 'unverified' && capA.some(c => c.id === memory.captureRef) && memory.claims?.length >= 1);
   check('typed_decision_with_rejected_alternative_and_reason', typed && typed.alternatives?.length === 1 && Boolean(typed.alternatives[0].reasonRejected), typed ? undefined : 'no decision record: its phrase fields were refused by claim verification', true);
-  check('extraction_child_isolated', callsA.every(c => c.hooksDisabled && !c.environmentNames.some(name => /^(SHADOWGRAPH_|ANTHROPIC_|CLAUDE_CODE_SESSION|CLAUDE_CODE_MESSAGING)/iu.test(name))), callsA.map(c => c.environmentNames));
+  check('extraction_child_isolated', callsA.length > 0 && callsA.every(c => c.hooksDisabled && !c.environmentNames.some(name => /^(SHADOWGRAPH_|ANTHROPIC_|CLAUDE|HTTPS?_PROXY$)/iu.test(name) && !/^CLAUDE_CODE_DISABLE_/u.test(name))), callsA.map(c => c.environmentNames));
 
   // Repeated and concurrent Stops: no second processing of anything.
+  // Two concurrent Stops with new material: it is processed, and once.
+  const sinceDup = Date.now();
   await Promise.all([hook('Stop', { session_id: A, stop_hook_active: false, last_assistant_message: 'Done.' }), hook('Stop', { session_id: A, stop_hook_active: false, last_assistant_message: 'Done.' })]);
-  await settle();
+  await settle(sinceDup);
   const callsDup = await calls(), refs = callsDup.map(c => c.sourceRef);
-  check('no_duplicate_processing', new Set(refs).size === refs.length, { calls: refs.length, distinct: new Set(refs).size });
+  check('no_duplicate_processing', refs.length > callsA.length && new Set(refs).size === refs.length && (await captures()).every(c => c.state === 'extracted'), { calls: refs.length, distinct: new Set(refs).size });
 
   // 3. A fresh session in the same project asks something the memory bears on.
   const B = randomUUID();
@@ -157,13 +162,14 @@ try {
   // 4. Budget: more captured work than one window allows stays pending, visibly.
   const C = randomUUID();
   for (let n = 1; n <= 10; n += 1) await hook('UserPromptSubmit', { session_id: C, prompt: `Note ${n}: keep the loader's error messages short, item ${n} of ten.` });
-  for (let round = 0; round < 4; round += 1) { await hook('Stop', { session_id: C, stop_hook_active: false, last_assistant_message: `Noted round ${round}.` }); await settle(); }
+  for (let round = 0; round < 4; round += 1) await stop(C, `Noted round ${round}.`, 30000);
   const usage = JSON.parse(await readFile(join(p.sgHome, 'extraction-usage.json'), 'utf8'));
   const head = context(await hook('SessionStart', { session_id: randomUUID(), source: 'startup' })).split('\n').find(line => line.startsWith('processing: '));
   const processing = head ? JSON.parse(head.slice('processing: '.length)) : null;
   step('budget', { reservations: usage.calls.length, processing });
-  check('budget_ceiling_held', usage.calls.length <= 12 && (await calls()).length <= 12, { reservations: usage.calls.length, executorCalls: (await calls()).length });
-  check('pending_visible_when_budget_limited', processing && processing.pending > 0, processing);
+  // More work than the window allows: the ceiling must be reached, not merely respected.
+  check('budget_ceiling_held', usage.calls.length === 12 && (await calls()).length === 12 && !(await captures()).some(c => c.state === 'processing'), { reservations: usage.calls.length, executorCalls: (await calls()).length });
+  check('pending_visible_when_budget_limited', processing && processing.pending > 0 && processing.workerErrors?.includes('window_calls'), processing);
 
   // 5. Restart: a new host process sees the same queue; nothing is lost or redone.
   const pendingBefore = (await captures()).filter(c => c.state === 'pending').length;
@@ -175,6 +181,7 @@ try {
 } finally {
   const text = `${JSON.stringify(receipt, null, 2)}\n`;
   if (out) await writeFile(out, text);
+  process.exitCode = receipt.result === 'PASS' ? 0 : 1;
   process.stdout.write(text);
   if (!keep) await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => {});
   else process.stderr.write(`kept ${root}\n`);
