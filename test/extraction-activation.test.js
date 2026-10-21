@@ -14,7 +14,7 @@ async function setup(t) {
   const store = { file: join(root, 'memory.json'), storage: 'json' };
   const extraction = { state: 'active', activationId: randomUUID(), changedAt: new Date().toISOString(), store, runtime,
     noOverageConfirmed: true, budgets: { ...FROZEN_WORKER_BUDGETS }, model: 'claude-opus-5[1m]',
-    executor: { ok: true, executable: join(root, 'claude.exe'), binarySha256: 'b'.repeat(64), hostVersion: '2.1.288', model: 'claude-opus-5[1m]', restrictions: Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`E-${i + 1}`, true])) } };
+    executor: { ok: true, executable: join(root, 'claude.exe'), binarySha256: 'b'.repeat(64), hostVersion: '2.1.288', model: 'claude-opus-5[1m]', restrictions: Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`E-${i + 1}`, true])), accountFingerprint: 'f'.repeat(64), accountSalt: 'e'.repeat(32) } };
   const record = { version: 1, capabilities: { extraction, capture: { state: 'active', store, runtime } }, history: [] };
   const file = join(root, 'activation.json'); const save = () => writeFile(file, JSON.stringify(record)); await save();
   return { root, env, extraction, record, file, save };
@@ -124,6 +124,21 @@ test('extraction activation refuses missing confirmation, unresolved restriction
   assert.deepEqual(await readFile(f.file), before);
   await assert.rejects(readFile(usageFile(f.env)), { code: 'ENOENT' });
 });
+test('extraction activation binds the account the executor names, under a key of its own, or refuses', async t => {
+  const f = await writable(t), { activateExtraction } = await activation(); const before = await readFile(f.file);
+  const { accountFingerprint, ...unnamed } = f.extraction.executor;
+  await assert.rejects(activateExtraction({ ...f.options, executorCheck: async () => unnamed }), /extraction_account_unidentified/);
+  assert.deepEqual(await readFile(f.file), before);
+  let given;
+  const result = await activateExtraction({ ...f.options, executorCheck: async options => { given = options; return f.extraction.executor; } });
+  const executor = result.record.capabilities.extraction.executor;
+  assert.match(given.accountSalt, /^[0-9a-f]{32}$/u); assert.equal(executor.accountSalt, given.accountSalt);
+  assert.equal(executor.accountFingerprint, accountFingerprint);
+  // An activation recorded without a bound account is not one this runtime runs.
+  const { activeExtraction } = await state();
+  delete result.record.capabilities.extraction.executor.accountFingerprint; await writeFile(f.file, JSON.stringify(result.record));
+  assert.equal(await activeExtraction(f.env), null);
+});
 test('extraction activation refuses concurrent record changes and malformed usage rather than resetting either', async t => {
   const f = await writable(t), { activateExtraction } = await activation();
   await assert.rejects(activateExtraction({ ...f.options, afterConfirmation: () => writeFile(f.file, '{changed') }), /changed_while_confirming/);
@@ -210,6 +225,17 @@ test('the requested worker inherits no host-session provider route or session to
     spawnProcess: (...args) => { spawned = args[2].env; const child = new EventEmitter(); child.unref = () => {}; return child; } });
   assert.equal(result.status, 'requested');
   assert.deepEqual(Object.keys(spawned).sort(), ['NoDefaultCurrentDirectoryInExePath', 'Path', 'SHADOWGRAPH_FILE', 'SHADOWGRAPH_HOME', 'SystemRoot', 'USERPROFILE']);
+});
+test('a session under another profile or a session token does not start the worker', async t => {
+  const f = await activated(t), { triggerExtraction } = await import('../src/internal/extraction-trigger.js'); let spawned = 0;
+  const run = env => triggerExtraction({ env: { ...f.env, ...env }, runtimeDirectory: f.options.runtime, deadline: Date.now() + 5000, event: 'Stop', outcome: 'written',
+    spawnProcess: () => { spawned++; const child = new EventEmitter(); child.unref = () => {}; return child; } });
+  for (const selector of [{ CLAUDE_CONFIG_DIR: join(f.root, 'other-profile') }, { CLAUDE_CODE_OAUTH_TOKEN: 'synthetic-token' }, { Claude_Config_Dir: join(f.root, 'other-profile') }]) {
+    assert.deepEqual(await run(selector), { status: 'refused', reason: 'session_profile_selected' });
+  }
+  assert.equal(spawned, 0);
+  assert.equal((await run({ CLAUDE_CONFIG_DIR: '', CLAUDE_CODE_OAUTH_TOKEN: '' })).status, 'requested', 'an empty selector selects nothing');
+  assert.equal(spawned, 1);
 });
 test('uninstall disables extraction even when no hooks remain', async t => {
   const f = await activated(t); const settings = join(f.root, 'host-config.json'); await writeFile(settings, '{"model":"owner-choice"}');

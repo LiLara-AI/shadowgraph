@@ -14,6 +14,11 @@ const ELIGIBLE = new Set(['written', 'nothing_new', 'already_held', 'transcript'
 const WORKER_ENV = new Set(['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'PATH', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'SYSTEMDRIVE', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL']);
 export const workerEnvironment = env => Object.fromEntries(Object.entries(env)
   .filter(([name, value]) => typeof value === 'string' && (WORKER_ENV.has(name.toUpperCase()) || /^SHADOWGRAPH_/iu.test(name))));
+// A session under another profile or a session token may be another account.
+// The worker would run under the default profile's account, so such a session
+// never starts it, as before the worker's environment was filtered.
+const PROFILE_SELECTORS = new Set(['CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN']);
+export const sessionProfileSelected = env => Object.entries(env).some(([name, value]) => PROFILE_SELECTORS.has(name.toUpperCase()) && typeof value === 'string' && value !== '');
 export async function triggerExtraction({ event, outcome, deadline, env = process.env, spawnProcess = spawn,
   runtimeDirectory = dirname(dirname(dirname(fileURLToPath(import.meta.url)))) } = {}) {
   const inert = { status: 'inert' };
@@ -21,6 +26,7 @@ export async function triggerExtraction({ event, outcome, deadline, env = proces
   try {
     const activation = await activeExtraction(env);
     if (!activation || await canonicalPath(runtimeDirectory) !== activation.runtime.path || Date.now() >= deadline) return inert;
+    if (sessionProfileSelected(env)) return { status: 'refused', reason: 'session_profile_selected' };
     const child = spawnProcess(process.execPath, [join(activation.runtime.path, 'src', 'cli.js'), 'extract', '--automatic'], {
       cwd: dirname(usageFile(env)), env: { ...workerEnvironment(env), NoDefaultCurrentDirectoryInExePath: '1' }, detached: true, shell: false, stdio: 'ignore', windowsHide: true
     });
