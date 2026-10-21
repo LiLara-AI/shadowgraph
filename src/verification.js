@@ -720,7 +720,17 @@ const FRAME_DETERMINERS = new Set(['the', 'this', 'that', 'a', 'an']);
 // Inside a part only what joins one name, with no space: "per-line", "src/cli.js".
 const FRAME_JOINERS = new Set(['-', '/', '.', '_', '+', '#', '@']);
 // A reason is one clause: these turn or bound what it says, or the decision.
-const REASON_TURNING = new Set(['unless', 'except', 'excluding', 'but', 'though', 'although', 'however', 'otherwise', 'whereas', 'while', 'until', 'if', 'because']);
+const REASON_TURNING = new Set(['unless', 'except', 'excluding', 'but', 'though', 'although', 'however', 'otherwise', 'whereas', 'while', 'until', 'if', 'whether', 'because',
+  // Hedges: a reason may report ("the log reports"), never doubt itself.
+  'may', 'might', 'could', 'would', 'should', 'possibly', 'probably', 'likely', 'unlikely', 'perhaps', 'maybe', 'seems', 'seem', 'seemed', 'seemingly', 'appears', 'appear',
+  'appeared', 'apparently', 'supposedly', 'suppose', 'allegedly', 'presumably', 'hopefully', 'theoretically', 'arguably', 'hypothetically', 'think', 'thinks', 'thought',
+  'believe', 'believes', 'believed', 'guess', 'suspect', 'suspects', 'suspected', 'assume', 'assumes', 'assumed', 'assuming', 'doubt', 'doubts', 'doubtful', 'unclear',
+  'uncertain', 'unconfirmed', 'unverified', 'expect', 'expects']);
+// A lead is "For|In the <name>": these name a time, a case or a manner, not a place.
+// ponytail: a hand-picked list; a lead is kept word for word in the title either way.
+const LEAD_IDIOMS = new Set(['moment', 'meantime', 'meanwhile', 'interim', 'time', 'being', 'event', 'case', 'cases', 'run', 'term', 'future', 'past', 'present', 'end',
+  'beginning', 'start', 'record', 'long', 'short', 'near', 'first', 'last', 'worst', 'best', 'rest', 'most', 'least', 'odd', 'rare', 'mean', 'theory', 'principle', 'general',
+  'practice', 'effect', 'fact', 'way', 'sake', 'now', 'today', 'week', 'month', 'sprint', 'release', 'demo', 'draft', 'test', 'trial']);
 // Words of one part: a space between them, or a joiner with none.
 const joined = ({ gap, tight }) => gap === '' || (tight && FRAME_JOINERS.has(gap));
 const startsWith = (tokens, at, words) => words.every((word, offset) => tokens[at + offset]?.w === word && (offset === 0 || tokens[at + offset].gap === ''));
@@ -746,7 +756,8 @@ function decisionFrameOf(text, unit) {
   // A named thing only: "In theory," or "For now," is no place.
   if (subject > 0) {
     const lead = tokens.slice(0, subject);
-    if (lead.length < 3 || !['for', 'in'].includes(lead[0].w) || !FRAME_DETERMINERS.has(lead[1].w) || !['', ','].includes(tokens[subject].gap)
+    if (lead.length < 3 || lead.length > 5 || !['for', 'in'].includes(lead[0].w) || !FRAME_DETERMINERS.has(lead[1].w) || !['', ','].includes(tokens[subject].gap)
+      || lead.slice(2).some(({ w }) => w === 'of' || LEAD_IDIOMS.has(w))
       || lead.some((token, index) => (token.marker && token.marker !== 'scope') || (index > 0 && !joined(token)))) return null;
   }
   const from = subject + head.length;
@@ -770,11 +781,12 @@ function decisionFrameOf(text, unit) {
   // The reason runs to the sentence's end, so whatever it says stays in it. It
   // may state a negative ("cannot handle"), never a hedge or a condition, and it
   // is a reason only for an alternative it names: "instead of JSON because it is
-  // faster" says nothing against JSON.
-  const reason = because >= 0 ? part(because + 1, tokens.length, ({ w, marker }) => marker === 'modality' || REASON_TURNING.has(w)) : null;
+  // faster" says nothing against JSON, nor does a word both parts share.
+  const reason = because >= 0 ? part(because + 1, tokens.length, ({ w }) => REASON_TURNING.has(w)) : null;
   const content = ([start, end]) => new Set(tokens.filter((token) => token.start >= start && token.end <= end && !token.marker && !CLAIM_STOP_WORDS.has(token.w)).map(({ w }) => stem(w)));
   if (!chosen || (contrast >= 0 && (!alternative || !['', ','].includes(tokens[contrast].gap)))) return null;
-  if (because >= 0 && (!reason || !alternative || !['', ','].includes(tokens[because].gap) || ![...content(reason)].some((word) => content(alternative).has(word)))) return null;
+  const rejectedOnly = alternative && [...content(alternative)].filter((word) => !content(chosen).has(word));
+  if (because >= 0 && (!reason || !alternative || !['', ','].includes(tokens[because].gap) || ![...content(reason)].some((word) => rejectedOnly.includes(word)))) return null;
   return { title: [tokens[0].start, chosen[1]], chosen, alternative, reason };
 }
 // What a proposed part says, to compare with the frame's: its words, without a

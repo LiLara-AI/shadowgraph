@@ -92,7 +92,8 @@ test('no decision is read from words that turn it; the message is kept as it is 
   // accepts, so it fails for the words it adds and for nothing else.
   const chosenOnly = chosen => ({ records: [{ kind: 'decision', fields: [field('title', 'Parser choice'), field('chosen', chosen)] }] });
   for (const [source, chosen] of [[DECISION, 'use the streaming tokenizer'], ['We will use the streaming tokenizer instead of the per-line regex parser.', 'use the streaming tokenizer'],
-    ['We will use SQLite instead of JSON because JSON is slow.', 'SQLite'], ['In the draft, we will use SQLite.', 'SQLite'], ['We will use option B.', 'option B']]) {
+    ['We will use SQLite instead of JSON because JSON is slow.', 'SQLite'], ['In the parser, we will use SQLite.', 'SQLite'], ['We will use option B.', 'option B'],
+    ['For the report exporter we will use the streaming CSV writer instead of the in-memory table builder, because the in-memory builder runs out of memory on large reports.', 'the streaming CSV writer']]) {
     assert.deepEqual(kinds(prepareExtraction(item, source, chosenOnly(chosen))), ['decision'], `positive twin: ${source}`);
   }
   for (const [label, source, chosen = 'use the streaming tokenizer'] of [
@@ -107,6 +108,10 @@ test('no decision is read from words that turn it; the message is kept as it is 
     ['a time in a lead', 'For the next release, we will use SQLite.', 'SQLite'],
     ['an outage as a lead', 'In case of an outage, we will use SQLite.', 'SQLite'],
     ['someone as a lead', "In Bob's opinion, we will use SQLite.", 'SQLite'],
+    ['a while as a lead', 'For the moment, we will use SQLite.', 'SQLite'],
+    ['a while as a lead, again', 'In the meantime, we will use SQLite.', 'SQLite'],
+    ['an event as a lead', 'In the event of an outage, we will use SQLite.', 'SQLite'],
+    ['a reason in words both parts share', 'We will use the JSON store instead of the SQLite store because the store is simple.', 'the JSON store'],
     ['negated', 'For the config loader we will not use the streaming tokenizer instead of the per-line regex parser.'],
     ['contracted negation', "We won't use the streaming tokenizer instead of the per-line regex parser."],
     ['hedged', 'We might use the streaming tokenizer instead of the per-line regex parser.'],
