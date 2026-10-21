@@ -58,14 +58,14 @@ try {
   await copyFile(join(here, 'fake-host.mjs'), join(p.host, 'fake-host.mjs'));
   await writeFile(join(p.host, 'fake-host.cfg'), `${process.execPath}\n${join(p.host, 'fake-host.mjs')}\n`);
   const load = async name => import(pathToFileURL(join(rt, 'src', name)).href);
-  const [{ createStorage }, { createShadowGraph }, { privilegedSnapshot }] = await Promise.all([load('storage.js'), load('shadowgraph.js'), load('internal/snapshot.js')]);
-  { const store = await createStorage({ type: 'json', file: p.store }); await store.save(privilegedSnapshot(createShadowGraph())); store.close?.(); }
+  const [{ createStorage }, { createShadowGraph }] = await Promise.all([load('storage.js'), load('shadowgraph.js')]);
   await writeFile(p.settings, '{}\n');
   const shadowgraph = async (cliArgs, env = owner) => {
     try { const { stdout } = await run(process.execPath, [cli, ...cliArgs], { cwd: p.home, env, maxBuffer: 1 << 26 }); return { code: 0, stdout }; }
     catch (error) { return { code: error.code ?? 1, stdout: error.stdout ?? '', stderr: String(error.stderr ?? error.message).slice(0, 400) }; }
   };
   const setup = [
+    ['setup'],
     ['install-hooks', '--settings', p.settings, '--runtime', rt],
     ['install-hooks', '--capture', '--settings', p.settings, '--runtime', rt],
     ['activate', 'delivery', '--evidence', 'isolated-automatic-e2e', '--store', p.store, '--runtime', rt, '--settings', p.settings, '--host-version', '2.1.288'],
