@@ -143,6 +143,9 @@ test('no decision is read from words that turn it; the message is kept as it is 
   }
   // A decision cited only to another source keeps nothing.
   assert.deepEqual(prepareExtraction(item, DECISION, { records: [{ kind: 'decision', fields: [field('chosen', 'use the streaming tokenizer', 'foreign-source')] }] }).records, []);
+  // Only the user's own message is kept as it is said; copied assistant text is not.
+  const assistant = { ...item, source: { role: 'assistant' } };
+  assert.deepEqual(prepareExtraction(assistant, `${DECISION} Kidding.`, { records: [phrases()] }).records, []);
 });
 
 test('a verified decision reason is the reason its one rejected alternative was rejected, and no other', () => {

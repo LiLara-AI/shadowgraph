@@ -95,10 +95,11 @@ function framedDecision(proposed, item, source) {
 
 // A decision the fields do not establish is kept as the message that says it:
 // the whole source, quoted by the ordinary rule, as a memory. Nothing is read
-// into it, so a reversal or a hedge anywhere in it stays in its text.
+// into it, so a reversal or a hedge anywhere in it stays in its text. Only
+// the user's own message: copied assistant or tool text stays as it was.
 function literalDecision(proposed, item, source) {
   const text = source.trim();
-  if (!proposed.fields.some(field => field.sourceRef === item.id) || !text || text.length > 8192 || captureWithheld(text)) return null;
+  if (item.source?.role !== 'user' || !proposed.fields.some(field => field.sourceRef === item.id) || !text || text.length > 8192 || captureWithheld(text)) return null;
   const outcome = classifyClaim({ text, sourceRef: item.id }, source);
   if (outcome.class !== 'quoted' && outcome.class !== 'entailed') return null;
   return { kind: 'memory', values: { text }, alternatives: [], claims: [withEvidence(outcome, source)], reason: null, places: [placeOf(item, outcome)] };
