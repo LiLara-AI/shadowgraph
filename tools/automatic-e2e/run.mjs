@@ -40,7 +40,8 @@ const owner = { SystemRoot: process.env.SystemRoot, PATH: process.env.PATH, TEMP
 // What a desktop host adds to every hook it runs (names as observed in a
 // Claude Code desktop session; the values here are placeholders).
 const hookEnv = terminalEnv ? owner : { ...owner, ANTHROPIC_BASE_URL: 'https://api.anthropic.com', CLAUDE_CODE_SIMPLE: '1', CLAUDECODE: '1',
-  CLAUDE_CODE_ENTRYPOINT: 'claude-desktop', CLAUDE_CODE_SESSION_ID: 'host-session', CLAUDE_CODE_MESSAGING_TOKEN: 'placeholder' };
+  CLAUDE_CODE_ENTRYPOINT: 'claude-desktop', CLAUDE_CODE_SESSION_ID: 'host-session', CLAUDE_CODE_MESSAGING_TOKEN: 'placeholder',
+  CLAUDE_CODE_ACCOUNT_UUID: 'placeholder', CLAUDE_CODE_ORGANIZATION_UUID: 'placeholder', CLAUDE_CODE_USER_EMAIL: 'placeholder@example.invalid' };
 const receipt = { kind: 'shadowgraph-automatic-e2e', version: 1, at: new Date().toISOString(), node: process.version, hookEnvironment: terminalEnv ? 'terminal' : 'desktop-host', steps: [], checks: {} };
 const step = (name, value) => { receipt.steps.push({ name, ...value }); return value; };
 // An informational check reports a known limitation and does not decide the result.
@@ -134,13 +135,17 @@ try {
   check('extraction_started_by_stop_hook_only', callsBefore === 0 && callsA.length === 3 && settledA !== null, { callsBeforeStop: callsBefore, callsAfter: callsA.length });
   check('all_captures_processed', capA.every(c => c.state === 'extracted'), capA.map(c => c.state));
   const experience = afterA.records.filter(r => ['decision', 'attempt', 'memory'].includes(r.kind) && r.project === 'config-loader');
-  const attempt = experience.find(r => r.kind === 'attempt'), memory = experience.find(r => r.kind === 'memory' && r.text === decision), typed = experience.find(r => r.kind === 'decision');
+  const attempt = experience.find(r => r.kind === 'attempt'), typed = experience.find(r => r.kind === 'decision');
   step('experience', { records: experience.map(r => ({ kind: r.kind, title: r.title, chosen: r.chosen, alternatives: r.alternatives?.map(a => ({ label: a.label, reasonRejected: a.reasonRejected })),
     solution: r.solution, result: r.result, text: r.text, sourceClass: r.sourceClass, verificationStatus: r.verificationStatus, captureRef: r.captureRef, claims: r.claims?.length, resultClass: r.resultClass, outcomeEvidence: r.outcomeEvidence?.state })) });
   check('attempt_recorded_with_evidence', attempt && attempt.solution.endsWith(command) && attempt.result.endsWith(failure) && attempt.claims?.length === 2 && attempt.verificationStatus === 'unverified' && capA.some(c => c.id === attempt.captureRef),
     attempt && { sourceClass: attempt.sourceClass, outcomeEvidence: attempt.outcomeEvidence?.state, resultClass: attempt.resultClass ?? null });
-  check('decision_message_recorded_verbatim_with_evidence', memory && memory.verificationStatus === 'unverified' && capA.some(c => c.id === memory.captureRef) && memory.claims?.length >= 1);
-  check('typed_decision_with_rejected_alternative_and_reason', typed && typed.alternatives?.length === 1 && Boolean(typed.alternatives[0].reasonRejected), typed ? undefined : 'no decision record: its phrase fields were refused by claim verification', true);
+  // The stand-in proposes only the decision's phrases: the record must come from the sentence itself.
+  check('typed_decision_with_rejected_alternative_and_reason', typed && typed.verificationStatus === 'unverified' && capA.some(c => c.id === typed.captureRef)
+    && typed.chosen === 'the streaming tokenizer' && typed.alternatives?.length === 1 && typed.alternatives[0].label === 'the per-line regex parser'
+    && typed.alternatives[0].reasonRejected === 'the regex parser cannot handle nested quotes'
+    && typed.claims?.some(c => c.class === 'quoted' && c.evidence === decision.slice(0, -1)) && typed.claims.some(c => c.rule === 'decision-frame-v1'),
+  typed ? { title: typed.title, claims: typed.claims?.map(c => c.rule ?? c.class) } : 'no decision record');
   check('extraction_child_isolated', callsA.length > 0 && callsA.every(c => c.hooksDisabled && !c.environmentNames.some(name => /^(SHADOWGRAPH_|ANTHROPIC_|CLAUDE|HTTPS?_PROXY$)/iu.test(name) && !/^CLAUDE_CODE_DISABLE_/u.test(name))), callsA.map(c => c.environmentNames));
 
   // Repeated and concurrent Stops: no second processing of anything.
