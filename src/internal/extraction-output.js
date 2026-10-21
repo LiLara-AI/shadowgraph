@@ -111,14 +111,26 @@ export function prepareExtraction(item, source, value) {
   const required = { decision: ['title', 'chosen'], attempt: ['solution', 'result'], memory: ['text'] };
   const allowed = { decision: ['title', 'chosen', 'goal', 'alternative', 'reason'], attempt: ['solution', 'result', 'reason'], memory: ['text'] };
   const split = recordedToolInputSplit(item, source);
-  const keep = ({ places, ...record }) => {
-    if (places.every(place => usedPlaces.has(place))) return;
-    for (const place of places) usedPlaces.add(place);
+  const owners = new Map(), placesOf = new Map();
+  const keep = ({ places, ...record }, { framed = false } = {}) => {
+    if (places.every(place => usedPlaces.has(place))) {
+      // A framed decision holds the very quote a memory already took, with its
+      // parts: it takes that memory's place, whichever the model listed first.
+      // Only a memory on exactly the same places; anything else keeps the place.
+      const [owner] = new Set(places.map(place => owners.get(place)));
+      const ownPlaces = placesOf.get(owner);
+      if (!framed || owner?.kind !== 'memory' || places.some(place => owners.get(place) !== owner) || ownPlaces.length !== places.length) return;
+      records[records.indexOf(owner)] = record; placesOf.delete(owner); placesOf.set(record, places);
+      for (const place of places) owners.set(place, record);
+      return;
+    }
+    for (const place of places) { usedPlaces.add(place); if (!owners.has(place)) owners.set(place, record); }
+    placesOf.set(record, places);
     records.push(record);
   };
   for (const proposed of value.records) {
     const framed = proposed.kind === 'decision' ? framedDecision(proposed, item, source) : null;
-    if (framed) { keep(framed); continue; }
+    if (framed) { keep(framed, { framed: true }); continue; }
     const accepted = [], values = {}, alternatives = [], places = new Set(), decisionReasons = [];
     let reason = null, conflict = false;
     const covered = proposed.kind === 'attempt' && split !== null && coversToolCall(proposed, item, split);

@@ -83,8 +83,18 @@ test('a decision sentence that stands alone is kept as a typed decision with its
     const typed = prepareExtraction(item, source, { records: [{ kind: 'decision', fields: [field('title', chosen), field('chosen', chosen)] }] });
     assert.deepEqual(kinds(typed), ['decision'], source); assert.equal(typed.records[0].values.chosen, chosen, source); assert.deepEqual(typed.records[0].alternatives, alternatives, source);
   }
-  // The model's own whole-message memory lands on the sentence's place: it is the same experience, recorded once.
-  assert.deepEqual(kinds(prepareExtraction(item, DECISION, { records: [phrases(), { kind: 'memory', fields: [field('text', DECISION)] }] })), ['decision']);
+  // The model's own whole-message memory lands on the sentence's place: it is the same experience, recorded once,
+  // as the typed decision whichever the model listed first (independent review of 945964e, R1).
+  const whole = { kind: 'memory', fields: [field('text', DECISION)] };
+  for (const records of [[phrases(), whole], [whole, phrases()], [whole, whole, phrases()], [{ kind: 'decision', fields: [field('chosen', 'the regex parser')] }, phrases()]]) {
+    const result = prepareExtraction(item, DECISION, { records });
+    assert.deepEqual(kinds(result), ['decision']); assert.deepEqual(result.records[0].alternatives, decision.alternatives);
+  }
+  // Only a memory on exactly the sentence's place gives way: a message that says more keeps its memory, and no frame reads it.
+  const longer = `${DECISION} Run node parse-demo.mjs sample.cfg.`;
+  assert.deepEqual(kinds(prepareExtraction(item, longer, { records: [{ kind: 'memory', fields: [field('text', longer)] }, phrases()] })), ['memory']);
+  // A second framed decision does not replace the first, and nothing else gives way to one.
+  assert.deepEqual(kinds(prepareExtraction(item, DECISION, { records: [phrases(), phrases('the streaming tokenizer')] })), ['decision']);
 });
 
 test('no decision is read from words that turn it; the message is kept as it is said, or not at all', () => {
