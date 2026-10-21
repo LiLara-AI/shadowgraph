@@ -275,6 +275,21 @@ is defense in depth for a local deployment, not a public-internet security model
 
 ## Interfaces
 
+### What MCP gives you, and what needs the Claude Code integration
+
+| | MCP server (any MCP client) | Claude Code integration (hooks) |
+|---|---|---|
+| Record decisions, attempts, memories and facts | Yes, when the agent or you call a tool | Capture records prompts, tool calls and the assistant's text; extraction turns them into records |
+| Get them back | Yes, when the agent calls a read tool | Delivery adds relevant records to each prompt with no tool call |
+| Works without the agent remembering to save or look | No | Yes, once delivery, capture and extraction are activated |
+| Clients | Claude Code, Cursor, Codex, Hermes and other MCP clients | Claude Code only; extraction on Windows with a profiled host binary |
+| Model calls | None | Extraction only, through your Claude subscription, within fixed budgets |
+
+The MCP server is the portable part: an agent that is told to use it can keep and query memory in any
+client. Everything automatic — capture, extraction and delivery — runs from Claude Code hooks, each
+inert until you activate it (see the [integrations guide](integrations/README.md) and
+[extraction](docs/extraction.md)).
+
 ### MCP
 
 ```bash

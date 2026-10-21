@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **Automatic extraction from desktop sessions.** The worker a Stop or SessionEnd hook requests no longer inherits the hook's environment. A Claude Code desktop session sets `ANTHROPIC_BASE_URL` and session tokens in the environment its hooks inherit; the executor refused them (`provider_environment`, shown as `executor_blocked`), so an automatic drain requested from a desktop session stopped before any model call (reproduced in isolation with those names). The worker now gets the executor's own environment names and `SHADOWGRAPH_*` only.
+- **Isolated end-to-end check.** `tools/automatic-e2e/run.mjs` installs one commit's packed runtime into a scratch home, activates it once, runs each hook as the settings file lists it and reports capture, the Stop-requested drain, the stored experience, delivery to a fresh session, duplicate Stops, the budget ceiling and the pending state. It uses a stand-in host program; real-host evidence is separate.
+- **README.** A table of what the MCP server provides and what needs the Claude Code integration.
+
 ## 0.42.0 — Technical Preview / Early Access (GitHub release, not published to npm)
 
 See the [release notes](RELEASE_NOTES.md) for scope, what was demonstrated and known limitations. Read
