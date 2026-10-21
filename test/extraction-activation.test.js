@@ -201,6 +201,16 @@ test('trigger only requests detached one-shot extraction after eligible capture;
   await (await activation()).deactivateExtraction({ env: f.env });
   assert.equal((await triggerExtraction({ ...options, event: 'Stop', outcome: 'written' })).status, 'inert'); assert.equal(calls.length, 2);
 });
+test('the requested worker inherits no host-session provider route or session token', async t => {
+  const f = await activated(t), { triggerExtraction } = await import('../src/internal/extraction-trigger.js'); let spawned;
+  // What a desktop host sets in every hook it runs, next to what the worker needs.
+  const env = { ...f.env, Path: 'C:\\Windows', SystemRoot: 'C:\\Windows', USERPROFILE: f.root, SHADOWGRAPH_FILE: 'manual.json',
+    ANTHROPIC_BASE_URL: 'https://api.anthropic.com', CLAUDE_CODE_SIMPLE: '1', CLAUDE_CODE_MESSAGING_TOKEN: 'session', CLAUDECODE: '1', HTTPS_PROXY: 'http://proxy' };
+  const result = await triggerExtraction({ env, runtimeDirectory: f.options.runtime, deadline: Date.now() + 5000, event: 'Stop', outcome: 'written',
+    spawnProcess: (...args) => { spawned = args[2].env; const child = new EventEmitter(); child.unref = () => {}; return child; } });
+  assert.equal(result.status, 'requested');
+  assert.deepEqual(Object.keys(spawned).sort(), ['NoDefaultCurrentDirectoryInExePath', 'Path', 'SHADOWGRAPH_FILE', 'SHADOWGRAPH_HOME', 'SystemRoot', 'USERPROFILE']);
+});
 test('uninstall disables extraction even when no hooks remain', async t => {
   const f = await activated(t); const settings = join(f.root, 'host-config.json'); await writeFile(settings, '{"model":"owner-choice"}');
   const result = await changeHookSettings(settings, 'uninstall', { env: f.env });
