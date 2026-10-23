@@ -8,6 +8,12 @@ rejected, why it rejected it, and when that decision should be reconsidered.
 > Status: **Technical Preview / Early Access, 0.42.0.** Install from GitHub — it is not on npm.
 > See [Limitations and Technical Preview status](#limitations-and-technical-preview-status).
 
+> This branch prepares **0.42.1 (unreleased)**. The public installation commands below still
+> select the unchanged 0.42.0 release, not this candidate. Automatic cross-session memory in
+> Claude Desktop Code is not yet demonstrated for this candidate; the account/profile capture
+> residual in [extraction guidance](docs/extraction.md) remains a release blocker, not a
+> production-accepted limitation. Packaging or MCP/container checks cannot close those gates.
+
 ## Why it matters
 
 Chat memory remembers the conversation. It loses the decision.
@@ -31,6 +37,11 @@ machine; data leaves the machine only through opt-ins you turn on (see
 [Local-first and privacy](#local-first-and-privacy)).
 
 ## Quick Start — 5 minutes
+
+For optional automatic capture, extraction and delivery after one-time owner setup, follow
+[the integration guide](integrations/README.md) and [extraction activation and recovery](docs/extraction.md).
+These are distinct from the manual MCP/CLI examples below. Installing the package alone does not
+activate extraction, bind projects, authorize provider usage, or demonstrate model-visible delivery.
 
 ### Requirements
 

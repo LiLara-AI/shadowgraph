@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.42.1 candidate — unreleased
+
+- Include the extraction operation and safety guide in the installation artifact and require it in the package check.
+- Document the publicly obtainable, checksum-pinned Windows extraction executor and distinguish its identity from required host validation.
+- Clarify automatic setup, the still-unverified complete Desktop episode, and the unresolved cross-profile capture boundary. These are not claims of release readiness.
+
 ## Unreleased
 
 - **Automatic extraction from desktop sessions.** The worker a Stop or SessionEnd hook requests no longer inherits the hook's environment. A Claude Code desktop session sets `ANTHROPIC_BASE_URL` and session tokens in the environment its hooks inherit; the executor refused them (`provider_environment`, shown as `executor_blocked`), so an automatic drain requested from a desktop session stopped before any model call (reproduced in isolation with those names). The worker now gets the executor's own environment names and `SHADOWGRAPH_*` only.

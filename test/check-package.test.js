@@ -19,6 +19,7 @@ const requiredFixtureFiles = [
   'dashboard/index.html',
   'docs/api-reference.md',
   'docs/benchmark-report.md',
+  'docs/extraction.md',
   'docs/mcp-compatibility.md',
   'docs/shadowgraph-benchmark-plan.md',
   'docs/unified-memory.md',

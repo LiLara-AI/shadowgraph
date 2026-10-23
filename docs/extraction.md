@@ -4,6 +4,32 @@ Extraction is a one-shot owner CLI worker. Capture requests it after an eligible
 
 ## Activate only after the extraction gate
 
+### Obtain the profiled Windows executor
+
+The Windows x64 Claude Code 2.1.292 executable is available from Anthropic's public download service. It is not necessary to obtain another user's private binary or credentials. Download it to a dedicated, owner-chosen directory rather than replacing the interactive host:
+
+```powershell
+$executorDirectory = Join-Path $env:LOCALAPPDATA 'ShadowGraphExecutor/2.1.292'
+New-Item -ItemType Directory -Force -Path $executorDirectory | Out-Null
+$executorPath = Join-Path $executorDirectory 'claude.exe'
+Invoke-WebRequest 'https://downloads.claude.ai/claude-code-releases/2.1.292/win32-x64/claude.exe' -OutFile $executorPath
+$expectedHash = 'eb95bb65955f8b1702e800815f9a2c0388a5de0f196c354c7ee1dd5cb9a2ba23'
+if ((Get-FileHash -Algorithm SHA256 $executorPath).Hash.ToLower() -ne $expectedHash) {
+    throw 'Executor checksum mismatch; do not run this download'
+}
+& $executorPath --version
+```
+
+The checksum is also published in the [vendor manifest](https://downloads.claude.ai/claude-code-releases/2.1.292/manifest.json). Availability and an exact checksum establish the binary's identity, not its isolation or account suitability. This profile still requires successful host validation for the exact installed ShadowGraph runtime, the existing first-party subscription, disabled overage, and the terminal activation confirmation below. Newer versions and other platform builds are not substitutes for this profile. Do not copy credentials between Windows users or profiles.
+
+### One-time setup and automatic operation
+
+Install a packed runtime, install its delivery/capture hooks, activate delivery and capture for the same private store, and confirm the project's binding using the [integration instructions](../integrations/README.md). Activate extraction only after its host gate passes. These setup actions require their existing owner confirmations; MCP proposals do not grant activation or binding authority.
+
+After setup, supported Stop/SessionEnd events request automatic extraction. Ordinary work does not need a memory reminder or a manual `extract` command. Capture being present does not establish successful extraction, and extraction being successful does not establish that a later model received or used the record. Check the processing state and scoped delivery evidence for each stage. The current candidate has not yet established the complete automatic Desktop-to-fresh-session acceptance episode; a manual extraction demonstration is not a substitute.
+
+Cross-profile/account capture remains a release blocker for a general automatic-memory claim: declining a foreign session's automatic trigger does not prevent its previously captured material from entering a later drain. A synthetic run confined to one fresh project and account does not resolve that boundary. Do not enable standing extraction on the strength of that bounded run.
+
 Prepare and verify the exact packed runtime before requesting approval. A real runtime replacement, activation and first real model call require the owner's explicit gate approval. The command records evidence, the exact shared runtime/store, the resolved executor configuration, frozen budgets and a new activation identity:
 
 ```text

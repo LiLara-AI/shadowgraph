@@ -1,4 +1,20 @@
-# ShadowGraph 0.42.0 — Technical Preview / Early Access release notes
+# ShadowGraph 0.42.1 — unreleased candidate
+
+This is a local release proposal, not a published release or a readiness declaration.
+The existing v0.42.0 tag and npm-unpublished policy remain unchanged (`private: true`).
+
+- Include the extraction activation/recovery guide in the packed artifact and enforce its presence.
+- Document a publicly obtainable, checksum-pinned Windows Claude Code executor without replacing
+  the interactive host's default executable or bypassing its account/billing checks.
+- Provide a credential-free, non-root MCP container definition. Local container discovery is
+  separate from Glama's configured build, remote indexing, and real Desktop automatic memory.
+
+Release blockers: the complete automatic Desktop A/fresh CLI B episode is unverified; captured
+material from a foreign profile/account can remain pending for a later default-profile drain.
+No general production acceptance of that residual is implied. Historical negative host-validation
+evidence remains negative. Do not publish this candidate as ready until these gates are resolved.
+
+## Previous public release: 0.42.0 — Technical Preview / Early Access
 
 > Technical Preview / Early Access only — not Beta, not stable. Install from GitHub:
 > `npm install --global github:LiLara-AI/shadowgraph#v0.42.0`. The package remains `private: true` and

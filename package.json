@@ -1,6 +1,6 @@
 {
   "name": "shadowgraph-unified-plugin",
-  "version": "0.42.0",
+  "version": "0.42.1",
   "private": true,
   "description": "Local-first decision and scoped temporal memory for AI agents",
   "type": "module",
@@ -33,6 +33,7 @@
   "homepage": "https://github.com/LiLara-AI/shadowgraph#readme",
   "files": [
     "docs/data-lifecycle.md",
+    "docs/extraction.md",
     "src/",
     "dashboard/",
     "integrations/README.md",
