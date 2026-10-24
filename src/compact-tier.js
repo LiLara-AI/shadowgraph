@@ -189,6 +189,10 @@ function reasonPart(record) {
 export function t1Parts(record) {
   const parts = [];
   const add = (name, text) => parts.push({ name, text });
+  if (record.interpretation?.status === 'model_proposed') {
+    add('interpretation', 'Model-proposed field interpretation, not verified facts; full source context is required before acting');
+    add('sourceContext', `full source context ${show(record.interpretation.sourceText)}`);
+  }
   if (sourceUnavailable(record)) add('sourceAvailability', 'cited source unavailable; recorded verification retained');
   if (record.kind === 'decision') {
     add('title', `Decision ${show(record.title)}`);

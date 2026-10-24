@@ -72,3 +72,12 @@ test('idle interactive prompt input cannot outlive the session deadline', async 
   await assert.rejects(runCodexSession({ ...f, cwd: f.alpha, prompts, deadlineMs: 100, makeExtractor: () => extractor(f.executor) }), /drain_stopped/);
   assert.ok(Date.now() - started < 5000);
 });
+
+test('a host policy rejection stops before extraction even when the CLI returns zero', async t => {
+  const f = await fixture(t); let extracted = 0;
+  const adapter = extractor(f.executor);
+  await assert.rejects(runCodexSession({ ...f, cwd: f.alpha, prompts: ['Run a diagnostic'],
+    runHost: async request => ({ ...await host(request), stderr: 'ERROR exec_command failed: rejected: blocked by policy' }),
+    makeExtractor: () => ({ ...adapter, extract: async input => { extracted++; return adapter.extract(input); } }) }), /codex_host_policy_rejected/);
+  assert.equal(extracted, 0);
+});

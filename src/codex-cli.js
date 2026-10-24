@@ -15,7 +15,7 @@ try {
     show(await setupCodex({ ...JSON.parse(await readFile(resolve(file), 'utf8')), home }));
   } else if (command === 'status') {
     const config = await loadCodexSetup(home);
-    show({ provider: config.provider, model: config.executor.model, projects: config.projects, capture: config.capture, sharing: config.sharing, paused: config.paused, store: config.store });
+    show({ provider: config.provider, hostMode: config.hostMode, model: config.executor.model, projects: config.projects, capture: config.capture, sharing: config.sharing, paused: config.paused, store: config.store });
   } else if (command === 'share') {
     show(await changeCodexSharing({ home, mode: option('--mode', 'project'), projects: option('--projects', '').split(',').filter(Boolean), exclude: option('--exclude', '').split(',').filter(Boolean) }));
   } else if (['pause', 'resume'].includes(command)) show(await pauseCodex({ home, paused: command === 'pause' }));

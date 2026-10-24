@@ -22,6 +22,13 @@ prior configuration and preserves memory and usage. Keep the private directory
 outside source repositories. The integration never edits the ordinary Claude or
 Codex configuration, authentication or existing activation.
 
+Set `hostMode` to `text` for text-only work with tool capabilities disabled and a
+read-only sandbox. The default `workspace` mode retains the host's execution
+policy and workspace sandbox; a policy rejection stops the session before
+extraction. It never retries using a less restrictive permission mode. The first
+local workspace episode was stopped because the native host rejected its shell
+command. Text-only evidence does not prove command execution support.
+
 Capture defaults to all enrolled workspaces. Optional `capture` configuration is
 `{"mode":"only","include":["project-name"],"exclude":[]}`. Capture coverage is
 independent of read sharing. A new setup holds older pending captures because
@@ -56,6 +63,13 @@ Reusable experience stays in its source project with evidence, conditions and
 uncertainty. Wider access does not make a lesson a universal fact. A changed
 condition can justify a new attempt; missing conditions remain unknown rather
 than erasing relevant past outcomes. Capture consent never grants wider reads.
+
+For ordinary multi-sentence material, Codex can propose a structured interpretation
+using exact source quotations. Each such record is explicitly model-proposed and
+unverified, and includes the entire source context; only that full quotation is
+checked by the existing deterministic verifier. Field roles and relationships
+are not presented as independently verified facts. Compact delivery discloses
+this limitation and includes context or requires full expansion.
 
 Uninstall: pause the integration, close its sessions, and remove the package's
 launcher. Private stores and evidence are retained; deletion is a separate owner
