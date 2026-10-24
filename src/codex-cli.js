@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { setupCodex, loadCodexSetup, runCodexSession, changeCodexSharing, pauseCodex } from './codex-host.js';
+import { setupCodex, codexStatus, inspectCodex, runCodexSession, changeCodexSharing, pauseCodex } from './codex-host.js';
 
 const [command, ...args] = process.argv.slice(2);
 function option(name, fallback) { const at = args.indexOf(name); return at < 0 ? fallback : args[at + 1]; }
@@ -14,8 +14,11 @@ try {
     const file = option('--config'); if (!file) throw new Error('setup requires --config <JSON file> with executable and projects [{project,cwd}]');
     show(await setupCodex({ ...JSON.parse(await readFile(resolve(file), 'utf8')), home }));
   } else if (command === 'status') {
-    const config = await loadCodexSetup(home);
-    show({ provider: config.provider, hostMode: config.hostMode, model: config.executor.model, projects: config.projects, capture: config.capture, sharing: config.sharing, paused: config.paused, store: config.store });
+    show(await codexStatus(home));
+  } else if (command === 'inspect') show(await inspectCodex({ home, query: option('--query', '') }));
+  else if (command === 'expand') {
+    const path = option('--handle'); if (!path) throw new Error('expand requires --handle <JSON file from inspect>');
+    show(await inspectCodex({ home, handle: JSON.parse(await readFile(resolve(path), 'utf8')) }));
   } else if (command === 'share') {
     show(await changeCodexSharing({ home, mode: option('--mode', 'project'), projects: option('--projects', '').split(',').filter(Boolean), exclude: option('--exclude', '').split(',').filter(Boolean) }));
   } else if (['pause', 'resume'].includes(command)) show(await pauseCodex({ home, paused: command === 'pause' }));
@@ -31,5 +34,5 @@ try {
         onResult: result => { process.stdout.write(result.answer + '\n'); process.stderr.write(`ShadowGraph: ${result.captureIds.length} captures; ${result.extraction.completed} extracted; ${result.contextBytes} context bytes.\n`); } });
       process.stderr.write(`Session evidence: ${result.runDirectory}\n`);
     } finally { terminal?.close(); process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); }
-  } else throw new Error('Usage: shadowgraph-codex setup --config <file> | status | run [--prompt <text>] | share --mode project|selected|all-permitted [--projects p1,p2] [--exclude p3] | pause | resume. All commands accept --home <private directory>. Run bounds: --max-calls 1..12 --max-turns 1..8 --deadline-ms 1..900000.');
+  } else throw new Error('Usage: shadowgraph-codex setup --config <file> | status | inspect --query <text> | expand --handle <JSON file> | run [--prompt <text>] | share --mode project|selected|all-permitted [--projects p1,p2] [--exclude p3] | pause | resume. All commands accept --home <private directory>. Run bounds: --max-calls 1..12 --max-turns 1..8 --deadline-ms 1..900000.');
 } catch (error) { process.stderr.write(`ShadowGraph Codex: ${error.code ?? error.message}\n`); process.exitCode = 1; }

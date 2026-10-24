@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { setupCodex, loadCodexSetup, runCodexSession, changeCodexSharing, codexDelivery, pauseCodex } from '../src/codex-host.js';
+import { setupCodex, loadCodexSetup, runCodexSession, changeCodexSharing, codexDelivery, pauseCodex, inspectCodex, codexStatus } from '../src/codex-host.js';
 import { createStorage } from '../src/storage.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { privilegedSnapshot } from '../src/internal/snapshot.js';
@@ -49,8 +49,13 @@ test('sharing off/on/revoke uses the existing grant boundary and preserves sourc
   await changeCodexSharing({ home: f.home, mode: 'selected', projects: ['alpha'], env: f.env });
   const shared = await codexDelivery({ ...request, config: await loadCodexSetup(f.home) });
   assert.match(shared.text, /K7/); assert.match(shared.text, /alpha/); assert.match(shared.text, /unknown/);
+  const inspected = await inspectCodex({ home: f.home, cwd: f.beta, query: request.prompt, env: f.env });
+  const handle = inspected.relevant.items[0].line.expansion;
+  assert.match(JSON.stringify((await inspectCodex({ home: f.home, cwd: f.beta, handle, env: f.env })).record), /K7/);
   await changeCodexSharing({ home: f.home, mode: 'project', env: f.env });
   assert.equal((await codexDelivery({ ...request, config: await loadCodexSetup(f.home) })).count, 0);
+  assert.equal((await inspectCodex({ home: f.home, cwd: f.beta, handle, env: f.env })).record, null);
+  assert.equal((await codexStatus(f.home, f.env)).counts.pendingEligible, 0);
   // A stale policy object still cannot use the revoked grant.
   const revoked = await changeCodexSharing({ home: f.home, mode: 'all-permitted', exclude: ['alpha'], env: f.env });
   assert.deepEqual(revoked.projects, ['beta']);

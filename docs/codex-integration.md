@@ -49,6 +49,14 @@ the session. Usage reservations, outcomes and timings are private under `runs`.
 Unknown usage is not zero. Ctrl+C stops the session; `pause` stops future work,
 and `resume` resumes the configured scope. `status` shows configuration.
 
+`status` also reports eligible pending captures, held unknown/foreign provenance,
+failed/blocked items and extracted items; provider availability is not inferred
+from configuration. `inspect --query <text>` reads the current scoped memory with
+compact expansion handles. Save a handle as JSON and use `expand --handle <file>`
+for the full record. Both run from the enrolled workspace and recheck current
+sharing; an old handle cannot restore revoked access. These inspection commands
+are optional owner controls, not prerequisites for automatic delivery.
+
 Reads default to the current project. Use `share --mode selected --projects a,b`
 to permit relevant records from that chosen set, or `share --mode all-permitted`
 to select all currently enrolled projects. `--exclude a` removes projects from

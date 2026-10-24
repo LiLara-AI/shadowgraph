@@ -20,6 +20,7 @@ import { assemblePayload } from './delivery.js';
 import { outcomeFromExitStatus } from './internal/outcome.js';
 import { currentAccessOperation } from './internal/access-transport.js';
 import { stripDeliveredBlocks } from './internal/capture-source.js';
+import { sameExtractionBinding } from './internal/extraction-provenance.js';
 
 const runtimeRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const configFile = home => join(home, 'codex-integration.json');
@@ -105,6 +106,37 @@ export async function pauseCodex({ home, paused }) {
   return { paused };
 }
 
+export async function inspectCodex({ home, cwd = process.cwd(), query, handle, env = process.env }) {
+  const config = await loadCodexSetup(home), work = await canonicalPath(cwd), project = config.projects.find(p => p.cwd === work)?.project;
+  if (!project) fail('codex_workspace_not_enrolled');
+  const store = await createStorage({ type: config.store.storage, file: config.store.file, env: { ...env, SHADOWGRAPH_HOME: home } });
+  const graph = createShadowGraph();
+  try {
+    return await currentAccessOperation(graph, store, () => {
+      const scope = { project, surface: 'cli', ...(config.sharing.accessId ? { accessId: config.sharing.accessId } : {}) };
+      if (!handle) return graph.context({ ...scope, query: query ?? '', compact: true });
+      const bounds = Object.fromEntries(['recordId', 'digest', 'derivedAt', 'derivationVersion', 'asOf', 'maxExpansions'].filter(key => handle[key] !== undefined).map(key => [key, handle[key]]));
+      return graph.expand({ ...bounds, ...scope });
+    }, { read: true });
+  } finally { store.close(); }
+}
+
+export async function codexStatus(home, env = process.env) {
+  const config = await loadCodexSetup(home);
+  const store = await createStorage({ type: config.store.storage, file: config.store.file, env: { ...env, SHADOWGRAPH_HOME: home } });
+  try {
+    const payload = await store.load(), binding = { provider: 'codex', accountFingerprint: config.executor.accountFingerprint, setupId: config.setupId };
+    const captures = (payload?.records ?? []).filter(item => item.kind === 'capture');
+    const waiting = captures.filter(item => ['pending', 'processing'].includes(item.state));
+    return { provider: config.provider, hostMode: config.hostMode, model: config.executor.model, projects: config.projects, capture: config.capture,
+      sharing: config.sharing, paused: config.paused, store: config.store,
+      counts: { pendingEligible: waiting.filter(item => sameExtractionBinding(item.observation?.extractionBinding, binding)).length,
+        heldUnknownOrForeign: waiting.filter(item => !sameExtractionBinding(item.observation?.extractionBinding, binding)).length,
+        failed: captures.filter(item => ['failed', 'blocked'].includes(item.state)).length, extracted: captures.filter(item => item.state === 'extracted').length },
+      availability: 'configuration_and_local_queue_only; provider availability is not guaranteed' };
+  } finally { store.close(); }
+}
+
 export async function codexDelivery({ config, project, prompt, env }) {
   const store = await createStorage({ type: config.store.storage, file: config.store.file, env });
   const graph = createShadowGraph();
@@ -112,7 +144,8 @@ export async function codexDelivery({ config, project, prompt, env }) {
     return await currentAccessOperation(graph, store, () => {
       const relevant = graph.context({ project, query: prompt, compact: false, limit: 6, surface: 'cli', ...(config.sharing.accessId ? { accessId: config.sharing.accessId } : {}) }).relevant;
       if (!relevant.relevance.established) return { text: '', bytes: 0, count: 0, sourceIds: [], scope: relevant.scope, relevance: relevant.relevance };
-      const framed = assemblePayload({ head: { scope: relevant.scope, total: relevant.total, complete: relevant.complete,
+      const framed = assemblePayload({ processing: { capture: config.paused ? 'paused' : 'active', extraction: config.paused ? 'paused' : 'active',
+        pending: relevant.capture?.pending ?? 0, blocked: relevant.capture?.blocked ?? 0, providerAvailability: 'not_guaranteed' }, head: { scope: relevant.scope, total: relevant.total, complete: relevant.complete,
         limitation: relevant.limitation, relevance: relevant.relevance, interpretation: 'Source observations retain their conditions and uncertainty. A prior outcome is neither a universal rule nor a permanent ban. Unknown conditions remain unknown. Relevance never grants permission.' }, items: relevant.items });
       return { text: framed.text, bytes: Buffer.byteLength(framed.text), count: relevant.items.length, scope: relevant.scope,
         sourceIds: [...new Set(relevant.items.map(item => item.record?.id).filter(Boolean))] };
