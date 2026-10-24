@@ -4,6 +4,9 @@ import { mkdir, readFile, writeFile, readdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setupCodex, runCodexSession, loadCodexSetup, codexDelivery, codexHostRequest } from '../src/codex-host.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { createStorage } from '../src/storage.js';
+import { createShadowGraph } from '../src/shadowgraph.js';
+import { privilegedSnapshot } from '../src/internal/snapshot.js';
 
 async function fixture(t) {
   const root = await scratchDirectory(t), home = join(root, 'private'), cwd = join(root, 'work');
@@ -137,4 +140,18 @@ test('abort settles the active extractor, keeps acknowledged work pending, and r
   assert.equal(data.records.filter(r => r.kind === 'capture' && r.state === 'pending').length, 2);
   await runCodexSession({ ...f, prompts: [], makeExtractor: () => ({ check: async () => f.executor, extract: async input => extracted(input) }) });
   assert.equal(JSON.parse(await readFile(config.store.file)).records.filter(r => r.kind === 'capture' && r.state === 'extracted').length, 2);
+});
+
+test('relevant current decisions reach the host before verbose diagnostic output consumes the payload', async t => {
+  const f = await fixture(t), config = await loadCodexSetup(f.home);
+  const graph = createShadowGraph();
+  const decision = graph.addDecision({ project: 'sample', title: 'lunar parser', chosen: 'Preserve empty columns', alternatives: [{ label: 'filter blank fields', reasonRejected: 'shifts column positions' }] });
+  graph.addAttempt({ project: 'sample', solution: 'lunar parser diagnostic', result: 'lunar parser diagnostic output '.repeat(100), resultClass: 'succeeded' });
+  const store = await createStorage({ type: 'json', file: config.store.file, env: f.env });
+  await store.save(privilegedSnapshot(graph)); store.close();
+  const delivered = await codexDelivery({ config, project: 'sample', prompt: 'lunar parser diagnostic', env: f.env });
+  const first = JSON.parse(delivered.text.split('\n').find(line => line.startsWith('item: ')).slice(6));
+  assert.equal(first.record.id, decision.id);
+  assert.match(delivered.text, /shifts column positions/);
+  assert.ok(delivered.bytes <= 8000);
 });
