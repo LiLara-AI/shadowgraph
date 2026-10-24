@@ -20,6 +20,10 @@ const requiredFixtureFiles = [
   'docs/api-reference.md',
   'docs/benchmark-report.md',
   'docs/extraction.md',
+  'docs/codex-integration.md',
+  'src/codex-cli.js',
+  'src/codex-host.js',
+  'src/codex-extractor.js',
   'docs/mcp-compatibility.md',
   'docs/shadowgraph-benchmark-plan.md',
   'docs/unified-memory.md',
@@ -144,9 +148,13 @@ test('check-package requires every effective v1.1 methodology source', async (t)
   }
 });
 
-test('check-package requires native methodology modules, probes, and portable syntax launcher', async (t) => {
+test('check-package requires native methodology modules, Codex integration, probes, and portable syntax launcher', async (t) => {
   const root = await packageFixture(t, '# Harmless package audit\n');
   const required = [
+    'docs/codex-integration.md',
+    'src/codex-cli.js',
+    'src/codex-host.js',
+    'src/codex-extractor.js',
     'benchmark/lib/v11-native-attempts.mjs',
     'benchmark/lib/v11-native-attempt-evidence.mjs',
     'benchmark/lib/v11-native-attempt-evidence-loader.mjs',

@@ -149,11 +149,15 @@ test('extraction activation refuses concurrent record changes and malformed usag
 });
 
 import { privilegedRecordCapture } from '../src/internal/snapshot.js';
+import { extractionBinding } from '../src/internal/extraction-provenance.js';
 async function activated(t) {
   const f = await writable(t), { activateExtraction } = await activation(); await activateExtraction(f.options);
   const store = await createStorage({ type: 'json', file: f.extraction.store.file });
   const graph = createShadowGraph(); graph.importData(await store.load());
-  const item = privilegedRecordCapture(graph, { project: 'p', originId: 'origin_fixture', text: 'Synthetic pending work.', source: { event: 'UserPromptSubmit', sessionId: 's' }, admission: { limits: CAPTURE_LIMITS, storeBytes: 0 } });
+  const binding = extractionBinding(await (await state()).activeExtraction(f.env));
+  const item = privilegedRecordCapture(graph, { project: 'p', originId: 'origin_fixture', text: 'Synthetic pending work.', source: { event: 'UserPromptSubmit', sessionId: 's' },
+    observation: { host: 'synthetic-claude', hostVersion: '2.1.288', toolName: null, cwd: null, outcome: null, extractionBinding: binding },
+    admission: { limits: CAPTURE_LIMITS, storeBytes: 0 } });
   await store.save(privilegedSnapshot(graph)); store.close();
   const read = async () => { const s = await createStorage({ type: 'json', file: f.extraction.store.file }); try { return await s.load(); } finally { s.close(); } };
   return { ...f, item, read };

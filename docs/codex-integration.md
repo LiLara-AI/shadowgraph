@@ -35,6 +35,16 @@ the package remains unpublished to npm.
 After installing the package, save a private setup JSON containing `executable`
 (the absolute native Codex executable) and `projects` (objects with `project` and
 absolute `cwd`). Run `shadowgraph-codex setup --config <file> --home <private-dir>`.
+For the evidenced text configuration, replace the paths in this example:
+
+```json
+{
+  "executable": "<absolute native Codex executable>",
+  "hostMode": "text",
+  "projects": [{ "project": "demo", "cwd": "<absolute project directory>" }]
+}
+```
+
 Persistent setup requires the owner at a terminal. Test setup under the operating
 system temporary directory follows the existing scratch policy. Setup backs up
 prior configuration and preserves memory and usage. Keep the private directory

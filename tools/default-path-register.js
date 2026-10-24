@@ -314,6 +314,9 @@ export const REGISTER = Object.freeze([
   m('relevant.items[].tier', 'provenance'),
   m('relevant.items[].score', 'evidence'),
   m('relevant.items[].ranks.**', 'evidence'),
+  // Full-record fallback retains the same revision-bound expansion handle.
+  m('relevant.items[].expansion.scope.**', 'scope'),
+  m('relevant.items[].expansion.**', 'interface'),
   // Temporal evidence (PR-29): derived from stored times and supersession.
   m('relevant.items[].temporalEvidence.recordedAt', 'provenance'),
   c('relevant.items[].temporalEvidence.eventTime.**', 'historical fact'),

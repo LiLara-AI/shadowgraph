@@ -52,7 +52,7 @@ protocol 2025-11-25 and all 35 full tools; compact mode exposes 16 tools.
 None of these results claims a remote Glama build, indexing update, hosting or
 permission to send a private store to a remote service.
 
-After final owner authorization: push the exact reviewed branch, open/merge the
+After the owner approves publication, push the exact reviewed branch, open/merge the
 release PR according to repository policy, create the new release tag without
 moving v0.42.0, attach the hash-checked package and public release notes, then use
 the owner's Glama account to claim/sync the approved source and inspect its actual

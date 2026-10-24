@@ -7,6 +7,7 @@ import { activeExtraction } from './extraction-state.js';
 import { canonicalPath } from './owner-files.js';
 import { usageFile } from './extraction-budget.js';
 import { accountEmailDigest } from './extraction-contract.js';
+import { sessionProfileSelected } from './extraction-provenance.js';
 const ELIGIBLE = new Set(['written', 'nothing_new', 'already_held', 'transcript', 'refused']);
 // The worker gets what the executor passes to its own child, plus ShadowGraph's
 // configuration, never the host session's environment: a desktop host sets its
@@ -20,8 +21,6 @@ export const workerEnvironment = env => Object.fromEntries(Object.entries(env)
 // never starts it, as before the worker's environment was filtered. A desktop
 // host names its session's account (CLAUDE_CODE_USER_EMAIL); one that is not the
 // bound account does not start it either.
-const PROFILE_SELECTORS = new Set(['CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN']);
-export const sessionProfileSelected = env => Object.entries(env).some(([name, value]) => PROFILE_SELECTORS.has(name.toUpperCase()) && typeof value === 'string' && value !== '');
 export async function triggerExtraction({ event, outcome, deadline, env = process.env, spawnProcess = spawn,
   runtimeDirectory = dirname(dirname(dirname(fileURLToPath(import.meta.url)))) } = {}) {
   const inert = { status: 'inert' };
