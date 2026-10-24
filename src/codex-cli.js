@@ -27,7 +27,9 @@ try {
     process.once('SIGINT', stop); process.once('SIGTERM', stop);
     const prompt = option('--prompt');
     let terminal;
-    const prompts = prompt === undefined ? (terminal = createInterface({ input: process.stdin, output: process.stdout, terminal: process.stdin.isTTY === true })) : [prompt];
+    // Attach the iterator before asynchronous setup/account checks so piped
+    // prompts cannot be emitted and lost while the session is preparing.
+    const prompts = prompt === undefined ? (terminal = createInterface({ input: process.stdin, output: process.stdout, terminal: process.stdin.isTTY === true }))[Symbol.asyncIterator]() : [prompt];
     try {
       const result = await runCodexSession({ home, prompts, maxCalls: Number(option('--max-calls', '12')), maxTurns: Number(option('--max-turns', '4')),
         deadlineMs: Number(option('--deadline-ms', '900000')), signal: controller.signal,
