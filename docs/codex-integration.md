@@ -4,8 +4,10 @@ This optional adapter observes work launched with `shadowgraph-codex run`. It do
 not observe the Codex desktop app or unrelated CLI sessions. Each turn launches
 Codex CLI in ephemeral mode; the wrapper retains the current conversation in
 memory and supplies fresh scoped ShadowGraph context before each new turn.
-Capture and bounded extraction finish before the next turn. There is no delivery
-inside an already running model turn. No historical Codex session is imported.
+Completed host answers are displayed without waiting for extraction. Durable
+captures are processed in the background while the next work task can proceed.
+There is no delivery inside an already running model turn. No historical Codex
+session is imported.
 
 The supported extraction configuration is Codex CLI 0.161.0, its existing signed-in
 ChatGPT subscription, and explicit model `gpt-6.1-sol`. API keys, provider overrides
@@ -35,12 +37,12 @@ the package remains unpublished to npm.
 After installing the package, save a private setup JSON containing `executable`
 (the absolute native Codex executable) and `projects` (objects with `project` and
 absolute `cwd`). Run `shadowgraph-codex setup --config <file> --home <private-dir>`.
-For the evidenced text configuration, replace the paths in this example:
+For ordinary command-executing work, replace the paths in this example:
 
 ```json
 {
   "executable": "<absolute native Codex executable>",
-  "hostMode": "text",
+  "hostMode": "workspace",
   "projects": [{ "project": "demo", "cwd": "<absolute project directory>" }]
 }
 ```
@@ -53,10 +55,12 @@ Codex configuration, authentication or existing activation.
 
 Set `hostMode` to `text` for text-only work with tool capabilities disabled and a
 read-only sandbox. The default `workspace` mode retains the host's execution
-policy and workspace sandbox; a policy rejection stops the session before
-extraction. It never retries using a less restrictive permission mode. The first
-local workspace episode was stopped because the native host rejected its shell
-command. Text-only evidence does not prove command execution support.
+policy and workspace sandbox. On Windows it explicitly selects the supported
+`unelevated` restricted-token backend, because ignoring user configuration would
+otherwise omit that backend selection. Managed policy and execution rules remain
+enforced, approval is `never`, and there is no unsandboxed fallback. A host policy
+rejection still stops the session. See the
+[official Windows sandbox guide](https://learn.chatgpt.com/docs/windows/windows-sandbox).
 
 Capture defaults to all enrolled workspaces. Optional `capture` configuration is
 `{"mode":"only","include":["project-name"],"exclude":[]}`. Capture coverage is
@@ -70,13 +74,35 @@ user text, final assistant messages and native command-execution events. Other
 tool-event coverage must be checked before claiming it. Extraction children are
 separate from the observed host stream, so they cannot recapture themselves.
 
-Default session bounds: four user turns, twelve total host/extraction calls,
-one call at a time and fifteen minutes. Lower them with `--max-turns`,
-`--max-calls`, and `--deadline-ms`. The existing extraction worker also retains
-its per-drain and rolling usage ceilings. A failed host or extraction gate ends
-the session. Usage reservations, outcomes and timings are private under `runs`.
-Unknown usage is not zero. Ctrl+C stops the session; `pause` stops future work,
-and `resume` resumes the configured scope. `status` shows configuration.
+Ordinary interactive sessions have no demonstration turn/call/deadline ceiling.
+Optional `--max-turns`, `--max-calls` (1–100), and `--deadline-ms` (up to one hour)
+set explicit acceptance-batch bounds. Each host turn still has a 120-second
+process limit. One host and one extraction invocation can run concurrently;
+extraction remains serial, with four items/calls and 240 seconds per drain,
+twelve reserved calls per rolling hour, and the existing bounded retry policy.
+These background ceilings do not terminate otherwise-permitted foreground work.
+Reservations, outcomes and timings are private under `runs`; unknown usage is not zero.
+
+Memory delay or failure reports pending/degraded state when that state changes.
+It does not withhold a completed answer or prevent another task. The private
+outbox durably accepts completed turns before acknowledging capture, then replays
+them into the store using stable source identities. Store interruptions and a
+crash between commit and receipt removal do not create duplicate captures.
+If the outbox cannot be written, capture is explicitly not acknowledged.
+Pending work retries automatically while the wrapper is open (normally after a
+60-second cooldown), and on the next ordinary launch. No memory command is needed.
+This does not bypass account, workspace, setup or permission failures. An unresolved
+host child prevents another host invocation; an unresolved memory child holds
+extraction while independently supervised foreground work can continue. Its
+original identity is retained until matching settlement proof permits recovery.
+
+End-of-input gives memory five seconds to settle, then stops the bounded worker
+and leaves uncommitted work pending. `--settle-ms 0..240000` changes that grace,
+without delaying already displayed answers. Ctrl+C stops immediately with bounded
+cleanup. A one-shot supervisor terminates its local child if the wrapper dies;
+unconfirmed settlement remains a visible hold, never fabricated completion.
+`pause` stops the configured integration; `resume` restores its scope. Nothing
+continues as an unattended permanent daemon after the wrapper closes.
 
 `status` also reports eligible pending captures, held unknown/foreign provenance,
 failed/blocked items and extracted items; provider availability is not inferred
@@ -132,18 +158,25 @@ Uninstall: pause the integration, close its sessions, and remove the package's
 launcher. Private stores and evidence are retained; deletion is a separate owner
 action. Existing Claude installation and public release v0.42.0 are unchanged.
 
-Coverage measured locally on Windows x64: installed Codex text host and extractor,
-English and one mixed Arabic/English episode, fresh sessions and per-turn task
-changes, source-attributed reuse, sharing off/on/exclusion/revocation and unrelated
-task suppression. The natural-work check was a returned JavaScript code correction,
-not executed code. Retrieval on this path uses lexical and graph signals; semantic
+Coverage measured locally on Windows x64: installed Codex workspace host and extractor,
+an actual failing parser test, agent repair and unchanged passing test; automatic
+recovery after a real extraction timeout; and a fresh tab-parser task using the
+specific earlier empty-field constraint before its first command. The new workspace
+contained only the new starter/check, with prior source files archived outside it.
+Source events, stored records, delivered context and behavior have separate receipts.
+Observed command exit results remain distinct from the agent's inferred cause.
+
+Accepted text evidence also covers English and one mixed Arabic/English episode,
+fresh sessions and per-turn task changes, source-attributed reuse, sharing
+off/on/exclusion/revocation and unrelated task suppression. Affected correction and
+sharing checks were rerun after the changes. Retrieval uses lexical and graph signals; semantic
 embeddings were unavailable in the measured episodes. Different wording succeeded
 in those cases but arbitrary paraphrase recall is not established. Full expansion
 uses current permissions; there is no implicit semantic sharing authorization.
 
-Not established: Codex desktop UI observation, command-executing work in the tested
-policy environment, a fresh Claude Desktop chain, general bilingual accuracy,
+Not established: Codex desktop UI observation, a fresh Claude Desktop chain, general bilingual accuracy,
 mid-turn delivery, every native tool event, or a fair native-memory comparison.
-Extraction completes synchronously after each turn and adds noticeable latency
-and subscription token usage. The release evidence reports measured timings and
-all known usage, including failed calls; this is not a savings claim.
+Memory is eventually available: the next task can run before new experience is
+processed, and bounded quotas can leave a backlog. Retrieval never waits for the
+backlog to drain. The release evidence reports answer visibility, memory delay
+and all known usage, including failed/unknown calls; this is not a savings claim.

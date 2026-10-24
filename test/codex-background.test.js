@@ -7,6 +7,7 @@ import { scratchDirectory } from '../tools/scratch-directory.js';
 import { createStorage } from '../src/storage.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { privilegedSnapshot } from '../src/internal/snapshot.js';
+import { workerFenceFile } from '../src/internal/extraction-state.js';
 
 async function fixture(t) {
   const root = await scratchDirectory(t), home = join(root, 'private'), cwd = join(root, 'work');
@@ -67,6 +68,7 @@ test('ordinary interactive work is not capped at the old eight-turn demonstratio
   const { writeFile } = await import('node:fs/promises');
   await writeFile(join(f.home, 'codex-integration.json'), JSON.stringify({ ...config, capture: { mode: 'all', exclude: ['sample'] } }));
   const result = await runCodexSession({ ...f, prompts: Array.from({ length: 10 }, (_, i) => `Work ${i}`), runHost: host,
+    onResult: result => { assert.equal(result.acceptedDurably, false, 'excluded work is not acknowledged into the memory outbox'); },
     makeExtractor: () => ({ check: async () => f.executor, extract: async () => { throw new Error('excluded'); } }) });
   assert.equal(result.results.length, 10);
 });
@@ -154,4 +156,16 @@ test('relevant current decisions reach the host before verbose diagnostic output
   assert.equal(first.record.id, decision.id);
   assert.match(delivered.text, /shifts column positions/);
   assert.ok(delivered.bytes <= 8000);
+});
+
+test('an unsettled memory child holds further extraction without blocking authorized host tasks', async t => {
+  const f = await fixture(t), marker = { version: 1, state: 'running', activationId: 'old-setup', pid: 1, invocationId: 'old-unsettled-invocation' };
+  await writeFile(workerFenceFile(f.env), JSON.stringify(marker));
+  let hostCalls = 0, extractionCalls = 0;
+  const result = await runCodexSession({ ...f, prompts: ['First work.', 'Second work.'], settleMs: 0,
+    runHost: async () => { hostCalls++; return host(); },
+    makeExtractor: () => ({ check: async () => f.executor, extract: async () => { extractionCalls++; throw new Error('must remain held'); } }) });
+  assert.equal(hostCalls, 2); assert.equal(extractionCalls, 0);
+  assert.deepEqual(JSON.parse(await readFile(workerFenceFile(f.env))), marker, 'do not erase the unresolved child identity');
+  assert.equal(JSON.parse(await readFile(join(result.runDirectory, 'finished.json'))).localChildStopped, false);
 });

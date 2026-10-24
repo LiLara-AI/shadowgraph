@@ -4,11 +4,13 @@
 
 - Include the extraction operation and safety guide in the installation artifact and require it in the package check.
 - Document the publicly obtainable, checksum-pinned Windows extraction executor and distinguish its identity from required host validation.
-- Add an optional installed Codex terminal host and subscription extraction adapter, bounded sessions, explicit executor/account binding, automatic per-turn capture and delivery, and queue inspection.
+- Add an optional installed Codex terminal host and subscription extraction adapter, explicit executor/account binding, automatic per-turn capture and delivery, and queue inspection.
+- Display completed host answers before extraction and permit the next task during memory delay/failure. Persist accepted turns in a replayable outbox; retain source identities across restart and commit/replay boundaries. Keep finite worker limits and optional test-batch limits separate from everyday interactive use.
+- Select the Windows restricted-token sandbox explicitly without disabling managed policy or execution rules. Prioritize relevant current decisions before verbose diagnostic results and have the host assess applicable experience before acting.
 - Separate capture coverage from project-only, selected-project and all-permitted sharing. Preserve source conditions and uncertainty; revoke access transitively through memory-informed answers.
 - Hold legacy, unknown-account and foreign-setup captures instead of draining them through the selected account/provider. Refuse unsupported Claude session profiles before capture.
 - Preserve exact full source quotations alongside explicitly model-proposed decision/attempt fields. Link supported user correction proposals to prior decisions, retain history and invalidate stale derived delivery.
-- Preserve the original negative host evidence. Bounded Codex text-work evidence does not establish desktop UI or shell-execution support.
+- Preserve the original negative host evidence. A later installed Windows workspace run demonstrates actual command failure, repair and passing check; automatic recovery from an extraction timeout and fresh-session reuse have separate evidence. Desktop UI observation remains unproved.
 
 ## Unreleased
 

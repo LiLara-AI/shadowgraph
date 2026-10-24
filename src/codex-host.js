@@ -28,6 +28,8 @@ const configFile = home => join(home, 'codex-integration.json');
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 const safeEnv = env => Object.fromEntries(Object.entries(env).filter(([key]) => !/^SHADOWGRAPH_/iu.test(key)));
 const hostEnv = env => Object.fromEntries(Object.entries(safeEnv(env)).filter(([key]) => !/^(CLAUDE|ANTHROPIC|OPENAI|AWS|AZURE|GOOGLE|CODEX_HOME|CODEX_API_KEY)/iu.test(key)));
+const captureAllowed = (config, project) => !config.capture.exclude?.includes(project)
+  && (config.capture.mode !== 'only' || config.capture.include.includes(project));
 
 export async function codexRuntimeHash() {
   const files = (await readdir(join(runtimeRoot, 'src'), { recursive: true })).filter(name => name.endsWith('.js')).sort();
@@ -163,7 +165,7 @@ export async function codexDelivery({ config, project, prompt, env }) {
 }
 
 export async function recordCodexEvents({ config, project, cwd, sessionId, turnIndex, prompt, events, env, sourceIds = [] }) {
-  if (config.capture.exclude?.includes(project) || (config.capture.mode === 'only' && !config.capture.include.includes(project))) return [];
+  if (!captureAllowed(config, project)) return [];
   const store = await createStorage({ type: config.store.storage, file: config.store.file, env });
   const extractionBinding = { provider: 'codex', accountFingerprint: config.executor.accountFingerprint, setupId: config.setupId };
   try {
@@ -258,7 +260,9 @@ export async function runCodexSession({ home, cwd = process.cwd(), prompts, maxC
   };
   try {
     return await (await workerFence(controlEnv)).run(async () => {
-      if (await workerSettlement(controlEnv) !== 'clear' || await workerSettlement(hostControlEnv) !== 'clear') fail('worker_settlement_unconfirmed');
+      if (await workerSettlement(hostControlEnv) !== 'clear') fail('host_settlement_unconfirmed');
+      uncertain = await workerSettlement(controlEnv) !== 'clear';
+      const inheritedUncertainty = uncertain;
       ownsFence = true;
       try {
       const extractor = makeExtractor({ executable: initial.executor.executable, expectedReceipt: initial.executor, env: safeEnv(env), supervision: { env: controlEnv, activationId: initial.setupId } });
@@ -272,12 +276,13 @@ export async function runCodexSession({ home, cwd = process.cwd(), prompts, maxC
         const key = JSON.stringify([state.status, state.blockedReason ?? state.reason]);
         if (key !== lastNotice) { lastNotice = key; await onMemory(state); }
       };
+      if (inheritedUncertainty) await notify({ status: 'blocked', blockedReason: 'memory_child_settlement_unconfirmed' });
       const replay = async config => {
         for (const name of (await readdir(outbox)).filter(name => name.endsWith('.json')).sort()) {
           if (memoryController.signal.aborted) break;
           const path = join(outbox, name), item = JSON.parse(await readFile(path, 'utf8'));
           // A changed setup or a removed workspace never silently adopts old data.
-          if (item.setupId !== config.setupId || !config.projects.some(p => p.project === item.project && p.cwd === item.cwd)) continue;
+          if (item.setupId !== config.setupId || !config.projects.some(p => p.project === item.project && p.cwd === item.cwd) || !captureAllowed(config, item.project)) continue;
           await recordCodexEvents({ ...item, config, env: controlEnv });
           await unlink(path);
         }
@@ -290,7 +295,7 @@ export async function runCodexSession({ home, cwd = process.cwd(), prompts, maxC
           if (!await guard()) return;
           await replay(config);
           const state = await runExtractionDrain({ type: config.store.storage, file: config.store.file, env: controlEnv,
-            scopes: config.projects.map(p => ({ project: p.project })), provider: 'codex',
+            scopes: config.projects.filter(p => captureAllowed(config, p.project)).map(p => ({ project: p.project })), provider: 'codex',
             extractionBinding: { provider: 'codex', accountFingerprint: config.executor.accountFingerprint, setupId: config.setupId }, guard, signal: memoryController.signal,
             budgets: FROZEN_WORKER_BUDGETS, executor: { extract: async input => {
               const reservation = await reserve('extraction');
@@ -359,10 +364,11 @@ export async function runCodexSession({ home, cwd = process.cwd(), prompts, maxC
         if (config.hostMode === 'text' && events.some(e => e.type?.startsWith('item.') && !['agent_message', 'reasoning', 'error'].includes(e.item?.type))) fail('codex_text_host_tool_activity');
         const answer = events.filter(e => e.type === 'item.completed' && e.item?.type === 'agent_message').map(e => e.item.text).join('\n');
         const accepted = { setupId: config.setupId, project, cwd: work, sessionId, turnIndex: turn, prompt, events, sourceIds: delivery.sourceIds }, pendingFile = join(outbox, `${sessionId}-${turn}.json`);
+        const captureRequested = captureAllowed(config, project);
         let acceptedDurably = false;
-        try { await writeJsonAtomically(pendingFile, accepted); acceptedDurably = true; }
+        try { if (captureRequested) { await writeJsonAtomically(pendingFile, accepted); acceptedDurably = true; } }
         catch { await notify({ status: 'unavailable', reason: 'capture_not_acknowledged' }); }
-        const result = { turn, prompt, answer, captureIds: [], acceptedDurably, extraction: { status: 'pending', completed: 0 }, deliveryMs, contextBytes: delivery.bytes, elapsedMs: Date.now() - turnStarted, usage: completed[0].usage };
+        const result = { turn, prompt, answer, captureIds: [], captureRequested, acceptedDurably, extraction: { status: captureRequested ? 'pending' : 'excluded', completed: 0 }, deliveryMs, contextBytes: delivery.bytes, elapsedMs: Date.now() - turnStarted, usage: completed[0].usage };
         await onResult(result);
         if (acceptedDurably) {
           try {
@@ -399,7 +405,7 @@ export async function runCodexSession({ home, cwd = process.cwd(), prompts, maxC
           const data = await store.load();
           for (const result of results) {
             const items = data.records.filter(item => result.captureIds.includes(item.id));
-            result.extraction = { status: items.length === result.captureIds.length && items.every(item => item.state === 'extracted') ? 'idle' : 'pending', completed: items.filter(item => item.state === 'extracted').length };
+            result.extraction = { status: !result.captureRequested ? 'excluded' : result.captureIds.length > 0 && items.length === result.captureIds.length && items.every(item => item.state === 'extracted') ? 'idle' : 'pending', completed: items.filter(item => item.state === 'extracted').length };
           }
         } finally { store.close(); }
       } catch { /* receipts already preserve pending state */ }
@@ -408,7 +414,9 @@ export async function runCodexSession({ home, cwd = process.cwd(), prompts, maxC
       } finally {
         // Publish settlement while still holding the session's fence, before
         // another wrapper can claim the same queue and supervision markers.
-        await recordWorkerSettlement(controlEnv, uncertain ? 'unconfirmed' : 'stopped', initial.setupId);
+        // A prior unresolved supervisor keeps its original identity/proof.
+        // No new memory invocation was allowed to replace that marker.
+        if (!inheritedUncertainty) await recordWorkerSettlement(controlEnv, uncertain ? 'unconfirmed' : 'stopped', initial.setupId);
         await recordWorkerSettlement(hostControlEnv, hostUncertain ? 'unconfirmed' : 'stopped', initial.setupId);
       }
     });

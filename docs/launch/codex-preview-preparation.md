@@ -8,7 +8,7 @@ The existing public release is v0.42.0. Keep `private: true` and the npm-unpubli
 The installed Codex terminal wrapper supplies automatic per-turn capture,
 subscription extraction, scoped retrieval and delivery. Only work launched through
 that wrapper is observed. The local functional evidence uses Codex CLI 0.161.0,
-explicit `gpt-6.1-sol` selection, and fresh synthetic text work on Windows x64.
+explicit `gpt-6.1-sol` selection, and fresh disposable development work on Windows x64.
 English and one mixed Arabic/English episode passed. It is not Codex desktop UI
 or Claude Desktop acceptance, and no universal semantic accuracy is claimed.
 
@@ -16,11 +16,15 @@ Selected projects and all permitted projects with exclusions use existing grants
 project-only remains the default. Relevant lessons retain source context and
 uncertainty. Revocation also withholds dependent answer copies. The same-session
 test changed from an unrelated translation to a related task with an untested
-fixture version; context was supplied only for the latter. A JavaScript code review
-returned the corrected reduce initializer; no code execution claim follows.
+fixture version; context was supplied only for the latter. The later workspace
+episode executed a failing parser test, repaired it and passed the unchanged check.
+After automatic recovery from an extraction timeout, a fresh tab-parser task used
+the earlier empty-field constraint before its first command and passed its checks.
 
-The first command-executing episode was rejected by native policy. Earlier failed
-extraction/inspection checks remain failures in the private evidence package.
+The first command-executing episode was rejected by native policy. The later
+launch configuration selects the Windows restricted-token backend explicitly;
+rules and managed policy remain enforced. Earlier failed extraction/inspection,
+reuse and timeout checks remain failures in the private evidence package.
 Historical L8 remains FAIL. Model-proposed field and correction relationships
 remain unverified; exact quotations are not proof of their semantic interpretation.
 No fair native-memory comparison or cost-saving claim was made.
@@ -29,9 +33,10 @@ No fair native-memory comparison or cost-saving claim was made.
 
 | Configuration | Local evidence | Boundary |
 | --- | --- | --- |
-| Installed Codex wrapper, text mode | Automatic A/fresh B; mixed language, sharing, conditions, task change | One line per user turn; extraction blocks the next turn |
+| Installed Codex wrapper, text mode | Automatic A/fresh B; mixed language, sharing, conditions, task change | One line per user turn; memory is eventually available |
 | Codex restricted extraction adapter | Real structured responses; bounded calls; no tool items | ChatGPT subscription, explicit model; JSON stream does not independently identify returned model |
-| Codex workspace mode | First command rejected by native execution policy | Unproved; no permission bypass |
+| Codex workspace mode, Windows | Real failing command, repair, passing check; fresh-session reuse before action | Explicit restricted-token sandbox; 120-second host turns; only command events and assistant/user text captured |
+| Memory failure/recovery | Delayed/failed extractor permits next task; outbox replay, restart and no-duplicate checks; real timeout recovery | Finite worker quotas; backlog can remain pending; no unattended permanent daemon |
 | Codex desktop app | No new automatic-memory evidence | Not observed by terminal wrapper |
 | Claude Code / Desktop | Existing implementation and compatibility tests retained | Fresh real-host chain pending; no new Claude calls |
 | MCP stdio / local container | Protocol, discovery and scoped empty read | Does not itself activate automatic capture/extraction |
@@ -65,16 +70,19 @@ owner choice, not a consequence of release publication.
 **ShadowGraph 0.42.1 Technical Preview — optional Codex terminal memory**
 
 This preview adds an installed Codex terminal wrapper that can capture ordinary
-text work, extract attributable decisions and deliver relevant experience on the
+development work, extract attributable decisions and deliver relevant experience on the
 next task. Sharing starts project-only; users can select permitted projects,
 exclude sources and revoke access. Memory-informed answers retain source
 dependencies, so copied answers cannot bypass later revocation.
 
-Local bounded episodes demonstrated fresh-session reuse and one mixed
-Arabic/English workflow. Interpretations remain model-proposed; source quotations,
+Local bounded episodes demonstrated a command failure, agent repair and passing
+check, followed by fresh-session reuse before acting, plus one mixed Arabic/English
+workflow. Completed answers and subsequent work no longer wait for memory
+extraction; pending captures recover automatically through the supported lifecycle.
+Interpretations remain model-proposed; source quotations,
 conditions and uncertainty stay visible. This is not a universal reliability,
-performance or native-memory comparison. Desktop UI observation and the tested
-environment's command-executing path remain unproved. See the packaged Codex guide
+performance or native-memory comparison. Desktop UI observation remains unproved.
+See the packaged Codex guide
 for exact setup, coverage and limits. Install from the approved GitHub artifact;
 the package is not on npm. Existing v0.42.0 remains unchanged.
 
@@ -85,8 +93,9 @@ rejected alternatives and their context can carry into later work automatically.
 Project-only is the default; cross-project reuse is an explicit choice, with
 exclusions and revocation that also applies to derived answers.
 
-The local text-work checks include a fresh-session decision reuse, mixed
-Arabic/English source material and a task change with unknown conditions. This is
+The local work checks include an executed failure and repair, fresh-session reuse
+of the specific earlier experience, automatic recovery after an extraction timeout,
+mixed Arabic/English source material and a task change with unknown conditions. This is
 a technical preview, not a claim of universal recall or lower cost. It observes
 the installed terminal wrapper, not every desktop conversation. Release link to
 be added only after publication is approved.
@@ -94,6 +103,7 @@ be added only after publication is approved.
 ## X draft
 
 ShadowGraph preview: optional Codex terminal memory, project-only by default,
-with selected-project sharing and revocation. Bounded text-work checks show
-attributable decision reuse. No universal recall or cost-saving claim. Release
+with selected-project sharing and revocation. Bounded development checks show
+failure → repair → fresh-session reuse; memory processing does not block work.
+No universal recall or cost-saving claim. Release
 link follows owner approval.

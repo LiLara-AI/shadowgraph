@@ -11,10 +11,12 @@ rejected, why it rejected it, and when that decision should be reconsidered.
 > This branch prepares **0.42.1 (unreleased)**. The public installation commands below still
 > select the unchanged 0.42.0 release, not this candidate. The optional installed
 > [Codex terminal wrapper](docs/codex-integration.md) has demonstrated automatic capture,
-> extraction and fresh-session delivery in bounded text-work episodes, including selected
-> cross-project sharing and revocation. It observes only work launched through that wrapper.
-> Codex desktop UI, command-executing Codex work and a fresh Claude Desktop episode remain
-> unproved. Model interpretations remain attributable and unverified; these episodes do not
+> extraction and fresh-session delivery, including a real failing command, agent repair,
+> passing check and later reuse before acting. Text episodes also cover selected-project
+> sharing and revocation. Memory processing runs independently of foreground answers;
+> pending work recovers through the wrapper lifecycle. Only work launched through it is observed.
+> Codex desktop UI and a fresh Claude Desktop episode remain unproved.
+> Model interpretations remain attributable and unverified; these episodes do not
 > establish universal reliability, lower cost or superiority over native memory.
 
 ## Why it matters

@@ -16,13 +16,18 @@ selected-project reuse, revocation, and a task change inside a wrapper session. 
 capture/extraction or evaluator memory injection is required. See the packaged
 [setup, coverage and limitations guide](docs/codex-integration.md).
 
+The Windows workspace path now also has a real command-failure → repair → passing-check
+trace and fresh-session use of that specific experience before acting. Completed answers
+are displayed independently of extraction. Delayed/failed memory permits subsequent work;
+accepted captures remain pending and recover automatically on the same setup. A real timeout
+and the earlier failed reuse gate remain recorded failures, not retroactive passes.
+
 Fresh provenance now separates captures by provider/account/setup; unknown and legacy captures
 are held. User corrections can carry a model-proposed relationship to a prior decision, preserving
 both quotations and history. Superseded source decisions invalidate dependent answer copies.
 Field interpretation and correction relationships are not independently verified semantic facts.
 
-Named host gaps: command execution in the tested Codex environment was rejected by native policy;
-Codex desktop UI is not observed by this integration; fresh Claude Desktop acceptance remains
+Named host gaps: Codex desktop UI is not observed by this integration; fresh Claude Desktop acceptance remains
 pending. No new Claude allowance was consumed for this work. Historical L8 remains FAIL.
 There is no comparative cost, speed or generalized superiority claim. Local package, MCP and
 container results do not establish remote Glama indexing. Publication and standing extraction
