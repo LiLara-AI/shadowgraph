@@ -87,6 +87,39 @@ test('a host policy rejection stops before extraction even when the CLI returns 
   assert.equal(extracted, 0);
 });
 
+test('ordinary user correction preserves history, rebuilds old compact views and withholds stale derived echoes', async t => {
+  const f = await fixture(t);
+  const original = 'For alpha export, we choose K7 for fixture v3.';
+  const correction = 'Correction for alpha export: K7 is withdrawn. We now choose R8 for fixture v3; its checksum test passed.';
+  const adapter = { ...extractor(f.executor), extract: async ({ prompt }) => {
+    const input = JSON.parse(prompt.slice(prompt.lastIndexOf('\n') + 1));
+    if (input.role !== 'user') return extractor(f.executor).extract({ prompt });
+    const choice = input.untrustedText === original ? original : 'We now choose R8 for fixture v3; its checksum test passed.';
+    return { status: 'success', value: { records: [{ kind: 'decision', fields: [{ name: 'chosen', text: choice, sourceRef: input.sourceRef }],
+      ...(input.untrustedText === correction ? { correction: { recordId: input.correctionCandidates[0]?.recordId ?? 'missing', priorChosen: original, statement: correction } } : {}) }] },
+      receipt: { provider: 'codex', model: 'gpt-6.1-sol', invocationStarted: true, localChildStopped: true } };
+  } };
+  await runCodexSession({ ...f, cwd: f.alpha, prompts: [original], maxCalls: 3, runHost: host, makeExtractor: () => adapter });
+  const inspected = await inspectCodex({ ...f, cwd: f.alpha, query: 'alpha export fixture' });
+  const handle = inspected.relevant.items.find(item => item.line.kind === 'decision' || item.line.expansion)?.line.expansion;
+  assert.ok(handle);
+  await runCodexSession({ ...f, cwd: f.alpha, prompts: [correction], maxCalls: 3, runHost: host, makeExtractor: () => adapter });
+  const config = await loadCodexSetup(f.home), data = JSON.parse(await readFile(config.store.file));
+  const old = data.records.find(record => record.kind === 'decision' && record.chosen === original);
+  const current = data.records.find(record => record.kind === 'decision' && record.correction);
+  assert.equal(old.status, 'superseded');
+  assert.equal(old.supersededBy, current.id);
+  assert.equal(current.correction.status, 'model_proposed');
+  assert.match(current.interpretation.sourceText, /withdrawn/);
+  const expanded = await inspectCodex({ ...f, cwd: f.alpha, handle });
+  assert.equal(expanded.revisionChanged, true);
+  const delivery = await codexDelivery({ config, project: 'alpha', prompt: 'alpha export fixture', env: f.env });
+  assert.match(delivery.text, /R8/);
+  const echoes = data.records.filter(record => record.memoryDependencies?.includes(old.id));
+  assert.ok(echoes.length > 0);
+  assert.ok(echoes.every(record => !delivery.sourceIds.includes(record.id)));
+});
+
 test('memory-informed answers cannot launder a shared source into locally readable memory after revocation', async t => {
   const f = await fixture(t), config = await loadCodexSetup(f.home);
   const store = await createStorage({ type: 'json', file: config.store.file, env: f.env });

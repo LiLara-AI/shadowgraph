@@ -8,7 +8,8 @@ export const accountEmailDigest = (salt, email) => typeof email === 'string' && 
 export const EXTRACTION_MODEL = 'claude-opus-5[1m]';
 export const CODEX_EXTRACTION_MODEL = 'gpt-6.1-sol';
 export const CODEX_CONFIGURATION = 'codex-subscription-text-only-v1';
-export const CODEX_PROMPT_VERSION = 'capture-quoted-fields-v1';
+export const CODEX_PROMPT_VERSION = 'capture-quoted-fields-corrections-v2';
+export const CODEX_OUTPUT_SCHEMA_VERSION = 'capture-quoted-corrections-v2';
 export function extractionModel(provider = 'claude') {
   if (provider === 'claude') return EXTRACTION_MODEL;
   if (provider === 'codex') return CODEX_EXTRACTION_MODEL;

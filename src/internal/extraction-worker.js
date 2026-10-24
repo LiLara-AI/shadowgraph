@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { createStorage } from '../storage.js';
 import { createShadowGraph } from '../shadowgraph.js';
-import { extractionModel, CODEX_PROMPT_VERSION } from './extraction-contract.js';
+import { extractionModel, CODEX_PROMPT_VERSION, CODEX_OUTPUT_SCHEMA_VERSION } from './extraction-contract.js';
 import { sameExtractionBinding, validExtractionBinding } from './extraction-provenance.js';
 import { isValidIsoInstant } from '../fact-validity.js';
 import { repositoryOf } from './owner-files.js';
@@ -11,7 +11,7 @@ import { attachDeletionView, readLedger, storeIo } from './deletion-knowledge.js
 import { claimAuthorityInvalid, effectiveGeneration } from './capture-generation.js';
 import { captureRawExpired } from './capture-retention.js';
 import { privilegedClaimCapture, privilegedCompleteExtraction, privilegedExtractionStatus, privilegedLiveSnapshot, privilegedSettleExtraction, privilegedSnapshot } from './snapshot.js';
-import { EXTRACTION_SCHEMA, OUTPUT_SCHEMA_VERSION, PROMPT_VERSION, extractionPrompt, extractionText, prepareExtraction } from './extraction-output.js';
+import { extractionSchema, OUTPUT_SCHEMA_VERSION, PROMPT_VERSION, extractionPrompt, extractionText, prepareExtraction } from './extraction-output.js';
 import { FROZEN_WORKER_BUDGETS, withWorkerBudget } from './extraction-budget.js';
 import { invokeWithRetry, awaitWorkerStep } from './extraction-policy.js';
 import { sessionJournalEntries, workerReason } from './extraction-session.js';
@@ -19,6 +19,7 @@ import { registerInvocation } from './extraction-identity.js';
 
 const digest = value => createHash('sha256').update(value).digest('hex');
 const promptVersion = options => options.provider === 'codex' ? CODEX_PROMPT_VERSION : PROMPT_VERSION;
+const schemaVersion = options => options.provider === 'codex' ? CODEX_OUTPUT_SCHEMA_VERSION : OUTPUT_SCHEMA_VERSION;
 const refusal = code => { throw Object.assign(new Error(`Extraction refused (${code})`), { code }); };
 const clock = options => { const at = (options.now ?? (() => new Date().toISOString()))(); if (!isValidIsoInstant(at)) refusal('capture_clock_invalid'); return at; };
 const owns = (item, options) => options.project ? item.attribution === 'project' && item.project === options.project
@@ -95,13 +96,24 @@ export async function claimCapture(options) {
       const selected = { ...item, lease };
       if (claimAuthorityInvalid(selected, live, at)) continue;
       const generation = effectiveGeneration(selected, ledger, live, at);
-      options.beforeClaim?.({ inputBytes: Buffer.byteLength(extractionPrompt(item, text, options)), journalEntries: sessionJournalEntries(live.journal, item) + 2 });
+      // Only this setup's independently sourced user decisions can be considered.
+      // No historical/foreign/private cross-project material enters this route.
+      const correctionCandidates = options.provider === 'codex' && item.source?.role === 'user'
+        ? graph.context({ project: item.project, query: text, limit: 4, compact: false }).relevant.items.flatMap(({ record }) => {
+          const sourceCapture = live.records.find(value => value.id === record?.captureRef);
+          const original = live.records.find(value => value.id === record?.id);
+          return record?.kind === 'decision' && original && !record.memoryDependencies?.length
+            && !['superseded', 'archived', 'abandoned', 'stale'].includes(record.status)
+            && sourceCapture?.source?.role === 'user' && sameExtractionBinding(sourceCapture.observation?.extractionBinding, options.extractionBinding)
+            ? [{ recordId: record.id, priorChosen: record.chosen, expectedHash: digest(JSON.stringify(original)) }] : [];
+        }) : [];
+      options.beforeClaim?.({ inputBytes: Buffer.byteLength(extractionPrompt(item, text, { ...options, correctionCandidates })), journalEntries: sessionJournalEntries(live.journal, item) + 2 });
       const claimed = privilegedClaimCapture(graph, { id: item.id, project: options.project, originId: options.originId, lease });
       if (!claimed) continue;
       await commit(privilegedSnapshot(graph));
       const token = item.erasureToken;
       return { status: 'claimed', id: item.id, token, leaseId: lease.leaseId, lease: structuredClone(lease), generation, rawHash: digest(text), text,
-        item: claimed, promptVersion: promptVersion(options), schemaVersion: OUTPUT_SCHEMA_VERSION, model, provider: options.provider ?? 'claude' };
+        item: claimed, correctionCandidates, promptVersion: promptVersion(options), schemaVersion: schemaVersion(options), model, provider: options.provider ?? 'claude' };
     }
     return { status: 'idle' };
   });
@@ -124,11 +136,11 @@ export async function commitCapture(options, claim, response) {
     if (response.receipt?.invocationStarted !== true || response.receipt.model !== model || claim.model !== model
       || (options.provider === 'codex' && (response.receipt.provider !== 'codex' || !sameExtractionBinding(item.observation?.extractionBinding, options.extractionBinding)))) return settle('executor_failed');
     let prepared;
-    try { prepared = prepareExtraction(item, extractionText(raw(live, item)), response.value, options); }
+    try { prepared = prepareExtraction(item, extractionText(raw(live, item)), response.value, { ...options, correctionCandidates: claim.correctionCandidates ?? [] }); }
     catch (error) { if (error.code !== 'extraction_schema_invalid') throw error; return settle('schema_invalid'); }
-    const key = digest(JSON.stringify([item.id, claim.generation, promptVersion(options), OUTPUT_SCHEMA_VERSION, model]));
+    const key = digest(JSON.stringify([item.id, claim.generation, promptVersion(options), schemaVersion(options), model]));
     // A receipt contains declared method/configuration and numeric usage only.
-    const receipt = { promptVersion: promptVersion(options), schemaVersion: OUTPUT_SCHEMA_VERSION, model,
+    const receipt = { promptVersion: promptVersion(options), schemaVersion: schemaVersion(options), model,
       ...(options.provider === 'codex' ? { provider: 'codex' } : {}),
       at, generation: claim.generation, invocationStarted: response.receipt?.invocationStarted === true,
       usage: Object.fromEntries(Object.entries(response.receipt?.usage ?? {}).filter(([name, value]) => ['inputTokens', 'outputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens'].includes(name) && Number.isSafeInteger(value) && value >= 0)) };
@@ -143,7 +155,7 @@ export async function commitCapture(options, claim, response) {
 export async function runExtractionItem(options) {
   const claim = await claimCapture(options); if (claim.status !== 'claimed') return claim;
   let response;
-  try { response = await options.executor.invoke({ prompt: extractionPrompt(claim.item, claim.text, options), schema: EXTRACTION_SCHEMA }); }
+  try { response = await options.executor.invoke({ prompt: extractionPrompt(claim.item, claim.text, { ...options, correctionCandidates: claim.correctionCandidates }), schema: extractionSchema(options.provider) }); }
   catch { response = { status: 'failed' }; }
   return commitCapture(options, claim, response);
 }
@@ -223,7 +235,7 @@ export async function runExtractionDrain(options) {
         }
         attempts = 0;
         const correlationToken = `sgcorr_${randomUUID()}`;
-        const response = await invokeWithRetry({ request: { prompt: extractionPrompt(claimed.item, claimed.text, options), schema: EXTRACTION_SCHEMA }, signal, sleep: options.sleep,
+        const response = await invokeWithRetry({ request: { prompt: extractionPrompt(claimed.item, claimed.text, { ...options, correctionCandidates: claimed.correctionCandidates }), schema: extractionSchema(options.provider) }, signal, sleep: options.sleep,
           reserve: () => budget.reserve(), invoke: async request => {
             budget.check();
             if (options.guard && !await awaitWorkerStep(options.guard, signal) || !await claimIsCurrent({ ...options, signal }, claimed)) return { status: 'blocked', blockedReason: 'drain_stopped' };

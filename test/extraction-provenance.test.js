@@ -48,6 +48,22 @@ test('contextual organization never discards corrections or accepts invented fie
   assert.ok(prepareExtraction(item, source, value, { provider: 'codex' }).records.every(r => !r.interpretation));
 });
 
+test('correction proposals require a supplied candidate, exact prior choice and an exact current user quotation', () => {
+  const source = 'Correction: choose R8 instead of K7.', item = { id: 'new', source: { role: 'user' } };
+  const candidate = { recordId: 'old', priorChosen: 'We choose K7.', expectedHash: 'a'.repeat(64) };
+  const value = { records: [{ kind: 'decision', fields: [{ name: 'chosen', text: source, sourceRef: 'new' }],
+    correction: { recordId: 'old', priorChosen: candidate.priorChosen, statement: source } }] };
+  const options = { provider: 'codex', correctionCandidates: [candidate] };
+  assert.equal(prepareExtraction(item, source, value, options).records[0].correction.recordId, 'old');
+  for (const altered of [{ ...options, correctionCandidates: [] }, options]) {
+    const local = structuredClone(value);
+    if (altered === options) local.records[0].correction.statement = 'This never appeared in the source';
+    assert.equal(prepareExtraction(item, source, local, altered).records[0].correction, undefined);
+  }
+  assert.equal(prepareExtraction({ ...item, source: { role: 'assistant' } }, source, value, options).records[0].correction, undefined);
+  assert.throws(() => prepareExtraction(item, source, value), { code: 'extraction_schema_invalid' });
+});
+
 test('Codex drains only fresh matching provenance; legacy, foreign accounts and prior setups remain untouched', async t => {
   const root = await scratchDirectory(t), binding = { provider: 'codex', accountFingerprint: 'a'.repeat(64), setupId: '12ab5678-1234-1234-1234-123456789012' };
   const options = { type: 'json', file: join(root, 'memory.json'), env: { SHADOWGRAPH_HOME: root }, project: 'fixture', provider: 'codex', extractionBinding: binding };

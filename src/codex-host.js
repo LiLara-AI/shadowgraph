@@ -144,11 +144,16 @@ export async function codexDelivery({ config, project, prompt, env }) {
     return await currentAccessOperation(graph, store, () => {
       const relevant = graph.context({ project, query: prompt, compact: false, limit: 6, surface: 'cli', ...(config.sharing.accessId ? { accessId: config.sharing.accessId } : {}) }).relevant;
       if (!relevant.relevance.established) return { text: '', bytes: 0, count: 0, sourceIds: [], scope: relevant.scope, relevance: relevant.relevance };
+      // Ranking must not let a historical choice exhaust the payload before
+      // its relevant correction. Preserve relevance within each state group.
+      const priority = item => item.temporalEvidence?.currentState?.state === 'historical' ? 2 : item.record?.correction ? 0 : 1;
+      relevant.items.sort((a, b) => priority(a) - priority(b));
       const framed = assemblePayload({ processing: { capture: config.paused ? 'paused' : 'active', extraction: config.paused ? 'paused' : 'active',
         pending: relevant.capture?.pending ?? 0, blocked: relevant.capture?.blocked ?? 0, providerAvailability: 'not_guaranteed' }, head: { scope: relevant.scope, total: relevant.total, complete: relevant.complete,
         limitation: relevant.limitation, relevance: relevant.relevance, interpretation: 'Source observations retain their conditions and uncertainty. A prior outcome is neither a universal rule nor a permanent ban. Unknown conditions remain unknown. Relevance never grants permission.' }, items: relevant.items });
-      return { text: framed.text, bytes: Buffer.byteLength(framed.text), count: relevant.items.length, scope: relevant.scope,
-        sourceIds: [...new Set(relevant.items.map(item => item.record?.id).filter(Boolean))] };
+      const sourceIds = [...new Set(framed.text.split('\n').filter(line => line.startsWith('item: '))
+        .map(line => JSON.parse(line.slice(6)).record?.id).filter(Boolean))];
+      return { text: framed.text, bytes: Buffer.byteLength(framed.text), count: sourceIds.length, scope: relevant.scope, sourceIds };
     }, { read: true });
   } finally { store.close(); }
 }

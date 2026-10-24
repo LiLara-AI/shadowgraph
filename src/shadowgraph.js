@@ -21,7 +21,7 @@ import { extractionSupersession } from './internal/extraction-supersession.js';
 import { accessScopeContains, validateAccess, intersectAccessScope, accessDiagnostics, reconcileAccessLedger } from './access.js';
 import { createAccessLifecycle } from './internal/access-lifecycle.js';
 import { assertCreationInput } from './internal/creation-id.js';
-import { EXTRACTION_RECIPE, CODEX_EXTRACTION_MODEL, CODEX_PROMPT_VERSION } from './internal/extraction-contract.js';
+import { EXTRACTION_RECIPE, CODEX_EXTRACTION_MODEL, CODEX_PROMPT_VERSION, CODEX_OUTPUT_SCHEMA_VERSION } from './internal/extraction-contract.js';
 import { attemptOutcome } from './internal/outcome.js';
 import { RUNTIME_MISSES, missReachedBy, runtimeMissLedgerIssue, withFallbackMisses } from './internal/miss-ledger.js';
 import { supersessionOrder, temporalEvidence, versionTimes } from './internal/temporal-evidence.js';
@@ -1508,7 +1508,7 @@ export function createShadowGraph(options = {}) {
         || (isValidIsoInstant(entity.updatedAt) && compareInstants(entity.updatedAt, item.updatedAt) > 0));
       const expired = rawExpired(item, at);
       const rawAvailable = !expired && item.contentRef !== null && (extras.get(CAPTURE_CONTENT) ?? []).some((entry) => entry.contentRef === item.contentRef);
-      const recipe = item.receipts.at(-1)?.provider === 'codex' ? { ...EXTRACTION_RECIPE, model: CODEX_EXTRACTION_MODEL, promptVersion: CODEX_PROMPT_VERSION } : EXTRACTION_RECIPE;
+      const recipe = item.receipts.at(-1)?.provider === 'codex' ? { ...EXTRACTION_RECIPE, model: CODEX_EXTRACTION_MODEL, promptVersion: CODEX_PROMPT_VERSION, schemaVersion: CODEX_OUTPUT_SCHEMA_VERSION } : EXTRACTION_RECIPE;
       const recipeChanges = item.state === 'extracted'
         ? Object.keys(recipe).filter(key => item.receipts.at(-1)?.[key] !== recipe[key]) : [];
       const lastReprocessing = item.receipts.at(-1)?.reprocessing;
@@ -2232,6 +2232,14 @@ export function createShadowGraph(options = {}) {
         fields.evidenceIndependence = 'derived_from_delivered_memory';
       }
       if (proposed.interpretation) fields.interpretation = clone(proposed.interpretation);
+      const correction = proposed.correction, previousDecision = correction && records.get(correction.recordId);
+      const applyCorrection = input.receipt.provider === 'codex' && item.source.role === 'user' && proposed.kind === 'decision'
+        && previousDecision?.kind === 'decision' && captureOwner(item).owns(previousDecision)
+        && !['superseded', 'archived', 'abandoned', 'stale'].includes(previousDecision.status)
+        && createHash('sha256').update(JSON.stringify(previousDecision)).digest('hex') === correction.expectedHash;
+      if (applyCorrection) fields.correction = { status: 'model_proposed', recordId: correction.recordId,
+        sourceRef: item.id, statement: correction.statement,
+        limitation: 'The source quotation is preserved; the correction relationship is a model interpretation, not independently verified.' };
       if (proposed.kind === 'attempt') {
         fields.outcomeEvidence = clone(item.observation?.outcome?.outcomeEvidence ?? { state: 'absent' });
         if (fields.outcomeEvidence.state === 'observed') fields.resultClass = fields.outcomeEvidence.exitStatus === 0 ? 'succeeded' : 'failed';
@@ -2246,6 +2254,7 @@ export function createShadowGraph(options = {}) {
       decorate(records.get(record.id), record.id, fields);
       for (const entry of journal) decorate(entry.payload, record.id, fields);
       for (const value of idempotency.values()) decorate(value, record.id, fields);
+      if (applyCorrection) supersedeDecision({ project: item.project, originId: item.originId, decisionId: previousDecision.id, replacementId: record.id });
       producedRecordIds.push(record.id);
     }
     if (producedRecordIds.length) {
@@ -5243,7 +5252,11 @@ export function createShadowGraph(options = {}) {
       if (item.memoryDependencies !== undefined) {
         if (!Array.isArray(item.memoryDependencies) || item.memoryDependencies.length > 32) return false;
         const next = new Set(ancestors); next.add(item.id);
-        if (!item.memoryDependencies.every(id => typeof id === 'string' && visibleWithDependencies(records.get(id) ?? facts.get(id), next))) return false;
+        if (!item.memoryDependencies.every(id => {
+          const dependency = records.get(id) ?? facts.get(id);
+          return typeof id === 'string' && dependency && !['superseded', 'invalidated', 'archived'].includes(dependency.status)
+            && visibleWithDependencies(dependency, next);
+        })) return false;
       }
       if (!own) boundary.widerRead = true;
       return allowed;
