@@ -126,7 +126,14 @@ function contextualInterpretation(proposed, item, source) {
     if (field.name === 'alternative') alternatives.push({ label: field.text });
     else { if (Object.hasOwn(values, field.name)) return null; values[field.name] = field.text; }
   }
-  if ((proposed.kind === 'decision' ? ['title', 'chosen'] : ['solution', 'result']).some(name => !values[name])) return null;
+  // A title is presentation, not another fact. A quoted choice already supplies
+  // a supported label when the model omits a title; do not invent a heading or
+  // throw away the choice merely because this optional presentation is absent.
+  if (proposed.kind === 'decision' && values.chosen && !values.title) {
+    values.title = values.chosen;
+    mappings.push({ name: 'title', span: { ...mappings.find(mapping => mapping.name === 'chosen').span }, derivedFrom: 'chosen' });
+  }
+  if ((proposed.kind === 'decision' ? ['chosen'] : ['solution', 'result']).some(name => !values[name])) return null;
   if (proposed.kind === 'decision' && values.reason) {
     if (alternatives.length !== 1 || !mentionsAny(values.reason, alternatives[0].label)) return null;
     alternatives[0].reasonRejected = values.reason; delete values.reason;
