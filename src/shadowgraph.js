@@ -21,7 +21,7 @@ import { extractionSupersession } from './internal/extraction-supersession.js';
 import { accessScopeContains, validateAccess, intersectAccessScope, accessDiagnostics, reconcileAccessLedger } from './access.js';
 import { createAccessLifecycle } from './internal/access-lifecycle.js';
 import { assertCreationInput } from './internal/creation-id.js';
-import { EXTRACTION_RECIPE } from './internal/extraction-contract.js';
+import { EXTRACTION_RECIPE, CODEX_EXTRACTION_MODEL } from './internal/extraction-contract.js';
 import { attemptOutcome } from './internal/outcome.js';
 import { RUNTIME_MISSES, missReachedBy, runtimeMissLedgerIssue, withFallbackMisses } from './internal/miss-ledger.js';
 import { supersessionOrder, temporalEvidence, versionTimes } from './internal/temporal-evidence.js';
@@ -1508,8 +1508,9 @@ export function createShadowGraph(options = {}) {
         || (isValidIsoInstant(entity.updatedAt) && compareInstants(entity.updatedAt, item.updatedAt) > 0));
       const expired = rawExpired(item, at);
       const rawAvailable = !expired && item.contentRef !== null && (extras.get(CAPTURE_CONTENT) ?? []).some((entry) => entry.contentRef === item.contentRef);
+      const recipe = item.receipts.at(-1)?.provider === 'codex' ? { ...EXTRACTION_RECIPE, model: CODEX_EXTRACTION_MODEL } : EXTRACTION_RECIPE;
       const recipeChanges = item.state === 'extracted'
-        ? Object.keys(EXTRACTION_RECIPE).filter(key => item.receipts.at(-1)?.[key] !== EXTRACTION_RECIPE[key]) : [];
+        ? Object.keys(recipe).filter(key => item.receipts.at(-1)?.[key] !== recipe[key]) : [];
       const lastReprocessing = item.receipts.at(-1)?.reprocessing;
       const reprocessOutcome = lastReprocessing && typeof lastReprocessing === 'object' ? {
         ...Object.fromEntries(['preservedCorrections', 'skippedProposals'].filter(key => Number.isSafeInteger(lastReprocessing[key]) && lastReprocessing[key] >= 0).map(key => [key, lastReprocessing[key]])),

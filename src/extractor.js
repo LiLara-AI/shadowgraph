@@ -46,7 +46,7 @@ const terminalReason = (stdout) => providerRefusal(stdout) ? 'provider_refusal' 
 // A small, explicit schema dialect. Unknown keywords are refused rather than
 // silently delegating validation to the model or following external references.
 const SCHEMA_KEYS = new Set(['type', 'properties', 'required', 'additionalProperties', 'items', 'minItems', 'maxItems', 'minLength', 'maxLength', 'minimum', 'maximum', 'enum', 'const', 'description']);
-function checkedSchema(schema, depth = 0, seen = new Set()) {
+export function checkedSchema(schema, depth = 0, seen = new Set()) {
   if (!object(schema) || depth > 32 || seen.has(schema) || Object.keys(schema).some(k => !SCHEMA_KEYS.has(k))) throw error('unsupported_schema');
   seen.add(schema);
   if (!['object', 'array', 'string', 'number', 'integer', 'boolean', 'null'].includes(schema.type)) throw error('unsupported_schema');

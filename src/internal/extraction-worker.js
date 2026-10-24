@@ -3,7 +3,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { createStorage } from '../storage.js';
 import { createShadowGraph } from '../shadowgraph.js';
-import { EXTRACTION_MODEL } from '../extractor.js';
+import { extractionModel } from './extraction-contract.js';
+import { sameExtractionBinding, validExtractionBinding } from './extraction-provenance.js';
 import { isValidIsoInstant } from '../fact-validity.js';
 import { repositoryOf } from './owner-files.js';
 import { attachDeletionView, readLedger, storeIo } from './deletion-knowledge.js';
@@ -49,9 +50,12 @@ async function fenced(options, action) {
 }
 
 export async function claimCapture(options) {
+  const model = extractionModel(options.provider);
+  if (options.provider === 'codex' && !validExtractionBinding(options.extractionBinding)) refusal('capture_provenance_required');
   return fenced(options, async ({ graph, ledger, at, commit }) => {
     const live = privilegedLiveSnapshot(graph);
     const queue = live.records.filter(item => item.kind === 'capture' && owns(item, options)
+      && (!options.extractionBinding || sameExtractionBinding(item.observation?.extractionBinding, options.extractionBinding))
       && ['pending', 'processing'].includes(item.state) && !item.cancelRequested
       && !captureRawExpired(item, ledger?.retentionOverrides ?? [], at));
     // Journal order survives wall-clock reversal. Imported/baselined work with
@@ -96,13 +100,14 @@ export async function claimCapture(options) {
       await commit(privilegedSnapshot(graph));
       const token = item.erasureToken;
       return { status: 'claimed', id: item.id, token, leaseId: lease.leaseId, lease: structuredClone(lease), generation, rawHash: digest(text), text,
-        item: claimed, promptVersion: PROMPT_VERSION, schemaVersion: OUTPUT_SCHEMA_VERSION, model: EXTRACTION_MODEL };
+        item: claimed, promptVersion: PROMPT_VERSION, schemaVersion: OUTPUT_SCHEMA_VERSION, model, provider: options.provider ?? 'claude' };
     }
     return { status: 'idle' };
   });
 }
 
 export async function commitCapture(options, claim, response) {
+  const model = extractionModel(options.provider);
   return fenced(options, async ({ graph, ledger, at, commit }) => {
     const live = privilegedLiveSnapshot(graph), item = live.records.find(value => value.kind === 'capture' && value.id === claim.id);
     const settle = async reason => {
@@ -115,13 +120,15 @@ export async function commitCapture(options, claim, response) {
       || claimAuthorityInvalid(item, live, at) || effectiveGeneration(item, ledger, live, at) !== claim.generation
       || typeof raw(live, item) !== 'string' || digest(extractionText(raw(live, item))) !== claim.rawHash) return settle('superseded_result');
     if (response?.status !== 'success') return settle(response?.status === 'worker_blocked' ? 'worker_blocked' : response?.status === 'schema_invalid' ? 'schema_invalid' : response?.status === 'blocked' ? (response.blockedReason === 'provider_refusal' ? 'provider_refusal' : 'executor_blocked') : 'executor_failed');
-    if (response.receipt?.invocationStarted !== true || response.receipt.model !== EXTRACTION_MODEL) return settle('executor_failed');
+    if (response.receipt?.invocationStarted !== true || response.receipt.model !== model || claim.model !== model
+      || (options.provider === 'codex' && (response.receipt.provider !== 'codex' || !sameExtractionBinding(item.observation?.extractionBinding, options.extractionBinding)))) return settle('executor_failed');
     let prepared;
     try { prepared = prepareExtraction(item, extractionText(raw(live, item)), response.value); }
     catch (error) { if (error.code !== 'extraction_schema_invalid') throw error; return settle('schema_invalid'); }
-    const key = digest(JSON.stringify([item.id, claim.generation, PROMPT_VERSION, OUTPUT_SCHEMA_VERSION, EXTRACTION_MODEL]));
+    const key = digest(JSON.stringify([item.id, claim.generation, PROMPT_VERSION, OUTPUT_SCHEMA_VERSION, model]));
     // A receipt contains declared method/configuration and numeric usage only.
-    const receipt = { promptVersion: PROMPT_VERSION, schemaVersion: OUTPUT_SCHEMA_VERSION, model: EXTRACTION_MODEL,
+    const receipt = { promptVersion: PROMPT_VERSION, schemaVersion: OUTPUT_SCHEMA_VERSION, model,
+      ...(options.provider === 'codex' ? { provider: 'codex' } : {}),
       at, generation: claim.generation, invocationStarted: response.receipt?.invocationStarted === true,
       usage: Object.fromEntries(Object.entries(response.receipt?.usage ?? {}).filter(([name, value]) => ['inputTokens', 'outputTokens', 'cacheReadInputTokens', 'cacheCreationInputTokens'].includes(name) && Number.isSafeInteger(value) && value >= 0)) };
     let result;

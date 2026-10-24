@@ -6,6 +6,13 @@ import { createHmac } from 'node:crypto';
 export const accountEmailDigest = (salt, email) => typeof email === 'string' && email.trim()
   ? createHmac('sha256', salt).update(`email\0${email.trim().toLowerCase()}`).digest('hex') : null;
 export const EXTRACTION_MODEL = 'claude-opus-5[1m]';
+export const CODEX_EXTRACTION_MODEL = 'gpt-6.1-sol';
+export const CODEX_CONFIGURATION = 'codex-subscription-text-only-v1';
+export function extractionModel(provider = 'claude') {
+  if (provider === 'claude') return EXTRACTION_MODEL;
+  if (provider === 'codex') return CODEX_EXTRACTION_MODEL;
+  throw new Error('unsupported_extraction_provider');
+}
 // The Claude Code hosts extraction runs on. A version string alone trusts no
 // host: 2.1.288 is the AG-3 profile, kept as it was validated; 2.1.292 names the
 // one binary it was prepared against, and an extraction activation on it also

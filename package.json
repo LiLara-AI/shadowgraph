@@ -32,6 +32,7 @@
   },
   "homepage": "https://github.com/LiLara-AI/shadowgraph#readme",
   "files": [
+    "docs/codex-integration.md",
     "docs/data-lifecycle.md",
     "docs/extraction.md",
     "src/",
@@ -88,7 +89,8 @@
     "RELEASE_NOTES.md"
   ],
   "bin": {
-    "shadowgraph": "./src/cli.js"
+    "shadowgraph": "./src/cli.js",
+    "shadowgraph-codex": "./src/codex-cli.js"
   },
   "scripts": {
     "test": "node --test --test-concurrency=1 --import ./test/helpers/isolated-home.mjs",

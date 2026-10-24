@@ -13,6 +13,7 @@ import { activeExtraction, workerFence, workerSettlement, recordWorkerSettlement
 import { runExtractionDrain } from './internal/extraction-worker.js';
 import { awaitWorkerStep } from './internal/extraction-policy.js';
 import { FROZEN_WORKER_BUDGETS } from './internal/extraction-budget.js';
+import { extractionBinding } from './internal/extraction-provenance.js';
 
 const covered = (capture, project) => capture.coverage.projects === 'only' ? capture.coverage.include.includes(project) : !capture.coverage.exclude.includes(project);
 const blocked = blockedReason => ({ status: 'blocked', blockedReason, completed: 0 });
@@ -63,6 +64,7 @@ export async function runActivatedExtraction({ env = process.env, project, origi
       const running = new Set(); let result, began = false, uncertain = false;
       try {
         result = await runExtractionDrain({ type: activation.store.storage, file: activation.store.file, env, scopes,
+          provider: activation.executor.provider ?? 'claude', extractionBinding: extractionBinding(activation),
           budgets: FROZEN_WORKER_BUDGETS, guard, now, signal: controller.signal, lockTimeoutMs: 1000,
           executor: { extract: request => {
             const pending = Promise.resolve().then(async () => {

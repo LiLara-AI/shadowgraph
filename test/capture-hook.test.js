@@ -74,6 +74,15 @@ function hook(s, input, args = ['capture', '--hook'], { keepOpen = false, env = 
 }
 const silent = (result, label) => assert.deepEqual([result.code, result.stdout, result.stderr], [0, '', ''], label);
 
+test('foreign profile capture is refused before it can enter the default worker queue', async t => {
+  const s = await setup(t);
+  const before = bytes(await load(s));
+  for (const selector of ['CLAUDE_CONFIG_DIR', 'claude_code_oauth_token']) {
+    assert.equal(await capture(s, prompt('Foreign profile material'), { env: { ...s.env, [selector]: 'synthetic-foreign' } }), 'session_profile_selected');
+    assert.equal(bytes(await load(s)), before);
+  }
+});
+
 test('the hook is inert unless the capture record is active, and capture without --hook is a usage error', async (t) => {
   const s = await setup(t);
   const before = bytes(await load(s));
