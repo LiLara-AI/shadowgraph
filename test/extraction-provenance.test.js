@@ -27,6 +27,11 @@ test('multi-sentence decisions can retain chosen and rejected evidence without w
   const titled = prepareExtraction(item, source, withoutTitle, { provider: 'codex' }).records[0];
   assert.equal(titled.kind, 'decision');
   assert.equal(titled.values.title, second);
+  withoutTitle.records[0].fields[0].span = { start: 1, end: 2 };
+  const located = prepareExtraction(item, source, withoutTitle, { provider: 'codex' }).records[0];
+  assert.equal(located.kind, 'decision');
+  assert.deepEqual(located.interpretation.fieldMapping[0].span, { start: source.indexOf(second), end: source.indexOf(second) + second.length });
+  assert.deepEqual(located.interpretation.fieldMapping[0].reportedSpan, { start: 1, end: 2 });
   assert.equal(prepareExtraction(item, source, proposed).records[0].kind, 'memory', 'Claude behavior is unchanged');
   assert.match(extractionPrompt(item, source, { provider: 'codex' }), /copy exact source wording/);
   assert.doesNotMatch(extractionPrompt(item, source), /copy exact source wording/);

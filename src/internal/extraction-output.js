@@ -120,9 +120,12 @@ function contextualInterpretation(proposed, item, source) {
   const values = {}, alternatives = [], mappings = [];
   for (const given of proposed.fields) {
     const field = fieldOf(given, item), start = source.indexOf(field.text);
-    if (field.sourceRef !== item.id || !allowed.includes(field.name) || start < 0 || source.indexOf(field.text, start + 1) >= 0
-      || (field.span && (field.span.start !== start || field.span.end !== start + field.text.length))) return null;
-    mappings.push({ name: field.name, span: { start, end: start + field.text.length } });
+    if (field.sourceRef !== item.id || !allowed.includes(field.name) || start < 0 || source.indexOf(field.text, start + 1) >= 0) return null;
+    // Coordinates come from the unique exact source match, not model arithmetic.
+    // Keep a disagreeing reported span as diagnostic data, never as evidence.
+    const span = { start, end: start + field.text.length };
+    mappings.push({ name: field.name, span, locationEvidence: 'unique_exact_source_match',
+      ...(field.span && (field.span.start !== span.start || field.span.end !== span.end) ? { reportedSpan: field.span } : {}) });
     if (field.name === 'alternative') alternatives.push({ label: field.text });
     else { if (Object.hasOwn(values, field.name)) return null; values[field.name] = field.text; }
   }
