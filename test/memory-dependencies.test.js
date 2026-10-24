@@ -25,10 +25,12 @@ test('derived memory requires transitively readable sources and rejects missing 
 });
 
 test('source unavailability removes contextual evidence copies while retaining the unverified field interpretation', () => {
-  const record = { kind: 'decision', id: 'synthetic', chosen: 'K7', interpretation: { status: 'model_proposed', sourceRef: 'capture-source', sourceText: 'full captured context' } };
+  const record = { kind: 'decision', id: 'synthetic', chosen: 'K7', interpretation: { status: 'model_proposed', sourceRef: 'capture-source', sourceText: 'full captured context' },
+    correction: { status: 'model_proposed', sourceRef: 'capture-source', statement: 'quoted correction' } };
   const result = withoutSourceCopies(record, new Set(['capture-source']));
   assert.equal(result.interpretation.sourceText, undefined);
   assert.equal(result.interpretation.sourceAvailability, 'unavailable');
+  assert.equal(result.correction.statement, undefined);
   assert.equal(result.chosen, 'K7');
   assert.equal(record.interpretation.sourceText, 'full captured context');
 });

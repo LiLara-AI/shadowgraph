@@ -9,10 +9,24 @@ The existing v0.42.0 tag and npm-unpublished policy remain unchanged (`private: 
 - Provide a credential-free, non-root MCP container definition. Local container discovery is
   separate from Glama's configured build, remote indexing, and real Desktop automatic memory.
 
-Release blockers: the complete automatic Desktop A/fresh CLI B episode is unverified; captured
-material from a foreign profile/account can remain pending for a later default-profile drain.
-No general production acceptance of that residual is implied. Historical negative host-validation
-evidence remains negative. Do not publish this candidate as ready until these gates are resolved.
+The new optional `shadowgraph-codex` wrapper uses the existing ChatGPT subscription through
+Codex CLI 0.161.0 with explicit `gpt-6.1-sol` selection. Installed text-work episodes have shown
+automatic capture, extraction, fresh-session delivery, mixed Arabic/English source handling,
+selected-project reuse, revocation, and a task change inside a wrapper session. No manual
+capture/extraction or evaluator memory injection is required. See the packaged
+[setup, coverage and limitations guide](docs/codex-integration.md).
+
+Fresh provenance now separates captures by provider/account/setup; unknown and legacy captures
+are held. User corrections can carry a model-proposed relationship to a prior decision, preserving
+both quotations and history. Superseded source decisions invalidate dependent answer copies.
+Field interpretation and correction relationships are not independently verified semantic facts.
+
+Named host gaps: command execution in the tested Codex environment was rejected by native policy;
+Codex desktop UI is not observed by this integration; fresh Claude Desktop acceptance remains
+pending. No new Claude allowance was consumed for this work. Historical L8 remains FAIL.
+There is no comparative cost, speed or generalized superiority claim. Local package, MCP and
+container results do not establish remote Glama indexing. Publication and standing extraction
+require a separate final owner decision; `private: true` and v0.42.0 remain unchanged.
 
 ## Previous public release: 0.42.0 — Technical Preview / Early Access
 

@@ -5655,7 +5655,8 @@ export function createShadowGraph(options = {}) {
       const line = established && input.compact === true ? t1Line(shown, lineContext) : null;
       if (line?.decisiveOmitted.length) shortened = true;
       const evidence = evidenceOf(record);
-      return line && !line.decisiveOmitted.length ? { tier: 'T1', line, score, ranks, temporalEvidence: evidence } : { tier: 'T2', record: shown, score, ranks, temporalEvidence: evidence };
+      return line && !line.decisiveOmitted.length ? { tier: 'T1', line, score, ranks, temporalEvidence: evidence }
+        : { tier: 'T2', record: shown, ...(line ? { expansion: line.expansion } : {}), score, ranks, temporalEvidence: evidence };
     });
     const byKind = { decision: 0, attempt: 0, memory: 0, fact: 0 };
     // A legacy fact may be stored with no kind; it is still a fact.

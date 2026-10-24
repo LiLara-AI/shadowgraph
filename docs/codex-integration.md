@@ -13,6 +13,25 @@ and foreign Codex profiles are refused. There is no Claude or paid API fallback.
 The CLI selection is recorded; its JSON stream does not independently identify
 the responding model. Source, binary or account changes require setup again.
 
+The executor is obtainable from the official `@openai/codex` npm distribution;
+this integration does not depend on a privately supplied binary. The tested
+version is available as `@openai/codex@0.161.0`. Install it into a dedicated
+directory with `npm install --prefix <executor-directory> @openai/codex@0.161.0`
+and select the native `codex.exe` under its Windows platform package's `vendor`
+directory, rather than the npm command shim. Check `--version` and `login status`.
+Use the ordinary Codex sign-in flow if needed; never copy authentication files.
+See the [official CLI installation guide](https://developers.openai.com/codex/cli).
+Availability, the exact binary hash and the supported account route are checked
+again during setup. Other CLI versions need a newly validated adapter profile.
+
+Install this unreleased candidate from the supplied checked tarball with
+`npm install --prefix <application-directory> <candidate.tgz>`. Run its
+`node_modules/.bin/shadowgraph-codex` launcher (the `.cmd` launcher in PowerShell).
+Alternatively run `node <application-directory>/node_modules/shadowgraph-unified-plugin/src/codex-cli.js`.
+The public v0.42.0 installation command does not contain this wrapper. A future
+GitHub source/tag installation route must use the final published candidate ref;
+the package remains unpublished to npm.
+
 After installing the package, save a private setup JSON containing `executable`
 (the absolute native Codex executable) and `projects` (objects with `project` and
 absolute `cwd`). Run `shadowgraph-codex setup --config <file> --home <private-dir>`.
@@ -86,10 +105,35 @@ checked by the existing deterministic verifier. Field roles and relationships
 are not presented as independently verified facts. Compact delivery discloses
 this limitation and includes context or requires full expansion.
 
+An ordinary user correction may automatically supersede a relevant earlier
+decision from the same bound setup and project. The model must identify the
+earlier exact choice and quote the correction; the local writer checks that the
+candidate has not changed. The relationship is explicitly model-proposed.
+Both source messages and the historical decision remain inspectable. Old compact
+handles report a changed revision, current corrections take delivery priority,
+and answer copies dependent on a superseded source are withheld from future
+reads. An unrelated new task or an assistant assertion is not authorized to
+correct an earlier decision. Ambiguous or unsupported proposals retain their
+source rather than acquiring verified authority. For an incorrect interpretation,
+give an ordinary explicit correction in the enrolled wrapper and inspect the result;
+the kernel's explicit decision supersession controls remain available to the owner.
+
 Uninstall: pause the integration, close its sessions, and remove the package's
 launcher. Private stores and evidence are retained; deletion is a separate owner
 action. Existing Claude installation and public release v0.42.0 are unchanged.
 
-Current implementation tests use fake host/model seams where stated. Real-host
-acceptance and precise language/tool coverage belong in the final release report;
-this document does not claim those checks have already passed.
+Coverage measured locally on Windows x64: installed Codex text host and extractor,
+English and one mixed Arabic/English episode, fresh sessions and per-turn task
+changes, source-attributed reuse, sharing off/on/exclusion/revocation and unrelated
+task suppression. The natural-work check was a returned JavaScript code correction,
+not executed code. Retrieval on this path uses lexical and graph signals; semantic
+embeddings were unavailable in the measured episodes. Different wording succeeded
+in those cases but arbitrary paraphrase recall is not established. Full expansion
+uses current permissions; there is no implicit semantic sharing authorization.
+
+Not established: Codex desktop UI observation, command-executing work in the tested
+policy environment, a fresh Claude Desktop chain, general bilingual accuracy,
+mid-turn delivery, every native tool event, or a fair native-memory comparison.
+Extraction completes synchronously after each turn and adds noticeable latency
+and subscription token usage. The release evidence reports measured timings and
+all known usage, including failed calls; this is not a savings claim.

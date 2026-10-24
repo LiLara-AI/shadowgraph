@@ -9,10 +9,13 @@ rejected, why it rejected it, and when that decision should be reconsidered.
 > See [Limitations and Technical Preview status](#limitations-and-technical-preview-status).
 
 > This branch prepares **0.42.1 (unreleased)**. The public installation commands below still
-> select the unchanged 0.42.0 release, not this candidate. Automatic cross-session memory in
-> Claude Desktop Code is not yet demonstrated for this candidate; the account/profile capture
-> residual in [extraction guidance](docs/extraction.md) remains a release blocker, not a
-> production-accepted limitation. Packaging or MCP/container checks cannot close those gates.
+> select the unchanged 0.42.0 release, not this candidate. The optional installed
+> [Codex terminal wrapper](docs/codex-integration.md) has demonstrated automatic capture,
+> extraction and fresh-session delivery in bounded text-work episodes, including selected
+> cross-project sharing and revocation. It observes only work launched through that wrapper.
+> Codex desktop UI, command-executing Codex work and a fresh Claude Desktop episode remain
+> unproved. Model interpretations remain attributable and unverified; these episodes do not
+> establish universal reliability, lower cost or superiority over native memory.
 
 ## Why it matters
 
@@ -39,7 +42,8 @@ machine; data leaves the machine only through opt-ins you turn on (see
 ## Quick Start — 5 minutes
 
 For optional automatic capture, extraction and delivery after one-time owner setup, follow
-[the integration guide](integrations/README.md) and [extraction activation and recovery](docs/extraction.md).
+[the Codex terminal guide](docs/codex-integration.md), or the existing
+[Claude integration guide](integrations/README.md) and [extraction activation and recovery](docs/extraction.md).
 These are distinct from the manual MCP/CLI examples below. Installing the package alone does not
 activate extraction, bind projects, authorize provider usage, or demonstrate model-visible delivery.
 

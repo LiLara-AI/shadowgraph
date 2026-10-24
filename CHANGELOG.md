@@ -4,7 +4,11 @@
 
 - Include the extraction operation and safety guide in the installation artifact and require it in the package check.
 - Document the publicly obtainable, checksum-pinned Windows extraction executor and distinguish its identity from required host validation.
-- Clarify automatic setup, the still-unverified complete Desktop episode, and the unresolved cross-profile capture boundary. These are not claims of release readiness.
+- Add an optional installed Codex terminal host and subscription extraction adapter, bounded sessions, explicit executor/account binding, automatic per-turn capture and delivery, and queue inspection.
+- Separate capture coverage from project-only, selected-project and all-permitted sharing. Preserve source conditions and uncertainty; revoke access transitively through memory-informed answers.
+- Hold legacy, unknown-account and foreign-setup captures instead of draining them through the selected account/provider. Refuse unsupported Claude session profiles before capture.
+- Preserve exact full source quotations alongside explicitly model-proposed decision/attempt fields. Link supported user correction proposals to prior decisions, retain history and invalidate stale derived delivery.
+- Preserve the original negative host evidence. Bounded Codex text-work evidence does not establish desktop UI or shell-execution support.
 
 ## Unreleased
 

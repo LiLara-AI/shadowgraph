@@ -89,7 +89,7 @@ test('a host policy rejection stops before extraction even when the CLI returns 
 
 test('ordinary user correction preserves history, rebuilds old compact views and withholds stale derived echoes', async t => {
   const f = await fixture(t);
-  const original = 'For alpha export, we choose K7 for fixture v3.';
+  const original = 'For alpha export, we choose K7 for fixture v3. ' + 'The source condition remains fixture v3, and the other environments are untested. '.repeat(6);
   const correction = 'Correction for alpha export: K7 is withdrawn. We now choose R8 for fixture v3; its checksum test passed.';
   const adapter = { ...extractor(f.executor), extract: async ({ prompt }) => {
     const input = JSON.parse(prompt.slice(prompt.lastIndexOf('\n') + 1));
@@ -101,7 +101,9 @@ test('ordinary user correction preserves history, rebuilds old compact views and
   } };
   await runCodexSession({ ...f, cwd: f.alpha, prompts: [original], maxCalls: 3, runHost: host, makeExtractor: () => adapter });
   const inspected = await inspectCodex({ ...f, cwd: f.alpha, query: 'alpha export fixture' });
-  const handle = inspected.relevant.items.find(item => item.line.kind === 'decision' || item.line.expansion)?.line.expansion;
+  const inspectedDecision = inspected.relevant.items.find(item => item.record?.kind === 'decision' || item.line?.kind === 'decision');
+  assert.equal(inspectedDecision.tier, 'T2', 'a long source stays full while exposing its revision handle');
+  const handle = inspectedDecision.line?.expansion ?? inspectedDecision.expansion;
   assert.ok(handle);
   await runCodexSession({ ...f, cwd: f.alpha, prompts: [correction], maxCalls: 3, runHost: host, makeExtractor: () => adapter });
   const config = await loadCodexSetup(f.home), data = JSON.parse(await readFile(config.store.file));
