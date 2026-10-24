@@ -31,10 +31,12 @@ try {
     // prompts cannot be emitted and lost while the session is preparing.
     const prompts = prompt === undefined ? (terminal = createInterface({ input: process.stdin, output: process.stdout, terminal: process.stdin.isTTY === true }))[Symbol.asyncIterator]() : [prompt];
     try {
-      const result = await runCodexSession({ home, prompts, maxCalls: Number(option('--max-calls', '12')), maxTurns: Number(option('--max-turns', '4')),
-        deadlineMs: Number(option('--deadline-ms', '900000')), signal: controller.signal,
-        onResult: result => { process.stdout.write(result.answer + '\n'); process.stderr.write(`ShadowGraph: ${result.captureIds.length} captures; ${result.extraction.completed} extracted; ${result.contextBytes} context bytes.\n`); } });
+      const numberOption = name => option(name) === undefined ? undefined : Number(option(name));
+      const result = await runCodexSession({ home, prompts, maxCalls: numberOption('--max-calls'), maxTurns: numberOption('--max-turns'),
+        deadlineMs: numberOption('--deadline-ms'), settleMs: numberOption('--settle-ms'), signal: controller.signal,
+        onResult: result => { process.stdout.write(result.answer + '\n'); },
+        onMemory: state => { process.stderr.write(state.status === 'idle' ? 'ShadowGraph: memory caught up.\n' : `ShadowGraph: memory pending (${state.blockedReason ?? state.reason ?? state.status}); work can continue.\n`); } });
       process.stderr.write(`Session evidence: ${result.runDirectory}\n`);
     } finally { terminal?.close(); process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); }
-  } else throw new Error('Usage: shadowgraph-codex setup --config <file> | status | inspect --query <text> | expand --handle <JSON file> | run [--prompt <text>] | share --mode project|selected|all-permitted [--projects p1,p2] [--exclude p3] | pause | resume. All commands accept --home <private directory>. Run bounds: --max-calls 1..12 --max-turns 1..8 --deadline-ms 1..900000.');
+  } else throw new Error('Usage: shadowgraph-codex setup --config <file> | status | inspect --query <text> | expand --handle <JSON file> | run [--prompt <text>] | share --mode project|selected|all-permitted [--projects p1,p2] [--exclude p3] | pause | resume. All commands accept --home <private directory>. Optional batch bounds: --max-calls 1..100 --max-turns 1..100 --deadline-ms 1..3600000. EOF memory grace: --settle-ms 0..240000 (default 5000). Interactive work has no demonstration turn limit; each child and memory drain remains bounded.');
 } catch (error) { process.stderr.write(`ShadowGraph Codex: ${error.code ?? error.message}\n`); process.exitCode = 1; }
