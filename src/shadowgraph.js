@@ -2227,6 +2227,10 @@ export function createShadowGraph(options = {}) {
         record = remember({ ...args, memoryType: 'episode', key }).memory;
       }
       const fields = { captureRef: item.id, claims: proposed.claims, verificationStatus: 'unverified' };
+      if (item.observation?.memoryDependencies?.length) {
+        fields.memoryDependencies = clone(item.observation.memoryDependencies);
+        fields.evidenceIndependence = 'derived_from_delivered_memory';
+      }
       if (proposed.interpretation) fields.interpretation = clone(proposed.interpretation);
       if (proposed.kind === 'attempt') {
         fields.outcomeEvidence = clone(item.observation?.outcome?.outcomeEvidence ?? { state: 'absent' });
@@ -5227,13 +5231,24 @@ export function createShadowGraph(options = {}) {
         provenance = { version: 1, request: { project: scope.project, originId: scope.originId }, accessId, scope: clone(authorizedScope), surfaces: inherited === undefined ? [...decision.entry.surfaces] : decision.entry.surfaces.filter(value => inherited.surfaces.includes(value)), expiresAt: scope.grant.expiresAt };
       } else scope.grantLimitation = decision.reason ?? 'grant_provenance_refused';
     }
-    const visible = item => {
+    const visibleWithDependencies = (item, ancestors) => {
       if (!item) return false;
-      if (baseVisible(item)) return true;
-      const allowed = authorizedScope !== null && accessScopeContains(authorizedScope, isStoredWithoutProject(item) ? { ...item, attribution: 'legacy_unattributed' } : item);
-      if (allowed) boundary.widerRead = true;
+      if (ancestors.size >= 32 || ancestors.has(item.id) || withheldToken(item.erasureToken)) return false;
+      const own = baseVisible(item);
+      const allowed = own || (authorizedScope !== null && accessScopeContains(authorizedScope, isStoredWithoutProject(item) ? { ...item, attribution: 'legacy_unattributed' } : item));
+      if (!allowed) return false;
+      // A model's memory-informed output cannot launder a private source into
+      // another project. Every source must still be readable in this request,
+      // transitively; missing sources and cycles are held, never guessed open.
+      if (item.memoryDependencies !== undefined) {
+        if (!Array.isArray(item.memoryDependencies) || item.memoryDependencies.length > 32) return false;
+        const next = new Set(ancestors); next.add(item.id);
+        if (!item.memoryDependencies.every(id => typeof id === 'string' && visibleWithDependencies(records.get(id) ?? facts.get(id), next))) return false;
+      }
+      if (!own) boundary.widerRead = true;
       return allowed;
     };
+    const visible = item => visibleWithDependencies(item, new Set());
     // Whether an id -- a relation endpoint, say -- resolves inside it.
     const boundary = { scope, visible, baseVisible, accessId, surface, requestedAccess, provenance, widerRead: false, reaches: (entityId) => entity(entityId, boundary) !== undefined };
     if (memoryScope !== undefined) boundary.reaches = scopedReach(boundary, memoryScope);

@@ -20,6 +20,11 @@ function entityWithoutCopies(value, ids) {
     return next;
   };
   if (Array.isArray(value.claims)) put('claims', mapChanged(value.claims, item => claim(item)));
+  if (value.interpretation?.status === 'model_proposed' && ids.has(value.interpretation.sourceRef)) {
+    const interpretation = { ...value.interpretation, sourceAvailability: 'unavailable' };
+    delete interpretation.sourceText;
+    put('interpretation', interpretation);
+  }
   const cause = value.causalClaim;
   if (cause && Array.isArray(cause.evidence)) {
     const evidence = mapChanged(cause.evidence, item => claim(item, true));

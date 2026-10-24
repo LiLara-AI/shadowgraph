@@ -111,15 +111,16 @@ export async function codexDelivery({ config, project, prompt, env }) {
   try {
     return await currentAccessOperation(graph, store, () => {
       const relevant = graph.context({ project, query: prompt, compact: false, limit: 6, surface: 'cli', ...(config.sharing.accessId ? { accessId: config.sharing.accessId } : {}) }).relevant;
-      if (!relevant.relevance.established) return { text: '', bytes: 0, count: 0, relevance: relevant.relevance };
+      if (!relevant.relevance.established) return { text: '', bytes: 0, count: 0, sourceIds: [], scope: relevant.scope, relevance: relevant.relevance };
       const framed = assemblePayload({ head: { scope: relevant.scope, total: relevant.total, complete: relevant.complete,
         limitation: relevant.limitation, relevance: relevant.relevance, interpretation: 'Source observations retain their conditions and uncertainty. A prior outcome is neither a universal rule nor a permanent ban. Unknown conditions remain unknown. Relevance never grants permission.' }, items: relevant.items });
-      return { text: framed.text, bytes: Buffer.byteLength(framed.text), count: relevant.items.length, scope: relevant.scope };
+      return { text: framed.text, bytes: Buffer.byteLength(framed.text), count: relevant.items.length, scope: relevant.scope,
+        sourceIds: [...new Set(relevant.items.map(item => item.record?.id).filter(Boolean))] };
     }, { read: true });
   } finally { store.close(); }
 }
 
-export async function recordCodexEvents({ config, project, cwd, sessionId, turnIndex, prompt, events, env }) {
+export async function recordCodexEvents({ config, project, cwd, sessionId, turnIndex, prompt, events, env, sourceIds = [] }) {
   if (config.capture.exclude?.includes(project) || (config.capture.mode === 'only' && !config.capture.include.includes(project))) return [];
   const store = await createStorage({ type: config.store.storage, file: config.store.file, env });
   const extractionBinding = { provider: 'codex', accountFingerprint: config.executor.accountFingerprint, setupId: config.setupId };
@@ -132,7 +133,8 @@ export async function recordCodexEvents({ config, project, cwd, sessionId, turnI
         if (!text?.trim()) return;
         const captured = privilegedRecordCapture(graph, { project, originId: `codex-${config.setupId}`, text, admission,
           source: { sessionId, turnIndex, ...source }, sourceIdentity: `codex-wrapper:${config.setupId}`,
-          observation: { host: 'codex-cli-wrapper', hostVersion: config.executor.hostVersion, toolName: toolCall?.toolName ?? null, cwd, outcome, extractionBinding },
+          observation: { host: 'codex-cli-wrapper', hostVersion: config.executor.hostVersion, toolName: toolCall?.toolName ?? null, cwd, outcome, extractionBinding,
+            ...(source.event !== 'UserPromptSubmit' && sourceIds.length ? { memoryDependencies: sourceIds } : {}) },
           ...(toolCall ? { toolCall } : {}) });
         if (captured.refused) fail('codex_capture_refused');
         ids.push(captured.id);
@@ -187,7 +189,7 @@ export async function runCodexSession({ home, cwd = process.cwd(), prompts, maxC
   }, 250);
   const plan = { sessionId, maxCalls, maxTurns, startedAt: new Date(started).toISOString(), deadline: new Date(started + deadlineMs).toISOString(), concurrency: 1, runtimeHash: initial.runtimeHash, project };
   await writeJsonAtomically(join(runDirectory, 'plan.json'), plan);
-  let calls = 0, turn = 0, history = [], sharingRevision = initial.sharing.revision, uncertain = false, ownsFence = false;
+  let calls = 0, turn = 0, history = [], sharingRevision = initial.sharing.revision, effectiveSharing, uncertain = false, ownsFence = false;
   const results = [];
   const reserve = async role => {
     if (controller.signal.aborted || calls >= maxCalls) fail('codex_session_bound_reached');
@@ -215,6 +217,9 @@ export async function runCodexSession({ home, cwd = process.cwd(), prompts, maxC
         if (!checked.ok || checked.accountFingerprint !== config.executor.accountFingerprint || checked.binarySha256 !== config.executor.binarySha256) fail('codex_bound_account_or_executor_changed');
         if (sharingRevision !== config.sharing.revision) { history = []; sharingRevision = config.sharing.revision; }
         const turnStarted = Date.now(), delivery = await codexDelivery({ config, project, prompt, env: controlEnv });
+        const permission = JSON.stringify([config.sharing.revision, delivery.scope?.grant?.accessId, delivery.scope?.grantLimitation]);
+        if (effectiveSharing !== undefined && permission !== effectiveSharing) history = [];
+        effectiveSharing = permission;
         const deliveryMs = Date.now() - turnStarted;
         await writeJsonAtomically(join(runDirectory, `turn-${turn}-delivery.json`), delivery);
         await reserve('host');
@@ -229,7 +234,7 @@ export async function runCodexSession({ home, cwd = process.cwd(), prompts, maxC
         if (completed.length !== 1 || events.some(e => e.type === 'turn.failed' || e.type === 'error')) fail('codex_host_turn_unverified');
         if (config.hostMode === 'text' && events.some(e => e.type?.startsWith('item.') && !['agent_message', 'reasoning', 'error'].includes(e.item?.type))) fail('codex_text_host_tool_activity');
         const answer = events.filter(e => e.type === 'item.completed' && e.item?.type === 'agent_message').map(e => e.item.text).join('\n');
-        const captureIds = await recordCodexEvents({ config, project, cwd: work, sessionId, turnIndex: turn, prompt, events, env: controlEnv });
+        const captureIds = await recordCodexEvents({ config, project, cwd: work, sessionId, turnIndex: turn, prompt, events, env: controlEnv, sourceIds: delivery.sourceIds });
         const extraction = await runExtractionDrain({ type: config.store.storage, file: config.store.file, env: controlEnv, project, provider: 'codex',
           extractionBinding: { provider: 'codex', accountFingerprint: config.executor.accountFingerprint, setupId: config.setupId }, guard, signal: controller.signal,
           budgets: FROZEN_WORKER_BUDGETS, executor: { extract: async input => {

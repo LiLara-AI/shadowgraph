@@ -81,3 +81,22 @@ test('a host policy rejection stops before extraction even when the CLI returns 
     makeExtractor: () => ({ ...adapter, extract: async input => { extracted++; return adapter.extract(input); } }) }), /codex_host_policy_rejected/);
   assert.equal(extracted, 0);
 });
+
+test('memory-informed answers cannot launder a shared source into locally readable memory after revocation', async t => {
+  const f = await fixture(t), config = await loadCodexSetup(f.home);
+  const store = await createStorage({ type: 'json', file: config.store.file, env: f.env });
+  const graph = createShadowGraph(); graph.importData(await store.load());
+  graph.remember({ project: 'alpha', memoryType: 'note', key: 'checksum', text: 'K7 preserves the footer checksum in fixture 3.' });
+  await store.save(privilegedSnapshot(graph)); store.close();
+  await changeCodexSharing({ home: f.home, mode: 'selected', projects: ['alpha'], env: f.env });
+  await runCodexSession({ ...f, cwd: f.beta, prompts: ['Which footer checksum approach applies?'], maxCalls: 3,
+    runHost: async () => ({ code: 0, stdout: events('K7 preserves the footer checksum in fixture 3.').map(JSON.stringify).join('\n'), stderr: '', localChildStopped: true }),
+    makeExtractor: () => extractor(f.executor) });
+  await changeCodexSharing({ home: f.home, mode: 'project', env: f.env });
+  const after = await codexDelivery({ config: await loadCodexSetup(f.home), project: 'beta', prompt: 'footer checksum approach', env: f.env });
+  assert.doesNotMatch(after.text, /K7/);
+  const reopened = await createStorage({ type: 'json', file: config.store.file, env: f.env });
+  const checked = createShadowGraph(); checked.importData(await reopened.load()); reopened.close();
+  assert.doesNotMatch(JSON.stringify(checked.exportData({ project: 'beta' })), /K7/);
+  assert.doesNotMatch(JSON.stringify(checked.getJournal({ project: 'beta' })), /K7/);
+});

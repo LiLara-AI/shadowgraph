@@ -59,6 +59,13 @@ Grant checks use the existing kernel on every retrieval; no delivery cache is
 used. Changing sharing clears the wrapper's conversation before the next turn.
 Previously displayed information cannot be erased from a person's knowledge.
 
+Answers and tool observations produced with delivered memory retain dependencies
+on those source records. They are not independent corroboration. Every future
+read, including project-local reads and public exports, checks those dependencies
+against current access. A revoked, missing or cyclic source cannot be made readable
+by copying the answer into another project. Capture still stores the original
+user prompt separately, without attaching the wrapper's supplied context.
+
 Reusable experience stays in its source project with evidence, conditions and
 uncertainty. Wider access does not make a lesson a universal fact. A changed
 condition can justify a new attempt; missing conditions remain unknown rather
