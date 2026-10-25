@@ -26,10 +26,10 @@ See the [official CLI installation guide](https://developers.openai.com/codex/cl
 Availability, the exact binary hash and the supported account route are checked
 again during setup. Other CLI versions need a newly validated adapter profile.
 
-Install the v0.42.1 Technical Preview from its GitHub Release tarball:
+Install the v0.42.2 Technical Preview from its GitHub Release tarball:
 
 ```powershell
-npm install --global https://github.com/LiLara-AI/shadowgraph/releases/download/v0.42.1/shadowgraph-unified-plugin-0.42.1.tgz
+npm install --global https://github.com/LiLara-AI/shadowgraph/releases/download/v0.42.2/shadowgraph-unified-plugin-0.42.2.tgz
 ```
 
 The release includes SHA-256 checksums. The [README quick start](../README.md#quick-start-windows-codex)
