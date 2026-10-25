@@ -386,7 +386,10 @@ test('recall and remember declare an open world only when an embedding endpoint 
 // description must not exceed, and what a caller would be misled by if it were
 // left out. There is deliberately no minimum length and no required wording,
 // because padding a clause to clear a floor makes a description worse.
-const DESCRIPTION_CAP = 350;
+// Mode/effect clarification: measured full maximum 447 characters. Keep prose
+// readable rather than reintroducing fragments to meet the old 350-char cap.
+// Compact's explicit full-only/operator notice has its own 550-char check.
+const DESCRIPTION_CAP = 450;
 // `compact` was raised from 4300 to 4450 on 2026-09-14, once and deliberately,
 // because compact gained a 13th tool: shadowgraph_ack_review was promoted so a
 // compact client could close the review loop it could already see. Measured, not
@@ -414,9 +417,9 @@ const DESCRIPTION_CAP = 350;
 // characters. Full and verifier are re-set with the same ~2.5% headroom; compact
 // still sits under its budget, so it was not moved.
 const DESCRIPTION_TOTALS = {
-  full: 9900,
-  verifier: 10250,
-  compact: 4750
+  full: 11700,
+  verifier: 12050,
+  compact: 7000
 };
 // A tool whose result a caller could destroy something with has to say so in
 // its own words. The check is on meaning, not on a keyword: each of these must
@@ -576,10 +579,14 @@ const WIRE_BUDGETS = {
   // compact 38720/40415/230998. The two full structured ceilings are re-set
   // with ~2% headroom (recorded variance, PR-12/13/16/26/27/36b precedent);
   // every other ceiling is unchanged.
-  'withoutVerifier.full': { bare: 59_900, annotated: 63_700, structured: 336_600 },
-  'withoutVerifier.compact': { bare: 39_500, annotated: 41_200, structured: 232_300 },
-  'withVerifier.full': { bare: 61_100, annotated: 65_000, structured: 341_200 },
-  'withVerifier.compact': { bare: 39_500, annotated: 41_200, structured: 232_300 }
+  // Mode-aware navigation and explicit audit/input recipes, measured 2026-10-25:
+  // full 64571/68269/338277, verifier 65719/69522/342824,
+  // compact 43595/45290/236943. Preserve ~2% headroom, every schema constraint,
+  // effect hint and tool; these are metadata-size budgets, not runtime gates.
+  'withoutVerifier.full': { bare: 65_900, annotated: 69_700, structured: 345_100 },
+  'withoutVerifier.compact': { bare: 44_500, annotated: 46_200, structured: 241_700 },
+  'withVerifier.full': { bare: 67_100, annotated: 71_000, structured: 349_700 },
+  'withVerifier.compact': { bare: 44_500, annotated: 46_200, structured: 241_700 }
 };
 
 test('the advertised tool list stays within its wire-size budget, at every tier', () => {
