@@ -1,4 +1,49 @@
-# ShadowGraph 0.42.1 — Technical Preview
+# ShadowGraph 0.42.2 — Technical Preview
+
+This patch publishes the accepted MCP-definition and mode-navigation corrections.
+It preserves the existing tool capabilities and full/compact distinction. It is a
+pre-release, not stable/GA. The package remains `private: true` and is not published
+to npm; the v0.42.0 and v0.42.1 tags and existing assets remain unchanged.
+
+## Changes
+
+- Qualify full-only tools referenced from compact-mode descriptions, including parameter and output-schema prose, with operator restart guidance. Preserve 35 default full tools, 16 compact tools, and 36 full tools with a configured verifier.
+- Clarify tool selection, scoped read/write and review effects, record expansion parameters, maintenance and outcome behavior. Preserve callable names, validation constraints, output schema constraints and effect annotations.
+- Correct compatibility documentation and identify the pinned local proxy gate as historical; do not change the proxy implementation.
+- This metadata issue does not demonstrate an automatic-memory regression. Automatic-memory implementation and its accepted scope are unchanged; this patch does not repeat live memory validation.
+- No new TDQS result is claimed by this release. A fresh Glama assessment, when available, is separate from release and deployment verification.
+
+## Install and upgrade
+
+Use Node 22.5+ and PowerShell 7+ for the documented Windows Codex workflow:
+
+```powershell
+npm install --global https://github.com/LiLara-AI/shadowgraph/releases/download/v0.42.2/shadowgraph-unified-plugin-0.42.2.tgz
+```
+
+Verify the downloaded tarball against `SHA256SUMS.txt` on the
+[GitHub Release](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.42.2).
+The [README](README.md#quick-start-windows-codex) covers the separate executor,
+existing subscription and genuine owner consent. Installation alone does not enable
+automatic memory. Stop active work and back up stores and the private integration
+home before upgrading. Schema 7 is unchanged; changed source/executor/account
+identity requires setup again, and older pending captures remain held rather than
+being silently reassigned. See [upgrade and rollback](docs/migration.md).
+
+## Scope and limitations
+
+MCP names, validation rules, output schema constraints and effect annotations stay
+compatible. Administrative capabilities remain full-only. Clearer prose adds metadata
+bytes; this release is not a token-optimization or tool-choice benchmark claim.
+The [compatibility guide](docs/mcp-compatibility.md) explains the supported workflows.
+
+Automatic-memory behavior, project/account boundaries, sharing and recovery are
+unchanged. The existing Windows Codex demonstration and limitations below remain
+historical evidence, not a new live run. The Glama container provides credential-free
+MCP; it cannot capture a user's Windows sessions. Publication, remote deployment and
+a fresh TDQS assessment are distinct results; no score improvement is promised.
+
+## Previous public release: 0.42.1 — Technical Preview
 
 Automatic experience reuse for the installed **Windows Codex terminal wrapper**.
 This is a pre-release, not stable/GA. The existing v0.42.0 tag and npm-unpublished

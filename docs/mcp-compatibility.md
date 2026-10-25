@@ -1,6 +1,6 @@
 # ShadowGraph — MCP Compatibility Status
 
-**Last verified:** 2026-09-03 against official MCP specification/schema sources, `@modelcontextprotocol/inspector@2.4.0`, and the pinned `mcp-proxy@6.4.3` that fronts Glama’s generated container. On 2026-10-08 the Inspector gate client moved to `@modelcontextprotocol/inspector@2.9.0` (it brings `@modelcontextprotocol/client` 2.2.0, the fix for GHSA-6qxp-vccf-f47h, and drops `@modelcontextprotocol/sdk` from the gate tooling); the same strict gate below passed unchanged with it. The specification sources were not rechecked then.
+**Last verified:** 2026-09-03 against official MCP specification/schema sources, `@modelcontextprotocol/inspector@2.4.0`, and the pinned `mcp-proxy@6.4.3` used by that historical local compatibility gate. On 2026-10-08 the Inspector gate client moved to `@modelcontextprotocol/inspector@2.9.0` (it brings `@modelcontextprotocol/client` 2.2.0, the fix for GHSA-6qxp-vccf-f47h, and drops `@modelcontextprotocol/sdk` from the gate tooling); the same strict gate below passed unchanged with it. The specification sources were not rechecked then.
 **Implemented revisions:** handshake `2024-11-05`, `2025-03-26`, `2025-06-18`, and `2025-11-25`, negotiated by `initialize`; modern `2026-07-28` through per-request `_meta` (dual-era stdio server).
 
 ## 1. Honest compatibility statement
@@ -40,13 +40,61 @@ Modern complete results include `resultType: 'complete'` and server identity met
 
 `SHADOWGRAPH_MCP_COMPACT=1` must be passed to the server process, not merely assumed from the Inspector launch shell. The automated gate uses Inspector's server environment option and verifies the returned list count.
 
+Compact mode keeps the recording, recall, context/expansion, review/acknowledgement and
+maintenance workflow. Decision status changes, decision supersession, keyed confidence evidence,
+stored-signal history, graph traversal and repair/recovery tools remain full-mode operations.
+Their implementations and stored data are not removed. Descriptions qualify full-only references,
+including references inside parameter and output schemas.
+
+To use those operations, the operator changes the MCP server's environment to
+`SHADOWGRAPH_MCP_COMPACT=0` (or removes the variable), then restarts/reconnects the server and
+refreshes `tools/list`. This also exposes the full administrative surface, including purge and
+restore; choose it deliberately. There is no agent-callable mode-switch tool. The `compact`
+argument of `shadowgraph_context` changes record presentation only, never tool availability.
+
+### Choosing a read or review operation
+
+| Need | Tool and meaningful effect |
+| --- | --- |
+| Prepare for a task with current decisions, failed attempts and fired conditions | `shadowgraph_context`; evaluates without persisting signals |
+| Find records containing every query term | `shadowgraph_search`; no graph expansion |
+| Include related records one edge from content matches | `shadowgraph_retrieve`; neighbours stay within the read scope |
+| Rank memory using available lexical, vector, graph and temporal signals | `shadowgraph_recall`; unavailable signals are disclosed, not fabricated |
+| Inspect a shortened context line in full | `shadowgraph_expand`; copy its expansion handle into the input as described below |
+| Evaluate and persist due review signals | `shadowgraph_review`; returns due decisions |
+| Evaluate and persist signals alongside the working set | `shadowgraph_review_context`; also returns context collections |
+| Explain triggered, grounded or unresolved conditions | `shadowgraph_reconsider`; persists own-scope signals, not a lifecycle transition |
+| Mark overdue owned decisions stale and facts expired | `shadowgraph_maintain`; time-dependent lifecycle writes, then rule evaluation |
+| Inspect integrity without repairing | `shadowgraph_validate` |
+
+These reads use the explicit project or confirmed workspace binding, otherwise the capture origin.
+No resolved identity yields an empty scoped result. An access key can widen reads within a current
+grant, but cannot widen writes. Grant-bearing reads commit a revision and bounded operational audit;
+they are not unconditionally read-only. Ordinary own-scope lookup reads do not save. Context fallback
+miss diagnostics remain in memory until a later save. `review`, `review_context` and `reconsider`
+deduplicate own-scope signals but still commit a revision on repeat calls.
+
+For a compact review loop, call `shadowgraph_review` or `shadowgraph_review_context`, then pass its
+`reviewSignalId` with the same project/origin to `shadowgraph_ack_review`. A context-only evaluation
+can report `reviewSignalStatus: unpersisted`; persist the evaluation before acknowledging it.
+Acknowledgement closes that signal, not the decision, and a new breach remains visible.
+
+For record expansion, obtain `relevant.items[].line.expansion` from
+`shadowgraph_context` with `query` or `focalId` and `compact:true`. Copy its `recordId`, `digest`,
+`asOf`, `derivedAt` and `derivationVersion` into the expansion input, omitting null optional values.
+Copy `scope.project`, `scope.originId` and `scope.grantId` to top-level fields, also omitting nulls;
+do not pass `operation` or a nested `scope`. Keep the original bounds. A changed record returns its
+current version with `revision_changed`; an out-of-scope record returns `unavailable`. Inspect
+completeness and fallback fields: a full record may be returned when a shortened line would lose
+decisive meaning.
+
 ### Tool inventory
 
 The **16 compact tools** are the everyday agent workflow. They are also present in full mode:
 
 | Tool | Purpose |
 | --- | --- |
-| `shadowgraph_context` | Read the working set for a project before a consequential task; persists nothing |
+| `shadowgraph_context` | Read the working set before a task; no canonical or signal writes; access keys persist bounded audit |
 | `shadowgraph_review_context` | The same working set, evaluated and persisted: raises the review signals it finds due |
 | `shadowgraph_expand` | Expand a claim line from `shadowgraph_context` to the full record it was derived from, checked against that revision, or an explicit limitation |
 | `shadowgraph_remember` | Store scoped memory (`preference`, `profile`, `goal`, `instruction`, `procedure`, `episode`, `note`) |
@@ -344,19 +392,20 @@ Detail that used to sit in a description, kept here because it is worth having s
 
 ### Glama inspection profile
 
-Glama inspects this server in **full mode**, advertising all 35 tools. Compact mode is not used for
-inspection: the published `glama.json` schema accepts only `maintainers`, so there is no supported
-way to declare the compact environment variable or to disclose in the generated configuration that
-the listing was produced from a reduced surface. Advertising 16 tools while the server offers 35
-would understate what the server does, so the tool-count penalty is accepted instead.
+The published v0.42.1 Glama build observed on 2026-10-25 uses **compact mode**, advertising 16
+tools, with `SHADOWGRAPH_MCP_COMPACT=1` in its container build configuration. `glama.json` is
+maintainer metadata, not the container's environment configuration. The listing describes both
+compact and full inventories. Neither mode removes stored data or the full-mode implementations.
 
-Glama's generated container does not talk to this server directly. It runs `mcp-proxy@6.4.3` in front
+Glama's observed v0.42.1 container runs `mcp-proxy@6.7.16` in front
 of `node ./src/cli.js mcp` and scans over HTTP, so what the proxy requests, what this server
 negotiates with it, and whether the tool list survives that hop are properties of the pair. None of
 them can be established by pointing a different client at the server, which is why they have their
 own gate rather than a note.
 
-`npm run check:glama`, also run by `npm run check:mcp`, starts that exact pinned proxy through `npx`
+`npm run check:glama`, also run by `npm run check:mcp`, remains a historical compatibility gate
+for pinned `mcp-proxy@6.4.3` in full mode. It is not a reproduction of the current remote build.
+It starts that pinned proxy through `npx`
 with no dependency added to the package, binds it to the loopback interface only, and puts a
 transparent stdio recorder between the proxy and `node src/cli.js mcp`, the command that container
 runs. It then behaves as the scanner does,
@@ -420,7 +469,7 @@ Measured on 2026-09-03, that Inspector requests `protocolVersion: "2025-11-25"`,
 implements and echoes, so the strict run exercises the structured tier by genuine negotiation.
 
 `scripts/check-glama-proxy.mjs`, also runnable alone as `npm run check:glama`, starts pinned
-`mcp-proxy@6.4.3` — the proxy in Glama's generated container — in front of `node src/cli.js mcp`, the
+`mcp-proxy@6.4.3` — the historical proxy used by this local compatibility gate — in front of `node src/cli.js mcp`, the
 command that container runs, with a stdio recorder between them, and drives it over streamable HTTP as Glama's scanner would (§4). It
 fails when:
 

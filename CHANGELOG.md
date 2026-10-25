@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.42.2 — Technical Preview (2026-10-25)
+
+- Qualify full-only tools referenced from compact-mode descriptions, including parameter and output-schema prose, with operator restart guidance. Preserve 35 default full tools, 16 compact tools, and 36 full tools with a configured verifier.
+- Clarify tool selection, scoped read/write and review effects, record expansion parameters, maintenance and outcome behavior. Preserve callable names, validation constraints, output schema constraints and effect annotations.
+- Correct compatibility documentation and identify the pinned local proxy gate as historical; do not change the proxy implementation.
+- This metadata issue does not demonstrate an automatic-memory regression. Automatic-memory implementation and its accepted scope are unchanged; this patch does not repeat live memory validation.
+- No new TDQS result is claimed by this release. A fresh Glama assessment, when available, is separate from release and deployment verification.
+
 ## 0.42.1 — Technical Preview (2026-10-25)
 
 - Include the extraction operation and safety guide in the installation artifact and require it in the package check.
