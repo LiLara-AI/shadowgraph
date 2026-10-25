@@ -1,7 +1,9 @@
-# 0.42.1 local release preparation
+# 0.42.1 Technical Preview release scope
 
-Draft only. Do not publish this document as proof of remote availability.
-The existing public release is v0.42.0. Keep `private: true` and the npm-unpublished policy.
+This document records scope and preparation. Remote availability is proven by the
+[GitHub Release](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.42.1) and the
+[Glama listing](https://glama.ai/mcp/servers/LiLara-AI/shadowgraph), not this document.
+Keep `private: true` and the npm-unpublished policy.
 
 ## Candidate scope
 
@@ -57,7 +59,7 @@ protocol 2025-11-25 and all 35 full tools; compact mode exposes 16 tools.
 None of these results claims a remote Glama build, indexing update, hosting or
 permission to send a private store to a remote service.
 
-After the owner approves publication, push the exact reviewed branch, open/merge the
+For an authorized publication, push the exact reviewed branch, open/merge the
 release PR according to repository policy, create the new release tag without
 moving v0.42.0, attach the hash-checked package and public release notes, then use
 the owner's Glama account to claim/sync the approved source and inspect its actual

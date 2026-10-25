@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.42.1 candidate — unreleased
+## 0.42.1 — Technical Preview (2026-10-25)
 
 - Include the extraction operation and safety guide in the installation artifact and require it in the package check.
 - Document the publicly obtainable, checksum-pinned Windows extraction executor and distinguish its identity from required host validation.
@@ -12,7 +12,7 @@
 - Preserve exact full source quotations alongside explicitly model-proposed decision/attempt fields. Link supported user correction proposals to prior decisions, retain history and invalidate stale derived delivery.
 - Preserve the original negative host evidence. A later installed Windows workspace run demonstrates actual command failure, repair and passing check; automatic recovery from an extraction timeout and fresh-session reuse have separate evidence. Desktop UI observation remains unproved.
 
-## Unreleased
+### Additional changes since 0.42.0
 
 - **Automatic extraction from desktop sessions.** The worker a Stop or SessionEnd hook requests no longer inherits the hook's environment. A Claude Code desktop session sets `ANTHROPIC_BASE_URL` and session tokens in the environment its hooks inherit; the executor refused them (`provider_environment`, shown as `executor_blocked`), so an automatic drain requested from a desktop session stopped before any model call (reproduced in isolation with those names). The worker now gets the executor's own environment names and `SHADOWGRAPH_*` only.
 - **Isolated end-to-end check.** `tools/automatic-e2e/run.mjs` installs one commit's packed runtime into a scratch home, activates it once, runs each hook as the settings file lists it and reports capture, the Stop-requested drain, the stored experience, delivery to a fresh session, duplicate Stops, the budget ceiling and the pending state. It uses a stand-in host program; real-host evidence is separate.

@@ -1,7 +1,29 @@
-# ShadowGraph 0.42.1 — unreleased candidate
+# ShadowGraph 0.42.1 — Technical Preview
 
-This is a local release proposal, not a published release or a readiness declaration.
-The existing v0.42.0 tag and npm-unpublished policy remain unchanged (`private: true`).
+Automatic experience reuse for the installed **Windows Codex terminal wrapper**.
+This is a pre-release, not stable/GA. The existing v0.42.0 tag and npm-unpublished
+policy remain unchanged (`private: true`).
+
+## Install and upgrade
+
+Use Node 22.5+ and PowerShell 7+ for the demonstrated Windows workflow:
+
+```powershell
+npm install --global https://github.com/LiLara-AI/shadowgraph/releases/download/v0.42.1/shadowgraph-unified-plugin-0.42.1.tgz
+```
+
+Verify the downloaded tarball against `SHA256SUMS.txt` on the
+[GitHub Release](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.42.1).
+The [README](README.md#quick-start-windows-codex) covers the separate
+`@openai/codex@0.161.0` executor, existing ChatGPT subscription, genuine one-time
+owner consent and project enrollment. Installation alone does not activate memory.
+
+Stop active work and back up each store and the private integration home before
+upgrading. Schema 7 remains in use; changed source/executor/account identity requires
+setup again. Older pending captures are held, not silently reassigned.
+See [upgrade and rollback](docs/migration.md).
+
+## Changes and demonstrated scope
 
 - Include the extraction activation/recovery guide in the packed artifact and enforce its presence.
 - Document a publicly obtainable, checksum-pinned Windows Claude Code executor without replacing
@@ -27,11 +49,19 @@ are held. User corrections can carry a model-proposed relationship to a prior de
 both quotations and history. Superseded source decisions invalidate dependent answer copies.
 Field interpretation and correction relationships are not independently verified semantic facts.
 
-Named host gaps: Codex desktop UI is not observed by this integration; fresh Claude Desktop acceptance remains
-pending. No new Claude allowance was consumed for this work. Historical L8 remains FAIL.
+Named host gaps: Codex desktop UI is not observed by this integration; fresh Claude Desktop automatic
+coverage remains unproved. Existing Claude integration evidence does not establish full acceptance.
 There is no comparative cost, speed or generalized superiority claim. Local package, MCP and
-container results do not establish remote Glama indexing. Publication and standing extraction
-require a separate final owner decision; `private: true` and v0.42.0 remain unchanged.
+container results do not establish remote Glama indexing. The Glama surface is credential-free MCP;
+it cannot capture a user's Windows Codex sessions by itself. Standing extraction requires the user's
+separate setup consent; `private: true` and v0.42.0 remain unchanged.
+
+Canonical memory stays local-first; selected capture/context data passes through the configured
+provider. Each host turn is bounded to 120 seconds, with bounded background calls and retries.
+Closing the wrapper leaves pending work for a later launch, not a permanent extraction daemon.
+Native command results and user/assistant text are covered, not every native tool event.
+See the [Codex guide](docs/codex-integration.md) and [issue tracker](https://github.com/LiLara-AI/shadowgraph/issues).
+Never attach private stores, credentials, transcripts or review archives to public issues.
 
 ## Previous public release: 0.42.0 — Technical Preview / Early Access
 

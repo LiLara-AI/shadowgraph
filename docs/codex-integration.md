@@ -26,13 +26,17 @@ See the [official CLI installation guide](https://developers.openai.com/codex/cl
 Availability, the exact binary hash and the supported account route are checked
 again during setup. Other CLI versions need a newly validated adapter profile.
 
-Install this unreleased candidate from the supplied checked tarball with
-`npm install --prefix <application-directory> <candidate.tgz>`. Run its
-`node_modules/.bin/shadowgraph-codex` launcher (the `.cmd` launcher in PowerShell).
-Alternatively run `node <application-directory>/node_modules/shadowgraph-unified-plugin/src/codex-cli.js`.
-The public v0.42.0 installation command does not contain this wrapper. A future
-GitHub source/tag installation route must use the final published candidate ref;
-the package remains unpublished to npm.
+Install the v0.42.1 Technical Preview from its GitHub Release tarball:
+
+```powershell
+npm install --global https://github.com/LiLara-AI/shadowgraph/releases/download/v0.42.1/shadowgraph-unified-plugin-0.42.1.tgz
+```
+
+The release includes SHA-256 checksums. The [README quick start](../README.md#quick-start-windows-codex)
+includes complete PowerShell 7 commands for executor discovery, enrollment and launch.
+The package remains `private: true` and unpublished to the npm registry. For a local
+non-global installation use `npm install --prefix <application-directory> <downloaded-tarball>`
+and its `node_modules/.bin/shadowgraph-codex.cmd` launcher.
 
 After installing the package, save a private setup JSON containing `executable`
 (the absolute native Codex executable) and `projects` (objects with `project` and
