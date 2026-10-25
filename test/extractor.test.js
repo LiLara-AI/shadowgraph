@@ -12,7 +12,7 @@ import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const SCHEMA = { type: 'object', properties: { claims: { type: 'array', maxItems: 4, items: { type: 'string', maxLength: 100 } } }, required: ['claims'], additionalProperties: false };
 const HELP = '--safe-mode --tools --setting-sources --settings --strict-mcp-config --mcp-config --disable-slash-commands --no-session-persistence --session-id --json-schema --model --output-format --system-prompt';
-const AUTH = { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', apiKeySource: null };
+const AUTH = { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', apiKeySource: null, email: 'synthetic-owner@example.invalid' };
 const DOCTOR = 'Managed settings (remote): not fetched — requires an Enterprise or Team subscription';
 const successful = { type: 'result', subtype: 'success', is_error: false, num_turns: 2, structured_output: { claims: ['bounded observation'] }, modelUsage: { 'claude-opus-5': { inputTokens: 12, outputTokens: 8 } } };
 const result = (value, extra = {}) => ({ code: 0, stdout: typeof value === 'string' ? value : JSON.stringify(value), stderr: '', ...extra });
@@ -413,10 +413,10 @@ test('real child receives deliberate environment plus documented Windows OS name
   assert.ok(value.env.every(name => ['EXPLICIT_FIXTURE', ...required].includes(name)));
 });
 
-test('extractor imports are limited to the worker, verifier and explicit owner activation', async () => {
+test('extractor imports are limited to the worker, verifier, provider adapter and explicit owner activation', async () => {
   const root = fileURLToPath(new URL('../src/', import.meta.url));
   const entries = await readdir(root, { recursive: true });
-  const internal = new Set(['extractor.js', 'activation.js', 'extraction-runtime.js', 'internal/extraction-worker.js', 'internal/extraction-output.js', 'internal/extraction-child.js']);
+  const internal = new Set(['extractor.js', 'codex-extractor.js', 'codex-host.js', 'activation.js', 'extraction-runtime.js', 'internal/extraction-worker.js', 'internal/extraction-output.js', 'internal/extraction-child.js']);
   for (const name of entries.filter(x => x.endsWith('.js') && !internal.has(x.replaceAll('\\', '/')))) {
     assert.doesNotMatch(await readFile(join(root, name), 'utf8'), /(?:from\s*|import\s*\()["'][^"']*extractor\.js/, name);
   }
@@ -486,6 +486,28 @@ test('activated executor binary/configuration pin is checked before every model 
   const out = await executor.extract({ prompt: 'synthetic', schema: SCHEMA });
   assert.equal(out.status, 'blocked'); assert.equal(out.blockedReason, 'activated_executor_changed');
   assert.equal(s.calls.filter(x => x.args.includes('-p')).length, before);
+});
+// Independent review F3: the route's checks pass for any first-party account; the
+// account confirmed at activation is bound by a keyed digest of the identity
+// `auth status` reports, and another or an unnamed one is refused before any call.
+test('the activated account is bound: another account or none blocks before any model invocation', async t => {
+  let auth = { ...AUTH, email: 'synthetic-a@example.invalid', orgId: 'synthetic-org-a' };
+  const s = await fixture(t, { onInvoke: () => result(successful) });
+  const runner = async request => request.args.includes('auth') ? result(auth) : s.runner(request);
+  const make = (options = {}) => createExtractor({ executable: s.executable, env: s.env, scratchRoot: s.root, runProcess: runner, inspectPolicy: async () => ({ ok: true }), ...options });
+  const salt = 'c'.repeat(32), expectedReceipt = { ...(await make({ accountSalt: salt }).check()), accountSalt: salt };
+  assert.match(expectedReceipt.accountFingerprint, /^[0-9a-f]{64}$/u); assert.match(expectedReceipt.accountEmailFingerprint, /^[0-9a-f]{64}$/u);
+  assert.doesNotMatch(JSON.stringify(expectedReceipt), /synthetic-a|synthetic-org-a/u);
+  assert.notEqual((await make({ accountSalt: 'd'.repeat(32) }).check()).accountFingerprint, expectedReceipt.accountFingerprint, 'keyed per activation');
+  assert.equal((await make({ expectedReceipt }).extract({ prompt: 'synthetic', schema: SCHEMA })).status, 'success');
+  const invoked = () => s.calls.filter(x => x.args.includes('-p')).length, before = invoked();
+  for (const other of [{ ...auth, email: 'synthetic-b@example.invalid' }, { ...auth, orgId: 'synthetic-org-b' }, { loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty' }]) {
+    auth = other;
+    const out = await make({ expectedReceipt }).extract({ prompt: 'synthetic', schema: SCHEMA });
+    assert.equal(out.status, 'blocked'); assert.equal(out.blockedReason, 'activated_account_changed');
+  }
+  assert.equal(invoked(), before, 'no model invocation under another account');
+  assert.equal((await make().check()).accountFingerprint, null, 'an unnamed account has no fingerprint');
 });
 test('registered invocation identity is snapshotted before asynchronous configuration checks', async t => {
   const s = await fixture(t);

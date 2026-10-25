@@ -98,7 +98,7 @@ for (const type of ['json', 'sqlite']) for (const mode of ['logical', 'hard']) {
     const extraction = { state: 'active', activationId: randomUUID(), changedAt: now(), runtime, store: enrolled,
       noOverageConfirmed: true, budgets: { ...FROZEN_WORKER_BUDGETS }, model: 'claude-opus-5[1m]',
       executor: { ok: true, executable: join(root, 'synthetic-claude.exe'), binarySha256: 'b'.repeat(64), hostVersion: '2.1.288', model: 'claude-opus-5[1m]',
-        restrictions: Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`E-${i + 1}`, true])) } };
+        restrictions: Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`E-${i + 1}`, true])), accountFingerprint: 'f'.repeat(64), accountSalt: 'e'.repeat(32) } };
     await mkdir(env.SHADOWGRAPH_HOME, { recursive: true });
     const activationFile = join(env.SHADOWGRAPH_HOME, 'activation.json');
     await writeFile(activationFile, JSON.stringify({ version: 1, capabilities: { extraction, capture: { state: 'active', runtime, store: enrolled } }, history: [] }));

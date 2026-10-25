@@ -391,7 +391,7 @@ directly.
 
 ## Next
 
-- [README quick start](../README.md#quick-start--5-minutes)
+- [Manual usage and setup](manual-usage.md)
 - [API reference](api-reference.md) — full argument shapes for every surface
 - [Unified memory guide](unified-memory.md) — `remember` / `recall`, scoping, and temporal recall
 - [Vision and principles](vision-and-principles.md) — what ShadowGraph deliberately will not do

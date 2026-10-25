@@ -53,7 +53,7 @@ test('generation source scan: both store commits advance before payload and rest
     if (!entry.isFile() || !entry.name.endsWith('.js')) continue;
     const path = `${directory}${entry.name}`, code = await source(path);
     if (/generationBase\s*(?::|=)|generationCounters\s*(?::|=)/u.test(code)) writers.push(path);
-    if (!['internal/extraction-worker.js', 'extraction-runtime.js'].includes(path)) assert.doesNotMatch(code, /(?:from\s+|import\s*\()['"][^'"]*extraction-worker\.js/u, `${path}: only the activated CLI controller may import the worker`);
+    if (!['internal/extraction-worker.js', 'extraction-runtime.js', 'codex-host.js'].includes(path)) assert.doesNotMatch(code, /(?:from\s+|import\s*\()['"][^'"]*extraction-worker\.js/u, `${path}: only the activated Claude controller or explicitly set up Codex wrapper may import the worker`);
   }
   assert.deepEqual(writers.sort(), ['internal/capture-generation.js', 'internal/deletion-knowledge.js']);
 });

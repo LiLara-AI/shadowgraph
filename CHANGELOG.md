@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.42.1 — Technical Preview (2026-10-25)
+
+- Include the extraction operation and safety guide in the installation artifact and require it in the package check.
+- Document the publicly obtainable, checksum-pinned Windows extraction executor and distinguish its identity from required host validation.
+- Add an optional installed Codex terminal host and subscription extraction adapter, explicit executor/account binding, automatic per-turn capture and delivery, and queue inspection.
+- Display completed host answers before extraction and permit the next task during memory delay/failure. Persist accepted turns in a replayable outbox; retain source identities across restart and commit/replay boundaries. Keep finite worker limits and optional test-batch limits separate from everyday interactive use.
+- Select the Windows restricted-token sandbox explicitly without disabling managed policy or execution rules. Prioritize relevant current decisions before verbose diagnostic results and have the host assess applicable experience before acting.
+- Separate capture coverage from project-only, selected-project and all-permitted sharing. Preserve source conditions and uncertainty; revoke access transitively through memory-informed answers.
+- Hold legacy, unknown-account and foreign-setup captures instead of draining them through the selected account/provider. Refuse unsupported Claude session profiles before capture.
+- Preserve exact full source quotations alongside explicitly model-proposed decision/attempt fields. Link supported user correction proposals to prior decisions, retain history and invalidate stale derived delivery.
+- Preserve the original negative host evidence. A later installed Windows workspace run demonstrates actual command failure, repair and passing check; automatic recovery from an extraction timeout and fresh-session reuse have separate evidence. Desktop UI observation remains unproved.
+
+### Additional changes since 0.42.0
+
+- **Automatic extraction from desktop sessions.** The worker a Stop or SessionEnd hook requests no longer inherits the hook's environment. A Claude Code desktop session sets `ANTHROPIC_BASE_URL` and session tokens in the environment its hooks inherit; the executor refused them (`provider_environment`, shown as `executor_blocked`), so an automatic drain requested from a desktop session stopped before any model call (reproduced in isolation with those names). The worker now gets the executor's own environment names and `SHADOWGRAPH_*` only.
+- **Isolated end-to-end check.** `tools/automatic-e2e/run.mjs` installs one commit's packed runtime into a scratch home, activates it once, runs each hook as the settings file lists it and reports capture, the Stop-requested drain, the stored experience, delivery to a fresh session, duplicate Stops, the budget ceiling and the pending state. It uses a stand-in host program; real-host evidence is separate.
+- **README.** A table of what the MCP server provides and what needs the Claude Code integration.
+- **Decisions from conversation.** A decision said in one sentence that stands alone in its message ("For the config loader we will use the streaming tokenizer instead of the per-line regex parser, because …") is now kept as a typed decision: its chosen part, its rejected alternative and the stated reason (`reasonRejected`), each the sentence's own words (`decision-frame-v1`). The sentence itself must still be quoted by the unchanged claim verifier; no part is read from a negated, hedged, conditional, questioned or other actor's sentence. A decision the sentence does not establish, such as one stated beside other sentences, is kept as the whole user message, verbatim and cited, instead of being dropped when the model proposed only its fields (assistant and tool text are unchanged). A verified decision `reason` is no longer refused when the decision names one alternative.
+- **Account binding for extraction.** Activation binds the account the executor's `auth status` names (a keyed digest, not the values); an invocation under another account is refused before any model call (`activated_account_changed`). A hook from a session under another profile (`CLAUDE_CONFIG_DIR`) or a session token (`CLAUDE_CODE_OAUTH_TOKEN`) does not start the automatic worker, and neither does a desktop session whose own account (`CLAUDE_CODE_USER_EMAIL`) is not the bound one. A decision reason is kept only as one clause that names the alternative it rejects. Existing extraction activations must be renewed.
+
 ## 0.42.0 — Technical Preview / Early Access (GitHub release, not published to npm)
 
 See the [release notes](RELEASE_NOTES.md) for scope, what was demonstrated and known limitations. Read

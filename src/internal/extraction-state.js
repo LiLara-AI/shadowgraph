@@ -23,7 +23,10 @@ const validatedHost = (value) => {
 export function validExecutorReceipt(value) {
   return value?.ok === true && typeof value.executable === 'string' && isAbsolute(value.executable)
     && /^[0-9a-f]{64}$/.test(value.binarySha256 ?? '') && validatedHost(value)
-    && value.model === 'claude-opus-5[1m]' && Array.from({ length: 10 }, (_, i) => `E-${i + 1}`).every(key => value.restrictions?.[key] === true);
+    && value.model === 'claude-opus-5[1m]' && Array.from({ length: 10 }, (_, i) => `E-${i + 1}`).every(key => value.restrictions?.[key] === true)
+    // An activation without a bound account is not one this runtime runs.
+    && /^[0-9a-f]{64}$/.test(value.accountFingerprint ?? '') && /^[0-9a-f]{32}$/.test(value.accountSalt ?? '')
+    && (value.accountEmailFingerprint == null || /^[0-9a-f]{64}$/.test(value.accountEmailFingerprint));
 }
 const sameStore = (a, b) => a?.file === b?.file && a?.storage === b?.storage;
 const sameRuntime = (a, b) => a?.path === b?.path && a?.commit === b?.commit;

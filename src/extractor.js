@@ -4,12 +4,12 @@
 // configuration checks nor this module introduce a credential or fallback.
 import { spawn } from 'node:child_process';
 import { runSupervised } from './internal/extraction-supervision.js';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { lstat, mkdtemp, readFile, realpath, readdir, rm } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, relative } from 'node:path';
 
-import { EXTRACTION_MODEL, HOST_PROFILES } from './internal/extraction-contract.js';
+import { EXTRACTION_MODEL, HOST_PROFILES, accountEmailDigest } from './internal/extraction-contract.js';
 import { commandPath } from './internal/owner-files.js';
 export { EXTRACTION_MODEL } from './internal/extraction-contract.js';
 // Model turns per invocation. The pinned host enforces --max-turns before it sends a further turn (hidden from its
@@ -24,6 +24,15 @@ const ENV_NAMES = new Set(['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'PA
 const forbiddenEnvironment = (env) => Object.keys(env).filter(name => env[name] !== undefined && env[name] !== ''
   && /^(?:ANTHROPIC_|AWS_|AZURE_|GOOGLE_|GCLOUD_|CLOUDSDK_|CLAUDE_CODE_USE_|CLAUDE_CODE_OAUTH_TOKEN$|CLAUDE_CONFIG_DIR$|CLAUDE_CODE_SIMPLE$|HTTP_PROXY$|HTTPS_PROXY$|ALL_PROXY$)/iu.test(name));
 const object = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
+// The account a route signs in as, never kept: a keyed digest of the identity
+// fields `auth status` reports. Activation binds it; a different or missing one
+// blocks every later invocation, since a permitted route is not yet the
+// confirmed account (independent review F3).
+const ACCOUNT_FIELDS = ['accountUuid', 'accountId', 'email', 'emailAddress', 'orgId', 'organizationId', 'organizationUuid', 'orgUuid'];
+const accountOf = (route, salt) => {
+  const identity = ACCOUNT_FIELDS.filter(name => typeof route[name] === 'string' && route[name].trim()).map(name => [name, route[name].trim()]);
+  return identity.length ? createHmac('sha256', salt).update(JSON.stringify(identity)).digest('hex') : null;
+};
 const error = (code) => Object.assign(new Error(code), { code });
 const sha = (data) => createHash('sha256').update(data).digest('hex');
 const blocked = (reason, details = {}) => ({ ok: false, blockedReason: reason, ...details });
@@ -37,7 +46,7 @@ const terminalReason = (stdout) => providerRefusal(stdout) ? 'provider_refusal' 
 // A small, explicit schema dialect. Unknown keywords are refused rather than
 // silently delegating validation to the model or following external references.
 const SCHEMA_KEYS = new Set(['type', 'properties', 'required', 'additionalProperties', 'items', 'minItems', 'maxItems', 'minLength', 'maxLength', 'minimum', 'maximum', 'enum', 'const', 'description']);
-function checkedSchema(schema, depth = 0, seen = new Set()) {
+export function checkedSchema(schema, depth = 0, seen = new Set()) {
   if (!object(schema) || depth > 32 || seen.has(schema) || Object.keys(schema).some(k => !SCHEMA_KEYS.has(k))) throw error('unsupported_schema');
   seen.add(schema);
   if (!['object', 'array', 'string', 'number', 'integer', 'boolean', 'null'].includes(schema.type)) throw error('unsupported_schema');
@@ -229,7 +238,7 @@ async function outsideRepository(cwd, env, signal) {
   return !out.failure && out.code !== 0 && /not a git repository/iu.test(out.stderr);
 }
 
-export function createExtractor({ executable, env = process.env, scratchRoot = tmpdir(), runProcess = runBounded, inspectPolicy: policyInspection = inspectPolicy, expectedReceipt, supervision, hostProfiles = HOST_PROFILES } = {}) {
+export function createExtractor({ executable, env = process.env, scratchRoot = tmpdir(), runProcess = runBounded, inspectPolicy: policyInspection = inspectPolicy, expectedReceipt, supervision, hostProfiles = HOST_PROFILES, accountSalt = expectedReceipt?.accountSalt ?? '' } = {}) {
   // Snapshot at each call, not at construction: a long-lived worker must not
   // reuse a route that was checked before its configuration changed.
   async function checkAt(cwd, parent, signal) {
@@ -263,7 +272,8 @@ export function createExtractor({ executable, env = process.env, scratchRoot = t
       if (help.failure || help.code !== 0 || FLAGS.some(flag => !help.stdout.includes(flag))) return blocked('restriction_switch_unavailable');
       const auth = await probe([...configurationArgs(), 'auth', 'status']);
       let route; try { route = JSON.parse(auth.stdout); } catch { return blocked('auth_unverified'); }
-      if (auth.failure || auth.code !== 0 || route.loggedIn !== true || route.authMethod !== 'claude.ai' || route.apiProvider !== 'firstParty' || route.apiKeySource) return blocked('auth_route_unapproved');
+      if (auth.failure || auth.code !== 0 || !object(route) || route.loggedIn !== true || route.authMethod !== 'claude.ai' || route.apiProvider !== 'firstParty' || route.apiKeySource) return blocked('auth_route_unapproved');
+      const accountFingerprint = accountOf(route, accountSalt), accountEmailFingerprint = accountEmailDigest(accountSalt, route.email);
       const doctor = await probe([...configurationArgs(), 'doctor']);
       // Exactly one remote-settings report in the whole output, and it is the host's own ineligible line verbatim;
       // any other, extra or decorated state may apply a cache (post-merge review F1).
@@ -274,7 +284,7 @@ export function createExtractor({ executable, env = process.env, scratchRoot = t
       return { ok: true, executable: binary, binarySha256: digest, hostVersion, model: EXTRACTION_MODEL,
         remotePolicy: { cache: cacheOnly ? 'present' : 'absent', applicability: 'host_reported_ineligible', conflict: 'not_assessed' },
         restrictions: Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`E-${i + 1}`, true])),
-        environmentNames: Object.keys(childEnv).sort(), switches: FLAGS, configurationProfile: 'subscription-unmanaged-safe-mode-v1' };
+        environmentNames: Object.keys(childEnv).sort(), switches: FLAGS, configurationProfile: 'subscription-unmanaged-safe-mode-v1', accountFingerprint, accountEmailFingerprint };
     } catch { return blocked('configuration_check_failed'); }
   }
   let childSettlementUnconfirmed = false;
@@ -307,6 +317,7 @@ export function createExtractor({ executable, env = process.env, scratchRoot = t
         const checked = await checkAt(cwd, parent, signal);
         if (!checked.ok) return { status: 'blocked', blockedReason: checked.blockedReason, receipt: { ...checked, invocationStarted: false, model: EXTRACTION_MODEL } };
         if (expectedReceipt && ['executable', 'binarySha256', 'hostVersion', 'model', 'configurationProfile'].some(key => checked[key] !== expectedReceipt[key])) return { status: 'blocked', blockedReason: 'activated_executor_changed', receipt };
+        if (expectedReceipt && (!checked.accountFingerprint || checked.accountFingerprint !== expectedReceipt.accountFingerprint)) return { status: 'blocked', blockedReason: 'activated_account_changed', receipt };
         receipt = { ...checked, invocationStarted: false, schemaSha256: sha(JSON.stringify(schema)) };
         let policy;
         try { policy = await policyInspection({ env: parent, signal }); }

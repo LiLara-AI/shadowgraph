@@ -387,7 +387,7 @@ test('RT-14 the footprint counts each side file and only a .tmp beside the store
   assert.equal(await storeFootprint(file), 25);
 });
 
-test('RT-15 only the capture hook calls the privileged capture writer', async () => {
+test('RT-15 only the capture hook and explicitly set up Codex wrapper call the privileged capture writer', async () => {
   const callers = { privilegedRecordCapture: [], privilegedRecordSelfEvent: [], privilegedTransitionCapture: [] };
   for (const directory of ['src', 'scripts', 'bin', 'integrations']) {
     let names = [];
@@ -398,7 +398,7 @@ test('RT-15 only the capture hook calls the privileged capture writer', async ()
     }
   }
   for (const verb of Object.keys(callers)) callers[verb].sort();
-  assert.deepEqual(callers, { privilegedRecordCapture: ['src/capture-hook.js', 'src/internal/snapshot.js'], privilegedRecordSelfEvent: ['src/capture-hook.js', 'src/internal/snapshot.js'], privilegedTransitionCapture: ['src/internal/snapshot.js'] });
+  assert.deepEqual(callers, { privilegedRecordCapture: ['src/capture-hook.js', 'src/codex-host.js', 'src/internal/snapshot.js'], privilegedRecordSelfEvent: ['src/capture-hook.js', 'src/internal/snapshot.js'], privilegedTransitionCapture: ['src/internal/snapshot.js'] });
 });
 
 test('RT-16 check-integrations refuses a capture template with async, a matcher, another event or a short timeout', async (t) => {

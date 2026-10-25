@@ -21,7 +21,9 @@ import { canonicalPath, repositoryOf as storeRepository } from './internal/owner
 import { renderToolMaterial } from './internal/tool-material.js';
 import { privilegedExpireCapture, privilegedRecordCapture, privilegedRecordSelfEvent, privilegedRecordTranscript, privilegedSnapshot } from './internal/snapshot.js';
 import { TRANSCRIPT_TRIGGERS } from './internal/transcript.js';
-import { workerFenceFile, settlementFile } from './internal/extraction-state.js';
+import { activeExtraction, workerFenceFile, settlementFile } from './internal/extraction-state.js';
+import { extractionBinding, sessionProfileSelected } from './internal/extraction-provenance.js';
+import { accountEmailDigest } from './internal/extraction-contract.js';
 import { usageFile } from './internal/extraction-budget.js';
 import { fenceLockPath } from './revision-store.js';
 import { usableOriginId } from './scope.js';
@@ -218,6 +220,15 @@ export async function openTranscript(path) {
 // tells the thread keeping the deadline when the store is entered and left.
 // Resolves to what happened, for tests; `now` and `registry` are test seams.
 export async function runCapture({ capture, input, deadline, record = null, registry = registryFile(), home = homedir(), cwd = process.cwd(), post = () => {}, now = Date.now, env = process.env }) {
+  if (sessionProfileSelected(env)) return 'session_profile_selected';
+  const extraction = await activeExtraction(env);
+  const sessionEmail = Object.entries(env).find(([name]) => name.toUpperCase() === 'CLAUDE_CODE_USER_EMAIL')?.[1];
+  const bound = extraction?.executor.accountEmailFingerprint;
+  if (extraction && sessionEmail && (!bound || accountEmailDigest(extraction.executor.accountSalt, sessionEmail) !== bound)) return 'session_account_differs';
+  // Without a verifiable session account capture remains local and explicitly
+  // unbound; production workers leave it held rather than assuming ownership.
+  const provenance = extraction && sessionEmail && (extraction.executor.provider ?? 'claude') === 'claude'
+    ? { extractionBinding: extractionBinding(extraction) } : {};
   let event;
   let payload;
   try {
@@ -276,7 +287,7 @@ export async function runCapture({ capture, input, deadline, record = null, regi
           return privilegedRecordTranscript(graph, {
             originId: capture.originId, sessionId: event.sessionId, project, activatedAt: capture.changedAt,
             trigger: null, triggerItemId: null, transcript: null, mayContinue,
-            observation: { host: 'claude-code', hostVersion: null, toolName: null, cwd: null, outcome: null },
+            observation: { host: 'claude-code', hostVersion: null, toolName: null, cwd: null, outcome: null, ...provenance },
             admission: { limits: admissionLimits(capture.limits), storeBytes },
             isSelfTool: (toolName, toolInput) => classifyCaptureSource({ event: 'PostToolUse', sessionId: event.sessionId, cwd: event.cwd, toolName, toolInput, prompt: null }, context).selfEvent,
             ...step
@@ -304,7 +315,7 @@ export async function runCapture({ capture, input, deadline, record = null, regi
             const result = privilegedRecordCapture(graph, {
               project, originId: capture.originId, text: event.text, sourceIdentity: classified.sourceIdentity,
               source: { ...source, role: event.role, hostEventId: event.hostEventId, toolCallId: event.toolCallId },
-              observation: { host: 'claude-code', hostVersion: null, toolName: event.toolName, cwd: event.cwd, outcome: event.outcome },
+              observation: { host: 'claude-code', hostVersion: null, toolName: event.toolName, cwd: event.cwd, outcome: event.outcome, ...provenance },
               admission: { limits: admissionLimits(capture.limits), storeBytes },
               // The writer's split is rendered from these fields. They are not stored.
               ...(toolEvent ? { toolCall: { toolName: payload.tool_name, toolInput: payload.tool_input, toolResponse: payload.tool_response, error: payload.error } } : {})

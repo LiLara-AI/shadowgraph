@@ -1,8 +1,38 @@
 # Extraction activation and operation
 
-Extraction is a one-shot owner CLI worker. Capture requests it after an eligible Stop or SessionEnd by spawning a detached, unreferenced process with ignored standard streams. Capture never waits for a model call. Delivery, MCP and HTTP do not invoke or activate extraction. There is no extraction listener or daemon. Detached survival on a particular host must be measured; if it is not verified, use explicit `shadowgraph extract` and narrow the automation claim.
+This page describes the retained Claude route. The optional explicitly selected
+Codex subscription route has its own [terminal setup guide](codex-integration.md).
+Neither route transfers legacy captures to a newly selected provider.
+
+Extraction is a one-shot owner CLI worker. Capture requests it after an eligible Stop or SessionEnd by spawning a detached, unreferenced process with ignored standard streams. Capture never waits for a model call. That process gets only the environment names the executor passes to its own child plus `SHADOWGRAPH_*` configuration, never the rest of the hook's environment: a Claude Code desktop session sets its own provider route (`ANTHROPIC_BASE_URL`) and session tokens in every hook, which the executor would refuse (`provider_environment`). Your settings' `env` and `apiKeyHelper` are still checked, and the child's own `auth status` must still report the first-party subscription route. Two variables are not filtered but refused: a hook whose session runs under another profile (`CLAUDE_CONFIG_DIR`) or a session token (`CLAUDE_CODE_OAUTH_TOKEN`) does not start the worker at all, because the worker would run under your default profile's account, which may not be that session's (`session_profile_selected`). Explicit `shadowgraph extract` still refuses those variables in its own environment. A desktop host names its session's account in every hook (`CLAUDE_CODE_USER_EMAIL`); a session whose account is not the bound one does not start the worker either (`session_account_differs`). Activation binds the account: it keeps a digest (never the values) of the identity fields the executor's `auth status` reports under your default profile, keyed per activation — the key is stored beside it, so this prevents linking activations, not a dictionary check by someone who can read the file — and every invocation compares it before any model call, so a different account, or one `auth status` no longer names, is refused (`activated_account_changed`); a host whose `auth status` names no account cannot be activated (`extraction_account_unidentified`). An activation recorded before this binding is not run; activate again. Fresh capture provenance is required by the production worker. Unsupported profiles or session tokens are refused before capture; a known mismatched session account is refused too. A session without account metadata can be captured locally but remains unbound and is held from automatic extraction. Legacy, unknown-origin, foreign-account and prior-activation captures are not silently relabeled or drained. Session identity uses the account e-mail supplied by the host, not every possible organisation/account identifier. The account can still change between the check and the invocation. `tools/automatic-e2e/run.mjs` checks this path end to end in isolation, with a stand-in host program and no model. Delivery, MCP and HTTP do not invoke or activate extraction. There is no extraction listener or daemon. Detached survival on a particular host must be measured; if it is not verified, use explicit `shadowgraph extract` and narrow the automation claim.
 
 ## Activate only after the extraction gate
+
+### Obtain the profiled Windows executor
+
+The Windows x64 Claude Code 2.1.292 executable is available from Anthropic's public download service. It is not necessary to obtain another user's private binary or credentials. Download it to a dedicated, owner-chosen directory rather than replacing the interactive host:
+
+```powershell
+$executorDirectory = Join-Path $env:LOCALAPPDATA 'ShadowGraphExecutor/2.1.292'
+New-Item -ItemType Directory -Force -Path $executorDirectory | Out-Null
+$executorPath = Join-Path $executorDirectory 'claude.exe'
+Invoke-WebRequest 'https://downloads.claude.ai/claude-code-releases/2.1.292/win32-x64/claude.exe' -OutFile $executorPath
+$expectedHash = 'eb95bb65955f8b1702e800815f9a2c0388a5de0f196c354c7ee1dd5cb9a2ba23'
+if ((Get-FileHash -Algorithm SHA256 $executorPath).Hash.ToLower() -ne $expectedHash) {
+    throw 'Executor checksum mismatch; do not run this download'
+}
+& $executorPath --version
+```
+
+The checksum is also published in the [vendor manifest](https://downloads.claude.ai/claude-code-releases/2.1.292/manifest.json). Availability and an exact checksum establish the binary's identity, not its isolation or account suitability. This profile still requires successful host validation for the exact installed ShadowGraph runtime, the existing first-party subscription, disabled overage, and the terminal activation confirmation below. Newer versions and other platform builds are not substitutes for this profile. Do not copy credentials between Windows users or profiles.
+
+### One-time setup and automatic operation
+
+Install a packed runtime, install its delivery/capture hooks, activate delivery and capture for the same private store, and confirm the project's binding using the [integration instructions](../integrations/README.md). Activate extraction only after its host gate passes. These setup actions require their existing owner confirmations; MCP proposals do not grant activation or binding authority.
+
+After setup, supported Stop/SessionEnd events request automatic extraction. Ordinary work does not need a memory reminder or a manual `extract` command. Capture being present does not establish successful extraction, and extraction being successful does not establish that a later model received or used the record. Check the processing state and scoped delivery evidence for each stage. The current candidate has not yet established the complete automatic Desktop-to-fresh-session acceptance episode; a manual extraction demonstration is not a substitute.
+
+Cross-profile/account capture remains a release blocker for a general automatic-memory claim: declining a foreign session's automatic trigger does not prevent its previously captured material from entering a later drain. A synthetic run confined to one fresh project and account does not resolve that boundary. Do not enable standing extraction on the strength of that bounded run.
 
 Prepare and verify the exact packed runtime before requesting approval. A real runtime replacement, activation and first real model call require the owner's explicit gate approval. The command records evidence, the exact shared runtime/store, the resolved executor configuration, frozen budgets and a new activation identity:
 

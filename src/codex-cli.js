@@ -1,0 +1,42 @@
+#!/usr/bin/env node
+import { readFile } from 'node:fs/promises';
+import { createInterface } from 'node:readline';
+import { resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { setupCodex, codexStatus, inspectCodex, runCodexSession, changeCodexSharing, pauseCodex } from './codex-host.js';
+
+const [command, ...args] = process.argv.slice(2);
+function option(name, fallback) { const at = args.indexOf(name); return at < 0 ? fallback : args[at + 1]; }
+const home = resolve(option('--home', resolve(homedir(), '.shadowgraph', 'codex')));
+const show = value => process.stdout.write(JSON.stringify(value, null, 2) + '\n');
+try {
+  if (command === 'setup') {
+    const file = option('--config'); if (!file) throw new Error('setup requires --config <JSON file> with executable and projects [{project,cwd}]');
+    show(await setupCodex({ ...JSON.parse(await readFile(resolve(file), 'utf8')), home }));
+  } else if (command === 'status') {
+    show(await codexStatus(home));
+  } else if (command === 'inspect') show(await inspectCodex({ home, query: option('--query', '') }));
+  else if (command === 'expand') {
+    const path = option('--handle'); if (!path) throw new Error('expand requires --handle <JSON file from inspect>');
+    show(await inspectCodex({ home, handle: JSON.parse(await readFile(resolve(path), 'utf8')) }));
+  } else if (command === 'share') {
+    show(await changeCodexSharing({ home, mode: option('--mode', 'project'), projects: option('--projects', '').split(',').filter(Boolean), exclude: option('--exclude', '').split(',').filter(Boolean) }));
+  } else if (['pause', 'resume'].includes(command)) show(await pauseCodex({ home, paused: command === 'pause' }));
+  else if (command === 'run') {
+    const controller = new AbortController(), stop = () => controller.abort();
+    process.once('SIGINT', stop); process.once('SIGTERM', stop);
+    const prompt = option('--prompt');
+    let terminal;
+    // Attach the iterator before asynchronous setup/account checks so piped
+    // prompts cannot be emitted and lost while the session is preparing.
+    const prompts = prompt === undefined ? (terminal = createInterface({ input: process.stdin, output: process.stdout, terminal: process.stdin.isTTY === true }))[Symbol.asyncIterator]() : [prompt];
+    try {
+      const numberOption = name => option(name) === undefined ? undefined : Number(option(name));
+      const result = await runCodexSession({ home, prompts, maxCalls: numberOption('--max-calls'), maxTurns: numberOption('--max-turns'),
+        deadlineMs: numberOption('--deadline-ms'), settleMs: numberOption('--settle-ms'), signal: controller.signal,
+        onResult: result => { process.stdout.write(result.answer + '\n'); },
+        onMemory: state => { process.stderr.write(state.status === 'idle' ? 'ShadowGraph: memory caught up.\n' : `ShadowGraph: memory pending (${state.blockedReason ?? state.reason ?? state.status}); work can continue.\n`); } });
+      process.stderr.write(`Session evidence: ${result.runDirectory}\n`);
+    } finally { terminal?.close(); process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); }
+  } else throw new Error('Usage: shadowgraph-codex setup --config <file> | status | inspect --query <text> | expand --handle <JSON file> | run [--prompt <text>] | share --mode project|selected|all-permitted [--projects p1,p2] [--exclude p3] | pause | resume. All commands accept --home <private directory>. Optional batch bounds: --max-calls 1..100 --max-turns 1..100 --deadline-ms 1..3600000. EOF memory grace: --settle-ms 0..240000 (default 5000). Interactive work has no demonstration turn limit; each child and memory drain remains bounded.');
+} catch (error) { process.stderr.write(`ShadowGraph Codex: ${error.code ?? error.message}\n`); process.exitCode = 1; }

@@ -21,7 +21,7 @@ import { extractionSupersession } from './internal/extraction-supersession.js';
 import { accessScopeContains, validateAccess, intersectAccessScope, accessDiagnostics, reconcileAccessLedger } from './access.js';
 import { createAccessLifecycle } from './internal/access-lifecycle.js';
 import { assertCreationInput } from './internal/creation-id.js';
-import { EXTRACTION_RECIPE } from './internal/extraction-contract.js';
+import { EXTRACTION_RECIPE, CODEX_EXTRACTION_MODEL, CODEX_PROMPT_VERSION, CODEX_OUTPUT_SCHEMA_VERSION } from './internal/extraction-contract.js';
 import { attemptOutcome } from './internal/outcome.js';
 import { RUNTIME_MISSES, missReachedBy, runtimeMissLedgerIssue, withFallbackMisses } from './internal/miss-ledger.js';
 import { supersessionOrder, temporalEvidence, versionTimes } from './internal/temporal-evidence.js';
@@ -1508,8 +1508,9 @@ export function createShadowGraph(options = {}) {
         || (isValidIsoInstant(entity.updatedAt) && compareInstants(entity.updatedAt, item.updatedAt) > 0));
       const expired = rawExpired(item, at);
       const rawAvailable = !expired && item.contentRef !== null && (extras.get(CAPTURE_CONTENT) ?? []).some((entry) => entry.contentRef === item.contentRef);
+      const recipe = item.receipts.at(-1)?.provider === 'codex' ? { ...EXTRACTION_RECIPE, model: CODEX_EXTRACTION_MODEL, promptVersion: CODEX_PROMPT_VERSION, schemaVersion: CODEX_OUTPUT_SCHEMA_VERSION } : EXTRACTION_RECIPE;
       const recipeChanges = item.state === 'extracted'
-        ? Object.keys(EXTRACTION_RECIPE).filter(key => item.receipts.at(-1)?.[key] !== EXTRACTION_RECIPE[key]) : [];
+        ? Object.keys(recipe).filter(key => item.receipts.at(-1)?.[key] !== recipe[key]) : [];
       const lastReprocessing = item.receipts.at(-1)?.reprocessing;
       const reprocessOutcome = lastReprocessing && typeof lastReprocessing === 'object' ? {
         ...Object.fromEntries(['preservedCorrections', 'skippedProposals'].filter(key => Number.isSafeInteger(lastReprocessing[key]) && lastReprocessing[key] >= 0).map(key => [key, lastReprocessing[key]])),
@@ -2153,7 +2154,7 @@ export function createShadowGraph(options = {}) {
   function sameExtractionFields(record, proposed) {
     const fields = { memory: ['text'], decision: ['title', 'chosen', 'goal'], attempt: ['solution', 'result', 'reason'] };
     return record.kind === proposed.kind && fields[record.kind].every(key => (record[key] ?? '') === (proposed.values[key] ?? ''))
-      && (record.kind !== 'decision' || JSON.stringify((record.alternatives ?? []).map(value => value.label)) === JSON.stringify(proposed.alternatives.map(value => value.label)));
+      && (record.kind !== 'decision' || JSON.stringify((record.alternatives ?? []).map(value => [value.label, value.reasonRejected ?? ''])) === JSON.stringify(proposed.alternatives.map(value => [value.label, value.reasonRejected ?? ''])));
   }
 
   // A replacement is a new representation of this capture, possibly split,
@@ -2226,6 +2227,19 @@ export function createShadowGraph(options = {}) {
         record = remember({ ...args, memoryType: 'episode', key }).memory;
       }
       const fields = { captureRef: item.id, claims: proposed.claims, verificationStatus: 'unverified' };
+      if (item.observation?.memoryDependencies?.length) {
+        fields.memoryDependencies = clone(item.observation.memoryDependencies);
+        fields.evidenceIndependence = 'derived_from_delivered_memory';
+      }
+      if (proposed.interpretation) fields.interpretation = clone(proposed.interpretation);
+      const correction = proposed.correction, previousDecision = correction && records.get(correction.recordId);
+      const applyCorrection = input.receipt.provider === 'codex' && item.source.role === 'user' && proposed.kind === 'decision'
+        && previousDecision?.kind === 'decision' && captureOwner(item).owns(previousDecision)
+        && !['superseded', 'archived', 'abandoned', 'stale'].includes(previousDecision.status)
+        && createHash('sha256').update(JSON.stringify(previousDecision)).digest('hex') === correction.expectedHash;
+      if (applyCorrection) fields.correction = { status: 'model_proposed', recordId: correction.recordId,
+        sourceRef: item.id, statement: correction.statement,
+        limitation: 'The source quotation is preserved; the correction relationship is a model interpretation, not independently verified.' };
       if (proposed.kind === 'attempt') {
         fields.outcomeEvidence = clone(item.observation?.outcome?.outcomeEvidence ?? { state: 'absent' });
         if (fields.outcomeEvidence.state === 'observed') fields.resultClass = fields.outcomeEvidence.exitStatus === 0 ? 'succeeded' : 'failed';
@@ -2240,6 +2254,7 @@ export function createShadowGraph(options = {}) {
       decorate(records.get(record.id), record.id, fields);
       for (const entry of journal) decorate(entry.payload, record.id, fields);
       for (const value of idempotency.values()) decorate(value, record.id, fields);
+      if (applyCorrection) supersedeDecision({ project: item.project, originId: item.originId, decisionId: previousDecision.id, replacementId: record.id });
       producedRecordIds.push(record.id);
     }
     if (producedRecordIds.length) {
@@ -5225,13 +5240,28 @@ export function createShadowGraph(options = {}) {
         provenance = { version: 1, request: { project: scope.project, originId: scope.originId }, accessId, scope: clone(authorizedScope), surfaces: inherited === undefined ? [...decision.entry.surfaces] : decision.entry.surfaces.filter(value => inherited.surfaces.includes(value)), expiresAt: scope.grant.expiresAt };
       } else scope.grantLimitation = decision.reason ?? 'grant_provenance_refused';
     }
-    const visible = item => {
+    const visibleWithDependencies = (item, ancestors) => {
       if (!item) return false;
-      if (baseVisible(item)) return true;
-      const allowed = authorizedScope !== null && accessScopeContains(authorizedScope, isStoredWithoutProject(item) ? { ...item, attribution: 'legacy_unattributed' } : item);
-      if (allowed) boundary.widerRead = true;
+      if (ancestors.size >= 32 || ancestors.has(item.id) || withheldToken(item.erasureToken)) return false;
+      const own = baseVisible(item);
+      const allowed = own || (authorizedScope !== null && accessScopeContains(authorizedScope, isStoredWithoutProject(item) ? { ...item, attribution: 'legacy_unattributed' } : item));
+      if (!allowed) return false;
+      // A model's memory-informed output cannot launder a private source into
+      // another project. Every source must still be readable in this request,
+      // transitively; missing sources and cycles are held, never guessed open.
+      if (item.memoryDependencies !== undefined) {
+        if (!Array.isArray(item.memoryDependencies) || item.memoryDependencies.length > 32) return false;
+        const next = new Set(ancestors); next.add(item.id);
+        if (!item.memoryDependencies.every(id => {
+          const dependency = records.get(id) ?? facts.get(id);
+          return typeof id === 'string' && dependency && !['superseded', 'invalidated', 'archived'].includes(dependency.status)
+            && visibleWithDependencies(dependency, next);
+        })) return false;
+      }
+      if (!own) boundary.widerRead = true;
       return allowed;
     };
+    const visible = item => visibleWithDependencies(item, new Set());
     // Whether an id -- a relation endpoint, say -- resolves inside it.
     const boundary = { scope, visible, baseVisible, accessId, surface, requestedAccess, provenance, widerRead: false, reaches: (entityId) => entity(entityId, boundary) !== undefined };
     if (memoryScope !== undefined) boundary.reaches = scopedReach(boundary, memoryScope);
@@ -5625,7 +5655,8 @@ export function createShadowGraph(options = {}) {
       const line = established && input.compact === true ? t1Line(shown, lineContext) : null;
       if (line?.decisiveOmitted.length) shortened = true;
       const evidence = evidenceOf(record);
-      return line && !line.decisiveOmitted.length ? { tier: 'T1', line, score, ranks, temporalEvidence: evidence } : { tier: 'T2', record: shown, score, ranks, temporalEvidence: evidence };
+      return line && !line.decisiveOmitted.length ? { tier: 'T1', line, score, ranks, temporalEvidence: evidence }
+        : { tier: 'T2', record: shown, ...(line ? { expansion: line.expansion } : {}), score, ranks, temporalEvidence: evidence };
     });
     const byKind = { decision: 0, attempt: 0, memory: 0, fact: 0 };
     // A legacy fact may be stored with no kind; it is still a fact.

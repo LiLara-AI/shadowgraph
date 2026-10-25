@@ -5,7 +5,7 @@
 // activation.json`, in exactly the shape delivery reads (src/delivery.js), with
 // an append-only history. It holds configuration and evidence references,
 // never memory. Delivery, capture and extraction share this record fence.
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { createDestinationFence } from './revision-store.js';
 import { execFile } from 'node:child_process';
 import { lstat, readFile, rename } from 'node:fs/promises';
@@ -335,18 +335,23 @@ export async function activateExtraction({ env = process.env, evidence, store, s
   const { validExecutorReceipt, workerSettlement } = await import('./internal/extraction-state.js');
   if (await workerSettlement(env) !== 'clear') throw new Error('worker_settlement_unconfirmed');
   const { FROZEN_WORKER_BUDGETS, initializeUsage } = await import('./internal/extraction-budget.js');
-  const checked = await (executorCheck ?? (() => createExtractor({ executable, env }).check()))();
+  // The account is bound by a keyed digest under this activation's own key.
+  const accountSalt = randomBytes(16).toString('hex');
+  const checked = await (executorCheck ?? (() => createExtractor({ executable, env, accountSalt }).check()))({ accountSalt });
   // Copy only resolved configuration and bounded metadata, never host diagnostics
   // or auth response fields. The executor repeats all checks on every invocation.
   // remotePolicy: whether a remote policy cache was present and left to the host's own report, shown at confirmation.
-  const executor = Object.fromEntries(['ok', 'executable', 'binarySha256', 'hostVersion', 'model', 'restrictions', 'environmentNames', 'switches', 'configurationProfile', 'remotePolicy']
+  const executor = Object.fromEntries(['ok', 'executable', 'binarySha256', 'hostVersion', 'model', 'restrictions', 'environmentNames', 'switches', 'configurationProfile', 'remotePolicy', 'accountFingerprint', 'accountEmailFingerprint']
     .filter(key => checked?.[key] !== undefined).map(key => [key, structuredClone(checked[key])]));
+  // A host that names no account in `auth status` cannot be bound to one.
+  if (checked?.ok === true && !/^[0-9a-f]{64}$/u.test(checked.accountFingerprint ?? '')) throw new Error('extraction_account_unidentified');
+  if (checked?.ok === true) executor.accountSalt = accountSalt;
   if (checked?.ok === true && HOST_PROFILES[checked.hostVersion]?.requiresHostValidation) executor.hostValidation = await checkedHostValidation(hostValidation, checked, pinned);
   if (!validExecutorReceipt(executor) || checked.executable !== await canonicalPath(executable)) throw new Error('extraction_executor_unverified');
   const at = new Date().toISOString();
   const extraction = { state: 'active', activationId: randomUUID(), changedAt: at, evidence, store: { file: storeFile, storage },
     runtime: pinned, settings: settingsFile, surface, model: EXTRACTION_MODEL, budgets: { ...FROZEN_WORKER_BUDGETS }, executor, noOverageConfirmed: true };
-  if (!(await isScratchFile(path)) && !await confirmOwnerAction('Activate extraction (subscription only; no overage authorized)', { record: path, ...extraction })) throw new Error(`activation_requires_owner_confirmation (${path})`);
+  if (!(await isScratchFile(path)) && !await confirmOwnerAction('Activate extraction (subscription only; no overage authorized; bound to the account `claude auth status` reports now under your default profile)', { record: path, ...extraction })) throw new Error(`activation_requires_owner_confirmation (${path})`);
   await afterConfirmation?.();
   if (await readText(path) !== text) throw new Error('activation_record_changed_while_confirming');
   await initializeUsage({ env }); // Existing usage must validate and is never reset.

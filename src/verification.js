@@ -266,7 +266,10 @@ export const CLAIM_DERIVATION_RULES = Object.freeze({
   'contraction-expansion-v1': "reads n't, 're, 've, 'll and 'm (with any apostrophe) as the words they contract; nothing else",
   // Applied only to a split capture recorded. classifyClaim never selects it
   // by reading labels, and it does not assign a decision, alternative or cause.
-  'tool-call-coverage-v1': 'copies a capture-recorded input side into the attempt solution and the outcome side into its result; it does not verify the tool report or assign a cause'
+  'tool-call-coverage-v1': 'copies a capture-recorded input side into the attempt solution and the outcome side into its result; it does not verify the tool report or assign a cause',
+  // Applied only to a decision a model proposed, whose chosen text it must
+  // match. The sentence itself must be quoted by the rules above.
+  'decision-frame-v1': 'reads one quoted sentence of the form "[For|In ...,] we|I|let\'s <decide> <chosen> [instead of|rather than|in place of <alternative>][, because <reason>]" into its parts, word for word; the reason is the one stated, not a verified cause'
 });
 // The order a failure is reported in: what reverses or hedges a claim first.
 const FAILURE_ORDER = ['polarity', 'modality', 'quantifier', 'actor', 'time', 'scope'];
@@ -691,6 +694,135 @@ export function toolCallCoverageClaims({ sourceRef, sourceText, boundary, soluti
     text, sourceRef, class: 'entailed', rule: 'tool-call-coverage-v1', verifierVersion: CLAIM_VERIFIER_VERSION, span: { start, end }
   });
   return [claim(input, 0, boundary), claim(outcome, boundary + 1, sourceText.length)];
+}
+
+// A decision said in one sentence that stands alone in its source -- the
+// sentence is quoted by the rules above -- read into its parts at fixed
+// connectives (decision-frame-v1). Each part is the source's own words. The
+// chosen and the rejected parts hold no negation, hedge, time or other actor;
+// the reason, one clause naming what it rejects, holds no hedge or condition;
+// the sentence holds no question, and nothing follows the reason, so no part
+// is read out of words that turn it. Anything else is not a frame, and the
+// caller keeps the message as it is said instead of fields read from a piece.
+const FRAME_SUFFIX = new Map([["'ll", 'will'], ["'re", 'are'], ["'m", 'am'], ["'ve", 'have']]);
+const FRAME_VERBS = [['use'], ['go', 'with'], ['switch', 'to'], ['adopt'], ['keep'], ['stick', 'with'], ['choose'], ['pick']];
+const FRAME_HEADS = [
+  ...['we', 'i'].flatMap((who) => [
+    ...FRAME_VERBS.flatMap((verb) => [[who, 'will', ...verb], [who, 'decided', 'to', ...verb], [who, 'have', 'decided', 'to', ...verb]]),
+    ...['are', 'am'].flatMap((be) => [[who, be, 'going', 'with'], ...FRAME_VERBS.map((verb) => [who, be, 'going', 'to', ...verb])]),
+    [who, 'chose'], [who, 'picked'], [who, 'decided', 'on']
+  ]),
+  ...FRAME_VERBS.map((verb) => ['let', 'us', ...verb])
+].sort((a, b) => b.length - a.length);
+const FRAME_CONTRASTS = [['instead', 'of'], ['rather', 'than'], ['in', 'place', 'of']];
+const FRAME_TURNING = new Set(['polarity', 'modality', 'actor', 'time']);
+const FRAME_DETERMINERS = new Set(['the', 'this', 'that', 'a', 'an']);
+// Inside a part only what joins one name, with no space: "per-line", "src/cli.js".
+const FRAME_JOINERS = new Set(['-', '/', '.', '_', '+', '#', '@']);
+// A reason is one clause: these turn or bound what it says, or the decision.
+const REASON_TURNING = new Set(['unless', 'except', 'excluding', 'but', 'though', 'although', 'however', 'otherwise', 'whereas', 'while', 'until', 'if', 'whether', 'because',
+  // Hedges: a reason may report ("the log reports"), never doubt itself.
+  'may', 'might', 'could', 'would', 'should', 'possibly', 'probably', 'likely', 'unlikely', 'perhaps', 'maybe', 'seems', 'seem', 'seemed', 'seemingly', 'appears', 'appear',
+  'appeared', 'apparently', 'supposedly', 'suppose', 'allegedly', 'presumably', 'hopefully', 'theoretically', 'arguably', 'hypothetically', 'think', 'thinks', 'thought',
+  'believe', 'believes', 'believed', 'guess', 'suspect', 'suspects', 'suspected', 'assume', 'assumes', 'assumed', 'assuming', 'doubt', 'doubts', 'doubtful', 'unclear',
+  'uncertain', 'unconfirmed', 'unverified', 'expect', 'expects']);
+// A lead is "For|In the <name>": these name a time, a case or a manner, not a place.
+// ponytail: a hand-picked list; a lead is kept word for word in the title either way.
+const LEAD_IDIOMS = new Set(['moment', 'meantime', 'meanwhile', 'interim', 'time', 'being', 'event', 'case', 'cases', 'run', 'term', 'future', 'past', 'present', 'end',
+  'beginning', 'start', 'record', 'long', 'short', 'near', 'first', 'last', 'worst', 'best', 'rest', 'most', 'least', 'odd', 'rare', 'mean', 'theory', 'principle', 'general',
+  'practice', 'effect', 'fact', 'way', 'sake', 'now', 'today', 'week', 'month', 'sprint', 'release', 'demo', 'draft', 'test', 'trial']);
+// Words of one part: a space between them, or a joiner with none.
+const joined = ({ gap, tight }) => gap === '' || (tight && FRAME_JOINERS.has(gap));
+const startsWith = (tokens, at, words) => words.every((word, offset) => tokens[at + offset]?.w === word && (offset === 0 || tokens[at + offset].gap === ''));
+
+function decisionFrameOf(text, unit) {
+  const tokens = [];
+  let previous = unit.bodyFrom;
+  for (const word of unit.words) {
+    const raw = text.slice(previous, word.start), gap = raw.trim();
+    const at = { gap, tight: !/\s/u.test(raw), start: word.start, end: word.end };
+    previous = word.end;
+    if (word.base === 'let' && word.suffix === "'s") tokens.push({ w: 'let', marker: null, ...at }, { w: 'us', marker: 'actor', ...at, gap: '', tight: true });
+    else if (FRAME_SUFFIX.has(word.suffix)) {
+      const second = FRAME_SUFFIX.get(word.suffix);
+      tokens.push({ w: word.base, marker: markerOf({ word: word.base, base: word.base, suffix: '' }), ...at }, { w: second, marker: markerOf({ word: second, base: second, suffix: '' }), ...at, gap: '', tight: true });
+    } else tokens.push({ w: word.word, marker: word.marker, ...at });
+  }
+  if (!tokens.length || tokens[0].gap || !['', '.', '!'].includes(text.slice(previous, unit.to).trim())) return null;
+  const subject = tokens.findIndex((token, index) => token.w === 'we' || token.w === 'i' || (token.w === 'let' && tokens[index + 1]?.w === 'us'));
+  const head = subject < 0 ? undefined : FRAME_HEADS.find((words) => startsWith(tokens, subject, words));
+  if (!head) return null;
+  // A lead names where the decision holds, and is kept in the title: "For the config loader, ...".
+  // A named thing only: "In theory," or "For now," is no place.
+  if (subject > 0) {
+    const lead = tokens.slice(0, subject);
+    if (lead.length < 3 || lead.length > 5 || !['for', 'in'].includes(lead[0].w) || !FRAME_DETERMINERS.has(lead[1].w) || !['', ','].includes(tokens[subject].gap)
+      || lead.slice(2).some(({ w }) => w === 'of' || LEAD_IDIOMS.has(w))
+      || lead.some((token, index) => (token.marker && token.marker !== 'scope') || (index > 0 && !joined(token)))) return null;
+  }
+  const from = subject + head.length;
+  let contrast = -1, contrastEnd = -1, because = -1;
+  for (let index = from; index < tokens.length && because < 0; index += 1) {
+    const words = FRAME_CONTRASTS.find((candidate) => startsWith(tokens, index, candidate));
+    if (tokens[index].w === 'because') because = index;
+    else if (words && contrast >= 0) return null;
+    else if (words) [contrast, contrastEnd] = [index, index + words.length];
+  }
+  const part = (first, last, refused) => {
+    const slice = tokens.slice(first, last);
+    if (!slice.length || slice[0].gap !== '' || !slice.some(({ w, marker }) => !marker && !CLAIM_STOP_WORDS.has(w))
+      || slice.some((token, index) => refused(token) || (index > 0 && !joined(token)))) return null;
+    return [slice[0].start, slice.at(-1).end];
+  };
+  const turned = ({ marker }) => FRAME_TURNING.has(marker);
+  const chosenEnd = contrast >= 0 ? contrast : because >= 0 ? because : tokens.length;
+  const chosen = part(from, chosenEnd, turned);
+  const alternative = contrast >= 0 ? part(contrastEnd, because >= 0 ? because : tokens.length, turned) : null;
+  // The reason runs to the sentence's end, so whatever it says stays in it. It
+  // may state a negative ("cannot handle"), never a hedge or a condition, and it
+  // is a reason only for an alternative it names: "instead of JSON because it is
+  // faster" says nothing against JSON, nor does a word both parts share.
+  const reason = because >= 0 ? part(because + 1, tokens.length, ({ w }) => REASON_TURNING.has(w)) : null;
+  const content = ([start, end]) => new Set(tokens.filter((token) => token.start >= start && token.end <= end && !token.marker && !CLAIM_STOP_WORDS.has(token.w)).map(({ w }) => stem(w)));
+  if (!chosen || (contrast >= 0 && (!alternative || !['', ','].includes(tokens[contrast].gap)))) return null;
+  const rejectedOnly = alternative && [...content(alternative)].filter((word) => !content(chosen).has(word));
+  if (because >= 0 && (!reason || !alternative || !['', ','].includes(tokens[because].gap) || ![...content(reason)].some((word) => rejectedOnly.includes(word)))) return null;
+  return { title: [tokens[0].start, chosen[1]], chosen, alternative, reason };
+}
+// What a proposed part says, to compare with the frame's: its words, without a
+// leading decide verb (for the chosen part), "because" (for the reason) or article.
+function frameCore(text, lead = []) {
+  const words = expandContractions(claimWordsOf(text)).split(' ').filter(Boolean);
+  const verb = lead.find((candidate) => candidate.every((word, offset) => words[offset] === word));
+  const rest = words.slice(verb?.length ?? 0);
+  while (['the', 'a', 'an'].includes(rest[0])) rest.shift();
+  return rest.join(' ');
+}
+export function decisionFrameClaims({ sourceRef, sourceText, chosen, alternatives = [], reasons = [] }) {
+  if (typeof sourceText !== 'string' || typeof sourceRef !== 'string' || !sourceRef || typeof chosen !== 'string') return null;
+  const want = frameCore(chosen, [['to'], ...FRAME_VERBS, ...FRAME_VERBS.map((verb) => ['to', ...verb])].sort((a, b) => b.length - a.length));
+  if (!want) return null;
+  const source = readSource(sourceText);
+  const text = ([start, end]) => sourceText.slice(start, end);
+  const frames = source.units.map((unit, index) => ({ index, frame: decisionFrameOf(sourceText, unit) }))
+    .filter(({ frame }) => frame && frameCore(text(frame.chosen)) === want);
+  if (frames.length !== 1) return null;
+  const [{ index, frame }] = frames;
+  // A proposed rejected part or reason that is not the frame's is another reading.
+  if (alternatives.some((given) => !frame.alternative || frameCore(given) !== frameCore(text(frame.alternative)))) return null;
+  if (reasons.some((given) => !frame.reason || frameCore(given, [['because']]) !== frameCore(text(frame.reason)))) return null;
+  const unit = source.units[index];
+  const statement = classifyAgainst({ text: sourceText.slice(unit.bodyFrom, unit.to), sourceRef }, source);
+  if (statement.class !== 'quoted' && statement.class !== 'entailed') return null;
+  const claim = (span) => span && ({ text: text(span), sourceRef, class: 'entailed', rule: 'decision-frame-v1', verifierVersion: CLAIM_VERIFIER_VERSION, span: { start: span[0], end: span[1] } });
+  return { statement, title: claim(frame.title), chosen: claim(frame.chosen), alternative: claim(frame.alternative), reason: claim(frame.reason) };
+}
+
+// Whether a text names anything another names: a content word in common.
+export function mentionsAny(text, other) {
+  if (typeof text !== 'string' || typeof other !== 'string') return false;
+  const named = new Set(contentOf(wordsOf(other)));
+  return contentOf(wordsOf(text)).some((word) => named.has(word));
 }
 
 // Plan v1.4.4 §17, G-5 §3.1 (PR-25): the negating words of a text, read as the

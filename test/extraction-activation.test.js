@@ -14,7 +14,7 @@ async function setup(t) {
   const store = { file: join(root, 'memory.json'), storage: 'json' };
   const extraction = { state: 'active', activationId: randomUUID(), changedAt: new Date().toISOString(), store, runtime,
     noOverageConfirmed: true, budgets: { ...FROZEN_WORKER_BUDGETS }, model: 'claude-opus-5[1m]',
-    executor: { ok: true, executable: join(root, 'claude.exe'), binarySha256: 'b'.repeat(64), hostVersion: '2.1.288', model: 'claude-opus-5[1m]', restrictions: Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`E-${i + 1}`, true])) } };
+    executor: { ok: true, executable: join(root, 'claude.exe'), binarySha256: 'b'.repeat(64), hostVersion: '2.1.288', model: 'claude-opus-5[1m]', restrictions: Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`E-${i + 1}`, true])), accountFingerprint: 'f'.repeat(64), accountSalt: 'e'.repeat(32) } };
   const record = { version: 1, capabilities: { extraction, capture: { state: 'active', store, runtime } }, history: [] };
   const file = join(root, 'activation.json'); const save = () => writeFile(file, JSON.stringify(record)); await save();
   return { root, env, extraction, record, file, save };
@@ -124,6 +124,21 @@ test('extraction activation refuses missing confirmation, unresolved restriction
   assert.deepEqual(await readFile(f.file), before);
   await assert.rejects(readFile(usageFile(f.env)), { code: 'ENOENT' });
 });
+test('extraction activation binds the account the executor names, under a key of its own, or refuses', async t => {
+  const f = await writable(t), { activateExtraction } = await activation(); const before = await readFile(f.file);
+  const { accountFingerprint, ...unnamed } = f.extraction.executor;
+  await assert.rejects(activateExtraction({ ...f.options, executorCheck: async () => unnamed }), /extraction_account_unidentified/);
+  assert.deepEqual(await readFile(f.file), before);
+  let given;
+  const result = await activateExtraction({ ...f.options, executorCheck: async options => { given = options; return f.extraction.executor; } });
+  const executor = result.record.capabilities.extraction.executor;
+  assert.match(given.accountSalt, /^[0-9a-f]{32}$/u); assert.equal(executor.accountSalt, given.accountSalt);
+  assert.equal(executor.accountFingerprint, accountFingerprint);
+  // An activation recorded without a bound account is not one this runtime runs.
+  const { activeExtraction } = await state();
+  delete result.record.capabilities.extraction.executor.accountFingerprint; await writeFile(f.file, JSON.stringify(result.record));
+  assert.equal(await activeExtraction(f.env), null);
+});
 test('extraction activation refuses concurrent record changes and malformed usage rather than resetting either', async t => {
   const f = await writable(t), { activateExtraction } = await activation();
   await assert.rejects(activateExtraction({ ...f.options, afterConfirmation: () => writeFile(f.file, '{changed') }), /changed_while_confirming/);
@@ -134,11 +149,15 @@ test('extraction activation refuses concurrent record changes and malformed usag
 });
 
 import { privilegedRecordCapture } from '../src/internal/snapshot.js';
+import { extractionBinding } from '../src/internal/extraction-provenance.js';
 async function activated(t) {
   const f = await writable(t), { activateExtraction } = await activation(); await activateExtraction(f.options);
   const store = await createStorage({ type: 'json', file: f.extraction.store.file });
   const graph = createShadowGraph(); graph.importData(await store.load());
-  const item = privilegedRecordCapture(graph, { project: 'p', originId: 'origin_fixture', text: 'Synthetic pending work.', source: { event: 'UserPromptSubmit', sessionId: 's' }, admission: { limits: CAPTURE_LIMITS, storeBytes: 0 } });
+  const binding = extractionBinding(await (await state()).activeExtraction(f.env));
+  const item = privilegedRecordCapture(graph, { project: 'p', originId: 'origin_fixture', text: 'Synthetic pending work.', source: { event: 'UserPromptSubmit', sessionId: 's' },
+    observation: { host: 'synthetic-claude', hostVersion: '2.1.288', toolName: null, cwd: null, outcome: null, extractionBinding: binding },
+    admission: { limits: CAPTURE_LIMITS, storeBytes: 0 } });
   await store.save(privilegedSnapshot(graph)); store.close();
   const read = async () => { const s = await createStorage({ type: 'json', file: f.extraction.store.file }); try { return await s.load(); } finally { s.close(); } };
   return { ...f, item, read };
@@ -200,6 +219,35 @@ test('trigger only requests detached one-shot extraction after eligible capture;
   }
   await (await activation()).deactivateExtraction({ env: f.env });
   assert.equal((await triggerExtraction({ ...options, event: 'Stop', outcome: 'written' })).status, 'inert'); assert.equal(calls.length, 2);
+});
+test('the requested worker inherits no host-session provider route or session token', async t => {
+  const f = await activated(t), { triggerExtraction } = await import('../src/internal/extraction-trigger.js'); let spawned;
+  // What a desktop host sets in every hook it runs, next to what the worker needs.
+  const env = { ...f.env, Path: 'C:\\Windows', SystemRoot: 'C:\\Windows', USERPROFILE: f.root, SHADOWGRAPH_FILE: 'manual.json',
+    ANTHROPIC_BASE_URL: 'https://api.anthropic.com', CLAUDE_CODE_SIMPLE: '1', CLAUDE_CODE_MESSAGING_TOKEN: 'session', CLAUDECODE: '1', HTTPS_PROXY: 'http://proxy' };
+  const result = await triggerExtraction({ env, runtimeDirectory: f.options.runtime, deadline: Date.now() + 5000, event: 'Stop', outcome: 'written',
+    spawnProcess: (...args) => { spawned = args[2].env; const child = new EventEmitter(); child.unref = () => {}; return child; } });
+  assert.equal(result.status, 'requested');
+  assert.deepEqual(Object.keys(spawned).sort(), ['NoDefaultCurrentDirectoryInExePath', 'Path', 'SHADOWGRAPH_FILE', 'SHADOWGRAPH_HOME', 'SystemRoot', 'USERPROFILE']);
+});
+test('a session under another profile or a session token does not start the worker', async t => {
+  const f = await activated(t), { triggerExtraction } = await import('../src/internal/extraction-trigger.js'); let spawned = 0;
+  const run = env => triggerExtraction({ env: { ...f.env, ...env }, runtimeDirectory: f.options.runtime, deadline: Date.now() + 5000, event: 'Stop', outcome: 'written',
+    spawnProcess: () => { spawned++; const child = new EventEmitter(); child.unref = () => {}; return child; } });
+  for (const selector of [{ CLAUDE_CONFIG_DIR: join(f.root, 'other-profile') }, { CLAUDE_CODE_OAUTH_TOKEN: 'synthetic-token' }, { Claude_Config_Dir: join(f.root, 'other-profile') }]) {
+    assert.deepEqual(await run(selector), { status: 'refused', reason: 'session_profile_selected' });
+  }
+  assert.equal(spawned, 0);
+  assert.equal((await run({ CLAUDE_CONFIG_DIR: '', CLAUDE_CODE_OAUTH_TOKEN: '' })).status, 'requested', 'an empty selector selects nothing');
+  assert.equal(spawned, 1);
+  // A desktop host names its session's account: only the bound one starts the worker.
+  const { accountEmailDigest } = await import('../src/internal/extraction-contract.js');
+  assert.deepEqual(await run({ CLAUDE_CODE_USER_EMAIL: 'owner@example.invalid' }), { status: 'refused', reason: 'session_account_differs' }, 'no bound e-mail: refused');
+  const record = JSON.parse(await readFile(f.file, 'utf8')), executor = record.capabilities.extraction.executor;
+  executor.accountEmailFingerprint = accountEmailDigest(executor.accountSalt, 'owner@example.invalid'); await writeFile(f.file, JSON.stringify(record));
+  assert.equal((await run({ CLAUDE_CODE_USER_EMAIL: ' Owner@Example.invalid ' })).status, 'requested');
+  assert.deepEqual(await run({ CLAUDE_CODE_USER_EMAIL: 'other@example.invalid' }), { status: 'refused', reason: 'session_account_differs' });
+  assert.equal(spawned, 2);
 });
 test('uninstall disables extraction even when no hooks remain', async t => {
   const f = await activated(t); const settings = join(f.root, 'host-config.json'); await writeFile(settings, '{"model":"owner-choice"}');
