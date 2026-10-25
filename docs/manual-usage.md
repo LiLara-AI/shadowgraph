@@ -440,4 +440,3 @@ in arbitrary workspaces, Git history, cloud sync, backups, or removable media. D
 separately. Backups, the preservation and downgraded copies that `migrate` and `downgrade` write, and
 the recovery files an interrupted restore leaves can also still hold material purged or expired
 later; a purge does not reach them (see the [data lifecycle map](../docs/data-lifecycle.md)).
-

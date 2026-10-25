@@ -46,4 +46,3 @@ Install the version-pinned release tarball or GitHub tag. Source, executor or ac
   `shadowgraph uninstall-hooks --capture` and `shadowgraph uninstall-hooks`, and check that
   extraction's cleanup did not report `deferred` (see
   [deactivate, uninstall and recover](extraction.md#deactivate-uninstall-and-recover)).
-
