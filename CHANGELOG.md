@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.42.3 — Technical Preview (2026-10-26)
+
+- Clarify evaluation versus persisted signals, rule-input interactions, scoped
+  retrieval and context diagnostics without changing existing tool contracts.
+- Add an explicitly selected `workflow` MCP profile: the compact 16 plus existing
+  supersession, lifecycle, confidence-evidence and stored-signal handlers. Full and
+  compact defaults are unchanged; this does not add administrative permissions.
+- Keep local selection/behavior evidence separate from TDQS. No candidate published
+  assessment or score improvement is claimed.
+
+
 ## 0.42.2 — Technical Preview (2026-10-25)
 
 - Qualify full-only tools referenced from compact-mode descriptions, including parameter and output-schema prose, with operator restart guidance. Preserve 35 default full tools, 16 compact tools, and 36 full tools with a configured verifier.

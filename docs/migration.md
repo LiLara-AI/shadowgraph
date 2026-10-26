@@ -1,12 +1,12 @@
 # Upgrade and rollback
 
-## Moving to 0.42.2
+## Moving to 0.42.3
 
 Stop active wrappers/workers and back up each store before upgrading. For a manual store, use `shadowgraph backup <backup-file>` with that store selected. For the Codex wrapper, stop it and preserve its entire private home (configuration, memory, pending outbox and usage receipts) in a private location. Do not publish these backups.
 
 Install the version-pinned release tarball or GitHub tag. Source, executor or account identity changes require owner setup again. Re-setup preserves memory and usage but holds older pending captures with different setup provenance; it does not silently reassign them. Inspect status before deciding what to do with any held work.
 
-0.42.2 retains schema 7. Keep a pre-upgrade backup for rollback; an older runtime is not a safe processor for new integration state. For older schema transitions, use the guidance below.
+0.42.3 retains schema 7. Keep a pre-upgrade backup for rollback; an older runtime is not a safe processor for new integration state. For older schema transitions, use the guidance below.
 
 ### Moving between 0.41.0 and 0.42.0
 

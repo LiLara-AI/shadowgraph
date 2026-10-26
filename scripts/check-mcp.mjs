@@ -10,7 +10,8 @@ const INSPECTOR_VERSION = '2.9.0';
 const INSPECTOR_TIMEOUT_MS = 300_000;
 const expected = [
   { name: 'Full', count: 35, env: [] },
-  { name: 'Compact', count: 16, env: ['SHADOWGRAPH_MCP_COMPACT=1'] }
+  { name: 'Compact', count: 16, env: ['SHADOWGRAPH_MCP_COMPACT=1'] },
+  { name: 'Workflow', count: 20, env: ['SHADOWGRAPH_MCP_COMPACT=0', 'SHADOWGRAPH_MCP_PROFILE=workflow'] }
 ];
 // Every tool now has an object envelope and output schema.
 const outputSchemaOmitted = new Set();

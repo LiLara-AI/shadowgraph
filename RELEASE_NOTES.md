@@ -1,4 +1,64 @@
-# ShadowGraph 0.42.2 — Technical Preview
+# ShadowGraph 0.42.3 — Technical Preview
+
+This release publishes the accepted MCP usability improvements and an optional
+20-tool Workflow Profile. Full remains the default (35 tools; 36 with a configured
+verifier), and Compact remains 16. This is a pre-release, not stable/GA. The package
+remains `private: true` and unpublished to npm. Earlier tags and assets are preserved.
+
+## Changes
+
+- Clarify context/search/retrieval/recall/expansion selection, evaluation versus
+  persisted review signals, parameter interactions, and audit/revision effects.
+- Add the explicitly selected Workflow Profile: all Compact tools plus existing
+  `shadowgraph_review_signals`, `shadowgraph_confidence_evidence`,
+  `shadowgraph_update_status` and `shadowgraph_supersede` handlers. This completes
+  more ordinary decision/review workflows without advertising administrative repair.
+- Preserve existing names, validation constraints, output schemas, effect annotations,
+  project restrictions and authorization. No storage or automatic-memory redesign.
+
+## Install and choose a profile
+
+For the documented Windows Codex workflow, use Node 22.5+ and PowerShell 7+:
+
+```powershell
+npm install --global https://github.com/LiLara-AI/shadowgraph/releases/download/v0.42.3/shadowgraph-unified-plugin-0.42.3.tgz
+```
+
+Verify the tarball using `SHA256SUMS.txt` on the
+[GitHub Release](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.42.3).
+Installation alone does not activate automatic memory. Stop active work and back up
+stores and private integration state before upgrading. Schema 7 remains unchanged;
+changed source/executor/account identity requires owner setup again. Pending captures
+with different setup provenance remain held. See [upgrade/rollback](docs/migration.md).
+
+Set environment variables on the MCP server process:
+
+| Profile | Configuration | Tools |
+| --- | --- | ---: |
+| Full (default) | `SHADOWGRAPH_MCP_PROFILE` unset; compact unset or `0` | 35 / 36 with verifier |
+| Compact | Profile unset; `SHADOWGRAPH_MCP_COMPACT=1` | 16 |
+| Workflow (opt-in) | `SHADOWGRAPH_MCP_PROFILE=workflow`; compact unset or `0` | 20 |
+
+Restart/reconnect and refresh `tools/list` after changing configuration. There is no
+agent-callable mode switch. Workflow plus compact `1` is rejected, not silently
+reinterpreted. The [MCP guide](docs/mcp-compatibility.md) documents effects and scope.
+
+## Evidence and limitations
+
+The accepted paired selection evaluation scored 16/16 on both baseline and candidate;
+it did not demonstrate improved model selection. Deterministic tests cover the newly
+available workflow sequences and refused unauthorized operations. Candidate TDQS was
+not measured locally. The prior published Glama score was 3.9/5 on 16 Compact tools;
+the 20-tool Workflow inventory is a different assessment surface. A fresh remote score
+is a separate observation, not a promised improvement or release acceptance target.
+
+Automatic capture, extraction, recovery, correction, sharing/revocation, provenance,
+uncertainty and project boundaries retain their accepted implementation and limits.
+No new live automatic-memory demonstration is claimed. The credential-free Glama
+MCP container cannot capture a user's Windows sessions. GitHub publication, Glama
+remote build/publication and assessment freshness must be verified independently.
+
+## Previous public release: 0.42.2 — Technical Preview
 
 This patch publishes the accepted MCP-definition and mode-navigation corrections.
 It preserves the existing tool capabilities and full/compact distinction. It is a

@@ -5,11 +5,11 @@
 ShadowGraph records what worked, what failed, and why a decision was made—then supplies relevant experience when you continue working. The demonstrated automatic path is the **Windows Codex terminal wrapper**, after one-time setup in projects you enroll.
 
 [![CI](https://github.com/LiLara-AI/shadowgraph/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/LiLara-AI/shadowgraph/actions/workflows/ci.yml)
-[![Technical Preview](https://img.shields.io/badge/Technical_Preview-v0.42.2-blue)](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.42.2)
+[![Technical Preview](https://img.shields.io/badge/Technical_Preview-v0.42.3-blue)](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.42.3)
 
-[Get started](#quick-start-windows-codex) · [Supported workflows](#supported-workflows) · [Release & downloads](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.42.2) · [Documentation](#documentation)
+[Get started](#quick-start-windows-codex) · [Supported workflows](#supported-workflows) · [Release & downloads](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.42.3) · [Documentation](#documentation)
 
-![Session A works and repairs a failure; capture feeds background extraction through the selected provider; local memory supplies relevant experience to fresh Session B. Foreground work continues and cross-project reuse requires explicit sharing.](https://raw.githubusercontent.com/LiLara-AI/shadowgraph/v0.42.2/docs/assets/workflow.svg)
+![Session A works and repairs a failure; capture feeds background extraction through the selected provider; local memory supplies relevant experience to fresh Session B. Foreground work continues and cross-project reuse requires explicit sharing.](https://raw.githubusercontent.com/LiLara-AI/shadowgraph/v0.42.3/docs/assets/workflow.svg)
 
 *After setup, work normally. Memory processes in the background; reuse follows your project and sharing choices. [Editable diagram](docs/assets/workflow.svg).*
 
@@ -33,10 +33,10 @@ The Codex executor is a separate prerequisite distributed as `@openai/codex`. Sh
 
 ### 1. Install
 
-Run in PowerShell 7+. The version is pinned; the [release](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.42.2) includes `SHA256SUMS.txt` for the tarball.
+Run in PowerShell 7+. The version is pinned; the [release](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.42.3) includes `SHA256SUMS.txt` for the tarball.
 
 ```powershell
-npm install --global https://github.com/LiLara-AI/shadowgraph/releases/download/v0.42.2/shadowgraph-unified-plugin-0.42.2.tgz
+npm install --global https://github.com/LiLara-AI/shadowgraph/releases/download/v0.42.3/shadowgraph-unified-plugin-0.42.3.tgz
 
 $executorDir = Join-Path $env:LOCALAPPDATA 'ShadowGraph-Codex-0.161.0'
 npm install --prefix $executorDir @openai/codex@0.161.0
@@ -108,6 +108,24 @@ Replace names with your enrolled projects. Sharing is explicit and revocable, no
 
 **Local-first, with a configured provider.** Canonical memory stays in your private local store. Automatic extraction and host delivery send selected captured/context data through the configured model provider and require its account and network. Pattern redaction cannot guarantee every secret is removed. There is no hosted sync or telemetry. [Data lifecycle, backup and deletion](docs/data-lifecycle.md).
 
+## MCP interface profiles
+
+Full remains the default (35 tools, or 36 with a configured verifier). Compact
+remains 16 tools. The new opt-in Workflow Profile offers 20 tools: Compact plus
+stored review signals, keyed confidence evidence, decision status transitions and
+explicit supersession, using the existing handlers and access controls.
+
+| Server environment | Inventory |
+| --- | ---: |
+| Profile unset; compact unset or `0` | Full: 35 / 36 |
+| Profile unset; `SHADOWGRAPH_MCP_COMPACT=1` | Compact: 16 |
+| `SHADOWGRAPH_MCP_PROFILE=workflow`; compact unset or `0` | Workflow: 20 |
+
+Set the environment on the MCP server process, then restart/reconnect and refresh
+`tools/list`. There is no agent-callable mode switch. Workflow does not expose
+administrative repair or destructive cleanup. See the [configuration and workflow
+guide](docs/mcp-compatibility.md#optional-workflow-profile-complete-the-decision-loop).
+
 ## Supported workflows
 
 | Workflow | What this preview establishes |
@@ -126,7 +144,7 @@ This is **Technical Preview**, not stable/GA. There are no claims of perfect sem
 
 ## Upgrade and storage
 
-Stop active work and back up your stores and private integration home before upgrading. v0.42.2 retains schema 7; changed source/executor/account identity requires setup again. Older pending work with different setup provenance is held, not silently reassigned. [Upgrade and rollback guide](docs/migration.md).
+Stop active work and back up your stores and private integration home before upgrading. v0.42.3 retains schema 7; changed source/executor/account identity requires setup again. Older pending work with different setup provenance is held, not silently reassigned. [Upgrade and rollback guide](docs/migration.md).
 
 ### Moving between 0.41.0 and 0.42.0
 
