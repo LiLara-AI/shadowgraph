@@ -55,6 +55,9 @@ argument of `shadowgraph_context` changes record presentation only, never tool a
 
 ### Optional workflow profile: complete the decision loop
 
+Available starting with v0.42.3 Technical Preview. This is an additive, opt-in
+advertisement profile; existing Full and Compact clients keep their inventories.
+
 The default remains full (35 tools, or 36 with a verifier); compact remains 16.
 For ordinary decision work without the full administrative inventory, an operator
 can explicitly set `SHADOWGRAPH_MCP_PROFILE=workflow` with `SHADOWGRAPH_MCP_COMPACT`

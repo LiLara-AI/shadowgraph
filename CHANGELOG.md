@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — MCP usability candidate
+## 0.42.3 — Technical Preview (2026-10-26)
 
 - Clarify evaluation versus persisted signals, rule-input interactions, scoped
   retrieval and context diagnostics without changing existing tool contracts.
