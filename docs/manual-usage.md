@@ -232,6 +232,15 @@ inert until you activate it (see the [integrations guide](../integrations/README
 shadowgraph mcp
 ```
 
+For an explicit decision/review workflow profile, set
+`SHADOWGRAPH_MCP_PROFILE=workflow` with `SHADOWGRAPH_MCP_COMPACT` unset or `0` before
+starting the server. Its 20 tools add scoped signal inspection, confidence evidence,
+legal status updates and supersession to the 16 compact tools. Existing defaults
+and compact clients are unchanged. The same authorization and persistence rules
+apply; administrative repair, purge and restoration remain outside the profile.
+See [profile setup and complete workflows](mcp-compatibility.md#optional-workflow-profile-complete-the-decision-loop).
+Restart/reconnect after changing configuration; tools cannot switch profiles.
+
 Compact mode is recommended: it advertises 16 workflow tools while the full graph, memories, facts,
 alternatives, and outcomes stay stored at full fidelity. Compact mode is a tool-advertisement
 choice, not lossy storage.

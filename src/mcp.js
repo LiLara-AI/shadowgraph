@@ -174,7 +174,7 @@ const toolCatalog = buildToolCatalog({
   verifier: Boolean(verifier),
   embeddingConfigured: Boolean(process.env.SHADOWGRAPH_EMBEDDING_URL)
 });
-const tools = selectTools(toolCatalog, { compact: process.env.SHADOWGRAPH_MCP_COMPACT === '1' });
+const tools = selectTools(toolCatalog, { compact: process.env.SHADOWGRAPH_MCP_COMPACT === '1', profile: process.env.SHADOWGRAPH_MCP_PROFILE || undefined });
 const toolsByName = new Map(tools.map((tool) => [tool.name, tool]));
 const persistingTools = new Set(tools.filter((tool) => tool.persists).map((tool) => tool.name));
 // One frozen projection per capability tier, built once. tools/list is answered

@@ -37,20 +37,76 @@ Modern complete results include `resultType: 'complete'` and server identity met
 | Full | not configured | 35 |
 | Full | configured | 36 (`shadowgraph_verify_fact` is added) |
 | Compact | either | 16 |
+| Workflow (explicit opt-in) | either | 20 |
 
 `SHADOWGRAPH_MCP_COMPACT=1` must be passed to the server process, not merely assumed from the Inspector launch shell. The automated gate uses Inspector's server environment option and verifies the returned list count.
 
 Compact mode keeps the recording, recall, context/expansion, review/acknowledgement and
 maintenance workflow. Decision status changes, decision supersession, keyed confidence evidence,
-stored-signal history, graph traversal and repair/recovery tools remain full-mode operations.
+and stored-signal inspection also exist in the opt-in workflow profile below. Graph traversal and repair/recovery remain full-mode operations.
 Their implementations and stored data are not removed. Descriptions qualify full-only references,
 including references inside parameter and output schemas.
 
 To use those operations, the operator changes the MCP server's environment to
-`SHADOWGRAPH_MCP_COMPACT=0` (or removes the variable), then restarts/reconnects the server and
+`SHADOWGRAPH_MCP_COMPACT=0` (or removes the variable), leaves `SHADOWGRAPH_MCP_PROFILE` unset, then restarts/reconnects the server and
 refreshes `tools/list`. This also exposes the full administrative surface, including purge and
 restore; choose it deliberately. There is no agent-callable mode-switch tool. The `compact`
 argument of `shadowgraph_context` changes record presentation only, never tool availability.
+
+### Optional workflow profile: complete the decision loop
+
+The default remains full (35 tools, or 36 with a verifier); compact remains 16.
+For ordinary decision work without the full administrative inventory, an operator
+can explicitly set `SHADOWGRAPH_MCP_PROFILE=workflow` with `SHADOWGRAPH_MCP_COMPACT`
+unset or `0`, then restart/reconnect and refresh `tools/list`. The profile has 20
+tools: all 16 compact tools plus these four **existing** handlers:
+
+| Added capability | Tool | Effect and boundary |
+| --- | --- | --- |
+| Inspect previously saved review work without reevaluation | `shadowgraph_review_signals` | Scoped read; an access key still persists its bounded audit |
+| Record new evidence short of a completed outcome | `shadowgraph_confidence_evidence` | Keyed contribution to an owned decision; retry does not double-count, but saves a revision |
+| Move a decision through its legal lifecycle | `shadowgraph_update_status` | Owned decision only; rejects caller-assigned stale/superseded states |
+| Correct a decision by explicit replacement | `shadowgraph_supersede` | Existing same-owner replacement required; retains both decisions and records their relation |
+
+Example: record a decision and its reopen conditions; evaluate with `review` or
+`reconsider`; inspect its evidence; record a replacement with `record_decision`;
+call `supersede` with the old and new returned IDs; then `ack_review` with the
+returned **signal** ID. For unchanged choices, `update_status` can make a legal
+lifecycle transition. Acknowledgement alone never changes a decision. After a
+restart, `review_signals` can recover open work without creating new signals.
+
+This addresses the compact workflow gap; it does not alter compact clients or
+silently advertise more tools to them. The profile reuses the same names, schemas,
+annotations, handlers, scope checks, grant audits and persistence paths as full mode.
+Grants never authorize the added writes. No permission is issued by selecting a
+profile. Purge, backup, restoration, repair/rebuild, graph mutation/traversal,
+owner binding and access-management tools are not added. These are deliberately
+separate operations, not steps the profile promises to complete.
+
+An unknown profile or `workflow` together with `SHADOWGRAPH_MCP_COMPACT=1` fails
+startup, rather than guessing which inventory was intended. There is no tool that
+changes the mode. To return to full, unset `SHADOWGRAPH_MCP_PROFILE` and restart
+with compact unset or `0`; to return to compact, unset the profile and set compact
+`1`. The context argument `compact:true` only shortens returned record presentation.
+
+### Rule inputs and review effects
+
+For an alternative with `reopenWhen:[{key:"ready",value:true}]`, a call with
+`facts:{ready:true}` evaluates a temporary override; other keys still use stored
+facts. It does not record a fact. A string rule `reopenWhen:["budget"]` instead
+matches `changedFacts:["budget"]`; supplying a value alone does not fire that rule.
+Both inputs may be supplied when a decision has both types of rules.
+
+`review` returns due items; `reconsider` also explains grounded negatives and
+unresolved evidence. `review_recommended` identifies a trigger, not a winning
+alternative. `manual_review` means unresolved or contested evidence. Only complete
+evaluation can produce `unchanged`; none of these verdicts changes confidence,
+choice or lifecycle. A specific `decisionId` still needs a resolved project/origin;
+unknown, foreign or closed decisions are rejected rather than reported unchanged.
+Use `context` for evaluation without persisted signals, and `review_context` for
+persisted signals alongside working context. Own-scope context saves no immediate
+revision; fallback diagnostics can be flushed by a later save. Access-key reads
+have their separately disclosed audit writes.
 
 ### Choosing a read or review operation
 
