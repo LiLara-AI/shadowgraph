@@ -21,9 +21,9 @@ The host assistant and the extractor are separate roles. The host can be any mod
 ### Durable capture
 
 A hook that meets a busy store (another writer, the extraction worker, a long delivery read) no longer loses the event:
-1. The hook redacts the event's material fields and writes the event to `<SHADOWGRAPH_HOME>\capture-spool\` (owner-only, never inside a repository) before it asks for the store.
-2. When the store is free, the hook writes the event and removes it from the spool.
-3. When the store stays busy, the event waits. The next hook replays waiting events oldest first, so a session's events keep their order. Only one hook drains at a time, and it never waits for another.
+1. The hook redacts the event's material fields and writes the event to `<SHADOWGRAPH_HOME>\capture-spool\` before it asks for the store. A tool's input and response are redacted by the same credential rules the stored text uses. The spool is owner-only and is never written inside a repository, however its path resolves. Each entry also names the store and origin it was kept for.
+2. One hook at a time holds the drain. It writes every waiting event oldest first, its own included, so a session's events reach the store in order. A hook that finds the drain taken leaves its event to the drainer, which lists the spool again before it stops.
+3. When the store stays busy, the events wait for the next hook. An entry kept for another store or origin (after a re-activation) is never written; it is dropped with a marker.
 4. An entry leaves the spool only once the store has decided it: written, already held, refused, or not capturable.
 5. Contention never counts as a failure. Other failures count attempts, and an entry is dropped after 8 attempts or 7 days. A content-free marker in `capture-dropped\` records when, why, which event and which session.
 6. Delivery reports `capture_input_waiting` (with `inputWaiting` and `oldestInputAt`) and `capture_input_dropped` (with `inputDropped`) in its `processing` line.
@@ -55,7 +55,12 @@ The runtime-evidence profile runs the quoted recipe with corrections:
 
 ### Which sessions are extracted
 
-- A Claude Code CLI session names no account in its hooks. Under your default profile, with no `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN` or provider-route variables (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_*`), its material is bound to the extraction activation. That activation checks its account with `claude auth status` before every model call.
+- A Claude Code CLI session names no account in its hooks. Its material is bound to the extraction activation only when all of these hold:
+  - it runs under your default profile, with no `CLAUDE_CONFIG_DIR` or `CLAUDE_CODE_OAUTH_TOKEN`;
+  - it has no provider-route variables (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_*`);
+  - the CLI's current sign-in, as its `.claude.json` names it, is the account bound at activation. A keyed digest is compared and nothing is kept.
+
+  A session after switching the default login to another account stays unbound. The activation also checks its account with `claude auth status` before every model call.
 - A Desktop-hosted session names its account (`CLAUDE_CODE_USER_EMAIL`), and only the bound account's sessions are bound.
 - Sessions under another profile are refused before capture. Sessions on their own provider route are captured but stay unbound and are not extracted.
 
