@@ -10,6 +10,9 @@ import { hostProfileFor, modelSelectable, RUNTIME_EVIDENCE_PROFILE } from './ext
 
 export const workerFenceFile = (env = process.env) => join(dirname(usageFile(env)), 'extraction-worker');
 export const settlementFile = env => `${workerFenceFile(env)}.settlement.json`;
+// Touched by every trigger: a worker already running sees it and runs another
+// round, so a trigger that meets a busy worker is not lost (extraction-runtime.js).
+export const requestFile = env => join(dirname(usageFile(env)), 'extraction-requested');
 // A host profile that requires validation is valid only with the binary it names
 // and the record of that binary's passing host validation (activation.js).
 const validatedHost = (value) => {

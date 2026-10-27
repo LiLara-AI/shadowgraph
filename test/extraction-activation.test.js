@@ -202,7 +202,7 @@ test('automatic extraction follows capture coverage; explicit manual project doe
 // met it busy is answered by one more round, not lost.
 test('one automatic worker drains past the per-drain item budget in bounded rounds, and answers a trigger that came while it ran', async t => {
   const f = await activated(t), { runActivatedExtraction } = await import('../src/extraction-runtime.js');
-  const { requestFile } = await import('../src/internal/extraction-trigger.js');
+  const { requestFile } = await import('../src/internal/extraction-state.js');
   const store = await createStorage({ type: 'json', file: f.extraction.store.file });
   const graph = createShadowGraph(); graph.importData(await store.load());
   const binding = extractionBinding(await (await state()).activeExtraction(f.env));

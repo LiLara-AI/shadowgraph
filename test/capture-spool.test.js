@@ -327,3 +327,20 @@ test('a Stop written by another hook\'s drain is reported so that hook asks for 
   assert.equal(await capture(s, prompt('next prompt', { message_id: 'next' }), { report }), 'written');
   assert.equal(report.terminalWritten, true);
 });
+
+// A deletion is never undone by input that waited through it: an entry
+// received before the store's newest tombstone is dropped with a marker.
+test('an entry received before a later deletion is dropped, not replayed', { timeout: 60_000 }, async (t) => {
+  const s = await setup(t);
+  const { ledgerPath } = await import('../src/internal/deletion-knowledge.js');
+  const release = await holdStore(s.file);
+  t.after(release);
+  assert.equal(await capture(s, prompt('said before the purge', { message_id: 'before' }), { deadline: Date.now() + 800 }), 'store_busy');
+  await release();
+  // A purge recorded after the entry arrived (only its time matters here).
+  await writeFile(ledgerPath(s.file), JSON.stringify({ version: 1, tombstones: [{ kind: 'project', purgedProject: 'alpha', mode: 'logical', tokens: null, at: new Date(Date.now() + 1000).toISOString() }], quarantine: [], pending: [] }));
+  const outcome = await capture(s, prompt('said after the purge', { message_id: 'after' }), { now: () => Date.now() + 5000 });
+  assert.deepEqual((await captures(s)).map((item) => item.source.hostEventId).filter((id) => id === 'before'), []);
+  const reasons = await Promise.all((await readdir(droppedDirectory(s.spool))).map(async (name) => JSON.parse(await readFile(join(droppedDirectory(s.spool), name), 'utf8')).reason));
+  assert.ok(reasons.includes('deletion_after_receipt'), JSON.stringify({ reasons, outcome }));
+});

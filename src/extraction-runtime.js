@@ -10,12 +10,11 @@ import { pinnedRuntime } from './host-hooks.js';
 import { createShadowGraph } from './shadowgraph.js';
 import { accessContext, discoverWorkspace } from './internal/access-transport.js';
 import { canonicalPath, repositoryOf } from './internal/owner-files.js';
-import { activeExtraction, workerFence, workerSettlement, recordWorkerSettlement } from './internal/extraction-state.js';
+import { activeExtraction, requestFile, workerFence, workerSettlement, recordWorkerSettlement } from './internal/extraction-state.js';
 import { runExtractionDrain } from './internal/extraction-worker.js';
 import { awaitWorkerStep } from './internal/extraction-policy.js';
 import { FROZEN_WORKER_BUDGETS } from './internal/extraction-budget.js';
 import { extractionBinding } from './internal/extraction-provenance.js';
-import { requestFile } from './internal/extraction-trigger.js';
 import { QUOTED_RECIPE } from './internal/extraction-contract.js';
 
 // Rounds one worker may run (see below); the wall time bounds them too.

@@ -4,15 +4,12 @@ import { spawn } from 'node:child_process';
 import { writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { activeExtraction } from './extraction-state.js';
+import { activeExtraction, requestFile } from './extraction-state.js';
 import { canonicalPath } from './owner-files.js';
 import { usageFile } from './extraction-budget.js';
 import { accountEmailDigest } from './extraction-contract.js';
 import { sessionProfileSelected } from './extraction-provenance.js';
 const ELIGIBLE = new Set(['written', 'nothing_new', 'already_held', 'transcript', 'refused']);
-// Touched by every trigger: a worker already running sees it and runs another
-// round, so a trigger that meets a busy worker is not lost (extraction-runtime.js).
-export const requestFile = env => join(dirname(usageFile(env)), 'extraction-requested');
 // The worker gets what the executor passes to its own child, plus ShadowGraph's
 // configuration, never the host session's environment: a desktop host sets its
 // own provider route (ANTHROPIC_BASE_URL) and session tokens in every hook, and

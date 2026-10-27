@@ -16,17 +16,16 @@ import { createStorage } from './storage.js';
 import { accessContext, discoverWorkspace, projectBindingFile } from './internal/access-transport.js';
 import { captureArtefacts, classifyCaptureSource, soleProgram } from './internal/capture-source.js';
 import { outcomeFromExitStatus } from './internal/outcome.js';
-import { canonicalPath as fencePath, registryFile } from './internal/deletion-knowledge.js';
+import { canonicalPath as fencePath, readLedger, registryFile } from './internal/deletion-knowledge.js';
 import { canonicalPath, repositoryOf as storeRepository } from './internal/owner-files.js';
 import { redactToolStructure, renderToolMaterial } from './internal/tool-material.js';
 import { captureWithheld, redactValue } from './internal/redaction.js';
 import { privilegedExpireCapture, privilegedRecordCapture, privilegedRecordSelfEvent, privilegedRecordTranscript, privilegedSnapshot } from './internal/snapshot.js';
 import { TRANSCRIPT_TRIGGERS } from './internal/transcript.js';
-import { activeExtraction, workerFenceFile, settlementFile } from './internal/extraction-state.js';
+import { activeExtraction, requestFile, workerFenceFile, settlementFile } from './internal/extraction-state.js';
 import { extractionBinding, sessionProfileSelected } from './internal/extraction-provenance.js';
 import { accountEmailDigest } from './internal/extraction-contract.js';
 import { usageFile } from './internal/extraction-budget.js';
-import { requestFile } from './internal/extraction-trigger.js';
 import { createDestinationFence, fenceLockPath } from './revision-store.js';
 import { usableOriginId } from './scope.js';
 import { readInvocationContext, identityFile } from './internal/extraction-identity.js';
@@ -246,6 +245,10 @@ export async function runCapture({ capture, input, deadline, record = null, regi
   const boundBy = claude && (sessionEmail || (!providerRouteSelected(env) && await defaultProfileIsBound(extraction, home))) ? extraction.activationId : null;
   const common = { capture, deadline, record, registry, home, post, now, env };
   if (record === null) return captureEvent({ ...common, payload, event, cwd, boundBy });
+  // A deletion or restore the store's ledger records as waiting (the crash
+  // window, PR-37c rev6:429) keeps the hook from writing anything anywhere:
+  // nothing is spooled, and the direct path refuses as it always has.
+  if (await deletionWaits(capture.store.file)) return captureEvent({ ...common, payload, event, cwd, boundBy });
   const spool = spoolDirectory(record);
   const transcriptSize = event.transcriptPath ? (await stat(event.transcriptPath).catch(() => null))?.size ?? null : null;
   // Nothing unredacted is kept anywhere (PR-37b M-2): the material fields are
@@ -267,6 +270,24 @@ export async function runCapture({ capture, input, deadline, record = null, regi
     return outcome;
   }
   return drainSpool({ ...common, spool, own: kept.entry, destination, report });
+}
+
+// Whether the store's control ledger records a deletion or restore still to
+// complete; an unreadable ledger counts as one, so the check fails closed.
+async function deletionWaits(file) {
+  try { return Boolean((await readLedger(file))?.pending?.length); } catch { return true; }
+}
+
+// The time of the store's newest deletion knowledge (a tombstone or a
+// quarantine entry), or -Infinity. An entry without a readable time counts as
+// now: everything waiting predates it.
+function newestDeletion(ledger) {
+  let newest = -Infinity;
+  for (const entry of [...(ledger?.tombstones ?? []), ...(ledger?.quarantine ?? [])]) {
+    const at = Date.parse(entry?.at ?? entry?.quarantinedAt ?? '');
+    newest = Math.max(newest, Number.isFinite(at) ? at : Date.now());
+  }
+  return newest;
 }
 
 // Whether the default profile's current sign-in, as the CLI's own
@@ -347,6 +368,16 @@ async function drainSpool({ spool, own, destination, deadline, now, report, ...c
     await createDestinationFence(join(spool, 'drain'), { lockTimeoutMs: 0, staleLockMs: CAPTURE_STALE_LOCK_MS }).run(async () => {
       // Entries age by the file system's clock, not the injected one.
       await expireSpool(spool);
+      // Nothing is replayed while a deletion or restore waits, and nothing
+      // received before the store's newest deletion knowledge is replayed at
+      // all: a purge is never undone by input that waited through it. Such an
+      // entry is dropped with a marker, whatever project it would have gone to.
+      let deletedAt;
+      try {
+        const ledger = await readLedger(destination.store);
+        if (ledger?.pending?.length) return;
+        deletedAt = newestDeletion(ledger);
+      } catch { return; }
       const tried = new Set();
       for (let pass = 0; pass < 4; pass += 1) {
         const waiting = (await spoolEntries(spool)).filter((entry) => !tried.has(entry.name));
@@ -358,6 +389,11 @@ async function drainSpool({ spool, own, destination, deadline, now, report, ...c
             return;
           }
           tried.add(entry.name);
+          if (entry.at <= deletedAt) {
+            await dropSpoolEntry(spool, entry, 'deletion_after_receipt');
+            if (entry.key === own.key) result = 'dropped';
+            continue;
+          }
           const replayed = await replayEntry({ ...context, entry });
           // A Stop or SessionEnd written here asks for extraction, whichever hook drained it.
           if (replayed.terminal && EXTRACTION_ELIGIBLE.has(replayed.outcome)) report.terminalWritten = true;
