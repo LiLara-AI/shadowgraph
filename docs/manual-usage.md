@@ -185,7 +185,11 @@ The opt-ins that can send data off the machine are all off by default:
 - **Embeddings.** No endpoint is configured. A localhost OpenAI-compatible server works once
   configured; a remote endpoint additionally requires `SHADOWGRAPH_ALLOW_REMOTE_EMBEDDINGS=1`,
   because that means memory and query text leave your machine.
-- **Extraction.** Separately approved extraction sends eligible redacted captures through the supported first-party Claude subscription route. No API-key, alternate-provider, proxy or paid fallback is supported by this executor; the owner must disable subscription overage. Pattern redaction cannot guarantee every secret is removed. Extraction runs only on Windows, with Claude Code 2.1.288, or with the profiled Claude Code 2.1.292 binary and the receipt of a passing real-host validation of it (ShadowGraph checks the receipt's identity, not the validation itself); on any other platform, version or binary it is refused. See [extraction and its host limits](../docs/extraction.md).
+- **Extraction.** Separately approved extraction sends eligible redacted captures through the supported first-party Claude subscription route. No API-key, alternate-provider, proxy or paid fallback is supported by this executor; the owner must disable subscription overage. Pattern redaction cannot guarantee every secret is removed. Extraction runs only on Windows. It runs either on a pinned profile or on the runtime-evidence profile:
+  - Pinned: Claude Code 2.1.288, or the profiled 2.1.292 binary with the receipt of a passing real-host validation of it (ShadowGraph checks the receipt's identity, not the validation itself).
+  - Runtime evidence: any later 2.x host, with a current model the owner selects at activation. Each invocation's own session account is checked before its output is used.
+
+  On any other platform or host it is refused. See [extraction and its host limits](../docs/extraction.md) and the [Claude Code CLI guide](../docs/claude-code-integration.md).
 - **Markdown export.** `markdown-sync` writes plaintext copies you control. ShadowGraph cannot find
   or delete those copies later — see [Storage, backup, and deletion](#storage-backup-and-deletion).
 - **Host delivery.** Inert unless you install the hooks and activate delivery for one store. Once

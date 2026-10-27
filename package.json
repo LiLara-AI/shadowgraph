@@ -38,6 +38,7 @@
     "docs/codex-integration.md",
     "docs/data-lifecycle.md",
     "docs/extraction.md",
+    "docs/claude-code-integration.md",
     "src/",
     "dashboard/",
     "integrations/README.md",
