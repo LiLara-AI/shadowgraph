@@ -119,7 +119,7 @@ Sharing uses one CLI grant with the Codex route's meaning. A revoked or expired 
 
 ## Known limits
 
-These limits were found by independent review and are not closed:
+These limits were found by independent review or by the live proof, and are not closed:
 - **Account.** A CLI hook carries no session identity. The binding uses the CLI's sign-in when the hook runs, so if the default login is switched back and forth during a running session, the hook judges by the login it sees.
 - **Order.** Events are written oldest first by one drainer, with two gaps:
   - an event whose spool write is still in progress, for milliseconds, is not yet visible to a concurrent drain;
@@ -130,8 +130,23 @@ These limits were found by independent review and are not closed:
 - **Hand-off.** A trigger is answered if the running worker exits within 5 seconds of its last check. A worker stalled longer leaves the request to the next trigger. Every Stop sends one.
 - **Throughput.** Extraction makes one model call per capture item within 12 calls per hour (see Budgets).
 - **Order behind a block.** A session's items are extracted in order. An item whose output is refused twice, or one blocked by the route itself, stays pending, and so do the items after it, until a later trigger (normally the next Stop). Delivery reports them as pending, and the executor's specific reason is reported only as `executor_blocked`.
-- **Host exit on Windows (observed, cause not established).** In the live proof, `claude -p` printed its result at Stop but did not exit until the extraction worker it had started finished: about 2 minutes, up to the worker's 4-minute wall time. Host work is not blocked, but the process exits late.
+- **Host exit on Windows (observed, cause not established).** In the live proof, `claude -p` printed its result at Stop but did not exit until the extraction worker it had started finished: about 2 minutes, up to the worker's 4-minute wall time. When no worker could run (its fence held), the host exited at once. Host work is not blocked, but the process can exit late.
+- **A user's decision kept as memory.** The extractor may propose a user's decision with fields that the claim verifier cannot establish as exact, unqualified quotations. The decision is then kept as the user's whole message, verbatim, as a memory: faithful, delivered and searchable, but not a decision. This happened to the Arabic decision in the live proof and to a one-sentence English one. The English decision frame does not read Arabic, and a sentence quoting code with dots in it (`Math.round(...)`) can defeat it in English too.
+- **Corrections target decisions only.** A user's correction supersedes an earlier **decision**, with history kept. A decision kept as memory (above) is not superseded: both remain current until one is reviewed.
+- **Replay time.** An event that waited in the spool carries the time it was written to the store as `observedAt`, not the time its hook received it. Order is kept.
 
 ## Support and evidence
 
-The verdict for this build and its evidence are recorded in the review package that accompanies the change. What was executed, what is inferred and what is untested are kept apart there. Desktop support is not inferred from CLI tests.
+Verified live (2026-10-27) on Windows 11 with Claude Code CLI **2.1.302** in print mode (`claude -p`, stream-json), host model `claude-haiku-5-5`, extractor `claude-haiku-5-5` then `claude-sonnet-5-5`, on synthetic projects and fresh stores:
+
+| Function | Result |
+| --- | --- |
+| Capture under a held store lock (25 s) and a held worker fence | Host work completed; delivery reported waiting input; every event reached the store once, in order; none dropped |
+| Automatic extraction after Stop | Ran without any command; Sonnet kept a decision with the rejected alternative and the reason, quoted; Haiku did so in one of two runs |
+| Recovery of pending extraction | Items left pending by a held worker were extracted by the next session's trigger |
+| Fresh session receives experience | SessionStart delivered the decision with its rejected alternative to a fresh session (Arabic prompt) |
+| Fresh session uses experience | Asked in English what was already decided, a fresh session answered from the delivered records alone. On the Arabic coding task it wrote the right parser first, but never referred to the earlier work, so use there is not shown |
+| Correction | An English user correction superseded a user decision, with history; an Arabic decision was kept as memory and could not be superseded |
+| Sharing | `selected`, `all-permitted` (with `--exclude`) and `project` changed what another bound project receives; each change revoked the previous grant |
+
+Not verified: Claude Desktop, the interactive TUI, resume flows, macOS and Linux hosts, and languages other than English and Arabic. Desktop support is not inferred from these CLI tests. The review package accompanying the change keeps executed, inferred and untested results apart.
