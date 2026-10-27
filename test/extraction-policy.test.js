@@ -24,6 +24,19 @@ test('retry: authentication, limits and ambiguous terminals are never retried', 
     const f = await run([response, success]); assert.equal(f.calls.length, 1); assert.equal(f.result.status, 'blocked');
   }
 });
+test('retry: output the executor\'s checks refused is asked once more, then blocks; a route refusal before the call is not retried', async () => {
+  for (const reason of ['unrecognised_response', 'turn_limit_unverified', 'runtime_confinement_unverified']) {
+    const recovered = await run([{ status: 'blocked', blockedReason: reason }, success]);
+    assert.equal(recovered.calls.length, 2); assert.deepEqual(recovered.calls[0], recovered.calls[1]);
+    assert.equal(recovered.result.status, 'success'); assert.equal(recovered.reservations.length, 2);
+    const twice = await run([{ status: 'blocked', blockedReason: reason }, { status: 'blocked', blockedReason: reason }, success]);
+    assert.equal(twice.calls.length, 2); assert.deepEqual(twice.result, { status: 'blocked', blockedReason: reason });
+  }
+  for (const reason of ['configuration_changed_before_invoke', 'host_changed_before_invoke', 'invocation_cwd_not_empty', 'model_unverified', 'invocation_failed', 'drain_stopped']) {
+    const f = await run([{ status: 'blocked', blockedReason: reason }, success]);
+    assert.equal(f.calls.length, 1); assert.equal(f.result.blockedReason, reason);
+  }
+});
 test('retry: positively unstarted transport gets one backed-off retry, never a chain across error classes', async () => {
   const response = { status: 'transport_error', receipt: { processStarted: false, invocationStarted: false, outputBytes: 0, zeroUsage: true } };
   const f = await run([response, success]); assert.equal(f.calls.length, 2); assert.deepEqual(f.delays, [1000]);

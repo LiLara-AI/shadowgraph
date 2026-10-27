@@ -128,6 +128,8 @@ These limits were found by independent review and are not closed:
 - **Sharing.** A crash between issuing a grant and saving the activation record, or a failed rollback, can leave a live grant the record does not name. It expires at its `--expires` time (30 days by default) and is listed by `shadowgraph access status`, where `shadowgraph access revoke <id>` removes it.
 - **Hand-off.** A trigger is answered if the running worker exits within 5 seconds of its last check. A worker stalled longer leaves the request to the next trigger. Every Stop sends one.
 - **Throughput.** Extraction makes one model call per capture item within 12 calls per hour (see Budgets).
+- **Order behind a block.** A session's items are extracted in order. An item whose output is refused twice, or one blocked by the route itself, stays pending, and so do the items after it, until a later trigger (normally the next Stop). Delivery reports them as pending, and the executor's specific reason is reported only as `executor_blocked`.
+- **Host exit on Windows (observed, cause not established).** In the live proof, `claude -p` printed its result at Stop but did not exit until the extraction worker it had started finished: about 2 minutes, up to the worker's 4-minute wall time. Host work is not blocked, but the process exits late.
 
 ## Support and evidence
 
