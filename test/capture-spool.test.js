@@ -290,3 +290,40 @@ test('a CLI session is bound only while its default sign-in is the bound account
   const byId = Object.fromEntries((await captures(s)).map((item) => [item.source.hostEventId, item.observation.extractionBinding?.setupId ?? null]));
   assert.deepEqual(byId, { bound: extraction.activationId, keyed: null, switched: null, unknown: null });
 });
+
+// Verification round (2026-10-27): a failure's structured error is redacted by
+// the same rules; a payload kept for another destination is its own entry; and
+// a Stop written by another hook's drain still asks for extraction.
+test('a waiting failure keeps no credential from its structured error', { timeout: 60_000 }, async (t) => {
+  const s = await setup(t);
+  const release = await holdStore(s.file);
+  t.after(release);
+  const secret = 'Zq9SpoolErr6Kx7Wv2';
+  const input = JSON.stringify({ hook_event_name: 'PostToolUseFailure', session_id: 'session-1', cwd: '/work', tool_name: 'Deploy', tool_use_id: 'toolu-error', tool_input: { target: 'prod' }, error: { pw: secret, message: 'failed' } });
+  assert.equal(await capture(s, input, { deadline: Date.now() + 800 }), 'store_busy');
+  const [entry] = await spoolEntries(s.spool);
+  assert.ok(!(await readFile(join(s.spool, entry.name), 'utf8')).includes(secret));
+});
+
+test('the same payload kept for another destination is another entry', async (t) => {
+  const s = await setup(t);
+  const input = prompt('same payload', { message_id: 'same' });
+  const first = await spoolEvent({ spool: s.spool, input, cwd: s.cwd, destination: { store: s.file, originId: 'origin-a' } });
+  const second = await spoolEvent({ spool: s.spool, input, cwd: s.cwd, destination: { store: s.file, originId: 'origin-b' } });
+  assert.ok(first.kept && second.kept && !second.duplicate);
+  assert.equal((await spoolEntries(s.spool)).length, 2);
+});
+
+test('a Stop written by another hook\'s drain is reported so that hook asks for extraction', { timeout: 60_000 }, async (t) => {
+  const s = await setup(t);
+  const release = await holdStore(s.file);
+  t.after(release);
+  const stop = JSON.stringify({ hook_event_name: 'Stop', session_id: 'session-1', cwd: '/work', stop_hook_active: false, last_assistant_message: 'Finished while the store was held.' });
+  const waiting = {};
+  assert.equal(await capture(s, stop, { deadline: Date.now() + 800, report: waiting }), 'store_busy');
+  assert.equal(waiting.terminalWritten, undefined);
+  await release();
+  const report = {};
+  assert.equal(await capture(s, prompt('next prompt', { message_id: 'next' }), { report }), 'written');
+  assert.equal(report.terminalWritten, true);
+});

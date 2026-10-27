@@ -117,6 +117,18 @@ Sharing uses one CLI grant with the Codex route's meaning. A revoked or expired 
 | `runtime_confinement_unverified` | The host's own stream showed something other than the confined session. The output was discarded. |
 | `activated_account_changed` | `auth status` names a different account than the one bound at activation. |
 
+## Known limits
+
+These limits were found by independent review and are not closed:
+- **Account.** A CLI hook carries no session identity. The binding uses the CLI's sign-in when the hook runs, so if the default login is switched back and forth during a running session, the hook judges by the login it sees.
+- **Order.** Events are written oldest first by one drainer, with two gaps:
+  - an event whose spool write is still in progress, for milliseconds, is not yet visible to a concurrent drain;
+  - when the spool itself cannot be written, an event takes the direct path and can land ahead of waiting ones.
+- **Destination.** An entry names its store path and origin, not the store's identity. A store deleted and recreated at the same path while entries wait receives them.
+- **Sharing.** A crash between issuing a grant and saving the activation record, or a failed rollback, can leave a live grant the record does not name. It expires at its `--expires` time (30 days by default) and is listed by `shadowgraph access status`, where `shadowgraph access revoke <id>` removes it.
+- **Hand-off.** A trigger is answered if the running worker exits within 5 seconds of its last check. A worker stalled longer leaves the request to the next trigger. Every Stop sends one.
+- **Throughput.** Extraction makes one model call per capture item within 12 calls per hour (see Budgets).
+
 ## Support and evidence
 
 The verdict for this build and its evidence are recorded in the review package that accompanies the change. What was executed, what is inferred and what is untested are kept apart there. Desktop support is not inferred from CLI tests.

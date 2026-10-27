@@ -65,7 +65,8 @@ export async function spoolEntries(spool) {
 export async function spoolEvent({ spool, input, cwd, transcript = null, boundBy = null, destination, now = Date.now }) {
   try {
     if (Buffer.byteLength(input) > SPOOL_LIMITS.maxEntryBytes) return { kept: false, reason: 'spool_entry_too_large' };
-    const key = digest(JSON.stringify([input, cwd]));
+    // The same payload kept for another store or origin is another entry.
+    const key = digest(JSON.stringify([input, cwd, destination ?? null]));
     const waiting = await spoolEntries(spool);
     const same = waiting.find((entry) => entry.key === key);
     if (same) return { kept: true, entry: same, duplicate: true };

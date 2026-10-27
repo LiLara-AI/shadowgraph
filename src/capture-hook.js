@@ -222,7 +222,7 @@ export async function openTranscript(path) {
 // else. A host re-delivery of an item already held writes nothing new. `post`
 // tells the thread keeping the deadline when the store is entered and left.
 // Resolves to what happened, for tests; `now` and `registry` are test seams.
-export async function runCapture({ capture, input, deadline, record = null, registry = registryFile(), home = homedir(), cwd = process.cwd(), post = () => {}, now = Date.now, env = process.env }) {
+export async function runCapture({ capture, input, deadline, record = null, registry = registryFile(), home = homedir(), cwd = process.cwd(), post = () => {}, now = Date.now, env = process.env, report = {} }) {
   if (sessionProfileSelected(env)) return 'session_profile_selected';
   const extraction = await activeExtraction(env);
   const sessionEmail = Object.entries(env).find(([name]) => name.toUpperCase() === 'CLAUDE_CODE_USER_EMAIL')?.[1];
@@ -253,7 +253,7 @@ export async function runCapture({ capture, input, deadline, record = null, regi
   // rules first -- before the spool sees them, and a payload the checker still
   // flags is never spooled; it takes the direct path alone.
   const safe = { ...payload };
-  for (const name of SPOOLED_MATERIAL) if (Object.hasOwn(safe, name)) safe[name] = redactValue(name.startsWith('tool_') ? redactToolStructure(safe[name]) : safe[name]);
+  for (const name of SPOOLED_MATERIAL) if (Object.hasOwn(safe, name)) safe[name] = redactValue(redactToolStructure(safe[name]));
   const safeInput = JSON.stringify(safe);
   const destination = { store: capture.store.file, originId: capture.originId };
   const kept = captureWithheld(safeInput) ? { kept: false, reason: 'material_withheld' } : await spoolEvent({ spool, input: safeInput, cwd, transcript: transcriptSize, boundBy, destination, now });
@@ -266,7 +266,7 @@ export async function runCapture({ capture, input, deadline, record = null, regi
     if (['store_busy', 'store_failed', 'out_of_time'].includes(outcome)) await recordDropped({ spool, reason: `${kept.reason}:${outcome}`, input, at: now() });
     return outcome;
   }
-  return drainSpool({ ...common, spool, own: kept.entry, destination });
+  return drainSpool({ ...common, spool, own: kept.entry, destination, report });
 }
 
 // Whether the default profile's current sign-in, as the CLI's own
@@ -295,6 +295,8 @@ export const providerRouteSelected = (env) => Object.entries(env).some(([name, v
 // Outcomes that leave an entry waiting for a later hook: the store was busy,
 // the deadline came first, or the store is newer than this runtime.
 const RETRY_LATER = new Set(['store_busy', 'out_of_time', 'newer_schema']);
+// The outcomes after which a Stop or SessionEnd asks for extraction (extraction-trigger.js).
+const EXTRACTION_ELIGIBLE = new Set(['written', 'nothing_new', 'already_held', 'transcript', 'refused']);
 
 // One spooled entry into the store. The entry leaves the spool once the store
 // has decided it; otherwise it waits, and a failure that is not contention
@@ -329,7 +331,7 @@ async function replayEntry({ spool, entry, destination, ...common }) {
   }
   if (RETRY_LATER.has(outcome)) return { outcome, stop: true };
   await settleSpoolEntry(spool, entry);
-  return { outcome };
+  return { outcome, terminal: ['Stop', 'SessionEnd'].includes(event.event) };
 }
 
 // Every spooled event is written by the one hook that holds the drain, oldest
@@ -338,7 +340,7 @@ async function replayEntry({ spool, entry, destination, ...common }) {
 // taken leaves its entry to the drainer, which lists the spool again before it
 // stops; one that arrives after that waits for the next hook, reported as
 // waiting input. Resolves the hook's own entry's outcome, or 'spooled'.
-async function drainSpool({ spool, own, destination, deadline, now, ...common }) {
+async function drainSpool({ spool, own, destination, deadline, now, report, ...common }) {
   const context = { ...common, spool, destination, deadline, now };
   let result = 'spooled';
   try {
@@ -357,6 +359,8 @@ async function drainSpool({ spool, own, destination, deadline, now, ...common })
           }
           tried.add(entry.name);
           const replayed = await replayEntry({ ...context, entry });
+          // A Stop or SessionEnd written here asks for extraction, whichever hook drained it.
+          if (replayed.terminal && EXTRACTION_ELIGIBLE.has(replayed.outcome)) report.terminalWritten = true;
           // The own entry, or one ahead of it that stopped the drain: its outcome is the own entry's too.
           if (entry.key === own.key || (replayed.stop && entry.at <= own.at)) result = replayed.outcome;
           if (replayed.stop) return;
