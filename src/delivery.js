@@ -14,6 +14,7 @@ import { pathToFileURL } from 'node:url';
 import { readExtractionAvailability } from './internal/extraction-availability.js';
 import { extractionSupersession } from './internal/extraction-supersession.js';
 import { activeCapture, storeRepository } from './capture-hook.js';
+import { spoolDirectory, spoolStatus } from './internal/capture-spool.js';
 import { createShadowGraph, MAX_PAGE_LIMIT, SCHEMA_VERSION } from './shadowgraph.js';
 import { show, t1Line } from './compact-tier.js';
 import { accessContext, discoverWorkspace } from './internal/access-transport.js';
@@ -398,9 +399,15 @@ export async function runDeliver({ args = [], readInput = () => '', file, storag
     // The status in brief, bounded whatever the store holds: counts, and the
     // names of the limits and gaps the reads declare.
     const status = relevant.capture;
+    // Hook input the store has not taken yet, and input that was lost: counted
+    // from the spool's file names alone (src/internal/capture-spool.js).
+    const spool = capturing ? await spoolStatus(spoolDirectory(activationFile(env))) : null;
+    const spoolGaps = spool ? [...(spool.pending ? ['capture_input_waiting'] : []), ...(spool.dropped ? ['capture_input_dropped'] : []), ...(spool.unreadable ? ['capture_spool_unreadable'] : [])] : [];
     const processing = capturing || status ? {
       ...(capturing ? captureState() : { capture: 'not_active' }), extraction: extractionAvailability.active ? 'active' : 'not_active',
-      ...(status ? { pending: status.pending, processing: status.processing, failed: status.failed, blocked: status.blocked, oldestPendingAt: status.oldestPendingAt, extractionAvailable: status.extractionAvailable, ...(status.workerErrors ? { workerErrors: status.workerErrors.map(entry => entry.reason) } : {}), limited: status.limited.map((entry) => entry.limit), gaps: [...new Set(status.gaps.map((entry) => entry.reason))] } : {})
+      ...(status ? { pending: status.pending, processing: status.processing, failed: status.failed, blocked: status.blocked, oldestPendingAt: status.oldestPendingAt, extractionAvailable: status.extractionAvailable, ...(status.workerErrors ? { workerErrors: status.workerErrors.map(entry => entry.reason) } : {}), limited: status.limited.map((entry) => entry.limit), gaps: [...new Set([...status.gaps.map((entry) => entry.reason), ...spoolGaps])] } : {}),
+      ...(!status && spoolGaps.length ? { gaps: spoolGaps } : {}),
+      ...(spool && (spool.pending || spool.dropped) ? { inputWaiting: spool.pending, oldestInputAt: spool.oldestAt, inputDropped: spool.dropped } : {})
     } : undefined;
     emit(assemblePayload({ head, items: session ? sessionOrder(items) : items, processing }).text);
   } catch {

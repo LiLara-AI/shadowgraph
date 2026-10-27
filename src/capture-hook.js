@@ -25,9 +25,10 @@ import { activeExtraction, workerFenceFile, settlementFile } from './internal/ex
 import { extractionBinding, sessionProfileSelected } from './internal/extraction-provenance.js';
 import { accountEmailDigest } from './internal/extraction-contract.js';
 import { usageFile } from './internal/extraction-budget.js';
-import { fenceLockPath } from './revision-store.js';
+import { createDestinationFence, fenceLockPath } from './revision-store.js';
 import { usableOriginId } from './scope.js';
 import { readInvocationContext, identityFile } from './internal/extraction-identity.js';
+import { claimSpoolEntry, dropSpoolEntry, droppedDirectory, expireSpool, failSpoolEntry, readSpoolEntry, recordDropped, recoverClaims, releaseSpoolEntry, settleSpoolEntry, spoolDirectory, spoolEntries, spoolEvent } from './internal/capture-spool.js';
 
 // Conservative admission limits, frozen until measured figures replace them
 // through a gate (§22.6.3). Crossing one refuses new items; it is never raised
@@ -225,10 +226,6 @@ export async function runCapture({ capture, input, deadline, record = null, regi
   const sessionEmail = Object.entries(env).find(([name]) => name.toUpperCase() === 'CLAUDE_CODE_USER_EMAIL')?.[1];
   const bound = extraction?.executor.accountEmailFingerprint;
   if (extraction && sessionEmail && (!bound || accountEmailDigest(extraction.executor.accountSalt, sessionEmail) !== bound)) return 'session_account_differs';
-  // Without a verifiable session account capture remains local and explicitly
-  // unbound; production workers leave it held rather than assuming ownership.
-  const provenance = extraction && sessionEmail && (extraction.executor.provider ?? 'claude') === 'claude'
-    ? { extractionBinding: extractionBinding(extraction) } : {};
   let event;
   let payload;
   try {
@@ -236,6 +233,128 @@ export async function runCapture({ capture, input, deadline, record = null, regi
     event = observedEvent(payload);
   } catch { return 'unreadable'; }
   if (event === null) return 'not_captured';
+  // The account the session's material belongs to, judged by this event's own
+  // hook: a host that names its session's account (Desktop) was compared with
+  // the bound one above. A CLI session names none; without a profile selector
+  // (refused above) or a provider route of its own it runs under the default
+  // profile, whose account extraction bound and checks again at every
+  // invocation. Any other session's capture stays local and unbound.
+  const boundBy = extraction && (extraction.executor.provider ?? 'claude') === 'claude' && (sessionEmail || !providerRouteSelected(env)) ? extraction.activationId : null;
+  const common = { capture, deadline, record, registry, home, post, now, env };
+  if (record === null) return captureEvent({ ...common, payload, event, cwd, boundBy });
+  const spool = spoolDirectory(record);
+  const transcriptSize = event.transcriptPath ? (await stat(event.transcriptPath).catch(() => null))?.size ?? null : null;
+  const kept = await spoolEvent({ spool, input, cwd, transcript: transcriptSize, boundBy, now });
+  if (!kept.kept) {
+    // No durable copy: the direct path as before, and a loss it cannot avoid
+    // is recorded, never silent.
+    let outcome;
+    try { outcome = await captureEvent({ ...common, payload, event, cwd, boundBy }); }
+    catch (error) { outcome = error?.code === 'storage_lock_timeout' ? 'store_busy' : 'store_failed'; }
+    if (['store_busy', 'store_failed', 'out_of_time'].includes(outcome)) await recordDropped({ spool, reason: `${kept.reason}:${outcome}`, input, at: now() });
+    return outcome;
+  }
+  // The hook's own entry, claimed so that no drain takes it meanwhile; a copy
+  // another hook already holds is that hook's to write.
+  const own = await claimSpoolEntry(spool, kept.entry);
+  return own ? replaySpool({ ...common, spool, own }) : 'spooled';
+}
+
+// The variables that put a session on a provider route of its own, apart from
+// the default profile's sign-in.
+const PROVIDER_ROUTE = /^(?:ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_BASE_URL|CLAUDE_CODE_USE_[A-Z_]+)$/iu;
+export const providerRouteSelected = (env) => Object.entries(env).some(([name, value]) => PROVIDER_ROUTE.test(name) && typeof value === 'string' && value !== '');
+
+// Outcomes that leave an entry waiting for a later hook: the store was busy,
+// the deadline came first, or the store is newer than this runtime.
+const RETRY_LATER = new Set(['store_busy', 'out_of_time', 'newer_schema']);
+
+// One spooled entry into the store. The entry leaves the spool once the store
+// has decided it; otherwise it waits, and a failure that is not contention
+// counts an attempt (capture-spool.js). { outcome, stop }: stop when the store
+// cannot take more now.
+async function replayEntry({ spool, entry, ...common }) {
+  let value, payload, event;
+  try {
+    value = await readSpoolEntry(spool, entry);
+    payload = JSON.parse(value.input.charCodeAt(0) === 0xfeff ? value.input.slice(1) : value.input);
+    event = observedEvent(payload);
+  } catch (error) {
+    // Gone: another hook replayed it first. Anything else unreadable is a loss.
+    if (error?.code === 'ENOENT') return { outcome: 'replayed' };
+    await dropSpoolEntry(spool, entry, 'spool_entry_unreadable');
+    return { outcome: 'dropped' };
+  }
+  if (event === null) { await settleSpoolEntry(spool, entry); return { outcome: 'not_captured' }; }
+  let outcome;
+  try {
+    outcome = await captureEvent({ ...common, payload, event, cwd: value.cwd, transcriptSize: value.transcriptSize ?? null, boundBy: value.boundBy ?? null });
+  } catch (error) {
+    if (error?.code !== 'storage_lock_timeout') {
+      await failSpoolEntry(spool, entry, error?.code ?? 'capture_failed');
+      return { outcome: 'store_failed' };
+    }
+    outcome = 'store_busy';
+  }
+  if (RETRY_LATER.has(outcome)) {
+    await releaseSpoolEntry(spool, entry);
+    return { outcome, stop: true };
+  }
+  await settleSpoolEntry(spool, entry);
+  return { outcome };
+}
+
+// The hook's own entry, and what waits before and after it. One hook drains at
+// a time and only when the drain is free: it replays older entries first, so a
+// session's events keep their order, then its own, then newer ones while time
+// is left. A hook that finds the drain taken writes its own entry alone, as
+// before the spool. Resolves the own entry's outcome.
+async function replaySpool({ spool, own, deadline, now, ...common }) {
+  const context = { ...common, spool, deadline, now };
+  let fence;
+  try { fence = createDestinationFence(join(spool, 'drain'), { lockTimeoutMs: 0, staleLockMs: CAPTURE_STALE_LOCK_MS }); }
+  catch { return (await replayEntry({ ...context, entry: own })).outcome; }
+  let result = null;
+  try {
+    await fence.run(async () => {
+      // Claims and entries age by the file system's clock, not the injected one.
+      await recoverClaims(spool);
+      await expireSpool(spool);
+      for (const entry of (await spoolEntries(spool)).filter((entry) => entry.at <= own.at && entry.key !== own.key)) {
+        const older = await replayEntry({ ...context, entry });
+        if (older.stop) {
+          // The own entry waits behind it, for the same reason.
+          await releaseSpoolEntry(spool, own);
+          result = older.outcome;
+          return;
+        }
+      }
+      const mine = await replayEntry({ ...context, entry: own });
+      result = mine.outcome;
+      if (mine.stop) return;
+      for (let pass = 0; pass < 4; pass += 1) {
+        const waiting = await spoolEntries(spool);
+        if (!waiting.length) return;
+        for (const entry of waiting) {
+          if (now() + 2 * COMMIT_MARGIN_MS >= deadline) return;
+          if ((await replayEntry({ ...context, entry })).stop) return;
+        }
+      }
+    });
+  } catch (error) {
+    if (result !== null) return result;
+    if (error?.code !== 'storage_lock_timeout') { await releaseSpoolEntry(spool, own); return 'store_failed'; }
+    // The drain is another hook's: this one writes its own entry alone.
+    return (await replayEntry({ ...context, entry: own })).outcome;
+  }
+  return result;
+}
+
+// One event into the store: what a capture was before the spool.
+async function captureEvent({ capture, payload, event, deadline, record, registry, home, cwd, post, now, env, boundBy = null, transcriptSize = null }) {
+  const extraction = boundBy ? await activeExtraction(env) : null;
+  // Bound only under the activation the event's own hook judged it by.
+  const provenance = extraction && extraction.activationId === boundBy ? { extractionBinding: extractionBinding(extraction) } : {};
   const file = capture.store.file;
   if (await storeRepository(file)) return 'store_inside_repository';
   const workspace = await discoverWorkspace(cwd, { timeout: Math.max(1, Math.min(GIT_TIMEOUT_MS, deadline - now())) });
@@ -246,7 +365,13 @@ export async function runCapture({ capture, input, deadline, record = null, regi
   // the file is found, and after anything else here that can throw.
   const invocationContext = await readInvocationContext({ env, now });
   const workerFiles = (await Promise.all([identityFile(env), usageFile(env), workerFenceFile(env), settlementFile(env)].map(async file => [await canonicalPath(file), await fenceLockPath(file)]))).flat();
+  const artefactDirectories = record ? await Promise.all([spoolDirectory(record), droppedDirectory(spoolDirectory(record))].map((path) => canonicalPath(path).catch(() => path))) : [];
   const transcript = await openTranscript(event.transcriptPath);
+  // A replayed event anchors a session's first cursor where the transcript
+  // ended when the event arrived; a cursor already made reads on as usual
+  // (a size below it would read as a rewritten transcript).
+  const transcriptFor = (session) => (transcript && !transcript.missing && Number.isSafeInteger(transcriptSize) && transcriptSize >= 0 && !session?.cursor
+    ? { ...transcript, size: () => Math.min(transcript.size(), transcriptSize) } : transcript);
   const lockTimeoutMs = deadline - now() - COMMIT_MARGIN_MS;
   if (lockTimeoutMs <= 0) {
     transcript?.close?.();
@@ -272,13 +397,14 @@ export async function runCapture({ capture, input, deadline, record = null, regi
       // store below its ceiling (PR-36b amendment).
       const storeBytes = await storeFootprint(file);
       const held = new Set((current.records ?? []).filter((record) => record?.kind === 'capture').map((record) => record.id));
+      const session = (current.captureSessions ?? []).find((entry) => entry?.originId === capture.originId && entry?.sessionId === event.sessionId);
       const graph = createShadowGraph({ now: () => new Date(now()).toISOString() });
       graph.importData(current);
       let changed = privilegedExpireCapture(graph, { mayContinue }).changed;
       const bound = accessContext(graph, {}, 'cli', workspace, { confirmedByStore: true }).binding?.project ?? null;
       const project = bound !== null && covered(capture.coverage, bound) ? bound : null;
       const workerInvocations = invocationContext.workerInvocations.filter(row => Date.parse(row.from) <= entered && entered < Date.parse(row.to));
-      const context = { ...captureArtefacts({ storeFile: file, runtimeDirectory: capture.runtime?.path ?? null, activationFile: record, markerFiles, registryFile: registryCanonical, workerFiles }), home, mcpServerNames: capture.mcpServerNames ?? ['shadowgraph'], workerInvocations, observedAt: new Date(entered).toISOString(), correlationTokens: workerInvocations.map(row => row.correlationToken) };
+      const context = { ...captureArtefacts({ storeFile: file, runtimeDirectory: capture.runtime?.path ?? null, activationFile: record, markerFiles, registryFile: registryCanonical, workerFiles, artefactDirectories }), home, mcpServerNames: capture.mcpServerNames ?? ['shadowgraph'], workerInvocations, observedAt: new Date(entered).toISOString(), correlationTokens: workerInvocations.map(row => row.correlationToken) };
       // The transcript cursor's step; a throw is undone by its own transaction
       // and never costs the event's own item.
       const cursor = (step) => {
@@ -327,7 +453,7 @@ export async function runCapture({ capture, input, deadline, record = null, regi
             } else if (held.has(result.id)) outcome = 'already_held';
             else [item, changed] = [result, true];
           }
-          const read = cursor({ trigger: TRANSCRIPT_TRIGGERS.includes(event.event) ? event.event : null, triggerItemId: item?.id ?? null, transcript });
+          const read = cursor({ trigger: TRANSCRIPT_TRIGGERS.includes(event.event) ? event.event : null, triggerItemId: item?.id ?? null, transcript: transcriptFor(session) });
           if (read?.changed) {
             changed = true;
             if (outcome === 'nothing_new' || outcome === 'already_held') outcome = 'transcript';
