@@ -549,7 +549,7 @@ test('a private key in a payload that has to wait is redacted before the spool h
   await writeFile(lock, `${process.pid}:${Date.now()}:held`);
   t.after(() => fs.rmSync(lock, { force: true }));
   const body = 'b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW';
-  const key = ['-----BEGIN OPENSSH PRIVATE KEY-----', body, '-----END OPENSSH PRIVATE KEY-----'].join('\n');
+  const key = [BEGIN, body, END].join('\n');
   assert.equal(await s.run({ hook_event_name: 'UserPromptSubmit', prompt: `use this:\n${key}`, message_id: 'm1' }, { deadline: Date.now() + 800 }), 'store_busy');
   const [entry] = await readdir(join(s.sgHome, 'capture-spool'));
   assert.match(await readFile(join(s.sgHome, 'capture-spool', entry), 'utf8'), /\[REDACTED\]/u);
