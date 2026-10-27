@@ -18,18 +18,21 @@ const WORKER_ENV = new Set(['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'P
 export const workerEnvironment = env => Object.fromEntries(Object.entries(env)
   .filter(([name, value]) => typeof value === 'string' && (WORKER_ENV.has(name.toUpperCase()) || /^SHADOWGRAPH_/iu.test(name))));
 // On Windows the Claude Code CLI waits, on exit, for every process its hooks
-// started, detached or not (live probe X3, 2026-10-27: `claude -p` exited only
-// when a detached 25 s child of its Stop hook had). The worker is therefore
-// started through PowerShell's Start-Process, which starts it by ShellExecute
-// and hands it none of the hook's handles. PowerShell itself returns at once;
-// it is not detached, since Windows PowerShell given no console exits at once.
+// started detached (live probe X3, 2026-10-27: `claude -p` exited only when a
+// detached 25 s child of its Stop hook had), and a hook's child that is not
+// detached does not outlive the hook (run 2, C1r). So the hook starts a
+// detached launcher (worker-launcher.js) that lives about half a second: it
+// starts the worker through PowerShell's Start-Process, by ShellExecute, which
+// hands the worker none of the hook's handles.
 const psQuote = value => `'${String(value).replace(/'/gu, "''")}'`;
 export function workerLaunch({ node, args, cwd, env, platform = process.platform }) {
-  const options = { cwd, env, detached: platform !== 'win32', shell: false, stdio: 'ignore', windowsHide: true };
+  const options = { cwd, env, detached: true, shell: false, stdio: 'ignore', windowsHide: true };
   if (platform !== 'win32') return [node, args, options];
   const systemRoot = Object.entries(env).find(([name]) => name.toUpperCase() === 'SYSTEMROOT')?.[1] || 'C:\\Windows';
   const command = `Start-Process -FilePath ${psQuote(node)} -ArgumentList ${args.map(arg => psQuote(`"${arg}"`)).join(',')} -WorkingDirectory ${psQuote(cwd)} -WindowStyle Hidden`;
-  return [join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', command], options];
+  const powershell = join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const launcher = join(dirname(fileURLToPath(import.meta.url)), 'worker-launcher.js');
+  return [node, [launcher, JSON.stringify({ powershell, command, node, args, cwd })], options];
 }
 // A session under another profile or a session token may be another account.
 // The worker would run under the default profile's account, so such a session
