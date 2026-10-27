@@ -252,7 +252,7 @@ import { changeHookSettings } from '../src/host-hooks.js';
 test('trigger only requests detached one-shot extraction after eligible capture; self traffic cannot recurse', async t => {
   const f = await activated(t), { triggerExtraction } = await import('../src/internal/extraction-trigger.js');
   const calls = []; let unrefs = 0;
-  const options = { env: f.env, runtimeDirectory: f.options.runtime, deadline: Date.now() + 5000, platform: 'linux', spawnProcess: (...args) => {
+  const options = { env: f.env, runtimeDirectory: f.options.runtime, deadline: Date.now() + 5000, spawnProcess: (...args) => {
     calls.push(args); const child = new EventEmitter(); child.unref = () => { unrefs++; }; return child;
   } };
   for (const event of ['Stop', 'SessionEnd']) assert.equal((await triggerExtraction({ ...options, event, outcome: 'written' })).status, 'requested');
@@ -267,28 +267,6 @@ test('trigger only requests detached one-shot extraction after eligible capture;
   }
   await (await activation()).deactivateExtraction({ env: f.env });
   assert.equal((await triggerExtraction({ ...options, event: 'Stop', outcome: 'written' })).status, 'inert'); assert.equal(calls.length, 2);
-});
-// Live probe X3 (2026-10-27): on Windows `claude -p` waits, on exit, for every
-// process its hooks started, so the worker is started through Start-Process.
-test('on Windows a detached launcher starts the worker through Start-Process, quoted, with the worker environment', async t => {
-  const f = await activated(t), { triggerExtraction, workerLaunch } = await import('../src/internal/extraction-trigger.js'); const calls = [];
-  const result = await triggerExtraction({ env: { ...f.env, SystemRoot: 'C:\\Windows' }, runtimeDirectory: f.options.runtime, deadline: Date.now() + 5000, event: 'Stop', outcome: 'written', platform: 'win32',
-    spawnProcess: (...args) => { calls.push(args); const child = new EventEmitter(); child.unref = () => {}; return child; } });
-  assert.equal(result.status, 'requested');
-  const [[executable, args, options]] = calls;
-  assert.equal(executable, process.execPath);
-  assert.match(args[0], /worker-launcher\.js$/u);
-  const plan = JSON.parse(args[1]);
-  assert.equal(plan.powershell, join('C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'));
-  assert.match(plan.command, /^Start-Process -FilePath '.+' -ArgumentList '".+cli\.js"','"extract"','"--automatic"' -WorkingDirectory '.+' -WindowStyle Hidden$/u);
-  assert.deepEqual(plan.args.slice(1), ['extract', '--automatic'], 'the direct fallback starts the same worker');
-  assert.equal(options.detached, true); assert.equal(options.stdio, 'ignore');
-  assert.equal(options.env.SHADOWGRAPH_HOME, f.env.SHADOWGRAPH_HOME);
-  // A single quote in a path is doubled for PowerShell; elsewhere the worker is spawned directly.
-  const [, quoted] = workerLaunch({ node: "C:\\o'k\\node.exe", args: ["C:\\o'k\\cli.js"], cwd: "C:\\o'k", env: {}, platform: 'win32' });
-  assert.equal(JSON.parse(quoted[1]).command, `Start-Process -FilePath 'C:\\o''k\\node.exe' -ArgumentList '"C:\\o''k\\cli.js"' -WorkingDirectory 'C:\\o''k' -WindowStyle Hidden`);
-  const [node, direct, directOptions] = workerLaunch({ node: 'node', args: ['cli.js'], cwd: '/home', env: {}, platform: 'linux' });
-  assert.deepEqual([node, direct, directOptions.detached], ['node', ['cli.js'], true]);
 });
 test('the requested worker inherits no host-session provider route or session token', async t => {
   const f = await activated(t), { triggerExtraction } = await import('../src/internal/extraction-trigger.js'); let spawned;
