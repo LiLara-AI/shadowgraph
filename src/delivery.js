@@ -372,7 +372,14 @@ export async function runDeliver({ args = [], readInput = () => '', file, storag
     const workspace = await discoverWorkspace(process.cwd(), { timeout: GIT_TIMEOUT_MS });
     // At SessionStart the whole working set, up to the largest page, is read,
     // so the order below chooses among all of it.
-    const input = accessContext(graph, { query: prompt, compact: true, ...(session ? { limit: MAX_PAGE_LIMIT } : {}) }, 'cli', workspace, { confirmedByStore: Boolean(pinned) });
+    const own = accessContext(graph, { query: prompt, compact: true, ...(session ? { limit: MAX_PAGE_LIMIT } : {}) }, 'cli', workspace, { confirmedByStore: Boolean(pinned) });
+    // The owner's sharing grant (activation.js changeDeliverySharing): the
+    // shared projects' memory is read from any project the store has bound, as
+    // on the Codex route; from no project at all, nothing is shared. The kernel
+    // reads the project alone once the grant is revoked or expired.
+    const sharing = pinned?.sharing;
+    const shares = typeof sharing?.accessId === 'string' && sharing.accessId && Boolean(own.binding?.project);
+    const input = shares ? { ...own, accessId: sharing.accessId } : own;
     const relevant = graph.context(input).relevant;
     const unresolved = relevant.scope.requestState !== 'project_selected';
     if (!session && (unresolved || !relevant.relevance.established)) return;
