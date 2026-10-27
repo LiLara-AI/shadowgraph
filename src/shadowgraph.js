@@ -2244,16 +2244,19 @@ export function createShadowGraph(options = {}) {
       // applied, and the memory stays current, named as corrected on every read.
       const verbatimDecision = previousDecision?.kind === 'memory' && previousDecision.status === 'active'
         && captures.get(previousDecision.captureRef)?.source?.role === 'user';
+      // A correction the claim checks could not structure is kept verbatim too,
+      // and is linked the same way: neither side is read into, nothing closed.
+      const verbatimCorrection = proposed.kind === 'memory';
       // The quoted recipe proposes corrections, on the Codex route and on a Claude runtime-evidence activation.
-      const applyCorrection = (input.receipt.provider === 'codex' || input.receipt.promptVersion === CODEX_PROMPT_VERSION) && item.source.role === 'user' && proposed.kind === 'decision'
+      const applyCorrection = (input.receipt.provider === 'codex' || input.receipt.promptVersion === CODEX_PROMPT_VERSION) && item.source.role === 'user' && (proposed.kind === 'decision' || verbatimCorrection)
         && (previousDecision?.kind === 'decision' || verbatimDecision) && captureOwner(item).owns(previousDecision)
         && !['superseded', 'archived', 'abandoned', 'stale'].includes(previousDecision.status)
         && createHash('sha256').update(JSON.stringify(previousDecision)).digest('hex') === correction.expectedHash;
       if (applyCorrection) fields.correction = { status: 'model_proposed', recordId: correction.recordId,
         sourceRef: item.id, statement: correction.statement,
-        ...(verbatimDecision ? { applied: false } : {}),
-        limitation: verbatimDecision
-          ? 'The corrected message is kept verbatim and may hold more than this correction replaces, so it is not closed: it stays current, marked as corrected by this decision. The correction relationship is a model interpretation, not independently verified.'
+        ...(verbatimDecision || verbatimCorrection ? { applied: false } : {}),
+        limitation: verbatimDecision || verbatimCorrection
+          ? 'A message kept verbatim may say more or less than the correction replaces, so nothing is closed: the corrected record stays current, marked as corrected by this one. The correction relationship is a model interpretation, not independently verified.'
           : 'The source quotation is preserved; the correction relationship is a model interpretation, not independently verified.' };
       if (proposed.kind === 'attempt') {
         fields.outcomeEvidence = clone(item.observation?.outcome?.outcomeEvidence ?? { state: 'absent' });
@@ -2269,7 +2272,7 @@ export function createShadowGraph(options = {}) {
       decorate(records.get(record.id), record.id, fields);
       for (const entry of journal) decorate(entry.payload, record.id, fields);
       for (const value of idempotency.values()) decorate(value, record.id, fields);
-      if (applyCorrection && !verbatimDecision) supersedeDecision({ project: item.project, originId: item.originId, decisionId: previousDecision.id, replacementId: record.id });
+      if (applyCorrection && !verbatimDecision && !verbatimCorrection) supersedeDecision({ project: item.project, originId: item.originId, decisionId: previousDecision.id, replacementId: record.id });
       producedRecordIds.push(record.id);
     }
     if (producedRecordIds.length) {
@@ -5793,14 +5796,15 @@ export function createShadowGraph(options = {}) {
     };
   }
 
-  // A verbatim memory a user's correction names, not applied (completeExtraction),
-  // stays current; a read and an expansion name the decisions, in their scope,
+  // A record a user's correction names, not applied (completeExtraction),
+  // stays current; a read and an expansion name the records, in their scope,
   // that correct it, beside the record and outside its digest.
   function correctionsWithin(reach) {
     const correctedBy = new Map();
     for (const record of records.values()) {
-      const target = record.kind === 'decision' && record.correction?.applied === false
-        && !['superseded', 'archived', 'abandoned', 'stale'].includes(record.status) && reach(record.id) ? record.correction.recordId : null;
+      const standing = record.kind === 'memory' ? record.status === 'active'
+        : record.kind === 'decision' && CURRENT_DECISION_STATUSES.includes(record.status);
+      const target = standing && record.correction?.applied === false && reach(record.id) ? record.correction.recordId : null;
       if (target) correctedBy.set(target, [...(correctedBy.get(target) ?? []), record.id].sort());
     }
     return (id) => (correctedBy.has(id) ? { correctedBy: correctedBy.get(id) } : {});
