@@ -107,3 +107,15 @@ test('sharing names only bound projects, at least one, and needs active delivery
   await writeFile(s.activation, JSON.stringify({ version: 1, capabilities: {} }));
   await assert.rejects(changeDeliverySharing({ env: s.env, mode: 'project' }), /sharing_requires_active_delivery/u);
 });
+
+// Review of the route (2026-10-27), finding 7: a record changed while the owner
+// was confirming stops the change before any grant moves.
+test('a sharing change that meets a changed activation record issues no grant', { timeout: 120_000 }, async (t) => {
+  const s = await setup(t);
+  await assert.rejects(changeDeliverySharing({ env: s.env, mode: 'selected', projects: ['alpha'], afterConfirmation: async () => {
+    const record = JSON.parse(await readFile(s.activation, 'utf8'));
+    await writeFile(s.activation, JSON.stringify({ ...record, history: [...record.history, { at: new Date().toISOString(), capability: 'capture', state: 'deactivated' }] }));
+  } }), /activation_record_changed_while_confirming/u);
+  assert.doesNotMatch(await readFile(s.file, 'utf8'), /access_[0-9a-f]{8}-/u, 'no grant was issued');
+  assert.equal(JSON.parse(await readFile(s.activation, 'utf8')).capabilities.delivery.sharing, undefined);
+});

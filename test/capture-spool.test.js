@@ -190,50 +190,103 @@ test('an entry that keeps failing is dropped with a marker after its attempts, a
   assert.deepEqual(reasons.sort(), ['attempts_exhausted:synthetic', 'expired']);
 });
 
-test('a claim a dead hook left returns to the queue and is replayed; a fresh claim is left to its hook', { timeout: 60_000 }, async (t) => {
+// Review of the spool (2026-10-27), finding 5: every spooled event is written
+// by the one hook holding the drain, oldest first; a hook that finds it taken
+// leaves its entry rather than writing ahead of older ones.
+test('a hook that finds the drain held leaves its entry; the next drain writes the session in order', { timeout: 60_000 }, async (t) => {
   const s = await setup(t);
-  const stale = (await spoolEvent({ spool: s.spool, input: prompt('claimed by a hook that died', { message_id: 'stale' }), cwd: s.cwd })).entry;
-  await rename(join(s.spool, stale.name), join(s.spool, `${stale.name}.claim`));
-  const old = new Date(Date.now() - 120_000);
-  await utimes(join(s.spool, `${stale.name}.claim`), old, old);
-  const live = (await spoolEvent({ spool: s.spool, input: prompt('claimed by a live hook', { message_id: 'live' }), cwd: s.cwd })).entry;
-  await rename(join(s.spool, live.name), join(s.spool, `${live.name}.claim`));
-  assert.equal((await spoolStatus(s.spool)).pending, 2, 'a claimed entry still counts as waiting');
-  assert.equal(await capture(s, prompt('after', { message_id: 'after' })), 'written');
-  assert.deepEqual((await captures(s)).map((item) => item.source.hostEventId), ['stale', 'after']);
-  assert.equal((await spoolStatus(s.spool)).pending, 1);
+  const { createDestinationFence } = await import('../src/revision-store.js');
+  let release;
+  const held = new Promise((settle) => { release = settle; });
+  let entered;
+  const inside = new Promise((settle) => { entered = settle; });
+  const drain = createDestinationFence(join(s.spool, 'drain'), { lockTimeoutMs: 0, staleLockMs: 2000 }).run(async () => { entered(); await held; });
+  await inside;
+  assert.equal(await capture(s, prompt('first while another hook drains', { message_id: 'one' })), 'spooled');
+  assert.equal(await capture(s, prompt('second while another hook drains', { message_id: 'two' })), 'spooled');
+  assert.deepEqual(await captures(s), [], 'nothing is written ahead of the drainer');
+  release();
+  await drain;
+  assert.equal(await capture(s, prompt('third', { message_id: 'three' })), 'written');
+  const items = await captures(s);
+  assert.deepEqual(items.map((item) => item.source.hostEventId), ['one', 'two', 'three']);
+  assert.deepEqual(items.map((item) => item.occurrenceSeq), [1, 2, 3]);
 });
 
-// A CLI session names no account (only Desktop sets CLAUDE_CODE_USER_EMAIL):
-// under the default profile, with no provider route of its own, its material
-// is bound to the extraction activation, which checks that account at every
-// invocation; a session on its own provider route stays unbound.
-test('a CLI session under the default profile is bound for extraction; one on its own provider route is not', async (t) => {
+// Finding 1: an argument vector's credential, short credential keys and header
+// pairs are redacted by the renderer's rules before the spool keeps them.
+test('a tool call that has to wait keeps no credential the renderer would redact', { timeout: 60_000 }, async (t) => {
   const s = await setup(t);
+  const release = await holdStore(s.file);
+  t.after(release);
+  const secrets = ['Zq9SpoolArg1Kx7Wv2', 'Zq9SpoolPw2Kx7Wv2', 'Zq9SpoolAuth3Kx7Wv2', 'Zq9SpoolCookie4Kx7Wv2', 'Zq9SpoolUser5Kx7Wv2'];
+  const input = JSON.stringify({ hook_event_name: 'PostToolUse', session_id: 'session-1', cwd: '/work', tool_name: 'Bash', tool_use_id: 'toolu-secret',
+    tool_input: { command: 'deploy', args: ['--password', secrets[0], '-u', `admin:${secrets[4]}`], pw: secrets[1], auth: secrets[2], headers: [['Cookie', secrets[3]]] }, tool_response: { stdout: 'ok', exit_code: 0 } });
+  assert.equal(await capture(s, input, { deadline: Date.now() + 800 }), 'store_busy');
+  const [entry] = await spoolEntries(s.spool);
+  const kept = await readFile(join(s.spool, entry.name), 'utf8');
+  for (const secret of secrets) assert.ok(!kept.includes(secret), secret);
+  await release();
+  assert.equal(await capture(s, prompt('after', { message_id: 'after' })), 'written');
+  const stored = await readFile(s.file, 'utf8');
+  for (const secret of secrets) assert.ok(!stored.includes(secret), secret);
+});
+
+// Finding 2: the spool is never written inside a repository, however its path
+// is reached; the event then takes the direct path, and a loss is recorded
+// outside the repository only.
+test('a spool that would lie inside a repository is never written', { timeout: 60_000 }, async (t) => {
+  const s = await setup(t);
+  await mkdir(join(s.sgHome, '.git'));
+  const release = await holdStore(s.file);
+  t.after(release);
+  assert.equal(await capture(s, prompt('private material near a repository', { message_id: 'repo' }), { deadline: Date.now() + 800 }), 'store_busy');
+  assert.deepEqual(await readdir(s.spool).catch(() => []), []);
+  assert.deepEqual(await readdir(droppedDirectory(s.spool)).catch(() => []), [], 'no marker inside the repository either');
+  await release();
+  assert.equal(await capture(s, prompt('direct path still works', { message_id: 'direct' })), 'written');
+});
+
+// Finding 6: an entry kept for one store is never written into another.
+test('an entry kept for another store or origin is dropped with a marker, not written here', { timeout: 60_000 }, async (t) => {
+  const s = await setup(t);
+  const release = await holdStore(s.file);
+  t.after(release);
+  assert.equal(await capture(s, prompt('kept for the first store', { message_id: 'old-store' }), { deadline: Date.now() + 800 }), 'store_busy');
+  await release();
+  const capture2 = { ...s.capture, originId: mintOriginId() };
+  assert.equal(await runCapture({ capture: capture2, input: prompt('under a new activation', { message_id: 'new' }), deadline: Date.now() + 10_000, record: s.activation, home: s.home, cwd: s.cwd }), 'written');
+  assert.deepEqual((await captures(s)).map((item) => item.source.hostEventId), ['new']);
+  const [marker] = await readdir(droppedDirectory(s.spool));
+  assert.equal(JSON.parse(await readFile(join(droppedDirectory(s.spool), marker), 'utf8')).reason, 'capture_destination_changed');
+});
+
+// Finding 3: a CLI session names no account in its hooks; its material is
+// bound only while the CLI's own current sign-in is the bound account, so a
+// switch of the default login does not carry its work to the bound account.
+test('a CLI session is bound only while its default sign-in is the bound account; a provider route stays unbound', { timeout: 60_000 }, async (t) => {
+  const s = await setup(t);
+  const { accountEmailDigest } = await import('../src/internal/extraction-contract.js');
   const runtime = { path: join(s.root, 'shadowgraph-runtime'), commit: 'a'.repeat(40), extraction: true };
   const record = JSON.parse(await readFile(s.activation, 'utf8'));
   record.capabilities.capture = { ...s.capture, runtime };
   record.capabilities.delivery = { ...record.capabilities.delivery, runtime };
+  const salt = 'e'.repeat(32);
   const extraction = { state: 'active', activationId: '0f0e0d0c-1111-4222-8333-444455556666', changedAt: new Date().toISOString(), store: s.capture.store, runtime,
     noOverageConfirmed: true, budgets: { ...FROZEN_WORKER_BUDGETS }, model: 'claude-opus-5[1m]',
-    executor: { ok: true, executable: join(s.root, 'claude.exe'), binarySha256: 'b'.repeat(64), hostVersion: '2.1.288', model: 'claude-opus-5[1m]', restrictions: Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`E-${i + 1}`, true])), accountFingerprint: 'f'.repeat(64), accountSalt: 'e'.repeat(32) } };
+    executor: { ok: true, executable: join(s.root, 'claude.exe'), binarySha256: 'b'.repeat(64), hostVersion: '2.1.288', model: 'claude-opus-5[1m]', restrictions: Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`E-${i + 1}`, true])),
+      accountFingerprint: 'f'.repeat(64), accountSalt: salt, accountEmailFingerprint: accountEmailDigest(salt, 'owner@example.invalid') } };
   record.capabilities.extraction = extraction;
   await writeFile(s.activation, JSON.stringify(record));
+  const signIn = (email) => writeFile(join(s.home, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: email, accountUuid: 'synthetic' } }));
   const env = { SHADOWGRAPH_HOME: s.sgHome };
-  assert.equal(await capture(s, prompt('cli default profile', { message_id: 'cli' }), { env }), 'written');
+  await signIn('owner@example.invalid');
+  assert.equal(await capture(s, prompt('under the bound account', { message_id: 'bound' }), { env }), 'written');
   assert.equal(await capture(s, prompt('own api key route', { message_id: 'keyed' }), { env: { ...env, ANTHROPIC_API_KEY: 'synthetic' } }), 'written');
-  const byId = Object.fromEntries((await captures(s)).map((item) => [item.source.hostEventId, item.observation.extractionBinding ?? null]));
-  assert.deepEqual(byId.cli, { provider: 'claude', accountFingerprint: 'f'.repeat(64), setupId: extraction.activationId });
-  assert.equal(byId.keyed, null);
-  // An entry judged under one activation and replayed under another stays unbound.
-  const release = await holdStore(s.file);
-  t.after(release);
-  assert.equal(await capture(s, prompt('judged under the first activation', { message_id: 'first' }), { env, deadline: Date.now() + 800 }), 'store_busy');
-  await release();
-  extraction.activationId = '0f0e0d0c-1111-4222-8333-777788889999';
-  await writeFile(s.activation, JSON.stringify(record));
-  assert.equal(await capture(s, prompt('after reactivation', { message_id: 'second' }), { env }), 'written');
-  const after = Object.fromEntries((await captures(s)).map((item) => [item.source.hostEventId, item.observation.extractionBinding?.setupId ?? null]));
-  assert.equal(after.first, null);
-  assert.equal(after.second, extraction.activationId);
+  await signIn('someone-else@example.invalid');
+  assert.equal(await capture(s, prompt('after the default login switched', { message_id: 'switched' }), { env }), 'written');
+  await unlink(join(s.home, '.claude.json'));
+  assert.equal(await capture(s, prompt('no readable sign-in', { message_id: 'unknown' }), { env }), 'written');
+  const byId = Object.fromEntries((await captures(s)).map((item) => [item.source.hostEventId, item.observation.extractionBinding?.setupId ?? null]));
+  assert.deepEqual(byId, { bound: extraction.activationId, keyed: null, switched: null, unknown: null });
 });

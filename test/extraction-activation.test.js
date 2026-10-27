@@ -230,6 +230,21 @@ test('one automatic worker drains past the per-drain item budget in bounded roun
   assert.ok((await f.read()).records.filter(item => item.kind === 'capture').every(item => item.state === 'extracted'));
 });
 
+// Review of the route (2026-10-27), finding 8: a triggered worker that meets a
+// finishing one waits for it rather than leaving the trigger unanswered.
+test('a triggered worker waits briefly for a finishing worker instead of giving up', async t => {
+  const f = await activated(t), { runActivatedExtraction } = await import('../src/extraction-runtime.js');
+  const { workerFenceFile } = await state();
+  let release; const finishing = createDestinationFence(workerFenceFile(f.env)).run(() => new Promise(resolve => { release = resolve; }));
+  setTimeout(() => release(), 1000);
+  let calls = 0;
+  const result = await runActivatedExtraction({ env: f.env, runtimeDirectory: f.options.runtime, automatic: true, executorFactory: () => ({ extract: async () => { calls += 1;
+    return { status: 'success', value: { records: [] }, receipt: { invocationStarted: true, model: 'claude-opus-5[1m]' } }; } }) });
+  await finishing;
+  assert.equal(calls, 1, JSON.stringify(result));
+  assert.equal(result.completed, 1);
+});
+
 import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';

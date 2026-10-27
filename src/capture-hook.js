@@ -18,7 +18,7 @@ import { captureArtefacts, classifyCaptureSource, soleProgram } from './internal
 import { outcomeFromExitStatus } from './internal/outcome.js';
 import { canonicalPath as fencePath, registryFile } from './internal/deletion-knowledge.js';
 import { canonicalPath, repositoryOf as storeRepository } from './internal/owner-files.js';
-import { renderToolMaterial } from './internal/tool-material.js';
+import { redactToolStructure, renderToolMaterial } from './internal/tool-material.js';
 import { captureWithheld, redactValue } from './internal/redaction.js';
 import { privilegedExpireCapture, privilegedRecordCapture, privilegedRecordSelfEvent, privilegedRecordTranscript, privilegedSnapshot } from './internal/snapshot.js';
 import { TRANSCRIPT_TRIGGERS } from './internal/transcript.js';
@@ -30,7 +30,7 @@ import { requestFile } from './internal/extraction-trigger.js';
 import { createDestinationFence, fenceLockPath } from './revision-store.js';
 import { usableOriginId } from './scope.js';
 import { readInvocationContext, identityFile } from './internal/extraction-identity.js';
-import { claimSpoolEntry, dropSpoolEntry, droppedDirectory, expireSpool, failSpoolEntry, readSpoolEntry, recordDropped, recoverClaims, releaseSpoolEntry, settleSpoolEntry, spoolDirectory, spoolEntries, spoolEvent } from './internal/capture-spool.js';
+import { dropSpoolEntry, droppedDirectory, expireSpool, failSpoolEntry, readSpoolEntry, recordDropped, settleSpoolEntry, spoolDirectory, spoolEntries, spoolEvent } from './internal/capture-spool.js';
 
 // Conservative admission limits, frozen until measured figures replace them
 // through a gate (§22.6.3). Crossing one refuses new items; it is never raised
@@ -236,23 +236,27 @@ export async function runCapture({ capture, input, deadline, record = null, regi
   } catch { return 'unreadable'; }
   if (event === null) return 'not_captured';
   // The account the session's material belongs to, judged by this event's own
-  // hook: a host that names its session's account (Desktop) was compared with
-  // the bound one above. A CLI session names none; without a profile selector
+  // hook. A host that names its session's account (Desktop) was compared with
+  // the bound one above. A CLI session names none: without a profile selector
   // (refused above) or a provider route of its own it runs under the default
-  // profile, whose account extraction bound and checks again at every
-  // invocation. Any other session's capture stays local and unbound.
-  const boundBy = extraction && (extraction.executor.provider ?? 'claude') === 'claude' && (sessionEmail || !providerRouteSelected(env)) ? extraction.activationId : null;
+  // profile's current sign-in, which the CLI's own configuration names; only
+  // when that is the bound account is the material bound (a digest compared,
+  // nothing kept). Any other session's capture stays local and unbound.
+  const claude = extraction && (extraction.executor.provider ?? 'claude') === 'claude';
+  const boundBy = claude && (sessionEmail || (!providerRouteSelected(env) && await defaultProfileIsBound(extraction, home))) ? extraction.activationId : null;
   const common = { capture, deadline, record, registry, home, post, now, env };
   if (record === null) return captureEvent({ ...common, payload, event, cwd, boundBy });
   const spool = spoolDirectory(record);
   const transcriptSize = event.transcriptPath ? (await stat(event.transcriptPath).catch(() => null))?.size ?? null : null;
   // Nothing unredacted is kept anywhere (PR-37b M-2): the material fields are
-  // redacted before the spool sees them, and a payload the checker still
-  // flags is never spooled -- it takes the direct path alone.
+  // redacted -- a tool's input and response by the renderer's own credential
+  // rules first -- before the spool sees them, and a payload the checker still
+  // flags is never spooled; it takes the direct path alone.
   const safe = { ...payload };
-  for (const name of SPOOLED_MATERIAL) if (Object.hasOwn(safe, name)) safe[name] = redactValue(safe[name]);
+  for (const name of SPOOLED_MATERIAL) if (Object.hasOwn(safe, name)) safe[name] = redactValue(name.startsWith('tool_') ? redactToolStructure(safe[name]) : safe[name]);
   const safeInput = JSON.stringify(safe);
-  const kept = captureWithheld(safeInput) ? { kept: false, reason: 'material_withheld' } : await spoolEvent({ spool, input: safeInput, cwd, transcript: transcriptSize, boundBy, now });
+  const destination = { store: capture.store.file, originId: capture.originId };
+  const kept = captureWithheld(safeInput) ? { kept: false, reason: 'material_withheld' } : await spoolEvent({ spool, input: safeInput, cwd, transcript: transcriptSize, boundBy, destination, now });
   if (!kept.kept) {
     // No durable copy: the direct path as before, and a loss it cannot avoid
     // is recorded, never silent.
@@ -262,10 +266,22 @@ export async function runCapture({ capture, input, deadline, record = null, regi
     if (['store_busy', 'store_failed', 'out_of_time'].includes(outcome)) await recordDropped({ spool, reason: `${kept.reason}:${outcome}`, input, at: now() });
     return outcome;
   }
-  // The hook's own entry, claimed so that no drain takes it meanwhile; a copy
-  // another hook already holds is that hook's to write.
-  const own = await claimSpoolEntry(spool, kept.entry);
-  return own ? replaySpool({ ...common, spool, own }) : 'spooled';
+  return drainSpool({ ...common, spool, own: kept.entry, destination });
+}
+
+// Whether the default profile's current sign-in, as the CLI's own
+// configuration names it, is the account extraction bound: a keyed digest of
+// its e-mail compared with the one activation kept. Unreadable, absent or
+// different is not bound.
+async function defaultProfileIsBound(extraction, home) {
+  const bound = extraction.executor.accountEmailFingerprint;
+  if (!bound) return false;
+  try {
+    const file = join(home, '.claude.json');
+    if ((await stat(file)).size > 16 * 1024 * 1024) return false;
+    const email = JSON.parse(await readFile(file, 'utf8'))?.oauthAccount?.emailAddress;
+    return accountEmailDigest(extraction.executor.accountSalt, email) === bound;
+  } catch { return false; }
 }
 
 // The hook payload's material fields; the rest identifies the event.
@@ -282,18 +298,22 @@ const RETRY_LATER = new Set(['store_busy', 'out_of_time', 'newer_schema']);
 
 // One spooled entry into the store. The entry leaves the spool once the store
 // has decided it; otherwise it waits, and a failure that is not contention
-// counts an attempt (capture-spool.js). { outcome, stop }: stop when the store
-// cannot take more now.
-async function replayEntry({ spool, entry, ...common }) {
+// counts an attempt (capture-spool.js). An entry kept for another store or
+// origin is never written here: it is dropped with a marker. { outcome, stop }:
+// stop when the store cannot take more now.
+async function replayEntry({ spool, entry, destination, ...common }) {
   let value, payload, event;
   try {
     value = await readSpoolEntry(spool, entry);
     payload = JSON.parse(value.input.charCodeAt(0) === 0xfeff ? value.input.slice(1) : value.input);
     event = observedEvent(payload);
   } catch (error) {
-    // Gone: another hook replayed it first. Anything else unreadable is a loss.
     if (error?.code === 'ENOENT') return { outcome: 'replayed' };
     await dropSpoolEntry(spool, entry, 'spool_entry_unreadable');
+    return { outcome: 'dropped' };
+  }
+  if (value.destination?.store !== destination.store || value.destination?.originId !== destination.originId) {
+    await dropSpoolEntry(spool, entry, 'capture_destination_changed');
     return { outcome: 'dropped' };
   }
   if (event === null) { await settleSpoolEntry(spool, entry); return { outcome: 'not_captured' }; }
@@ -307,57 +327,43 @@ async function replayEntry({ spool, entry, ...common }) {
     }
     outcome = 'store_busy';
   }
-  if (RETRY_LATER.has(outcome)) {
-    await releaseSpoolEntry(spool, entry);
-    return { outcome, stop: true };
-  }
+  if (RETRY_LATER.has(outcome)) return { outcome, stop: true };
   await settleSpoolEntry(spool, entry);
   return { outcome };
 }
 
-// The hook's own entry, and what waits before and after it. One hook drains at
-// a time and only when the drain is free: it replays older entries first, so a
-// session's events keep their order, then its own, then newer ones while time
-// is left. A hook that finds the drain taken writes its own entry alone, as
-// before the spool. Resolves the own entry's outcome.
-async function replaySpool({ spool, own, deadline, now, ...common }) {
-  const context = { ...common, spool, deadline, now };
-  let fence;
-  try { fence = createDestinationFence(join(spool, 'drain'), { lockTimeoutMs: 0, staleLockMs: CAPTURE_STALE_LOCK_MS }); }
-  catch { return (await replayEntry({ ...context, entry: own })).outcome; }
-  let result = null;
+// Every spooled event is written by the one hook that holds the drain, oldest
+// first, so a session's events reach the store in their order and its first
+// transcript cursor is anchored by its first event. A hook that finds the drain
+// taken leaves its entry to the drainer, which lists the spool again before it
+// stops; one that arrives after that waits for the next hook, reported as
+// waiting input. Resolves the hook's own entry's outcome, or 'spooled'.
+async function drainSpool({ spool, own, destination, deadline, now, ...common }) {
+  const context = { ...common, spool, destination, deadline, now };
+  let result = 'spooled';
   try {
-    await fence.run(async () => {
-      // Claims and entries age by the file system's clock, not the injected one.
-      await recoverClaims(spool);
+    await createDestinationFence(join(spool, 'drain'), { lockTimeoutMs: 0, staleLockMs: CAPTURE_STALE_LOCK_MS }).run(async () => {
+      // Entries age by the file system's clock, not the injected one.
       await expireSpool(spool);
-      for (const entry of (await spoolEntries(spool)).filter((entry) => entry.at <= own.at && entry.key !== own.key)) {
-        const older = await replayEntry({ ...context, entry });
-        if (older.stop) {
-          // The own entry waits behind it, for the same reason.
-          await releaseSpoolEntry(spool, own);
-          result = older.outcome;
-          return;
-        }
-      }
-      const mine = await replayEntry({ ...context, entry: own });
-      result = mine.outcome;
-      if (mine.stop) return;
+      const tried = new Set();
       for (let pass = 0; pass < 4; pass += 1) {
-        const waiting = await spoolEntries(spool);
+        const waiting = (await spoolEntries(spool)).filter((entry) => !tried.has(entry.name));
         if (!waiting.length) return;
         for (const entry of waiting) {
-          if (now() + 2 * COMMIT_MARGIN_MS >= deadline) return;
-          if ((await replayEntry({ ...context, entry })).stop) return;
+          if (now() + 2 * COMMIT_MARGIN_MS >= deadline) {
+            // The deadline stops the drain; an own entry not reached waits for that reason.
+            if (!tried.has(own.name) && result === 'spooled') result = 'out_of_time';
+            return;
+          }
+          tried.add(entry.name);
+          const replayed = await replayEntry({ ...context, entry });
+          // The own entry, or one ahead of it that stopped the drain: its outcome is the own entry's too.
+          if (entry.key === own.key || (replayed.stop && entry.at <= own.at)) result = replayed.outcome;
+          if (replayed.stop) return;
         }
       }
     });
-  } catch (error) {
-    if (result !== null) return result;
-    if (error?.code !== 'storage_lock_timeout') { await releaseSpoolEntry(spool, own); return 'store_failed'; }
-    // The drain is another hook's: this one writes its own entry alone.
-    return (await replayEntry({ ...context, entry: own })).outcome;
-  }
+  } catch {}
   return result;
 }
 

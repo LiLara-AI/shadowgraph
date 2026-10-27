@@ -20,6 +20,9 @@ import { QUOTED_RECIPE } from './internal/extraction-contract.js';
 
 // Rounds one worker may run (see below); the wall time bounds them too.
 const MAX_ROUNDS = 6;
+// Longer than a finishing worker takes from its last marker check to its exit
+// (child settlement is bounded at 1.5 s).
+const TRIGGER_HANDOFF_MS = 5000;
 // Whether a trigger asked for extraction after a round began (extraction-trigger.js).
 async function requestedSince(env, at) {
   const modified = (await stat(requestFile(env)).catch(() => null))?.mtimeMs;
@@ -43,7 +46,10 @@ export async function runActivatedExtraction({ env = process.env, project, origi
   let monitor, checking = false;
   const guard = async () => !controller.signal.aborted && isDeepStrictEqual(await activeExtraction(env), activation) && isDeepStrictEqual(await activeCapture(env), capture);
   try {
-    return await (await workerFence(env)).run(async () => {
+    // A triggered worker that finds another running waits briefly for it: the
+    // other checks the request marker after each round, and this wait covers
+    // the moments between its last check and its exit, so no trigger is lost.
+    return await (await workerFence(env, automatic ? TRIGGER_HANDOFF_MS : 0)).run(async () => {
       if (!await guard()) return blocked('drain_stopped');
       if (await workerSettlement(env) !== 'clear') return blocked('worker_settlement_unconfirmed');
       const pinned = await awaitWorkerStep(() => pinnedRuntime(runtimeDirectory), controller.signal);

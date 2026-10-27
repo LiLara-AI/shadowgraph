@@ -127,7 +127,8 @@ export function buildInvocation({ executable, cwd, schema, env = process.env, id
 // The structured tool the host's --json-schema adds; the only tool a confined
 // session may have or call.
 const STRUCTURED_TOOL = 'StructuredOutput';
-const emptyList = (value) => value === undefined || (Array.isArray(value) && value.length === 0);
+// Absent is not empty: a stream that leaves a confinement field out is not one this profile reads.
+const emptyList = (value) => Array.isArray(value) && value.length === 0;
 // The runtime-evidence profile's check of one invocation (extraction-contract.js):
 // the host's stream must open with its init event describing the confined
 // session that was asked for, run no hook, call no tool but the structured
@@ -147,7 +148,7 @@ export function confinedResult(stdout, { model, hostVersion }) {
   const tools = session.tools;
   if (!Array.isArray(tools) || tools.some(tool => tool !== STRUCTURED_TOOL) || !emptyList(session.mcp_servers) || !emptyList(session.slash_commands) || !emptyList(session.skills)
     || session.apiKeySource !== 'none' || session.model !== model || session.claude_code_version !== hostVersion
-    || !Array.isArray(session.plugins ?? []) || (session.plugins ?? []).some(plugin => plugin?.path !== 'builtin')) return { blockedReason: 'runtime_confinement_unverified' };
+    || !Array.isArray(session.plugins) || session.plugins.some(plugin => plugin?.path !== 'builtin')) return { blockedReason: 'runtime_confinement_unverified' };
   if (events.some(event => event?.type === 'system' && /^hook_/u.test(event.subtype ?? ''))) return { blockedReason: 'runtime_confinement_unverified' };
   const calls = events.filter(event => event?.type === 'assistant').flatMap(event => (Array.isArray(event.message?.content) ? event.message.content : []).filter(block => block?.type === 'tool_use'));
   if (calls.some(call => call.name !== STRUCTURED_TOOL)) return { blockedReason: 'runtime_confinement_unverified' };

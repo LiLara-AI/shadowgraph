@@ -98,6 +98,8 @@ test('any sign of an unconfined session discards the output', async (t) => {
     ['another model', { init: { model: 'claude-opus-5-5' } }],
     ['another host version', { init: { claude_code_version: '2.1.303' } }],
     ['a plugin that is not built in', { init: { plugins: [{ name: 'p', path: 'C:/plugins/p' }] } }],
+    // Absent is not empty (review of the route, 2026-10-27, finding 4).
+    ...['tools', 'mcp_servers', 'slash_commands', 'skills', 'plugins'].map((field) => [`no ${field} field`, { init: { [field]: undefined } }]),
     ['a hook that ran', { events: [{ type: 'system', subtype: 'hook_started', hook_event: 'SessionStart' }] }],
     ['a tool call', { events: [{ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: {} }] } }] }],
     ['another provider', { final: { modelUsage: { [MODEL]: { inputTokens: 1, provider: 'bedrock' } } } }]

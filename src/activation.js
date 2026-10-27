@@ -397,21 +397,31 @@ export async function changeDeliverySharing({ env = process.env, mode, projects 
   const change = { record: path, mode, projects: selected, exclude, ...(selected.length ? { expiresAt } : {}), replaces: delivery.sharing?.accessId ?? null };
   if (!(await isScratchFile(path)) && !await confirmOwnerAction('Change Claude memory sharing', change)) throw new Error(`sharing_requires_owner_confirmation (${path})`);
   await afterConfirmation?.();
-  const store = await createStorage({ type: delivery.store.storage, file: delivery.store.file, env });
-  const graph = createShadowGraph();
-  let sharing;
-  try {
-    sharing = await currentAccessOperation(graph, store, () => {
-      if (delivery.sharing?.accessId) graph.revokeAccess({ accessId: delivery.sharing.accessId, surface: 'cli', reason: 'Claude memory sharing changed' });
-      if (!selected.length) return { mode: 'project', projects: [], exclude: [] };
-      const issued = privilegedIssueAccess(graph, { scope: { projects: selected }, surfaces: ['cli'], expiresAt, reason: `Owner selected Claude memory sharing (${mode})` });
-      if (!issued.ok) throw new Error(`sharing_refused (${issued.refusal?.reason ?? 'grant_refused'})`);
-      return { mode, projects: selected, exclude, accessId: issued.entry.accessId, expiresAt };
-    });
-  } finally { store.close?.(); }
-  const at = new Date().toISOString();
-  const next = { ...record, capabilities: { ...record.capabilities, delivery: { ...delivery, sharing: { ...sharing, changedAt: at } } },
-    history: [...(Array.isArray(record.history) ? record.history : []), { at, capability: 'delivery', change: 'sharing', surface, mode: sharing.mode, projects: sharing.projects, accessId: sharing.accessId ?? null, revoked: delivery.sharing?.accessId ?? null }] };
-  await saveActivation(path, text, next);
-  return { capability: 'delivery', sharing: next.capabilities.delivery.sharing, revoked: delivery.sharing?.accessId ?? null, file: path };
+  // The grant and the record change together under the record's fence: an
+  // activation or sharing change meanwhile is found before any grant moves,
+  // and a record that cannot be published takes its new grant back with it.
+  return createDestinationFence(path).run(async () => {
+    if (await readText(path) !== text) throw new Error('activation_record_changed_while_confirming');
+    const store = await createStorage({ type: delivery.store.storage, file: delivery.store.file, env });
+    const graph = createShadowGraph();
+    let sharing;
+    try {
+      sharing = await currentAccessOperation(graph, store, () => {
+        if (delivery.sharing?.accessId) graph.revokeAccess({ accessId: delivery.sharing.accessId, surface: 'cli', reason: 'Claude memory sharing changed' });
+        if (!selected.length) return { mode: 'project', projects: [], exclude: [] };
+        const issued = privilegedIssueAccess(graph, { scope: { projects: selected }, surfaces: ['cli'], expiresAt, reason: `Owner selected Claude memory sharing (${mode})` });
+        if (!issued.ok) throw new Error(`sharing_refused (${issued.refusal?.reason ?? 'grant_refused'})`);
+        return { mode, projects: selected, exclude, accessId: issued.entry.accessId, expiresAt };
+      });
+      const at = new Date().toISOString();
+      const next = { ...record, capabilities: { ...record.capabilities, delivery: { ...delivery, sharing: { ...sharing, changedAt: at } } },
+        history: [...(Array.isArray(record.history) ? record.history : []), { at, capability: 'delivery', change: 'sharing', surface, mode: sharing.mode, projects: sharing.projects, accessId: sharing.accessId ?? null, revoked: delivery.sharing?.accessId ?? null }] };
+      try { await writeJsonAtomically(path, next); }
+      catch (error) {
+        if (sharing.accessId) await currentAccessOperation(graph, store, () => graph.revokeAccess({ accessId: sharing.accessId, surface: 'cli', reason: 'Claude memory sharing record not saved' })).catch(() => {});
+        throw error;
+      }
+      return { capability: 'delivery', sharing: next.capabilities.delivery.sharing, revoked: delivery.sharing?.accessId ?? null, file: path };
+    } finally { store.close?.(); }
+  });
 }

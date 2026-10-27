@@ -1,0 +1,117 @@
+# Claude Code CLI: automatic experience memory
+
+This guide covers ShadowGraph's native Claude Code hooks on **Windows, Claude Code CLI 2.x (2.1.288 or later)**. After a one-time setup:
+- ordinary sessions are captured;
+- captured work is extracted into decisions, attempts and memories by a separate, owner-selected Claude model;
+- fresh sessions receive that experience at start and with relevant prompts.
+
+Claude Desktop, the interactive TUI's resume flows and other platforms are outside what this guide's evidence covers. See [Support and evidence](#support-and-evidence).
+
+## How it works
+
+| Step | What runs | Notes |
+| --- | --- | --- |
+| Capture | `capture --hook` on UserPromptSubmit, PostToolUse, PostToolUseFailure, Stop, PreCompact and SessionEnd | Each event is redacted and kept in an owner-only spool before the store is touched (see below). |
+| Extraction | Spawned after Stop or SessionEnd as a detached one-shot worker | It runs `claude -p` as a **separate executor**, with no tools, MCP servers, hooks, skills or settings, on the model you selected. It never shares the host session's process. |
+| Delivery | `deliver --hook` on SessionStart and UserPromptSubmit | SessionStart delivers the project's working set. A prompt receives what is relevant to it. |
+| Sharing | `shadowgraph sharing …` | Project-only by default. |
+
+The host assistant and the extractor are separate roles. The host can be any model you use. The extractor model is chosen once, at activation.
+
+### Durable capture
+
+A hook that meets a busy store (another writer, the extraction worker, a long delivery read) no longer loses the event:
+1. The hook redacts the event's material fields and writes the event to `<SHADOWGRAPH_HOME>\capture-spool\` (owner-only, never inside a repository) before it asks for the store.
+2. When the store is free, the hook writes the event and removes it from the spool.
+3. When the store stays busy, the event waits. The next hook replays waiting events oldest first, so a session's events keep their order. Only one hook drains at a time, and it never waits for another.
+4. An entry leaves the spool only once the store has decided it: written, already held, refused, or not capturable.
+5. Contention never counts as a failure. Other failures count attempts, and an entry is dropped after 8 attempts or 7 days. A content-free marker in `capture-dropped\` records when, why, which event and which session.
+6. Delivery reports `capture_input_waiting` (with `inputWaiting` and `oldestInputAt`) and `capture_input_dropped` (with `inputDropped`) in its `processing` line.
+7. Host events with identifiers (prompts, tool calls, session end) are written once however often they are replayed. A Stop replayed after a crash between write and removal is marked `possibleDuplicateOf`, not removed.
+8. A tool call that touches the spool or the drop markers is ShadowGraph's own traffic and is not captured.
+
+### Extraction on current hosts
+
+Two host profiles exist:
+- **Pinned** (2.1.288, and the traced 2.1.292 binary with its host-validation receipt). These run as before, with `claude-opus-5[1m]`.
+- **Runtime evidence** (`claude-code-runtime-evidence-v1`). Every other 2.x host from 2.1.288 on runs on this profile, with a model you select explicitly: `claude-haiku-5-5`, `claude-sonnet-5-5` or `claude-opus-5-5`. Every invocation streams the host's own account of the session (`--output-format stream-json --verbose`). The output is used only when:
+  - the init event lists no tool but `StructuredOutput`, and no MCP server, slash command, skill or non-builtin plugin;
+  - `apiKeySource` is `none`;
+  - the model and host version are the ones checked;
+  - no hook ran;
+  - no tool but `StructuredOutput` was called;
+  - every usage entry is `firstParty`.
+
+  Anything else is `runtime_confinement_unverified`, and nothing is recorded. The host may update in place; the executable path, model and account stay bound to the activation.
+
+Managed policy is never bypassed:
+- A system `managed-settings` file or folder, or a registry policy, refuses extraction (`managed_policy_present`).
+- So does a remote policy cache larger than 5 bytes, unless the pinned 2.1.292 profile applies.
+- A cache of at most 5 bytes can hold no setting (at most `{}`), so it is not counted. The host writes such a cache for accounts it reports ineligible for remote managed settings. Only its size is read; the file is never opened.
+
+The runtime-evidence profile runs the quoted recipe with corrections:
+- Fields quote the source exactly.
+- A later user message that explicitly corrects an earlier user decision proposes a correction. The kernel then supersedes the earlier decision and keeps its history.
+
+### Which sessions are extracted
+
+- A Claude Code CLI session names no account in its hooks. Under your default profile, with no `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_OAUTH_TOKEN` or provider-route variables (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_*`), its material is bound to the extraction activation. That activation checks its account with `claude auth status` before every model call.
+- A Desktop-hosted session names its account (`CLAUDE_CODE_USER_EMAIL`), and only the bound account's sessions are bound.
+- Sessions under another profile are refused before capture. Sessions on their own provider route are captured but stay unbound and are not extracted.
+
+### Budgets and throughput
+
+Extraction makes one model call per capture item, within the frozen worker budgets: 4 items and 4 calls per drain, 12 calls per rolling hour, and a 240 s wall time per worker. A worker that stops at its per-drain limit, or sees a trigger that arrived while it ran, runs another bounded round, so no trigger is lost.
+
+A short coding session produces about 10 items, so roughly one such session per hour is extracted promptly. Under heavier use the queue lags, and the delivery `processing` line shows the backlog (`pending`, `oldestPendingAt`).
+
+## One-time setup
+
+All commands use the pinned runtime's `src\cli.js`. The pinned runtime is installed from a reviewed commit with `node scripts\install-runtime.mjs --commit <sha>`. Outside a scratch location, each command that changes configuration asks you to confirm at a terminal.
+
+```powershell
+$rt = "$env:USERPROFILE\.shadowgraph\runtime\<commit>\src\cli.js"
+$store = "$env:LOCALAPPDATA\ShadowGraph\memory.json"   # private, outside every repository
+$env:SHADOWGRAPH_FILE = $store
+node $rt setup
+node $rt install-hooks --runtime (Split-Path (Split-Path $rt))
+node $rt install-hooks --capture --runtime (Split-Path (Split-Path $rt))
+node $rt activate delivery --evidence <note> --store $store --runtime (Split-Path (Split-Path $rt))
+node $rt activate capture  --evidence <note> --store $store --runtime (Split-Path (Split-Path $rt)) [--only <project,...>]
+# In each project you want captured, once:
+node $rt bind '{\"project\":\"<name>\"}'          # answer: worktree, then confirm
+node $rt activate extraction --evidence <note> --store $store --runtime (Split-Path (Split-Path $rt)) `
+  --executable "$env:USERPROFILE\.local\bin\claude.exe" --model claude-haiku-5-5 --no-overage-confirmed true
+```
+
+Choose the least costly model that extracts your work adequately. Re-activating with another model is an ordinary owner change.
+
+## Everyday commands
+
+| Command | Purpose |
+| --- | --- |
+| `shadowgraph extract --status` | Queue counts, blocked reasons and worker status |
+| `shadowgraph capture inspect` | Capture items, sessions and retention |
+| `shadowgraph sharing status` | Current sharing mode and grant |
+| `shadowgraph sharing selected --projects a,b [--expires <ISO>]` | Share these projects' memory with every bound project |
+| `shadowgraph sharing all-permitted [--exclude a]` | Share every bound project's memory, less those excluded |
+| `shadowgraph sharing project` | Back to project-only; revokes the grant in the store |
+| `shadowgraph deactivate extraction\|capture\|delivery` | Turn a capability off; extraction waits for its worker to stop |
+
+Sharing uses one CLI grant with the Codex route's meaning. A revoked or expired grant leaves each project reading only its own memory. Hook reads under a grant are not audited in the store, because delivery never writes. Issue and revocation are audited.
+
+## Troubleshooting
+
+| Reason | Meaning |
+| --- | --- |
+| `capture_input_waiting` | Events wait in the spool for a busy store. They replay at the next hook. |
+| `capture_input_dropped` | Events were lost. Read `capture-dropped\` for when and why. |
+| `managed_policy_present` | An administrator policy source exists. Extraction does not run. |
+| `model_not_selectable` | The model does not belong to the host's profile. Select a current model on a current host. |
+| `restriction_switch_unavailable` | The host lacks a required switch (including `--verbose` on the runtime-evidence profile). |
+| `runtime_confinement_unverified` | The host's own stream showed something other than the confined session. The output was discarded. |
+| `activated_account_changed` | `auth status` names a different account than the one bound at activation. |
+
+## Support and evidence
+
+The verdict for this build and its evidence are recorded in the review package that accompanies the change. What was executed, what is inferred and what is untested are kept apart there. Desktop support is not inferred from CLI tests.

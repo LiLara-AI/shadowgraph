@@ -211,7 +211,9 @@ test('R2-1 concurrent captures near the store ceiling admit one item, since each
   const results = await Promise.all(['msg_1', 'msg_2', 'msg_3', 'msg_4'].map((id) => capture(s, promptOf(id))));
   await released;
   assert.equal((await items(s)).length, 1, JSON.stringify({ base, estimate, growth, results }));
-  assert.equal(results.filter((result) => result === 'written' || result === 'refused').length, 4);
+  // One hook drains for all: the others leave their entries to it (capture spool), and every entry is decided.
+  assert.ok(results.every((result) => ['written', 'refused', 'spooled'].includes(result)), JSON.stringify(results));
+  assert.equal((await spoolStatus(spoolDirectory(s.activation))).pending, 0);
 });
 
 test('R2-2 delivery on a runtime that cannot capture is refused a store holding only capture sessions, or a busy one', async (t) => {

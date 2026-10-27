@@ -1,20 +1,21 @@
 // Durable capture input (independent review 2026-10-26 §5). The hook keeps an
 // event's payload on disk before it seeks the store's fence, so a store another
-// writer holds delays the event instead of losing it. Each later hook replays
-// what is waiting, oldest first and within its own deadline; an entry leaves
-// the spool only when the store has decided it (written, already held, refused
-// or not capturable). What can be neither kept nor replayed is never dropped
-// silently: a content-free marker records that it was lost and why, and
-// delivery reports the count.
+// writer holds delays the event instead of losing it. The one hook holding the
+// drain replays what is waiting, oldest first and within its own deadline; an
+// entry leaves the spool only when the store has decided it (written, already
+// held, refused or not capturable). What can be neither kept nor replayed is
+// never dropped silently: a content-free marker records that it was lost and
+// why, and delivery reports the count.
 //
 // The spool lives beside the activation record, in the owner's private
-// ShadowGraph home, never in a repository; entries are owner-only. An entry
-// holds the host's raw payload, which the host's own transcript already holds
-// on the same disk: redaction happens when the store records it, as for a
-// direct capture. Nothing here reads or writes the store.
+// ShadowGraph home and never in a repository, however the path is reached;
+// entries are owner-only. An entry holds the host's payload with its material
+// redacted (capture-hook.js), and names the store and origin it was kept for.
+// Nothing here reads or writes the store.
 import { createHash, randomUUID } from 'node:crypto';
 import { lstat, mkdir, open, readdir, readFile, rename, stat, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { repositoryOf } from './owner-files.js';
 
 export const SPOOL_LIMITS = Object.freeze({
   maxEntries: 512, maxEntryBytes: 1024 * 1024, maxBytes: 64 * 1024 * 1024,
@@ -30,8 +31,12 @@ export const droppedDirectory = (spool) => join(dirname(spool), 'capture-dropped
 const digest = (value) => createHash('sha256').update(value).digest('hex').slice(0, 32);
 const nameOf = ({ at, key, attempts }) => `${String(at).padStart(15, '0')}-${key}-${attempts}.json`;
 
+// Private material is never written into a repository (§21.3): the folder is
+// checked where it resolves, links followed, before anything is written there.
 async function writeOwnerOnly(directory, name, value) {
+  if (await repositoryOf(join(directory, name))) throw Object.assign(new Error('spool inside a repository'), { code: 'spool_inside_repository' });
   await mkdir(directory, { recursive: true, mode: 0o700 });
+  if (await repositoryOf(join(directory, name))) throw Object.assign(new Error('spool inside a repository'), { code: 'spool_inside_repository' });
   const temporary = join(directory, `.${name}.${randomUUID()}.tmp`);
   try {
     const handle = await open(temporary, 'wx', 0o600);
@@ -51,12 +56,13 @@ export async function spoolEntries(spool) {
   }).sort((left, right) => left.at - right.at || (left.name < right.name ? -1 : 1));
 }
 
-// Keeps one event's payload, with the activation its own hook judged its
-// account bound under (capture-hook.js), if any. The key is the payload and working directory's
-// digest, so a host re-delivery while the first copy waits is kept once.
-// Resolves { kept, entry } or { kept: false, reason } -- the caller then takes
-// the direct path and, failing that, records the loss.
-export async function spoolEvent({ spool, input, cwd, transcript = null, boundBy = null, now = Date.now }) {
+// Keeps one event's payload, with the store and origin it is kept for and the
+// activation its own hook judged its account bound under (capture-hook.js), if
+// any. The key is the payload and working directory's digest, so a host
+// re-delivery while the first copy waits is kept once. Resolves
+// { kept, entry } or { kept: false, reason } -- the caller then takes the
+// direct path and, failing that, records the loss.
+export async function spoolEvent({ spool, input, cwd, transcript = null, boundBy = null, destination, now = Date.now }) {
   try {
     if (Buffer.byteLength(input) > SPOOL_LIMITS.maxEntryBytes) return { kept: false, reason: 'spool_entry_too_large' };
     const key = digest(JSON.stringify([input, cwd]));
@@ -71,50 +77,26 @@ export async function spoolEvent({ spool, input, cwd, transcript = null, boundBy
     entry.name = nameOf(entry);
     // The transcript's size when the event arrived: a replay anchors a new
     // session's cursor there, not at the end the transcript has reached since.
-    await writeOwnerOnly(spool, entry.name, { version: 1, receivedAt: new Date(entry.at).toISOString(), cwd, input, transcriptSize: transcript, boundBy });
+    await writeOwnerOnly(spool, entry.name, { version: 1, receivedAt: new Date(entry.at).toISOString(), cwd, input, transcriptSize: transcript, boundBy, destination });
     return { kept: true, entry };
-  } catch {
-    return { kept: false, reason: 'spool_unwritable' };
-  }
-}
-
-// A hook works on its own entry under a claim: renamed out of the queue, so no
-// drain takes it meanwhile. A claim a dead hook left returns to the queue after
-// CLAIM_STALE_MS, well past any hook's hard cap.
-const CLAIM = '.claim';
-export const CLAIM_STALE_MS = 60000;
-const fileOf = (entry) => (entry.claimed ? `${entry.name}${CLAIM}` : entry.name);
-export async function claimSpoolEntry(spool, entry) {
-  try { await rename(join(spool, entry.name), join(spool, `${entry.name}${CLAIM}`)); return { ...entry, claimed: true }; }
-  catch { return null; }
-}
-export async function releaseSpoolEntry(spool, entry) {
-  if (!entry.claimed) return entry;
-  await rename(join(spool, fileOf(entry)), join(spool, entry.name)).catch(() => {});
-  return { ...entry, claimed: false };
-}
-export async function recoverClaims(spool, now = Date.now()) {
-  for (const name of await readdir(spool).catch(() => [])) {
-    if (!name.endsWith(CLAIM) || !ENTRY.test(name.slice(0, -CLAIM.length))) continue;
-    const modified = (await stat(join(spool, name)).catch(() => null))?.mtimeMs;
-    if (Number.isFinite(modified) && now - modified >= CLAIM_STALE_MS) await rename(join(spool, name), join(spool, name.slice(0, -CLAIM.length))).catch(() => {});
+  } catch (error) {
+    return { kept: false, reason: error?.code === 'spool_inside_repository' ? 'spool_inside_repository' : 'spool_unwritable' };
   }
 }
 
 export async function readSpoolEntry(spool, entry) {
-  const value = JSON.parse(await readFile(join(spool, fileOf(entry)), 'utf8')); // ENOENT propagates: replayed elsewhere
+  // ENOENT propagates: another drainer replayed it first.
+  const value = JSON.parse(await readFile(join(spool, entry.name), 'utf8'));
   if (value?.version !== 1 || typeof value.input !== 'string' || typeof value.cwd !== 'string') throw Object.assign(new Error('spool entry unreadable'), { code: 'spool_entry_unreadable' });
   return value;
 }
 
-// The store decided the entry: it leaves the spool. Already gone is fine --
-// another hook replayed it first.
-export const settleSpoolEntry = (spool, entry) => unlink(join(spool, fileOf(entry))).catch((error) => { if (error.code !== 'ENOENT') throw error; });
+// The store decided the entry: it leaves the spool. Already gone is fine.
+export const settleSpoolEntry = (spool, entry) => unlink(join(spool, entry.name)).catch((error) => { if (error.code !== 'ENOENT') throw error; });
 
 // A failure that was not contention counts as an attempt; past the limit the
 // entry is dropped with a marker, so a poisoned entry cannot hold the queue.
 export async function failSpoolEntry(spool, entry, reason) {
-  entry = await releaseSpoolEntry(spool, entry);
   const attempts = entry.attempts + 1;
   if (attempts >= SPOOL_LIMITS.maxAttempts) return dropSpoolEntry(spool, entry, 'attempts_exhausted', reason);
   const next = { ...entry, attempts };
@@ -165,10 +147,7 @@ export async function spoolStatus(spool) {
   if (kind === null) return { pending: 0, oldestAt: null, dropped };
   try {
     if (kind instanceof Error || !kind.isDirectory()) throw kind;
-    // Claimed entries wait too: a hook is writing them, or died doing so.
-    const claimed = (await readdir(spool)).filter((name) => name.endsWith(CLAIM) && ENTRY.test(name.slice(0, -CLAIM.length)))
-      .map((name) => ({ name, at: Number(ENTRY.exec(name.slice(0, -CLAIM.length))[1]) }));
-    const waiting = [...await spoolEntries(spool), ...claimed].sort((left, right) => left.at - right.at);
+    const waiting = await spoolEntries(spool);
     return { pending: waiting.length, oldestAt: waiting.length ? new Date(waiting[0].at).toISOString() : null, dropped };
   } catch { return { pending: 0, oldestAt: null, dropped, unreadable: true }; }
 }
