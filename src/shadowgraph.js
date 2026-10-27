@@ -2236,14 +2236,28 @@ export function createShadowGraph(options = {}) {
       }
       if (proposed.interpretation) fields.interpretation = clone(proposed.interpretation);
       const correction = proposed.correction, previousDecision = correction && records.get(correction.recordId);
+      // A user's decision the claim checks could not structure is kept as the
+      // user's own message, verbatim, as a memory (extraction-output.js). A
+      // correction reaches it as it reaches a decision; the memory is not read
+      // into. A message may hold more than the correction replaces, and nothing
+      // shows how much, so it is not guessed: the correction is linked, not
+      // applied, and the memory stays current, named as corrected on every read.
+      const verbatimDecision = previousDecision?.kind === 'memory' && previousDecision.status === 'active'
+        && captures.get(previousDecision.captureRef)?.source?.role === 'user';
+      // A correction the claim checks could not structure is kept verbatim too,
+      // and is linked the same way: neither side is read into, nothing closed.
+      const verbatimCorrection = proposed.kind === 'memory';
       // The quoted recipe proposes corrections, on the Codex route and on a Claude runtime-evidence activation.
-      const applyCorrection = (input.receipt.provider === 'codex' || input.receipt.promptVersion === CODEX_PROMPT_VERSION) && item.source.role === 'user' && proposed.kind === 'decision'
-        && previousDecision?.kind === 'decision' && captureOwner(item).owns(previousDecision)
+      const applyCorrection = (input.receipt.provider === 'codex' || input.receipt.promptVersion === CODEX_PROMPT_VERSION) && item.source.role === 'user' && (proposed.kind === 'decision' || verbatimCorrection)
+        && (previousDecision?.kind === 'decision' || verbatimDecision) && captureOwner(item).owns(previousDecision)
         && !['superseded', 'archived', 'abandoned', 'stale'].includes(previousDecision.status)
         && createHash('sha256').update(JSON.stringify(previousDecision)).digest('hex') === correction.expectedHash;
       if (applyCorrection) fields.correction = { status: 'model_proposed', recordId: correction.recordId,
         sourceRef: item.id, statement: correction.statement,
-        limitation: 'The source quotation is preserved; the correction relationship is a model interpretation, not independently verified.' };
+        ...(verbatimDecision || verbatimCorrection ? { applied: false } : {}),
+        limitation: verbatimDecision || verbatimCorrection
+          ? 'A message kept verbatim may say more or less than the correction replaces, so nothing is closed: the corrected record stays current, marked as corrected by this one. The correction relationship is a model interpretation, not independently verified.'
+          : 'The source quotation is preserved; the correction relationship is a model interpretation, not independently verified.' };
       if (proposed.kind === 'attempt') {
         fields.outcomeEvidence = clone(item.observation?.outcome?.outcomeEvidence ?? { state: 'absent' });
         if (fields.outcomeEvidence.state === 'observed') fields.resultClass = fields.outcomeEvidence.exitStatus === 0 ? 'succeeded' : 'failed';
@@ -2258,7 +2272,7 @@ export function createShadowGraph(options = {}) {
       decorate(records.get(record.id), record.id, fields);
       for (const entry of journal) decorate(entry.payload, record.id, fields);
       for (const value of idempotency.values()) decorate(value, record.id, fields);
-      if (applyCorrection) supersedeDecision({ project: item.project, originId: item.originId, decisionId: previousDecision.id, replacementId: record.id });
+      if (applyCorrection && !verbatimDecision && !verbatimCorrection) supersedeDecision({ project: item.project, originId: item.originId, decisionId: previousDecision.id, replacementId: record.id });
       producedRecordIds.push(record.id);
     }
     if (producedRecordIds.length) {
@@ -5653,14 +5667,17 @@ export function createShadowGraph(options = {}) {
       successors: linksOf('successors', record.id), predecessors: linksOf('predecessors', record.id),
       at: asOf ?? currentAt, asOf
     });
+    const corrections = correctionsWithin(reach);
     let shortened = false;
     const items = candidates.slice(0, page.limit).map(({ record, score, ranks }) => {
       const shown = canonicalRecord(record);
-      const line = established && input.compact === true ? t1Line(shown, lineContext) : null;
-      if (line?.decisiveOmitted.length) shortened = true;
+      // A compact read gives each full record its handle too, derived in this
+      // read's scope, so a consumer that shortens it keeps the read's handle.
+      const line = input.compact === true ? t1Line(shown, lineContext) : null;
+      if (established && line?.decisiveOmitted.length) shortened = true;
       const evidence = evidenceOf(record);
-      return line && !line.decisiveOmitted.length ? { tier: 'T1', line, score, ranks, temporalEvidence: evidence }
-        : { tier: 'T2', record: shown, ...(line ? { expansion: line.expansion } : {}), score, ranks, temporalEvidence: evidence };
+      return established && line && !line.decisiveOmitted.length ? { tier: 'T1', line, score, ranks, temporalEvidence: evidence, ...corrections(record.id) }
+        : { tier: 'T2', record: shown, ...(line ? { expansion: line.expansion } : {}), score, ranks, temporalEvidence: evidence, ...corrections(record.id) };
     });
     const byKind = { decision: 0, attempt: 0, memory: 0, fact: 0 };
     // A legacy fact may be stored with no kind; it is still a fact.
@@ -5774,9 +5791,23 @@ export function createShadowGraph(options = {}) {
       : null;
     return {
       recordId, status: current ? 'current' : 'revision_changed', revisionChanged: !current, boundRevision, currentRevision: { recordId, digest },
-      record, investigation,
+      record, ...correctionsWithin(reach)(recordId), investigation,
       completeness: scopeCompleteness(boundary.scope, { scope: {}, complete: limitation === null, ...(limitation ? { limitation } : {}) })
     };
+  }
+
+  // A record a user's correction names, not applied (completeExtraction),
+  // stays current; a read and an expansion name the records, in their scope,
+  // that correct it, beside the record and outside its digest.
+  function correctionsWithin(reach) {
+    const correctedBy = new Map();
+    for (const record of records.values()) {
+      const standing = record.kind === 'memory' ? record.status === 'active'
+        : record.kind === 'decision' && CURRENT_DECISION_STATUSES.includes(record.status);
+      const target = standing && record.correction?.applied === false && reach(record.id) ? record.correction.recordId : null;
+      if (target) correctedBy.set(target, [...(correctedBy.get(target) ?? []), record.id].sort());
+    }
+    return (id) => (correctedBy.has(id) ? { correctedBy: correctedBy.get(id) } : {});
   }
 
   // The handle scope a line carries: the read's project and grant, and its

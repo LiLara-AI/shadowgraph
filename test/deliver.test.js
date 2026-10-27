@@ -326,6 +326,46 @@ test('SessionStart delivers the working set newest first and mixed by kind, and 
   assert.ok(items.filter((item) => item.line.startsWith('Attempt')).length >= 2);
 });
 
+// Live proof run 2, case C3r: a prompt's read ranked a tool call of several
+// kilobytes first, delivered in full, and the relevant decisions behind it were
+// left out for size.
+test('UserPromptSubmit: a large full record ranked first does not crowd out the relevant lines behind it', async (t) => {
+  const { cwd, file } = await workspace(t);
+  const bulk = 'invoice amounts format Intl.NumberFormat '.repeat(64);
+  await seed(file, (graph) => {
+    graph.addAttempt({ project: 'app', solution: `tool: Edit invoice amounts format\n${bulk}`, result: `response: ${bulk}`, resultClass: 'succeeded' });
+    graph.addDecision({ project: 'app', title: 'Format invoice amounts', chosen: "format invoice amounts with Intl.NumberFormat('de-DE')" });
+    graph.addDecision({ project: 'app', title: 'Invoice amount format for exports', chosen: 'format invoice amounts for exports with two decimals' });
+  });
+  const graph = createShadowGraph(); graph.importData(JSON.parse(readFileSync(file, 'utf8')));
+  const ranked = graph.context({ project: 'app', query: 'How should invoice amounts be formatted', compact: true }).relevant.items;
+  assert.equal(ranked[0].tier, 'T2', 'the large attempt is ranked first, in full');
+  const { head, items } = parsed(await run([], { cwd, stdin: hook('UserPromptSubmit', 'How should invoice amounts be formatted'), env: { SHADOWGRAPH_FILE: file } }));
+  const decisions = items.filter((item) => (item.line ?? '').startsWith('Decision'));
+  assert.equal(decisions.length, 2, `both decisions delivered: ${JSON.stringify(head)}`);
+  assert.ok(items.findIndex((item) => item.tier !== 'T1') === -1 || items.findIndex((item) => item.tier !== 'T1') > items.findLastIndex((item) => item.tier === 'T1'), 'lines come before full records');
+});
+
+test('UserPromptSubmit: a full record delivered as its longer line keeps the read\'s handle, links included, and expands as current', async (t) => {
+  const { cwd, file } = await workspace(t);
+  const detail = 'with the de-DE grouping and two decimals for every amount in the export '.repeat(10);
+  await seed(file, (graph) => {
+    const old = graph.addDecision({ project: 'app', title: 'Format invoice amounts', chosen: "format invoice amounts with Intl.NumberFormat('en-US')" });
+    const replacement = graph.addDecision({ project: 'app', title: 'Format invoice amounts', chosen: `format invoice amounts with Intl.NumberFormat('de-DE') ${detail}` });
+    graph.supersedeDecision({ project: 'app', decisionId: old.id, replacementId: replacement.id });
+  });
+  const graph = createShadowGraph(); graph.importData(JSON.parse(readFileSync(file, 'utf8')));
+  const read = graph.context({ project: 'app', query: 'How should invoice amounts be formatted', compact: true }).relevant.items;
+  const full = read.find((item) => item.tier === 'T2' && item.record.supersedes?.length);
+  assert.ok(full, 'the linked replacement is too long for the read\'s own line');
+  const { items } = parsed(await run([], { cwd, stdin: hook('UserPromptSubmit', 'How should invoice amounts be formatted'), env: { SHADOWGRAPH_FILE: file } }));
+  const line = items.find((item) => item.tier === 'T1' && item.expansion.recordId === full.record.id);
+  assert.ok(line, 'delivered as its longer line');
+  assert.equal(line.expansion.digest, full.expansion.digest, 'the handle names the revision the read names, links included');
+  const { operation, scope, ...handle } = line.expansion;
+  assert.equal(graph.expand({ ...handle, project: scope.project }).status, 'current');
+});
+
 test('SessionStart: a decision with its rejected alternative and source context is not crowded out by a newer, smaller one', async (t) => {
   const { cwd, file } = await workspace(t);
   let clock = Date.parse('2026-01-01T00:00:00.000Z');

@@ -51,7 +51,7 @@ Managed policy is never bypassed:
 
 The runtime-evidence profile runs the quoted recipe with corrections:
 - Fields quote the source exactly.
-- A later user message that explicitly corrects an earlier user decision proposes a correction. The kernel then supersedes the earlier decision and keeps its history.
+- A later user message that explicitly corrects an earlier user decision proposes a correction. The kernel then supersedes the earlier decision and keeps its history. When the earlier decision was kept verbatim as the user's message, the correction is linked to it but not applied: the message may say more than the correction replaces. The message stays current, and every read names the decision that corrects it (`correctedBy`).
 
 ### Which sessions are extracted
 
@@ -130,14 +130,15 @@ These limits were found by independent review or by the live proof, and are not 
 - **Hand-off.** A trigger is answered if the running worker exits within 5 seconds of its last check. A worker stalled longer leaves the request to the next trigger. Every Stop sends one.
 - **Throughput.** Extraction makes one model call per capture item within 12 calls per hour (see Budgets).
 - **Order behind a block.** A session's items are extracted in order. An item whose output is refused twice, or one blocked by the route itself, stays pending, and so do the items after it, until a later trigger (normally the next Stop). Delivery reports them as pending, and the executor's specific reason is reported only as `executor_blocked`.
-- **Host exit on Windows (observed, cause not established).** In the live proof, `claude -p` printed its result at Stop but did not exit until the extraction worker it had started finished: about 2 minutes, up to the worker's 4-minute wall time. When no worker could run (its fence held), the host exited at once. Host work is not blocked, but the process can exit late.
+- **Host exit on Windows.** The Claude Code CLI waits, on exit, for every process its hooks started, including a detached one and one started through PowerShell's `Start-Process`. A live probe with a detached 25 s child of a Stop hook showed the exit delayed until the child ended. The extraction worker is such a process, so `claude -p` exits only when the worker has finished, after the result is printed (about 1 to 2 minutes in the live runs, at most the worker's 4-minute wall time). Host work is not blocked. Two remedies were tried and did not remove the wait (see the review package).
 - **A user's decision kept as memory.** The extractor may propose a user's decision with fields that the claim verifier cannot establish as exact, unqualified quotations. The decision is then kept as the user's whole message, verbatim, as a memory: faithful, delivered and searchable, but not a decision. This happened to the Arabic decision in the live proof and to a one-sentence English one. The English decision frame does not read Arabic, and a sentence quoting code with dots in it (`Math.round(...)`) can defeat it in English too.
-- **Corrections target decisions only.** A user's correction supersedes an earlier **decision**, with history kept. A decision kept as memory (above) is not superseded: both remain current until one is reviewed.
+- **Corrections and verbatim decisions.** A user's correction supersedes an earlier user **decision**, with history kept. A decision kept verbatim as a memory (above) may hold more than the correction replaces, for example a standing instruction in the same message, and nothing shows how much, so it is not guessed: the correcting decision records the link with `applied: false` and says so in its line, the memory keeps its text and stays current, and every read, expansion and delivery names it as corrected (`correctedBy`). A correction whose own fields fail the claim checks is kept verbatim too, and links what it corrects the same way, closing nothing. An export carries the link on the correcting record (`correction.recordId`, `applied: false`), not on the memory. A fresh session therefore receives both, linked. An assistant's or a tool's memory is never a correction target.
+- **Reprocessing keeps an identical record as it was.** When a capture is reprocessed and a proposed record matches an existing one field for field, the existing record is reused with its correction link, or its lack of one, unchanged. A correction kept verbatim before this release therefore gains no link on reprocessing.
 - **Replay time.** An event that waited in the spool carries the time it was written to the store as `observedAt`, not the time its hook received it. Order is kept.
 
 ## Support and evidence
 
-Verified live (2026-10-27) on Windows 11 with Claude Code CLI **2.1.302** in print mode (`claude -p`, stream-json), host model `claude-haiku-5-5`, extractor `claude-haiku-5-5` then `claude-sonnet-5-5`, on synthetic projects and fresh stores:
+Verified live (2026-10-27, two runs) on Windows 11 with Claude Code CLI **2.1.302** in print mode (`claude -p`, stream-json), host model `claude-haiku-5-5`, extractor `claude-haiku-5-5` then `claude-sonnet-5-5`, on synthetic projects and fresh stores:
 
 | Function | Result |
 | --- | --- |
@@ -146,7 +147,7 @@ Verified live (2026-10-27) on Windows 11 with Claude Code CLI **2.1.302** in pri
 | Recovery of pending extraction | Items left pending by a held worker were extracted by the next session's trigger |
 | Fresh session receives experience | SessionStart delivered the decision with its rejected alternative to a fresh session (Arabic prompt) |
 | Fresh session uses experience | Asked in English what was already decided, a fresh session answered from the delivered records alone. On the Arabic coding task it wrote the right parser first, but never referred to the earlier work, so use there is not shown |
-| Correction | An English user correction superseded a user decision, with history; an Arabic decision was kept as memory and could not be superseded |
+| Correction | Arabic decision, then an English correction in a later session: the correction superseded the decision, which had been kept verbatim as memory, with history, and SessionStart then delivered only the correction as current (second run). On the final build, after independent review, a correction no longer closes a verbatim message: it is linked, not applied, and the message is delivered marked as corrected (tests) |
 | Sharing | `selected`, `all-permitted` (with `--exclude`) and `project` changed what another bound project receives; each change revoked the previous grant |
 
 Not verified: Claude Desktop, the interactive TUI, resume flows, macOS and Linux hosts, and languages other than English and Arabic. Desktop support is not inferred from these CLI tests. The review package accompanying the change keeps executed, inferred and untested results apart.

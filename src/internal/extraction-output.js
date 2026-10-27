@@ -276,12 +276,12 @@ export function prepareExtraction(item, source, value, { provider, recipe, corre
       // it cannot form one unambiguous canonical field assignment.
       unsupported.push(...accepted.map(claim => ({ ...claim, supportedClass: claim.class, class: 'unsupported', failingDimension: 'field_conflict' })));
       const literal = proposed.kind === 'decision' ? literalDecision(proposed, item, source) : null;
-      if (literal) keep(literal);
+      if (literal) keep(corrected(literal));
       continue;
     }
     if (required[proposed.kind].some(name => !values[name]) || !places.size) {
       const literal = proposed.kind === 'decision' ? literalDecision(proposed, item, source) : null;
-      if (literal) keep(literal);
+      if (literal) keep(corrected(literal));
       continue;
     }
     keep({ kind: proposed.kind, values, alternatives, claims: accepted, reason, places: [...places] });
