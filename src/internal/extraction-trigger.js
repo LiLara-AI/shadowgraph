@@ -1,6 +1,7 @@
 // Capture only requests a separate one-shot CLI process. No executor import,
 // model call, listener, store access, or wait for extraction occurs in the hook.
 import { spawn } from 'node:child_process';
+import { writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { activeExtraction } from './extraction-state.js';
@@ -9,6 +10,9 @@ import { usageFile } from './extraction-budget.js';
 import { accountEmailDigest } from './extraction-contract.js';
 import { sessionProfileSelected } from './extraction-provenance.js';
 const ELIGIBLE = new Set(['written', 'nothing_new', 'already_held', 'transcript', 'refused']);
+// Touched by every trigger: a worker already running sees it and runs another
+// round, so a trigger that meets a busy worker is not lost (extraction-runtime.js).
+export const requestFile = env => join(dirname(usageFile(env)), 'extraction-requested');
 // The worker gets what the executor passes to its own child, plus ShadowGraph's
 // configuration, never the host session's environment: a desktop host sets its
 // own provider route (ANTHROPIC_BASE_URL) and session tokens in every hook, and
@@ -32,6 +36,7 @@ export async function triggerExtraction({ event, outcome, deadline, env = proces
     const sessionEmail = Object.entries(env).find(([name]) => name.toUpperCase() === 'CLAUDE_CODE_USER_EMAIL')?.[1];
     const bound = activation.executor.accountEmailFingerprint;
     if (typeof sessionEmail === 'string' && sessionEmail.trim() && (!bound || accountEmailDigest(activation.executor.accountSalt, sessionEmail) !== bound)) return { status: 'refused', reason: 'session_account_differs' };
+    await writeFile(requestFile(env), `${new Date().toISOString()}\n`, { mode: 0o600 }).catch(() => {});
     const child = spawnProcess(process.execPath, [join(activation.runtime.path, 'src', 'cli.js'), 'extract', '--automatic'], {
       cwd: dirname(usageFile(env)), env: { ...workerEnvironment(env), NoDefaultCurrentDirectoryInExePath: '1' }, detached: true, shell: false, stdio: 'ignore', windowsHide: true
     });

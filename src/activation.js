@@ -19,7 +19,7 @@ import { credentialLiteralIn } from './internal/credential-literal.js';
 import { DELETION_VIEW } from './internal/deletion-knowledge.js';
 import { canonicalPath, commandPath, isScratchFile, readText, writeJsonAtomically } from './internal/owner-files.js';
 import { mintOriginId, usableOriginId } from './scope.js';
-import { HOST_PROFILES, HOST_VALIDATION_CHECKS, HOST_VALIDATION_KIND } from './internal/extraction-contract.js';
+import { HOST_VALIDATION_CHECKS, HOST_VALIDATION_KIND, hostProfileFor } from './internal/extraction-contract.js';
 
 export const COVERAGE_MANIFEST_URL = new URL('../integrations/claude-code.coverage.json', import.meta.url);
 const RECORD_VERSION = 1;
@@ -320,7 +320,7 @@ async function checkedHostValidation(file, checked, pinned) {
     binarySha256: receipt.binarySha256, runtimeCommit: receipt.runtimeCommit, validatedAt: typeof receipt.validatedAt === 'string' ? receipt.validatedAt : null };
 }
 export async function activateExtraction({ env = process.env, evidence, store, storage = 'json', hostVersion,
-  settings = defaultSettingsPath(), runtime, executable, noOverageConfirmed, surface = 'cli', executorCheck, afterConfirmation, hostValidation } = {}) {
+  settings = defaultSettingsPath(), runtime, executable, noOverageConfirmed, surface = 'cli', executorCheck, afterConfirmation, hostValidation, model } = {}) {
   if (noOverageConfirmed !== true && noOverageConfirmed !== 'true') throw new Error('extraction_requires_no_overage_confirmation');
   if (surface !== 'cli' || typeof executable !== 'string' || !isAbsolute(executable)) throw new Error('extraction_requires_explicit_executable');
   const { storeFile, payload } = await checkedActivation({ evidence, store, storage, hostVersion });
@@ -332,26 +332,29 @@ export async function activateExtraction({ env = process.env, evidence, store, s
   if (!await activeCapture(env)) throw new Error('extraction_requires_active_capture');
   for (const name of ['delivery', 'capture']) sharedWith(record?.capabilities?.[name], name, storeFile, storage, pinned);
   const { createExtractor, EXTRACTION_MODEL } = await import('./extractor.js');
+  // The extraction model is the owner's explicit choice; a pinned profile only runs the one it was traced with.
+  const selected = model ?? EXTRACTION_MODEL;
   const { validExecutorReceipt, workerSettlement } = await import('./internal/extraction-state.js');
   if (await workerSettlement(env) !== 'clear') throw new Error('worker_settlement_unconfirmed');
   const { FROZEN_WORKER_BUDGETS, initializeUsage } = await import('./internal/extraction-budget.js');
   // The account is bound by a keyed digest under this activation's own key.
   const accountSalt = randomBytes(16).toString('hex');
-  const checked = await (executorCheck ?? (() => createExtractor({ executable, env, accountSalt }).check()))({ accountSalt });
+  const checked = await (executorCheck ?? (() => createExtractor({ executable, env, accountSalt, model: selected }).check()))({ accountSalt, model: selected });
   // Copy only resolved configuration and bounded metadata, never host diagnostics
   // or auth response fields. The executor repeats all checks on every invocation.
   // remotePolicy: whether a remote policy cache was present and left to the host's own report, shown at confirmation.
-  const executor = Object.fromEntries(['ok', 'executable', 'binarySha256', 'hostVersion', 'model', 'restrictions', 'environmentNames', 'switches', 'configurationProfile', 'remotePolicy', 'accountFingerprint', 'accountEmailFingerprint']
+  const executor = Object.fromEntries(['ok', 'executable', 'binarySha256', 'hostVersion', 'model', 'restrictions', 'environmentNames', 'switches', 'configurationProfile', 'hostProfile', 'remotePolicy', 'accountFingerprint', 'accountEmailFingerprint']
     .filter(key => checked?.[key] !== undefined).map(key => [key, structuredClone(checked[key])]));
   // A host that names no account in `auth status` cannot be bound to one.
   if (checked?.ok === true && !/^[0-9a-f]{64}$/u.test(checked.accountFingerprint ?? '')) throw new Error('extraction_account_unidentified');
   if (checked?.ok === true) executor.accountSalt = accountSalt;
-  if (checked?.ok === true && HOST_PROFILES[checked.hostVersion]?.requiresHostValidation) executor.hostValidation = await checkedHostValidation(hostValidation, checked, pinned);
-  if (!validExecutorReceipt(executor) || checked.executable !== await canonicalPath(executable)) throw new Error('extraction_executor_unverified');
+  if (checked?.ok === true && hostProfileFor(checked.hostVersion)?.requiresHostValidation) executor.hostValidation = await checkedHostValidation(hostValidation, checked, pinned);
+  if (checked?.ok === true && checked.model !== selected) throw new Error('extraction_model_unverified');
+  if (!validExecutorReceipt(executor) || checked.executable !== await canonicalPath(executable)) throw new Error(checked?.ok === false && checked.blockedReason ? `extraction_executor_unverified (${checked.blockedReason})` : 'extraction_executor_unverified');
   const at = new Date().toISOString();
   const extraction = { state: 'active', activationId: randomUUID(), changedAt: at, evidence, store: { file: storeFile, storage },
-    runtime: pinned, settings: settingsFile, surface, model: EXTRACTION_MODEL, budgets: { ...FROZEN_WORKER_BUDGETS }, executor, noOverageConfirmed: true };
-  if (!(await isScratchFile(path)) && !await confirmOwnerAction('Activate extraction (subscription only; no overage authorized; bound to the account `claude auth status` reports now under your default profile)', { record: path, ...extraction })) throw new Error(`activation_requires_owner_confirmation (${path})`);
+    runtime: pinned, settings: settingsFile, surface, model: selected, budgets: { ...FROZEN_WORKER_BUDGETS }, executor, noOverageConfirmed: true };
+  if (!(await isScratchFile(path)) && !await confirmOwnerAction(`Activate extraction with ${selected} (subscription only; no overage authorized; bound to the account \`claude auth status\` reports now under your default profile)`, { record: path, ...extraction })) throw new Error(`activation_requires_owner_confirmation (${path})`);
   await afterConfirmation?.();
   if (await readText(path) !== text) throw new Error('activation_record_changed_while_confirming');
   await initializeUsage({ env }); // Existing usage must validate and is never reset.
@@ -362,4 +365,53 @@ export async function activateExtraction({ env = process.env, evidence, store, s
       noOverageConfirmed: true, executor }] };
   await saveActivation(path, text, next);
   return { capability: 'extraction', state: 'active', file: path, record: next };
+}
+
+// Sharing on the Claude hook path (2026-10-27), with the Codex route's meaning:
+// whose memory every project the store has bound may read besides its own.
+// `project` (the default: each project reads its own), `selected` (the named
+// projects) or `all-permitted` (every bound project, less those excluded), as
+// one CLI grant
+// in the delivery store, revoked when the policy changes. The owner confirms
+// at a terminal unless the record is a scratch file. Delivery passes the grant
+// on every read and falls back to the project alone once it is revoked or
+// expired; it never writes, so its reads under the grant are not audited in
+// the store -- the grant's issue and revocation are.
+export async function changeDeliverySharing({ env = process.env, mode, projects = [], exclude = [], expiresAt = new Date(Date.now() + 30 * 86400000).toISOString(), surface = 'cli', afterConfirmation } = {}) {
+  if (!['project', 'selected', 'all-permitted'].includes(mode)) throw new Error('sharing_mode_invalid (project, selected or all-permitted)');
+  if (![projects, exclude].every((list) => Array.isArray(list) && list.every((name) => typeof name === 'string' && name.trim() === name && name))) throw new Error('sharing_projects_invalid');
+  if (mode !== 'project' && !(Date.parse(expiresAt) > Date.now())) throw new Error('sharing_expiry_invalid');
+  const { path, text, record } = await recordAt(env);
+  const delivery = record?.capabilities?.delivery;
+  if (delivery?.state !== 'active' || typeof delivery.store?.file !== 'string') throw new Error('sharing_requires_active_delivery');
+  const { createStorage } = await import('./storage.js');
+  const { createShadowGraph } = await import('./shadowgraph.js');
+  const { currentAccessOperation } = await import('./internal/access-transport.js');
+  const { privilegedIssueAccess } = await import('./internal/snapshot.js');
+  const read = await readStoreForDelivery(delivery.store);
+  if (!read.payload) throw new Error(`sharing_store_unavailable (${read.unavailable ?? 'busy'})`);
+  const permitted = [...new Set((read.payload.projectBindings?.entries ?? []).map((entry) => entry?.project).filter((name) => typeof name === 'string' && name))].sort();
+  if ([...projects, ...exclude].some((name) => !permitted.includes(name))) throw new Error(`sharing_project_not_bound (bound: ${permitted.join(', ') || 'none'})`);
+  const selected = (mode === 'all-permitted' ? permitted : mode === 'selected' ? projects : []).filter((name) => !exclude.includes(name));
+  if (mode !== 'project' && !selected.length) throw new Error('sharing_empty');
+  const change = { record: path, mode, projects: selected, exclude, ...(selected.length ? { expiresAt } : {}), replaces: delivery.sharing?.accessId ?? null };
+  if (!(await isScratchFile(path)) && !await confirmOwnerAction('Change Claude memory sharing', change)) throw new Error(`sharing_requires_owner_confirmation (${path})`);
+  await afterConfirmation?.();
+  const store = await createStorage({ type: delivery.store.storage, file: delivery.store.file, env });
+  const graph = createShadowGraph();
+  let sharing;
+  try {
+    sharing = await currentAccessOperation(graph, store, () => {
+      if (delivery.sharing?.accessId) graph.revokeAccess({ accessId: delivery.sharing.accessId, surface: 'cli', reason: 'Claude memory sharing changed' });
+      if (!selected.length) return { mode: 'project', projects: [], exclude: [] };
+      const issued = privilegedIssueAccess(graph, { scope: { projects: selected }, surfaces: ['cli'], expiresAt, reason: `Owner selected Claude memory sharing (${mode})` });
+      if (!issued.ok) throw new Error(`sharing_refused (${issued.refusal?.reason ?? 'grant_refused'})`);
+      return { mode, projects: selected, exclude, accessId: issued.entry.accessId, expiresAt };
+    });
+  } finally { store.close?.(); }
+  const at = new Date().toISOString();
+  const next = { ...record, capabilities: { ...record.capabilities, delivery: { ...delivery, sharing: { ...sharing, changedAt: at } } },
+    history: [...(Array.isArray(record.history) ? record.history : []), { at, capability: 'delivery', change: 'sharing', surface, mode: sharing.mode, projects: sharing.projects, accessId: sharing.accessId ?? null, revoked: delivery.sharing?.accessId ?? null }] };
+  await saveActivation(path, text, next);
+  return { capability: 'delivery', sharing: next.capabilities.delivery.sharing, revoked: delivery.sharing?.accessId ?? null, file: path };
 }

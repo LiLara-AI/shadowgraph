@@ -26,6 +26,38 @@ export const HOST_PROFILES = Object.freeze({
   '2.1.288': Object.freeze({ binarySha256: null, requiresHostValidation: false }),
   '2.1.292': Object.freeze({ binarySha256: 'eb95bb65955f8b1702e800815f9a2c0388a5de0f196c354c7ee1dd5cb9a2ba23', requiresHostValidation: true, remoteCacheGatedByEligibility: true })
 });
+// Claude Code moves on weekly; a list of traced versions cannot keep up, and a
+// version string trusted nothing by itself anyway. A 2.x host newer than the
+// first profile is taken on the runtime-evidence profile instead: every
+// invocation streams the host's own account of the session it started (its
+// init event: tools, MCP servers, slash commands, skills, plugins, model,
+// version and key source; any hook it ran; every tool call) and its output is
+// used only when that account shows the confined session the flags asked for
+// (extractor.js). It runs only with no managed policy present at all and with
+// a model the owner selected explicitly at activation.
+export const RUNTIME_EVIDENCE_PROFILE = Object.freeze({ id: 'claude-code-runtime-evidence-v1', minimumVersion: '2.1.288', belowMajor: 3,
+  binarySha256: null, requiresHostValidation: false, runtimeEvidence: true });
+// The current models an owner may select for that profile, least costly first.
+// The pinned profiles keep the model they were traced with.
+export const CURRENT_EXTRACTION_MODELS = Object.freeze(['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5']);
+export const EXTRACTION_MODELS = Object.freeze([EXTRACTION_MODEL, ...CURRENT_EXTRACTION_MODELS]);
+const version = (value) => (/^(\d+)\.(\d+)\.(\d+)$/u.exec(value ?? '') ?? []).slice(1).map(Number);
+// The profile a host version runs under, or null. Only the build's own profile
+// list falls back to the runtime-evidence profile; a list a caller supplies is
+// taken as it is.
+export function hostProfileFor(hostVersion, profiles = HOST_PROFILES) {
+  if (typeof hostVersion !== 'string') return null;
+  if (Object.hasOwn(profiles, hostVersion)) return profiles[hostVersion];
+  if (profiles !== HOST_PROFILES) return null;
+  const [major, minor, patch] = version(hostVersion), floor = version(RUNTIME_EVIDENCE_PROFILE.minimumVersion);
+  if (major === undefined || major >= RUNTIME_EVIDENCE_PROFILE.belowMajor) return null;
+  const above = major !== floor[0] ? major > floor[0] : minor !== floor[1] ? minor > floor[1] : patch >= floor[2];
+  return above ? RUNTIME_EVIDENCE_PROFILE : null;
+}
+export const modelSelectable = (profile, model) => (profile?.runtimeEvidence ? CURRENT_EXTRACTION_MODELS.includes(model) : model === EXTRACTION_MODEL);
+// The quoted-fields recipe with corrections, which the Codex route introduced,
+// is what a runtime-evidence activation runs on Claude as well.
+export const QUOTED_RECIPE = 'capture-quoted-corrections-v2';
 export const HOST_VALIDATION_KIND = 'shadowgraph-extraction-host-validation';
 export const HOST_VALIDATION_CHECKS = Object.freeze(['confinement', 'routing', 'recursion', 'shutdown']);
 export const PROMPT_VERSION = 'capture-fields-v1';

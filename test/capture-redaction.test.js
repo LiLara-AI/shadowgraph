@@ -282,19 +282,29 @@ test('PR-37b M-3: a directory whose .git entry cannot be examined counts as a re
   assert.equal(await storeRepository(join(deny, 'inner', 'store.json')), await realpath(deny));
 });
 
-test('PR-37b D5: a capture that loses the lock or runs out of time writes nothing anywhere', async (t) => {
+// The independent review of 2026-10-26 (§5) found that such an event was lost.
+// It now waits in the capture spool -- redacted, as the store would hold it --
+// and nothing else is written anywhere.
+test('PR-37b D5: a capture that loses the lock or runs out of time writes nothing but a redacted spool entry', async (t) => {
   const s = await setup(t);
+  const k = [sentinel(), sentinel()];
   const listing = async () => (await readdir(s.root, { recursive: true })).sort();
   const before = await listing();
   const storeBefore = await readFile(s.file);
-  assert.equal(await s.run({ hook_event_name: 'UserPromptSubmit', prompt: 'late', message_id: 'm1' }, { deadline: Date.now() + 100 }), 'out_of_time');
+  assert.equal(await s.run({ hook_event_name: 'UserPromptSubmit', prompt: `late, password=${k[0]}`, message_id: 'm1' }, { deadline: Date.now() + 100 }), 'out_of_time');
   // The store's lock held by a live owner, so the hook cannot take it in time.
   const lock = `${s.file}.lock`;
   await writeFile(lock, `${process.pid}:${Date.now()}:held`);
-  await assert.rejects(s.run({ hook_event_name: 'UserPromptSubmit', prompt: 'blocked', message_id: 'm2' }, { deadline: Date.now() + 1500 }));
+  assert.equal(await s.run({ hook_event_name: 'UserPromptSubmit', prompt: `blocked with ${token(k[1])}`, message_id: 'm2' }, { deadline: Date.now() + 1500 }), 'store_busy');
   fs.rmSync(lock);
-  assert.deepEqual(await listing(), before);
+  const added = (await listing()).filter((name) => !before.includes(name));
+  assert.ok(added.length >= 2 && added.every((name) => name.startsWith(join('sg-home', 'capture-spool'))), JSON.stringify(added));
   assert.deepEqual(await readFile(s.file), storeBefore);
+  assert.deepEqual(await leaks(s.root, k), []);
+  // Replayed later, both arrive redacted, and the spool empties.
+  assert.equal(await s.run({ hook_event_name: 'UserPromptSubmit', prompt: 'after', message_id: 'm3' }), 'written');
+  assert.deepEqual((await s.items()).map((item) => item.source.hostEventId), ['m1', 'm2', 'm3']);
+  assert.deepEqual(await leaks(s.root, k), []);
 });
 
 // What mode each file was created with: a spy on the creating calls, so the
@@ -518,14 +528,32 @@ test('PR-37b review P-6: a SQLite backup copy is made owner-only before it is re
   assert.ok(renamed > calls.indexOf(chmods[0]) && calls[renamed][1] === chmods[0][1]);
 });
 
-test('PR-37b review P-7: a capture out of time inside the store writes nothing in the store\'s, the record\'s or the per-user directory', async (t) => {
+test('PR-37b review P-7: a capture out of time inside the store writes nothing in the store\'s, the record\'s or the per-user directory but its redacted spool entry', async (t) => {
   const s = await setup(t);
+  const k = sentinel();
   const roots = [s.root, process.env.SHADOWGRAPH_HOME].filter(Boolean);
   const listing = async () => (await Promise.all(roots.map((directory) => readdir(directory, { recursive: true }).catch(() => [])))).map((list) => list.sort());
   const before = await listing();
   let skew = 0;
-  assert.equal(await s.run({ hook_event_name: 'UserPromptSubmit', prompt: 'late', message_id: 'm1' }, { post: (stage) => { if (stage === 'enter') skew = 60_000; }, now: () => Date.now() + skew }), 'out_of_time');
-  assert.deepEqual(await listing(), before);
+  assert.equal(await s.run({ hook_event_name: 'UserPromptSubmit', prompt: `late, password=${k}`, message_id: 'm1' }, { post: (stage) => { if (stage === 'enter') skew = 60_000; }, now: () => Date.now() + skew }), 'out_of_time');
+  const after = await listing();
+  const added = after.map((list, index) => list.filter((name) => !before[index].includes(name)));
+  assert.ok(added[0].length && added[0].every((name) => name.startsWith(join('sg-home', 'capture-spool'))), JSON.stringify(added));
+  assert.deepEqual(added.slice(1).flat(), []);
+  for (const directory of roots) assert.deepEqual(await leaks(directory, [k]), []);
+});
+
+test('a private key in a payload that has to wait is redacted before the spool holds it', async (t) => {
+  const s = await setup(t);
+  const lock = `${s.file}.lock`;
+  await writeFile(lock, `${process.pid}:${Date.now()}:held`);
+  t.after(() => fs.rmSync(lock, { force: true }));
+  const body = 'b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW';
+  const key = ['-----BEGIN OPENSSH PRIVATE KEY-----', body, '-----END OPENSSH PRIVATE KEY-----'].join('\n');
+  assert.equal(await s.run({ hook_event_name: 'UserPromptSubmit', prompt: `use this:\n${key}`, message_id: 'm1' }, { deadline: Date.now() + 800 }), 'store_busy');
+  const [entry] = await readdir(join(s.sgHome, 'capture-spool'));
+  assert.match(await readFile(join(s.sgHome, 'capture-spool', entry), 'utf8'), /\[REDACTED\]/u);
+  assert.deepEqual(await leaks(s.root, [body]), []);
 });
 
 test('PR-37b review P-8: admission measures the observation as it is stored, redacted', () => {

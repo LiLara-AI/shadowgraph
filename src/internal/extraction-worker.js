@@ -11,15 +11,17 @@ import { attachDeletionView, readLedger, storeIo } from './deletion-knowledge.js
 import { claimAuthorityInvalid, effectiveGeneration } from './capture-generation.js';
 import { captureRawExpired } from './capture-retention.js';
 import { privilegedClaimCapture, privilegedCompleteExtraction, privilegedExtractionStatus, privilegedLiveSnapshot, privilegedSettleExtraction, privilegedSnapshot } from './snapshot.js';
-import { extractionSchema, OUTPUT_SCHEMA_VERSION, PROMPT_VERSION, extractionPrompt, extractionText, prepareExtraction } from './extraction-output.js';
+import { extractionSchema, OUTPUT_SCHEMA_VERSION, PROMPT_VERSION, extractionPrompt, extractionText, prepareExtraction, quotedRecipe } from './extraction-output.js';
 import { FROZEN_WORKER_BUDGETS, withWorkerBudget } from './extraction-budget.js';
 import { invokeWithRetry, awaitWorkerStep } from './extraction-policy.js';
 import { sessionJournalEntries, workerReason } from './extraction-session.js';
 import { registerInvocation } from './extraction-identity.js';
 
 const digest = value => createHash('sha256').update(value).digest('hex');
-const promptVersion = options => options.provider === 'codex' ? CODEX_PROMPT_VERSION : PROMPT_VERSION;
-const schemaVersion = options => options.provider === 'codex' ? CODEX_OUTPUT_SCHEMA_VERSION : OUTPUT_SCHEMA_VERSION;
+const promptVersion = options => quotedRecipe(options.provider, options.recipe) ? CODEX_PROMPT_VERSION : PROMPT_VERSION;
+const schemaVersion = options => quotedRecipe(options.provider, options.recipe) ? CODEX_OUTPUT_SCHEMA_VERSION : OUTPUT_SCHEMA_VERSION;
+// The model the activation selected; the provider's default otherwise.
+const modelOf = options => options.model ?? extractionModel(options.provider);
 const refusal = code => { throw Object.assign(new Error(`Extraction refused (${code})`), { code }); };
 const clock = options => { const at = (options.now ?? (() => new Date().toISOString()))(); if (!isValidIsoInstant(at)) refusal('capture_clock_invalid'); return at; };
 const owns = (item, options) => options.project ? item.attribution === 'project' && item.project === options.project
@@ -52,7 +54,7 @@ async function fenced(options, action) {
 }
 
 export async function claimCapture(options) {
-  const model = extractionModel(options.provider);
+  const model = modelOf(options);
   if (options.provider === 'codex' && !validExtractionBinding(options.extractionBinding)) refusal('capture_provenance_required');
   return fenced(options, async ({ graph, ledger, at, commit }) => {
     const live = privilegedLiveSnapshot(graph);
@@ -98,7 +100,7 @@ export async function claimCapture(options) {
       const generation = effectiveGeneration(selected, ledger, live, at);
       // Only this setup's independently sourced user decisions can be considered.
       // No historical/foreign/private cross-project material enters this route.
-      const correctionCandidates = options.provider === 'codex' && item.source?.role === 'user'
+      const correctionCandidates = quotedRecipe(options.provider, options.recipe) && item.source?.role === 'user'
         ? graph.context({ project: item.project, query: text, limit: 4, compact: false }).relevant.items.flatMap(({ record }) => {
           const sourceCapture = live.records.find(value => value.id === record?.captureRef);
           const original = live.records.find(value => value.id === record?.id);
@@ -120,7 +122,7 @@ export async function claimCapture(options) {
 }
 
 export async function commitCapture(options, claim, response) {
-  const model = extractionModel(options.provider);
+  const model = modelOf(options);
   return fenced(options, async ({ graph, ledger, at, commit }) => {
     const live = privilegedLiveSnapshot(graph), item = live.records.find(value => value.kind === 'capture' && value.id === claim.id);
     const settle = async reason => {
@@ -155,7 +157,7 @@ export async function commitCapture(options, claim, response) {
 export async function runExtractionItem(options) {
   const claim = await claimCapture(options); if (claim.status !== 'claimed') return claim;
   let response;
-  try { response = await options.executor.invoke({ prompt: extractionPrompt(claim.item, claim.text, { ...options, correctionCandidates: claim.correctionCandidates }), schema: extractionSchema(options.provider) }); }
+  try { response = await options.executor.invoke({ prompt: extractionPrompt(claim.item, claim.text, { ...options, correctionCandidates: claim.correctionCandidates }), schema: extractionSchema(options.provider, options.recipe) }); }
   catch { response = { status: 'failed' }; }
   return commitCapture(options, claim, response);
 }
@@ -235,7 +237,7 @@ export async function runExtractionDrain(options) {
         }
         attempts = 0;
         const correlationToken = `sgcorr_${randomUUID()}`;
-        const response = await invokeWithRetry({ request: { prompt: extractionPrompt(claimed.item, claimed.text, { ...options, correctionCandidates: claimed.correctionCandidates }), schema: extractionSchema(options.provider) }, signal, sleep: options.sleep,
+        const response = await invokeWithRetry({ request: { prompt: extractionPrompt(claimed.item, claimed.text, { ...options, correctionCandidates: claimed.correctionCandidates }), schema: extractionSchema(options.provider, options.recipe) }, signal, sleep: options.sleep,
           reserve: () => budget.reserve(), invoke: async request => {
             budget.check();
             if (options.guard && !await awaitWorkerStep(options.guard, signal) || !await claimIsCurrent({ ...options, signal }, claimed)) return { status: 'blocked', blockedReason: 'drain_stopped' };

@@ -525,7 +525,8 @@ test('registered invocation identity is snapshotted before asynchronous configur
 import { HOST_PROFILES } from '../src/internal/extraction-contract.js';
 test('the executor accepts a profiled host version only on the binary its profile names', async (t) => {
   for (const [version, profiles, expected] of [
-    ['2.1.300 (Claude Code)', undefined, 'host_version_unverified'],
+    ['2.1.300 (Claude Code)', undefined, 'model_not_selectable'],
+    ['3.0.0 (Claude Code)', undefined, 'host_version_unverified'],
     ['2.1.292 (Claude Code)', undefined, 'host_binary_unverified']
   ]) {
     const s = await fixture(t, { version });

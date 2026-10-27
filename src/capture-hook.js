@@ -19,12 +19,14 @@ import { outcomeFromExitStatus } from './internal/outcome.js';
 import { canonicalPath as fencePath, registryFile } from './internal/deletion-knowledge.js';
 import { canonicalPath, repositoryOf as storeRepository } from './internal/owner-files.js';
 import { renderToolMaterial } from './internal/tool-material.js';
+import { captureWithheld, redactValue } from './internal/redaction.js';
 import { privilegedExpireCapture, privilegedRecordCapture, privilegedRecordSelfEvent, privilegedRecordTranscript, privilegedSnapshot } from './internal/snapshot.js';
 import { TRANSCRIPT_TRIGGERS } from './internal/transcript.js';
 import { activeExtraction, workerFenceFile, settlementFile } from './internal/extraction-state.js';
 import { extractionBinding, sessionProfileSelected } from './internal/extraction-provenance.js';
 import { accountEmailDigest } from './internal/extraction-contract.js';
 import { usageFile } from './internal/extraction-budget.js';
+import { requestFile } from './internal/extraction-trigger.js';
 import { createDestinationFence, fenceLockPath } from './revision-store.js';
 import { usableOriginId } from './scope.js';
 import { readInvocationContext, identityFile } from './internal/extraction-identity.js';
@@ -244,7 +246,13 @@ export async function runCapture({ capture, input, deadline, record = null, regi
   if (record === null) return captureEvent({ ...common, payload, event, cwd, boundBy });
   const spool = spoolDirectory(record);
   const transcriptSize = event.transcriptPath ? (await stat(event.transcriptPath).catch(() => null))?.size ?? null : null;
-  const kept = await spoolEvent({ spool, input, cwd, transcript: transcriptSize, boundBy, now });
+  // Nothing unredacted is kept anywhere (PR-37b M-2): the material fields are
+  // redacted before the spool sees them, and a payload the checker still
+  // flags is never spooled -- it takes the direct path alone.
+  const safe = { ...payload };
+  for (const name of SPOOLED_MATERIAL) if (Object.hasOwn(safe, name)) safe[name] = redactValue(safe[name]);
+  const safeInput = JSON.stringify(safe);
+  const kept = captureWithheld(safeInput) ? { kept: false, reason: 'material_withheld' } : await spoolEvent({ spool, input: safeInput, cwd, transcript: transcriptSize, boundBy, now });
   if (!kept.kept) {
     // No durable copy: the direct path as before, and a loss it cannot avoid
     // is recorded, never silent.
@@ -259,6 +267,9 @@ export async function runCapture({ capture, input, deadline, record = null, regi
   const own = await claimSpoolEntry(spool, kept.entry);
   return own ? replaySpool({ ...common, spool, own }) : 'spooled';
 }
+
+// The hook payload's material fields; the rest identifies the event.
+const SPOOLED_MATERIAL = Object.freeze(['prompt', 'last_assistant_message', 'tool_input', 'tool_response', 'error']);
 
 // The variables that put a session on a provider route of its own, apart from
 // the default profile's sign-in.
@@ -364,7 +375,7 @@ async function captureEvent({ capture, payload, event, deadline, record, registr
   // Opened before the store's lock is taken, so the lock is never held while
   // the file is found, and after anything else here that can throw.
   const invocationContext = await readInvocationContext({ env, now });
-  const workerFiles = (await Promise.all([identityFile(env), usageFile(env), workerFenceFile(env), settlementFile(env)].map(async file => [await canonicalPath(file), await fenceLockPath(file)]))).flat();
+  const workerFiles = (await Promise.all([identityFile(env), usageFile(env), workerFenceFile(env), settlementFile(env), requestFile(env)].map(async file => [await canonicalPath(file), await fenceLockPath(file)]))).flat();
   const artefactDirectories = record ? await Promise.all([spoolDirectory(record), droppedDirectory(spoolDirectory(record))].map((path) => canonicalPath(path).catch(() => path))) : [];
   const transcript = await openTranscript(event.transcriptPath);
   // A replayed event anchors a session's first cursor where the transcript

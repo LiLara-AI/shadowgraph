@@ -14,6 +14,7 @@ import { CAPTURE_LIMITS, runCapture } from '../src/capture-hook.js';
 import { privilegedBindProject, privilegedSnapshot } from '../src/internal/snapshot.js';
 import { droppedDirectory, failSpoolEntry, SPOOL_LIMITS, spoolDirectory, spoolEntries, spoolEvent, spoolStatus } from '../src/internal/capture-spool.js';
 import { mintOriginId } from '../src/scope.js';
+import { FROZEN_WORKER_BUDGETS } from '../src/internal/extraction-budget.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const CLI = resolve('src/cli.js');
@@ -201,4 +202,38 @@ test('a claim a dead hook left returns to the queue and is replayed; a fresh cla
   assert.equal(await capture(s, prompt('after', { message_id: 'after' })), 'written');
   assert.deepEqual((await captures(s)).map((item) => item.source.hostEventId), ['stale', 'after']);
   assert.equal((await spoolStatus(s.spool)).pending, 1);
+});
+
+// A CLI session names no account (only Desktop sets CLAUDE_CODE_USER_EMAIL):
+// under the default profile, with no provider route of its own, its material
+// is bound to the extraction activation, which checks that account at every
+// invocation; a session on its own provider route stays unbound.
+test('a CLI session under the default profile is bound for extraction; one on its own provider route is not', async (t) => {
+  const s = await setup(t);
+  const runtime = { path: join(s.root, 'shadowgraph-runtime'), commit: 'a'.repeat(40), extraction: true };
+  const record = JSON.parse(await readFile(s.activation, 'utf8'));
+  record.capabilities.capture = { ...s.capture, runtime };
+  record.capabilities.delivery = { ...record.capabilities.delivery, runtime };
+  const extraction = { state: 'active', activationId: '0f0e0d0c-1111-4222-8333-444455556666', changedAt: new Date().toISOString(), store: s.capture.store, runtime,
+    noOverageConfirmed: true, budgets: { ...FROZEN_WORKER_BUDGETS }, model: 'claude-opus-5[1m]',
+    executor: { ok: true, executable: join(s.root, 'claude.exe'), binarySha256: 'b'.repeat(64), hostVersion: '2.1.288', model: 'claude-opus-5[1m]', restrictions: Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`E-${i + 1}`, true])), accountFingerprint: 'f'.repeat(64), accountSalt: 'e'.repeat(32) } };
+  record.capabilities.extraction = extraction;
+  await writeFile(s.activation, JSON.stringify(record));
+  const env = { SHADOWGRAPH_HOME: s.sgHome };
+  assert.equal(await capture(s, prompt('cli default profile', { message_id: 'cli' }), { env }), 'written');
+  assert.equal(await capture(s, prompt('own api key route', { message_id: 'keyed' }), { env: { ...env, ANTHROPIC_API_KEY: 'synthetic' } }), 'written');
+  const byId = Object.fromEntries((await captures(s)).map((item) => [item.source.hostEventId, item.observation.extractionBinding ?? null]));
+  assert.deepEqual(byId.cli, { provider: 'claude', accountFingerprint: 'f'.repeat(64), setupId: extraction.activationId });
+  assert.equal(byId.keyed, null);
+  // An entry judged under one activation and replayed under another stays unbound.
+  const release = await holdStore(s.file);
+  t.after(release);
+  assert.equal(await capture(s, prompt('judged under the first activation', { message_id: 'first' }), { env, deadline: Date.now() + 800 }), 'store_busy');
+  await release();
+  extraction.activationId = '0f0e0d0c-1111-4222-8333-777788889999';
+  await writeFile(s.activation, JSON.stringify(record));
+  assert.equal(await capture(s, prompt('after reactivation', { message_id: 'second' }), { env }), 'written');
+  const after = Object.fromEntries((await captures(s)).map((item) => [item.source.hostEventId, item.observation.extractionBinding?.setupId ?? null]));
+  assert.equal(after.first, null);
+  assert.equal(after.second, extraction.activationId);
 });

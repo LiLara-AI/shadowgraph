@@ -197,6 +197,39 @@ test('automatic extraction follows capture coverage; explicit manual project doe
   assert.equal((await runActivatedExtraction({ ...options, project: 'p' })).completed, 1); assert.equal(calls, 1);
 });
 
+// A drain stops at its per-drain item budget; the same worker runs further
+// rounds, each bounded alike, until the queue is empty -- and a trigger that
+// met it busy is answered by one more round, not lost.
+test('one automatic worker drains past the per-drain item budget in bounded rounds, and answers a trigger that came while it ran', async t => {
+  const f = await activated(t), { runActivatedExtraction } = await import('../src/extraction-runtime.js');
+  const { requestFile } = await import('../src/internal/extraction-trigger.js');
+  const store = await createStorage({ type: 'json', file: f.extraction.store.file });
+  const graph = createShadowGraph(); graph.importData(await store.load());
+  const binding = extractionBinding(await (await state()).activeExtraction(f.env));
+  const add = (session) => privilegedRecordCapture(graph, { project: 'p', originId: 'origin_fixture', text: `Synthetic pending work ${session}.`, source: { event: 'UserPromptSubmit', sessionId: session },
+    observation: { host: 'synthetic-claude', hostVersion: '2.1.288', toolName: null, cwd: null, outcome: null, extractionBinding: binding }, admission: { limits: CAPTURE_LIMITS, storeBytes: 0 } });
+  for (let index = 0; index < 8; index += 1) add(`more-${index}`);
+  await store.save(privilegedSnapshot(graph)); store.close();
+  let calls = 0, late = false;
+  const result = await runActivatedExtraction({ env: f.env, runtimeDirectory: f.options.runtime, automatic: true, executorFactory: () => ({ extract: async () => {
+    calls += 1;
+    // While the last item of the queue is being extracted, a capture lands and its trigger meets the busy worker.
+    if (calls === 9 && !late) {
+      late = true;
+      const s = await createStorage({ type: 'json', file: f.extraction.store.file }); const g = createShadowGraph(); g.importData(await s.load());
+      privilegedRecordCapture(g, { project: 'p', originId: 'origin_fixture', text: 'Arrived during the drain.', source: { event: 'UserPromptSubmit', sessionId: 'late' },
+        observation: { host: 'synthetic-claude', hostVersion: '2.1.288', toolName: null, cwd: null, outcome: null, extractionBinding: binding }, admission: { limits: CAPTURE_LIMITS, storeBytes: 0 } });
+      await s.save(privilegedSnapshot(g)); s.close();
+      await writeFile(requestFile(f.env), new Date().toISOString());
+    }
+    return { status: 'success', value: { records: [] }, receipt: { invocationStarted: true, model: 'claude-opus-5[1m]' } };
+  } }) });
+  assert.equal(calls, 10, 'nine queued and one that arrived meanwhile');
+  assert.equal(result.completed, 10);
+  assert.ok(result.rounds >= 3, JSON.stringify(result));
+  assert.ok((await f.read()).records.filter(item => item.kind === 'capture').every(item => item.state === 'extracted'));
+});
+
 import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
