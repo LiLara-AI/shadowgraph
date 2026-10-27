@@ -50,6 +50,27 @@ export function renderToolMaterial({ toolName, toolInput, toolResponse, error })
   return lines.join('\n');
 }
 
+// A tool call's input or response with every value the renderer would show as
+// redacted replaced by REDACTED, in the same shape, by the same rules: a key
+// named for a credential, the value of a pair keyed by one, an array element
+// after one, and a user flag's `user:password`. The capture spool keeps this
+// (independent review of the spool, 2026-10-27): the redactor's text rules
+// alone do not know an argument vector's neighbours. Strings are then
+// redacted as text by the caller. Walked to a bounded depth; past it a value
+// is withheld whole.
+export function redactToolStructure(value, depth = 0) {
+  if (depth > 64) return REDACTED;
+  if (Array.isArray(value)) {
+    const follows = (index) => index > 0 && typeof value[index - 1] === 'string'
+      && (credentialKey(value[index - 1]) || (USER_FLAG.test(value[index - 1]) && typeof value[index] === 'string' && value[index].includes(':')));
+    return value.map((item, index) => (follows(index) && item !== null && item !== undefined ? REDACTED : redactToolStructure(item, depth + 1)));
+  }
+  if (!isObject(value)) return value;
+  const keyed = KEYED_NAMES.some((name) => typeof value[name] === 'string' && isCredentialName(value[name]));
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key,
+    item !== null && item !== undefined && (credentialKey(key) || (keyed && KEYED_VALUES.has(key))) ? REDACTED : redactToolStructure(item, depth + 1)]));
+}
+
 const sha256 = (text) => createHash('sha256').update(text).digest('hex');
 
 // The stored length of the redacted input side, and the hash of that side.

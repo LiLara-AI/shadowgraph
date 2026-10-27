@@ -14,6 +14,7 @@ import { pathToFileURL } from 'node:url';
 import { readExtractionAvailability } from './internal/extraction-availability.js';
 import { extractionSupersession } from './internal/extraction-supersession.js';
 import { activeCapture, storeRepository } from './capture-hook.js';
+import { spoolDirectory, spoolStatus } from './internal/capture-spool.js';
 import { createShadowGraph, MAX_PAGE_LIMIT, SCHEMA_VERSION } from './shadowgraph.js';
 import { show, t1Line } from './compact-tier.js';
 import { accessContext, discoverWorkspace } from './internal/access-transport.js';
@@ -269,11 +270,27 @@ export function readHookInput(stream = process.stdin, { limit = HOOK_INPUT_LIMIT
   });
 }
 
+// At SessionStart the read ranks nothing and hands over the working set as full
+// records. A decision with its claims and source runs to several kilobytes, so
+// the cap held one, the newest, whatever it said. Each is delivered as its line
+// instead, with room for a decision's alternatives and source context, and in
+// full only where even that line would leave out a decisive part.
+const SESSION_LINE_CEILING = 2048;
+
 // A line is rendered again from the redacted record, so its text never holds
 // what redaction removed; its handle stays the read's own, bound to the record
 // as stored, so expansion finds the very revision.
-function itemOf({ tier, line, record, temporalEvidence }, records) {
+function itemOf({ tier, line, record, temporalEvidence }, records, session = null) {
   const time = { eventTime: temporalEvidence?.eventTime?.state ?? null, currentState: temporalEvidence?.currentState ? { state: temporalEvidence.currentState.state, basis: temporalEvidence.currentState.basis } : null };
+  if (tier !== 'T1' && session) {
+    // The handle is derived from the record as the read holds it, the text
+    // from the redacted record, as for a line the read made.
+    const context = { scope: session.scope, derivedAt: session.derivedAt, ceiling: SESSION_LINE_CEILING };
+    const bound = t1Line(record, context), rendered = t1Line(redactValue(record), context);
+    if (!bound.decisiveOmitted.length && !rendered.decisiveOmitted.length) {
+      return { tier: 'T1', line: rendered.line, claimClass: bound.claimClass, requiresExpansion: bound.requiresExpansion, ...time, expansion: bound.expansion };
+    }
+  }
   if (tier !== 'T1') return { tier, record, ...time };
   const full = records.get(line.recordId);
   if (!full) return null;
@@ -371,7 +388,14 @@ export async function runDeliver({ args = [], readInput = () => '', file, storag
     const workspace = await discoverWorkspace(process.cwd(), { timeout: GIT_TIMEOUT_MS });
     // At SessionStart the whole working set, up to the largest page, is read,
     // so the order below chooses among all of it.
-    const input = accessContext(graph, { query: prompt, compact: true, ...(session ? { limit: MAX_PAGE_LIMIT } : {}) }, 'cli', workspace, { confirmedByStore: Boolean(pinned) });
+    const own = accessContext(graph, { query: prompt, compact: true, ...(session ? { limit: MAX_PAGE_LIMIT } : {}) }, 'cli', workspace, { confirmedByStore: Boolean(pinned) });
+    // The owner's sharing grant (activation.js changeDeliverySharing): the
+    // shared projects' memory is read from any project the store has bound, as
+    // on the Codex route; from no project at all, nothing is shared. The kernel
+    // reads the project alone once the grant is revoked or expired.
+    const sharing = pinned?.sharing;
+    const shares = typeof sharing?.accessId === 'string' && sharing.accessId && Boolean(own.binding?.project);
+    const input = shares ? { ...own, accessId: sharing.accessId } : own;
     const relevant = graph.context(input).relevant;
     const unresolved = relevant.scope.requestState !== 'project_selected';
     if (!session && (unresolved || !relevant.relevance.established)) return;
@@ -394,15 +418,23 @@ export async function runDeliver({ args = [], readInput = () => '', file, storag
       // version is said to be unverified (§18.1, F-23).
       ...(pinned?.host ? { host: pinned.host } : {})
     };
-    const items = relevant.items.map((item) => itemOf(item, records)).filter(Boolean);
+    const lines = session ? { scope: { project: relevant.scope.project ?? null, grantId: relevant.scope.grant?.accessId ?? null }, derivedAt: new Date().toISOString() } : null;
+    // The working set is ordered on the records, then each becomes its line.
+    const items = (session ? sessionOrder(relevant.items) : relevant.items).map((item) => itemOf(item, records, lines)).filter(Boolean);
     // The status in brief, bounded whatever the store holds: counts, and the
     // names of the limits and gaps the reads declare.
     const status = relevant.capture;
+    // Hook input the store has not taken yet, and input that was lost: counted
+    // from the spool's file names alone (src/internal/capture-spool.js).
+    const spool = capturing ? await spoolStatus(spoolDirectory(activationFile(env))) : null;
+    const spoolGaps = spool ? [...(spool.pending ? ['capture_input_waiting'] : []), ...(spool.dropped ? ['capture_input_dropped'] : []), ...(spool.unreadable ? ['capture_spool_unreadable'] : [])] : [];
     const processing = capturing || status ? {
       ...(capturing ? captureState() : { capture: 'not_active' }), extraction: extractionAvailability.active ? 'active' : 'not_active',
-      ...(status ? { pending: status.pending, processing: status.processing, failed: status.failed, blocked: status.blocked, oldestPendingAt: status.oldestPendingAt, extractionAvailable: status.extractionAvailable, ...(status.workerErrors ? { workerErrors: status.workerErrors.map(entry => entry.reason) } : {}), limited: status.limited.map((entry) => entry.limit), gaps: [...new Set(status.gaps.map((entry) => entry.reason))] } : {})
+      ...(status ? { pending: status.pending, processing: status.processing, failed: status.failed, blocked: status.blocked, oldestPendingAt: status.oldestPendingAt, extractionAvailable: status.extractionAvailable, ...(status.workerErrors ? { workerErrors: status.workerErrors.map(entry => entry.reason) } : {}), limited: status.limited.map((entry) => entry.limit), gaps: [...new Set([...status.gaps.map((entry) => entry.reason), ...spoolGaps])] } : {}),
+      ...(!status && spoolGaps.length ? { gaps: spoolGaps } : {}),
+      ...(spool && (spool.pending || spool.dropped) ? { inputWaiting: spool.pending, oldestInputAt: spool.oldestAt, inputDropped: spool.dropped } : {})
     } : undefined;
-    emit(assemblePayload({ head, items: session ? sessionOrder(items) : items, processing }).text);
+    emit(assemblePayload({ head, items, processing }).text);
   } catch {
     // Degraded, never blocking: nothing on stderr and no exit code (§18.4). A
     // session start that failed after the read still says memory is unavailable.

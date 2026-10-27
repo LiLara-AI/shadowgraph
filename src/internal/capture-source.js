@@ -22,7 +22,7 @@
 // or `pnpm <bin>` without exec, a Grep or Glob of the store's folder,
 // symlinked or short-name paths, another casing of the MCP server's name.
 import { randomUUID } from 'node:crypto';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { DELIVERY_CAP_BYTES, DELIVERY_FRAME } from './delivery-marker.js';
 
 export const SELF_SIGNALS = Object.freeze(['S-1', 'S-2', 'S-3']);
@@ -63,7 +63,7 @@ const texts = (value) => (Array.isArray(value) ? value.filter((item) => typeof i
 // entry points, its activation record, the marker files it reads, and the
 // per-user deletion registry with its lock (PR-37d design §7.3). The registry
 // path given is canonical already, so its lock is the one fenceLockPath names.
-export function captureArtefacts({ storeFile, runtimeDirectory, activationFile, markerFiles = [], registryFile, workerFiles = [] } = {}) {
+export function captureArtefacts({ storeFile, runtimeDirectory, activationFile, markerFiles = [], registryFile, workerFiles = [], artefactDirectories = [] } = {}) {
   const files = [];
   if (storeFile) files.push(storeFile, ...STORE_SIDE_FILES.map((suffix) => `${storeFile}${suffix}`));
   if (registryFile) files.push(registryFile, `${registryFile}.lock`);
@@ -71,6 +71,8 @@ export function captureArtefacts({ storeFile, runtimeDirectory, activationFile, 
   files.push(...markerFiles, ...workerFiles);
   return {
     artefactPaths: files,
+    // A folder ShadowGraph keeps its own files in (the capture spool): any path in it.
+    artefactDirectories,
     storeFiles: storeFile ? [storeFile] : [],
     runtimeEntryPoints: runtimeDirectory ? RUNTIME_ENTRY_POINTS.map((parts) => join(runtimeDirectory, ...parts)) : []
   };
@@ -307,6 +309,7 @@ function isArtefact(candidate, known, quote) {
   const target = comparablePath(candidate, known, quote);
   if (target === null) return false;
   if (known.artefacts.has(target)) return true;
+  if (known.directories?.some((directory) => target === directory || target.startsWith(`${directory}${sep}`))) return true;
   // A restore's staging, rollback and recovery files, and a save's temporary
   // file, beside the store (backup.js, storage.js, sqlite-storage.js).
   const name = basename(target);
@@ -370,6 +373,7 @@ function targetsShadowGraph(event, context) {
     cwd: event.cwd,
     binaries: Array.isArray(context.binaryNames) ? texts(context.binaryNames) : BINARIES,
     artefacts: new Set(texts(context.artefactPaths).map(comparable)),
+    directories: texts(context.artefactDirectories).map(comparable),
     stores: texts(context.storeFiles).map(comparable),
     entries: new Set(texts(context.runtimeEntryPoints).map(comparable))
   };

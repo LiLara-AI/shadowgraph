@@ -146,14 +146,31 @@ async function changeActivation() {
   const usage = command === 'activate'
     ? 'Usage: shadowgraph activate delivery --evidence <ref> --store <path> [--storage json|sqlite] [--host-version <version>] [--settings <path>] [--runtime <directory>]\n'
       + '       shadowgraph activate capture --evidence <ref> --store <path> [--storage json] [--only <project,...> | --exclude <project,...>] [--mcp-servers <name,...>] [--host-version <version>] [--settings <path>] [--runtime <directory>]'
-      + '\n       shadowgraph activate extraction --evidence <ref> --store <path> --runtime <directory> --executable <absolute-path> --no-overage-confirmed true [--host-validation <receipt>] [--settings <path>]'
+      + '\n       shadowgraph activate extraction --evidence <ref> --store <path> --runtime <directory> --executable <absolute-path> --model <model> --no-overage-confirmed true [--host-validation <receipt>] [--settings <path>]'
     : 'Usage: shadowgraph deactivate delivery|capture|extraction';
   if (!['delivery', 'capture', 'extraction'].includes(capability)) throw new Error(usage);
   if (command === 'deactivate') return ({ delivery: deactivateDelivery, capture: deactivateCapture, extraction: deactivateExtraction })[capability](flagsOf(flags, {}, usage));
   const names = { '--evidence': 'evidence', '--store': 'store', '--storage': 'storage', '--host-version': 'hostVersion', '--settings': 'settings', '--runtime': 'runtime' };
-  if (capability === 'extraction') return activateExtraction(flagsOf(flags, { ...names, '--executable': 'executable', '--no-overage-confirmed': 'noOverageConfirmed', '--host-validation': 'hostValidation' }, usage));
+  if (capability === 'extraction') return activateExtraction(flagsOf(flags, { ...names, '--executable': 'executable', '--no-overage-confirmed': 'noOverageConfirmed', '--host-validation': 'hostValidation', '--model': 'model' }, usage));
   if (capability === 'delivery') return activateDelivery(flagsOf(flags, names, usage));
   return activateCapture(flagsOf(flags, { ...names, '--only': 'only', '--exclude': 'exclude', '--mcp-servers': 'mcpServers' }, usage));
+}
+
+// `sharing`: which projects a project's Claude hook delivery may read
+// (src/activation.js changeDeliverySharing); `sharing status` reads the record.
+async function changeSharing() {
+  const usage = 'Usage: shadowgraph sharing status | project | selected --projects <a,b,...> | all-permitted [--exclude <a,...>] [--expires <ISO instant>]';
+  const [mode, ...flags] = rest;
+  if (mode === 'status' && flags.length === 0) {
+    const { activeDelivery } = await import('./delivery.js');
+    const delivery = await activeDelivery();
+    return { delivery: delivery ? 'active' : 'not_active', sharing: delivery?.sharing ?? { mode: 'project', projects: [] } };
+  }
+  if (!['project', 'selected', 'all-permitted'].includes(mode)) throw new Error(usage);
+  const options = flagsOf(flags, { '--projects': 'projects', '--exclude': 'exclude', '--expires': 'expiresAt' }, usage);
+  const list = (value) => (value === undefined ? [] : value.split(',').map((name) => name.trim()).filter(Boolean));
+  const { changeDeliverySharing } = await import('./activation.js');
+  return changeDeliverySharing({ mode, projects: list(options.projects), exclude: list(options.exclude), ...(options.expiresAt ? { expiresAt: options.expiresAt } : {}) });
 }
 
 async function extractOnce() {
@@ -466,6 +483,7 @@ try {
   else if (command === 'extract') console.log(JSON.stringify(await extractOnce(), null, 2));
   else if (command === 'install-hooks' || command === 'uninstall-hooks') console.log(JSON.stringify(await changeHooks(), null, 2));
   else if (command === 'activate' || command === 'deactivate') console.log(JSON.stringify(await changeActivation(), null, 2));
+  else if (command === 'sharing') console.log(JSON.stringify(await changeSharing(), null, 2));
   else {
     const result = await runOneShot();
     if (result !== null && result !== undefined) console.log(JSON.stringify(result, null, 2));

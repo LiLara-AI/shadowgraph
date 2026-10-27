@@ -18,6 +18,7 @@ import { changeHookSettings, runtimeHookCommand, shadowGraphHookKind } from '../
 import { privilegedBindProject, privilegedRecordCapture, privilegedRecordSelfEvent, privilegedSnapshot } from '../src/internal/snapshot.js';
 import { mintOriginId } from '../src/scope.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
+import { spoolDirectory, spoolStatus } from '../src/internal/capture-spool.js';
 
 const CLI = resolve('src/cli.js');
 const bytes = (value) => JSON.stringify(value);
@@ -110,14 +111,15 @@ test('RT-4 a lock a dead writer left is taken over, and the capture is written',
   assert.equal((await items(s)).length, 1);
 });
 
-test('RT-5 a live lock is waited for no longer than the time left, and nothing is written', async (t) => {
+test('RT-5 a live lock is waited for no longer than the time left; nothing is written and the event waits in the spool', async (t) => {
   const s = await setup(t);
   const before = bytes(await load(s));
   await writeFile(`${s.file}.lock`, `${process.pid}:${Date.now()}:held`);
   const started = Date.now();
-  await assert.rejects(capture(s, prompt('blocked'), { deadline: started + 1_500 }));
+  assert.equal(await capture(s, prompt('blocked'), { deadline: started + 1_500 }), 'store_busy');
   assert.ok(Date.now() - started < 2_500, `${Date.now() - started} ms`);
   assert.equal(bytes(await load(s)), before);
+  assert.equal((await spoolStatus(spoolDirectory(s.activation))).pending, 1);
 });
 
 test('RT-6 the commit margin is twice the time spent inside the store, and at least 250 ms', async (t) => {
@@ -209,7 +211,9 @@ test('R2-1 concurrent captures near the store ceiling admit one item, since each
   const results = await Promise.all(['msg_1', 'msg_2', 'msg_3', 'msg_4'].map((id) => capture(s, promptOf(id))));
   await released;
   assert.equal((await items(s)).length, 1, JSON.stringify({ base, estimate, growth, results }));
-  assert.equal(results.filter((result) => result === 'written' || result === 'refused').length, 4);
+  // One hook drains for all: the others leave their entries to it (capture spool), and every entry is decided.
+  assert.ok(results.every((result) => ['written', 'refused', 'spooled'].includes(result)), JSON.stringify(results));
+  assert.equal((await spoolStatus(spoolDirectory(s.activation))).pending, 0);
 });
 
 test('R2-2 delivery on a runtime that cannot capture is refused a store holding only capture sessions, or a busy one', async (t) => {

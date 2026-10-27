@@ -3,6 +3,13 @@
 import { setTimeout as delay } from 'node:timers/promises';
 
 const blocked = reason => ({ status: 'blocked', blockedReason: reason });
+// The call ran, and the executor's own checks refused what came back: the
+// stream was not one result, the turn count was not verified, or the session's
+// own account did not show the confined session. That is this output's fault,
+// not the route's, so the item is asked once more, as an invalid answer is, and
+// the checks apply again. A capture's later items wait behind it in order, so
+// leaving it to the next session's trigger left a whole session unextracted.
+const REFUSED_OUTPUT = new Set(['unrecognised_response', 'turn_limit_unverified', 'runtime_confinement_unverified']);
 const unstarted = receipt => receipt?.invocationStarted === false && receipt.processStarted === false
   && receipt.outputBytes === 0 && receipt.zeroUsage === true;
 
@@ -40,8 +47,8 @@ export async function invokeWithRetry({ request, invoke, reserve, correct, signa
     finally { if (abort) signal?.removeEventListener('abort', abort); }
     if (signal?.aborted) return blocked('drain_stopped');
     if (response?.status === 'success') return response;
-    if (response?.status === 'blocked') return response;
-    if (response?.status === 'schema_invalid') { if (attempt) return response; }
+    if (response?.status === 'blocked') { if (attempt || !REFUSED_OUTPUT.has(response.blockedReason)) return response; }
+    else if (response?.status === 'schema_invalid') { if (attempt) return response; }
     else if (response?.status === 'transport_error' && unstarted(response.receipt)) {
       if (attempt) return blocked('transport_error');
     } else if (response?.status === 'malformed_invocation' && unstarted(response.receipt) && !attempt && correct) {

@@ -16,18 +16,20 @@ import { createStorage } from './storage.js';
 import { accessContext, discoverWorkspace, projectBindingFile } from './internal/access-transport.js';
 import { captureArtefacts, classifyCaptureSource, soleProgram } from './internal/capture-source.js';
 import { outcomeFromExitStatus } from './internal/outcome.js';
-import { canonicalPath as fencePath, registryFile } from './internal/deletion-knowledge.js';
+import { canonicalPath as fencePath, readLedger, registryFile } from './internal/deletion-knowledge.js';
 import { canonicalPath, repositoryOf as storeRepository } from './internal/owner-files.js';
-import { renderToolMaterial } from './internal/tool-material.js';
+import { redactToolStructure, renderToolMaterial } from './internal/tool-material.js';
+import { captureWithheld, redactValue } from './internal/redaction.js';
 import { privilegedExpireCapture, privilegedRecordCapture, privilegedRecordSelfEvent, privilegedRecordTranscript, privilegedSnapshot } from './internal/snapshot.js';
 import { TRANSCRIPT_TRIGGERS } from './internal/transcript.js';
-import { activeExtraction, workerFenceFile, settlementFile } from './internal/extraction-state.js';
+import { activeExtraction, requestFile, workerFenceFile, settlementFile } from './internal/extraction-state.js';
 import { extractionBinding, sessionProfileSelected } from './internal/extraction-provenance.js';
 import { accountEmailDigest } from './internal/extraction-contract.js';
 import { usageFile } from './internal/extraction-budget.js';
-import { fenceLockPath } from './revision-store.js';
+import { createDestinationFence, fenceLockPath } from './revision-store.js';
 import { usableOriginId } from './scope.js';
 import { readInvocationContext, identityFile } from './internal/extraction-identity.js';
+import { dropSpoolEntry, droppedDirectory, expireSpool, failSpoolEntry, readSpoolEntry, recordDropped, settleSpoolEntry, spoolDirectory, spoolEntries, spoolEvent } from './internal/capture-spool.js';
 
 // Conservative admission limits, frozen until measured figures replace them
 // through a gate (§22.6.3). Crossing one refuses new items; it is never raised
@@ -219,16 +221,12 @@ export async function openTranscript(path) {
 // else. A host re-delivery of an item already held writes nothing new. `post`
 // tells the thread keeping the deadline when the store is entered and left.
 // Resolves to what happened, for tests; `now` and `registry` are test seams.
-export async function runCapture({ capture, input, deadline, record = null, registry = registryFile(), home = homedir(), cwd = process.cwd(), post = () => {}, now = Date.now, env = process.env }) {
+export async function runCapture({ capture, input, deadline, record = null, registry = registryFile(), home = homedir(), cwd = process.cwd(), post = () => {}, now = Date.now, env = process.env, report = {} }) {
   if (sessionProfileSelected(env)) return 'session_profile_selected';
   const extraction = await activeExtraction(env);
   const sessionEmail = Object.entries(env).find(([name]) => name.toUpperCase() === 'CLAUDE_CODE_USER_EMAIL')?.[1];
   const bound = extraction?.executor.accountEmailFingerprint;
   if (extraction && sessionEmail && (!bound || accountEmailDigest(extraction.executor.accountSalt, sessionEmail) !== bound)) return 'session_account_differs';
-  // Without a verifiable session account capture remains local and explicitly
-  // unbound; production workers leave it held rather than assuming ownership.
-  const provenance = extraction && sessionEmail && (extraction.executor.provider ?? 'claude') === 'claude'
-    ? { extractionBinding: extractionBinding(extraction) } : {};
   let event;
   let payload;
   try {
@@ -236,6 +234,194 @@ export async function runCapture({ capture, input, deadline, record = null, regi
     event = observedEvent(payload);
   } catch { return 'unreadable'; }
   if (event === null) return 'not_captured';
+  // The account the session's material belongs to, judged by this event's own
+  // hook. A host that names its session's account (Desktop) was compared with
+  // the bound one above. A CLI session names none: without a profile selector
+  // (refused above) or a provider route of its own it runs under the default
+  // profile's current sign-in, which the CLI's own configuration names; only
+  // when that is the bound account is the material bound (a digest compared,
+  // nothing kept). Any other session's capture stays local and unbound.
+  const claude = extraction && (extraction.executor.provider ?? 'claude') === 'claude';
+  const boundBy = claude && (sessionEmail || (!providerRouteSelected(env) && await defaultProfileIsBound(extraction, home))) ? extraction.activationId : null;
+  const common = { capture, deadline, record, registry, home, post, now, env };
+  if (record === null) return captureEvent({ ...common, payload, event, cwd, boundBy });
+  // A deletion or restore the store's ledger records as waiting (the crash
+  // window, PR-37c rev6:429) keeps the hook from writing anything anywhere:
+  // nothing is spooled, and the direct path refuses as it always has.
+  if (await deletionWaits(capture.store.file)) return captureEvent({ ...common, payload, event, cwd, boundBy });
+  const spool = spoolDirectory(record);
+  const transcriptSize = event.transcriptPath ? (await stat(event.transcriptPath).catch(() => null))?.size ?? null : null;
+  // Nothing unredacted is kept anywhere (PR-37b M-2): the material fields are
+  // redacted -- a tool's input and response by the renderer's own credential
+  // rules first -- before the spool sees them, and a payload the checker still
+  // flags is never spooled; it takes the direct path alone.
+  const safe = { ...payload };
+  for (const name of SPOOLED_MATERIAL) if (Object.hasOwn(safe, name)) safe[name] = redactValue(redactToolStructure(safe[name]));
+  const safeInput = JSON.stringify(safe);
+  const destination = { store: capture.store.file, originId: capture.originId };
+  const kept = captureWithheld(safeInput) ? { kept: false, reason: 'material_withheld' } : await spoolEvent({ spool, input: safeInput, cwd, transcript: transcriptSize, boundBy, destination, now });
+  if (!kept.kept) {
+    // No durable copy: the direct path as before, and a loss it cannot avoid
+    // is recorded, never silent.
+    let outcome;
+    try { outcome = await captureEvent({ ...common, payload, event, cwd, boundBy }); }
+    catch (error) { outcome = error?.code === 'storage_lock_timeout' ? 'store_busy' : 'store_failed'; }
+    if (['store_busy', 'store_failed', 'out_of_time'].includes(outcome)) await recordDropped({ spool, reason: `${kept.reason}:${outcome}`, input, at: now() });
+    return outcome;
+  }
+  return drainSpool({ ...common, spool, own: kept.entry, destination, report });
+}
+
+// Whether the store's control ledger records a deletion or restore still to
+// complete; an unreadable ledger counts as one, so the check fails closed.
+async function deletionWaits(file) {
+  try { return Boolean((await readLedger(file))?.pending?.length); } catch { return true; }
+}
+
+// The time of the store's newest deletion knowledge (a tombstone or a
+// quarantine entry), or -Infinity. An entry without a readable time counts as
+// now: everything waiting predates it.
+function newestDeletion(ledger) {
+  let newest = -Infinity;
+  for (const entry of [...(ledger?.tombstones ?? []), ...(ledger?.quarantine ?? [])]) {
+    const at = Date.parse(entry?.at ?? entry?.quarantinedAt ?? '');
+    newest = Math.max(newest, Number.isFinite(at) ? at : Date.now());
+  }
+  return newest;
+}
+
+// Whether the default profile's current sign-in, as the CLI's own
+// configuration names it, is the account extraction bound: a keyed digest of
+// its e-mail compared with the one activation kept. Unreadable, absent or
+// different is not bound.
+async function defaultProfileIsBound(extraction, home) {
+  const bound = extraction.executor.accountEmailFingerprint;
+  if (!bound) return false;
+  try {
+    const file = join(home, '.claude.json');
+    if ((await stat(file)).size > 16 * 1024 * 1024) return false;
+    const email = JSON.parse(await readFile(file, 'utf8'))?.oauthAccount?.emailAddress;
+    return accountEmailDigest(extraction.executor.accountSalt, email) === bound;
+  } catch { return false; }
+}
+
+// The hook payload's material fields; the rest identifies the event.
+const SPOOLED_MATERIAL = Object.freeze(['prompt', 'last_assistant_message', 'tool_input', 'tool_response', 'error']);
+
+// The variables that put a session on a provider route of its own, apart from
+// the default profile's sign-in.
+const PROVIDER_ROUTE = /^(?:ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_BASE_URL|CLAUDE_CODE_USE_[A-Z_]+)$/iu;
+export const providerRouteSelected = (env) => Object.entries(env).some(([name, value]) => PROVIDER_ROUTE.test(name) && typeof value === 'string' && value !== '');
+
+// Outcomes that leave an entry waiting for a later hook: the store was busy,
+// the deadline came first, or the store is newer than this runtime.
+const RETRY_LATER = new Set(['store_busy', 'out_of_time', 'newer_schema']);
+// The outcomes after which a Stop or SessionEnd asks for extraction (extraction-trigger.js).
+const EXTRACTION_ELIGIBLE = new Set(['written', 'nothing_new', 'already_held', 'transcript', 'refused']);
+
+// One spooled entry into the store. The entry leaves the spool once the store
+// has decided it; otherwise it waits, and a failure that is not contention
+// counts an attempt (capture-spool.js). An entry kept for another store or
+// origin is never written here: it is dropped with a marker. { outcome, stop }:
+// stop when the store cannot take more now.
+async function replayEntry({ spool, entry, destination, ...common }) {
+  let value, payload, event;
+  try {
+    value = await readSpoolEntry(spool, entry);
+    payload = JSON.parse(value.input.charCodeAt(0) === 0xfeff ? value.input.slice(1) : value.input);
+    event = observedEvent(payload);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { outcome: 'replayed' };
+    await dropSpoolEntry(spool, entry, 'spool_entry_unreadable');
+    return { outcome: 'dropped' };
+  }
+  if (value.destination?.store !== destination.store || value.destination?.originId !== destination.originId) {
+    await dropSpoolEntry(spool, entry, 'capture_destination_changed');
+    return { outcome: 'dropped' };
+  }
+  if (event === null) { await settleSpoolEntry(spool, entry); return { outcome: 'not_captured' }; }
+  let outcome;
+  try {
+    outcome = await captureEvent({ ...common, payload, event, cwd: value.cwd, transcriptSize: value.transcriptSize ?? null, boundBy: value.boundBy ?? null });
+  } catch (error) {
+    if (error?.code !== 'storage_lock_timeout') {
+      await failSpoolEntry(spool, entry, error?.code ?? 'capture_failed');
+      return { outcome: 'store_failed' };
+    }
+    outcome = 'store_busy';
+  }
+  if (RETRY_LATER.has(outcome)) return { outcome, stop: true };
+  await settleSpoolEntry(spool, entry);
+  return { outcome, terminal: ['Stop', 'SessionEnd'].includes(event.event) };
+}
+
+// Times the drain is taken again for entries that arrived while it was held.
+const DRAIN_ROUNDS = 4;
+
+// Every spooled event is written by the one hook that holds the drain, oldest
+// first, so a session's events reach the store in their order and its first
+// transcript cursor is anchored by its first event. A hook that finds the drain
+// taken leaves its entry to the drainer. Such an entry was written before the
+// drainer let go, so the drainer, having found nothing more and let go, looks
+// once more and takes the drain again for what arrived (an entry it already
+// tried, and could not write yet, waits for the next hook, reported as waiting
+// input). Resolves the hook's own entry's outcome, or 'spooled'.
+async function drainSpool({ spool, own, destination, deadline, now, report, ...common }) {
+  const context = { ...common, spool, destination, deadline, now };
+  let result = 'spooled', idle;
+  const tried = new Set();
+  for (let round = 0; round < DRAIN_ROUNDS; round += 1) {
+    idle = false;
+    try {
+      await createDestinationFence(join(spool, 'drain'), { lockTimeoutMs: 0, staleLockMs: CAPTURE_STALE_LOCK_MS }).run(async () => {
+        // Entries age by the file system's clock, not the injected one.
+        await expireSpool(spool);
+        // Nothing is replayed while a deletion or restore waits, and nothing
+        // received before the store's newest deletion knowledge is replayed at
+        // all: a purge is never undone by input that waited through it. Such an
+        // entry is dropped with a marker, whatever project it would have gone to.
+        let deletedAt;
+        try {
+          const ledger = await readLedger(destination.store);
+          if (ledger?.pending?.length) return;
+          deletedAt = newestDeletion(ledger);
+        } catch { return; }
+        for (let pass = 0; pass < 4; pass += 1) {
+          const waiting = (await spoolEntries(spool)).filter((entry) => !tried.has(entry.name));
+          if (!waiting.length) { idle = true; return; }
+          for (const entry of waiting) {
+            if (now() + 2 * COMMIT_MARGIN_MS >= deadline) {
+              // The deadline stops the drain; an own entry not reached waits for that reason.
+              if (!tried.has(own.name) && result === 'spooled') result = 'out_of_time';
+              return;
+            }
+            tried.add(entry.name);
+            if (entry.at <= deletedAt) {
+              await dropSpoolEntry(spool, entry, 'deletion_after_receipt');
+              if (entry.key === own.key) result = 'dropped';
+              continue;
+            }
+            const replayed = await replayEntry({ ...context, entry });
+            // A Stop or SessionEnd written here asks for extraction, whichever hook drained it.
+            if (replayed.terminal && EXTRACTION_ELIGIBLE.has(replayed.outcome)) report.terminalWritten = true;
+            // The own entry, or one ahead of it that stopped the drain: its outcome is the own entry's too.
+            if (entry.key === own.key || (replayed.stop && entry.at <= own.at)) result = replayed.outcome;
+            if (replayed.stop) return;
+          }
+        }
+      });
+    } catch { break; } // Taken: its holder took it after these entries were written, and lists them.
+    if (!idle || now() + 2 * COMMIT_MARGIN_MS >= deadline) break;
+    if (!(await spoolEntries(spool).catch(() => [])).some((entry) => !tried.has(entry.name))) break;
+  }
+  return result;
+}
+
+// One event into the store: what a capture was before the spool.
+async function captureEvent({ capture, payload, event, deadline, record, registry, home, cwd, post, now, env, boundBy = null, transcriptSize = null }) {
+  const extraction = boundBy ? await activeExtraction(env) : null;
+  // Bound only under the activation the event's own hook judged it by.
+  const provenance = extraction && extraction.activationId === boundBy ? { extractionBinding: extractionBinding(extraction) } : {};
   const file = capture.store.file;
   if (await storeRepository(file)) return 'store_inside_repository';
   const workspace = await discoverWorkspace(cwd, { timeout: Math.max(1, Math.min(GIT_TIMEOUT_MS, deadline - now())) });
@@ -245,8 +431,14 @@ export async function runCapture({ capture, input, deadline, record = null, regi
   // Opened before the store's lock is taken, so the lock is never held while
   // the file is found, and after anything else here that can throw.
   const invocationContext = await readInvocationContext({ env, now });
-  const workerFiles = (await Promise.all([identityFile(env), usageFile(env), workerFenceFile(env), settlementFile(env)].map(async file => [await canonicalPath(file), await fenceLockPath(file)]))).flat();
+  const workerFiles = (await Promise.all([identityFile(env), usageFile(env), workerFenceFile(env), settlementFile(env), requestFile(env)].map(async file => [await canonicalPath(file), await fenceLockPath(file)]))).flat();
+  const artefactDirectories = record ? await Promise.all([spoolDirectory(record), droppedDirectory(spoolDirectory(record))].map((path) => canonicalPath(path).catch(() => path))) : [];
   const transcript = await openTranscript(event.transcriptPath);
+  // A replayed event anchors a session's first cursor where the transcript
+  // ended when the event arrived; a cursor already made reads on as usual
+  // (a size below it would read as a rewritten transcript).
+  const transcriptFor = (session) => (transcript && !transcript.missing && Number.isSafeInteger(transcriptSize) && transcriptSize >= 0 && !session?.cursor
+    ? { ...transcript, size: () => Math.min(transcript.size(), transcriptSize) } : transcript);
   const lockTimeoutMs = deadline - now() - COMMIT_MARGIN_MS;
   if (lockTimeoutMs <= 0) {
     transcript?.close?.();
@@ -272,13 +464,14 @@ export async function runCapture({ capture, input, deadline, record = null, regi
       // store below its ceiling (PR-36b amendment).
       const storeBytes = await storeFootprint(file);
       const held = new Set((current.records ?? []).filter((record) => record?.kind === 'capture').map((record) => record.id));
+      const session = (current.captureSessions ?? []).find((entry) => entry?.originId === capture.originId && entry?.sessionId === event.sessionId);
       const graph = createShadowGraph({ now: () => new Date(now()).toISOString() });
       graph.importData(current);
       let changed = privilegedExpireCapture(graph, { mayContinue }).changed;
       const bound = accessContext(graph, {}, 'cli', workspace, { confirmedByStore: true }).binding?.project ?? null;
       const project = bound !== null && covered(capture.coverage, bound) ? bound : null;
       const workerInvocations = invocationContext.workerInvocations.filter(row => Date.parse(row.from) <= entered && entered < Date.parse(row.to));
-      const context = { ...captureArtefacts({ storeFile: file, runtimeDirectory: capture.runtime?.path ?? null, activationFile: record, markerFiles, registryFile: registryCanonical, workerFiles }), home, mcpServerNames: capture.mcpServerNames ?? ['shadowgraph'], workerInvocations, observedAt: new Date(entered).toISOString(), correlationTokens: workerInvocations.map(row => row.correlationToken) };
+      const context = { ...captureArtefacts({ storeFile: file, runtimeDirectory: capture.runtime?.path ?? null, activationFile: record, markerFiles, registryFile: registryCanonical, workerFiles, artefactDirectories }), home, mcpServerNames: capture.mcpServerNames ?? ['shadowgraph'], workerInvocations, observedAt: new Date(entered).toISOString(), correlationTokens: workerInvocations.map(row => row.correlationToken) };
       // The transcript cursor's step; a throw is undone by its own transaction
       // and never costs the event's own item.
       const cursor = (step) => {
@@ -327,7 +520,7 @@ export async function runCapture({ capture, input, deadline, record = null, regi
             } else if (held.has(result.id)) outcome = 'already_held';
             else [item, changed] = [result, true];
           }
-          const read = cursor({ trigger: TRANSCRIPT_TRIGGERS.includes(event.event) ? event.event : null, triggerItemId: item?.id ?? null, transcript });
+          const read = cursor({ trigger: TRANSCRIPT_TRIGGERS.includes(event.event) ? event.event : null, triggerItemId: item?.id ?? null, transcript: transcriptFor(session) });
           if (read?.changed) {
             changed = true;
             if (outcome === 'nothing_new' || outcome === 'already_held') outcome = 'transcript';

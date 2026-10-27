@@ -1,9 +1,10 @@
 // Capture only requests a separate one-shot CLI process. No executor import,
 // model call, listener, store access, or wait for extraction occurs in the hook.
 import { spawn } from 'node:child_process';
+import { writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { activeExtraction } from './extraction-state.js';
+import { activeExtraction, requestFile } from './extraction-state.js';
 import { canonicalPath } from './owner-files.js';
 import { usageFile } from './extraction-budget.js';
 import { accountEmailDigest } from './extraction-contract.js';
@@ -32,6 +33,7 @@ export async function triggerExtraction({ event, outcome, deadline, env = proces
     const sessionEmail = Object.entries(env).find(([name]) => name.toUpperCase() === 'CLAUDE_CODE_USER_EMAIL')?.[1];
     const bound = activation.executor.accountEmailFingerprint;
     if (typeof sessionEmail === 'string' && sessionEmail.trim() && (!bound || accountEmailDigest(activation.executor.accountSalt, sessionEmail) !== bound)) return { status: 'refused', reason: 'session_account_differs' };
+    await writeFile(requestFile(env), `${new Date().toISOString()}\n`, { mode: 0o600 }).catch(() => {});
     const child = spawnProcess(process.execPath, [join(activation.runtime.path, 'src', 'cli.js'), 'extract', '--automatic'], {
       cwd: dirname(usageFile(env)), env: { ...workerEnvironment(env), NoDefaultCurrentDirectoryInExePath: '1' }, detached: true, shell: false, stdio: 'ignore', windowsHide: true
     });

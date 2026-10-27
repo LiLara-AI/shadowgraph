@@ -6,15 +6,21 @@ import { isDeepStrictEqual } from 'node:util';
 import { createDestinationFence, fenceLockPath } from '../revision-store.js';
 import { FROZEN_WORKER_BUDGETS, usageFile } from './extraction-budget.js';
 import { canonicalPath, repositoryOf, writeJsonAtomically } from './owner-files.js';
-import { HOST_PROFILES } from './extraction-contract.js';
+import { hostProfileFor, modelSelectable, RUNTIME_EVIDENCE_PROFILE } from './extraction-contract.js';
 
 export const workerFenceFile = (env = process.env) => join(dirname(usageFile(env)), 'extraction-worker');
 export const settlementFile = env => `${workerFenceFile(env)}.settlement.json`;
+// Touched by every trigger: a worker already running sees it and runs another
+// round, so a trigger that meets a busy worker is not lost (extraction-runtime.js).
+export const requestFile = env => join(dirname(usageFile(env)), 'extraction-requested');
 // A host profile that requires validation is valid only with the binary it names
 // and the record of that binary's passing host validation (activation.js).
 const validatedHost = (value) => {
-  const profile = Object.hasOwn(HOST_PROFILES, value?.hostVersion ?? '') ? HOST_PROFILES[value.hostVersion] : null;
+  const profile = hostProfileFor(value?.hostVersion);
   if (!profile) return false;
+  // A runtime-evidence receipt names that profile, and only such a receipt may run on it.
+  if (Boolean(profile.runtimeEvidence) !== (value.hostProfile === RUNTIME_EVIDENCE_PROFILE.id)) return false;
+  if (!modelSelectable(profile, value.model)) return false;
   if (profile.binarySha256 && value.binarySha256 !== profile.binarySha256) return false;
   const v = value.hostValidation;
   return !profile.requiresHostValidation || (/^[0-9a-f]{64}$/.test(v?.sha256 ?? '') && v.hostVersion === value.hostVersion
@@ -23,7 +29,7 @@ const validatedHost = (value) => {
 export function validExecutorReceipt(value) {
   return value?.ok === true && typeof value.executable === 'string' && isAbsolute(value.executable)
     && /^[0-9a-f]{64}$/.test(value.binarySha256 ?? '') && validatedHost(value)
-    && value.model === 'claude-opus-5[1m]' && Array.from({ length: 10 }, (_, i) => `E-${i + 1}`).every(key => value.restrictions?.[key] === true)
+    && Array.from({ length: 10 }, (_, i) => `E-${i + 1}`).every(key => value.restrictions?.[key] === true)
     // An activation without a bound account is not one this runtime runs.
     && /^[0-9a-f]{64}$/.test(value.accountFingerprint ?? '') && /^[0-9a-f]{32}$/.test(value.accountSalt ?? '')
     && (value.accountEmailFingerprint == null || /^[0-9a-f]{64}$/.test(value.accountEmailFingerprint));
@@ -37,7 +43,7 @@ export async function activeExtraction(env = process.env) {
     const record = JSON.parse(await readFile(file, 'utf8')), value = record?.capabilities?.extraction;
     if (record.version !== 1 || value?.state !== 'active' || !/^[0-9a-f-]{36}$/.test(value.activationId ?? '')
       || value.noOverageConfirmed !== true || !isDeepStrictEqual(value.budgets, FROZEN_WORKER_BUDGETS)
-      || value.model !== 'claude-opus-5[1m]' || !validExecutorReceipt(value.executor)
+      || value.model !== value.executor?.model || !validExecutorReceipt(value.executor)
       || typeof value.store?.file !== 'string' || !isAbsolute(value.store.file) || !['json', 'sqlite'].includes(value.store.storage)
       || value.runtime?.extraction !== true || typeof value.runtime.path !== 'string' || !isAbsolute(value.runtime.path)
       || !/^[0-9a-f]{40}$/.test(value.runtime.commit ?? '')

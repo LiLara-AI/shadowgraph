@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased — Claude Code CLI automatic memory (release candidate, not published)
+
+- Keep native capture hook input durable while the store is busy. Each event is redacted and spooled owner-only, outside every repository, and one drainer replays the spool oldest first. Losses are recorded as content-free markers. Delivery reports waiting and dropped input as `capture_input_waiting` and `capture_input_dropped` (independent review 2026-10-26, §5).
+- Extract on current Claude Code 2.x hosts through a runtime-evidence profile. Each invocation's own `stream-json` session account must show the confined session before its output is used. The owner selects the extraction model at activation (`--model`), choosing among current models.
+- Do not count a remote-settings cache of 5 bytes or less (at most `{}`) as managed policy. Every policy source with content still blocks.
+- Bind Claude Code CLI sessions for extraction only while the CLI's own current sign-in is the activation's account. A session with a profile selector is refused; one on its own provider route is captured but not extracted.
+- Run the quoted extraction recipe with corrections on the Claude route, and apply proposed user corrections as supersessions with history.
+- Add `shadowgraph sharing project|selected|all-permitted`, an owner-confirmed, revocable grant for Claude hook delivery, with the Codex route's meaning.
+- An extraction worker runs further bounded rounds while work remains, and a trigger that arrives during a drain is answered. The frozen per-drain and hourly budgets are unchanged.
+- Deliver the SessionStart working set as lines, falling back to the full record only when the line would drop a decisive part. Before this, one large decision could fill the 8 000-byte cap, and a newer, smaller record could crowd out the decision that said what was rejected and why (live proof 2026-10-27, case B).
+- Ask an item once more when the call ran but the executor's own checks refused its output (an unrecognised stream, an unverified turn count or session account), within the same budgets. A session's items are extracted in order, so one refused output used to leave the rest of that session pending until the next session ended (live proof 2026-10-27, case A').
+- Let the capture spool's drainer take the drain again for entries that arrived while it held it, so a burst of hooks leaves none waiting.
+- Add the [Claude Code CLI guide](docs/claude-code-integration.md), including its live evidence and the limits found by review and by the live proof that remain open.
+
 ## 0.42.3 — Technical Preview (2026-10-26)
 
 - Clarify evaluation versus persisted signals, rule-input interactions, scoped

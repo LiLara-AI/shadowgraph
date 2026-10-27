@@ -20,6 +20,8 @@ const requiredFixtureFiles = [
   'docs/api-reference.md',
   'docs/benchmark-report.md',
   'docs/extraction.md',
+  'docs/claude-code-integration.md',
+  'src/internal/capture-spool.js',
   'docs/codex-integration.md',
   'src/codex-cli.js',
   'src/codex-host.js',

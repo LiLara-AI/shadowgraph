@@ -21,7 +21,7 @@ import { extractionSupersession } from './internal/extraction-supersession.js';
 import { accessScopeContains, validateAccess, intersectAccessScope, accessDiagnostics, reconcileAccessLedger } from './access.js';
 import { createAccessLifecycle } from './internal/access-lifecycle.js';
 import { assertCreationInput } from './internal/creation-id.js';
-import { EXTRACTION_RECIPE, CODEX_EXTRACTION_MODEL, CODEX_PROMPT_VERSION, CODEX_OUTPUT_SCHEMA_VERSION } from './internal/extraction-contract.js';
+import { EXTRACTION_RECIPE, CURRENT_EXTRACTION_MODELS, CODEX_EXTRACTION_MODEL, CODEX_PROMPT_VERSION, CODEX_OUTPUT_SCHEMA_VERSION } from './internal/extraction-contract.js';
 import { attemptOutcome } from './internal/outcome.js';
 import { RUNTIME_MISSES, missReachedBy, runtimeMissLedgerIssue, withFallbackMisses } from './internal/miss-ledger.js';
 import { supersessionOrder, temporalEvidence, versionTimes } from './internal/temporal-evidence.js';
@@ -1508,7 +1508,10 @@ export function createShadowGraph(options = {}) {
         || (isValidIsoInstant(entity.updatedAt) && compareInstants(entity.updatedAt, item.updatedAt) > 0));
       const expired = rawExpired(item, at);
       const rawAvailable = !expired && item.contentRef !== null && (extras.get(CAPTURE_CONTENT) ?? []).some((entry) => entry.contentRef === item.contentRef);
-      const recipe = item.receipts.at(-1)?.provider === 'codex' ? { ...EXTRACTION_RECIPE, model: CODEX_EXTRACTION_MODEL, promptVersion: CODEX_PROMPT_VERSION, schemaVersion: CODEX_OUTPUT_SCHEMA_VERSION } : EXTRACTION_RECIPE;
+      const last = item.receipts.at(-1);
+      // A Claude receipt on the quoted recipe ran the model its activation selected.
+      const recipe = last?.provider === 'codex' ? { ...EXTRACTION_RECIPE, model: CODEX_EXTRACTION_MODEL, promptVersion: CODEX_PROMPT_VERSION, schemaVersion: CODEX_OUTPUT_SCHEMA_VERSION }
+        : last?.promptVersion === CODEX_PROMPT_VERSION && CURRENT_EXTRACTION_MODELS.includes(last.model) ? { model: last.model, promptVersion: CODEX_PROMPT_VERSION, schemaVersion: CODEX_OUTPUT_SCHEMA_VERSION } : EXTRACTION_RECIPE;
       const recipeChanges = item.state === 'extracted'
         ? Object.keys(recipe).filter(key => item.receipts.at(-1)?.[key] !== recipe[key]) : [];
       const lastReprocessing = item.receipts.at(-1)?.reprocessing;
@@ -2233,7 +2236,8 @@ export function createShadowGraph(options = {}) {
       }
       if (proposed.interpretation) fields.interpretation = clone(proposed.interpretation);
       const correction = proposed.correction, previousDecision = correction && records.get(correction.recordId);
-      const applyCorrection = input.receipt.provider === 'codex' && item.source.role === 'user' && proposed.kind === 'decision'
+      // The quoted recipe proposes corrections, on the Codex route and on a Claude runtime-evidence activation.
+      const applyCorrection = (input.receipt.provider === 'codex' || input.receipt.promptVersion === CODEX_PROMPT_VERSION) && item.source.role === 'user' && proposed.kind === 'decision'
         && previousDecision?.kind === 'decision' && captureOwner(item).owns(previousDecision)
         && !['superseded', 'archived', 'abandoned', 'stale'].includes(previousDecision.status)
         && createHash('sha256').update(JSON.stringify(previousDecision)).digest('hex') === correction.expectedHash;

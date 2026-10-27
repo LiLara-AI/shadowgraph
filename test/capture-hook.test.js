@@ -16,6 +16,7 @@ import { privilegedBindProject, privilegedSnapshot } from '../src/internal/snaps
 import { discoverWorkspace } from '../src/internal/access-transport.js';
 import { DELIVERY_FRAME, deliveryEndLine } from '../src/internal/delivery-marker.js';
 import { mintOriginId } from '../src/scope.js';
+import { spoolDirectory, spoolEntries, spoolStatus } from '../src/internal/capture-spool.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const CLI = resolve('src/cli.js');
@@ -368,12 +369,21 @@ test('every resolved project is captured by default, a Stop included, and a dire
   assert.equal((await load(s)).captureContent.find((entry) => entry.contentRef === stop.contentRef).text, 'Done in beta.');
 });
 
+// Each event is in the store or waits in the spool for the next hook (a hook
+// on a slow machine can reach its deadline with entries still waiting); none
+// is dropped, and the next hook writes every one that waits.
 test('a burst of hook processes on one store records every event', async (t) => {
   const s = await setup(t);
   const results = await Promise.all(Array.from({ length: 8 }, (_, index) => hook(s, prompt(`burst ${index}`, { message_id: `msg_${index}`, session_id: `session-${index}` }))));
   for (const result of results) silent(result);
-  assert.equal((await items(s)).length, 8);
-  t.diagnostic(`8 parallel captures: slowest ${Math.max(...results.map((result) => result.ms))} ms`);
+  const spool = spoolDirectory(s.activation);
+  const waiting = (await spoolEntries(spool)).length;
+  assert.equal((await items(s)).length + waiting, 8);
+  assert.equal((await spoolStatus(spool)).dropped, 0);
+  silent(await hook(s, prompt('after the burst', { message_id: 'msg_after', session_id: 'session-after' })));
+  assert.equal((await items(s)).length, 9);
+  assert.deepEqual(await spoolEntries(spool), []);
+  t.diagnostic(`8 parallel captures: slowest ${Math.max(...results.map((result) => result.ms))} ms; ${waiting} waited for the next hook`);
 });
 
 test('a SQLite store is never captured into: a record naming one is inert', async (t) => {
