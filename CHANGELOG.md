@@ -11,6 +11,7 @@
 - An extraction worker runs further bounded rounds while work remains, and a trigger that arrives during a drain is answered. The frozen per-drain and hourly budgets are unchanged.
 - Deliver the SessionStart working set as lines, falling back to the full record only when the line would drop a decisive part. Before this, one large decision could fill the 8 000-byte cap, and a newer, smaller record could crowd out the decision that said what was rejected and why (live proof 2026-10-27, case B).
 - Ask an item once more when the call ran but the executor's own checks refused its output (an unrecognised stream, an unverified turn count or session account), within the same budgets. A session's items are extracted in order, so one refused output used to leave the rest of that session pending until the next session ended (live proof 2026-10-27, case A').
+- Let a user's correction supersede the user's earlier decision when that decision was kept verbatim as a memory (live proof 2026-10-27, case C2). The memory keeps its text and closes its validity; assistant and tool memories are never offered as targets.
 - Let the capture spool's drainer take the drain again for entries that arrived while it held it, so a burst of hooks leaves none waiting.
 - Add the [Claude Code CLI guide](docs/claude-code-integration.md), including its live evidence and the limits found by review and by the live proof that remain open.
 

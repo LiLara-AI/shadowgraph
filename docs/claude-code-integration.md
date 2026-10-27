@@ -51,7 +51,7 @@ Managed policy is never bypassed:
 
 The runtime-evidence profile runs the quoted recipe with corrections:
 - Fields quote the source exactly.
-- A later user message that explicitly corrects an earlier user decision proposes a correction. The kernel then supersedes the earlier decision and keeps its history.
+- A later user message that explicitly corrects an earlier user decision proposes a correction. The kernel then supersedes the earlier decision and keeps its history. This also holds when the earlier decision was kept verbatim as the user's message.
 
 ### Which sessions are extracted
 
@@ -132,7 +132,7 @@ These limits were found by independent review or by the live proof, and are not 
 - **Order behind a block.** A session's items are extracted in order. An item whose output is refused twice, or one blocked by the route itself, stays pending, and so do the items after it, until a later trigger (normally the next Stop). Delivery reports them as pending, and the executor's specific reason is reported only as `executor_blocked`.
 - **Host exit on Windows (observed, cause not established).** In the live proof, `claude -p` printed its result at Stop but did not exit until the extraction worker it had started finished: about 2 minutes, up to the worker's 4-minute wall time. When no worker could run (its fence held), the host exited at once. Host work is not blocked, but the process can exit late.
 - **A user's decision kept as memory.** The extractor may propose a user's decision with fields that the claim verifier cannot establish as exact, unqualified quotations. The decision is then kept as the user's whole message, verbatim, as a memory: faithful, delivered and searchable, but not a decision. This happened to the Arabic decision in the live proof and to a one-sentence English one. The English decision frame does not read Arabic, and a sentence quoting code with dots in it (`Math.round(...)`) can defeat it in English too.
-- **Corrections target decisions only.** A user's correction supersedes an earlier **decision**, with history kept. A decision kept as memory (above) is not superseded: both remain current until one is reviewed.
+- **Corrections and verbatim decisions.** A user's correction supersedes an earlier user decision, whether it was structured as a decision or kept verbatim as a memory (above). The memory keeps its text; its validity is closed and it links to the correcting decision. An assistant's or a tool's memory is never a correction target.
 - **Replay time.** An event that waited in the spool carries the time it was written to the store as `observedAt`, not the time its hook received it. Order is kept.
 
 ## Support and evidence
@@ -146,7 +146,7 @@ Verified live (2026-10-27) on Windows 11 with Claude Code CLI **2.1.302** in pri
 | Recovery of pending extraction | Items left pending by a held worker were extracted by the next session's trigger |
 | Fresh session receives experience | SessionStart delivered the decision with its rejected alternative to a fresh session (Arabic prompt) |
 | Fresh session uses experience | Asked in English what was already decided, a fresh session answered from the delivered records alone. On the Arabic coding task it wrote the right parser first, but never referred to the earlier work, so use there is not shown |
-| Correction | An English user correction superseded a user decision, with history; an Arabic decision was kept as memory and could not be superseded |
+| Correction | An English user correction superseded a user decision, with history. An Arabic decision kept verbatim as memory could not be superseded in the first run; that is fixed, and verified in the second run below |
 | Sharing | `selected`, `all-permitted` (with `--exclude`) and `project` changed what another bound project receives; each change revoked the previous grant |
 
 Not verified: Claude Desktop, the interactive TUI, resume flows, macOS and Linux hosts, and languages other than English and Arabic. Desktop support is not inferred from these CLI tests. The review package accompanying the change keeps executed, inferred and untested results apart.

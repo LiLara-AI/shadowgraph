@@ -2236,9 +2236,15 @@ export function createShadowGraph(options = {}) {
       }
       if (proposed.interpretation) fields.interpretation = clone(proposed.interpretation);
       const correction = proposed.correction, previousDecision = correction && records.get(correction.recordId);
+      // A user's decision the claim checks could not structure is kept as the
+      // user's own message, verbatim, as a memory (extraction-output.js). A
+      // correction reaches it as it reaches a decision; the memory is not read
+      // into, only closed and linked to what replaces it.
+      const verbatimDecision = previousDecision?.kind === 'memory' && previousDecision.status === 'active'
+        && captures.get(previousDecision.captureRef)?.source?.role === 'user';
       // The quoted recipe proposes corrections, on the Codex route and on a Claude runtime-evidence activation.
       const applyCorrection = (input.receipt.provider === 'codex' || input.receipt.promptVersion === CODEX_PROMPT_VERSION) && item.source.role === 'user' && proposed.kind === 'decision'
-        && previousDecision?.kind === 'decision' && captureOwner(item).owns(previousDecision)
+        && (previousDecision?.kind === 'decision' || verbatimDecision) && captureOwner(item).owns(previousDecision)
         && !['superseded', 'archived', 'abandoned', 'stale'].includes(previousDecision.status)
         && createHash('sha256').update(JSON.stringify(previousDecision)).digest('hex') === correction.expectedHash;
       if (applyCorrection) fields.correction = { status: 'model_proposed', recordId: correction.recordId,
@@ -2258,7 +2264,9 @@ export function createShadowGraph(options = {}) {
       decorate(records.get(record.id), record.id, fields);
       for (const entry of journal) decorate(entry.payload, record.id, fields);
       for (const value of idempotency.values()) decorate(value, record.id, fields);
-      if (applyCorrection) supersedeDecision({ project: item.project, originId: item.originId, decisionId: previousDecision.id, replacementId: record.id });
+      // A memory is closed and linked as a reclassified one is (supersedeExtractionRecord).
+      if (applyCorrection && verbatimDecision) supersedeExtractionRecord(previousDecision, records.get(record.id), at);
+      else if (applyCorrection) supersedeDecision({ project: item.project, originId: item.originId, decisionId: previousDecision.id, replacementId: record.id });
       producedRecordIds.push(record.id);
     }
     if (producedRecordIds.length) {

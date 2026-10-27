@@ -222,3 +222,68 @@ test('on the Claude route a later user correction supersedes the earlier decisio
   assert.equal(extracted.receipts.at(-1).model, MODEL);
   assert.equal(extracted.receipts.at(-1).promptVersion, CODEX_PROMPT_VERSION);
 });
+
+// Live proof 2026-10-27, case C2: an Arabic decision the claim checks could not
+// structure was kept verbatim as a memory, and a later English correction had
+// nothing to supersede. The user's own verbatim decision is now a candidate.
+test('a user correction supersedes a user decision kept verbatim as a memory; an assistant memory is never offered', async (t) => {
+  const { createShadowGraph } = await import('../src/shadowgraph.js');
+  const { createStorage } = await import('../src/storage.js');
+  const { privilegedRecordCapture, privilegedSnapshot } = await import('../src/internal/snapshot.js');
+  const { claimCapture, commitCapture } = await import('../src/internal/extraction-worker.js');
+  const { QUOTED_RECIPE } = await import('../src/internal/extraction-contract.js');
+  const root = await scratchDirectory(t, 'shadowgraph-evidence-verbatim-correction-');
+  const binding = { provider: 'claude', accountFingerprint: 'a'.repeat(64), setupId: '12ab5678-1234-1234-1234-123456789012' };
+  const options = { type: 'json', file: join(root, 'memory.json'), env: { SHADOWGRAPH_HOME: root }, project: 'inv', provider: 'claude', recipe: QUOTED_RECIPE, model: MODEL, extractionBinding: binding };
+  const admission = { limits: { maxStoreBytes: 2 ** 24, maxQueueDepth: 100, maxItemBytes: 65536, maxItemsPerSession: 100 }, storeBytes: 0 };
+  const capture = (graph, text, sessionId, role) => privilegedRecordCapture(graph, { project: 'inv', originId: 'inv-origin', text,
+    source: { event: role === 'user' ? 'UserPromptSubmit' : 'Stop', sessionId, role, hostEventId: `${sessionId}-${role}` },
+    observation: { host: 'claude-code', hostVersion: null, toolName: null, cwd: null, outcome: null, extractionBinding: binding }, admission });
+  const save = async (graph) => { const store = await createStorage(options); await store.save(privilegedSnapshot(graph)); store.close(); };
+  const load = async () => { const store = await createStorage(options); try { return await store.load(); } finally { store.close(); } };
+  const receipt = { invocationStarted: true, model: MODEL };
+  const arabic = 'قرار لهذا المشروع: نقرّب مبالغ الفواتير إلى سنتين باستخدام Math.round(amount * 100) / 100 لأنه أبسط ولا يحتاج مكتبة. سجّل ذلك في README.md تحت عنوان "Rounding" فقط.';
+  const echo = 'Rounding invoice amounts with Math.round(amount * 100) / 100 is noted.';
+  const graph = createShadowGraph();
+  capture(graph, arabic, 's1', 'user'); capture(graph, echo, 's1', 'assistant');
+  await save(graph);
+  // The fields the extractor proposed live (evidence/live/B2E/diag/replay-C1.json):
+  // partial Arabic quotes the checks do not establish, so the user's whole
+  // message is kept verbatim as a memory.
+  const first = await claimCapture(options);
+  assert.equal((await commitCapture(options, first, { status: 'success', receipt, value: { records: [{ kind: 'decision', fields: [
+    { name: 'title', text: 'قرار لهذا المشروع', sourceRef: first.id }, { name: 'chosen', text: 'نقرّب مبالغ الفواتير إلى سنتين باستخدام Math.round(amount * 100) / 100 لأنه أبسط ولا يحتاج مكتبة.', sourceRef: first.id },
+    { name: 'reason', text: 'لأنه أبسط ولا يحتاج مكتبة', sourceRef: first.id }] }] } })).status, 'committed');
+  const reply = await claimCapture(options);
+  assert.equal((await commitCapture(options, reply, { status: 'success', receipt, value: { records: [{ kind: 'memory', fields: [{ name: 'text', text: echo, sourceRef: reply.id }] }] } })).status, 'committed');
+  let data = await load();
+  const verbatim = data.records.find((row) => row.kind === 'memory' && row.text === arabic);
+  assert.ok(verbatim, 'the Arabic decision is kept verbatim as a memory');
+  const assistantMemory = data.records.find((row) => row.kind === 'memory' && row.text === echo);
+  assert.ok(assistantMemory);
+  const correction = 'Correction to the rounding decision: round invoice amounts with Number(amount.toFixed(2)) instead of Math.round(amount * 100) / 100, because Math.round(amount * 100) / 100 rounds 1.005 down to 1 in our tests.';
+  const merged = createShadowGraph(); merged.importData(data);
+  capture(merged, correction, 's2', 'user');
+  await save(merged);
+  const second = await claimCapture(options);
+  assert.deepEqual(second.correctionCandidates.map((candidate) => candidate.recordId), [verbatim.id], 'only the user\'s own verbatim decision is offered');
+  assert.equal(second.correctionCandidates[0].priorChosen, arabic);
+  const [candidate] = second.correctionCandidates;
+  assert.equal((await commitCapture(options, second, { status: 'success', receipt, value: { records: [{ kind: 'decision', fields: [{ name: 'chosen', text: correction, sourceRef: second.id }],
+    correction: { recordId: candidate.recordId, priorChosen: candidate.priorChosen, statement: correction } }] } })).status, 'committed');
+  data = await load();
+  const closed = data.records.find((row) => row.id === verbatim.id);
+  const fresh = data.records.find((row) => row.kind === 'decision' && row.correction?.recordId === verbatim.id);
+  assert.ok(fresh, 'the correcting decision names the verbatim memory');
+  assert.equal(closed.status, 'superseded');
+  assert.equal(closed.supersededBy, fresh.id);
+  assert.ok(closed.temporal.invalidatedAt && closed.temporal.validTo, 'the memory\'s validity is closed, its text kept');
+  assert.equal(closed.text, arabic);
+  assert.equal(data.records.find((row) => row.id === assistantMemory.id).status, 'active', 'an assistant memory is untouched');
+  // Delivery reads the memory as history and the correction as current.
+  const reader = createShadowGraph(); reader.importData(data);
+  const states = Object.fromEntries(reader.context({ project: 'inv', query: 'rounding invoice amounts Math.round', compact: false }).relevant.items
+    .map((item) => [item.record.id, item.temporalEvidence?.currentState?.state]));
+  assert.equal(states[fresh.id], 'current');
+  if (verbatim.id in states) assert.notEqual(states[verbatim.id], 'current');
+});

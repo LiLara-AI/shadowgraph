@@ -98,16 +98,19 @@ export async function claimCapture(options) {
       const selected = { ...item, lease };
       if (claimAuthorityInvalid(selected, live, at)) continue;
       const generation = effectiveGeneration(selected, ledger, live, at);
-      // Only this setup's independently sourced user decisions can be considered.
-      // No historical/foreign/private cross-project material enters this route.
+      // Only this setup's independently sourced user decisions can be considered:
+      // a decision, or a user's decision kept verbatim as a memory (its whole
+      // message is its prior wording). No historical/foreign/private
+      // cross-project material enters this route.
       const correctionCandidates = quotedRecipe(options.provider, options.recipe) && item.source?.role === 'user'
         ? graph.context({ project: item.project, query: text, limit: 4, compact: false }).relevant.items.flatMap(({ record }) => {
           const sourceCapture = live.records.find(value => value.id === record?.captureRef);
           const original = live.records.find(value => value.id === record?.id);
-          return record?.kind === 'decision' && original && !record.memoryDependencies?.length
+          const prior = record?.kind === 'decision' ? record.chosen : record?.kind === 'memory' && record.status === 'active' ? record.text : null;
+          return typeof prior === 'string' && prior && original && !record.memoryDependencies?.length
             && !['superseded', 'archived', 'abandoned', 'stale'].includes(record.status)
             && sourceCapture?.source?.role === 'user' && sameExtractionBinding(sourceCapture.observation?.extractionBinding, options.extractionBinding)
-            ? [{ recordId: record.id, priorChosen: record.chosen, expectedHash: digest(JSON.stringify(original)) }] : [];
+            ? [{ recordId: record.id, priorChosen: prior, expectedHash: digest(JSON.stringify(original)) }] : [];
         }) : [];
       options.beforeClaim?.({ inputBytes: Buffer.byteLength(extractionPrompt(item, text, { ...options, correctionCandidates })), journalEntries: sessionJournalEntries(live.journal, item) + 2 });
       const claimed = privilegedClaimCapture(graph, { id: item.id, project: options.project, originId: options.originId, lease });
