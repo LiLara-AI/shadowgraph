@@ -318,10 +318,36 @@ test('SessionStart delivers the working set newest first and mixed by kind, and 
   const { head, items } = parsed(await run([], { cwd, stdin: hook('SessionStart'), env: { SHADOWGRAPH_FILE: file } }));
   assert.deepEqual([head.relevance, head.limitation.code, head.total], ['not_assessed', 'relevance_not_assessed', 63]);
   assert.ok(head.omittedForSize > 0);
-  // Past the read's default page of 50: the newest of all of it comes first.
-  assert.equal(items[0].record.title, 'decision number 59');
-  assert.equal(items[1].record.solution, 'attempt number 2');
-  assert.ok(items.filter((item) => item.record.kind === 'attempt').length >= 2);
+  // Past the read's default page of 50: the newest of all of it comes first,
+  // each as its line, which carries its expansion handle.
+  assert.ok(items.every((item) => item.tier === 'T1' && item.expansion?.recordId && item.expansion.digest));
+  assert.match(items[0].line, /^Decision "decision number 59"/u);
+  assert.match(items[1].line, /^Attempt "attempt number 2"/u);
+  assert.ok(items.filter((item) => item.line.startsWith('Attempt')).length >= 2);
+});
+
+test('SessionStart: a decision with its rejected alternative and source context is not crowded out by a newer, smaller one', async (t) => {
+  const { cwd, file } = await workspace(t);
+  let clock = Date.parse('2026-01-01T00:00:00.000Z');
+  await seed(file, (graph) => {
+    graph.addDecision({ project: 'app', title: 'Parse hours explicitly', chosen: 'Parse the export format explicitly and validate the whole cell',
+      alternatives: [{ label: 'parseFloat after replacing the separators', reasonRejected: 'It still reads 2,5- as 2 and turns abc into 0', status: 'rejected' }],
+      evidence: Array.from({ length: 7 }, (unused, index) => `Measured on the sample export, row ${index}: ${'7,5;2,5-;1.234,5 '.repeat(15)}`) });
+    graph.addDecision({ project: 'app', title: 'Rewrite the parser', chosen: 'I will rewrite the parser' });
+  }, { now: () => new Date(clock += 60_000).toISOString() });
+  // The older record fits the cap alone, but delivered in full after the
+  // newer, smaller one it found no room: the one that says what was rejected
+  // was the one left out.
+  const stored = JSON.parse(readFileSync(file, 'utf8')).records;
+  const [explicitRecord, newerRecord] = ['Parse hours explicitly', 'Rewrite the parser'].map((title) => stored.find((record) => record.title === title));
+  assert.ok(bytes(JSON.stringify(explicitRecord)) < DELIVERY_CAP_BYTES);
+  const { head, items } = parsed(await run([], { cwd, stdin: hook('SessionStart'), env: { SHADOWGRAPH_FILE: file } }));
+  assert.deepEqual([head.total, head.delivered, head.omittedForSize], [2, 2, 0]);
+  assert.deepEqual(items.map(idOf), [newerRecord.id, explicitRecord.id]);
+  const explicit = items[1];
+  assert.equal(explicit.tier, 'T1');
+  assert.match(explicit.line, /parseFloat after replacing the separators/u);
+  assert.match(explicit.line, /It still reads 2,5- as 2 and turns abc into 0/u);
 });
 
 test('shape: exactly hookSpecificOutput with the event and its context; no decision, continue or stop field; any other input is silent', async (t) => {

@@ -9,6 +9,7 @@
 - Run the quoted extraction recipe with corrections on the Claude route, and apply proposed user corrections as supersessions with history.
 - Add `shadowgraph sharing project|selected|all-permitted`, an owner-confirmed, revocable grant for Claude hook delivery, with the Codex route's meaning.
 - An extraction worker runs further bounded rounds while work remains, and a trigger that arrives during a drain is answered. The frozen per-drain and hourly budgets are unchanged.
+- Deliver the SessionStart working set as lines, falling back to the full record only when the line would drop a decisive part. Before this, one large decision could fill the 8 000-byte cap, and a newer, smaller record could crowd out the decision that said what was rejected and why (live proof 2026-10-27, case B).
 - Add the [Claude Code CLI guide](docs/claude-code-integration.md), including the limits found by review that remain open.
 
 ## 0.42.3 — Technical Preview (2026-10-26)
