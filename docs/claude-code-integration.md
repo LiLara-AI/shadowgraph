@@ -124,6 +124,7 @@ These limits were found by independent review and are not closed:
 - **Order.** Events are written oldest first by one drainer, with two gaps:
   - an event whose spool write is still in progress, for milliseconds, is not yet visible to a concurrent drain;
   - when the spool itself cannot be written, an event takes the direct path and can land ahead of waiting ones.
+- **Waiting input.** A hook that reaches its deadline with entries still in the spool leaves them for the next hook. They are durable and reported as `capture_input_waiting` until then.
 - **Destination.** An entry names its store path and origin, not the store's identity. A store deleted and recreated at the same path while entries wait receives them.
 - **Sharing.** A crash between issuing a grant and saving the activation record, or a failed rollback, can leave a live grant the record does not name. It expires at its `--expires` time (30 days by default) and is listed by `shadowgraph access status`, where `shadowgraph access revoke <id>` removes it.
 - **Hand-off.** A trigger is answered if the running worker exits within 5 seconds of its last check. A worker stalled longer leaves the request to the next trigger. Every Stop sends one.

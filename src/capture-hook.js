@@ -355,55 +355,65 @@ async function replayEntry({ spool, entry, destination, ...common }) {
   return { outcome, terminal: ['Stop', 'SessionEnd'].includes(event.event) };
 }
 
+// Times the drain is taken again for entries that arrived while it was held.
+const DRAIN_ROUNDS = 4;
+
 // Every spooled event is written by the one hook that holds the drain, oldest
 // first, so a session's events reach the store in their order and its first
 // transcript cursor is anchored by its first event. A hook that finds the drain
-// taken leaves its entry to the drainer, which lists the spool again before it
-// stops; one that arrives after that waits for the next hook, reported as
-// waiting input. Resolves the hook's own entry's outcome, or 'spooled'.
+// taken leaves its entry to the drainer. Such an entry was written before the
+// drainer let go, so the drainer, having found nothing more and let go, looks
+// once more and takes the drain again for what arrived (an entry it already
+// tried, and could not write yet, waits for the next hook, reported as waiting
+// input). Resolves the hook's own entry's outcome, or 'spooled'.
 async function drainSpool({ spool, own, destination, deadline, now, report, ...common }) {
   const context = { ...common, spool, destination, deadline, now };
-  let result = 'spooled';
-  try {
-    await createDestinationFence(join(spool, 'drain'), { lockTimeoutMs: 0, staleLockMs: CAPTURE_STALE_LOCK_MS }).run(async () => {
-      // Entries age by the file system's clock, not the injected one.
-      await expireSpool(spool);
-      // Nothing is replayed while a deletion or restore waits, and nothing
-      // received before the store's newest deletion knowledge is replayed at
-      // all: a purge is never undone by input that waited through it. Such an
-      // entry is dropped with a marker, whatever project it would have gone to.
-      let deletedAt;
-      try {
-        const ledger = await readLedger(destination.store);
-        if (ledger?.pending?.length) return;
-        deletedAt = newestDeletion(ledger);
-      } catch { return; }
-      const tried = new Set();
-      for (let pass = 0; pass < 4; pass += 1) {
-        const waiting = (await spoolEntries(spool)).filter((entry) => !tried.has(entry.name));
-        if (!waiting.length) return;
-        for (const entry of waiting) {
-          if (now() + 2 * COMMIT_MARGIN_MS >= deadline) {
-            // The deadline stops the drain; an own entry not reached waits for that reason.
-            if (!tried.has(own.name) && result === 'spooled') result = 'out_of_time';
-            return;
+  let result = 'spooled', idle;
+  const tried = new Set();
+  for (let round = 0; round < DRAIN_ROUNDS; round += 1) {
+    idle = false;
+    try {
+      await createDestinationFence(join(spool, 'drain'), { lockTimeoutMs: 0, staleLockMs: CAPTURE_STALE_LOCK_MS }).run(async () => {
+        // Entries age by the file system's clock, not the injected one.
+        await expireSpool(spool);
+        // Nothing is replayed while a deletion or restore waits, and nothing
+        // received before the store's newest deletion knowledge is replayed at
+        // all: a purge is never undone by input that waited through it. Such an
+        // entry is dropped with a marker, whatever project it would have gone to.
+        let deletedAt;
+        try {
+          const ledger = await readLedger(destination.store);
+          if (ledger?.pending?.length) return;
+          deletedAt = newestDeletion(ledger);
+        } catch { return; }
+        for (let pass = 0; pass < 4; pass += 1) {
+          const waiting = (await spoolEntries(spool)).filter((entry) => !tried.has(entry.name));
+          if (!waiting.length) { idle = true; return; }
+          for (const entry of waiting) {
+            if (now() + 2 * COMMIT_MARGIN_MS >= deadline) {
+              // The deadline stops the drain; an own entry not reached waits for that reason.
+              if (!tried.has(own.name) && result === 'spooled') result = 'out_of_time';
+              return;
+            }
+            tried.add(entry.name);
+            if (entry.at <= deletedAt) {
+              await dropSpoolEntry(spool, entry, 'deletion_after_receipt');
+              if (entry.key === own.key) result = 'dropped';
+              continue;
+            }
+            const replayed = await replayEntry({ ...context, entry });
+            // A Stop or SessionEnd written here asks for extraction, whichever hook drained it.
+            if (replayed.terminal && EXTRACTION_ELIGIBLE.has(replayed.outcome)) report.terminalWritten = true;
+            // The own entry, or one ahead of it that stopped the drain: its outcome is the own entry's too.
+            if (entry.key === own.key || (replayed.stop && entry.at <= own.at)) result = replayed.outcome;
+            if (replayed.stop) return;
           }
-          tried.add(entry.name);
-          if (entry.at <= deletedAt) {
-            await dropSpoolEntry(spool, entry, 'deletion_after_receipt');
-            if (entry.key === own.key) result = 'dropped';
-            continue;
-          }
-          const replayed = await replayEntry({ ...context, entry });
-          // A Stop or SessionEnd written here asks for extraction, whichever hook drained it.
-          if (replayed.terminal && EXTRACTION_ELIGIBLE.has(replayed.outcome)) report.terminalWritten = true;
-          // The own entry, or one ahead of it that stopped the drain: its outcome is the own entry's too.
-          if (entry.key === own.key || (replayed.stop && entry.at <= own.at)) result = replayed.outcome;
-          if (replayed.stop) return;
         }
-      }
-    });
-  } catch {}
+      });
+    } catch { break; } // Taken: its holder took it after these entries were written, and lists them.
+    if (!idle || now() + 2 * COMMIT_MARGIN_MS >= deadline) break;
+    if (!(await spoolEntries(spool).catch(() => [])).some((entry) => !tried.has(entry.name))) break;
+  }
   return result;
 }
 

@@ -190,6 +190,20 @@ test('an entry that keeps failing is dropped with a marker after its attempts, a
   assert.deepEqual(reasons.sort(), ['attempts_exhausted:synthetic', 'expired']);
 });
 
+// CI (ubuntu, Node 24, 2026-10-27): of a burst of hooks, the entries one wrote
+// while another drained, after that drainer's last listing, waited for the next
+// hook. The drainer now looks again once it lets go.
+test('a burst of concurrent hooks leaves no entry waiting once every hook has returned', { timeout: 120_000 }, async (t) => {
+  const s = await setup(t);
+  for (let round = 0; round < 3; round += 1) {
+    const outcomes = await Promise.all(Array.from({ length: 12 }, (unused, index) =>
+      capture(s, prompt(`burst ${round}-${index}`, { message_id: `burst-${round}-${index}`, session_id: `session-${round}-${index}` }))));
+    assert.ok(outcomes.every((outcome) => ['written', 'spooled'].includes(outcome)), outcomes.join());
+    assert.deepEqual(await spoolEntries(s.spool), [], `round ${round}: ${outcomes.join()}`);
+  }
+  assert.equal((await captures(s)).length, 36);
+});
+
 // Review of the spool (2026-10-27), finding 5: every spooled event is written
 // by the one hook holding the drain, oldest first; a hook that finds it taken
 // leaves its entry rather than writing ahead of older ones.
