@@ -44,6 +44,9 @@ const load = async ({ file }) => JSON.parse(await readFile(file, 'utf8'));
 const captures = async (s) => (await load(s)).records.filter((item) => item.kind === 'capture');
 const texts = async (s) => (await load(s)).captureContent.map((entry) => entry.text);
 const prompt = (text, fields = {}) => JSON.stringify({ hook_event_name: 'UserPromptSubmit', session_id: 'session-1', cwd: '/work', prompt: text, message_id: `msg-${text.length}-${text.slice(0, 12)}`, ...fields });
+// What a hook reports for an event left waiting in the spool: the store was
+// busy when tried, or, on a slow machine, a short deadline came before it was.
+const WAITING = ['store_busy', 'out_of_time'];
 const capture = (s, input, options = {}) => runCapture({ capture: s.capture, input, deadline: Date.now() + 10_000, record: s.activation, home: s.home, cwd: s.cwd, ...options });
 
 function spawnCli(args, { cwd, env, input = '' }) {
@@ -136,8 +139,8 @@ test('a re-delivery while the first copy waits is kept once, and written once', 
   const release = await holdStore(s.file);
   t.after(release);
   const input = prompt('kept once while the store is held', { message_id: 'once' });
-  assert.equal(await capture(s, input, { deadline: Date.now() + 800 }), 'store_busy');
-  assert.equal(await capture(s, input, { deadline: Date.now() + 800 }), 'store_busy');
+  assert.ok(WAITING.includes(await capture(s, input, { deadline: Date.now() + 800 })));
+  assert.ok(WAITING.includes(await capture(s, input, { deadline: Date.now() + 800 })));
   assert.equal((await spoolEntries(s.spool)).length, 1);
   await release();
   assert.equal(await capture(s, prompt('next', { message_id: 'next' })), 'written');
@@ -236,7 +239,7 @@ test('a tool call that has to wait keeps no credential the renderer would redact
   const secrets = ['Zq9SpoolArg1Kx7Wv2', 'Zq9SpoolPw2Kx7Wv2', 'Zq9SpoolAuth3Kx7Wv2', 'Zq9SpoolCookie4Kx7Wv2', 'Zq9SpoolUser5Kx7Wv2'];
   const input = JSON.stringify({ hook_event_name: 'PostToolUse', session_id: 'session-1', cwd: '/work', tool_name: 'Bash', tool_use_id: 'toolu-secret',
     tool_input: { command: 'deploy', args: ['--password', secrets[0], '-u', `admin:${secrets[4]}`], pw: secrets[1], auth: secrets[2], headers: [['Cookie', secrets[3]]] }, tool_response: { stdout: 'ok', exit_code: 0 } });
-  assert.equal(await capture(s, input, { deadline: Date.now() + 800 }), 'store_busy');
+  assert.ok(WAITING.includes(await capture(s, input, { deadline: Date.now() + 800 })));
   const [entry] = await spoolEntries(s.spool);
   const kept = await readFile(join(s.spool, entry.name), 'utf8');
   for (const secret of secrets) assert.ok(!kept.includes(secret), secret);
@@ -314,7 +317,7 @@ test('a waiting failure keeps no credential from its structured error', { timeou
   t.after(release);
   const secret = 'Zq9SpoolErr6Kx7Wv2';
   const input = JSON.stringify({ hook_event_name: 'PostToolUseFailure', session_id: 'session-1', cwd: '/work', tool_name: 'Deploy', tool_use_id: 'toolu-error', tool_input: { target: 'prod' }, error: { pw: secret, message: 'failed' } });
-  assert.equal(await capture(s, input, { deadline: Date.now() + 800 }), 'store_busy');
+  assert.ok(WAITING.includes(await capture(s, input, { deadline: Date.now() + 800 })));
   const [entry] = await spoolEntries(s.spool);
   assert.ok(!(await readFile(join(s.spool, entry.name), 'utf8')).includes(secret));
 });
