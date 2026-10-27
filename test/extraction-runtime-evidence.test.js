@@ -226,7 +226,7 @@ test('on the Claude route a later user correction supersedes the earlier decisio
 // Live proof 2026-10-27, case C2: an Arabic decision the claim checks could not
 // structure was kept verbatim as a memory, and a later English correction had
 // nothing to supersede. The user's own verbatim decision is now a candidate.
-test('a user correction supersedes a user decision kept verbatim as a memory; an assistant memory is never offered', async (t) => {
+async function verbatimCorrection(t, arabic, chosen) {
   const { createShadowGraph } = await import('../src/shadowgraph.js');
   const { createStorage } = await import('../src/storage.js');
   const { privilegedRecordCapture, privilegedSnapshot } = await import('../src/internal/snapshot.js');
@@ -242,7 +242,6 @@ test('a user correction supersedes a user decision kept verbatim as a memory; an
   const save = async (graph) => { const store = await createStorage(options); await store.save(privilegedSnapshot(graph)); store.close(); };
   const load = async () => { const store = await createStorage(options); try { return await store.load(); } finally { store.close(); } };
   const receipt = { invocationStarted: true, model: MODEL };
-  const arabic = 'قرار لهذا المشروع: نقرّب مبالغ الفواتير إلى سنتين باستخدام Math.round(amount * 100) / 100 لأنه أبسط ولا يحتاج مكتبة. سجّل ذلك في README.md تحت عنوان "Rounding" فقط.';
   const echo = 'Rounding invoice amounts with Math.round(amount * 100) / 100 is noted.';
   const graph = createShadowGraph();
   capture(graph, arabic, 's1', 'user'); capture(graph, echo, 's1', 'assistant');
@@ -252,7 +251,7 @@ test('a user correction supersedes a user decision kept verbatim as a memory; an
   // message is kept verbatim as a memory.
   const first = await claimCapture(options);
   assert.equal((await commitCapture(options, first, { status: 'success', receipt, value: { records: [{ kind: 'decision', fields: [
-    { name: 'title', text: 'قرار لهذا المشروع', sourceRef: first.id }, { name: 'chosen', text: 'نقرّب مبالغ الفواتير إلى سنتين باستخدام Math.round(amount * 100) / 100 لأنه أبسط ولا يحتاج مكتبة.', sourceRef: first.id },
+    { name: 'title', text: 'قرار لهذا المشروع', sourceRef: first.id }, { name: 'chosen', text: chosen, sourceRef: first.id },
     { name: 'reason', text: 'لأنه أبسط ولا يحتاج مكتبة', sourceRef: first.id }] }] } })).status, 'committed');
   const reply = await claimCapture(options);
   assert.equal((await commitCapture(options, reply, { status: 'success', receipt, value: { records: [{ kind: 'memory', fields: [{ name: 'text', text: echo, sourceRef: reply.id }] }] } })).status, 'committed');
@@ -272,18 +271,46 @@ test('a user correction supersedes a user decision kept verbatim as a memory; an
   assert.equal((await commitCapture(options, second, { status: 'success', receipt, value: { records: [{ kind: 'decision', fields: [{ name: 'chosen', text: correction, sourceRef: second.id }],
     correction: { recordId: candidate.recordId, priorChosen: candidate.priorChosen, statement: correction } }] } })).status, 'committed');
   data = await load();
-  const closed = data.records.find((row) => row.id === verbatim.id);
   const fresh = data.records.find((row) => row.kind === 'decision' && row.correction?.recordId === verbatim.id);
   assert.ok(fresh, 'the correcting decision names the verbatim memory');
-  assert.equal(closed.status, 'superseded');
-  assert.equal(closed.supersededBy, fresh.id);
-  assert.ok(closed.temporal.invalidatedAt && closed.temporal.validTo, 'the memory\'s validity is closed, its text kept');
-  assert.equal(closed.text, arabic);
   assert.equal(data.records.find((row) => row.id === assistantMemory.id).status, 'active', 'an assistant memory is untouched');
-  // Delivery reads the memory as history and the correction as current.
   const reader = createShadowGraph(); reader.importData(data);
-  const states = Object.fromEntries(reader.context({ project: 'inv', query: 'rounding invoice amounts Math.round', compact: false }).relevant.items
-    .map((item) => [item.record.id, item.temporalEvidence?.currentState?.state]));
+  const read = reader.context({ project: 'inv', query: 'rounding invoice amounts Math.round', compact: false }).relevant.items;
+  const states = Object.fromEntries(read.map((item) => [item.record.id, item.temporalEvidence?.currentState?.state]));
+  return { data, verbatim, fresh, closed: data.records.find((row) => row.id === verbatim.id), states, reader };
+}
+const CHOSEN = 'نقرّب مبالغ الفواتير إلى سنتين باستخدام Math.round(amount * 100) / 100 لأنه أبسط ولا يحتاج مكتبة.';
+
+test('a user correction of a decision kept verbatim as a memory is linked, not applied; the memory stays current, marked as corrected', async (t) => {
+  const arabic = `قرار لهذا المشروع: ${CHOSEN}`;
+  const { fresh, closed, states, reader } = await verbatimCorrection(t, arabic, CHOSEN);
+  assert.equal(closed.status, 'active');
+  assert.equal(closed.supersededBy, undefined);
+  assert.equal(closed.text, arabic, 'the memory keeps its text');
+  assert.equal(fresh.correction.applied, false);
+  assert.match(fresh.correction.limitation, /kept verbatim/);
   assert.equal(states[fresh.id], 'current');
-  if (verbatim.id in states) assert.notEqual(states[verbatim.id], 'current');
+  assert.equal(states[closed.id], 'current');
+  const read = reader.context({ project: 'inv', query: 'rounding invoice amounts Math.round', compact: true }).relevant.items;
+  const memory = read.find((item) => (item.record?.id ?? item.line?.recordId) === closed.id);
+  assert.deepEqual(memory.correctedBy, [fresh.id], 'every read names the correcting decision');
+  const { operation, scope, ...handle } = memory.line?.expansion ?? memory.expansion;
+  const expanded = reader.expand({ ...handle, project: scope.project });
+  assert.equal(expanded.status, 'current');
+  assert.deepEqual(expanded.correctedBy, [fresh.id], 'and so does its expansion');
+  const { t1Line } = await import('../src/compact-tier.js');
+  assert.match(t1Line(fresh, { ceiling: 2048 }).line, new RegExp(`not applied: "${closed.id}" is kept verbatim and stays current, marked as corrected`));
+});
+
+// Independent review: a correction of one statement closed a memory that also
+// held a standing instruction, which retrieval then lost, whatever separated
+// the two. Nothing the correction does not name is closed.
+test('a correction never closes what else a verbatim message says', async (t) => {
+  for (const rest of [' احتفظ بسجلات التدقيق لمدة 90 يومًا.', '؛ واحتفظ بسجلات التدقيق لمدة 90 يومًا.', 'Keep audit logs for 90 days.']) {
+    await t.test(JSON.stringify(rest), async (st) => {
+      const { closed, states } = await verbatimCorrection(st, `قرار لهذا المشروع: ${CHOSEN}${rest}`, CHOSEN);
+      assert.equal(closed.status, 'active');
+      assert.equal(states[closed.id], 'current', 'the standing instruction stays retrievable');
+    });
+  }
 });

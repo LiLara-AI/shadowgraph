@@ -274,21 +274,26 @@ export function readHookInput(stream = process.stdin, { limit = HOOK_INPUT_LIMIT
 // records. A decision with its claims and source runs to several kilobytes, so
 // the cap held one, the newest, whatever it said. Each is delivered as its line
 // instead, with room for a decision's alternatives and source context, and in
-// full only where even that line would leave out a decisive part.
+// full only where even that line would leave out a decisive part. A prompt's
+// read gives a record whose short line drops a decisive part in full too, and
+// it gets the same longer line first.
 const SESSION_LINE_CEILING = 2048;
 
 // A line is rendered again from the redacted record, so its text never holds
 // what redaction removed; its handle stays the read's own, bound to the record
 // as stored, so expansion finds the very revision.
-function itemOf({ tier, line, record, temporalEvidence }, records, session = null) {
-  const time = { eventTime: temporalEvidence?.eventTime?.state ?? null, currentState: temporalEvidence?.currentState ? { state: temporalEvidence.currentState.state, basis: temporalEvidence.currentState.basis } : null };
-  if (tier !== 'T1' && session) {
-    // The handle is derived from the record as the read holds it, the text
-    // from the redacted record, as for a line the read made.
-    const context = { scope: session.scope, derivedAt: session.derivedAt, ceiling: SESSION_LINE_CEILING };
+function itemOf({ tier, line, record, expansion, temporalEvidence, correctedBy }, records, longer = false) {
+  // A memory a correction names without closing it says so beside its state.
+  const time = { eventTime: temporalEvidence?.eventTime?.state ?? null, currentState: temporalEvidence?.currentState ? { state: temporalEvidence.currentState.state, basis: temporalEvidence.currentState.basis } : null,
+    ...(correctedBy ? { correctedBy } : {}) };
+  if (tier !== 'T1' && longer && expansion) {
+    // The read's record holds only the links its scope shows, so the line is
+    // derived from it under the read's instant and scope, and kept only where
+    // it names the very revision the read's handle does.
+    const context = { asOf: expansion.asOf, scope: expansion.scope, derivedAt: expansion.derivedAt, ceiling: SESSION_LINE_CEILING, visible: () => true };
     const bound = t1Line(record, context), rendered = t1Line(redactValue(record), context);
-    if (!bound.decisiveOmitted.length && !rendered.decisiveOmitted.length) {
-      return { tier: 'T1', line: rendered.line, claimClass: bound.claimClass, requiresExpansion: bound.requiresExpansion, ...time, expansion: bound.expansion };
+    if (bound.expansion.digest === expansion.digest && !bound.decisiveOmitted.length && !rendered.decisiveOmitted.length) {
+      return { tier: 'T1', line: rendered.line, claimClass: bound.claimClass, requiresExpansion: bound.requiresExpansion, ...time, expansion };
     }
   }
   if (tier !== 'T1') return { tier, record, ...time };
@@ -418,9 +423,12 @@ export async function runDeliver({ args = [], readInput = () => '', file, storag
       // version is said to be unverified (§18.1, F-23).
       ...(pinned?.host ? { host: pinned.host } : {})
     };
-    const lines = session ? { scope: { project: relevant.scope.project ?? null, grantId: relevant.scope.grant?.accessId ?? null }, derivedAt: new Date().toISOString() } : null;
     // The working set is ordered on the records, then each becomes its line.
-    const items = (session ? sessionOrder(relevant.items) : relevant.items).map((item) => itemOf(item, records, lines)).filter(Boolean);
+    const derived = (session ? sessionOrder(relevant.items) : relevant.items).map((item) => itemOf(item, records, true)).filter(Boolean);
+    // Lines first, then full records, each in the read's order: a full record
+    // of several kilobytes ranked first left no room for the relevant lines
+    // behind it (live proof run 2, case C3r).
+    const items = [...derived.filter((item) => item.tier === 'T1'), ...derived.filter((item) => item.tier !== 'T1')];
     // The status in brief, bounded whatever the store holds: counts, and the
     // names of the limits and gaps the reads declare.
     const status = relevant.capture;
