@@ -17,6 +17,7 @@
 - Let the capture spool's drainer take the drain again for entries that arrived while it held it, so a burst of hooks leaves none waiting.
 - Offer a correction the earlier decisions it may name even when other records share more words with it: the candidate read is filtered before it is cut to four. Before this, older corrections from another setup could fill every place, and a live correction found no target (live proof run 3, case Cx2).
 - Document that Claude Code 2.1.312 no longer waits on exit for the extraction worker a hook started (2.1.302 did), and the third live run's Arabic coding task, where a fresh session applied earlier experience the repository did not hold.
+- Document that the claim verifier keeps an assistant's decision only when the rest of its message is plain, so a summary that also names a rejected alternative may keep none of it (fifth live run, final build). Pending recovery was verified on the final build in the same run.
 - Add the [Claude Code CLI guide](docs/claude-code-integration.md), including its live evidence and the limits found by review and by the live proof that remain open.
 
 ## 0.42.3 — Technical Preview (2026-10-26)
