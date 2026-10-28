@@ -79,7 +79,8 @@ export async function createShadowGraphServer(options = {}) {
   const restoreValidator = createRestoreValidator(options);
   const store = options.store ?? await createStorage({ type: options.storage ?? process.env.SHADOWGRAPH_STORAGE, file: options.file ?? process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json', restoreValidator });
   let extractionAvailability = () => false;
-  const graph = createShadowGraph({ ...options, extractionAvailable: scope => extractionAvailability(scope) });
+  // The binding is read through, as availability is, from the latest read.
+  const graph = createShadowGraph({ ...options, extractionAvailable: Object.defineProperty(scope => extractionAvailability(scope), 'binding', { get: () => extractionAvailability.binding }) });
   graph.importData(await store.load());
   const workspace = await discoverWorkspace(options.cwd);
   const dashboardRoot = new URL('../dashboard/', import.meta.url);
