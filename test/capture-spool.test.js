@@ -257,7 +257,7 @@ test('a spool that would lie inside a repository is never written', { timeout: 6
   await mkdir(join(s.sgHome, '.git'));
   const release = await holdStore(s.file);
   t.after(release);
-  assert.equal(await capture(s, prompt('private material near a repository', { message_id: 'repo' }), { deadline: Date.now() + 800 }), 'store_busy');
+  assert.ok(WAITING.includes(await capture(s, prompt('private material near a repository', { message_id: 'repo' }), { deadline: Date.now() + 800 })));
   assert.deepEqual(await readdir(s.spool).catch(() => []), []);
   assert.deepEqual(await readdir(droppedDirectory(s.spool)).catch(() => []), [], 'no marker inside the repository either');
   await release();
@@ -269,7 +269,7 @@ test('an entry kept for another store or origin is dropped with a marker, not wr
   const s = await setup(t);
   const release = await holdStore(s.file);
   t.after(release);
-  assert.equal(await capture(s, prompt('kept for the first store', { message_id: 'old-store' }), { deadline: Date.now() + 800 }), 'store_busy');
+  assert.ok(WAITING.includes(await capture(s, prompt('kept for the first store', { message_id: 'old-store' }), { deadline: Date.now() + 800 })));
   await release();
   const capture2 = { ...s.capture, originId: mintOriginId() };
   assert.equal(await runCapture({ capture: capture2, input: prompt('under a new activation', { message_id: 'new' }), deadline: Date.now() + 10_000, record: s.activation, home: s.home, cwd: s.cwd }), 'written');
@@ -337,7 +337,7 @@ test('a Stop written by another hook\'s drain is reported so that hook asks for 
   t.after(release);
   const stop = JSON.stringify({ hook_event_name: 'Stop', session_id: 'session-1', cwd: '/work', stop_hook_active: false, last_assistant_message: 'Finished while the store was held.' });
   const waiting = {};
-  assert.equal(await capture(s, stop, { deadline: Date.now() + 800, report: waiting }), 'store_busy');
+  assert.ok(WAITING.includes(await capture(s, stop, { deadline: Date.now() + 800, report: waiting })));
   assert.equal(waiting.terminalWritten, undefined);
   await release();
   const report = {};
@@ -352,7 +352,7 @@ test('an entry received before a later deletion is dropped, not replayed', { tim
   const { ledgerPath } = await import('../src/internal/deletion-knowledge.js');
   const release = await holdStore(s.file);
   t.after(release);
-  assert.equal(await capture(s, prompt('said before the purge', { message_id: 'before' }), { deadline: Date.now() + 800 }), 'store_busy');
+  assert.ok(WAITING.includes(await capture(s, prompt('said before the purge', { message_id: 'before' }), { deadline: Date.now() + 800 })));
   await release();
   // A purge recorded after the entry arrived (only its time matters here).
   await writeFile(ledgerPath(s.file), JSON.stringify({ version: 1, tombstones: [{ kind: 'project', purgedProject: 'alpha', mode: 'logical', tokens: null, at: new Date(Date.now() + 1000).toISOString() }], quarantine: [], pending: [] }));

@@ -138,7 +138,7 @@ These limits were found by independent review or by the live proof, and are not 
 
 ## Support and evidence
 
-Verified live (2026-10-27/28, three runs) on Windows 11 with Claude Code CLI **2.1.302**, and **2.1.312** for the third run, in print mode (`claude -p`, stream-json), host model `claude-haiku-5-5`, extractor `claude-haiku-5-5` then `claude-sonnet-5-5`, on synthetic projects and fresh stores:
+Verified live (2026-10-27/28, four runs) on Windows 11 with Claude Code CLI **2.1.302**, and **2.1.312** for the third and fourth runs, in print mode (`claude -p`, stream-json), host model `claude-haiku-5-5`, extractor `claude-haiku-5-5` then `claude-sonnet-5-5`, on synthetic projects and fresh stores:
 
 | Function | Result |
 | --- | --- |
@@ -147,7 +147,7 @@ Verified live (2026-10-27/28, three runs) on Windows 11 with Claude Code CLI **2
 | Recovery of pending extraction | Items left pending by a held worker were extracted by the next session's trigger |
 | Fresh session receives experience | SessionStart delivered the decision with its rejected alternative to a fresh session (Arabic prompt) |
 | Fresh session uses experience | Asked in English what was already decided, a fresh session answered from the delivered records alone. On the first Arabic coding task, use was not shown: the task could be solved from the repository alone. On a second Arabic task (third run, 2.1.312), whose earlier experience could not be found in the repository, the fresh session wrote exact cent arithmetic before its first check, giving the earlier session's reason, where a no-memory control on the same prompt used float arithmetic |
-| Correction | Arabic decision, then an English correction in a later session: the correction superseded the decision, which had been kept verbatim as memory, with history, and SessionStart then delivered only the correction as current (second run). On the final build, after independent review, a correction no longer closes a verbatim message: it is linked, not applied, and the message is delivered marked as corrected (tests) |
+| Correction | Arabic decision, then an English correction in a later session: the correction superseded the decision, which had been kept verbatim as memory, with history, and SessionStart then delivered only the correction as current (second run). On the final build (fourth run, 2.1.312), an Arabic decision kept verbatim and an English correction in a later session: the correction linked it without closing it, reads and the next SessionStart marked it as corrected, and the correction was delivered first |
 | Sharing | `selected`, `all-permitted` (with `--exclude`) and `project` changed what another bound project receives; each change revoked the previous grant |
 
 Not verified: Claude Desktop, the interactive TUI, resume flows, macOS and Linux hosts, and languages other than English and Arabic. Desktop support is not inferred from these CLI tests. The review package accompanying the change keeps executed, inferred and untested results apart.
