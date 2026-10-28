@@ -27,6 +27,10 @@ const clock = options => { const at = (options.now ?? (() => new Date().toISOStr
 const owns = (item, options) => options.project ? item.attribution === 'project' && item.project === options.project
   : item.attribution === 'unattributed' && item.originId === options.originId;
 const raw = (payload, item) => (payload.captureContent ?? []).find(entry => entry.contentRef === item.contentRef)?.text;
+// A correction is offered at most this many earlier decisions, the most
+// relevant of those it may name, found among this many records of the read.
+const MAX_CORRECTION_CANDIDATES = 4;
+const CANDIDATE_READ = 50;
 
 async function fenced(options, action) {
   const check = () => { if (options.signal?.aborted) refusal('drain_stopped'); };
@@ -101,9 +105,12 @@ export async function claimCapture(options) {
       // Only this setup's independently sourced user decisions can be considered:
       // a decision, or a user's decision kept verbatim as a memory (its whole
       // message is its prior wording). No historical/foreign/private
-      // cross-project material enters this route.
+      // cross-project material enters this route. The read is filtered before it
+      // is cut to the candidates offered: records from another setup, or not a
+      // user's, can share more words with the correction and would otherwise
+      // fill the places (live proof run 3, case Cx2).
       const correctionCandidates = quotedRecipe(options.provider, options.recipe) && item.source?.role === 'user'
-        ? graph.context({ project: item.project, query: text, limit: 4, compact: false }).relevant.items.flatMap(({ record }) => {
+        ? graph.context({ project: item.project, query: text, limit: CANDIDATE_READ, compact: false }).relevant.items.flatMap(({ record }) => {
           const sourceCapture = live.records.find(value => value.id === record?.captureRef);
           const original = live.records.find(value => value.id === record?.id);
           const prior = record?.kind === 'decision' ? record.chosen : record?.kind === 'memory' && record.status === 'active' ? record.text : null;
@@ -111,7 +118,7 @@ export async function claimCapture(options) {
             && !['superseded', 'archived', 'abandoned', 'stale'].includes(record.status)
             && sourceCapture?.source?.role === 'user' && sameExtractionBinding(sourceCapture.observation?.extractionBinding, options.extractionBinding)
             ? [{ recordId: record.id, priorChosen: prior, expectedHash: digest(JSON.stringify(original)) }] : [];
-        }) : [];
+        }).slice(0, MAX_CORRECTION_CANDIDATES) : [];
       options.beforeClaim?.({ inputBytes: Buffer.byteLength(extractionPrompt(item, text, { ...options, correctionCandidates })), journalEntries: sessionJournalEntries(live.journal, item) + 2 });
       const claimed = privilegedClaimCapture(graph, { id: item.id, project: options.project, originId: options.originId, lease });
       if (!claimed) continue;

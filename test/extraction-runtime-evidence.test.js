@@ -339,3 +339,49 @@ test('a correction kept verbatim itself still links what it corrects, and closes
     .find((item) => (item.record?.id ?? item.line?.recordId) === closed.id);
   assert.equal(after.correctedBy, undefined);
 });
+
+// Live proof run 3, case Cx2: the candidate read was cut to four before it was
+// filtered, and earlier corrections from another setup, sharing the words
+// "Correction ... decision ... instead of", filled every place. The user's own
+// decision, kept verbatim, ranked sixth and was never offered.
+test('a correction is offered its target even when ineligible records share more words with it', async (t) => {
+  const { createShadowGraph } = await import('../src/shadowgraph.js');
+  const { createStorage } = await import('../src/storage.js');
+  const { privilegedRecordCapture, privilegedSnapshot } = await import('../src/internal/snapshot.js');
+  const { claimCapture, commitCapture } = await import('../src/internal/extraction-worker.js');
+  const { QUOTED_RECIPE } = await import('../src/internal/extraction-contract.js');
+  const root = await scratchDirectory(t, 'shadowgraph-evidence-candidate-read-');
+  const binding = { provider: 'claude', accountFingerprint: 'a'.repeat(64), setupId: '12ab5678-1234-1234-1234-123456789012' };
+  const options = { type: 'json', file: join(root, 'memory.json'), env: { SHADOWGRAPH_HOME: root }, project: 'inv', provider: 'claude', recipe: QUOTED_RECIPE, model: MODEL, extractionBinding: binding };
+  const admission = { limits: { maxStoreBytes: 2 ** 24, maxQueueDepth: 100, maxItemBytes: 65536, maxItemsPerSession: 100 }, storeBytes: 0 };
+  const capture = (graph, text, sessionId) => privilegedRecordCapture(graph, { project: 'inv', originId: 'inv-origin', text,
+    source: { event: 'UserPromptSubmit', sessionId, role: 'user', hostEventId: sessionId },
+    observation: { host: 'claude-code', hostVersion: null, toolName: null, cwd: null, outcome: null, extractionBinding: binding }, admission });
+  const save = async (graph) => { const store = await createStorage(options); await store.save(privilegedSnapshot(graph)); store.close(); };
+  const load = async () => { const store = await createStorage(options); try { return await store.load(); } finally { store.close(); } };
+  const receipt = { invocationStarted: true, model: MODEL };
+  const graph = createShadowGraph();
+  // Decisions with no capture of this setup behind them: never candidates.
+  for (const subject of ['rounding', 'formatting', 'date', 'currency', 'discount', 'tax']) {
+    graph.addDecision({ project: 'inv', title: 'Correction to the invoice number decision', chosen: `Correction to the invoice number decision: number invoices with the ${subject} prefix instead of INV-2026-0001, because the tax office portal rejects the INV- prefix.` });
+  }
+  const arabic = 'قرار لهذا المشروع: نرقّم الفواتير بالصيغة INV-2026-0001 لأن قسم المحاسبة يفرزها بهذا الشكل.';
+  capture(graph, arabic, 's1');
+  await save(graph);
+  const first = await claimCapture(options);
+  assert.equal((await commitCapture(options, first, { status: 'success', receipt, value: { records: [{ kind: 'decision', fields: [
+    { name: 'chosen', text: 'نرقّم الفواتير بالصيغة INV-2026-0001', sourceRef: first.id }] }] } })).status, 'committed');
+  const data = await load();
+  // Kept as a decision or verbatim as a memory, it is the one record the correction may name.
+  const [targetId] = data.records.find((row) => row.id === first.id).producedRecordIds;
+  const verbatim = data.records.find((row) => row.id === targetId);
+  assert.ok(['decision', 'memory'].includes(verbatim?.kind));
+  const merged = createShadowGraph(); merged.importData(data);
+  const correction = 'Correction to the invoice number decision: number invoices as 2026/0001 instead of INV-2026-0001, because the tax office portal rejects the INV- prefix.';
+  const ranked = merged.context({ project: 'inv', query: correction, limit: 10, compact: false }).relevant.items.map((item) => item.record.id);
+  assert.ok(ranked.indexOf(verbatim.id) >= 4, `the target ranks below four ineligible records (rank ${ranked.indexOf(verbatim.id) + 1})`);
+  capture(merged, correction, 's2');
+  await save(merged);
+  const second = await claimCapture(options);
+  assert.deepEqual(second.correctionCandidates.map((candidate) => candidate.recordId), [verbatim.id]);
+});

@@ -15,6 +15,8 @@
 - Let a user's correction reach the user's earlier decision when that decision was kept verbatim as a memory (live proof 2026-10-27, case C2). The correction is linked with `applied: false` and the memory is not closed, since the message may say more than the correction replaces (independent review); every read names it as corrected (`correctedBy`). A correction that is itself kept verbatim keeps its link the same way. Assistant and tool memories are never offered as targets.
 - Keep the read's own expansion handle when delivery shortens a full record to a line, so its links stay as the read shows them and expansion reports the record current (independent review).
 - Let the capture spool's drainer take the drain again for entries that arrived while it held it, so a burst of hooks leaves none waiting.
+- Offer a correction the earlier decisions it may name even when other records share more words with it: the candidate read is filtered before it is cut to four. Before this, older corrections from another setup could fill every place, and a live correction found no target (live proof run 3, case Cx2).
+- Document that Claude Code 2.1.312 no longer waits on exit for the extraction worker a hook started (2.1.302 did), and the third live run's Arabic coding task, where a fresh session applied earlier experience the repository did not hold.
 - Add the [Claude Code CLI guide](docs/claude-code-integration.md), including its live evidence and the limits found by review and by the live proof that remain open.
 
 ## 0.42.3 — Technical Preview (2026-10-26)
