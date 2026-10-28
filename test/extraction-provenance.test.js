@@ -121,4 +121,14 @@ test('a contextual decision whose reason does not name its alternative keeps the
   const both = prepareExtraction(item, source, { records: [{ kind: 'decision', fields: two }] }, { provider: 'claude', recipe: QUOTED_RECIPE }).records[0];
   assert.equal(both.kind, 'decision');
   assert.ok(both.alternatives.every(entry => !Object.hasOwn(entry, 'reasonRejected')));
+  // The same for a user's message and on the Codex route.
+  const user = { ...item, source: { role: 'user' } };
+  for (const options of [{ provider: 'claude', recipe: QUOTED_RECIPE }, { provider: 'codex' }]) {
+    const kept = prepareExtraction(user, source, { records: [{ kind: 'decision', fields }] }, options).records[0];
+    assert.equal(kept.kind, 'decision');
+    assert.deepEqual(kept.alternatives, [{ label: alternative }]);
+  }
+  // A reason with no alternative still leaves a user's message to the verbatim path.
+  const reasonOnly = fields.filter(field => field.name !== 'alternative');
+  assert.equal(prepareExtraction(user, source, { records: [{ kind: 'decision', fields: reasonOnly }] }, { provider: 'claude', recipe: QUOTED_RECIPE }).records[0]?.kind, 'memory');
 });
