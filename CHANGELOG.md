@@ -17,6 +17,7 @@
 - Let the capture spool's drainer take the drain again for entries that arrived while it held it, so a burst of hooks leaves none waiting.
 - Offer a correction the earlier decisions it may name even when other records share more words with it: the candidate read is filtered before it is cut to four. Before this, older corrections from another setup could fill every place, and a live correction found no target (live proof run 3, case Cx2).
 - Document that Claude Code 2.1.312 no longer waits on exit for the extraction worker a hook started (2.1.302 did), and the third live run's Arabic coding task, where a fresh session applied earlier experience the repository did not hold.
+- Keep a decision organized from a multi-sentence message (the whole message is the checked quotation) when the proposed reason names none of its alternatives: the choice and the alternatives stay, and the reason is not linked to either, but stays in the quoted source. Before this, the whole decision was dropped, as the field-by-field path never did. In the fifth live run, on the final build, a session's decision and rejected alternative were lost this way.
 - Add the [Claude Code CLI guide](docs/claude-code-integration.md), including its live evidence and the limits found by review and by the live proof that remain open.
 
 ## 0.42.3 — Technical Preview (2026-10-26)

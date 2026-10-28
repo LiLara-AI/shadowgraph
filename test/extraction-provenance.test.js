@@ -88,3 +88,47 @@ test('Codex drains only fresh matching provenance; legacy, foreign accounts and 
   assert.equal(accepted.receipts.at(-1).provider, 'codex');
   assert.equal(accepted.receipts.at(-1).model, 'gpt-6.1-sol');
 });
+
+test('a contextual decision whose reason does not name its alternative keeps the choice and the alternative, not the link', async () => {
+  const { QUOTED_RECIPE } = await import('../src/internal/extraction-contract.js');
+  // The fifth live run's session summary, and the fields the extractor proposed for it.
+  const title = '**What I changed:** hours and rates are scaled to integer hundredths, multiplied as integers, then rounded half up to cents with integer arithmetic and formatted as a string.';
+  const chosen = 'hours and rates are scaled to integer hundredths, multiplied as integers, then rounded half up to cents with integer arithmetic and formatted as a string.';
+  const alternative = 'the obvious fix is `Math.round(h * r * 100) / 100`. I checked it against the four sample rows and it fails two of them: `1.15 × 10.10` gives `11.61` (expected `11.62`), and `0.7 × 18.15` gives `12.70` (expected `12.71`).';
+  const reason = 'Both products land just below the half cent in floating point, so the simple version would underpay those lines.';
+  const source = 'The pay check passes now. I only changed `src/pay-total.js`; the check and `samples/pay.csv` are untouched.\n\n'
+    + '**What was wrong:** `linePay` multiplied the two floats and called `toFixed(2)`. `2.3 × 10.05` is `23.114999…` in binary, so it rounded down to `23.11` instead of `23.12`.\n\n'
+    + `${title}\n\n**Why not the simpler option:** ${alternative} ${reason} The integer version gets all four right.\n\n`
+    + 'One limit: the integer scaling assumes hours and rates have at most two decimal places, which matches the sample export. Inputs with more decimals would be rounded to hundredths before multiplying. Negative amounts are also not handled specially, since the rounding is half-up toward positive infinity.';
+  const item = { id: 'capture-a5-stop', source: { role: 'assistant' } };
+  const fields = [['title', title], ['chosen', chosen], ['alternative', alternative], ['reason', reason]].map(([name, text]) => ({ name, text, sourceRef: item.id }));
+  const record = prepareExtraction(item, source, { records: [{ kind: 'decision', fields }] }, { provider: 'claude', recipe: QUOTED_RECIPE }).records[0];
+  assert.equal(record?.kind, 'decision');
+  assert.equal(record.values.chosen, chosen);
+  assert.deepEqual(record.alternatives, [{ label: alternative }], 'the reason names nothing in the alternative, so it is not linked to it');
+  assert.equal(Object.hasOwn(record.values, 'reason'), false);
+  assert.ok(record.interpretation.fieldMapping.every(mapping => mapping.name !== 'reason'));
+  assert.equal(record.interpretation.sourceText, source, 'the unlinked reason stays in the quoted source');
+  assert.equal(record.claims.length, 1);
+  assert.equal(record.claims[0].text, source);
+  // A reason that does name the alternative is still linked to it.
+  const named = fields.map(field => field.name === 'reason' ? { ...field, text: 'Both products land just below the half cent in floating point, so the simple version would underpay those lines.'.replace('the simple version', 'the obvious fix') } : field);
+  const linkedSource = source.replace('so the simple version', 'so the obvious fix');
+  const linked = prepareExtraction(item, linkedSource, { records: [{ kind: 'decision', fields: named }] }, { provider: 'claude', recipe: QUOTED_RECIPE }).records[0];
+  assert.equal(linked.alternatives[0].reasonRejected, named[3].text);
+  // Two alternatives and a reason: nothing says which one it rejects, so it is not linked and the decision stays.
+  const two = [...fields, { name: 'alternative', text: 'Inputs with more decimals would be rounded to hundredths before multiplying.', sourceRef: item.id }];
+  const both = prepareExtraction(item, source, { records: [{ kind: 'decision', fields: two }] }, { provider: 'claude', recipe: QUOTED_RECIPE }).records[0];
+  assert.equal(both.kind, 'decision');
+  assert.ok(both.alternatives.every(entry => !Object.hasOwn(entry, 'reasonRejected')));
+  // The same for a user's message and on the Codex route.
+  const user = { ...item, source: { role: 'user' } };
+  for (const options of [{ provider: 'claude', recipe: QUOTED_RECIPE }, { provider: 'codex' }]) {
+    const kept = prepareExtraction(user, source, { records: [{ kind: 'decision', fields }] }, options).records[0];
+    assert.equal(kept.kind, 'decision');
+    assert.deepEqual(kept.alternatives, [{ label: alternative }]);
+  }
+  // A reason with no alternative still leaves a user's message to the verbatim path.
+  const reasonOnly = fields.filter(field => field.name !== 'alternative');
+  assert.equal(prepareExtraction(user, source, { records: [{ kind: 'decision', fields: reasonOnly }] }, { provider: 'claude', recipe: QUOTED_RECIPE }).records[0]?.kind, 'memory');
+});

@@ -151,9 +151,15 @@ function contextualInterpretation(proposed, item, source) {
     mappings.push({ name: 'title', span: { ...mappings.find(mapping => mapping.name === 'chosen').span }, derivedFrom: 'chosen' });
   }
   if ((proposed.kind === 'decision' ? ['chosen'] : ['solution', 'result']).some(name => !values[name])) return null;
+  // A reason is linked only to the one alternative it names. With alternatives
+  // but no such link, the link is not made, as on the field-by-field path, and
+  // the choice and alternatives stay: the reason's words remain in the quoted
+  // source, never in a field. A reason with no alternative has no place here.
   if (proposed.kind === 'decision' && values.reason) {
-    if (alternatives.length !== 1 || !mentionsAny(values.reason, alternatives[0].label)) return null;
-    alternatives[0].reasonRejected = values.reason; delete values.reason;
+    if (!alternatives.length) return null;
+    if (alternatives.length === 1 && mentionsAny(values.reason, alternatives[0].label)) alternatives[0].reasonRejected = values.reason;
+    else mappings.splice(mappings.findIndex(mapping => mapping.name === 'reason'), 1);
+    delete values.reason;
   }
   return { kind: proposed.kind, values, alternatives, claims: [withEvidence(whole, source)], reason: null, places: [...new Set(mappings.map(mapping => placeOf(item, mapping)))],
     interpretation: { status: 'model_proposed', fieldMapping: mappings, sourceRef: item.id, sourceText: source,
