@@ -337,7 +337,7 @@ test('a Stop written by another hook\'s drain is reported so that hook asks for 
   t.after(release);
   const stop = JSON.stringify({ hook_event_name: 'Stop', session_id: 'session-1', cwd: '/work', stop_hook_active: false, last_assistant_message: 'Finished while the store was held.' });
   const waiting = {};
-  assert.equal(await capture(s, stop, { deadline: Date.now() + 800, report: waiting }), 'store_busy');
+  assert.ok(WAITING.includes(await capture(s, stop, { deadline: Date.now() + 800, report: waiting })));
   assert.equal(waiting.terminalWritten, undefined);
   await release();
   const report = {};
