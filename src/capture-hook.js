@@ -345,8 +345,8 @@ async function replayEntry({ spool, entry, destination, ...common }) {
     outcome = await captureEvent({ ...common, payload, event, cwd: value.cwd, transcriptSize: value.transcriptSize ?? null, boundBy: value.boundBy ?? null });
   } catch (error) {
     if (error?.code !== 'storage_lock_timeout') {
-      await failSpoolEntry(spool, entry, error?.code ?? 'capture_failed');
-      return { outcome: 'store_failed' };
+      const next = await failSpoolEntry(spool, entry, error?.code ?? 'capture_failed');
+      return { outcome: 'store_failed', renamed: next?.name };
     }
     outcome = 'store_busy';
   }
@@ -402,6 +402,8 @@ async function drainSpool({ spool, own, destination, deadline, now, report, ...c
               continue;
             }
             const replayed = await replayEntry({ ...context, entry });
+            // A failed entry is renamed with its attempt count; one hook counts it once.
+            if (replayed.renamed) tried.add(replayed.renamed);
             // A Stop or SessionEnd written here asks for extraction, whichever hook drained it.
             if (replayed.terminal && EXTRACTION_ELIGIBLE.has(replayed.outcome)) report.terminalWritten = true;
             // The own entry, or one ahead of it that stopped the drain: its outcome is the own entry's too.

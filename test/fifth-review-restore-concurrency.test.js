@@ -679,6 +679,20 @@ for (const backend of ['json', 'sqlite']) {
   });
 }
 
+// Audit 2026-10-29: waiters that all saw one dead lock could each delete it,
+// the later ones deleting the lock the first had just taken, so two held it.
+test('waiters that find one stale lock reclaim it once: the fence is never held twice', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph stale lock waiters ');
+  const destination = join(directory, 'state.json');
+  const lockPath = await fenceLockPath(destination);
+  await writeFile(lockPath, 'dead-owner', 'utf8');
+  await utimes(lockPath, new Date('2000-01-01T00:00:00.000Z'), new Date('2000-01-01T00:00:00.000Z'));
+  let inside = 0, most = 0;
+  await Promise.all(Array.from({ length: 16 }, () => createDestinationFence(destination, { lockTimeoutMs: 10_000, staleLockMs: 200, lockPollIntervalMs: 1 })
+    .run(async () => { inside += 1; most = Math.max(most, inside); await delay(10); inside -= 1; })));
+  assert.equal(most, 1);
+});
+
 for (const backend of ['json', 'sqlite']) {
   test(`DS-P1-003 ${backend}: a child-process writer waits behind restore and is checked against restored state`, async (t) => {
     const directory = await scratchDirectory(t, `shadowgraph fifth review ${backend} child `);

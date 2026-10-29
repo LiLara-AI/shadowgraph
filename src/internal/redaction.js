@@ -75,6 +75,11 @@ const DEFINE = /\bdefine\(\s*(['"])([^'"]+)\1\s*,\s*(['"])(?:\\.|(?!\3)[^\\])*\3
 const ELEMENT = /<([A-Za-z_][\w.-]*)>[^<]*<\/\1>/gu;
 const CREDENTIAL_FLAG = /((?:^|\s)--(?:password|passwd|pass|pw|auth|token|api-?key|secret|client-secret|auth-token)(?:=|\s+))\S+/giu;
 const USER_PASSWORD_FLAG = /((?:^|\s)(?:-u|--user)\s+)[^\s:]+:\S+/gu;
+// Short password flags, each bound to its command: elsewhere -p is a path or
+// port flag (mkdir -p, ssh -p) and -a a switch. A bare mysql -p prompts. The
+// flag is looked for within 200 characters of its command, so a line that
+// repeats a command name stays linear.
+const COMMAND_PASSWORD_FLAG = /((?:\b(?:mysql|mysqldump|mysqladmin|mariadb)\b[^\n|;&]{0,200}?\s-p(?=[^\s-]))|(?:\bsshpass\b[^\n|;&]{0,200}?\s-p\s*)|(?:\bdocker\s+login\b[^\n|;&]{0,200}?\s-p\s+)|(?:\bredis-cli\b[^\n|;&]{0,200}?\s-a\s+)|(?:\s-pass(?:in|out)?\s+pass:))\S+/gu;
 const AUTH_SCHEME = /\b(Bearer|Basic)\s+([A-Za-z0-9._~+/=-]{8,})/giu;
 export const KEYED_NAMES = ['key', 'name', 'Key', 'Name', 'ParameterKey'];
 export const KEYED_VALUES = new Set(['value', 'text', 'Value', 'ParameterValue']);
@@ -169,7 +174,7 @@ function redactView(text) {
   result = result.replace(ANY_URL, (url) => (urlHasCredential(url.replace(/^[^a-z]+/iu, '')) ? REDACTED : url));
   result = result.replace(DEFINE, (match, quote, name) => (isCredentialName(name) ? REDACTED : match));
   result = result.replace(ELEMENT, (match, tag) => (isCredentialName(tag) ? `<${tag}>${REDACTED}</${tag}>` : match));
-  result = result.replace(CREDENTIAL_FLAG, `$1${REDACTED}`).replace(USER_PASSWORD_FLAG, `$1${REDACTED}`);
+  result = result.replace(CREDENTIAL_FLAG, `$1${REDACTED}`).replace(USER_PASSWORD_FLAG, `$1${REDACTED}`).replace(COMMAND_PASSWORD_FLAG, `$1${REDACTED}`);
   result = result.replace(COOKIE_HEADER, `$1 ${REDACTED}`);
   result = redactNamedValues(result);
   // Bearer and basic tokens go only when they look like tokens, so "Basic

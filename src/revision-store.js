@@ -103,6 +103,29 @@ export function createDestinationFence(filePath, options = {}) {
     catch (error) { return error.code === 'EPERM'; }
   }
 
+  // Waiters that saw one dead lock delete it one at a time, behind a guard, and
+  // only while it still holds the token they saw: a later waiter never deletes
+  // the lock an earlier one has just taken (audit 2026-10-29).
+  async function reclaimStale(lockPath, observedToken) {
+    const guardPath = `${lockPath}.reclaim`;
+    let guard;
+    try { guard = await open(guardPath, 'wx', 0o600); }
+    catch (error) {
+      if (!LOCK_CONTENTION_CODES.has(error.code)) throw error;
+      // The guard is held for one read and one delete; one this old was left by a waiter that died.
+      if (Date.now() - (await stat(guardPath)).mtimeMs > staleLockMs) await unlink(guardPath).catch((candidate) => { if (candidate.code !== 'ENOENT') throw candidate; });
+      return false;
+    }
+    try {
+      if ((await readFile(lockPath, 'utf8')) !== observedToken) return false;
+      await unlink(lockPath).catch((candidate) => { if (candidate.code !== 'ENOENT') throw candidate; });
+      return true;
+    } finally {
+      await guard.close();
+      await unlink(guardPath).catch(() => {});
+    }
+  }
+
   async function acquire(lockPath, onWait) {
     const started = Date.now();
     const token = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
@@ -138,10 +161,7 @@ export function createDestinationFence(filePath, options = {}) {
         try {
           if (Date.now() - (await stat(lockPath)).mtimeMs > staleLockMs) {
             const observedToken = await readFile(lockPath, 'utf8');
-            if (!ownerIsAlive(observedToken) && (await readFile(lockPath, 'utf8')) === observedToken) {
-              await unlink(lockPath).catch((candidate) => { if (candidate.code !== 'ENOENT') throw candidate; });
-              continue;
-            }
+            if (!ownerIsAlive(observedToken) && await reclaimStale(lockPath, observedToken)) continue;
           }
         } catch (candidate) {
           if (candidate.code === 'ENOENT') continue;

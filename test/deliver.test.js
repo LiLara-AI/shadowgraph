@@ -940,7 +940,9 @@ test('adversarial values are redacted and checked in linear time', () => {
     percent: `${'%C3'.repeat(33_333)}: x`,
     runs: `${'%C3x'.repeat(25_000)}: x`,
     declaration: `const${' '.repeat(40_000)}${'a:b,'.repeat(10_000)}`,
-    block: 'token: >a; '.repeat(90_909)
+    block: 'token: >a; '.repeat(90_909),
+    // A command name repeated on one line, with no password flag after it.
+    commands: 'mysql '.repeat(20_000)
   };
   for (const [name, text] of Object.entries(shapes)) {
     const started = Date.now();
