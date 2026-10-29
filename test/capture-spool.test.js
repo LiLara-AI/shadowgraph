@@ -193,6 +193,15 @@ test('an entry that keeps failing is dropped with a marker after its attempts, a
   assert.deepEqual(reasons.sort(), ['attempts_exhausted:synthetic', 'expired']);
 });
 
+// Audit 2026-10-29: a store failure that is not contention counted an attempt
+// on every drain pass, so one hook spent four of an entry's eight.
+test('a store failure costs a waiting entry one attempt per hook, not one per drain pass', { timeout: 60_000 }, async (t) => {
+  const s = await setup(t);
+  await writeFile(s.file, '{ corrupt');
+  assert.equal(await capture(s, prompt('kept through a broken store', { message_id: 'broken' })), 'store_failed');
+  assert.deepEqual((await spoolEntries(s.spool)).map((entry) => entry.attempts), [1]);
+});
+
 // CI (ubuntu, Node 24, 2026-10-27): of a burst of hooks, the entries one wrote
 // while another drained, after that drainer's last listing, waited for the next
 // hook. The drainer now looks again once it lets go.

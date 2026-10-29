@@ -622,3 +622,16 @@ test('PR-37b re-review NF-4, NF-5: user flags, auth and pw flags in any array, a
   assert.deepEqual(await leaks(dirname(s.file), k), []);
   assert.equal((await s.items())[0].state, 'pending', 'redacted, not withheld');
 });
+
+// Audit 2026-10-29: common short password flags reached the store in the clear.
+test('short password flags of common commands are redacted; ordinary -p and -a flags are kept', () => {
+  const secret = 'S3cretValue9';
+  for (const command of [
+    `mysql -u root -p${secret} orders`, `mysqldump -h db -u root -p${secret} orders`,
+    `docker login -u me -p ${secret} registry.example.invalid`, `sshpass -p ${secret} ssh host`,
+    `redis-cli -h cache -a ${secret} ping`, `openssl enc -aes-256-cbc -pass pass:${secret} -in f`,
+    `openssl pkcs12 -in k.p12 -passin pass:${secret}`
+  ]) assert.ok(!redactText(command).includes(secret), command);
+  for (const command of ['mkdir -p src/lib', 'ssh -p 2222 host', 'mysql -u root -p orders', 'git log -p -a', 'redis-cli -h cache ping', 'docker run -p 8080:80 app'])
+    assert.equal(redactText(command), command, command);
+});
