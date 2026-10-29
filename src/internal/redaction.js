@@ -76,8 +76,10 @@ const ELEMENT = /<([A-Za-z_][\w.-]*)>[^<]*<\/\1>/gu;
 const CREDENTIAL_FLAG = /((?:^|\s)--(?:password|passwd|pass|pw|auth|token|api-?key|secret|client-secret|auth-token)(?:=|\s+))\S+/giu;
 const USER_PASSWORD_FLAG = /((?:^|\s)(?:-u|--user)\s+)[^\s:]+:\S+/gu;
 // Short password flags, each bound to its command: elsewhere -p is a path or
-// port flag (mkdir -p, ssh -p) and -a a switch. A bare mysql -p prompts.
-const COMMAND_PASSWORD_FLAG = /((?:\b(?:mysql|mysqldump|mysqladmin|mariadb)\b[^\n|;&]*?\s-p(?=[^\s-]))|(?:\bsshpass\b[^\n|;&]*?\s-p\s*)|(?:\bdocker\s+login\b[^\n|;&]*?\s-p\s+)|(?:\bredis-cli\b[^\n|;&]*?\s-a\s+)|(?:\s-pass(?:in|out)?\s+pass:))\S+/gu;
+// port flag (mkdir -p, ssh -p) and -a a switch. A bare mysql -p prompts. The
+// flag is looked for within 200 characters of its command, so a line that
+// repeats a command name stays linear.
+const COMMAND_PASSWORD_FLAG = /((?:\b(?:mysql|mysqldump|mysqladmin|mariadb)\b[^\n|;&]{0,200}?\s-p(?=[^\s-]))|(?:\bsshpass\b[^\n|;&]{0,200}?\s-p\s*)|(?:\bdocker\s+login\b[^\n|;&]{0,200}?\s-p\s+)|(?:\bredis-cli\b[^\n|;&]{0,200}?\s-a\s+)|(?:\s-pass(?:in|out)?\s+pass:))\S+/gu;
 const AUTH_SCHEME = /\b(Bearer|Basic)\s+([A-Za-z0-9._~+/=-]{8,})/giu;
 export const KEYED_NAMES = ['key', 'name', 'Key', 'Name', 'ParameterKey'];
 export const KEYED_VALUES = new Set(['value', 'text', 'Value', 'ParameterValue']);
