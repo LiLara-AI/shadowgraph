@@ -9,6 +9,7 @@
 // in-process and keeps the wire output deterministic.
 import { SOURCE_CLASSES, DECISION_STATUSES, OUTCOME_STATUSES, CONTENT_SEARCH_FIELDS, MEMORY_TYPES } from './shadowgraph.js';
 import { TRANSCRIPT_GAP_REASONS } from './internal/transcript.js';
+import { PRIOR_SETUP } from './internal/extraction-provenance.js';
 import { PURGE_BACKUPS_STATEMENT } from './internal/deletion-knowledge.js';
 
 // ---------------------------------------------------------------------------
@@ -433,7 +434,7 @@ const captureLimitedSchema = {
 const captureGapsSchema = {
   type: 'array', description: 'Capture refusal/unread gaps; no identities.',
   items: { type: 'object', required: ['reason', 'from', 'to'], properties: {
-    reason: { type: 'string', enum: ['maxQueueDepth', 'maxStoreBytes', 'maxItemsPerSession', 'session_in_another_project', 'raw_expired', ...TRANSCRIPT_GAP_REASONS], description: 'Why capture has a gap.' },
+    reason: { type: 'string', enum: ['maxQueueDepth', 'maxStoreBytes', 'maxItemsPerSession', 'session_in_another_project', 'raw_expired', PRIOR_SETUP, ...TRANSCRIPT_GAP_REASONS], description: 'Why capture has a gap.' },
     from: { type: 'string', description: 'Gap start time.' },
     to: stringOrNull('End time, if known.'),
     sessions: integerCount('Sessions covered by this gap.')
@@ -449,6 +450,7 @@ const captureStatusSchema = {
     blocked: integerCount('Items blocked.'),
     expired: integerCount('Raw expired before extraction; a gap, not backlog.'),
     oldestPendingAt: stringOrNull('Oldest pending capture.'),
+    priorSetup: integerCount('Unextracted items of no or an earlier setup; never extracted by the current one.'),
     extractionAvailable: { type: 'boolean', description: 'Whether extraction runs.' },
     workerErrors: { type: 'array', description: 'Scoped worker stops; fixed codes.', items: { type: 'object', required: ['reason', 'at'], properties: { reason: { type: 'string', description: 'Worker stop code.' }, at: { type: 'string', description: 'Stop timestamp.' } } } },
     limited: captureLimitedSchema,
@@ -1016,6 +1018,7 @@ const relevantSchema = {
         failed: integerCount('Items whose extraction failed.'),
         blocked: integerCount('Items whose extraction is blocked.'),
         oldestPendingAt: stringOrNull('When the oldest pending item arrived.'),
+        priorSetup: captureStatusSchema.properties.priorSetup,
         extractionAvailable: { type: 'boolean', description: 'Whether extraction runs.' },
         workerErrors: captureStatusSchema.properties.workerErrors,
         limited: captureLimitedSchema,

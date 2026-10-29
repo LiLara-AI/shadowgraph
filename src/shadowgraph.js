@@ -36,6 +36,7 @@ import { provenToolInputSplit } from './internal/tool-material.js';
 import { RAW_EXPIRED, RAW_RETENTION_DAYS, captureRawExpired, effectiveCaptureExpiry, hasCaptureRetentionState } from './internal/capture-retention.js';
 import { invalidatedCaptureTokens } from './internal/capture-generation.js';
 import { sessionJournalEntries, workerReason } from './internal/extraction-session.js';
+import { PRIOR_SETUP, sameExtractionBinding } from './internal/extraction-provenance.js';
 import { DELETION_INTENT, DELETION_VIEW, IDEMPOTENCY_KEY_WITHHELD, PURGE_AWARE_RESTORE_UNSUPPORTED, PURGE_BACKUPS_STATEMENT, SCOPE_KEY_WITHHELD, SESSION_WITHHELD, deletionError, journalHead } from './internal/deletion-knowledge.js';
 
 // PUBLIC API. These vocabularies are part of the supported surface (see
@@ -905,7 +906,7 @@ function paginate(items, options, scope, extra = {}) {
 function scopeCompleteness(scope, current = { complete: true }, signals = []) {
   const partial = signals.some((signal) => signal.limitation?.code === 'scoped_coverage');
   const capture = scope.capture ?? null;
-  const backlog = capture ? UNEXTRACTED_STATES.reduce((sum, state) => sum + capture[state], 0) : 0;
+  const backlog = capture ? UNEXTRACTED_STATES.reduce((sum, state) => sum + capture[state], capture.priorSetup ?? 0) : 0;
   const details = [current.limitation?.detail];
   if (scope.state === 'project_unresolved') details.push(scope.grant
     ? 'No project was resolved. The explicit wider grant augmented any permitted origin-owned content; project identity remains unresolved.'
@@ -916,8 +917,9 @@ function scopeCompleteness(scope, current = { complete: true }, signals = []) {
   if (scope.grantLimitation) details.push(`Wider access was refused (${scope.grantLimitation}); permitted own-scope access is retained.`);
   const scoped = details.length > 1;
   if (backlog) details.push(`${backlog} captured ${backlog === 1 ? 'item is' : 'items are'} not yet understood in this scope: captured is not stored experience.`);
+  if (capture?.priorSetup) details.push(`${capture.priorSetup} of them ${capture.priorSetup === 1 ? 'was' : 'were'} captured under no or an earlier extraction setup, which the current setup does not extract.`);
   if (capture?.limited.length) details.push(`Capture is at a limit (${capture.limited.map((entry) => entry.limit).join(', ')}): new material is refused, and nothing accepted is removed.`);
-  const refused = [...new Set((capture?.gaps ?? []).map((entry) => entry.reason).filter((reason) => reason !== RAW_EXPIRED && !TRANSCRIPT_GAP_REASONS.includes(reason)))];
+  const refused = [...new Set((capture?.gaps ?? []).map((entry) => entry.reason).filter((reason) => reason !== RAW_EXPIRED && reason !== PRIOR_SETUP && !TRANSCRIPT_GAP_REASONS.includes(reason)))];
   const unread = [...new Set((capture?.gaps ?? []).map((entry) => entry.reason).filter((reason) => TRANSCRIPT_GAP_REASONS.includes(reason)))];
   if (refused.length) details.push(`Capture refused material (${refused.join(', ')}); what it refused is not here.`);
   if (unread.length) details.push(`Capture did not read part of a session's transcript (${unread.join(', ')}); what it did not read is not here.`);
@@ -1619,6 +1621,11 @@ export function createShadowGraph(options = {}) {
   // limit's last closed period, the scope's sessions that reached their limit
   // (counted, never named, from the earliest refusal each records), and material refused because another project owned
   // its session. Availability is a non-persistent host configuration projection.
+  // While an extraction setup is active its worker drains only the captures
+  // bound to it: the unextracted rest (bound to an earlier setup, or to none)
+  // is counted as `priorSetup` with a `prior_setup` gap, never as pending, and
+  // a worker stop recorded on a session holding only such captures is not
+  // reported as this setup's.
   function captureStatus(scope) {
     const sessions = extras.get(CAPTURE_SESSIONS) ?? [];
     const entries = events.filter((entry) => entry?.type === CAPTURE_LIMIT_EVENT || entry?.type === CAPTURE_REFUSED_EVENT);
@@ -1626,7 +1633,11 @@ export function createShadowGraph(options = {}) {
     const owns = (entry) => (scope.state === 'project_selected' ? entry.attribution === 'project' && entry.project === scope.project : entry.attribution === 'unattributed' && sameOrigin(entry.originId, scope.originId));
     const status = { pending: 0, processing: 0, failed: 0, blocked: 0, oldestPendingAt: null, extractionAvailable: false, limited: [], gaps: [] };
     const at = now();
+    const binding = options.extractionAvailable?.binding;
+    const current = (item) => !binding || sameExtractionBinding(item.observation?.extractionBinding, binding);
     let expiredFrom = null;
+    let priorFrom = null;
+    let priorTo = null;
     let queued = 0;
     for (const item of captures.values()) {
       if (item.state !== 'extracted' && !rawExpired(item, at)) queued += 1;
@@ -1635,6 +1646,12 @@ export function createShadowGraph(options = {}) {
         status.expired = (status.expired ?? 0) + 1;
         const expiry = effectiveCaptureExpiry(item, retentionPolicy());
         if (expiredFrom === null || compareInstants(expiry, expiredFrom) < 0) expiredFrom = expiry;
+        continue;
+      }
+      if (!current(item) && (item.state === 'pending' || item.state === 'processing')) {
+        status.priorSetup = (status.priorSetup ?? 0) + 1;
+        if (priorFrom === null || compareInstants(item.createdAt, priorFrom) < 0) priorFrom = item.createdAt;
+        if (priorTo === null || compareInstants(item.createdAt, priorTo) > 0) priorTo = item.createdAt;
         continue;
       }
       status[item.state] += 1;
@@ -1651,6 +1668,7 @@ export function createShadowGraph(options = {}) {
       if (closed) status.gaps.push({ reason: limit, from: closed.lastPeriod.from, to: closed.lastPeriod.to });
     }
     if (expiredFrom !== null) status.gaps.push({ reason: RAW_EXPIRED, from: expiredFrom, to: null });
+    if (status.priorSetup) status.gaps.push({ reason: PRIOR_SETUP, from: priorFrom, to: priorTo });
     const limitedSessions = sessions.filter((session) => owns(session) && (session.limited?.since || session.limited?.lastPeriod));
     if (limitedSessions.length) {
       const starts = limitedSessions.map((session) => session.limited.lastPeriod?.from ?? session.limited.since).sort(compareInstants);
@@ -1680,7 +1698,11 @@ export function createShadowGraph(options = {}) {
     for (const [reason, period] of [...periods].sort(([left], [right]) => sessionGapReasons.indexOf(left) - sessionGapReasons.indexOf(right))) {
       status.gaps.push({ reason, sessions: period.sessions.size, from: period.from.sort(compareInstants)[0], to: period.to.includes(null) ? null : period.to.sort(compareInstants).at(-1) });
     }
-    const errors = sessions.filter(session => owns(session) && session.extraction?.state === 'blocked' && isValidIsoInstant(session.extraction.at));
+    const priorOnly = (session) => {
+      const held = [...captures.values()].filter((item) => item.originId === session.originId && item.source?.sessionId === session.sessionId);
+      return Boolean(binding) && held.length > 0 && !held.some(current);
+    };
+    const errors = sessions.filter(session => owns(session) && session.extraction?.state === 'blocked' && isValidIsoInstant(session.extraction.at) && !priorOnly(session));
     if (errors.length) status.workerErrors = [...new Set(errors.map(session => workerReason(session.extraction.reason)))].map(reason => ({ reason, at: errors.filter(session => workerReason(session.extraction.reason) === reason).map(session => session.extraction.at).sort(compareInstants)[0] }));
     if (!errors.length && typeof options.extractionAvailable === 'function') status.extractionAvailable = options.extractionAvailable(scope) === true;
     return status;
