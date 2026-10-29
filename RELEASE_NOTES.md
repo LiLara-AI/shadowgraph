@@ -1,4 +1,87 @@
-# ShadowGraph 0.42.3 — Technical Preview
+# ShadowGraph 0.43.0 — Technical Preview
+
+This release adds automatic experience memory for the **Claude Code CLI on Windows**,
+evaluated in print mode (`claude -p`). After a one-time setup, ordinary Claude Code
+CLI sessions are captured durably, extracted in the background by a separate,
+owner-selected Claude model, and delivered to fresh sessions at start and with
+relevant prompts. This is a pre-release, not stable/GA. The package remains
+`private: true` and unpublished to npm. Earlier tags and assets (v0.41.0 to v0.42.3)
+are preserved. The Windows Codex workflow and the MCP Full, Compact and Workflow
+profiles are unchanged.
+
+## Changes
+
+- Durable capture spool for Claude Code hooks: input is kept while the store is busy,
+  replayed oldest first, and losses are recorded as content-free markers that
+  delivery reports.
+- Runtime-evidence extraction profile for Claude Code 2.x: each invocation's own
+  session account must show the confined session before its output is used; the
+  owner chooses the extraction model at activation (`--model`).
+- Corrections on the Claude route: a user's correction supersedes the user's earlier
+  decision; a decision kept verbatim as a memory is linked to the correction
+  (`applied: false`) and marked `correctedBy`, not closed.
+- `shadowgraph sharing project|selected|all-permitted`: owner-confirmed, revocable
+  delivery grants.
+- Delivery puts lines before full records at SessionStart and UserPromptSubmit, so one
+  large record no longer crowds out the decision that says what was rejected and why.
+- An extraction output refused by the executor's own checks is asked once more,
+  within the frozen budgets (4 calls per drain, 12 per rolling hour).
+- A decision organized from a whole message keeps its choice and alternatives when
+  the proposed reason names none of them; the reason stays in the quoted source.
+- Captures from an earlier extraction setup are reported as `priorSetup` with a
+  `prior_setup` gap, not as pending work. They are not extracted by a new activation.
+
+The full list is in the [changelog](CHANGELOG.md).
+
+## Install
+
+```powershell
+npm install --global https://github.com/LiLara-AI/shadowgraph/releases/download/v0.43.0/shadowgraph-unified-plugin-0.43.0.tgz
+```
+
+Verify the tarball against `SHA256SUMS.txt` on the
+[GitHub Release](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.43.0).
+Installation alone does not activate automatic memory. Claude Code setup, activation
+and its commands are in the [Claude Code guide](docs/claude-code-integration.md).
+Stop active work and back up stores and private integration state before upgrading.
+Schema 7 is unchanged. See [upgrade and rollback](docs/migration.md).
+
+## Evidence
+
+On Windows 11 with Claude Code CLI 2.1.312 in print mode, a fresh-store run showed
+one complete chain: a session failed a real check, repaired it, and kept the decision
+with the rejected alternative; extraction ran automatically; a fresh session (Arabic
+prompt) received that decision at SessionStart and used the same exact-arithmetic
+approach before its first check, where a no-memory control used floating point. That
+session still made and repaired a type error. Recovery of pending extraction by the
+next ordinary session under the same activation was also shown. The [Claude Code
+guide](docs/claude-code-integration.md#support-and-evidence) lists each run.
+
+## Known limits
+
+- Delivered experience is not always applied. In one live run a fresh session
+  received an earlier lesson, named it, and implemented only what its own sample
+  showed. The cause is not established.
+- After extraction is deactivated and activated again, items left pending under the
+  earlier setup are not extracted. Status reports them as `priorSetup`; this
+  reporting was tested offline and in CI, not in a live run.
+- A user's decision may be kept as verbatim memory under strict claim verification.
+  The separate `reasonRejected` field can be empty while the reason stays in the
+  quoted alternative and source.
+- Extraction quality varies by model: Sonnet was reliable in the live runs; Haiku
+  once missed the decision.
+- With Claude Code 2.1.302 or earlier on Windows, `claude -p` exits only after the
+  extraction worker finishes (up to about 4 minutes). Use 2.1.312 or later.
+- Not verified: Claude Desktop, the interactive TUI, resume flows, and macOS or Linux
+  hosts. No claim of universal model obedience, general bilingual accuracy, cost or
+  time savings, or superiority over native memory.
+- Automatic extraction sends selected captured data to the configured model
+  provider and uses its account. Pattern redaction cannot guarantee every secret is
+  removed.
+- The credential-free Glama MCP container does not capture or extract a user's
+  Claude Code or Codex sessions.
+
+## Previous public release: 0.42.3 — Technical Preview
 
 This release publishes the accepted MCP usability improvements and an optional
 20-tool Workflow Profile. Full remains the default (35 tools; 36 with a configured

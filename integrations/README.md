@@ -10,12 +10,12 @@ ShadowGraph is a local decision ledger and unified memory kernel for AI agents. 
 The package remains `private: true` and is not published to the npm registry. Install the GitHub Technical Preview as the [main README](../README.md#1-install) describes, or use its pinned GitHub source tag:
 
 ```bash
-npm install --global github:LiLara-AI/shadowgraph#v0.42.3
+npm install --global github:LiLara-AI/shadowgraph#v0.43.0
 shadowgraph setup
 shadowgraph doctor
 ```
 
-Use `github:LiLara-AI/shadowgraph#v0.42.3` for the 0.42.3 Technical Preview; without the tag you get `main`. Read the [upgrade and rollback guide](../docs/migration.md) before switching versions.
+Use `github:LiLara-AI/shadowgraph#v0.43.0` for the 0.43.0 Technical Preview; without the tag you get `main`. Read the [upgrade and rollback guide](../docs/migration.md) before switching versions.
 
 The global install makes the `shadowgraph` binary available to GUI clients that may not launch from a project containing `node_modules/.bin`. If `shadowgraph doctor` is not found, add npm's global bin directory to the environment used by the client and restart it.
 
