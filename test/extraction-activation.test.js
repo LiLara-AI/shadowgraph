@@ -342,6 +342,27 @@ test('availability is a fresh scoped read projection, never persisted or inferre
   assert.deepEqual(await readFile(f.extraction.store.file), before);
 });
 
+test('availability carries the active setup binding, so a reactivated setup reports the earlier one apart (R7)', async t => {
+  const f = await activated(t), { readExtractionAvailability } = await import('../src/internal/extraction-availability.js');
+  const statusUnder = async () => {
+    const available = await readExtractionAvailability({ file: f.extraction.store.file, storage: 'json', env: f.env });
+    const graph = createShadowGraph({ extractionAvailable: available }); graph.importData(await f.read());
+    return { available, capture: graph.search('', { project: 'p' }).completeness.capture };
+  };
+  const first = await statusUnder();
+  assert.deepEqual(first.available.binding, extractionBinding(await (await state()).activeExtraction(f.env)));
+  assert.equal(first.capture.pending, 1); assert.equal(first.capture.priorSetup, undefined);
+  await (await activation()).deactivateExtraction({ env: f.env });
+  assert.equal((await statusUnder()).available.binding, undefined);
+  assert.equal((await statusUnder()).capture.pending, 1, 'with no active setup the count is unchanged');
+  await (await activation()).activateExtraction(f.options);
+  const second = await statusUnder();
+  assert.notEqual(second.available.binding.setupId, first.available.binding.setupId);
+  assert.equal(second.capture.pending, 0); assert.equal(second.capture.oldestPendingAt, null);
+  assert.equal(second.capture.priorSetup, 1);
+  assert.ok(second.capture.gaps.some(gap => gap.reason === 'prior_setup'));
+});
+
 import { runBounded } from '../src/extractor.js';
 test('real local child exits before deactivation reports complete and its model result is discarded', async t => {
   const f = await activated(t), { runActivatedExtraction } = await import('../src/extraction-runtime.js');

@@ -10,5 +10,7 @@ export function sameExtractionBinding(left, right) {
   return Boolean(validExtractionBinding(left) && validExtractionBinding(right)
     && ['provider', 'accountFingerprint', 'setupId'].every(key => left[key] === right[key]));
 }
+// The gap capture status declares for items the current setup never extracts.
+export const PRIOR_SETUP = 'prior_setup';
 export const extractionBinding = activation => ({ provider: activation.executor.provider ?? 'claude',
   accountFingerprint: activation.executor.accountFingerprint, setupId: activation.activationId });

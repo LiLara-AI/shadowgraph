@@ -80,7 +80,8 @@ const SUPPORTED_PROTOCOL_VERSIONS = Object.freeze([MODERN_PROTOCOL_VERSION, ...L
 const JSON_RPC_ERROR = Symbol('shadowgraph.jsonRpcError');
 const PUBLIC_ERROR = Symbol('shadowgraph.publicError');
 let extractionAvailability = () => false;
-const graph = createShadowGraph({ extractionAvailable: scope => extractionAvailability(scope), verifier, ...(injectedNow ? { now: injectedNow } : {}) });
+// The binding is read through, as availability is, from the latest read.
+const graph = createShadowGraph({ extractionAvailable: Object.defineProperty(scope => extractionAvailability(scope), 'binding', { get: () => extractionAvailability.binding }), verifier, ...(injectedNow ? { now: injectedNow } : {}) });
 graph.importData(await store.load());
 const workspace = await discoverWorkspace();
 const embeddingClient = process.env.SHADOWGRAPH_EMBEDDING_URL ? createEmbeddingClient({
