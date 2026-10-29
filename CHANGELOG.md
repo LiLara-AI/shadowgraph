@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — Claude Code CLI automatic memory (release candidate, not published)
+## 0.43.0 — Technical Preview (2026-10-29)
 
 - Keep native capture hook input durable while the store is busy. Each event is redacted and spooled owner-only, outside every repository, and one drainer replays the spool oldest first. Losses are recorded as content-free markers. Delivery reports waiting and dropped input as `capture_input_waiting` and `capture_input_dropped` (independent review 2026-10-26, §5).
 - Extract on current Claude Code 2.x hosts through a runtime-evidence profile. Each invocation's own `stream-json` session account must show the confined session before its output is used. The owner selects the extraction model at activation (`--model`), choosing among current models.

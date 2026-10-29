@@ -2,14 +2,14 @@
 
 **Carry useful development experience into the next agent session.**
 
-ShadowGraph records what worked, what failed, and why a decision was made—then supplies relevant experience when you continue working. The demonstrated automatic path is the **Windows Codex terminal wrapper**, after one-time setup in projects you enroll.
+ShadowGraph records what worked, what failed, and why a decision was made—then supplies relevant experience when you continue working. The demonstrated automatic paths are the **Windows Codex terminal wrapper** and, in print mode, **Claude Code CLI hooks on Windows**, after one-time setup in projects you enroll.
 
 [![CI](https://github.com/LiLara-AI/shadowgraph/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/LiLara-AI/shadowgraph/actions/workflows/ci.yml)
-[![Technical Preview](https://img.shields.io/badge/Technical_Preview-v0.42.3-blue)](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.42.3)
+[![Technical Preview](https://img.shields.io/badge/Technical_Preview-v0.43.0-blue)](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.43.0)
 
-[Get started](#quick-start-windows-codex) · [Supported workflows](#supported-workflows) · [Release & downloads](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.42.3) · [Documentation](#documentation)
+[Get started](#quick-start-windows-codex) · [Supported workflows](#supported-workflows) · [Release & downloads](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.43.0) · [Documentation](#documentation)
 
-![Session A works and repairs a failure; capture feeds background extraction through the selected provider; local memory supplies relevant experience to fresh Session B. Foreground work continues and cross-project reuse requires explicit sharing.](https://raw.githubusercontent.com/LiLara-AI/shadowgraph/v0.42.3/docs/assets/workflow.svg)
+![Session A works and repairs a failure; capture feeds background extraction through the selected provider; local memory supplies relevant experience to fresh Session B. Foreground work continues and cross-project reuse requires explicit sharing.](https://raw.githubusercontent.com/LiLara-AI/shadowgraph/v0.43.0/docs/assets/workflow.svg)
 
 *After setup, work normally. Memory processes in the background; reuse follows your project and sharing choices. [Editable diagram](docs/assets/workflow.svg).*
 
@@ -33,10 +33,10 @@ The Codex executor is a separate prerequisite distributed as `@openai/codex`. Sh
 
 ### 1. Install
 
-Run in PowerShell 7+. The version is pinned; the [release](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.42.3) includes `SHA256SUMS.txt` for the tarball.
+Run in PowerShell 7+. The version is pinned; the [release](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.43.0) includes `SHA256SUMS.txt` for the tarball.
 
 ```powershell
-npm install --global https://github.com/LiLara-AI/shadowgraph/releases/download/v0.42.3/shadowgraph-unified-plugin-0.42.3.tgz
+npm install --global https://github.com/LiLara-AI/shadowgraph/releases/download/v0.43.0/shadowgraph-unified-plugin-0.43.0.tgz
 
 $executorDir = Join-Path $env:LOCALAPPDATA 'ShadowGraph-Codex-0.161.0'
 npm install --prefix $executorDir @openai/codex@0.161.0
@@ -132,7 +132,7 @@ guide](docs/mcp-compatibility.md#optional-workflow-profile-complete-the-decision
 | --- | --- |
 | Windows `shadowgraph-codex run` | Installed command-executing workflow; automatic capture, background extraction, fresh-session delivery and recovery after delay/failure |
 | MCP, CLI, HTTP and JavaScript API | Explicit record/read operations; MCP exposes 16 compact or 35 full tools. Tool calls alone do not observe all work |
-| Claude Code CLI hooks (Windows) | After one-time setup on Claude Code CLI 2.x (verified on 2.1.302 and 2.1.312, print mode): durable capture under contention, automatic extraction by an owner-selected model, delivery to fresh sessions, corrections of decisions (a decision kept verbatim is linked and marked as corrected, not closed) and revocable sharing. On Windows, use Claude Code 2.1.312 or later: up to 2.1.302, `claude -p` exits only after the extraction worker it started finishes (up to 4 minutes; the result is printed first). See the [Claude Code guide](docs/claude-code-integration.md#support-and-evidence) for what was verified and its limits. Claude Desktop is not verified |
+| Claude Code CLI hooks (Windows) | After one-time setup on Claude Code CLI 2.x (verified on 2.1.302 and 2.1.312, print mode): durable capture under contention, automatic extraction by an owner-selected model, delivery to fresh sessions, corrections of decisions (a decision kept verbatim is linked and marked as corrected, not closed) and revocable sharing. On Windows, use Claude Code 2.1.312 or later: up to 2.1.302, `claude -p` exits only after the extraction worker it started finishes (up to 4 minutes; the result is printed first). See the [Claude Code guide](docs/claude-code-integration.md#support-and-evidence) for what was verified and its limits. Claude Desktop, the interactive TUI, resume, macOS and Linux are not verified |
 | Codex Desktop UI or ordinary CLI launched elsewhere | Not observed by this wrapper |
 | Glama MCP container | Credential-free MCP surface; cannot capture a user's Windows Codex sessions by itself |
 
@@ -140,11 +140,13 @@ guide](docs/mcp-compatibility.md#optional-workflow-profile-complete-the-decision
 
 Each host turn has a 120-second process limit. Background extraction has bounded calls, retries and concurrency; a backlog can remain honestly pending. Native command events and user/assistant text are captured, but not every native tool-event type. Retrieval happens between turns, not inside a running turn.
 
+For Claude Code CLI, delivered experience is not always applied: in one live run a fresh session received an earlier lesson and did not apply it. After extraction is deactivated and activated again, items left pending under the earlier setup are not extracted; status reports them as `priorSetup`. The Claude Code evidence is one Windows print-mode (`claude -p`) path, not every host.
+
 This is **Technical Preview**, not stable/GA. There are no claims of perfect semantic classification, universal language support, cost or time savings, superiority over native memory, or a human third-party security audit. See [release notes](RELEASE_NOTES.md), [security scope](SECURITY.md) and [benchmark status](docs/benchmark-report.md).
 
 ## Upgrade and storage
 
-Stop active work and back up your stores and private integration home before upgrading. v0.42.3 retains schema 7; changed source/executor/account identity requires setup again. Older pending work with different setup provenance is held, not silently reassigned. [Upgrade and rollback guide](docs/migration.md).
+Stop active work and back up your stores and private integration home before upgrading. v0.43.0 retains schema 7; changed source/executor/account identity requires setup again. Older pending work with different setup provenance is held, not silently reassigned. [Upgrade and rollback guide](docs/migration.md).
 
 ### Moving between 0.41.0 and 0.42.0
 
