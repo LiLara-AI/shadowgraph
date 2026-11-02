@@ -1,6 +1,17 @@
 # Upgrade and rollback
 
-## Moving to 0.43.0
+## Moving to 0.43.1
+
+This reliability patch retains schema 7 and the existing host support limits.
+Stop all writers, hooks and workers before upgrading; do not mix runtime versions
+on one store. The fence now needs exclusive hard-link support on a local filesystem.
+An orphan `.lock.reclaim` guard fails closed and needs recovery with all writers
+stopped; see [locking and retry limits](../README.md#store-locking-and-retry-limits-0431).
+Capture retry accounting uses stable event keys across drain rounds, including
+interleaved hooks. Pending input is replayed on a later hook under the same
+destination and existing admission/deletion rules.
+
+### Previous transition: 0.43.0
 
 Stop active wrappers/workers and back up each store before upgrading. For a manual store, use `shadowgraph backup <backup-file>` with that store selected. For the Codex wrapper, stop it and preserve its entire private home (configuration, memory, pending outbox and usage receipts) in a private location. Do not publish these backups.
 

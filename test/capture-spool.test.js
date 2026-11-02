@@ -6,6 +6,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { appendFile, mkdir, readdir, readFile, rename, unlink, utimes, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { createShadowGraph } from '../src/shadowgraph.js';
@@ -200,6 +202,66 @@ test('a store failure costs a waiting entry one attempt per hook, not one per dr
   await writeFile(s.file, '{ corrupt');
   assert.equal(await capture(s, prompt('kept through a broken store', { message_id: 'broken' })), 'store_failed');
   assert.deepEqual((await spoolEntries(s.spool)).map((entry) => entry.attempts), [1]);
+});
+
+test('another hook renaming a failed entry does not make the first hook retry it twice', { timeout: 60_000 }, async (t) => {
+  const s = await setup(t);
+  await writeFile(s.file, '{ corrupt');
+  const first = prompt('original retry cycle', { message_id: 'original' });
+  const originalUnlink = fs.promises.unlink;
+  let interleaved = false;
+  fs.promises.unlink = async (path, ...args) => {
+    const result = await originalUnlink(path, ...args);
+    if (!interleaved && String(path).endsWith('drain.lock')) {
+      interleaved = true;
+      assert.equal(await capture(s, prompt('concurrent retry cycle', { message_id: 'concurrent' })), 'store_failed');
+    }
+    return result;
+  };
+  syncBuiltinESMExports();
+  try {
+    assert.equal(await capture(s, first), 'store_failed');
+  } finally { fs.promises.unlink = originalUnlink; syncBuiltinESMExports(); }
+  assert.ok(interleaved, 'the second hook ran after the first released its drain');
+  const waiting = await spoolEntries(s.spool);
+  const original = await Promise.all(waiting.map(async (entry) => ({ entry, text: await readFile(join(s.spool, entry.name), 'utf8') })));
+  assert.equal(original.find(({ text }) => text.includes('original retry cycle')).entry.attempts, 2, 'one failed attempt by each of two hooks');
+});
+
+test('eight separate failed hooks exhaust one entry once and report the loss while the host continues', { timeout: 60_000 }, async (t) => {
+  const s = await setup(t);
+  const healthy = await readFile(s.file, 'utf8');
+  await writeFile(s.file, '{ corrupt');
+  const input = prompt('bounded failure', { message_id: 'bounded' });
+  for (let attempt = 1; attempt <= 8; attempt += 1) {
+    assert.equal(await capture(s, input), 'store_failed');
+    assert.deepEqual((await spoolEntries(s.spool)).map(({ attempts }) => attempts), attempt === 8 ? [] : [attempt]);
+  }
+  assert.equal((await spoolStatus(s.spool)).dropped, 1);
+  await writeFile(s.file, healthy);
+  assert.equal((await processing(s)).inputDropped, 1);
+  assert.equal(await capture(s, prompt('host continued', { message_id: 'continued' })), 'written');
+  assert.deepEqual((await captures(s)).map(({ source }) => source.hostEventId), ['continued']);
+});
+
+test('failed input survives hook process restarts and replays exactly once after repair', { timeout: 60_000 }, async (t) => {
+  const s = await setup(t);
+  const healthy = await readFile(s.file, 'utf8');
+  const input = prompt('restart durable input', { message_id: 'restart' });
+  await writeFile(s.file, '{ corrupt');
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const failed = await hook(s, input);
+    silent(failed, 'a store failure does not stop the host');
+    assert.ok(failed.ms < 9000, `${failed.ms} ms`);
+    assert.deepEqual((await spoolEntries(s.spool)).map(({ attempts }) => attempts), [attempt]);
+    assert.equal((await spoolStatus(s.spool)).dropped, 0);
+  }
+  await writeFile(s.file, healthy);
+  silent(await hook(s, prompt('work after restart', { message_id: 'after-restart' })));
+  silent(await hook(s, input));
+  assert.deepEqual((await captures(s)).map(({ source }) => source.hostEventId), ['restart', 'after-restart']);
+  assert.ok((await texts(s)).includes('restart durable input'));
+  assert.equal((await spoolStatus(s.spool)).pending, 0);
 });
 
 // CI (ubuntu, Node 24, 2026-10-27): of a burst of hooks, the entries one wrote

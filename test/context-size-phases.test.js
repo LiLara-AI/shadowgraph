@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fsPromises, { open, rename, writeFile } from 'node:fs/promises';
+import fsPromises, { link, open, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { performance } from 'node:perf_hooks';
 import { join } from 'node:path';
 import { measureWrites, observeFileSystem, windowPhases } from '../scripts/context-size.mjs';
 import { scratchDirectory } from '../tools/scratch-directory.js';
@@ -62,4 +63,26 @@ test('every measured save carries phases that account for its whole window, with
     });
   }
   assert.doesNotMatch(JSON.stringify([report.grant.phases, report.nullReference.phases]), /[\\/]|store\.json|context-size|Synthetic|regional/);
+});
+
+test('the observer counts exclusive link acquisition and all token candidate I/O as lock work', async (t) => {
+  const root = await scratchDirectory(t);
+  const candidate = join(root, 'store.json.lock.123-456-owner.candidate');
+  const lock = join(root, 'store.json.lock');
+  const observation = observeFileSystem();
+  const started = performance.now();
+  try {
+    await writeFile(candidate, 'synthetic-owner', { flag: 'wx', mode: 0o600 });
+    await link(candidate, lock);
+    await assert.rejects(link(candidate, lock), { code: 'EEXIST' });
+    await unlink(candidate);
+    assert.equal(await readFile(lock, 'utf8'), 'synthetic-owner');
+    await unlink(lock);
+  } finally { observation.stop(); }
+  const phase = windowPhases({ started, ended: performance.now(), events: observation.events });
+  assert.deepEqual(phase.calls, { lock: 6, store: 0, temp: 0, other: 0 });
+  assert.equal(phase.lock.attempts, 2);
+  assert.equal(phase.lock.acquired, 1);
+  assert.deepEqual(phase.lock.codes, { EEXIST: 1 });
+  assert.equal(phase.writes, 0, 'a lock token is not a store payload write');
 });

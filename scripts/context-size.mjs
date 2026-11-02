@@ -213,7 +213,7 @@ const OBSERVED_CALLS = ['open', 'readFile', 'writeFile', 'rename', 'stat', 'lsta
 const HANDLE_CALLS = ['appendFile', 'chmod', 'chown', 'close', 'datasync', 'read', 'readFile', 'readv', 'stat', 'sync', 'truncate', 'utimes', 'write', 'writeFile', 'writev'];
 const fileRole = (path) => {
   const name = basename(String(path));
-  return name === 'store.json' ? 'store' : name.endsWith('.lock') ? 'lock' : name.endsWith('.tmp') ? 'temp' : 'other';
+  return name === 'store.json' ? 'store' : name.endsWith('.lock') || /\.lock\.[^.]+\.candidate$/u.test(name) ? 'lock' : name.endsWith('.tmp') ? 'temp' : 'other';
 };
 export function observeFileSystem() {
   const events = [], gc = [], originals = {};
@@ -264,7 +264,9 @@ export function windowPhases({ started, ended, events, gc = [], excluded = [] })
   const of = (op, role) => inside.filter((event) => event.op === op && event.role === role);
   const sum = (items) => items.reduce((total, item) => total + (item.ended - item.started), 0);
   const span = (items) => (items.length ? items.at(-1).ended - items[0].started : 0);
-  const lockOpens = of('open', 'lock'), renames = of('rename', 'temp'), writes = of('writeFile', 'temp');
+  // A completed token is now acquired by exclusive link; both the candidate
+  // write/cleanup and acquisition stay counted as lock I/O under the same caps.
+  const lockOpens = inside.filter((event) => event.role === 'lock' && ['open', 'link'].includes(event.op)), renames = of('rename', 'temp'), writes = of('writeFile', 'temp');
   const firstLock = lockOpens.find((event) => !event.code);
   const lockWaitMs = firstLock ? firstLock.ended - lockOpens[0].started : span(lockOpens);
   const lockPollMs = Math.max(0, lockWaitMs - covered(lockOpens.filter((event) => event.ended <= (firstLock?.ended ?? Infinity))));
@@ -283,7 +285,7 @@ export function windowPhases({ started, ended, events, gc = [], excluded = [] })
     lock: { attempts: lockOpens.length, acquired: lockOpens.filter((event) => !event.code).length,
       // Lock calls made while waiting for the lock (failed opens and staleness probes), counted apart.
       contentionCalls: firstLock ? inside.filter((event) => event.role === 'lock' && event.started >= lockOpens[0].started && event.started < firstLock.started).length : lockOpens.length,
-      codes: codes(lockOpens), waitMs: round(lockWaitMs), pollMs: round(lockPollMs), handleAndReleaseMs: round(sum(inside.filter((event) => event.role === 'lock' && event.op !== 'open'))) },
+      codes: codes(lockOpens), waitMs: round(lockWaitMs), pollMs: round(lockPollMs), handleAndReleaseMs: round(sum(inside.filter((event) => event.role === 'lock' && !['open', 'link'].includes(event.op)))) },
     rename: { attempts: renames.length, committed: renames.filter((event) => !event.code).length, codes: codes(renames), callMs: round(sum(renames)), backoffMs: round(renameBackoffMs) },
     writes: writes.length,
     readMs: round(sum(of('readFile', 'store'))),
