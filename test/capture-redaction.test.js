@@ -317,7 +317,7 @@ function spyModes(t) {
   fs.promises.open = async (path, flags, mode) => { if (String(flags).includes('x')) created.push({ call: 'open', path: String(path), mode: mode ?? null }); return originalOpen(path, flags, mode); };
   fs.promises.link = async (from, to) => {
     await originalLink(from, to);
-    created.push({ call: 'link', path: String(to), mode: created.findLast((entry) => entry.call === 'open' && entry.path === String(from))?.mode ?? null });
+    created.push({ call: 'link', path: String(to), mode: created.findLast((entry) => ['open', 'writeFile'].includes(entry.call) && entry.path === String(from))?.mode ?? null });
   };
   fs.promises.mkdir = async (path, options) => { created.push({ call: 'mkdir', path: String(path), mode: modeOf(options) }); return originalMkdir(path, options); };
   syncBuiltinESMExports();

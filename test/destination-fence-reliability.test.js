@@ -37,7 +37,7 @@ test('a paused token writer cannot enter alongside the next lock owner', { timeo
   const file = join(directory, 'state.json');
   const lock = await fenceLockPath(file);
   const writing = deferred(), resume = deferred(), entered = deferred(), release = deferred(), firstState = deferred();
-  const original = fs.promises.open;
+  const original = fs.promises.open, originalWrite = fs.promises.writeFile;
   let intercepted = false, inside = 0, most = 0;
   fs.promises.open = async (...args) => {
     const handle = await original(...args);
@@ -53,8 +53,16 @@ test('a paused token writer cannot enter alongside the next lock owner', { timeo
     }
     return handle;
   };
+  fs.promises.writeFile = async (path, ...args) => {
+    if (!intercepted && String(path).startsWith(lock)) {
+      intercepted = true;
+      writing.resolve();
+      await resume.promise;
+    }
+    return originalWrite(path, ...args);
+  };
   syncBuiltinESMExports();
-  t.after(() => { fs.promises.open = original; syncBuiltinESMExports(); });
+  t.after(() => { fs.promises.open = original; fs.promises.writeFile = originalWrite; syncBuiltinESMExports(); });
   const first = createDestinationFence(file, options).run(async () => {
     inside += 1; most = Math.max(most, inside); firstState.resolve('entered'); inside -= 1;
   }, { onWait: () => firstState.resolve('waiting') });

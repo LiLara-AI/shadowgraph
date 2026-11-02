@@ -8,8 +8,8 @@ unpublished to npm, and Technical Preview. Earlier tags and assets are preserved
 ## Reliability changes
 
 - A lock's PID token is complete before its exclusive publication. A writer paused
-  during token creation cannot enter beside the next owner; heartbeats target its
-  own file handle.
+  during token creation cannot enter beside the next owner. PID liveness protects
+  long-running owners without a heartbeat.
 - Stale store locks are reclaimed one at a time with token-identity checking.
   Reclaim guards are not expired by age. A crashed reclaimer's orphan guard fails
   closed and needs recovery with every writer stopped.

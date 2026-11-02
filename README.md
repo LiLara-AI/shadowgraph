@@ -150,7 +150,7 @@ If a crashed reclaimer leaves this guard, writes time out with
 `storage_lock_timeout`. Stop every process using that store (including hooks and
 workers), preserve a private backup, confirm no writer remains, then remove only
 the orphan `.lock.reclaim` guard and retry. Do not remove a live writer's lock.
-Lock-candidate `.lock.*.tmp` files contain ownership tokens, not store content;
+Lock-candidate `.lock.*.candidate` files contain ownership tokens, not store content;
 a process killed before linking can leave one. Remove such orphans only with all
 writers stopped.
 

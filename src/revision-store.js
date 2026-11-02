@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { link, mkdir, open, readFile, stat, unlink } from 'node:fs/promises';
+import { link, mkdir, open, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 // deletion-knowledge.js imports nothing from here, so there is no import
 // cycle (PR-37c design §3.1, check R3-4).
@@ -130,15 +130,10 @@ export function createDestinationFence(filePath, options = {}) {
   // by writeFile exposed an empty lock: if that writer paused, a waiter could
   // reclaim it before the writer resumed and entered with its unlinked handle.
   async function publishLock(lockPath, token) {
-    const candidate = `${lockPath}.${token.replaceAll(':', '-')}.tmp`;
-    const handle = await open(candidate, 'wx', 0o600);
+    const candidate = `${lockPath}.${token.replaceAll(':', '-')}.candidate`;
+    await writeFile(candidate, token, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     try {
-      await handle.writeFile(token, 'utf8');
       await link(candidate, lockPath);
-      return handle;
-    } catch (error) {
-      await handle.close().catch(() => {});
-      throw error;
     } finally {
       await unlink(candidate).catch(() => {});
     }
@@ -152,16 +147,9 @@ export function createDestinationFence(filePath, options = {}) {
     await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
     while (true) {
       try {
-        const handle = await publishLock(lockPath, token);
-        const heartbeatMs = Math.max(10, Math.min(1000, Math.floor(staleLockMs / 3)));
-        const heartbeat = setInterval(() => {
-          const now = new Date();
-          void handle.utimes(now, now).catch(() => {});
-        }, heartbeatMs);
-        heartbeat.unref?.();
+        await publishLock(lockPath, token);
+        // PID liveness, not a heartbeat's age, protects a long-running owner.
         return async () => {
-          clearInterval(heartbeat);
-          await handle.close();
           try {
             if ((await readFile(lockPath, 'utf8')) === token) await unlink(lockPath);
           } catch (error) {

@@ -2,7 +2,7 @@
 
 ## 0.43.1 — Technical Preview (2026-11-02)
 
-- Publish a complete destination-lock ownership token atomically using an exclusive hard link, so a writer paused before writing its token cannot later enter beside a replacement owner. Heartbeats update the owned file handle.
+- Publish a complete destination-lock ownership token atomically using an exclusive hard link, so a writer paused before writing its token cannot later enter beside a replacement owner. PID liveness protects long-running owners without a heartbeat.
 - Serialize stale-lock reclamation without expiring a held reclaim guard. Guard recovery after a crash requires stopped writers; live owner locks are never stolen by age.
 - Count capture retry attempts by the stable spool key for the entire hook, including when another hook renames the same entry between drain rounds. Keep the existing eight-attempt, age and capacity bounds, durable replay and loss reporting.
 - Include PR #50's already-merged command-bound short-password redaction and its regression checks unchanged. This patch performs no new security/redaction audit.
