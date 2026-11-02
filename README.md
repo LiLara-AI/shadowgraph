@@ -136,6 +136,9 @@ guide](docs/mcp-compatibility.md#optional-workflow-profile-complete-the-decision
 | Codex Desktop UI or ordinary CLI launched elsewhere | Not observed by this wrapper |
 | Glama MCP container | Credential-free MCP surface; cannot capture a user's Windows Codex sessions by itself |
 
+Glama's release label **0.42.5** maps to ShadowGraph runtime **0.43.1**, with
+the 20-tool Workflow profile. See the [release/runtime identity mapping](docs/mcp-compatibility.md#current-release-mapping-read-back-2026-11-02).
+
 ### Store locking and retry limits (0.43.1)
 
 Store fences require a local filesystem with exclusive hard-link creation (tested
@@ -146,10 +149,13 @@ Stop every writer and back up private state before upgrading; schema 7 is unchan
 A live PID keeps its lock even if its timestamp is old. Stale store locks with a
 dead owner are reclaimed serially. A `.lock.reclaim` guard is never stolen merely
 because it is old: a suspended owner is indistinguishable from a crashed one.
-If a crashed reclaimer leaves this guard, writes time out with
+If a crashed reclaimer leaves this guard while a stale store lock still needs
+reclamation, writes time out with
 `storage_lock_timeout`. Stop every process using that store (including hooks and
-workers), preserve a private backup, confirm no writer remains, then remove only
-the orphan `.lock.reclaim` guard and retry. Do not remove a live writer's lock.
+workers), preserve a private backup, positively identify the exact orphan guard,
+then remove only that guard and retry. Follow the
+[stopped-writer recovery checklist](docs/migration.md#recovering-an-orphan-reclaim-guard).
+Do not remove a live writer's lock or infer an orphan from age alone.
 Lock-candidate `.lock.*.candidate` files contain ownership tokens, not store content;
 a process killed before linking can leave one. Remove such orphans only with all
 writers stopped.
