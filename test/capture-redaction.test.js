@@ -311,13 +311,17 @@ test('PR-37b D5: a capture that loses the lock or runs out of time writes nothin
 // check holds on every platform.
 function spyModes(t) {
   const created = [];
-  const { writeFile: originalWrite, open: originalOpen, mkdir: originalMkdir } = fs.promises;
+  const { writeFile: originalWrite, open: originalOpen, mkdir: originalMkdir, link: originalLink } = fs.promises;
   const modeOf = (options) => (typeof options === 'object' && options !== null && options.mode !== undefined ? options.mode : null);
   fs.promises.writeFile = async (path, data, options) => { created.push({ call: 'writeFile', path: String(path), mode: modeOf(options) }); return originalWrite(path, data, options); };
   fs.promises.open = async (path, flags, mode) => { if (String(flags).includes('x')) created.push({ call: 'open', path: String(path), mode: mode ?? null }); return originalOpen(path, flags, mode); };
+  fs.promises.link = async (from, to) => {
+    await originalLink(from, to);
+    created.push({ call: 'link', path: String(to), mode: created.findLast((entry) => entry.call === 'open' && entry.path === String(from))?.mode ?? null });
+  };
   fs.promises.mkdir = async (path, options) => { created.push({ call: 'mkdir', path: String(path), mode: modeOf(options) }); return originalMkdir(path, options); };
   syncBuiltinESMExports();
-  t.after(() => { Object.assign(fs.promises, { writeFile: originalWrite, open: originalOpen, mkdir: originalMkdir }); syncBuiltinESMExports(); });
+  t.after(() => { Object.assign(fs.promises, { writeFile: originalWrite, open: originalOpen, mkdir: originalMkdir, link: originalLink }); syncBuiltinESMExports(); });
   return created;
 }
 const modes = (entries) => [...new Set(entries.map((entry) => entry.mode))];
@@ -333,7 +337,7 @@ test('PR-37b FND-P6-11: every capture commit, its lock and the store\'s director
   assert.deepEqual(modes(temporary), [0o600], 'the capture commit');
   // The fence names its lock beside the store's canonical path (PR-37c design §3.1, check R3-2).
   const lock = await fenceLockPath(s.file);
-  assert.deepEqual(modes(created.filter((entry) => entry.call === 'open' && entry.path === lock)), [0o600], 'the lock');
+  assert.deepEqual(modes(created.filter((entry) => ['open', 'link'].includes(entry.call) && entry.path === lock)), [0o600], 'the published lock inherits the owner-only candidate mode');
   assert.deepEqual(modes(created.filter((entry) => entry.call === 'mkdir' && entry.path === dirname(s.file))), [0o700], 'the store\'s directory, when made');
   created.length = 0;
   // The capture made the store owner-only; a manual store made readable again keeps that mode on a manual save.

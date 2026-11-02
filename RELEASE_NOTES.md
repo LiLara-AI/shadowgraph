@@ -1,4 +1,50 @@
-# ShadowGraph 0.43.0 — Technical Preview
+# ShadowGraph 0.43.1 — Reliability Technical Preview
+
+This patch verifies and repairs PR #50's destination-lock and capture-retry paths.
+It includes the already-merged PR #50 redaction protection unchanged and the
+accepted PR #51 MCP gate tooling maintenance. The package stays `private: true`,
+unpublished to npm, and Technical Preview. Earlier tags and assets are preserved.
+
+## Reliability changes
+
+- A lock's PID token is complete before its exclusive publication. A writer paused
+  during token creation cannot enter beside the next owner; heartbeats target its
+  own file handle.
+- Stale store locks are reclaimed one at a time with token-identity checking.
+  Reclaim guards are not expired by age. A crashed reclaimer's orphan guard fails
+  closed and needs recovery with every writer stopped.
+- One hook tracks each spool key across all drain rounds, even when another hook
+  renames that input after a failure. At most one failed attempt is counted for
+  that input per hook. The eight-attempt bound, pending-work durability, restart
+  replay, duplicate suppression and content-free loss reporting remain in place.
+
+## Install and support
+
+```powershell
+npm install --global https://github.com/LiLara-AI/shadowgraph/releases/download/v0.43.1/shadowgraph-unified-plugin-0.43.1.tgz
+```
+
+Verify the package against `SHA256SUMS.txt` on the
+[GitHub Release](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.43.1).
+Stop every writer and back up private state first. Schema 7 is unchanged.
+Local filesystems must support exclusive hard links; network/cross-host stores,
+mixed Windows/WSL access and simultaneous old/new runtime writers are unsupported.
+See [locking/retry limits and orphan-guard recovery](README.md#store-locking-and-retry-limits-0431)
+and [upgrade guidance](docs/migration.md). Existing Windows Codex and Claude Code
+print-mode support limits below remain unchanged. Linux CI tests do not establish
+new live host/model support. No new live memory or model experiment was performed.
+
+The MCP Full (35/36), Compact (16) and Workflow (20) definitions are unchanged.
+Glama's credential-free Workflow container does not observe a user's host work;
+its display label and the MCP runtime version are separate values.
+
+## Deferred
+
+Audit findings 4–18 and the previously declared bundled dependency follow-up are
+outside this patch. Preserved redaction tests are regression checks, not a new
+security audit or universal secret-removal guarantee.
+
+## Previous release: 0.43.0 — Technical Preview
 
 This release adds automatic experience memory for the **Claude Code CLI on Windows**,
 evaluated in print mode (`claude -p`). After a one-time setup, ordinary Claude Code

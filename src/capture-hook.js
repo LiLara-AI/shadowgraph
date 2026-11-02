@@ -345,8 +345,8 @@ async function replayEntry({ spool, entry, destination, ...common }) {
     outcome = await captureEvent({ ...common, payload, event, cwd: value.cwd, transcriptSize: value.transcriptSize ?? null, boundBy: value.boundBy ?? null });
   } catch (error) {
     if (error?.code !== 'storage_lock_timeout') {
-      const next = await failSpoolEntry(spool, entry, error?.code ?? 'capture_failed');
-      return { outcome: 'store_failed', renamed: next?.name };
+      await failSpoolEntry(spool, entry, error?.code ?? 'capture_failed');
+      return { outcome: 'store_failed' };
     }
     outcome = 'store_busy';
   }
@@ -387,23 +387,23 @@ async function drainSpool({ spool, own, destination, deadline, now, report, ...c
           deletedAt = newestDeletion(ledger);
         } catch { return; }
         for (let pass = 0; pass < 4; pass += 1) {
-          const waiting = (await spoolEntries(spool)).filter((entry) => !tried.has(entry.name));
+          const waiting = (await spoolEntries(spool)).filter((entry) => !tried.has(entry.key));
           if (!waiting.length) { idle = true; return; }
           for (const entry of waiting) {
             if (now() + 2 * COMMIT_MARGIN_MS >= deadline) {
               // The deadline stops the drain; an own entry not reached waits for that reason.
-              if (!tried.has(own.name) && result === 'spooled') result = 'out_of_time';
+              if (!tried.has(own.key) && result === 'spooled') result = 'out_of_time';
               return;
             }
-            tried.add(entry.name);
+            // Attempts rename the file; another hook can rename it again
+            // between drain rounds. The payload key is stable across both.
+            tried.add(entry.key);
             if (entry.at <= deletedAt) {
               await dropSpoolEntry(spool, entry, 'deletion_after_receipt');
               if (entry.key === own.key) result = 'dropped';
               continue;
             }
             const replayed = await replayEntry({ ...context, entry });
-            // A failed entry is renamed with its attempt count; one hook counts it once.
-            if (replayed.renamed) tried.add(replayed.renamed);
             // A Stop or SessionEnd written here asks for extraction, whichever hook drained it.
             if (replayed.terminal && EXTRACTION_ELIGIBLE.has(replayed.outcome)) report.terminalWritten = true;
             // The own entry, or one ahead of it that stopped the drain: its outcome is the own entry's too.
@@ -414,7 +414,7 @@ async function drainSpool({ spool, own, destination, deadline, now, report, ...c
       });
     } catch { break; } // Taken: its holder took it after these entries were written, and lists them.
     if (!idle || now() + 2 * COMMIT_MARGIN_MS >= deadline) break;
-    if (!(await spoolEntries(spool).catch(() => [])).some((entry) => !tried.has(entry.name))) break;
+    if (!(await spoolEntries(spool).catch(() => [])).some((entry) => !tried.has(entry.key))) break;
   }
   return result;
 }

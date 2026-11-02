@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { mkdir, open, readFile, stat, unlink, utimes } from 'node:fs/promises';
+import { link, mkdir, open, readFile, stat, unlink } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 // deletion-knowledge.js imports nothing from here, so there is no import
 // cycle (PR-37c design §3.1, check R3-4).
@@ -112,8 +112,8 @@ export function createDestinationFence(filePath, options = {}) {
     try { guard = await open(guardPath, 'wx', 0o600); }
     catch (error) {
       if (!LOCK_CONTENTION_CODES.has(error.code)) throw error;
-      // The guard is held for one read and one delete; one this old was left by a waiter that died.
-      if (Date.now() - (await stat(guardPath)).mtimeMs > staleLockMs) await unlink(guardPath).catch((candidate) => { if (candidate.code !== 'ENOENT') throw candidate; });
+      // Age cannot distinguish a crashed reclaimer from a suspended one. An
+      // orphan guard needs recovery with every writer stopped; fail closed.
       return false;
     }
     try {
@@ -126,6 +126,24 @@ export function createDestinationFence(filePath, options = {}) {
     }
   }
 
+  // Publish a complete token with an exclusive hard link. open('wx') followed
+  // by writeFile exposed an empty lock: if that writer paused, a waiter could
+  // reclaim it before the writer resumed and entered with its unlinked handle.
+  async function publishLock(lockPath, token) {
+    const candidate = `${lockPath}.${token.replaceAll(':', '-')}.tmp`;
+    const handle = await open(candidate, 'wx', 0o600);
+    try {
+      await handle.writeFile(token, 'utf8');
+      await link(candidate, lockPath);
+      return handle;
+    } catch (error) {
+      await handle.close().catch(() => {});
+      throw error;
+    } finally {
+      await unlink(candidate).catch(() => {});
+    }
+  }
+
   async function acquire(lockPath, onWait) {
     const started = Date.now();
     const token = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
@@ -134,13 +152,11 @@ export function createDestinationFence(filePath, options = {}) {
     await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
     while (true) {
       try {
-        const handle = await open(lockPath, 'wx', 0o600);
-        try { await handle.writeFile(token, 'utf8'); }
-        catch (error) { await handle.close().catch(() => {}); await unlink(lockPath).catch(() => {}); throw error; }
+        const handle = await publishLock(lockPath, token);
         const heartbeatMs = Math.max(10, Math.min(1000, Math.floor(staleLockMs / 3)));
         const heartbeat = setInterval(() => {
           const now = new Date();
-          void utimes(lockPath, now, now).catch(() => {});
+          void handle.utimes(now, now).catch(() => {});
         }, heartbeatMs);
         heartbeat.unref?.();
         return async () => {

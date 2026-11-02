@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.43.1 — Technical Preview (2026-11-02)
+
+- Publish a complete destination-lock ownership token atomically using an exclusive hard link, so a writer paused before writing its token cannot later enter beside a replacement owner. Heartbeats update the owned file handle.
+- Serialize stale-lock reclamation without expiring a held reclaim guard. Guard recovery after a crash requires stopped writers; live owner locks are never stolen by age.
+- Count capture retry attempts by the stable spool key for the entire hook, including when another hook renames the same entry between drain rounds. Keep the existing eight-attempt, age and capacity bounds, durable replay and loss reporting.
+- Include PR #50's already-merged command-bound short-password redaction and its regression checks unchanged. This patch performs no new security/redaction audit.
+- Include the accepted PR #51 MCP gate tooling maintenance (Inspector 2.11.0 and its locked updates). The bundled dependency follow-up and audit findings 4–18 remain deferred; this release does not resolve them.
+- Add focused suspended-writer, reclaim-guard, replacement-identity, concurrent-update, interleaved-retry, exhaustion and process-restart regressions. Preserve Full 35/36, Compact 16 and Workflow 20 tools and `private: true`.
+
 ## 0.43.0 — Technical Preview (2026-10-29)
 
 - Keep native capture hook input durable while the store is busy. Each event is redacted and spooled owner-only, outside every repository, and one drainer replays the spool oldest first. Losses are recorded as content-free markers. Delivery reports waiting and dropped input as `capture_input_waiting` and `capture_input_dropped` (independent review 2026-10-26, §5).

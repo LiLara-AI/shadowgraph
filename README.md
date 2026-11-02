@@ -5,11 +5,11 @@
 ShadowGraph records what worked, what failed, and why a decision was made—then supplies relevant experience when you continue working. The demonstrated automatic paths are the **Windows Codex terminal wrapper** and, in print mode, **Claude Code CLI hooks on Windows**, after one-time setup in projects you enroll.
 
 [![CI](https://github.com/LiLara-AI/shadowgraph/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/LiLara-AI/shadowgraph/actions/workflows/ci.yml)
-[![Technical Preview](https://img.shields.io/badge/Technical_Preview-v0.43.0-blue)](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.43.0)
+[![Technical Preview](https://img.shields.io/badge/Technical_Preview-v0.43.1-blue)](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.43.1)
 
-[Get started](#quick-start-windows-codex) · [Supported workflows](#supported-workflows) · [Release & downloads](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.43.0) · [Documentation](#documentation)
+[Get started](#quick-start-windows-codex) · [Supported workflows](#supported-workflows) · [Release & downloads](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.43.1) · [Documentation](#documentation)
 
-![Session A works and repairs a failure; capture feeds background extraction through the selected provider; local memory supplies relevant experience to fresh Session B. Foreground work continues and cross-project reuse requires explicit sharing.](https://raw.githubusercontent.com/LiLara-AI/shadowgraph/v0.43.0/docs/assets/workflow.svg)
+![Session A works and repairs a failure; capture feeds background extraction through the selected provider; local memory supplies relevant experience to fresh Session B. Foreground work continues and cross-project reuse requires explicit sharing.](https://raw.githubusercontent.com/LiLara-AI/shadowgraph/v0.43.1/docs/assets/workflow.svg)
 
 *After setup, work normally. Memory processes in the background; reuse follows your project and sharing choices. [Editable diagram](docs/assets/workflow.svg).*
 
@@ -33,10 +33,10 @@ The Codex executor is a separate prerequisite distributed as `@openai/codex`. Sh
 
 ### 1. Install
 
-Run in PowerShell 7+. The version is pinned; the [release](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.43.0) includes `SHA256SUMS.txt` for the tarball.
+Run in PowerShell 7+. The version is pinned; the [release](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.43.1) includes `SHA256SUMS.txt` for the tarball.
 
 ```powershell
-npm install --global https://github.com/LiLara-AI/shadowgraph/releases/download/v0.43.0/shadowgraph-unified-plugin-0.43.0.tgz
+npm install --global https://github.com/LiLara-AI/shadowgraph/releases/download/v0.43.1/shadowgraph-unified-plugin-0.43.1.tgz
 
 $executorDir = Join-Path $env:LOCALAPPDATA 'ShadowGraph-Codex-0.161.0'
 npm install --prefix $executorDir @openai/codex@0.161.0
@@ -136,6 +136,32 @@ guide](docs/mcp-compatibility.md#optional-workflow-profile-complete-the-decision
 | Codex Desktop UI or ordinary CLI launched elsewhere | Not observed by this wrapper |
 | Glama MCP container | Credential-free MCP surface; cannot capture a user's Windows Codex sessions by itself |
 
+### Store locking and retry limits (0.43.1)
+
+Store fences require a local filesystem with exclusive hard-link creation (tested
+on Linux and Windows CI). Network/shared filesystems, cross-host stores, mixed
+Windows/WSL writers and concurrent old/new runtime writers are not supported.
+Stop every writer and back up private state before upgrading; schema 7 is unchanged.
+
+A live PID keeps its lock even if its timestamp is old. Stale store locks with a
+dead owner are reclaimed serially. A `.lock.reclaim` guard is never stolen merely
+because it is old: a suspended owner is indistinguishable from a crashed one.
+If a crashed reclaimer leaves this guard, writes time out with
+`storage_lock_timeout`. Stop every process using that store (including hooks and
+workers), preserve a private backup, confirm no writer remains, then remove only
+the orphan `.lock.reclaim` guard and retry. Do not remove a live writer's lock.
+Lock-candidate `.lock.*.tmp` files contain ownership tokens, not store content;
+a process killed before linking can leave one. Remove such orphans only with all
+writers stopped.
+
+Capture retries track an entry's stable payload key throughout one hook, including
+when another hook has renamed the file. A non-contention failure consumes at most
+one attempt per hook; after eight failed hook cycles the entry is dropped with a
+content-free marker. Store contention, deadline exhaustion and newer schemas leave
+input pending without consuming an attempt. Pending input survives hook restarts;
+the existing seven-day age and spool-size bounds still apply. This patch adds no
+new live model or automatic-memory support claims.
+
 ### Preview limits
 
 Each host turn has a 120-second process limit. Background extraction has bounded calls, retries and concurrency; a backlog can remain honestly pending. Native command events and user/assistant text are captured, but not every native tool-event type. Retrieval happens between turns, not inside a running turn.
@@ -146,7 +172,7 @@ This is **Technical Preview**, not stable/GA. There are no claims of perfect sem
 
 ## Upgrade and storage
 
-Stop active work and back up your stores and private integration home before upgrading. v0.43.0 retains schema 7; changed source/executor/account identity requires setup again. Older pending work with different setup provenance is held, not silently reassigned. [Upgrade and rollback guide](docs/migration.md).
+Stop active work and back up your stores and private integration home before upgrading. v0.43.1 retains schema 7; changed source/executor/account identity requires setup again. Older pending work with different setup provenance is held, not silently reassigned. [Upgrade and rollback guide](docs/migration.md).
 
 ### Moving between 0.41.0 and 0.42.0
 
