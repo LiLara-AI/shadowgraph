@@ -1160,10 +1160,11 @@ for (const [backend, options] of BACKENDS) test(`D42 ${backend}: a plain purge s
   const lock = await fenceLockPath(registryFile(state.env));
   const opened = [];
   const seen = {};
-  const original = fs.promises.open;
-  fs.promises.open = async (path, flags, ...rest) => {
-    if (flags === 'wx' && String(path).endsWith('.lock')) opened.push(basename(String(path)));
-    return original(path, flags, ...rest);
+  const original = fs.promises.link;
+  fs.promises.link = async (from, to, ...rest) => {
+    const result = await original(from, to, ...rest);
+    if (String(to).endsWith('.lock')) opened.push(basename(String(to)));
+    return result;
   };
   syncBuiltinESMExports();
   try {
@@ -1171,7 +1172,7 @@ for (const [backend, options] of BACKENDS) test(`D42 ${backend}: a plain purge s
       if (stage === 'deletionLedgerWritten') seen.temporaries = readdirSync(state.dir).filter((name) => name.endsWith('.tmp') && !name.includes('.control.json'));
       if (stage === 'beforeCommit') seen.registryLock = existsSync(lock);
     } });
-  } finally { fs.promises.open = original; syncBuiltinESMExports(); }
+  } finally { fs.promises.link = original; syncBuiltinESMExports(); }
   assert.deepEqual(opened.slice(-2), [`${basename(state.file)}.lock`, 'deletion-registry.json.lock'], 'the store fence, then the registry lock');
   assert.equal(opened.filter((name) => name === 'deletion-registry.json.lock').length, 1);
   assert.deepEqual(seen, { temporaries: [], registryLock: false });
@@ -2123,13 +2124,14 @@ for (const [backend, options] of BACKENDS) test(`D40 ${backend}: purgeRecordVali
 for (const [backend, options] of BACKENDS) test(`D42 ${backend}: on a resolver's path -- a backup completing a waiting purge -- the restore lock, then the store fence, then the registry lock (P48)`, options, async (t) => {
   const { state } = await crashWindow(t, backend);
   const opened = [];
-  const original = fs.promises.open;
-  fs.promises.open = async (path, flags, ...rest) => {
-    if (flags === 'wx' && String(path).endsWith('.lock')) opened.push(basename(String(path)));
-    return original(path, flags, ...rest);
+  const original = fs.promises.link;
+  fs.promises.link = async (from, to, ...rest) => {
+    const result = await original(from, to, ...rest);
+    if (String(to).endsWith('.lock')) opened.push(basename(String(to)));
+    return result;
   };
   syncBuiltinESMExports();
-  try { await backupOf(state, 'copy'); } finally { fs.promises.open = original; syncBuiltinESMExports(); }
+  try { await backupOf(state, 'copy'); } finally { fs.promises.link = original; syncBuiltinESMExports(); }
   const first = opened.indexOf(`${basename(state.file)}.restore.lock`);
   assert.deepEqual(opened.slice(first, first + 3), [`${basename(state.file)}.restore.lock`, `${basename(state.file)}.lock`, 'deletion-registry.json.lock'], opened.join(', '));
   assert.equal((await ledgerOf(state)).pending, undefined);
