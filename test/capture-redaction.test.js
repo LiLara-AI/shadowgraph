@@ -359,14 +359,16 @@ test('PR-37b FND-P6-11: a restore creates its temporary and rollback files with 
   const kept = (await stat(s.file)).mode & 0o777;
   const created = spyModes(t);
   await restoreFile(source, s.file, { env: s.env });
-  const restoreFiles = created.filter((entry) => entry.call === 'writeFile' && dirname(entry.path) === dirname(s.file) && /\.restore\.|\.rollback/u.test(basename(entry.path)));
+  const restorePayload = (entry) => entry.call === 'writeFile' && /^\.restore\..+\.(?:tmp|rollback|recovery)$/u.test(basename(entry.path));
+  const restoreFiles = created.filter((entry) => restorePayload(entry) && dirname(entry.path) === dirname(s.file));
   assert.ok(restoreFiles.length >= 2, JSON.stringify(created));
   assert.deepEqual(modes(restoreFiles), [kept]);
+  assert.deepEqual(modes(created.filter((entry) => entry.call === 'writeFile' && entry.path.endsWith('.candidate'))), [0o600], 'restore lock tokens are owner-only independently of the payload mode');
   created.length = 0;
   const fresh = join(s.root, 'fresh', 'restored.json');
   await mkdir(dirname(fresh));
   await restoreFile(source, fresh, { env: s.env });
-  assert.deepEqual(modes(created.filter((entry) => entry.call === 'writeFile' && /\.restore\./u.test(basename(entry.path)))), [0o600], 'a new destination is owner-only');
+  assert.deepEqual(modes(created.filter(restorePayload)), [0o600], 'a new destination is owner-only');
 });
 
 test('PR-37b FND-P6-11: on POSIX, a capture store created group- and world-readable is owner-only after a capture, and a manual store keeps its mode', POSIX, async (t) => {
