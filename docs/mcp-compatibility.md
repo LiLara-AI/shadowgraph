@@ -451,6 +451,39 @@ Detail that used to sit in a description, kept here because it is worth having s
 
 ### Glama inspection profile
 
+#### Current release mapping (read back 2026-11-02)
+
+The [Glama listing](https://glama.ai/mcp/servers/LiLara-AI/shadowgraph) and its
+existing published build use these distinct identities:
+
+| Field | Verified value |
+| --- | --- |
+| Glama release/display label | `0.42.5` |
+| MCP `serverInfo.version` in that build's startup log | `0.43.1` |
+| Profile | `SHADOWGRAPH_MCP_PROFILE=workflow`, compact `0`: 20 tools |
+| Clone bootstrap / Glama test Commit field | `13b78329a61e03fe294525f1976072a5304b484f` |
+| Actual checkout after the explicit build step | `becb5c3b9d6fd8cfdca9452184611c1fba0b313e` |
+| Actual tree asserted and printed by the build | `d3424175d98980f6029280b6d49bdf8284f4bce8` |
+
+The bootstrap is the normal main merge of the
+[v0.43.1 release source](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.43.1)
+and has the same tree. The following build step explicitly checks out the exact
+tagged source and asserts HEAD, tree, package version and `private: true` before
+installation. The retained startup log reports runtime `0.43.1`; the separately
+stored Glama release label remains `0.42.5`. This label does not identify the
+ShadowGraph runtime version. The current release/build admin views expose no
+in-place rename control, so the public listing explains the mapping while the
+existing image is preserved.
+
+The [public schema](https://glama.ai/mcp/servers/LiLara-AI/shadowgraph/schema)
+lists all 20 Workflow tools. The build logs verify their names, input/output
+object-schema types and four annotation hints. Glama truncates the raw
+`tools/list` transport string; full remote nested-schema/description equality is
+not claimed. These are readbacks of the existing published build, with no new
+deployment, live model test or expansion of host support.
+
+#### Historical inspection profile (0.42.1)
+
 The published v0.42.1 Glama build observed on 2026-10-25 uses **compact mode**, advertising 16
 tools, with `SHADOWGRAPH_MCP_COMPACT=1` in its container build configuration. `glama.json` is
 maintainer metadata, not the container's environment configuration. The listing describes both

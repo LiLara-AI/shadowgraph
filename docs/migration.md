@@ -11,6 +11,52 @@ Capture retry accounting uses stable event keys across drain rounds, including
 interleaved hooks. Pending input is replayed on a later hook under the same
 destination and existing admission/deletion rules.
 
+### Recovering an orphan reclaim guard
+
+When a stale store lock needs reclamation, a leftover guard causes bounded
+`storage_lock_timeout` refusals intentionally.
+Recovery is an offline operator procedure; it does not require a runtime or
+schema change. Use a supported local filesystem with exclusive hard-link
+support. Network stores, mixed Windows/WSL writers and simultaneous old/new
+runtimes remain unsupported.
+
+1. Record the exact canonical `.lock` path in the timeout. Its reclaim guard is
+   that path with `.reclaim` appended. For example, a timeout for
+   `store.json.lock` identifies `store.json.lock.reclaim`; a timeout for
+   `store.json.restore.lock` identifies `store.json.restore.lock.reclaim`.
+   Confirm the path belongs to the intended configured store, including any
+   symlink resolution. Do not search for and delete matching lock files globally.
+2. Stop and account for **every** process that can write that store: enrolled
+   hosts, wrappers, hooks, extraction workers, MCP/HTTP servers, other CLI
+   processes and any service or scheduled launcher that could restart them.
+   Include other accounts on the same machine. A suspended process is still a
+   writer. If any writer's state is unknown, leave the guard in place.
+3. With all writers stopped, make a private filesystem backup of the store and
+   its companion files, and of the integration home containing configuration,
+   pending captures/outbox and receipts. Preserve SQLite companion files when
+   present. Keep this backup outside source control; do not rely on a backup
+   command that itself cannot obtain the blocked fence.
+4. Positively identify the orphan by the exact path from step 1 and confirmed
+   writer-free state from step 2. The reclaim guard is empty: it contains no
+   owner PID or token. The PID in an adjacent `.lock` belongs to that store-lock
+   owner, not necessarily the reclaimer. Neither an old timestamp nor a dead
+   adjacent PID proves the guard is orphaned. If ownership or quiescence cannot
+   be established, retain the files and request operator assistance.
+5. Remove **only that confirmed orphan reclaim guard**. Preserve the ordinary
+   `.lock`, other guards, lock candidates, store, journal and backup. Restart one
+   configured writer using one supported runtime version. The normal fence
+   logic handles a stale dead-owner store lock; do not delete it manually. If
+   writes are still refused, stop and retain the diagnostic and backup rather
+   than repeating lock deletion.
+
+This does not clear or reset pending captures. A later hook replays eligible
+input under the same destination and existing admission/deletion rules.
+Non-contention failures consume at most one attempt per hook, with an eight-cycle
+retry limit and content-free loss markers; contention, deadline exhaustion and
+newer schemas retain input without consuming an attempt. The seven-day age and
+spool-size bounds remain. The [host support limits](../README.md#supported-workflows)
+are unchanged.
+
 ### Previous transition: 0.43.0
 
 Stop active wrappers/workers and back up each store before upgrading. For a manual store, use `shadowgraph backup <backup-file>` with that store selected. For the Codex wrapper, stop it and preserve its entire private home (configuration, memory, pending outbox and usage receipts) in a private location. Do not publish these backups.
