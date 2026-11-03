@@ -356,7 +356,7 @@ export async function measureWrites({ deliveries = 5, request = {}, project = PR
       },
       close() {}
     };
-    app = await createShadowGraphServer({ store: measuredStore, now, cwd: directory, apiToken: '' });
+    app = await createShadowGraphServer({ store: measuredStore, now, cwd: directory });
     await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve));
     const url = `http://127.0.0.1:${app.server.address().port}/context`;
     async function deliver(body) {

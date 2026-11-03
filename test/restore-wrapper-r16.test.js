@@ -301,7 +301,7 @@ async function restoreThrough(surface, pair, memoryOnly) {
     const saved = process.env.SHADOWGRAPH_HOME;
     process.env.SHADOWGRAPH_HOME = pair.home;
     try {
-      const app = await createShadowGraphServer({ file: pair.target, storage: pair.backend, cwd: pair.dir, apiToken: '' });
+      const app = await createShadowGraphServer({ file: pair.target, storage: pair.backend, cwd: pair.dir });
       app.server.listen(0, '127.0.0.1');
       await once(app.server, 'listening');
       try {

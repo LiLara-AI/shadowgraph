@@ -925,7 +925,7 @@ for (const [backend, options] of BACKENDS) test(`PR-37c rev6:429 read half ${bac
     assert.deepEqual([delivered.processing.capture, delivered.processing.reason], backend === 'json' ? ['unavailable', 'deletion_pending'] : ['not_active', undefined], name);
     for (const args of [['list', JSON.stringify({ project: 'p' })], ['search', JSON.stringify({ project: 'p', query: 'hidden' })]]) texts.push((await execute(process.execPath, [cliPath, ...args], { cwd: s.dir, env })).stdout);
     texts.push(...await mcpCalls(t, s, [['shadowgraph_search', { query: 'hidden decision', project: 'p' }], ['shadowgraph_journal', { project: 'p' }]]));
-    const app = await createShadowGraphServer({ file: s.file, storage: backend, cwd: s.dir, apiToken: '' });
+    const app = await createShadowGraphServer({ file: s.file, storage: backend, cwd: s.dir });
     app.server.listen(0, '127.0.0.1');
     await once(app.server, 'listening');
     try { for (const path of ['/records?project=p', '/search?project=p&q=hidden']) texts.push(await (await fetch(`http://127.0.0.1:${app.server.address().port}${path}`)).text()); }
@@ -1308,7 +1308,7 @@ for (const [backend, options] of BACKENDS) test(`PR-37c rev6:426 window ${backen
   const pause = pauseOnce('postStepLedgerWritten');
   // A SQLite server is built over a store that carries the seam (server.js passes one through for JSON only).
   const store = backend === 'sqlite' ? await createStorage({ type: 'sqlite', file: state.file, restoreFault: pause.seam }) : undefined;
-  const app = await createShadowGraphServer({ file: state.file, storage: backend, cwd: state.dir, apiToken: '', ...(store ? { store } : { restoreFault: pause.seam }) });
+  const app = await createShadowGraphServer({ file: state.file, storage: backend, cwd: state.dir, ...(store ? { store } : { restoreFault: pause.seam }) });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   t.after(() => new Promise((done) => app.server.close(done)));
@@ -1952,7 +1952,7 @@ async function surfaceReads(t, state, project, { prompt } = {}) {
   const structured = JSON.parse(mcp).result.structuredContent;
   assert.deepEqual(schemaErrors(MCP_TOOLS.get('shadowgraph_search').outputSchema, structured), []);
   reads.mcp = structured.completeness;
-  const app = await createShadowGraphServer({ file: state.file, storage: state.backend, cwd: state.dir, apiToken: '' });
+  const app = await createShadowGraphServer({ file: state.file, storage: state.backend, cwd: state.dir });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   try { reads.http = (await (await fetch(`http://127.0.0.1:${app.server.address().port}/search?project=${project}&q=${encodeURIComponent(query)}`)).json()).completeness; }
@@ -2205,7 +2205,7 @@ for (const [backend, options] of BACKENDS) test(`PR-37c R5 L1 VS1 ${backend}: a 
       const saved = process.env.SHADOWGRAPH_HOME;
       process.env.SHADOWGRAPH_HOME = home;
       try {
-        const app = await createShadowGraphServer({ file: state.file, storage: backend, cwd: state.dir, apiToken: '' });
+        const app = await createShadowGraphServer({ file: state.file, storage: backend, cwd: state.dir });
         app.server.listen(0, '127.0.0.1');
         await once(app.server, 'listening');
         try {
@@ -2329,7 +2329,7 @@ async function restoreVia(t, entry, state, source, options = {}) {
     assert.equal(response.result?.isError, undefined, text);
     return response.result.structuredContent;
   }
-  const app = await createShadowGraphServer({ file: state.file, storage: state.backend, cwd: state.dir, apiToken: '' });
+  const app = await createShadowGraphServer({ file: state.file, storage: state.backend, cwd: state.dir });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   try {
@@ -2464,7 +2464,7 @@ for (const [backend, options] of BACKENDS) test(`PR-37c R5 L2 VS1 ${backend}: a 
       const [text] = await mcpCalls(t, state, [['shadowgraph_backup', { destination: copy }]]);
       assert.equal(JSON.parse(text).result?.isError, undefined, text);
     } else {
-      const app = await createShadowGraphServer({ file: state.file, storage: backend, cwd: state.dir, apiToken: '' });
+      const app = await createShadowGraphServer({ file: state.file, storage: backend, cwd: state.dir });
       app.server.listen(0, '127.0.0.1');
       await once(app.server, 'listening');
       try {
@@ -2919,7 +2919,7 @@ for (const [backend, options] of BACKENDS) test(`PR-37c review 11 verifier ${bac
       const [text] = await mcpCalls(t, state, [['shadowgraph_restore', { source: source.file }]], { SHADOWGRAPH_VERIFIER_CONFIG: fixture.configPath });
       result = JSON.parse(text).result.structuredContent;
     } else {
-      const app = await createShadowGraphServer({ file: state.file, storage: backend, cwd: state.dir, apiToken: '', verifier: fixture.verifier });
+      const app = await createShadowGraphServer({ file: state.file, storage: backend, cwd: state.dir, verifier: fixture.verifier });
       app.server.listen(0, '127.0.0.1');
       await once(app.server, 'listening');
       try {

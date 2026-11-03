@@ -263,7 +263,7 @@ async function mcp(t, state, calls, home = state.env.SHADOWGRAPH_HOME, extra = {
 async function http(state, request, { home = state.env.SHADOWGRAPH_HOME, extra = {} } = {}) {
   const store = await createStorage({ type: state.backend, file: state.file, env: { SHADOWGRAPH_HOME: home }, ...extra });
   try {
-    const app = await createShadowGraphServer({ file: state.file, storage: state.backend, cwd: state.dir, apiToken: '', store });
+    const app = await createShadowGraphServer({ file: state.file, storage: state.backend, cwd: state.dir, store });
     app.server.listen(0, '127.0.0.1');
     await once(app.server, 'listening');
     try { return await request((path) => `http://127.0.0.1:${app.server.address().port}${path}`); }
@@ -1306,7 +1306,7 @@ async function restoreThrough(t, entry, state, source) {
   const saved = process.env.SHADOWGRAPH_HOME;
   process.env.SHADOWGRAPH_HOME = state.env.SHADOWGRAPH_HOME;
   try {
-    const app = await createShadowGraphServer({ file: state.file, storage: state.backend, cwd: state.dir, apiToken: '' });
+    const app = await createShadowGraphServer({ file: state.file, storage: state.backend, cwd: state.dir });
     app.server.listen(0, '127.0.0.1');
     await once(app.server, 'listening');
     try {

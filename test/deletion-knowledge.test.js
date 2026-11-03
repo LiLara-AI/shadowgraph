@@ -747,7 +747,7 @@ async function call(t, surface, state, source) {
     catch (error) { return { ok: false, text: `${error.stderr}` }; }
   }
   if (surface === 'http') {
-    const app = await createShadowGraphServer({ file: state.file, storage: state.backend, cwd: state.dir, apiToken: '' });
+    const app = await createShadowGraphServer({ file: state.file, storage: state.backend, cwd: state.dir });
     app.server.listen(0, '127.0.0.1'); await once(app.server, 'listening');
     t.after(() => new Promise((resolve) => app.server.close(resolve)));
     const response = await fetch(`http://127.0.0.1:${app.server.address().port}/restore`, { method: 'POST', body: JSON.stringify({ source }) });
@@ -1245,7 +1245,7 @@ async function mcpCalls(t, state, calls, extraEnv = {}) {
 for (const [backend, options] of BACKENDS) test(`T-4 ${backend}: HTTP, CLI and MCP reads name no withheld token, id or content`, options, async (t) => {
   const f = fixture();
   const state = await storeOf(t, backend, f.payload, VIEWS.item(f).ledger);
-  const app = await createShadowGraphServer({ file: state.file, storage: backend, cwd: state.dir, apiToken: '' });
+  const app = await createShadowGraphServer({ file: state.file, storage: backend, cwd: state.dir });
   app.server.listen(0, '127.0.0.1'); await once(app.server, 'listening');
   t.after(() => new Promise((resolve) => app.server.close(resolve)));
   const base = `http://127.0.0.1:${app.server.address().port}`;
@@ -1477,7 +1477,7 @@ for (const surface of ['cli', 'http', 'mcp']) test(`T-17 ${surface}: a registry 
       const saved = process.env.SHADOWGRAPH_HOME;
       process.env.SHADOWGRAPH_HOME = home;
       try {
-        const app = await createShadowGraphServer({ file: destination.file, storage: 'json', cwd: destination.dir, apiToken: '' });
+        const app = await createShadowGraphServer({ file: destination.file, storage: 'json', cwd: destination.dir });
         app.server.listen(0, '127.0.0.1'); await once(app.server, 'listening');
         try { text = await (await fetch(`http://127.0.0.1:${app.server.address().port}/restore`, { method: 'POST', body: JSON.stringify({ source: source.file, memoryOnly }) })).text(); }
         finally { await new Promise((resolve) => app.server.close(resolve)); }

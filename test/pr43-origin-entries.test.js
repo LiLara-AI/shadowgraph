@@ -65,7 +65,7 @@ for (const type of ['json', 'sqlite']) for (const mode of ['logical', 'hard']) f
     else if (entry === 'mcp') result = await restoreMcp(destination, backup, env, root);
     else {
       const target = await createStorage({ type, file: destination, env });
-      const app = await createShadowGraphServer({ store: target, file: destination, storage: type, cwd: root, apiToken: '' });
+      const app = await createShadowGraphServer({ store: target, file: destination, storage: type, cwd: root });
       app.server.listen(0, '127.0.0.1'); await once(app.server, 'listening');
       const url = `http://127.0.0.1:${app.server.address().port}`;
       try {

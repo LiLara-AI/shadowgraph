@@ -67,7 +67,7 @@ test('an own-scope CLI context takes no fence: it completes while the store lock
 
 test('an own-scope HTTP context takes no fence: it answers while the store lock is held', async (t) => {
   const { directory, file } = await dueStore(t, 'budget-http-');
-  const app = await createShadowGraphServer({ file, storage: 'json', cwd: directory, apiToken: '' });
+  const app = await createShadowGraphServer({ file, storage: 'json', cwd: directory });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   t.after(() => new Promise((resolve) => app.server.close(resolve)));

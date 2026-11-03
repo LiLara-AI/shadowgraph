@@ -68,7 +68,7 @@ print(json.dumps({"results": results, "sent": sent}))
 
 test('the Hermes template runs against the HTTP API inside the project it names', { skip: python ? false : 'no Python 3 interpreter on PATH' }, async (t) => {
   const directory = await scratchDirectory(t, 'shadowgraph-hermes-template-');
-  const app = await createShadowGraphServer({ file: join(directory, 'data.json'), storage: 'json', apiToken: '' });
+  const app = await createShadowGraphServer({ file: join(directory, 'data.json'), storage: 'json' });
   await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise((resolve) => app.server.close(resolve)));
   const base = `http://127.0.0.1:${app.server.address().port}`;
