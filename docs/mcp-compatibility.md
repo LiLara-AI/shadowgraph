@@ -11,6 +11,12 @@ ShadowGraph implements both eras in the current specification's terms:
 - **Modern:** requests carrying the required `io.modelcontextprotocol/*` `_meta` fields use stateless `2026-07-28` semantics. `server/discover` is implemented and advertises every revision this server implements, newest first.
 - An unsupported modern per-request version returns `-32022` with exact `supported` and `requested` data. `supported` lists every implemented revision; only `2026-07-28` is usable per request, because the others are negotiated through `initialize`.
 
+Starting with v0.43.3, every supported handshake response includes the same
+optional `instructions` guidance as modern `server/discover`. Earlier handshake
+responses omitted it. These instructions explain tool selection, actual writes,
+signal-ID mapping and profile boundaries; they do not grant permissions or add
+tools. The optional field exists in the supported handshake specifications.
+
 An `initialize` request selects handshake semantics; it never causes the server to falsely echo a revision it does not implement, `2026-07-28` included. Modern clients select modern semantics with per-request metadata.
 
 ## 2. Implemented methods
@@ -134,7 +140,7 @@ miss diagnostics remain in memory until a later save. `review`, `review_context`
 deduplicate own-scope signals but still commit a revision on repeat calls.
 
 For a compact review loop, call `shadowgraph_review` or `shadowgraph_review_context`, then pass its
-`reviewSignalId` with the same project/origin to `shadowgraph_ack_review`. A context-only evaluation
+`reviewSignalId` as the required `id` argument, with the same project/origin, to `shadowgraph_ack_review`. A context-only evaluation
 can report `reviewSignalStatus: unpersisted`; persist the evaluation before acknowledging it.
 Acknowledgement closes that signal, not the decision, and a new breach remains visible.
 
@@ -452,6 +458,16 @@ Detail that used to sit in a description, kept here because it is worth having s
   signature, method, and target status all come from the server's configuration, never from the call.
 
 ### Glama inspection profile
+
+#### Accepted 0.43.2 release mapping (read back 2026-11-03)
+
+The owner release view identifies display label `0.42.6` as ShadowGraph runtime
+`0.43.2`. The configured build explicitly checks out source
+`04ea6801ac1ee0b4aad2214841f38c95234cbd02`, asserts tree
+`0e0db8829040071b833a7e4ded02f39999f36fcf`, version `0.43.2` and
+`private: true`, and advertises the 20-tool Workflow profile. This is the accepted
+release, not a measurement of the v0.43.3 candidate. A new deployment must have its
+own build/runtime read-back; the display counter is not a package version.
 
 #### Current release mapping (read back 2026-11-02)
 

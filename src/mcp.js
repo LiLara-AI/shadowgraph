@@ -403,6 +403,18 @@ function call(name, args, tier) { return queueCall(() => callUnqueued(name, args
 const RESOURCE_URIS = new Set(['shadowgraph://context']);
 const PROMPT_NAMES = new Set(['shadowgraph_consequential_task']);
 const SERVER_INFO = Object.freeze({ name: 'shadowgraph', version: MCP_VERSION });
+// Both discovery eras must give clients the same navigation and effect guidance.
+// Instructions are an optional InitializeResult member in every supported
+// handshake revision; they do not change the advertised catalog or authority.
+const SERVER_INSTRUCTIONS = [
+  "Local-first decision and scoped temporal memory. Session tools/list defines the callable tools, schemas and effect hints.",
+  "Literal every-term lookup: shadowgraph_search. Ranked experience: shadowgraph_recall. Content matches plus one-hop neighbours: shadowgraph_retrieve. Project working set: shadowgraph_context. Full record behind a context line: shadowgraph_expand, with the returned expansion handle.",
+  "A review signal is a saved reminder to revisit a decision. Reopen rules are saved conditions on rejected alternatives. shadowgraph_review rechecks conditions and saves reminders; shadowgraph_review_context also loads the working set; shadowgraph_reconsider rechecks and explains all verdicts, including unresolved conditions. These evaluation calls commit a revision even on repeats. shadowgraph_context does not save review signals.",
+  "shadowgraph_review_signals, when advertised, reads already-saved reminders without reevaluation or signal creation. shadowgraph_ack_review takes the saved signal's id; a review item's reviewSignalId maps to its required id argument. Reading saved signals and evaluating conditions have different effects.",
+  "Chosen approach: shadowgraph_record_decision. Tried action and result: shadowgraph_record_attempt. Project/key observation for conditions: shadowgraph_record_fact. Scoped reusable memory: shadowgraph_remember. What happened to an existing decision: shadowgraph_record_outcome. Supporting or contradicting evidence: shadowgraph_confidence_evidence, when advertised. Lifecycle transition: shadowgraph_update_status. Replacement relation between decisions: shadowgraph_supersede.",
+  "Read-capable tools accepting accessId or grantId can save a bounded audit and revision when a key is presented. A grant widens reads, never write authority. IDs do not supply project/origin scope. Returned completeness and provenance describe the result limits.",
+  "Full-only operator capabilities require an operator-selected Full session and reconnect. A named sibling is callable only when advertised. Profiles change advertisement, not stored memory or product capabilities."
+].join('\n');
 const SERVER_CAPABILITIES = Object.freeze({
   tools: Object.freeze({ listChanged: false }),
   resources: Object.freeze({ listChanged: false, subscribe: false }),
@@ -729,7 +741,7 @@ async function handleMessage(request, emit, batchFailure = null) {
         legacyTier = metadataTierForProtocolVersion(negotiated);
         batchesAccepted = BATCH_PROTOCOL_VERSIONS.includes(negotiated);
       }
-      respond({ protocolVersion: negotiated, capabilities: SERVER_CAPABILITIES, serverInfo: SERVER_INFO });
+      respond({ protocolVersion: negotiated, capabilities: SERVER_CAPABILITIES, serverInfo: SERVER_INFO, instructions: SERVER_INSTRUCTIONS });
     } else if (request.method.startsWith('notifications/')) {
       // Method names do not define notifications; absence of id does. A client
       // that explicitly supplies id:null sent a request and still gets a reply.
@@ -739,7 +751,7 @@ async function handleMessage(request, emit, batchFailure = null) {
       respond(modernResult({
         supportedVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
         capabilities: SERVER_CAPABILITIES,
-        instructions: "Local-first explainable decision and scoped temporal memory. context returns one project's recorded decisions, stale facts, failed attempts and fired review conditions; retrieve returns the records matching a content query with their one-hop graph neighbours; record_outcome stores what happened."
+        instructions: SERVER_INSTRUCTIONS
       }, 'public'));
     } else if (request.method === 'tools/list') respond(eraResult(modern, { tools: toolLists[modern ? METADATA_TIER.STRUCTURED : legacyTier] }, 'public'));
     else if (request.method === 'resources/list') respond(eraResult(modern, { resources: resourceList }, 'public'));

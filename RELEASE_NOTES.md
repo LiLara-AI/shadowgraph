@@ -1,3 +1,30 @@
+# ShadowGraph 0.43.3 — MCP Guidance Technical Preview
+
+Handshake MCP clients now receive the navigation and effect instructions that
+modern discovery clients receive. Review tool definitions lead with the user's
+intent and distinguish reading saved reminders from reevaluating conditions and
+persisting signals. Acknowledgement guidance explicitly maps a returned
+`reviewSignalId` to the required `id` argument.
+
+All functionality is retained: Full 35 (36 with a verifier), Compact 16 and
+Workflow 20, with unchanged public names, schemas, handlers, permissions and
+truthful effect annotations. Reevaluation still commits a revision on repeats;
+reads with an access key still persist their bounded audit. Automatic capture,
+extraction, correction, sharing, schema 7 and declared host support are unchanged.
+The package stays `private: true`, unpublished to npm. No new live-memory or
+model-selection experiment is claimed, and no TDQS increase is promised.
+
+Stop every writer and privately back up the complete store and integration home
+before upgrading. Follow the existing [migration and recovery guide](docs/migration.md).
+Existing runtime/account setup boundaries and unsupported mixed Windows/WSL or
+cross-host writers still apply. The accepted v0.43.2 tag and downloads are retained.
+
+Glama's display label and MCP runtime version are independent. Verify the actual
+build checkout, tree, runtime and advertised tools before treating a new listing
+label as a runtime upgrade. See [MCP compatibility](docs/mcp-compatibility.md).
+
+## Previous 0.43.2 release
+
 # ShadowGraph 0.43.2 — Closeout Technical Preview
 
 This patch addresses reproduced remaining readiness defects. Schema 7, supported
