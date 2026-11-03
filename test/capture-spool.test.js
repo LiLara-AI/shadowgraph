@@ -14,7 +14,7 @@ import { createShadowGraph } from '../src/shadowgraph.js';
 import { createStorage } from '../src/storage.js';
 import { CAPTURE_LIMITS, runCapture } from '../src/capture-hook.js';
 import { privilegedBindProject, privilegedSnapshot } from '../src/internal/snapshot.js';
-import { droppedDirectory, failSpoolEntry, SPOOL_LIMITS, spoolDirectory, spoolEntries, spoolEvent, spoolStatus } from '../src/internal/capture-spool.js';
+import { droppedDirectory, failSpoolEntry, recordDropped, SPOOL_LIMITS, spoolDirectory, spoolEntries, spoolEvent, spoolStatus } from '../src/internal/capture-spool.js';
 import { mintOriginId } from '../src/scope.js';
 import { FROZEN_WORKER_BUDGETS } from '../src/internal/extraction-budget.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
@@ -50,6 +50,55 @@ const prompt = (text, fields = {}) => JSON.stringify({ hook_event_name: 'UserPro
 // busy when tried, or, on a slow machine, a short deadline came before it was.
 const WAITING = ['store_busy', 'out_of_time'];
 const capture = (s, input, options = {}) => runCapture({ capture: s.capture, input, deadline: Date.now() + 10_000, record: s.activation, home: s.home, cwd: s.cwd, ...options });
+
+test('an I/O read failure keeps a valid spooled event for the next hook', async t => {
+  const s = await setup(t);
+  const input = prompt('retained after I/O failure', { message_id: 'io-read' });
+  const kept = await spoolEvent({ spool: s.spool, input, cwd: s.cwd, destination: { store: s.file, originId: s.capture.originId } });
+  const path = join(s.spool, kept.entry.name), original = fs.promises.readFile;
+  fs.promises.readFile = async (file, ...args) => {
+    if (String(file) === path) throw Object.assign(new Error('synthetic read failure'), { code: 'EIO' });
+    return original(file, ...args);
+  };
+  syncBuiltinESMExports();
+  try { assert.equal(await capture(s, input), 'store_failed'); }
+  finally { fs.promises.readFile = original; syncBuiltinESMExports(); }
+  assert.deepEqual((await spoolEntries(s.spool)).map(e => e.attempts), [1]);
+  assert.equal((await spoolStatus(s.spool)).dropped, 0);
+  assert.equal(await capture(s, input), 'written');
+  assert.deepEqual((await captures(s)).map(e => e.source.hostEventId), ['io-read']);
+});
+
+test('unreadable hook input leaves a content-free coverage marker', async t => {
+  const s = await setup(t);
+  // The bounded stdin reader returns an empty string for oversized input.
+  assert.equal(await capture(s, ''), 'unreadable');
+  assert.equal((await spoolStatus(s.spool)).dropped, 1);
+  const [name] = await readdir(droppedDirectory(s.spool));
+  const marker = JSON.parse(await readFile(join(droppedDirectory(s.spool), name), 'utf8'));
+  assert.equal(marker.reason, 'hook_input_unreadable');
+  assert.equal(marker.event, null);
+});
+
+test('unrelated temporary names do not consume loss-marker capacity', async t => {
+  const s = await setup(t), directory = droppedDirectory(s.spool);
+  await mkdir(directory);
+  for (let i = 0; i < SPOOL_LIMITS.maxDropMarkers; i++) await writeFile(join(directory, `unowned-${i}.tmp`), '');
+  assert.equal(await recordDropped({ spool: s.spool, reason: 'synthetic' }), true);
+  assert.equal((await spoolStatus(s.spool)).dropped, 1);
+  assert.ok((await readdir(directory)).includes('unowned-0.tmp'), 'unowned temporary files are preserved');
+});
+
+test('loss-marker saturation is reported as a lower bound', async t => {
+  const s = await setup(t), directory = droppedDirectory(s.spool);
+  await mkdir(directory);
+  for (let i = 0; i < SPOOL_LIMITS.maxDropMarkers; i++) await writeFile(join(directory, `000000000000000-${i.toString(16).padStart(32, '0')}.json`), '{}');
+  assert.equal(await recordDropped({ spool: s.spool, reason: 'beyond-cap' }), false);
+  assert.equal((await spoolStatus(s.spool)).droppedSaturated, true);
+  const delivered = await processing(s);
+  assert.equal(delivered.inputDroppedSaturated, true);
+  assert.ok(delivered.gaps.includes('capture_drop_accounting_saturated'));
+});
 
 function spawnCli(args, { cwd, env, input = '' }) {
   const base = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(?:SHADOWGRAPH_|CLAUDE|ANTHROPIC_)/i.test(name)));

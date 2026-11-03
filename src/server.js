@@ -86,7 +86,7 @@ export async function createShadowGraphServer(options = {}) {
   const dashboardRoot = new URL('../dashboard/', import.meta.url);
   const dashboardHtml = await readFile(new URL('index.html', dashboardRoot), 'utf8');
   const apiToken = options.apiToken ?? process.env.SHADOWGRAPH_API_TOKEN;
-  if (apiToken && apiToken.length < 16) throw new Error('SHADOWGRAPH_API_TOKEN must be at least 16 characters');
+  if (apiToken !== undefined && (typeof apiToken !== 'string' || apiToken.length < 16)) throw new Error('SHADOWGRAPH_API_TOKEN must be at least 16 characters');
 
   let restoreInProgress = false;
   let persistenceUnavailable = null;

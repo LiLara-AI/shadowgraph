@@ -1303,7 +1303,7 @@ const CATALOG = [
     compact: true,
     persists: true,
     openWorldWhenEmbedding: true,
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     describe: {
       does: 'Add or reconcile one scoped memory, or apply an ADD/UPDATE/DELETE/NOOP plan, by identity tuple.',
       route: 'Use shadowgraph_record_decision for a choice, shadowgraph_record_fact for an observation, shadowgraph_recall to read memory back.',
@@ -1418,7 +1418,7 @@ const CATALOG = [
     name: 'shadowgraph_record_fact',
     compact: true,
     persists: true,
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     describe: {
       does: 'Record one observed fact as a project and key, with a claimed provenance class and optional validity window.',
       route: 'Use for the fact keys reopenWhen rules name; shadowgraph_remember stores durable memory that is not an observation.',
@@ -1448,7 +1448,7 @@ const CATALOG = [
     name: 'shadowgraph_record_outcome',
     compact: true,
     persists: true,
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     describe: {
       does: 'Record how a decision turned out and move its confidence by an evidence-weighted amount.',
       route: 'shadowgraph_confidence_evidence records evidence short of an outcome, shadowgraph_update_status changes the lifecycle state.',
@@ -1478,7 +1478,7 @@ const CATALOG = [
     name: 'shadowgraph_confidence_evidence',
     compact: false,
     persists: true,
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     describe: {
       does: "Apply one keyed piece of supporting or contradicting evidence to a decision's confidence.",
       route: 'Use shadowgraph_record_outcome once the decision has played out, shadowgraph_record_fact for an observation that can reopen it.',
@@ -1502,7 +1502,7 @@ const CATALOG = [
     name: 'shadowgraph_update_status',
     compact: false,
     persists: true,
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     describe: {
       does: 'Move one decision to another lifecycle state.',
       route: 'shadowgraph_supersede replaces a decision, shadowgraph_maintain alone produces stale, shadowgraph_record_outcome records the result.',
@@ -1605,7 +1605,7 @@ const CATALOG = [
     name: 'shadowgraph_supersede',
     compact: false,
     persists: true,
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     describe: {
       does: 'Mark one decision superseded by a replacement in the same project.',
       route: 'shadowgraph_record_decision creates the replacement; shadowgraph_update_status changes state without replacement.',
@@ -1698,7 +1698,7 @@ const CATALOG = [
     name: 'shadowgraph_maintain',
     compact: true,
     persists: true,
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     describe: {
       does: 'Run time-based maintenance: make due decisions stale, expire due facts, then evaluate reopen rules.',
       route: 'shadowgraph_review only evaluates reopen rules, shadowgraph_validate only reports, shadowgraph_update_status cannot set stale.',
@@ -2115,7 +2115,7 @@ const CATALOG = [
     requires: 'verifier',
     compact: false,
     persists: true,
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     describe: {
       does: "Verify one active fact against a signed local evidence file, checked by the server's preconfigured Ed25519 trust store.",
       route: 'Advertised only with a verifier configured; shadowgraph_record_fact can never produce a verified fact.',

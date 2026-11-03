@@ -1,9 +1,9 @@
-import { readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { readFile, readdir, rename, rm, stat } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { nextRevision, assertRevision, createDestinationFence, restoreLock } from './revision-store.js';
 import { SCHEMA_VERSION } from './shadowgraph.js';
 import { refusePublicExport } from './internal/collections.js';
-import { DELETION_FILE_DESTINATION_REFUSED, DELETION_INTENT, DELETION_VIEW, attachDeletionView, canonicalPath, commitFile, deletionError, readUnfenced, recordGenerationChanges, refuseDeletionFileDestination, registerStoreIo, storeIo } from './internal/deletion-knowledge.js';
+import { DELETION_FILE_DESTINATION_REFUSED, DELETION_INTENT, DELETION_VIEW, attachDeletionView, canonicalPath, commitFile, deletionError, readUnfenced, recordGenerationChanges, refuseDeletionFileDestination, registerStoreIo, storeIo, writeSyncedFile } from './internal/deletion-knowledge.js';
 import { RestorePendingError, activation, asRestoreRefusal, completeRestore, freshPurgeIntents, purgeRecorded, recordPurges, resolvePendingRestore, restoreContext, restoreHook, retentionRestoreGuard, saveResolving, settleAfterFailure } from './internal/restore-wrapper.js';
 
 // Journal lives INSIDE the same payload as the state and is written by the same
@@ -93,7 +93,7 @@ export function createJsonFileStore(filePath, options = {}) {
       // that holds raw text past its expiry (post-merge review R3-2).
       if (clear || hook) await removeLeftTemporaries(target);
       try {
-        await writeFile(temporaryPath, JSON.stringify(payload, null, 2) + '\n', { encoding: 'utf8', mode });
+        await writeSyncedFile(temporaryPath, JSON.stringify(payload, null, 2) + '\n', { encoding: 'utf8', mode });
         options.saveFault?.('beforeCommit', context);
         options.signal?.throwIfAborted();
         await commitFile(temporaryPath, target, (from, to) => {

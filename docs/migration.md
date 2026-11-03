@@ -1,5 +1,39 @@
 # Upgrade and rollback
 
+## Moving to 0.43.2
+
+Stop all wrappers, hooks, servers and workers and privately back up the complete
+store and integration home before upgrading. Use one runtime and one platform
+writer at a time on local hard-link-capable storage. Schema 7, project/sharing
+boundaries and the documented support limits are unchanged. Changed runtime or
+account identity still requires owner setup; older pending input is held under
+its original setup, not silently reassigned. See the beginner path in the
+[Windows quick start](../README.md#quick-start-windows-codex).
+
+This patch retries transient lock-release and backup/restore rename errors.
+After exhausted lock-release retries, `storage_lock_release_failed` means the
+operation completed; inspect stored state before replaying a write. Its error
+retains the operation result. If both operation and release fail, the original
+operation error remains primary. Stop writers and preserve the diagnostic and a
+private offline backup before resolving a persistent filesystem/access problem;
+never remove an active lock to force progress.
+
+JSON payloads, backup copies and JSON restore/rollback candidates are synced
+before replacement. Directory sync and physical power-cut immunity are not
+claimed. Unreadable captured input leaves a content-free gap marker. Temporary
+spool read errors retain the event for bounded retry; invalid content is dropped
+with a marker. At 4096 loss markers, `inputDroppedSaturated` and
+`capture_drop_accounting_saturated` mean the count is a lower bound. Unowned
+temporary files are ignored for that limit and preserved.
+
+Automatic corrections require a locally supported user statement related to the
+accepted new choice. This rejects fragment-only false correction proposals but
+does not establish perfect semantic interpretation. Maintenance still accepts
+its documented deterministic `now`; it changes current state, so use review for
+evaluation without aging. Future-effective facts retain non-decreasing time
+ordering; correct at the same effective boundary or record a later version. Do
+not expect an earlier current-time write to rewrite future history.
+
 ## Moving to 0.43.1
 
 This reliability patch retains schema 7 and the existing host support limits.

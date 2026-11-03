@@ -3,7 +3,7 @@ import { link, mkdir, open, readFile, stat, unlink, writeFile } from 'node:fs/pr
 import { dirname, resolve } from 'node:path';
 // deletion-knowledge.js imports nothing from here, so there is no import
 // cycle (PR-37c design §3.1, check R3-4).
-import { canonicalPath } from './internal/deletion-knowledge.js';
+import { canonicalPath, retryBusy } from './internal/deletion-knowledge.js';
 
 const heldDestinationFences = new AsyncLocalStorage();
 
@@ -151,7 +151,10 @@ export function createDestinationFence(filePath, options = {}) {
         // PID liveness, not a heartbeat's age, protects a long-running owner.
         return async () => {
           try {
-            if ((await readFile(lockPath, 'utf8')) === token) await unlink(lockPath);
+            await retryBusy(async () => {
+              // Recheck ownership on every retry, including a busy read.
+              if ((await readFile(lockPath, 'utf8')) === token) await unlink(lockPath);
+            });
           } catch (error) {
             if (error.code !== 'ENOENT') throw error;
           }
@@ -192,8 +195,23 @@ export function createDestinationFence(filePath, options = {}) {
       const release = await acquire(lockPath, runOptions.onWait);
       const held = new Set(inherited ?? []);
       held.add(key);
-      try { return await heldDestinationFences.run(held, operation); }
-      finally { await release(); }
+      let result, operationFailure, completed = false;
+      try { result = await heldDestinationFences.run(held, operation); completed = true; }
+      catch (error) { operationFailure = error; }
+      try { await release(); }
+      catch (releaseCause) {
+        if (!completed) {
+          if (operationFailure && typeof operationFailure === 'object') operationFailure.releaseCause = releaseCause;
+          throw operationFailure;
+        }
+        // Do not present a completed operation as an uncommitted write that is
+        // safe to replay. Keep its result available for explicit recovery.
+        throw Object.assign(new Error(`ShadowGraph operation completed but lock release failed; inspect the destination before retrying: ${lockPath}`), {
+          code: 'storage_lock_release_failed', operationCompleted: true, operationResult: result, lockPath, cause: releaseCause
+        });
+      }
+      if (!completed) throw operationFailure;
+      return result;
     }
   };
 }

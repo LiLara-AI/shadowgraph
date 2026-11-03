@@ -1,4 +1,47 @@
-# ShadowGraph 0.43.1 — Reliability Technical Preview
+# ShadowGraph 0.43.2 — Closeout Technical Preview
+
+This patch addresses reproduced remaining readiness defects. Schema 7, supported
+Windows Codex wrapper and Claude CLI print-mode paths, privacy controls and tool
+inventories are preserved. No new live-model evidence or workspace activation is
+claimed. The package stays `private: true`, unpublished to npm.
+
+## Closeout changes
+
+- Require a locally supported user correction statement related to the accepted
+  new choice. Fragment-only and unrelated proposals cannot retire an old decision;
+  genuine corrections and history remain. This is not perfect semantic proof.
+- Retry transient lock-release and JSON/SQLite backup/restore rename errors.
+  Exhausted release errors preserve completed-operation results; original
+  operation failures remain primary. Sync JSON candidates before replacement,
+  without claiming directory or physical power-cut immunity.
+- Retain valid spool input after I/O failures, record unreadable hook input with
+  content-free gaps, and report loss-marker saturation as a lower bound. Unowned
+  temporary files are ignored for capacity and preserved.
+- Reject an explicitly configured empty HTTP token while keeping documented local
+  optional-auth mode and Host/Origin protections.
+- Keep acknowledgement's accurate Destructive hint. Existing-state replacements
+  are potentially destructive even when journalled; no capability was removed or
+  behavior changed to hide a warning. Full/Compact/Workflow remain 35 (36 with a
+  verifier)/16/20.
+
+Start with the [Windows beginner path](README.md#quick-start-windows-codex).
+Existing users must stop every writer and privately back up the complete store
+and integration home; follow [upgrade and recovery](docs/migration.md#moving-to-0432).
+Changed runtime/account identity still needs owner setup; prior-setup captures
+are held, never silently rebound. Local hard-link-capable storage is required;
+mixed Windows/WSL, runtime versions and cross-host writers are unsupported.
+
+Documented deterministic maintenance time and future-effective fact ordering are
+retained. Confinement-proof refusals remain bounded to two attempts per item and
+the existing usage budget; persistent host incompatibility can leave work pending.
+Memory delivery does not guarantee model obedience. Desktop, interactive/resume
+and other-platform parity remain unverified. The older fast-uri embedded in the
+pinned gate SDK remains upstream-tracked: observed gates use local synthetic
+schemas, and no consuming exploit was demonstrated. Earlier public tags and
+assets are preserved. Verify Glama build/source/runtime identity independently;
+the previously read-back 0.42.5 -> 0.43.1 mapping describes the earlier build.
+
+## Previous 0.43.1 release
 
 This patch verifies and repairs PR #50's destination-lock and capture-retry paths.
 It includes the already-merged PR #50 redaction protection unchanged and the

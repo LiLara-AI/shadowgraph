@@ -435,12 +435,12 @@ export async function runDeliver({ args = [], readInput = () => '', file, storag
     // Hook input the store has not taken yet, and input that was lost: counted
     // from the spool's file names alone (src/internal/capture-spool.js).
     const spool = capturing ? await spoolStatus(spoolDirectory(activationFile(env))) : null;
-    const spoolGaps = spool ? [...(spool.pending ? ['capture_input_waiting'] : []), ...(spool.dropped ? ['capture_input_dropped'] : []), ...(spool.unreadable ? ['capture_spool_unreadable'] : [])] : [];
+    const spoolGaps = spool ? [...(spool.pending ? ['capture_input_waiting'] : []), ...(spool.dropped ? ['capture_input_dropped'] : []), ...(spool.droppedSaturated ? ['capture_drop_accounting_saturated'] : []), ...(spool.unreadable ? ['capture_spool_unreadable'] : [])] : [];
     const processing = capturing || status ? {
       ...(capturing ? captureState() : { capture: 'not_active' }), extraction: extractionAvailability.active ? 'active' : 'not_active',
       ...(status ? { pending: status.pending, processing: status.processing, failed: status.failed, blocked: status.blocked, oldestPendingAt: status.oldestPendingAt, ...(status.priorSetup ? { priorSetup: status.priorSetup } : {}), extractionAvailable: status.extractionAvailable, ...(status.workerErrors ? { workerErrors: status.workerErrors.map(entry => entry.reason) } : {}), limited: status.limited.map((entry) => entry.limit), gaps: [...new Set([...status.gaps.map((entry) => entry.reason), ...spoolGaps])] } : {}),
       ...(!status && spoolGaps.length ? { gaps: spoolGaps } : {}),
-      ...(spool && (spool.pending || spool.dropped) ? { inputWaiting: spool.pending, oldestInputAt: spool.oldestAt, inputDropped: spool.dropped } : {})
+      ...(spool && (spool.pending || spool.dropped) ? { inputWaiting: spool.pending, oldestInputAt: spool.oldestAt, inputDropped: spool.dropped, ...(spool.droppedSaturated ? { inputDroppedSaturated: true } : {}) } : {})
     } : undefined;
     emit(assemblePayload({ head, items, processing }).text);
   } catch {

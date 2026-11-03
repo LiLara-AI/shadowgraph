@@ -192,7 +192,7 @@ async function enumerate(t) {
   maps.push(valuePaths(prompts, 'prompt-list:', 'mcp prompts/list'));
   for (const { name } of prompts.prompts) maps.push(valuePaths(await rpc('prompts/get', { name }), 'prompt:', 'mcp prompts/get'));
 
-  const app = await createShadowGraphServer({ file, storage: 'json', cwd: directory, apiToken: '', now: () => NOW });
+  const app = await createShadowGraphServer({ file, storage: 'json', cwd: directory, now: () => NOW });
   app.server.listen(0, '127.0.0.1');
   await once(app.server, 'listening');
   t.after(() => new Promise((done) => app.server.close(done)));

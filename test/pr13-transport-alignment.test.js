@@ -67,7 +67,7 @@ async function connect(t, fixture, surface, { modern = false } = {}) {
     }
   };
   if (surface === 'http') {
-    const app = await createShadowGraphServer({ file, storage: backend, cwd: directory, apiToken: '' });
+    const app = await createShadowGraphServer({ file, storage: backend, cwd: directory });
     app.server.listen(0, '127.0.0.1'); await once(app.server, 'listening');
     t.after(() => new Promise(resolve => app.server.close(resolve)));
     return async (operation, args) => {

@@ -445,7 +445,7 @@ test('the verifier build advertises and satisfies the verification tool contract
   assert.equal(listed.tools.length, 36);
   const verifyTool = listed.tools.find((tool) => tool.name === 'shadowgraph_verify_fact');
   assert.ok(verifyTool, 'the verification tool must be advertised when a verifier is configured');
-  assert.deepEqual(verifyTool.annotations, { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true });
+  assert.deepEqual(verifyTool.annotations, { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true });
   assert.equal(verifyTool.outputSchema.type, 'object');
 
   const schemas = new Map(listed.tools.filter((tool) => tool.outputSchema).map((tool) => [tool.name, tool.outputSchema]));

@@ -195,7 +195,7 @@ test('an own-scope read saves nothing; the next save writes what it recorded', a
   const file = join(directory, 'store.json');
   const store = createJsonFileStore(file);
   await store.save(privilegedSnapshot(graph));
-  const app = await createShadowGraphServer({ store, now, cwd: directory, apiToken: '' });
+  const app = await createShadowGraphServer({ store, now, cwd: directory });
   t.after(() => new Promise((resolve) => app.server.close(resolve)));
   await new Promise((resolve) => app.server.listen(0, '127.0.0.1', resolve));
   const post = async (path, body) => {
