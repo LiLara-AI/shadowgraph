@@ -64,6 +64,20 @@ test('correction proposals require a supplied candidate, exact prior choice and 
   assert.throws(() => prepareExtraction(item, source, value), { code: 'extraction_schema_invalid' });
 });
 
+test('a correction needs a supported statement about its accepted new choice', () => {
+  const item = { id: 'new', source: { role: 'user' } };
+  const candidate = { recordId: 'old', priorChosen: 'We will use Redis for the cache layer.', expectedHash: 'a'.repeat(64) };
+  for (const [source, chosen, statement, accepted] of [
+    ['We will use PostgreSQL for the invoice database. Inspect the cache layer.', 'We will use PostgreSQL for the invoice database.', 'cache layer', false],
+    ['We will use PostgreSQL for the invoice database. We will inspect the cache layer.', 'We will use PostgreSQL for the invoice database.', 'We will inspect the cache layer.', false],
+    ['Correction: use Memcached for the cache layer instead of Redis.', 'Correction: use Memcached for the cache layer instead of Redis.', 'Correction: use Memcached for the cache layer instead of Redis.', true]
+  ]) {
+    const result = prepareExtraction(item, source, { records: [{ kind: 'decision', fields: [{ name: 'chosen', text: chosen, sourceRef: item.id }], correction: { recordId: candidate.recordId, priorChosen: candidate.priorChosen, statement } }] }, { provider: 'codex', correctionCandidates: [candidate] });
+    assert.equal(Boolean(result.records[0]?.correction), accepted, statement);
+    assert.equal(result.records[0]?.kind, 'decision', 'rejecting a false correction preserves the new decision itself');
+  }
+});
+
 test('Codex drains only fresh matching provenance; legacy, foreign accounts and prior setups remain untouched', async t => {
   const root = await scratchDirectory(t), binding = { provider: 'codex', accountFingerprint: 'a'.repeat(64), setupId: '12ab5678-1234-1234-1234-123456789012' };
   const options = { type: 'json', file: join(root, 'memory.json'), env: { SHADOWGRAPH_HOME: root }, project: 'fixture', provider: 'codex', extractionBinding: binding };

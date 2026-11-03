@@ -278,17 +278,19 @@ unknown-tool guard, and the set of tools whose successful call is followed by a 
 
 Annotations are hints, and every one here is derived from what the handler actually does to the
 server's environment. `readOnlyHint` means a call leaves the durable store byte-identical and writes
-no file. `destructiveHint` means a call can remove stored state, overwrite an existing record without
-leaving the previous value in the journal, or replace a file outside the store; transitions that keep
-history (status changes, supersession, fact supersession, memory invalidation) are additive and are
-not destructive. `idempotentHint` means a repeated identical call has no further effect on that
+no file. `destructiveHint=false` means only additive updates. Replacing existing current state is
+potentially destructive even when the journal retains history; status changes, supersession,
+confidence changes and fact/memory replacement therefore advertise true. The warning is risk
+vocabulary, not evidence that a build failed or the tool is malicious. Acknowledgement changes
+`status` and restamps `acknowledgedAt` without a journal entry; its true hint is retained. See the
+[official MCP annotation semantics](https://modelcontextprotocol.io/specification/2025-11-25/schema#toolannotations). `idempotentHint` means a repeated identical call has no further effect on that
 environment — which includes the durable revision, not only the domain result. `openWorldHint` means
 the tool reads or writes a caller-selected path outside the store.
 
 `test/mcp-tool-effects.test.js` drives the running server, calls every tool twice with identical
 arguments, records the durable revision, the journal, the stored entities, the timestamps, and the
 files written, and derives all four hints from those observations. Every row below is what that test
-proves, not a description maintained beside the code, with one exception: it runs with no embedding
+proves, not a description maintained beside the code. Replacement cases preseed existing fact/memory keys; history does not exempt an overwrite. One exception: it runs with no embedding
 endpoint configured, so the two "only with an embedder" cells are covered by the catalog tests in
 `test/mcp-tool-metadata.test.js` instead, which build the catalog both ways.
 
@@ -308,18 +310,18 @@ endpoint configured, so the two "only with an embedder" cells are covered by the
 | `shadowgraph_redact` | no | no | no | no |
 | `shadowgraph_record_decision` | no | no | no | no |
 | `shadowgraph_record_attempt` | no | no | no | no |
-| `shadowgraph_record_fact` | no | no | no | no |
-| `shadowgraph_record_outcome` | no | no | no | no |
+| `shadowgraph_record_fact` | no | **yes** | no | no |
+| `shadowgraph_record_outcome` | no | **yes** | no | no |
 | `shadowgraph_link` | no | no | no | no |
-| `shadowgraph_maintain` | no | no | no | no |
+| `shadowgraph_maintain` | no | **yes** | no | no |
 | `shadowgraph_review` | no | no | no | no |
 | `shadowgraph_context` | no | no | no | no |
 | `shadowgraph_review_context` | no | no | no | no |
-| `shadowgraph_remember` | no | no | no | only with an embedder |
-| `shadowgraph_confidence_evidence` | no | no | no | no |
-| `shadowgraph_update_status` | no | no | no | no |
-| `shadowgraph_supersede` | no | no | no | no |
-| `shadowgraph_verify_fact` | no | no | no | **yes** |
+| `shadowgraph_remember` | no | **yes** | no | only with an embedder |
+| `shadowgraph_confidence_evidence` | no | **yes** | no | no |
+| `shadowgraph_update_status` | no | **yes** | no | no |
+| `shadowgraph_supersede` | no | **yes** | no | no |
+| `shadowgraph_verify_fact` | no | **yes** | no | **yes** |
 | `shadowgraph_ack_review` | no | **yes** | no | no |
 | `shadowgraph_purge` | no | **yes** | no | no |
 | `shadowgraph_backup` | no | **yes** | no | yes |
@@ -452,6 +454,11 @@ Detail that used to sit in a description, kept here because it is worth having s
 ### Glama inspection profile
 
 #### Current release mapping (read back 2026-11-02)
+
+This is the historical read-back for that date. A later GitHub release does not
+prove a newer Glama runtime; verify the newly published build's source, tree,
+startup version and tools separately. The earlier build and this mapping remain
+valid historical evidence.
 
 The [Glama listing](https://glama.ai/mcp/servers/LiLara-AI/shadowgraph) and its
 existing published build use these distinct identities:

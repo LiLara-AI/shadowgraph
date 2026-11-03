@@ -202,9 +202,9 @@ function deriveAnnotations({ first, repeat, external }) {
   return {
     // Nothing durable moved and no file was written.
     readOnlyHint: first.revisionDelta === 0 && !first.storeChanged && first.newFiles.length === 0 && !external.write,
-    // State was removed, rewritten without an audit trail, or a file outside the
-    // store was replaced.
-    destructiveHint: first.removed.length > 0 || first.unjournalledOverwrite || external.overwrite,
+    // Only additions may advertise false. Replacing existing state is still a
+    // potentially destructive update when a journal preserves its history.
+    destructiveHint: first.removed.length > 0 || first.changedExisting.length > 0 || external.overwrite,
     // "Calling the tool repeatedly with the same arguments has no additional
     // effect on its environment": the durable revision is part of that
     // environment, since it is the concurrency token other writers compare.
@@ -265,6 +265,7 @@ test('every advertised tool annotation matches the effects the server actually h
     idempotencyKey: 'effects-attempt-key'
   });
 
+  await rpc.ok('shadowgraph_record_fact', { project: PROJECT, key: 'deployment', value: 'single-user' });
   const fact = await observe('shadowgraph_record_fact', { project: PROJECT, key: 'deployment', value: 'multi-user', sourceClass: 'tool_observed' });
   assert.notEqual(fact.firstResult.id, fact.repeatResult.id, 'a repeated observation supersedes rather than overwriting');
 
@@ -289,6 +290,7 @@ test('every advertised tool annotation matches the effects the server actually h
   // Plan v1.4.4 PR-16: evaluate-and-persist moved from shadowgraph_context to
   // shadowgraph_review_context; context is observed below as an own-scope read.
   await observe('shadowgraph_review_context', { project: PROJECT });
+  await rpc.ok('shadowgraph_remember', { project: PROJECT, memoryType: 'preference', key: 'store-style', text: 'prefers remote databases', scope: { userId: 'alice' } });
   await observe('shadowgraph_remember', {
     project: PROJECT, memoryType: 'preference', key: 'store-style', text: 'prefers embedded databases',
     scope: { userId: 'alice' }

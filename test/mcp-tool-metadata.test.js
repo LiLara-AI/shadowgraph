@@ -130,19 +130,19 @@ const ANNOTATIONS_EXPECTED = {
   shadowgraph_search: [false, false, false, false],
   shadowgraph_context: [false, false, false, false],
   shadowgraph_review_context: [false, false, false, false],
-  shadowgraph_remember: [false, false, false, false],
+  shadowgraph_remember: [false, true, false, false],
   shadowgraph_recall: [false, false, false, false],
-  shadowgraph_record_fact: [false, false, false, false],
-  shadowgraph_record_outcome: [false, false, false, false],
-  shadowgraph_confidence_evidence: [false, false, false, false],
-  shadowgraph_update_status: [false, false, false, false],
+  shadowgraph_record_fact: [false, true, false, false],
+  shadowgraph_record_outcome: [false, true, false, false],
+  shadowgraph_confidence_evidence: [false, true, false, false],
+  shadowgraph_update_status: [false, true, false, false],
   shadowgraph_link: [false, false, false, false],
   shadowgraph_traverse: [false, false, false, false],
   shadowgraph_expand: [false, false, false, false],
-  shadowgraph_supersede: [false, false, false, false],
+  shadowgraph_supersede: [false, true, false, false],
   shadowgraph_redact: [false, false, false, false],
   shadowgraph_purge: [false, true, false, false],
-  shadowgraph_maintain: [false, false, false, false],
+  shadowgraph_maintain: [false, true, false, false],
   shadowgraph_retrieve: [false, false, false, false],
   shadowgraph_validate: [false, false, false, false],
   shadowgraph_journal: [false, false, false, false],
@@ -157,7 +157,7 @@ const ANNOTATIONS_EXPECTED = {
   shadowgraph_request_wider_access: [false, false, false, false],
   shadowgraph_revoke_grant: [false, false, false, false],
   shadowgraph_discard_access: [false, false, false, false],
-  shadowgraph_verify_fact: [false, false, false, true]
+  shadowgraph_verify_fact: [false, true, false, true]
 };
 // Overlapping tools must name the siblings a model would otherwise confuse them
 // with, so routing is decidable from the description alone.

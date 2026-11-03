@@ -12,7 +12,7 @@
 // ledger as bytes.
 //
 // INTERNAL: package.json "exports" does not map this file.
-import { lstat, open, readFile, realpath, rename, rm, stat, unlink } from 'node:fs/promises';
+import { chmod, lstat, open, readFile, realpath, rename, rm, stat, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -757,6 +757,29 @@ export async function writeSidecar(destination, bytes) {
 // those codes only; any other error, or the fifth, stands (PR-37c design §2
 // step 4, re-review NF-4).
 const BUSY_CODES = ['EPERM', 'EACCES', 'EBUSY'];
+// Flush an owned payload/copy before publishing its final name. This does not
+// promise directory durability or physical power-cut immunity.
+export async function syncFile(file) {
+  let handle, originalMode;
+  try { handle = await open(file, 'r+'); }
+  catch (error) {
+    if (!['EACCES', 'EPERM'].includes(error.code)) throw error;
+    const mode = (await stat(file)).mode & 0o777;
+    if (mode & 0o200) throw error;
+    // Only our unpublished candidate is adjusted, never its source or final
+    // destination. A copy can inherit a read-only mode; restore it before rename.
+    originalMode = mode;
+    await chmod(file, mode | 0o200);
+  }
+  try {
+    handle ??= await open(file, 'r+');
+    await handle.sync();
+  } finally {
+    try { await handle?.close(); }
+    finally { if (originalMode !== undefined) await chmod(file, originalMode); }
+  }
+}
+
 export async function retryBusy(step) {
   for (let attempt = 1; ; attempt += 1) {
     try { return await step(); }

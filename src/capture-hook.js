@@ -232,7 +232,10 @@ export async function runCapture({ capture, input, deadline, record = null, regi
   try {
     payload = JSON.parse(input.charCodeAt(0) === 0xfeff ? input.slice(1) : input);
     event = observedEvent(payload);
-  } catch { return 'unreadable'; }
+  } catch {
+    if (record !== null) await recordDropped({ spool: spoolDirectory(record), reason: 'hook_input_unreadable', at: now() });
+    return 'unreadable';
+  }
   if (event === null) return 'not_captured';
   // The account the session's material belongs to, judged by this event's own
   // hook. A host that names its session's account (Desktop) was compared with
@@ -332,6 +335,10 @@ async function replayEntry({ spool, entry, destination, ...common }) {
     event = observedEvent(payload);
   } catch (error) {
     if (error?.code === 'ENOENT') return { outcome: 'replayed' };
+    if (!(error instanceof SyntaxError) && error?.code !== 'spool_entry_unreadable') {
+      await failSpoolEntry(spool, entry, error?.code ?? 'spool_read_failed');
+      return { outcome: 'store_failed', stop: true };
+    }
     await dropSpoolEntry(spool, entry, 'spool_entry_unreadable');
     return { outcome: 'dropped' };
   }

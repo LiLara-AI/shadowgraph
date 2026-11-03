@@ -16,6 +16,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { lstat, mkdir, open, readdir, readFile, rename, stat, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { repositoryOf } from './owner-files.js';
+import { retryBusy } from './deletion-knowledge.js';
 
 export const SPOOL_LIMITS = Object.freeze({
   maxEntries: 512, maxEntryBytes: 1024 * 1024, maxBytes: 64 * 1024 * 1024,
@@ -87,7 +88,7 @@ export async function spoolEvent({ spool, input, cwd, transcript = null, boundBy
 
 export async function readSpoolEntry(spool, entry) {
   // ENOENT propagates: another drainer replayed it first.
-  const value = JSON.parse(await readFile(join(spool, entry.name), 'utf8'));
+  const value = JSON.parse(await retryBusy(() => readFile(join(spool, entry.name), 'utf8')));
   if (value?.version !== 1 || typeof value.input !== 'string' || typeof value.cwd !== 'string') throw Object.assign(new Error('spool entry unreadable'), { code: 'spool_entry_unreadable' });
   return value;
 }
@@ -113,7 +114,7 @@ export async function recordDropped({ spool, reason, input = null, at = Date.now
     let event = null, sessionId = null;
     try { const payload = JSON.parse(input); event = typeof payload?.hook_event_name === 'string' ? payload.hook_event_name : null; sessionId = typeof payload?.session_id === 'string' ? payload.session_id : null; } catch {}
     const directory = droppedDirectory(spool);
-    const markers = await readdir(directory).catch(() => []);
+    const markers = (await readdir(directory).catch(() => [])).filter(name => MARKER.test(name));
     if (markers.length >= SPOOL_LIMITS.maxDropMarkers) return false;
     await writeOwnerOnly(directory, `${String(at).padStart(15, '0')}-${digest(randomUUID())}.json`, { version: 1, at: new Date(at).toISOString(), reason, event, sessionId });
     return true;
@@ -144,11 +145,12 @@ export async function expireSpool(spool, now = Date.now()) {
 export async function spoolStatus(spool) {
   // Losses are counted whatever state the spool itself is in.
   const dropped = (await readdir(droppedDirectory(spool)).catch(() => [])).filter((name) => MARKER.test(name)).length;
+  const saturation = dropped >= SPOOL_LIMITS.maxDropMarkers ? { droppedSaturated: true } : {};
   const kind = await lstat(spool).catch((error) => (error.code === 'ENOENT' ? null : error));
-  if (kind === null) return { pending: 0, oldestAt: null, dropped };
+  if (kind === null) return { pending: 0, oldestAt: null, dropped, ...saturation };
   try {
     if (kind instanceof Error || !kind.isDirectory()) throw kind;
     const waiting = await spoolEntries(spool);
-    return { pending: waiting.length, oldestAt: waiting.length ? new Date(waiting[0].at).toISOString() : null, dropped };
-  } catch { return { pending: 0, oldestAt: null, dropped, unreadable: true }; }
+    return { pending: waiting.length, oldestAt: waiting.length ? new Date(waiting[0].at).toISOString() : null, dropped, ...saturation };
+  } catch { return { pending: 0, oldestAt: null, dropped, ...saturation, unreadable: true }; }
 }

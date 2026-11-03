@@ -13,7 +13,7 @@ import { SCHEMA_VERSION } from './shadowgraph.js';
 import { extraCollections, isExtraCollectionKey, refusePublicExport } from './internal/collections.js';
 import { RUNTIME_MISSES } from './internal/miss-ledger.js';
 import { CAPTURE_CONTENT, CAPTURE_SESSIONS } from './internal/capture.js';
-import { DELETION_VIEW, attachDeletionView, backupSidecar, captureItemRecordValid, journalHead, pendingUnsupported, readLedger, recordGenerationChanges, refuseAbsentWithRecord, refuseDeletionFileDestination, registerStoreIo, writeSidecar } from './internal/deletion-knowledge.js';
+import { DELETION_VIEW, attachDeletionView, backupSidecar, captureItemRecordValid, journalHead, pendingUnsupported, readLedger, recordGenerationChanges, refuseAbsentWithRecord, refuseDeletionFileDestination, registerStoreIo, retryBusy, writeSidecar } from './internal/deletion-knowledge.js';
 import { RestorePendingError, purgeRecorded, recordPurges, resolvePendingRestore, saveResolving } from './internal/restore-wrapper.js';
 
 // One generic carrier for every top-level collection this build does not
@@ -707,8 +707,8 @@ export async function createSqliteStore(filePath, options = {}) {
         // required for recovery and stale ones must not accompany another main file.
         for (const path of sidecars(destination)) await removePath(path);
         displacedExists = true;
-        await restoreFs.rename(destination, displacedPath);
-        await restoreFs.rename(stagedPath, destination);
+        await retryBusy(() => restoreFs.rename(destination, displacedPath));
+        await retryBusy(() => restoreFs.rename(stagedPath, destination));
         stagedExists = false;
         fault('afterReplacementRename');
 
@@ -762,7 +762,7 @@ export async function createSqliteStore(filePath, options = {}) {
                 recoveryHandle = undefined;
               }
               await removeDatabase(destination);
-              await restoreFs.rename(recoveryPath, destination);
+              await retryBusy(() => restoreFs.rename(recoveryPath, destination));
               recoveryExists = false;
               await confirmOldAtDestination();
             }
@@ -862,7 +862,7 @@ export async function createSqliteStore(filePath, options = {}) {
             await writeSidecar(target, await backupSidecar(filePath, target, options.env));
             // A backup copy is owner-only (FND-P6-11; PR-37b).
             await chmod(temporary, 0o600);
-            await rename(temporary, target);
+            await retryBusy(() => rename(temporary, target));
             return { source: filePath, destination };
           } finally {
             closeChecked(database, 'backup');

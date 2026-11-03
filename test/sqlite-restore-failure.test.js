@@ -105,6 +105,33 @@ function openWith(DatabaseSync, path, options) {
   return options ? new DatabaseSync(path, options) : new DatabaseSync(path);
 }
 
+test('SQLite restore tolerates transient replacement rename failures', async t => {
+  let failures = 0;
+  const pair = await createPair(t, 'shadowgraph-closeout-sqlite-busy-', { liveOptions: { restoreFs: { rename: async (from, to) => {
+    if (failures++ < 2) throw Object.assign(new Error('synthetic file busy'), { code: 'EPERM' });
+    return realRename(from, to);
+  } } } });
+  if (!pair) return;
+  await seed(pair);
+  await pair.live.restore(pair.sourcePath);
+  assert.equal((await pair.live.load()).records[0].id, 'NEW');
+});
+
+test('SQLite restore tolerates transient rollback rename failures and confirms old state', async t => {
+  let recoveryFailures = 0;
+  const pair = await createPair(t, 'shadowgraph-closeout-sqlite-rollback-', { liveOptions: {
+    restoreFault: stage => { if (stage === 'afterReplacementRename') throw new Error('synthetic activation refusal'); },
+    restoreFs: { rename: async (from, to) => {
+      if (String(from).endsWith('.recovery') && recoveryFailures++ < 2) throw Object.assign(new Error('synthetic file busy'), { code: 'EPERM' });
+      return realRename(from, to);
+    } }
+  } });
+  if (!pair) return;
+  await seed(pair);
+  await assert.rejects(pair.live.restore(pair.sourcePath), { code: 'sqlite_restore_rolled_back' });
+  await assertOldState(pair);
+});
+
 test('SQLite restore rejects malformed readable payload before touching live state', async (t) => {
   const pair = await createPair(t, 'shadowgraph-sqlite-restore-malformed-');
   if (!pair) return;

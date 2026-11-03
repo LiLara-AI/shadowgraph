@@ -4,7 +4,7 @@ import { createDestinationFence, currentRevision, nextRevisionAfter, restoreLock
 import { guardAuthorityRestore, validateRestorePayload, validateRestoreSnapshot } from './restore-validation.js';
 import { mergeAuthorityRestore } from './authority-restore.js';
 import { createJsonFileStore } from './storage.js';
-import { backupSidecar, refuseDeletionFileDestination, storeIo, writeSidecar } from './internal/deletion-knowledge.js';
+import { backupSidecar, refuseDeletionFileDestination, retryBusy, storeIo, syncFile, writeSidecar } from './internal/deletion-knowledge.js';
 import { activation, asRestoreRefusal, completeRestore, resolvePendingRestore, restoreContext, restoreHook, retentionRestoreGuard, settleAfterFailure } from './internal/restore-wrapper.js';
 
 // A backup carries the store's deletion records beside it (PR-37a): the
@@ -22,8 +22,9 @@ export async function backupFile(source, destination, options = {}) {
     const temporary = join(dirname(target), `.${target.split(/[\\/]/).pop()}.${process.pid}.${Date.now()}.tmp`);
     try {
       await copyFile(source, temporary);
+      await syncFile(temporary);
       await writeSidecar(target, await backupSidecar(source, target, options.env));
-      await rename(temporary, target);
+      await retryBusy(() => rename(temporary, target));
       return { source, destination };
     }
     finally { await unlink(temporary).catch(() => {}); }
@@ -145,16 +146,18 @@ async function restoreJsonFileFenced(source, destination, options) {
   };
   try {
     await restoreFs.writeFile(temporaryPath, JSON.stringify(installedPayload, null, 2) + '\n', 'utf8');
+    await syncFile(temporaryPath);
     // Materialize and read back the complete old file before installing anything.
     // Recovery installs a verified copy, so this sole rollback artifact is never
     // consumed until the old destination has been confirmed byte-for-byte.
     if (destinationExisted) {
       await restoreFs.writeFile(rollbackPath, previousBytes);
+      await syncFile(rollbackPath);
       await assertExactBytes(rollbackPath, previousBytes, 'JSON rollback artifact');
     }
     try {
       fault('beforeReplacementRename');
-      await restoreFs.rename(temporaryPath, destination);
+      await retryBusy(() => restoreFs.rename(temporaryPath, destination));
       fault('afterReplacementRename');
       if (options.afterReplace) await options.afterReplace(installedPayload);
     } catch (cause) {
@@ -163,7 +166,8 @@ async function restoreJsonFileFenced(source, destination, options) {
           fault('beforeRollbackInstall');
           await restoreFs.copyFile(rollbackPath, recoveryPath);
           await assertExactBytes(recoveryPath, previousBytes, 'JSON recovery copy');
-          await restoreFs.rename(recoveryPath, destination);
+          await syncFile(recoveryPath);
+          await retryBusy(() => restoreFs.rename(recoveryPath, destination));
           await assertExactBytes(destination, previousBytes, 'Restored JSON destination');
           fault('afterRollbackConfirmed');
         } else {

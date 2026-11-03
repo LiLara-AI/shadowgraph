@@ -195,7 +195,15 @@ export function prepareExtraction(item, source, value, { provider, recipe, corre
       ? correctionCandidates.find(old => old.recordId === proposed.correction.recordId && old.priorChosen === proposed.correction.priorChosen) : null;
     const correction = candidate && proposed.correction.statement.trim() && source.includes(proposed.correction.statement)
       ? { ...proposed.correction, expectedHash: candidate.expectedHash, status: 'model_proposed', sourceRef: item.id } : null;
-    const corrected = record => correction ? { ...record, correction } : record;
+    // A supported quotation about some other subject is not evidence for this
+    // accepted choice. This is an evidence floor, not semantic proof of intent.
+    const corrected = record => {
+      if (!correction || !mentionsAny(correction.statement, record.values?.chosen ?? record.values?.text)) return record;
+      // A verbatim memory only links a model-proposed correction, unapplied;
+      // preserve that accepted path. Retiring a decision needs supported evidence.
+      if (record.kind === 'decision' && !['quoted', 'entailed'].includes(classifyClaim({ text: correction.statement, sourceRef: item.id }, source).class)) return record;
+      return { ...record, correction };
+    };
     const framed = proposed.kind === 'decision' ? framedDecision(proposed, item, source) : null;
     if (framed) { keep(corrected(framed), { framed: true }); continue; }
     const contextual = quoted && split === null ? contextualInterpretation(proposed, item, source) : null;
