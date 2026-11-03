@@ -12,7 +12,7 @@
 // ledger as bytes.
 //
 // INTERNAL: package.json "exports" does not map this file.
-import { chmod, lstat, open, readFile, realpath, rename, rm, stat, unlink } from 'node:fs/promises';
+import { chmod, lstat, open, readFile, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -757,6 +757,16 @@ export async function writeSidecar(destination, bytes) {
 // those codes only; any other error, or the fifth, stands (PR-37c design §2
 // step 4, re-review NF-4).
 const BUSY_CODES = ['EPERM', 'EACCES', 'EBUSY'];
+// Node 20.10+ can flush the same handle used by writeFile. Earlier supported
+// Node 20 releases need the equivalent explicit write/sync/close sequence.
+export async function writeSyncedFile(file, bytes, options = {}) {
+  const [major, minor] = process.versions.node.split('.').map(Number);
+  if (major > 20 || (major === 20 && minor >= 10)) return writeFile(file, bytes, { ...options, flush: true });
+  const handle = await open(file, options.flag ?? 'w', options.mode ?? 0o666);
+  try { await handle.writeFile(bytes, options.encoding); await handle.sync(); }
+  finally { await handle.close(); }
+}
+
 // Flush an owned payload/copy before publishing its final name. This does not
 // promise directory durability or physical power-cut immunity.
 export async function syncFile(file) {

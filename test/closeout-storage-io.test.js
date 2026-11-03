@@ -2,11 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
-import { chmod, readFile, rename, stat, writeFile } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { chmod, open, readFile, rename, stat, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { createDestinationFence, fenceLockPath } from '../src/revision-store.js';
 import { createJsonFileStore } from '../src/storage.js';
 import { backupFile, restoreFile } from '../src/backup.js';
+import { writeSyncedFile } from '../src/internal/deletion-knowledge.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const busy = () => Object.assign(new Error('synthetic file busy'), { code: 'EPERM' });
@@ -35,17 +36,13 @@ test('a failed JSON payload sync refuses replacement and preserves the previous 
   const store = createJsonFileStore(file);
   await store.save(payload('old'));
   const before = await readFile(file);
-  const original = fs.promises.open;
-  fs.promises.open = async (path, ...args) => {
-    const handle = await original(path, ...args);
-    if (basename(String(path)).startsWith('.memory.json.') && String(path).endsWith('.tmp')) {
-      handle.sync = async () => { throw Object.assign(new Error('synthetic sync failure'), { code: 'EIO' }); };
-    }
-    return handle;
-  };
-  syncBuiltinESMExports();
+  const sample = await open(join(dir, 'handle-prototype'), 'w');
+  const prototype = Object.getPrototypeOf(sample), original = prototype.sync;
+  await sample.close();
+  // Fault the real FileHandle sync, including Node's integrated write+flush.
+  prototype.sync = async function () { throw Object.assign(new Error('synthetic sync failure'), { code: 'EIO' }); };
   try { await assert.rejects(store.save({ ...payload('new'), revision: 1 }), { code: 'EIO' }); }
-  finally { fs.promises.open = original; syncBuiltinESMExports(); }
+  finally { prototype.sync = original; }
   assert.deepEqual(await readFile(file), before);
 });
 
@@ -71,6 +68,25 @@ test('exhausted release retries preserve the operation outcome and the original 
       return true;
     });
   } finally { fs.promises.unlink = original; syncBuiltinESMExports(); }
+});
+
+test('the pre-20.10 compatibility path flushes its original writable handle', async t => {
+  const dir = await scratchDirectory(t, 'closeout older node flush '), file = join(dir, 'legacy.json');
+  const sample = await open(join(dir, 'prototype'), 'w'), prototype = Object.getPrototypeOf(sample);
+  await sample.close();
+  const original = prototype.sync, version = Object.getOwnPropertyDescriptor(process.versions, 'node');
+  let syncs = 0;
+  prototype.sync = async function () { syncs++; return original.call(this); };
+  Object.defineProperty(process.versions, 'node', { value: '20.0.0', configurable: true });
+  try {
+    await writeSyncedFile(file, 'older Node compatibility\n', { encoding: 'utf8', mode: 0o400 });
+    assert.equal(syncs, 1);
+    assert.equal(await readFile(file, 'utf8'), 'older Node compatibility\n');
+  } finally {
+    Object.defineProperty(process.versions, 'node', version);
+    prototype.sync = original;
+    await chmod(file, 0o600).catch(() => {});
+  }
 });
 
 test('JSON backup retries a transient replacement error and keeps a usable snapshot', async t => {
