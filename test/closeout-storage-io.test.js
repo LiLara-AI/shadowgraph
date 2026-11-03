@@ -6,7 +6,7 @@ import { chmod, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { createDestinationFence, fenceLockPath } from '../src/revision-store.js';
 import { createJsonFileStore } from '../src/storage.js';
-import { backupFile, restoreJsonPrimitive } from '../src/backup.js';
+import { backupFile, restoreFile } from '../src/backup.js';
 import { scratchDirectory } from '../tools/scratch-directory.js';
 
 const busy = () => Object.assign(new Error('synthetic file busy'), { code: 'EPERM' });
@@ -119,7 +119,7 @@ test('JSON restore retries transient replacement and rollback failures without l
     if (String(from).endsWith('.recovery') && rollbackFailures++ < 2) throw busy();
     return rename(from, to);
   } };
-  await assert.rejects(restoreJsonPrimitive(source, target, { restoreFs, afterReplace: () => { throw new Error('activation refused'); } }), { code: 'json_restore_rolled_back' });
+  await assert.rejects(restoreFile(source, target, { env: { SHADOWGRAPH_HOME: join(dir, 'home') }, restoreFs, afterReplace: () => { throw new Error('activation refused'); } }), { code: 'json_restore_rolled_back' });
   assert.deepEqual(await readFile(target), before);
   assert.ok(replacementFailures >= 3 && rollbackFailures >= 3);
 });

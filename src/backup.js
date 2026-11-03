@@ -48,7 +48,14 @@ export async function restoreFile(source, destination, options = {}) {
     // the destination's mode, or owner-only for a new one (FND-P6-11; PR-37b).
     const mode = await stat(destination).then((info) => info.mode & 0o777, () => 0o600);
     const create = options.restoreFs?.writeFile ?? writeFile;
-    const restoreFs = { ...options.restoreFs, writeFile: (path, data, encoding) => create(path, data, { encoding, mode }) };
+    // Durability/retry belongs to the I/O adapter; keep the reviewed restore
+    // primitive and its authority/recovery algorithm byte-identical.
+    const restoreFs = {
+      ...options.restoreFs,
+      writeFile: async (path, data, encoding) => { await create(path, data, { encoding, mode }); await syncFile(path); },
+      copyFile: async (from, to) => { await (options.restoreFs?.copyFile ?? copyFile)(from, to); await syncFile(to); },
+      rename: (from, to) => retryBusy(() => (options.restoreFs?.rename ?? rename)(from, to))
+    };
     let result;
     try { result = await restoreJsonFileFenced(source, destination, { ...options, validate: restoreHook(ctx, options.validate), afterReplace: activation(ctx, options.afterReplace), restoreFs }); }
     catch (error) {
@@ -146,18 +153,16 @@ async function restoreJsonFileFenced(source, destination, options) {
   };
   try {
     await restoreFs.writeFile(temporaryPath, JSON.stringify(installedPayload, null, 2) + '\n', 'utf8');
-    await syncFile(temporaryPath);
     // Materialize and read back the complete old file before installing anything.
     // Recovery installs a verified copy, so this sole rollback artifact is never
     // consumed until the old destination has been confirmed byte-for-byte.
     if (destinationExisted) {
       await restoreFs.writeFile(rollbackPath, previousBytes);
-      await syncFile(rollbackPath);
       await assertExactBytes(rollbackPath, previousBytes, 'JSON rollback artifact');
     }
     try {
       fault('beforeReplacementRename');
-      await retryBusy(() => restoreFs.rename(temporaryPath, destination));
+      await restoreFs.rename(temporaryPath, destination);
       fault('afterReplacementRename');
       if (options.afterReplace) await options.afterReplace(installedPayload);
     } catch (cause) {
@@ -166,8 +171,7 @@ async function restoreJsonFileFenced(source, destination, options) {
           fault('beforeRollbackInstall');
           await restoreFs.copyFile(rollbackPath, recoveryPath);
           await assertExactBytes(recoveryPath, previousBytes, 'JSON recovery copy');
-          await syncFile(recoveryPath);
-          await retryBusy(() => restoreFs.rename(recoveryPath, destination));
+          await restoreFs.rename(recoveryPath, destination);
           await assertExactBytes(destination, previousBytes, 'Restored JSON destination');
           fault('afterRollbackConfirmed');
         } else {

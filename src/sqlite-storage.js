@@ -55,6 +55,10 @@ export function exportSqlitePayload(database, { tolerant = false } = {}) {
 }
 
 export async function createSqliteStore(filePath, options = {}) {
+  const suppliedRename = options.restoreFs?.rename ?? rename;
+  // Keep the reviewed restore method intact; apply bounded platform retries at
+  // its existing filesystem seam without mutating caller-owned options.
+  options = { ...options, restoreFs: { ...options.restoreFs, rename: (from, to) => retryBusy(() => suppliedRename(from, to)) } };
   let DatabaseSync;
   try { ({ DatabaseSync } = await import('node:sqlite')); }
   catch { throw new Error(NODE_SQLITE_NOT_APPLICABLE_REASON); }
@@ -707,8 +711,8 @@ export async function createSqliteStore(filePath, options = {}) {
         // required for recovery and stale ones must not accompany another main file.
         for (const path of sidecars(destination)) await removePath(path);
         displacedExists = true;
-        await retryBusy(() => restoreFs.rename(destination, displacedPath));
-        await retryBusy(() => restoreFs.rename(stagedPath, destination));
+        await restoreFs.rename(destination, displacedPath);
+        await restoreFs.rename(stagedPath, destination);
         stagedExists = false;
         fault('afterReplacementRename');
 
@@ -762,7 +766,7 @@ export async function createSqliteStore(filePath, options = {}) {
                 recoveryHandle = undefined;
               }
               await removeDatabase(destination);
-              await retryBusy(() => restoreFs.rename(recoveryPath, destination));
+              await restoreFs.rename(recoveryPath, destination);
               recoveryExists = false;
               await confirmOldAtDestination();
             }
