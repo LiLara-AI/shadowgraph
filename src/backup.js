@@ -4,7 +4,7 @@ import { createDestinationFence, currentRevision, nextRevisionAfter, restoreLock
 import { guardAuthorityRestore, validateRestorePayload, validateRestoreSnapshot } from './restore-validation.js';
 import { mergeAuthorityRestore } from './authority-restore.js';
 import { createJsonFileStore } from './storage.js';
-import { backupSidecar, refuseDeletionFileDestination, storeIo, writeSidecar } from './internal/deletion-knowledge.js';
+import { backupSidecar, refuseDeletionFileDestination, retryBusy, storeIo, syncFile, writeSidecar } from './internal/deletion-knowledge.js';
 import { activation, asRestoreRefusal, completeRestore, resolvePendingRestore, restoreContext, restoreHook, retentionRestoreGuard, settleAfterFailure } from './internal/restore-wrapper.js';
 
 // A backup carries the store's deletion records beside it (PR-37a): the
@@ -22,8 +22,9 @@ export async function backupFile(source, destination, options = {}) {
     const temporary = join(dirname(target), `.${target.split(/[\\/]/).pop()}.${process.pid}.${Date.now()}.tmp`);
     try {
       await copyFile(source, temporary);
+      await syncFile(temporary);
       await writeSidecar(target, await backupSidecar(source, target, options.env));
-      await rename(temporary, target);
+      await retryBusy(() => rename(temporary, target));
       return { source, destination };
     }
     finally { await unlink(temporary).catch(() => {}); }
@@ -47,7 +48,14 @@ export async function restoreFile(source, destination, options = {}) {
     // the destination's mode, or owner-only for a new one (FND-P6-11; PR-37b).
     const mode = await stat(destination).then((info) => info.mode & 0o777, () => 0o600);
     const create = options.restoreFs?.writeFile ?? writeFile;
-    const restoreFs = { ...options.restoreFs, writeFile: (path, data, encoding) => create(path, data, { encoding, mode }) };
+    // Durability/retry belongs to the I/O adapter; keep the reviewed restore
+    // primitive and its authority/recovery algorithm byte-identical.
+    const restoreFs = {
+      ...options.restoreFs,
+      writeFile: async (path, data, encoding) => { await create(path, data, { encoding, mode }); await syncFile(path); },
+      copyFile: async (from, to) => { await (options.restoreFs?.copyFile ?? copyFile)(from, to); await syncFile(to); },
+      rename: (from, to) => retryBusy(() => (options.restoreFs?.rename ?? rename)(from, to))
+    };
     let result;
     try { result = await restoreJsonFileFenced(source, destination, { ...options, validate: restoreHook(ctx, options.validate), afterReplace: activation(ctx, options.afterReplace), restoreFs }); }
     catch (error) {

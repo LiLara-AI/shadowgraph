@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.43.2 — Technical Preview (2026-11-03)
+
+- Reject unsupported or unrelated automatic correction statements while retaining genuine corrections, new decisions and history.
+- Retry transient lock-release and JSON/SQLite backup/restore rename failures; preserve completed-operation diagnostics if release retries are exhausted. Sync JSON candidates before replacement, without claiming physical power-cut immunity.
+- Keep valid spool input on I/O read failures, record unreadable hook input as a content-free gap, and report loss-marker saturation honestly without deleting unowned files.
+- Reject a defined empty HTTP token while retaining optional authentication for the documented local interface.
+- Retain the accurate Destructive hint on review acknowledgement. Mark existing-state replacements as potentially destructive even when a journal preserves history; no capabilities, time semantics, protections or support claims are removed.
+- Preserve schema 7, Full 35/36, Compact 16, Workflow 20, `private: true`, and all published releases. The bundled SDK follow-up remains a declared upstream tooling limitation.
+
 ## 0.43.1 — Technical Preview (2026-11-02)
 
 - Publish a complete destination-lock ownership token atomically using an exclusive hard link, so a writer paused before writing its token cannot later enter beside a replacement owner. PID liveness protects long-running owners without a heartbeat.

@@ -13,7 +13,7 @@ import { SCHEMA_VERSION } from './shadowgraph.js';
 import { extraCollections, isExtraCollectionKey, refusePublicExport } from './internal/collections.js';
 import { RUNTIME_MISSES } from './internal/miss-ledger.js';
 import { CAPTURE_CONTENT, CAPTURE_SESSIONS } from './internal/capture.js';
-import { DELETION_VIEW, attachDeletionView, backupSidecar, captureItemRecordValid, journalHead, pendingUnsupported, readLedger, recordGenerationChanges, refuseAbsentWithRecord, refuseDeletionFileDestination, registerStoreIo, writeSidecar } from './internal/deletion-knowledge.js';
+import { DELETION_VIEW, attachDeletionView, backupSidecar, captureItemRecordValid, journalHead, pendingUnsupported, readLedger, recordGenerationChanges, refuseAbsentWithRecord, refuseDeletionFileDestination, registerStoreIo, retryBusy, writeSidecar } from './internal/deletion-knowledge.js';
 import { RestorePendingError, purgeRecorded, recordPurges, resolvePendingRestore, saveResolving } from './internal/restore-wrapper.js';
 
 // One generic carrier for every top-level collection this build does not
@@ -55,6 +55,10 @@ export function exportSqlitePayload(database, { tolerant = false } = {}) {
 }
 
 export async function createSqliteStore(filePath, options = {}) {
+  const suppliedRename = options.restoreFs?.rename ?? rename;
+  // Keep the reviewed restore method intact; apply bounded platform retries at
+  // its existing filesystem seam without mutating caller-owned options.
+  options = { ...options, restoreFs: { ...options.restoreFs, rename: (from, to) => retryBusy(() => suppliedRename(from, to)) } };
   let DatabaseSync;
   try { ({ DatabaseSync } = await import('node:sqlite')); }
   catch { throw new Error(NODE_SQLITE_NOT_APPLICABLE_REASON); }
@@ -862,7 +866,7 @@ export async function createSqliteStore(filePath, options = {}) {
             await writeSidecar(target, await backupSidecar(filePath, target, options.env));
             // A backup copy is owner-only (FND-P6-11; PR-37b).
             await chmod(temporary, 0o600);
-            await rename(temporary, target);
+            await retryBusy(() => rename(temporary, target));
             return { source: filePath, destination };
           } finally {
             closeChecked(database, 'backup');
