@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.43.3 — Technical Preview (2026-11-03)
+
+- Send the same tool-navigation and effect guidance through all four supported `initialize` revisions and modern `server/discover`. Handshake clients previously received no server instructions.
+- Describe review signals as saved reminders. Distinguish reading existing reminders from reevaluating conditions and saving signals; explain due-only versus all-verdict evaluation and the `reviewSignalId` to `id` acknowledgement mapping in the actual MCP catalog.
+- Preserve all public tool names, schemas, effect annotations, permissions and handlers: Full 35/36, Compact 16 and Workflow 20. Review evaluation still commits a revision on repeats; access-key reads still save their bounded audit. Automatic memory, correction and sharing are unchanged.
+- Add real-stdio handshake regressions with disposable stores and classify both guides as factual interface metadata; existing advice checks remain unchanged. This is a client-guidance repair, not evidence of improved model selection or a predicted TDQS score. The v0.43.2 release and its assets remain available.
+
 ## 0.43.2 — Technical Preview (2026-11-03)
 
 - Reject unsupported or unrelated automatic correction statements while retaining genuine corrections, new decisions and history.

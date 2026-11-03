@@ -5,9 +5,9 @@
 ShadowGraph records what worked, what failed, and why a decision was made—then supplies relevant experience when you continue working. The demonstrated automatic paths are the **Windows Codex terminal wrapper** and, in print mode, **Claude Code CLI hooks on Windows**, after one-time setup in projects you enroll.
 
 [![CI](https://github.com/LiLara-AI/shadowgraph/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/LiLara-AI/shadowgraph/actions/workflows/ci.yml)
-[![Technical Preview](https://img.shields.io/badge/Technical_Preview-v0.43.2-blue)](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.43.2)
+[![Technical Preview](https://img.shields.io/badge/Technical_Preview-v0.43.3-blue)](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.43.3)
 
-[Get started](#quick-start-windows-codex) · [Supported workflows](#supported-workflows) · [Release & downloads](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.43.2) · [Documentation](#documentation)
+[Get started](#quick-start-windows-codex) · [Supported workflows](#supported-workflows) · [Release & downloads](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.43.3) · [Documentation](#documentation)
 
 ![Session A works and repairs a failure; capture feeds background extraction through the selected provider; local memory supplies relevant experience to fresh Session B. Foreground work continues and cross-project reuse requires explicit sharing.](https://raw.githubusercontent.com/LiLara-AI/shadowgraph/v0.43.1/docs/assets/workflow.svg)
 
@@ -33,10 +33,10 @@ The Codex executor is a separate prerequisite distributed as `@openai/codex`. Sh
 
 ### 1. Install
 
-Run in PowerShell 7+. The version is pinned; the [release](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.43.2) includes `SHA256SUMS.txt` for the tarball.
+Run in PowerShell 7+. The version is pinned; the [release](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.43.3) includes `SHA256SUMS.txt` for the tarball.
 
 ```powershell
-npm install --global https://github.com/LiLara-AI/shadowgraph/releases/download/v0.43.2/shadowgraph-unified-plugin-0.43.2.tgz
+npm install --global https://github.com/LiLara-AI/shadowgraph/releases/download/v0.43.3/shadowgraph-unified-plugin-0.43.3.tgz
 
 $executorDir = Join-Path $env:LOCALAPPDATA 'ShadowGraph-Codex-0.161.0'
 npm install --prefix $executorDir @openai/codex@0.161.0
@@ -126,6 +126,14 @@ Set the environment on the MCP server process, then restart/reconnect and refres
 administrative repair or destructive cleanup. See the [configuration and workflow
 guide](docs/mcp-compatibility.md#optional-workflow-profile-complete-the-decision-loop).
 
+Use `shadowgraph_search` for literal every-term matching, `shadowgraph_recall`
+for ranked experience, `shadowgraph_retrieve` for matches plus one-hop neighbours,
+`shadowgraph_context` for a working set, and `shadowgraph_expand` for a returned
+context-line handle. In Workflow or Full, `shadowgraph_review_signals` reads saved
+reminders; `shadowgraph_review`, `shadowgraph_review_context` and
+`shadowgraph_reconsider` reevaluate conditions and save reminders. Access-key
+reads save a bounded audit. See the [read and review guide](docs/mcp-compatibility.md#choosing-a-read-or-review-operation).
+
 ## Supported workflows
 
 | Workflow | What this preview establishes |
@@ -136,8 +144,8 @@ guide](docs/mcp-compatibility.md#optional-workflow-profile-complete-the-decision
 | Codex Desktop UI or ordinary CLI launched elsewhere | Not observed by this wrapper |
 | Glama MCP container | Credential-free MCP surface; cannot capture a user's Windows Codex sessions by itself |
 
-The Glama build read back on 2026-11-02 has release label **0.42.5** and runtime **0.43.1**, with
-the 20-tool Workflow profile. See the [release/runtime identity mapping](docs/mcp-compatibility.md#current-release-mapping-read-back-2026-11-02).
+The accepted Glama release read back on 2026-11-03 has display label **0.42.6** and runtime **0.43.2**, with
+the 20-tool Workflow profile. See the [release/runtime identity mapping](docs/mcp-compatibility.md#accepted-0432-release-mapping-read-back-2026-11-03). A new package release alone does not update that container.
 
 ### Store locking and retry limits (0.43.1)
 

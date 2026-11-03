@@ -122,6 +122,8 @@ export const REGISTER = Object.freeze([
   m('initialize:protocolVersion', 'interface'),
   m('initialize:capabilities.**', 'interface'),
   m('initialize:serverInfo.**', 'interface'),
+  // The same factual interface guide is exposed in both discovery eras.
+  c('initialize:instructions', 'current state', G),
   c('discover:instructions', 'current state', G),
   m('discover:supportedVersions.**', 'interface'),
   m('discover:capabilities.**', 'interface'),
