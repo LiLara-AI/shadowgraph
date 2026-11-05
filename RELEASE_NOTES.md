@@ -11,8 +11,8 @@ the advertised catalog on `review signals`. Opening clauses state upfront that
 
 All functionality is retained: Full 35 (36 with a verifier), Compact 16 and
 Workflow 20, with unchanged public names, schemas, handlers, permissions, wire
-and character budgets (`11,692 / 11,700` Full, `6,643 / 7,000` Compact,
-`12,041 / 12,050` Verifier) and truthful `destructiveHint` annotations. Automatic
+and character budgets (`11,670 / 11,700` Full, `6,722 / 7,000` Compact,
+`12,019 / 12,050` Verifier) and truthful `destructiveHint` annotations. Automatic
 capture, extraction, correction, sharing, schema 7 and declared host support are
 unchanged. The package stays `private: true`, unpublished to npm. No new
 live-memory or model-selection experiment is claimed, and no TDQS increase is
