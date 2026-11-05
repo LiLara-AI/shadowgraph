@@ -48,7 +48,7 @@ test('tool choice explains working context, lookup, expansion, evaluation and ma
   const byName = Object.fromEntries(buildToolCatalog().map(tool => [tool.name, tool]));
   const desc = name => byName[`shadowgraph_${name}`].description;
   assert.match(desc('context'), /^Read .*working set/u);
-  assert.match(desc('retrieve'), /one-hop/u);
+  assert.match(desc('retrieve'), /ordered graph neighbours/u);
   assert.match(desc('recall'), /Rank.*lexical.*vector/u);
   assert.match(desc('expand'), /input/u);
   assert.match(desc('review_context'), /shadowgraph_review.*also persists/u);

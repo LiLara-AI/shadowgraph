@@ -123,7 +123,7 @@ have their separately disclosed audit writes.
 | --- | --- |
 | Prepare for a task with current decisions, failed attempts and fired conditions | `shadowgraph_context`; evaluates without persisting signals |
 | Find records containing every query term | `shadowgraph_search`; no graph expansion |
-| Include related records one edge from content matches | `shadowgraph_retrieve`; neighbours stay within the read scope |
+| Include related records from content matches by following graph links in order | `shadowgraph_retrieve`; neighbours stay within the read scope |
 | Rank memory using available lexical, vector, graph and temporal signals | `shadowgraph_recall`; unavailable signals are disclosed, not fabricated |
 | Inspect a shortened context line in full | `shadowgraph_expand`; copy its expansion handle into the input as described below |
 | Evaluate and persist due review signals | `shadowgraph_review`; returns due decisions |
@@ -466,7 +466,7 @@ The owner release view identifies display label `0.42.6` as ShadowGraph runtime
 `04ea6801ac1ee0b4aad2214841f38c95234cbd02`, asserts tree
 `0e0db8829040071b833a7e4ded02f39999f36fcf`, version `0.43.2` and
 `private: true`, and advertises the 20-tool Workflow profile. This is the accepted
-release, not a measurement of the v0.43.3 candidate. A new deployment must have its
+release, not a measurement of the v0.43.3 or v0.43.4 releases. A new deployment must have its
 own build/runtime read-back; the display counter is not a package version.
 
 #### Current release mapping (read back 2026-11-02)
