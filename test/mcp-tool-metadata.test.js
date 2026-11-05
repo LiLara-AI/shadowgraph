@@ -416,6 +416,13 @@ const DESCRIPTION_CAP = 450;
 // description. Measured the same way: full 9,695, verifier 10,044, compact 4,614
 // characters. Full and verifier are re-set with the same ~2.5% headroom; compact
 // still sits under its budget, so it was not moved.
+//
+// Refined on 2026-11-04 for the Argon usability and correctness release: clarifies
+// overlapping read clusters (search, retrieve, recall), review families (review,
+// review_context, reconsider, review_signals), decision lifecycle side effects,
+// repair_plan unlink boundary, and standardizes on 'review signals' (eliminating
+// 'reminders'). Measured with `node scripts/mcp-wire-size.mjs`: full 11,692,
+// compact 6,643, verifier full 12,041. All budgets are preserved with headroom.
 const DESCRIPTION_TOTALS = {
   full: 11700,
   verifier: 12050,

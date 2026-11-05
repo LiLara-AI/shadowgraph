@@ -1,3 +1,34 @@
+# ShadowGraph 0.43.4 — MCP Interface & Usability Technical Preview
+
+Tool descriptions in the MCP catalog now resolve the `shadowgraph_repair_plan`
+unlink boundary, describe `shadowgraph_retrieve`'s single-pass ordered graph
+expansion faithfully (`ordered graph neighbours` / `follows graph links in order`
+without promising one-hop-only or complete transitive closure), and standardize
+the advertised catalog on `review signals`. Opening clauses state upfront that
+`shadowgraph_context` evaluates without saving signals and that
+`shadowgraph_ack_review`, `shadowgraph_record_outcome` and
+`shadowgraph_confidence_evidence` do not transition decision lifecycle status.
+
+All functionality is retained: Full 35 (36 with a verifier), Compact 16 and
+Workflow 20, with unchanged public names, schemas, handlers, permissions, wire
+and character budgets (`11,692 / 11,700` Full, `6,643 / 7,000` Compact,
+`12,041 / 12,050` Verifier) and truthful `destructiveHint` annotations. Automatic
+capture, extraction, correction, sharing, schema 7 and declared host support are
+unchanged. The package stays `private: true`, unpublished to npm. No new
+live-memory or model-selection experiment is claimed, and no TDQS increase is
+promised.
+
+Stop every writer and privately back up the complete store and integration home
+before upgrading. Follow the existing [migration and recovery guide](docs/migration.md).
+Existing runtime/account setup boundaries and unsupported mixed Windows/WSL or
+cross-host writers still apply. Earlier accepted tags and downloads are retained.
+
+Glama's display label and MCP runtime version are independent. Verify the actual
+build checkout, tree, runtime and advertised tools before treating a new listing
+label as a runtime upgrade. See [MCP compatibility](docs/mcp-compatibility.md).
+
+## Previous 0.43.3 release
+
 # ShadowGraph 0.43.3 — MCP Guidance Technical Preview
 
 Handshake MCP clients now receive the navigation and effect instructions that

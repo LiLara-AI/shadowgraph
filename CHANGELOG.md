@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.43.4 — Technical Preview (2026-11-05)
+
+- Clarify 13 MCP tool descriptions in `src/mcp-tools.js` across the read, review and decision-lifecycle clusters while keeping all 23 other tool descriptions unchanged.
+- Describe `shadowgraph_retrieve` single-pass ordered graph expansion faithfully (`ordered graph neighbours` / `follows graph links in order`) without promising one-hop-only or complete transitive closure, and add forward/reverse relation-order chain regressions.
+- Resolve the `shadowgraph_repair_plan` routing contradiction (`there is no apply or unlink tool, so repairs require owner or store-level action`) so callers are not instructed to remove relations with non-existent ordinary tools.
+- Standardize the advertised MCP tool catalog on `review signals` (0 occurrences of `reminder` in `src/mcp-tools.js`), state upfront that `shadowgraph_context` evaluates without saving signals, and state that `shadowgraph_ack_review`, `shadowgraph_record_outcome` and `shadowgraph_confidence_evidence` do not transition decision lifecycle state.
+- Preserve all public tool names, schemas, permissions, handlers, wire/character ceilings (`11,692 / 11,700` Full, `6,643 / 7,000` Compact, `12,041 / 12,050` Verifier) and truthful `destructiveHint` annotations across Full 35/36, Compact 16 and Workflow 20. No model-selection win or TDQS score increase is claimed.
+
 ## 0.43.3 — Technical Preview (2026-11-03)
 
 - Send the same tool-navigation and effect guidance through all four supported `initialize` revisions and modern `server/discover`. Handshake clients previously received no server instructions.
