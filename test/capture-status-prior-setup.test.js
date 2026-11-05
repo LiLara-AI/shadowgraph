@@ -28,7 +28,7 @@ function store(entries, blocked = []) {
 }
 function read(data, binding) {
   const extractionAvailable = Object.assign(() => true, { active: Boolean(binding), ...(binding ? { binding } : {}) });
-  const graph = createShadowGraph({ extractionAvailable }); graph.importData(data);
+  const graph = createShadowGraph({ now: () => at(45), extractionAvailable }); graph.importData(data);
   return graph.search('', { project: 'p' }).completeness;
 }
 
@@ -60,7 +60,7 @@ test('a prior-only store has nothing pending and no stale worker error', () => {
 
 test('with no active binding capture status is unchanged', () => {
   const data = store(MIXED, ['prior', 'unbound']);
-  for (const status of [read(data, null).capture, (() => { const g = createShadowGraph(); g.importData(data); return g.search('', { project: 'p' }).completeness.capture; })()]) {
+  for (const status of [read(data, null).capture, (() => { const g = createShadowGraph({ now: () => at(45) }); g.importData(data); return g.search('', { project: 'p' }).completeness.capture; })()]) {
     assert.equal(status.pending, 5);
     assert.equal(status.oldestPendingAt, at(1));
     assert.equal(status.priorSetup, undefined);
