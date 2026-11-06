@@ -4,8 +4,8 @@ Use ShadowGraph as a decision ledger, not as unquestioned truth.
 
 ## Before consequential work
 
-1. Call `shadowgraph_context` for the project.
-2. Call `shadowgraph_recall` for scoped/temporal memory and `shadowgraph_retrieve` for decision compatibility. Inspect matched signals, facts, failed attempts, and superseded decisions.
+1. Call `shadowgraph_context` for the project (optionally passing `task` to also inspect `userMemories`, `successfulApproaches`, `crossProjectExperience`, and `relevantToTask`).
+2. Call `shadowgraph_recall` for scoped/temporal memory (passing `includeHistory: true` when inspecting prior versions and `changeSummary` evolution) and `shadowgraph_retrieve` for decision compatibility. Inspect matched signals, facts, failed attempts (`reusableWhen` conditions and `visibility`), and superseded decisions.
 3. Treat every fact as an **unverified hypothesis**. Legacy imported `verificationStatus: 'verified'` values may be preserved for compatibility, but this build has no agent-accessible verification channel and no tool input can create verified facts. Read `sourceClass`, not `source`.
 
 ## Provenance vocabulary

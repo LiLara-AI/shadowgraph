@@ -402,7 +402,14 @@ export const REGISTER = Object.freeze([
   m('relevant.items[].record.version', 'provenance'),
   m('relevant.items[].record.scope.**', 'scope'),
   // A field a legacy or newer writer left on the record, kept verbatim.
-  c('relevant.items[].record.*.**', 'historical fact', { passThrough: true })
+  c('relevant.items[].record.*.**', 'historical fact', { passThrough: true }),
+
+  // --- task-driven sections on shadowgraph_context --------------------------
+  c('digest.**', 'current state'),
+  c('userMemories.**', 'historical fact'),
+  c('successfulApproaches.**', 'observed experience'),
+  c('crossProjectExperience.**', 'observed experience'),
+  c('relevantToTask.**', 'historical fact')
 ]);
 
 const escape = (text) => text.replace(/[.+?^${}()|[\]\\]/g, '\\$&');

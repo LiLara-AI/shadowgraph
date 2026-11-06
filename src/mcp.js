@@ -2,7 +2,7 @@ import { assertToolCreationInput } from './internal/creation-id.js';
 import { createInterface } from 'node:readline';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { stat as fsStat, unlink as fsUnlink } from 'node:fs/promises';
-import { createStorage } from './storage.js';
+import { createStorage, resolveDefaultProject, resolveStoragePath } from './storage.js';
 import { createShadowGraph, isCommittedRejection } from './shadowgraph.js';
 import { createEmbeddingClient } from './embedding.js';
 import { VERSION } from './version.js';
@@ -14,7 +14,11 @@ import { accessContext, currentAccessOperation, discoverWorkspace, hasAccessRefe
 import { readExtractionAvailability } from './internal/extraction-availability.js';
 import { DELETION_CODES } from './internal/deletion-knowledge.js';
 
-const file = process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json';
+const file = resolveStoragePath(process.env.SHADOWGRAPH_FILE);
+const configuredDefaultProject = (!process.env.SHADOWGRAPH_FILE || process.env.SHADOWGRAPH_PROJECT || process.env.SHADOWGRAPH_AUTO_PROJECT === '1')
+  ? resolveDefaultProject()
+  : null;
+const multiProcessSyncEnabled = process.env.SHADOWGRAPH_MULTI_PROCESS_SYNC === '1' || !process.env.SHADOWGRAPH_FILE;
 const injectedRestoreFaultStages = process.env.NODE_ENV === 'test'
   ? new Set(String(process.env.SHADOWGRAPH_TEST_RESTORE_FAULT_STAGES ?? '').split(',').map((value) => value.trim()).filter(Boolean))
   : new Set();
@@ -84,12 +88,21 @@ let extractionAvailability = () => false;
 const graph = createShadowGraph({ extractionAvailable: Object.defineProperty(scope => extractionAvailability(scope), 'binding', { get: () => extractionAvailability.binding }), verifier, ...(injectedNow ? { now: injectedNow } : {}) });
 graph.importData(await store.load());
 const workspace = await discoverWorkspace();
-const embeddingClient = process.env.SHADOWGRAPH_EMBEDDING_URL ? createEmbeddingClient({
-  baseUrl: process.env.SHADOWGRAPH_EMBEDDING_URL,
-  model: process.env.SHADOWGRAPH_EMBEDDING_MODEL,
-  apiKey: process.env.SHADOWGRAPH_EMBEDDING_API_KEY,
-  allowRemote: process.env.SHADOWGRAPH_ALLOW_REMOTE_EMBEDDINGS === '1'
-}) : null;
+let embeddingClient = null;
+if (process.env.SHADOWGRAPH_EMBEDDING_URL) {
+  try {
+    const parsedTimeout = Number(process.env.SHADOWGRAPH_EMBEDDING_TIMEOUT_MS);
+    embeddingClient = createEmbeddingClient({
+      baseUrl: process.env.SHADOWGRAPH_EMBEDDING_URL,
+      model: process.env.SHADOWGRAPH_EMBEDDING_MODEL || 'text-embedding-3-small',
+      apiKey: process.env.SHADOWGRAPH_EMBEDDING_API_KEY,
+      allowRemote: process.env.SHADOWGRAPH_ALLOW_REMOTE_EMBEDDINGS === '1',
+      timeoutMs: Number.isFinite(parsedTimeout) && parsedTimeout >= 1 ? Math.trunc(parsedTimeout) : undefined
+    });
+  } catch {
+    embeddingClient = null;
+  }
+}
 let persistQueue = Promise.resolve();
 function persist() { const operation = persistQueue.then(async () => { const revision = await store.save(privilegedSnapshot(graph)); graph.setRevision(revision); }); persistQueue = operation.catch(() => {}); return operation; }
 let callQueue = Promise.resolve();
@@ -225,19 +238,74 @@ function withRuntimeSession(args) {
   return stamped;
 }
 
-async function addConfiguredEmbeddings(args = {}) {
-  if (!embeddingClient) return args;
-  if (Array.isArray(args.operations)) {
-    const operations = [];
-    for (const operation of args.operations) {
-      const needsEmbedding = ['ADD', 'UPDATE'].includes(String(operation.action ?? '').toUpperCase()) && !operation.embedding && typeof operation.text === 'string' && operation.text.trim();
-      operations.push(needsEmbedding ? { ...operation, embedding: await embeddingClient(operation.text) } : operation);
-    }
-    return { ...args, operations };
+async function safeEmbed(text) {
+  if (!embeddingClient || typeof text !== 'string' || !text.trim()) return null;
+  try {
+    return await embeddingClient(text);
+  } catch {
+    return null;
   }
-  return !args.embedding && typeof args.text === 'string' && args.text.trim()
-    ? { ...args, embedding: await embeddingClient(args.text) }
-    : args;
+}
+
+async function addConfiguredEmbeddings(args = {}, kind = 'memory') {
+  if (!embeddingClient || !args || typeof args !== 'object') return args;
+  if (kind === 'memory') {
+    if (Array.isArray(args.operations)) {
+      const operations = [];
+      for (const operation of args.operations) {
+        const needsEmbedding = ['ADD', 'UPDATE'].includes(String(operation.action ?? '').toUpperCase()) && !operation.embedding && typeof operation.text === 'string' && operation.text.trim();
+        const emb = needsEmbedding ? await safeEmbed(operation.text) : null;
+        operations.push(emb ? { ...operation, embedding: emb } : operation);
+      }
+      return { ...args, operations };
+    }
+    if (!args.embedding && typeof args.text === 'string' && args.text.trim()) {
+      const emb = await safeEmbed(args.text);
+      return emb ? { ...args, embedding: emb } : args;
+    }
+    return args;
+  }
+  if (args.embedding) return args;
+  let textToEmbed = '';
+  if (kind === 'decision') {
+    textToEmbed = [args.title, args.goal, args.chosen, ...(Array.isArray(args.assumptions) ? args.assumptions : [])].filter((x) => typeof x === 'string' && x.trim()).join(' ');
+  } else if (kind === 'attempt') {
+    textToEmbed = [args.task, args.solution, args.result, args.reason, args.environment].filter((x) => typeof x === 'string' && x.trim()).join(' ');
+  } else if (kind === 'fact') {
+    textToEmbed = [args.key, typeof args.value === 'string' ? args.value : JSON.stringify(args.value ?? '')].filter((x) => typeof x === 'string' && x.trim()).join(' ');
+  }
+  if (!textToEmbed) return args;
+  const emb = await safeEmbed(textToEmbed);
+  return emb ? { ...args, embedding: emb } : args;
+}
+
+const PROJECT_DEFAULTED_TOOLS = new Set([
+  'shadowgraph_record_decision',
+  'shadowgraph_record_attempt',
+  'shadowgraph_record_fact',
+  'shadowgraph_remember',
+  'shadowgraph_recall',
+  'shadowgraph_context',
+  'shadowgraph_review',
+  'shadowgraph_traverse'
+]);
+function withDefaultProject(name, args) {
+  if (!configuredDefaultProject || !PROJECT_DEFAULTED_TOOLS.has(name)) return args;
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return args;
+  if (args.project !== undefined || args.originId !== undefined) return args;
+  return { ...args, project: configuredDefaultProject };
+}
+
+async function syncFromStore() {
+  if (!multiProcessSyncEnabled) return;
+  try {
+    const latest = await store.load();
+    if (Number.isSafeInteger(latest?.revision) && latest.revision > privilegedSnapshot(graph).revision) {
+      graph.replaceData(latest);
+    }
+  } catch {
+    // Fail-open on background pre-call sync check; normal operation/save path handles storage errors.
+  }
 }
 
 // G-5 §8: an expansion answers a store it cannot read with an explicit
@@ -268,6 +336,7 @@ async function callUnqueued(name, args, tier, accessManaged = false) {
   if (!accessManaged && (tool?.accessLifecycle || (tool?.persistsWithAccess && hasAccessReference(args)))) {
     return currentAccessOperation(graph, store, () => callUnqueued(name, args, tier, true), { read: !tool?.accessLifecycle });
   }
+  if (args !== undefined) args = withDefaultProject(name, args);
   if (args && typeof args === 'object' && !Array.isArray(args)) {
     const { binding: ignoredBinding, surface: ignoredSurface, ...input } = args;
     args = tool?.persistsWithAccess || tool?.accessLifecycle || ['shadowgraph_record_decision', 'shadowgraph_record_attempt', 'shadowgraph_record_fact', 'shadowgraph_remember', 'shadowgraph_link', 'shadowgraph_supersede', 'shadowgraph_confidence_evidence', 'shadowgraph_record_outcome', 'shadowgraph_update_status', 'shadowgraph_ack_review'].includes(name)
@@ -277,6 +346,11 @@ async function callUnqueued(name, args, tier, accessManaged = false) {
       if (binding) args = { ...input, project: binding.project };
     }
   }
+  if (name === 'shadowgraph_record_decision') args = await addConfiguredEmbeddings(args, 'decision');
+  else if (name === 'shadowgraph_record_attempt') args = await addConfiguredEmbeddings(args, 'attempt');
+  else if (name === 'shadowgraph_remember') args = await addConfiguredEmbeddings(args ?? {}, 'memory');
+  else if (name === 'shadowgraph_record_fact') args = await addConfiguredEmbeddings(args, 'fact');
+  if (name !== 'shadowgraph_restore') await syncFromStore();
   const before = privilegedSnapshot(graph);
   let value;
   try {
@@ -291,7 +365,7 @@ async function callUnqueued(name, args, tier, accessManaged = false) {
   else if (name === 'shadowgraph_context') value = graph.context(args ?? {});
   else if (name === 'shadowgraph_review_context') value = graph.reviewContext(args ?? {});
   else if (name === 'shadowgraph_remember') {
-    const prepared = withRuntimeSession(await addConfiguredEmbeddings(args ?? {}));
+    const prepared = withRuntimeSession(args ?? {});
     value = Array.isArray(prepared.operations) ? graph.applyMemoryPlan(prepared) : graph.remember(prepared);
   }
   else if (name === 'shadowgraph_recall') {
@@ -307,7 +381,17 @@ async function callUnqueued(name, args, tier, accessManaged = false) {
   }
   else if (name === 'shadowgraph_record_fact') value = graph.addFact(withRuntimeSession(args));
   else if (name === 'shadowgraph_verify_fact' && verifier) value = await graph.verifyFact(args ?? {});
-  else if (name === 'shadowgraph_record_outcome') value = graph.setOutcome(args?.decisionId, args?.outcome, args);
+  else if (name === 'shadowgraph_record_outcome') {
+    const outcomePayload = args?.outcome && typeof args.outcome === 'object' && !Array.isArray(args.outcome)
+      ? {
+          ...args.outcome,
+          ...(args.decisionStatus !== undefined && args.outcome.decisionStatus === undefined ? { decisionStatus: args.decisionStatus } : {}),
+          ...(args.lifecycleStatus !== undefined && args.outcome.lifecycleStatus === undefined ? { lifecycleStatus: args.lifecycleStatus } : {}),
+          ...(args.autoTransition !== undefined && args.outcome.autoTransition === undefined ? { autoTransition: args.autoTransition } : {})
+        }
+      : args?.outcome;
+    value = graph.setOutcome(args?.decisionId, outcomePayload, args);
+  }
   else if (name === 'shadowgraph_confidence_evidence') value = graph.addConfidenceEvidence(withRuntimeSession(args ?? {}));
   else if (name === 'shadowgraph_update_status') value = graph.updateDecisionStatus(args?.decisionId, args?.status, args);
   else if (name === 'shadowgraph_link') value = graph.link(args);

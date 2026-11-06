@@ -10,9 +10,9 @@
 
 import { CREATION_ENTRY_TYPES, HARD_GAP_EVIDENCE_TYPES, assertHardPurgeGapLedgers, assertJournalBaselinePlacement, assertJournalEntrySequence, assertUniqueJournalSequences, rebuildProjection, journalGaps, duplicateSequences, journalBaselinePlacementIssues, journalEntryPostconditionIssue, journalEntrySequenceIssue, journalFactLifecycleIssues, replayedEntity, reattributeIdempotency, schema5PurgeArtifactIssue, ATTRIBUTED_ENTITY_KINDS, ATTRIBUTION_ENTRY_KINDS, JOURNAL_ENTRY_TYPES, JOURNAL_TYPE_ENTITY_KIND, READABLE_JOURNAL_SCHEMA_VERSION, REPLAYABLE_ENTRY_TYPES } from './journal.js';
 import { createConfidence, applyContribution, setOutcomeContribution, computeConfidence, summarizeBasis, CONFIDENCE_POLICY } from './confidence.js';
-import { hybridSearch, foldText } from './hybrid-search.js';
+import { hybridSearch, foldText, expandSearchTokens, extractKeywords, stemArabicToken } from './hybrid-search.js';
 import { effectiveFactExpirationBoundary, factValidityPolicyIssue, isValidIsoInstant } from './fact-validity.js';
-import { evaluateRule, isSupportedOperator, isSupportedUnit, ruleOperandIssue } from './condition-eval.js';
+import { SYMBOLIC_OPERATOR_ALIASES, evaluateRule, formatRuleCompact, isSupportedOperator, isSupportedUnit, normalizeOperator, parseConditionString, ruleOperandIssue } from './condition-eval.js';
 import { privilegedSnapshot, privilegedValidate, registerPrivileged } from './internal/snapshot.js';
 import { extraCollections, refusePublicExport, NATIVE_STORE_KEYS, PUBLIC_EXPORT_KIND, REDACTION_EXPORT_KIND } from './internal/collections.js';
 import { isLegacyOwned, resolveScope, sameOrigin, usableOriginId } from './scope.js';
@@ -407,6 +407,16 @@ const AS_STORED_KEYS = new Set(['payload', 'value', 'expected', 'observed']);
 //   written, or a caller's value.
 // Copies are made only along a path that changes, so stored state is never
 // touched.
+function preserveHiddenProperties(source, target, transform = (v) => v) {
+  if (!source || !target || source === target || typeof source !== 'object' || typeof target !== 'object') return target;
+  for (const [key, desc] of Object.entries(Object.getOwnPropertyDescriptors(source))) {
+    if (!desc.enumerable && Object.hasOwn(desc, 'value')) {
+      Object.defineProperty(target, key, { ...desc, value: transform(desc.value) });
+    }
+  }
+  return target;
+}
+
 function publicValue(value, derive = true) {
   if (Array.isArray(value)) {
     let copy = null;
@@ -430,7 +440,7 @@ function publicValue(value, derive = true) {
     const next = publicValue(item, derive && !record && !AS_STORED_KEYS.has(key));
     if (next !== item) (copy ??= { ...value })[key] = next;
   }
-  return copy ?? value;
+  return copy ? preserveHiddenProperties(value, copy, (v) => publicValue(v, derive)) : value;
 }
 
 function tokenFreeApi(api, project = value => value) {
@@ -2424,7 +2434,8 @@ export function createShadowGraph(options = {}) {
       // Mutation echoes are limited to the returned record's existing owner
       // and memory scope. A read grant never widens mutation ownership.
       const own = { visible: item => !isLegacyOwned(value) && !isLegacyOwned(item) && sameOwnerKey(value, item) };
-      return visibleRecordReferences(value, reaches ?? scopedReach(own, normalizeMemoryScope(value.kind === 'memory' ? value.scope : undefined)));
+      const projected = visibleRecordReferences(value, reaches ?? scopedReach(own, normalizeMemoryScope(value.kind === 'memory' ? value.scope : undefined)));
+      return projected === value ? value : preserveHiddenProperties(value, projected);
     }
     let result = value;
     for (const [key, item] of Object.entries(value)) {
@@ -2433,7 +2444,7 @@ export function createShadowGraph(options = {}) {
       if (result === value) result = Array.isArray(value) ? [...value] : { ...value };
       result[key] = shown;
     }
-    return result;
+    return result === value ? value : preserveHiddenProperties(value, result, (v) => publicReferences(v, reaches));
   }
   // The entity whose owner an integrity issue belongs to, for the issues that
   // name an owner only inside a composite key (duplicate fact and memory scopes).
@@ -3114,27 +3125,70 @@ export function createShadowGraph(options = {}) {
     if (typeof confidence !== 'number' || confidence < 0 || confidence > 1) throw new Error('Decision confidence must be a number between 0 and 1');
     const alternatives = input.alternatives ?? [];
     if (!Array.isArray(alternatives) || alternatives.some((item) => !item || typeof item.label !== 'string' || !item.label.trim())) throw new Error('Decision alternatives must have non-empty label strings');
+    let initialStatus = 'proposed';
+    if (input.status !== undefined) {
+      initialStatus = normalizeDecisionStatus(input.status);
+      if (!initialStatus) throw new Error(`Invalid decision status: ${input.status}`);
+      if (initialStatus === 'stale') throw new Error('Decision status stale is system-owned and can only be produced by maintain()');
+      if (initialStatus === 'superseded') throw new Error('Decision status superseded is system-owned and can only be produced by supersedeDecision()');
+    }
     const owner = writeOwner(input);
+    const boundary = readBoundary(owner);
+    const rawSupersedesList = input.supersedes === undefined || input.supersedes === null
+      ? []
+      : (Array.isArray(input.supersedes) ? input.supersedes : [input.supersedes]);
+    const supersedesList = [...new Set(rawSupersedesList)];
+    for (const prevId of supersedesList) {
+      const prev = typeof prevId === 'string' ? decisionIn(boundary, prevId) : null;
+      if (!prev) throw new Error('Supersession requires two existing decisions');
+      if (['superseded', 'archived'].includes(prev.status) || ['superseded', 'archived', 'abandoned', 'stale'].includes(initialStatus)) {
+        throw new Error('Supersession would create an invalid decision chain');
+      }
+    }
+    const tags = input.tags !== undefined
+      ? strings(input.tags, 'tags')
+      : (input.task !== undefined || input.status !== undefined
+        ? extractKeywords(`${input.title ?? ''} ${input.chosen ?? ''} ${input.goal ?? ''} ${input.task ?? ''}`)
+        : undefined);
+    const visibility = input.visibility !== undefined ? normalizeVisibility(input.visibility) : undefined;
+    const embedding = input.embedding !== undefined ? normalizeEmbedding(input.embedding) : undefined;
+    let changeSummary = typeof input.changeSummary === 'string' && input.changeSummary.trim() ? input.changeSummary.trim() : undefined;
+    if (!changeSummary && supersedesList.length > 0) {
+      const prevSummary = supersedesList.map((pid) => {
+        const p = records.get(pid);
+        if (!p) return pid;
+        return p.title === input.title ? `"${p.chosen}"` : `"${p.chosen}" (${p.title})`;
+      }).join(', ');
+      changeSummary = `Changed from ${prevSummary} to "${input.chosen}"${input.reason ? ` because ${input.reason}` : input.goal ? ` for ${input.goal}` : ''}`;
+    }
     const evidence = (input.evidence ?? []).map((item) => normalizeEvidence(item, now));
     const reservedIds = new Set();
     const record = {
       id: allocateEntityId('decision', reservedIds), kind: 'decision', schemaVersion: SCHEMA_VERSION, erasureToken: allocateErasureToken(),
       ...owner, title: input.title, goal: input.goal ?? '', chosen: input.chosen,
+      ...(typeof input.task === 'string' && input.task.trim() ? { task: input.task.trim() } : {}),
       // G2: provenance travels with the decision. Plain JSON values only.
       ...provenanceFields(input),
       // G8: confidence carries an auditable basis, not a bare number.
-      confidence: createConfidence(confidence, evidence.length), status: 'proposed',
+      confidence: createConfidence(confidence, evidence.length), status: initialStatus,
       assumptions: strings(input.assumptions, 'assumptions'), evidence,
       alternatives: alternatives.map((item) => ({ id: allocateEntityId('alternative', reservedIds), label: item.label, reasonRejected: item.reasonRejected ?? item.reason ?? '', reopenWhen: normalizeRules(item.reopenWhen ?? [], { strict: true }), status: 'rejected' })),
       failedAttempts: [...(input.failedAttempts ?? [])], outcome: input.outcome ?? null,
-      reviewAfter: input.reviewAfter ?? null, createdAt: input.createdAt ?? now(), updatedAt: now()
+      reviewAfter: input.reviewAfter ?? null, createdAt: input.createdAt ?? now(), updatedAt: now(),
+      ...(tags !== undefined ? { tags } : {}),
+      ...(visibility !== undefined ? { visibility } : {}),
+      ...(embedding !== undefined ? { embedding } : {}),
+      ...(changeSummary !== undefined ? { changeSummary } : {})
     };
     clone(record);
-    assertJournalCapacity(1);
+    assertJournalCapacity(1 + (supersedesList.length * 3));
     records.set(record.id, record);
     event('decision.recorded', { recordId: record.id });
     appendJournal({ type: 'decision.recorded', entityKind: 'decision', entityId: record.id, project: record.project, payload: record, provenance: writeProvenance(record), idempotencyKey: input.idempotencyKey ? retrySlot(input, 'decision', owner) : undefined });
-    const result = clone(record); rememberIdempotency(input, 'decision', result); return result;
+    for (const prevId of supersedesList) {
+      supersedeDecision({ ...owner, decisionId: prevId, replacementId: record.id, changeSummary, reason: input.reason });
+    }
+    const result = clone(records.get(record.id)); rememberIdempotency(input, 'decision', result); return result;
   }
 
   function addAttempt(input) {
@@ -3146,7 +3200,25 @@ export function createShadowGraph(options = {}) {
     }
     validateTemporalFields(input, ['createdAt']);
     const owner = writeOwner(input);
-    const attempt = { id: allocateEntityId('attempt'), kind: 'attempt', schemaVersion: SCHEMA_VERSION, erasureToken: allocateErasureToken(), ...owner, ...provenanceFields(input), solution: input.solution, result: input.result, environment: input.environment ?? '', ...(input.resultClass === undefined ? {} : { resultClass: input.resultClass }), reason: input.reason ?? '', causalClaim: causalClaimFor(input.reason), reusableWhen: normalizeRules(input.reusableWhen ?? [], { strict: true }), relatedTo: input.relatedTo ?? [], createdAt: input.createdAt ?? now() };
+    const hasTask = typeof input.task === 'string' && input.task.trim() !== '';
+    const tags = input.tags !== undefined
+      ? strings(input.tags, 'tags')
+      : (hasTask ? extractKeywords(`${input.task ?? ''} ${input.solution ?? ''} ${input.result ?? ''} ${input.reason ?? ''}`) : undefined);
+    const visibility = input.visibility !== undefined ? normalizeVisibility(input.visibility) : undefined;
+    const embedding = input.embedding !== undefined ? normalizeEmbedding(input.embedding) : undefined;
+    const attempt = {
+      id: allocateEntityId('attempt'), kind: 'attempt', schemaVersion: SCHEMA_VERSION, erasureToken: allocateErasureToken(),
+      ...owner, ...provenanceFields(input),
+      ...(hasTask ? { task: input.task.trim() } : {}),
+      solution: input.solution, result: input.result, environment: input.environment ?? '',
+      ...(input.resultClass === undefined ? {} : { resultClass: input.resultClass }),
+      reason: input.reason ?? '', causalClaim: causalClaimFor(input.reason),
+      reusableWhen: normalizeRules(input.reusableWhen ?? [], { strict: true }),
+      relatedTo: input.relatedTo ?? [], createdAt: input.createdAt ?? now(),
+      ...(tags !== undefined ? { tags } : {}),
+      ...(visibility !== undefined ? { visibility } : {}),
+      ...(embedding !== undefined ? { embedding } : {})
+    };
     clone(attempt);
     assertJournalCapacity(1);
     records.set(attempt.id, attempt);
@@ -3171,6 +3243,7 @@ export function createShadowGraph(options = {}) {
     const project = owner.project;
     const scope = normalizeMemoryScope(input.scope);
     const tags = strings(input.tags, 'tags');
+    const visibility = input.visibility !== undefined ? normalizeVisibility(input.visibility) : undefined;
     const metadata = clone(input.metadata ?? {});
     const embedding = normalizeEmbedding(input.embedding);
     const scopeKey = memoryScopeKey({ ...owner, scope, memoryType: input.memoryType, key: input.key });
@@ -3214,10 +3287,28 @@ export function createShadowGraph(options = {}) {
     }
 
     validateMemoryInterval(validFrom, validTo);
-    if (latest?.temporal?.validFrom && compareInstants(validFrom, latest.temporal.validFrom) < 0) {
+    const isHistoricalBackfill = Boolean((input.allowHistorical || input.backfill) && latest?.temporal?.validFrom && compareInstants(validFrom, latest.temporal.validFrom) < 0);
+    if (!isHistoricalBackfill && latest?.temporal?.validFrom && compareInstants(validFrom, latest.temporal.validFrom) < 0) {
       throw new Error('Memories for one identity must be recorded in non-decreasing validFrom order');
     }
     const provenance = provenanceFields(input);
+    const changeSummary = typeof input.changeSummary === 'string' && input.changeSummary.trim()
+      ? input.changeSummary.trim()
+      : (previous && !isHistoricalBackfill && input.reason !== undefined && previous.text !== input.text
+        ? `Changed from "${previous.text}" to "${input.text}"${input.reason ? ` because ${input.reason}` : ''}`
+        : undefined);
+    const effectiveVisibility = visibility ?? previous?.visibility;
+    const chronologicalMemories = isHistoricalBackfill
+      ? [...records.values()]
+          .filter((record) => record.kind === 'memory' && memoryScopeKey(record) === scopeKey)
+          .sort((left, right) => compareInstants(left.temporal?.validFrom ?? left.createdAt, right.temporal?.validFrom ?? right.createdAt) || (left.version ?? 1) - (right.version ?? 1) || String(left.id).localeCompare(String(right.id)))
+      : [];
+    const backfillPredecessor = isHistoricalBackfill
+      ? [...chronologicalMemories].reverse().find((item) => compareInstants(item.temporal?.validFrom ?? item.createdAt, validFrom) <= 0)
+      : null;
+    const backfillSuccessor = isHistoricalBackfill
+      ? (chronologicalMemories.find((item) => compareInstants(item.temporal?.validFrom ?? item.createdAt, validFrom) > 0) ?? previous ?? latest)
+      : null;
     const memory = {
       id: allocateEntityId('memory'), kind: 'memory', schemaVersion: SCHEMA_VERSION, erasureToken: allocateErasureToken(),
       ...owner, scope, memoryType: input.memoryType, key: input.key, text: input.text,
@@ -3227,8 +3318,25 @@ export function createShadowGraph(options = {}) {
       metadata, tags, embedding, ...provenance, verificationStatus: 'unverified', status: 'active',
       temporal: { validFrom, validTo, recordedAt, invalidatedAt: null },
       createdAt: input.createdAt ?? recordedAt, updatedAt: recordedAt,
-      ...(previous ? { supersedes: previous.id } : {})
+      ...(previous && !isHistoricalBackfill ? { supersedes: previous.id } : {}),
+      ...(isHistoricalBackfill && backfillPredecessor ? { supersedes: backfillPredecessor.id } : {}),
+      ...(changeSummary !== undefined ? { changeSummary } : {}),
+      ...(effectiveVisibility !== undefined ? { visibility: effectiveVisibility } : {})
     };
+    if (isHistoricalBackfill) {
+      const successor = backfillSuccessor;
+      assertJournalCapacity(2);
+      records.set(memory.id, memory);
+      event('memory.recorded', { recordId: memory.id, project });
+      appendJournal({ type: 'memory.recorded', entityKind: 'memory', entityId: memory.id, project, payload: clone(memory), provenance: writeProvenance(memory), idempotencyKey: input.idempotencyKey ? retrySlot({ ...input, ...memory }, 'memory') : undefined });
+      touchMutableObject(memory);
+      memory.status = 'superseded';
+      memory.supersededBy = successor.id;
+      memory.temporal = { ...memory.temporal, validTo: earliestBoundary(validTo, successor.temporal?.validFrom ?? recordedAt), invalidatedAt: recordedAt };
+      appendJournal({ type: 'memory.superseded', entityKind: 'memory', entityId: memory.id, project, payload: clone(memory), provenance: writeProvenance(memory) });
+      rememberIdempotency(input, 'memory', memory);
+      return { operation: 'ADD', backfilled: true, memory: clone(memory) };
+    }
     assertJournalCapacity(previous ? 2 : 1);
 
     if (previous) {
@@ -3403,6 +3511,9 @@ export function createShadowGraph(options = {}) {
     validateTemporalFields(input, ['recordedAt', 'observedAt', 'validFrom', 'validTo', 'expiresAt']);
     const confidence = input.confidence ?? 0.5;
     if (typeof confidence !== 'number' || confidence < 0 || confidence > 1) throw new Error('Fact confidence must be a number between 0 and 1');
+    const tags = input.tags !== undefined ? strings(input.tags, 'tags') : undefined;
+    const visibility = input.visibility !== undefined ? normalizeVisibility(input.visibility) : undefined;
+    const embedding = input.embedding !== undefined ? normalizeEmbedding(input.embedding) : undefined;
     // G2: a source label is a CLAIM about origin, not a grant of trust. Unknown or
     // non-canonical labels downgrade to agent_claimed with the raw label kept for
     // audit. See provenance-contract.md §4.
@@ -3434,9 +3545,16 @@ export function createShadowGraph(options = {}) {
     refuseWithheldScope(deletion.get('held')?.factScopes.has(factScope));
     const previous = currentFacts.get(factScope);
     const existing = idempotent(input, 'fact'); if (existing) return existing;
-    if (previous?.temporal?.validFrom && compareInstants(validFrom, previous.temporal.validFrom) < 0) {
+    const isHistoricalBackfill = Boolean((input.allowHistorical || input.backfill) && previous?.temporal?.validFrom && compareInstants(validFrom, previous.temporal.validFrom) < 0);
+    if (!isHistoricalBackfill && previous?.temporal?.validFrom && compareInstants(validFrom, previous.temporal.validFrom) < 0) {
       throw new Error('Facts for one scope must be recorded in non-decreasing validFrom order');
     }
+    const changeSummary = typeof input.changeSummary === 'string' && input.changeSummary.trim()
+      ? input.changeSummary.trim()
+      : (previous && !isHistoricalBackfill && input.reason !== undefined && !Object.is(previous.value, input.value)
+        ? `Changed from ${JSON.stringify(previous.value)} to ${JSON.stringify(input.value)}${input.reason ? ` because ${input.reason}` : ''}`
+        : undefined);
+    const effectiveVisibility = visibility ?? previous?.visibility;
     const fact = {
       id: allocateEntityId('fact'), kind: 'fact', schemaVersion: SCHEMA_VERSION, erasureToken: allocateErasureToken(),
       ...owner, key: input.key, value: input.value,
@@ -3447,9 +3565,34 @@ export function createShadowGraph(options = {}) {
         declaredValidTo: validTo,
         effectiveExpirationBoundary
       },
-      temporal: { validFrom, validTo, recordedAt, invalidatedAt: null }
+      temporal: { validFrom, validTo, recordedAt, invalidatedAt: null },
+      ...(tags !== undefined ? { tags } : {}),
+      ...(effectiveVisibility !== undefined ? { visibility: effectiveVisibility } : {}),
+      ...(embedding !== undefined ? { embedding } : {}),
+      ...(changeSummary !== undefined ? { changeSummary } : {})
     };
     clone(fact);
+    if (isHistoricalBackfill) {
+      const chronologicalFacts = [...facts.values()]
+        .filter((item) => item.kind === 'fact' && JSON.stringify([ownerKey(item, (p) => p), item.key]) === factScope)
+        .sort((left, right) => compareInstants(left.temporal?.validFrom ?? left.observedAt, right.temporal?.validFrom ?? right.observedAt) || String(left.id).localeCompare(String(right.id)));
+      const nextFact = chronologicalFacts.find((item) => compareInstants(item.temporal?.validFrom ?? item.observedAt, validFrom) > 0) ?? previous;
+      assertJournalCapacity(2);
+      facts.set(fact.id, fact);
+      event('fact.observed', { factId: fact.id, key: fact.key });
+      appendJournal({ type: 'fact.observed', entityKind: 'fact', entityId: fact.id, project: fact.project, payload: clone(fact), provenance: writeProvenance(fact), idempotencyKey: input.idempotencyKey ? retrySlot(input, 'fact', owner) : undefined });
+      touchMutableObject(fact);
+      fact.status = 'superseded';
+      fact.supersededBy = nextFact.id;
+      fact.temporal = {
+        validFrom,
+        validTo: earliestBoundary(validTo, nextFact.temporal?.validFrom ?? observedAt),
+        recordedAt,
+        invalidatedAt: recordedAt
+      };
+      appendJournal({ type: 'fact.superseded', entityKind: 'fact', entityId: fact.id, project: fact.project, payload: clone(fact), provenance: writeProvenance(fact) });
+      const result = clone(fact); rememberIdempotency(input, 'fact', result); return result;
+    }
     assertJournalCapacity(previous ? 2 : 1);
     if (previous) {
       touchMutableObject(previous);
@@ -3837,10 +3980,26 @@ export function createShadowGraph(options = {}) {
     };
     const root = reach(input.id);
     if (!root) return scopedResult({ root: input.id, direction, depth, nodes: [], relations: [], limitation: { code: 'scoped_coverage', detail: 'No record with this id is visible in the scope of this traversal.' } }, boundary);
+    const virtualRelations = [];
+    for (const record of records.values()) {
+      if (!reach(record.id)) continue;
+      for (const attemptId of Array.isArray(record.failedAttempts) ? record.failedAttempts : []) {
+        if (typeof attemptId === 'string' && reach(attemptId)) {
+          virtualRelations.push({ id: `rel_failed_${record.id}_${attemptId}`, kind: 'relation', project: record.project ?? null, from: record.id, to: attemptId, relation: 'tried_for', createdAt: record.createdAt });
+        }
+      }
+      const relTargets = Array.isArray(record.relatedTo) ? record.relatedTo : typeof record.relatedTo === 'string' && record.relatedTo ? [record.relatedTo] : [];
+      for (const relId of relTargets) {
+        if (typeof relId === 'string' && reach(relId)) {
+          virtualRelations.push({ id: `rel_related_${record.id}_${relId}`, kind: 'relation', project: record.project ?? null, from: record.id, to: relId, relation: 'related_to', createdAt: record.createdAt });
+        }
+      }
+    }
+    const allRelations = [...relations.values(), ...virtualRelations];
     const seen = new Set([input.id]); const nodes = [clone(extractionView(root, memoryScope))]; const edges = []; let frontier = [input.id];
     for (let level = 0; level < depth && frontier.length; level += 1) {
       const next = [];
-      for (const relation of relations.values()) {
+      for (const relation of allRelations) {
         if (input.relation && relation.relation !== input.relation) continue;
         const fromMatch = direction !== 'in' && frontier.includes(relation.from);
         const toMatch = direction !== 'out' && frontier.includes(relation.to);
@@ -3870,7 +4029,12 @@ export function createShadowGraph(options = {}) {
     touchMutableObject(previous);
     touchMutableObject(replacement);
     previous.status = 'superseded'; previous.supersededBy = replacement.id; previous.updatedAt = now();
-    replacement.supersedes = [...new Set([...(replacement.supersedes ?? []), previous.id])]; replacement.updatedAt = now();
+    replacement.supersedes = [...new Set([...(replacement.supersedes ?? []), previous.id])];
+    if (input.changeSummary !== undefined || input.reason !== undefined) {
+      const prevLabel = previous.title === replacement.title ? `"${previous.chosen}"` : `"${previous.chosen}" (${previous.title})`;
+      replacement.changeSummary = input.changeSummary ?? replacement.changeSummary ?? `Changed from ${prevLabel} to "${replacement.chosen}"${input.reason ? ` because ${input.reason}` : replacement.goal ? ` for ${replacement.goal}` : ''}`;
+    }
+    replacement.updatedAt = now();
     const relation = addRelation({ from: replacement.id, to: previous.id, relation: 'supersedes' }, replacement.project ?? previous.project ?? null);
     event('decision.superseded', { recordId: previous.id, replacementId: replacement.id });
     const cause = appendJournal({ type: 'decision.superseded', entityKind: 'decision', entityId: previous.id, project: previous.project, payload: clone(previous), provenance: writeProvenance(previous) });
@@ -3906,11 +4070,27 @@ export function createShadowGraph(options = {}) {
   function setOutcome(decisionId, outcome, scope = {}) {
     const record = decisionIn(writeBoundary(scope), decisionId); if (!record) throw new Error('Decision not found');
     if (!OUTCOME_STATUSES.includes(outcome?.status)) throw new Error('Outcome status must be successful, mixed, failed, or unknown');
+    const requestedDecisionStatus = outcome.decisionStatus ?? outcome.lifecycleStatus ?? (outcome.autoTransition === true ? (outcome.status === 'successful' ? 'validated' : outcome.status === 'failed' ? 'failed' : undefined) : undefined);
+    let transitionPath = [];
+    if (requestedDecisionStatus !== undefined) {
+      const targetCanonical = normalizeDecisionStatus(requestedDecisionStatus);
+      if (!targetCanonical) throw new Error(`Invalid decision status: ${requestedDecisionStatus}`);
+      if (targetCanonical === 'stale') throw new Error('Decision status stale is system-owned and can only be produced by maintain()');
+      if (targetCanonical === 'superseded') throw new Error('Decision status superseded is system-owned and can only be produced by supersedeDecision()');
+      if (targetCanonical !== record.status) {
+        transitionPath = findDecisionTransitionPath(record.status, targetCanonical);
+        if (!transitionPath) throw new Error(`Illegal decision status transition: ${record.status} -> ${targetCanonical}`);
+      }
+    }
     // G2/G8: an outcome's own provenance is a CLAIM. It weights the confidence move
     // but never sets a verification status anywhere.
     const outcomeProvenance = normalizeSourceClass(outcome.sourceClass ?? outcome.source);
     const observedAt = outcome.observedAt ?? now();
-    const normalizedOutcome = { ...clone(outcome), sourceClass: outcomeProvenance.sourceClass, observedAt };
+    const cleanedOutcome = clone(outcome);
+    delete cleanedOutcome.decisionStatus;
+    delete cleanedOutcome.lifecycleStatus;
+    delete cleanedOutcome.autoTransition;
+    const normalizedOutcome = { ...cleanedOutcome, sourceClass: outcomeProvenance.sourceClass, observedAt };
     const updatedAt = now();
     const contribution = {
       key: `outcome:${record.id}`,
@@ -3924,10 +4104,15 @@ export function createShadowGraph(options = {}) {
     };
     const confidenceProbe = clone(record.confidence);
     const changesConfidence = setOutcomeContribution(confidenceProbe, contribution);
-    assertJournalCapacity(changesConfidence ? 2 : 1);
+    assertJournalCapacity((changesConfidence ? 2 : 1) + transitionPath.length);
 
     touchMutableObject(record);
     record.outcome = normalizedOutcome;
+    const hasAdvisoryOutcomeFields = Boolean(outcome?.autoTransition !== undefined || outcome?.decisionStatus !== undefined || outcome?.lifecycleStatus !== undefined || outcome?.lessons !== undefined);
+    if (hasAdvisoryOutcomeFields || Array.isArray(record.tags)) {
+      const lessonText = Array.isArray(outcome?.lessons) ? outcome.lessons.join(' ') : String(outcome?.lessons ?? '');
+      record.tags = extractKeywords([record.title, record.goal, record.chosen, record.task, lessonText].filter(Boolean).join(' '));
+    }
     record.updatedAt = updatedAt;
     event('decision.outcome', { recordId: decisionId, status: outcome.status });
     const cause = appendJournal({ type: 'outcome.recorded', entityKind: 'decision', entityId: record.id, project: record.project, payload: clone(record), provenance: writeProvenance(record) });
@@ -3938,6 +4123,9 @@ export function createShadowGraph(options = {}) {
     const changed = setOutcomeContribution(record.confidence, contribution);
     if (changed) {
       appendJournal({ type: 'confidence.changed', entityKind: 'decision', entityId: record.id, project: record.project, payload: clone(record), provenance: writeProvenance(record), causationId: cause.id });
+    }
+    for (const stepStatus of transitionPath) {
+      updateDecisionStatus(decisionId, stepStatus, scope);
     }
     return clone(record);
   }
@@ -3998,31 +4186,53 @@ export function createShadowGraph(options = {}) {
     return evaluateRule(rule, value);
   }
 
+  function isFactUsableAt(fact, asOf) {
+    if (fact.verificationStatus === 'contradicted' || fact.status === 'expired') return false;
+    const boundary = effectiveFactExpirationBoundary(fact);
+    if (boundary && compareInstants(boundary, asOf) <= 0) return false;
+    const temporal = fact.temporal;
+    if (temporal) {
+      if (temporal.validFrom && compareInstants(temporal.validFrom, asOf) > 0) return false;
+      if (temporal.validTo && compareInstants(temporal.validTo, asOf) <= 0) return false;
+    } else if (fact.status !== 'active') return false;
+    return true;
+  }
+
   // G1: reconsideration must work from persisted state, not only from facts the
   // caller happens to re-supply. Projects one owner's ACTIVE facts into the same
   // { key: value } shape review({ facts }) already accepts, so stored and supplied
   // facts share a single matching path. `inScope` says which facts are that
-  // owner's; superseded/expired skipped.
-  function storedFactValues(inScope, asOf) {
+  // owner's; superseded/expired/contradicted skipped.
+  function storedFactValues(inScope, asOf, options = {}) {
     const candidates = new Map();
+    const blockedLocalKeys = new Set();
+    const matchesPrimaryScope = typeof inScope === 'function' ? inScope : (fact) => (fact.project ?? 'default') === inScope;
     for (const fact of facts.values()) {
-      if (!inScope(fact)) continue;
-      // Expiry is a property of the fact, not of whether housekeeping has run
-      // yet. maintain() is what flips `status` to expired and stamps validTo,
-      // and it may not have run since the boundary passed -- so read-time
-      // evaluation asks the canonical policy directly. Without this, context()
-      // reported an attempt reusable and the same call after maintain() did not,
-      // from identical evidence. The boundary instant itself is already past:
-      // `expiresAt` is when the fact stops holding, matching maintain().
-      const boundary = effectiveFactExpirationBoundary(fact);
-      if (boundary && compareInstants(boundary, asOf) <= 0) continue;
-      const temporal = fact.temporal;
-      if (temporal) {
-        if (temporal.validFrom && compareInstants(temporal.validFrom, asOf) > 0) continue;
-        if (temporal.validTo && compareInstants(temporal.validTo, asOf) <= 0) continue;
-      } else if (fact.status !== 'active') continue;
-      if (!candidates.has(fact.key)) candidates.set(fact.key, []);
-      candidates.get(fact.key).push(fact);
+      if (!matchesPrimaryScope(fact)) continue;
+      if (isFactUsableAt(fact, asOf)) {
+        if (!candidates.has(fact.key)) candidates.set(fact.key, []);
+        candidates.get(fact.key).push(fact);
+      } else if (fact.status === 'active' || fact.verificationStatus === 'contradicted' || fact.status === 'expired') {
+        blockedLocalKeys.add(fact.key);
+      }
+    }
+    const fallbackProjects = Array.isArray(options.fallbackProjects) ? options.fallbackProjects : [];
+    const includeGlobal = options.includeGlobal === true;
+    if (includeGlobal || fallbackProjects.length > 0) {
+      const fallbackKeys = new Set();
+      for (const fact of facts.values()) {
+        if (matchesPrimaryScope(fact) || withheldToken(fact.erasureToken)) continue;
+        const factProject = fact.project ?? 'default';
+        const isGlobal = includeGlobal && fact.visibility === 'global';
+        const isFallback = fallbackProjects.includes(factProject) && fact.visibility !== 'project';
+        if (!isGlobal && !isFallback) continue;
+        if (!isFactUsableAt(fact, asOf)) continue;
+        if (blockedLocalKeys.has(fact.key) && !candidates.has(fact.key)) continue;
+        if (candidates.has(fact.key) && !fallbackKeys.has(fact.key)) continue;
+        fallbackKeys.add(fact.key);
+        if (!candidates.has(fact.key)) candidates.set(fact.key, []);
+        candidates.get(fact.key).push(fact);
+      }
     }
     const values = {};
     const sources = {};
@@ -5415,6 +5625,18 @@ export function createShadowGraph(options = {}) {
     // `terms`. Matching uses the folded form; ranking uses this to prefer a
     // record that holds the word the caller actually typed.
     const rawTerms = String(query).toLocaleLowerCase().split(/\s+/).filter(Boolean);
+    const expandTermMatches = (record, term, { includeSynonyms = Boolean(options.expandSynonyms) } = {}) => {
+      const direct = matchFields(record, term);
+      if (direct.length) return direct;
+      const candidates = expandSearchTokens(term, { includeSynonyms });
+      const fields = new Set();
+      for (const candidate of candidates) {
+        if (candidate.length >= 2) {
+          for (const field of matchFields(record, candidate)) fields.add(field);
+        }
+      }
+      return [...fields];
+    };
     const hits = [];
     for (const record of records.values()) {
       if (!matchesFilters(record, options, boundary)) continue;
@@ -5422,7 +5644,7 @@ export function createShadowGraph(options = {}) {
       // G7: a term must match a DECLARED CONTENT FIELD. Schema keys and internal
       // metadata are not content, so `search('confidence')` no longer matches a
       // record merely because it has a confidence field.
-      const perTerm = terms.map((term) => matchFields(record, term));
+      const perTerm = terms.map((term) => expandTermMatches(record, term));
       if (terms.length && perTerm.some((fields) => fields.length === 0)) continue;
       const matched = [...new Set(perTerm.flat())];
       hits.push({
@@ -5433,6 +5655,37 @@ export function createShadowGraph(options = {}) {
         matchedBy: terms.length ? 'content' : 'filter',
         filters: appliedFilters(options)
       });
+    }
+    const allowPartial = options.matchMode === 'partial' || options.matchMode === 'any' || (hits.length === 0 && terms.length >= 3);
+    if (hits.length === 0 && terms.length >= 2 && allowPartial) {
+      const negationTerms = new Set(['not', 'never', 'without', 'no', 'none', 'neither', 'nor', 'بدون', 'دون', 'لا', 'لم', 'لن']);
+      const usePartialSynonyms = Boolean(options.matchMode === 'partial' || options.matchMode === 'any' || options.expandSynonyms);
+      const minMatchedTerms = (options.matchMode === 'partial' || options.matchMode === 'any')
+        ? 1
+        : Math.max(2, terms.length - 1);
+      for (const record of records.values()) {
+        if (!matchesFilters(record, options, boundary)) continue;
+        if (record.kind === 'memory' && !sameMemoryScopeValues(record.scope, memoryScope)) continue;
+        const perTerm = terms.map((term) => expandTermMatches(record, term, { includeSynonyms: usePartialSynonyms }));
+        if (terms.some((term, idx) => negationTerms.has(term) && perTerm[idx].length === 0)) continue;
+        const matchedTermIndices = perTerm.map((fields, idx) => (fields.length > 0 ? idx : -1)).filter((idx) => idx >= 0);
+        if (matchedTermIndices.length < minMatchedTerms) continue;
+        const matched = [...new Set(perTerm.flat())];
+        const matchedTerms = matchedTermIndices.map((idx) => terms[idx]);
+        const matchedRawTerms = matchedTermIndices.map((idx) => rawTerms[idx]);
+        const coverageRatio = matchedTermIndices.length / terms.length;
+        hits.push({
+          record: clone(extractionView(record, memoryScope)),
+          score: Number((score(record, matchedTerms, matchedRawTerms) * coverageRatio).toFixed(4)),
+          matched,
+          partialMatch: true,
+          matchedTermCount: matchedTermIndices.length,
+          totalQueryTerms: terms.length,
+          reason: `Partial match (${matchedTermIndices.length}/${terms.length} terms) in ${matched.join(', ')}`,
+          matchedBy: 'content',
+          filters: appliedFilters(options)
+        });
+      }
     }
     return hits.sort((a, b) => b.score - a.score || String(a.record.id).localeCompare(String(b.record.id)));
   }
@@ -5449,8 +5702,19 @@ export function createShadowGraph(options = {}) {
     const hits = rank(query, options, boundary);
     const directIds = new Set(hits.map((item) => item.record.id));
     const results = hits.map((item) => ({ ...item, graphBoost: 0, reasons: [item.reason] }));
+    const allRelations = [...relations.values()];
+    for (const record of records.values()) {
+      if (!boundary.visible(record)) continue;
+      for (const attemptId of Array.isArray(record.failedAttempts) ? record.failedAttempts : []) {
+        if (typeof attemptId === 'string') allRelations.push({ from: record.id, to: attemptId, relation: 'tried_for' });
+      }
+      const relTargets = Array.isArray(record.relatedTo) ? record.relatedTo : typeof record.relatedTo === 'string' && record.relatedTo ? [record.relatedTo] : [];
+      for (const relId of relTargets) {
+        if (typeof relId === 'string') allRelations.push({ from: record.id, to: relId, relation: 'related_to' });
+      }
+    }
     // A neighbour joins only from inside the same boundary as the hits.
-    for (const relation of relations.values()) {
+    for (const relation of allRelations) {
       const relatedId = directIds.has(relation.from) ? relation.to : directIds.has(relation.to) ? relation.from : null;
       const related = relatedId && entity(relatedId, boundary);
       if (related && related.kind !== 'alternative' && (related.kind !== 'memory' || sameMemoryScopeValues(related.scope, memoryScope)) && !directIds.has(relatedId)) {
@@ -5473,11 +5737,21 @@ export function createShadowGraph(options = {}) {
   // What ranking may read: the entities inside the read boundary and the
   // relations joining two of them that the memory scope may reach. recall()
   // and the default read's relevance rank this one view.
-  function rankingView(boundary, memoryScope) {
+  function rankingView(boundary, memoryScope, { includeCrossProject = false } = {}) {
     const reach = scopedReach(boundary, memoryScope);
+    const isCrossVisible = (record) => {
+      if (boundary.visible(record)) return true;
+      if (!includeCrossProject || withheldToken(record.erasureToken) || isLegacyOwned(record) || isStoredWithoutProject(record)) return false;
+      if (record.visibility === 'project') return false;
+      if (record.visibility === 'global') return true;
+      if (record.kind === 'memory') return ['preference', 'instruction', 'profile', 'procedure'].includes(record.memoryType);
+      if (record.kind === 'attempt') return true;
+      if (record.kind === 'decision') return Boolean(record.outcome || record.status === 'validated' || record.status === 'failed');
+      return false;
+    };
     return {
-      records: [...records.values()].filter(boundary.visible).map(record => extractionView(record, memoryScope)),
-      facts: [...facts.values()].filter(boundary.visible),
+      records: [...records.values()].filter(isCrossVisible).map(record => extractionView(record, memoryScope)),
+      facts: [...facts.values()].filter((fact) => boundary.visible(fact) || (includeCrossProject && !withheldToken(fact.erasureToken) && fact.visibility === 'global')),
       relations: [...relations.values()].filter((relation) => reach(relation.from) && reach(relation.to))
     };
   }
@@ -5485,23 +5759,8 @@ export function createShadowGraph(options = {}) {
   function recall(query = '', options = {}) {
     validateTemporalFields(options, ['asOf', 'currentAt']);
     const boundary = readBoundary(options, { memoryScope: normalizeMemoryScope(options.scope) });
-    const recallOptions = { ...options, project: boundary.scope.grant ? null : boundary.scope.project, scope: normalizeMemoryScope(options.scope), currentAt: options.currentAt ?? (options.asOf ? null : now()) };
-    // Ranking only READS the graph, but this used to hand it `exportData()`,
-    // which deep-clones every record, fact, relation, review signal, idempotency
-    // entry, event and the entire journal -- on every call. Ranking reads three
-    // of those. Measured with scripts/context-size.mjs on a 70-record corpus,
-    // about 89% of recall() was that copy (2.05 ms) rather than the ranking it
-    // paid for (0.26 ms), and the journal grows without bound.
-    //
-    // So rank over live entities and clone only the page actually returned. No
-    // caller receives a reference into live state, which is the property the
-    // wholesale clone was really providing.
-    //
-    // Only what lies inside the read boundary is ranked, and the graph signal
-    // walks only relations between such entities: it cannot pass through
-    // another project, and a focus outside the boundary reaches nothing, just
-    // as one that does not exist.
-    const result = hybridSearch(rankingView(boundary, recallOptions.scope), query, recallOptions);
+    const recallOptions = { ...options, includeCrossProject: options.includeCrossProject === true, excludeSupersededDecisions: !options.includeHistory && !options.asOf, project: boundary.scope.grant ? null : boundary.scope.project, scope: normalizeMemoryScope(options.scope), currentAt: options.currentAt ?? (options.asOf ? null : now()) };
+    const result = hybridSearch(rankingView(boundary, recallOptions.scope, { includeCrossProject: options.includeCrossProject === true }), query, recallOptions);
     const envelope = scopedPage(
       result.items,
       recallOptions,
@@ -5517,28 +5776,9 @@ export function createShadowGraph(options = {}) {
     };
   }
 
-  // context() returns several collections. Each one declares its own total and
-  // whether it was truncated, so a caller can never be silently short-changed.
-  // Everything context() reads, evaluates or cites -- decisions, facts,
-  // attempts and the review signals it may raise -- lies inside one read
-  // boundary; a context with no project selected evaluates nothing and
-  // reports no project.
-  //
-  // context() is the default-path read (plan v1.4.4 §13.1-13.2, PC-25): the
-  // working set is evaluated without persisting any review signal, so reading
-  // it changes no canonical truth. Signals already persisted are still
-  // reported. The notice is declared interface metadata, not memory: it tells
-  // a caller that relied on the old implicit persist where that moved.
-  //
-  // It names each collection for what it holds (§13.4, E03): failedAttempts,
-  // firedConditions with affectedAlternatives, and belowConfidenceThreshold,
-  // the fact the generated suggestedQuestions was built from. Every record is
-  // kept.
-  //
-  // With a query or a focalId it also returns `relevant`, ahead of the working
-  // set (PR-26; relevanceBlock()).
   function context(input = {}) {
-    return { ...buildContext(input, { persistSignals: false, factual: true }), notice: contextNotice() };
+    const built = buildContext(input, { persistSignals: false, factual: true });
+    return preserveHiddenProperties(built, { ...built, notice: contextNotice() });
   }
 
   // Explicit evaluation (§13.2): the evaluate-and-persist working set that
@@ -5555,6 +5795,8 @@ export function createShadowGraph(options = {}) {
     const project = boundary.scope.project;
     const inScope = boundary.visible;
     const limit = input.limit;
+    const taskQuery = typeof input.task === 'string' && input.task.trim() ? input.task.trim() : null;
+    const advisoryMode = Boolean(taskQuery || input.includeCrossProject === true);
     const collect = (items) => {
       const page = resolvePage({ limit, offset: 0 }, items.length);
       return { items: items.slice(0, page.limit), total: items.length, returned: Math.min(page.limit, items.length), hasMore: page.limit < items.length };
@@ -5568,22 +5810,36 @@ export function createShadowGraph(options = {}) {
     // is never implied to have succeeded, and is counted on this one.
     const attemptsInScope = [...records.values()].filter((x) => x.kind === 'attempt' && inScope(x) && extractionView(x).derivationState !== 'superseded');
     const failed = attemptsInScope.filter((x) => attemptOutcome(x) === 'failed');
-    const failedAttemptsToAvoid = {
-      ...collect(failed.map(record => clone(extractionView(record)))),
-      undetermined: attemptsInScope.filter((x) => attemptOutcome(x) === 'undetermined').length
-    };
     const evaluated = evaluateForRead({ changedFacts: input.changedFacts ?? [], facts: input.facts ?? {} }, boundary, { persistSignals });
     const openReviews = collect(evaluated.due);
     // Conditions that could not be settled travel as their own collection, so
     // they are bounded and declared by the same completeness contract as every
     // other collection here rather than riding along unbounded.
     const reuse = evaluateAttemptReuse(inScope, now(), input.facts ?? {});
+    const reusableIds = new Set(reuse.reusable.map((item) => item.attemptId ?? item.id));
+    const failedAttemptItems = failed.map((record) => {
+      const cloned = clone(extractionView(record));
+      const summary = (record.reusableWhen ?? []).map((rule) => formatRuleCompact(rule)).filter(Boolean);
+      Object.defineProperty(cloned, 'reusableNow', { value: reusableIds.has(record.id), enumerable: false, configurable: true, writable: true });
+      if (summary.length) Object.defineProperty(cloned, 'conditionSummary', { value: summary, enumerable: false, configurable: true, writable: true });
+      return cloned;
+    });
+    const enrichedFailedAttemptItems = failed.map((record) => {
+      const cloned = clone(extractionView(record));
+      const summary = (record.reusableWhen ?? []).map((rule) => formatRuleCompact(rule)).filter(Boolean);
+      return {
+        ...cloned,
+        reusableNow: reusableIds.has(record.id),
+        ...(summary.length ? { conditionSummary: summary } : {})
+      };
+    });
+    const failedAttemptsToAvoid = {
+      ...collect(failedAttemptItems),
+      undetermined: attemptsInScope.filter((x) => attemptOutcome(x) === 'undetermined').length
+    };
+    const enrichedFailedCollection = collect(enrichedFailedAttemptItems);
     const reusableAttempts = collect(reuse.reusable);
     const conditionDiagnostics = collect([...evaluated.diagnostics, ...reuse.diagnostics]);
-    // A decision of any status whose recorded confidence is below the policy
-    // threshold. The review-named shape turns each into a generated question.
-    // Values are copies, as recorded: a legacy writer may have left no status,
-    // one this build does not recognise, or a confidence that is not a number.
     const lowConfidence = [...records.values()].filter((x) => x.kind === 'decision' && inScope(x) && (x.confidence?.current ?? 0) < LOW_CONFIDENCE_THRESHOLD);
     const belowThreshold = collect(factual
       ? lowConfidence.map((x) => ({ decisionId: x.id, title: clone(x.title ?? null), status: clone(x.status ?? null), confidence: clone(x.confidence?.current ?? null), threshold: LOW_CONFIDENCE_THRESHOLD }))
@@ -5591,14 +5847,180 @@ export function createShadowGraph(options = {}) {
     const fired = factual
       ? { ...openReviews, items: openReviews.items.map((entry) => Object.fromEntries(Object.entries(entry).map(([key, value]) => [key === 'alternativesToReconsider' ? 'affectedAlternatives' : key, value]))) }
       : openReviews;
+    const isForeignSelectable = (x) => !withheldToken(x.erasureToken) && !isLegacyOwned(x) && !isStoredWithoutProject(x) && x.project !== null && x.project !== project && x.visibility !== 'project';
+    const userMemories = collect(
+      project == null ? [] : [...records.values()]
+        .filter((x) => x.kind === 'memory' && x.status === 'active' && (inScope(x) || (isForeignSelectable(x) && (x.visibility === 'global' || ['preference', 'instruction', 'profile', 'procedure'].includes(x.memoryType)))))
+        .map((x) => ({
+          ...clone(x),
+          sourceProject: x.project,
+          crossProject: x.project !== project
+        }))
+    );
+    const successfulApproaches = collect(project == null ? [] : [
+      ...[...records.values()]
+        .filter((x) => x.kind === 'attempt' && (inScope(x) || isForeignSelectable(x)) && (x.resultClass === 'succeeded' || (attemptOutcome(x) !== 'failed' && /\b(succeeded|success|passed|worked|resolved)\b/i.test(String(x.result ?? '')))))
+        .map((x) => ({
+          id: x.id,
+          kind: 'attempt',
+          project: x.project,
+          sourceProject: x.project,
+          crossProject: x.project !== project,
+          task: x.task ?? null,
+          solution: x.solution,
+          result: x.result,
+          reason: x.reason ?? '',
+          environment: x.environment ?? '',
+          tags: x.tags ?? []
+        })),
+      ...[...records.values()]
+        .filter((x) => x.kind === 'decision' && (inScope(x) || isForeignSelectable(x)) && (x.status === 'validated' || x.outcome?.status === 'successful'))
+        .map((x) => ({
+          id: x.id,
+          kind: 'decision',
+          project: x.project,
+          sourceProject: x.project,
+          crossProject: x.project !== project,
+          title: x.title,
+          chosen: x.chosen,
+          goal: x.goal ?? '',
+          lessons: x.outcome?.lessons ?? [],
+          tags: x.tags ?? []
+        }))
+    ]);
+    const crossProjectExperience = collect(
+      project == null ? [] : [...records.values()]
+        .filter((x) => isForeignSelectable(x) && (x.kind === 'attempt' || (x.kind === 'decision' && (x.outcome || x.status === 'validated' || x.status === 'failed'))))
+        .map((x) => {
+          if (x.kind === 'attempt') {
+            const hasRules = Array.isArray(x.reusableWhen) && x.reusableWhen.length > 0;
+            let crossReusableNow = false;
+            const conditionEvaluations = [];
+            if (hasRules) {
+              const stored = storedFactValues(inScope, now(), { fallbackProjects: [x.project], includeGlobal: true });
+              const effectiveFacts = { ...stored.values, ...(input.facts ?? {}) };
+              for (const rule of x.reusableWhen) {
+                const parsed = typeof rule === 'string' ? (parseConditionString(rule) ?? rule) : rule;
+                if (typeof parsed !== 'object' || !parsed || Array.isArray(parsed)) {
+                  conditionEvaluations.push({ condition: formatRuleCompact(rule), verdict: 'unknown', reason: 'Unstructured condition string' });
+                  continue;
+                }
+                const hasKey = Object.prototype.hasOwnProperty.call(effectiveFacts, parsed.key);
+                const evalRes = hasKey
+                  ? evaluateRule(parsed, effectiveFacts[parsed.key])
+                  : { operator: parsed.operator ?? 'equals', expected: parsed.value, actual: undefined, verdict: 'unknown', reason: 'No fact recorded for this key' };
+                const factProject = Object.prototype.hasOwnProperty.call(input.facts ?? {}, parsed.key)
+                  ? 'caller_supplied'
+                  : (stored.sources[parsed.key]?.project ?? null);
+                conditionEvaluations.push({
+                  condition: formatRuleCompact(parsed),
+                  key: parsed.key,
+                  expected: evalRes.expected,
+                  observed: evalRes.actual,
+                  verdict: evalRes.verdict,
+                  ...(evalRes.reason ? { reason: evalRes.reason } : {}),
+                  ...(factProject ? { factProject } : {})
+                });
+              }
+              crossReusableNow = conditionEvaluations.length === x.reusableWhen.length && conditionEvaluations.every((c) => c.verdict === 'true');
+            }
+            return {
+              id: x.id,
+              kind: 'attempt',
+              sourceProject: x.project,
+              task: x.task ?? null,
+              solution: x.solution,
+              result: x.result,
+              resultClass: x.resultClass ?? (attemptOutcome(x) === 'failed' ? 'failed' : 'succeeded'),
+              reason: x.reason ?? '',
+              environment: x.environment ?? '',
+              reusableWhen: clone(x.reusableWhen ?? []),
+              conditionSummary: (x.reusableWhen ?? []).map((rule) => formatRuleCompact(rule)).filter(Boolean),
+              ...(conditionEvaluations.length ? { conditionEvaluations } : {}),
+              reusableNow: crossReusableNow,
+              tags: x.tags ?? []
+            };
+          }
+          return {
+            id: x.id,
+            kind: 'decision',
+            sourceProject: x.project,
+            title: x.title,
+            chosen: x.chosen,
+            status: x.status,
+            outcome: x.outcome ? clone(x.outcome) : null,
+            changeSummary: x.changeSummary ?? null,
+            tags: x.tags ?? []
+          };
+        })
+    );
+    const relevantToTask = taskQuery
+      ? recall(taskQuery, { project, includeCrossProject: true, expandSynonyms: true, limit: Math.min(limit ?? 10, 10), preferRecent: true }).items.map((item) => ({
+          id: item.record.id,
+          kind: item.record.kind,
+          sourceProject: item.record.project ?? project,
+          crossProject: (item.record.project ?? project) !== project,
+          score: item.score,
+          summary: item.record.title ?? item.record.solution ?? item.record.text ?? item.record.key ?? item.record.id,
+          detail: item.record.chosen ?? item.record.result ?? item.record.value ?? '',
+          reason: item.record.reason ?? item.record.changeSummary ?? null,
+          ...(item.record.reusableWhen ? { reusableWhen: item.record.reusableWhen.map((r) => formatRuleCompact(r)) } : {})
+        }))
+      : [];
+    const digest = {
+      project,
+      task: taskQuery,
+      counts: {
+        activeDecisions: activeDecisions.total,
+        openReviews: openReviews.total,
+        failedAttemptsToAvoid: failedAttemptsToAvoid.total,
+        reusableAttempts: reusableAttempts.total,
+        userMemories: userMemories.total,
+        successfulApproaches: successfulApproaches.total,
+        crossProjectExperience: crossProjectExperience.total,
+        relevantToTask: relevantToTask.length
+      },
+      highlights: {
+        decisions: activeDecisions.items.slice(0, 5).map((d) => ({
+          id: d.id,
+          title: d.title,
+          chosen: d.chosen,
+          status: d.status,
+          ...(d.changeSummary ? { changeSummary: d.changeSummary } : {})
+        })),
+        avoidRetries: enrichedFailedCollection.items.slice(0, 5).map((a) => ({
+          id: a.id,
+          solution: a.solution,
+          reason: a.reason ?? a.result,
+          environment: a.environment ?? '',
+          reusableNow: Boolean(a.reusableNow),
+          ...(a.conditionSummary?.length ? { retryWhen: a.conditionSummary } : {})
+        })),
+        preferences: userMemories.items.slice(0, 5).map((m) => ({
+          id: m.id,
+          key: m.key,
+          text: m.text,
+          sourceProject: m.sourceProject,
+          ...(m.changeSummary ? { changeSummary: m.changeSummary } : {})
+        }))
+      }
+    };
     const groups = factual
       ? { activeDecisions, staleAssumptions, failedAttempts: failedAttemptsToAvoid, firedConditions: fired, belowConfidenceThreshold: belowThreshold, conditionDiagnostics, reusableAttempts }
       : { activeDecisions, staleAssumptions, failedAttemptsToAvoid, openReviews, suggestedQuestions: belowThreshold, conditionDiagnostics, reusableAttempts };
     const workingSet = [...current, ...failed, ...reuse.reusable.map((entry) => records.get(entry.attemptId)), ...stale];
-    return {
+    const result = {
       project,
       ...(relevance ? { relevant: relevanceBlock(input, boundary, workingSet) } : {}),
       ...Object.fromEntries(Object.entries(groups).map(([name, group]) => [name, group.items])),
+      ...(advisoryMode && factual ? {
+        ...(taskQuery ? { task: taskQuery } : {}),
+        digest,
+        userMemories: userMemories.items,
+        successfulApproaches: successfulApproaches.items,
+        crossProjectExperience: crossProjectExperience.items,
+        relevantToTask
+      } : {}),
       completeness: scopeCompleteness(boundary.scope, {
         scope: { project },
         complete: Object.values(groups).every((group) => !group.hasMore),
@@ -5607,6 +6029,26 @@ export function createShadowGraph(options = {}) {
         collections: Object.fromEntries(Object.entries(groups).map(([name, group]) => [name, { returned: group.returned, total: group.total, hasMore: group.hasMore, omitted: group.total - group.returned, ...(group.undetermined === undefined ? {} : { undetermined: group.undetermined }) }]))
       }, referencedSignals(boundary, openReviews.items))
     };
+    if (factual) {
+      Object.defineProperty(result, 'failedAttemptsToAvoid', {
+        value: enrichedFailedCollection.items,
+        enumerable: false,
+        configurable: true,
+        writable: true
+      });
+    }
+    if (!advisoryMode || !factual) {
+      for (const [k, v] of [
+        ['digest', digest],
+        ['userMemories', userMemories.items],
+        ['successfulApproaches', successfulApproaches.items],
+        ['crossProjectExperience', crossProjectExperience.items],
+        ['relevantToTask', relevantToTask]
+      ]) {
+        Object.defineProperty(result, k, { value: v, enumerable: false, configurable: true, writable: true });
+      }
+    }
+    return result;
   }
 
   // Whether text names a stored entity's id: the whole text, a word of it, or
@@ -6938,15 +7380,24 @@ export function createShadowGraph(options = {}) {
 // unknown entity is kept and flagged, because losing it is worse.
 function normalizeRules(rules, { strict = false } = {}) {
   return rules.map((rule) => {
-    if (typeof rule === 'string') return rule;
+    if (typeof rule === 'string') {
+      if (strict) {
+        const parsed = parseConditionString(rule);
+        if (parsed) return parsed;
+      }
+      return rule;
+    }
     if (!rule || typeof rule !== 'object' || Array.isArray(rule)) {
       if (strict) throw new Error('A reopen/reuse rule must be a string or an object');
       return rule;
     }
-    const operator = rule.operator ?? 'equals';
+    const rawOperator = rule.operator ?? 'equals';
+    const operator = strict
+      ? normalizeOperator(rawOperator)
+      : (typeof rawOperator === 'string' && SYMBOLIC_OPERATOR_ALIASES[rawOperator.trim().toLowerCase()]) || rawOperator;
     if (strict) {
       if (typeof rule.key !== 'string' || !rule.key.trim()) throw new Error('A structured rule requires a non-empty key');
-      if (!isSupportedOperator(operator)) throw new Error(`Unsupported rule operator ${String(operator)}`);
+      if (!isSupportedOperator(operator)) throw new Error(`Unsupported rule operator ${String(rawOperator)}`);
       if (rule.unit != null && !isSupportedUnit(rule.unit)) throw new Error(`Unsupported rule unit ${String(rule.unit)}`);
       // Already rejected, but only as a side effect of clone() refusing an
       // `undefined` field, which reported "Values must be plain JSON data" and
@@ -6972,6 +7423,33 @@ function normalizeProject(value) {
   if (value === undefined || value === null) return 'default';
   if (typeof value !== 'string' || !value.trim()) throw new Error('project must be a non-empty string');
   return value;
+}
+
+function normalizeVisibility(value, fallback = 'project') {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value !== 'string') throw new Error('visibility must be "project" or "global"');
+  const candidate = value.trim().toLowerCase();
+  if (candidate !== 'project' && candidate !== 'global') {
+    throw new Error('visibility must be "project" or "global"');
+  }
+  return candidate;
+}
+
+function findDecisionTransitionPath(fromStatus, toStatus) {
+  if (fromStatus === toStatus) return [];
+  const queue = [[fromStatus, []]];
+  const visited = new Set([fromStatus]);
+  while (queue.length > 0) {
+    const [current, path] = queue.shift();
+    for (const next of DECISION_TRANSITIONS[current] ?? []) {
+      if (next === toStatus) return [...path, next];
+      if (!visited.has(next)) {
+        visited.add(next);
+        queue.push([next, [...path, next]]);
+      }
+    }
+  }
+  return null;
 }
 
 function normalizeMemoryScope(scope = {}) {
@@ -7630,9 +8108,13 @@ function matchFieldsWith(record, needle, has) {
   if (has(record.title)) fields.push('title');
   if (has(record.goal)) fields.push('goal');
   if (has(record.chosen)) fields.push('chosen');
+  if ((record.tags ?? []).some(has)) fields.push('tags');
+  if (has(record.changeSummary)) fields.push('changeSummary');
+  if ((record.outcome?.lessons ?? []).some(has)) fields.push('outcome lessons');
   if ((record.assumptions ?? []).some(has)) fields.push('assumption');
   if ((record.evidence ?? []).some((entry) => has(entry?.source) || has(entry?.detail))) fields.push('evidence');
   if ((record.alternatives ?? []).some((entry) => has(entry?.label) || has(entry?.reasonRejected))) fields.push('alternative');
+  if (has(record.task)) fields.push('attempt task');
   if (has(record.solution)) fields.push('attempt solution');
   if (has(record.result)) fields.push('attempt result');
   if (has(record.reason)) fields.push('attempt reason');
@@ -7640,7 +8122,7 @@ function matchFieldsWith(record, needle, has) {
   return fields;
 }
 
-const FIELD_WEIGHT = { title: 5, chosen: 3, goal: 3 };
+const FIELD_WEIGHT = { title: 5, chosen: 3, goal: 3, text: 4, key: 4, tags: 3, 'attempt task': 3, 'outcome lessons': 3 };
 // Folding decides WHETHER a record matches; this decides what ranks first among
 // those that do.
 //
