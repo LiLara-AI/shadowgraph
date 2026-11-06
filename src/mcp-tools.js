@@ -818,6 +818,7 @@ const defaultContextInputSchema = {
   type: 'object',
   properties: {
     ...contextInputSchema.properties,
+    task: { type: 'string', description: 'Optional current task or question text. Adds digest, userMemories, successfulApproaches, crossProjectExperience and relevantToTask.' },
     query: { type: 'string', description: 'Free text. With it or focalId, the response adds relevant: the records in scope that the lexical or graph signal ranks, ahead of the working set. No semantic signal is computed on this read.' },
     focalId: { type: 'string', description: 'Entity id to rank graph neighbours from. An id outside the scope reaches nothing, like an unknown one.' },
     asOf: { type: 'string', description: 'ISO 8601 instant for relevant: facts and memories valid then, recency ordered from it, and lines derived as of it.' },
@@ -1105,6 +1106,15 @@ const expandOutputSchema = {
 // shape, under names and descriptions that state what they hold, with the
 // declared notice. suggestedQuestions gives way to belowConfidenceThreshold, the
 // fact each question was generated from.
+const advisoryItemSchema = (description) => ({
+  type: 'object',
+  description,
+  required: ['id', 'kind'],
+  properties: {
+    id: { type: 'string', description: 'Identifier of the record.' },
+    kind: { type: 'string', description: 'The entity kind.' }
+  }
+});
 const contextOutputSchema = {
   type: 'object',
   description: 'The working set for one project.',
@@ -1112,6 +1122,20 @@ const contextOutputSchema = {
   properties: {
     project: reviewContextOutputSchema.properties.project,
     relevant: relevantSchema,
+    digest: {
+      type: 'object',
+      description: 'Token-efficient summary when task is supplied.',
+      required: ['project', 'counts', 'highlights'],
+      properties: {
+        project: stringOrNull('The resolved project, or null when unresolved.'),
+        counts: { type: 'object', description: 'Counts per returned section.' },
+        highlights: { type: 'object', description: 'Top digest lines per section.' }
+      }
+    },
+    userMemories: { type: 'array', description: 'Active memories in scope when task is supplied.', items: advisoryItemSchema('An active memory record.') },
+    successfulApproaches: { type: 'array', description: 'Attempts in scope that succeeded when task is supplied.', items: advisoryItemSchema('A succeeded attempt record.') },
+    crossProjectExperience: { type: 'array', description: 'Globally shared records from other projects when task is supplied.', items: advisoryItemSchema('A globally shared record from another project.') },
+    relevantToTask: { type: 'array', description: 'Records ranked against task keywords when task is supplied.', items: advisoryItemSchema('A record matched against task keywords.') },
     activeDecisions: { ...reviewContextOutputSchema.properties.activeDecisions, description: 'Decisions whose lifecycle status is current: proposed, planned, in_progress, executed, validated, or reconsidered.' },
     staleAssumptions: reviewContextOutputSchema.properties.staleAssumptions,
     failedAttempts: reviewContextOutputSchema.properties.failedAttemptsToAvoid,

@@ -20,6 +20,28 @@ export const RULE_OPERATORS = Object.freeze([
   'in', 'not_in'
 ]);
 
+export const SYMBOLIC_OPERATOR_ALIASES = Object.freeze({
+  '>=': 'gte',
+  '<=': 'lte',
+  '==': 'equals',
+  '===': 'equals',
+  '=': 'equals',
+  '!=': 'not_equals',
+  '!==': 'not_equals',
+  '<>': 'not_equals',
+  '>': 'greater_than',
+  '<': 'less_than'
+});
+
+const COMPACT_OPERATOR_SYMBOLS = Object.freeze({
+  equals: '==',
+  not_equals: '!=',
+  greater_than: '>',
+  less_than: '<',
+  gte: '>=',
+  lte: '<='
+});
+
 const ORDERED_OPERATORS = Object.freeze(new Set(['greater_than', 'less_than', 'gte', 'lte']));
 
 // Unit conversion is an explicit whitelist, keyed by dimension. A unit outside
@@ -40,8 +62,14 @@ const UNITS = Object.freeze({
   pct: ['percent', 1]
 });
 
+export function normalizeOperator(operator) {
+  if (typeof operator !== 'string') return operator;
+  const trimmed = operator.trim();
+  return Object.hasOwn(SYMBOLIC_OPERATOR_ALIASES, trimmed) ? SYMBOLIC_OPERATOR_ALIASES[trimmed] : trimmed;
+}
+
 export function isSupportedOperator(operator) {
-  return RULE_OPERATORS.includes(operator);
+  return RULE_OPERATORS.includes(normalizeOperator(operator));
 }
 
 export function isSupportedUnit(unit) {
@@ -61,7 +89,7 @@ export function isSupportedUnit(unit) {
  * by one definition rather than two that can drift apart.
  */
 export function ruleOperandIssue(rule) {
-  const operator = rule?.operator ?? 'equals';
+  const operator = normalizeOperator(rule?.operator ?? 'equals');
   if (!rule || typeof rule !== 'object' || !Object.hasOwn(rule, 'value') || rule.value === undefined) {
     return `Operator ${operator} has no value to compare against`;
   }
@@ -76,6 +104,7 @@ export function ruleOperandIssue(rule) {
 }
 
 const QUANTITY = /^\s*(-?\d+(?:\.\d+)?)\s*([A-Za-z%]*)\s*$/;
+const SYMBOLIC_CONDITION_RE = /^\s*([A-Za-z0-9_.:/-]+)\s*(>=|<=|===|!==|==|!=|<>|=|>|<)\s*(.+?)\s*$/;
 
 // A finite number, optionally carrying a recognised unit suffix. Returns null
 // for anything we refuse to interpret -- including a well-formed number with an
@@ -91,6 +120,39 @@ function parseQuantity(raw) {
   const unit = match[2] ? match[2].toLowerCase() : null;
   if (unit && !Object.hasOwn(UNITS, unit)) return null;
   return { value, unit };
+}
+
+export function parseConditionString(raw) {
+  if (typeof raw !== 'string') return null;
+  const match = SYMBOLIC_CONDITION_RE.exec(raw);
+  if (!match) return null;
+  const key = match[1].trim();
+  const operator = normalizeOperator(match[2]);
+  const rhs = match[3].trim();
+  if (!key || !rhs) return null;
+  if (rhs === 'true') return { key, operator, value: true };
+  if (rhs === 'false') return { key, operator, value: false };
+  if (rhs === 'null') return { key, operator, value: null };
+  const quantity = parseQuantity(rhs);
+  if (quantity) {
+    return quantity.unit
+      ? { key, operator, value: quantity.value, unit: quantity.unit }
+      : { key, operator, value: quantity.value };
+  }
+  if ((rhs.startsWith('"') && rhs.endsWith('"')) || (rhs.startsWith("'") && rhs.endsWith("'"))) {
+    return { key, operator, value: rhs.slice(1, -1) };
+  }
+  return { key, operator, value: rhs };
+}
+
+export function formatRuleCompact(rule) {
+  if (typeof rule === 'string') return rule.trim();
+  if (!rule || typeof rule !== 'object') return String(rule ?? '');
+  const op = normalizeOperator(rule.operator ?? 'equals');
+  const sym = COMPACT_OPERATOR_SYMBOLS[op] ?? op;
+  const val = Array.isArray(rule.value) ? JSON.stringify(rule.value) : String(rule.value ?? '');
+  const unit = rule.unit ? String(rule.unit) : '';
+  return `${rule.key} ${sym} ${val}${unit}`.trim();
 }
 
 // Convert one quantity to the comparison base, given the unit the RULE declared.
@@ -173,7 +235,7 @@ export function evaluateRule(rule, value) {
     };
   }
 
-  const operator = rule.operator ?? 'equals';
+  const operator = normalizeOperator(rule.operator ?? 'equals');
   const unit = rule.unit ?? null;
   const base = { operator, key: rule.key ?? null, expected: rule.value, actual: value, unit };
 

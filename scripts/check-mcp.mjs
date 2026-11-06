@@ -42,8 +42,12 @@ const localInspectorCli = join(
   'clients', 'launcher', 'build', 'index.js'
 );
 const useLocalInspector = existsSync(localInspectorCli);
-const npxCli = process.env.npm_execpath ? join(dirname(process.env.npm_execpath), 'npx-cli.js') : null;
-const useNpxCli = Boolean(npxCli && existsSync(npxCli));
+const npxCandidates = [
+  process.env.npm_execpath ? join(dirname(process.env.npm_execpath), 'npx-cli.js') : null,
+  join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npx-cli.js')
+].filter(Boolean);
+const npxCli = npxCandidates.find((candidate) => existsSync(candidate)) ?? null;
+const useNpxCli = Boolean(npxCli);
 const runner = useLocalInspector || useNpxCli ? process.execPath : (process.platform === 'win32' ? 'npx.cmd' : 'npx');
 
 try {

@@ -7,6 +7,7 @@
 - Resolve the `shadowgraph_repair_plan` routing contradiction (`there is no apply or unlink tool, so repairs require owner or store-level action`) so callers are not instructed to remove relations with non-existent ordinary tools.
 - Standardize the advertised MCP tool catalog on `review signals` (0 occurrences of `reminder` in `src/mcp-tools.js`), state upfront that `shadowgraph_context` evaluates without saving signals, and state that `shadowgraph_ack_review`, `shadowgraph_record_outcome` and `shadowgraph_confidence_evidence` do not transition decision lifecycle state.
 - Preserve all public tool names, schemas, permissions, handlers, wire/character ceilings (`11,692 / 11,700` Full, `6,643 / 7,000` Compact, `12,041 / 12,050` Verifier) and truthful `destructiveHint` annotations across Full 35/36, Compact 16 and Workflow 20. Fix deterministic reader clock injection in `test/capture-status-prior-setup.test.js` so 7-day retention fixtures do not expire against the wall clock. No model-selection win or TDQS score increase is claimed.
+- Add task-driven `userMemories`, `successfulApproaches`, `crossProjectExperience`, `relevantToTask` and `digest` sections to `context({ task })`, flexible symbolic/natural condition parsing via `parseConditionString`, automatic `changeSummary` evolution tracking, and `includeHistory` / `allowHistorical` timeline support.
 
 ## 0.43.3 — Technical Preview (2026-11-03)
 

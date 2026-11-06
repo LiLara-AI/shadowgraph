@@ -1,10 +1,38 @@
+import { existsSync } from 'node:fs';
 import { readFile, readdir, rename, rm, stat } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { nextRevision, assertRevision, createDestinationFence, restoreLock } from './revision-store.js';
 import { SCHEMA_VERSION } from './shadowgraph.js';
 import { refusePublicExport } from './internal/collections.js';
 import { DELETION_FILE_DESTINATION_REFUSED, DELETION_INTENT, DELETION_VIEW, attachDeletionView, canonicalPath, commitFile, deletionError, readUnfenced, recordGenerationChanges, refuseDeletionFileDestination, registerStoreIo, storeIo, writeSyncedFile } from './internal/deletion-knowledge.js';
 import { RestorePendingError, activation, asRestoreRefusal, completeRestore, freshPurgeIntents, purgeRecorded, recordPurges, resolvePendingRestore, restoreContext, restoreHook, retentionRestoreGuard, saveResolving, settleAfterFailure } from './internal/restore-wrapper.js';
+
+export function resolveStoragePath(explicitFile, options = {}) {
+  const opts = explicitFile && typeof explicitFile === 'object' ? explicitFile : (options ?? {});
+  const fileArg = typeof explicitFile === 'string' ? explicitFile : opts.file;
+  if (typeof fileArg === 'string' && fileArg.trim()) return fileArg.trim();
+  const env = opts.env ?? process.env;
+  if (typeof env?.SHADOWGRAPH_FILE === 'string' && env.SHADOWGRAPH_FILE.trim()) return env.SHADOWGRAPH_FILE.trim();
+  const storageType = opts.type ?? env?.SHADOWGRAPH_STORAGE ?? 'json';
+  const ext = storageType === 'sqlite' ? 'data.db' : 'data.json';
+  const cwd = opts.cwd ?? process.cwd();
+  const localPath = join(cwd, '.shadowgraph', ext);
+  if (opts.preferLocal || existsSync(localPath)) return localPath;
+  const home = opts.homedir ?? env?.SHADOWGRAPH_HOME ?? homedir();
+  return home ? join(home, '.shadowgraph', ext) : localPath;
+}
+
+export function resolveDefaultProject(explicitProject, options = {}) {
+  const opts = explicitProject && typeof explicitProject === 'object' ? explicitProject : (options ?? {});
+  const projArg = typeof explicitProject === 'string' ? explicitProject : opts.project;
+  if (typeof projArg === 'string' && projArg.trim()) return projArg.trim();
+  const env = opts.env ?? process.env;
+  if (typeof env?.SHADOWGRAPH_PROJECT === 'string' && env.SHADOWGRAPH_PROJECT.trim()) return env.SHADOWGRAPH_PROJECT.trim();
+  const cwd = opts.cwd ?? process.cwd();
+  const name = basename(cwd || '').trim();
+  return name || 'default';
+}
 
 // Journal lives INSIDE the same payload as the state and is written by the same
 // atomic temp-write + rename. See journal-contract.md §atomicity: state and
@@ -201,10 +229,11 @@ export function createJsonFileStore(filePath, options = {}) {
 }
 
 export async function createStorage(options = {}) {
+  const file = options.file ?? resolveStoragePath(options);
   if ((options.type ?? process.env.SHADOWGRAPH_STORAGE ?? 'json') === 'sqlite') {
-    const freshlyCreated = await stat(options.file).then(() => false, (error) => { if (error.code === 'ENOENT') return true; throw error; });
+    const freshlyCreated = await stat(file).then(() => false, (error) => { if (error.code === 'ENOENT') return true; throw error; });
     const { createSqliteStore } = await import('./sqlite-storage.js');
-    const store = await createSqliteStore(options.file, {
+    const store = await createSqliteStore(file, {
       restoreValidator: options.restoreValidator,
       restoreFault: options.restoreFault,
       restoreFs: options.restoreFs,
@@ -223,10 +252,10 @@ export async function createStorage(options = {}) {
     // primitive (d37a F18). `verifier` is the wrapper's own option.
     const restore = store.restore;
     const io = storeIo(store);
-    store.restore = (source, restoreOptions = {}) => restoreLock(options.file, options).run(async () => {
-      await asRestoreRefusal(resolvePendingRestore(io, { verifier: restoreOptions.verifier, beforeResolve: retentionRestoreGuard(source, options.file, 'sqlite') }));
+    store.restore = (source, restoreOptions = {}) => restoreLock(file, options).run(async () => {
+      await asRestoreRefusal(resolvePendingRestore(io, { verifier: restoreOptions.verifier, beforeResolve: retentionRestoreGuard(source, file, 'sqlite') }));
       const ctx = restoreContext({
-        source, destination: options.file, env: options.env, verifier: restoreOptions.verifier, backend: 'sqlite', freshlyCreated,
+        source, destination: file, env: options.env, verifier: restoreOptions.verifier, backend: 'sqlite', freshlyCreated,
         instant: restoreOptions.now ?? new Date().toISOString(), read: () => io.run(({ read }) => read(), { held: true })
       });
       const callerValidate = restoreOptions.validate === options.restoreValidator ? undefined : restoreOptions.validate;
@@ -240,5 +269,5 @@ export async function createStorage(options = {}) {
     });
     return store;
   }
-  return createJsonFileStore(options.file, options);
+  return createJsonFileStore(file, options);
 }
