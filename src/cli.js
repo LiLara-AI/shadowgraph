@@ -26,7 +26,103 @@ import { activateCapture, activateDelivery, activateExtraction, deactivateCaptur
 // started.
 if (process.platform === 'win32') process.env.NoDefaultCurrentDirectoryInExePath = '1';
 
-const [requestedCommand, ...arguments_] = process.argv.slice(2);
+function formatUsageHelp() {
+  return [
+    'Usage: shadowgraph <command> [options] [arguments]',
+    '',
+    'Adversarial, memory-driven intelligence engine exposing MCP endpoints, HTTP, and CLI.',
+    '',
+    'Commands:',
+    '  mcp                           Start Model Context Protocol (MCP) stdio server',
+    '  serve                         Start HTTP API server (default port 8787)',
+    '  setup                         Initialize storage backend',
+    '  doctor                        Verify environment, storage, graph validity, and MCP configuration',
+    '',
+    'Cognitive & Memory Operations:',
+    '  remember <JSON>               Record structured memory or execute memory plan',
+    '  decision <JSON>               Record an architectural or operational decision',
+    '  attempt <JSON>                Record an attempt with solution, result, and reusable conditions',
+    '  outcome <JSON>                Record decision outcome with optional autoTransition',
+    '  status <JSON>                 Update decision status',
+    '  fact <JSON>                   Record a bi-temporal fact',
+    '  supersede <JSON>              Supersede an existing decision with replacement',
+    '  recall <JSON>                 Retrieve ranked memories and facts by semantic query',
+    '  search <JSON>                 Search decisions and attempts (supports matchMode and Arabic stemming)',
+    '  retrieve <JSON>               Retrieve graph entities matching query',
+    '  context <JSON>                Get contextual summary and advisory items for a project',
+    '  review-context <JSON>         Evaluate active conditions and persist state',
+    '  link <JSON>                   Create relationship link between graph entities',
+    '  traverse <JSON>               Traverse graph relationships from a starting entity',
+    '  redact <JSON>                 Redact sensitive information from graph records',
+    '',
+    'Lifecycle & Governance:',
+    '  review [JSON]                 Evaluate decision review conditions against recorded facts',
+    '  reconsider [JSON]             Reconsider decisions flagged for review',
+    '  signals [JSON]                List active review signals',
+    '  ack <JSON>                    Acknowledge a review signal (accepts id or reviewSignalId)',
+    '  maintain [JSON]               Run maintenance passes on the memory graph',
+    '  journal [JSON]                Inspect chronological event journal',
+    '  rebuild [JSON]                Rebuild graph indexes from event journal',
+    '  stats [JSON]                  Display summary statistics of the graph',
+    '  list [JSON]                   Export graph data in structured format',
+    '  validate                      Validate graph integrity and consistency',
+    '  repair-plan                   Generate a repair plan for detected graph issues',
+    '',
+    'Storage & Workspace:',
+    '  backup [path]                 Create a backup copy of current storage',
+    '  restore <path> [--memory-only] Restore storage from a backup file',
+    '  migrate [JSON]                Migrate store to current schema version',
+    '  downgrade [JSON]              Downgrade store to previous schema version',
+    '  markdown-sync <JSON>          Synchronize bidirectional markdown workspace',
+    '  purge <JSON>                  Purge records by project or originId',
+    '  purge-preview <JSON>          Preview records to be purged',
+    '  quarantine <verb> [JSON]      Inspect, release, or purge quarantined records',
+    '',
+    'Hook & Runtime Integration:',
+    '  deliver [--hook]              Hook delivery worker for Claude Code / coding assistants',
+    '  capture --hook                Hook capture worker for session events',
+    '  extract [options]             Run extraction pipeline on captured sessions',
+    '  install-hooks [options]       Install host assistant hooks',
+    '  uninstall-hooks [options]     Uninstall host assistant hooks',
+    '  activate <capability> ...     Activate delivery, capture, or extraction',
+    '  deactivate <capability>       Deactivate delivery, capture, or extraction',
+    '  sharing <mode> ...            Configure delivery project sharing',
+    '',
+    'Options & Flags:',
+    '  --help, -h                    Show this help message and exit (code 0)',
+    '  --args, -a <JSON>             Provide command payload as JSON string',
+    '  --settings <path>             Path to assistant hook settings',
+    '  --runtime <dir>               Pinned runtime directory for hooks',
+    '  --memory-only                 Exclude authority collections during restore',
+    '',
+    'Environment Variables:',
+    '  SHADOWGRAPH_FILE              Path to storage database (default: ./.shadowgraph/data.json)',
+    '  SHADOWGRAPH_STORAGE           Storage backend: "json" or "sqlite" (default: "json")',
+    '  SHADOWGRAPH_PROJECT           Default project identifier for graph operations',
+    '  SHADOWGRAPH_MCP_PROFILE       MCP tool profile: set to "workflow" (20 tools); unset for full (35) or compact',
+    '  SHADOWGRAPH_MCP_COMPACT       MCP compact flag: 1 for compact (16 tools, profile unset); 0 or unset for full (35)',
+    '  PORT                          HTTP server port for `serve` command (default: 8787)'
+  ].join('\n');
+}
+
+const rawArgs = process.argv.slice(2);
+function isHelpRequested(args) {
+  if (!args || args.length === 0) return false;
+  if (args[0] === 'help' || args[0] === '--help' || args[0] === '-h') return true;
+  for (let i = 1; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--help' || arg === '-h') return true;
+    if (arg === '--args' || arg === '-a') break;
+    if (typeof arg === 'string' && (arg.startsWith('{') || arg.startsWith('['))) break;
+  }
+  return false;
+}
+if (isHelpRequested(rawArgs)) {
+  console.log(formatUsageHelp());
+  process.exit(0);
+}
+
+const [requestedCommand, ...arguments_] = rawArgs;
 let command = ({ grant: 'issue-access', delegate: 'delegate-access' })[requestedCommand] ?? requestedCommand;
 let rest = arguments_;
 if (requestedCommand === 'access' && ['discard', 'revoke', 'status'].includes(rest[0])) {
@@ -35,7 +131,15 @@ if (requestedCommand === 'access' && ['discard', 'revoke', 'status'].includes(re
 } else if (['issue-access', 'delegate-access'].includes(command) && rest[0] === '--request' && rest.length === 2) {
   rest = [JSON.stringify({ requestId: rest[1] })];
 }
-const input = rest.join(' ');
+
+let input;
+const argsFlagIndex = rest.findIndex((arg) => arg === '--args' || arg === '-a');
+if (argsFlagIndex !== -1 && argsFlagIndex + 1 < rest.length) {
+  input = rest.slice(argsFlagIndex + 1).join(' ');
+  rest = rest.filter((_, idx) => idx !== argsFlagIndex && idx !== argsFlagIndex + 1);
+} else {
+  input = rest.join(' ');
+}
 const storageType = process.env.SHADOWGRAPH_STORAGE ?? 'json';
 const file = resolve(process.env.SHADOWGRAPH_FILE ?? './.shadowgraph/data.json');
 
@@ -46,7 +150,17 @@ function assertStorageType() {
 }
 
 function parse(value) {
-  try { return JSON.parse(value); } catch { throw new Error('Expected a JSON argument'); }
+  if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) {
+    throw new Error('Expected a JSON argument');
+  }
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    const trimmed = typeof value === 'string' ? value.trim() : String(value);
+    const snippet = trimmed.length > 50 ? `${trimmed.slice(0, 47)}...` : trimmed;
+    const msg = error?.message ? error.message.replace(/^SyntaxError:\s*/i, '') : 'Invalid JSON';
+    throw new Error(`Invalid JSON argument: ${msg}. Input: "${snippet}"`);
+  }
 }
 
 async function exists(path) {
@@ -247,7 +361,7 @@ async function runOneShot() {
     if (!nodeSqlite.available) throw new Error(nodeSqlite.reason);
   }
   if (command === 'doctor' && !initializedBeforeOpen) {
-    throw new Error(`Storage is not initialized at ${file}. Run \`shadowgraph setup\` first.`);
+    throw new Error(`Storage is not initialized at ${file}. Run \`shadowgraph setup\` first. (Configured MCP profiles: compact, workflow, full via SHADOWGRAPH_MCP_PROFILE).`);
   }
   const restoreValidator = createRestoreValidator();
   const store = await createStorage({ type: storageType, file, restoreValidator });
@@ -398,7 +512,17 @@ async function runOneShot() {
           ...(storageDiagnostics?.issues?.length ? { diagnostics: storageDiagnostics } : {}) },
         graph: { valid: graphValid, issues: validation.issues?.length ?? 0, completeness: validation.completeness, limitation: validation.limitation },
         hooks: hooks.stores.length ? { activeStore: hooks.stores[0].file, sameStore: !hooks.other } : { activeStore: null },
-        mcp: { available: true, recommendedMode: 'compact', fullMode: 'Set SHADOWGRAPH_MCP_COMPACT=0 or remove it.' }
+        mcp: {
+          available: true,
+          recommendedMode: 'compact',
+          workflowMode: 'Set SHADOWGRAPH_MCP_PROFILE=workflow for 20 tools.',
+          fullMode: 'Set SHADOWGRAPH_MCP_COMPACT=0 (or unset) with SHADOWGRAPH_MCP_PROFILE unset for 35 tools (default).',
+          profiles: {
+            compact: '16 tools (lean footprint, SHADOWGRAPH_MCP_COMPACT=1 with SHADOWGRAPH_MCP_PROFILE unset)',
+            workflow: '20 tools (balanced lifecycle, SHADOWGRAPH_MCP_PROFILE=workflow with SHADOWGRAPH_MCP_COMPACT unset or 0)',
+            full: '35 tools (default comprehensive administrative & review, SHADOWGRAPH_MCP_PROFILE unset and SHADOWGRAPH_MCP_COMPACT=0 or unset)'
+          }
+        }
       };
     }
 

@@ -38,12 +38,99 @@ Modern complete results include `resultType: 'complete'` and server identity met
 
 ## 3. Tool modes and verifier boundary
 
-| Mode | Verifier | Advertised tools |
-| --- | --- | ---: |
-| Full | not configured | 35 |
-| Full | configured | 36 (`shadowgraph_verify_fact` is added) |
-| Compact | either | 16 |
-| Workflow (explicit opt-in) | either | 20 |
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Host as MCP Client (Host / Agent)
+    participant Proxy as Glama MCP Proxy / Gateway
+    participant Server as ShadowGraph MCP Server
+    participant Catalog as MCP Tool Catalog
+
+    rect rgb(240, 248, 255)
+    Note over Host,Catalog: Phase 1: Protocol Negotiation & Handshake
+    Host->>Proxy: JSON-RPC initialize { protocolVersion: "2025-11-25", ... }
+    Proxy->>Server: Forward initialize request
+    Server->>Server: negotiateLegacyProtocolVersion("2025-11-25")
+    Server-->>Proxy: initialize response { protocolVersion: "2025-11-25", instructions, serverInfo }
+    Proxy-->>Host: Handshake established
+    Host->>Server: notifications/initialized
+    end
+
+    rect rgb(245, 255, 245)
+    Note over Host,Catalog: Phase 2: Profile Selection & Tool Inventory Listing
+    Host->>Server: tools/list { _meta: { ... } }
+    alt SHADOWGRAPH_MCP_COMPACT=1
+        Server->>Catalog: selectTools(catalog, { compact: true })
+        Catalog-->>Server: 16 Compact Tools
+    else SHADOWGRAPH_MCP_PROFILE=workflow
+        Server->>Catalog: selectTools(catalog, { profile: "workflow" })
+        Catalog-->>Server: 20 Workflow Tools
+    else Default / SHADOWGRAPH_MCP_COMPACT=0
+        Server->>Catalog: selectTools(catalog)
+        Catalog-->>Server: 35 Full Tools (36 with verifier)
+    end
+    Server-->>Host: tools/list response { tools: [...] }
+    end
+
+    rect rgb(255, 250, 240)
+    Note over Host,Catalog: Phase 3: Tool Execution & Profile Boundary Enforcement
+    Host->>Server: tools/call { name: "shadowgraph_link", arguments: { ... } }
+    alt Tool in Active Profile
+        Server->>Server: Execute handler & sanitize output
+        Server-->>Host: { content: [...], structuredContent: { ... } }
+    else Tool Excluded from Active Profile (Compact/Workflow)
+        Server-->>Host: RPC error -32601 with active profile guidance
+    end
+    end
+```
+
+| Mode | Verifier | Advertised tools | Environment Trigger |
+| --- | --- | ---: | --- |
+| Full | not configured | 35 | Default (unset or `SHADOWGRAPH_MCP_COMPACT=0`) |
+| Full | configured | 36 | Verifier endpoint configured |
+| Compact | either | 16 | `SHADOWGRAPH_MCP_COMPACT=1` |
+| Workflow (explicit opt-in) | either | 20 | `SHADOWGRAPH_MCP_PROFILE=workflow` |
+
+### Complete Tool Inventory Availability Matrix
+
+| Tool Name | Compact (16) | Workflow (20) | Full (35/36) | Category | Mutating / Destructive |
+|---|:---:|:---:|:---:|---|:---:|
+| `shadowgraph_record_decision` | ✅ | ✅ | ✅ | Decision | Writes revision |
+| `shadowgraph_record_attempt` | ✅ | ✅ | ✅ | Decision | Writes revision |
+| `shadowgraph_record_outcome` | ✅ | ✅ | ✅ | Lifecycle | Overwrites / transitions |
+| `shadowgraph_remember` | ✅ | ✅ | ✅ | Memory | Overwrites / appends |
+| `shadowgraph_recall` | ✅ | ✅ | ✅ | Memory | Read (conditional audit) |
+| `shadowgraph_record_fact` | ✅ | ✅ | ✅ | Knowledge | Overwrites / appends |
+| `shadowgraph_search` | ✅ | ✅ | ✅ | Search | Read-only |
+| `shadowgraph_retrieve` | ✅ | ✅ | ✅ | Search | Read (conditional audit) |
+| `shadowgraph_context` | ✅ | ✅ | ✅ | Context | Read-only fast path |
+| `shadowgraph_review_context` | ✅ | ✅ | ✅ | Review | Evaluates & persists |
+| `shadowgraph_expand` | ✅ | ✅ | ✅ | Context | Read-only |
+| `shadowgraph_review` | ✅ | ✅ | ✅ | Review | Evaluates & persists |
+| `shadowgraph_reconsider` | ✅ | ✅ | ✅ | Review | Evaluates & persists |
+| `shadowgraph_ack_review` | ✅ | ✅ | ✅ | Review | Overwrites signal state |
+| `shadowgraph_maintain` | ✅ | ✅ | ✅ | Maintenance | Prunes expired / stale |
+| `shadowgraph_validate` | ✅ | ✅ | ✅ | Integrity | Read (conditional audit) |
+| `shadowgraph_supersede` | ❌ | ✅ | ✅ | Decision | Overwrites / links |
+| `shadowgraph_update_status` | ❌ | ✅ | ✅ | Lifecycle | Overwrites decision status |
+| `shadowgraph_confidence_evidence` | ❌ | ✅ | ✅ | Decision | Writes evidence revision |
+| `shadowgraph_review_signals` | ❌ | ✅ | ✅ | Review | Read (conditional audit) |
+| `shadowgraph_link` | ❌ | ❌ | ✅ | Graph | Overwrites graph edges |
+| `shadowgraph_traverse` | ❌ | ❌ | ✅ | Graph | Read (conditional audit) |
+| `shadowgraph_redact` | ❌ | ❌ | ✅ | Security | Read (conditional audit) |
+| `shadowgraph_purge` | ❌ | ❌ | ✅ | Storage | Irreversible deletion |
+| `shadowgraph_purge_preview` | ❌ | ❌ | ✅ | Storage | Read-only preview |
+| `shadowgraph_backup` | ❌ | ❌ | ✅ | Storage | Overwrites backup target |
+| `shadowgraph_restore` | ❌ | ❌ | ✅ | Storage | Overwrites store data |
+| `shadowgraph_journal` | ❌ | ❌ | ✅ | Storage | Read (conditional audit) |
+| `shadowgraph_rebuild` | ❌ | ❌ | ✅ | Storage | Read (conditional audit) |
+| `shadowgraph_repair_plan` | ❌ | ❌ | ✅ | Maintenance | Read (conditional audit) |
+| `shadowgraph_request_wider_access` | ❌ | ❌ | ✅ | Governance | Writes access request |
+| `shadowgraph_revoke_grant` | ❌ | ❌ | ✅ | Governance | Writes grant revocation |
+| `shadowgraph_discard_access` | ❌ | ❌ | ✅ | Governance | Writes access discard |
+| `shadowgraph_bind` | ❌ | ❌ | ✅ | Governance | Proposes project bind |
+| `shadowgraph_attribute` | ❌ | ❌ | ✅ | Governance | Proposes attribution |
+| `shadowgraph_verify_fact` | ❌ | ❌ | Optional | Verification | Writes fact verification |
 
 `SHADOWGRAPH_MCP_COMPACT=1` must be passed to the server process, not merely assumed from the Inspector launch shell. The automated gate uses Inspector's server environment option and verifies the returned list count.
 
@@ -140,7 +227,7 @@ miss diagnostics remain in memory until a later save. `review`, `review_context`
 deduplicate own-scope signals but still commit a revision on repeat calls.
 
 For a compact review loop, call `shadowgraph_review` or `shadowgraph_review_context`, then pass its
-`reviewSignalId` as the required `id` argument, with the same project/origin, to `shadowgraph_ack_review`. A context-only evaluation
+`reviewSignalId` (or `id`), with the same project/origin, to `shadowgraph_ack_review` (which accepts `id` or `reviewSignalId`). A context-only evaluation
 can report `reviewSignalStatus: unpersisted`; persist the evaluation before acknowledging it.
 Acknowledgement closes that signal, not the decision, and a new breach remains visible.
 

@@ -76,6 +76,51 @@ export function isSupportedUnit(unit) {
   return Object.hasOwn(UNITS, unit);
 }
 
+function deepEqual(a, b) {
+  if (a === b || (Number.isNaN(a) && Number.isNaN(b))) return true;
+  if (typeof a !== 'object' || a === null || typeof b !== 'object' || b === null) {
+    return false;
+  }
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (!deepEqual(a[i], b[i])) return false;
+    }
+    return true;
+  }
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  if (keysA.length !== keysB.length) return false;
+  for (const key of keysA) {
+    if (!Object.hasOwn(b, key) || !deepEqual(a[key], b[key])) return false;
+  }
+  return true;
+}
+
+function valuesConflict(a, b) {
+  return !deepEqual(a, b);
+}
+
+export function resolveRuleAliases(rule) {
+  if (!rule || typeof rule !== 'object' || Array.isArray(rule)) {
+    return { key: undefined, value: undefined, hasValue: false };
+  }
+  const hasKey = Object.hasOwn(rule, 'key') && rule.key !== undefined;
+  const hasTarget = Object.hasOwn(rule, 'target') && rule.target !== undefined;
+  if (hasKey && hasTarget && valuesConflict(rule.key, rule.target)) {
+    throw new Error('Conflicting condition aliases: key and target must not conflict');
+  }
+  const hasValue = Object.hasOwn(rule, 'value') && rule.value !== undefined;
+  const hasExpected = Object.hasOwn(rule, 'expected') && rule.expected !== undefined;
+  if (hasValue && hasExpected && valuesConflict(rule.value, rule.expected)) {
+    throw new Error('Conflicting condition aliases: value and expected must not conflict');
+  }
+  const key = hasKey ? rule.key : (hasTarget ? rule.target : undefined);
+  const value = hasValue ? rule.value : (hasExpected ? rule.expected : undefined);
+  const hasResolvedValue = hasValue || hasExpected;
+  return { key, value, hasValue: hasResolvedValue };
+}
+
 /**
  * Why this rule has nothing usable to compare against, or null when it does.
  *
@@ -89,16 +134,20 @@ export function isSupportedUnit(unit) {
  * by one definition rather than two that can drift apart.
  */
 export function ruleOperandIssue(rule) {
+  if (!rule || typeof rule !== 'object' || Array.isArray(rule)) {
+    return 'Rule is not a structured object';
+  }
+  const { value, hasValue } = resolveRuleAliases(rule);
   const operator = normalizeOperator(rule?.operator ?? 'equals');
-  if (!rule || typeof rule !== 'object' || !Object.hasOwn(rule, 'value') || rule.value === undefined) {
+  if (!hasValue || value === undefined) {
     return `Operator ${operator} has no value to compare against`;
   }
   if (operator === 'in' || operator === 'not_in') {
-    if (!Array.isArray(rule.value)) return `Operator ${operator} requires an array of allowed values`;
+    if (!Array.isArray(value)) return `Operator ${operator} requires an array of allowed values`;
   }
   if (operator === 'between') {
-    if (!Array.isArray(rule.value) || rule.value.length !== 2) return 'Operator between requires a two-element [low, high] range';
-    if (rule.value[0] === undefined || rule.value[1] === undefined) return 'Operator between requires both bounds';
+    if (!Array.isArray(value) || value.length !== 2) return 'Operator between requires a two-element [low, high] range';
+    if (value[0] === undefined || value[1] === undefined) return 'Operator between requires both bounds';
   }
   return null;
 }
@@ -148,11 +197,12 @@ export function parseConditionString(raw) {
 export function formatRuleCompact(rule) {
   if (typeof rule === 'string') return rule.trim();
   if (!rule || typeof rule !== 'object') return String(rule ?? '');
+  const { key, value } = resolveRuleAliases(rule);
   const op = normalizeOperator(rule.operator ?? 'equals');
   const sym = COMPACT_OPERATOR_SYMBOLS[op] ?? op;
-  const val = Array.isArray(rule.value) ? JSON.stringify(rule.value) : String(rule.value ?? '');
+  const val = Array.isArray(value) ? JSON.stringify(value) : String(value ?? '');
   const unit = rule.unit ? String(rule.unit) : '';
-  return `${rule.key} ${sym} ${val}${unit}`.trim();
+  return `${key ?? ''} ${sym} ${val}${unit}`.trim();
 }
 
 // Convert one quantity to the comparison base, given the unit the RULE declared.
@@ -235,9 +285,10 @@ export function evaluateRule(rule, value) {
     };
   }
 
+  const { key: resolvedKey, value: resolvedExpected } = resolveRuleAliases(rule);
   const operator = normalizeOperator(rule.operator ?? 'equals');
   const unit = rule.unit ?? null;
-  const base = { operator, key: rule.key ?? null, expected: rule.value, actual: value, unit };
+  const base = { operator, key: resolvedKey ?? null, expected: resolvedExpected, actual: value, unit };
 
   if (!isSupportedOperator(operator)) {
     // Previously this returned false, so a typo'd operator meant the condition
@@ -267,24 +318,24 @@ export function evaluateRule(rule, value) {
   // held deliberately -- equality here means "the stored value is this value",
   // not "these measure the same thing" -- but use an ordered operator or
   // `between` when you mean the latter.
-  if (operator === 'equals') return { ...base, verdict: verdictOf(value === rule.value), reason: 'Strict equality' };
-  if (operator === 'not_equals') return { ...base, verdict: verdictOf(value !== rule.value), reason: 'Strict inequality' };
+  if (operator === 'equals') return { ...base, verdict: verdictOf(value === resolvedExpected), reason: 'Strict equality' };
+  if (operator === 'not_equals') return { ...base, verdict: verdictOf(value !== resolvedExpected), reason: 'Strict inequality' };
   if (operator === 'contains') {
-    const satisfied = Array.isArray(value) ? value.includes(rule.value) : String(value).includes(String(rule.value));
+    const satisfied = Array.isArray(value) ? value.includes(resolvedExpected) : String(value).includes(String(resolvedExpected));
     return { ...base, verdict: verdictOf(satisfied), reason: Array.isArray(value) ? 'Array membership' : 'Substring containment' };
   }
 
   // The shape guards these two and `between` used to carry inline now live in
   // ruleOperandIssue() above, which runs first and returns the same reasons.
   if (operator === 'in' || operator === 'not_in') {
-    const member = rule.value.includes(value);
+    const member = resolvedExpected.includes(value);
     return { ...base, verdict: verdictOf(operator === 'in' ? member : !member), reason: 'Categorical set membership' };
   }
 
   if (operator === 'between') {
-    const low = comparablePair(value, rule.value[0], unit);
+    const low = comparablePair(value, resolvedExpected[0], unit);
     if (low.reason) return { ...base, verdict: 'unknown', reason: low.reason };
-    const high = comparablePair(value, rule.value[1], unit);
+    const high = comparablePair(value, resolvedExpected[1], unit);
     if (high.reason) return { ...base, verdict: 'unknown', reason: high.reason };
     // Bounds are INCLUSIVE at both ends. Stated here because a range contract
     // that leaves this to the reader produces off-by-one review misses.
@@ -293,7 +344,7 @@ export function evaluateRule(rule, value) {
   }
 
   if (ORDERED_OPERATORS.has(operator)) {
-    const resolved = comparablePair(value, rule.value, unit);
+    const resolved = comparablePair(value, resolvedExpected, unit);
     if (resolved.reason) {
       // Previously Number("250ms") produced NaN, and every comparison against
       // NaN is false, so an unreadable value silently meant "no review needed".

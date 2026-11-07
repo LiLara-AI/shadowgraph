@@ -12,7 +12,7 @@ import { CREATION_ENTRY_TYPES, HARD_GAP_EVIDENCE_TYPES, assertHardPurgeGapLedger
 import { createConfidence, applyContribution, setOutcomeContribution, computeConfidence, summarizeBasis, CONFIDENCE_POLICY } from './confidence.js';
 import { hybridSearch, foldText, expandSearchTokens, extractKeywords, stemArabicToken } from './hybrid-search.js';
 import { effectiveFactExpirationBoundary, factValidityPolicyIssue, isValidIsoInstant } from './fact-validity.js';
-import { SYMBOLIC_OPERATOR_ALIASES, evaluateRule, formatRuleCompact, isSupportedOperator, isSupportedUnit, normalizeOperator, parseConditionString, ruleOperandIssue } from './condition-eval.js';
+import { SYMBOLIC_OPERATOR_ALIASES, evaluateRule, formatRuleCompact, isSupportedOperator, isSupportedUnit, normalizeOperator, parseConditionString, resolveRuleAliases, ruleOperandIssue } from './condition-eval.js';
 import { privilegedSnapshot, privilegedValidate, registerPrivileged } from './internal/snapshot.js';
 import { extraCollections, refusePublicExport, NATIVE_STORE_KEYS, PUBLIC_EXPORT_KIND, REDACTION_EXPORT_KIND } from './internal/collections.js';
 import { isLegacyOwned, resolveScope, sameOrigin, usableOriginId } from './scope.js';
@@ -3123,8 +3123,12 @@ export function createShadowGraph(options = {}) {
     validateTemporalFields(input, ['createdAt', 'reviewAfter']);
     const confidence = input.confidence ?? 0.5;
     if (typeof confidence !== 'number' || confidence < 0 || confidence > 1) throw new Error('Decision confidence must be a number between 0 and 1');
-    const alternatives = input.alternatives ?? [];
+    const rawReopenWhen = input.reopenWhen !== undefined ? normalizeRules(input.reopenWhen, { strict: true }) : undefined;
+    let alternatives = input.alternatives ?? [];
     if (!Array.isArray(alternatives) || alternatives.some((item) => !item || typeof item.label !== 'string' || !item.label.trim())) throw new Error('Decision alternatives must have non-empty label strings');
+    if (alternatives.length === 0 && Array.isArray(rawReopenWhen) && rawReopenWhen.length > 0) {
+      alternatives = [{ label: 'reconsider', reopenWhen: rawReopenWhen }];
+    }
     let initialStatus = 'proposed';
     if (input.status !== undefined) {
       initialStatus = normalizeDecisionStatus(input.status);
@@ -3172,9 +3176,10 @@ export function createShadowGraph(options = {}) {
       // G8: confidence carries an auditable basis, not a bare number.
       confidence: createConfidence(confidence, evidence.length), status: initialStatus,
       assumptions: strings(input.assumptions, 'assumptions'), evidence,
-      alternatives: alternatives.map((item) => ({ id: allocateEntityId('alternative', reservedIds), label: item.label, reasonRejected: item.reasonRejected ?? item.reason ?? '', reopenWhen: normalizeRules(item.reopenWhen ?? [], { strict: true }), status: 'rejected' })),
+      alternatives: alternatives.map((item) => ({ id: allocateEntityId('alternative', reservedIds), label: item.label, reasonRejected: item.reasonRejected ?? item.reason ?? '', reopenWhen: normalizeRules(item.reopenWhen ?? (rawReopenWhen ?? []), { strict: true }), status: 'rejected' })),
       failedAttempts: [...(input.failedAttempts ?? [])], outcome: input.outcome ?? null,
       reviewAfter: input.reviewAfter ?? null, createdAt: input.createdAt ?? now(), updatedAt: now(),
+      ...(rawReopenWhen !== undefined ? { reopenWhen: rawReopenWhen } : {}),
       ...(tags !== undefined ? { tags } : {}),
       ...(visibility !== undefined ? { visibility } : {}),
       ...(embedding !== undefined ? { embedding } : {}),
@@ -4841,8 +4846,27 @@ export function createShadowGraph(options = {}) {
   const SIGNAL_OWN_FIELDS = ['id', 'kind', 'decisionId', 'title', 'reason', 'alternativesToReconsider', 'coverage', 'status', 'createdAt', 'acknowledgedAt'];
 
   function acknowledgeReview(signalId, scope = {}) {
-    const boundary = writeBoundary(scope);
-    const item = [...reviewSignals.values()].find((candidate) => candidate.id === signalId && decisionIn(boundary, candidate.decisionId));
+    let resolvedId = signalId;
+    let effectiveScope = scope;
+    if (typeof signalId === 'object' && signalId !== null) {
+      effectiveScope = signalId;
+      resolvedId = effectiveScope.id ?? effectiveScope.reviewSignalId;
+    }
+    if (effectiveScope && typeof effectiveScope === 'object') {
+      const idVal = effectiveScope.id;
+      const aliasVal = effectiveScope.reviewSignalId;
+      if (idVal !== undefined && aliasVal !== undefined && idVal !== aliasVal) {
+        throw new Error('Conflicting id and reviewSignalId provided');
+      }
+      if (signalId !== undefined && typeof signalId === 'string' && aliasVal !== undefined && signalId !== aliasVal) {
+        throw new Error('Conflicting id and reviewSignalId provided');
+      }
+      if (!resolvedId) {
+        resolvedId = idVal ?? aliasVal;
+      }
+    }
+    const boundary = writeBoundary(effectiveScope);
+    const item = [...reviewSignals.values()].find((candidate) => candidate.id === resolvedId && decisionIn(boundary, candidate.decisionId));
     if (!item) throw new Error('Review signal not found');
     touchMutableObject(item); item.status = 'acknowledged'; item.acknowledgedAt = now();
     // The decision is the caller's, so the acknowledgement is too; the answer is
@@ -7391,27 +7415,28 @@ function normalizeRules(rules, { strict = false } = {}) {
       if (strict) throw new Error('A reopen/reuse rule must be a string or an object');
       return rule;
     }
+    const { key, value, hasValue } = resolveRuleAliases(rule);
     const rawOperator = rule.operator ?? 'equals';
     const operator = strict
       ? normalizeOperator(rawOperator)
       : (typeof rawOperator === 'string' && SYMBOLIC_OPERATOR_ALIASES[rawOperator.trim().toLowerCase()]) || rawOperator;
     if (strict) {
-      if (typeof rule.key !== 'string' || !rule.key.trim()) throw new Error('A structured rule requires a non-empty key');
+      if (typeof key !== 'string' || !key.trim()) throw new Error('A structured rule requires a non-empty key');
       if (!isSupportedOperator(operator)) throw new Error(`Unsupported rule operator ${String(rawOperator)}`);
       if (rule.unit != null && !isSupportedUnit(rule.unit)) throw new Error(`Unsupported rule unit ${String(rule.unit)}`);
       // Already rejected, but only as a side effect of clone() refusing an
       // `undefined` field, which reported "Values must be plain JSON data" and
       // named neither the rule nor the missing operand.
-      if (!Object.hasOwn(rule, 'value') || rule.value === undefined) throw new Error(`A structured rule requires a value for operator ${operator}`);
+      if (!hasValue || value === undefined) throw new Error(`A structured rule requires a value for operator ${operator}`);
     }
     // Only write `value` when the rule actually carries one. Writing
     // `value: undefined` for a rule with no operand made every later clone() of
     // the record throw, so one such rule arriving through the lenient import
     // path poisoned exportData() and context() for the whole graph. The rule is
     // preserved as stored -- it is never given an operand it did not have.
-    const normalized = Object.hasOwn(rule, 'value') && rule.value !== undefined
-      ? { key: rule.key, operator, value: rule.value }
-      : { key: rule.key, operator };
+    const normalized = hasValue && value !== undefined
+      ? { key, operator, value }
+      : { key, operator };
     // The unit was previously dropped here, so a caller could declare one and
     // have it silently discarded before any comparison saw it.
     if (rule.unit != null) normalized.unit = rule.unit;

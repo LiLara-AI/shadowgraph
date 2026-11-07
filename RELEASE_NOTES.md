@@ -1,3 +1,46 @@
+# ShadowGraph 0.44.0 — MCP Tool Disambiguation, Usability & Lifecycle Exposure
+
+This release delivers comprehensive MCP tool disambiguation, full schema exposure of underlying engine lifecycle functions, safe domain error recovery, enhanced CLI ergonomics, and extensive visual documentation, while strictly maintaining the fixed 3-profile inventory invariants (Compact 16, Workflow 20, Full 35 / 36 with verifier).
+
+## Key Highlights & Features
+
+### 1. Complete MCP Schema Exposure & Function Alignment
+Exposed previously hidden lifecycle, retry, search, and memory management capabilities directly across MCP schemas:
+- `shadowgraph_record_attempt`: Expose `reusableWhen`, `relatedTo`, `task`, `tags`, and `visibility` in input schema; optional `task`, `tags`, `visibility` in attempt record output schema.
+- `shadowgraph_record_decision`: Expose `status`, `supersedes`, `reviewAfter`, `failedAttempts`, `reason`, `changeSummary`, `task`, `tags`, and `visibility` in input schema; optional fields in record output schema.
+- `shadowgraph_record_outcome`: Expose `autoTransition`, `decisionStatus`, and `lifecycleStatus` both inside the `outcome` object schema and as top-level MCP aliases.
+- `shadowgraph_recall`: Expose inputs `includeHistory`, `includeCrossProject`, and `expandSynonyms`; expose `historyChain` on recall hit schema.
+- `shadowgraph_context`: Expose `includeCrossProject` input on default context input schema; enrich `advisoryItemSchema` with optional fields (`sourceProject`, `crossProject`, `reusableNow`, `conditionSummary`, `changeSummary`, `summary`, `detail`, `score`, `title`, `chosen`, `solution`, `result`, `text`, `key`, `tags`).
+- `shadowgraph_remember` & `shadowgraph_record_fact`: Expose `visibility`, `reason`, `changeSummary`, `allowHistorical`, and `backfill` (`validFrom`, `validTo`, `observedAt`, `tags`) with optional `visibility` and `changeSummary` on record schemas. Enforce `value` as required on `shadowgraph_record_fact`. Expose optional `reason` and `changeSummary` on `shadowgraph_supersede`.
+- `shadowgraph_search` & `shadowgraph_retrieve`: Expose inputs `matchMode` (`'all' | 'partial' | 'any'`) and `expandSynonyms`; expose outputs `partialMatch`, `matchedTermCount`, `totalQueryTerms` on search hit schema.
+
+### 2. Fixed Profile Invariants
+- Preserved exact tool counts across all tiers: Compact 16, Workflow 20, Full 35 (36 with verifier).
+
+### 3. Tool Description Alignment
+- Synchronized tool descriptions with actual engine execution semantics:
+  - Documented Arabic root/stemming support, 3+-term partial match fallback, and the role of `shadowgraph_recall`.
+  - Documented symbolic condition operators (`>=`, `<=`, `==`, `!=`, `>`, `<`) and plain `changedFacts` keys for `reopenWhen` and `reusableWhen`.
+  - Documented that decision lifecycle status remains unchanged unless `autoTransition` or `decisionStatus`/`lifecycleStatus` is supplied.
+
+### 4. AI Error Recovery & Ergonomics
+- **Safe Domain Error Recovery**: Replaced generic `Tool execution failed` with sanitized domain messages (`publicErrorDetails` / `PUBLIC_DOMAIN_MESSAGES`), strictly preventing leakage of filesystem paths and store internals.
+- **Profile-Hidden Tool Guidance**: Provided structured guidance when tools outside the active Compact or Workflow profile are called, retaining JSON-RPC code -32601.
+- **Consistent Project Defaulting**: Auto-defaults the `project` parameter across follow-up tools (`shadowgraph_record_outcome`, `shadowgraph_update_status`, `shadowgraph_confidence_evidence`, `shadowgraph_supersede`, `shadowgraph_link`, `shadowgraph_ack_review`, `shadowgraph_reconsider`, `shadowgraph_review_context`).
+- **Parameter Aliases**: Accepted `reviewSignalId` as an alias for `id` in `shadowgraph_ack_review`, and accepted `target`/`expected` as aliases for `key`/`value` in rule conditions (rejecting conflicting definitions).
+
+### 5. CLI Help, Wire Budgets & Visual Documentation
+- **CLI Ergonomics**: Added `shadowgraph --help`, `-h`, and `help` commands (exiting code 0 on stdout); added helpful JSON parse error formatting; documented `SHADOWGRAPH_MCP_PROFILE=workflow` in `doctor`.
+- **Wire Budgets**: Added `workflow` profile measurement to `scripts/mcp-wire-size.mjs`; re-calibrated `WIRE_BUDGETS` and `DESCRIPTION_TOTALS` in test metadata with ~2% measured headroom.
+- **Visual Documentation**: Enhanced GitHub visual presentation with Mermaid diagrams for engine architecture, profile hierarchy, decision-to-attempt lifecycle loops, and consequential work patterns across `README.md`, `docs/mcp-compatibility.md`, and `integrations/agent-policy.md`.
+
+## Verification & Compatibility
+
+- All verification suites pass 100%: unit tests (`npm test`), E2E suite (`node --test test/e2e-mcp-disambiguation.test.js`), wire budgets (`npm run size:mcp`), MCP and Glama checks (`npm run check:mcp`, `npm run check:glama`), integration policies (`npm run check:integrations`), and clean package installation smoke (`npm run smoke:package`).
+- The package remains `private: true`, unpublished to npm.
+
+## Previous 0.43.4 release
+
 # ShadowGraph 0.43.4 — MCP Interface & Usability Technical Preview
 
 Tool descriptions in the MCP catalog now resolve the `shadowgraph_repair_plan`
