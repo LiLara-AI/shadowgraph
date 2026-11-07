@@ -217,6 +217,10 @@ export const REGISTER = Object.freeze([
   c('activeDecisions[].alternatives[].reasonRejected', 'historical fact'),
   c('activeDecisions[].alternatives[].reopenWhen.**', 'historical fact'),
   c('activeDecisions[].alternatives', 'historical fact'),
+  c('activeDecisions[].task', 'historical fact'),
+  c('activeDecisions[].tags.**', 'historical fact'),
+  m('activeDecisions[].visibility', 'scope'),
+  c('activeDecisions[].changeSummary', 'historical fact'),
   passThrough('activeDecisions'),
 
   // --- staleAssumptions: facts no longer active -----------------------------
@@ -235,6 +239,9 @@ export const REGISTER = Object.freeze([
   c('staleAssumptions[].expiresAt', 'historical fact'),
   c('staleAssumptions[].validTo', 'historical fact'),
   c('staleAssumptions[].temporal.**', 'historical fact'),
+  m('staleAssumptions[].visibility', 'scope'),
+  c('staleAssumptions[].changeSummary', 'historical fact'),
+  c('staleAssumptions[].tags.**', 'historical fact'),
   passThrough('staleAssumptions'),
 
   // --- failedAttempts: recorded failed attempts ----------------------------
@@ -255,6 +262,9 @@ export const REGISTER = Object.freeze([
   c('failedAttempts[].environment', 'observed experience'),
   c('failedAttempts[].relatedTo.**', 'relationship'),
   c('failedAttempts[].reusableWhen.**', 'historical fact'),
+  c('failedAttempts[].task', 'historical fact'),
+  c('failedAttempts[].tags.**', 'historical fact'),
+  m('failedAttempts[].visibility', 'scope'),
   passThrough('failedAttempts'),
 
   // --- firedConditions: recorded review conditions that fired --------------

@@ -115,6 +115,7 @@ const memoryScopeProperty = {
   additionalProperties: false
 };
 const embeddingProperty = { type: 'array', minItems: 1, items: { type: 'number' }, description: 'Caller-supplied vector for this text. Omit to use the configured embedding provider; with no provider the record is still stored and recall reports semantic.available=false instead of renaming lexical overlap as semantic.' };
+const visibilityProperty = { type: 'string', enum: ['project', 'global'], description: 'Visibility scope for cross-project recall and context: project (default) or global.' };
 const memoryProperties = {
   memoryType: { type: 'string', enum: [...MEMORY_TYPES], description: 'Which kind of memory this is, and part of its identity. preference and profile are durable user facts, goal a desired state, instruction an operating constraint, procedure reusable steps, episode a recallable event, note general knowledge.' },
   key: { type: 'string', description: 'Stable caller-chosen name within this scope and type, such as hotel-style. Reusing it reconciles that memory rather than adding a second one.' },
@@ -124,7 +125,12 @@ const memoryProperties = {
   metadata: { type: 'object', description: 'Caller-owned JSON object kept with the memory. Part of the compared content, so changing it produces a new version.' },
   validFrom: { type: 'string', description: 'ISO 8601 instant from which this memory is true in the modeled world. Defaults to the write time. Writes for one identity must arrive in non-decreasing validFrom order.' },
   validTo: described(nullableStringProperty, 'ISO 8601 instant after which it stops being true, or null for open-ended. Must be later than validFrom.'),
-  embedding: embeddingProperty
+  embedding: embeddingProperty,
+  visibility: visibilityProperty,
+  reason: { type: 'string', description: 'Explanation or rationale for storing or updating this memory.' },
+  changeSummary: { type: 'string', description: 'Summary of what changed compared to previous versions.' },
+  allowHistorical: { type: 'boolean', description: 'Permit recording a historical version with validFrom earlier than existing versions.' },
+  backfill: { type: 'boolean', description: 'Alias for allowHistorical to insert a memory into past historical intervals.' }
 };
 const idempotencyKeyProperty = { type: 'string', maxLength: 200, description: 'Retry identity within the project or origin and operation (also scope/type/key for memory). Reuse it to recover the original canonical ID; this key is never an entity ID.' };
 const projectProperty = { type: 'string', description: 'Project or confirmed workspace binding; otherwise origin-only. No identity returns an empty scoped view.' };
@@ -133,7 +139,7 @@ const writeProjectProperty = { type: 'string', description: 'Owning project; req
 const originIdProperty = { type: 'string', description: 'Capture-origin ID for unattributed records when project is omitted.' };
 const creationIdPolicy = { description: 'ShadowGraph generates and returns canonical IDs. Supplying a creation id is refused before lookup or retry; keep returned IDs for later references.', not: { required: ['id'] } };
 const decisionIdProperty = { type: 'string', description: 'Identifier of an existing decision, as returned by shadowgraph_record_decision, shadowgraph_search, or shadowgraph_retrieve.' };
-const changedFactsProperty = { type: 'array', items: { type: 'string' }, description: 'Non-persisted string[] of changed fact keys firing string reopenWhen rules (e.g. ["budget"]); non-strings error. Object rules read values from facts overrides or stored facts instead.' };
+const changedFactsProperty = { type: 'array', items: { type: 'string' }, description: 'Non-persisted string[] of changed fact keys firing plain string reopenWhen rules (e.g. ["budget"]); non-strings error. Symbolic strings ("key >= value") and object rules read values from stored facts or facts overrides instead.' };
 const factsOverrideProperty = { type: 'object', description: 'Non-persisted {key:value} map overriding stored facts for object rules (e.g. {ready:true}); arrays/non-objects error. Unlisted keys read active stored facts; string rules require changedFacts.' };
 const statusFilterProperty = { type: 'string', enum: [...DECISION_STATUSES], description: 'Return only decisions in this lifecycle state. A structured filter, so matching it is never counted as a content match.' };
 const kindFilterProperty = { type: 'string', enum: ['decision', 'attempt'], description: 'Restrict results to decisions or to attempts. A structured filter, never a content match.' };
@@ -155,6 +161,7 @@ const integerCount = (description) => ({ type: 'integer', minimum: 0, descriptio
 const stringOrNull = (description) => ({ anyOf: [{ type: 'string' }, { type: 'null' }], description });
 const numberOrNull = (description) => ({ anyOf: [{ type: 'number' }, { type: 'null' }], description });
 const integerOrNull = (description) => ({ anyOf: [{ type: 'integer' }, { type: 'null' }], description });
+const booleanOrNull = (description) => ({ anyOf: [{ type: 'boolean' }, { type: 'null' }], description });
 const objectOrNull = (description) => ({ anyOf: [{ type: 'object' }, { type: 'null' }], description });
 const stringList = (description) => ({ type: 'array', items: { type: 'string' }, description });
 
@@ -197,7 +204,11 @@ const decisionRecordSchema = entityRecordSchema('A stored decision, including it
   reviewAfter: stringOrNull('ISO 8601 instant after which shadowgraph_maintain marks this decision stale.'),
   supersededBy: stringOrNull('Identifier of the decision that replaced this one.'),
   supersedes: { type: 'array', description: 'Identifiers of decisions this one replaced.' },
-  migration: { type: 'object', description: 'Present only on migrated records; records the legacy value a field was mapped from.' }
+  migration: { type: 'object', description: 'Present only on migrated records; records the legacy value a field was mapped from.' },
+  task: stringOrNull('Task or problem context this decision addresses.'),
+  tags: stringList('Labels or extracted keywords stored with the decision.'),
+  visibility: stringOrNull('Visibility boundary: project or global.'),
+  changeSummary: stringOrNull('Summary of changes from superseded decisions.')
 });
 const attemptRecordSchema = entityRecordSchema('A stored attempt and its result.', {
   solution: stringOrNull('What was tried.'),
@@ -207,7 +218,10 @@ const attemptRecordSchema = entityRecordSchema('A stored attempt and its result.
   causalClaim: { type: 'object', description: 'The cause, attributed apart from the attempt: state recorded (the reason, agent_claimed), unknown, not_recorded, or legacy_freetext (a reason stored before causes were, never classed or evidenced).' },
   environment: stringOrNull('Where it was tried.'),
   reusableWhen: { type: 'array', description: 'Conditions recorded for reusing the attempt. All must hold, and none may be unresolved.' },
-  relatedTo: { type: 'array', description: 'Identifiers of related entities.' }
+  relatedTo: { type: 'array', description: 'Identifiers of related entities.' },
+  task: stringOrNull('Task or problem context this attempt was trying to solve.'),
+  tags: stringList('Labels or extracted keywords stored with the attempt.'),
+  visibility: stringOrNull('Visibility boundary: project or global.')
 });
 const factRecordSchema = entityRecordSchema('A stored fact with its provenance claim and validity window.', {
   key: stringOrNull('Fact name, unique per project among active facts.'),
@@ -220,7 +234,10 @@ const factRecordSchema = entityRecordSchema('A stored fact with its provenance c
   observedAt: stringOrNull('ISO 8601 time the fact was observed.'),
   validityPolicy: { type: 'object', description: 'Declared expiry inputs and the effective expiration boundary derived from them.' },
   temporal: { type: 'object', description: 'Bi-temporal window: validFrom, validTo, recordedAt, invalidatedAt.' },
-  verification: { type: 'object', description: 'Present only on a signed verification: the attestation this build checked.' }
+  verification: { type: 'object', description: 'Present only on a signed verification: the attestation this build checked.' },
+  visibility: stringOrNull('Visibility boundary: project or global.'),
+  changeSummary: stringOrNull('Summary of modifications compared to superseded versions.'),
+  tags: stringList('Labels or extracted keywords stored with the fact.')
 }, ['key']);
 const memoryRecordSchema = entityRecordSchema('A stored scoped memory version.', {
   memoryType: stringOrNull('preference, profile, goal, instruction, procedure, episode, or note.'),
@@ -235,7 +252,9 @@ const memoryRecordSchema = entityRecordSchema('A stored scoped memory version.',
   verificationStatus: stringOrNull('Always unverified for memories.'),
   temporal: { type: 'object', description: 'Bi-temporal window: validFrom, validTo, recordedAt, invalidatedAt.' },
   supersedes: stringOrNull('Identifier of the version this one replaced.'),
-  supersededBy: stringOrNull('Identifier of the version that replaced this one.')
+  supersededBy: stringOrNull('Identifier of the version that replaced this one.'),
+  visibility: stringOrNull('Visibility boundary: project or global.'),
+  changeSummary: stringOrNull('Summary of modifications compared to superseded versions.')
 });
 const storedRecordSchema = entityRecordSchema('One stored entity: a decision, attempt, memory, fact, or alternative. Fields vary by kind, and an entity imported from an older schema may carry fewer of them.', {}, []);
 const storedRelationSchema = entityRecordSchema('A stored relationship between two entities.', {
@@ -513,7 +532,10 @@ const searchHitSchema = {
     matched: stringList('The content fields that actually matched, never schema keys.'),
     reason: { type: 'string', description: 'Human-readable explanation built from matched, so it can never claim a match it cannot name.' },
     matchedBy: { type: 'string', enum: ['content', 'filter', 'graph'], description: 'content when query terms matched, filter when only structured filters applied, graph when the item was pulled in as a neighbour.' },
-    filters: { type: 'object', description: 'The structured filters that were applied.' }
+    filters: { type: 'object', description: 'The structured filters that were applied.' },
+    partialMatch: { type: 'boolean', description: 'True when the record matched a subset of query terms rather than all terms.' },
+    matchedTermCount: integerCount('Number of distinct query terms that matched content fields in this record.'),
+    totalQueryTerms: integerCount('Total number of search terms parsed from the query string.')
   }
 };
 const retrieveHitSchema = {
@@ -617,7 +639,8 @@ const recallHitSchema = {
     score: { type: 'number', description: 'Fused score.' },
     ranks: signalRankSchema,
     scores: signalScoreSchema,
-    reasons: stringList('One entry per contributing signal, naming the rank it contributed.')
+    reasons: stringList('One entry per contributing signal, naming the rank it contributed.'),
+    historyChain: { type: 'array', description: 'Lineage of prior superseded versions associated with this record.' }
   }
 };
 const collectionCompletenessSchema = (description) => ({
@@ -759,12 +782,12 @@ const readProvenanceSchema = { type: 'object', description: 'Original read bound
 const GRANT_READ_TOOLS = new Set(['shadowgraph_review', 'shadowgraph_search', 'shadowgraph_context', 'shadowgraph_review_context', 'shadowgraph_recall', 'shadowgraph_traverse', 'shadowgraph_expand', 'shadowgraph_redact', 'shadowgraph_maintain', 'shadowgraph_retrieve', 'shadowgraph_validate', 'shadowgraph_journal', 'shadowgraph_rebuild', 'shadowgraph_review_signals', 'shadowgraph_repair_plan', 'shadowgraph_reconsider']);
 const ACCESS_DESCRIPTIONS = {
   shadowgraph_review: {"does": "Evaluate reopen rules, reviewAfter and failed outcomes; persist signals and return due decisions as { items, completeness }.", "route": "shadowgraph_review_signals lists signals; shadowgraph_reconsider audits verdicts; shadowgraph_review_context adds context; shadowgraph_ack_review closes one.", "effects": "Skips closed decisions. Saves owned signals deduped by decision/reason/coverage and commits a revision; grants widen reads only; no status changes.", "returns": ""},
-  shadowgraph_search: {"does": "Match records containing every literal query term as direct content matches.", "route": "shadowgraph_retrieve adds ordered neighbours; shadowgraph_recall ranks matches; shadowgraph_context prepares a working set.", "returns": "Paginated { items, page, completeness }. \"redis timeout\" requires both terms, not an exact phrase; empty query applies filters only.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
+  shadowgraph_search: {"does": "Match records containing every literal query term as direct content matches. Arabic stems.", "route": "shadowgraph_retrieve adds ordered neighbours; shadowgraph_recall ranks matches; shadowgraph_context prepares a working set.", "returns": "Paginated hits. \"a b\" requires both terms, not an exact phrase; 3+ terms fallback. recall ranks memory/facts.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
   shadowgraph_context: {"does": "Read a planning working set without saving signals: decisions, stale facts, failed attempts and fired conditions.", "route": "shadowgraph_search or shadowgraph_retrieve find records; shadowgraph_recall ranks memory; shadowgraph_review_context persists signals.", "effects": "No decision or signal writes; unmatched-query diagnostics stay in memory until the next save. Own-scope read saves nothing; an access key commits a revision and audit."},
   shadowgraph_review_context: {"does": "Load the project working set and persist signals from reopen rules, reviewAfter and failed outcomes.", "route": "shadowgraph_context saves no signals; shadowgraph_review also persists signals, returning due items only; shadowgraph_ack_review closes one.", "effects": "Skips closed decisions. Deduplicates owned signals by decision/reason/coverage and commits a revision; grants widen reads only (unpersisted); no status changes."},
   shadowgraph_recall: {"does": "Rank relevant scoped memory and records by lexical, vector, graph and temporal signals.", "route": "shadowgraph_search requires every term; shadowgraph_retrieve adds neighbours; shadowgraph_context prepares a working set.", "returns": "Returns scores and available signals; no provider/vector means no semantic ranking. Omitted memory scope fields select null, not any user/run.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
   shadowgraph_maintain: {"does": "Age due owned decisions to stale, expire due owned facts, then evaluate reopen rules.", "route": "shadowgraph_review evaluates without aging; shadowgraph_validate diagnoses integrity. Maintenance does not repair or restore.", "effects": "Uses now or the clock; saves lifecycle changes and signals, even on repeats. Grants widen audited reads, not writes.", "returns": "Returns changed IDs, due items and stored signals, including acknowledged ones."},
-  shadowgraph_retrieve: {"does": "Retrieve seed records matching every query term plus their ordered graph neighbours.", "route": "shadowgraph_search returns matches only; shadowgraph_recall ranks relevance; shadowgraph_context prepares a working set.", "returns": "Paginated records with match/relationship reasons. Every term must match a seed; neighbours need not match. Both stay in scope.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
+  shadowgraph_retrieve: {"does": "Retrieve seed records matching every query term plus their ordered graph neighbours. Arabic stems.", "route": "shadowgraph_search returns matches only; shadowgraph_recall ranks relevance; shadowgraph_context prepares a working set.", "returns": "Paginated hits. Every term must match a seed; neighbours need not match. 3+ terms fallback; recall ranks facts/memory.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
   shadowgraph_expand: {"does": "Expand a context claim line to its full current record using its expansion handle as input.", "route": "shadowgraph_context supplies the handle; pass recordId, digest and flattened scope fields at top level.", "returns": "Returns record, status and counterparts. Stale digest yields revision_changed; purged yields purged; missing or out-of-scope yields unavailable.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
   shadowgraph_validate: {"does": "Diagnose record, graph and journal integrity without applying repairs.", "route": "shadowgraph_maintain ages records; shadowgraph_review checks decision rules; shadowgraph_repair_plan proposes repairs; shadowgraph_rebuild checks journal replay.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
   shadowgraph_reconsider: {"does": "Audit one decision or project: explain all reopen verdicts and persist signals for due decisions.", "route": "shadowgraph_review returns only due items; shadowgraph_ack_review closes reviewSignalId.", "effects": "Rejects unknown, out-of-scope or closed decisionId. Saves deduplicated owned signals and commits a revision; grants widen reads only; no status changes.", "returns": "review_recommended: condition fired; manual_review: unresolved evidence; unchanged: complete, no trigger."},
@@ -822,7 +845,8 @@ const defaultContextInputSchema = {
     query: { type: 'string', description: 'Free text. With it or focalId, the response adds relevant: the records in scope that the lexical or graph signal ranks, ahead of the working set. No semantic signal is computed on this read.' },
     focalId: { type: 'string', description: 'Entity id to rank graph neighbours from. An id outside the scope reaches nothing, like an unknown one.' },
     asOf: { type: 'string', description: 'ISO 8601 instant for relevant: facts and memories valid then, recency ordered from it, and lines derived as of it.' },
-    compact: { type: 'boolean', description: 'With query or focalId, true delivers each relevant record as a shortened claim line (T1); false or omitted delivers full records. A line that would omit decisive meaning falls back to the full record. This controls record presentation, not the server tool mode. For example, query:"cache", compact:true adds relevant.items with expansion handles; compact:true alone does not add relevant.' }
+    compact: { type: 'boolean', description: 'With query or focalId, true delivers each relevant record as a shortened claim line (T1); false or omitted delivers full records. A line that would omit decisive meaning falls back to the full record. This controls record presentation, not the server tool mode. For example, query:"cache", compact:true adds relevant.items with expansion handles; compact:true alone does not add relevant.' },
+    includeCrossProject: { type: 'boolean', description: 'Include cross-project experience and advisory collections without requiring a task query.' }
   }
 };
 const reviewContextOutputSchema = {
@@ -1112,7 +1136,22 @@ const advisoryItemSchema = (description) => ({
   required: ['id', 'kind'],
   properties: {
     id: { type: 'string', description: 'Identifier of the record.' },
-    kind: { type: 'string', description: 'The entity kind.' }
+    kind: { type: 'string', description: 'The entity kind.' },
+    sourceProject: stringOrNull('Original project namespace that authored this advisory record.'),
+    crossProject: booleanOrNull('True when this advisory record originated outside the active project.'),
+    reusableNow: booleanOrNull('True when the attempt conditions currently hold against active facts.'),
+    conditionSummary: { anyOf: [{ type: 'array', items: { type: 'string' } }, { type: 'string' }, { type: 'null' }], description: 'Summary of evaluated conditions or compact condition rule strings.' },
+    changeSummary: stringOrNull('Summary of modifications from superseded versions of this entity.'),
+    summary: stringOrNull('Short summary text of the advisory record.'),
+    detail: stringOrNull('Extended description or rationale for this advisory item.'),
+    score: numberOrNull('Relevance or similarity score computed for this advisory item.'),
+    title: stringOrNull('Short title of the advisory decision or entity.'),
+    chosen: stringOrNull('The chosen alternative or resolution in an advisory decision.'),
+    solution: stringOrNull('What was tried in an advisory attempt.'),
+    result: stringOrNull('What happened in an advisory attempt.'),
+    text: stringOrNull('Verbatim text content of an advisory memory record.'),
+    key: stringOrNull('Key name identifying an advisory fact or scoped memory.'),
+    tags: stringList('Labels or extracted keywords stored with this advisory record.')
   }
 });
 const contextOutputSchema = {
@@ -1201,6 +1240,15 @@ const CATALOG = [
         originId: originIdProperty,
         goal: { type: 'string', description: 'What the decision is meant to achieve. Searchable content.' },
         confidence: { type: 'number', minimum: 0, maximum: 1, description: 'Starting confidence, 0-1. Defaults to 0.5. Later outcomes and evidence move it from this baseline; it is a degree of belief, never a verification status.' },
+        status: { type: 'string', enum: ['proposed', 'planned', 'in_progress', 'executed', 'validated', 'reconsidered', 'abandoned', 'archived'], description: 'Initial lifecycle status of the decision; defaults to proposed.' },
+        supersedes: { anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }], description: 'Identifier or list of identifiers of earlier decisions that this decision replaces.' },
+        reviewAfter: { type: 'string', description: 'ISO 8601 instant after which maintenance marks this decision stale.' },
+        failedAttempts: { type: 'array', items: { type: 'string' }, description: 'Identifiers or descriptions of failed attempts that motivated this decision.' },
+        reason: { type: 'string', description: 'Rationale or motivation for making or superseding with this decision. Searchable content.' },
+        changeSummary: { type: 'string', description: 'Summary of differences or architectural changes compared to superseded decisions.' },
+        task: { type: 'string', description: 'Task, goal context, or ticket identifier this decision addresses. Searchable content.' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Free-form labels stored with the decision. Searchable content.' },
+        visibility: visibilityProperty,
         assumptions: { type: 'array', items: { type: 'string' }, description: 'What the decision takes for granted. Record each as a fact too if it should be able to reopen the decision.' },
         evidence: { type: 'array', items: evidenceItemProperty, description: 'Supporting evidence. Counted as declared evidence in the confidence basis, but never re-checked.' },
         alternatives: {
@@ -1213,7 +1261,7 @@ const CATALOG = [
               label: { type: 'string', description: 'Name of the rejected option. Required in practice: an alternative without a non-empty label is rejected.' },
               reasonRejected: { type: 'string', description: 'Why it was rejected. Searchable content.' },
               reason: { type: 'string', description: 'Accepted as an alias of reasonRejected for older callers.' },
-              reopenWhen: { type: 'array', description: 'Rules that make this alternative worth reconsidering. Each is either a fact key as a plain string, matched only against changedFacts, or an object { key, operator, value } evaluated against stored facts so it still fires after a restart. operator defaults to equals.' }
+              reopenWhen: { type: 'array', description: 'Rules that make this alternative reconsiderable. Each is either a plain changedFacts key string, a symbolic condition string ("key >= value"), or an object { key, operator, value } with symbolic operators (>=, <=, ==, !=, >, <) or words (equals, gte, in, between).' }
             }
           }
         },
@@ -1241,6 +1289,11 @@ const CATALOG = [
         solution: { type: 'string', description: 'What was tried. Required, non-empty, and searchable content.' },
         result: { type: 'string', description: 'What happened. Required, non-empty, and searchable content. With no resultClass, wording such as failed, error, or regression is what places the attempt in shadowgraph_context failedAttempts; a captured attempt\'s wording is never read.' },
         resultClass: { type: 'string', enum: ['failed', 'succeeded', 'inconclusive'], description: 'Classify the result instead of leaving it to the wording heuristic. Set it when the result text does not say failed, error, or regression, or when it does but the attempt did not fail.' },
+        task: { type: 'string', description: 'Task or problem context this attempt was trying to solve. Searchable content.' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Free-form labels stored with the attempt. Searchable content.' },
+        visibility: visibilityProperty,
+        reusableWhen: { type: 'array', description: 'Conditions for reusing this attempt: plain changedFacts key strings, symbolic condition strings ("key >= value"), or rule objects { key, operator, value } with symbolic operators (>=, <=, ==, !=, >, <) or words (equals, gte, in, between).' },
+        relatedTo: { type: 'array', items: { type: 'string' }, description: 'Identifiers of related entities such as decisions or other attempts.' },
         project: writeProjectProperty,
         originId: originIdProperty,
         reason: { type: 'string', description: 'Why it turned out that way. Searchable content.' },
@@ -1278,15 +1331,17 @@ const CATALOG = [
     persists: false,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     describe: {
-      does: 'Match records containing every literal query term as direct content matches.',
+      does: 'Match records containing every literal query term as direct content matches. Arabic stems.',
       route: 'shadowgraph_retrieve adds ordered neighbours; shadowgraph_recall ranks matches; shadowgraph_context prepares a working set.',
       effects: 'Reads only. Schema keys never match, and a filter is never a content match.',
-      returns: 'Paginated { items, page, completeness }. "redis timeout" requires both terms, not an exact phrase; empty query applies filters only.'
+      returns: 'Paginated hits. "a b" requires both terms, not an exact phrase; 3+ terms fallback. recall ranks memory/facts.'
     },
     inputSchema: {
       type: 'object',
       properties: {
         query: { type: 'string', description: `Whitespace-separated terms, matched case-insensitively as substrings against the declared content fields (${CONTENT_FIELD_LIST}). Every term must match something, so more terms narrow the result. Omit to filter without searching.` },
+        matchMode: { type: 'string', enum: ['all', 'partial', 'any'], description: 'Term matching strategy: all (default, require every term), partial (allow term subset with 3+ terms), or any.' },
+        expandSynonyms: { type: 'boolean', description: 'Expand query terms with bilingual English and Arabic synonyms and morphological variants.' },
         project: { type: 'string', description: 'Restrict to one project. Omitted, decisions and facts are searched across projects, while memories stay in the default project and all-null scope.' },
         status: statusFilterProperty,
         kind: kindFilterProperty,
@@ -1430,6 +1485,9 @@ const CATALOG = [
         focalId: { type: 'string', description: 'Entity id to measure graph distance from. Without it the graph signal reports available:false.' },
         preferRecent: { type: 'boolean', description: 'Enable temporal ranking against now. Ignored when asOf is supplied, which already selects a point in time.' },
         queryEmbedding: described(embeddingProperty, 'Caller-supplied query vector. Omit to use the configured provider; with neither, the semantic signal reports available:false and a reason.'),
+        includeHistory: { type: 'boolean', description: 'Include superseded and historical versions with an attached historyChain.' },
+        includeCrossProject: { type: 'boolean', description: 'Include matching records from other projects marked with global visibility.' },
+        expandSynonyms: { type: 'boolean', description: 'Expand search query tokens using bilingual English and Arabic synonym dictionaries.' },
         ...pageProperties
       }
     },
@@ -1454,7 +1512,7 @@ const CATALOG = [
       type: 'object',
       ...creationIdPolicy,
       $defs: { jsonValue: jsonValueProperty },
-      required: ['key'],
+      required: ['key', 'value'],
       properties: {
         key: { type: 'string', description: 'Fact name, unique per project among active facts. Required and non-empty. Use the same key that a decision’s reopenWhen rules refer to.' },
         value: jsonValueProperty,
@@ -1462,6 +1520,15 @@ const CATALOG = [
         confidence: { type: 'number', minimum: 0, maximum: 1, description: 'How much the caller trusts this observation, 0-1. Defaults to 0.5. It does not verify anything.' },
         project: writeProjectProperty,
         originId: originIdProperty,
+        visibility: visibilityProperty,
+        reason: { type: 'string', description: 'Explanation or rationale for observing, updating, or superseding this fact.' },
+        changeSummary: { type: 'string', description: 'Summary of what changed from the previous value of this fact.' },
+        allowHistorical: { type: 'boolean', description: 'Permit recording a historical fact with validFrom earlier than current active facts.' },
+        backfill: { type: 'boolean', description: 'Alias for allowHistorical to insert a fact into past validity intervals.' },
+        validFrom: { type: 'string', description: 'ISO 8601 instant from which this fact became true in the modeled world.' },
+        validTo: { anyOf: [{ type: 'string' }, { type: 'null' }], description: 'ISO 8601 instant after which this fact stopped being true, or null.' },
+        observedAt: { type: 'string', description: 'ISO 8601 timestamp when this fact was observed or measured. Defaults to now.' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Free-form labels stored with the fact. Searchable content.' },
         expiresAt: { type: 'string', description: 'ISO 8601 instant after which shadowgraph_maintain expires this fact. Combined with validTo, the earlier boundary wins.' },
         verificationStatus: { type: 'string', enum: ['unverified', 'contradicted'], description: 'Only "contradicted" may be set by a caller, because it lowers trust. "verified" and "expired" are rejected: verification is not self-assertable and expiry is owned by shadowgraph_maintain.' },
         idempotencyKey: idempotencyKeyProperty,
@@ -1477,8 +1544,8 @@ const CATALOG = [
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     describe: {
       does: 'Record what happened to an existing decision and update its evidence-weighted confidence.',
-      route: 'shadowgraph_confidence_evidence records evidence short of an outcome, shadowgraph_update_status changes the lifecycle state.',
-      effects: 'One outcome contribution per decision: re-recording replaces it, updates the decision timestamp and commits a revision; it does not change lifecycle status.'
+      route: 'shadowgraph_confidence_evidence records evidence; shadowgraph_update_status changes the lifecycle state.',
+      effects: 'One outcome per decision: re-recording replaces it, updates timestamp and confidence; does not change lifecycle status unless autoTransition or decisionStatus/lifecycleStatus is supplied.'
     },
     inputSchema: {
       type: 'object',
@@ -1493,9 +1560,15 @@ const CATALOG = [
             status: { type: 'string', enum: [...OUTCOME_STATUSES], description: 'successful raises confidence, failed lowers it and makes the decision due for review, mixed lowers it by half, and unknown moves nothing because "we do not know" is not evidence.' },
             sourceClass: { type: 'string', enum: [...SOURCE_CLASSES], description: 'Claimed origin of this outcome observation. It weights how far confidence moves; it never verifies anything.' },
             lessons: { type: 'array', items: { type: 'string' }, description: 'What was learned, stored with the outcome.' },
-            observedAt: { type: 'string', description: 'ISO 8601 time the outcome was observed. Defaults to now.' }
+            observedAt: { type: 'string', description: 'ISO 8601 time the outcome was observed. Defaults to now.' },
+            autoTransition: { type: 'boolean', description: 'Automatically step decision lifecycle to validated on success or failed on failure.' },
+            decisionStatus: { type: 'string', description: 'Target decision lifecycle state to transition into upon recording this outcome.' },
+            lifecycleStatus: { type: 'string', description: 'Alias for decisionStatus specifying target lifecycle state to transition into.' }
           }
-        }
+        },
+        autoTransition: { type: 'boolean', description: 'Top-level alias to auto-transition decision lifecycle to validated or failed.' },
+        decisionStatus: { type: 'string', description: 'Top-level alias for target lifecycle status to transition the decision into.' },
+        lifecycleStatus: { type: 'string', description: 'Top-level alias for decisionStatus specifying target decision lifecycle status.' }
       }
     },
     outputSchema: decisionRecordSchema
@@ -1643,7 +1716,9 @@ const CATALOG = [
       required: ['decisionId', 'replacementId'],
       properties: {
         decisionId: { type: 'string', description: 'The decision being replaced. It becomes superseded and is excluded from current context.' },
-        replacementId: { type: 'string', description: 'The decision replacing it. Must be in the same project and must not be superseded, archived, abandoned, or stale.' }
+        replacementId: { type: 'string', description: 'The decision replacing it. Must be in the same project and must not be superseded, archived, abandoned, or stale.' },
+        reason: { type: 'string', description: 'Rationale or explanation for replacing the previous decision.' },
+        changeSummary: { type: 'string', description: 'Summary of differences or architectural changes introduced by the replacement.' }
       }
     },
     outputSchema: {
@@ -1760,15 +1835,17 @@ const CATALOG = [
     persists: false,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     describe: {
-      does: 'Retrieve seed records matching every query term plus their ordered graph neighbours.',
+      does: 'Retrieve seed records matching every query term plus their ordered graph neighbours. Arabic stems.',
       route: 'shadowgraph_search returns matches only; shadowgraph_recall ranks relevance; shadowgraph_context prepares a working set.',
       effects: 'Reads only. A neighbour can appear with no content match of its own.',
-      returns: 'Paginated records with match/relationship reasons. Every term must match a seed; neighbours need not match. Both stay in scope.'
+      returns: 'Paginated hits. Every term must match a seed; neighbours need not match. 3+ terms fallback; recall ranks facts/memory.'
     },
     inputSchema: {
       type: 'object',
       properties: {
         query: { type: 'string', description: `Whitespace-separated terms matched against the declared content fields (${CONTENT_FIELD_LIST}), exactly as in shadowgraph_search. Omit to retrieve by filters alone.` },
+        matchMode: { type: 'string', enum: ['all', 'partial', 'any'], description: 'Term matching strategy: all (default, require every term), partial (allow term subset with 3+ terms), or any.' },
+        expandSynonyms: { type: 'boolean', description: 'Expand query terms with bilingual English and Arabic synonyms and morphological variants.' },
         project: { type: 'string', description: 'Restrict to one project, including which neighbours may be pulled in.' },
         status: statusFilterProperty,
         kind: kindFilterProperty,
@@ -1941,7 +2018,6 @@ const CATALOG = [
     },
     inputSchema: {
       type: 'object',
-      required: ['id'],
       properties: {
         id: { type: 'string', description: 'Persisted signal id: reviewSignalId from shadowgraph_review or shadowgraph_review_context, or id from shadowgraph_review_signals. A fresh context evaluation can be unpersisted and have no ID. This is not the decisionId.' }
       }

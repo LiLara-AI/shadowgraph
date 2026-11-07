@@ -187,7 +187,28 @@ async function persistCommittedRejection(rejection) {
 const toolCatalog = buildToolCatalog({
   verifier: Boolean(verifier),
   embeddingConfigured: Boolean(process.env.SHADOWGRAPH_EMBEDDING_URL)
+}).map((tool) => {
+  if (tool.name === 'shadowgraph_ack_review' && tool.inputSchema?.properties) {
+    const { required, ...restSchema } = tool.inputSchema;
+    const nextRequired = Array.isArray(required) ? required.filter((key) => key !== 'id') : undefined;
+    return {
+      ...tool,
+      inputSchema: {
+        ...restSchema,
+        ...(nextRequired && nextRequired.length > 0 ? { required: nextRequired } : {}),
+        properties: {
+          ...tool.inputSchema.properties,
+          reviewSignalId: {
+            type: 'string',
+            description: 'Alias for id: persisted signal id from shadowgraph_review or shadowgraph_review_context.'
+          }
+        }
+      }
+    };
+  }
+  return tool;
 });
+const fullCatalogByName = new Map(toolCatalog.map((tool) => [tool.name, tool]));
 const tools = selectTools(toolCatalog, { compact: process.env.SHADOWGRAPH_MCP_COMPACT === '1', profile: process.env.SHADOWGRAPH_MCP_PROFILE || undefined });
 const toolsByName = new Map(tools.map((tool) => [tool.name, tool]));
 const persistingTools = new Set(tools.filter((tool) => tool.persists).map((tool) => tool.name));
@@ -287,7 +308,15 @@ const PROJECT_DEFAULTED_TOOLS = new Set([
   'shadowgraph_recall',
   'shadowgraph_context',
   'shadowgraph_review',
-  'shadowgraph_traverse'
+  'shadowgraph_traverse',
+  'shadowgraph_record_outcome',
+  'shadowgraph_update_status',
+  'shadowgraph_confidence_evidence',
+  'shadowgraph_supersede',
+  'shadowgraph_link',
+  'shadowgraph_ack_review',
+  'shadowgraph_reconsider',
+  'shadowgraph_review_context'
 ]);
 function withDefaultProject(name, args) {
   if (!configuredDefaultProject || !PROJECT_DEFAULTED_TOOLS.has(name)) return args;
@@ -357,7 +386,12 @@ async function callUnqueued(name, args, tier, accessManaged = false) {
   if (name === 'shadowgraph_request_wider_access') value = graph.requestAccess(args ?? {});
   else if (name === 'shadowgraph_revoke_grant') value = graph.revokeAccess(args ?? {});
   else if (name === 'shadowgraph_discard_access') value = graph.discardAccess(args ?? {});
-  else if (name === 'shadowgraph_record_decision') value = graph.addDecision(withRuntimeSession(args));
+  else if (name === 'shadowgraph_record_decision') {
+    const decisionInput = args && typeof args === 'object' && !Array.isArray(args) && !args.chosen && args.title
+      ? { ...args, chosen: args.title }
+      : args;
+    value = graph.addDecision(withRuntimeSession(decisionInput));
+  }
   else if (name === 'shadowgraph_record_attempt') value = graph.addAttempt(withRuntimeSession(args));
   else if (name === 'shadowgraph_review') value = graph.review(args ?? {});
   else if (name === 'shadowgraph_reconsider') value = graph.reconsider(args ?? {});
@@ -382,7 +416,7 @@ async function callUnqueued(name, args, tier, accessManaged = false) {
   else if (name === 'shadowgraph_record_fact') value = graph.addFact(withRuntimeSession(args));
   else if (name === 'shadowgraph_verify_fact' && verifier) value = await graph.verifyFact(args ?? {});
   else if (name === 'shadowgraph_record_outcome') {
-    const outcomePayload = args?.outcome && typeof args.outcome === 'object' && !Array.isArray(args.outcome)
+    let outcomePayload = args?.outcome && typeof args.outcome === 'object' && !Array.isArray(args.outcome)
       ? {
           ...args.outcome,
           ...(args.decisionStatus !== undefined && args.outcome.decisionStatus === undefined ? { decisionStatus: args.decisionStatus } : {}),
@@ -390,7 +424,11 @@ async function callUnqueued(name, args, tier, accessManaged = false) {
           ...(args.autoTransition !== undefined && args.outcome.autoTransition === undefined ? { autoTransition: args.autoTransition } : {})
         }
       : args?.outcome;
-    value = graph.setOutcome(args?.decisionId, outcomePayload, args);
+    if (outcomePayload && typeof outcomePayload === 'object' && !outcomePayload.status && outcomePayload.success !== undefined) {
+      outcomePayload = { ...outcomePayload, status: outcomePayload.success ? 'successful' : 'failed' };
+    }
+    const targetDecisionId = args?.decisionId ?? args?.id;
+    value = graph.setOutcome(targetDecisionId, outcomePayload, args);
   }
   else if (name === 'shadowgraph_confidence_evidence') value = graph.addConfidenceEvidence(withRuntimeSession(args ?? {}));
   else if (name === 'shadowgraph_update_status') value = graph.updateDecisionStatus(args?.decisionId, args?.status, args);
@@ -407,7 +445,13 @@ async function callUnqueued(name, args, tier, accessManaged = false) {
   else if (name === 'shadowgraph_rebuild') value = graph.rebuild(args ?? {});
   else if (name === 'shadowgraph_review_signals') value = graph.getReviewSignals(args ?? {});
   else if (name === 'shadowgraph_purge_preview') value = graph.projectSummary(args?.project);
-  else if (name === 'shadowgraph_ack_review') value = graph.acknowledgeReview(args?.id, args);
+  else if (name === 'shadowgraph_ack_review') {
+    if (args?.id !== undefined && args?.reviewSignalId !== undefined && args.id !== args.reviewSignalId) {
+      throw new Error('Conflicting id and reviewSignalId provided');
+    }
+    const resolvedId = args?.id ?? args?.reviewSignalId;
+    value = graph.acknowledgeReview(resolvedId, args);
+  }
   else if (name === 'shadowgraph_repair_plan') value = graph.repairPlan(args ?? {});
   else if (name === 'shadowgraph_backup') {
     // A missing destination would otherwise write a file named `undefined` (post-merge review R1-5).
@@ -576,8 +620,68 @@ const PUBLIC_DOMAIN_MESSAGES = new Set([
   'Invalid fact verificationStatus',
   'Purge mode must be logical or hard',
   'Outcome status must be successful, mixed, failed, or unknown',
-  'Decision not found'
+  'Decision not found',
+  'Review signal not found',
+  'Conflicting id and reviewSignalId provided',
+  'Conflicting key and target in rule condition',
+  'Conflicting value and expected in rule condition',
+  'A structured rule requires a non-empty key',
+  'A reopen/reuse rule must be a string or an object',
+  'A relationship requires from, to, and relation',
+  'Relation endpoints must exist in the scope the relation is written for',
+  'Supersession requires two existing decisions',
+  'A decision cannot supersede itself',
+  'Supersession would create an invalid decision chain',
+  'Confidence evidence requires a non-empty reason',
+  'Confidence evidence requires a stable `key` so a retry cannot double-count',
+  'A fact requires a non-empty key',
+  'Fact confidence must be a number between 0 and 1',
+  'destination must be a non-empty string',
+  'source must be a non-empty string',
+  'memoryOnly must be a boolean',
+  'A grant is never write authority for a binding or an attribution',
+  'type must be worktree or shared_repository',
+  'targetProject must be a non-empty string',
+  'reason must be a non-empty string',
+  'Decision status stale is system-owned and can only be produced by maintain()',
+  'Decision status superseded is system-owned and can only be produced by supersedeDecision()',
+  'Attempt not found',
+  'Fact not found'
 ]);
+const PUBLIC_DOMAIN_PATTERNS = [
+  /^A structured rule requires a value for operator /u,
+  /^Unsupported rule operator /u,
+  /^Unsupported rule unit /u,
+  /^Invalid decision status: /u
+];
+
+function containsPathOrSecret(str) {
+  if (typeof str !== 'string') return false;
+  if (/[a-zA-Z]:[\\/]/u.test(str)) return true;
+  if (str.includes('\\\\')) return true;
+  if (/(?:\.\.[\\/]|[\\/]\.\.)/u.test(str)) return true;
+  if (/(?:^|\s|[\\/])(?:Users|home|tmp|var|etc|usr|opt|bin|Windows|Program Files)(?:[\\/]|$|\s)/iu.test(str)) return true;
+  if (/^\/[a-zA-Z0-9_.-]+(?:\/[a-zA-Z0-9_.-]+)+/u.test(str)) return true;
+  if (/(?:password|secret|bearer\s+[^\s]+|api[-_]?key|private[-_]?key)/iu.test(str)) return true;
+  return false;
+}
+
+function profileHiddenError(name) {
+  const isWorkflow = process.env.SHADOWGRAPH_MCP_PROFILE === 'workflow';
+  const isCompact = process.env.SHADOWGRAPH_MCP_COMPACT === '1';
+  let message;
+  if (isWorkflow) {
+    message = `Tool "${name}" is excluded by active workflow profile (20 tools). For full-mode tools, ask operator to unset SHADOWGRAPH_MCP_PROFILE and restart with SHADOWGRAPH_MCP_COMPACT=0.`;
+  } else if (isCompact) {
+    message = `Tool "${name}" is excluded by active compact profile (16 tools). For full-mode tools, ask operator to restart with SHADOWGRAPH_MCP_COMPACT=0.`;
+  } else {
+    message = `Tool "${name}" is excluded by active profile. For full-mode tools, ask operator to restart with SHADOWGRAPH_MCP_COMPACT=0.`;
+  }
+  const error = new Error(message);
+  error.code = -32601;
+  error[JSON_RPC_ERROR] = true;
+  return tagPublicError(error, message);
+}
 const PUBLIC_ERROR_NAME_MESSAGES = new Map([
   ['RevisionConflictError', 'Storage revision conflict']
 ]);
@@ -665,7 +769,12 @@ function ownerProposal(name, args) {
 function publicErrorDetails(error) {
   if (error?.code === 'creation_id_not_allowed') return { message: 'Caller-supplied creation IDs are not supported' };
   const tagged = error?.[PUBLIC_ERROR];
-  if (tagged) return tagged;
+  if (tagged) {
+    if (tagged.message && containsPathOrSecret(tagged.message)) {
+      return { message: 'Tool execution failed' };
+    }
+    return tagged;
+  }
 
   const issueCode = publicDomainCode(error);
   if (issueCode) {
@@ -680,7 +789,12 @@ function publicErrorDetails(error) {
   if (error instanceof SyntaxError) return { message: 'Tool execution failed: invalid JSON data' };
   const namedMessage = PUBLIC_ERROR_NAME_MESSAGES.get(error?.name);
   if (namedMessage) return { message: namedMessage };
-  if (PUBLIC_DOMAIN_MESSAGES.has(error?.message)) return { message: error.message };
+  if (error?.message && !containsPathOrSecret(error.message)) {
+    if (PUBLIC_DOMAIN_MESSAGES.has(error.message)) return { message: error.message };
+    for (const pattern of PUBLIC_DOMAIN_PATTERNS) {
+      if (pattern.test(error.message)) return { message: error.message };
+    }
+  }
   return { message: 'Tool execution failed' };
 }
 
@@ -875,6 +989,9 @@ async function handleMessage(request, emit, batchFailure = null) {
       if (!toolsByName.has(request.params.name)) {
         if (!persistenceUnavailable && ['shadowgraph_issue_access', 'shadowgraph_delegate_access', 'shadowgraph_grant', 'shadowgraph_delegate', 'shadowgraph_import'].includes(request.params.name)) {
           await queueCall(() => currentAccessOperation(graph, store, () => privilegedAccessRefusal(graph, { surface: 'mcp', reason: 'issuance_surface_unavailable' })));
+        }
+        if (fullCatalogByName.has(request.params.name)) {
+          throw profileHiddenError(request.params.name);
         }
         throw rpcError(modern ? -32602 : -32601, 'Unknown tool');
       }

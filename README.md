@@ -5,9 +5,9 @@
 ShadowGraph records what worked, what failed, and why a decision was made—then supplies relevant experience when you continue working. The demonstrated automatic paths are the **Windows Codex terminal wrapper** and, in print mode, **Claude Code CLI hooks on Windows**, after one-time setup in projects you enroll.
 
 [![CI](https://github.com/LiLara-AI/shadowgraph/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/LiLara-AI/shadowgraph/actions/workflows/ci.yml)
-[![Technical Preview](https://img.shields.io/badge/Technical_Preview-v0.43.4-blue)](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.43.4)
+[![Technical Preview](https://img.shields.io/badge/Technical_Preview-v0.44.0-blue)](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.44.0)
 
-[Get started](#quick-start-windows-codex) · [Supported workflows](#supported-workflows) · [Release & downloads](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.43.4) · [Documentation](#documentation)
+[Get started](#quick-start-windows-codex) · [Supported workflows](#supported-workflows) · [Release & downloads](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.44.0) · [Documentation](#documentation)
 
 ![Session A works and repairs a failure; capture feeds background extraction through the selected provider; local memory supplies relevant experience to fresh Session B. Foreground work continues and cross-project reuse requires explicit sharing.](https://raw.githubusercontent.com/LiLara-AI/shadowgraph/v0.43.1/docs/assets/workflow.svg)
 
@@ -33,10 +33,10 @@ The Codex executor is a separate prerequisite distributed as `@openai/codex`. Sh
 
 ### 1. Install
 
-Run in PowerShell 7+. The version is pinned; the [release](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.43.4) includes `SHA256SUMS.txt` for the tarball.
+Run in PowerShell 7+. The version is pinned; the [release](https://github.com/LiLara-AI/shadowgraph/releases/tag/v0.44.0) includes `SHA256SUMS.txt` for the tarball.
 
 ```powershell
-npm install --global https://github.com/LiLara-AI/shadowgraph/releases/download/v0.43.4/shadowgraph-unified-plugin-0.43.4.tgz
+npm install --global https://github.com/LiLara-AI/shadowgraph/releases/download/v0.44.0/shadowgraph-unified-plugin-0.44.0.tgz
 
 $executorDir = Join-Path $env:LOCALAPPDATA 'ShadowGraph-Codex-0.161.0'
 npm install --prefix $executorDir @openai/codex@0.161.0
@@ -111,15 +111,157 @@ Replace names with your enrolled projects. Sharing is explicit and revocable, no
 ## MCP interface profiles
 
 Full remains the default (35 tools, or 36 with a configured verifier). Compact
-remains 16 tools. The new opt-in Workflow Profile offers 20 tools: Compact plus
+remains 16 tools. The opt-in Workflow Profile offers 20 tools: Compact plus
 stored review signals, keyed confidence evidence, decision status transitions and
 explicit supersession, using the existing handlers and access controls.
 
-| Server environment | Inventory |
-| --- | ---: |
-| Profile unset; compact unset or `0` | Full: 35 / 36 |
-| Profile unset; `SHADOWGRAPH_MCP_COMPACT=1` | Compact: 16 |
-| `SHADOWGRAPH_MCP_PROFILE=workflow`; compact unset or `0` | Workflow: 20 |
+### Architecture & Multi-Tier Profiles
+
+```mermaid
+graph TD
+    Client["AI Agent / MCP Client"] -->|tools/list| Server["ShadowGraph MCP Server"]
+    
+    subgraph Profiles ["Three-Tier Profile Architecture"]
+        direction TB
+        subgraph Compact ["Compact Profile (16 Tools)"]
+            C1["Core Recording: record_decision, record_attempt, record_fact, remember, record_outcome"]
+            C2["Active Context: context, recall, search, retrieve, expand"]
+            C3["Maintenance & Review: review, review_context, ack_review, reconsider, maintain, validate"]
+        end
+        
+        subgraph Workflow ["Workflow Profile (20 Tools) - SHADOWGRAPH_MCP_PROFILE=workflow"]
+            W1["Compact Profile (16 Tools)"]
+            W2["+ shadowgraph_supersede (Decision correction & replacement)"]
+            W3["+ shadowgraph_update_status (Lifecycle transitions)"]
+            W4["+ shadowgraph_confidence_evidence (Keyed observations)"]
+            W5["+ shadowgraph_review_signals (Saved signal inspection)"]
+        end
+        
+        subgraph Full ["Full Catalog (35 Tools / 36 with verifier)"]
+            F1["Workflow Profile (20 Tools)"]
+            F2["+ Administration: backup, restore, migrate, downgrade, purge, purge_preview"]
+            F3["+ Advanced Graph: link, traverse, redact, journal, rebuild, repair_plan"]
+            F4["+ Access & Governance: request_wider_access, revoke_grant, discard_access, bind, attribute"]
+            F5["+ Optional: shadowgraph_verify_fact (with configured verifier)"]
+        end
+    end
+    
+    Server -->|SHADOWGRAPH_MCP_COMPACT=1| Compact
+    Server -->|SHADOWGRAPH_MCP_PROFILE=workflow| Workflow
+    Server -->|Default / Unset| Full
+```
+
+| Server environment | Inventory | Scope & Target Audience |
+| --- | ---: | --- |
+| Profile unset; compact unset or `0` | Full: 35 / 36 | Complete administrative, access management, and deep graph engine |
+| Profile unset; `SHADOWGRAPH_MCP_COMPACT=1` | Compact: 16 | Fast cognitive loop with low token overhead for standard tasks |
+| `SHADOWGRAPH_MCP_PROFILE=workflow`; compact unset or `0` | Workflow: 20 | Complete decision-to-attempt lifecycle and review signal management |
+
+### Autonomous Agent Memory & Decision Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> ContextReview: Agent starts turn
+    ContextReview --> PreFlightRecall: shadowgraph_context / shadowgraph_recall
+    
+    state "Decision & Execution Lifecycle" as Loop {
+        PreFlightRecall --> ProposeDecision: Formulate approach
+        ProposeDecision --> RecordDecision: shadowgraph_record_decision(status='proposed')
+        RecordDecision --> ExecuteAttempt: Execute tool / action
+        ExecuteAttempt --> RecordAttempt: shadowgraph_record_attempt(solution, result, reusableWhen)
+        
+        state AttemptEvaluation <<choice>>
+        RecordAttempt --> AttemptEvaluation: Check resultClass
+        AttemptEvaluation --> ValidateOutcome: succeeded
+        AttemptEvaluation --> ProposeDecision: failed (retry with lesson)
+        
+        ValidateOutcome --> RecordOutcome: shadowgraph_record_outcome(autoTransition=true, decisionStatus='validated')
+    }
+    
+    state "Review & Governance Loop" as Governance {
+        RecordOutcome --> MonitorFacts: Environmental changes (shadowgraph_record_fact)
+        MonitorFacts --> EvaluateReview: shadowgraph_review / shadowgraph_reconsider
+        EvaluateReview --> RaiseSignals: Condition violated / stale
+        RaiseSignals --> AckReview: shadowgraph_ack_review(reviewSignalId)
+        AckReview --> ProposeDecision: Supersede or adapt
+    }
+```
+
+### Consequential Work Workflow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Agent as Autonomous Agent
+    participant SG as ShadowGraph Engine
+    participant Store as Local Storage
+    actor Env as Target Environment
+
+    Note over Agent,Env: Step 1: Pre-Execution Recall & Context Advisory
+    Agent->>SG: shadowgraph_context({ project, task })
+    SG-->>Agent: workingSet, relevantToTask, activeConditions
+    Agent->>SG: shadowgraph_recall({ query, includeHistory: true })
+    SG-->>Agent: rankedMemories, causalClaims, reusableAttempts
+
+    Note over Agent,Env: Step 2: Decision Formulation & Attempt Execution
+    Agent->>SG: shadowgraph_record_decision({ title, chosen, reopenWhen, project })
+    SG->>Store: Save decision (revision incremented)
+    SG-->>Agent: { id: "dec-...", status: "proposed" }
+    
+    Agent->>Env: Execute action / run command
+    Env-->>Agent: Execution output & telemetry
+
+    Agent->>SG: shadowgraph_record_attempt({ relatedTo: [decId], resultClass, reusableWhen })
+    SG->>Store: Save attempt & link to decision
+    SG-->>Agent: { id: "att-...", resultClass: "succeeded" }
+
+    Note over Agent,Env: Step 3: Post-Execution Outcome & Lifecycle Transition
+    Agent->>SG: shadowgraph_record_outcome({ decisionId, outcome, autoTransition: true, decisionStatus: "validated" })
+    SG->>Store: Atomic status transition -> 'validated'
+    SG-->>Agent: { status: "validated", outcome: { ... } }
+```
+
+### Profile Inventory & Capability Comparison Matrix
+
+| Capability Category | Compact (16 Tools) | Workflow (20 Tools) | Full (35/36 Tools) | Primary Tool(s) |
+|---|:---:|:---:|:---:|---|
+| **Architectural Decisions** | ✅ | ✅ | ✅ | `shadowgraph_record_decision` |
+| **Attempt Recording & Reuse** | ✅ | ✅ | ✅ | `shadowgraph_record_attempt` |
+| **Bi-temporal Fact Recording** | ✅ | ✅ | ✅ | `shadowgraph_record_fact` |
+| **Outcome Recording & autoTransition**| ✅ | ✅ | ✅ | `shadowgraph_record_outcome` |
+| **Episodic & Procedural Memory**| ✅ | ✅ | ✅ | `shadowgraph_remember` |
+| **Ranked Recall & Semantic Search**| ✅ | ✅ | ✅ | `shadowgraph_recall` |
+| **Exact Search & Arabic Stemming** | ✅ | ✅ | ✅ | `shadowgraph_search` |
+| **Graph Retrieval & Expansion** | ✅ | ✅ | ✅ | `shadowgraph_retrieve`, `shadowgraph_expand` |
+| **Task Context & Advisory** | ✅ | ✅ | ✅ | `shadowgraph_context` |
+| **Review Execution & Persist** | ✅ | ✅ | ✅ | `shadowgraph_review`, `shadowgraph_review_context` |
+| **Review Signal Acknowledgment**| ✅ | ✅ | ✅ | `shadowgraph_ack_review` |
+| **Signal Reconsideration** | ✅ | ✅ | ✅ | `shadowgraph_reconsider` |
+| **Graph Validation & Maintenance**| ✅ | ✅ | ✅ | `shadowgraph_validate`, `shadowgraph_maintain` |
+| **Decision Supersession** | ❌ | ✅ | ✅ | `shadowgraph_supersede` |
+| **Decision Status Lifecycle** | ❌ | ✅ | ✅ | `shadowgraph_update_status` |
+| **Keyed Confidence Evidence** | ❌ | ✅ | ✅ | `shadowgraph_confidence_evidence` |
+| **Stored Review Signal Inspection**| ❌ | ✅ | ✅ | `shadowgraph_review_signals` |
+| **Graph Traversal & Linking** | ❌ | ❌ | ✅ | `shadowgraph_link`, `shadowgraph_traverse` |
+| **Content Redaction** | ❌ | ❌ | ✅ | `shadowgraph_redact` |
+| **Backup & Restoration** | ❌ | ❌ | ✅ | `shadowgraph_backup`, `shadowgraph_restore` |
+| **Store Migration & Downgrade** | ❌ | ❌ | ✅ | `shadowgraph_migrate`, `shadowgraph_downgrade` |
+| **Store Purge & Quarantine** | ❌ | ❌ | ✅ | `shadowgraph_purge`, `shadowgraph_purge_preview` |
+| **Journal & Index Rebuilding** | ❌ | ❌ | ✅ | `shadowgraph_journal`, `shadowgraph_rebuild`, `shadowgraph_repair_plan` |
+| **Access Governance & Delegation**| ❌ | ❌ | ✅ | `shadowgraph_request_wider_access`, `shadowgraph_bind`, `attribute` |
+| **External Fact Verification** | ❌ | ❌ | Optional (36th) | `shadowgraph_verify_fact` |
+
+### MCP Tool Selection & Disambiguation Guide
+
+| When you need to... | Use this tool | Do NOT use | Why? |
+|---|---|---|---|
+| Retrieve ranked facts, procedural lessons, and temporal history for a prompt | `shadowgraph_recall` | `shadowgraph_search` | `recall` computes relevance scoring, temporal validity, and returns structured history chains; `search` is strict term-matching. |
+| Find records containing specific keywords or Arabic stems across tasks/tags | `shadowgraph_search` | `shadowgraph_retrieve` | `search` supports partial match fallback (`matchMode: 'partial'`) and Arabic root normalization. |
+| Find a focal record and walk its immediate neighbors | `shadowgraph_retrieve` | `shadowgraph_traverse` | `retrieve` is available in Compact/Workflow; `traverse` requires Full mode and does unbounded graph traversal. |
+| Fetch immediate project working set and active conditions without writes | `shadowgraph_context` | `shadowgraph_review_context` | `context` is a read-only fast path saving nothing; `review_context` evaluates and commits review signals. |
+| Inspect pending review signals without triggering reevaluation | `shadowgraph_review_signals` | `shadowgraph_review` | `review_signals` inspects already stored signals (Workflow/Full); `review` runs live condition evaluations against all recorded facts. |
+| Replace an obsolete decision with an updated architectural choice | `shadowgraph_supersede` | `shadowgraph_record_outcome` | `supersede` preserves both decisions with an explicit superseded link; `record_outcome` validates or closes an existing decision without replacing it. |
+| Close out a decision after completing execution | `shadowgraph_record_outcome` | `shadowgraph_update_status` | `record_outcome` with `autoTransition: true` records lessons and advances lifecycle in one atomic call. |
 
 Set the environment on the MCP server process, then restart/reconnect and refresh
 `tools/list`. There is no agent-callable mode switch. Workflow does not expose

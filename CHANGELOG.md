@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.44.0 — Technical Preview (2026-11-07)
+
+- **MCP Schema Completeness & Function Exposure**: Expose all underlying lifecycle, retry, search, and memory management capabilities across MCP schemas without altering profile inventory:
+  - `shadowgraph_record_attempt`: Expose `reusableWhen`, `relatedTo`, `task`, `tags`, and `visibility` in input schema; optional `task`, `tags`, `visibility` in attempt record output schema.
+  - `shadowgraph_record_decision`: Expose `status`, `supersedes`, `reviewAfter`, `failedAttempts`, `reason`, `changeSummary`, `task`, `tags`, and `visibility` in input schema; optional fields in record output schema.
+  - `shadowgraph_record_outcome`: Expose `autoTransition`, `decisionStatus`, and `lifecycleStatus` both inside `outcome` object schema and as top-level MCP aliases.
+  - `shadowgraph_recall`: Expose inputs `includeHistory`, `includeCrossProject`, and `expandSynonyms`; expose `historyChain` on recall hit schema.
+  - `shadowgraph_context`: Expose `includeCrossProject` input on default context input schema; enrich `advisoryItemSchema` with optional fields (`sourceProject`, `crossProject`, `reusableNow`, `conditionSummary`, `changeSummary`, `summary`, `detail`, `score`, `title`, `chosen`, `solution`, `result`, `text`, `key`, `tags`).
+  - `shadowgraph_remember` & `shadowgraph_record_fact`: Expose `visibility`, `reason`, `changeSummary`, `allowHistorical`, and `backfill` (`validFrom`, `validTo`, `observedAt`, `tags`) with optional `visibility` and `changeSummary` on memory/fact record schemas. Enforce `value` as required on `shadowgraph_record_fact`. Expose optional `reason` and `changeSummary` on `shadowgraph_supersede`.
+  - `shadowgraph_search` & `shadowgraph_retrieve`: Expose inputs `matchMode` (`'all' | 'partial' | 'any'`) and `expandSynonyms`; expose outputs `partialMatch`, `matchedTermCount`, `totalQueryTerms` on search hit schema.
+- **Fixed Profile Invariants**: Profile inventories remain exactly 16 Compact, 20 Workflow, and 35 Full (36 with verifier).
+- **Tool Description Alignment**: Sharpen tool descriptions to document exact engine semantics: Arabic stemming, 3+-term partial match fallback, symbolic condition operators (`>=`, `<=`, `==`, `!=`, `>`, `<`), plain `changedFacts` keys for conditions, and `autoTransition`/`decisionStatus` lifecycle side-effects in `shadowgraph_record_outcome`.
+- **Condition Normalization Aliases**: Accept `target` and `expected` as aliases for `key` and `value` in rule condition normalization, rejecting conflicting inputs.
+- **Safe AI Error Recovery & Domain Messages**: Replace generic `Tool execution failed` with actionable, non-leaking domain error messages (`publicErrorDetails` / `PUBLIC_DOMAIN_MESSAGES`), protecting filesystem paths and store internals.
+- **Profile-Hidden Tool Guidance**: Return structured guidance when tools outside the active Compact or Workflow profile are invoked, retaining JSON-RPC code -32601.
+- **Consistent Project Defaulting**: Add follow-up tools (`shadowgraph_record_outcome`, `shadowgraph_update_status`, `shadowgraph_confidence_evidence`, `shadowgraph_supersede`, `shadowgraph_link`, `shadowgraph_ack_review`, `shadowgraph_reconsider`, `shadowgraph_review_context`) to `PROJECT_DEFAULTED_TOOLS`.
+- **Parameter Aliases**: Accept `reviewSignalId` as alias for `id` in `shadowgraph_ack_review`.
+- **CLI Ergonomics & Help**: Intercept `shadowgraph --help`, `-h`, and `help` to display help text and exit with status 0; provide syntax feedback in JSON CLI parsing; document `SHADOWGRAPH_MCP_PROFILE=workflow` in `doctor`.
+- **Wire Budgets**: Measure `workflow` profile in `scripts/mcp-wire-size.mjs`; re-baseline `WIRE_BUDGETS` and `DESCRIPTION_TOTALS` with ~2% measured headroom in test metadata.
+- **Visual Documentation**: Add Mermaid diagrams for multi-tier architecture, profile hierarchy, decision-to-attempt lifecycle loops, and consequential work patterns across `README.md`, `docs/mcp-compatibility.md`, and `integrations/agent-policy.md`.
+
 ## 0.43.4 — Technical Preview (2026-11-05)
 
 - Clarify 13 MCP tool descriptions in `src/mcp-tools.js` across the read, review and decision-lifecycle clusters while keeping all 23 other tool descriptions unchanged.

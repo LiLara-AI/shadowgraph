@@ -255,7 +255,7 @@ for (const backend of ['json', 'sqlite']) for (const surface of ['cli', 'http', 
       };
       const rejected = await invoke(inputFor(arm, f)); outcomes.push(rejected);
       if (surface.endsWith('-compact') && arm[0] === 'relation') {
-        assert.equal(rejected.failed, true); assert.equal(rejected.value.message, 'Unknown tool');
+        assert.equal(rejected.failed, true); assert.match(rejected.value.message, /Unknown tool|excluded by active (?:compact|workflow) profile/);
         assert.deepEqual(await invoke(inputFor(arm, f, false)), rejected);
         const reopened = await createStorage({ type: backend, file }); assert.deepEqual(await reopened.load(), before); await reopened.close();
         continue;

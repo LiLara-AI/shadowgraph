@@ -215,7 +215,7 @@ const INPUT_CONSTRAINTS_EXPECTED = {
   shadowgraph_review_context: { required: null, enums: {} },
   shadowgraph_remember: { required: null, enums: {} },
   shadowgraph_recall: { required: null, enums: {} },
-  shadowgraph_record_fact: { required: ['key'], enums: { verificationStatus: ['unverified', 'contradicted'] } },
+  shadowgraph_record_fact: { required: ['key', 'value'], enums: { verificationStatus: ['unverified', 'contradicted'] } },
   shadowgraph_record_outcome: { required: ['decisionId', 'outcome'], enums: {} },
   shadowgraph_confidence_evidence: { required: ['decisionId', 'reason', 'key'], enums: {} },
   shadowgraph_update_status: { required: ['decisionId', 'status'], enums: {} },
@@ -232,7 +232,7 @@ const INPUT_CONSTRAINTS_EXPECTED = {
   shadowgraph_rebuild: { required: null, enums: {} },
   shadowgraph_review_signals: { required: null, enums: { status: ['open', 'acknowledged'] } },
   shadowgraph_purge_preview: { required: ['project'], enums: {} },
-  shadowgraph_ack_review: { required: ['id'], enums: {} },
+  shadowgraph_ack_review: { required: null, enums: {} },
   shadowgraph_repair_plan: { required: null, enums: {} },
   shadowgraph_backup: { required: ['destination'], enums: {} },
   shadowgraph_restore: { required: ['source'], enums: {} },
@@ -424,9 +424,10 @@ const DESCRIPTION_CAP = 450;
 // 'reminders'). Measured with `node scripts/mcp-wire-size.mjs`: full 11,692,
 // compact 6,643, verifier full 12,041. All budgets are preserved with headroom.
 const DESCRIPTION_TOTALS = {
-  full: 11700,
-  verifier: 12050,
-  compact: 7000
+  full: 11950,
+  verifier: 12300,
+  workflow: 7950,
+  compact: 6900
 };
 // A tool whose result a caller could destroy something with has to say so in
 // its own words. The check is on meaning, not on a keyword: each of these must
@@ -472,6 +473,7 @@ test('the advertised description text stays within its aggregate budget', () => 
   const totals = {
     full: total(fullCatalog),
     verifier: total(verifierCatalog),
+    workflow: total(selectTools(fullCatalog, { profile: 'workflow' })),
     compact: total(selectTools(fullCatalog, { compact: true }))
   };
   for (const [mode, budget] of Object.entries(DESCRIPTION_TOTALS)) {
@@ -586,14 +588,17 @@ const WIRE_BUDGETS = {
   // compact 38720/40415/230998. The two full structured ceilings are re-set
   // with ~2% headroom (recorded variance, PR-12/13/16/26/27/36b precedent);
   // every other ceiling is unchanged.
-  // Mode-aware navigation and explicit audit/input recipes, measured 2026-10-25:
-  // full 64571/68269/338277, verifier 65719/69522/342824,
-  // compact 43595/45290/236943. Preserve ~2% headroom, every schema constraint,
-  // effect hint and tool; these are metadata-size budgets, not runtime gates.
-  'withoutVerifier.full': { bare: 65_900, annotated: 69_700, structured: 345_100 },
-  'withoutVerifier.compact': { bare: 44_500, annotated: 46_200, structured: 241_700 },
-  'withVerifier.full': { bare: 67_100, annotated: 71_000, structured: 349_700 },
-  'withVerifier.compact': { bare: 44_500, annotated: 46_200, structured: 241_700 }
+  // Milestone 4 wire budget re-baseline: includes workflow profile (20 tools)
+  // and updated schema properties/descriptions. Measured with scripts/mcp-wire-size.mjs:
+  // full 72268/75959/366467, verifier 73417/77212/371382,
+  // workflow 56811/58923/293060, compact 50937/52628/261513.
+  // Ceilings preserve ~2% measured headroom across all tiers.
+  'withoutVerifier.full': { bare: 73_800, annotated: 77_500, structured: 373_800 },
+  'withoutVerifier.workflow': { bare: 58_000, annotated: 60_200, structured: 299_000 },
+  'withoutVerifier.compact': { bare: 52_000, annotated: 53_700, structured: 266_800 },
+  'withVerifier.full': { bare: 74_900, annotated: 78_800, structured: 378_900 },
+  'withVerifier.workflow': { bare: 58_000, annotated: 60_200, structured: 299_000 },
+  'withVerifier.compact': { bare: 52_000, annotated: 53_700, structured: 266_800 }
 };
 
 test('the advertised tool list stays within its wire-size budget, at every tier', () => {
@@ -610,8 +615,9 @@ test('the advertised tool list stays within its wire-size budget, at every tier'
     assert.ok(measured.tiers.structured.total > measured.tiers.annotated.total, `${path} structured must exceed annotated`);
   }
   // The compact surface is the one an agent loads by default, so its full
-  // structured listing must stay well under the full mode's.
-  assert.ok(report.withoutVerifier.compact.tiers.structured.total < report.withoutVerifier.full.tiers.structured.total);
+  // structured listing must stay well under the workflow and full modes.
+  assert.ok(report.withoutVerifier.compact.tiers.structured.total < report.withoutVerifier.workflow.tiers.structured.total);
+  assert.ok(report.withoutVerifier.workflow.tiers.structured.total < report.withoutVerifier.full.tiers.structured.total);
 });
 
 test('overlapping tools route to their siblings by name, and every named sibling exists', () => {
