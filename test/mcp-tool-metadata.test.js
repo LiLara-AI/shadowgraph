@@ -22,6 +22,7 @@ import {
   toolResult
 } from '../src/mcp-tools.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
+import { RULE_OPERATORS } from '../src/condition-eval.js';
 import { measureAll } from '../scripts/mcp-wire-size.mjs';
 
 // --- expected inventory ----------------------------------------------------
@@ -174,13 +175,13 @@ const ROUTING_EXPECTED = {
 // documentation pass cannot quietly change what a host will accept.
 const INPUT_CONSTRAINTS_EXPECTED = {
   shadowgraph_record_decision: { required: ['title', 'chosen'], enums: {} },
-  shadowgraph_record_attempt: { required: ['solution', 'result'], enums: {} },
+  shadowgraph_record_attempt: { required: ['solution', 'result', 'resultClass'], enums: {} },
   shadowgraph_review: { required: null, enums: {} },
   shadowgraph_search: { required: null, enums: { kind: ['decision', 'attempt'] } },
   shadowgraph_context: { required: null, enums: {} },
   shadowgraph_remember: { required: null, enums: {} },
   shadowgraph_recall: { required: null, enums: {} },
-  shadowgraph_record_fact: { required: ['key'], enums: { verificationStatus: ['unverified', 'contradicted'] } },
+  shadowgraph_record_fact: { required: ['key', 'value'], enums: { verificationStatus: ['unverified', 'contradicted'] } },
   shadowgraph_record_outcome: { required: ['decisionId', 'outcome'], enums: {} },
   shadowgraph_confidence_evidence: { required: ['decisionId', 'reason', 'key'], enums: {} },
   shadowgraph_update_status: { required: ['decisionId', 'status'], enums: {} },
@@ -291,6 +292,21 @@ test('the catalog advertises exactly the documented full, compact, and verifier 
 
   assert.equal(new Set(verifierCatalog.map((entry) => entry.name)).size, 29);
   for (const entry of verifierCatalog) assert.match(entry.name, /^shadowgraph_[a-z_]+$/u);
+});
+
+test('write schemas advertise every supported field and structured condition', () => {
+  const decision = fullCatalog.find((tool) => tool.name === 'shadowgraph_record_decision');
+  const attempt = fullCatalog.find((tool) => tool.name === 'shadowgraph_record_attempt');
+  const fact = fullCatalog.find((tool) => tool.name === 'shadowgraph_record_fact');
+
+  assert.deepEqual(attempt.inputSchema.required, ['solution', 'result', 'resultClass']);
+  assert.deepEqual(fact.inputSchema.required, ['key', 'value']);
+  assert.deepEqual(decision.inputSchema.properties.alternatives.items.required, ['label']);
+  assert.deepEqual(attempt.inputSchema.properties.reusableWhen.items.required, ['key', 'value']);
+  assert.deepEqual(attempt.inputSchema.properties.reusableWhen.items.properties.operator.enum, [...RULE_OPERATORS]);
+  for (const key of ['reviewAfter']) assert.ok(decision.inputSchema.properties[key]);
+  for (const key of ['relatedTo', 'reusableWhen']) assert.ok(attempt.inputSchema.properties[key]);
+  for (const key of ['observedAt', 'validFrom', 'validTo']) assert.ok(fact.inputSchema.properties[key]);
 });
 
 test('every compact description route names an available compact tool', () => {
@@ -501,13 +517,21 @@ test('the advertised description text stays within its aggregate budget', () => 
 //   withVerifier.full           bare 44,495  annotated 47,540  structured 191,542
 //   withVerifier.compact        bare 32,802  annotated 34,489  structured 138,281
 //
-// Only the compact ceilings moved, using the same roughly 2% headroom rounded
-// up to the next 500 bytes.
+// Re-measured on 2026-11-08 after the complete write fields and structured
+// condition schemas were advertised:
+//
+//   withoutVerifier.full        bare 46,617  annotated 49,557  structured 190,265
+//   withoutVerifier.compact     bare 35,840  annotated 37,527  structured 141,319
+//   withVerifier.full           bare 47,533  annotated 50,578  structured 194,580
+//   withVerifier.compact        bare 35,840  annotated 37,527  structured 141,319
+//
+// All ceilings moved using the same roughly 2% headroom rounded up to the next
+// 500 bytes.
 const WIRE_BUDGETS = {
-  'withoutVerifier.full': { bare: 44_500, annotated: 47_500, structured: 191_000 },
-  'withoutVerifier.compact': { bare: 33_500, annotated: 35_500, structured: 141_500 },
-  'withVerifier.full': { bare: 45_500, annotated: 48_500, structured: 195_500 },
-  'withVerifier.compact': { bare: 33_500, annotated: 35_500, structured: 141_500 }
+  'withoutVerifier.full': { bare: 47_500, annotated: 50_500, structured: 194_500 },
+  'withoutVerifier.compact': { bare: 37_000, annotated: 38_500, structured: 144_500 },
+  'withVerifier.full': { bare: 48_500, annotated: 52_000, structured: 198_500 },
+  'withVerifier.compact': { bare: 37_000, annotated: 38_500, structured: 144_500 }
 };
 
 test('the advertised tool list stays within its wire-size budget, at every tier', () => {

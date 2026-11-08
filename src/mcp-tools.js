@@ -8,6 +8,7 @@
 // function of the server's configuration, which keeps every claim testable
 // in-process and keeps the wire output deterministic.
 import { SOURCE_CLASSES, DECISION_STATUSES, OUTCOME_STATUSES, CONTENT_SEARCH_FIELDS, MEMORY_TYPES } from './shadowgraph.js';
+import { RULE_OPERATORS } from './condition-eval.js';
 
 // ---------------------------------------------------------------------------
 // Protocol negotiation and capability tiers
@@ -82,6 +83,16 @@ const jsonValueProperty = {
     { type: 'array', items: { $ref: '#/$defs/jsonValue' } },
     { type: 'object', additionalProperties: { $ref: '#/$defs/jsonValue' } }
   ]
+};
+const structuredConditionProperty = {
+  type: 'object',
+  required: ['key', 'value'],
+  properties: {
+    key: { type: 'string', minLength: 1, description: 'Stored fact key to evaluate; required and non-empty.' },
+    operator: { type: 'string', enum: [...RULE_OPERATORS], description: 'Comparison to apply. Defaults to equals when omitted.' },
+    value: described(jsonValueProperty, 'Expected operand. Required for every operator, including null, false, zero, or an empty string.'),
+    unit: { type: 'string', description: 'Optional comparison unit: ms, s, sec, min, h, hr, d, %, or pct.' }
+  }
 };
 const evidenceItemProperty = {
   description: 'One piece of supporting evidence. A plain string is stored as its source; an object carries structured provenance. Nothing here is checked or re-verified: it records what the caller claimed.',
@@ -663,6 +674,7 @@ const CATALOG = [
     },
     inputSchema: {
       type: 'object',
+      $defs: { jsonValue: jsonValueProperty },
       required: ['title', 'chosen'],
       properties: {
         id: { type: 'string', minLength: 1, description: 'Optional caller-chosen decision identifier. Omit to generate one; a duplicate entity identifier is rejected.' },
@@ -678,15 +690,26 @@ const CATALOG = [
           description: 'Options considered and rejected. Alternatives belong to the decision and have no separate write API; they are what shadowgraph_review reconsiders.',
           items: {
             type: 'object',
+            required: ['label'],
             properties: {
               id: { type: 'string', minLength: 1, description: 'Optional caller-chosen identifier for this alternative. Omit to generate one; identifiers must remain unique.' },
               label: { type: 'string', description: 'Name of the rejected option. Required in practice: an alternative without a non-empty label is rejected.' },
               reasonRejected: { type: 'string', description: 'Why it was rejected. Searchable content.' },
               reason: { type: 'string', description: 'Accepted as an alias of reasonRejected for older callers.' },
-              reopenWhen: { type: 'array', description: 'Rules that make this alternative worth reconsidering. Each is either a fact key as a plain string, matched only against changedFacts, or an object { key, operator, value } evaluated against stored facts so it still fires after a restart. operator defaults to equals.' }
+              reopenWhen: {
+                type: 'array',
+                description: 'Structured rules use stored facts; legacy string tokens match only ephemeral changedFacts.',
+                items: {
+                  anyOf: [
+                    { type: 'string', description: 'Legacy fact-change token matched only against changedFacts.' },
+                    structuredConditionProperty
+                  ]
+                }
+              }
             }
           }
         },
+        reviewAfter: { type: 'string', description: 'ISO 8601 instant after which shadowgraph_maintain marks this decision stale.' },
         idempotencyKey: idempotencyKeyProperty,
         ...provenanceProperties
       }
@@ -705,7 +728,8 @@ const CATALOG = [
     },
     inputSchema: {
       type: 'object',
-      required: ['solution', 'result'],
+      $defs: { jsonValue: jsonValueProperty },
+      required: ['solution', 'result', 'resultClass'],
       properties: {
         id: { type: 'string', minLength: 1, description: 'Optional caller-chosen attempt identifier. Omit to generate one; a duplicate entity identifier is rejected.' },
         solution: { type: 'string', description: 'What was tried. Required, non-empty, and searchable content.' },
@@ -714,6 +738,8 @@ const CATALOG = [
         project: projectProperty,
         reason: { type: 'string', description: 'Why it turned out that way. Searchable content.' },
         environment: { type: 'string', description: 'Where it was tried, such as a runtime, OS, or version. Searchable content, so a later attempt can be matched to the same environment.' },
+        relatedTo: { type: 'array', items: { type: 'string' }, description: 'Identifiers of entities related to this attempt; retained as declared references.' },
+        reusableWhen: { type: 'array', items: structuredConditionProperty, description: 'Conditions that must all hold before reconsideration; unresolved conditions block reuse.' },
         idempotencyKey: idempotencyKeyProperty,
         ...provenanceProperties
       }
@@ -791,7 +817,7 @@ const CATALOG = [
         project: { type: 'string', description: 'The project this context describes.' },
         activeDecisions: { type: 'array', items: decisionRecordSchema, description: 'Decisions in a current, actionable state: proposed, planned, in_progress, executed, validated, or reconsidered.' },
         staleAssumptions: { type: 'array', items: factRecordSchema, description: 'Facts that are no longer active, such as superseded or expired ones, which earlier decisions may still rest on.' },
-        failedAttemptsToAvoid: { type: 'array', items: attemptRecordSchema, description: 'Attempts whose result mentions failure, regression, or error.' },
+        failedAttemptsToAvoid: { type: 'array', items: attemptRecordSchema, description: 'Declared failures plus legacy attempts classified by wording.' },
         openReviews: { type: 'array', items: reviewDueSchema, description: 'Decisions currently due for reconsideration.' },
         suggestedQuestions: stringList('Questions for the low-confidence decisions in this project.'),
         conditionDiagnostics: { type: 'array', items: conditionDiagnosticSchema, description: 'Conditions that could not be settled, or that rest on facts which disagree. Neither a breach nor a confirmed-safe decision.' },
@@ -948,13 +974,16 @@ const CATALOG = [
     inputSchema: {
       type: 'object',
       $defs: { jsonValue: jsonValueProperty },
-      required: ['key'],
+      required: ['key', 'value'],
       properties: {
         key: { type: 'string', description: 'Fact name, unique per project among active facts. Required and non-empty. Use the same key that a decision’s reopenWhen rules refer to.' },
         value: jsonValueProperty,
         source: { type: 'string', description: 'Legacy alias for sourceClass. An unknown label downgrades to agent_claimed with the raw label kept in sourceRaw.' },
         confidence: { type: 'number', minimum: 0, maximum: 1, description: 'How much the caller trusts this observation, 0-1. Defaults to 0.5. It does not verify anything.' },
         project: projectProperty,
+        observedAt: { type: 'string', description: 'ISO 8601 time this value was observed. Defaults to recordedAt.' },
+        validFrom: { type: 'string', description: 'ISO 8601 start of modeled validity. Defaults to observedAt.' },
+        validTo: described(nullableStringProperty, 'ISO 8601 end of modeled validity, or null for open-ended. Must be later than validFrom.'),
         expiresAt: { type: 'string', description: 'ISO 8601 instant after which shadowgraph_maintain expires this fact. Combined with validTo, the earlier boundary wins.' },
         verificationStatus: { type: 'string', enum: ['unverified', 'contradicted'], description: 'Only "contradicted" may be set by a caller, because it lowers trust. "verified" and "expired" are rejected: verification is not self-assertable and expiry is owned by shadowgraph_maintain.' },
         idempotencyKey: idempotencyKeyProperty,

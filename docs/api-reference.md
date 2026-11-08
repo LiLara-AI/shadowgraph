@@ -56,6 +56,8 @@ const graph = createShadowGraph({ now });   // `now` is an injectable clock, use
 | `supersedeDecision(input)` | Same-project supersession with a persisted `supersedes` relation. |
 | `link(input)` | Explainable relationship; both endpoints must exist and the new relation ID must be unused in the global schema-4 entity namespace before mutation. |
 
+The MCP write schemas advertise the complete supported inputs: decisions include `reviewAfter` and require each alternative's `label`; attempts require `solution`, `result`, and `resultClass` and include `relatedTo` and `reusableWhen`; facts require `key` and `value` and include `observedAt`, `validFrom`, and nullable `validTo`. Structured conditions contain required `key` and `value` fields plus optional `operator` and `unit`; the operator defaults to `equals`, and an explicit `null`, `false`, `0`, or empty-string value is still a value. Decision `reopenWhen` arrays preserve legacy string tokens, which match only ephemeral `changedFacts`, while structured rules use stored facts. Every attempt `reusableWhen` condition must hold before reconsideration, and an unresolved condition blocks reuse.
+
 ### Reading — all return `{ items, page, completeness }`
 
 `search(query, options)` · `retrieve(query, options)` · `recall(query, options)` · `memoryHistory(options)` · `getJournal(options)`

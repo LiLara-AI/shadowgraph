@@ -291,13 +291,13 @@ structured cost was again `evaluatedConditionSchema` inlined — four more sites
 `triggeredRules`, `groundedConditions`, `rulesNotEvaluated` and `contestedConditions` — because
 this catalog forbids `$ref`, so a shared shape cannot be shared on the wire.
 
-The current surface, re-measured on 2026-11-08 after `shadowgraph_update_status` and
-`shadowgraph_supersede` became the 15th and 16th compact tools:
+The current surface, re-measured on 2026-11-08 after the complete write fields and structured
+condition schemas were advertised:
 
 | Mode and tier | Bare | Annotated | Structured |
 | --- | ---: | ---: | ---: |
-| Full 28 | 43,579 | 46,519 | 187,227 |
-| Compact 16 | 32,802 | 34,489 | 138,281 |
+| Full 28 | 46,617 | 49,557 | 190,265 |
+| Compact 16 | 35,840 | 37,527 | 141,319 |
 
 Output schemas account for 111,308 of the 155,847 bytes in the full structured tier, and they were
 not touched. An output schema is a promise a validating client enforces, so trimming one to reduce a
@@ -313,7 +313,16 @@ Detail that used to sit in a description, kept here because it is worth having s
   declares what was omitted. The searchable content fields are listed in each tool's `query` property.
 - `shadowgraph_context` returns several named collections, each with its own `returned`, `total`,
   `hasMore`, and `omitted` under `completeness.collections`, so truncation is attributable.
-- `shadowgraph_record_fact` rejects `verificationStatus` of `verified` or `expired`: verification is
+- `shadowgraph_record_decision` advertises `reviewAfter`; each alternative requires `label` and its
+  `reopenWhen` accepts both structured conditions and legacy string tokens. Structured rules use
+  stored facts, while legacy tokens match only ephemeral `changedFacts`.
+- `shadowgraph_record_attempt` requires `solution`, `result`, and `resultClass` in its advertised
+  schema and accepts `relatedTo` identifiers plus structured `reusableWhen` conditions. All reuse
+  conditions must hold, and unresolved conditions block reuse.
+- A structured condition requires `key` and `value`, with optional `operator` and `unit`. The operator
+  defaults to `equals`; explicit `null`, `false`, `0`, and empty-string operands remain valid values.
+- `shadowgraph_record_fact` requires `key` and `value` in its advertised schema and accepts
+  `observedAt`, `validFrom`, and nullable `validTo`. It rejects `verificationStatus` of `verified` or `expired`: verification is
   not self-assertable and expiry belongs to `shadowgraph_maintain`. Writes for one key must arrive in
   non-decreasing `validFrom` order.
 - `shadowgraph_record_outcome` appends a journal entry on every call, even when the outcome is
