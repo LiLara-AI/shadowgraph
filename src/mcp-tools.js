@@ -783,12 +783,12 @@ const readProvenanceSchema = { type: 'object', description: 'Original read bound
 const GRANT_READ_TOOLS = new Set(['shadowgraph_review', 'shadowgraph_search', 'shadowgraph_context', 'shadowgraph_review_context', 'shadowgraph_recall', 'shadowgraph_traverse', 'shadowgraph_expand', 'shadowgraph_redact', 'shadowgraph_maintain', 'shadowgraph_retrieve', 'shadowgraph_validate', 'shadowgraph_journal', 'shadowgraph_rebuild', 'shadowgraph_review_signals', 'shadowgraph_repair_plan', 'shadowgraph_reconsider']);
 const ACCESS_DESCRIPTIONS = {
   shadowgraph_review: {"does": "Evaluate reopen rules, reviewAfter and failed outcomes; persist signals and return due decisions as { items, completeness }.", "route": "shadowgraph_review_signals lists signals; shadowgraph_reconsider audits verdicts; shadowgraph_review_context adds context; shadowgraph_ack_review closes one.", "effects": "Skips closed decisions. Saves owned signals deduped by decision/reason/coverage and commits a revision; grants widen reads only; no status changes.", "returns": ""},
-  shadowgraph_search: {"does": "Match records containing every literal query term as direct content matches. Arabic stems.", "route": "shadowgraph_retrieve adds ordered neighbours; shadowgraph_recall ranks matches; shadowgraph_context prepares a working set.", "returns": "Paginated hits. \"a b\" requires both terms, not an exact phrase; 3+ terms fallback. recall ranks memory/facts.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
+  shadowgraph_search: {"does": "Match records containing every literal query term as direct content matches. Queries match Arabic stem forms.", "route": "shadowgraph_retrieve adds ordered neighbours; shadowgraph_recall ranks matches; shadowgraph_context prepares a working set.", "returns": "\"a b\" requires both terms, not an exact phrase; matchMode allows 3+ terms fallback; empty query filters.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
   shadowgraph_context: {"does": "Read a planning working set without saving signals: decisions, stale facts, failed attempts and fired conditions.", "route": "shadowgraph_search or shadowgraph_retrieve find records; shadowgraph_recall ranks memory; shadowgraph_review_context persists signals.", "effects": "No decision or signal writes; unmatched-query diagnostics stay in memory until the next save. Own-scope read saves nothing; an access key commits a revision and audit."},
   shadowgraph_review_context: {"does": "Load the project working set and persist signals from reopen rules, reviewAfter and failed outcomes.", "route": "shadowgraph_context saves no signals; shadowgraph_review also persists signals, returning due items only; shadowgraph_ack_review closes one.", "effects": "Skips closed decisions. Deduplicates owned signals by decision/reason/coverage and commits a revision; grants widen reads only (unpersisted); no status changes."},
   shadowgraph_recall: {"does": "Rank relevant scoped memory and records by lexical, vector, graph and temporal signals.", "route": "shadowgraph_search requires every term; shadowgraph_retrieve adds neighbours; shadowgraph_context prepares a working set.", "returns": "Returns scores and available signals; no provider/vector means no semantic ranking. Omitted memory scope fields select null, not any user/run.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
-  shadowgraph_maintain: {"does": "Age due owned decisions to stale, expire due owned facts, then evaluate reopen rules.", "route": "shadowgraph_review evaluates without aging; shadowgraph_validate diagnoses integrity. Maintenance does not repair or restore.", "effects": "Uses now or the clock; saves lifecycle changes and signals, even on repeats. Grants widen audited reads, not writes.", "returns": "Returns changed IDs, due items and stored signals, including acknowledged ones."},
-  shadowgraph_retrieve: {"does": "Retrieve seed records matching every query term plus their ordered graph neighbours. Arabic stems.", "route": "shadowgraph_search returns matches only; shadowgraph_recall ranks relevance; shadowgraph_context prepares a working set.", "returns": "Paginated hits. Every term must match a seed; neighbours need not match. 3+ terms fallback; recall ranks facts/memory.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
+  shadowgraph_maintain: {"does": "Age due owned decisions to stale, expire due owned facts, then evaluate reopen rules.", "route": "Run to apply expiry; shadowgraph_review evaluates without aging; shadowgraph_validate diagnoses integrity. Maintenance does not repair or restore.", "effects": "Compares reviewAfter and expiresAt to now; persists status changes and signals on repeats. accessId widens reads only.", "returns": "Returns changed IDs, due items and all stored signals."},
+  shadowgraph_retrieve: {"does": "Retrieve seed records matching every query term plus their ordered graph neighbours. Queries match Arabic stem forms.", "route": "shadowgraph_search returns matches only; shadowgraph_recall ranks relevance; shadowgraph_context prepares a working set.", "returns": "Every term must match a seed; neighbours need not match, and matchMode allows 3+ terms fallback on seeds.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
   shadowgraph_expand: {"does": "Expand a context claim line to its full current record using its expansion handle as input.", "route": "shadowgraph_context supplies the handle; pass recordId, digest and flattened scope fields at top level.", "returns": "Returns record, status and counterparts. Stale digest yields revision_changed; purged yields purged; missing or out-of-scope yields unavailable.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
   shadowgraph_validate: {"does": "Diagnose record, graph and journal integrity without applying repairs.", "route": "shadowgraph_maintain ages records; shadowgraph_review checks decision rules; shadowgraph_repair_plan proposes repairs; shadowgraph_rebuild checks journal replay.", "effects": "Own-scope read saves nothing; an access key commits a revision and audit."},
   shadowgraph_reconsider: {"does": "Audit one decision or project: explain all reopen verdicts and persist signals for due decisions.", "route": "shadowgraph_review returns only due items; shadowgraph_ack_review closes reviewSignalId.", "effects": "Rejects unknown, out-of-scope or closed decisionId. Saves deduplicated owned signals and commits a revision; grants widen reads only; no status changes.", "returns": "review_recommended: condition fired; manual_review: unresolved evidence; unchanged: complete, no trigger."},
@@ -1333,10 +1333,10 @@ const CATALOG = [
     persists: false,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     describe: {
-      does: 'Match records containing every literal query term as direct content matches. Arabic stems.',
+      does: 'Match records containing every literal query term as direct content matches. Queries match Arabic stem forms.',
       route: 'shadowgraph_retrieve adds ordered neighbours; shadowgraph_recall ranks matches; shadowgraph_context prepares a working set.',
       effects: 'Reads only. Schema keys never match, and a filter is never a content match.',
-      returns: 'Paginated hits. "a b" requires both terms, not an exact phrase; 3+ terms fallback. recall ranks memory/facts.'
+      returns: '"a b" requires both terms, not an exact phrase; matchMode allows 3+ terms fallback; empty query filters.'
     },
     inputSchema: {
       type: 'object',
@@ -1556,7 +1556,7 @@ const CATALOG = [
         decisionId: decisionIdProperty,
         outcome: {
           type: 'object',
-          description: 'The outcome to record.',
+          description: 'Outcome: status, sourceClass, lessons, lifecycle state.',
           required: ['status'],
           properties: {
             status: { type: 'string', enum: [...OUTCOME_STATUSES], description: 'successful raises confidence, failed lowers it and makes the decision due for review, mixed lowers it by half, and unknown moves nothing because "we do not know" is not evidence.' },
@@ -1805,9 +1805,9 @@ const CATALOG = [
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     describe: {
       does: 'Age due owned decisions to stale, expire due owned facts, then evaluate reopen rules.',
-      route: 'shadowgraph_review evaluates without aging; shadowgraph_validate diagnoses integrity. Maintenance does not repair or restore.',
-      effects: 'Uses now or the clock; saves lifecycle changes and signals, even on repeats.',
-      returns: 'Returns changed IDs, due items and stored signals, including acknowledged ones.'
+      route: 'Run to apply expiry; shadowgraph_review evaluates without aging; shadowgraph_validate diagnoses integrity. Maintenance does not repair or restore.',
+      effects: 'Compares reviewAfter and expiresAt to now; persists status changes and signals on repeats.',
+      returns: 'Returns changed IDs, due items and all stored signals.'
     },
     inputSchema: {
       type: 'object',
@@ -1837,10 +1837,10 @@ const CATALOG = [
     persists: false,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     describe: {
-      does: 'Retrieve seed records matching every query term plus their ordered graph neighbours. Arabic stems.',
+      does: 'Retrieve seed records matching every query term plus their ordered graph neighbours. Queries match Arabic stem forms.',
       route: 'shadowgraph_search returns matches only; shadowgraph_recall ranks relevance; shadowgraph_context prepares a working set.',
       effects: 'Reads only. A neighbour can appear with no content match of its own.',
-      returns: 'Paginated hits. Every term must match a seed; neighbours need not match. 3+ terms fallback; recall ranks facts/memory.'
+      returns: 'Every term must match a seed; neighbours need not match, and matchMode allows 3+ terms fallback on seeds.'
     },
     inputSchema: {
       type: 'object',
