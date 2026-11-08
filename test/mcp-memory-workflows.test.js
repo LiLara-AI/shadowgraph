@@ -320,3 +320,105 @@ test('MCP JSON restart persists the complete decision, attempt, and fact workflo
   assert.deepEqual(context.failedAttemptsToAvoid.map((record) => record.id), [attemptId]);
   assert.deepEqual(context.reusableAttempts, [], 'the stored rate limit does not satisfy reusableWhen');
 });
+
+test('MCP cold start rediscovers the checkout failure and completes the decision lifecycle', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-mcp-cold-start-');
+  const file = join(directory, 'data.json');
+  let requestId = 0;
+  const callTool = (rpc, name, args) => rpc.call({
+    jsonrpc: '2.0', id: ++requestId, method: 'tools/call',
+    params: { name, arguments: args }
+  });
+  const payload = (response) => {
+    assert.equal(response.error, undefined, response.error?.message);
+    return JSON.parse(response.result.content[0].text);
+  };
+
+  const first = startJsonRpcChild(file);
+  t.after(() => first.child.kill());
+  const decision = payload(await callTool(first, 'shadowgraph_record_decision', {
+    project: 'checkout-service',
+    title: 'Choose the datastore',
+    chosen: 'SQLite',
+    confidence: 0.8,
+    alternatives: [{
+      label: 'PostgreSQL',
+      reasonRejected: 'Single-user local deployment does not justify running a server',
+      reopenWhen: [{ key: 'deployment', operator: 'equals', value: 'multi-user' }]
+    }]
+  }));
+  const attempt = payload(await callTool(first, 'shadowgraph_record_attempt', {
+    project: 'checkout-service',
+    solution: 'One SQLite file per user',
+    result: 'Cross-user reporting became impossible',
+    resultClass: 'failed',
+    reason: 'No shared transactional view',
+    environment: 'Single-user local checkout prototype',
+    relatedTo: [decision.id]
+  }));
+  const initialOutcome = {
+    status: 'mixed',
+    lessons: ['Fine for one user, wrong once reporting spans users']
+  };
+  const withOutcome = payload(await callTool(first, 'shadowgraph_record_outcome', {
+    decisionId: decision.id,
+    outcome: initialOutcome
+  }));
+  assert.equal(withOutcome.outcome.status, initialOutcome.status);
+
+  const firstExit = new Promise((resolve) => first.child.once('exit', resolve));
+  first.child.kill();
+  await firstExit;
+
+  const second = startJsonRpcChild(file);
+  t.after(() => second.child.kill());
+  const context = payload(await callTool(second, 'shadowgraph_context', { project: 'checkout-service' }));
+  const rediscovered = context.failedAttemptsToAvoid.find((record) => record.id === attempt.id);
+  assert.ok(rediscovered, 'the prior attempt is discovered from project context alone');
+  assert.equal(rediscovered.reason, 'No shared transactional view');
+  assert.equal(rediscovered.environment, 'Single-user local checkout prototype');
+  assert.equal(rediscovered.resultClass, 'failed');
+  const priorDecision = context.activeDecisions.find((record) => record.id === decision.id);
+  assert.ok(priorDecision, 'the prior decision is active after the cold start');
+  assert.equal(priorDecision.alternatives[0].label, 'PostgreSQL');
+  assert.equal(priorDecision.alternatives[0].reasonRejected, 'Single-user local deployment does not justify running a server');
+  assert.equal(priorDecision.outcome.status, initialOutcome.status);
+  assert.deepEqual(priorDecision.outcome.lessons, initialOutcome.lessons);
+
+  const defaultContext = payload(await callTool(second, 'shadowgraph_context', { project: 'default' }));
+  assert.equal(defaultContext.activeDecisions.some((record) => record.id === decision.id), false);
+  assert.equal(defaultContext.failedAttemptsToAvoid.some((record) => record.id === attempt.id), false);
+
+  const updated = payload(await callTool(second, 'shadowgraph_update_status', {
+    decisionId: decision.id,
+    status: 'planned'
+  }));
+  assert.equal(updated.status, 'planned');
+  const replacement = payload(await callTool(second, 'shadowgraph_record_decision', {
+    project: 'checkout-service',
+    title: 'Choose the datastore',
+    chosen: 'PostgreSQL'
+  }));
+  const superseded = payload(await callTool(second, 'shadowgraph_supersede', {
+    decisionId: decision.id,
+    replacementId: replacement.id
+  }));
+  assert.equal(superseded.previous.status, 'superseded');
+  assert.equal(superseded.replacement.id, replacement.id);
+  const finalOutcome = {
+    status: 'successful',
+    lessons: ['Shared PostgreSQL restored cross-user reporting']
+  };
+  const completed = payload(await callTool(second, 'shadowgraph_record_outcome', {
+    decisionId: replacement.id,
+    outcome: finalOutcome
+  }));
+  assert.equal(completed.outcome.status, finalOutcome.status);
+  assert.deepEqual(completed.outcome.lessons, finalOutcome.lessons);
+
+  const finalContext = payload(await callTool(second, 'shadowgraph_context', { project: 'checkout-service' }));
+  assert.equal(finalContext.activeDecisions.some((record) => record.id === decision.id), false);
+  const currentDecision = finalContext.activeDecisions.find((record) => record.id === replacement.id);
+  assert.equal(currentDecision.outcome.status, finalOutcome.status);
+  assert.ok(finalContext.failedAttemptsToAvoid.some((record) => record.id === attempt.id));
+});

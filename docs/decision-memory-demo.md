@@ -3,8 +3,8 @@
 One worked example, run four ways. It shows the thing ShadowGraph exists for: a decision that
 carries its own rejection reasons and reopens itself when the world changes.
 
-Every command and response on this page was executed against ShadowGraph 0.40.0. Identifiers and
-timestamps will differ in your run; nothing else will.
+The setup/doctor output and cold-start MCP scenario were executed against ShadowGraph 0.41.0.
+Identifiers and timestamps are illustrative and will differ in your run.
 
 ## The story
 
@@ -60,8 +60,8 @@ stores; later clients must use the same path and project.
 {
   "ok": true,
   "command": "doctor",
-  "version": "0.40.0",
-  "node": { "version": "24.18.0", "supported": true, "requirement": ">=20" },
+  "version": "0.41.0",
+  "node": { "version": "24.21.0", "supported": true, "requirement": ">=20" },
   "storage": { "type": "json", "path": "...", "initialized": true, "readable": true, "writable": true },
   "graph": { "valid": true, "issues": 0 },
   "mcp": { "available": true, "recommendedMode": "compact", "fullMode": "Set SHADOWGRAPH_MCP_COMPACT=0 or remove it." }
@@ -214,7 +214,7 @@ contribution to the decision's confidence history rather than overwriting a numb
 
 ## 2. MCP
 
-The same story through the stdio MCP server in compact mode, which advertises 14 workflow tools.
+The same story through the stdio MCP server in compact mode, which advertises 16 workflow tools.
 
 ```bash
 SHADOWGRAPH_MCP_COMPACT=1 SHADOWGRAPH_FILE=/absolute/path/to/shared-shadowgraph/data.json shadowgraph mcp
@@ -244,6 +244,16 @@ An agent calls, in order:
   }
 ]
 ```
+
+The cold-start acceptance scenario closes session A after it records the decision, failed attempt,
+and initial `mixed` outcome. Session B opens the same store and calls `shadowgraph_context` with
+only `{"project":"checkout-service"}`. The response contains the attempt ID, reason, and environment
+in `failedAttemptsToAvoid`, plus PostgreSQL's rejection reason and the outcome in the active decision.
+A `default`-project context contains neither record. Session B then moves the original decision to
+`planned` with `shadowgraph_update_status`, records a PostgreSQL replacement, calls
+`shadowgraph_supersede`, and records the replacement's final `successful` outcome. This proves
+persistence and discovery across processes; it does not measure real-agent behavioral improvement,
+time savings, or token use.
 
 Compact mode changes only which tools are advertised. The full relational graph, memories, facts,
 alternatives, and outcomes are stored unchanged, and full mode (28 tools) exposes the rest of the
