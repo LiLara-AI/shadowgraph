@@ -296,13 +296,13 @@ condition schemas were advertised:
 
 | Mode and tier | Bare | Annotated | Structured |
 | --- | ---: | ---: | ---: |
-| Full 28 | 46,617 | 49,557 | 190,265 |
-| Compact 16 | 35,840 | 37,527 | 141,319 |
+| Full 28 | 46,582 | 49,522 | 190,230 |
+| Compact 16 | 35,805 | 37,492 | 141,284 |
 
-Output schemas account for 111,308 of the 155,847 bytes in the full structured tier, and they were
-not touched. An output schema is a promise a validating client enforces, so trimming one to reduce a
-number would trade a real guarantee for a smaller figure. The reduction above comes from the
-descriptions and from the input-schema property text that several tools share.
+Output schemas account for 140,682 of the 190,230 bytes in the full structured tier. The increase
+above comes from the newly advertised write fields and structured-condition schemas. An output
+schema is a promise a validating client enforces, so trimming one to reduce a number would trade a
+real guarantee for a smaller figure.
 
 ### Per-tool notes
 

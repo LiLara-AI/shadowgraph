@@ -733,8 +733,8 @@ const CATALOG = [
       properties: {
         id: { type: 'string', minLength: 1, description: 'Optional caller-chosen attempt identifier. Omit to generate one; a duplicate entity identifier is rejected.' },
         solution: { type: 'string', description: 'What was tried. Required, non-empty, and searchable content.' },
-        result: { type: 'string', description: 'What happened. Required, non-empty, and searchable content. With no resultClass, wording such as failed, error, or regression is what makes the attempt surface in shadowgraph_context as one to avoid.' },
-        resultClass: { type: 'string', enum: ['failed', 'succeeded', 'inconclusive'], description: 'Classify the result instead of leaving it to the wording heuristic. Set it when the result text does not say failed, error, or regression, or when it does but the attempt did not fail.' },
+        result: { type: 'string', description: 'What happened. Required, non-empty, and searchable content. Only legacy/core records without resultClass use wording such as failed, error, or regression to surface in shadowgraph_context as attempts to avoid.' },
+        resultClass: { type: 'string', enum: ['failed', 'succeeded', 'inconclusive'], description: 'Required for new MCP writes. Classify the result explicitly; wording classification applies only to legacy/core records lacking this field.' },
         project: projectProperty,
         reason: { type: 'string', description: 'Why it turned out that way. Searchable content.' },
         environment: { type: 'string', description: 'Where it was tried, such as a runtime, OS, or version. Searchable content, so a later attempt can be matched to the same environment.' },
