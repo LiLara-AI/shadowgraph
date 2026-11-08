@@ -486,7 +486,10 @@ test('P1-3 independent review: exposed rebuild migrates pre-schema-5 lifecycle v
 test('P1-3 independent review: invalid verified journal payload makes core and configured MCP rebuild incomplete without trust elevation', async (t) => {
   const directory = await scratchDirectory(t, 'shadowgraph-independent-p1-invalid-rebuild-');
   const fixture = await verifierFixture(directory);
-  const payload = await verifiedSnapshot(directory, fixture, { id: 'invalid-rebuild-payload' });
+  const payload = await verifiedSnapshot(directory, fixture, {
+    id: 'invalid-rebuild-payload',
+    expiresAt: new Date(Date.now() + 86_400_000).toISOString()
+  });
   const invalidEntry = payload.journal.find((entry) => entry.type === 'fact.verified');
   invalidEntry.payload.value = 'tampered-journal-only';
   const rawJournal = structuredClone(payload.journal);
