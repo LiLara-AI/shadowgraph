@@ -345,7 +345,9 @@ test('a legacy tool-execution failure stays a protocol error and carries no stru
   const failed = await rpc.call('tools/call', { name: 'shadowgraph_update_status', arguments: { decisionId: 'missing', status: 'planned' } });
   assert.equal(failed.result, undefined);
   assert.equal(failed.error.code, -32000);
-  assert.match(failed.error.message, /Decision not found/u);
+  assert.equal(failed.error.message, 'Tool execution failed (unknown_decision)');
+  assert.deepEqual(failed.error.data, { issueCode: 'unknown_decision', fieldPath: 'decisionId', retryable: false });
+  assert.equal(JSON.stringify(failed).includes('missing'), false);
 });
 
 test('the verifier build advertises and satisfies the verification tool contract', async (t) => {

@@ -183,7 +183,11 @@ test('MCP modern metadata, version, JSON-RPC, and tool errors remain distinguish
   });
   assert.equal(executionFailure.error, undefined);
   assert.equal(executionFailure.result.isError, true);
-  assert.match(executionFailure.result.content[0].text, /Decision not found/);
+  assert.equal(executionFailure.result.content[0].text, 'Tool execution failed (unknown_decision)');
+  assert.deepEqual(executionFailure.result._meta['shadowgraph/error'], {
+    issueCode: 'unknown_decision', fieldPath: 'decisionId', retryable: false
+  });
+  assert.equal(JSON.stringify(executionFailure).includes('missing'), false);
   assertModernComplete(executionFailure.result);
 });
 

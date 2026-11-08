@@ -171,3 +171,17 @@ on the public registry belongs to an unrelated package. Install from GitHub as d
 `A caller cannot set fact verificationStatus to verified` · `... to expired` · `Invalid fact verificationStatus` · `Invalid decision status: <raw>` · `Unknown journal entry type: <type>` · `Purge mode must be logical or hard` · `Outcome status must be successful, mixed, failed, or unknown` · `<field> must be a string when provided` · `Decision not found` · `Illegal decision status transition: <from> -> <to>` · `Relation endpoints must exist before linking` · `A traversal requires an existing id` · `Review signal not found`.
 
 The first four message shapes pre-date this release and are preserved for compatibility.
+
+### MCP caller-safe failures
+
+MCP does not expose the raw validation diagnostics above for mapped caller errors. It returns `Tool execution failed (<issueCode>)` with constructed details `{ issueCode, fieldPath, retryable: false }` in legacy JSON-RPC `error.data` and modern `result._meta['shadowgraph/error']`. Existing missing-field details are preserved in both locations.
+
+| Phase 1 failure case | `issueCode` | `fieldPath` |
+| --- | --- | --- |
+| Unknown decision | `unknown_decision` | `decisionId` |
+| Invalid decision status | `invalid_field` | `status` |
+| Invalid attempt result class | `invalid_field` | `resultClass` |
+| Illegal decision transition | `illegal_transition` | `status` |
+| Missing required field | `missing_required_field` | the required field, including `resultClass` |
+
+The five mappings emit four distinct codes because `invalid_field` covers both invalid-value cases. Raw values/messages, paths, stacks, and internal diagnostic keys remain private. `idempotency_conflict` arrives with Phase 2 and is not yet emitted.

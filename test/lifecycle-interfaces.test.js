@@ -92,7 +92,10 @@ test('lifecycle MCP modern tool errors preserve the durable graph exactly', asyn
   assert.equal(rejected.error, undefined, 'modern tool failures use CallToolResult, not JSON-RPC error');
   assert.equal(rejected.result.isError, true);
   assert.equal(rejected.result.resultType, 'complete');
-  assert.deepEqual(rejected.result.content, [{ type: 'text', text: 'Tool execution failed' }]);
+  assert.deepEqual(rejected.result.content, [{ type: 'text', text: 'Tool execution failed (illegal_transition)' }]);
+  assert.deepEqual(rejected.result._meta['shadowgraph/error'], {
+    issueCode: 'illegal_transition', fieldPath: 'status', retryable: false
+  });
   const publicFailure = JSON.stringify(rejected);
   assert.equal(publicFailure.includes(decision.id), false, 'modern tool failure disclosed the decision id');
   assert.equal(publicFailure.includes('Illegal decision status transition: planned -> validated'), false, 'modern tool failure disclosed the raw lifecycle diagnostic');

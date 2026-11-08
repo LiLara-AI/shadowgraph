@@ -442,9 +442,14 @@ const PUBLIC_DOMAIN_MESSAGES = new Set([
   'A caller cannot set fact verificationStatus to expired',
   'Invalid fact verificationStatus',
   'Purge mode must be logical or hard',
-  'Outcome status must be successful, mixed, failed, or unknown',
-  'Decision not found'
+  'Outcome status must be successful, mixed, failed, or unknown'
 ]);
+const SAFE_CALLER_ERRORS = [
+  { matches: (message) => message === 'Decision not found', issueCode: 'unknown_decision', fieldPath: 'decisionId' },
+  { matches: (message) => message.startsWith('Illegal decision status transition:'), issueCode: 'illegal_transition', fieldPath: 'status' },
+  { matches: (message) => message.startsWith('Invalid decision status:'), issueCode: 'invalid_field', fieldPath: 'status' },
+  { matches: (message) => message.startsWith('Attempt resultClass must be '), issueCode: 'invalid_field', fieldPath: 'resultClass' }
+];
 const PUBLIC_ERROR_NAME_MESSAGES = new Map([
   ['RevisionConflictError', 'Storage revision conflict']
 ]);
@@ -518,12 +523,15 @@ function publicErrorDetails(error) {
   if (error instanceof SyntaxError) return { message: 'Tool execution failed: invalid JSON data' };
   const namedMessage = PUBLIC_ERROR_NAME_MESSAGES.get(error?.name);
   if (namedMessage) return { message: namedMessage };
+  const callerError = SAFE_CALLER_ERRORS.find((entry) => entry.matches(error?.message));
+  if (callerError) {
+    return {
+      message: `Tool execution failed (${callerError.issueCode})`,
+      data: { issueCode: callerError.issueCode, fieldPath: callerError.fieldPath, retryable: false }
+    };
+  }
   if (PUBLIC_DOMAIN_MESSAGES.has(error?.message)) return { message: error.message };
   return { message: 'Tool execution failed' };
-}
-
-function publicErrorMessage(error) {
-  return publicErrorDetails(error).message;
 }
 
 // The wire shape of one JSON-RPC response. Building it separately from writing
@@ -714,7 +722,12 @@ async function handleMessage(request, emit) {
         respond(eraResult(modern, modern ? { ...result, isError: false } : result));
       } catch (error) {
         if (!modern || isRpcError(error)) throw error;
-        respond(modernResult({ content: [{ type: 'text', text: publicErrorMessage(error) }], isError: true }));
+        const failure = publicErrorDetails(error);
+        respond(modernResult({
+          content: [{ type: 'text', text: failure.message }],
+          isError: true,
+          ...(failure.data === undefined ? {} : { _meta: { 'shadowgraph/error': failure.data } })
+        }));
       }
     } else throw rpcError(-32601, 'Method not found');
   } catch (error) {

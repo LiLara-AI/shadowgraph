@@ -161,6 +161,7 @@ function assertSafeToolFailure(response, {
     assert.equal(response.result?.content?.length, 1);
     assert.equal(response.result.content[0].type, 'text');
     assert.equal(response.result.content[0].text, message);
+    assert.deepEqual(response.result?._meta?.['shadowgraph/error'], data);
   } else {
     assertRpcCode(response, code);
     assert.equal(response.error.message, message);
@@ -187,10 +188,79 @@ for (const modern of [false, true]) {
       assertSafeToolFailure(response, {
         modern,
         message: 'Tool execution failed (missing_required_field)',
-        data: modern ? undefined : { issueCode: 'missing_required_field', fieldPath, retryable: false }
+        data: { issueCode: 'missing_required_field', fieldPath, retryable: false }
       });
     }
   });
+
+  const privatePath = join('PRIVATE-CALLER-ERROR-DIRECTORY-0a1b', 'PRIVATE-CALLER-ERROR-PATH-1a2b');
+  const stackText = 'at updateDecisionStatus (PRIVATE-CALLER-ERROR-STACK-3c4d)';
+  const callerErrorCases = [
+    {
+      label: 'unknown decision',
+      name: 'shadowgraph_update_status',
+      arguments_: { decisionId: `${era}-PRIVATE-UNKNOWN-DECISION-5e6f`, status: 'planned' },
+      expected: { issueCode: 'unknown_decision', fieldPath: 'decisionId', retryable: false },
+      forbidden: [`${era}-PRIVATE-UNKNOWN-DECISION-5e6f`, 'Decision not found', privatePath, stackText]
+    },
+    {
+      label: 'invalid decision status',
+      name: 'shadowgraph_update_status',
+      arguments_: { decisionId: `${era}-PRIVATE-INVALID-STATUS-DECISION-7a8b`, status: 'PRIVATE-RAW-STATUS-9c0d' },
+      seedDecision: true,
+      expected: { issueCode: 'invalid_field', fieldPath: 'status', retryable: false },
+      forbidden: [`${era}-PRIVATE-INVALID-STATUS-DECISION-7a8b`, 'PRIVATE-RAW-STATUS-9c0d', 'Invalid decision status:', privatePath, stackText]
+    },
+    {
+      label: 'invalid attempt result class',
+      name: 'shadowgraph_record_attempt',
+      arguments_: {
+        project: 'p',
+        solution: `PRIVATE-${era}-SOLUTION-1e2f`,
+        result: `PRIVATE-${era}-RESULT-3a4b`,
+        resultClass: `PRIVATE-${era}-RESULT-CLASS-5c6d`
+      },
+      expected: { issueCode: 'invalid_field', fieldPath: 'resultClass', retryable: false },
+      forbidden: [`PRIVATE-${era}-SOLUTION-1e2f`, `PRIVATE-${era}-RESULT-3a4b`, `PRIVATE-${era}-RESULT-CLASS-5c6d`, 'Attempt resultClass must be ', privatePath, stackText]
+    },
+    {
+      label: 'illegal decision transition',
+      name: 'shadowgraph_update_status',
+      arguments_: { decisionId: `${era}-PRIVATE-ILLEGAL-TRANSITION-DECISION-7e8f`, status: 'validated' },
+      seedDecision: true,
+      initialStatus: 'planned',
+      expected: { issueCode: 'illegal_transition', fieldPath: 'status', retryable: false },
+      forbidden: [`${era}-PRIVATE-ILLEGAL-TRANSITION-DECISION-7e8f`, 'Illegal decision status transition:', 'planned -> validated', 'validated', privatePath, stackText]
+    }
+  ];
+  for (const scenario of callerErrorCases) {
+    test(`${era} MCP ${scenario.label} returns safe corrective details`, async (t) => {
+      const rpc = await startMcp(t);
+      if (scenario.seedDecision) {
+        const seeded = await rpc.call(toolRequest(`${era}-${scenario.label}-seed`, 'shadowgraph_record_decision', {
+          id: scenario.arguments_.decisionId,
+          title: 'Caller error fixture',
+          chosen: 'keep'
+        }, { modern }));
+        assert.equal(seeded.error, undefined, seeded.error?.message);
+      }
+      if (scenario.initialStatus) {
+        const transitioned = await rpc.call(toolRequest(`${era}-${scenario.label}-initial`, 'shadowgraph_update_status', {
+          decisionId: scenario.arguments_.decisionId,
+          status: scenario.initialStatus
+        }, { modern }));
+        assert.equal(transitioned.error, undefined, transitioned.error?.message);
+        assert.equal(JSON.parse(transitioned.result.content[0].text).status, scenario.initialStatus);
+      }
+      const response = await rpc.call(toolRequest(`${era}-${scenario.label}`, scenario.name, scenario.arguments_, { modern }));
+      assertSafeToolFailure(response, {
+        modern,
+        message: `Tool execution failed (${scenario.expected.issueCode})`,
+        data: scenario.expected,
+        forbidden: scenario.forbidden
+      });
+    });
+  }
 }
 
 function emptyRestorePayload(schemaVersion = 4) {
@@ -494,7 +564,7 @@ test('legacy JSON-RPC parse, request, method, params, primitive, and domain erro
     ['unknown tool', unknownTool, -32601, /Unknown tool/],
     ['unknown resource', unknownResource, -32602, /Unknown resource URI/],
     ['unknown prompt', unknownPrompt, -32602, /Unknown prompt/],
-    ['domain failure', domainFailure, -32000, /Decision not found/]
+    ['domain failure', domainFailure, -32000, /Tool execution failed \(unknown_decision\)/]
   ]) {
     assertRpcCode(response, code);
     assert.match(response.error.message, message, label);
@@ -731,7 +801,12 @@ for (const modern of [false, true]) {
       { decisionId: `${era}-status-owner`, status: statusSentinel },
       { modern }
     ));
-    assertSafeToolFailure(malformedStatus, { modern, forbidden: [statusSentinel, 'Invalid decision status'] });
+    assertSafeToolFailure(malformedStatus, {
+      modern,
+      message: 'Tool execution failed (invalid_field)',
+      data: { issueCode: 'invalid_field', fieldPath: 'status', retryable: false },
+      forbidden: [statusSentinel, `${era}-status-owner`, 'Invalid decision status']
+    });
   });
 }
 
@@ -758,7 +833,7 @@ for (const modern of [false, true]) {
       assertSafeToolFailure(response, {
         modern,
         message: `Tool execution failed (${issueCode})`,
-        data: modern ? undefined : { issueCode },
+        data: { issueCode },
         forbidden: [source, rpc.directory, 'sequence 1', 'schemaVersion 999']
       });
     });
@@ -843,6 +918,10 @@ test('modern nested restore causes and degraded latch stay private CallToolResul
   assertSafeToolFailure(restore, {
     modern: true,
     message: 'Tool execution failed (json_restore_recovery_unconfirmed)',
+    data: {
+      issueCode: 'json_restore_recovery_unconfirmed',
+      recoveryCode: 'json_restore_recovery_unconfirmed'
+    },
     forbidden: [sentinel, source, rpc.directory, 'afterReplacementRename', 'beforeRollbackInstall', '.rollback']
   });
 
@@ -850,6 +929,7 @@ test('modern nested restore causes and degraded latch stay private CallToolResul
   assertSafeToolFailure(blocked, {
     modern: true,
     message: 'Persistent storage unavailable',
+    data: { recoveryCode: 'json_restore_recovery_unconfirmed' },
     forbidden: [sentinel, source, rpc.directory, '.rollback']
   });
 });
