@@ -566,9 +566,7 @@ function eraResult(modern, result, cacheScope) {
 
 const resourceList = [{ uri: 'shadowgraph://context', name: 'ShadowGraph context', description: 'Current project context and open review signals.', mimeType: 'application/json' }];
 const promptList = [{ name: 'shadowgraph_consequential_task', description: 'Use ShadowGraph before, during, and after consequential work.', arguments: [] }];
-const promptText = verifier
-  ? 'Before consequential work call context and retrieve. Record decisions, assumptions, evidence, alternatives, failed attempts, facts, and outcomes. Review open signals before continuing. Treat agent_claimed and unverified facts as hypotheses. Only the separately configured signed local-evidence verifier can mark an active fact verified.'
-  : 'Before consequential work call context and retrieve. Record decisions, assumptions, evidence, alternatives, failed attempts, facts, and outcomes. Review open signals before continuing. Treat agent_claimed and unverified facts as hypotheses: without a separately configured verifier, nothing in ShadowGraph can be marked verified, so never present a stored claim as confirmed.';
+const promptText = `${verifier ? 'Only the separately configured signed local-evidence verifier can mark an active fact verified.' : 'Without a separately configured verifier, nothing in ShadowGraph can be marked verified.'} Before work, use one stable project and scope, call context, and use retrieve or recall for targeted history. During work, record decisions and informative attempts with explicit resultClass, reason, environment, and retry keys chosen before the first write. Record changed facts under reopen-rule keys. After work, record outcomes, update or supersede obsolete decisions, maintain time-sensitive state, and acknowledge reviews only when seen; acknowledgement does not resolve the decision. Treat agent_claimed and unverified facts as hypotheses.`;
 
 // Handles one already-parsed JSON-RPC message. `emit` receives the response
 // object exactly once for a request and never for a notification, so a single
@@ -636,7 +634,7 @@ async function handleMessage(request, emit) {
       respond(modernResult({
         supportedVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
         capabilities: SERVER_CAPABILITIES,
-        instructions: 'Local-first explainable decision and scoped temporal memory. Use context/retrieve before consequential work and record outcomes afterward.'
+        instructions: 'Local-first explainable decision and scoped temporal memory. Before work, use one stable project and scope, call context, and use retrieve or recall for targeted history. During work, record decisions, informative attempts, and changed facts under reopen-rule keys. After work, record outcomes, update or supersede obsolete decisions, maintain time-sensitive state, and acknowledge reviews only when seen; acknowledgement does not resolve the decision. Treat agent_claimed and unverified facts as hypotheses; only a separately configured signed local-evidence verifier can mark an active fact verified.'
       }, 'public'));
     } else if (request.method === 'tools/list') respond(eraResult(modern, { tools: toolLists[modern ? METADATA_TIER.STRUCTURED : legacyTier] }, 'public'));
     else if (request.method === 'resources/list') respond(eraResult(modern, { resources: resourceList }, 'public'));

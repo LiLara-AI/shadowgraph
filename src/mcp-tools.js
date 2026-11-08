@@ -644,7 +644,7 @@ function compose({ does, route, effects, returns }) {
 // ---------------------------------------------------------------------------
 // The catalog
 // ---------------------------------------------------------------------------
-// `compact` marks the 14 everyday workflow tools advertised when
+// `compact` marks the 16 everyday workflow tools advertised when
 // SHADOWGRAPH_MCP_COMPACT=1. `persists` marks the tools whose successful call is
 // followed by a durable save in src/mcp.js; shadowgraph_restore is deliberately
 // false because the storage backend commits the replacement itself.
@@ -727,7 +727,7 @@ const CATALOG = [
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     describe: {
       does: 'List decisions whose rejected alternatives are due again, from reopenWhen rules over stored facts.',
-      route: 'shadowgraph_review_signals reads persisted ones, shadowgraph_ack_review closes one, shadowgraph_maintain ages first.',
+      route: 'shadowgraph_context lists due reviews and signal ids, shadowgraph_ack_review acknowledges one, shadowgraph_maintain ages first.',
       effects: 'Persists one signal per newly due decision, deduped by decision and reason; a repeat commits a revision.',
       returns: 'Returns a bare JSON array.'
     },
@@ -747,7 +747,7 @@ const CATALOG = [
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     describe: {
       does: 'Find decisions, attempts, and facts whose declared content fields contain every query term.',
-      route: 'shadowgraph_retrieve adds one-hop neighbours, shadowgraph_recall fuses ranks over scoped memory, shadowgraph_context builds a working set, shadowgraph_traverse walks from an id.',
+      route: 'shadowgraph_retrieve adds one-hop neighbours, shadowgraph_recall fuses ranks over scoped memory, shadowgraph_context builds a working set.',
       effects: 'Reads only. Schema keys never match, and a filter is never a content match.'
     },
     inputSchema: {
@@ -970,7 +970,7 @@ const CATALOG = [
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     describe: {
       does: 'Record how a decision turned out and move its confidence by an evidence-weighted amount.',
-      route: 'shadowgraph_confidence_evidence records evidence short of an outcome, shadowgraph_update_status changes the lifecycle state.',
+      route: 'shadowgraph_update_status changes the lifecycle state, shadowgraph_record_fact records an observation that can reopen the decision.',
       effects: 'One outcome contribution per decision, so re-recording replaces rather than stacking, restamps it, and commits a revision.'
     },
     inputSchema: {
@@ -1019,7 +1019,7 @@ const CATALOG = [
   },
   {
     name: 'shadowgraph_update_status',
-    compact: false,
+    compact: true,
     persists: true,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     describe: {
@@ -1095,12 +1095,12 @@ const CATALOG = [
   },
   {
     name: 'shadowgraph_supersede',
-    compact: false,
+    compact: true,
     persists: true,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     describe: {
       does: 'Mark one decision superseded by a replacement in the same project.',
-      route: 'shadowgraph_update_status handles ordinary lifecycle moves, shadowgraph_link any other relationship.',
+      route: 'shadowgraph_update_status handles ordinary lifecycle moves.',
       effects: 'Nothing is deleted: the previous decision stays searchable. A repeat returns the same result and commits a revision.'
     },
     inputSchema: {
@@ -1219,7 +1219,7 @@ const CATALOG = [
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     describe: {
       does: 'Retrieve records matching a content query together with their one-hop graph neighbours.',
-      route: 'shadowgraph_search returns matches only, shadowgraph_recall ranks scoped memory, shadowgraph_traverse walks from a known id, shadowgraph_context builds a project working set.',
+      route: 'shadowgraph_search returns matches only, shadowgraph_recall ranks scoped memory, shadowgraph_context builds a project working set.',
       effects: 'Reads only. A neighbour can appear with no content match of its own.'
     },
     inputSchema: {
@@ -1247,7 +1247,7 @@ const CATALOG = [
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     describe: {
       does: 'Report graph integrity diagnostics by severity, without modifying storage.',
-      route: 'shadowgraph_repair_plan shows what a fix would involve, shadowgraph_rebuild tests whether the journal reproduces the data.',
+      route: 'shadowgraph_context builds a working set, shadowgraph_maintain applies time-based changes.',
       effects: 'Reads only. Legacy data is named rather than guess-repaired, and newer-schema data is reported, not downgraded.'
     },
     inputSchema: { type: 'object' },
@@ -1391,15 +1391,15 @@ const CATALOG = [
     persists: true,
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     describe: {
-      does: 'Acknowledge one persisted review signal by id, closing it as open work.',
-      route: 'Ids come from shadowgraph_review_signals or shadowgraph_review; use shadowgraph_update_status or shadowgraph_supersede to act on the decision.',
+      does: 'Acknowledge one persisted review signal by id as seen, without resolving the decision.',
+      route: 'Ids come from shadowgraph_context, shadowgraph_review, or shadowgraph_maintain; use shadowgraph_update_status or shadowgraph_supersede to act on the decision.',
       effects: 'Overwrites status and acknowledgedAt in place with no journal entry, so a rebuild cannot reconstruct it; a repeat restamps it.'
     },
     inputSchema: {
       type: 'object',
       required: ['id'],
       properties: {
-        id: { type: 'string', description: 'Review signal id, as returned in reviewSignalId by shadowgraph_context, in the id field by shadowgraph_review_signals, or in reviewSignals by shadowgraph_maintain. This is the signal id, not the decisionId it refers to.' }
+        id: { type: 'string', description: 'Review signal id, as returned in reviewSignalId by shadowgraph_context or shadowgraph_review, or in reviewSignals by shadowgraph_maintain. This is the signal id, not the decisionId it refers to.' }
       }
     },
     outputSchema: acknowledgedSignalSchema

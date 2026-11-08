@@ -79,7 +79,7 @@ test('compact can list a review, acknowledge it, keep that across restart, and s
   t.after(() => first.stop());
   const listed = await first.send('tools/list', {});
   const names = listed.result.tools.map((tool) => tool.name);
-  assert.equal(names.length, 14);
+  assert.equal(names.length, 16);
   assert.ok(names.includes('shadowgraph_context'), 'listing route');
   assert.ok(names.includes('shadowgraph_ack_review'), 'acknowledgement route');
 
@@ -164,4 +164,27 @@ test('acknowledging one breach does not mute a broader breach on the same decisi
   assert.notEqual(broadened[0].reviewSignalId, narrow.reviewSignalId);
   assert.equal(broadened[0].reviewSignalStatus, 'open', 'so it is unacknowledged and visible');
   assert.equal(broadened[0].violatedConditions.length, 2);
+});
+
+test('compact can update and supersede a decision through the advertised lifecycle tools', async (t) => {
+  const dir = await scratchDirectory(t, 'shadowgraph-compact-lifecycle-');
+  const mcp = client(join(dir, 'data.json'));
+  t.after(() => mcp.stop());
+
+  const original = await mcp.call('shadowgraph_record_decision', {
+    project: 'p', title: 'Use the original plan', chosen: 'original'
+  });
+  const replacement = await mcp.call('shadowgraph_record_decision', {
+    project: 'p', title: 'Use the replacement plan', chosen: 'replacement'
+  });
+  const updated = await mcp.call('shadowgraph_update_status', {
+    decisionId: original.id, status: 'in_progress'
+  });
+  assert.equal(updated.status, 'in_progress');
+
+  const superseded = await mcp.call('shadowgraph_supersede', {
+    decisionId: original.id, replacementId: replacement.id
+  });
+  assert.equal(superseded.previous.status, 'superseded');
+  assert.equal(superseded.previous.supersededBy, replacement.id);
 });

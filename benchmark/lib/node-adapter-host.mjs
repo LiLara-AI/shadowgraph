@@ -63,6 +63,8 @@ export const COMPACT_TOOL_NAMES = Object.freeze([
   'shadowgraph_recall',
   'shadowgraph_record_fact',
   'shadowgraph_record_outcome',
+  'shadowgraph_update_status',
+  'shadowgraph_supersede',
   'shadowgraph_maintain',
   'shadowgraph_retrieve',
   'shadowgraph_validate',

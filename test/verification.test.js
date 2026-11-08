@@ -277,8 +277,13 @@ test('U-1: MCP exposes verification only when a separate verifier is preconfigur
   });
   t.after(() => configuredCompact.child.kill());
   const compactList = await configuredCompact.call({ jsonrpc: '2.0', id: 20, method: 'tools/list' });
-  assert.equal(compactList.result.tools.length, 14);
+  assert.equal(compactList.result.tools.length, 16);
   assert.equal(compactList.result.tools.some((tool) => tool.name === 'shadowgraph_verify_fact'), false);
+
+  const prompt = await configured.call({
+    jsonrpc: '2.0', id: 21, method: 'prompts/get', params: { name: 'shadowgraph_consequential_task' }
+  });
+  assert.equal(prompt.result.messages[0].content.text, 'Only the separately configured signed local-evidence verifier can mark an active fact verified. Before work, use one stable project and scope, call context, and use retrieve or recall for targeted history. During work, record decisions and informative attempts with explicit resultClass, reason, environment, and retry keys chosen before the first write. Record changed facts under reopen-rule keys. After work, record outcomes, update or supersede obsolete decisions, maintain time-sensitive state, and acknowledge reviews only when seen; acknowledgement does not resolve the decision. Treat agent_claimed and unverified facts as hypotheses.');
 
   const recorded = await configured.call({
     jsonrpc: '2.0', id: 3, method: 'tools/call', params: {

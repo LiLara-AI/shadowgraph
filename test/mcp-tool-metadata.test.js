@@ -65,6 +65,8 @@ const COMPACT_EXPECTED = [
   'shadowgraph_recall',
   'shadowgraph_record_fact',
   'shadowgraph_record_outcome',
+  'shadowgraph_update_status',
+  'shadowgraph_supersede',
   'shadowgraph_maintain',
   'shadowgraph_retrieve',
   'shadowgraph_validate',
@@ -138,32 +140,32 @@ const ANNOTATIONS_EXPECTED = {
 // Overlapping tools must name the siblings a model would otherwise confuse them
 // with, so routing is decidable from the description alone.
 const ROUTING_EXPECTED = {
-  shadowgraph_search: ['shadowgraph_retrieve', 'shadowgraph_recall', 'shadowgraph_context', 'shadowgraph_traverse'],
-  shadowgraph_retrieve: ['shadowgraph_search', 'shadowgraph_recall', 'shadowgraph_traverse', 'shadowgraph_context'],
+  shadowgraph_search: ['shadowgraph_retrieve', 'shadowgraph_recall', 'shadowgraph_context'],
+  shadowgraph_retrieve: ['shadowgraph_search', 'shadowgraph_recall', 'shadowgraph_context'],
   shadowgraph_recall: ['shadowgraph_search', 'shadowgraph_retrieve', 'shadowgraph_remember'],
   shadowgraph_context: ['shadowgraph_search', 'shadowgraph_retrieve', 'shadowgraph_recall', 'shadowgraph_review'],
   shadowgraph_traverse: ['shadowgraph_search', 'shadowgraph_recall', 'shadowgraph_retrieve'],
-  shadowgraph_review: ['shadowgraph_review_signals', 'shadowgraph_ack_review', 'shadowgraph_maintain'],
+  shadowgraph_review: ['shadowgraph_context', 'shadowgraph_ack_review', 'shadowgraph_maintain'],
   shadowgraph_reconsider: ['shadowgraph_review', 'shadowgraph_ack_review'],
   shadowgraph_review_signals: ['shadowgraph_review', 'shadowgraph_ack_review'],
-  shadowgraph_ack_review: ['shadowgraph_review_signals', 'shadowgraph_review', 'shadowgraph_update_status', 'shadowgraph_supersede'],
+  shadowgraph_ack_review: ['shadowgraph_context', 'shadowgraph_review', 'shadowgraph_maintain', 'shadowgraph_update_status', 'shadowgraph_supersede'],
   shadowgraph_maintain: ['shadowgraph_review', 'shadowgraph_validate', 'shadowgraph_update_status'],
   shadowgraph_purge: ['shadowgraph_purge_preview', 'shadowgraph_redact', 'shadowgraph_backup'],
   shadowgraph_purge_preview: ['shadowgraph_purge'],
   shadowgraph_backup: ['shadowgraph_purge', 'shadowgraph_restore', 'shadowgraph_redact'],
   shadowgraph_restore: ['shadowgraph_purge', 'shadowgraph_backup'],
   shadowgraph_redact: ['shadowgraph_backup', 'shadowgraph_purge'],
-  shadowgraph_validate: ['shadowgraph_repair_plan', 'shadowgraph_rebuild'],
+  shadowgraph_validate: ['shadowgraph_context', 'shadowgraph_maintain'],
   shadowgraph_repair_plan: ['shadowgraph_validate'],
   shadowgraph_journal: ['shadowgraph_rebuild', 'shadowgraph_validate', 'shadowgraph_search'],
   shadowgraph_rebuild: ['shadowgraph_journal', 'shadowgraph_validate'],
   shadowgraph_link: ['shadowgraph_traverse', 'shadowgraph_supersede'],
-  shadowgraph_supersede: ['shadowgraph_update_status', 'shadowgraph_link'],
+  shadowgraph_supersede: ['shadowgraph_update_status'],
   shadowgraph_update_status: ['shadowgraph_supersede', 'shadowgraph_maintain', 'shadowgraph_record_outcome'],
   shadowgraph_record_decision: ['shadowgraph_record_attempt', 'shadowgraph_record_fact', 'shadowgraph_remember'],
   shadowgraph_record_attempt: ['shadowgraph_record_decision', 'shadowgraph_record_outcome'],
   shadowgraph_record_fact: ['shadowgraph_remember'],
-  shadowgraph_record_outcome: ['shadowgraph_confidence_evidence', 'shadowgraph_update_status'],
+  shadowgraph_record_outcome: ['shadowgraph_update_status', 'shadowgraph_record_fact'],
   shadowgraph_confidence_evidence: ['shadowgraph_record_outcome', 'shadowgraph_record_fact'],
   shadowgraph_remember: ['shadowgraph_record_decision', 'shadowgraph_record_fact', 'shadowgraph_recall'],
   shadowgraph_verify_fact: ['shadowgraph_record_fact']
@@ -280,7 +282,7 @@ test('the catalog advertises exactly the documented full, compact, and verifier 
 
   const compact = selectTools(fullCatalog, { compact: true });
   assert.deepEqual(compact.map((entry) => entry.name), COMPACT_EXPECTED);
-  assert.equal(compact.length, 14);
+  assert.equal(compact.length, 16);
   assert.deepEqual([...COMPACT_TOOL_NAMES], COMPACT_EXPECTED);
 
   // The optional verification tool is a full-mode capability only.
@@ -289,6 +291,22 @@ test('the catalog advertises exactly the documented full, compact, and verifier 
 
   assert.equal(new Set(verifierCatalog.map((entry) => entry.name)).size, 29);
   for (const entry of verifierCatalog) assert.match(entry.name, /^shadowgraph_[a-z_]+$/u);
+});
+
+test('every compact description route names an available compact tool', () => {
+  const compact = selectTools(buildToolCatalog(), { compact: true });
+  const names = new Set(compact.map((tool) => tool.name));
+  const descriptions = [];
+  const walk = (value) => {
+    if (typeof value === 'string') descriptions.push(value);
+    else if (value && typeof value === 'object') Object.values(value).forEach(walk);
+  };
+  compact.forEach((tool) => walk({ describe: tool.describe, inputSchema: tool.inputSchema }));
+  for (const description of descriptions) {
+    for (const match of description.matchAll(/shadowgraph_[a-z_]+/gu)) {
+      assert.ok(names.has(match[0]), `unknown compact route: ${match[0]}`);
+    }
+  }
 });
 
 test('every tool carries the four behavioural annotations its handler actually justifies', () => {
@@ -346,7 +364,9 @@ test('recall and remember declare an open world only when an embedding endpoint 
 // description must not exceed, and what a caller would be misled by if it were
 // left out. There is deliberately no minimum length and no required wording,
 // because padding a clause to clear a floor makes a description worse.
-const DESCRIPTION_CAP = 350;
+// Raised from 350 to 400 on 2026-11-08: the exact required review route made
+// that description 358 characters, so the ceiling moves to the next 50.
+const DESCRIPTION_CAP = 400;
 // `compact` was raised from 4300 to 4450 on 2026-09-14, once and deliberately,
 // because compact gained a 13th tool: shadowgraph_ack_review was promoted so a
 // compact client could close the review loop it could already see. Measured, not
@@ -360,10 +380,15 @@ const DESCRIPTION_CAP = 350;
 // description, itself under the per-description cap. `full` (8,861) and
 // `verifier` (9,210) both grew by the same 346 and still sit under their
 // existing budgets, so neither was moved.
+//
+// Raised to 5200 on 2026-11-08 for the 15th and 16th compact tools,
+// shadowgraph_update_status and shadowgraph_supersede, and the route rewrite that
+// removed full-only destinations. `npm run size:mcp` measured compact at 5,162,
+// full at 8,754, and verifier at 9,103 characters; only compact needed movement.
 const DESCRIPTION_TOTALS = {
   full: 9100,
   verifier: 9400,
-  compact: 4750
+  compact: 5200
 };
 // A tool whose result a caller could destroy something with has to say so in
 // its own words. The check is on meaning, not on a keyword: each of these must
@@ -467,11 +492,22 @@ test('the advertised description text stays within its aggregate budget', () => 
 // client buys for it is a reconsideration that states which conditions fired,
 // which did not, and which could not be evaluated, rather than a bare due list.
 // Budgets below keep roughly 2% headroom, as before.
+//
+// Re-measured on 2026-11-08 after update_status and supersede became the 15th
+// and 16th compact tools and unavailable routes were removed:
+//
+//   withoutVerifier.full        bare 43,579  annotated 46,519  structured 187,227
+//   withoutVerifier.compact     bare 32,802  annotated 34,489  structured 138,281
+//   withVerifier.full           bare 44,495  annotated 47,540  structured 191,542
+//   withVerifier.compact        bare 32,802  annotated 34,489  structured 138,281
+//
+// Only the compact ceilings moved, using the same roughly 2% headroom rounded
+// up to the next 500 bytes.
 const WIRE_BUDGETS = {
   'withoutVerifier.full': { bare: 44_500, annotated: 47_500, structured: 191_000 },
-  'withoutVerifier.compact': { bare: 31_500, annotated: 33_000, structured: 126_000 },
+  'withoutVerifier.compact': { bare: 33_500, annotated: 35_500, structured: 141_500 },
   'withVerifier.full': { bare: 45_500, annotated: 48_500, structured: 195_500 },
-  'withVerifier.compact': { bare: 31_500, annotated: 33_000, structured: 126_000 }
+  'withVerifier.compact': { bare: 33_500, annotated: 35_500, structured: 141_500 }
 };
 
 test('the advertised tool list stays within its wire-size budget, at every tier', () => {

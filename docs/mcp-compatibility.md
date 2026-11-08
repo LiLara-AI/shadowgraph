@@ -36,13 +36,13 @@ Modern complete results include `resultType: 'complete'` and server identity met
 | --- | --- | ---: |
 | Full | not configured | 28 |
 | Full | configured | 29 (`shadowgraph_verify_fact` is added) |
-| Compact | either | 14 |
+| Compact | either | 16 |
 
 `SHADOWGRAPH_MCP_COMPACT=1` must be passed to the server process, not merely assumed from the Inspector launch shell. The automated gate uses Inspector's server environment option and verifies the returned list count.
 
 ### Tool inventory
 
-The **14 compact tools** are the everyday agent workflow. They are also present in full mode:
+The **16 compact tools** are the everyday agent workflow. They are also present in full mode:
 
 | Tool | Purpose |
 | --- | --- |
@@ -53,22 +53,22 @@ The **14 compact tools** are the everyday agent workflow. They are also present 
 | `shadowgraph_record_attempt` | Record an attempt and its lesson |
 | `shadowgraph_record_fact` | Record an observed fact with a `sourceClass` provenance claim |
 | `shadowgraph_record_outcome` | Record `successful` / `mixed` / `failed` / `unknown` and update confidence |
+| `shadowgraph_update_status` | Move a decision through the documented lifecycle states |
+| `shadowgraph_supersede` | Replace a decision, persisting a `supersedes` relation |
 | `shadowgraph_retrieve` | Bounded retrieval with declared completeness |
 | `shadowgraph_search` | Content search across decisions, attempts, and facts |
 | `shadowgraph_review` | Evaluate reopen rules against stored facts and persist review signals |
 | `shadowgraph_reconsider` | The same evaluation, read as a verdict: `review_recommended`, `unchanged`, or `manual_review`, with the conditions behind each |
-| `shadowgraph_ack_review` | Acknowledge one review signal |
+| `shadowgraph_ack_review` | Acknowledge one review signal as seen, without resolving the decision |
 | `shadowgraph_validate` | Report graph diagnostics by severity |
 | `shadowgraph_maintain` | Stale decisions past `reviewAfter`, expire facts, then review |
 
-**Full mode adds these 14**, for 28 total:
+**Full mode adds these 12**, for 28 total:
 
 | Tool | Purpose |
 | --- | --- |
-| `shadowgraph_update_status` | Move a decision through the documented lifecycle states |
 | `shadowgraph_link` | Create an explainable relationship between two entities |
 | `shadowgraph_traverse` | Walk relationships from an entity by depth and direction |
-| `shadowgraph_supersede` | Replace a decision, persisting a `supersedes` relation |
 | `shadowgraph_redact` | Produce a privacy-safe export; never mutates |
 | `shadowgraph_purge` | Logical (default) or explicit irreversible hard project purge |
 | `shadowgraph_purge_preview` | Show deletion counts without changing storage |
@@ -83,7 +83,7 @@ The **14 compact tools** are the everyday agent workflow. They are also present 
 A 29th tool, `shadowgraph_verify_fact`, appears in full mode **only** when
 `SHADOWGRAPH_VERIFIER_CONFIG` names a local trust configuration. The caller supplies just `factId`
 and an evidence path inside the configured root — never verifier identity, key, signature, method,
-or target status. Compact mode stays at exactly 14 regardless.
+or target status. Compact mode stays at exactly 16 regardless.
 
 Compact mode is a tool-advertisement choice, not lossy storage: the full relational graph,
 memories, facts, alternatives, and outcomes are stored identically in both modes. Every tool listed
@@ -278,7 +278,7 @@ re-labelled is a historical measurement falsified.
 | Compact 12, structured | n/a | 95,553 | **90,356** |
 | Description text, 27 tools | 3,712 chars | 18,429 chars | **8,515 chars** |
 
-The current surface, re-measured with `npm run size:mcp` on 2026-09-20 after
+The earlier surface was measured with `npm run size:mcp` on 2026-09-20 after
 `shadowgraph_reconsider` became the 28th full and 14th compact tool:
 
 | Mode and tier | Bare | Annotated | Structured |
@@ -286,12 +286,18 @@ The current surface, re-measured with `npm run size:mcp` on 2026-09-20 after
 | Full 28 | 43,711 | 46,651 | 187,359 |
 | Compact 14 | 30,958 | 32,433 | 123,799 |
 
-Compact pays the largest relative increase because the new tool is advertised there, and its
-structured cost is again `evaluatedConditionSchema` inlined — four more sites, for
+Compact paid the largest relative increase because the new tool was advertised there, and its
+structured cost was again `evaluatedConditionSchema` inlined — four more sites, for
 `triggeredRules`, `groundedConditions`, `rulesNotEvaluated` and `contestedConditions` — because
-this catalog forbids `$ref`, so a shared shape cannot be shared on the wire. What a structured
-client buys for those bytes is a reconsideration that states which conditions fired, which did not,
-and which could not be evaluated, instead of a bare due list.
+this catalog forbids `$ref`, so a shared shape cannot be shared on the wire.
+
+The current surface, re-measured on 2026-11-08 after `shadowgraph_update_status` and
+`shadowgraph_supersede` became the 15th and 16th compact tools:
+
+| Mode and tier | Bare | Annotated | Structured |
+| --- | ---: | ---: | ---: |
+| Full 28 | 43,579 | 46,519 | 187,227 |
+| Compact 16 | 32,802 | 34,489 | 138,281 |
 
 Output schemas account for 111,308 of the 155,847 bytes in the full structured tier, and they were
 not touched. An output schema is a promise a validating client enforces, so trimming one to reduce a
@@ -336,7 +342,7 @@ Detail that used to sit in a description, kept here because it is worth having s
 Glama inspects this server in **full mode**, advertising all 28 tools. Compact mode is not used for
 inspection: the published `glama.json` schema accepts only `maintainers`, so there is no supported
 way to declare the compact environment variable or to disclose in the generated configuration that
-the listing was produced from a reduced surface. Advertising 14 tools while the server offers 28
+the listing was produced from a reduced surface. Advertising 16 tools while the server offers 28
 would understate what the server does, so the tool-count penalty is accepted instead.
 
 Glama's generated container does not talk to this server directly. It runs `mcp-proxy@6.4.3` in front
@@ -404,7 +410,7 @@ tooling install, the scripts fall back to the same exact versions through `npx`.
 - Inspector exits non-zero;
 - Inspector writes any strict schema finding to stderr;
 - Full mode is not exactly 28 tools without a verifier;
-- Compact mode is not exactly 14 tools;
+- Compact mode is not exactly 16 tools;
 - any advertised tool is missing one of the four boolean annotations;
 - any tool other than the two documented omissions is missing an object-rooted `outputSchema`.
 

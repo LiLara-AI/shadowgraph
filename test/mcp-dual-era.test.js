@@ -102,6 +102,7 @@ test('MCP modern discovery and every advertised primitive use 2026-07-28 result 
   assert.deepEqual(Object.keys(discovered.result.capabilities).sort(), ['prompts', 'resources', 'tools']);
   assert.equal(discovered.result.cacheScope, 'public');
   assert.equal(discovered.result.ttlMs, 0);
+  assert.equal(discovered.result.instructions, 'Local-first explainable decision and scoped temporal memory. Before work, use one stable project and scope, call context, and use retrieve or recall for targeted history. During work, record decisions, informative attempts, and changed facts under reopen-rule keys. After work, record outcomes, update or supersede obsolete decisions, maintain time-sensitive state, and acknowledge reviews only when seen; acknowledgement does not resolve the decision. Treat agent_claimed and unverified facts as hypotheses; only a separately configured signed local-evidence verifier can mark an active fact verified.');
   assertModernComplete(discovered.result);
 
   const tools = await rpc.call({ jsonrpc: '2.0', id: 'tools', method: 'tools/list', params: modernParams() });
@@ -143,6 +144,7 @@ test('MCP modern discovery and every advertised primitive use 2026-07-28 result 
     params: modernParams({ name: 'shadowgraph_consequential_task' })
   });
   assert.equal(prompt.result.messages.length, 1);
+  assert.equal(prompt.result.messages[0].content.text, 'Without a separately configured verifier, nothing in ShadowGraph can be marked verified. Before work, use one stable project and scope, call context, and use retrieve or recall for targeted history. During work, record decisions and informative attempts with explicit resultClass, reason, environment, and retry keys chosen before the first write. Record changed facts under reopen-rule keys. After work, record outcomes, update or supersede obsolete decisions, maintain time-sensitive state, and acknowledge reviews only when seen; acknowledgement does not resolve the decision. Treat agent_claimed and unverified facts as hypotheses.');
   assertModernComplete(prompt.result);
 });
 
@@ -198,9 +200,9 @@ test('MCP modern notifications are accepted without any response', async (t) => 
   assert.equal(listed.result.tools.length, 28);
 });
 
-test('MCP modern compact mode advertises exactly 14 tools', async (t) => {
+test('MCP modern compact mode advertises exactly 16 tools', async (t) => {
   const rpc = await startMcp(t, { SHADOWGRAPH_MCP_COMPACT: '1' });
   const listed = await rpc.call({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: modernParams() });
-  assert.equal(listed.result.tools.length, 14);
+  assert.equal(listed.result.tools.length, 16);
   assertModernComplete(listed.result);
 });
