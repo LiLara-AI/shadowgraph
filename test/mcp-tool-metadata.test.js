@@ -520,10 +520,10 @@ test('the advertised description text stays within its aggregate budget', () => 
 // Re-measured on 2026-11-08 after the complete write fields and structured
 // condition schemas were advertised:
 //
-//   withoutVerifier.full        bare 46,617  annotated 49,557  structured 190,265
-//   withoutVerifier.compact     bare 35,840  annotated 37,527  structured 141,319
-//   withVerifier.full           bare 47,533  annotated 50,578  structured 194,580
-//   withVerifier.compact        bare 35,840  annotated 37,527  structured 141,319
+//   withoutVerifier.full        bare 46,582  annotated 49,522  structured 190,230
+//   withoutVerifier.compact     bare 35,805  annotated 37,492  structured 141,284
+//   withVerifier.full           bare 47,498  annotated 50,543  structured 194,545
+//   withVerifier.compact        bare 35,805  annotated 37,492  structured 141,284
 //
 // All ceilings moved using the same roughly 2% headroom rounded up to the next
 // 500 bytes.

@@ -1,4 +1,12 @@
-# ShadowGraph 0.41.0 — Technical Preview release notes
+# ShadowGraph release notes
+
+## Unreleased — Phase 1A
+
+The compact MCP workflow now exposes a **16-tool compact inventory**, including decision status updates and supersession. New MCP attempt writes require `resultClass`; CLI and JavaScript callers and older stored attempts retain the wording-based fallback when it is absent. MCP fact writes require fact `value`, and every decision alternative requires an alternative `label`, matching the existing runtime contracts.
+
+Caller-safe MCP errors keep their era-specific locations: legacy JSON-RPC responses use `error.data`, while modern `CallToolResult` responses use `result._meta['shadowgraph/error']`. Unknown failures, including non-Error throws and non-string messages, retain the generic safe response.
+
+## 0.41.0 — Technical Preview release notes
 
 > Technical Preview / Early Access only — not Beta, not stable. Install from GitHub. The package
 > remains `private: true` and is **not published to npm**. A Git tag `v0.41.0` and a GitHub Release

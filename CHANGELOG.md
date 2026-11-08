@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — Phase 1A
+
+### Changed
+
+- **The compact MCP workflow now has a 16-tool compact inventory**, including decision status updates and supersession alongside the existing capture, retrieval, review, and maintenance tools.
+- **New MCP attempt writes require `resultClass`; CLI and JavaScript callers and older stored attempts retain the wording-based fallback when it is absent.** The MCP write schemas also require fact `value` and each alternative `label`, matching the existing runtime requirements.
+- **Caller-safe MCP errors retain era-specific locations.** Constructed safe details appear in legacy JSON-RPC `error.data` and modern `result._meta['shadowgraph/error']`; unknown failures, including non-Error throws and non-string messages, use the generic safe response without exposing internal details.
+
 ## 0.41.0 — Technical Preview (2026-09-20; GitHub release, not published to npm)
 
 ### Added

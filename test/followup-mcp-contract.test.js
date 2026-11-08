@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
@@ -26,13 +27,13 @@ function modernParams(values = {}, { clientInfo } = {}) {
   return { ...values, _meta };
 }
 
-async function startMcp(t, extraEnv = {}) {
+async function startMcp(t, extraEnv = {}, nodeArgs = []) {
   const directory = await scratchDirectory(t, 'shadowgraph-followup-mcp-');
   const file = join(directory, 'data.json');
   const configuredEnv = typeof extraEnv === 'function'
     ? await extraEnv({ directory, file })
     : extraEnv;
-  const child = spawn(process.execPath, ['src/mcp.js'], {
+  const child = spawn(process.execPath, [...nodeArgs, 'src/mcp.js'], {
     cwd: process.cwd(),
     env: { ...process.env, SHADOWGRAPH_FILE: file, ...configuredEnv },
     stdio: ['pipe', 'pipe', 'pipe']
@@ -262,6 +263,35 @@ for (const modern of [false, true]) {
     });
   }
 }
+
+test('legacy MCP returns the generic safe response for a non-Error throw with a non-string message', async (t) => {
+  const fixtures = await scratchDirectory(t, 'shadowgraph-non-error-mcp-');
+  const loader = join(fixtures, 'loader.mjs');
+  const graphFixture = join(fixtures, 'non-error-graph.mjs');
+  const sentinel = 'PRIVATE-NON-ERROR-MESSAGE-71c2';
+  await writeFile(loader, `
+    export async function resolve(specifier, context, nextResolve) {
+      if (specifier === './shadowgraph.js' && context.parentURL?.endsWith('/src/mcp.js')) {
+        return { url: new URL('./non-error-graph.mjs', import.meta.url).href, shortCircuit: true };
+      }
+      return nextResolve(specifier, context);
+    }
+  `, 'utf8');
+  await writeFile(graphFixture, `
+    import { createShadowGraph as createRealShadowGraph, isCommittedRejection } from ${JSON.stringify(new URL('../src/shadowgraph.js', import.meta.url).href)};
+    export { isCommittedRejection };
+    export function createShadowGraph(...args) {
+      const graph = createRealShadowGraph(...args);
+      graph.updateDecisionStatus = () => { throw { message: { sentinel: ${JSON.stringify(sentinel)} }, sentinel: ${JSON.stringify(sentinel)} }; };
+      return graph;
+    }
+  `, 'utf8');
+  const rpc = await startMcp(t, {}, ['--no-warnings', '--experimental-loader', pathToFileURL(loader).href]);
+  const response = await rpc.call(toolRequest('non-error-throw', 'shadowgraph_update_status', {
+    decisionId: 'non-error-throw', status: 'planned'
+  }));
+  assertSafeToolFailure(response, { forbidden: [sentinel] });
+});
 
 function emptyRestorePayload(schemaVersion = 4) {
   return {

@@ -56,7 +56,7 @@ const graph = createShadowGraph({ now });   // `now` is an injectable clock, use
 | `supersedeDecision(input)` | Same-project supersession with a persisted `supersedes` relation. |
 | `link(input)` | Explainable relationship; both endpoints must exist and the new relation ID must be unused in the global schema-4 entity namespace before mutation. |
 
-The MCP write schemas advertise the complete supported inputs: decisions include `reviewAfter` and require each alternative's `label`; attempts require `solution`, `result`, and `resultClass` and include `relatedTo` and `reusableWhen`; facts require `key` and `value` and include `observedAt`, `validFrom`, and nullable `validTo`. Structured conditions contain required `key` and `value` fields plus optional `operator` and `unit`; the operator defaults to `equals`, and an explicit `null`, `false`, `0`, or empty-string value is still a value. Decision `reopenWhen` arrays preserve legacy string tokens, which match only ephemeral `changedFacts`, while structured rules use stored facts. Every attempt `reusableWhen` condition must hold before reconsideration, and an unresolved condition blocks reuse.
+The MCP write schemas advertise the complete supported inputs: decisions include `reviewAfter` and require each alternative's `label`; attempts require `solution`, `result`, and `resultClass` and include `relatedTo` and `reusableWhen`; facts require `key` and `value` and include `observedAt`, `validFrom`, and nullable `validTo`. New MCP attempt writes require `resultClass`; CLI and JavaScript callers and older stored attempts retain the wording-based fallback when it is absent. Structured conditions contain required `key` and `value` fields plus optional `operator` and `unit`; the operator defaults to `equals`, and an explicit `null`, `false`, `0`, or empty-string value is still a value. Decision `reopenWhen` arrays preserve legacy string tokens, which match only ephemeral `changedFacts`, while structured rules use stored facts. Every attempt `reusableWhen` condition must hold before reconsideration, and an unresolved condition blocks reuse.
 
 ### Reading — all return `{ items, page, completeness }`
 
@@ -157,7 +157,7 @@ MCP exposes `shadowgraph_verify_fact` only in full mode when `SHADOWGRAPH_VERIFI
 
 | Surface | Entry point | Notes |
 | --- | --- | --- |
-| MCP | `shadowgraph mcp` (from a clone: `npm run mcp`) | Dual-era: `initialize` negotiates `2024-11-05`, `2025-03-26`, `2025-06-18`, or `2025-11-25`, and modern `2026-07-28` is served per request; see [MCP compatibility](mcp-compatibility.md). `SHADOWGRAPH_MCP_COMPACT=1` advertises 14 tools instead of 28. |
+| MCP | `shadowgraph mcp` (from a clone: `npm run mcp`) | Dual-era: `initialize` negotiates `2024-11-05`, `2025-03-26`, `2025-06-18`, or `2025-11-25`, and modern `2026-07-28` is served per request; see [MCP compatibility](mcp-compatibility.md). `SHADOWGRAPH_MCP_COMPACT=1` advertises 16 tools instead of 28. |
 | HTTP | `shadowgraph serve` (from a clone: `npm start`) | Binds `127.0.0.1`; optional Bearer auth via `SHADOWGRAPH_API_TOKEN`. |
 | CLI | `shadowgraph <command>` (from a clone: `node src/cli.js <command>`) | Each invocation is a separate process that reopens the store. |
 

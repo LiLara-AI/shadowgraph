@@ -523,14 +523,17 @@ function publicErrorDetails(error) {
   if (error instanceof SyntaxError) return { message: 'Tool execution failed: invalid JSON data' };
   const namedMessage = PUBLIC_ERROR_NAME_MESSAGES.get(error?.name);
   if (namedMessage) return { message: namedMessage };
-  const callerError = SAFE_CALLER_ERRORS.find((entry) => entry.matches(error?.message));
+  const message = error?.message;
+  const callerError = typeof message === 'string'
+    ? SAFE_CALLER_ERRORS.find((entry) => entry.matches(message))
+    : undefined;
   if (callerError) {
     return {
       message: `Tool execution failed (${callerError.issueCode})`,
       data: { issueCode: callerError.issueCode, fieldPath: callerError.fieldPath, retryable: false }
     };
   }
-  if (PUBLIC_DOMAIN_MESSAGES.has(error?.message)) return { message: error.message };
+  if (PUBLIC_DOMAIN_MESSAGES.has(message)) return { message };
   return { message: 'Tool execution failed' };
 }
 

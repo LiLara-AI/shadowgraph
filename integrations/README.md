@@ -26,7 +26,7 @@ shadowgraph doctor
 
 The global install makes the `shadowgraph` binary available to GUI clients that may not launch from a project containing `node_modules/.bin`. If `shadowgraph doctor` is not found, add npm's global bin directory to the environment used by the client and restart it.
 
-All templates recommend `SHADOWGRAPH_MCP_COMPACT=1`: 14 workflow tools with the same full-fidelity stored graph. To use all 28 tools, remove that environment variable or set it to `0`; compact mode is a tool-advertisement choice, not lossy storage.
+All templates recommend `SHADOWGRAPH_MCP_COMPACT=1`: 16 workflow tools with the same full-fidelity stored graph. To use all 28 tools, remove that environment variable or set it to `0`; compact mode is a tool-advertisement choice, not lossy storage.
 
 Every stdio registration below uses `SHADOWGRAPH_FILE=/absolute/path/to/shared-shadowgraph/data.json`. On Windows, substitute a native absolute path such as `C:\shadowgraph\data.json`. The other explicit choice is project-local `.shadowgraph/data.json`: remove `SHADOWGRAPH_FILE` and launch the client in that project directory. `setup` and `doctor` print the absolute `storage.path`; later clients must use the same path and project. ShadowGraph never moves or merges stores.
 
@@ -131,7 +131,7 @@ Restart Hermes after registration. Hermes exposes discovered tools with its `mcp
 ## What was verified
 
 - `scripts/check-integrations.mjs` validates every JSON template and the required Codex TOML/Hermes YAML launch fields.
-- `scripts/smoke-package.mjs` builds a real tarball, installs it into a new directory whose path contains spaces, launches `shadowgraph mcp` only from that installed package, verifies 28 full and 14 compact tools, and performs MCP remember/restart/recall.
+- `scripts/smoke-package.mjs` builds a real tarball, installs it into a new directory whose path contains spaces, launches `shadowgraph mcp` only from that installed package, verifies 28 full and 16 compact tools, and performs MCP remember/restart/recall.
 - `npm run check:mcp` runs pinned official Inspector strict checks in both modes, then the pinned Glama `mcp-proxy@6.4.3` gate.
 - Product config shapes and commands follow the current official Claude Code, Cursor, Codex, and Hermes MCP documentation. A host application still needs to be installed locally to measure its own discovery UI and lifecycle.
 
