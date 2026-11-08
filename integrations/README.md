@@ -6,8 +6,11 @@ ShadowGraph is a local decision ledger and unified memory kernel for AI agents. 
 
 The candidate remains `private: true` until the release checklist's independent security and benchmark gates are approved. For a built review tarball:
 
+Choose one shared absolute store path before setup:
+
 ```bash
 npm install --global /absolute/path/to/shadowgraph-unified-plugin-0.40.0.tgz
+export SHADOWGRAPH_FILE=/absolute/path/to/shared-shadowgraph/data.json
 shadowgraph setup
 shadowgraph doctor
 ```
@@ -16,6 +19,7 @@ After npm publication, the install command becomes:
 
 ```bash
 npm install --global shadowgraph-unified-plugin@0.40.0
+export SHADOWGRAPH_FILE=/absolute/path/to/shared-shadowgraph/data.json
 shadowgraph setup
 shadowgraph doctor
 ```
@@ -24,14 +28,14 @@ The global install makes the `shadowgraph` binary available to GUI clients that 
 
 All templates recommend `SHADOWGRAPH_MCP_COMPACT=1`: 14 workflow tools with the same full-fidelity stored graph. To use all 28 tools, remove that environment variable or set it to `0`; compact mode is a tool-advertisement choice, not lossy storage.
 
-By default, data is project-local at `.shadowgraph/data.json` under the MCP process working directory. To pin one store across launches, add an absolute `SHADOWGRAPH_FILE` value to the same `env` mapping.
+Every stdio registration below uses `SHADOWGRAPH_FILE=/absolute/path/to/shared-shadowgraph/data.json`. On Windows, substitute a native absolute path such as `C:\shadowgraph\data.json`. The other explicit choice is project-local `.shadowgraph/data.json`: remove `SHADOWGRAPH_FILE` and launch the client in that project directory. `setup` and `doctor` print the absolute `storage.path`; later clients must use the same path and project. ShadowGraph never moves or merges stores.
 
 ## Claude Code
 
 Copy-ready CLI registration at user scope:
 
 ```bash
-claude mcp add --scope user --env SHADOWGRAPH_MCP_COMPACT=1 --transport stdio shadowgraph -- shadowgraph mcp
+claude mcp add --scope user --env SHADOWGRAPH_MCP_COMPACT=1 --env SHADOWGRAPH_FILE=/absolute/path/to/shared-shadowgraph/data.json --transport stdio shadowgraph -- shadowgraph mcp
 claude mcp list
 ```
 
@@ -44,7 +48,10 @@ Or copy `claude-code.mcp.json` to a project `.mcp.json`:
       "type": "stdio",
       "command": "shadowgraph",
       "args": ["mcp"],
-      "env": { "SHADOWGRAPH_MCP_COMPACT": "1" }
+      "env": {
+        "SHADOWGRAPH_MCP_COMPACT": "1",
+        "SHADOWGRAPH_FILE": "/absolute/path/to/shared-shadowgraph/data.json"
+      }
     }
   }
 }
@@ -63,7 +70,10 @@ Copy `cursor.mcp.json` to project `.cursor/mcp.json` or user `~/.cursor/mcp.json
       "type": "stdio",
       "command": "shadowgraph",
       "args": ["mcp"],
-      "env": { "SHADOWGRAPH_MCP_COMPACT": "1" }
+      "env": {
+        "SHADOWGRAPH_MCP_COMPACT": "1",
+        "SHADOWGRAPH_FILE": "/absolute/path/to/shared-shadowgraph/data.json"
+      }
     }
   }
 }
@@ -76,7 +86,7 @@ Enable the server in **Cursor Settings → MCP**, then restart/reload the client
 Copy-ready CLI registration:
 
 ```bash
-codex mcp add shadowgraph --env SHADOWGRAPH_MCP_COMPACT=1 -- shadowgraph mcp
+codex mcp add shadowgraph --env SHADOWGRAPH_MCP_COMPACT=1 --env SHADOWGRAPH_FILE=/absolute/path/to/shared-shadowgraph/data.json -- shadowgraph mcp
 codex mcp list
 ```
 
@@ -90,6 +100,7 @@ startup_timeout_sec = 30
 
 [mcp_servers.shadowgraph.env]
 SHADOWGRAPH_MCP_COMPACT = "1"
+SHADOWGRAPH_FILE = "/absolute/path/to/shared-shadowgraph/data.json"
 ```
 
 Restart Codex CLI/IDE after changing `config.toml`.
@@ -99,7 +110,7 @@ Restart Codex CLI/IDE after changing `config.toml`.
 Prefer the CLI so Hermes writes valid configuration itself:
 
 ```bash
-hermes mcp add shadowgraph --command shadowgraph --connect-timeout 30 --env SHADOWGRAPH_MCP_COMPACT=1 --args mcp
+hermes mcp add shadowgraph --command shadowgraph --connect-timeout 30 --env SHADOWGRAPH_MCP_COMPACT=1 --env SHADOWGRAPH_FILE=/absolute/path/to/shared-shadowgraph/data.json --args mcp
 ```
 
 The resulting `mcp_servers` entry (also in `hermes.mcp.yaml`) is:
@@ -111,6 +122,7 @@ mcp_servers:
     args: ["mcp"]
     env:
       SHADOWGRAPH_MCP_COMPACT: "1"
+      SHADOWGRAPH_FILE: "/absolute/path/to/shared-shadowgraph/data.json"
     connect_timeout: 30
 ```
 

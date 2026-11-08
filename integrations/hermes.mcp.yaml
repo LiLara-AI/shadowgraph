@@ -4,4 +4,5 @@ mcp_servers:
     args: ["mcp"]
     env:
       SHADOWGRAPH_MCP_COMPACT: "1"
+      SHADOWGRAPH_FILE: "/absolute/path/to/shared-shadowgraph/data.json"
     connect_timeout: 30

@@ -78,16 +78,23 @@ The examples below use the bash form. All three are tested on every command in t
 
 ### 3. Initialize a store
 
+Choose one shared absolute store path before setup so later clients and working directories use the
+same data:
+
 ```bash
 mkdir shadowgraph-demo
 cd shadowgraph-demo
+export SHADOWGRAPH_FILE=/absolute/path/to/shared-shadowgraph/data.json
 shadowgraph setup
 shadowgraph doctor
 ```
 
-`setup` creates `.shadowgraph/data.json` in the current directory, so run it where you want the
-store to live. It never rewrites an existing store. `doctor` then checks Node compatibility, storage
-readability and writability, graph validity, and the MCP entry point.
+On Windows, substitute a native absolute path such as `C:\shadowgraph\data.json`. The other
+explicit choice is a project-local `.shadowgraph/data.json`; omit `SHADOWGRAPH_FILE` and run setup
+in that project directory. `setup` and `doctor` print the absolute `storage.path`: use that exact
+path in every later client, and never move or merge stores. `setup` never rewrites an existing
+store. `doctor` checks Node compatibility, storage readability and writability, graph validity, and
+the MCP entry point.
 
 Run `setup` **before** `doctor`: on a fresh directory `doctor` reports `Storage is not initialized`
 and exits `1` until a store exists. That is expected, not a failed install.
@@ -179,8 +186,10 @@ instructions, procedures, episodes, and notes under a project plus optional `use
 moment. Retrieval fuses lexical, vector, graph-distance, and temporal signals and declares which
 signals were unavailable rather than silently degrading.
 
-**Project and scope isolation.** Omitted project and scope mean the `default` project and all-null
-scope — never every project or every user. Purge is previewable, logical by default, and explicitly
+**Project and scope isolation.** Writes, context, and scoped recall default to the `default`
+project. Search/retrieve retain their documented cross-project decision/fact behavior when project
+is omitted; review/reconsider without project evaluate all projects. Omitted memory scope fields
+are exact nulls, not wildcards. Purge is previewable, logical by default, and explicitly
 irreversible in hard mode.
 
 **Explainable retrieval.** Results expose raw scores, ranks, and reasons, and every bounded response
@@ -223,7 +232,7 @@ alternatives, and outcomes stay stored at full fidelity. Compact mode is a tool-
 choice, not lossy storage.
 
 ```bash
-SHADOWGRAPH_MCP_COMPACT=1 shadowgraph mcp
+SHADOWGRAPH_MCP_COMPACT=1 SHADOWGRAPH_FILE=/absolute/path/to/shared-shadowgraph/data.json shadowgraph mcp
 ```
 
 Tool metadata follows the revision `initialize` negotiates: a session negotiated at `2025-03-26`
@@ -245,10 +254,12 @@ revision, and verified client behaviour.
 
 ### AI tool setup
 
-Install globally first so the client can find `shadowgraph` on its `PATH`:
+Install globally first so the client can find `shadowgraph` on its `PATH`, then choose the shared
+absolute store path before setup:
 
 ```bash
 npm install --global github:LiLara-AI/shadowgraph
+export SHADOWGRAPH_FILE=/absolute/path/to/shared-shadowgraph/data.json
 shadowgraph setup
 shadowgraph doctor
 ```
@@ -256,42 +267,44 @@ shadowgraph doctor
 **Claude Code** (user scope):
 
 ```bash
-claude mcp add --scope user --env SHADOWGRAPH_MCP_COMPACT=1 --transport stdio shadowgraph -- shadowgraph mcp
+claude mcp add --scope user --env SHADOWGRAPH_MCP_COMPACT=1 --env SHADOWGRAPH_FILE=/absolute/path/to/shared-shadowgraph/data.json --transport stdio shadowgraph -- shadowgraph mcp
 ```
 
 **Cursor** (`.cursor/mcp.json` or `~/.cursor/mcp.json`):
 
 ```json
-{"mcpServers":{"shadowgraph":{"type":"stdio","command":"shadowgraph","args":["mcp"],"env":{"SHADOWGRAPH_MCP_COMPACT":"1"}}}}
+{"mcpServers":{"shadowgraph":{"type":"stdio","command":"shadowgraph","args":["mcp"],"env":{"SHADOWGRAPH_MCP_COMPACT":"1","SHADOWGRAPH_FILE":"/absolute/path/to/shared-shadowgraph/data.json"}}}}
 ```
 
 **Codex**:
 
 ```bash
-codex mcp add shadowgraph --env SHADOWGRAPH_MCP_COMPACT=1 -- shadowgraph mcp
+codex mcp add shadowgraph --env SHADOWGRAPH_MCP_COMPACT=1 --env SHADOWGRAPH_FILE=/absolute/path/to/shared-shadowgraph/data.json -- shadowgraph mcp
 ```
 
 **Hermes Agent**:
 
 ```bash
-hermes mcp add shadowgraph --command shadowgraph --connect-timeout 30 --env SHADOWGRAPH_MCP_COMPACT=1 --args mcp
+hermes mcp add shadowgraph --command shadowgraph --connect-timeout 30 --env SHADOWGRAPH_MCP_COMPACT=1 --env SHADOWGRAPH_FILE=/absolute/path/to/shared-shadowgraph/data.json --args mcp
 ```
 
-Verified file forms for all four live in [`integrations/`](integrations/README.md). Set an absolute
-`SHADOWGRAPH_FILE` in the client environment when one store must be shared across working
-directories.
+Verified file forms for all four live in [`integrations/`](integrations/README.md). On Windows,
+substitute a native absolute path. Project-local `.shadowgraph/data.json` is the other explicit
+choice. Later clients must use the same `storage.path` printed by setup/doctor and the same
+project; ShadowGraph never moves or merges stores.
 
 ### CLI
 
 The commands you will actually use:
 
 ```bash
+export SHADOWGRAPH_FILE=/absolute/path/to/shared-shadowgraph/data.json
 shadowgraph setup
 shadowgraph doctor
 shadowgraph context '{"project":"my-app"}'
 shadowgraph decision '{"project":"my-app","title":"Choose the datastore","chosen":"SQLite"}'
 shadowgraph fact '{"project":"my-app","key":"deployment","value":"local","sourceClass":"human_confirmed"}'
-shadowgraph attempt '{"solution":"Rewrite everything","result":"Regression"}'
+shadowgraph attempt '{"project":"my-app","solution":"Rewrite everything","result":"Regressions appeared in checkout reporting","resultClass":"failed","reason":"The rewrite removed shared transactional state","environment":"local Node.js development"}'
 shadowgraph outcome '{"decisionId":"DECISION_ID","outcome":{"status":"failed","lessons":["Assumption was wrong"]}}'
 shadowgraph review '{"project":"my-app"}'
 shadowgraph search '{"query":"database","project":"my-app"}'
