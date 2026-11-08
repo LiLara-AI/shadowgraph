@@ -166,6 +166,7 @@ function attemptArguments(request) {
     id: record.id,
     solution: record.content.approachId,
     result: 'failed',
+    resultClass: 'failed',
     project: request.namespace.projectId,
     reason: encodeContent(record.content),
     environment: request.scenarioId

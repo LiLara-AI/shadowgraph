@@ -194,6 +194,7 @@ for (const storage of ['json', 'sqlite']) {
           id: 'harness-attempt-id',
           solution: 'unsafe-choice',
           result: 'failed',
+          resultClass: 'failed',
           project: 'primary-project'
         })
       ]

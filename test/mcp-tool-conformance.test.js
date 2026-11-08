@@ -281,7 +281,7 @@ test('every advertised output schema accepts the result its own tool really retu
   const acknowledged = await callTool('shadowgraph_ack_review', { id: signals[0].id });
   assert.equal(acknowledged.status, 'acknowledged');
 
-  await callTool('shadowgraph_record_attempt', { project, solution: 'rolled out to everyone', result: 'failed during rollout', reason: 'no migration path', environment: 'node 24' });
+  await callTool('shadowgraph_record_attempt', { project, solution: 'rolled out to everyone', result: 'failed during rollout', resultClass: 'failed', reason: 'no migration path', environment: 'node 24' });
 
   const added = await callTool('shadowgraph_remember', { project, scope: { userId: 'alice' }, memoryType: 'preference', key: 'hotel-style', text: 'Prefers quiet boutique hotels' });
   assert.equal(added.operation, 'ADD');

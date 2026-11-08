@@ -252,7 +252,7 @@ test('every advertised tool annotation matches the effects the server actually h
 
   await observe('shadowgraph_record_attempt', {
     project: PROJECT, solution: 'tried the in-memory store', result: 'failed under restart',
-    idempotencyKey: 'effects-attempt-key'
+    resultClass: 'failed', idempotencyKey: 'effects-attempt-key'
   });
 
   const fact = await observe('shadowgraph_record_fact', { project: PROJECT, key: 'deployment', value: 'multi-user', sourceClass: 'tool_observed' });

@@ -229,3 +229,94 @@ test('MCP serializes restore with a concurrent acknowledged memory write', async
   const keys = JSON.parse(recalled.result.content[0].text).items.map((item) => item.record.key);
   assert.deepEqual(keys, ['concurrent']);
 });
+
+test('MCP JSON restart persists the complete decision, attempt, and fact workflow', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-mcp-complete-workflow-');
+  const file = join(directory, 'data.json');
+  const decision = {
+    project: 'p', title: 'API import', chosen: 'serial import',
+    reviewAfter: '2026-11-09T00:00:00.000Z'
+  };
+  const first = startJsonRpcChild(file);
+  t.after(() => first.child.kill());
+
+  const decisionResponse = await first.call({
+    jsonrpc: '2.0', id: 1, method: 'tools/call',
+    params: { name: 'shadowgraph_record_decision', arguments: decision }
+  });
+  assert.equal(decisionResponse.error, undefined, decisionResponse.error?.message);
+  const decisionId = JSON.parse(decisionResponse.result.content[0].text).id;
+  const attempt = {
+    project: 'p', solution: 'parallel import', result: 'rate limited',
+    resultClass: 'failed', relatedTo: [decisionId],
+    reusableWhen: [{ key: 'apiRateLimitPerMin', operator: 'gte', value: 600 }]
+  };
+  const fact = {
+    project: 'p', key: 'apiRateLimitPerMin', value: 60,
+    observedAt: '2026-11-08T00:00:00.000Z',
+    validFrom: '2026-11-08T00:00:00.000Z',
+    validTo: null
+  };
+  const attemptResponse = await first.call({
+    jsonrpc: '2.0', id: 2, method: 'tools/call',
+    params: { name: 'shadowgraph_record_attempt', arguments: attempt }
+  });
+  const factResponse = await first.call({
+    jsonrpc: '2.0', id: 3, method: 'tools/call',
+    params: { name: 'shadowgraph_record_fact', arguments: fact }
+  });
+  assert.equal(attemptResponse.error, undefined, attemptResponse.error?.message);
+  assert.equal(factResponse.error, undefined, factResponse.error?.message);
+  const attemptId = JSON.parse(attemptResponse.result.content[0].text).id;
+  const factId = JSON.parse(factResponse.result.content[0].text).id;
+
+  const firstExit = new Promise((resolve) => first.child.once('exit', resolve));
+  first.child.kill();
+  await firstExit;
+
+  const second = startJsonRpcChild(file);
+  t.after(() => second.child.kill());
+  const durable = JSON.parse(await readFile(file, 'utf8'));
+  const storedDecision = durable.records.find((record) => record.id === decisionId);
+  const storedAttempt = durable.records.find((record) => record.id === attemptId);
+  const storedFact = durable.facts.find((record) => record.id === factId);
+  assert.deepEqual({
+    project: storedDecision.project,
+    title: storedDecision.title,
+    chosen: storedDecision.chosen,
+    reviewAfter: storedDecision.reviewAfter
+  }, decision);
+  assert.deepEqual({
+    project: storedAttempt.project,
+    solution: storedAttempt.solution,
+    result: storedAttempt.result,
+    resultClass: storedAttempt.resultClass,
+    relatedTo: storedAttempt.relatedTo,
+    reusableWhen: storedAttempt.reusableWhen
+  }, attempt);
+  assert.deepEqual({
+    project: storedFact.project,
+    key: storedFact.key,
+    value: storedFact.value,
+    observedAt: storedFact.observedAt,
+    validFrom: storedFact.temporal.validFrom,
+    validTo: storedFact.temporal.validTo
+  }, fact);
+
+  const maintained = await second.call({
+    jsonrpc: '2.0', id: 4, method: 'tools/call',
+    params: { name: 'shadowgraph_maintain', arguments: { now: '2026-11-09T00:00:00.000Z' } }
+  });
+  assert.equal(maintained.error, undefined, maintained.error?.message);
+  assert.deepEqual(JSON.parse(maintained.result.content[0].text).staleDecisionIds, [decisionId]);
+
+  const contextResponse = await second.call({
+    jsonrpc: '2.0', id: 5, method: 'tools/call',
+    params: { name: 'shadowgraph_context', arguments: { project: 'p' } }
+  });
+  assert.equal(contextResponse.error, undefined, contextResponse.error?.message);
+  const context = JSON.parse(contextResponse.result.content[0].text);
+  assert.equal(context.activeDecisions.some((record) => record.id === decisionId), false);
+  assert.deepEqual(context.failedAttemptsToAvoid.map((record) => record.id), [attemptId]);
+  assert.deepEqual(context.reusableAttempts, [], 'the stored rate limit does not satisfy reusableWhen');
+});

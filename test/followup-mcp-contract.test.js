@@ -175,6 +175,24 @@ function assertSafeToolFailure(response, {
   assert.equal(/\b(?:ENOENT|EACCES|EPERM|SQLITE_[A-Z_]+)\b/.test(serialized), false, `OS/storage message escaped: ${serialized}`);
 }
 
+for (const modern of [false, true]) {
+  const era = modern ? 'modern' : 'legacy';
+  test(`${era} MCP calls reject missing required write fields with safe coded failures`, async (t) => {
+    const rpc = await startMcp(t);
+    for (const [name, arguments_, fieldPath] of [
+      ['shadowgraph_record_attempt', { project: 'p', solution: 'parallel import', result: 'rate limited' }, 'resultClass'],
+      ['shadowgraph_record_fact', { project: 'p', key: 'apiRateLimitPerMin' }, 'value']
+    ]) {
+      const response = await rpc.call(toolRequest(`${era}-missing-${fieldPath}`, name, arguments_, { modern }));
+      assertSafeToolFailure(response, {
+        modern,
+        message: 'Tool execution failed (missing_required_field)',
+        data: modern ? undefined : { issueCode: 'missing_required_field', fieldPath, retryable: false }
+      });
+    }
+  });
+}
+
 function emptyRestorePayload(schemaVersion = 4) {
   return {
     schemaVersion,

@@ -178,7 +178,7 @@ test('P1-4 independent review: real MCP maintain rejection rolls live graph back
     jsonrpc: '2.0', id: 6, method: 'tools/call',
     params: {
       name: 'shadowgraph_record_attempt',
-      arguments: { id: 'mcp-write-after-rejection', project: 'maintain-project', solution: 'continue safely', result: 'valid' }
+      arguments: { id: 'mcp-write-after-rejection', project: 'maintain-project', solution: 'continue safely', result: 'valid', resultClass: 'succeeded' }
     }
   });
   await rpc.stop();

@@ -232,8 +232,32 @@ async function addConfiguredEmbeddings(args = {}) {
     : args;
 }
 
+function missingRequiredField(fieldPath) {
+  return applicationError(
+    -32000,
+    'Invalid tool arguments',
+    undefined,
+    'Tool execution failed (missing_required_field)',
+    { issueCode: 'missing_required_field', fieldPath, retryable: false }
+  );
+}
+
+function validateRequiredArguments(tool, args) {
+  for (const field of tool.inputSchema.required ?? []) {
+    if (!Object.hasOwn(args, field)) throw missingRequiredField(field);
+  }
+  if (tool.name === 'shadowgraph_record_decision' && Array.isArray(args.alternatives)) {
+    args.alternatives.forEach((alternative, index) => {
+      if (alternative && typeof alternative === 'object' && !Object.hasOwn(alternative, 'label')) {
+        throw missingRequiredField(`alternatives[${index}].label`);
+      }
+    });
+  }
+}
+
 async function callUnqueued(name, args, tier) {
   if (persistenceUnavailable) throw unavailableError();
+  validateRequiredArguments(toolsByName.get(name), args);
   const before = graph.exportData();
   let value;
   try {
