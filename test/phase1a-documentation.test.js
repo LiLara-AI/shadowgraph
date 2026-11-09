@@ -45,8 +45,8 @@ test('current-facing guidance preserves the v0.44 profile inventories', () => {
 test('Phase 1A release notes disclose the compatibility boundary', () => {
   for (const path of ['CHANGELOG.md', 'RELEASE_NOTES.md']) {
     const document = read(path);
-    const start = document.indexOf('## Unreleased');
-    assert.notEqual(start, -1, `${path} needs an Unreleased entry`);
+    const start = document.indexOf('## 0.44.1');
+    assert.notEqual(start, -1, `${path} needs a 0.44.1 entry`);
     const next = document.indexOf('\n## ', start + 1);
     const entry = document.slice(start, next === -1 ? undefined : next);
     assert.match(entry, /Phase 1A/);

@@ -1,6 +1,6 @@
 # ShadowGraph release notes
 
-## Unreleased — Phase 1A
+## 0.44.1 — Phase 1A Technical Preview (2026-11-09)
 
 The **16-tool compact**, 20-tool workflow, and 35-tool full inventories remain unchanged. New MCP attempt writes require `resultClass`; CLI and JavaScript callers and older stored attempts retain the wording-based fallback when it is absent. MCP fact writes require fact `value`, and every decision alternative requires an alternative `label`, matching the existing runtime contracts. Structured condition schemas now describe canonical `key`/`value` fields and the `target`/`expected` aliases without dropping legacy or symbolic string rules.
 

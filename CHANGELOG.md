@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — Phase 1A
+## 0.44.1 — Phase 1A Technical Preview (2026-11-09)
 
 ### Changed
 
