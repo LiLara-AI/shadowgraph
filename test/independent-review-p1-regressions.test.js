@@ -500,8 +500,8 @@ test('P1-3 independent review: invalid verified journal payload makes core and c
   const rawJournal = structuredClone(payload.journal);
 
   // The live fact is genuinely verified only inside its attestation's window,
-  // which ends at the fixture's expiresAt (2026-09-30). Both graphs run at the
-  // fixture's own instant: on the wall clock the premise lapsed on that date.
+  // whose expiresAt is dynamically set one day in the future. Both graphs
+  // evaluate it at the deterministic fixture instant, not the wall clock.
   const fixtureNow = '2026-08-27T12:00:00.000Z';
   const graph = createShadowGraph({ verifier: fixture.verifier, now: () => fixtureNow });
   graph.importData(payload);
