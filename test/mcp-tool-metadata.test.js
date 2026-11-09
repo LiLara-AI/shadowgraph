@@ -22,6 +22,7 @@ import {
   toolResult
 } from '../src/mcp-tools.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
+import { RULE_OPERATORS, SYMBOLIC_OPERATOR_ALIASES } from '../src/condition-eval.js';
 import { measureAll } from '../scripts/mcp-wire-size.mjs';
 import { privilegedIssueAccess, privilegedSnapshot } from '../src/internal/snapshot.js';
 
@@ -208,7 +209,7 @@ const INPUT_CONSTRAINTS_EXPECTED = {
   shadowgraph_revoke_grant: { required: ['accessId'], enums: {} },
   shadowgraph_discard_access: { required: ['accessId'], enums: {} },
   shadowgraph_record_decision: { required: ['title', 'chosen'], enums: {} },
-  shadowgraph_record_attempt: { required: ['solution', 'result'], enums: {} },
+  shadowgraph_record_attempt: { required: ['solution', 'result', 'resultClass'], enums: {} },
   shadowgraph_review: { required: null, enums: {} },
   shadowgraph_search: { required: null, enums: { kind: ['decision', 'attempt'] } },
   shadowgraph_context: { required: null, enums: {} },
@@ -329,6 +330,31 @@ test('the catalog advertises exactly the documented full, compact, and verifier 
   for (const entry of verifierCatalog) assert.match(entry.name, /^shadowgraph_[a-z_]+$/u);
 });
 
+test('write schemas require explicit attempt classes and advertise structured condition aliases', () => {
+  const decision = fullCatalog.find((tool) => tool.name === 'shadowgraph_record_decision');
+  const attempt = fullCatalog.find((tool) => tool.name === 'shadowgraph_record_attempt');
+  const fact = fullCatalog.find((tool) => tool.name === 'shadowgraph_record_fact');
+
+  assert.deepEqual(attempt.inputSchema.required, ['solution', 'result', 'resultClass']);
+  assert.deepEqual(fact.inputSchema.required, ['key', 'value']);
+  assert.deepEqual(decision.inputSchema.properties.alternatives.items.required, ['label']);
+  for (const entry of [
+    decision.inputSchema.properties.alternatives.items.properties.reopenWhen,
+    attempt.inputSchema.properties.reusableWhen
+  ]) {
+    const condition = entry.items.anyOf.find((branch) => branch.type === 'object');
+    assert.ok(condition, 'structured conditions have an object schema');
+    assert.deepEqual(condition.anyOf, [
+      { required: ['key', 'value'] },
+      { required: ['key', 'expected'] },
+      { required: ['target', 'value'] },
+      { required: ['target', 'expected'] }
+    ]);
+    assert.deepEqual(condition.properties.operator.enum, [...RULE_OPERATORS, ...Object.keys(SYMBOLIC_OPERATOR_ALIASES)]);
+    for (const operand of ['value', 'expected']) assert.ok(condition.properties[operand].anyOf.length > 0);
+  }
+});
+
 test('every tool carries the four behavioural annotations its handler actually justifies', () => {
   assert.equal(Object.keys(ANNOTATIONS_EXPECTED).length, 36);
   for (const entry of verifierCatalog) {
@@ -423,6 +449,8 @@ const DESCRIPTION_CAP = 450;
 // repair_plan unlink boundary, and standardizes on 'review signals' (eliminating
 // 'reminders'). Measured with `node scripts/mcp-wire-size.mjs`: full 11,692,
 // compact 6,643, verifier full 12,041. All budgets are preserved with headroom.
+// PR61's restored guidance measures full 11,695, verifier 12,044, workflow 7,769,
+// compact 6,747; every existing description ceiling retains its headroom.
 const DESCRIPTION_TOTALS = {
   full: 11950,
   verifier: 12300,
@@ -593,12 +621,17 @@ const WIRE_BUDGETS = {
   // full 72469/76160/367548, verifier 73618/77413/372463,
   // workflow 57012/59124/294141, compact 51138/52829/262134.
   // Ceilings preserve ~2% measured headroom across all tiers.
-  'withoutVerifier.full': { bare: 73_800, annotated: 77_500, structured: 373_800 },
-  'withoutVerifier.workflow': { bare: 58_000, annotated: 60_200, structured: 299_000 },
-  'withoutVerifier.compact': { bare: 52_000, annotated: 53_700, structured: 266_800 },
-  'withVerifier.full': { bare: 74_900, annotated: 78_800, structured: 378_900 },
-  'withVerifier.workflow': { bare: 58_000, annotated: 60_200, structured: 299_000 },
-  'withVerifier.compact': { bare: 52_000, annotated: 53_700, structured: 266_800 }
+  // PR61 restores main's condition-operator and captured-wording guidance while
+  // retaining structured condition schemas. Final `npm run size:mcp` measurements:
+  // full 76296/79987/371375, verifier 77445/81240/376290,
+  // workflow 60839/62951/297968, compact 54965/56656/265961. Every ceiling is
+  // rounded upward to 100 bytes with approximately 2% headroom.
+  'withoutVerifier.full': { bare: 77_900, annotated: 81_600, structured: 378_900 },
+  'withoutVerifier.workflow': { bare: 62_100, annotated: 64_300, structured: 304_000 },
+  'withoutVerifier.compact': { bare: 56_100, annotated: 57_800, structured: 271_300 },
+  'withVerifier.full': { bare: 79_000, annotated: 82_900, structured: 383_900 },
+  'withVerifier.workflow': { bare: 62_100, annotated: 64_300, structured: 304_000 },
+  'withVerifier.compact': { bare: 56_100, annotated: 57_800, structured: 271_300 }
 };
 
 test('the advertised tool list stays within its wire-size budget, at every tier', () => {

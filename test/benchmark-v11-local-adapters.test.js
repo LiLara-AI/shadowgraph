@@ -188,6 +188,7 @@ for (const storage of ['json', 'sqlite']) {
         toolCall(3, 'shadowgraph_record_attempt', {
           solution: 'unsafe-choice',
           result: 'failed',
+          resultClass: 'failed',
           project: 'primary-project'
         })
       ]

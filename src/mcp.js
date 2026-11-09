@@ -248,6 +248,30 @@ async function safeEmbed(text) {
   }
 }
 
+function missingRequiredField(fieldPath) {
+  return applicationError(
+    -32000,
+    'Invalid tool arguments',
+    undefined,
+    'Tool execution failed (missing_required_field)',
+    { issueCode: 'missing_required_field', fieldPath, retryable: false }
+  );
+}
+
+function validateRequiredArguments(tool, args) {
+  const input = args && typeof args === 'object' && !Array.isArray(args) ? args : {};
+  for (const field of tool.inputSchema.required ?? []) {
+    if (!Object.hasOwn(input, field)) throw missingRequiredField(field);
+  }
+  if (tool.name === 'shadowgraph_record_decision' && Array.isArray(input.alternatives)) {
+    input.alternatives.forEach((alternative, index) => {
+      if (alternative && typeof alternative === 'object' && !Array.isArray(alternative) && !Object.hasOwn(alternative, 'label')) {
+        throw missingRequiredField(`alternatives[${index}].label`);
+      }
+    });
+  }
+}
+
 async function addConfiguredEmbeddings(args = {}, kind = 'memory') {
   if (!embeddingClient || !args || typeof args !== 'object') return args;
   if (kind === 'memory') {
@@ -355,6 +379,12 @@ async function callUnqueued(name, args, tier, accessManaged = false) {
       if (binding) args = { ...input, project: binding.project };
     }
   }
+  if (name === 'shadowgraph_record_decision' && args && typeof args === 'object' && !Array.isArray(args) && !args.chosen && args.title) {
+    args = { ...args, chosen: args.title };
+  } else if (name === 'shadowgraph_record_outcome' && args && typeof args === 'object' && !Array.isArray(args) && args.decisionId == null && args.id != null) {
+    args = { ...args, decisionId: args.id };
+  }
+  validateRequiredArguments(tool, args);
   if (name === 'shadowgraph_record_decision') args = await addConfiguredEmbeddings(args, 'decision');
   else if (name === 'shadowgraph_record_attempt') args = await addConfiguredEmbeddings(args, 'attempt');
   else if (name === 'shadowgraph_remember') args = await addConfiguredEmbeddings(args ?? {}, 'memory');
@@ -636,6 +666,12 @@ const PUBLIC_DOMAIN_PATTERNS = [
   /^Unsupported rule unit /u,
   /^Invalid decision status: /u
 ];
+const SAFE_CALLER_ERRORS = [
+  { matches: (message) => message === 'Decision not found', issueCode: 'unknown_decision', fieldPath: 'decisionId' },
+  { matches: (message) => message.startsWith('Illegal decision status transition:'), issueCode: 'illegal_transition', fieldPath: 'status' },
+  { matches: (message) => message.startsWith('Invalid decision status:'), issueCode: 'invalid_field', fieldPath: 'status' },
+  { matches: (message) => message.startsWith('Attempt resultClass must be '), issueCode: 'invalid_field', fieldPath: 'resultClass' }
+];
 
 function containsPathOrSecret(str) {
   if (typeof str !== 'string') return false;
@@ -771,10 +807,20 @@ function publicErrorDetails(error) {
   if (error instanceof SyntaxError) return { message: 'Tool execution failed: invalid JSON data' };
   const namedMessage = PUBLIC_ERROR_NAME_MESSAGES.get(error?.name);
   if (namedMessage) return { message: namedMessage };
-  if (error?.message && !containsPathOrSecret(error.message)) {
-    if (PUBLIC_DOMAIN_MESSAGES.has(error.message)) return { message: error.message };
+  const message = error?.message;
+  const callerError = typeof message === 'string'
+    ? SAFE_CALLER_ERRORS.find((entry) => entry.matches(message))
+    : undefined;
+  if (callerError) {
+    return {
+      message: `Tool execution failed (${callerError.issueCode})`,
+      data: { issueCode: callerError.issueCode, fieldPath: callerError.fieldPath, retryable: false }
+    };
+  }
+  if (message && !containsPathOrSecret(message)) {
+    if (PUBLIC_DOMAIN_MESSAGES.has(message)) return { message };
     for (const pattern of PUBLIC_DOMAIN_PATTERNS) {
-      if (pattern.test(error.message)) return { message: error.message };
+      if (pattern.test(message)) return { message };
     }
   }
   return { message: 'Tool execution failed' };
@@ -987,7 +1033,12 @@ async function handleMessage(request, emit, batchFailure = null) {
         respond(eraResult(modern, modern ? { ...result, isError: false } : result));
       } catch (error) {
         if (!modern || isRpcError(error)) throw error;
-        respond(modernResult({ content: [{ type: 'text', text: publicErrorMessage(error) }], isError: true }));
+        const failure = publicErrorDetails(error);
+        respond(modernResult({
+          content: [{ type: 'text', text: failure.message }],
+          isError: true,
+          ...(failure.data === undefined ? {} : { _meta: { 'shadowgraph/error': failure.data } })
+        }));
       }
     } else throw rpcError(-32601, 'Method not found');
   } catch (error) {

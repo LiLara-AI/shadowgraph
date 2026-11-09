@@ -245,3 +245,200 @@ test('MCP serializes restore with a concurrent acknowledged memory write', async
   const keys = JSON.parse(recalled.result.content[0].text).items.map((item) => item.record.key);
   assert.deepEqual(keys, ['concurrent']);
 });
+
+test('MCP JSON restart persists the complete decision, attempt, and fact workflow', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-mcp-complete-workflow-');
+  const file = join(directory, 'data.json');
+  const decision = {
+    project: 'p', title: 'API import', chosen: 'serial import',
+    reviewAfter: '2026-11-09T00:00:00.000Z'
+  };
+  const first = startJsonRpcChild(file);
+  t.after(() => first.child.kill());
+
+  const decisionResponse = await first.call({
+    jsonrpc: '2.0', id: 1, method: 'tools/call',
+    params: { name: 'shadowgraph_record_decision', arguments: decision }
+  });
+  assert.equal(decisionResponse.error, undefined, decisionResponse.error?.message);
+  const decisionId = JSON.parse(decisionResponse.result.content[0].text).id;
+  const attempt = {
+    project: 'p', solution: 'parallel import', result: 'rate limited',
+    resultClass: 'failed', relatedTo: [decisionId],
+    reusableWhen: [{ key: 'apiRateLimitPerMin', operator: 'gte', value: 600 }]
+  };
+  const fact = {
+    project: 'p', key: 'apiRateLimitPerMin', value: 60,
+    observedAt: '2026-11-08T00:00:00.000Z',
+    validFrom: '2026-11-08T00:00:00.000Z',
+    validTo: null
+  };
+  const attemptResponse = await first.call({
+    jsonrpc: '2.0', id: 2, method: 'tools/call',
+    params: { name: 'shadowgraph_record_attempt', arguments: attempt }
+  });
+  const factResponse = await first.call({
+    jsonrpc: '2.0', id: 3, method: 'tools/call',
+    params: { name: 'shadowgraph_record_fact', arguments: fact }
+  });
+  assert.equal(attemptResponse.error, undefined, attemptResponse.error?.message);
+  assert.equal(factResponse.error, undefined, factResponse.error?.message);
+  const attemptId = JSON.parse(attemptResponse.result.content[0].text).id;
+  const factId = JSON.parse(factResponse.result.content[0].text).id;
+
+  const firstExit = new Promise((resolve) => first.child.once('exit', resolve));
+  first.child.kill();
+  await firstExit;
+
+  const second = startJsonRpcChild(file);
+  t.after(() => second.child.kill());
+  const durable = JSON.parse(await readFile(file, 'utf8'));
+  const storedDecision = durable.records.find((record) => record.id === decisionId);
+  const storedAttempt = durable.records.find((record) => record.id === attemptId);
+  const storedFact = durable.facts.find((record) => record.id === factId);
+  assert.deepEqual({
+    project: storedDecision.project,
+    title: storedDecision.title,
+    chosen: storedDecision.chosen,
+    reviewAfter: storedDecision.reviewAfter
+  }, decision);
+  assert.deepEqual({
+    project: storedAttempt.project,
+    solution: storedAttempt.solution,
+    result: storedAttempt.result,
+    resultClass: storedAttempt.resultClass,
+    relatedTo: storedAttempt.relatedTo,
+    reusableWhen: storedAttempt.reusableWhen
+  }, attempt);
+  assert.deepEqual({
+    project: storedFact.project,
+    key: storedFact.key,
+    value: storedFact.value,
+    observedAt: storedFact.observedAt,
+    validFrom: storedFact.temporal.validFrom,
+    validTo: storedFact.temporal.validTo
+  }, fact);
+
+  const maintained = await second.call({
+    jsonrpc: '2.0', id: 4, method: 'tools/call',
+    params: { name: 'shadowgraph_maintain', arguments: { project: 'p', now: '2026-11-09T00:00:00.000Z' } }
+  });
+  assert.equal(maintained.error, undefined, maintained.error?.message);
+  assert.deepEqual(JSON.parse(maintained.result.content[0].text).staleDecisionIds, [decisionId]);
+
+  const contextResponse = await second.call({
+    jsonrpc: '2.0', id: 5, method: 'tools/call',
+    params: { name: 'shadowgraph_context', arguments: { project: 'p' } }
+  });
+  assert.equal(contextResponse.error, undefined, contextResponse.error?.message);
+  const context = JSON.parse(contextResponse.result.content[0].text);
+  assert.equal(context.activeDecisions.some((record) => record.id === decisionId), false);
+  assert.deepEqual(context.failedAttempts.map((record) => record.id), [attemptId]);
+  assert.deepEqual(context.reusableAttempts, [], 'the stored rate limit does not satisfy reusableWhen');
+});
+
+test('MCP cold start rediscovers the checkout failure and completes the decision lifecycle', async (t) => {
+  const directory = await scratchDirectory(t, 'shadowgraph-mcp-cold-start-');
+  const file = join(directory, 'data.json');
+  let requestId = 0;
+  const callTool = (rpc, name, args) => rpc.call({
+    jsonrpc: '2.0', id: ++requestId, method: 'tools/call',
+    params: { name, arguments: args }
+  });
+  const payload = (response) => {
+    assert.equal(response.error, undefined, response.error?.message);
+    return JSON.parse(response.result.content[0].text);
+  };
+
+  const first = startJsonRpcChild(file);
+  t.after(() => first.child.kill());
+  const decision = payload(await callTool(first, 'shadowgraph_record_decision', {
+    project: 'checkout-service',
+    title: 'Choose the datastore',
+    chosen: 'SQLite',
+    confidence: 0.8,
+    alternatives: [{
+      label: 'PostgreSQL',
+      reasonRejected: 'Single-user local deployment does not justify running a server',
+      reopenWhen: [{ key: 'deployment', operator: 'equals', value: 'multi-user' }]
+    }]
+  }));
+  const attempt = payload(await callTool(first, 'shadowgraph_record_attempt', {
+    project: 'checkout-service',
+    solution: 'One SQLite file per user',
+    result: 'Cross-user reporting became impossible',
+    resultClass: 'failed',
+    reason: 'No shared transactional view',
+    environment: 'Single-user local checkout prototype',
+    relatedTo: [decision.id]
+  }));
+  const initialOutcome = {
+    status: 'mixed',
+    lessons: ['Fine for one user, wrong once reporting spans users']
+  };
+  const withOutcome = payload(await callTool(first, 'shadowgraph_record_outcome', {
+    project: 'checkout-service',
+    decisionId: decision.id,
+    outcome: initialOutcome
+  }));
+  assert.equal(withOutcome.outcome.status, initialOutcome.status);
+
+  const firstExit = new Promise((resolve) => first.child.once('exit', resolve));
+  first.child.kill();
+  await firstExit;
+
+  const second = startJsonRpcChild(file, undefined, false);
+  t.after(() => second.child.kill());
+  const context = payload(await callTool(second, 'shadowgraph_context', { project: 'checkout-service' }));
+  const rediscovered = context.failedAttempts.find((record) => record.id === attempt.id);
+  assert.ok(rediscovered, 'the prior attempt is discovered from project context alone');
+  assert.equal(rediscovered.reason, 'No shared transactional view');
+  assert.equal(rediscovered.environment, 'Single-user local checkout prototype');
+  assert.equal(rediscovered.resultClass, 'failed');
+  const priorDecision = context.activeDecisions.find((record) => record.id === decision.id);
+  assert.ok(priorDecision, 'the prior decision is active after the cold start');
+  assert.equal(priorDecision.alternatives[0].label, 'PostgreSQL');
+  assert.equal(priorDecision.alternatives[0].reasonRejected, 'Single-user local deployment does not justify running a server');
+  assert.equal(priorDecision.outcome.status, initialOutcome.status);
+  assert.deepEqual(priorDecision.outcome.lessons, initialOutcome.lessons);
+
+  const defaultContext = payload(await callTool(second, 'shadowgraph_context', { project: 'default' }));
+  assert.equal(defaultContext.activeDecisions.some((record) => record.id === decision.id), false);
+  assert.equal(defaultContext.failedAttempts.some((record) => record.id === attempt.id), false);
+
+  const updated = payload(await callTool(second, 'shadowgraph_update_status', {
+    project: 'checkout-service',
+    decisionId: decision.id,
+    status: 'planned'
+  }));
+  assert.equal(updated.status, 'planned');
+  const replacement = payload(await callTool(second, 'shadowgraph_record_decision', {
+    project: 'checkout-service',
+    title: 'Choose the datastore',
+    chosen: 'PostgreSQL'
+  }));
+  const superseded = payload(await callTool(second, 'shadowgraph_supersede', {
+    project: 'checkout-service',
+    decisionId: decision.id,
+    replacementId: replacement.id
+  }));
+  assert.equal(superseded.previous.status, 'superseded');
+  assert.equal(superseded.replacement.id, replacement.id);
+  const finalOutcome = {
+    status: 'successful',
+    lessons: ['Shared PostgreSQL restored cross-user reporting']
+  };
+  const completed = payload(await callTool(second, 'shadowgraph_record_outcome', {
+    project: 'checkout-service',
+    decisionId: replacement.id,
+    outcome: finalOutcome
+  }));
+  assert.equal(completed.outcome.status, finalOutcome.status);
+  assert.deepEqual(completed.outcome.lessons, finalOutcome.lessons);
+
+  const finalContext = payload(await callTool(second, 'shadowgraph_context', { project: 'checkout-service' }));
+  assert.equal(finalContext.activeDecisions.some((record) => record.id === decision.id), false);
+  const currentDecision = finalContext.activeDecisions.find((record) => record.id === replacement.id);
+  assert.equal(currentDecision.outcome.status, finalOutcome.status);
+  assert.ok(finalContext.failedAttempts.some((record) => record.id === attempt.id));
+});

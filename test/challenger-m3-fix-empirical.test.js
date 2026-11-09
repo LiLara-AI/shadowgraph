@@ -487,7 +487,10 @@ test('Challenger M3 Fix: Error sanitization blocks Windows UNC and backslash pat
 
     assert.ok(res.result?.isError, `Input "${input}" must be rejected`);
     const errorText = res.result.content[0].text;
-    assert.equal(errorText, 'Tool execution failed', `Leakage detected for input "${input}": got "${errorText}"`);
-    assert.equal(errorText.includes(input), false, 'Must not echo back the input path/secret');
+    assert.equal(errorText, 'Tool execution failed (invalid_field)', `Unexpected error for input "${input}": got "${errorText}"`);
+    assert.deepEqual(res.result._meta['shadowgraph/error'], {
+      issueCode: 'invalid_field', fieldPath: 'status', retryable: false
+    });
+    assert.equal(JSON.stringify(res).includes(input), false, 'Must not echo back the input path/secret');
   }
 });

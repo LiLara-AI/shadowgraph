@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — Phase 1A
+
+### Changed
+
+- **The 16-tool compact, 20-tool workflow, and 35-tool full inventories remain unchanged.** New MCP attempt writes require `resultClass`; CLI and JavaScript callers and older stored attempts retain the wording-based fallback when it is absent. The MCP write schemas also require fact `value` and each alternative `label`, matching the existing runtime requirements.
+- **Structured MCP conditions now advertise operands and aliases.** Decision and attempt condition items accept legacy/symbolic strings and object rules with `key`/`value` or `target`/`expected`, including explicit null, false, zero, and empty-string operands.
+- **Caller-safe MCP errors retain era-specific locations.** Constructed safe details appear in legacy JSON-RPC `error.data` and modern `result._meta['shadowgraph/error']`; unknown failures, including non-Error throws and non-string messages, use the generic safe response without exposing internal details.
+
 ## 0.44.0 (2026-11-07)
 
 - **MCP Schema Completeness & Function Exposure**: Expose all underlying lifecycle, retry, search, and memory management capabilities across MCP schemas without altering profile inventory:

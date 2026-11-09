@@ -1,4 +1,12 @@
-# ShadowGraph 0.44.0 — MCP Tool Disambiguation, Usability & Lifecycle Exposure
+# ShadowGraph release notes
+
+## Unreleased — Phase 1A
+
+The **16-tool compact**, 20-tool workflow, and 35-tool full inventories remain unchanged. New MCP attempt writes require `resultClass`; CLI and JavaScript callers and older stored attempts retain the wording-based fallback when it is absent. MCP fact writes require fact `value`, and every decision alternative requires an alternative `label`, matching the existing runtime contracts. Structured condition schemas now describe canonical `key`/`value` fields and the `target`/`expected` aliases without dropping legacy or symbolic string rules.
+
+Caller-safe MCP errors keep their era-specific locations: legacy JSON-RPC responses use `error.data`, while modern `CallToolResult` responses use `result._meta['shadowgraph/error']`. Unknown failures, including non-Error throws and non-string messages, retain the generic safe response.
+
+## 0.44.0 — MCP Tool Disambiguation, Usability & Lifecycle Exposure
 
 This release delivers comprehensive MCP tool disambiguation, full schema exposure of underlying engine lifecycle functions, safe domain error recovery, enhanced CLI ergonomics, and extensive visual documentation, while strictly maintaining the fixed 3-profile inventory invariants (Compact 16, Workflow 20, Full 35 / 36 with verifier).
 

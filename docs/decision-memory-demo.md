@@ -43,12 +43,20 @@ is a genuine restart.
 
 ### Set up
 
+Choose one shared absolute store path before setup so later clients and working directories use the
+same data:
+
 ```bash
 mkdir shadowgraph-demo
 cd shadowgraph-demo
+export SHADOWGRAPH_FILE=/absolute/path/to/shared-shadowgraph/data.json
 shadowgraph setup
 shadowgraph doctor
 ```
+
+On Windows, substitute a native absolute path such as `C:\shadowgraph\data.json`. The other explicit
+choice is project-local `.shadowgraph/data.json`: omit `SHADOWGRAPH_FILE` and run setup in that
+project directory. Later clients must use the same path and project; never move or merge stores.
 
 Abridged:
 
@@ -100,8 +108,34 @@ Ordinary input can never produce `verified`.
 ### Record a failed attempt, so it is not repeated
 
 ```bash
-shadowgraph attempt '{"project":"checkout-service","solution":"One SQLite file per user","result":"Cross-user reporting became impossible","reason":"No shared transactional view"}'
+shadowgraph attempt '{"project":"checkout-service","solution":"One SQLite file per user","result":"Cross-user reporting became impossible","resultClass":"failed","reason":"No shared transactional view","environment":"Single-user local checkout prototype"}'
 ```
+
+### Discover the failure in a fresh process
+
+A new process calls `context({project:'checkout-service'})` without being told about the attempt:
+
+```bash
+shadowgraph context '{"project":"checkout-service"}'
+```
+
+```json
+{
+  "project": "checkout-service",
+  "failedAttempts": [
+    {
+      "project": "checkout-service",
+      "solution": "One SQLite file per user",
+      "result": "Cross-user reporting became impossible",
+      "resultClass": "failed",
+      "reason": "No shared transactional view",
+      "environment": "Single-user local checkout prototype"
+    }
+  ]
+}
+```
+
+The new session avoids per-user SQLite files.
 
 ### Nothing to reconsider yet
 
@@ -202,6 +236,8 @@ shadowgraph ack '{"project":"checkout-service","id":"review_1788079327576_q1wmw5
 { "status": "acknowledged", "acknowledgedAt": "2026-08-30T08:46:59.143Z", "...": "..." }
 ```
 
+Acknowledgement means seen, not resolved.
+
 ### Close the loop with an outcome
 
 ```bash
@@ -218,7 +254,7 @@ contribution to the decision's confidence history rather than overwriting a numb
 The same story through the stdio MCP server in compact mode, which advertises 16 workflow tools.
 
 ```bash
-SHADOWGRAPH_MCP_COMPACT=1 shadowgraph mcp
+SHADOWGRAPH_MCP_COMPACT=1 SHADOWGRAPH_FILE=/absolute/path/to/shared-shadowgraph/data.json shadowgraph mcp
 ```
 
 An agent calls, in order:
@@ -228,9 +264,10 @@ An agent calls, in order:
 | Load context first | `shadowgraph_context` | `{"project":"checkout-service"}` |
 | Record the decision | `shadowgraph_record_decision` | project, title, chosen, confidence, alternatives with `reasonRejected` + `reopenWhen` |
 | Record the fact | `shadowgraph_record_fact` | `{"project":"checkout-service","key":"deployment","value":"single-user","sourceClass":"human_confirmed","confidence":1}` |
-| Record what failed | `shadowgraph_record_attempt` | project, solution, result, reason |
+| Record what failed | `shadowgraph_record_attempt` | `{"project":"checkout-service","solution":"One SQLite file per user","result":"Cross-user reporting became impossible","resultClass":"failed","reason":"No shared transactional view","environment":"Single-user local checkout prototype"}` |
 | Later, the changed fact | `shadowgraph_record_fact` | same key, `"value":"multi-user"` |
 | Ask what to revisit | `shadowgraph_review` | `{"project":"checkout-service"}` |
+| Record the final outcome | `shadowgraph_record_outcome` | `{"project":"checkout-service","decisionId":"decision_1788079560852_g3b79y","outcome":{"status":"mixed","lessons":["Fine for one user, wrong once reporting spans users"]}}` |
 
 Every write names its project; without one it is refused (`write_scope_unresolved`).
 `shadowgraph_review` returns the same result as the CLI, abridged:
@@ -336,7 +373,9 @@ graph.addAttempt({
   project: 'checkout-service',
   solution: 'One SQLite file per user',
   result: 'Cross-user reporting became impossible',
-  reason: 'No shared transactional view'
+  resultClass: 'failed',
+  reason: 'No shared transactional view',
+  environment: 'Single-user local checkout prototype'
 });
 
 graph.addFact({

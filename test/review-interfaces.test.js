@@ -242,7 +242,9 @@ test('P1-5: a genuine tool failure stays distinguishable from a protocol error',
     const [response] = await collect(child, 1);
     assert.equal(response.id, 6);
     assert.equal(response.error.code, -32000, 'application errors keep the generic code');
-    assert.match(response.error.message, /Decision not found/);
+    assert.equal(response.error.message, 'Tool execution failed (unknown_decision)');
+    assert.deepEqual(response.error.data, { issueCode: 'unknown_decision', fieldPath: 'decisionId', retryable: false });
+    assert.equal(JSON.stringify(response).includes('nope'), false);
   } finally {
     child.kill();
   }

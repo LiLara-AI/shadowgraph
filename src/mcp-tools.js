@@ -8,6 +8,7 @@
 // function of the server's configuration, which keeps every claim testable
 // in-process and keeps the wire output deterministic.
 import { SOURCE_CLASSES, DECISION_STATUSES, OUTCOME_STATUSES, CONTENT_SEARCH_FIELDS, MEMORY_TYPES } from './shadowgraph.js';
+import { RULE_OPERATORS, SYMBOLIC_OPERATOR_ALIASES } from './condition-eval.js';
 import { TRANSCRIPT_GAP_REASONS } from './internal/transcript.js';
 import { PRIOR_SETUP } from './internal/extraction-provenance.js';
 import { PURGE_BACKUPS_STATEMENT } from './internal/deletion-knowledge.js';
@@ -84,6 +85,29 @@ const jsonValueProperty = {
     { type: 'null' },
     { type: 'array', items: { $ref: '#/$defs/jsonValue' } },
     { type: 'object', additionalProperties: { $ref: '#/$defs/jsonValue' } }
+  ]
+};
+const structuredConditionProperty = {
+  type: 'object',
+  properties: {
+    key: { type: 'string', minLength: 1, description: 'Stored fact key to evaluate; use key or its target alias.' },
+    target: { type: 'string', minLength: 1, description: 'Alias for key; conflicting key and target values are rejected.' },
+    operator: { type: 'string', enum: [...RULE_OPERATORS, ...Object.keys(SYMBOLIC_OPERATOR_ALIASES)], description: 'Comparison to apply, as a supported word or symbolic alias. Defaults to equals.' },
+    value: described(jsonValueProperty, 'Expected operand; use value or its expected alias. Null, false, zero, and empty string are explicit values.'),
+    expected: described(jsonValueProperty, 'Alias for value; conflicting value and expected operands are rejected.'),
+    unit: { type: 'string', enum: ['ms', 's', 'sec', 'min', 'h', 'hr', 'd', '%', 'pct'], description: 'Optional comparison unit.' }
+  },
+  anyOf: [
+    { required: ['key', 'value'] },
+    { required: ['key', 'expected'] },
+    { required: ['target', 'value'] },
+    { required: ['target', 'expected'] }
+  ]
+};
+const conditionEntryProperty = {
+  anyOf: [
+    { type: 'string', description: 'A legacy changedFacts key or symbolic condition such as "key >= value".' },
+    structuredConditionProperty
   ]
 };
 const evidenceItemProperty = {
@@ -1233,6 +1257,7 @@ const CATALOG = [
     inputSchema: {
       type: 'object',
       ...creationIdPolicy,
+      $defs: { jsonValue: jsonValueProperty },
       required: ['title', 'chosen'],
       properties: {
         title: { type: 'string', description: 'Short name of the decision. Required, non-empty, and searchable content.' },
@@ -1252,18 +1277,19 @@ const CATALOG = [
         visibility: visibilityProperty,
         assumptions: { type: 'array', items: { type: 'string' }, description: 'What the decision takes for granted. Record each as a fact too if it should be able to reopen the decision.' },
         evidence: { type: 'array', items: evidenceItemProperty, description: 'Supporting evidence. Counted as declared evidence in the confidence basis, but never re-checked.' },
-        reopenWhen: { type: 'array', description: 'Reopen conditions when alternatives are omitted; accepts target/expected aliases.' },
+        reopenWhen: { type: 'array', description: 'Reopen conditions when alternatives are omitted; accepts target/expected aliases. Symbolic operators: >=, <=, ==, !=, >, <.' },
         alternatives: {
           type: 'array',
           description: 'Options considered and rejected. Alternatives belong to the decision and have no separate write API; they are what shadowgraph_review reconsiders.',
           items: {
             type: 'object',
             ...creationIdPolicy,
+            required: ['label'],
             properties: {
-              label: { type: 'string', description: 'Name of the rejected option. Required in practice: an alternative without a non-empty label is rejected.' },
+              label: { type: 'string', description: 'Name of the rejected option. Required and non-empty.' },
               reasonRejected: { type: 'string', description: 'Why it was rejected. Searchable content.' },
               reason: { type: 'string', description: 'Accepted as an alias of reasonRejected for older callers.' },
-              reopenWhen: { type: 'array', description: 'Rules making this alternative reconsiderable: plain keys, symbolic strings ("key >= value"), or { key, operator, value } (accepts target/expected aliases) with symbolic operators (>=, <=, ==, !=, >, <) or words.' }
+              reopenWhen: { type: 'array', items: conditionEntryProperty, description: 'Rules making this alternative reconsiderable: legacy keys, symbolic strings, or structured rules using stored facts and key/value or target/expected aliases. Symbolic operators: >=, <=, ==, !=, >, <.' }
             }
           }
         },
@@ -1286,15 +1312,16 @@ const CATALOG = [
     inputSchema: {
       type: 'object',
       ...creationIdPolicy,
-      required: ['solution', 'result'],
+      $defs: { jsonValue: jsonValueProperty },
+      required: ['solution', 'result', 'resultClass'],
       properties: {
         solution: { type: 'string', description: 'What was tried. Required, non-empty, and searchable content.' },
-        result: { type: 'string', description: 'What happened. Required, non-empty, and searchable content. With no resultClass, wording such as failed, error, or regression is what places the attempt in shadowgraph_context failedAttempts; a captured attempt\'s wording is never read.' },
-        resultClass: { type: 'string', enum: ['failed', 'succeeded', 'inconclusive'], description: 'Classify the result instead of leaving it to the wording heuristic. Set it when the result text does not say failed, error, or regression, or when it does but the attempt did not fail.' },
+        result: { type: 'string', description: "What happened. Required, non-empty, and searchable content. Only legacy/core records without resultClass use wording such as failed, error, or regression to surface in shadowgraph_context failedAttempts; a captured attempt's wording is never read." },
+        resultClass: { type: 'string', enum: ['failed', 'succeeded', 'inconclusive'], description: 'Required for new MCP writes. Classify the result explicitly instead of leaving it to the legacy wording heuristic.' },
         task: { type: 'string', description: 'Task or problem context this attempt was trying to solve. Searchable content.' },
         tags: { type: 'array', items: { type: 'string' }, description: 'Free-form labels stored with the attempt. Searchable content.' },
         visibility: visibilityProperty,
-        reusableWhen: { type: 'array', description: 'Conditions for reusing this attempt: plain keys, symbolic strings ("key >= value"), or rule objects { key, operator, value } (accepts target/expected aliases) with symbolic operators (>=, <=, ==, !=, >, <) or words.' },
+        reusableWhen: { type: 'array', items: conditionEntryProperty, description: 'Conditions for reusing this attempt: legacy keys, symbolic strings, or structured rules using stored facts and key/value or target/expected aliases. Symbolic operators: >=, <=, ==, !=, >, <. All must hold; unresolved conditions block reuse.' },
         relatedTo: { type: 'array', items: { type: 'string' }, description: 'Identifiers of related entities such as decisions or other attempts.' },
         project: writeProjectProperty,
         originId: originIdProperty,

@@ -282,6 +282,11 @@ test('U-1: MCP exposes verification only when a separate verifier is preconfigur
   assert.equal(compactList.result.tools.length, 16);
   assert.equal(compactList.result.tools.some((tool) => tool.name === 'shadowgraph_verify_fact'), false);
 
+  const prompt = await configured.call({
+    jsonrpc: '2.0', id: 21, method: 'prompts/get', params: { name: 'shadowgraph_consequential_task' }
+  });
+  assert.equal(prompt.result.messages[0].content.text, "context returns one project's current decisions, stale facts, failed attempts, fired review conditions and conditions that could not be settled; retrieve returns the records matching a content query with their one-hop graph neighbours. ShadowGraph records decisions, assumptions, evidence, alternatives, attempts, facts and outcomes. A review signal stays open until it is acknowledged. agent_claimed and unverified facts are claims, not confirmations. Only the separately configured signed local-evidence verifier can mark an active fact verified.");
+
   const recorded = await configured.call({
     jsonrpc: '2.0', id: 3, method: 'tools/call', params: {
       name: 'shadowgraph_record_fact', arguments: { project: 'app', key: 'release', value: 'ready' }

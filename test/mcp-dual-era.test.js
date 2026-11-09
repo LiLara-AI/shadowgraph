@@ -102,6 +102,15 @@ test('MCP modern discovery and every advertised primitive use 2026-07-28 result 
   assert.deepEqual(Object.keys(discovered.result.capabilities).sort(), ['prompts', 'resources', 'tools']);
   assert.equal(discovered.result.cacheScope, 'public');
   assert.equal(discovered.result.ttlMs, 0);
+  assert.equal(discovered.result.instructions, [
+    'Local-first decision and scoped temporal memory. Session tools/list defines the callable tools, schemas and effect hints.',
+    'Literal every-term lookup: shadowgraph_search. Ranked experience: shadowgraph_recall. Content matches plus ordered graph neighbours: shadowgraph_retrieve. Project working set: shadowgraph_context. Full record behind a context line: shadowgraph_expand, with the returned expansion handle.',
+    'A review signal records that a decision needs revisiting. Reopen rules are saved conditions on rejected alternatives. shadowgraph_review rechecks conditions and saves review signals; shadowgraph_review_context also loads the working set; shadowgraph_reconsider rechecks and explains all verdicts, including unresolved conditions. These evaluation calls commit a revision even on repeats. shadowgraph_context does not save review signals.',
+    'shadowgraph_review_signals, when advertised, lists already-saved review signals without reevaluation or signal creation. shadowgraph_ack_review accepts id or reviewSignalId to acknowledge the saved signal. Reading saved signals and evaluating conditions have different effects.',
+    'Chosen approach: shadowgraph_record_decision. Tried action and result: shadowgraph_record_attempt. Project/key observation for conditions: shadowgraph_record_fact. Scoped reusable memory: shadowgraph_remember. What happened to an existing decision: shadowgraph_record_outcome. Supporting or contradicting evidence: shadowgraph_confidence_evidence, when advertised. Lifecycle transition: shadowgraph_update_status. Replacement relation between decisions: shadowgraph_supersede.',
+    'Read-capable tools accepting accessId or grantId can save a bounded audit and revision when a key is presented. A grant widens reads, never write authority. IDs do not supply project/origin scope. Returned completeness and provenance describe the result limits.',
+    'Full-only operator capabilities require an operator-selected Full session and reconnect. A named sibling is callable only when advertised. Profiles change advertisement, not stored memory or product capabilities.'
+  ].join('\n'));
   assertModernComplete(discovered.result);
 
   const tools = await rpc.call({ jsonrpc: '2.0', id: 'tools', method: 'tools/list', params: modernParams() });
@@ -143,6 +152,7 @@ test('MCP modern discovery and every advertised primitive use 2026-07-28 result 
     params: modernParams({ name: 'shadowgraph_consequential_task' })
   });
   assert.equal(prompt.result.messages.length, 1);
+  assert.equal(prompt.result.messages[0].content.text, "context returns one project's current decisions, stale facts, failed attempts, fired review conditions and conditions that could not be settled; retrieve returns the records matching a content query with their one-hop graph neighbours. ShadowGraph records decisions, assumptions, evidence, alternatives, attempts, facts and outcomes. A review signal stays open until it is acknowledged. agent_claimed and unverified facts are claims, not confirmations. Without a separately configured verifier nothing in ShadowGraph can be marked verified, so a stored claim is never a confirmation.");
   assertModernComplete(prompt.result);
 });
 
@@ -181,7 +191,11 @@ test('MCP modern metadata, version, JSON-RPC, and tool errors remain distinguish
   });
   assert.equal(executionFailure.error, undefined);
   assert.equal(executionFailure.result.isError, true);
-  assert.match(executionFailure.result.content[0].text, /Decision not found/);
+  assert.equal(executionFailure.result.content[0].text, 'Tool execution failed (unknown_decision)');
+  assert.deepEqual(executionFailure.result._meta['shadowgraph/error'], {
+    issueCode: 'unknown_decision', fieldPath: 'decisionId', retryable: false
+  });
+  assert.equal(JSON.stringify(executionFailure).includes('missing'), false);
   assertModernComplete(executionFailure.result);
 });
 

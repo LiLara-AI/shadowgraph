@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { getRuntimeCapabilities } from '../src/runtime-capabilities.js';
 import { createShadowGraph } from '../src/shadowgraph.js';
 import { createSqliteStore } from '../src/sqlite-storage.js';
@@ -27,13 +28,13 @@ function modernParams(values = {}, { clientInfo } = {}) {
   return { ...values, _meta };
 }
 
-async function startMcp(t, extraEnv = {}) {
+async function startMcp(t, extraEnv = {}, nodeArgs = []) {
   const directory = await scratchDirectory(t, 'shadowgraph-followup-mcp-');
   const file = join(directory, 'data.json');
   const configuredEnv = typeof extraEnv === 'function'
     ? await extraEnv({ directory, file })
     : extraEnv;
-  const child = spawn(process.execPath, ['src/mcp.js'], {
+  const child = spawn(process.execPath, [...nodeArgs, 'src/mcp.js'], {
     cwd: process.cwd(),
     env: { ...process.env, SHADOWGRAPH_FILE: file, ...configuredEnv },
     stdio: ['pipe', 'pipe', 'pipe']
@@ -162,6 +163,7 @@ function assertSafeToolFailure(response, {
     assert.equal(response.result?.content?.length, 1);
     assert.equal(response.result.content[0].type, 'text');
     assert.equal(response.result.content[0].text, message);
+    assert.deepEqual(response.result?._meta?.['shadowgraph/error'], data);
   } else {
     assertRpcCode(response, code);
     assert.equal(response.error.message, message);
@@ -175,6 +177,125 @@ function assertSafeToolFailure(response, {
   }
   assert.equal(/\b(?:ENOENT|EACCES|EPERM|SQLITE_[A-Z_]+)\b/.test(serialized), false, `OS/storage message escaped: ${serialized}`);
 }
+
+for (const modern of [false, true]) {
+  const era = modern ? 'modern' : 'legacy';
+  test(`${era} MCP calls reject missing required write fields with safe coded failures`, async (t) => {
+    const rpc = await startMcp(t);
+    for (const [name, arguments_, fieldPath] of [
+      ['shadowgraph_record_attempt', { project: 'p', solution: 'parallel import', result: 'rate limited' }, 'resultClass'],
+      ['shadowgraph_record_fact', { project: 'p', key: 'apiRateLimitPerMin' }, 'value']
+    ]) {
+      const response = await rpc.call(toolRequest(`${era}-missing-${fieldPath}`, name, arguments_, { modern }));
+      assertSafeToolFailure(response, {
+        modern,
+        message: 'Tool execution failed (missing_required_field)',
+        data: { issueCode: 'missing_required_field', fieldPath, retryable: false }
+      });
+    }
+  });
+
+  const privatePath = join('PRIVATE-CALLER-ERROR-DIRECTORY-0a1b', 'PRIVATE-CALLER-ERROR-PATH-1a2b');
+  const stackText = 'at updateDecisionStatus (PRIVATE-CALLER-ERROR-STACK-3c4d)';
+  const callerErrorCases = [
+    {
+      label: 'unknown decision',
+      name: 'shadowgraph_update_status',
+      arguments_: { decisionId: `${era}-PRIVATE-UNKNOWN-DECISION-5e6f`, status: 'planned' },
+      expected: { issueCode: 'unknown_decision', fieldPath: 'decisionId', retryable: false },
+      forbidden: [`${era}-PRIVATE-UNKNOWN-DECISION-5e6f`, 'Decision not found', privatePath, stackText]
+    },
+    {
+      label: 'invalid decision status',
+      name: 'shadowgraph_update_status',
+      arguments_: { decisionId: `${era}-PRIVATE-INVALID-STATUS-DECISION-7a8b`, status: 'PRIVATE-RAW-STATUS-9c0d' },
+      seedDecision: true,
+      expected: { issueCode: 'invalid_field', fieldPath: 'status', retryable: false },
+      forbidden: [`${era}-PRIVATE-INVALID-STATUS-DECISION-7a8b`, 'PRIVATE-RAW-STATUS-9c0d', 'Invalid decision status:', privatePath, stackText]
+    },
+    {
+      label: 'invalid attempt result class',
+      name: 'shadowgraph_record_attempt',
+      arguments_: {
+        project: 'p',
+        solution: `PRIVATE-${era}-SOLUTION-1e2f`,
+        result: `PRIVATE-${era}-RESULT-3a4b`,
+        resultClass: `PRIVATE-${era}-RESULT-CLASS-5c6d`
+      },
+      expected: { issueCode: 'invalid_field', fieldPath: 'resultClass', retryable: false },
+      forbidden: [`PRIVATE-${era}-SOLUTION-1e2f`, `PRIVATE-${era}-RESULT-3a4b`, `PRIVATE-${era}-RESULT-CLASS-5c6d`, 'Attempt resultClass must be ', privatePath, stackText]
+    },
+    {
+      label: 'illegal decision transition',
+      name: 'shadowgraph_update_status',
+      arguments_: { decisionId: `${era}-PRIVATE-ILLEGAL-TRANSITION-DECISION-7e8f`, status: 'validated' },
+      seedDecision: true,
+      initialStatus: 'planned',
+      expected: { issueCode: 'illegal_transition', fieldPath: 'status', retryable: false },
+      forbidden: [`${era}-PRIVATE-ILLEGAL-TRANSITION-DECISION-7e8f`, 'Illegal decision status transition:', 'planned -> validated', 'validated', privatePath, stackText]
+    }
+  ];
+  for (const scenario of callerErrorCases) {
+    test(`${era} MCP ${scenario.label} returns safe corrective details`, async (t) => {
+      const rpc = await startMcp(t);
+      const arguments_ = { project: 'p', ...scenario.arguments_ };
+      if (scenario.seedDecision) {
+        const seeded = await rpc.call(toolRequest(`${era}-${scenario.label}-seed`, 'shadowgraph_record_decision', {
+          project: 'p',
+          title: 'Caller error fixture',
+          chosen: 'keep'
+        }, { modern }));
+        assert.equal(seeded.error, undefined, seeded.error?.message);
+        arguments_.decisionId = JSON.parse(seeded.result.content[0].text).id;
+      }
+      if (scenario.initialStatus) {
+        const transitioned = await rpc.call(toolRequest(`${era}-${scenario.label}-initial`, 'shadowgraph_update_status', {
+          project: 'p',
+          decisionId: arguments_.decisionId,
+          status: scenario.initialStatus
+        }, { modern }));
+        assert.equal(transitioned.error, undefined, transitioned.error?.message);
+        assert.equal(JSON.parse(transitioned.result.content[0].text).status, scenario.initialStatus);
+      }
+      const response = await rpc.call(toolRequest(`${era}-${scenario.label}`, scenario.name, arguments_, { modern }));
+      assertSafeToolFailure(response, {
+        modern,
+        message: `Tool execution failed (${scenario.expected.issueCode})`,
+        data: scenario.expected,
+        forbidden: scenario.forbidden
+      });
+    });
+  }
+}
+
+test('legacy MCP returns the generic safe response for a non-Error throw with a non-string message', async (t) => {
+  const fixtures = await scratchDirectory(t, 'shadowgraph-non-error-mcp-');
+  const loader = join(fixtures, 'loader.mjs');
+  const graphFixture = join(fixtures, 'non-error-graph.mjs');
+  const sentinel = 'PRIVATE-NON-ERROR-MESSAGE-71c2';
+  await writeFile(loader, `
+    export async function resolve(specifier, context, nextResolve) {
+      if (specifier === './shadowgraph.js' && context.parentURL?.endsWith('/src/mcp.js')) {
+        return { url: new URL('./non-error-graph.mjs', import.meta.url).href, shortCircuit: true };
+      }
+      return nextResolve(specifier, context);
+    }
+  `, 'utf8');
+  await writeFile(graphFixture, `
+    import { createShadowGraph as createRealShadowGraph, isCommittedRejection } from ${JSON.stringify(new URL('../src/shadowgraph.js', import.meta.url).href)};
+    export { isCommittedRejection };
+    export function createShadowGraph(...args) {
+      const graph = createRealShadowGraph(...args);
+      graph.updateDecisionStatus = () => { throw { message: { sentinel: ${JSON.stringify(sentinel)} }, sentinel: ${JSON.stringify(sentinel)} }; };
+      return graph;
+    }
+  `, 'utf8');
+  const rpc = await startMcp(t, {}, ['--no-warnings', '--experimental-loader', pathToFileURL(loader).href]);
+  const response = await rpc.call(toolRequest('non-error-throw', 'shadowgraph_update_status', {
+    decisionId: 'non-error-throw', status: 'planned'
+  }));
+  assertSafeToolFailure(response, { forbidden: [sentinel] });
+});
 
 function emptyRestorePayload(schemaVersion = 4) {
   return {
@@ -477,7 +598,7 @@ test('legacy JSON-RPC parse, request, method, params, primitive, and domain erro
     ['unknown tool', unknownTool, -32601, /Unknown tool/],
     ['unknown resource', unknownResource, -32602, /Unknown resource URI/],
     ['unknown prompt', unknownPrompt, -32602, /Unknown prompt/],
-    ['domain failure', domainFailure, -32000, /Decision not found/]
+    ['domain failure', domainFailure, -32000, /Tool execution failed \(unknown_decision\)/]
   ]) {
     assertRpcCode(response, code);
     assert.match(response.error.message, message, label);
@@ -729,10 +850,15 @@ for (const modern of [false, true]) {
     const malformedStatus = await rpc.call(toolRequest(
       `${era}-malformed-status`,
       'shadowgraph_update_status',
-      { decisionId: JSON.parse(seed.result.content[0].text).id, status: statusSentinel },
+      { project: 'default', decisionId: JSON.parse(seed.result.content[0].text).id, status: statusSentinel },
       { modern }
     ));
-    assertSafeToolFailure(malformedStatus, { modern, forbidden: [statusSentinel, 'Invalid decision status'] });
+    assertSafeToolFailure(malformedStatus, {
+      modern,
+      message: 'Tool execution failed (invalid_field)',
+      data: { issueCode: 'invalid_field', fieldPath: 'status', retryable: false },
+      forbidden: [statusSentinel, `${era}-status-owner`, 'Invalid decision status']
+    });
   });
 }
 
@@ -759,7 +885,7 @@ for (const modern of [false, true]) {
       assertSafeToolFailure(response, {
         modern,
         message: `Tool execution failed (${issueCode})`,
-        data: modern ? undefined : { issueCode },
+        data: { issueCode },
         forbidden: [source, rpc.directory, 'sequence 1', 'schemaVersion 999']
       });
     });
@@ -844,6 +970,10 @@ test('modern nested restore causes and degraded latch stay private CallToolResul
   assertSafeToolFailure(restore, {
     modern: true,
     message: 'Tool execution failed (json_restore_recovery_unconfirmed)',
+    data: {
+      issueCode: 'json_restore_recovery_unconfirmed',
+      recoveryCode: 'json_restore_recovery_unconfirmed'
+    },
     forbidden: [sentinel, source, rpc.directory, 'afterReplacementRename', 'beforeRollbackInstall', '.rollback']
   });
 
@@ -851,6 +981,7 @@ test('modern nested restore causes and degraded latch stay private CallToolResul
   assertSafeToolFailure(blocked, {
     modern: true,
     message: 'Persistent storage unavailable',
+    data: { recoveryCode: 'json_restore_recovery_unconfirmed' },
     forbidden: [sentinel, source, rpc.directory, '.rollback']
   });
 });

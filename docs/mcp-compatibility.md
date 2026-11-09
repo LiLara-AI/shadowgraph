@@ -36,6 +36,20 @@ An explicit `"id": null` is still a request and receives a correlated `id:null` 
 
 Modern complete results include `resultType: 'complete'` and server identity metadata. Modern cacheable lists/resources include explicit `ttlMs` and `cacheScope`. Modern tool execution failures are returned as `isError: true`; malformed calls and unknown tools remain protocol errors. Handshake result shapes never gain the fields a modern result requires; the optional members a session receives are covered in §4.
 
+### Safe caller error details
+
+Phase 1 caller-corrective failures use the public message `Tool execution failed (<issueCode>)` and constructed details `{ issueCode, fieldPath, retryable: false }`. Legacy responses place that object in JSON-RPC `error.data`; modern `CallToolResult` responses place it in `result._meta['shadowgraph/error']`. Tagged missing-field details and allowlisted domain/recovery data use the same locations.
+
+| Failure case | `issueCode` | `fieldPath` |
+| --- | --- | --- |
+| Unknown decision | `unknown_decision` | `decisionId` |
+| Invalid decision status | `invalid_field` | `status` |
+| Invalid attempt result class | `invalid_field` | `resultClass` |
+| Illegal decision transition | `illegal_transition` | `status` |
+| Missing required field | `missing_required_field` | the required field, including `resultClass` |
+
+These five Phase 1 mappings emit four caller-error codes because `invalid_field` covers both invalid-value cases. Raw error messages, supplied values, filesystem paths, stacks, and internal diagnostic keys are not copied into these responses. `idempotency_conflict` arrives with Phase 2 and is not yet emitted.
+
 ## 3. Tool modes and verifier boundary
 
 ```mermaid
@@ -520,15 +534,20 @@ Detail that used to sit in a description, kept here because it is worth having s
   declares what was omitted. The searchable content fields are listed in each tool's `query` property.
 - `shadowgraph_context` returns several named collections, each with its own `returned`, `total`,
   `hasMore`, and `omitted` under `completeness.collections`, so truncation is attributable.
-- `shadowgraph_record_fact` rejects `verificationStatus` of `verified` or `expired`: verification is
-  not self-assertable and expiry belongs to `shadowgraph_maintain`. Writes for one key must arrive in
-  non-decreasing `validFrom` order.
+- `shadowgraph_record_decision` requires each alternative's `label`. Alternative `reopenWhen` and
+  attempt `reusableWhen` items accept legacy/symbolic strings and structured rules using stored facts.
+  Structured rules require `key`/`value` or `target`/`expected`; explicit `null`, `false`, `0`, and
+  empty-string operands are values, and an unresolved reuse condition blocks reuse.
+- `shadowgraph_record_attempt` requires `solution`, `result`, and `resultClass` for new MCP writes.
+- `shadowgraph_record_fact` requires `key` and `value` and rejects `verificationStatus` of `verified`
+  or `expired`: verification is not self-assertable and expiry belongs to `shadowgraph_maintain`.
+  Writes for one key must arrive in non-decreasing `validFrom` order.
 - `shadowgraph_record_outcome` appends a journal entry on every call, even when the outcome is
   identical, and a `failed` outcome makes the decision due for review.
 - `shadowgraph_update_status` rejects an illegal move before any record, event, journal, or durable
   change. The legal moves are listed in its `status` property. Over MCP the failure arrives as
-  `Tool execution failed`: only allowlisted domain messages cross that boundary, and the exact
-  transition text is available through the library and HTTP surfaces, where
+  `Tool execution failed (illegal_transition)` with safe `status` details in the era-specific location
+  above; the exact transition text remains available through the library and HTTP surfaces, where
   [the API reference](api-reference.md) lists it.
 - `shadowgraph_supersede` requires both decisions to exist, to differ, to share a project, and not to
   be already superseded or archived.

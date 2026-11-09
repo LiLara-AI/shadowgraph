@@ -135,16 +135,16 @@ test('every attempt not captured classifies exactly as before: declared class fi
   assert.deepEqual(reuse.context({ project: 'alpha' }).reusableAttempts.map((item) => item.solution).sort(), ['failed', 'inconclusive', 'succeeded', 'wording miss']);
 });
 
-test('a caller cannot set captureRef or outcomeEvidence: the API, CLI, HTTP and MCP store the attempt without them, and the wording still applies', async (t) => {
+test('a caller cannot set captureRef or outcomeEvidence: classless API, CLI and HTTP attempts retain wording fallback; MCP declares failure', async (t) => {
   const declared = { captureRef: 'capture:c1', outcomeEvidence: { state: 'observed', source: 'exit_status', exitStatus: 0 } };
   const entities = (payload) => [...payload.records, ...payload.idempotency.map((item) => item.value), ...payload.journal.map((entry) => entry.payload)].filter((entity) => entity?.kind === 'attempt');
-  // The attempt is stored, nowhere with either field, and classified by its wording.
+  // Every transport stores the attempt without either field; classless writes use wording.
   const check = (payload, solution, label) => {
     assert.ok(entities(payload).some((entity) => entity.solution === solution), `${label}: stored`);
     assert.equal(entities(payload).some((entity) => Object.hasOwn(entity, 'captureRef') || Object.hasOwn(entity, 'outcomeEvidence')), false, label);
     const graph = createShadowGraph({ now });
     graph.importData(structuredClone(payload));
-    assert.deepEqual(graph.context({ project: 'alpha' }).failedAttempts.map((item) => item.solution), [solution], `${label}: the heuristic still classifies it`);
+    assert.deepEqual(graph.context({ project: 'alpha' }).failedAttempts.map((item) => item.solution), [solution], `${label}: failed classification is retained`);
   };
   const graph = createShadowGraph({ now });
   graph.addAttempt({ project: 'alpha', solution: 'api', result: 'failed', idempotencyKey: 'api', ...declared });
@@ -176,7 +176,7 @@ test('a caller cannot set captureRef or outcomeEvidence: the API, CLI, HTTP and 
     const line = buffer.split('\n').find((item) => item.includes('"id":1'));
     if (line) resolve(JSON.parse(line));
   }));
-  child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'shadowgraph_record_attempt', arguments: { project: 'alpha', solution: 'mcp', result: 'failed', ...declared } } })}\n`);
+  child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'shadowgraph_record_attempt', arguments: { project: 'alpha', solution: 'mcp', result: 'failed', resultClass: 'failed', ...declared } } })}\n`);
   const answer = await reply;
   assert.equal(answer.error, undefined, JSON.stringify(answer.error));
   assert.notEqual(answer.result.isError, true, JSON.stringify(answer.result));

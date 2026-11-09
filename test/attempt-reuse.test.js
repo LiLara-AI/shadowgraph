@@ -159,6 +159,23 @@ test('reuse evaluation is project scoped and declared by the completeness contra
   assert.equal(theirs.reusableAttempts.length, 1);
 });
 
+test('the documented impossible-result failure is explicit and appears in context', () => {
+  const graph = createShadowGraph();
+  const attempt = graph.addAttempt({
+    project: 'checkout-service',
+    solution: 'One SQLite file per user',
+    result: 'Cross-user reporting became impossible',
+    resultClass: 'failed',
+    reason: 'No shared transactional view',
+    environment: 'Single-user local checkout prototype'
+  });
+  const found = graph.context({ project: 'checkout-service' }).failedAttemptsToAvoid
+    .find((item) => item.id === attempt.id);
+  assert.equal(found.reason, 'No shared transactional view');
+  assert.equal(found.environment, 'Single-user local checkout prototype');
+  assert.equal(found.resultClass, 'failed');
+});
+
 test('resultClass and reusableWhen survive export, restart and journal rebuild', async (t) => {
   const directory = await scratchDirectory(t);
   const store = await createJsonFileStore(join(directory, 'memory.json'));

@@ -68,6 +68,8 @@ const graph = createShadowGraph({ now });   // `now` is an injectable clock, use
 
 A by-id change -- `setOutcome`, `addConfidenceEvidence`, `updateDecisionStatus`, `supersedeDecision`, `verifyFact`, `acknowledgeReview` -- changes only what its own write scope owns: `project`, or with none `originId`, given in the input object or as the trailing `scope` argument. An id of another project, of legacy data or of another origin gets exactly the error an id that does not exist gets (`Decision not found`, `Fact not found`, `Review signal not found`), and with neither a project nor an origin the call is refused with `write_scope_unresolved` before any id is resolved. Reading more never allows writing more.
 
+The MCP write schemas require each decision alternative's `label`; attempts require `solution`, `result`, and `resultClass`; facts require `key` and `value`. New MCP attempt writes require `resultClass`; CLI and JavaScript callers and older stored attempts retain the wording-based fallback when it is absent. Decision `reopenWhen` and attempt `reusableWhen` items accept legacy/symbolic strings or structured objects. Structured conditions require `key` and `value`, or their `target` and `expected` aliases, plus optional `operator` and `unit`; the operator defaults to `equals`, and explicit `null`, `false`, `0`, and empty-string operands remain values. Every attempt reuse condition must hold, and an unresolved condition blocks reuse.
+
 ### Reading — all return `{ items, page, completeness }`
 
 `search(query, options)` · `retrieve(query, options)` · `recall(query, options)` · `memoryHistory(options)` · `getJournal(options)` · `legacyAttributionReview(options)`
@@ -313,6 +315,19 @@ administrative diagnostics are not attached to scoped HTTP/MCP graph reads.
 
 The first four message shapes pre-date this release and are preserved for compatibility.
 
+### MCP caller-safe failures
+
+MCP does not expose raw validation diagnostics for mapped caller errors. It returns `Tool execution failed (<issueCode>)` with constructed details `{ issueCode, fieldPath, retryable: false }` in legacy JSON-RPC `error.data` and modern `result._meta['shadowgraph/error']`. Missing-field details use the same locations.
+
+| Phase 1 failure case | `issueCode` | `fieldPath` |
+| --- | --- | --- |
+| Unknown decision | `unknown_decision` | `decisionId` |
+| Invalid decision status | `invalid_field` | `status` |
+| Invalid attempt result class | `invalid_field` | `resultClass` |
+| Illegal decision transition | `illegal_transition` | `status` |
+| Missing required field | `missing_required_field` | the required field, including `resultClass` |
+
+The five mappings emit four distinct codes because `invalid_field` covers both invalid-value cases. Raw values/messages, paths, stacks, and internal diagnostic keys remain private. `idempotency_conflict` arrives with Phase 2 and is not yet emitted.
 
 ### Bounded extraction worker (internal)
 

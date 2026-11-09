@@ -292,7 +292,7 @@ test('every advertised output schema accepts the result its own tool really retu
     assert.ok(result, `${name} returns its schema-validated successful result`);
   }
 
-  await callTool('shadowgraph_record_attempt', { project, solution: 'rolled out to everyone', result: 'failed during rollout', reason: 'no migration path', environment: 'node 24' });
+  await callTool('shadowgraph_record_attempt', { project, solution: 'rolled out to everyone', result: 'failed during rollout', resultClass: 'failed', reason: 'no migration path', environment: 'node 24' });
 
   const added = await callTool('shadowgraph_remember', { project, scope: { userId: 'alice' }, memoryType: 'preference', key: 'hotel-style', text: 'Prefers quiet boutique hotels' });
   assert.equal(added.operation, 'ADD');
@@ -425,7 +425,9 @@ test('a legacy tool-execution failure stays a protocol error and carries no stru
   const failed = await rpc.call('tools/call', { name: 'shadowgraph_confidence_evidence', arguments: { project: 'conformance', decisionId: 'missing', reason: 'r', key: 'k' } });
   assert.equal(failed.result, undefined);
   assert.equal(failed.error.code, -32000);
-  assert.match(failed.error.message, /Decision not found/u);
+  assert.equal(failed.error.message, 'Tool execution failed (unknown_decision)');
+  assert.deepEqual(failed.error.data, { issueCode: 'unknown_decision', fieldPath: 'decisionId', retryable: false });
+  assert.equal(JSON.stringify(failed).includes('missing'), false);
 });
 
 test('the verifier build advertises and satisfies the verification tool contract', async (t) => {

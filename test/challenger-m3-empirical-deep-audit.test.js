@@ -262,8 +262,11 @@ test('Deep Audit 3: UNC network paths and backslash path traversals are masked w
     });
     const parsedRec = parseToolResult(recRes);
     const recMessage = typeof parsedRec === 'string' ? parsedRec : recRes.error?.message ?? recRes.result?.content?.[0]?.text;
-    assert.equal(recMessage, 'Tool execution failed',
-      `Adversarial record status "${status}" must be masked to generic "Tool execution failed"`);
+    assert.equal(recMessage, 'Tool execution failed (invalid_field)',
+      `Adversarial record status "${status}" must return only the safe invalid_field code`);
+    assert.deepEqual(recRes.result._meta['shadowgraph/error'], {
+      issueCode: 'invalid_field', fieldPath: 'status', retryable: false
+    });
     assert.ok(!JSON.stringify(recRes).includes(status),
       `record_decision response must NEVER leak payload: ${status}`);
 
@@ -275,13 +278,16 @@ test('Deep Audit 3: UNC network paths and backslash path traversals are masked w
     });
     const parsedUpdate = parseToolResult(updateRes);
     const updateMessage = typeof parsedUpdate === 'string' ? parsedUpdate : updateRes.error?.message ?? updateRes.result?.content?.[0]?.text;
-    assert.equal(updateMessage, 'Tool execution failed',
-      `Adversarial update status "${status}" must be masked to generic "Tool execution failed"`);
+    assert.equal(updateMessage, 'Tool execution failed (invalid_field)',
+      `Adversarial update status "${status}" must return only the safe invalid_field code`);
+    assert.deepEqual(updateRes.result._meta['shadowgraph/error'], {
+      issueCode: 'invalid_field', fieldPath: 'status', retryable: false
+    });
     assert.ok(!JSON.stringify(updateRes).includes(status),
       `update_status response must NEVER leak payload: ${status}`);
   }
 
-  // Confirm legitimate domain errors without paths or secrets are preserved
+  // Clean invalid statuses also return the safe code without echoing the value.
   const validDomainErrorRes = await mcp.callTool('shadowgraph_record_decision', {
     title: 'Clean Domain Error Decision',
     chosen: 'Test',
@@ -290,8 +296,11 @@ test('Deep Audit 3: UNC network paths and backslash path traversals are masked w
   });
   const validParsed = parseToolResult(validDomainErrorRes);
   const validMessage = typeof validParsed === 'string' ? validParsed : validDomainErrorRes.result?.content?.[0]?.text;
-  assert.match(validMessage, /^Invalid decision status: completely_custom_status_without_paths$/,
-    'Legitimate domain validation messages must be preserved when clean');
+  assert.equal(validMessage, 'Tool execution failed (invalid_field)');
+  assert.deepEqual(validDomainErrorRes.result._meta['shadowgraph/error'], {
+    issueCode: 'invalid_field', fieldPath: 'status', retryable: false
+  });
+  assert.equal(JSON.stringify(validDomainErrorRes).includes('completely_custom_status_without_paths'), false);
 
   const validUpdateErrorRes = await mcp.callTool('shadowgraph_update_status', {
     decisionId,
@@ -300,8 +309,11 @@ test('Deep Audit 3: UNC network paths and backslash path traversals are masked w
   });
   const validUpdateParsed = parseToolResult(validUpdateErrorRes);
   const validUpdateMessage = typeof validUpdateParsed === 'string' ? validUpdateParsed : validUpdateErrorRes.result?.content?.[0]?.text;
-  assert.match(validUpdateMessage, /^Invalid decision status: clean_nonexistent_status_value$/,
-    'Legitimate update_status domain validation messages must be preserved when clean');
+  assert.equal(validUpdateMessage, 'Tool execution failed (invalid_field)');
+  assert.deepEqual(validUpdateErrorRes.result._meta['shadowgraph/error'], {
+    issueCode: 'invalid_field', fieldPath: 'status', retryable: false
+  });
+  assert.equal(JSON.stringify(validUpdateErrorRes).includes('clean_nonexistent_status_value'), false);
 });
 
 // ---------------------------------------------------------------------------
