@@ -223,7 +223,7 @@ test('the reason stays searchable and round-trips unchanged through MCP record a
   const call = (id, name, args) => rpc(id, 'tools/call', { name, arguments: args }).then((result) => result.structuredContent);
   await rpc(0, 'initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'causal-carrier', version: '1.0.0' } });
   const encoded = 'sgx1:eyJpZCI6InJlY29yZC0xIn0=\n  trailing  ';
-  const recorded = await call(1, 'shadowgraph_record_attempt', { project: 'bench', solution: 'approach-1', result: 'failed', reason: encoded, environment: 'scenario-1' });
+  const recorded = await call(1, 'shadowgraph_record_attempt', { project: 'bench', solution: 'approach-1', result: 'failed', resultClass: 'failed', reason: encoded, environment: 'scenario-1' });
   assert.equal(recorded.reason, encoded);
   assert.deepEqual(recorded.causalClaim, RECORDED);
   const page = await call(2, 'shadowgraph_search', { query: 'scenario-1', project: 'bench', kind: 'attempt', offset: 0, limit: 10 });

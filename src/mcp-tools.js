@@ -1277,7 +1277,7 @@ const CATALOG = [
         visibility: visibilityProperty,
         assumptions: { type: 'array', items: { type: 'string' }, description: 'What the decision takes for granted. Record each as a fact too if it should be able to reopen the decision.' },
         evidence: { type: 'array', items: evidenceItemProperty, description: 'Supporting evidence. Counted as declared evidence in the confidence basis, but never re-checked.' },
-        reopenWhen: { type: 'array', description: 'Reopen conditions when alternatives are omitted; accepts target/expected aliases.' },
+        reopenWhen: { type: 'array', description: 'Reopen conditions when alternatives are omitted; accepts target/expected aliases. Symbolic operators: >=, <=, ==, !=, >, <.' },
         alternatives: {
           type: 'array',
           description: 'Options considered and rejected. Alternatives belong to the decision and have no separate write API; they are what shadowgraph_review reconsiders.',
@@ -1289,7 +1289,7 @@ const CATALOG = [
               label: { type: 'string', description: 'Name of the rejected option. Required and non-empty.' },
               reasonRejected: { type: 'string', description: 'Why it was rejected. Searchable content.' },
               reason: { type: 'string', description: 'Accepted as an alias of reasonRejected for older callers.' },
-              reopenWhen: { type: 'array', items: conditionEntryProperty, description: 'Rules making this alternative reconsiderable: legacy keys, symbolic strings, or structured rules using stored facts and key/value or target/expected aliases.' }
+              reopenWhen: { type: 'array', items: conditionEntryProperty, description: 'Rules making this alternative reconsiderable: legacy keys, symbolic strings, or structured rules using stored facts and key/value or target/expected aliases. Symbolic operators: >=, <=, ==, !=, >, <.' }
             }
           }
         },
@@ -1316,12 +1316,12 @@ const CATALOG = [
       required: ['solution', 'result', 'resultClass'],
       properties: {
         solution: { type: 'string', description: 'What was tried. Required, non-empty, and searchable content.' },
-        result: { type: 'string', description: 'What happened. Required, non-empty, and searchable content. Only legacy/core records without resultClass use wording such as failed, error, or regression to surface in shadowgraph_context failedAttempts; captured attempt wording is never read.' },
+        result: { type: 'string', description: "What happened. Required, non-empty, and searchable content. Only legacy/core records without resultClass use wording such as failed, error, or regression to surface in shadowgraph_context failedAttempts; a captured attempt's wording is never read." },
         resultClass: { type: 'string', enum: ['failed', 'succeeded', 'inconclusive'], description: 'Required for new MCP writes. Classify the result explicitly instead of leaving it to the legacy wording heuristic.' },
         task: { type: 'string', description: 'Task or problem context this attempt was trying to solve. Searchable content.' },
         tags: { type: 'array', items: { type: 'string' }, description: 'Free-form labels stored with the attempt. Searchable content.' },
         visibility: visibilityProperty,
-        reusableWhen: { type: 'array', items: conditionEntryProperty, description: 'Conditions for reusing this attempt: legacy keys, symbolic strings, or structured rules using stored facts and key/value or target/expected aliases. All must hold; unresolved conditions block reuse.' },
+        reusableWhen: { type: 'array', items: conditionEntryProperty, description: 'Conditions for reusing this attempt: legacy keys, symbolic strings, or structured rules using stored facts and key/value or target/expected aliases. Symbolic operators: >=, <=, ==, !=, >, <. All must hold; unresolved conditions block reuse.' },
         relatedTo: { type: 'array', items: { type: 'string' }, description: 'Identifiers of related entities such as decisions or other attempts.' },
         project: writeProjectProperty,
         originId: originIdProperty,

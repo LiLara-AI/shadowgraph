@@ -549,12 +549,12 @@ test('Tier 2: Boundary & Quality - Aggregate profile description budgets and emp
 test('Tier 2: Boundary & Quality - Wire budgets across bare, annotated, and structured tiers maintain 1.5% to 3.5% empirical headroom', () => {
   const report = measureAll();
   const WIRE_BUDGETS = {
-    'withoutVerifier.full': { bare: 73800, annotated: 77500, structured: 373800 },
-    'withoutVerifier.workflow': { bare: 58000, annotated: 60200, structured: 299000 },
-    'withoutVerifier.compact': { bare: 52000, annotated: 53700, structured: 266800 },
-    'withVerifier.full': { bare: 74900, annotated: 78800, structured: 378900 },
-    'withVerifier.workflow': { bare: 58000, annotated: 60200, structured: 299000 },
-    'withVerifier.compact': { bare: 52000, annotated: 53700, structured: 266800 }
+    'withoutVerifier.full': { bare: 77900, annotated: 81600, structured: 378900 },
+    'withoutVerifier.workflow': { bare: 62100, annotated: 64300, structured: 304000 },
+    'withoutVerifier.compact': { bare: 56100, annotated: 57800, structured: 271300 },
+    'withVerifier.full': { bare: 79000, annotated: 82900, structured: 383900 },
+    'withVerifier.workflow': { bare: 62100, annotated: 64300, structured: 304000 },
+    'withVerifier.compact': { bare: 56100, annotated: 57800, structured: 271300 }
   };
 
   let tierCount = 0;

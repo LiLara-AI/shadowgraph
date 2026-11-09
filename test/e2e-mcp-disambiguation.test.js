@@ -207,6 +207,7 @@ test('Tier 1: Feature 1 - shadowgraph_record_attempt schema exposure and executi
   const res = await mcp.callTool('shadowgraph_record_attempt', {
     solution: 'Implement schema validation hook',
     result: 'Passed all unit tests',
+    resultClass: 'succeeded',
     task: 'Add schema completeness',
     tags: ['mcp', 'schema', 'e2e'],
     visibility: 'global',
@@ -831,6 +832,7 @@ test('Tier 3: Combination 3 - Arabic query terms with matchMode partial across r
   await mcp.callTool('shadowgraph_record_attempt', {
     solution: 'تجربة تحسين الأداء وقواعد البيانات',
     result: 'تمت المحاولة بنجاح تام وسرعة فائقة',
+    resultClass: 'succeeded',
     task: 'تحسين الاستعلامات',
     tags: ['عربي', 'أداء'],
     visibility: 'global',

@@ -496,17 +496,19 @@ test('Adversarial M1-7: search and retrieve matchMode parameter enforcement', ()
   assert.equal(searchPartial.items[0].totalQueryTerms, 3, 'totalQueryTerms must be 3');
 });
 
-test('Adversarial M1-8: Additive schema backward compatibility for existing payloads', () => {
+test('Adversarial M1-8: Required schema fields accept a classified attempt payload', () => {
   const catalog = buildToolCatalog({ verifier: true });
 
-  // Minimal legacy payloads without any of the new M1 fields must still be valid
-  const legacyAttemptPayload = {
+  // New MCP attempt writes classify the result explicitly; other M1 fields stay optional.
+  const classifiedAttemptPayload = {
     solution: 'Restarted process',
-    result: 'Process recovered'
+    result: 'Process recovered',
+    resultClass: 'succeeded'
   };
   const attemptTool = catalog.find((t) => t.name === 'shadowgraph_record_attempt');
+  assert.ok(attemptTool.inputSchema.required.includes('resultClass'));
   for (const req of attemptTool.inputSchema.required) {
-    assert.ok(req in legacyAttemptPayload, `Legacy payload must satisfy required property ${req}`);
+    assert.ok(req in classifiedAttemptPayload, `Classified payload must satisfy required property ${req}`);
   }
 
   const legacyDecisionPayload = {

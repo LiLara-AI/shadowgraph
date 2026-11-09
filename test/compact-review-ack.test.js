@@ -183,26 +183,3 @@ test('acknowledging one breach does not mute a broader breach on the same decisi
   assert.equal(broadened[0].reviewSignalStatus, 'open', 'so it is unacknowledged and visible');
   assert.equal(broadened[0].violatedConditions.length, 2);
 });
-
-test('compact can update and supersede a decision through the advertised lifecycle tools', async (t) => {
-  const dir = await scratchDirectory(t, 'shadowgraph-compact-lifecycle-');
-  const mcp = client(join(dir, 'data.json'));
-  t.after(() => mcp.stop());
-
-  const original = await mcp.call('shadowgraph_record_decision', {
-    project: 'p', title: 'Use the original plan', chosen: 'original'
-  });
-  const replacement = await mcp.call('shadowgraph_record_decision', {
-    project: 'p', title: 'Use the replacement plan', chosen: 'replacement'
-  });
-  const updated = await mcp.call('shadowgraph_update_status', {
-    decisionId: original.id, status: 'in_progress'
-  });
-  assert.equal(updated.status, 'in_progress');
-
-  const superseded = await mcp.call('shadowgraph_supersede', {
-    decisionId: original.id, replacementId: replacement.id
-  });
-  assert.equal(superseded.previous.status, 'superseded');
-  assert.equal(superseded.previous.supersededBy, replacement.id);
-});

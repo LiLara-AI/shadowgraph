@@ -238,9 +238,10 @@ for (const modern of [false, true]) {
   for (const scenario of callerErrorCases) {
     test(`${era} MCP ${scenario.label} returns safe corrective details`, async (t) => {
       const rpc = await startMcp(t);
-      const arguments_ = { ...scenario.arguments_ };
+      const arguments_ = { project: 'p', ...scenario.arguments_ };
       if (scenario.seedDecision) {
         const seeded = await rpc.call(toolRequest(`${era}-${scenario.label}-seed`, 'shadowgraph_record_decision', {
+          project: 'p',
           title: 'Caller error fixture',
           chosen: 'keep'
         }, { modern }));
@@ -249,6 +250,7 @@ for (const modern of [false, true]) {
       }
       if (scenario.initialStatus) {
         const transitioned = await rpc.call(toolRequest(`${era}-${scenario.label}-initial`, 'shadowgraph_update_status', {
+          project: 'p',
           decisionId: arguments_.decisionId,
           status: scenario.initialStatus
         }, { modern }));

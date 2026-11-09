@@ -130,8 +130,9 @@ test('Auditor Adversarial 1: Error masking preserves domain validation messages 
   const err1 = res1.result?.isError ? res1.result.content[0].text : res1.error?.message;
   assert.match(err1, /A caller cannot set fact verificationStatus to verified/);
 
-  // 2. Fact missing key
+  // 2. Fact empty key reaches domain validation
   const res2 = await mcp.callTool('shadowgraph_record_fact', {
+    key: '',
     value: 'something',
     project: 'auditor-p1'
   });
@@ -158,7 +159,7 @@ test('Auditor Adversarial 1: Error masking preserves domain validation messages 
   const err4 = res4.result?.isError ? res4.result.content[0].text : res4.error?.message;
   assert.match(err4, /A structured rule requires a value for operator equals/);
 
-  // 5. Existing decision updated with invalid decision status transition
+  // 5. Existing decision updated with invalid status returns a safe coded error
   const decInit = await mcp.callTool('shadowgraph_record_decision', {
     title: 'Decision for Status Test',
     chosen: 'Choice C',
@@ -171,16 +172,22 @@ test('Auditor Adversarial 1: Error masking preserves domain validation messages 
     project: 'auditor-p1'
   });
   const err5 = res5.result?.isError ? res5.result.content[0].text : res5.error?.message;
-  assert.match(err5, /Invalid decision status: invalid_status_xyz/);
+  assert.equal(err5, 'Tool execution failed (invalid_field)');
+  assert.deepEqual(res5.result._meta['shadowgraph/error'], {
+    issueCode: 'invalid_field', fieldPath: 'status', retryable: false
+  });
 
-  // 6. Nonexistent decision returns sanitized domain message 'Decision not found'
+  // 6. Nonexistent decision returns only the safe unknown_decision code
   const res6 = await mcp.callTool('shadowgraph_update_status', {
     decisionId: 'dec-nonexistent',
     status: 'approved',
     project: 'auditor-p1'
   });
   const err6 = res6.result?.isError ? res6.result.content[0].text : res6.error?.message;
-  assert.match(err6, /Decision not found/);
+  assert.equal(err6, 'Tool execution failed (unknown_decision)');
+  assert.deepEqual(res6.result._meta['shadowgraph/error'], {
+    issueCode: 'unknown_decision', fieldPath: 'decisionId', retryable: false
+  });
 
   // Verify none of these leaked platform path or credentials
   for (const msg of [err1, err2, err3, err4, err5, err6]) {

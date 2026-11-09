@@ -379,6 +379,11 @@ async function callUnqueued(name, args, tier, accessManaged = false) {
       if (binding) args = { ...input, project: binding.project };
     }
   }
+  if (name === 'shadowgraph_record_decision' && args && typeof args === 'object' && !Array.isArray(args) && !args.chosen && args.title) {
+    args = { ...args, chosen: args.title };
+  } else if (name === 'shadowgraph_record_outcome' && args && typeof args === 'object' && !Array.isArray(args) && args.decisionId == null && args.id != null) {
+    args = { ...args, decisionId: args.id };
+  }
   validateRequiredArguments(tool, args);
   if (name === 'shadowgraph_record_decision') args = await addConfiguredEmbeddings(args, 'decision');
   else if (name === 'shadowgraph_record_attempt') args = await addConfiguredEmbeddings(args, 'attempt');

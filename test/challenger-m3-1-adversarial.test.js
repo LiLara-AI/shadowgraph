@@ -239,12 +239,16 @@ test('Feature 11: Valid domain errors remain actionable without leakage', async 
   });
   assert.match(JSON.stringify(resOp.error ?? resOp.result), /Unsupported rule operator unknown_op_foo/);
 
-  // Missing entity errors
+  // Missing entity errors expose only the safe code and canonical field.
   const resDec = await mcp.callTool('shadowgraph_record_outcome', {
-    id: 'dec-nonexistent-123',
+    decisionId: 'dec-nonexistent-123',
     outcome: { status: 'successful' }
   });
-  assert.match(JSON.stringify(resDec.error ?? resDec.result), /Decision not found/);
+  assert.equal(resDec.result.content[0].text, 'Tool execution failed (unknown_decision)');
+  assert.deepEqual(resDec.result._meta['shadowgraph/error'], {
+    issueCode: 'unknown_decision', fieldPath: 'decisionId', retryable: false
+  });
+  assert.equal(JSON.stringify(resDec).includes('dec-nonexistent-123'), false);
 
   // Conflict errors
   const resConf = await mcp.callTool('shadowgraph_ack_review', {

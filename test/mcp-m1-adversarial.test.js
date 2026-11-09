@@ -420,6 +420,7 @@ test('Malformations: visibility validation rejects invalid scopes', async (t) =>
   const resAttempt = await mcp.callTool('shadowgraph_record_attempt', {
     solution: 'Adversarial visibility test',
     result: 'Failed',
+    resultClass: 'failed',
     visibility: 'private',
     project: 'adv-project'
   });
@@ -497,6 +498,7 @@ test('Feature 1 & 2: Complex field storage and propagation', async (t) => {
   const attemptRes = await mcp.callTool('shadowgraph_record_attempt', {
     solution: 'Optimistic concurrency control with revision check',
     result: 'Zero conflicts detected under 500 RPS benchmark',
+    resultClass: 'succeeded',
     task: 'High-throughput concurrency test',
     tags: ['performance', 'concurrency', 'occ'],
     visibility: 'global',
@@ -550,6 +552,7 @@ test('Feature 4 & 5: Cross-project recall and context advisory enrichment', asyn
   const attemptAlpha = await mcp.callTool('shadowgraph_record_attempt', {
     solution: 'Use shared service url with TLS 1.3',
     result: 'Connected successfully with mutual TLS',
+    resultClass: 'succeeded',
     visibility: 'global',
     tags: ['shared', 'service', 'tls'],
     project: 'project-alpha'

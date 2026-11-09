@@ -270,7 +270,11 @@ test('Challenger M3: Error sanitization blocks internal code leakage on illegal 
   });
   assert.ok(illegalRes.result?.isError, 'Illegal lifecycle jump must return error');
   const errText = illegalRes.result.content[0].text;
-  assert.equal(errText, 'Tool execution failed', 'Internal transition error must be masked by safe generic failure');
+  assert.equal(errText, 'Tool execution failed (illegal_transition)', 'Transition error must expose only its safe code');
+  assert.deepEqual(illegalRes.result._meta['shadowgraph/error'], {
+    issueCode: 'illegal_transition', fieldPath: 'status', retryable: false
+  });
+  assert.equal(JSON.stringify(illegalRes).includes('proposed -> validated'), false);
 });
 
 // ============================================================================

@@ -449,6 +449,8 @@ const DESCRIPTION_CAP = 450;
 // repair_plan unlink boundary, and standardizes on 'review signals' (eliminating
 // 'reminders'). Measured with `node scripts/mcp-wire-size.mjs`: full 11,692,
 // compact 6,643, verifier full 12,041. All budgets are preserved with headroom.
+// PR61's restored guidance measures full 11,695, verifier 12,044, workflow 7,769,
+// compact 6,747; every existing description ceiling retains its headroom.
 const DESCRIPTION_TOTALS = {
   full: 11950,
   verifier: 12300,
@@ -619,16 +621,17 @@ const WIRE_BUDGETS = {
   // full 72469/76160/367548, verifier 73618/77413/372463,
   // workflow 57012/59124/294141, compact 51138/52829/262134.
   // Ceilings preserve ~2% measured headroom across all tiers.
-  // Phase 1A structured condition operands and aliases, measured with
-  // `npm run size:mcp`: full 76166/79857/371245, verifier 77315/81110/376160,
-  // workflow 60709/62821/297838, compact 54835/56526/265831. Only ceilings
-  // below the new measurements move, retaining at least roughly 2% headroom.
-  'withoutVerifier.full': { bare: 78_000, annotated: 81_500, structured: 373_800 },
-  'withoutVerifier.workflow': { bare: 62_000, annotated: 64_500, structured: 299_000 },
-  'withoutVerifier.compact': { bare: 56_000, annotated: 58_000, structured: 266_800 },
-  'withVerifier.full': { bare: 79_000, annotated: 83_000, structured: 378_900 },
-  'withVerifier.workflow': { bare: 62_000, annotated: 64_500, structured: 299_000 },
-  'withVerifier.compact': { bare: 56_000, annotated: 58_000, structured: 266_800 }
+  // PR61 restores main's condition-operator and captured-wording guidance while
+  // retaining structured condition schemas. Final `npm run size:mcp` measurements:
+  // full 76296/79987/371375, verifier 77445/81240/376290,
+  // workflow 60839/62951/297968, compact 54965/56656/265961. Every ceiling is
+  // rounded upward to 100 bytes with approximately 2% headroom.
+  'withoutVerifier.full': { bare: 77_900, annotated: 81_600, structured: 378_900 },
+  'withoutVerifier.workflow': { bare: 62_100, annotated: 64_300, structured: 304_000 },
+  'withoutVerifier.compact': { bare: 56_100, annotated: 57_800, structured: 271_300 },
+  'withVerifier.full': { bare: 79_000, annotated: 82_900, structured: 383_900 },
+  'withVerifier.workflow': { bare: 62_100, annotated: 64_300, structured: 304_000 },
+  'withVerifier.compact': { bare: 56_100, annotated: 57_800, structured: 271_300 }
 };
 
 test('the advertised tool list stays within its wire-size budget, at every tier', () => {

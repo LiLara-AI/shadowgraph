@@ -22,7 +22,7 @@ const policy = error => error?.code === 'creation_id_not_allowed';
 const arms = [
   ['decision', 'addDecision', 'decision', '/decisions', 'shadowgraph_record_decision', { title: 'Probe', chosen: 'A' }],
   ['alternative', 'addDecision', 'decision', '/decisions', 'shadowgraph_record_decision', { title: 'Probe', chosen: 'A', alternatives: [{ label: 'B' }] }],
-  ['attempt', 'addAttempt', 'attempt', '/attempts', 'shadowgraph_record_attempt', { solution: 'Probe', result: 'failed' }],
+  ['attempt', 'addAttempt', 'attempt', '/attempts', 'shadowgraph_record_attempt', { solution: 'Probe', result: 'failed', resultClass: 'failed' }],
   ['memory', 'remember', 'remember', '/memories', 'shadowgraph_remember', { memoryType: 'note', key: 'new', text: 'Probe' }],
   ['fact', 'addFact', 'fact', '/facts', 'shadowgraph_record_fact', { key: 'new', value: true }],
   ['relation', 'link', 'link', '/relationships', 'shadowgraph_link', { relation: 'supports' }],
@@ -210,7 +210,7 @@ for (const backend of ['json', 'sqlite']) test(`creation policy ${backend} prefl
       { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {} } },
       [
         { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'shadowgraph_record_decision', arguments: { project: 'alpha', title: 'Must not commit', chosen: 'A' } } },
-        { jsonrpc: '2.0', method: 'tools/call', params: { name: 'shadowgraph_record_attempt', arguments: { project: 'alpha', solution: 'Notification must not commit', result: 'failed' } } },
+        { jsonrpc: '2.0', method: 'tools/call', params: { name: 'shadowgraph_record_attempt', arguments: { project: 'alpha', solution: 'Notification must not commit', result: 'failed', resultClass: 'failed' } } },
         { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { _meta: meta, name: 'shadowgraph_remember', arguments: { project: 'alpha', operations: [{ action: 'ADD', memoryType: 'note', key: 'late', text: 'No', id: target }] } } }
       ]
     ];
